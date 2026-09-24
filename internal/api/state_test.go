@@ -68,8 +68,8 @@ func TestUserMessageFlipsIdleToRunningAndEnqueues(t *testing.T) {
 		t.Errorf("status after user.message = %q, want running", got)
 	}
 	types := s.eventTypes(sessionID)
-	if !sameStrings(types, []string{"user.message", "session.thread_status_running", "session.status_running"}) {
-		t.Errorf("event log = %v, want [user.message session.thread_status_running session.status_running]", types)
+	if !sameStrings(types, []string{"user.message", "session.status_running", "session.thread_status_running"}) {
+		t.Errorf("event log = %v, want [user.message session.status_running session.thread_status_running]", types)
 	}
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn items = %d, want 1", n)
@@ -134,7 +134,8 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 
 	// A self-hosted worker posts the tool result → the next turn is queued,
 	// with no extra status_running (the session never left running).
-	sendEvents(t, s, sessionID, map[string]any{
+	worker := workerAuth(t, s, sessionID)
+	sendEventsAs(t, s, worker, sessionID, map[string]any{
 		"type": "user.tool_result", "tool_use_id": toolUseID,
 		"content": []any{map[string]any{"type": "text", "text": "ok"}},
 	})
@@ -161,7 +162,7 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	pgtest.SetSessionStatus(t, s.pool, domain.ID(sessionID), "idle")
-	sendEvents(t, s, sessionID, map[string]any{
+	sendEventsAs(t, s, worker, sessionID, map[string]any{
 		"type": "user.tool_result", "tool_use_id": toolUseID2,
 	})
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
@@ -203,7 +204,7 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
 		t.Errorf("live model_turn items = %d, want 0", n)
 	}
-	want := []string{"user.message", "session.thread_status_running", "session.status_running", "agent.tool_use", "user.message"}
+	want := []string{"user.message", "session.status_running", "session.thread_status_running", "agent.tool_use", "user.message"}
 	got := s.eventTypes(sessionID)
 	if len(got) != len(want) {
 		t.Fatalf("event log = %v, want %v", got, want)
@@ -217,7 +218,7 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	// The repair: the outstanding result and the next message in one batch.
 	// The result answers the use, so the resume fires — gating on the
 	// pre-batch log alone would stall a send that is legal and complete.
-	sendEvents(t, s, sessionID,
+	sendEventsAs(t, s, workerAuth(t, s, sessionID), sessionID,
 		map[string]any{"type": "user.tool_result", "tool_use_id": toolUseID,
 			"content": []any{map[string]any{"type": "text", "text": "ok"}}},
 		userMessage("carry on"))
@@ -292,8 +293,11 @@ func TestInboundToolResultValidation(t *testing.T) {
 	if got := post(result("sevt_00000000000000000000000000")); got != http.StatusBadRequest {
 		t.Errorf("unknown tool_use ref: status %d, want 400", got)
 	}
-	// Kind mismatch: a user.tool_result cannot answer a custom tool call.
-	if got := post(map[string]any{"type": "user.tool_result", "tool_use_id": customID}); got != http.StatusBadRequest {
+	// Kind mismatch: a user.tool_result cannot answer a custom tool call —
+	// posted as the worker, whose event it is.
+	if got := status(t, s, http.MethodPost, "/v1/sessions/"+sessionID+"/events",
+		map[string]any{"events": []any{map[string]any{"type": "user.tool_result", "tool_use_id": customID}}},
+		workerAuth(t, s, sessionID)); got != http.StatusBadRequest {
 		t.Errorf("kind mismatch: status %d, want 400", got)
 	}
 	// Duplicate within one request.

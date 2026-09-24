@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
@@ -32,6 +34,8 @@ type tserver struct {
 	url   string
 	pool  *pgxpool.Pool
 	blobs *blobtest.MemStore
+	// workerKeys holds workerAuth's one environment key per session.
+	workerKeys map[string]string
 }
 
 // newPoolWithKey is the database half of newTestServer, for tests that
@@ -104,6 +108,17 @@ func (s *tserver) do(method, path string, body any) (int, map[string]any) {
 // doRaw issues a request with explicit headers and returns the raw response.
 func (s *tserver) doRaw(method, path string, body any, headers map[string]string) *http.Response {
 	s.t.Helper()
+	res, err := s.roundTrip(context.Background(), method, path, body, headers)
+	if err != nil {
+		s.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return res
+}
+
+// roundTrip is doRaw returning its failure instead of failing the test, for a
+// caller off the test's goroutine, where t.Fatalf would end only that
+// goroutine.
+func (s *tserver) roundTrip(ctx context.Context, method, path string, body any, headers map[string]string) (*http.Response, error) {
 	var rd io.Reader
 	switch b := body.(type) {
 	case nil:
@@ -112,22 +127,59 @@ func (s *tserver) doRaw(method, path string, body any, headers map[string]string
 	default:
 		buf, err := json.Marshal(b)
 		if err != nil {
-			s.t.Fatalf("marshal request body: %v", err)
+			return nil, fmt.Errorf("marshal request body: %w", err)
 		}
 		rd = bytes.NewBuffer(buf)
 	}
-	req, err := http.NewRequest(method, s.url+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, s.url+path, rd)
 	if err != nil {
-		s.t.Fatalf("new request: %v", err)
+		return nil, err
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		s.t.Fatalf("%s %s: %v", method, path, err)
+	return http.DefaultClient.Do(req)
+}
+
+// reply is a request's outcome as sendAsync delivers it: the status and the
+// trimmed body, or the error that stopped the request.
+type reply struct {
+	code int
+	body string
+	err  error
+}
+
+// sendAsync sends a request off the test's goroutine; its reply arrives on
+// the channel. The request, body read included, is bounded by awaitReply's
+// 30s, so one abandoned after a timeout cannot hold the server's Close open.
+func (s *tserver) sendAsync(method, path string, body any, headers map[string]string) <-chan reply {
+	done := make(chan reply, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res, err := s.roundTrip(ctx, method, path, body, headers)
+		if err != nil {
+			done <- reply{err: err}
+			return
+		}
+		defer res.Body.Close()
+		raw, err := io.ReadAll(res.Body)
+		done <- reply{res.StatusCode, strings.TrimSpace(string(raw)), err}
+	}()
+	return done
+}
+
+// awaitReply receives sendAsync's reply, failing the test if none comes
+// within 30s.
+func awaitReply(t *testing.T, done <-chan reply) reply {
+	t.Helper()
+	select {
+	case r := <-done:
+		return r
+	case <-time.After(30 * time.Second):
+		t.Fatal("no reply within 30s")
+		return reply{}
 	}
-	return res
 }
 
 // wantErr asserts the Anthropic error envelope:

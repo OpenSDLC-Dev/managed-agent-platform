@@ -39,7 +39,7 @@ func classified(typ string, err error) error { return &runError{typ: typ, err: e
 //
 //   - success: the session commits, the run carries session_id, and
 //     succeeded_at is stamped as the durable marker (#520 — the session link
-//     is ON DELETE SET NULL and may go stale; the marker may not).
+//     may dangle once its session is deleted; the marker never changes).
 //   - a classified failure (§5.2): the savepoint rollback discards the
 //     half-made session, the run settles on its error arm, and the response
 //     is still a 200 — the endpoint's only success shape is the run object,
@@ -73,16 +73,16 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 	// checked: "manual runs through the run endpoint are still allowed while
 	// paused" (§8.1 entry 11).
 	var (
-		envID, agentID        string
+		name, envID, agentID  string
 		agentVersion          int
 		vaultIDs              []string
 		initial, rawResources []byte
 		archivedAt            *time.Time
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT environment_id, agent_id, agent_version, vault_ids, initial_events, resources, archived_at
+		`SELECT name, environment_id, agent_id, agent_version, vault_ids, initial_events, resources, archived_at
 		   FROM deployments WHERE id = $1 FOR SHARE`, id).
-		Scan(&envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources, &archivedAt)
+		Scan(&name, &envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("deployment %s not found", id)
 	}
@@ -107,7 +107,7 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	in, err := deploymentSessionIn(id, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
+	in, err := deploymentSessionIn(id, name, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
 	if err != nil {
 		return nil, err
 	}
@@ -171,14 +171,18 @@ func settleRun(ctx context.Context, tx pgx.Tx, sql string, args ...any) error {
 // deploymentSessionIn hydrates a session create from the deployment's stored
 // columns: the fire validates exactly what POST /v1/sessions validates and no
 // more, the parse stage having run at deployment create/update. The metadata
-// bag is deliberately empty and the title unset — session metadata is the
-// application layer's hook, not the deployment's (§8.1 entry 24). created_by
+// bag is deliberately empty — session metadata is the application layer's
+// hook, not the deployment's (§8.1 entry 24) — and the reference sends it
+// empty too. The title is the deployment's name as it stands at the fire,
+// which is what the reference sets (#678; the docs/DIVERGENCES.md entry "A
+// fired session is titled with the deployment's name"). Entry 24 also left
+// the title unset; that half of it no longer holds. created_by
 // is left to createSessionInTx's ctx read: a manual run therefore attributes
 // the session to the caller who fired it — the request is authenticated, and
 // created_by is the audit answer to who caused a row to exist — while a
 // scheduled fire, whose ticker ctx carries no principal, creates
 // unattributed (plan §9's NULL is the schedule's, not this path's).
-func deploymentSessionIn(deplID, envID, agentID string, agentVersion int,
+func deploymentSessionIn(deplID, name, envID, agentID string, agentVersion int,
 	vaultIDs []string, initial, rawResources []byte) (createSessionIn, error) {
 	var stored []deploymentResource
 	if err := json.Unmarshal(rawResources, &stored); err != nil {
@@ -197,6 +201,7 @@ func deploymentSessionIn(deplID, envID, agentID string, agentVersion int,
 		agentRaw: mustJSON(map[string]any{
 			"type": "agent", "id": agentID, "version": agentVersion,
 		}),
+		title:          name,
 		metadata:       map[string]string{},
 		resourceInputs: inputs,
 		sealedTokens:   sealed,
@@ -211,11 +216,12 @@ const runColumns = `id, deployment_id, trigger_type, scheduled_at, session_id,
 	error_type, error_message, agent_id, agent_version, created_at`
 
 // scanRun renders a stored run row. A successful run whose session was later
-// deleted comes back with session_id null AND error null — the session link is
-// ON DELETE SET NULL, and there is nothing truer to render in its place. The
-// run stays a legible success (a null error is the success arm's signature);
-// only the link is gone. Durable success lives in succeeded_at, which the wire
-// object does not carry (#520; the docs/DIVERGENCES.md entry).
+// deleted keeps its session_id, dangling, as the reference's does (#663,
+// migration 0042) — except one whose session was deleted before 0042, when the
+// link was ON DELETE SET NULL: it comes back with session_id null AND error
+// null, because the id it held is recorded nowhere. Either way the run stays a
+// legible success (a null error is the success arm's signature). Durable
+// success lives in succeeded_at, which the wire object does not carry (#520).
 func scanRun(row pgx.Row) (domain.DeploymentRun, error) {
 	var (
 		run             domain.DeploymentRun
@@ -305,8 +311,9 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		// Published as "true for runs with non-null error, false for runs
 		// with non-null session_id" — but the false arm keys off succeeded_at,
 		// the durable success marker, never the session link: a success whose
-		// session was later deleted has a null session_id and must not fall
-		// out of the success set (#520, migration 0032).
+		// session was deleted before migration 0042 has a null session_id and
+		// must not fall out of the success set (#520, #663). On every other
+		// row the two predicates agree.
 		if v {
 			query += ` AND error_type IS NOT NULL`
 		} else {

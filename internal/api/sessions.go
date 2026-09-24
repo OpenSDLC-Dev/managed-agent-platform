@@ -236,12 +236,11 @@ type querier interface {
 // overrideSystemMaxRunes is the documented ceiling on an agent_with_overrides
 // replacement system prompt — "Up to 100,000 characters" (checked against
 // anthropic-sdk-go v1.70.1 — betasession.go
-// BetaManagedAgentsAgentWithOverridesParams.System). The bound is specific to
-// the session override params; agents' own create/update system documents none.
-// Counted in runes (the filesupload.go precedent for character-documented
-// limits, shared with #66/#289's metadata caps); the reference's counting unit
-// and reject shape are unobserved — docs/DIVERGENCES.md (#291).
-const overrideSystemMaxRunes = 100_000
+// BetaManagedAgentsAgentWithOverridesParams.System) — the agent params' own
+// system bound (#665), and like it a bound on what a request supplies. Counted
+// in runes: code points, the unit the 2026-09-02 recording showed for this
+// override — docs/DIVERGENCES.md (#291).
+const overrideSystemMaxRunes = maxAgentSystemRunes
 
 // resolveAgent resolves the create-time agent union (plain id string,
 // {type:"agent"}, or {type:"agent_with_overrides"}) into the immutable
@@ -370,9 +369,10 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 			// The SDK bounds the replacement prompt — "Up to 100,000
 			// characters" (checked against anthropic-sdk-go v1.70.1 —
 			// betasession.go BetaManagedAgentsAgentWithOverridesParams.System)
-			// — on this override only; the stored agent's own system documents
-			// no ceiling, so the check binds what the override supplies, never
-			// the preserved value.
+			// — so the check binds what the override supplies, never the
+			// preserved value. The agent params' own bound (#665) binds
+			// requests alike, so a stored system written over it before then
+			// still resolves.
 			return snap, errInvalid("agent override system cannot exceed %d characters", overrideSystemMaxRunes)
 		}
 	}
@@ -767,7 +767,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	// outcome checks run after the insert, against the fresh row.
 	var initialEvents []events.NewEvent
 	if len(in.rawInitial) > 0 {
-		initialEvents, err = events.NormalizeInbound(envKind, in.rawInitial)
+		initialEvents, err = events.NormalizeInbound(envKind, events.ManagementCredential, in.rawInitial)
 		if err != nil {
 			return createdSession{}, errInvalid("initial_events: %s", err)
 		}
@@ -1364,7 +1364,8 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 // It is also the first half of a lock order the mutation depends on: the session
 // row before anything that cascades from it. internal/gatetoken.Ensure takes the
 // same order on purpose, and taking the two the other way round here would
-// reopen the deadlock #313 closed.
+// reopen the deadlock #313 closed. The work API's claim takes a session's item
+// and never its row, so it has no order to keep (claimWork, #643).
 func requireNotRunning(ctx context.Context, tx pgx.Tx, id, verb string) error {
 	var status string
 	err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, id).Scan(&status)
@@ -1557,6 +1558,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Its sessions tokens go with the row by migration 0043's trigger.
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
 		return nil, err
 	}

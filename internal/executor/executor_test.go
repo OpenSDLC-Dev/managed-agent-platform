@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -297,13 +298,36 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 
 // WriteFiles is the batch every backend lands for a fixed couple of execs
 // however many members it carries; the fake keeps the same observable semantics
-// by writing the members in order and stopping at the first failure.
+// by writing the members in order and stopping at the first failure. It keeps
+// the backends' two path refusals too (sandbox.BulkPrepareShell and
+// BulkRenameShell), or a batch that could never land in a real sandbox would
+// land here: every member's directories are made before any member lands, so a
+// file in their way fails the whole batch with nothing landed, and a member
+// whose target is a directory — one already there, or one the batch made —
+// fails at that member.
 func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
 	f.bulkSizes = append(f.bulkSizes, len(files))
 	if f.modes == nil {
 		f.modes = map[string]fs.FileMode{}
 	}
+	dirs := map[string]bool{}
+	for p := range f.files {
+		for d := path.Dir(p); d != "/" && d != "."; d = path.Dir(d) {
+			dirs[d] = true
+		}
+	}
 	for _, w := range files {
+		for d := path.Dir(w.Path); d != "/" && d != "."; d = path.Dir(d) {
+			if _, isFile := f.files[d]; isFile {
+				return fmt.Errorf("fake: bulk write: %w (%s)", sandbox.ErrNotDirectory, d)
+			}
+			dirs[d] = true
+		}
+	}
+	for _, w := range files {
+		if dirs[w.Path] {
+			return fmt.Errorf("fake: %s: %w", w.Path, sandbox.ErrIsDirectory)
+		}
 		f.modes[w.Path] = w.Mode
 		if err := f.WriteFile(ctx, w.Path, w.Data); err != nil {
 			return err

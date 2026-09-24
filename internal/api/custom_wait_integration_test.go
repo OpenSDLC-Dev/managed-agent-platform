@@ -293,7 +293,7 @@ func TestSelfHostedToolWaitUntilResult(t *testing.T) {
 					t.Fatal("approval emitted a redundant idle")
 				}
 			}
-			sendEvents(t, s, sid, map[string]any{"type": "user.tool_result", "tool_use_id": use, "content": []any{map[string]any{"type": "text", "text": "done"}}})
+			sendEventsAs(t, s, workerAuth(t, s, sid), sid, map[string]any{"type": "user.tool_result", "tool_use_id": use, "content": []any{map[string]any{"type": "text", "text": "done"}}})
 			if s.sessionStatus(sid) != "running" {
 				t.Fatal("worker result did not resume")
 			}
@@ -331,7 +331,7 @@ func TestCustomBeforeApprovalDefersExecution(t *testing.T) {
 				t.Fatal("approval processed before custom")
 			}
 			if verdict == "deny" {
-				code, _ := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": []any{map[string]any{"type": "user.tool_result", "tool_use_id": toolID, "content": []any{map[string]any{"type": "text", "text": "must not override deny"}}}}})
+				code, _ := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": []any{map[string]any{"type": "user.tool_result", "tool_use_id": toolID, "content": []any{map[string]any{"type": "text", "text": "must not override deny"}}}}}, workerAuth(t, s, sid)))
 				if code != http.StatusBadRequest {
 					t.Fatalf("result after queued denial=%d", code)
 				}

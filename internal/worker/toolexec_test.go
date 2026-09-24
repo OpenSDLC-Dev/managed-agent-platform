@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -144,10 +146,30 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 
 // WriteFiles is the batch every backend lands for a fixed couple of execs
 // however many members it carries; the fake keeps the same observable semantics
-// by writing the members in order and stopping at the first failure.
+// by writing the members in order and stopping at the first failure. It keeps
+// the backends' two path refusals too — the executor fake's, for its reason: a
+// file in the way of a member's directories fails the whole batch with nothing
+// landed, and a member whose target is a directory fails at that member.
 func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
 	f.bulkSizes = append(f.bulkSizes, len(files))
+	dirs := map[string]bool{}
+	for p := range f.files {
+		for d := path.Dir(p); d != "/" && d != "."; d = path.Dir(d) {
+			dirs[d] = true
+		}
+	}
 	for _, w := range files {
+		for d := path.Dir(w.Path); d != "/" && d != "."; d = path.Dir(d) {
+			if _, isFile := f.files[d]; isFile {
+				return fmt.Errorf("fake: bulk write: %w (%s)", sandbox.ErrNotDirectory, d)
+			}
+			dirs[d] = true
+		}
+	}
+	for _, w := range files {
+		if dirs[w.Path] {
+			return fmt.Errorf("fake: %s: %w", w.Path, sandbox.ErrIsDirectory)
+		}
 		if err := f.WriteFile(ctx, w.Path, w.Data); err != nil {
 			return err
 		}
@@ -895,7 +917,7 @@ func (h *harness) answerOnThread(t *testing.T, threadID, useID domain.ID) {
 // self_hosted session silently stopped running.
 func (h *harness) confirm(t *testing.T, useID domain.ID, result string) {
 	t.Helper()
-	evs, err := events.NormalizeInbound(string(domain.EnvSelfHosted), []json.RawMessage{json.RawMessage(
+	evs, err := events.NormalizeInbound(string(domain.EnvSelfHosted), events.ManagementCredential, []json.RawMessage{json.RawMessage(
 		fmt.Sprintf(`{"type":"user.tool_confirmation","tool_use_id":%q,"result":%q}`, useID, result))})
 	if err != nil {
 		t.Fatalf("normalize confirmation for %s: %v", useID, err)
@@ -1179,20 +1201,76 @@ func TestRescanIsCoordinatorOnly(t *testing.T) {
 }
 
 // TestCoordinatorSkipsDelegationCalls: a delegation call is answered by the
-// settlement that emitted it, so the full walk should never meet an unanswered
-// one. If a log ever presented one anyway, running it would answer it
-// "unknown tool" and the post would be refused — faulting the item into a
-// reclaim loop. Skipped by name, for the reason the web filter gives.
+// settlement that emitted it, and a current control plane lists none on a
+// session that delegates (#675), so the scan's name check is the backstop for
+// an older control plane, which lists them. The wrapper is that older one: on
+// the walk's last page it puts back the allowed, unanswered create_agent the
+// real handler hid. Running it would answer it "unknown tool" and the post
+// would be refused — faulting the item into a reclaim loop — so it is skipped
+// by name, for the reason the web filter gives.
 func TestCoordinatorSkipsDelegationCalls(t *testing.T) {
-	h := newHarness(t, &fakeSandbox{})
-	spawn, _ := json.Marshal(map[string]any{
-		"name": toolset.ToolCreateAgent, "input": map[string]string{"agent_name": "worker", "message": "go"},
+	var hidden json.RawMessage // the call as a pre-#675 control plane rendered it
+	var hiddenID string
+	var armed atomic.Bool // set once both are written, so the handler reads them after
+	listed := func(ev json.RawMessage) bool {
+		var e struct {
+			ID string `json:"id"`
+		}
+		return json.Unmarshal(ev, &e) == nil && e.ID == hiddenID
+	}
+	reexposed := make(chan struct{}, 1)
+	h := newHarnessWrapped(t, &fakeSandbox{}, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !armed.Load() || r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/events") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			rec := httptest.NewRecorder()
+			next.ServeHTTP(rec, r)
+			var page struct {
+				Data     []json.RawMessage `json:"data"`
+				NextPage *string           `json:"next_page"`
+			}
+			// Passed through untouched unless this is the last page and the
+			// real handler hid the call — so reexposed also proves it did.
+			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &page) != nil ||
+				page.NextPage != nil || slices.ContainsFunc(page.Data, listed) {
+				maps.Copy(w.Header(), rec.Header())
+				w.WriteHeader(rec.Code)
+				_, _ = w.Write(rec.Body.Bytes())
+				return
+			}
+			// Newest first, and the call is the oldest row planted: it closes
+			// the last page, where the older control plane listed it.
+			page.Data = append(page.Data, hidden)
+			select {
+			case reexposed <- struct{}{}:
+			default:
+			}
+			w.Header().Set("content-type", "application/json")
+			_ = json.NewEncoder(w).Encode(page)
+		})
 	})
-	uses := h.suspend(t, string(spawn), writeUse("out.txt", "hello"))
+	h.refRoster(t, rosterMember{name: "worker"})
+	spawn := map[string]any{
+		"name": toolset.ToolCreateAgent, "input": map[string]string{"agent_name": "worker", "message": "go"},
+		"evaluated_permission": "allow", "session_thread_id": nil,
+	}
+	body, _ := json.Marshal(spawn)
+	uses := h.suspend(t, string(body), writeUse("out.txt", "hello"))
+	hiddenID = uses[0].ID.String()
+	spawn["id"], spawn["type"] = hiddenID, string(domain.EventAgentToolUse)
+	hidden, _ = json.Marshal(spawn)
+	armed.Store(true)
 
 	got, err := unansweredToolUses(context.Background(), h.client, h.sid.String(), true, func() {})
 	if err != nil {
 		t.Fatalf("scan: %v", err)
+	}
+	select {
+	case <-reexposed:
+	default:
+		t.Fatal("the wrapper never put the call back: the control plane listed it itself, or the walk never reached its last page")
 	}
 	if want := []string{uses[1].ID.String()}; !slices.Equal(useIDs(got), want) {
 		t.Errorf("scan = %v, want the sandbox tool only %v", useIDs(got), want)

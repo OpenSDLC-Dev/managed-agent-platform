@@ -104,6 +104,8 @@ type harness struct {
 	registry  *provider.Registry
 	sessionID domain.ID
 	envID     domain.ID
+	// workerKey is postToolResult's environment key, issued on first use.
+	workerKey string
 }
 
 func newHarness(t *testing.T, scripts [][]provider.Chunk, errs []error) *harness {
@@ -170,6 +172,18 @@ func (h *harness) postToolResult(t *testing.T, eventType domain.EventType, paylo
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+h.sessionID.String()+"/events", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", "brain-test-key")
+	if eventType == domain.EventUserToolResult {
+		// A BYOC worker's event, admitted under its environment key alone (#662).
+		if h.workerKey == "" {
+			key, err := api.IssueEnvironmentKey(context.Background(), h.pool, h.envID.String(), "brain-test-worker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.workerKey = key
+		}
+		req.Header.Del("x-api-key")
+		req.Header.Set("Authorization", "Bearer "+h.workerKey)
+	}
 	rec := httptest.NewRecorder()
 	api.NewHandler(h.pool, nil, nil, nil).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -305,18 +319,20 @@ func stopReasonType(t *testing.T, body []byte) string {
 }
 
 // typesEqual compares a log against the expected sequence written without
-// the primary-thread events: every session.status_* is preceded by its
+// the primary-thread events: every session.status_* is paired with its
 // session.thread_status_* (plan 35 decision 12, one rule, pinned by
 // TestStatusEventsComeInPrimaryThreadPairs), so the turn-shape assertions
 // below state the session-level sequence and the pairing is applied here.
-// withPrimaryThread inserts the primary thread's status event before each
-// session status event, as the log records them.
+// withPrimaryThread inserts the primary thread's status event after
+// session.status_running and before every other session status event, as the
+// log records them (#674).
 func withPrimaryThread(types []string) []string {
 	out := make([]string, 0, len(types)*2)
 	for _, ty := range types {
 		switch ty {
 		case "session.status_running":
-			out = append(out, "session.thread_status_running")
+			out = append(out, ty, "session.thread_status_running")
+			continue
 		case "session.status_idle":
 			out = append(out, "session.thread_status_idle")
 		case "session.status_rescheduled":

@@ -799,3 +799,89 @@ func TestReaperSyncsBeforeReaping(t *testing.T) {
 		t.Errorf("versions = %v", got)
 	}
 }
+
+// TestMemoryShadowingTheMarkerIsSkipped: the store may hold a memory at
+// `/.anthropic-memory-store` — the reference accepts one (#669) — or under
+// it, and neither ever lands in the mount: one at the path would be written
+// over the marker, and one under it needs a directory where the marker file
+// is, which fails every batch it rides in. Whether the store holds it when it
+// lands or gains it later, the marker keeps its bytes, the baseline never
+// names the path, the store's other changes still land, the store stays
+// writable, and the memory itself is left alone in the store — never pulled
+// and never read as a local deletion. It is still a memory of the store's, so
+// it counts toward the cap.
+func TestMemoryShadowingTheMarkerIsSkipped(t *testing.T) {
+	const markerMemory = "/.anthropic-memory-store"
+	for name, shadow := range map[string]string{
+		"at the marker's path":    markerMemory,
+		"under the marker's path": markerMemory + "/x.md",
+	} {
+		check := func(t *testing.T, h *harness, sb *fakeSandbox) {
+			t.Helper()
+			if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+				t.Errorf("marker = %q; a memory was written over it", got)
+			}
+			if _, ok := baselineOf(t, sb, memStoreID).Synced[shadow]; ok {
+				t.Errorf("the baseline names %s: %+v", shadow, baselineOf(t, sb, memStoreID))
+			}
+			if _, err := h.pool.Exec(context.Background(),
+				`UPDATE memories SET content = 'remote v2', content_sha256 = $2 WHERE memory_store_id = $1 AND path = '/notes.md'`,
+				memStoreID, sha256hex([]byte("remote v2"))); err != nil {
+				t.Fatal(err)
+			}
+			sb.files[memMount+"/new.md"] = "fresh"
+			h.step(t)
+			if got := sb.files[memMount+"/notes.md"]; got != "remote v2" {
+				t.Errorf("/notes.md = %q; the store's other changes did not land", got)
+			}
+			if got, _ := h.memoryContent(t, memStoreID, "/new.md"); got != "fresh" {
+				t.Errorf("/new.md in the store = %q; the store went pull-only", got)
+			}
+			h.step(t)
+			if got, ok := h.memoryContent(t, memStoreID, shadow); !ok || got != "m" {
+				t.Errorf("%s in the store = %q, %v; want it left alone", shadow, got, ok)
+			}
+			if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+				t.Errorf("marker after the syncs = %q", got)
+			}
+		}
+		t.Run(name+", held when the store lands", func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			h.seedMemory(t, memStoreID, "/notes.md", "hello")
+			h.seedMemory(t, memStoreID, shadow, "m")
+			h.refMemory(t, memStoreID, memMount, "read_write")
+			h.step(t)
+			if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+				t.Errorf("/notes.md = %q", got)
+			}
+			check(t, h, sb)
+		})
+		t.Run(name+", created after the store landed", func(t *testing.T) {
+			h, sb := materialized(t, "read_write")
+			h.seedMemory(t, memStoreID, shadow, "m")
+			h.step(t)
+			check(t, h, sb)
+		})
+	}
+	t.Run("counted toward the cap", func(t *testing.T) {
+		sb := &fakeSandbox{}
+		h := newHarness(t, sb)
+		h.seedMemoryStore(t, memStoreID, "Full")
+		if _, err := h.pool.Exec(context.Background(),
+			`INSERT INTO memories (id, memory_store_id, path, content, content_sha256, content_size_bytes, memory_version_id)
+			 SELECT 'mem_' || lpad(i::text, 26, '0'), $1, '/m/' || i, '', $2, 0, 'memver_' || lpad(i::text, 26, '0')
+			   FROM generate_series(1, $3) AS i`, memStoreID, sha256hex(nil), memsync.MaxMemoriesPerStore-1); err != nil {
+			t.Fatal(err)
+		}
+		h.seedMemory(t, memStoreID, markerMemory, "m")
+		h.refMemory(t, memStoreID, memMount, "read_write")
+		h.step(t)
+		sb.files[memMount+"/one-more.md"] = "over the cap"
+		h.step(t)
+		if _, ok := h.memoryContent(t, memStoreID, "/one-more.md"); ok {
+			t.Error("the 2,001st memory was created by the sync; the one at the marker's path went uncounted")
+		}
+	})
+}

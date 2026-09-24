@@ -385,9 +385,9 @@ func TestCreateSessionInitialEvents(t *testing.T) {
 	}
 	evs := listData(t, list)
 	if len(evs) != 4 {
-		t.Fatalf("log has %d events, want 4 (message, define_outcome, thread_status_running, status_running)", len(evs))
+		t.Fatalf("log has %d events, want 4 (message, define_outcome, status_running, thread_status_running)", len(evs))
 	}
-	for i, wantType := range []string{"user.message", "user.define_outcome", "session.thread_status_running", "session.status_running"} {
+	for i, wantType := range []string{"user.message", "user.define_outcome", "session.status_running", "session.thread_status_running"} {
 		if evs[i]["type"] != wantType {
 			t.Errorf("log[%d].type = %v, want %s", i, evs[i]["type"], wantType)
 		}

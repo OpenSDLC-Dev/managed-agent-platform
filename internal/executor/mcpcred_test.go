@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -883,6 +884,14 @@ func mcpErrorType(t *testing.T, h *harness) string {
 // fails at the handshake and never gets there.
 func serveRefusingTheCall(t *testing.T, tool mcptest.Tool) string {
 	t.Helper()
+	return serveFailingTheCall(t, tool, http.StatusUnauthorized, false)
+}
+
+// serveFailingTheCall is serveRefusingTheCall with the status left to the
+// caller, and optionally a JSON-RPC error body carrying the call's id — the
+// shape the go-sdk decodes out of a non-2xx and wraps as the error it returns.
+func serveFailingTheCall(t *testing.T, tool mcptest.Tool, status int, jsonRPCBody bool) string {
+	t.Helper()
 	inner := mcptest.Server(t, tool)
 	target, err := neturl.Parse(inner)
 	if err != nil {
@@ -896,11 +905,19 @@ func serveRefusingTheCall(t *testing.T, tool mcptest.Tool) string {
 			return
 		}
 		var msg struct {
-			Method string `json:"method"`
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
 		}
 		_ = json.Unmarshal(body, &msg)
 		if msg.Method == "tools/call" {
-			w.WriteHeader(http.StatusUnauthorized)
+			if !jsonRPCBody {
+				w.WriteHeader(status)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = fmt.Fprintf(w,
+				`{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"policy says no"}}`, msg.ID)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))

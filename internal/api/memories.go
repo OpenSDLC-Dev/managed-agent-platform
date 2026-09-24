@@ -146,8 +146,11 @@ func lockMemoryStore(ctx context.Context, tx pgx.Tx, storeID string) (archived b
 }
 
 // lockMemoryStoreForWrite is lockMemoryStore plus decision 3's refusal: an
-// archived store takes no new content. Redaction deliberately does not use it
-// — a compliance erasure is not a new write, and archiving is one-way.
+// archived store takes no new content. Redaction and a memory delete
+// deliberately do not use it — an erasure of existing content is not a new
+// write, and archiving is one-way. The reference draws the same line: a create
+// or an update on an archived store is a 400, a delete and a redaction 200
+// (the 2026-09-02 recording, #685).
 func lockMemoryStoreForWrite(ctx context.Context, tx pgx.Tx, storeID string) error {
 	archived, err := lockMemoryStore(ctx, tx, storeID)
 	if err != nil {
@@ -402,6 +405,13 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A rename onto the marker's path stays refused, though a create there is
+	// accepted as the reference accepts it (#669): no recording renamed onto
+	// it, so this is our choice, registered in docs/DIVERGENCES.md. An update
+	// naming the path the memory already holds is no rename.
+	if pathSet && path != row.path && memsync.IsMarkerPath(path) {
+		return nil, errInvalid("path %s is reserved for the memory store's marker file", path)
+	}
 
 	next := row
 	if contentSet {
@@ -504,17 +514,23 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	// The delete precondition rides the query string, not a body (checked
 	// against anthropic-sdk-go v1.66.0 — betamemorystorememory.go
 	// BetaMemoryStoreMemoryService.Delete and
-	// BetaMemoryStoreMemoryDeleteParams.ExpectedContentSha256). storableText,
-	// not a digest shape check: any value that is not the stored one is a
-	// mismatch, and the only byte that must not reach the comparison is one
-	// Postgres cannot store (#135).
+	// BetaMemoryStoreMemoryDeleteParams.ExpectedContentSha256). Its shape is
+	// checked before its value, as the reference checks it: the 2026-09-02
+	// recording answers `nothex` with a 400 invalid_request_error and a
+	// well-formed digest that does not match with the 409 below (#684). A
+	// value of any other shape than contentDigest's could never match, and the
+	// check keeps a byte Postgres cannot store out of the comparison (#135).
+	// Only an absent parameter means no precondition: one supplied empty — the
+	// SDK sends that for param.NewOpt("") — is refused like any other shape,
+	// and so is a query string that does not parse, since URL.Query drops a
+	// malformed pair and a corrupted precondition would read as absent.
 	q, err := queryValues(r)
 	if err != nil {
 		return nil, err
 	}
 	expected := q.Get("expected_content_sha256")
-	if !storableText(expected) {
-		return nil, errInvalid("expected_content_sha256 must be valid text")
+	if q.Has("expected_content_sha256") && !memsync.IsDigest([]byte(expected)) {
+		return nil, errInvalid("expected_content_sha256: must be 64 lowercase hex characters")
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -522,7 +538,8 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockMemoryStoreForWrite(ctx, tx, storeID); err != nil {
+	// The permissive lock: a delete erases, so an archived store admits it.
+	if _, err := lockMemoryStore(ctx, tx, storeID); err != nil {
 		return nil, err
 	}
 	var row memoryRow

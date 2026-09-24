@@ -2,12 +2,14 @@ package events_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -240,6 +242,97 @@ func TestSessionViewWithThreadToolCalls(t *testing.T) {
 				t.Errorf("%s: seqs %v, want %v", c.name, got, c.want)
 				break
 			}
+		}
+	}
+}
+
+// HideTools drops the named agent.tool_use calls and the agent.tool_result
+// answering each from any scope (#675) — keyed on the call's name, which a
+// result carries only through its tool_use_id — inside the query, so a limit
+// still counts visible rows. The call's type and name together are the key,
+// and nothing else about the call: a custom tool of the same name stays, and so
+// does a name off the list, answered by the settlement exactly as a delegation
+// call is, while a named call goes whatever its evaluated_permission. A scope
+// that does not set it — a thread's replay — reads every row.
+func TestListHideTools(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	child := domain.NewID(domain.PrefixSessionThread)
+	use := func(name string) (domain.ID, []byte) {
+		return domain.NewID(domain.PrefixEvent), []byte(`{"name":"` + name + `","input":{},"evaluated_permission":"allow"}`)
+	}
+	answer := func(id domain.ID) []byte {
+		return []byte(`{"tool_use_id":"` + id.String() + `","content":[{"type":"text","text":"ok"}],"is_error":false}`)
+	}
+	spawn, spawnBody := use("create_agent")
+	bash, bashBody := use("bash")
+	report, reportBody := use("submit_result")
+	unknown, unknownBody := use("frobnicate")
+	denied := domain.NewID(domain.PrefixEvent)
+
+	if _, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("primary")},                                     // 1
+		{ID: spawn, Type: domain.EventAgentToolUse, Payload: spawnBody},                               // 2
+		{Type: domain.EventAgentToolResult, Payload: answer(spawn)},                                   // 3
+		{ID: bash, Type: domain.EventAgentToolUse, Payload: bashBody},                                 // 4
+		{Type: domain.EventAgentToolResult, Payload: answer(bash)},                                    // 5
+		{Type: domain.EventAgentCustomToolUse, Payload: []byte(`{"name":"create_agent","input":{}}`)}, // 6
+		{ID: report, Type: domain.EventAgentToolUse, ThreadID: child, Payload: reportBody},            // 7
+		{Type: domain.EventAgentToolResult, ThreadID: child, Payload: answer(report)},                 // 8
+		{Type: domain.EventAgentToolUse, ThreadID: child, CrossPosted: true,
+			Payload: []byte(`{"name":"bash","input":{},"evaluated_permission":"ask"}`)}, // 9
+		{Type: domain.EventAgentToolUse, ThreadID: child, Payload: bashBody}, // 10
+		{ID: unknown, Type: domain.EventAgentToolUse, Payload: unknownBody},  // 11
+		{Type: domain.EventAgentToolResult, Payload: answer(unknown)},        // 12
+		{ID: denied, Type: domain.EventAgentToolUse,
+			Payload: []byte(`{"name":"submit_result","input":{},"evaluated_permission":"deny"}`)}, // 13
+		{Type: domain.EventAgentToolResult, Payload: answer(denied)}, // 14
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seqs := func(q events.ListQuery) []int64 {
+		evs, err := log.List(ctx, sid, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]int64, 0, len(evs))
+		for _, ev := range evs {
+			out = append(out, ev.Seq)
+		}
+		return out
+	}
+	hide := toolset.AllDelegationTools()
+	one, four := int64(1), int64(4)
+	cases := []struct {
+		name string
+		q    events.ListQuery
+		want []int64
+	}{
+		{"session, nothing hidden", events.ListQuery{Scope: events.ScopeSession},
+			[]int64{1, 2, 3, 4, 5, 6, 9, 11, 12, 13, 14}},
+		{"session", events.ListQuery{Scope: events.ScopeSession, HideTools: hide},
+			[]int64{1, 4, 5, 6, 9, 11, 12}},
+		// The widening would pull the child's report and its answer back in.
+		{"session widened", events.ListQuery{Scope: events.ScopeSession, ThreadToolCalls: true, HideTools: hide},
+			[]int64{1, 4, 5, 6, 9, 10, 11, 12}},
+		{"the child's own surface", events.ListQuery{Scope: events.ScopeThread, ThreadID: child, HideTools: hide},
+			[]int64{9, 10}},
+		// What the primary's turn replays keeps the pair it answered.
+		{"primary replay", events.ListQuery{Scope: events.ScopeThread}, []int64{1, 2, 3, 4, 5, 6, 11, 12, 13, 14}},
+		// Two arrays bind ahead of the type filter; the placeholders still line up.
+		{"widened and typed", events.ListQuery{Scope: events.ScopeSession, ThreadToolCalls: true, HideTools: hide,
+			Types: []string{"agent.tool_result"}}, []int64{5, 12}},
+		{"a full first page", events.ListQuery{Scope: events.ScopeSession, HideTools: hide, Limit: 2}, []int64{1, 4}},
+		{"a full page after a hidden pair", events.ListQuery{Scope: events.ScopeSession, HideTools: hide,
+			AfterSeq: &one, Limit: 1}, []int64{4}},
+		{"descending past a hidden pair", events.ListQuery{Scope: events.ScopeSession, HideTools: hide,
+			Desc: true, AfterSeq: &four, Limit: 2}, []int64{1}},
+	}
+	for _, c := range cases {
+		if got := seqs(c.q); !slices.Equal(got, c.want) {
+			t.Errorf("%s: seqs %v, want %v", c.name, got, c.want)
 		}
 	}
 }
