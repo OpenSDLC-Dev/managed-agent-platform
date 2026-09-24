@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -711,10 +713,11 @@ func TestMemoryPushRefusedIsRememberedUntilBytesChange(t *testing.T) {
 	}
 }
 
-// TestMemoryDeleteWithheldWhileArchived pins the DeleteRemote-vs-archive arm:
-// a local deletion against an archived store is refused (the store's 400),
-// withheld with its baseline kept, and propagates only after the unarchive.
-func TestMemoryDeleteWithheldWhileArchived(t *testing.T) {
+// TestMemoryDeleteReachesAnArchivedStore pins the DeleteRemote-vs-archive
+// arm: an archived store admits a delete — an erasure, not new content, as
+// the reference's store does (#685) — so a local deletion lands there and its
+// baseline entry drops, where an edit would draw the store's archived 400.
+func TestMemoryDeleteReachesAnArchivedStore(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
 	h.seedMemoryStore(t, memStoreID, "Notes")
@@ -728,19 +731,88 @@ func TestMemoryDeleteWithheldWhileArchived(t *testing.T) {
 	}
 	delete(sb.files, memMount+"/a.md")
 	h.runWith(t, token)
-	if _, ok := h.memoryContent(t, memStoreID, "/a.md"); !ok {
-		t.Error("a delete reached an archived store")
+	if _, ok := h.memoryContent(t, memStoreID, "/a.md"); ok {
+		t.Error("the deletion did not reach the archived store")
 	}
-	if h.baseline(t, memStoreID).Synced["/a.md"] != sha256hex([]byte("alpha")) {
-		t.Errorf("baseline while archived = %+v, want the memory kept", h.baseline(t, memStoreID))
+	if b := h.baseline(t, memStoreID); b.Synced["/a.md"] != "" {
+		t.Errorf("baseline after the delete = %+v, want the memory dropped", b)
+	}
+}
+
+// TestMemoryDeleteWithheldByAnOlderControlPlane pins both archived arms of a
+// delete, which exist for a control plane older than #685's: one that answers
+// a delete on an archived store with the store's archived 400. The first
+// refused delete makes the rest of the sync pull-only, so the second is
+// withheld without a request; both keep their baseline, the sync still
+// settles — the remote change beside them is pulled — and the deletions
+// propagate once the store is unarchived.
+func TestMemoryDeleteWithheldByAnOlderControlPlane(t *testing.T) {
+	var refuse atomic.Bool
+	var mu sync.Mutex
+	refused := map[string]int{} // memory id -> its delete requests refused
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if refuse.Load() && r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/memory_stores/"+memStoreID+"/memories/") {
+				mu.Lock()
+				refused[r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]]++
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"memory store ` +
+					memStoreID + ` is archived"}}`))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	sb := &fakeSandbox{}
+	h := newHarnessWrapped(t, sb, wrap)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	idA := h.seedMemory(t, memStoreID, "/a.md", "alpha")
+	idB := h.seedMemory(t, memStoreID, "/b.md", "beta")
+	h.seedMemory(t, memStoreID, "/c.md", "gamma")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token)
+
+	h.rewriteMemory(t, memStoreID, "/c.md", "gamma v2")
+	if _, err := h.pool.Exec(context.Background(), `UPDATE memory_stores SET archived_at = now() WHERE id = $1`, memStoreID); err != nil {
+		t.Fatal(err)
+	}
+	refuse.Store(true)
+	delete(sb.files, memMount+"/a.md")
+	delete(sb.files, memMount+"/b.md")
+	h.runWith(t, token)
+	// Deletions settle in path order, so /a.md's is the one sent and refused
+	// — once per sync, and a run syncs before its tools and after — and
+	// /b.md's is withheld behind it without a request.
+	mu.Lock()
+	sentA, sentB := refused[idA], refused[idB]
+	mu.Unlock()
+	if sentA == 0 || sentB != 0 {
+		t.Errorf("refused deletes: /a.md %d, /b.md %d; want /a.md's sent and /b.md's withheld", sentA, sentB)
+	}
+	for p, content := range map[string]string{"/a.md": "alpha", "/b.md": "beta"} {
+		if _, ok := h.memoryContent(t, memStoreID, p); !ok {
+			t.Errorf("%s: a delete reached an archived store", p)
+		}
+		if got := h.baseline(t, memStoreID).Synced[p]; got != sha256hex([]byte(content)) {
+			t.Errorf("%s: baseline while archived = %q, want the memory kept", p, got)
+		}
+	}
+	if got := sb.files[memMount+"/c.md"]; got != "gamma v2" {
+		t.Errorf("/c.md = %q, want the store's change pulled in the same sync", got)
 	}
 
+	refuse.Store(false)
 	if _, err := h.pool.Exec(context.Background(), `UPDATE memory_stores SET archived_at = NULL WHERE id = $1`, memStoreID); err != nil {
 		t.Fatal(err)
 	}
 	h.runWith(t, token)
-	if _, ok := h.memoryContent(t, memStoreID, "/a.md"); ok {
-		t.Error("the deletion did not propagate after the unarchive")
+	for _, p := range []string{"/a.md", "/b.md"} {
+		if _, ok := h.memoryContent(t, memStoreID, p); ok {
+			t.Errorf("%s: the deletion did not propagate after the unarchive", p)
+		}
 	}
 }
 

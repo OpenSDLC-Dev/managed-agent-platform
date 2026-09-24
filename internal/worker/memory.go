@@ -131,8 +131,9 @@ func newMemoryStores(client sdk.Client, token, sessionID string, sb sandbox.Sand
 // roots hands the tool runner what the executor hands its own: every mount,
 // and the read_only ones as read-only roots. An archived store is not among
 // the latter here — the token reaches no store read, so the worker learns of
-// an archive only when the store refuses a write, and withholds the sync
-// then (settleStore); the reference worker holds the same position.
+// an archive only when the store refuses a create or an update, and withholds
+// the sync's pushes then (settleStore); a deletion is admitted by the store,
+// so it lands (#685). The reference worker holds the same position.
 func (m *memoryStores) roots() (all, readOnly []string) {
 	if m == nil {
 		return nil, nil
@@ -653,6 +654,11 @@ func (m *memoryStores) settleStore(ctx context.Context, st *storeSync, progress 
 			st.removals = append(st.removals, act.Path)
 			st.counts.deleted++
 		case memsync.DeleteRemote:
+			// Both archived arms of a delete serve a control plane older than
+			// #685's, which refused a delete on an archived store with the
+			// store's 400. A current one admits it, so neither fires there;
+			// they stay because a customer-hosted worker can run against an
+			// older control plane.
 			if st.archived {
 				st.next.Synced[act.Path] = act.BaselineSHA
 				st.counts.withheld++

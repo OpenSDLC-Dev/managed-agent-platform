@@ -172,3 +172,17 @@ func TestParseHashTree(t *testing.T) {
 		}
 	}
 }
+
+// IsDigest is the one lowercase-hex digest check: the hash listing's and the
+// store API's delete precondition's.
+func TestIsDigest(t *testing.T) {
+	if !memsync.IsDigest([]byte(strings.Repeat("0123456789abcdef", 4))) {
+		t.Error("a lowercase 64-hex digest was refused")
+	}
+	for _, bad := range []string{"", "nothex", strings.Repeat("a", 63), strings.Repeat("a", 65),
+		strings.Repeat("g", 64), strings.Repeat("A", 64)} {
+		if memsync.IsDigest([]byte(bad)) {
+			t.Errorf("IsDigest(%q) = true", bad)
+		}
+	}
+}
