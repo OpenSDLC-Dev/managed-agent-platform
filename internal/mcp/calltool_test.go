@@ -500,6 +500,43 @@ func TestCallToolRefusesAnInputRequiredAnswerItCannotFulfil(t *testing.T) {
 	}
 }
 
+// A request for input this platform cannot supply fails the call with no
+// exchange of its own after the 200 that asked: the SDK's middleware tries to
+// fulfil it locally, and with no elicitation handler the client refuses with a
+// *jsonrpc.Error (checked against go-sdk v1.7.0 — mcp/mrtr.go
+// clientMultiRoundTripMiddleware and fulfillInputRequests; checked against
+// go-sdk v1.7.0 — mcp/client.go Client.elicit). That is still the server's
+// answer — ErrServerAnswered names
+// exactly this case — so a rule that judged the error by its lack of an
+// exchange rather than by the status would lose it.
+func TestCallToolMarksAnInputRequestItCannotFulfilAsAnswered(t *testing.T) {
+	t.Parallel()
+	url, _ := serveToolCall(t, func(json.RawMessage) map[string]any {
+		return map[string]any{
+			"content":    []any{},
+			"resultType": "input_required",
+			"inputRequests": map[string]any{
+				"e1": map[string]any{"method": "elicitation/create", "params": map[string]any{
+					"message":         "which repository?",
+					"requestedSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+				}},
+			},
+			"requestState": "opaque",
+		}
+	})
+
+	_, err := connect(t, url).CallTool(context.Background(), "echo", json.RawMessage(`{"q":"x"}`))
+	if err == nil {
+		t.Fatal("CallTool reported success for a call waiting on input")
+	}
+	if !strings.Contains(err.Error(), "elicitation") {
+		t.Fatalf("the call did not fail on the elicitation, so this proves nothing: %v", err)
+	}
+	if !errors.Is(err, mcp.ErrServerAnswered) {
+		t.Errorf("a request for input the platform cannot supply = %v, want ErrServerAnswered", err)
+	}
+}
+
 // TestCallToolOnAConnectionThatWasNeverOpened pins that this package's own
 // misuse is reported as such rather than as a nil dereference in an executor
 // shared by every session on the host.
