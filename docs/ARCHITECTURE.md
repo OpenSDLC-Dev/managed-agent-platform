@@ -435,7 +435,7 @@ Layout order is by layer, as the repo is.
 
 | Package | What it owns |
 |---|---|
-| `store/` | The Postgres schema. Every table lives in `migrations/`, embedded in the binaries so a deployment needs no migration step. Three properties of `Migrate` are contract rather than detail — one all-or-nothing transaction, an advisory lock, and the filename as the immutable version record — and the schema reserves the multi-tenant columns it does not yet enforce. |
+| `store/` | The Postgres schema. Every table lives in `migrations/`, embedded in the binaries so a deployment needs no migration step. Three properties of `Migrate` are contract rather than detail — one all-or-nothing transaction (retried whole on a lock timeout or deadlock), an advisory lock, and the filename as the immutable version record — and the schema reserves the multi-tenant columns it does not yet enforce. |
 | `blob/` | The object-storage seam: `s3/` for anything speaking S3, `gcs/` native on Application Default Credentials, one contract suite for both. |
 | `skills/` | Skill-upload validation and canonical-zip normalization, funnelled through one place so the rules cannot drift between entry points. |
 | `cron/` | The occurrence engine behind a deployment's schedule: the reference's 5-field POSIX dialect, matched literally against a wall clock in an IANA zone. `Due`, `Next` and `Upcoming` share one walk, so the list a client reads in `upcoming_runs_at` and the instant the scheduler fires cannot disagree. It imports `time/tzdata` itself rather than leaving that to a `main`, because the server image ships no zoneinfo and the failure would appear only there. |

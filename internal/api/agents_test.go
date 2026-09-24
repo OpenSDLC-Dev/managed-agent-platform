@@ -834,68 +834,55 @@ func TestAgentArchiveCannotReadPastAConcurrentDeployment(t *testing.T) {
 		t.Fatalf("revive the deployment: %v", err)
 	}
 
-	// Its own client rather than s.do: a t.Fatalf from this goroutine would be
-	// the wrong kind of failure, and the transport error belongs on the channel.
-	done := make(chan int, 1)
-	go func() {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/agents/"+agentID+"/archive", nil)
-		if err != nil {
-			done <- 0
-			return
-		}
-		req.Header.Set("x-api-key", testKey)
-		res, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-		if err != nil {
-			done <- 0
-			return
-		}
-		_ = res.Body.Close()
-		done <- res.StatusCode
-	}()
+	done := s.sendAsync(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil, map[string]string{"x-api-key": testKey})
 
-	waitUntilBlockedOnALock(t, s.pool, done)
+	waitUntilBlockedOnALock(t, s.pool, 0, done)
 
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the revived deployment: %v", err)
 	}
-	if status := <-done; status != http.StatusBadRequest {
-		t.Errorf("the archive answered %d, want 400 — it read the deployments before taking the agent lock", status)
+	if r := awaitReply(t, done); r.err != nil || r.code != http.StatusBadRequest {
+		t.Errorf("the archive answered %d (%v), want 400 — it read the deployments before taking the agent lock", r.code, r.err)
 	}
 }
 
-// waitUntilBlockedOnALock returns once another backend on this test's database
-// is waiting on a lock, which is the archive request. Any backend will do: a
-// pgtest database is private to one test, and the only other two connections on
-// it are the poller and the transaction holding the locks, neither of which
-// ever waits. internal/queue/keeperbudget_test.go polls the same broad way for
-// the same reason.
+// waitUntilBlockedOnALock returns the pid of a backend on this test's database
+// that is waiting on a lock blocker holds, and fails if done answers first — a
+// request that should have been waiting. With blocker 0 any waiting backend
+// will do, which is enough where, as for the archive request above, nothing
+// else on the database ever waits: a pgtest database is private to one test,
+// and the poller and the transaction holding the locks never wait.
+// internal/queue/keeperbudget_test.go polls the same broad way for the same
+// reason. A test with more than one waiter names the blocker.
 //
-// The two failure exits are diagnostics for an archive that answered or died
-// early, not the mechanism that catches a broken ordering — that is the caller's
-// status assertion. 15s is generous by roughly fifty times: the wait was
-// measured at under 300ms even under a verified 2.6x host slowdown.
-func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, done <-chan int) {
+// The two failure exits are diagnostics for a request that answered or died
+// early, not the mechanism that catches a broken ordering — that is the
+// caller's assertion. 15s is generous by roughly fifty times: the archive's
+// wait was measured at under 300ms even under a verified 2.6x host slowdown.
+func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, blocker int, done <-chan reply) int {
 	t.Helper()
 	// Its own deadline, so a pool that could not hand out a connection fails
 	// here rather than hanging until the package's timeout.
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	for ctx.Err() == nil {
-		var waiting int
+		var waiter int
 		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM pg_stat_activity
+			`SELECT COALESCE(min(pid), 0) FROM pg_stat_activity
 			  WHERE datname = current_database() AND wait_event_type = 'Lock'
-			    AND pid <> pg_backend_pid()`).Scan(&waiting); err != nil {
+			    AND pid <> pg_backend_pid()
+			    AND ($1::int = 0 OR $1::int = ANY(pg_blocking_pids(pid)))`, blocker).Scan(&waiter); err != nil {
 			t.Fatalf("read pg_stat_activity: %v", err)
 		}
-		if waiting > 0 {
-			return
+		if waiter != 0 {
+			return waiter
 		}
 		select {
-		case status := <-done:
-			t.Fatalf("the archive answered %d before ever waiting on a lock", status)
+		case r := <-done:
+			t.Fatalf("answered %d %s (%v) before ever waiting on a lock", r.code, r.body, r.err)
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	t.Fatal("no backend waited on a lock within 15s — the archive never reached the agent row")
+	t.Fatalf("no backend waited on a lock held by %d within 15s (0 is any)", blocker)
+	return 0
 }
