@@ -288,16 +288,27 @@ func TestReplayRendersAReceivedMessage(t *testing.T) {
 			`[{"text":"[message from researcher]\n\nfound three papers","type":"text"}]`,
 		},
 		{
-			// from_agent_name is null when the sender is the primary agent,
-			// which has a role rather than a roster name.
-			"from the primary",
+			// A row written before #675: the coordinator's half carried a
+			// null name. Stored rows are never rewritten, so this rendering
+			// must not move.
+			"from the primary, unnamed",
 			`{"content":[{"type":"text","text":"summarize them"}],"from_session_thread_id":"sthr_0","from_agent_name":null}`,
+			`[{"text":"[message from your coordinator]\n\nsummarize them","type":"text"}]`,
+		},
+		{
+			// Since #675 the coordinator's half names it, as the reference
+			// does; the rendering still names its role, byte for byte what the
+			// unnamed row renders.
+			"from the primary, named",
+			`{"content":[{"type":"text","text":"summarize them"}],"from_session_thread_id":"sthr_0","from_agent_name":"planner"}`,
 			`[{"text":"[message from your coordinator]\n\nsummarize them","type":"text"}]`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req, _, err := buildRequest("", nil,
-				[]domain.Event{ev(1, domain.EventAgentThreadMessageReceived, tc.body)}, "", "", "", "")
+			// sthr_0 is this session's primary thread.
+			e := ev(1, domain.EventAgentThreadMessageReceived, tc.body)
+			e.SessionID = "sesn_0"
+			req, _, err := buildRequest("", nil, []domain.Event{e}, "", "", "", "")
 			if err != nil {
 				t.Fatalf("buildRequest: %v", err)
 			}

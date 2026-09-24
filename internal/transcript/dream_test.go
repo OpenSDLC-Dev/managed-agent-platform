@@ -290,8 +290,10 @@ func TestRenderDreamUnreadableToolUse(t *testing.T) {
 	}
 }
 
-// A received message whose sender carries no name — the primary agent's half
-// of the pair — still says who is speaking rather than trailing off.
+// A received message whose sender carries no name still says who is speaking
+// rather than trailing off. No stored row reaches a dream that way: the only
+// nameless ones, a coordinator's messages from before #675, sit on a child's
+// own list, which the session view RenderDream reads never holds.
 func TestThreadMessageWithoutSenderName(t *testing.T) {
 	d := renderEvents(t, mustEvent(t, 1, domain.EventAgentThreadMessageReceived,
 		map[string]any{"content": "done", "from_agent_name": nil}))

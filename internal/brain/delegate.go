@@ -135,8 +135,9 @@ type delegation struct {
 type delegate struct {
 	sid   domain.ID
 	agent domain.ResolvedAgent
-	// caller is the calling thread as a message peer: the coordinator is the
-	// zero value (the primary has no roster name), a child carries its own.
+	// caller is the calling thread as a message peer, named by the agent it
+	// runs: the coordinator's thread id is empty and its name is the session
+	// agent's, which every message it sends carries (#675).
 	caller    events.ThreadPeer
 	watermark int64
 	// settlementOnly is false when the turn also holds a call some driver must
@@ -153,8 +154,7 @@ type delegate struct {
 }
 
 // wrongRole reports why this thread may not call name, or "" when it may. A
-// child is a child by having a caller peer at all: the primary thread has no
-// roster name, so the zero value is the coordinator.
+// child is a child by having a thread id: the primary's is empty.
 //
 // The message names the tool the model should have reached for, because the
 // model can see neither its own role nor the half it was not offered — it has
@@ -732,10 +732,8 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		if err != nil {
 			return nil, opts, err
 		}
-		d := &delegate{sid: sid, agent: agent, watermark: watermark, settlementOnly: settlementOnly}
-		if item.ThreadID != "" {
-			d.caller = events.ThreadPeer{ThreadID: item.ThreadID, AgentName: agent.Name}
-		}
+		d := &delegate{sid: sid, agent: agent, watermark: watermark, settlementOnly: settlementOnly,
+			caller: events.ThreadPeer{ThreadID: item.ThreadID, AgentName: agent.Name}}
 		// Whether this turn made at least one genuine delegation call — the
 		// session-wide delegation budget's own distinction (#567): a turn whose
 		// delegated set is entirely names the model was not offered spent no

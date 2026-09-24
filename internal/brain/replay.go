@@ -183,20 +183,27 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			// tool_result even when it answers a spawn, because the sender's
 			// own delegation call was answered in the commit that made it: this
 			// arrives turns later, out of band, and the bracketed prefix is what
-			// tells the model who is speaking. Deterministic from the payload,
-			// so every replay of this log rebuilds the same block (rendering
-			// ours, INFERRED — docs/DIVERGENCES.md).
+			// tells the model who is speaking. Deterministic from the stored
+			// row — its payload and its session id — so every replay of this
+			// log rebuilds the same block (rendering ours, INFERRED —
+			// docs/DIVERGENCES.md).
 			var p struct {
-				FromAgentName string `json:"from_agent_name"`
+				FromSessionThreadID domain.ID `json:"from_session_thread_id"`
+				FromAgentName       string    `json:"from_agent_name"`
 			}
 			if err := json.Unmarshal(ev.Body, &p); err != nil {
 				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
 			}
-			// The field is null when the sender is the primary agent, which has
-			// a role rather than a roster name.
-			from := "your coordinator"
-			if p.FromAgentName != "" {
-				from = p.FromAgentName
+			// The primary agent is named by its role, whatever the row holds.
+			// Its name was null before #675 — the only sender ever written
+			// without one — and is the session agent's since, but this block
+			// heads every request a child assembles: keyed on the name, the
+			// change would have reworded that head for every child spawned
+			// after it, and a child whose log straddles it would hear one
+			// coordinator under two names. Old and new rows render alike.
+			from := p.FromAgentName
+			if p.FromSessionThreadID == domain.PrimaryThreadID(ev.SessionID) {
+				from = "your coordinator"
 			}
 			blk, err := json.Marshal(map[string]any{
 				"type": "text",
