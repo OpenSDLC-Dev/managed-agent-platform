@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -144,10 +145,30 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 
 // WriteFiles is the batch every backend lands for a fixed couple of execs
 // however many members it carries; the fake keeps the same observable semantics
-// by writing the members in order and stopping at the first failure.
+// by writing the members in order and stopping at the first failure. It keeps
+// the backends' two path refusals too — the executor fake's, for its reason: a
+// file in the way of a member's directories fails the whole batch with nothing
+// landed, and a member whose target is a directory fails at that member.
 func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
 	f.bulkSizes = append(f.bulkSizes, len(files))
+	dirs := map[string]bool{}
+	for p := range f.files {
+		for d := path.Dir(p); d != "/" && d != "."; d = path.Dir(d) {
+			dirs[d] = true
+		}
+	}
 	for _, w := range files {
+		for d := path.Dir(w.Path); d != "/" && d != "."; d = path.Dir(d) {
+			if _, isFile := f.files[d]; isFile {
+				return fmt.Errorf("fake: bulk write: %w (%s)", sandbox.ErrNotDirectory, d)
+			}
+			dirs[d] = true
+		}
+	}
+	for _, w := range files {
+		if dirs[w.Path] {
+			return fmt.Errorf("fake: %s: %w", w.Path, sandbox.ErrIsDirectory)
+		}
 		if err := f.WriteFile(ctx, w.Path, w.Data); err != nil {
 			return err
 		}
