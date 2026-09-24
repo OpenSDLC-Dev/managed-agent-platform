@@ -270,23 +270,36 @@ func TestCoordinatorSpawnsThreeAgentsAndParksInOneCommit(t *testing.T) {
 			t.Errorf("%s = %d, want one per spawn", typ, n)
 		}
 	}
-	// The session view — the primary thread's list too — still reads each
-	// spawn's creation straight before the coordinator's copy of the task, as
-	// the reference's does, and never the child's received.
+	// The session view — the primary thread's list too — reads, after the
+	// primary's own running from the wake, each spawn in turn as its
+	// creation, the coordinator's copy of the task and its child's
+	// cross-posted running, and never a child's received. Creation before
+	// send is the reference's order; each spawn's three rows staying together
+	// is ours, and docs/DIVERGENCES.md records how the reference interleaves
+	// them.
 	view, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Scope: events.ScopeSession,
-		Types: []string{"session.thread_created", "agent.thread_message_sent", "agent.thread_message_received"}})
+		Types: []string{"session.thread_created", "agent.thread_message_sent",
+			"session.thread_status_running", "agent.thread_message_received"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	viewTypes := make([]string, len(view))
-	for i, ev := range view {
-		viewTypes[i] = string(ev.Type)
+	names := map[domain.ID]string{}
+	for _, k := range kids {
+		names[k.id] = k.name
 	}
-	if !slicesEq(viewTypes, []string{
-		"session.thread_created", "agent.thread_message_sent",
-		"session.thread_created", "agent.thread_message_sent",
-		"session.thread_created", "agent.thread_message_sent"}) {
-		t.Errorf("session view = %v, want each spawn's creation and then its send", viewTypes)
+	viewRows := make([]string, len(view))
+	for i, ev := range view {
+		viewRows[i] = string(ev.Type)
+		if ev.ThreadID != "" {
+			viewRows[i] += " " + names[ev.ThreadID]
+		}
+	}
+	if !slicesEq(viewRows, []string{
+		"session.thread_status_running",
+		"session.thread_created", "agent.thread_message_sent", "session.thread_status_running researcher",
+		"session.thread_created", "agent.thread_message_sent", "session.thread_status_running writer",
+		"session.thread_created", "agent.thread_message_sent", "session.thread_status_running reviewer"}) {
+		t.Errorf("session view = %v, want each spawn's creation, its send and its child's running", viewRows)
 	}
 	got := h.answers(t)
 	if len(got) != 4 {
