@@ -32,11 +32,17 @@
 -- so does a deadlock_timeout raised to 2s or more, or an autovacuum preventing
 -- wraparound, which no waiter cancels. Holding neither table when it starts,
 -- the migration asks for sessions the instant it has the token table, so in
--- a cycle with an old replica it is the first to wait: its check runs first
--- and it is the side that gives up (40P01), not live traffic. A holder
--- outside any cycle makes it give up at the bound (55P03). Migrate retries
--- both (migrate.go). The timeout is reset at the end, so no later migration
--- in the same transaction inherits it.
+-- a cycle with an old replica it is the first to wait, and usually the side
+-- that gives up (40P01). Not always: each waiter runs its deadlock check
+-- once, deadlock_timeout after it starts waiting, and whichever check finds
+-- the closed cycle aborts its own transaction. A cycle that closes after the
+-- migration's check has run, where the replica's check falls due before the
+-- migration's 2s bound (a deadlock_timeout under 1s, or a near tie at the
+-- default), aborts the replica's session delete or poll instead: a one-off
+-- 500 while this migration applies. A holder outside any cycle makes the
+-- migration give up at the bound (55P03). Migrate retries both (migrate.go).
+-- The timeout is reset at the end, so no later migration in the same
+-- transaction inherits it.
 SET LOCAL lock_timeout = '2s';
 
 ALTER TABLE work_session_tokens DROP CONSTRAINT work_session_tokens_session_id_fkey;
