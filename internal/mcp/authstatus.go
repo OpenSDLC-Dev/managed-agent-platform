@@ -60,8 +60,9 @@ type authWatch struct {
 	status atomic.Int32
 }
 
-// withAuthWatch returns a shallow copy of client whose transport records
-// refusals, and the recorder to read them back from.
+// withAuthWatch returns a shallow copy of client whose transport records each
+// exchange's status, and the watch to read it back from — the refusal and the
+// server-answered question both.
 func withAuthWatch(client *http.Client) (*http.Client, *authWatch) {
 	w := &authWatch{base: client.Transport}
 	copied := *client
@@ -105,8 +106,7 @@ func (w *authWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // mark wraps err with ErrUnauthorized when this connection was refused. A nil
-// watch marks nothing, so a Conn built without one (a test's, or a future
-// caller's) behaves exactly as it did before.
+// watch marks nothing.
 func (w *authWatch) mark(err error) error {
 	if err == nil || !w.refused() {
 		return err
@@ -123,8 +123,24 @@ func (w *authWatch) refused() bool {
 // delivered reports whether this operation's most recent exchange came back
 // 2xx. MCP's streamable transport carries a JSON-RPC error on a 2xx, so that is
 // the only status on which an error can be the server's own refusal; anything
-// else, or no response at all, is the HTTP layer failing (#641). A nil watch
-// has seen no exchange and vouches for none.
+// else, or no response at all, is the HTTP layer failing (#641).
+//
+// The most recent exchange is not always the call's own. A reply the client
+// posts to a server's request mid-call is one too, and a transient failure of
+// that reply, which the go-sdk shrugs off, leaves a call the server then refused
+// reading as a connection failure: the operator hears of an HTTP failure that
+// did happen, and the model's result is the same either way. Reading only the
+// call's own exchange would err the other way, which is worse. A non-transient
+// refusal of the reply ends the connection (checked against go-sdk v1.7.0 —
+// mcp/streamable.go streamableClientConn.Write), and the call then fails
+// carrying the refusal's JSON-RPC error while its own exchange was a 200 — a
+// connection failure the operator would never hear of. The two differ only in
+// which statuses the SDK counts as transient.
+//
+// A nil watch has seen no exchange and vouches for none, so a Conn built without
+// one reports no error as the server's answer: without the status nothing shows
+// the error rode a 2xx, and reporting a failure that was not one costs less
+// than hiding one that was.
 func (w *authWatch) delivered() bool {
 	if w == nil {
 		return false
@@ -133,10 +149,9 @@ func (w *authWatch) delivered() bool {
 	return status >= 200 && status < 300
 }
 
-// reset starts a fresh operation. Clearing on the way in rather than on any
-// non-401 response is what keeps the status readable under the SDK's standalone
-// SSE stream, whose exchanges are not this operation's and could otherwise clear
-// a refusal between the refusal and the read of it.
+// reset starts a fresh operation, so each operation is judged on its own
+// exchanges alone: one that fails before making any is judged on nothing, not
+// on whatever the previous operation's last exchange said.
 func (w *authWatch) reset() {
 	if w != nil {
 		w.status.Store(0)

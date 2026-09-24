@@ -141,7 +141,8 @@ type Conn struct {
 	// auth records the status of this connection's latest exchange, so a
 	// failure raised on it can be classified by what the wire said: refused
 	// (401), answered by the server (a 2xx), or neither. Nil on a Conn built
-	// without the transport chain, which marks nothing.
+	// without the transport chain, which marks nothing refused and nothing
+	// answered.
 	auth *authWatch
 }
 
@@ -898,7 +899,7 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		if resp.Body != nil {
 			_ = resp.Body.Close()
 		}
-		return nil, fmt.Errorf("mcp: server responses exceed %d bytes in total", t.limit)
+		return nil, &budgetError{limit: t.limit}
 	}
 	if resp.Body == nil {
 		return resp, nil
@@ -1022,7 +1023,18 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 }
 
 func (b *limitedBody) tooBig() error {
-	return fmt.Errorf("mcp: server responses exceed %d bytes in total", b.transport.limit)
+	return &budgetError{limit: b.transport.limit}
+}
+
+// budgetError is the limit's refusal, in a type of this package's own so it
+// stays recognisable after the go-sdk has wrapped it. A response refused at its
+// headers reaches the SDK as an error from the HTTP client, which it wraps in
+// jsonrpc2.ErrRejected — a *jsonrpc.Error — so without this a 2xx the limit
+// discarded would read as the server's answer (see [answered]).
+type budgetError struct{ limit int64 }
+
+func (e *budgetError) Error() string {
+	return fmt.Sprintf("mcp: server responses exceed %d bytes in total", e.limit)
 }
 
 // give returns bytes drawn but not used, so a short read does not spend budget a

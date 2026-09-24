@@ -98,20 +98,26 @@ var ErrServerAnswered = errors.New("the server answered, refusing the call")
 
 // answered reports whether an error is the server's own JSON-RPC error
 // response: one in the chain, on an operation whose most recent exchange was a
-// 2xx. The SDK aliases the wire type publicly (jsonrpc.Error), so the type test
-// costs this package nothing and the type stays inside it.
+// 2xx the response limit let through. The SDK aliases the wire type publicly
+// (jsonrpc.Error), so the type test costs this package nothing and the type
+// stays inside it.
 //
 // The type alone no longer says the server answered (#641). The go-sdk wraps
 // the JSON-RPC error it decodes out of a non-2xx body, and turns 500, 502, 503,
 // 504 and 429 — body unread — into jsonrpc2.ErrRejected, as it does every error
-// from the HTTP client, a dropped connection included; ErrRejected is a
-// *jsonrpc.Error too (checked against go-sdk v1.7.0 — mcp/streamable.go
-// streamableClientConn.checkResponse and isTransientHTTPStatus and
-// streamableClientConn.Write). A non-2xx or a missing response is the HTTP layer
-// failing, so the status decides and the body does not.
+// from the HTTP client, a connection dropped before the response included;
+// ErrRejected is a *jsonrpc.Error too (checked against go-sdk v1.7.0 —
+// mcp/streamable.go streamableClientConn.checkResponse and
+// isTransientHTTPStatus and streamableClientConn.Write). A non-2xx or a missing
+// response is the HTTP layer failing, so the status decides and the body does
+// not. The one error from the HTTP client that follows a 2xx is this package's
+// own: the limit discarding a response at its headers, after the watch below it
+// saw the status — which fails the same budget a body overrun does, and that
+// one reaches the caller as a connection failure.
 func answered(w *authWatch, err error) bool {
 	var wire *jsonrpc.Error
-	return w.delivered() && errors.As(err, &wire)
+	var overBudget *budgetError
+	return w.delivered() && errors.As(err, &wire) && !errors.As(err, &overBudget)
 }
 
 // CallTool runs one tool on the connected server and returns its answer.

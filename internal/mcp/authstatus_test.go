@@ -309,7 +309,9 @@ func TestANon2xxOnACallIsAConnectionFailureWhateverItCarries(t *testing.T) {
 
 	// The third route to the same misreading: an exchange with no response at
 	// all. The go-sdk wraps every error from the HTTP client in ErrRejected, so a
-	// server that dropped the connection mid-call read as one that answered.
+	// server that dropped the connection before responding read as one that
+	// answered. (A drop after the headers fails the body read instead, which the
+	// SDK reports as a plain error and never read as an answer.)
 	t.Run("no response at all", func(t *testing.T) {
 		conn, err := mcp.Connect(context.Background(), mcp.Config{
 			URL: serveThenHangingUpOn(t, "tools/call"), HTTPClient: &http.Client{}, BearerToken: "tok"})
@@ -325,6 +327,161 @@ func TestANon2xxOnACallIsAConnectionFailureWhateverItCarries(t *testing.T) {
 			t.Errorf("a dropped connection read as the server's own answer: %v", err)
 		}
 	})
+}
+
+// A 2xx the response limit discards is not an answer either: the SDK never read
+// it, and the limit's refusal reaches the SDK as an error from the HTTP client,
+// which it wraps in jsonrpc2.ErrRejected — a *jsonrpc.Error — while the watch,
+// which sits below the limit so a discarded 401 still counts, has recorded the
+// 200. Past the body the same budget fails as a connection failure, so the
+// header half has to agree with it.
+func TestA2xxTheResponseLimitDiscardsIsNotTheServersAnswer(t *testing.T) {
+	conn, err := mcp.Connect(context.Background(), mcp.Config{
+		URL: serveDrainingThenOversizingTheCall(t), HTTPClient: &http.Client{}, BearerToken: "tok"})
+	if err != nil {
+		t.Fatalf("the handshake was expected to succeed: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ListTools(context.Background()); err != nil {
+		t.Fatalf("the draining listing was expected to succeed: %v", err)
+	}
+
+	_, err = conn.CallTool(context.Background(), "echo", nil)
+	if err == nil {
+		t.Fatal("expected the call to fail")
+	}
+	if !strings.Contains(err.Error(), "exceed") {
+		t.Fatalf("the fixture did not reach the response limit, so this proves nothing: %v", err)
+	}
+	if errors.Is(err, mcp.ErrServerAnswered) {
+		t.Errorf("a response the limit discarded read as the server's own answer: %v", err)
+	}
+}
+
+// serveDrainingThenOversizingTheCall is serveDrainingThenRefusing's twin for a
+// call: one tools/list page spends almost the whole connection budget, and the
+// call is then answered 200 with a header block larger than what is left.
+func serveDrainingThenOversizingTheCall(t *testing.T) string {
+	t.Helper()
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "draining-server", Version: "1"}, nil)
+	}, nil)
+	pad := strings.Repeat("d", mcp.MaxResponseBytes-(16<<10))
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		var result map[string]any
+		switch req.Method {
+		case "tools/list":
+			result = map[string]any{"tools": []any{map[string]any{
+				"name": "bulky", "description": pad,
+				"inputSchema": map[string]any{"type": "object"},
+			}}}
+		case "tools/call":
+			w.Header().Set("X-Padding", strings.Repeat("p", 32<<10))
+			result = map[string]any{"content": []any{map[string]any{"type": "text", "text": "ok"}}}
+		default:
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			inner.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+	}))
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
+// A reply the client posts mid-call is an exchange too, and a gateway that
+// refuses one with a non-transient status ends the connection: the go-sdk fails
+// it (checked against go-sdk v1.7.0 — mcp/streamable.go
+// streamableClientConn.Write), and the call is retired with that failure —
+// which carries the JSON-RPC error the refusal's body held. The call's own
+// exchange was a 200, so a rule that read only the call's exchange would take
+// the gateway's words for the server's answer and tell the operator nothing.
+func TestACallWhoseConnectionARefusedReplyEndedIsNotTheServersAnswer(t *testing.T) {
+	url, answer := serveCallThatPings(t, http.StatusForbidden)
+	conn, err := mcp.Connect(context.Background(), mcp.Config{
+		URL: url, HTTPClient: &http.Client{}, BearerToken: "tok"})
+	if err != nil {
+		t.Fatalf("the handshake was expected to succeed: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.CallTool(context.Background(), "echo", nil)
+	// Only now does the tool answer, so the call cannot have ended on it.
+	answer <- errors.New("too late to matter")
+	if err == nil {
+		t.Fatal("expected the call to fail")
+	}
+	if !strings.Contains(err.Error(), "policy says no") {
+		t.Fatalf("the call did not fail on the refused reply, so this proves nothing: %v", err)
+	}
+	if errors.Is(err, mcp.ErrServerAnswered) {
+		t.Errorf("a connection a refused reply ended read as the server's own answer: %v", err)
+	}
+}
+
+// serveCallThatPings serves one tool whose handler pings the client over the
+// call's own stream before answering, and refuses the client's reply to that
+// ping with replyStatus and a JSON-RPC error body. Once the refusal is written,
+// the tool fails with the first error sent on answer — so a test decides
+// whether the tool's own refusal arrives before the call ends or after.
+func serveCallThatPings(t *testing.T, replyStatus int) (string, chan<- error) {
+	t.Helper()
+	replied := make(chan struct{})
+	answer := make(chan error, 1)
+	var once sync.Once
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		s := sdk.NewServer(&sdk.Implementation{Name: "pinging-server", Version: "1"}, nil)
+		s.AddTool(&sdk.Tool{Name: "echo", InputSchema: map[string]any{"type": "object"}},
+			func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+				go func() { _ = req.Session.Ping(ctx, nil) }()
+				select {
+				case <-replied:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				select {
+				case err := <-answer:
+					return nil, err
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			})
+		return s
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		var msg struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if r.Method == http.MethodPost && msg.Method == "" && len(msg.ID) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(replyStatus)
+			jsonRPCError(w, msg.ID)
+			once.Do(func() { close(replied) })
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(ts.Close)
+	return ts.URL, answer
 }
 
 // serveThenHangingUpOn serves MCP but closes the connection, with no status and
