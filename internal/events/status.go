@@ -17,10 +17,10 @@ import (
 // reason a precedence pick over the idle threads' (requires_action ≻
 // retries_exhausted ≻ end_turn, event_ids the seq-ordered union) — in the
 // same transaction, under the same session row lock. It is recorded as a
-// pair (decision 12), ordered by the session event: session.status_running
-// ahead of the thread's own event, every other session event behind it — the
-// order the reference's sequences show for the primary thread (#674), running
-// ahead and idle behind (the fact, then the rollup), rescheduled unrecorded.
+// pair (decision 12), ordered by the session event emitted:
+// session.status_running ahead of the thread's own event, every other session
+// event behind it (the fact, then the rollup) — the order the reference's
+// sequences show for the primary thread (#674), rescheduled unrecorded.
 // A child's move that wakes an idle session is ours, not a recorded pair: the
 // reference pairs that status_running with the primary (docs/DIVERGENCES.md,
 // "Session threads — a child's resume of an idle session"). A single-thread
@@ -83,10 +83,9 @@ type ThreadTransition struct {
 // returns the events to append — the thread's own (a child's is cross-posted
 // to the session view and names its agent; the primary's is completed with
 // the session's agent name by AppendInTx) and, when the folded value changed
-// or Force, the session's: before the thread's when it is status_running,
-// after it otherwise — and the status the session column moved to, nil when
-// it did not: what the caller's post-commit metric counts, so a re-idle or a
-// reclaim pair never inflates it.
+// or Force, the session's, the two ordered as the pair above — and the status
+// the session column moved to, nil when it did not: what the caller's
+// post-commit metric counts, so a re-idle or a reclaim pair never inflates it.
 func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t ThreadTransition) ([]NewEvent, *domain.SessionStatus, error) {
 	if _, ok := sessionStatusOf[t.Status]; !ok {
 		return nil, nil, fmt.Errorf("events: no status event for session status %q", t.Status)
@@ -160,9 +159,8 @@ func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t Thr
 			payload["stop_reason"] = stop
 		}
 		session = &NewEvent{Type: sessionStatusOf[emit], Payload: mustJSON(payload)}
-		// Keyed on the event emitted, not on the moving thread's status: the
-		// fold can land elsewhere (a sibling decides it, or the moving row is
-		// outside it).
+		// Not t.Status: the fold can land elsewhere (a sibling decides it, or
+		// the moving row is outside it).
 		sessionFirst = emit == domain.SessionRunning
 	}
 	pair := [2]*NewEvent{thread, session}
