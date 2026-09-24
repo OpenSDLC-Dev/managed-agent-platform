@@ -75,13 +75,16 @@ func TestSelfHostedSessionViewCarriesChildToolCalls(t *testing.T) {
 		}
 	}
 
-	// The child's own surface is unchanged: its rows, with the stored null.
+	// The child's own surface is unchanged: its rows, the stored null omitted
+	// as the reference omits it (#674).
 	own := eventsByID(t, s, "/v1/sessions/"+sid+"/threads/"+child+"/events")
 	if len(own) != 4 {
 		t.Errorf("the child's own view holds %d events, want its four", len(own))
 	}
-	if ev := own[use]; ev == nil || ev["session_thread_id"] != nil {
-		t.Errorf("the child's call on its own view = %v, want session_thread_id null", ev)
+	if ev := own[use]; ev == nil {
+		t.Errorf("the child's call is missing from its own view")
+	} else if _, ok := ev["session_thread_id"]; ok {
+		t.Errorf("the child's call on its own view = %v, want no session_thread_id", ev)
 	}
 
 	// The stream widens with the list — it rebuilds its own query per wake.

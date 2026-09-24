@@ -133,50 +133,81 @@ func TestSendEchoShapesPerType(t *testing.T) {
 	customID := appendToolUse(t, s, sid, domain.EventAgentCustomToolUse)
 	toolID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
 	riskyID := appendToolUseWithPerm(t, s, sid, "risky", "ask")
+	safeID := appendToolUseWithPerm(t, s, sid, "safe", "ask")
 
 	// Under the worker's credential, since the batch carries a user.tool_result.
 	echo := sendEventsAs(t, s, workerAuth(t, s, sid), sid,
 		map[string]any{"type": "user.interrupt"},
 		map[string]any{"type": "user.tool_confirmation", "result": "deny",
 			"tool_use_id": riskyID, "deny_message": "too risky"},
+		map[string]any{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": safeID},
 		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
 			"content": []any{map[string]any{"type": "text", "text": "ok"}}, "is_error": false},
 		map[string]any{"type": "user.tool_result", "tool_use_id": toolID},
 		map[string]any{"type": "user.message", "content": []any{map[string]any{"type": "text", "text": "hi"}}},
 		map[string]any{"type": "system.message", "content": []any{map[string]any{"type": "text", "text": "note"}}},
 	)
-	if len(echo) != 6 {
-		t.Fatalf("echoed %d events, want 6", len(echo))
+	if len(echo) != 7 {
+		t.Fatalf("echoed %d events, want 7", len(echo))
 	}
 
+	// A null session_thread_id or deny_message is omitted, never rendered
+	// null (#674); a value, where there is one, still renders. processed_at
+	// renders null while unprocessed (docs/DIVERGENCES.md, "POST/history
+	// processed_at").
 	interrupt := echo[0]
-	wantExactKeys(t, interrupt, "id", "type", "processed_at", "session_thread_id")
-	if interrupt["session_thread_id"] != nil {
-		t.Errorf("session_thread_id = %v, want null", interrupt["session_thread_id"])
-	}
+	wantExactKeys(t, interrupt, "id", "type", "processed_at")
 
 	confirm := echo[1]
-	wantExactKeys(t, confirm, "id", "type", "result", "tool_use_id", "deny_message", "processed_at", "session_thread_id")
+	wantExactKeys(t, confirm, "id", "type", "result", "tool_use_id", "deny_message", "processed_at")
 	if confirm["result"] != "deny" || confirm["deny_message"] != "too risky" || confirm["tool_use_id"] != riskyID {
 		t.Errorf("tool_confirmation echo = %v", confirm)
 	}
 
-	custom := echo[2]
-	wantExactKeys(t, custom, "id", "type", "custom_tool_use_id", "content", "is_error", "processed_at", "session_thread_id")
-	if custom["is_error"] != false || custom["custom_tool_use_id"] != customID {
+	allow := echo[2]
+	wantExactKeys(t, allow, "id", "type", "result", "tool_use_id", "processed_at")
+	if allow["result"] != "allow" || allow["tool_use_id"] != safeID {
+		t.Errorf("allow tool_confirmation echo = %v", allow)
+	}
+
+	custom := echo[3]
+	wantExactKeys(t, custom, "id", "type", "custom_tool_use_id", "content", "is_error", "processed_at")
+	if custom["is_error"] != false || custom["custom_tool_use_id"] != customID || custom["processed_at"] == nil {
 		t.Errorf("custom_tool_result echo = %v", custom)
 	}
 
-	toolRes := echo[3]
-	wantExactKeys(t, toolRes, "id", "type", "tool_use_id", "content", "is_error", "processed_at", "session_thread_id")
+	toolRes := echo[4]
+	wantExactKeys(t, toolRes, "id", "type", "tool_use_id", "content", "is_error", "processed_at")
 	if toolRes["content"] != nil || toolRes["is_error"] != nil {
 		t.Errorf("omitted content/is_error should render null: %v", toolRes)
 	}
 
-	system := echo[5]
+	system := echo[6]
 	wantExactKeys(t, system, "id", "type", "content", "processed_at")
 	if system["type"] != "system.message" {
 		t.Errorf("system echo = %v", system)
+	}
+
+	// The list renders deny_message by the same rule: kept when given,
+	// omitted when null — never a present null anywhere in the recordings.
+	_, res := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
+	seen := 0
+	for _, ev := range listData(t, res) {
+		switch ev["id"] {
+		case confirm["id"]:
+			seen++
+			if ev["deny_message"] != "too risky" {
+				t.Errorf("listed deny = %v, want its deny_message", ev)
+			}
+		case allow["id"]:
+			seen++
+			if _, ok := ev["deny_message"]; ok {
+				t.Errorf("listed allow = %v, want no deny_message", ev)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Errorf("listed %d of the two confirmations", seen)
 	}
 }
 
@@ -1169,6 +1200,47 @@ func TestSendMalformedBody(t *testing.T) {
 	sid := eventsFixture(t, s)
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", `{"events":`)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// A stored null is dropped only where the recordings show the key omitted
+// (#674): session_thread_id on the thread-addressable types, deny_message on
+// user.tool_confirmation. Anywhere else it renders as stored, so a writer
+// storing a null the SDK forbids — session_thread_id is required on the
+// session.thread_* events — shows on the wire instead of being hidden.
+func TestNullOmissionIsScopedToTheEvidencedTypes(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	appended, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sid), []events.NewEvent{
+		{Type: domain.EventAgentToolUse, Payload: []byte(`{"name":"bash","input":{},"session_thread_id":null}`)},
+		{Type: domain.EventUserToolConfirm,
+			Payload: []byte(`{"result":"allow","tool_use_id":"sevt_x","deny_message":null,"session_thread_id":null}`)},
+		{Type: domain.EventSessionThreadStatusIdle,
+			Payload: []byte(`{"session_thread_id":null,"stop_reason":{"type":"end_turn"}}`)},
+		{Type: domain.EventAgentMessage, Payload: []byte(`{"content":[],"deny_message":null}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := eventsByID(t, s, "/v1/sessions/"+sid+"/events")
+	for _, tc := range []struct {
+		id, key string
+		kept    bool
+	}{
+		{appended[0].ID.String(), "session_thread_id", false},
+		{appended[1].ID.String(), "session_thread_id", false},
+		{appended[1].ID.String(), "deny_message", false},
+		{appended[2].ID.String(), "session_thread_id", true},
+		{appended[3].ID.String(), "deny_message", true},
+	} {
+		ev := listed[tc.id]
+		if ev == nil {
+			t.Fatalf("event %s missing from the list", tc.id)
+		}
+		v, ok := ev[tc.key]
+		if ok != tc.kept || v != nil {
+			t.Errorf("%s %s: present=%v value=%v, want present=%v and null", ev["type"], tc.key, ok, v, tc.kept)
+		}
+	}
 }
 
 func TestEventsCorruptRowRendering(t *testing.T) {
