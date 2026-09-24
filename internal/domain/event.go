@@ -57,8 +57,9 @@ const (
 // session.status_* per thread — emitted on the thread's own stream and, for a
 // child, cross-posted to the primary's; the primary thread's accompany every
 // session.status_running/_idle/_rescheduled on every session (decision 12),
-// thread event first — never _terminated, which the primary does not emit (a
-// child terminates; the primary ends with its session). Each carries
+// after the session event for _running and before it otherwise (#674) —
+// never _terminated, which the primary does not emit (a child terminates; the
+// primary ends with its session). Each carries
 // {session_thread_id, agent_name}; _idle adds stop_reason.
 const (
 	EventSessionThreadCreated           EventType = "session.thread_created"

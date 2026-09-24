@@ -17,14 +17,16 @@ import (
 // reason a precedence pick over the idle threads' (requires_action ≻
 // retries_exhausted ≻ end_turn, event_ids the seq-ordered union) — in the
 // same transaction, under the same session row lock. It is recorded as a
-// pair (decision 12): the thread's own session.thread_status_* first, the
-// session's session.status_* second — the fact, then the rollup, the order
-// the reference's own sequences show. A single-thread session reduces to the
-// pre-thread behavior exactly: every thread move is a session move, so every
-// pair is emitted; that reduction is the regression gate. Every session has a
-// primary thread, so every session.status_* emission goes through
-// TransitionThread; a history from before the thread resource existed holds
-// no thread events (append-only; nothing backfills them).
+// pair (decision 12), in the order the reference's own sequences show (#674):
+// the session's session.status_running before the thread's own
+// session.thread_status_running; for idle the other way round, the fact and
+// then the rollup; for rescheduled, never recorded, as for idle. A
+// single-thread session reduces to the pre-thread behavior exactly: every
+// thread move is a session move, so every pair is emitted; that reduction is
+// the regression gate. Every session has a primary thread, so every
+// session.status_* emission goes through TransitionThread; a history from
+// before the thread resource existed holds no thread events (append-only;
+// nothing backfills them).
 
 // primaryStatusEvents are the thread events AppendInTx completes with the
 // session's agent name when they carry no thread (the primary's own status
@@ -75,12 +77,13 @@ type ThreadTransition struct {
 // live threads', in the caller's transaction under the session row lock (the
 // API's trigger, the brain's settlements and the thread archive all hold it).
 // It writes the thread row (status, stop_reason) and sessions.status, and
-// returns the events to append — the thread's own first (a child's is
-// cross-posted to the session view and names its agent; the primary's is
-// completed with the session's agent name by AppendInTx), the session's
-// second when the folded value changed or Force — and the status the session
-// column moved to, nil when it did not: what the caller's post-commit metric
-// counts, so a re-idle or a reclaim pair never inflates it.
+// returns the events to append — the thread's own (a child's is cross-posted
+// to the session view and names its agent; the primary's is completed with
+// the session's agent name by AppendInTx) and, when the folded value changed
+// or Force, the session's: before the thread's for running, after it for
+// every other status — and the status the session column moved to, nil when
+// it did not: what the caller's post-commit metric counts, so a re-idle or a
+// reclaim pair never inflates it.
 func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t ThreadTransition) ([]NewEvent, *domain.SessionStatus, error) {
 	if _, ok := sessionStatusOf[t.Status]; !ok {
 		return nil, nil, fmt.Errorf("events: no status event for session status %q", t.Status)
@@ -152,7 +155,12 @@ func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t Thr
 		if emit == domain.SessionIdle && stop != nil {
 			payload["stop_reason"] = stop
 		}
-		out = append(out, NewEvent{Type: sessionStatusOf[emit], Payload: mustJSON(payload)})
+		session := NewEvent{Type: sessionStatusOf[emit], Payload: mustJSON(payload)}
+		if t.Status == domain.SessionRunning {
+			out = append([]NewEvent{session}, out...)
+		} else {
+			out = append(out, session)
+		}
 	}
 	return out, moved, nil
 }
