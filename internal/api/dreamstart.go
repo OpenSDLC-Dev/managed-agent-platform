@@ -549,7 +549,11 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 	store := resourceInput{kind: resourceKindMemory, memoryStoreID: outputStoreID, access: "read_write"}
 	// The mount path the prompt spells is the resource's own: the snapshot
 	// createSessionInTx takes a moment below, taken here first, so no slug is
-	// computed twice or by hand.
+	// computed twice or by hand — and with the one store this session mounts,
+	// no collision suffix can move it. Neither of the snapshot's refusals can
+	// fire here: the store is the clone this transaction inserted, or the input
+	// dreamStartChecks found live and holds FOR SHARE. Were one to, it would be
+	// a start failure for the runner to log and retry, never an HTTP answer.
 	mounted, err := snapshotMemoryStore(ctx, tx, store)
 	if err != nil {
 		return createdSession{}, err

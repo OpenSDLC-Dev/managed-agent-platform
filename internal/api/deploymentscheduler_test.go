@@ -448,6 +448,53 @@ func TestSchedulerFireFailureSettlesAndPauses(t *testing.T) {
 	}
 }
 
+// A deployment whose memory store was deleted after it was created fails each
+// fire as classified, not as the 404 a session create answers the same store
+// with (#668): the classified wrap around that 404 is what makes a manual run
+// record session_resource_not_found_error on a 200, and a scheduled fire pause
+// the deployment on it, as for every other classified type.
+func TestDeletedMemoryStoreFailsAFireAsClassified(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	storeID := createMemoryStore(t, s, "fire-store")
+	body := scheduledBody(agentID, envID, "0 9 * * *", "UTC")
+	body["resources"] = []any{map[string]any{"type": "memory_store", "memory_store_id": storeID}}
+	deplID := createDeployment(t, s, body)["id"].(string)
+	setResumedAt(t, s, deplID, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC))
+	if code, res := s.do(http.MethodDelete, "/v1/memory_stores/"+storeID, nil); code != http.StatusOK {
+		t.Fatalf("delete store: %d %v", code, res)
+	}
+
+	run := runDeployment(t, s, deplID)
+	re, _ := run["error"].(map[string]any)
+	if run["session_id"] != nil || re["type"] != "session_resource_not_found_error" {
+		t.Errorf("manual run = session %v, error %v; want no session and session_resource_not_found_error", run["session_id"], re)
+	}
+	if msg, _ := re["message"].(string); !strings.Contains(msg, storeID+" not found") {
+		t.Errorf("error.message = %q, want it to name the missing store", msg)
+	}
+	if code, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil); code != http.StatusOK || d["status"] != "active" {
+		t.Fatalf("after the manual run: %d %v, want active — only a scheduled fire pauses", code, d["status"])
+	}
+
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 10, 0, time.UTC)); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	runs := scheduledRuns(t, s, deplID)
+	if len(runs) != 1 || runs[0].errType == nil || *runs[0].errType != "session_resource_not_found_error" {
+		t.Fatalf("scheduled runs = %+v, want one settled on session_resource_not_found_error", runs)
+	}
+	code, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil)
+	if code != http.StatusOK {
+		t.Fatalf("get: %d %v", code, d)
+	}
+	reason, _ := d["paused_reason"].(map[string]any)
+	inner, _ := reason["error"].(map[string]any)
+	if d["status"] != "paused" || reason["type"] != "error" || inner["type"] != "session_resource_not_found_error" {
+		t.Errorf("deployment = status %v, paused_reason %v; want paused on session_resource_not_found_error", d["status"], reason)
+	}
+}
+
 // An unclassified failure rolls the whole transaction back: no run row, no
 // pause, nothing in any list — the claim is released and the next tick fires
 // the same occurrence. The pair with the classified case above is what pins

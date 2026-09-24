@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -51,10 +52,11 @@ func TestSessionMemoryStoreAttachment(t *testing.T) {
 		t.Fatalf("resources = %v, want two", res)
 	}
 	// The response variant's exact key set — no id, no timestamps, unlike file
-	// and repo elements — on both the fully specified and the bare element.
-	for _, el := range res {
-		wantExactFields(t, el, "type", "memory_store_id", "access", "description", "instructions", "mount_path", "name")
-	}
+	// and repo elements — with instructions only where the attachment supplied
+	// it: the bare element carries six keys, not a null seventh, as the
+	// reference's does (#666).
+	wantExactFields(t, res[0], "type", "memory_store_id", "access", "description", "instructions", "mount_path", "name")
+	wantExactFields(t, res[1], "type", "memory_store_id", "access", "description", "mount_path", "name")
 	if res[0]["type"] != "memory_store" || res[0]["memory_store_id"] != store {
 		t.Errorf("element = %v, want the memory_store element for %s", res[0], store)
 	}
@@ -67,13 +69,10 @@ func TestSessionMemoryStoreAttachment(t *testing.T) {
 	if res[0]["mount_path"] != "/mnt/memory/user-preferences" {
 		t.Errorf("mount_path = %v, want /mnt/memory/user-preferences", res[0]["mount_path"])
 	}
-	// Omitted access is the documented default, echoed as the string; omitted
-	// instructions is null; a store without a description snapshots "".
+	// Omitted access is the documented default, echoed as the string; a store
+	// without a description snapshots "".
 	if res[1]["access"] != "read_write" {
 		t.Errorf("default access = %v, want read_write", res[1]["access"])
-	}
-	if v, ok := res[1]["instructions"]; !ok || v != nil {
-		t.Errorf("omitted instructions = %v, want null", v)
 	}
 	if res[1]["description"] != "" || res[1]["mount_path"] != "/mnt/memory/notes" {
 		t.Errorf("bare store element = %v", res[1])
@@ -131,7 +130,9 @@ func TestSessionMemoryStoreAttachment(t *testing.T) {
 
 // The slug (decision 8): lowercased, every non-[a-z0-9] run one hyphen, a
 // leading or trailing hyphen trimmed, ASCII only, and a name with no
-// alphanumerics falling back to the store id's token.
+// alphanumerics falling back to the slug of the whole store id — the
+// reference mounted its "!!!" at /mnt/memory/memstore-<token, lowercased>
+// (#671).
 func TestSessionMemoryStoreMountPathSlug(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -155,19 +156,89 @@ func TestSessionMemoryStoreMountPathSlug(t *testing.T) {
 		"agent": agentID, "environment_id": envID,
 		"resources": []any{memoryElement(symbols, nil)},
 	})
-	if got, want := resourcesOf(t, sess)[0]["mount_path"], "/mnt/memory/"+strings.TrimPrefix(symbols, "memstore_"); got != want {
+	if got, want := resourcesOf(t, sess)[0]["mount_path"], "/mnt/memory/memstore-"+strings.ToLower(strings.TrimPrefix(symbols, "memstore_")); got != want {
 		t.Errorf("all-symbol name: mount_path = %v, want %s", got, want)
 	}
 }
 
+// Stores whose names slug alike all attach (#671). Recorded: a pair ("notes"
+// then "NOTES", and "notes" then "(Notes)") answers 200 with the later store at
+// notes-2. Ours, and registered as such: every store claims its own slug
+// before any suffix is handed out, so a suffix never displaces a store whose
+// name slugs to it; among identical slugs the first in request order wins; the
+// losers take the first free -2, -3, …; a suffixed slug is cut to stay inside
+// the 255-byte NAME_MAX; and the id fallback is a slug like any other.
+func TestSessionMemoryStoreSlugCollisions(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	mounts := func(ids ...string) []any {
+		t.Helper()
+		var resources []any
+		for _, id := range ids {
+			resources = append(resources, memoryElement(id, nil))
+		}
+		sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "resources": resources})
+		var got []any
+		for _, el := range resourcesOf(t, sess) {
+			got = append(got, el["mount_path"])
+		}
+		return got
+	}
+	want := func(slugs ...string) []any {
+		out := make([]any, len(slugs))
+		for i, slug := range slugs {
+			out[i] = "/mnt/memory/" + slug
+		}
+		return out
+	}
+	lower, upper, title := createMemoryStore(t, s, "notes"), createMemoryStore(t, s, "NOTES"), createMemoryStore(t, s, "Notes")
+	notes2 := createMemoryStore(t, s, "notes 2")
+	symbols := createMemoryStore(t, s, "!!!")
+	namedLikeID := createMemoryStore(t, s, symbols) // its name slugs to the symbol store's fallback
+	idSlug := "memstore-" + strings.ToLower(strings.TrimPrefix(symbols, "memstore_"))
+
+	// Names at the 255-character cap, whose slugs are 255 bytes: a suffix
+	// cannot simply be appended.
+	a := strings.Repeat("a", 252)
+	long, longUpper := createMemoryStore(t, s, a+"aaa"), createMemoryStore(t, s, strings.ToUpper(a+"aaa"))
+	longTail, longTailUpper := createMemoryStore(t, s, a+" bb"), createMemoryStore(t, s, strings.ToUpper(a+" bb"))
+	longTwo := createMemoryStore(t, s, a+"a 2") // slugs to what longUpper's cut -2 would be
+
+	for _, tc := range []struct {
+		name   string
+		stores []string
+		want   []any
+	}{
+		{"the recorded pair", []string{lower, upper}, want("notes", "notes-2")},
+		{"request order, not creation order", []string{upper, lower}, want("notes", "notes-2")},
+		{"a third collider", []string{lower, upper, title}, want("notes", "notes-2", "notes-3")},
+		{"an own slug ahead of the suffixes", []string{notes2, lower, upper, title}, want("notes-2", "notes", "notes-3", "notes-4")},
+		{"an own slug behind the suffixes", []string{lower, upper, notes2}, want("notes", "notes-3", "notes-2")},
+		{"the id fallback", []string{symbols, namedLikeID}, want(idSlug, idSlug+"-2")},
+		{"a slug at NAME_MAX is cut for its suffix", []string{long, longUpper}, want(a+"aaa", a+"a-2")},
+		{"a cut that ends on a hyphen drops it", []string{longTail, longTailUpper}, want(a+"-bb", a+"-2")},
+		{"a cut candidate is checked like any other", []string{long, longUpper, longTwo}, want(a+"aaa", a+"a-3", a+"a-2")},
+	} {
+		got := mounts(tc.stores...)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: mount paths = %v, want %v", tc.name, got, tc.want)
+		}
+		for _, m := range got {
+			if slug := strings.TrimPrefix(m.(string), "/mnt/memory/"); len(slug) > 255 {
+				t.Errorf("%s: mount directory %q is %d bytes, over NAME_MAX", tc.name, slug, len(slug))
+			}
+		}
+	}
+}
+
 // The create-time rejections (decision 7), each a 400 in the standard
-// envelope; the cap and the same-store rule are judged before any row is
-// read, the store's existence and state inside the create transaction.
+// envelope but the unknown store's 404; the cap and the same-store rule are
+// judged before any row is read, the store's existence and state inside the
+// create transaction.
 func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	store := createMemoryStore(t, s, "Notes")
-	twin := createMemoryStore(t, s, "notes") // slugs collide with store's
 	archived := createMemoryStore(t, s, "Old")
 	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+archived+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: %d (%v)", status, body)
@@ -182,11 +253,9 @@ func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 		resources []any
 		want      string
 	}{
-		"unknown store":   {envID, []any{memoryElement("memstore_"+strings.Repeat("0", 23)+"1", nil)}, "not found"},
 		"archived store":  {envID, []any{memoryElement(archived, nil)}, "is archived"},
 		"nine stores":     {envID, nine, "at most 8"},
 		"the same twice":  {envID, []any{memoryElement(store, nil), memoryElement(store, map[string]any{"access": "read_only"})}, "more than once"},
-		"slug collision":  {envID, []any{memoryElement(store, nil), memoryElement(twin, nil)}, "both mount at /mnt/memory/notes"},
 		"instructions":    {envID, []any{memoryElement(store, map[string]any{"instructions": strings.Repeat("x", 4097)})}, "4096"},
 		"malformed id":    {envID, []any{memoryElement("mem_x", nil)}, "memory_store_id"},
 		"missing id":      {envID, []any{map[string]any{"type": "memory_store"}}, "memory_store_id"},
@@ -202,8 +271,21 @@ func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 		}
 	}
 
+	// A well-formed id naming no store is a 404, as on the reference and as
+	// GET /v1/memory_stores/{id} answers it here — where an archived one, a
+	// row that exists, stays the 400 above (#668).
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{memoryElement("memstore_"+strings.Repeat("0", 23)+"1", nil)},
+	})
+	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "not found") {
+		t.Errorf("unknown store: message %q does not mention %q", msg, "not found")
+	}
+
 	// Eight stores, instructions of exactly 4,096 characters, and explicit
-	// nulls for access and instructions are all accepted.
+	// nulls for access and instructions are all accepted — the null
+	// instructions omitted from the element, as an omitted one is.
 	eight := nine[:8]
 	eight[0] = memoryElement(eight[0].(map[string]any)["memory_store_id"].(string),
 		map[string]any{"access": nil, "instructions": nil})
@@ -211,9 +293,10 @@ func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 		map[string]any{"instructions": strings.Repeat("ü", 4096)})
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "resources": eight})
 	res := resourcesOf(t, sess)
-	if len(res) != 8 || res[0]["access"] != "read_write" || res[0]["instructions"] != nil {
+	if len(res) != 8 || res[0]["access"] != "read_write" {
 		t.Errorf("eight stores with nulls = %v", res)
 	}
+	wantNoFields(t, res[0], "instructions")
 }
 
 // The resources-list cursor names the last element by a key every element
@@ -347,15 +430,17 @@ func TestSessionRepoMountRefusedUnderMemoryRoot(t *testing.T) {
 // the environment row (TestConsoleKeyIssueLocksTheEnvironmentRow). An
 // uncommitted archive or delete on the store must block the create at its FOR
 // SHARE read, so that when the write lands the create answers for the row as it
-// now is — the archived store's 400, the deleted store's "not found" 400 —
-// rather than attaching a store that is gone. Without the lock the read never
-// waits: the poll below times out, which is exactly how that mutant fails.
+// now is — the archived store's 400, the deleted store's 404 — rather than
+// attaching a store that is gone. Without the lock the read never waits: the
+// poll below times out, which is exactly how that mutant fails.
 func TestSessionMemoryAttachLocksTheStoreRow(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, want string
+		status          int
+		errType         string
 	}{
-		{"concurrent archive", `UPDATE memory_stores SET archived_at = now() WHERE id = $1`, "is archived"},
-		{"concurrent delete", `DELETE FROM memory_stores WHERE id = $1`, "not found"},
+		{"concurrent archive", `UPDATE memory_stores SET archived_at = now() WHERE id = $1`, "is archived", http.StatusBadRequest, "invalid_request_error"},
+		{"concurrent delete", `DELETE FROM memory_stores WHERE id = $1`, "not found", http.StatusNotFound, "not_found_error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestServer(t)
@@ -438,7 +523,7 @@ func TestSessionMemoryAttachLocksTheStoreRow(t *testing.T) {
 			if got.err != nil {
 				t.Fatalf("create request: %v", got.err)
 			}
-			wantErr(t, got.status, got.body, http.StatusBadRequest, "invalid_request_error")
+			wantErr(t, got.status, got.body, tc.status, tc.errType)
 			if msg, _ := got.body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, tc.want) {
 				t.Errorf("message %q does not mention %q", msg, tc.want)
 			}
