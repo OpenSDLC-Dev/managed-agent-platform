@@ -255,7 +255,7 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if row.parent == nil {
-		return nil, errInvalid("the primary thread cannot be archived; archive the session")
+		return nil, errInvalid("The primary thread cannot be archived; archive the session instead.")
 	}
 	var woke, ended *domain.SessionStatus
 	if row.archivedAt == nil {
