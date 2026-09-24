@@ -21,22 +21,23 @@ import (
 // sessions.resolved_agent minus the roster, so a session update never leaves a
 // stale duplicate; child threads (slice 3) hold their spawn-time snapshot. The
 // primary's events are the session's: its list and stream serve the session
-// view; a child's serve that child's own rows. Thread stats render the empty
-// shape, the precedent session stats set (docs/DIVERGENCES.md).
+// view; a child's serve that child's own rows. Thread stats, once a thread has
+// any, render the empty shape, the precedent session stats set
+// (docs/DIVERGENCES.md).
 
 // threadJSON is BetaManagedAgentsSessionThread.
 type threadJSON struct {
-	ID             string          `json:"id"`
-	Type           string          `json:"type"` // "session_thread"
-	SessionID      string          `json:"session_id"`
-	ParentThreadID *string         `json:"parent_thread_id"`
-	Agent          threadAgentJSON `json:"agent"`
-	Status         string          `json:"status"`
-	Usage          usageJSON       `json:"usage"`
-	Stats          threadStatsJSON `json:"stats"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	ArchivedAt     *time.Time      `json:"archived_at"`
+	ID             string           `json:"id"`
+	Type           string           `json:"type"` // "session_thread"
+	SessionID      string           `json:"session_id"`
+	ParentThreadID *string          `json:"parent_thread_id"`
+	Agent          threadAgentJSON  `json:"agent"`
+	Status         string           `json:"status"`
+	Usage          *usageJSON       `json:"usage"` // null until the thread has something to report: renderThread
+	Stats          *threadStatsJSON `json:"stats"` // likewise
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	ArchivedAt     *time.Time       `json:"archived_at"`
 }
 
 type threadStatsJSON struct {
@@ -53,18 +54,19 @@ type threadRow struct {
 	agentJSON            []byte // NULL on the primary
 	agentName, status    string
 	usageJSON            []byte
+	stopJSON             []byte // NULL unless idle
 	createdAt, updatedAt time.Time
 	archivedAt           *time.Time
 	resolvedAgent        []byte
 }
 
 const threadColumns = `t.id, t.session_id, t.parent_thread_id, t.agent, t.agent_name, t.status, t.usage,
-	t.created_at, t.updated_at, t.archived_at, s.resolved_agent`
+	t.stop_reason, t.created_at, t.updated_at, t.archived_at, s.resolved_agent`
 
 func scanThread(row pgx.Row) (threadRow, error) {
 	var r threadRow
 	err := row.Scan(&r.id, &r.sessionID, &r.parent, &r.agentJSON, &r.agentName, &r.status, &r.usageJSON,
-		&r.createdAt, &r.updatedAt, &r.archivedAt, &r.resolvedAgent)
+		&r.stopJSON, &r.createdAt, &r.updatedAt, &r.archivedAt, &r.resolvedAgent)
 	return r, err
 }
 
@@ -95,13 +97,41 @@ func renderThread(r threadRow) (threadJSON, error) {
 	if agent.Tools == nil {
 		agent.Tools = []json.RawMessage{}
 	}
-	var usage usageJSON
-	if err := json.Unmarshal(r.usageJSON, &usage); err != nil {
-		return threadJSON{}, fmt.Errorf("decode stored thread usage: %w", err)
+	// Stats are "Null until the thread's first status transition" and usage
+	// "Null until the thread's first idle transition" (checked against
+	// anthropic-sdk-go v1.70.1 — spec
+	// components.schemas.BetaManagedAgentsSessionThread.properties.stats and
+	// checked against anthropic-sdk-go v1.70.1 — spec
+	// components.schemas.BetaManagedAgentsSessionThread.properties.usage). The
+	// row keeps no transition history, so both are read off what it does keep:
+	// its usage column holds the '{}' default until the first model turn folds
+	// into it (events.AppendOptions.AddUsage), every idle transition writes a
+	// stop reason and every other clears it, and only a primary is born idle —
+	// so an idle row with neither has never moved. A terminated one has idled:
+	// a thread's own archive takes only an idle one, and its session's end
+	// finds none running and none left rescheduling across a commit (#730).
+	// Whether a thread running or rescheduling has idled before is lost, and
+	// folded usage stands in: a first run shows usage from its first settled
+	// model request rather than its first idle, and a thread whose first run
+	// settled none shows null again when it next runs, until one does.
+	idle := r.status == string(domain.SessionIdle)
+	atRest := idle || r.status == string(domain.SessionTerminated)
+	folded := string(r.usageJSON) != `{}`
+	moved := !idle || len(r.stopJSON) > 0 || folded
+	var stats *threadStatsJSON
+	if moved {
+		stats = &threadStatsJSON{}
+	}
+	var usage *usageJSON
+	if moved && (atRest || folded) {
+		usage = new(usageJSON)
+		if err := json.Unmarshal(r.usageJSON, usage); err != nil {
+			return threadJSON{}, fmt.Errorf("decode stored thread usage: %w", err)
+		}
 	}
 	return threadJSON{
 		ID: r.id, Type: "session_thread", SessionID: r.sessionID, ParentThreadID: r.parent,
-		Agent: agent, Status: r.status, Usage: usage, Stats: threadStatsJSON{},
+		Agent: agent, Status: r.status, Usage: usage, Stats: stats,
 		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),
 	}, nil
 }
@@ -255,7 +285,7 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if row.parent == nil {
-		return nil, errInvalid("the primary thread cannot be archived; archive the session")
+		return nil, errInvalid("The primary thread cannot be archived; archive the session instead.")
 	}
 	var woke, ended *domain.SessionStatus
 	if row.archivedAt == nil {

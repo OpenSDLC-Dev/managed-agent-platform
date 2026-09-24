@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -71,8 +72,10 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 		th["parent_thread_id"] != nil || th["status"] != "idle" || th["archived_at"] != nil {
 		t.Errorf("primary thread = %v", th)
 	}
-	if st, _ := th["stats"].(map[string]any); st["active_seconds"] != float64(0) || st["startup_seconds"] != float64(0) {
-		t.Errorf("stats = %v, want the empty shape", th["stats"])
+	// A thread that has never moved has nothing to report: both keys present,
+	// both null (TestThreadStatsAndUsageWaitForTheThreadToMove has the rest).
+	if th["stats"] != nil || th["usage"] != nil {
+		t.Errorf("fresh thread stats = %v, usage = %v, want both null", th["stats"], th["usage"])
 	}
 	// The agent is the session's resolved agent minus the roster — the
 	// SessionThreadAgent shape, tools materialized.
@@ -121,6 +124,113 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 	cagent, _ := listThreads(t, s, csid)[0]["agent"].(map[string]any)
 	if _, ok := cagent["multiagent"]; ok || cagent["name"] != "coordinator" {
 		t.Errorf("coordinator primary agent = %v, want no multiagent key", cagent)
+	}
+}
+
+// A thread's stats and usage are null until it has something to report (#674):
+// stats until its first status transition, usage until its first idle one —
+// the spec's two sentences. What the row cannot tell is whether a running
+// thread has idled before, so there usage waits for the first model turn
+// folded into it instead (docs/DIVERGENCES.md, session threads).
+func TestThreadStatsAndUsageWaitForTheThreadToMove(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+	log := events.NewLog(s.pool)
+	get := func(tid string) map[string]any {
+		t.Helper()
+		status, th := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/"+tid, nil)
+		if status != http.StatusOK {
+			t.Fatalf("get thread %s: %d %v", tid, status, th)
+		}
+		wantFields(t, th, "stats", "usage")
+		return th
+	}
+	emptyStats := func(th map[string]any) bool {
+		st, ok := th["stats"].(map[string]any)
+		return ok && len(st) == 3 && st["active_seconds"] == float64(0) &&
+			st["duration_seconds"] == float64(0) && st["startup_seconds"] == float64(0)
+	}
+	tokens := func(th map[string]any) (in, out any) {
+		u, _ := th["usage"].(map[string]any)
+		return u["input_tokens"], u["output_tokens"]
+	}
+
+	// Fresh: nothing on either surface.
+	if th := get(primary); th["stats"] != nil || th["usage"] != nil {
+		t.Errorf("fresh primary: stats %v usage %v, want both null", th["stats"], th["usage"])
+	}
+	if th := listThreads(t, s, sid)[0]; th["stats"] != nil || th["usage"] != nil {
+		t.Errorf("fresh primary listed: stats %v usage %v, want both null", th["stats"], th["usage"])
+	}
+	// The first transition — idle to running — brings stats; usage waits.
+	sendEvents(t, s, sid, userMessage("go"))
+	if th := get(primary); !emptyStats(th) || th["usage"] != nil {
+		t.Errorf("primary in its first run: stats %v usage %v, want the empty shape and null", th["stats"], th["usage"])
+	}
+	// Its first idle brings usage, even with no model turn folded into it
+	// (an interrupt ended this run before the model answered).
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	if th := get(primary); !emptyStats(th) {
+		t.Errorf("primary after its first idle: stats %v, want the empty shape", th["stats"])
+	} else if in, out := tokens(th); in != float64(0) || out != float64(0) {
+		t.Errorf("primary after its first idle: usage %v, want zeroes, not null", th["usage"])
+	}
+	// Folded usage renders, and running again keeps both.
+	if _, err := log.AppendWith(context.Background(), domain.ID(sid), nil,
+		events.AppendOptions{AddUsage: &domain.ModelUsage{InputTokens: 5, OutputTokens: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	sendEvents(t, s, sid, userMessage("again"))
+	if th := get(primary); th["status"] != "running" || !emptyStats(th) {
+		t.Errorf("primary running again: %v", th)
+	} else if in, out := tokens(th); in != float64(5) || out != float64(2) {
+		t.Errorf("primary running again: usage %v, want the 5/2 folded", th["usage"])
+	}
+
+	// A child is born running, which is its first transition; its usage waits
+	// for its first folded turn, the row keeping no record of an idle.
+	child := insertChild(t, s, sid, "running")
+	if th := get(child); !emptyStats(th) || th["usage"] != nil {
+		t.Errorf("child in its first run: stats %v usage %v, want the empty shape and null", th["stats"], th["usage"])
+	}
+	if _, err := log.AppendWith(context.Background(), domain.ID(sid), nil,
+		events.AppendOptions{ThreadID: domain.ID(child), AddUsage: &domain.ModelUsage{InputTokens: 1, OutputTokens: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if th := get(child); !emptyStats(th) {
+		t.Errorf("child after a folded turn: stats %v, want the empty shape", th["stats"])
+	} else if in, out := tokens(th); in != float64(1) || out != float64(1) {
+		t.Errorf("child after a folded turn: usage %v, want the 1/1 folded", th["usage"])
+	}
+	// A child whose first run settled no model turn still has usage once it
+	// idles, and keeps it through its archive: terminated is reached from idle.
+	bare := insertChild(t, s, sid, "running")
+	if _, err := log.AppendTransition(context.Background(), domain.ID(sid), nil, []events.ThreadTransition{{
+		ThreadID: domain.ID(bare), Status: domain.SessionIdle, Stop: &domain.StopReason{Type: domain.StopEndTurn}}},
+		events.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if th := get(bare); !emptyStats(th) || th["usage"] == nil {
+		t.Errorf("child idle with nothing folded: stats %v usage %v, want the empty shape and zeroes", th["stats"], th["usage"])
+	}
+	status, archived := s.do(http.MethodPost, "/v1/sessions/"+sid+"/threads/"+bare+"/archive", nil)
+	if status != http.StatusOK || archived["status"] != "terminated" {
+		t.Fatalf("archive: %d %v", status, archived)
+	}
+	for _, th := range []map[string]any{archived, get(bare)} {
+		if !emptyStats(th) {
+			t.Errorf("archived child: stats %v, want the empty shape", th["stats"])
+		} else if in, out := tokens(th); in != float64(0) || out != float64(0) {
+			t.Errorf("archived child: usage %v, want zeroes, not null", th["usage"])
+		}
+	}
+	// The list renders each row by the same rule as the single read.
+	for _, th := range listThreads(t, s, sid) {
+		if one := get(th["id"].(string)); !reflect.DeepEqual(th["stats"], one["stats"]) || !reflect.DeepEqual(th["usage"], one["usage"]) {
+			t.Errorf("thread %v listed as stats %v usage %v, read as stats %v usage %v",
+				th["id"], th["stats"], th["usage"], one["stats"], one["usage"])
+		}
 	}
 }
 
@@ -333,9 +443,11 @@ func TestThreadArchive(t *testing.T) {
 	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
 	path := "/v1/sessions/" + sid + "/threads/"
 
+	// The reference's own sentence (recorded, #674): ours carried nothing it
+	// withholds, so nothing was lost adopting it.
 	status, body := s.do(http.MethodPost, path+primary+"/archive", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg := errMessage(body); !strings.Contains(msg, "primary thread cannot be archived") {
+	if msg := errMessage(body); msg != "The primary thread cannot be archived; archive the session instead." {
 		t.Errorf("message = %q", msg)
 	}
 	running := insertChild(t, s, sid, "running")
