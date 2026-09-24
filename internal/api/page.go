@@ -284,11 +284,11 @@ func pageEdges(n int, more, hadCursor, reversed bool, key func(i int) (time.Time
 
 // queryValues is r.URL.Query() for a handler where a lost pair would widen,
 // swap or unguard the answer. URL.Query drops a pair it cannot parse — an
-// escape such as %zz, a pair holding a bare ";" — and, past Go's 10,000-pair
-// ceiling, the whole query, so a parameter sent that way reads as never sent:
-// a filtered list answers with everything, a version read serves the latest,
-// a delete precondition deletes unconditionally. This refuses the request
-// instead.
+// escape such as %zz, a pair holding a bare ";" — and, past Go's default
+// ceiling of 10,000 pairs (GODEBUG urlmaxqueryparams), the whole query, so a
+// parameter sent that way reads as never sent: a filtered list answers with
+// everything, a version read serves the latest, a delete precondition deletes
+// unconditionally. This refuses the request instead.
 //
 // A handler where a lost pair can only change the page, the view, the preview
 // frames or a timing, hide archived rows, or leave a refusal standing still

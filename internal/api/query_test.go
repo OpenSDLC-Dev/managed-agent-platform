@@ -30,16 +30,31 @@ func (s *tserver) doQuery(method, path, raw string) (int, map[string]any) {
 	return res.StatusCode, obj
 }
 
+// queryCeiling is Go's default ceiling on the pairs one query string may hold
+// (GODEBUG urlmaxqueryparams); url.ParseQuery refuses a query past it whole.
+const queryCeiling = 10000
+
+// pinQueryCeiling holds that ceiling at Go's default for the rest of t, which
+// must not be parallel. url.ParseQuery reads GODEBUG's urlmaxqueryparams at
+// every call, so the caller's environment would otherwise decide the ceiling
+// case: 0 lifts the ceiling and any other number moves it. The empty value is
+// the default itself; "urlmaxqueryparams=10000" is not, since a number set
+// there admits one pair fewer than it names, and the default admits 10,000.
+func pinQueryCeiling(t *testing.T) {
+	t.Helper()
+	t.Setenv("GODEBUG", "urlmaxqueryparams=")
+}
+
 // malformedQueries are the three ways url.Values loses a pair it was sent, each
 // built around param=value so that the pair lost is the one under test: an
 // escape that does not decode, a pair holding a bare ";" (dropped since Go 1.17
-// stopped splitting on it), and a query past Go's 10,000-pair ceiling, which
-// loses every pair at once.
+// stopped splitting on it), and a query one pair past Go's default ceiling of
+// 10,000, which loses every pair at once and needs pinQueryCeiling.
 func malformedQueries(param, value string) map[string]string {
 	return map[string]string{
 		"invalid escape":        param + "=" + value + "%zz",
 		"semicolon":             param + "=" + value + ";x=1",
-		"over the pair ceiling": param + "=" + value + strings.Repeat("&x=1", 10000),
+		"over the pair ceiling": param + "=" + value + strings.Repeat("&x=1", queryCeiling),
 	}
 }
 
@@ -58,9 +73,11 @@ func wantMalformedQuery(t *testing.T, label string, status int, body map[string]
 // serves refuses a query string that does not parse, rather than answering as
 // if the lost parameter had never been sent: a list that lost its filter
 // answers with everything, and an agent read that lost its version answers
-// with the latest one, both as a 200. Each path's control request, the same
-// parameter well-formed, is not a 400, so the refusal is the query's doing.
+// with the latest one, both as a 200. Each path's control requests, the same
+// parameter well-formed, alone and among exactly 10,000 pairs, are not a 400,
+// so the refusal is the query's doing and the ceiling is where the docs put it.
 func TestMalformedQueryStringIsRefused(t *testing.T) {
+	pinQueryCeiling(t)
 	s := newTestServer(t)
 	agent := createAgent(t, s, map[string]any{"name": "q", "model": "claude-opus-4-8"})["id"].(string)
 	store := createMemoryStore(t, s, "queries")
@@ -85,8 +102,13 @@ func TestMalformedQueryStringIsRefused(t *testing.T) {
 		{"/v1/memory_stores/" + store + "/memory_versions", "memory_id", domain.NewID(domain.PrefixMemory).String()},
 	} {
 		t.Run(c.path+"?"+c.param, func(t *testing.T) {
-			if status, body := s.doQuery(http.MethodGet, c.path, c.param+"="+c.value); status == http.StatusBadRequest {
-				t.Fatalf("well-formed: status %d (%v)", status, body)
+			for name, raw := range map[string]string{
+				"well-formed":         c.param + "=" + c.value,
+				"at the pair ceiling": c.param + "=" + c.value + strings.Repeat("&x=1", queryCeiling-1),
+			} {
+				if status, body := s.doQuery(http.MethodGet, c.path, raw); status == http.StatusBadRequest {
+					t.Fatalf("%s: status %d (%v)", name, status, body)
+				}
 			}
 			for name, raw := range malformedQueries(c.param, c.value) {
 				status, body := s.doQuery(http.MethodGet, c.path, raw)
@@ -105,6 +127,7 @@ func TestMalformedQueryStringIsRefused(t *testing.T) {
 // well-formed digest that does not match is a 409, so the digest here would
 // refuse the delete whichever way it arrived — unless it is lost.
 func TestMalformedQueryStringKeepsTheDeletePrecondition(t *testing.T) {
+	pinQueryCeiling(t)
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "guarded")
 	id := createMemory(t, s, store, "/kept.md", "bytes")["id"].(string)
