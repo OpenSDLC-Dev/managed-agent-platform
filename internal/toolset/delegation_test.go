@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -148,10 +149,21 @@ func TestDelegationSchemas(t *testing.T) {
 // consult, so it must admit exactly the tools the brain injects — no more, and
 // no fewer.
 func TestIsDelegationTool(t *testing.T) {
+	var injected []string
 	for _, d := range decodeDefs(t, append(toolset.CoordinatorTools(), toolset.WorkerTools()...)) {
 		if !toolset.IsDelegationTool(d.Name) {
 			t.Errorf("IsDelegationTool(%q) = false, want true", d.Name)
 		}
+		injected = append(injected, d.Name)
+	}
+	// The same set as a list, for a caller that cannot take a predicate: the
+	// events API hides exactly these names in SQL (#675), so a name the
+	// predicate admits and the list lacks would reach the wire.
+	all := toolset.AllDelegationTools()
+	slices.Sort(injected)
+	slices.Sort(all)
+	if !slices.Equal(all, injected) {
+		t.Errorf("AllDelegationTools() = %v, want the injected set %v", all, injected)
 	}
 	for _, name := range []string{"bash", "read", "web_fetch", "mcp__srv__create_agent", "", "create_agents"} {
 		if toolset.IsDelegationTool(name) {

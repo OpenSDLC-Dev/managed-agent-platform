@@ -1480,13 +1480,13 @@ func readRangeUse(tr *Trial, path string, line int) map[string]any {
 }
 
 // SpawnedAgent asserts the coordinator spawned a named roster agent: a
-// create_agent call whose agent_name is exactly that name.
+// session.thread_created whose agent_name is exactly that name.
 //
-// Exact on the field, where a general ToolCalledWith would match a marker
-// anywhere in the input — and a coordinator's message to one worker may well
-// name the other ("ask the archivist for it"), which would report a spawn that
-// never happened and hold open the premise of the Platform-class grader beside
-// it. Class Model: whether to delegate, and to whom, is the model's.
+// Exact on the field, where a text match would find a marker anywhere — and a
+// coordinator's message to one worker may well name the other ("ask the
+// archivist for it"), which would report a spawn that never happened and hold
+// open the premise of the Platform-class grader beside it. Class Model:
+// whether to delegate, and to whom, is the model's.
 func SpawnedAgent(name string, class Class) Grader {
 	return Grader{
 		Name:  "spawned-agent:" + name,
@@ -1496,7 +1496,7 @@ func SpawnedAgent(name string, class Class) Grader {
 			if slices.Contains(spawned, name) {
 				return nil
 			}
-			return fmt.Errorf("no create_agent call named %q; the coordinator spawned %v", name, spawned)
+			return fmt.Errorf("no thread created for %q; the coordinator spawned %v", name, spawned)
 		},
 	}
 }
@@ -1509,66 +1509,26 @@ func spawnedAgent(name string) func(*Trial) bool {
 	return func(tr *Trial) bool { return slices.Contains(spawnedAgents(tr), name) }
 }
 
-// spawnedAgents returns the agent_name of every create_agent call the
-// settlement answered without an error, in log order.
-//
-// The answer is read, not just the call, and which half of the split that
-// serves is worth stating. A call the settlement refused — a name off the
-// roster, a missing message, the thread cap reached — is the model asking
-// wrongly, and the model's graders should own that. Counting it as a spawn
-// would do the opposite twice over: it would pass this Model grader on a spawn
-// that never happened, and then hold open the premise of the Platform grader
-// beside it, which would red and blame the platform for a malformed call. So
-// what is left to Platform is exactly its own: a spawn the settlement said it
-// performed that left no thread row behind.
+// spawnedAgents returns the agent_name of every session.thread_created on the
+// session view, in log order — one per spawn the settlement performed, read
+// there because the create_agent call and its answer are on no events surface
+// (#675). A call the settlement refused — a name off the roster, a missing
+// message, the thread cap reached — is the model asking wrongly, and the
+// model's graders should own that; it creates no thread, so nothing here
+// counts it. Counting it would pass this Model grader on a spawn that never
+// happened, and then hold open the premise of the Platform grader beside it,
+// which would red and blame the platform for a malformed call. So what is left
+// to Platform is exactly its own: a spawn the log records that left no thread
+// row behind. The name is the roster's as createAgent resolved it, trimmed —
+// the name the threads route renders.
 func spawnedAgents(tr *Trial) []string {
-	failed := map[string]bool{}
-	for _, res := range eventsOfType(tr, "agent.tool_result") {
-		if isErr, _ := res["is_error"].(bool); isErr {
-			if id, _ := res["tool_use_id"].(string); id != "" {
-				failed[id] = true
-			}
-		}
-	}
 	var out []string
-	for _, use := range eventsOfType(tr, "agent.tool_use") {
-		if use["name"] != "create_agent" {
-			continue
-		}
-		// An unanswered call is not counted either: a settlement answers every
-		// delegation call in the commit that emits it, so a create_agent with no
-		// result is a turn that never settled — nothing was spawned.
-		id, _ := use["id"].(string)
-		if id == "" || failed[id] || !answeredUse(tr, id) {
-			continue
-		}
-		input, _ := use["input"].(map[string]any)
-		// Trimmed, because createAgent trims before it resolves the roster: a
-		// spawn asking for " archivist " succeeds and renders agent.name
-		// "archivist" on the threads route, and an untrimmed read here would
-		// call that a Model failure — then, as OnlyIf's premise, skip the
-		// Platform grader that would have checked the thread it really created.
-		if name := strings.TrimSpace(nameOf(input)); name != "" {
+	for _, ev := range eventsOfType(tr, "session.thread_created") {
+		if name, _ := ev["agent_name"].(string); name != "" {
 			out = append(out, name)
 		}
 	}
 	return out
-}
-
-// nameOf reads a create_agent call's agent_name.
-func nameOf(input map[string]any) string {
-	name, _ := input["agent_name"].(string)
-	return name
-}
-
-// answeredUse reports whether an agent.tool_result answers the given tool-use id.
-func answeredUse(tr *Trial, useID string) bool {
-	for _, res := range eventsOfType(tr, "agent.tool_result") {
-		if id, _ := res["tool_use_id"].(string); id == useID {
-			return true
-		}
-	}
-	return false
 }
 
 // ThreadPerAgent asserts the session ran a child thread for each named roster

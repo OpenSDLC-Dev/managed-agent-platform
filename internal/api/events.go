@@ -36,6 +36,14 @@ func platformExecuted(name string) bool {
 	return toolset.IsWebTool(name) || toolset.IsDelegationTool(name)
 }
 
+// wireHiddenTools are the calls no events list or stream renders, nor the
+// answers to them: the six delegation tools, of which the reference's lists
+// show neither half on any surface (#675) — a spawn reads there as
+// session.thread_created and the agent.thread_message_sent/_received pair.
+// The rows stay in the log, where the thread's replay, the tool-result
+// validation platformExecuted steers and the runnable classification read them.
+var wireHiddenTools = toolset.AllDelegationTools()
+
 // sendSessionEvents implements POST /v1/sessions/{id}/events. The body is
 // always a batch ({"events":[…]}); the response echoes the persisted events
 // as {"data":[…]} with server-assigned ids.
@@ -993,6 +1001,7 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		return nil, err
 	}
 	query.ThreadToolCalls = wide
+	query.HideTools = wireHiddenTools
 	evs, err := s.log.List(ctx, domain.ID(id), query)
 	if err != nil {
 		return nil, err
@@ -1057,6 +1066,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, id string,
 		return
 	}
 	scope.ThreadToolCalls = wide
+	scope.HideTools = wireHiddenTools
 	sub := s.broker.SubscribeThread(domain.ID(id), scope.ThreadID)
 	defer sub.Close()
 
