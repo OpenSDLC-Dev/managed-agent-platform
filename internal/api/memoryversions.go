@@ -112,7 +112,10 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 	if err := checkID(storeID, "memory store"); err != nil {
 		return nil, err
 	}
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	view, err := parseMemoryView(q, viewBasic)
 	if err != nil {
 		return nil, err
@@ -251,14 +254,13 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 // It nulls content, content_sha256, content_size_bytes and path, and records
 // who did it; the attribution of the original write is preserved through it.
 //
-// Two rules the reference states without a status, both registered as
-// inferences. "A version that is the current head of a live memory cannot be
-// redacted" — a 400 here, since a redaction that left the memory serving the
-// same bytes would erase nothing. And an archived store still admits one
-// (decision 3): archived means no new content, not no compliance erasure, and
-// archiving is one-way, so a refusal would leave the whole-store delete as the
-// only lever. On an archived store the head is redactable too — nothing can
-// supersede it — and the memory row is emptied so the bytes stop being served.
+// Two rules the 2026-09-02 recording settled. "A version that is the current
+// head of a live memory cannot be redacted" — a 400 invalid_request_error,
+// since a redaction that left the memory serving the same bytes would erase
+// nothing — and it holds on an archived store too, where the reference refuses
+// a head exactly as on a live one (#686). And an archived store still admits
+// the redaction of any other version (decision 3): archived means no new
+// content, not no compliance erasure, and archiving is one-way.
 func (s *server) redactMemoryVersion(r *http.Request) (any, error) {
 	ctx := r.Context()
 	storeID, versionID := r.PathValue("id"), r.PathValue("vid")
@@ -274,8 +276,7 @@ func (s *server) redactMemoryVersion(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	archived, err := lockMemoryStore(ctx, tx, storeID)
-	if err != nil {
+	if _, err := lockMemoryStore(ctx, tx, storeID); err != nil {
 		return nil, err
 	}
 	var row memoryVersionRow
@@ -303,17 +304,9 @@ func (s *server) redactMemoryVersion(r *http.Request) (any, error) {
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
-	if head != "" && !archived {
+	if head != "" {
 		return nil, errInvalid(
 			"memory version %s is the current head of memory %s and cannot be redacted", versionID, head)
-	}
-	if head != "" {
-		if _, err := tx.Exec(ctx,
-			`UPDATE memories
-			    SET content = '', content_sha256 = $2, content_size_bytes = 0, updated_at = now()
-			  WHERE id = $1`, head, contentDigest("")); err != nil {
-			return nil, err
-		}
 	}
 
 	var redactedBy any

@@ -18,8 +18,10 @@
 package memsync
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -44,14 +46,40 @@ const (
 	// readable and editable" (the memory guide). The API's create and the
 	// sync's create push both hold it.
 	MaxMemoriesPerStore = 2000
-
-	// markerPath is the path a memory would have to occupy to collide with the
-	// per-mount marker file `.anthropic-memory-store` (decision 10), which
-	// every store directory carries at its root. Only the root one collides: a
-	// memory at /x/.anthropic-memory-store lands in a subdirectory, where the
-	// worker's own exclusion is by path rather than by basename.
-	markerPath = "/.anthropic-memory-store"
 )
+
+// IsMarkerPath reports whether a memory at path would land on the marker file
+// every store directory carries at its root (decision 10) — the reference
+// client's own test, exactly (checked against anthropic-sdk-go v1.70.1 —
+// memories.go SessionMemoryStores.listMemories): the path with its leading
+// slashes trimmed is the marker's name. The reference accepts a memory there
+// (#669); the update route refuses a rename onto it, and the consumers skip
+// it with ShadowsMarker.
+func IsMarkerPath(path string) bool {
+	return strings.TrimLeft(path, "/") == MarkerName
+}
+
+// ShadowsMarker reports whether a memory at path can never land in a mounted
+// store directory: one at the marker's path would be written over the marker,
+// and one under it needs a directory where the marker file is, which fails
+// every write batch it rides in. It is what every consumer that lands or
+// syncs a store skips. The reference client skips the marker's path alone
+// (IsMarkerPath); the descendants are ours, registered in docs/DIVERGENCES.md.
+// Nothing else collides — a memory at /x/.anthropic-memory-store lands in a
+// subdirectory, and the tree hash excludes the marker by path rather than by
+// basename.
+func ShadowsMarker(path string) bool {
+	return IsMarkerPath(path) || strings.HasPrefix(strings.TrimLeft(path, "/"), MarkerName+"/")
+}
+
+// WarnShadowedMemory logs a memory ShadowsMarker skipped, from whichever
+// consumer skipped it — the reference worker's own warning when its listing
+// carries the marker's path (checked against anthropic-sdk-go v1.70.1 —
+// memories.go SessionMemoryStores.listMemories).
+func WarnShadowedMemory(ctx context.Context, sessionID, storeID, path string) {
+	slog.WarnContext(ctx, "the store holds a memory at or under the reserved marker path; skipping",
+		"session_id", sessionID, "memory_store_id", storeID, "path", path)
+}
 
 // ValidatePath holds the reference's own documented path rule verbatim
 // (checked against anthropic-sdk-go v1.70.1 — betamemorystorememory.go
@@ -70,9 +98,10 @@ const (
 // caller did not write while its own SHA-based preconditions still spoke of
 // the original bytes.
 //
-// The marker path is this platform's own addition, registered as an inference:
-// a memory there would overwrite the mount's marker file or be overwritten by
-// it, and the marker is what tells a worker the directory is a real store.
+// The marker's path is not refused here: the reference accepts a create there
+// (#669), and ShadowsMarker is how the consumers keep such a memory, or one
+// under it, off the marker file. A rename onto the marker's path is refused by
+// the update route alone.
 func ValidatePath(path string) error {
 	if path == "" {
 		return errors.New("path is required")
@@ -113,9 +142,6 @@ func ValidatePath(path string) error {
 	}
 	if !norm.NFC.IsNormalString(path) {
 		return errors.New("path must be NFC-normalized")
-	}
-	if path == markerPath {
-		return fmt.Errorf("path %s is reserved for the memory store's marker file", markerPath)
 	}
 	return nil
 }

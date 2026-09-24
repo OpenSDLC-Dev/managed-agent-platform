@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -279,6 +280,25 @@ func pageEdges(n int, more, hadCursor, reversed bool, key func(i int) (time.Time
 		prev = &p
 	}
 	return next, prev
+}
+
+// queryValues is r.URL.Query() for a handler where a lost pair would widen,
+// swap or unguard the answer. URL.Query drops a pair it cannot parse — an
+// escape such as %zz, a pair holding a bare ";" — and, past Go's default
+// ceiling of 10,000 pairs (GODEBUG urlmaxqueryparams), the whole query, so a
+// parameter sent that way reads as never sent: a filtered list answers with
+// everything, a version read serves the latest, a delete precondition deletes
+// unconditionally. This refuses the request instead.
+//
+// A handler where a lost pair can only change the page, the view, the preview
+// frames or a timing, hide archived rows, or leave a refusal standing still
+// reads r.URL.Query(); docs/DIVERGENCES.md's malformed-query entry names them.
+func queryValues(r *http.Request) (url.Values, error) {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, errInvalid("malformed query string: %v", err)
+	}
+	return q, nil
 }
 
 // parseBoolParam parses an optional boolean query parameter.

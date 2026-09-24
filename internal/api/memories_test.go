@@ -205,7 +205,6 @@ func TestMemoryPathRules(t *testing.T) {
 		"a paragraph separator": "/notes/para\u2029break.md",
 		"an NFD path":           "/cafe\u0301.md",
 		"1025 bytes":            "/" + strings.Repeat("a", 1024),
-		"the marker path":       "/.anthropic-memory-store",
 		"not a string":          42,
 	} {
 		status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories",
@@ -220,7 +219,9 @@ func TestMemoryPathRules(t *testing.T) {
 	createMemory(t, s, store, "/"+strings.Repeat("a", 1023), "at the byte bound")
 	createMemory(t, s, store, "/café.md", "NFC")
 
-	// The same rules hold on a rename.
+	// The same rules hold on a rename \u2014 and a rename onto the marker's path
+	// stays refused, which is this platform's choice: the reference was never
+	// recorded answering one (docs/DIVERGENCES.md).
 	id := createMemory(t, s, store, "/renamable.md", "x")["id"].(string)
 	for _, path := range []string{"relative.md", "/a//b", "/..", "/.anthropic-memory-store", "/re\u2028named.md"} {
 		status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
@@ -228,6 +229,53 @@ func TestMemoryPathRules(t *testing.T) {
 		if status != http.StatusBadRequest {
 			t.Errorf("rename to %q: status %d (%v)", path, status, body)
 		}
+	}
+
+	// A create at the marker's own path is an ordinary memory, as the
+	// reference answers it (#669): 200, and listed like any other row. What
+	// keeps it off a mount's marker file is the consumers' skip, not the API.
+	created := createMemory(t, s, store, "/.anthropic-memory-store", "m")
+	marker := created["id"].(string)
+	status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?view=full", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list: status %d (%v)", status, body)
+	}
+	listed := false
+	for _, row := range listData(t, body) {
+		if row["path"] == "/.anthropic-memory-store" {
+			listed = row["type"] == "memory" && row["id"] == marker && row["content"] == "m"
+		}
+	}
+	if !listed {
+		t.Errorf("the memory at the marker's path is not listed as an ordinary memory: %v", listData(t, body))
+	}
+	// An update naming the path the memory already holds is no rename, and
+	// renaming it away is an ordinary rename.
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+marker,
+		map[string]any{"path": "/.anthropic-memory-store", "content": "m2"})
+	if status != http.StatusOK || body["path"] != "/.anthropic-memory-store" {
+		t.Errorf("update in place at the marker's path: status %d (%v)", status, body)
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories/"+marker, nil)
+	if status != http.StatusOK || body["content"] != "m2" || body["content_sha256"] != digest("m2") ||
+		body["memory_version_id"] == created["memory_version_id"] {
+		t.Errorf("the update in place did not land as a new version: status %d (%v)", status, body)
+	}
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+marker,
+		map[string]any{"path": "/moved.md"})
+	if status != http.StatusOK || body["path"] != "/moved.md" {
+		t.Errorf("rename away from the marker's path: status %d (%v)", status, body)
+	}
+	// The rename guard is judged once the memory is read, so a memory that is
+	// not there answers its 404 first (the order docs/DIVERGENCES.md states).
+	gone := createMemory(t, s, store, "/gone.md", "g")["id"].(string)
+	if status, body := s.do(http.MethodDelete, "/v1/memory_stores/"+store+"/memories/"+gone, nil); status != http.StatusOK {
+		t.Fatalf("delete: status %d (%v)", status, body)
+	}
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+gone,
+		map[string]any{"path": "/.anthropic-memory-store"})
+	if status != http.StatusNotFound {
+		t.Errorf("rename of a missing memory onto the marker's path: status %d (%v), want its 404", status, body)
 	}
 }
 
@@ -462,8 +510,33 @@ func TestMemoryDeletePrecondition(t *testing.T) {
 		}
 	}
 
+	// A value that is not a digest's shape is refused as such, before any
+	// comparison: the reference answers `nothex` with a 400
+	// invalid_request_error, and a well-formed digest that does not match with
+	// the 409 below (the 2026-09-02 recording, #684). The uppercase spelling of
+	// the stored digest is refused too, since what is stored is lowercase, and
+	// so is a parameter supplied empty — the SDK sends one for param.NewOpt("")
+	// — since only an absent parameter means no precondition.
+	for _, bad := range []string{"nothex", strings.Repeat("a", 63), strings.Repeat("a", 65),
+		strings.Repeat("g", 64), strings.ToUpper(digest("bytes")), ""} {
+		status, resp := s.do(http.MethodDelete, path+"?expected_content_sha256="+bad, nil)
+		wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
+	}
+	// A query string that does not parse is refused whole: url.Values drops a
+	// malformed pair, so a corrupted precondition would otherwise read as
+	// absent and the delete run unconditionally.
+	for _, raw := range []string{"expected_content_sha256=%zz",
+		"expected_content_sha256=" + digest("other") + ";x=1"} {
+		status, resp := s.do(http.MethodDelete, path+"?"+raw, nil)
+		wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
+		if status, got := s.do(http.MethodGet, path, nil); status != http.StatusOK || got["content"] != "bytes" {
+			t.Fatalf("?%s: the memory after the refused delete: status %d (%v)", raw, status, got)
+		}
+	}
+
 	// The precondition rides the query string on delete, and a mismatch is the
-	// same 409 an update's is (the reference worker accepts 409 or 412).
+	// same 409 an update's is — the status and type the reference answers a
+	// well-formed wrong digest with (the 2026-09-02 recording).
 	status, resp := s.do(http.MethodDelete, path+"?expected_content_sha256="+digest("other"), nil)
 	wantErr(t, status, resp, http.StatusConflict, "memory_precondition_failed_error")
 	if status, got := s.do(http.MethodGet, path, nil); status != http.StatusOK || got["content"] != "bytes" {
@@ -681,9 +754,11 @@ func TestMemoryStoreCapacity(t *testing.T) {
 	}
 }
 
-// An archived store is read-only (decision 3): its memories still read, and
-// every write answers the store's own 400.
-func TestMemoryWritesRefusedOnAnArchivedStore(t *testing.T) {
+// An archived store takes no new content (decision 3): its memories still
+// read, a create or an update answers the store's own 400, and a delete — an
+// erasure, not new content — is admitted, as the reference admits it (the
+// 2026-09-02 recording, #685).
+func TestMemoryArchivedStoreRefusesNewContentAdmitsDelete(t *testing.T) {
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "archived")
 	id := createMemory(t, s, store, "/kept.md", "bytes")["id"].(string)
@@ -697,7 +772,6 @@ func TestMemoryWritesRefusedOnAnArchivedStore(t *testing.T) {
 	}{
 		{http.MethodPost, "/v1/memory_stores/" + store + "/memories", map[string]any{"path": "/new.md", "content": "x"}},
 		{http.MethodPost, "/v1/memory_stores/" + store + "/memories/" + id, map[string]any{"content": "x"}},
-		{http.MethodDelete, "/v1/memory_stores/" + store + "/memories/" + id, nil},
 	} {
 		status, body := s.do(call.method, call.path, call.body)
 		if status != http.StatusBadRequest {
@@ -712,6 +786,17 @@ func TestMemoryWritesRefusedOnAnArchivedStore(t *testing.T) {
 	}
 	if status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories", nil); status != http.StatusOK || len(listData(t, body)) != 1 {
 		t.Fatalf("list on an archived store: status %d (%v)", status, body)
+	}
+
+	status, body := s.do(http.MethodDelete, "/v1/memory_stores/"+store+"/memories/"+id, nil)
+	if status != http.StatusOK || body["id"] != id || body["type"] != "memory_deleted" {
+		t.Fatalf("delete on an archived store: status %d (%v)", status, body)
+	}
+	if status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories/"+id, nil); status != http.StatusNotFound {
+		t.Fatalf("read after the delete: status %d (%v)", status, body)
+	}
+	if n := countVersions(t, s, store); n != 2 {
+		t.Errorf("versions = %d, want 2 (created, deleted)", n)
 	}
 }
 

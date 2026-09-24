@@ -72,6 +72,7 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error
 		}
 		spec.Model = m
 	}
+	limits := map[string]int{"system": maxAgentSystemRunes, "description": maxAgentDescriptionRunes}
 	for key, dst := range map[string]*string{"system": &spec.System, "description": &spec.Description} {
 		val, set, null, err := stringField(obj, key)
 		if err != nil {
@@ -80,6 +81,8 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error
 		if set {
 			if null {
 				val = ""
+			} else if err := capRunes(key, val, limits[key]); err != nil {
+				return err
 			}
 			*dst = val
 		}
@@ -176,6 +179,9 @@ func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMe
 	if err != nil {
 		return false, err
 	}
+	if err := capRunes("name", name, maxAgentNameRunes); err != nil {
+		return false, err
+	}
 	if raw, ok := obj["model"]; !ok || isNull(raw) {
 		return false, errInvalid("model is required")
 	}
@@ -229,7 +235,11 @@ func (s *server) getAgent(r *http.Request) (any, error) {
 	if err := checkID(id, "agent"); err != nil {
 		return nil, err
 	}
-	if v := r.URL.Query().Get("version"); v != "" {
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
+	if v := q.Get("version"); v != "" {
 		version, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || version < 1 {
 			return nil, errInvalid("version must be a positive integer")
@@ -244,7 +254,7 @@ func (s *server) getAgent(r *http.Request) (any, error) {
 		createdAt, updatedAt time.Time
 		archivedAt           *time.Time
 	)
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`SELECT name, version, spec, metadata, created_at, updated_at, archived_at
 		 FROM agents WHERE id = $1`+notInternal, id).
 		Scan(&name, &version, &specJSON, &metaJSON, &createdAt, &updatedAt, &archivedAt)
@@ -400,6 +410,9 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		if null || newName == "" {
 			return nil, errInvalid("name cannot be cleared")
 		}
+		if err := capRunes("name", newName, maxAgentNameRunes); err != nil {
+			return nil, err
+		}
 		name = newName
 	}
 	if err := parseAgentSpecFields(obj, &spec); err != nil {
@@ -460,7 +473,10 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 
 func (s *server) listAgents(r *http.Request) (any, error) {
 	ctx := r.Context()
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	page, err := parsePage(q)
 	if err != nil {
 		return nil, err

@@ -204,14 +204,17 @@ thread is offered `create_agent` / `send_to_agent` / `list_agents` / `wait_for_a
 every child `submit_result` / `send_to_parent`, and the transaction that commits the turn
 calling one also does what it asked and answers it there — inserting a thread row, writing
 the `agent.thread_message_sent`/`_received` pair the agents talk through, enqueueing
-whatever turn follows. The session's skills are the roster's union, the coordinator's
-references first and each member's after, deduplicated by skill id. On a `self_hosted`
-session the session-level list and stream additionally carry every child thread's
-`agent.tool_use` and the results answering it, which is how the thread-unaware BYOC worker
-sees calls it must run on a thread it knows nothing about. A single-agent session is the
-one-thread case of the same machinery and its wire is unchanged. What is inferred versus
-documented is in [DIVERGENCES.md](./DIVERGENCES.md) ("Session status as a fold over
-threads", "Coordinator delegation", "The `self_hosted` session view").
+whatever turn follows. The call and its answer stay on the calling thread's log, where
+its replay reads them, but no events list or stream renders either, as none of the
+reference's recorded lists does. The session's skills are the roster's union, the
+coordinator's references first and each member's after, deduplicated by skill id. On a
+`self_hosted` session the session-level list and stream additionally carry every child
+thread's `agent.tool_use` but a delegation call, and the results answering it, which is
+how the thread-unaware BYOC worker sees calls it must run on a thread it knows nothing
+about. A single-agent session is the one-thread case of the same machinery and its wire
+is unchanged. What is inferred versus documented is in [DIVERGENCES.md](./DIVERGENCES.md)
+("Session status as a fold over threads", "Coordinator delegation", "The `self_hosted`
+session view").
 
 **Crash recovery is replay.** Sessions are never bound to a brain: any brain can pick up
 any session's next turn from the log. A sandbox container dying surfaces as one
@@ -247,12 +250,15 @@ digest and appends a `session_actor` version; the store wins a both-sides change
 emptied directory against a baseline of several files is re-downloaded, never read as
 deletions), and the settlement is written back; a listing that fails, or holds more
 changed files than a store can, skips the store rather than reading as deletions. A `read_only` or archived store, or a
-directory whose marker was altered, is pulled from and never pushed to. The file tools
+directory whose marker was altered, is pulled from and never pushed to, with one exception
+on `self_hosted` below. The file tools
 refuse to write in a `read_only` store on either kind; an archived store is read-only at
 the tools only on `cloud`, where the executor reads `archived_at` from the row — a
 `self_hosted` worker's token cannot read the store, so it learns the archive from the
-first write the store refuses, and a `bash` write there is withheld at the sync rather
-than refused at the tool. On `cloud` the reaper syncs a sandbox before every tier's
+first create or update the store refuses, and a `bash` write there is withheld at the sync rather
+than refused at the tool. The exception is a local deletion: an archived store admits a
+delete (#685), and the worker settles deletions before its pushes, so a `self_hosted`
+deletion reaches the archived store where the `cloud` executor keeps it local. On `cloud` the reaper syncs a sandbox before every tier's
 action but the deleted tier's, and a run whose sandbox already held a mount syncs it
 before its tools run as well, so a store's change reaches a session at its next run
 rather than the one after. The BYOC worker has no reaper, so beyond the two run boundaries — a mount found already
@@ -429,7 +435,7 @@ Layout order is by layer, as the repo is.
 
 | Package | What it owns |
 |---|---|
-| `store/` | The Postgres schema. Every table lives in `migrations/`, embedded in the binaries so a deployment needs no migration step. Three properties of `Migrate` are contract rather than detail — one all-or-nothing transaction, an advisory lock, and the filename as the immutable version record — and the schema reserves the multi-tenant columns it does not yet enforce. |
+| `store/` | The Postgres schema. Every table lives in `migrations/`, embedded in the binaries so a deployment needs no migration step. Three properties of `Migrate` are contract rather than detail — one all-or-nothing transaction (retried whole on a lock timeout or deadlock), an advisory lock, and the filename as the immutable version record — and the schema reserves the multi-tenant columns it does not yet enforce. |
 | `blob/` | The object-storage seam: `s3/` for anything speaking S3, `gcs/` native on Application Default Credentials, one contract suite for both. |
 | `skills/` | Skill-upload validation and canonical-zip normalization, funnelled through one place so the rules cannot drift between entry points. |
 | `cron/` | The occurrence engine behind a deployment's schedule: the reference's 5-field POSIX dialect, matched literally against a wall clock in an IANA zone. `Due`, `Next` and `Upcoming` share one walk, so the list a client reads in `upcoming_runs_at` and the instant the scheduler fires cannot disagree. It imports `time/tzdata` itself rather than leaving that to a `main`, because the server image ships no zoneinfo and the failure would appear only there. |
@@ -502,7 +508,12 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **Auth is scoped.** Management calls carry `x-api-key` (hashed at rest,
   rotation-by-restart); workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's
-  sessions. Environment keys are hashed at rest too, issued one per host so a
+  sessions. One event runs the other way: a `user.tool_result`, the result of a
+  built-in toolset call, is admitted only under a worker's credential, and a management
+  key or human posting one is refused 403 on any session (#662). The rule is that
+  event's alone: management still posts `user.custom_tool_result` and
+  `user.tool_confirmation`, and a `user.interrupt` still has the platform answer the
+  calls it ends. Environment keys are hashed at rest too, issued one per host so a
   compromised host is revoked alone, and expire a year after issue; revoked,
   expired and unknown are one indistinguishable 401. Issuing and revoking them is
   a **management** operation on the off-wire console API, so an environment key

@@ -50,8 +50,9 @@ func (p ThreadPeer) wire(sessionID domain.ID) string {
 func ThreadMessage(sessionID domain.ID, from, to ThreadPeer, text string) (sent, received NewEvent, err error) {
 	content := []map[string]any{{"type": "text", "text": text}}
 	// The nullable agent name is written as a present null rather than
-	// omitted, the convention the tool-use events' session_thread_id keeps, so
-	// the two directions render alike whichever way the message went.
+	// omitted, so the two directions render alike whichever way the message
+	// went. (The tool-use events' session_thread_id is stored null too, but
+	// the API omits that one on render — #674.)
 	sentPayload, err := json.Marshal(map[string]any{
 		"content":              content,
 		"to_session_thread_id": to.wire(sessionID),

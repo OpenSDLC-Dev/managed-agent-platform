@@ -126,7 +126,7 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 		// Reported per store for materializeFiles's reason: a store can be
 		// 2,000 files, and the pass has moved whether it landed or was skipped.
 		progress()
-		outcome, err := e.materializeStore(ctx, sb, m)
+		outcome, err := e.materializeStore(ctx, sb, sid, m)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
 		case err != nil:
@@ -154,7 +154,7 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 }
 
 // materializeStore lands one store, answering with its outcome.
-func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m memoryRef) (string, error) {
+func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m memoryRef) (string, error) {
 	marker := path.Join(m.MountPath, memsync.MarkerName)
 	want := memsync.MarkerBytes(m.MemoryStoreID)
 	// The marker's bytes, not its presence: the directory is agent-writable,
@@ -200,6 +200,12 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m m
 		var p, content, sha string
 		if err := rows.Scan(&p, &content, &sha); err != nil {
 			return memoryOutcomeFailed, err
+		}
+		// Later in this batch than the marker it would land over it, and under
+		// the marker's name it would fail the whole batch.
+		if memsync.ShadowsMarker(p) {
+			memsync.WarnShadowedMemory(ctx, sid.String(), m.MemoryStoreID, p)
+			continue
 		}
 		writes = append(writes, sandbox.FileWrite{Path: m.MountPath + p, Data: []byte(content), Mode: memoryFileMode})
 		baseline.Synced[p] = sha
@@ -444,12 +450,22 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 		return err
 	}
 	remote := map[string]memsync.Head{}
+	held := 0
 	for rows.Next() {
 		var head memsync.Head
 		var p string
 		if err := rows.Scan(&head.ID, &p, &head.SHA); err != nil {
 			rows.Close()
 			return err
+		}
+		// Counted toward the cap, but never planned: a pull would land it
+		// over the marker or fail the batch under it, and once in the
+		// baseline its absence from the directory would read as a local
+		// deletion.
+		held++
+		if memsync.ShadowsMarker(p) {
+			memsync.WarnShadowedMemory(ctx, sid.String(), id, p)
+			continue
 		}
 		remote[p] = head
 	}
@@ -476,7 +492,6 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 	// session writes carries.
 	actorJSON, _ := json.Marshal(map[string]string{"type": "session_actor", "session_id": sid.String()})
 	actor := json.RawMessage(actorJSON)
-	held := len(remote)
 	// Deletions settle first, then the rest in path order: a create needs
 	// the room a deletion makes under the cap, and a file replacing a
 	// directory (`/a/b` gone, `/a` written) needs the descendant's deletion

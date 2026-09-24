@@ -109,14 +109,17 @@ func renderDefs(defs []toolDef) []json.RawMessage {
 	return out
 }
 
+// delegationToolNames is the six, listed once: AllDelegationTools hands out a
+// copy and IsDelegationTool reads it, so the list the events API hides in SQL
+// (#675) and the predicate every other reader consults cannot disagree.
+var delegationToolNames = []string{
+	ToolCreateAgent, ToolSendToAgent, ToolListAgents, ToolWaitForAgents,
+	ToolSubmitResult, ToolSendToParent,
+}
+
 // AllDelegationTools names the six, for a caller that must reason about the
 // half it was not offered as well as the half it was.
-func AllDelegationTools() []string {
-	return []string{
-		ToolCreateAgent, ToolSendToAgent, ToolListAgents, ToolWaitForAgents,
-		ToolSubmitResult, ToolSendToParent,
-	}
-}
+func AllDelegationTools() []string { return slices.Clone(delegationToolNames) }
 
 // CoordinatorTools returns the four delegation tools the primary thread of a
 // session with a roster is offered, and WorkerTools the two any child is. Both
@@ -151,11 +154,4 @@ func IsWorkerTool(name string) bool {
 // client can forge a child's report and no driver ever tries to run a call only
 // the settlement can answer — the same one-predicate discipline IsWebTool keeps
 // for the split it names.
-func IsDelegationTool(name string) bool {
-	switch name {
-	case ToolCreateAgent, ToolSendToAgent, ToolListAgents, ToolWaitForAgents,
-		ToolSubmitResult, ToolSendToParent:
-		return true
-	}
-	return false
-}
+func IsDelegationTool(name string) bool { return slices.Contains(delegationToolNames, name) }

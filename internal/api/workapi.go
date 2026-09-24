@@ -98,6 +98,18 @@ func toWire(w *queue.Work) workWire {
 // next poll (plan 36 decision 15). The rendered secret comes back beside the
 // item; nil for a storeless session, whose item is what it was before the
 // plan, byte for byte.
+//
+// The claim locks the item and nothing of its session's: the resources read
+// takes no row lock, the item's own key to its session goes unchecked because
+// PollOn never changes session_id, and the token's row names its session
+// without a foreign key (migration 0043). That key's check took the session
+// row FOR KEY SHARE after the item — the reverse of every path that holds the
+// session FOR UPDATE and then needs its items, a delete cascading into them
+// and an interrupt cancelling them — and the ordinary self_hosted wait put the
+// two together: the turn that calls a worker's tools idles the session on
+// requires_action in the commit that queues the item, and requireNotRunning
+// lets an idle session's delete through. Postgres broke the cycle by aborting
+// either side (#643). A deleted session's tokens go by 0043's trigger.
 func (s *server) claimWork(ctx context.Context, envID domain.ID, reclaim time.Duration) (*queue.Work, *string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

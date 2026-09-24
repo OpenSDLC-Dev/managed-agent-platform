@@ -346,7 +346,10 @@ func (s *server) getSkill(r *http.Request) (any, error) {
 
 func (s *server) listSkills(r *http.Request) (any, error) {
 	ctx := r.Context()
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	page, err := parseSkillsPage(q)
 	if err != nil {
 		return nil, err

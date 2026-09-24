@@ -1,0 +1,29 @@
+-- A run keeps the id of the session it created after that session is deleted
+-- (#663). 0031 declared the link ON DELETE SET NULL, so a session delete
+-- rewrote a committed success to session_id null beside a null error — both
+-- members of "Exactly one of session_id or error is non-null" gone at once.
+-- The reference never nulls the link: a recorded run read byte-identically
+-- before and after its session was deleted, naming a session that answered
+-- 404.
+--
+-- The foreign key is dropped rather than re-declared. NO ACTION or RESTRICT
+-- would refuse the session delete, which the reference does not, and CASCADE
+-- would delete run history — the row this platform's scheduler also reads as
+-- the occurrence claim and the watermark (0031). What remains is a plain text
+-- column that may name a session which no longer exists. Every writer sets it
+-- to the session created in the same transaction, so nothing but a later
+-- delete can leave it dangling.
+--
+-- succeeded_at stays the success predicate (0032): last_run_at and the runs
+-- list's has_error=false arm read it, never the link, and on a row written
+-- from here on the two agree.
+--
+-- Forward-only. A run whose session was deleted before this migration already
+-- holds a null, and the id it held is recorded nowhere, so it keeps rendering
+-- session_id null and error null; succeeded_at still marks it a success.
+--
+-- Catalog-only: no rewrite and no scan. It takes ACCESS EXCLUSIVE on
+-- deployment_runs and on sessions (the constraint's triggers live on both),
+-- held until migrate.go commits the one transaction every pending migration
+-- shares.
+ALTER TABLE deployment_runs DROP CONSTRAINT deployment_runs_session_id_fkey;
