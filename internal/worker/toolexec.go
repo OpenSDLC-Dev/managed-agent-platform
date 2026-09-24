@@ -398,13 +398,22 @@ scan:
 			// A web call (web_fetch/web_search) is never this worker's: it runs
 			// in the platform executor's web driver for every environment kind,
 			// even when an earlier sandbox call makes tool_exec runnable while
-			// that web call still waits. A delegation call is never anyone's to run: the
-			// settlement that emitted it answers it in the same commit. Both
-			// filters keep the six-tool Runner from being fed
-			// a name it must answer unknown-tool — an answer the control plane
-			// would then refuse, faulting the item into a reclaim loop. They
-			// still mark sawUse — the call belongs to the trailing turn's run,
-			// and the boundary is about turns, not this worker's share.
+			// that web call still waits.
+			//
+			// A delegation call is never anyone's to run — the settlement that
+			// emitted it answers it in the same commit — and a current control
+			// plane lists none: a session that delegates hides all six names
+			// (#675), and on one that does not they are stamped deny, which
+			// the runnable check below skips. The name check stays as the
+			// backstop for an older control plane, which lists them: there an
+			// answered call is passed over by its answer, and this catches a
+			// stray unanswered one.
+			//
+			// Both filters keep the six-tool Runner from being fed a name it
+			// must answer unknown-tool — an answer the control plane would then
+			// refuse, faulting the item into a reclaim loop. They still mark
+			// sawUse — the call belongs to the trailing turn's run, and the
+			// boundary is about turns, not this worker's share.
 			if toolset.IsWebTool(ev.Name) || toolset.IsDelegationTool(ev.Name) {
 				continue
 			}

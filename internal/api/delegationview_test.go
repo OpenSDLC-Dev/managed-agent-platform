@@ -10,20 +10,39 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
-// No events surface renders a delegation call or the settlement's answer to
-// it (#675): the reference's lists show neither on the session view, the
-// primary thread's or a child's own, while an ordinary tool call — a
-// cross-posted ask-gated bash among them — reaches every surface it did
-// before. The rows stay in the log; only the wire projection drops them.
+// No events surface of a session that delegates renders a delegation call or
+// the settlement's answer to it (#675): the reference's lists show neither on
+// the session view, the primary thread's or a child's own, while an ordinary
+// tool call — a cross-posted ask-gated bash among them — reaches every surface
+// it did before. The rows stay in the log; only the wire projection drops them.
+
+// rosterSession creates a coordinator's session, a roster of one member, in an
+// environment of the given kind — the only kind of session whose brain stamps
+// a delegation call allow, and so the only one whose surfaces hide them.
+func rosterSession(t *testing.T, s *tserver, envKind string) string {
+	t.Helper()
+	member := createAgent(t, s, map[string]any{"name": "worker", "model": "claude-opus-4-8"})["id"]
+	coord := createAgent(t, s, map[string]any{"name": "coordinator", "model": "claude-opus-4-8",
+		"multiagent": map[string]any{"type": "coordinator", "agents": []any{member}}})["id"]
+	env := createEnvironment(t, s, map[string]any{"name": "roster-env", "config": map[string]any{"type": envKind}})["id"]
+	return createSession(t, s, map[string]any{"agent": coord, "environment_id": env})["id"].(string)
+}
 
 // delegationPair plants one delegation call on a thread's log and the
 // agent.tool_result a settlement answers it with, and returns both ids.
 func delegationPair(t *testing.T, s *tserver, sid string, tid domain.ID, name string) []string {
+	return answeredDelegation(t, s, sid, tid, name, false)
+}
+
+// answeredDelegation is delegationPair with the answer's is_error chosen: a
+// refused call — a name off the roster, the thread cap, the other role's half —
+// is stamped allow like any other and answered is_error in the same commit.
+func answeredDelegation(t *testing.T, s *tserver, sid string, tid domain.ID, name string, isError bool) []string {
 	t.Helper()
 	use := appendOn(t, s, sid, tid, false, domain.EventAgentToolUse,
 		`{"name":"`+name+`","input":{},"evaluated_permission":"allow","session_thread_id":null}`)
 	res := appendOn(t, s, sid, tid, false, domain.EventAgentToolResult,
-		`{"tool_use_id":"`+use+`","content":[{"type":"text","text":"Message sent."}],"is_error":false}`)
+		`{"tool_use_id":"`+use+`","content":[{"type":"text","text":"Message sent."}],"is_error":`+strconv.FormatBool(isError)+`}`)
 	return []string{use, res}
 }
 
@@ -41,7 +60,7 @@ func answeredBash(t *testing.T, s *tserver, sid string, tid domain.ID) (use, res
 
 func TestNoEventsSurfaceRendersADelegationCall(t *testing.T) {
 	s := newTestServer(t)
-	sid := eventsFixture(t, s)
+	sid := rosterSession(t, s, "cloud")
 	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
 	child := insertChild(t, s, sid, "running")
 	base := "/v1/sessions/" + sid
@@ -59,6 +78,13 @@ func TestNoEventsSurfaceRendersADelegationCall(t *testing.T) {
 	for _, name := range []string{"send_to_parent", "submit_result"} {
 		hidden = append(hidden, delegationPair(t, s, sid, domain.ID(child), name)...)
 	}
+	// Refused calls go the same way — one recorded refusal matches, the rest
+	// are INFERRED (docs/DIVERGENCES.md, "Refused delegation calls"): a spawn
+	// the roster refused, and each role reaching for the other's half — both
+	// classed as settlement work, stamped allow.
+	hidden = append(hidden, answeredDelegation(t, s, sid, "", "create_agent", true)...)
+	hidden = append(hidden, answeredDelegation(t, s, sid, "", "submit_result", true)...)
+	hidden = append(hidden, answeredDelegation(t, s, sid, domain.ID(child), "create_agent", true)...)
 	bashUse, bashRes := answeredBash(t, s, sid, "")
 	ask := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentToolUse, askBashCall)
 
@@ -111,7 +137,7 @@ func TestNoEventsSurfaceRendersADelegationCall(t *testing.T) {
 // the exposure no longer differs by environment.
 func TestSelfHostedSessionViewHidesAChildsDelegationCalls(t *testing.T) {
 	s := newTestServer(t)
-	sid := selfHostedSession(t, s)
+	sid := rosterSession(t, s, "self_hosted")
 	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
 	st := s.stream(t, "/v1/sessions/"+sid+"/events/stream")
 	child := insertChild(t, s, sid, "running")
@@ -148,7 +174,7 @@ func TestSelfHostedSessionViewHidesAChildsDelegationCalls(t *testing.T) {
 // was minted would skip what it trimmed.
 func TestDelegationRowsNeverShortenAPage(t *testing.T) {
 	s := newTestServer(t)
-	sid := eventsFixture(t, s)
+	sid := rosterSession(t, s, "cloud")
 	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
 	msg := func() string {
 		return appendOn(t, s, sid, "", false, domain.EventAgentMessage, `{"content":[{"type":"text","text":"m"}]}`)
@@ -213,6 +239,38 @@ func TestDelegationRowsNeverShortenAPage(t *testing.T) {
 					t.Errorf("%s order=%q limit=%d: page %d holds %d rows, want a full page: %v",
 						tc.path, tc.order, limit, i, len(page), pages)
 				}
+			}
+		}
+	}
+}
+
+// The filter is taken only on a session whose snapshot carries a roster —
+// where the brain classes the six names as settlement work and stamps them
+// allow. A single-agent session is offered none of them and stamps one deny
+// (#567), which the filter would spare anyway, so its surfaces list without
+// it: an allow-stamped pair planted there, a state no brain writes, stays on
+// the session view, the primary thread's list and the stream alike.
+func TestASingleAgentSessionListsWithoutTheDelegationFilter(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+	base := "/v1/sessions/" + sid
+	sessionStream := s.stream(t, base+"/events/stream")
+	primaryStream := s.stream(t, base+"/threads/"+primary+"/stream")
+
+	pair := delegationPair(t, s, sid, "", "create_agent")
+	for _, path := range []string{base + "/events", base + "/threads/" + primary + "/events"} {
+		view := eventsByID(t, s, path)
+		for _, id := range pair {
+			if _, ok := view[id]; !ok {
+				t.Errorf("%s dropped %s: a single-agent session took the delegation filter", path, id)
+			}
+		}
+	}
+	for name, st := range map[string]*sseStream{"session": sessionStream, "primary": primaryStream} {
+		for _, id := range pair {
+			if f := st.next(t); f.data["id"] != id {
+				t.Fatalf("%s stream frame = %q %v, want %s", name, f.name, f.data, id)
 			}
 		}
 	}

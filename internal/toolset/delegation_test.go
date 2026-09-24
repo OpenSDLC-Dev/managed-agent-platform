@@ -157,13 +157,20 @@ func TestIsDelegationTool(t *testing.T) {
 		injected = append(injected, d.Name)
 	}
 	// The same set as a list, for a caller that cannot take a predicate: the
-	// events API hides exactly these names in SQL (#675), so a name the
-	// predicate admits and the list lacks would reach the wire.
+	// events API hides exactly these names in SQL (#675). The predicate reads
+	// the list, so the two agree by construction; what is pinned here is that
+	// the list is the injected set, and that the copy it hands out is the
+	// caller's — rewriting it moves neither the predicate nor the next copy.
 	all := toolset.AllDelegationTools()
 	slices.Sort(injected)
 	slices.Sort(all)
 	if !slices.Equal(all, injected) {
 		t.Errorf("AllDelegationTools() = %v, want the injected set %v", all, injected)
+	}
+	first := all[0]
+	all[0] = "bash"
+	if !toolset.IsDelegationTool(first) || toolset.IsDelegationTool("bash") || !slices.Contains(toolset.AllDelegationTools(), first) {
+		t.Errorf("rewriting AllDelegationTools()'s result moved the shared list")
 	}
 	for _, name := range []string{"bash", "read", "web_fetch", "mcp__srv__create_agent", "", "create_agents"} {
 		if toolset.IsDelegationTool(name) {

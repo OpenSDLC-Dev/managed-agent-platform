@@ -446,11 +446,18 @@ type ListQuery struct {
 	ThreadToolCalls bool
 	// HideTools names agent.tool_use calls a surface omits, together with the
 	// agent.tool_result answering each, under any scope. The API passes the six
-	// delegation tools, which no reference events surface shows (#675); the rows
-	// stay in the log, and a thread's replay, which never sets this, reads them.
-	// A call stamped deny stays: that is a name the model was never offered
-	// (#567) — a session that does not delegate — answered unknown-tool like
-	// any other such name, not a tool this platform ran.
+	// delegation tools on a session with a roster, which no reference events
+	// surface shows (#675); the rows stay in the log, and a thread's replay,
+	// which never sets this, reads them.
+	//
+	// A call stamped deny stays. The rule reads the brain's stamping (#567),
+	// not what a thread was offered: the brain stamps allow every name it
+	// classes as settlement work — inside a session that delegates, all six,
+	// the half a thread was never offered included, so a call across the roles
+	// is hidden with its is_error answer — and deny a name it classes as
+	// nothing, which is what any of the six is on a session that does not
+	// delegate, answered unknown-tool like any other such name. A change to
+	// that stamping changes what this hides.
 	HideTools []string
 }
 

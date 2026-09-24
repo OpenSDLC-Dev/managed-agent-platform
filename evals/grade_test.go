@@ -1517,10 +1517,14 @@ func spawnedAgent(name string) func(*Trial) bool {
 // model's graders should own that; it creates no thread, so nothing here
 // counts it. Counting it would pass this Model grader on a spawn that never
 // happened, and then hold open the premise of the Platform grader beside it,
-// which would red and blame the platform for a malformed call. So what is left
-// to Platform is exactly its own: a spawn the log records that left no thread
-// row behind. The name is the roster's as createAgent resolved it, trimmed —
-// the name the threads route renders.
+// which would red and blame the platform for a malformed call. What that
+// premise leaves the Platform grader is not a spawn that left no row behind:
+// the settlement writes session.thread_created in the transaction that inserts
+// the thread row, so the log and the row cannot disagree at write. What it can
+// still catch is the threads route disagreeing with the log — a thread the log
+// says was created that the route does not list, or lists under another parent
+// or another agent. The name is the roster's as createAgent resolved it,
+// trimmed — the name the threads route renders.
 func spawnedAgents(tr *Trial) []string {
 	var out []string
 	for _, ev := range eventsOfType(tr, "session.thread_created") {
@@ -1544,8 +1548,9 @@ func spawnedAgents(tr *Trial) []string {
 //
 // Platform, on the premise that the model actually spawned: pair it with a
 // SpawnedAgent over the same names, which owns "the coordinator never
-// delegated", and what is left here is a spawn the model asked for that left no
-// thread to show for it.
+// delegated", and what is left here is a spawn the log records that this route
+// does not show as a child of the primary running that agent (spawnedAgents
+// says why that is all).
 func ThreadPerAgent(names []string, class Class) Grader {
 	return Grader{
 		Name:  "thread-per-agent:" + strings.Join(names, "|"),
