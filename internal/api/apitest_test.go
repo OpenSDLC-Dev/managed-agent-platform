@@ -106,7 +106,7 @@ func (s *tserver) do(method, path string, body any) (int, map[string]any) {
 // doRaw issues a request with explicit headers and returns the raw response.
 func (s *tserver) doRaw(method, path string, body any, headers map[string]string) *http.Response {
 	s.t.Helper()
-	res, err := s.roundTrip(method, path, body, headers)
+	res, err := s.roundTrip(context.Background(), method, path, body, headers)
 	if err != nil {
 		s.t.Fatalf("%s %s: %v", method, path, err)
 	}
@@ -116,7 +116,7 @@ func (s *tserver) doRaw(method, path string, body any, headers map[string]string
 // roundTrip is doRaw returning its failure instead of failing the test, for a
 // caller off the test's goroutine, where t.Fatalf would end only that
 // goroutine.
-func (s *tserver) roundTrip(method, path string, body any, headers map[string]string) (*http.Response, error) {
+func (s *tserver) roundTrip(ctx context.Context, method, path string, body any, headers map[string]string) (*http.Response, error) {
 	var rd io.Reader
 	switch b := body.(type) {
 	case nil:
@@ -129,7 +129,7 @@ func (s *tserver) roundTrip(method, path string, body any, headers map[string]st
 		}
 		rd = bytes.NewBuffer(buf)
 	}
-	req, err := http.NewRequest(method, s.url+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, s.url+path, rd)
 	if err != nil {
 		return nil, err
 	}
@@ -148,11 +148,14 @@ type reply struct {
 }
 
 // sendAsync sends a request off the test's goroutine; its reply arrives on
-// the channel.
+// the channel. The request, body read included, is bounded by awaitReply's
+// 30s, so one abandoned after a timeout cannot hold the server's Close open.
 func (s *tserver) sendAsync(method, path string, body any, headers map[string]string) <-chan reply {
 	done := make(chan reply, 1)
 	go func() {
-		res, err := s.roundTrip(method, path, body, headers)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res, err := s.roundTrip(ctx, method, path, body, headers)
 		if err != nil {
 			done <- reply{err: err}
 			return
