@@ -49,9 +49,10 @@ services:
     # Object storage for the skills registry (docs/plan/06_skills.md): skill
     # archives live here, not in Postgres. The controlplane consumes it via
     # the BLOB_* env below. Same pinned release as the helm default and the
-    # blobtest contract harness, and from quay.io for the reason that harness
-    # gives: Docker Hub no longer serves the `minio` namespace at all (#701).
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # blobtest contract harness, and PGSTY Silo, a maintained MinIO fork, for
+    # the reason that harness gives: MinIO no longer publishes community images
+    # on Docker Hub (#701) or quay.io (#799).
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
     command: server /data
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-map}

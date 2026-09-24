@@ -12,7 +12,7 @@ import (
 
 // serverNotInitialized is what MinIO answers S3 requests with while its object
 // layer is still coming up — the 503 that failed the suite in CI (#208), under
-// the code the pinned release actually sends.
+// the code MinIO's release sent then and Silo's binary still carries.
 const serverNotInitialized = `<?xml version="1.0" encoding="UTF-8"?>` +
 	`<Error><Code>XMinioServerNotInitialized</Code>` +
 	`<Message>Server not initialized yet, please try again.</Message></Error>`
@@ -20,7 +20,8 @@ const serverNotInitialized = `<?xml version="1.0" encoding="UTF-8"?>` +
 // noSuchBucket is what it answers the probe's bucket-location lookup with once
 // the object layer serves: the probe names a bucket nothing creates, and
 // minio-go turns that 404 into a plain "no, and no error" — one round trip,
-// with no HEAD after it (traced against the pinned image).
+// with no HEAD after it (traced against MinIO's image, and again against Silo's
+// for #799).
 const noSuchBucket = `<?xml version="1.0" encoding="UTF-8"?>` +
 	`<Error><Code>NoSuchBucket</Code>` +
 	`<Message>The specified bucket does not exist</Message></Error>`

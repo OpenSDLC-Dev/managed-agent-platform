@@ -1,8 +1,8 @@
 # Local development stack (docker compose)
 
 Brings up the platform's three server processes — **controlplane**, **brain**,
-**executor** — against a bundled Postgres, a bundled MinIO (S3-compatible
-object storage where the controlplane stores skill archives — the `/v1/skills`
+**executor** — against a bundled Postgres, a bundled MinIO (the PGSTY Silo
+fork, #799; S3-compatible object storage where the controlplane stores skill archives — the `/v1/skills`
 registry, docs/plan/06_skills.md), and a bundled OpenBao (the transit cipher
 that encrypts vault credential material, docs/plan/12_vaults-credentials.md),
 so you can drive the API with the real `ant` CLI or the Anthropic SDKs on your
