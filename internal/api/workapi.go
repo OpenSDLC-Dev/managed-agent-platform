@@ -99,24 +99,19 @@ func toWire(w *queue.Work) workWire {
 // item; nil for a storeless session, whose item is what it was before the
 // plan, byte for byte.
 //
-// The token's row needs the session row as well — its foreign key takes it
-// FOR KEY SHARE — and a claim that waited for that row while holding the item
-// would close a cycle with every path that holds the session FOR UPDATE and
-// then needs the item: a delete cascading into it, an interrupt cancelling
-// it. The overlap is the ordinary self_hosted wait: the turn that calls a
-// worker's tools idles the session on requires_action in the commit that
-// queues the item, and requireNotRunning lets an idle session's delete
-// through (#643). So PollOn takes the session row in the statement that picks
-// the item, SKIP LOCKED like the item — every item's, storeless ones too
-// (Poll says why) — and the token's insert finds it already held: the claim
-// waits for no row, and a held session passes over its own items only. The
-// alternatives each lose something. Peeking at the
-// oldest candidate and locking its session first (stopWork's order) queues
-// every poller of the environment behind a slow holder of that one session;
-// skipping in a later statement and retrying needs an exclusion list and a
-// round trip per held session; retrying on the deadlock abandons the other
-// side, since Postgres aborts whichever waited first — the delete as readily
-// as the claim.
+// The claim locks the item and nothing of its session's: the resources read
+// takes no lock, the item's own key to its session goes unchecked because
+// PollOn never changes session_id, and the token's row names its session
+// without a foreign key (migration 0043). That key's check took the session
+// row FOR KEY SHARE after the item — the reverse of every path that holds the
+// session FOR UPDATE and then needs its items, a delete cascading into them
+// and an interrupt cancelling them — and the ordinary self_hosted wait put the
+// two together: the turn that calls a worker's tools idles the session on
+// requires_action in the commit that queues the item, and requireNotRunning
+// lets an idle session's delete through. Postgres broke the cycle by aborting
+// either side (#643). What the key did is done without it: Authenticate joins
+// a token to its live item and unarchived session, and deleteSession removes
+// the session's tokens itself.
 func (s *server) claimWork(ctx context.Context, envID domain.ID, reclaim time.Duration) (*queue.Work, *string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -167,8 +162,7 @@ func (s *server) claimWork(ctx context.Context, envID domain.ID, reclaim time.Du
 // queue.Enqueue), the window's deadline, or the client disconnecting ends it.
 // The deadline arm polls once more before answering null, because a wake can
 // race the timer. Availability that arrives without an enqueue (a lapsed
-// reservation or lease reclaim, or the holder of a passed-over item's session
-// row letting go — see Poll) has no NOTIFY and is found by the next poll —
+// reservation or lease reclaim) has no NOTIFY and is found by the next poll —
 // the window is capped at 999ms, so that discovery is at most one window late,
 // and the reference client spaces its empty polls with a jitter sleep besides.
 // The broker's listener is only held while subscribers exist, so a lone idle

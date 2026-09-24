@@ -597,44 +597,6 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	}
 }
 
-// TestPollPassesOverAnItemWhoseSessionIsHeld: Poll takes an item's session
-// row with the item, FOR KEY SHARE and SKIP LOCKED like it (#643), so an item
-// whose session another transaction holds FOR UPDATE is passed over for the
-// next one — never waited for — and goes out once the holder lets go.
-func TestPollPassesOverAnItemWhoseSessionIsHeld(t *testing.T) {
-	ctx := context.Background()
-	pool := pgtest.NewPool(t)
-	q := queue.New(pool)
-	held, env := pgtest.NewSession(t, pool, "self_hosted")
-	other := pgtest.NewSessionInEnv(t, pool, env)
-	for _, sid := range []domain.ID{held, other} {
-		if _, err := q.Enqueue(ctx, pool, env, sid, queue.ToolExec); err != nil {
-			t.Fatal(err)
-		}
-	}
-	holder, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = holder.Rollback(ctx) }()
-	if _, err := holder.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, held); err != nil {
-		t.Fatalf("hold the session row: %v", err)
-	}
-	// Bounded, so a poll that waits for the held row fails here instead of
-	// hanging to the package timeout.
-	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if w, err := q.Poll(pollCtx, env, time.Minute); err != nil || w == nil || w.SessionID != other {
-		t.Fatalf("poll with the first item's session held = %+v %v; want the other session's item", w, err)
-	}
-	if err := holder.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if w, err := q.Poll(ctx, env, time.Minute); err != nil || w == nil || w.SessionID != held {
-		t.Fatalf("poll after the holder let go = %+v %v; want the passed-over item", w, err)
-	}
-}
-
 // TestEveryReHandOutMintsAFreshWorkIdentity pins the fix for the identity-blind
 // hung-worker race (#62). The wire's lifecycle calls carry no ownership proof —
 // stop's body is {force} only and the work object has no generation field — so
