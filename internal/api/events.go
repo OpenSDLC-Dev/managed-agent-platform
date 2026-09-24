@@ -68,8 +68,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// user.tool_result is only valid on self_hosted environments, so the
-	// batch is validated against the session's environment kind.
+	// user.tool_result is valid only under a worker's credential and only on
+	// self_hosted environments, so the batch is validated against both.
 	var envKind, status string
 	var envID domain.ID
 	var sessionArchivedAt *time.Time
@@ -93,7 +93,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	newEvents, err := events.NormalizeInbound(envKind, rawEvents)
+	// A management credential's user.tool_result is the reference's 403, on
+	// every session (#662); the transaction rolls back, so nothing lands.
+	newEvents, err := events.NormalizeInbound(envKind, credentialFrom(ctx), rawEvents)
+	if errors.Is(err, events.ErrEnvironmentCredentialRequired) {
+		return nil, errForbidden(err.Error())
+	}
 	if err != nil {
 		return nil, errInvalid("%s", err)
 	}
@@ -729,7 +734,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 	// the session stopped. It is threadless, which is the session-wide spelling
 	// RouteInbound would leave untouched, and unstamped, as the handler leaves
 	// a session-wide interrupt.
-	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
+	batch, err := events.NormalizeInbound(envKind, events.ManagementCredential, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
 	if err != nil {
 		return nil, err
 	}
@@ -844,7 +849,7 @@ func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, t
 		"type":    "user.message",
 		"content": []any{map[string]any{"type": "text", "text": text}},
 	})
-	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(msg)})
+	batch, err := events.NormalizeInbound(envKind, events.ManagementCredential, []json.RawMessage{json.RawMessage(msg)})
 	if err != nil {
 		return nil, err
 	}

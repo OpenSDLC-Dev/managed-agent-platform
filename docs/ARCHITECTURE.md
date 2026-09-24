@@ -505,7 +505,12 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **Auth is scoped.** Management calls carry `x-api-key` (hashed at rest,
   rotation-by-restart); workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's
-  sessions. Environment keys are hashed at rest too, issued one per host so a
+  sessions. One event runs the other way: a `user.tool_result`, the result of a
+  built-in toolset call, is admitted only under a worker's credential, and a management
+  key or human posting one is refused 403 on any session (#662). The rule is that
+  event's alone: management still posts `user.custom_tool_result` and
+  `user.tool_confirmation`, and a `user.interrupt` still has the platform answer the
+  calls it ends. Environment keys are hashed at rest too, issued one per host so a
   compromised host is revoked alone, and expire a year after issue; revoked,
   expired and unknown are one indistinguishable 401. Issuing and revoking them is
   a **management** operation on the off-wire console API, so an environment key

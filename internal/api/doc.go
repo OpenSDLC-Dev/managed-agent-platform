@@ -58,7 +58,11 @@
 // it runs the other way, taking the environment key and nothing else, since
 // resolveEnvironmentKey demands a Bearer and a management x-api-key never
 // satisfies it (envauth.go). Outside the events subtree the dual-auth routes
-// are GET-only.
+// are GET-only. Inside it, one event type runs the work API's way: a
+// user.tool_result is the environment credential's alone, and a management or
+// human caller posting one is refused 403 (#662) — by events.NormalizeInbound,
+// given the credential class the two environment lanes record (credentialFrom,
+// envauth.go).
 //
 // The cross-cutting fact no single file makes obvious: dispatchAuth classifies
 // on r.URL.EscapedPath() while ServeMux matches the DECODED path, and the

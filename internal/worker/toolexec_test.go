@@ -895,7 +895,7 @@ func (h *harness) answerOnThread(t *testing.T, threadID, useID domain.ID) {
 // self_hosted session silently stopped running.
 func (h *harness) confirm(t *testing.T, useID domain.ID, result string) {
 	t.Helper()
-	evs, err := events.NormalizeInbound(string(domain.EnvSelfHosted), []json.RawMessage{json.RawMessage(
+	evs, err := events.NormalizeInbound(string(domain.EnvSelfHosted), events.ManagementCredential, []json.RawMessage{json.RawMessage(
 		fmt.Sprintf(`{"type":"user.tool_confirmation","tool_use_id":%q,"result":%q}`, useID, result))})
 	if err != nil {
 		t.Fatalf("normalize confirmation for %s: %v", useID, err)
