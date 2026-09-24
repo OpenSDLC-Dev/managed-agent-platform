@@ -13,7 +13,7 @@ import (
 // Mem returns an in-memory blob.Store for tests exercising logic above the
 // storage seam (the API registry, later the executor's materialization). It
 // holds the same contract as the real backends — the suite in contract.go
-// runs against it in mem_test.go — without a MinIO container, so suites that
+// runs against it in mem_test.go — without a Silo container, so suites that
 // already carry a Postgres harness need no second one.
 func Mem() *MemStore { return &MemStore{objects: map[string]memObject{}} }
 
