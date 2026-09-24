@@ -98,6 +98,22 @@ func toWire(w *queue.Work) workWire {
 // next poll (plan 36 decision 15). The rendered secret comes back beside the
 // item; nil for a storeless session, whose item is what it was before the
 // plan, byte for byte.
+//
+// The token's row needs the session row as well — its foreign key takes it
+// FOR KEY SHARE — and the claim reaches it only after the item's: it learns
+// the session from the item PollOn locked, so it cannot take the session
+// first, the order the rest of the platform takes (requireNotRunning, #313).
+// Waiting for the session while holding the item closes a cycle with any
+// path that holds the session FOR UPDATE and then needs the item — a delete
+// cascading into it and an interrupt's CancelSession among them — and the
+// overlap is the ordinary self_hosted wait: the turn that calls a worker's
+// tools idles the session on requires_action in the commit that queues the
+// item, and requireNotRunning lets an idle session's delete through (#643).
+// So the claim takes the session row SKIP LOCKED, and a row someone holds
+// rolls the claim back, leaving the item for the next poll —
+// finalizeAbandoned's answer to the same lock. Retrying on the deadlock
+// would not do: Postgres aborts whichever side waited first, sometimes the
+// delete.
 func (s *server) claimWork(ctx context.Context, envID domain.ID, reclaim time.Duration) (*queue.Work, *string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -116,6 +132,15 @@ func (s *server) claimWork(ctx context.Context, envID domain.ID, reclaim time.Du
 	}
 	var secret *string
 	if withStore {
+		var one int
+		err := tx.QueryRow(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR KEY SHARE SKIP LOCKED`,
+			item.SessionID.String()).Scan(&one)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, nil
+		}
+		if err != nil {
+			return nil, nil, err
+		}
 		token, err := worktoken.Mint(ctx, tx, item.ID.String(), item.SessionID.String())
 		if err != nil {
 			return nil, nil, err

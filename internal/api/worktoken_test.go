@@ -6,12 +6,15 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -447,4 +450,153 @@ func TestSessionsTokenInsertFailureLeavesTheItemUnclaimed(t *testing.T) {
 	if _, _, token := pollItem(t, s, envID, key); token == "" {
 		t.Error("the next poll did not hand the item out with a token")
 	}
+}
+
+// TestPollDoesNotDeadlockAgainstTheSessionLock: a worker's poll racing a
+// delete, or an interrupt, of the session it would claim for (#643). The
+// overlap is the ordinary self_hosted wait, not a corner: a turn that calls a
+// worker's tool idles the session on requires_action and queues its tool_exec
+// in the same commit, and requireNotRunning admits a delete of an idle
+// session. For a session that attaches a memory store the claim mints a
+// sessions token, whose foreign key needs the session row after the claim has
+// locked the item, while the delete (the interrupt) holds the session row and
+// then needs the item, to cascade into (to cancel) — a cycle Postgres breaks
+// by aborting whichever side waited first, surfaced as a 500 on either. Real
+// handlers on both sides, raced over a bounded number of sessions, because
+// the cycle needs the two to interleave: before the fix well over half the
+// rounds deadlocked, the delete or the interrupt among the victims.
+func TestPollDoesNotDeadlockAgainstTheSessionLock(t *testing.T) {
+	for _, racer := range []struct {
+		name, method, suffix, body string
+	}{
+		{"delete", http.MethodDelete, "", ""},
+		{"interrupt", http.MethodPost, "/events", `{"events":[{"type":"user.interrupt"}]}`},
+	} {
+		t.Run(racer.name, func(t *testing.T) {
+			s := newTestServer(t)
+			logs := captureWarnings(t)
+			agent := createAgent(t, s, map[string]any{"name": "race", "model": "claude-opus-4-8",
+				"tools": []any{map[string]any{"type": "agent_toolset_20260401"}}})
+			envID := createEnvironment(t, s, map[string]any{"name": "race", "config": map[string]any{"type": "self_hosted"}})["id"].(string)
+			key := issueKey(t, s.pool, envID, "race")
+			storeID := createMemoryStore(t, s, "race")
+			turn := []provider.Chunk{
+				{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{ID: "toolu_bash", Name: "bash", Input: json.RawMessage(`{"command":"true"}`)}},
+				{Kind: provider.KindDone, StopReason: "tool_use", Usage: &domain.ModelUsage{InputTokens: 1, OutputTokens: 1}},
+			}
+
+			const rounds = 20
+			for i := range rounds {
+				sid := createSession(t, s, map[string]any{"agent": agent["id"], "environment_id": envID,
+					"resources": []any{map[string]any{"type": "memory_store", "memory_store_id": storeID}}})["id"].(string)
+				sendEvents(t, s, sid, userMessage("run bash"))
+				if found, err := newScriptedBrain(t, s.pool, turn).RunOnce(context.Background()); err != nil || !found {
+					t.Fatalf("round %d: brain: %v %v", i, found, err)
+				}
+				// The state under test, reached the way production reaches it.
+				if st, live := s.sessionStatus(sid), s.liveWork(sid, queue.ToolExec); st != "idle" || live != 1 {
+					t.Fatalf("round %d: session %s with %d live tool_exec; want idle with 1", i, st, live)
+				}
+
+				start := make(chan struct{})
+				outcomes := make(chan string, 2)
+				race := func(who, method, path, body string, header map[string]string) {
+					<-start
+					code, got, err := s.request(method, path, body, header)
+					switch {
+					case err != nil:
+						outcomes <- who + ": " + err.Error()
+					case code != http.StatusOK:
+						outcomes <- fmt.Sprintf("%s: %d %s", who, code, got)
+					default:
+						outcomes <- ""
+					}
+				}
+				go race("poll", http.MethodGet, "/v1/environments/"+envID+"/work/poll", "", asBearer(key))
+				go race(racer.name, racer.method, "/v1/sessions/"+sid+racer.suffix, racer.body, map[string]string{"x-api-key": testKey})
+				close(start)
+				for range 2 {
+					if msg := <-outcomes; msg != "" {
+						t.Errorf("round %d: %s", i, msg)
+					}
+				}
+			}
+			if strings.Contains(logs(), "40P01") {
+				t.Errorf("a poll or a %s was aborted as a deadlock:\n%s", racer.name, logs())
+			}
+		})
+	}
+}
+
+// TestPollLeavesAStoreItemWhoseSessionIsHeld: the other half of #643's
+// answer. A claim never waits for its session's row while it holds the item,
+// so a row someone holds FOR UPDATE — as a delete, an interrupt or a turn's
+// settlement does — answers the poll null at once and leaves the item exactly
+// as it was, for the poll after the holder lets go.
+func TestPollLeavesAStoreItemWhoseSessionIsHeld(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	_, envID, sessionID, _, key := storeWorker(t, s, "held")
+	holder, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sessionID); err != nil {
+		t.Fatalf("hold the session row: %v", err)
+	}
+
+	type answer struct {
+		code int
+		body string
+		err  error
+	}
+	polled := make(chan answer, 1)
+	go func() {
+		code, body, err := s.request(http.MethodGet, "/v1/environments/"+envID+"/work/poll", "", asBearer(key))
+		polled <- answer{code, body, err}
+	}()
+	select {
+	case a := <-polled:
+		if a.err != nil || a.code != http.StatusOK || a.body != "null" {
+			t.Fatalf("poll with the session held = %d %q (%v); want 200 null", a.code, a.body, a.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the poll waited for the held session row")
+	}
+	var untouched bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT state = 'queued' AND lease_expires_at IS NULL FROM work_items WHERE session_id = $1`, sessionID).Scan(&untouched); err != nil || !untouched {
+		t.Errorf("the item was claimed or reserved behind a held session (%v)", err)
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, token := pollItem(t, s, envID, key); token == "" {
+		t.Error("the poll after the holder let go did not hand the item out with a token")
+	}
+}
+
+// request is doRaw for a goroutine: it reports a transport failure instead
+// of failing the test from off the test's own goroutine, and reads the body
+// through. body is sent verbatim; "" sends none.
+func (s *tserver) request(method, path, body string, header map[string]string) (int, string, error) {
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, s.url+path, rd)
+	if err != nil {
+		return 0, "", err
+	}
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(res.Body)
+	return res.StatusCode, strings.TrimSpace(string(raw)), err
 }
