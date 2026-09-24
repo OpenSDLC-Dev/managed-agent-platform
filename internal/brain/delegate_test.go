@@ -255,9 +255,11 @@ func TestCoordinatorSpawnsThreeAgentsAndParksInOneCommit(t *testing.T) {
 		if n := h.liveTurns(t, k.id); n != 1 {
 			t.Errorf("child %s has %d queued turns, want 1", k.id, n)
 		}
+		// Its status, then its task: the order every recorded child list
+		// opens with on the reference (#675).
 		if got := h.threadTypes(t, k.id); !slicesEq(got,
-			[]string{"agent.thread_message_received", "session.thread_status_running"}) {
-			t.Errorf("child %s log = %v, want its task and its status", k.id, got)
+			[]string{"session.thread_status_running", "agent.thread_message_received"}) {
+			t.Errorf("child %s log = %v, want its status and then its task", k.id, got)
 		}
 		if got := h.receivedTexts(t, k.id); len(got) != 1 || got[0] != tasks[k.name] {
 			t.Errorf("child %s (%s) received %v, want its own task %q", k.id, k.name, got, tasks[k.name])
@@ -267,6 +269,24 @@ func TestCoordinatorSpawnsThreeAgentsAndParksInOneCommit(t *testing.T) {
 		if n := h.countType(t, typ); n != 3 {
 			t.Errorf("%s = %d, want one per spawn", typ, n)
 		}
+	}
+	// The session view — the primary thread's list too — still reads each
+	// spawn's creation straight before the coordinator's copy of the task, as
+	// the reference's does, and never the child's received.
+	view, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Scope: events.ScopeSession,
+		Types: []string{"session.thread_created", "agent.thread_message_sent", "agent.thread_message_received"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewTypes := make([]string, len(view))
+	for i, ev := range view {
+		viewTypes[i] = string(ev.Type)
+	}
+	if !slicesEq(viewTypes, []string{
+		"session.thread_created", "agent.thread_message_sent",
+		"session.thread_created", "agent.thread_message_sent",
+		"session.thread_created", "agent.thread_message_sent"}) {
+		t.Errorf("session view = %v, want each spawn's creation and then its send", viewTypes)
 	}
 	got := h.answers(t)
 	if len(got) != 4 {
