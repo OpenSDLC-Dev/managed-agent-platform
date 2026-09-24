@@ -474,6 +474,17 @@ func TestMemoryDeletePrecondition(t *testing.T) {
 		status, resp := s.do(http.MethodDelete, path+"?expected_content_sha256="+bad, nil)
 		wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
 	}
+	// A query string that does not parse is refused whole: url.Values drops a
+	// malformed pair, so a corrupted precondition would otherwise read as
+	// absent and the delete run unconditionally.
+	for _, raw := range []string{"expected_content_sha256=%zz",
+		"expected_content_sha256=" + digest("other") + ";x=1"} {
+		status, resp := s.do(http.MethodDelete, path+"?"+raw, nil)
+		wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
+		if status, got := s.do(http.MethodGet, path, nil); status != http.StatusOK || got["content"] != "bytes" {
+			t.Fatalf("?%s: the memory after the refused delete: status %d (%v)", raw, status, got)
+		}
+	}
 
 	// The precondition rides the query string on delete, and a mismatch is the
 	// same 409 an update's is — the status and type the reference answers a

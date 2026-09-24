@@ -514,8 +514,13 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	// value of any other shape than contentDigest's could never match, and the
 	// check keeps a byte Postgres cannot store out of the comparison (#135).
 	// Only an absent parameter means no precondition: one supplied empty — the
-	// SDK sends that for param.NewOpt("") — is refused like any other shape.
-	q := r.URL.Query()
+	// SDK sends that for param.NewOpt("") — is refused like any other shape,
+	// and so is a query string that does not parse, since URL.Query drops a
+	// malformed pair and a corrupted precondition would read as absent.
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, errInvalid("malformed query string: %v", err)
+	}
 	expected := q.Get("expected_content_sha256")
 	if q.Has("expected_content_sha256") && !memsync.IsDigest([]byte(expected)) {
 		return nil, errInvalid("expected_content_sha256: must be 64 lowercase hex characters")
