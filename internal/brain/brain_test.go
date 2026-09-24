@@ -104,6 +104,8 @@ type harness struct {
 	registry  *provider.Registry
 	sessionID domain.ID
 	envID     domain.ID
+	// workerKey is postToolResult's environment key, issued on first use.
+	workerKey string
 }
 
 func newHarness(t *testing.T, scripts [][]provider.Chunk, errs []error) *harness {
@@ -172,12 +174,15 @@ func (h *harness) postToolResult(t *testing.T, eventType domain.EventType, paylo
 	req.Header.Set("x-api-key", "brain-test-key")
 	if eventType == domain.EventUserToolResult {
 		// A BYOC worker's event, admitted under its environment key alone (#662).
-		key, err := api.IssueEnvironmentKey(context.Background(), h.pool, h.envID.String(), "brain-test-worker")
-		if err != nil {
-			t.Fatal(err)
+		if h.workerKey == "" {
+			key, err := api.IssueEnvironmentKey(context.Background(), h.pool, h.envID.String(), "brain-test-worker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.workerKey = key
 		}
 		req.Header.Del("x-api-key")
-		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Authorization", "Bearer "+h.workerKey)
 	}
 	rec := httptest.NewRecorder()
 	api.NewHandler(h.pool, nil, nil, nil).ServeHTTP(rec, req)

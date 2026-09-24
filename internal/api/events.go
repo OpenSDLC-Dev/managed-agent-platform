@@ -36,42 +36,6 @@ func platformExecuted(name string) bool {
 	return toolset.IsWebTool(name) || toolset.IsDelegationTool(name)
 }
 
-// requireEnvironmentCredentialForToolResult is the credential gate on
-// user.tool_result (#662): answering a tool call is the worker's, so the event
-// is admitted only under environment credentials — the session's environment
-// key, or the per-item sessions token the reference worker sends its results
-// under — and a management credential (the x-api-key, or a human on the
-// identity lane) is refused 403 permission_error on any session, cloud or
-// self_hosted, as the reference refuses it. A tool_result anywhere refuses the whole batch, before
-// anything is read or written. The environment-kind refusal NormalizeInbound
-// keeps is what an environment credential then meets on a cloud session.
-//
-// The type is read exactly as normalizeOne reads it — the object's "type"
-// member, as a string — so no event this admits can normalize to a
-// user.tool_result; one that does not parse is left for NormalizeInbound to
-// refuse. Of the lanes that reach this route, only the two environment lanes
-// put an environment in the context (requireEnvironmentKeyForSession,
-// requireWorkToken), and both have already confined the credential to this
-// session.
-func requireEnvironmentCredentialForToolResult(ctx context.Context, rawEvents []json.RawMessage) error {
-	if environmentFrom(ctx) != "" {
-		return nil
-	}
-	for i, raw := range rawEvents {
-		var obj map[string]json.RawMessage
-		var typ string
-		if json.Unmarshal(raw, &obj) != nil || json.Unmarshal(obj["type"], &typ) != nil {
-			continue
-		}
-		if domain.EventType(typ) == domain.EventUserToolResult {
-			return errForbidden(fmt.Sprintf("events[%d]: `user.tool_result` may only be sent with environment credentials "+
-				"(the self-hosted worker's environment key or its sessions token); "+
-				"an API key or Console session cannot post this event type", i))
-		}
-	}
-	return nil
-}
-
 // sendSessionEvents implements POST /v1/sessions/{id}/events. The body is
 // always a batch ({"events":[…]}); the response echoes the persisted events
 // as {"data":[…]} with server-assigned ids.
@@ -93,9 +57,6 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	if err := requireEnvironmentCredentialForToolResult(ctx, rawEvents); err != nil {
-		return nil, err
-	}
 
 	// The whole send is one transaction: the session row lock is taken up
 	// front (FOR UPDATE OF s) so the state-machine decision — flip to
@@ -107,8 +68,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// user.tool_result is only valid on self_hosted environments, so the
-	// batch is validated against the session's environment kind.
+	// user.tool_result is valid only under a worker's credential and only on
+	// self_hosted environments, so the batch is validated against both.
 	var envKind, status string
 	var envID domain.ID
 	var sessionArchivedAt *time.Time
@@ -132,7 +93,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	newEvents, err := events.NormalizeInbound(envKind, rawEvents)
+	// A management credential's user.tool_result is the reference's 403, on
+	// every session (#662); the transaction rolls back, so nothing lands.
+	newEvents, err := events.NormalizeInbound(envKind, credentialFrom(ctx), rawEvents)
+	if errors.Is(err, events.ErrEnvironmentCredentialRequired) {
+		return nil, errForbidden(err.Error())
+	}
 	if err != nil {
 		return nil, errInvalid("%s", err)
 	}
@@ -768,7 +734,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 	// the session stopped. It is threadless, which is the session-wide spelling
 	// RouteInbound would leave untouched, and unstamped, as the handler leaves
 	// a session-wide interrupt.
-	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
+	batch, err := events.NormalizeInbound(envKind, events.ManagementCredential, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
 	if err != nil {
 		return nil, err
 	}
@@ -883,7 +849,7 @@ func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, t
 		"type":    "user.message",
 		"content": []any{map[string]any{"type": "text", "text": text}},
 	})
-	batch, err := events.NormalizeInbound(envKind, []json.RawMessage{json.RawMessage(msg)})
+	batch, err := events.NormalizeInbound(envKind, events.ManagementCredential, []json.RawMessage{json.RawMessage(msg)})
 	if err != nil {
 		return nil, err
 	}

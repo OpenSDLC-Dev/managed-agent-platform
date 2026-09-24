@@ -42,13 +42,10 @@ func userMessage(text string) map[string]any {
 	}
 }
 
+// sendEvents posts a batch under the management key and returns the echo.
 func sendEvents(t *testing.T, s *tserver, sessionID string, evs ...map[string]any) []map[string]any {
 	t.Helper()
-	status, res := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events", map[string]any{"events": evs})
-	if status != http.StatusOK {
-		t.Fatalf("send events: status %d, body %v", status, res)
-	}
-	return listData(t, res)
+	return sendEventsAs(t, s, map[string]string{"x-api-key": testKey}, sessionID, evs...)
 }
 
 // sendEventsAs is sendEvents under the given credential headers.
@@ -61,17 +58,25 @@ func sendEventsAs(t *testing.T, s *tserver, headers map[string]string, sessionID
 	return listData(t, res)
 }
 
-// workerAuth is the credential a session's BYOC worker posts under: a fresh
-// environment key for the session's own environment, as a Bearer. A
-// user.tool_result is admitted under environment credentials alone (#662).
+// workerAuth is the credential a session's BYOC worker posts under: an
+// environment key for the session's own environment, as a Bearer, issued on
+// the session's first call and reused after. A user.tool_result is admitted
+// under environment credentials alone (#662).
 func workerAuth(t *testing.T, s *tserver, sessionID string) map[string]string {
 	t.Helper()
+	if key, ok := s.workerKeys[sessionID]; ok {
+		return asBearer(key)
+	}
 	var envID string
 	if err := s.pool.QueryRow(context.Background(),
 		`SELECT environment_id FROM sessions WHERE id = $1`, sessionID).Scan(&envID); err != nil {
 		t.Fatalf("session %s's environment: %v", sessionID, err)
 	}
-	return asBearer(issueKey(t, s.pool, envID, "worker"))
+	if s.workerKeys == nil {
+		s.workerKeys = map[string]string{}
+	}
+	s.workerKeys[sessionID] = issueKey(t, s.pool, envID, "worker")
+	return asBearer(s.workerKeys[sessionID])
 }
 
 func keysOf(m map[string]any) []string {
@@ -400,6 +405,100 @@ func TestToolResultAdmissionIsByCredential(t *testing.T) {
 	echo := sendEventsAs(t, s, workerAuth(t, s, sid), sid, result)
 	if echo[0]["type"] != "user.tool_result" || echo[0]["tool_use_id"] != useID {
 		t.Errorf("the worker's result echoed as %v", echo[0])
+	}
+}
+
+// TestToolResultRefusalOrder pins where the credential rule sits: in the
+// batch's normalization, after the session is read, so a management caller's
+// result to an absent session is the 404 and to an archived one the archived
+// 400, and within a batch the first event that fails decides the answer. The
+// reference's order in all three is unobserved (docs/DIVERGENCES.md).
+func TestToolResultRefusalOrder(t *testing.T) {
+	s := newTestServer(t)
+	mgmt := map[string]string{"x-api-key": testKey}
+	result := map[string]any{"type": "user.tool_result", "tool_use_id": "sevt_00000000000000000000000000"}
+
+	st, body := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+domain.NewID("sesn").String()+"/events",
+		map[string]any{"events": []any{result}}, mgmt))
+	wantErr(t, st, body, http.StatusNotFound, "not_found_error")
+
+	archived := selfHostedSession(t, s)
+	if st, _ := s.do(http.MethodPost, "/v1/sessions/"+archived+"/archive", nil); st != http.StatusOK {
+		t.Fatalf("archive: %d", st)
+	}
+	st, body = readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+archived+"/events",
+		map[string]any{"events": []any{result}}, mgmt))
+	wantErr(t, st, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "archived") {
+		t.Errorf("message %q, want the archived refusal", msg)
+	}
+
+	live := selfHostedSession(t, s)
+	st, body = readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+live+"/events",
+		map[string]any{"events": []any{map[string]any{"type": "user.bogus"}, result}}, mgmt))
+	wantErr(t, st, body, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.HasPrefix(msg, "events[0]: unknown event type") {
+		t.Errorf("message %q, want events[0]'s own refusal", msg)
+	}
+	if got := s.eventTypes(live); len(got) != 0 {
+		t.Errorf("the refused batch left %v on the log", got)
+	}
+}
+
+// TestToolResultTypeSpellingsUnderAManagementKey posts raw bodies — which a
+// marshalled map could not carry: a duplicate key, a chosen escape — spelling
+// the type every way a second parse could read differently from the one that
+// decides it. Under a management key none may land a user.tool_result: a
+// spelling that decodes to user.tool_result draws the credential's 403, and
+// the rest the 400 an unknown, absent or ill-typed type, or a stray field,
+// gets (#662).
+func TestToolResultTypeSpellingsUnderAManagementKey(t *testing.T) {
+	s := newTestServer(t)
+	sid := selfHostedSession(t, s)
+	useID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
+	path := "/v1/sessions/" + sid + "/events"
+	mgmt := map[string]string{"x-api-key": testKey}
+	rest := fmt.Sprintf(`"tool_use_id":%q,"content":[{"type":"text","text":"forged"}]`, useID)
+	before := s.eventTypes(sid)
+
+	const forbidden, invalid = http.StatusForbidden, http.StatusBadRequest
+	for _, tc := range []struct {
+		name  string
+		event string
+		want  int
+	}{
+		{"duplicate type, tool_result last", `{"type":"user.message","type":"user.tool_result",` + rest + `}`, forbidden},
+		{"duplicate type, tool_result first", `{"type":"user.tool_result","type":"user.message",` + rest + `}`, invalid},
+		{"escaped key", `{"\u0074ype":"user.tool_result",` + rest + `}`, forbidden},
+		{"escaped key after a plain one", `{"type":"user.message","\u0074ype":"user.tool_result",` + rest + `}`, forbidden},
+		{"escaped key before a plain one", `{"\u0074ype":"user.tool_result","type":"user.message",` + rest + `}`, invalid},
+		{"escaped dot in the value", `{"type":"user\u002etool_result",` + rest + `}`, forbidden},
+		{"every letter escaped", `{"type":"\u0075\u0073\u0065\u0072\u002e\u0074\u006f\u006f\u006c\u005f\u0072\u0065\u0073\u0075\u006c\u0074",` + rest + `}`, forbidden},
+		{"whitespace around the colon", "{\"type\"\t:\n \"user.tool_result\"," + rest + "}", forbidden},
+		{"Type beside type", `{"type":"user.message","Type":"user.tool_result",` + rest + `}`, invalid},
+		{"Type alone", `{"Type":"user.tool_result",` + rest + `}`, invalid},
+		{"TYPE alone", `{"TYPE":"user.tool_result",` + rest + `}`, invalid},
+		{"a space in the key", `{"type ":"user.tool_result",` + rest + `}`, invalid},
+		{"null type", `{"type":null,` + rest + `}`, invalid},
+		{"numeric type", `{"type":7,` + rest + `}`, invalid},
+		{"array type", `{"type":["user.tool_result"],` + rest + `}`, invalid},
+		{"object type", `{"type":{"type":"user.tool_result"},` + rest + `}`, invalid},
+		{"upper-case value", `{"type":"USER.TOOL_RESULT",` + rest + `}`, invalid},
+		{"mixed-case value", `{"type":"User.Tool_Result",` + rest + `}`, invalid},
+		{"leading space", `{"type":" user.tool_result",` + rest + `}`, invalid},
+		{"trailing space", `{"type":"user.tool_result ",` + rest + `}`, invalid},
+		{"escaped trailing space", `{"type":"user.tool_result\u0020",` + rest + `}`, invalid},
+		{"escaped NUL suffix", `{"type":"user.tool_result\u0000",` + rest + `}`, invalid},
+	} {
+		st, body := readJSON(t, s.doRaw(http.MethodPost, path, `{"events":[`+tc.event+`]}`, mgmt))
+		inner, _ := body["error"].(map[string]any)
+		wantType := map[int]string{forbidden: "permission_error", invalid: "invalid_request_error"}[tc.want]
+		if st != tc.want || inner["type"] != wantType {
+			t.Errorf("%s: %d %v, want %d %s", tc.name, st, body, tc.want, wantType)
+		}
+	}
+	if got := s.eventTypes(sid); strings.Join(got, ",") != strings.Join(before, ",") {
+		t.Errorf("the log is %v after every spelling was refused, want it unchanged at %v", got, before)
 	}
 }
 

@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -21,16 +22,38 @@ import (
 // do user.define_outcome's single-active check and file-rubric validation
 // (ValidateDefineOutcomes in the API layer).
 
+// Credential is the class of credential a batch arrives under. It decides who
+// may post a user.tool_result (#662), and nothing else. The zero value is
+// every caller that is not a worker, so a sender nobody classified is refused
+// rather than admitted.
+type Credential int
+
+const (
+	// ManagementCredential is an API key or a human: the zero value.
+	ManagementCredential Credential = iota
+	// EnvironmentCredential is a worker's environment key or its item's
+	// sessions token.
+	EnvironmentCredential
+)
+
+// ErrEnvironmentCredentialRequired refuses a user.tool_result sent under any
+// credential but a worker's; NormalizeInbound wraps it with the event's index,
+// and the API answers it 403 permission_error, as the reference does.
+var ErrEnvironmentCredentialRequired = errors.New("`user.tool_result` may only be sent with environment credentials " +
+	"(the self-hosted worker's environment key or its sessions token); " +
+	"an API key or Console session cannot post this event type")
+
 // NormalizeInbound validates one send batch. envKind is the session's
-// environment kind ("cloud" | "self_hosted"), which gates user.tool_result.
-func NormalizeInbound(envKind string, raws []json.RawMessage) ([]NewEvent, error) {
+// environment kind ("cloud" | "self_hosted") and cred the class of credential
+// the batch arrived under; both gate user.tool_result, the credential first.
+func NormalizeInbound(envKind string, cred Credential, raws []json.RawMessage) ([]NewEvent, error) {
 	if len(raws) == 0 {
 		return nil, fmt.Errorf("events must contain at least one event")
 	}
 	out := make([]NewEvent, 0, len(raws))
 	var prev domain.EventType
 	for i, raw := range raws {
-		ev, err := normalizeOne(envKind, raw)
+		ev, err := normalizeOne(envKind, cred, raw)
 		if err != nil {
 			return nil, fmt.Errorf("events[%d]: %w", i, err)
 		}
@@ -92,7 +115,7 @@ func walkStrings(v any) error {
 	return nil
 }
 
-func normalizeOne(envKind string, raw json.RawMessage) (NewEvent, error) {
+func normalizeOne(envKind string, cred Credential, raw json.RawMessage) (NewEvent, error) {
 	obj, err := asObject(raw, "event")
 	if err != nil {
 		return NewEvent{}, err
@@ -117,10 +140,14 @@ func normalizeOne(envKind string, raw json.RawMessage) (NewEvent, error) {
 	case domain.EventUserCustomToolRes:
 		return normalizeToolResult(obj, et, "custom_tool_use_id")
 	case domain.EventUserToolResult:
-		// Who may send one is the API's credential gate, which runs first
-		// (#662): only an environment credential reaches this check, and
-		// what the reference answers one on a cloud session is unobserved —
-		// an inference in docs/DIVERGENCES.md.
+		// The credential first, before anything else about the event is
+		// read: the reference refuses a management caller on every session
+		// (#662). What it answers an environment credential on a cloud
+		// session is unobserved — the refusal below is an inference in
+		// docs/DIVERGENCES.md.
+		if cred != EnvironmentCredential {
+			return NewEvent{}, ErrEnvironmentCredentialRequired
+		}
 		if envKind != "self_hosted" {
 			return NewEvent{}, fmt.Errorf("user.tool_result is only valid on self_hosted environments")
 		}

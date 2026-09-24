@@ -767,7 +767,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	// outcome checks run after the insert, against the fresh row.
 	var initialEvents []events.NewEvent
 	if len(in.rawInitial) > 0 {
-		initialEvents, err = events.NormalizeInbound(envKind, in.rawInitial)
+		initialEvents, err = events.NormalizeInbound(envKind, events.ManagementCredential, in.rawInitial)
 		if err != nil {
 			return createdSession{}, errInvalid("initial_events: %s", err)
 		}
