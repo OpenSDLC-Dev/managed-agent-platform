@@ -11,7 +11,8 @@ import (
 // Inbound validation for POST /v1/sessions/{id}/events. Only the wire's seven
 // inbound types exist; each is validated field-by-field against the reference
 // schema and normalized so every nullable wire field is stored explicitly
-// (rendering is then a plain merge of payload + envelope). Content blocks are
+// (rendering is then a merge of payload + envelope, less the nulls
+// internal/api's eventWire omits). Content blocks are
 // kept as the client's raw bytes after validation, so they round-trip
 // byte-for-byte.
 //

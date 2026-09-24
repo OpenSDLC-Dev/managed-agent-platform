@@ -1330,7 +1330,7 @@ var threadAddressable = map[domain.EventType]bool{
 // session_thread_id, rendered per surface (plan 35 decision 2): a child's
 // thread-addressable event seen through the session view names its thread —
 // whether it got there by cross-posting or by decision 13's self_hosted
-// widening; on the child's own surface the stored null stands.
+// widening; on the child's own surface the stored null is dropped.
 //
 // "Thread-addressable" is the whole of the qualifier, and it is the wire's
 // rather than ours: the widening also carries the results answering a child's
@@ -1346,6 +1346,17 @@ func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {
 	}
 	if out == nil {
 		out = make(map[string]json.RawMessage)
+	}
+	// No recorded event carries session_thread_id or deny_message as a present
+	// null: the reference omits them (#674). The writers store the null and the
+	// log is append-only, so it is dropped here, for old rows and on every
+	// surface alike — but only on the types the recordings show it omitted
+	// from. A null anywhere else still renders, so a writer bug stays visible.
+	if threadAddressable[ev.Type] && isNull(out["session_thread_id"]) {
+		delete(out, "session_thread_id")
+	}
+	if ev.Type == domain.EventUserToolConfirm && isNull(out["deny_message"]) {
+		delete(out, "deny_message")
 	}
 	if scope == events.ScopeSession && ev.ThreadID != "" && threadAddressable[ev.Type] {
 		out["session_thread_id"], _ = json.Marshal(ev.ThreadID.String())
