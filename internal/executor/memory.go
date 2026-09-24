@@ -201,6 +201,11 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m m
 		if err := rows.Scan(&p, &content, &sha); err != nil {
 			return memoryOutcomeFailed, err
 		}
+		// Later in this batch than the marker, it would land over it.
+		if memsync.IsMarkerPath(p) {
+			warnMarkerMemory(ctx, m.MemoryStoreID, p)
+			continue
+		}
 		writes = append(writes, sandbox.FileWrite{Path: m.MountPath + p, Data: []byte(content), Mode: memoryFileMode})
 		baseline.Synced[p] = sha
 	}
@@ -212,6 +217,16 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m m
 		return memoryOutcomeFailed, err
 	}
 	return memoryOutcomeOK, nil
+}
+
+// warnMarkerMemory logs a store's memory at the marker's path, which the API
+// accepts as the reference does (#669) and no mount ever holds — the
+// reference worker's own warning when its listing carries one (checked
+// against anthropic-sdk-go v1.70.1 — memories.go
+// SessionMemoryStores.listMemories).
+func warnMarkerMemory(ctx context.Context, storeID, p string) {
+	slog.WarnContext(ctx, "the store holds a memory at the reserved marker path; skipping",
+		"path", p, "memory_store_id", storeID)
 }
 
 // memorySync is one sync of a session's stores, carried across its three
@@ -444,12 +459,21 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 		return err
 	}
 	remote := map[string]memsync.Head{}
+	held := 0
 	for rows.Next() {
 		var head memsync.Head
 		var p string
 		if err := rows.Scan(&head.ID, &p, &head.SHA); err != nil {
 			rows.Close()
 			return err
+		}
+		// Counted toward the cap, but never planned: a pull would land it
+		// over the marker, and once in the baseline its absence from the
+		// directory would read as a local deletion.
+		held++
+		if memsync.IsMarkerPath(p) {
+			warnMarkerMemory(ctx, id, p)
+			continue
 		}
 		remote[p] = head
 	}
@@ -476,7 +500,6 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 	// session writes carries.
 	actorJSON, _ := json.Marshal(map[string]string{"type": "session_actor", "session_id": sid.String()})
 	actor := json.RawMessage(actorJSON)
-	held := len(remote)
 	// Deletions settle first, then the rest in path order: a create needs
 	// the room a deletion makes under the cap, and a file replacing a
 	// directory (`/a/b` gone, `/a` written) needs the descendant's deletion

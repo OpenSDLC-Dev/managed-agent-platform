@@ -402,6 +402,13 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A rename onto the marker's path stays refused, though a create there is
+	// accepted as the reference accepts it (#669): no recording renamed onto
+	// it, so this is our choice, registered in docs/DIVERGENCES.md. An update
+	// naming the path the memory already holds is no rename.
+	if pathSet && path != row.path && memsync.IsMarkerPath(path) {
+		return nil, errInvalid("path %s is reserved for the memory store's marker file", path)
+	}
 
 	next := row
 	if contentSet {

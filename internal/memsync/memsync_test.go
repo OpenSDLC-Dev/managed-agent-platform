@@ -38,7 +38,6 @@ func TestValidatePath(t *testing.T) {
 		"an NFD path":                "/cafe\u0301.md",
 		"invalid UTF-8":              "/notes/\xff.md",
 		"1025 bytes":                 "/" + strings.Repeat("a", 1024),
-		"the marker's path":          "/.anthropic-memory-store",
 	} {
 		if err := memsync.ValidatePath(path); err == nil {
 			t.Errorf("%s (%q): accepted, want a rejection", name, path)
@@ -51,6 +50,7 @@ func TestValidatePath(t *testing.T) {
 		"a dotfile":                   "/.gitignore",
 		"three dots":                  "/...",
 		"the marker below the root":   "/x/.anthropic-memory-store",
+		"the marker's own path":       "/.anthropic-memory-store",
 		"an NFC path":                 "/caf\u00e9.md",
 		"a space":                     "/my notes.md",
 		"a no-break space (Zs)":       "/a\u00a0b.md",
@@ -62,6 +62,26 @@ func TestValidatePath(t *testing.T) {
 	} {
 		if err := memsync.ValidatePath(path); err != nil {
 			t.Errorf("%s (%q): %v, want it accepted", name, path, err)
+		}
+	}
+}
+
+// The marker's path is an ordinary memory path to the rules above — the
+// reference accepts a create there (#669) — so what keeps such a memory off
+// the marker file is this predicate, on every consumer that lands or syncs a
+// store. It is the reference client's own test (checked against
+// anthropic-sdk-go v1.70.1 — memories.go SessionMemoryStores.listMemories):
+// the path with its leading slashes trimmed is the marker's name, so only the
+// root collides.
+func TestIsMarkerPath(t *testing.T) {
+	for _, path := range []string{"/.anthropic-memory-store", "//.anthropic-memory-store", ".anthropic-memory-store"} {
+		if !memsync.IsMarkerPath(path) {
+			t.Errorf("%q: not the marker's path, want it to be", path)
+		}
+	}
+	for _, path := range []string{"/x/.anthropic-memory-store", "/.anthropic-memory-store/x", "/.anthropic-memory-store.md", "/.Anthropic-memory-store", "/"} {
+		if memsync.IsMarkerPath(path) {
+			t.Errorf("%q: read as the marker's path", path)
 		}
 	}
 }

@@ -148,7 +148,13 @@ func (m *memoryStores) roots() (all, readOnly []string) {
 
 // listMemories pages a store's memories at the largest page the view allows,
 // prefix rollups skipped (none come without depth; the type is checked
-// rather than assumed), handing each to f.
+// rather than assumed), handing each to f. A memory at the marker's path is
+// skipped with a warning, as the reference worker's listing skips it
+// (checked against anthropic-sdk-go v1.70.1 — memories.go
+// SessionMemoryStores.listMemories): the routes accept one (#669), and
+// unskipped, materialize would land it over the marker and the sync pull it
+// there — or, once it was in the baseline, read its absence from the
+// directory as a local deletion.
 func (m *memoryStores) listMemories(ctx context.Context, storeID string, view sdk.BetaManagedAgentsMemoryView, f func(sdk.BetaManagedAgentsMemory)) error {
 	limit := int64(memoryListPageSize)
 	if view == sdk.BetaManagedAgentsMemoryViewFull {
@@ -159,6 +165,11 @@ func (m *memoryStores) listMemories(ctx context.Context, storeID string, view sd
 	for pager.Next() {
 		item := pager.Current()
 		if item.Type != "memory" {
+			continue
+		}
+		if memsync.IsMarkerPath(item.Path) {
+			slog.WarnContext(ctx, "the server listed the reserved marker path; skipping",
+				"session_id", m.sessionID, "path", item.Path, "memory_store_id", storeID)
 			continue
 		}
 		f(item.AsMemory())
