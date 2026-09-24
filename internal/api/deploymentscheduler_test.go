@@ -153,6 +153,13 @@ func TestSchedulerFiresTheMostRecentDueOccurrence(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	deplID := createDeployment(t, s, scheduledBody(agentID, envID, "0 9 * * *", "UTC"))["id"].(string)
+	// Renamed before the tick, so the title check below tells the name the
+	// deployment carries at the fire from the one it was created with (#678).
+	const firedName = "Renamed order report"
+	if code, res := s.do(http.MethodPost, "/v1/deployments/"+deplID,
+		map[string]any{"name": firedName}); code != http.StatusOK {
+		t.Fatalf("rename deployment: status %d, body %v", code, res)
+	}
 	setResumedAt(t, s, deplID, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC))
 
 	// Three occurrences are due (03-10, 03-11, 03-12, each 09:00); only the
@@ -174,19 +181,23 @@ func TestSchedulerFiresTheMostRecentDueOccurrence(t *testing.T) {
 		t.Fatalf("run settled as session=%v succeeded=%v err=%v, want the success arm", run.sessionID, run.succeededAt, run.errType)
 	}
 
-	// The fired session: linked, running (initial events start the loop),
-	// and unattributed.
+	// The fired session: linked, titled with the deployment's name (#678),
+	// running (initial events start the loop), and unattributed.
 	var (
 		sessDeplID, status *string
 		createdBy          *string
+		title              string
 	)
 	if err := s.pool.QueryRow(t.Context(),
-		`SELECT deployment_id, status, created_by FROM sessions WHERE id = $1`, *run.sessionID).
-		Scan(&sessDeplID, &status, &createdBy); err != nil {
+		`SELECT deployment_id, status, created_by, title FROM sessions WHERE id = $1`, *run.sessionID).
+		Scan(&sessDeplID, &status, &createdBy, &title); err != nil {
 		t.Fatal(err)
 	}
 	if sessDeplID == nil || *sessDeplID != deplID {
 		t.Errorf("session.deployment_id = %v, want %s", sessDeplID, deplID)
+	}
+	if title != firedName {
+		t.Errorf("session.title = %q, want the deployment's name at the fire %q", title, firedName)
 	}
 	if status == nil || *status != "running" {
 		t.Errorf("session.status = %v, want running", status)
