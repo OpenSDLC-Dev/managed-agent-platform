@@ -307,19 +307,26 @@ func TestChildThreadViewAndCrossPosts(t *testing.T) {
 	if len(own) != 3 {
 		t.Fatalf("child view = %v, want its three rows only", own)
 	}
-	if tu := byID(own, appended[1].ID.String()); tu["session_thread_id"] != nil {
-		t.Errorf("child's own tool_use session_thread_id = %v, want null", tu["session_thread_id"])
+	// Unnamed means the key is omitted, not null: the reference never renders
+	// it as a present null (#674).
+	if tu := byID(own, appended[1].ID.String()); tu == nil {
+		t.Errorf("child's own view is missing its tool_use")
+	} else if _, ok := tu["session_thread_id"]; ok {
+		t.Errorf("child's own tool_use = %v, want no session_thread_id", tu)
 	}
-	// The child's stream tails its own rows.
+	// The child's stream tails its own rows, rendered as its list renders them.
 	st := s.stream(t, "/v1/sessions/"+sid+"/threads/"+child+"/stream")
 	if _, err := log.Append(context.Background(), domain.ID(sid), []events.NewEvent{
 		{Type: domain.EventAgentMessage, Payload: []byte(`{"content":[]}`)},
-		{Type: domain.EventAgentMessage, ThreadID: domain.ID(child), Payload: []byte(`{"content":[]}`)},
+		{Type: domain.EventAgentToolUse, ThreadID: domain.ID(child),
+			Payload: []byte(`{"name":"bash","input":{},"session_thread_id":null}`)},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if f := st.next(t); f.name != "agent.message" {
+	if f := st.next(t); f.name != "agent.tool_use" {
 		t.Errorf("child stream frame = %q", f.name)
+	} else if _, ok := f.data["session_thread_id"]; ok {
+		t.Errorf("child stream tool_use = %v, want no session_thread_id", f.data)
 	}
 	st.expectNone(t)
 }

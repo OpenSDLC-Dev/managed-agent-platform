@@ -79,17 +79,16 @@ func TestSendUserMessageEchoShape(t *testing.T) {
 		t.Fatalf("echoed %d events, want 1", len(echo))
 	}
 	ev := echo[0]
-	// Field-exact: BetaManagedAgentsUserMessageEvent has id, content, type,
-	// processed_at — and no session_thread_id.
-	wantExactKeys(t, ev, "id", "type", "content", "processed_at")
+	// Field-exact: BetaManagedAgentsUserMessageEvent has id, content, type and
+	// a nullable processed_at — and no session_thread_id. The message is not
+	// yet processed, and the echo omits the null stamp rather than rendering
+	// it, as every recorded user.message echo does (#674).
+	wantExactKeys(t, ev, "id", "type", "content")
 	if !strings.HasPrefix(ev["id"].(string), "sevt_") {
 		t.Errorf("id = %v, want sevt_ prefix", ev["id"])
 	}
 	if ev["type"] != "user.message" {
 		t.Errorf("type = %v", ev["type"])
-	}
-	if ev["processed_at"] != nil {
-		t.Errorf("processed_at = %v, want null (not yet processed)", ev["processed_at"])
 	}
 	content := ev["content"].([]any)
 	block := content[0].(map[string]any)
@@ -104,49 +103,79 @@ func TestSendEchoShapesPerType(t *testing.T) {
 	customID := appendToolUse(t, s, sid, domain.EventAgentCustomToolUse)
 	toolID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
 	riskyID := appendToolUseWithPerm(t, s, sid, "risky", "ask")
+	safeID := appendToolUseWithPerm(t, s, sid, "safe", "ask")
 
 	echo := sendEvents(t, s, sid,
 		map[string]any{"type": "user.interrupt"},
 		map[string]any{"type": "user.tool_confirmation", "result": "deny",
 			"tool_use_id": riskyID, "deny_message": "too risky"},
+		map[string]any{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": safeID},
 		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
 			"content": []any{map[string]any{"type": "text", "text": "ok"}}, "is_error": false},
 		map[string]any{"type": "user.tool_result", "tool_use_id": toolID},
 		map[string]any{"type": "user.message", "content": []any{map[string]any{"type": "text", "text": "hi"}}},
 		map[string]any{"type": "system.message", "content": []any{map[string]any{"type": "text", "text": "note"}}},
 	)
-	if len(echo) != 6 {
-		t.Fatalf("echoed %d events, want 6", len(echo))
+	if len(echo) != 7 {
+		t.Fatalf("echoed %d events, want 7", len(echo))
 	}
 
+	// The nullable session_thread_id, deny_message and processed_at are
+	// omitted while null, never rendered null — the recorded interrupt echo is
+	// exactly {id, type} (#674). A value, where there is one, still renders.
 	interrupt := echo[0]
-	wantExactKeys(t, interrupt, "id", "type", "processed_at", "session_thread_id")
-	if interrupt["session_thread_id"] != nil {
-		t.Errorf("session_thread_id = %v, want null", interrupt["session_thread_id"])
-	}
+	wantExactKeys(t, interrupt, "id", "type")
 
 	confirm := echo[1]
-	wantExactKeys(t, confirm, "id", "type", "result", "tool_use_id", "deny_message", "processed_at", "session_thread_id")
+	wantExactKeys(t, confirm, "id", "type", "result", "tool_use_id", "deny_message")
 	if confirm["result"] != "deny" || confirm["deny_message"] != "too risky" || confirm["tool_use_id"] != riskyID {
 		t.Errorf("tool_confirmation echo = %v", confirm)
 	}
 
-	custom := echo[2]
-	wantExactKeys(t, custom, "id", "type", "custom_tool_use_id", "content", "is_error", "processed_at", "session_thread_id")
-	if custom["is_error"] != false || custom["custom_tool_use_id"] != customID {
+	allow := echo[2]
+	wantExactKeys(t, allow, "id", "type", "result", "tool_use_id")
+	if allow["result"] != "allow" || allow["tool_use_id"] != safeID {
+		t.Errorf("allow tool_confirmation echo = %v", allow)
+	}
+
+	custom := echo[3]
+	wantExactKeys(t, custom, "id", "type", "custom_tool_use_id", "content", "is_error", "processed_at")
+	if custom["is_error"] != false || custom["custom_tool_use_id"] != customID || custom["processed_at"] == nil {
 		t.Errorf("custom_tool_result echo = %v", custom)
 	}
 
-	toolRes := echo[3]
-	wantExactKeys(t, toolRes, "id", "type", "tool_use_id", "content", "is_error", "processed_at", "session_thread_id")
+	toolRes := echo[4]
+	wantExactKeys(t, toolRes, "id", "type", "tool_use_id", "content", "is_error", "processed_at")
 	if toolRes["content"] != nil || toolRes["is_error"] != nil {
 		t.Errorf("omitted content/is_error should render null: %v", toolRes)
 	}
 
-	system := echo[5]
-	wantExactKeys(t, system, "id", "type", "content", "processed_at")
+	system := echo[6]
+	wantExactKeys(t, system, "id", "type", "content")
 	if system["type"] != "system.message" {
 		t.Errorf("system echo = %v", system)
+	}
+
+	// The list renders deny_message by the same rule: kept when given,
+	// omitted when null — never a present null anywhere in the recordings.
+	_, res := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
+	seen := 0
+	for _, ev := range listData(t, res) {
+		switch ev["id"] {
+		case confirm["id"]:
+			seen++
+			if ev["deny_message"] != "too risky" {
+				t.Errorf("listed deny = %v, want its deny_message", ev)
+			}
+		case allow["id"]:
+			seen++
+			if _, ok := ev["deny_message"]; ok {
+				t.Errorf("listed allow = %v, want no deny_message", ev)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Errorf("listed %d of the two confirmations", seen)
 	}
 }
 

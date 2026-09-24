@@ -483,12 +483,17 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 
 	// The response echoes the posted events only, not the platform's
-	// state-machine reaction (which clients observe on the stream/log).
+	// state-machine reaction (which clients observe on the stream/log). An
+	// event not yet processed echoes without processed_at, as every recorded
+	// echo of one does (#674); the lists and the stream still render the null.
 	data := make([]any, 0, len(newEvents))
 	for _, ev := range appended[:len(newEvents)] {
-		wire, err := eventWire(ev, events.ScopeSession)
+		wire, err := eventFields(ev, events.ScopeSession)
 		if err != nil {
 			return nil, err
+		}
+		if ev.ProcessedAt == nil {
+			delete(wire, "processed_at")
 		}
 		data = append(data, wire)
 	}
@@ -1287,13 +1292,21 @@ var threadAddressable = map[domain.EventType]bool{
 	domain.EventUserInterrupt: true,
 }
 
+// omittedWhenNull are the nullable payload keys the reference leaves out
+// rather than rendering null: no recorded event, on any surface, carries
+// either as a present null, though the same bodies carry other nulls (#674).
+// The writers store them null and the log is append-only, so they are dropped
+// here, which covers old rows and every surface alike.
+var omittedWhenNull = []string{"session_thread_id", "deny_message"}
+
 // eventWire renders a stored event onto the wire: the type-specific payload
 // fields merged with the id/type/processed_at envelope. Payload bytes pass
-// through untouched, so content blocks round-trip exactly — except
-// session_thread_id, rendered per surface (plan 35 decision 2): a child's
-// thread-addressable event seen through the session view names its thread —
-// whether it got there by cross-posting or by decision 13's self_hosted
-// widening; on the child's own surface the stored null stands.
+// through untouched, so content blocks round-trip exactly — except that a
+// null omittedWhenNull key is dropped, and session_thread_id is rendered per
+// surface (plan 35 decision 2): a child's thread-addressable event seen
+// through the session view names its thread — whether it got there by
+// cross-posting or by decision 13's self_hosted widening; on the child's own
+// surface the stored null is dropped.
 //
 // "Thread-addressable" is the whole of the qualifier, and it is the wire's
 // rather than ours: the widening also carries the results answering a child's
@@ -1303,6 +1316,16 @@ var threadAddressable = map[domain.EventType]bool{
 // renders unnamed. A worker still correlates it, because the call it answers is
 // named.
 func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {
+	out, err := eventFields(ev, scope)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(out)
+}
+
+// eventFields is eventWire's object before the marshal, which the send echo
+// trims further.
+func eventFields(ev domain.Event, scope events.Scope) (map[string]json.RawMessage, error) {
 	var out map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Body, &out); err != nil {
 		return nil, fmt.Errorf("event %s payload is corrupt: %w", ev.ID, err)
@@ -1313,6 +1336,11 @@ func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {
 	if scope == events.ScopeSession && ev.ThreadID != "" && threadAddressable[ev.Type] {
 		out["session_thread_id"], _ = json.Marshal(ev.ThreadID.String())
 	}
+	for _, k := range omittedWhenNull {
+		if raw, ok := out[k]; ok && isNull(raw) {
+			delete(out, k)
+		}
+	}
 	// Marshals of plain strings and database timestamps cannot fail.
 	out["id"], _ = json.Marshal(ev.ID.String())
 	out["type"], _ = json.Marshal(string(ev.Type))
@@ -1320,7 +1348,7 @@ func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {
 	if ev.ProcessedAt != nil {
 		out["processed_at"], _ = json.Marshal(ev.ProcessedAt.UTC())
 	}
-	return json.Marshal(out)
+	return out, nil
 }
 
 // sessionExists resolves list/stream 404s (session_ already normalized).

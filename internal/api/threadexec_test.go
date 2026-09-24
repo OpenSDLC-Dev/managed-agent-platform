@@ -224,8 +224,8 @@ func TestThreadScopedInterruptLeavesTheSharedExecItem(t *testing.T) {
 		t.Errorf("A's idle event = %v", idle)
 	}
 	// The client's own interrupt is on both surfaces — A's thread named on
-	// the session view, null on A's own — like the answers to a cross-posted
-	// call.
+	// the session view, omitted on A's own — like the answers to a
+	// cross-posted call.
 	interrupt := lastEventOfType(t, s, sid, "user.interrupt")
 	if interrupt["session_thread_id"] != a {
 		t.Errorf("the interrupt on the session view = %v, want session_thread_id A", interrupt)
@@ -237,8 +237,8 @@ func TestThreadScopedInterruptLeavesTheSharedExecItem(t *testing.T) {
 	}
 	_, own := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/"+a+"/events", nil)
 	for _, ev := range listData(t, own) {
-		if ev["type"] == "user.interrupt" && ev["session_thread_id"] != nil {
-			t.Errorf("the interrupt on A's own view = %v, want a null session_thread_id", ev)
+		if _, named := ev["session_thread_id"]; ev["type"] == "user.interrupt" && named {
+			t.Errorf("the interrupt on A's own view = %v, want no session_thread_id", ev)
 		}
 	}
 
