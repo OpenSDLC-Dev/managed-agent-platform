@@ -1198,8 +1198,8 @@ func TestMigrateRetriesALockConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := store.MigrateThrough(ctx, pool, "0041_primary_thread_unarchived_check.sql"); err != nil {
-		t.Fatalf("migrate through 0041: %v", err)
+	if err := store.MigrateThrough(ctx, pool, "0042_deployment_runs_session_link.sql"); err != nil {
+		t.Fatalf("migrate through 0042: %v", err)
 	}
 	holder, err := pool.Begin(ctx)
 	if err != nil {
@@ -1266,8 +1266,8 @@ func TestMigrateRetriesADeadlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := store.MigrateThrough(ctx, pool, "0041_primary_thread_unarchived_check.sql"); err != nil {
-		t.Fatalf("migrate through 0041: %v", err)
+	if err := store.MigrateThrough(ctx, pool, "0042_deployment_runs_session_link.sql"); err != nil {
+		t.Fatalf("migrate through 0042: %v", err)
 	}
 	holder, err := pool.Begin(ctx)
 	if err != nil {
@@ -1370,8 +1370,8 @@ func TestMigrateGivesUpAfterItsAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := store.MigrateThrough(ctx, pool, "0041_primary_thread_unarchived_check.sql"); err != nil {
-		t.Fatalf("migrate through 0041: %v", err)
+	if err := store.MigrateThrough(ctx, pool, "0042_deployment_runs_session_link.sql"); err != nil {
+		t.Fatalf("migrate through 0042: %v", err)
 	}
 	holder, err := pool.Begin(ctx)
 	if err != nil {
