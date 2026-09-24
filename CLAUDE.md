@@ -111,7 +111,7 @@ make verify               # the whole Go gate: build + crossbuild + vet + fmt-ch
 make build crossbuild     # host build + linux/arm cross-compile of ./internal/... (worker portability)
 make vet fmt-check        # lint
 make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate
-docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres+MinIO+OpenBao(+Jaeger)
+docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres+Silo (MinIO fork)+OpenBao(+Jaeger)
 make openbao-init-test   # ...and the compose + chart OpenBao init scripts, run against a fake `bao`
 make cd-outcome-test     # ...and the CD failure notifier's classifier, which `workflow_run` would otherwise first run on main
 make parked-test         # ...and the parked-cluster label rule `deploy.yml` and `staging-parked.yml` share
