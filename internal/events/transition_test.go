@@ -12,9 +12,10 @@ import (
 )
 
 // The status fold (plan 35 decision 4): TransitionThread moves one thread,
-// folds the session over its live threads, and emits the thread event first
-// and the session event second — only when the folded value changed, or the
-// caller forced the two value-independent emissions.
+// folds the session over its live threads, and emits the thread event and the
+// session event — the latter only when the folded value changed, or the
+// caller forced the two value-independent emissions. Running puts the
+// session's event first, every other status the thread's (#674).
 
 // transition runs one TransitionThread under the session lock in its own
 // transaction, appends what it returns, and reports the event types appended
@@ -85,8 +86,9 @@ func bodyOf(t *testing.T, ev domain.Event) map[string]any {
 }
 
 // The single-thread reduction: every move of the primary is a move of the
-// session, so every transition is the pair — thread event first, named with
-// the session's agent, then the session event — and the column follows.
+// session, so every transition is the pair — the thread event named with the
+// session's agent, and the session event: the session's first when running,
+// the thread's first when idle — and the column follows.
 func TestTransitionThreadSingleThreadIsThePair(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
@@ -96,18 +98,18 @@ func TestTransitionThreadSingleThreadIsThePair(t *testing.T) {
 	stop := &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: []domain.ID{"sevt_a"}}
 
 	got, moved := transition(t, pool, log, sid, events.ThreadTransition{Status: running})
-	if !sameTypes(got, domain.EventSessionThreadStatusRunning, domain.EventSessionStatusRunning) {
-		t.Fatalf("idle→running = %v, want the thread/session pair", types(got))
+	if !sameTypes(got, domain.EventSessionStatusRunning, domain.EventSessionThreadStatusRunning) {
+		t.Fatalf("idle→running = %v, want the session/thread pair", types(got))
 	}
 	if moved == nil || *moved != running || sessionStatus(t, pool, sid) != "running" || threadStatus(t, pool, primary) != "running" {
 		t.Errorf("moved = %v, session %s, thread %s; want running everywhere", moved, sessionStatus(t, pool, sid), threadStatus(t, pool, primary))
 	}
-	p := bodyOf(t, got[0])
-	if p["session_thread_id"] != primary.String() || p["agent_name"] != "named" || got[0].ThreadID != "" {
-		t.Errorf("primary thread event = %s on thread %q, want the primary id and the session's agent name on the session's own row", got[0].Body, got[0].ThreadID)
+	p := bodyOf(t, got[1])
+	if p["session_thread_id"] != primary.String() || p["agent_name"] != "named" || got[1].ThreadID != "" {
+		t.Errorf("primary thread event = %s on thread %q, want the primary id and the session's agent name on the session's own row", got[1].Body, got[1].ThreadID)
 	}
-	if _, has := bodyOf(t, got[1])["session_thread_id"]; has {
-		t.Errorf("session event carries a session_thread_id: %s", got[1].Body)
+	if _, has := bodyOf(t, got[0])["session_thread_id"]; has {
+		t.Errorf("session event carries a session_thread_id: %s", got[0].Body)
 	}
 
 	got, moved = transition(t, pool, log, sid, events.ThreadTransition{Status: idle, Stop: stop})
@@ -163,7 +165,7 @@ func TestTransitionThreadSingleThreadIsThePair(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !sameTypes(appended, domain.EventSessionThreadStatusRescheduled, domain.EventSessionStatusRescheduled,
-		domain.EventSessionThreadStatusRunning, domain.EventSessionStatusRunning) || sessionStatus(t, pool, sid) != "running" {
+		domain.EventSessionStatusRunning, domain.EventSessionThreadStatusRunning) || sessionStatus(t, pool, sid) != "running" {
 		t.Errorf("reclaim pair = %v, session %s", types(appended), sessionStatus(t, pool, sid))
 	}
 
@@ -185,7 +187,7 @@ func TestTransitionThreadWithoutThreadRows(t *testing.T) {
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	got, moved := transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionRunning})
-	if !sameTypes(got, domain.EventSessionThreadStatusRunning, domain.EventSessionStatusRunning) || moved == nil || sessionStatus(t, pool, sid) != "running" {
+	if !sameTypes(got, domain.EventSessionStatusRunning, domain.EventSessionThreadStatusRunning) || moved == nil || sessionStatus(t, pool, sid) != "running" {
 		t.Errorf("bare session: %v moved %v status %s", types(got), moved, sessionStatus(t, pool, sid))
 	}
 	ctx := context.Background()
@@ -196,6 +198,49 @@ func TestTransitionThreadWithoutThreadRows(t *testing.T) {
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, _, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{ThreadID: "sthr_missing", Status: domain.SessionRunning}); err == nil {
 		t.Error("a child thread that does not exist was moved")
+	}
+}
+
+// The pair's order follows the session event the fold emits, not the moving
+// thread's status, and the two can differ: a sibling decides the fold, or the
+// moving row sits outside it. Both states are forged here — the session column
+// set apart from the fold — because no settlement leaves one across a commit.
+func TestTransitionThreadOrdersThePairByTheSessionEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	setColumn := func(sid domain.ID, status string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE sessions SET status = $2 WHERE id = $1`, sid.String(), status); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A child idles while the primary runs and the column reads idle: the fold
+	// moves the session to running, so status_running leads the child's idle.
+	sid := newThreadedSession(t, pool)
+	a := pgtest.NewChildThread(t, pool, sid)
+	transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionRunning})
+	transition(t, pool, log, sid, events.ThreadTransition{ThreadID: a, Status: domain.SessionRunning})
+	setColumn(sid, "idle")
+	got, _ := transition(t, pool, log, sid, events.ThreadTransition{ThreadID: a, Status: domain.SessionIdle,
+		Stop: &domain.StopReason{Type: domain.StopEndTurn}})
+	if !sameTypes(got, domain.EventSessionStatusRunning, domain.EventSessionThreadStatusIdle) || got[1].ThreadID != a {
+		t.Errorf("idle child under a running primary, column idle = %v, want status_running then %s's thread_status_idle", types(got), a)
+	}
+
+	// An archived child — outside the fold — moves to running while the column
+	// reads running over an idle primary: the fold idles the session, so the
+	// child's running event leads status_idle.
+	sid = newThreadedSession(t, pool)
+	c := pgtest.NewChildThread(t, pool, sid)
+	if _, err := pool.Exec(ctx, `UPDATE session_threads SET archived_at = now(), status = 'terminated' WHERE id = $1`, c.String()); err != nil {
+		t.Fatal(err)
+	}
+	setColumn(sid, "running")
+	got, _ = transition(t, pool, log, sid, events.ThreadTransition{ThreadID: c, Status: domain.SessionRunning})
+	if !sameTypes(got, domain.EventSessionThreadStatusRunning, domain.EventSessionStatusIdle) || got[0].ThreadID != c {
+		t.Errorf("archived child running, fold idle = %v, want %s's thread_status_running then status_idle", types(got), c)
 	}
 }
 
@@ -299,10 +344,19 @@ func TestTransitionThreadFoldsOverChildren(t *testing.T) {
 	}
 	// A child resumes while the other still asks: the session runs (the
 	// confirmation-for-A-while-B-asks shape), and A's later end_turn folds
-	// back to b's requires_action.
+	// back to b's requires_action. The pair here is ours, not the reference's:
+	// status_running is followed by A's own event and the primary stays
+	// idle, where the recorded child resume pairs status_running with the
+	// primary's event and brings the child's later (docs/DIVERGENCES.md,
+	// "Session threads — a child's resume of an idle session").
 	got, moved = transition(t, pool, log, sid, events.ThreadTransition{ThreadID: a, Status: running})
-	if !sameTypes(got, domain.EventSessionThreadStatusRunning, domain.EventSessionStatusRunning) || moved == nil || *moved != running {
+	if !sameTypes(got, domain.EventSessionStatusRunning, domain.EventSessionThreadStatusRunning) || moved == nil || *moved != running {
 		t.Errorf("child resume on an idle session = %v moved %v", types(got), moved)
+	} else if got[1].ThreadID != a || bodyOf(t, got[1])["session_thread_id"] != a.String() || got[0].ThreadID != "" {
+		t.Errorf("child resume pair = %s on %q then %s on %q, want the session event then %s's own", got[0].Body, got[0].ThreadID, got[1].Body, got[1].ThreadID, a)
+	}
+	if threadStatus(t, pool, domain.PrimaryThreadID(sid)) != "idle" {
+		t.Error("a child's resume moved the primary; ours leaves it idle")
 	}
 	got, _ = transition(t, pool, log, sid, events.ThreadTransition{ThreadID: a, Status: idle, Stop: endTurn})
 	if sr, _ := bodyOf(t, got[1])["stop_reason"].(map[string]any); sr["type"] != "requires_action" {

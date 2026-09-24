@@ -651,7 +651,7 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	// Four platform events sit on top of the six posted ones: the first
 	// user.message woke the idle session, and the interrupt ended the turn that
 	// woke, each a primary-thread + session status pair — m0,
-	// session.thread_status_running, session.status_running, m1..m4,
+	// session.status_running, session.thread_status_running, m1..m4,
 	// user.interrupt, session.thread_status_idle, session.status_idle.
 
 	// Default: chronological asc, everything, next_page null.
@@ -924,12 +924,12 @@ func TestStreamLiveTail(t *testing.T) {
 
 	// Batches arrive in order, the platform's reaction to them included: the
 	// interrupt ends the running turn and the message in the same batch starts
-	// the next one, so both status pairs — the primary thread's event, then
-	// the session's — follow the two posted events.
+	// the next one, so both status pairs — the idle one thread-first, the
+	// running one session-first — follow the two posted events.
 	sendEvents(t, s, sid, userMessage("after-2"), map[string]any{"type": "user.interrupt"})
 	for i, want := range []string{"user.message", "user.interrupt",
 		"session.thread_status_idle", "session.status_idle",
-		"session.thread_status_running", "session.status_running"} {
+		"session.status_running", "session.thread_status_running"} {
 		if f := st.next(t); f.name != want {
 			t.Errorf("frame %d = %q, want %q", i+2, f.name, want)
 		}

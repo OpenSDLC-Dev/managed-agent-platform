@@ -55,10 +55,11 @@ const (
 
 // Session-thread lifecycle events (plan 35). The four status events mirror
 // session.status_* per thread — emitted on the thread's own stream and, for a
-// child, cross-posted to the primary's; the primary thread's accompany every
-// session.status_running/_idle/_rescheduled on every session (decision 12),
-// thread event first — never _terminated, which the primary does not emit (a
-// child terminates; the primary ends with its session). Each carries
+// child, cross-posted to the primary's; every session.status_running/_idle/
+// _rescheduled a primary-thread transition emits has the primary's beside it,
+// on every session (decision 12; events.TransitionThread orders the pair) —
+// never _terminated, which the primary does not emit (a child terminates; the
+// primary ends with its session). Each carries
 // {session_thread_id, agent_name}; _idle adds stop_reason.
 const (
 	EventSessionThreadCreated           EventType = "session.thread_created"

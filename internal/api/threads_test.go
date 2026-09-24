@@ -124,9 +124,11 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 	}
 }
 
-// Every session.status_* is preceded, in the same batch, by the primary
-// thread's session.thread_status_* naming the thread and the agent; the
-// thread row's status follows the session's.
+// On a single-agent session every session.status_* comes paired, in the same
+// batch, with the primary thread's session.thread_status_* naming the thread
+// and the agent — right after it when running, right before it otherwise, the
+// order the reference records for the primary (#674) — and no thread status
+// event stands outside a pair; the thread row's status follows the session's.
 func TestStatusEventsComeInPrimaryThreadPairs(t *testing.T) {
 	s := newTestServer(t)
 	sid := eventsFixture(t, s)
@@ -142,34 +144,53 @@ func TestStatusEventsComeInPrimaryThreadPairs(t *testing.T) {
 
 	_, res := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
 	evs := listData(t, res)
+	isThreadStatus := func(k int) bool {
+		return k >= 0 && k < len(evs) && strings.HasPrefix(evs[k]["type"].(string), "session.thread_status_")
+	}
 	pairs := 0
+	paired := map[int]bool{}
 	for i, ev := range evs {
 		typ := ev["type"].(string)
 		if !strings.HasPrefix(typ, "session.status_") {
 			continue
 		}
 		pairs++
-		if i == 0 {
-			t.Fatalf("%s at the head of the log, no thread event before it", typ)
+		j, other, where := i-1, i+1, "preceded"
+		if typ == "session.status_running" {
+			j, other, where = i+1, i-1, "followed"
 		}
-		prev := evs[i-1]
-		if prev["type"] != "session.thread_status_"+strings.TrimPrefix(typ, "session.status_") {
-			t.Errorf("%s preceded by %v, want the primary thread's event", typ, prev["type"])
+		if j < 0 || j >= len(evs) {
+			t.Fatalf("%s at an end of the log, not %s by its thread event", typ, where)
+		}
+		// The other neighbour is never a thread status event: a doubled or
+		// leftover one — the pair written in both orders, say — would sit there.
+		if isThreadStatus(other) {
+			t.Errorf("%s has a thread status event on both sides: %v and %v", typ, evs[j]["type"], evs[other]["type"])
+		}
+		paired[j] = true
+		th := evs[j]
+		if th["type"] != "session.thread_status_"+strings.TrimPrefix(typ, "session.status_") {
+			t.Errorf("%s %s by %v, want the primary thread's event", typ, where, th["type"])
 			continue
 		}
-		if prev["session_thread_id"] != primary || prev["agent_name"] != "task-agent" {
-			t.Errorf("thread event = %v, want session_thread_id %s and agent_name task-agent", prev, primary)
+		if th["session_thread_id"] != primary || th["agent_name"] != "task-agent" {
+			t.Errorf("thread event = %v, want session_thread_id %s and agent_name task-agent", th, primary)
 		}
 		if typ == "session.status_idle" {
-			ps, _ := prev["stop_reason"].(map[string]any)
+			ps, _ := th["stop_reason"].(map[string]any)
 			ss, _ := ev["stop_reason"].(map[string]any)
 			if ps["type"] != ss["type"] || ps["type"] != "end_turn" {
-				t.Errorf("stop reasons: thread %v, session %v, want end_turn on both", prev["stop_reason"], ev["stop_reason"])
+				t.Errorf("stop reasons: thread %v, session %v, want end_turn on both", th["stop_reason"], ev["stop_reason"])
 			}
 		}
 	}
 	if pairs != 2 {
 		t.Errorf("saw %d session status events, want running + idle", pairs)
+	}
+	for k := range evs {
+		if isThreadStatus(k) && !paired[k] {
+			t.Errorf("%s at %d stands outside every pair", evs[k]["type"], k)
+		}
 	}
 }
 
@@ -240,7 +261,7 @@ func TestPrimaryThreadEventsAreTheSessionView(t *testing.T) {
 	// The stream: the same frames as the session's, from connect time.
 	st := s.stream(t, tpath+"/stream")
 	echo := sendEvents(t, s, sid, userMessage("m1"))
-	for _, want := range []string{"user.message", "session.thread_status_running", "session.status_running"} {
+	for _, want := range []string{"user.message", "session.status_running", "session.thread_status_running"} {
 		if f := st.next(t); f.name != want {
 			t.Errorf("thread stream frame = %q, want %q", f.name, want)
 		} else if want == "user.message" && f.data["id"] != echo[0]["id"] {
