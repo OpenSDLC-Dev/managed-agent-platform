@@ -67,12 +67,10 @@ func TestValidatePath(t *testing.T) {
 }
 
 // The marker's path is an ordinary memory path to the rules above — the
-// reference accepts a create there (#669) — so what keeps such a memory off
-// the marker file is this predicate, on every consumer that lands or syncs a
-// store. It is the reference client's own test (checked against
-// anthropic-sdk-go v1.70.1 — memories.go SessionMemoryStores.listMemories):
-// the path with its leading slashes trimmed is the marker's name, so only the
-// root collides.
+// reference accepts a create there (#669). IsMarkerPath is the reference
+// client's own test for it (checked against anthropic-sdk-go v1.70.1 —
+// memories.go SessionMemoryStores.listMemories), exact and nothing more: the
+// path with its leading slashes trimmed is the marker's name.
 func TestIsMarkerPath(t *testing.T) {
 	for _, path := range []string{"/.anthropic-memory-store", "//.anthropic-memory-store", ".anthropic-memory-store"} {
 		if !memsync.IsMarkerPath(path) {
@@ -82,6 +80,23 @@ func TestIsMarkerPath(t *testing.T) {
 	for _, path := range []string{"/x/.anthropic-memory-store", "/.anthropic-memory-store/x", "/.anthropic-memory-store.md", "/.Anthropic-memory-store", "/"} {
 		if memsync.IsMarkerPath(path) {
 			t.Errorf("%q: read as the marker's path", path)
+		}
+	}
+}
+
+// ShadowsMarker is what the consumers skip: the marker's path and everything
+// under it, since a memory below the marker's name needs a directory where
+// the marker file is. Nothing else is reserved — a memory named like the
+// marker in a subdirectory, or one merely prefixed by its name, is ordinary.
+func TestShadowsMarker(t *testing.T) {
+	for _, path := range []string{"/.anthropic-memory-store", "//.anthropic-memory-store", "/.anthropic-memory-store/x.md", "/.anthropic-memory-store/a/b.md"} {
+		if !memsync.ShadowsMarker(path) {
+			t.Errorf("%q: not read as shadowing the marker, want it to be", path)
+		}
+	}
+	for _, path := range []string{"/x/.anthropic-memory-store", "/x/.anthropic-memory-store/y.md", "/.anthropic-memory-store.md", "/.anthropic-memory-storex/y.md", "/.Anthropic-memory-store/x.md", "/"} {
+		if memsync.ShadowsMarker(path) {
+			t.Errorf("%q: read as shadowing the marker", path)
 		}
 	}
 }

@@ -234,7 +234,8 @@ func TestMemoryPathRules(t *testing.T) {
 	// A create at the marker's own path is an ordinary memory, as the
 	// reference answers it (#669): 200, and listed like any other row. What
 	// keeps it off a mount's marker file is the consumers' skip, not the API.
-	marker := createMemory(t, s, store, "/.anthropic-memory-store", "m")["id"].(string)
+	created := createMemory(t, s, store, "/.anthropic-memory-store", "m")
+	marker := created["id"].(string)
 	status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?view=full", nil)
 	if status != http.StatusOK {
 		t.Fatalf("list: status %d (%v)", status, body)
@@ -255,10 +256,26 @@ func TestMemoryPathRules(t *testing.T) {
 	if status != http.StatusOK || body["path"] != "/.anthropic-memory-store" {
 		t.Errorf("update in place at the marker's path: status %d (%v)", status, body)
 	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories/"+marker, nil)
+	if status != http.StatusOK || body["content"] != "m2" || body["content_sha256"] != digest("m2") ||
+		body["memory_version_id"] == created["memory_version_id"] {
+		t.Errorf("the update in place did not land as a new version: status %d (%v)", status, body)
+	}
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+marker,
 		map[string]any{"path": "/moved.md"})
 	if status != http.StatusOK || body["path"] != "/moved.md" {
 		t.Errorf("rename away from the marker's path: status %d (%v)", status, body)
+	}
+	// The rename guard is judged once the memory is read, so a memory that is
+	// not there answers its 404 first (the order docs/DIVERGENCES.md states).
+	gone := createMemory(t, s, store, "/gone.md", "g")["id"].(string)
+	if status, body := s.do(http.MethodDelete, "/v1/memory_stores/"+store+"/memories/"+gone, nil); status != http.StatusOK {
+		t.Fatalf("delete: status %d (%v)", status, body)
+	}
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+gone,
+		map[string]any{"path": "/.anthropic-memory-store"})
+	if status != http.StatusNotFound {
+		t.Errorf("rename of a missing memory onto the marker's path: status %d (%v), want its 404", status, body)
 	}
 }
 

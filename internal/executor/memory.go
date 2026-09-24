@@ -126,7 +126,7 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 		// Reported per store for materializeFiles's reason: a store can be
 		// 2,000 files, and the pass has moved whether it landed or was skipped.
 		progress()
-		outcome, err := e.materializeStore(ctx, sb, m)
+		outcome, err := e.materializeStore(ctx, sb, sid, m)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
 		case err != nil:
@@ -154,7 +154,7 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 }
 
 // materializeStore lands one store, answering with its outcome.
-func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m memoryRef) (string, error) {
+func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m memoryRef) (string, error) {
 	marker := path.Join(m.MountPath, memsync.MarkerName)
 	want := memsync.MarkerBytes(m.MemoryStoreID)
 	// The marker's bytes, not its presence: the directory is agent-writable,
@@ -201,9 +201,10 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m m
 		if err := rows.Scan(&p, &content, &sha); err != nil {
 			return memoryOutcomeFailed, err
 		}
-		// Later in this batch than the marker, it would land over it.
-		if memsync.IsMarkerPath(p) {
-			warnMarkerMemory(ctx, m.MemoryStoreID, p)
+		// Later in this batch than the marker it would land over it, and under
+		// the marker's name it would fail the whole batch.
+		if memsync.ShadowsMarker(p) {
+			memsync.WarnShadowedMemory(ctx, sid.String(), m.MemoryStoreID, p)
 			continue
 		}
 		writes = append(writes, sandbox.FileWrite{Path: m.MountPath + p, Data: []byte(content), Mode: memoryFileMode})
@@ -217,16 +218,6 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, m m
 		return memoryOutcomeFailed, err
 	}
 	return memoryOutcomeOK, nil
-}
-
-// warnMarkerMemory logs a store's memory at the marker's path, which the API
-// accepts as the reference does (#669) and no mount ever holds — the
-// reference worker's own warning when its listing carries one (checked
-// against anthropic-sdk-go v1.70.1 — memories.go
-// SessionMemoryStores.listMemories).
-func warnMarkerMemory(ctx context.Context, storeID, p string) {
-	slog.WarnContext(ctx, "the store holds a memory at the reserved marker path; skipping",
-		"path", p, "memory_store_id", storeID)
 }
 
 // memorySync is one sync of a session's stores, carried across its three
@@ -468,11 +459,12 @@ func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st
 			return err
 		}
 		// Counted toward the cap, but never planned: a pull would land it
-		// over the marker, and once in the baseline its absence from the
-		// directory would read as a local deletion.
+		// over the marker or fail the batch under it, and once in the
+		// baseline its absence from the directory would read as a local
+		// deletion.
 		held++
-		if memsync.IsMarkerPath(p) {
-			warnMarkerMemory(ctx, id, p)
+		if memsync.ShadowsMarker(p) {
+			memsync.WarnShadowedMemory(ctx, sid.String(), id, p)
 			continue
 		}
 		remote[p] = head

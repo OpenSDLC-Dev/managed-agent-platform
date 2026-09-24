@@ -894,59 +894,71 @@ func TestMemorySyncReportsProgressWithinTheStore(t *testing.T) {
 	}
 }
 
-// TestMemoryAtTheMarkerPathIsSkipped: the server may list a memory at
-// `/.anthropic-memory-store` — the reference's does (#669) — and the worker
-// skips it the way the reference worker's listing does, whether the store
-// holds it when it lands or gains it later: the marker keeps its bytes, the
-// baseline never names the path, the store stays writable, and the memory is
-// left alone in the store, never pulled and never read as a local deletion.
-func TestMemoryAtTheMarkerPathIsSkipped(t *testing.T) {
+// TestMemoryShadowingTheMarkerIsSkipped: the server may list a memory at
+// `/.anthropic-memory-store` — the reference's does (#669) — or under it, and
+// the worker skips both: the first the way the reference worker's listing
+// does, the second because it needs a directory where the marker file is,
+// which fails every batch it rides in. Whether the store holds it when it
+// lands or gains it later, the marker keeps its bytes, the baseline never
+// names the path, the store's other changes still land, the store stays
+// writable, and the memory is left alone in the store — never pulled and
+// never read as a local deletion.
+func TestMemoryShadowingTheMarkerIsSkipped(t *testing.T) {
 	const markerMemory = "/.anthropic-memory-store"
-	check := func(t *testing.T, h *harness, sb *fakeSandbox, token string) {
-		t.Helper()
-		if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
-			t.Errorf("marker = %q; a memory was written over it", got)
+	for name, shadow := range map[string]string{
+		"at the marker's path":    markerMemory,
+		"under the marker's path": markerMemory + "/x.md",
+	} {
+		check := func(t *testing.T, h *harness, sb *fakeSandbox, token string) {
+			t.Helper()
+			if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+				t.Errorf("marker = %q; a memory was written over it", got)
+			}
+			if _, ok := h.baseline(t, memStoreID).Synced[shadow]; ok {
+				t.Errorf("the baseline names %s: %+v", shadow, h.baseline(t, memStoreID))
+			}
+			h.rewriteMemory(t, memStoreID, "/facts/a.md", "alpha two")
+			sb.files[memMount+"/new.md"] = "fresh"
+			h.runWith(t, token)
+			if got := sb.files[memMount+"/facts/a.md"]; got != "alpha two" {
+				t.Errorf("/facts/a.md = %q; the store's other changes did not land", got)
+			}
+			if got, _ := h.memoryContent(t, memStoreID, "/new.md"); got != "fresh" {
+				t.Errorf("/new.md in the store = %q; the store went pull-only", got)
+			}
+			h.runWith(t, token)
+			if got, ok := h.memoryContent(t, memStoreID, shadow); !ok || got != "m" {
+				t.Errorf("%s in the store = %q, %v; want it left alone", shadow, got, ok)
+			}
+			if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+				t.Errorf("marker after the syncs = %q", got)
+			}
 		}
-		if _, ok := h.baseline(t, memStoreID).Synced[markerMemory]; ok {
-			t.Errorf("the baseline names the marker's path: %+v", h.baseline(t, memStoreID))
-		}
-		sb.files[memMount+"/new.md"] = "fresh"
-		h.runWith(t, token)
-		if got, _ := h.memoryContent(t, memStoreID, "/new.md"); got != "fresh" {
-			t.Errorf("/new.md in the store = %q; the store went pull-only", got)
-		}
-		h.runWith(t, token)
-		if got, ok := h.memoryContent(t, memStoreID, markerMemory); !ok || got != "m" {
-			t.Errorf("the memory at the marker's path = %q, %v; want it left alone in the store", got, ok)
-		}
-		if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
-			t.Errorf("marker after the syncs = %q", got)
-		}
+		t.Run(name+", held when the store lands", func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
+			h.seedMemory(t, memStoreID, shadow, "m")
+			h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+			token := h.sessionsToken(t)
+			h.runWith(t, token)
+			if got := sb.files[memMount+"/facts/a.md"]; got != "alpha" {
+				t.Errorf("/facts/a.md = %q", got)
+			}
+			check(t, h, sb, token)
+		})
+		t.Run(name+", created after the store landed", func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
+			h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+			token := h.sessionsToken(t)
+			h.runWith(t, token)
+			h.seedMemory(t, memStoreID, shadow, "m")
+			h.runWith(t, token)
+			check(t, h, sb, token)
+		})
 	}
-	t.Run("held when the store lands", func(t *testing.T) {
-		sb := &fakeSandbox{}
-		h := newHarness(t, sb)
-		h.seedMemoryStore(t, memStoreID, "Notes")
-		h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
-		h.seedMemory(t, memStoreID, markerMemory, "m")
-		h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
-		token := h.sessionsToken(t)
-		h.runWith(t, token)
-		if got := sb.files[memMount+"/facts/a.md"]; got != "alpha" {
-			t.Errorf("/facts/a.md = %q", got)
-		}
-		check(t, h, sb, token)
-	})
-	t.Run("created after the store landed", func(t *testing.T) {
-		sb := &fakeSandbox{}
-		h := newHarness(t, sb)
-		h.seedMemoryStore(t, memStoreID, "Notes")
-		h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
-		h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
-		token := h.sessionsToken(t)
-		h.runWith(t, token)
-		h.seedMemory(t, memStoreID, markerMemory, "m")
-		h.runWith(t, token)
-		check(t, h, sb, token)
-	})
 }
