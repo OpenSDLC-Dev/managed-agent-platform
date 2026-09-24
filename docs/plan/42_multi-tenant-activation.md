@@ -1784,7 +1784,7 @@ gate (`:130`) kept only for the missing-session 404, not for scope. · The by-id
 the clause before any lock suffix — including the ones a bulk count hides: **the events and SSE
 lane's entire scope gate is `sessionExists`** (`internal/api/events.go:1158`, statement `:1160`,
 `SELECT 1 FROM sessions WHERE id = $1`), which resolves the 404 for both the events list and the
-stream by bare id; `sessionSelfHosted` (`:1171`, statement `:1173-1174`) is the second such read
+stream by bare id; `sessionView` (`:1171`, statement `:1173-1174`) is the second such read
 and the append path's locked read (`:77-81`) the third; and in `threads.go`, `loadThread`
 (`:180`, statement `:181`) and `liveChildThreads` (`:450`, statement `:451`, `FOR UPDATE OF t`)
 are two more join-based reads that predicate nothing on the joined `sessions` row. The broker itself is sound —

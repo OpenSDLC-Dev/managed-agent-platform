@@ -169,8 +169,8 @@ func coordinatorTeam() Task {
 			// Platform, premised on those same two spawns — spawnedAgent is
 			// SpawnedAgent's condition over the same finder, so the pair can
 			// never disagree about whether the spawn happened. What is left is
-			// the platform's alone: a spawn the model asked for must leave a
-			// live child thread running that agent under the primary. No other
+			// the platform's alone: the threads route must list a child of the
+			// primary for each agent the log says it spawned. No other
 			// trial in the suite makes this claim — the session ran more than
 			// one thread, and the threads route says which.
 			// One grader per name, each under its own premise. Pairing both names

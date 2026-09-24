@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worktoken"
 )
 
@@ -166,6 +167,7 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), ctxKeyEnvironment, principal.EnvironmentID)
 		ctx = context.WithValue(ctx, ctxKeyWorkSession, principal.SessionID)
+		ctx = context.WithValue(ctx, ctxKeyCredential, events.EnvironmentCredential)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

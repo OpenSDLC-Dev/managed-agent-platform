@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 // authenticateEnvironmentKey resolves a Bearer token to the environment it is
@@ -116,7 +118,8 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 			writeError(w, r, err)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyEnvironment, envID)))
+		ctx := context.WithValue(r.Context(), ctxKeyEnvironment, envID)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxKeyCredential, events.EnvironmentCredential)))
 	})
 }
 
@@ -125,4 +128,15 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 func environmentFrom(ctx context.Context) string {
 	e, _ := ctx.Value(ctxKeyEnvironment).(string)
 	return e
+}
+
+// credentialFrom returns the class of credential that signed the request:
+// EnvironmentCredential where one of the two lanes that admit a worker to its
+// session's events marked it (requireEnvironmentKeyForSession,
+// requireWorkToken), and the zero value, ManagementCredential, everywhere
+// else. It is its own value rather than read off environmentFrom, so a lane
+// that stores an environment for some other reason fails closed.
+func credentialFrom(ctx context.Context) events.Credential {
+	c, _ := ctx.Value(ctxKeyCredential).(events.Credential)
+	return c
 }

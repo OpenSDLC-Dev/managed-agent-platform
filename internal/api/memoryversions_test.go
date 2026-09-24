@@ -420,34 +420,50 @@ func TestMemoryVersionRedact(t *testing.T) {
 	}
 }
 
-// Decision 3's carve-out: an archived store refuses every write except a
-// redaction, and on an archived store even the head is redactable — nothing can
-// supersede it — which empties the memory so the bytes stop being served.
+// Decision 3's carve-out: an archived store refuses new content but admits a
+// redaction. The head rule is a content rule, not an archive rule, so it holds
+// there too — the reference refuses a head's redaction on an archived store
+// with the same 400 as on a live one, and the memory keeps serving its bytes
+// (the 2026-09-02 recording, #686).
 func TestMemoryVersionRedactOnAnArchivedStore(t *testing.T) {
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "archived-redaction")
 	created := createMemory(t, s, store, "/secret.md", "a passphrase")
-	id, head := created["id"].(string), created["memory_version_id"].(string)
+	id, older := created["id"].(string), created["memory_version_id"].(string)
+	status, updated := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
+		map[string]any{"content": "rewritten"})
+	if status != http.StatusOK {
+		t.Fatalf("update: status %d (%v)", status, updated)
+	}
+	head := updated["memory_version_id"].(string)
 	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: status %d (%v)", status, body)
 	}
 
-	status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memory_versions/"+head+"/redact", nil)
-	if status != http.StatusOK {
-		t.Fatalf("redacting the head of an archived store: status %d (%v)", status, body)
+	status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memory_versions/"+older+"/redact", nil)
+	if status != http.StatusOK || body["content"] != nil || body["redacted_at"] == nil {
+		t.Fatalf("redacting a superseded version on an archived store: status %d (%v)", status, body)
 	}
-	if body["content"] != nil || body["path"] != nil {
-		t.Errorf("the redacted head still carries content: %v", body)
+
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memory_versions/"+head+"/redact", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, got := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memory_versions/"+head, nil)
+	if status != http.StatusOK || got["redacted_at"] != nil || got["content"] != "rewritten" {
+		t.Errorf("the refused head redaction changed the version: status %d (%v)", status, got)
 	}
 	status, memory := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories/"+id, nil)
-	if status != http.StatusOK {
-		t.Fatalf("get the memory: status %d (%v)", status, memory)
+	if status != http.StatusOK || memory["content"] != "rewritten" || memory["content_sha256"] != digest("rewritten") {
+		t.Errorf("the memory after the refused head redaction: status %d (%v)", status, memory)
 	}
-	if memory["content"] != "" || memory["content_sha256"] != digest("") || memory["content_size_bytes"] != float64(0) {
-		t.Errorf("the memory was not emptied by the head's redaction: %v", memory)
+
+	// The way to its bytes is the memory's delete, which an archived store
+	// admits: the version then heads nothing, and redacts like any other.
+	if status, body := s.do(http.MethodDelete, "/v1/memory_stores/"+store+"/memories/"+id, nil); status != http.StatusOK {
+		t.Fatalf("delete on an archived store: status %d (%v)", status, body)
 	}
-	if memory["path"] != "/secret.md" {
-		t.Errorf("the memory's own path must survive: %v", memory["path"])
+	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memory_versions/"+head+"/redact", nil)
+	if status != http.StatusOK || body["content"] != nil || body["redacted_at"] == nil {
+		t.Fatalf("redacting the deleted memory's last version: status %d (%v)", status, body)
 	}
 }
 

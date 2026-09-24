@@ -131,8 +131,9 @@ func newMemoryStores(client sdk.Client, token, sessionID string, sb sandbox.Sand
 // roots hands the tool runner what the executor hands its own: every mount,
 // and the read_only ones as read-only roots. An archived store is not among
 // the latter here — the token reaches no store read, so the worker learns of
-// an archive only when the store refuses a write, and withholds the sync
-// then (settleStore); the reference worker holds the same position.
+// an archive only when the store refuses a create or an update, and withholds
+// the sync's pushes then (settleStore); a deletion is admitted by the store,
+// so it lands (#685). The reference worker holds the same position.
 func (m *memoryStores) roots() (all, readOnly []string) {
 	if m == nil {
 		return nil, nil
@@ -148,8 +149,18 @@ func (m *memoryStores) roots() (all, readOnly []string) {
 
 // listMemories pages a store's memories at the largest page the view allows,
 // prefix rollups skipped (none come without depth; the type is checked
-// rather than assumed), handing each to f.
-func (m *memoryStores) listMemories(ctx context.Context, storeID string, view sdk.BetaManagedAgentsMemoryView, f func(sdk.BetaManagedAgentsMemory)) error {
+// rather than assumed), handing each to f. A memory at or under the marker's
+// path (memsync.ShadowsMarker) is skipped with a warning, as the reference
+// worker's listing skips the path itself (checked against anthropic-sdk-go
+// v1.70.1 — memories.go SessionMemoryStores.listMemories): the routes accept
+// one (#669), and unskipped, materialize and the sync's pulls would land it
+// over the marker or fail their batch under it — or, once it was in the
+// baseline, read its absence from the directory as a local deletion.
+//
+// progress is reported once per row listed, before any row is skipped: a
+// skipped row still cost its page, and a store of them — up to 2,000,
+// a hundred sequential full-view pages — must not read as a stall.
+func (m *memoryStores) listMemories(ctx context.Context, storeID string, view sdk.BetaManagedAgentsMemoryView, progress func(), f func(sdk.BetaManagedAgentsMemory)) error {
 	limit := int64(memoryListPageSize)
 	if view == sdk.BetaManagedAgentsMemoryViewFull {
 		limit = memoryFullListPageSize
@@ -157,8 +168,13 @@ func (m *memoryStores) listMemories(ctx context.Context, storeID string, view sd
 	pager := m.client.Beta.MemoryStores.Memories.ListAutoPaging(ctx, storeID,
 		sdk.BetaMemoryStoreMemoryListParams{View: view, Limit: param.NewOpt(limit)}, m.opts...)
 	for pager.Next() {
+		progress()
 		item := pager.Current()
 		if item.Type != "memory" {
+			continue
+		}
+		if memsync.ShadowsMarker(item.Path) {
+			memsync.WarnShadowedMemory(ctx, m.sessionID, storeID, item.Path)
 			continue
 		}
 		f(item.AsMemory())
@@ -243,10 +259,9 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	// the directory and the store agree on every one of them.
 	writes := []sandbox.FileWrite{{Path: marker, Data: want}}
 	baseline := memsync.Baseline{Synced: map[string]string{}}
-	err = m.listMemories(ctx, ref.MemoryStoreID, sdk.BetaManagedAgentsMemoryViewFull, func(mem sdk.BetaManagedAgentsMemory) {
+	err = m.listMemories(ctx, ref.MemoryStoreID, sdk.BetaManagedAgentsMemoryViewFull, progress, func(mem sdk.BetaManagedAgentsMemory) {
 		writes = append(writes, sandbox.FileWrite{Path: ref.MountPath + mem.Path, Data: []byte(mem.Content), Mode: memoryFileMode})
 		baseline.Synced[mem.Path] = mem.ContentSha256
-		progress()
 	})
 	if isStatus(err, 404) {
 		// The store is gone, or this session no longer attaches it: the
@@ -412,9 +427,8 @@ func (m *memoryStores) flushStore(ctx context.Context, st *storeSync, progress f
 		return
 	}
 	remote := map[string]memsync.Head{}
-	if err := m.listMemories(ctx, id, sdk.BetaManagedAgentsMemoryViewBasic, func(mem sdk.BetaManagedAgentsMemory) {
+	if err := m.listMemories(ctx, id, sdk.BetaManagedAgentsMemoryViewBasic, progress, func(mem sdk.BetaManagedAgentsMemory) {
 		remote[mem.Path] = memsync.Head{ID: mem.ID, SHA: mem.ContentSha256}
-		progress()
 	}); err != nil {
 		slog.WarnContext(ctx, "memory not flushed: the store's heads could not be listed",
 			"session_id", m.sessionID, "memory_store_id", id, "err", err)
@@ -579,9 +593,8 @@ func sha256hex(data []byte) string {
 func (m *memoryStores) settleStore(ctx context.Context, st *storeSync, progress func()) (bool, error) {
 	id := st.ref.MemoryStoreID
 	remote := map[string]memsync.Head{}
-	err := m.listMemories(ctx, id, sdk.BetaManagedAgentsMemoryViewBasic, func(mem sdk.BetaManagedAgentsMemory) {
+	err := m.listMemories(ctx, id, sdk.BetaManagedAgentsMemoryViewBasic, progress, func(mem sdk.BetaManagedAgentsMemory) {
 		remote[mem.Path] = memsync.Head{ID: mem.ID, SHA: mem.ContentSha256}
-		progress()
 	})
 	if isStatus(err, 404) {
 		slog.InfoContext(ctx, "memory store not synced: the store no longer exists",
@@ -653,6 +666,11 @@ func (m *memoryStores) settleStore(ctx context.Context, st *storeSync, progress 
 			st.removals = append(st.removals, act.Path)
 			st.counts.deleted++
 		case memsync.DeleteRemote:
+			// Both archived arms of a delete serve a control plane older than
+			// #685's, which refused a delete on an archived store with the
+			// store's 400. A current one admits it, so neither fires there;
+			// they stay because a customer-hosted worker can run against an
+			// older control plane.
 			if st.archived {
 				st.next.Synced[act.Path] = act.BaselineSHA
 				st.counts.withheld++

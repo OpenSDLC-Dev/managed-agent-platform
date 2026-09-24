@@ -480,6 +480,35 @@ const (
 	maxAgentMCPServers = 20
 )
 
+// The agent create and update params' string bounds, which live in the spec's
+// maxLength and nowhere in the generated Go doc comments (checked against
+// anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsCreateAgentParams.properties and checked
+// against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsUpdateAgentParams.properties). They bind
+// the value a request supplies and never a stored one, because the spec puts
+// them on the request params: an agent stored over one before #665 enforced it
+// keeps resolving — at session create, in a roster, at a deployment fire,
+// under a session patch — and an update that does not resend the field lands.
+// Counted in runes. Recorded 2026-09-02 for system on agent create: 100,001
+// ASCII characters refused with 400 invalid_request_error, 100,000 "é" (200,000
+// bytes) accepted, which rules out bytes. Code points rather than UTF-16 units
+// is the session override's recorded unit, assumed here; update, name and
+// description were never probed. The messages are ours (#665).
+const (
+	maxAgentNameRunes        = 256
+	maxAgentDescriptionRunes = 2048
+	maxAgentSystemRunes      = 100_000
+)
+
+// capRunes refuses a request-supplied string of more than limit code points.
+func capRunes(key, val string, limit int) error {
+	if utf8.RuneCountInString(val) > limit {
+		return errInvalid("%s cannot exceed %d characters", key, limit)
+	}
+	return nil
+}
+
 // validateAgentSpec enforces the caps and cross-checks that need the whole
 // spec rather than one entry: the tools and mcp_servers caps, server-name
 // uniqueness, every server referenced by an mcp_toolset, and tool names

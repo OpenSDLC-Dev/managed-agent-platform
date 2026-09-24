@@ -79,6 +79,13 @@ var reservedRepoMounts = map[string]bool{"/": true, "/tmp": true, memoryMountPar
 // mount is refused at or below it, so the parent is the stores' alone.
 const memoryMountParent = "/mnt/memory"
 
+// memoryMountNameMax is NAME_MAX, the longest name a Linux directory entry
+// takes: a store mounted under a longer one fails every write the executor or
+// worker makes there. A store's own slug never exceeds it — a name is at most
+// memoryStoreNameMax characters, each slugging to at most one byte, and the id
+// fallback is 33 bytes — so only a collision suffix has to be held to it.
+const memoryMountNameMax = 255
+
 // maxMemoryStoresPerSession is the memory guide's documented cap ("8 stores
 // per session"); the status of the ninth is INFERRED (plan 36 decision 7).
 const maxMemoryStoresPerSession = 8
@@ -143,14 +150,16 @@ type checkoutJSON struct {
 // name, description and mount_path are snapshotted from the store row inside
 // the create transaction ("Later edits to the store's name do not propagate");
 // access renders the documented default "read_write" when the request omitted
-// it (whether the reference echoes the string or null is INFERRED);
-// instructions renders null when omitted. Stored verbatim as one element of
-// sessions.resources, so the brain, executor and worker decoders — which pick
-// elements by type — pass it over until slice 4 teaches them the mount.
+// it, and instructions is present only when the request supplied it — both as
+// the reference was recorded answering (#666; an element stored before that
+// keeps the "instructions": null it was written with). Stored verbatim as one
+// element of sessions.resources, so the brain, executor and worker decoders —
+// which pick elements by type — pass it over until slice 4 teaches them the
+// mount.
 type memoryResourceJSON struct {
 	Access        string  `json:"access"`
 	Description   string  `json:"description"`
-	Instructions  *string `json:"instructions"`
+	Instructions  *string `json:"instructions,omitempty"`
 	MemoryStoreID string  `json:"memory_store_id"`
 	MountPath     string  `json:"mount_path"`
 	Name          string  `json:"name"`
@@ -337,7 +346,7 @@ func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
 // v1.70.1 — spec components.schemas.BetaManagedAgentsMemoryStoreResourceParam).
 // The id is checked on shape here and against the store row in the create
 // transaction; an explicit null for access is the omitted case — the documented
-// default, "read_write" — and for instructions the stored null. The SDK never
+// default, "read_write" — and for instructions the omitted key. The SDK never
 // transmits an empty access (omitzero), so "" is refused with every other value
 // outside the enum rather than read as the default.
 func parseMemoryResource(obj map[string]json.RawMessage) (resourceInput, error) {
@@ -670,11 +679,14 @@ func sealRepoTokens(ctx context.Context, cipher secrets.Cipher, inputs []resourc
 // Repositories render token-free (plan 25 decision 2); their fresh sesrsc_
 // ids come back in input order for the caller to bind to the pre-sealed
 // ciphertexts (sealRepoTokens walks the same inputs in the same order) once
-// the session row exists — the credential rows FK the session.
+// the session row exists — the credential rows FK the session. Memory stores
+// whose slugs collide all attach (#671, suffixCollidingMemoryMounts), so their
+// elements are marshaled only once every store's mount is settled.
 func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time) ([]json.RawMessage, []string, error) {
 	out := make([]json.RawMessage, 0, len(inputs))
 	var repoIDs []string
-	memoryMounts := map[string]string{}
+	var stores []memoryResourceJSON
+	var storeAt []int
 	for _, in := range inputs {
 		switch in.kind {
 		case resourceKindMemory:
@@ -682,12 +694,9 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			if err != nil {
 				return nil, nil, err
 			}
-			// Two stores whose names slug alike would mount over each other.
-			if prev, taken := memoryMounts[el.MountPath]; taken {
-				return nil, nil, errInvalid("memory stores %s and %s both mount at %s", prev, in.memoryStoreID, el.MountPath)
-			}
-			memoryMounts[el.MountPath] = in.memoryStoreID
-			out = append(out, mustJSON(el))
+			stores = append(stores, el)
+			storeAt = append(storeAt, len(out))
+			out = append(out, nil)
 		case resourceKindRepo:
 			id := domain.NewID(domain.PrefixResource).String()
 			out = append(out, mustJSON(repoResourceJSON{
@@ -707,17 +716,62 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			}))
 		}
 	}
+	suffixCollidingMemoryMounts(stores)
+	for i, el := range stores {
+		out[storeAt[i]] = mustJSON(el)
+	}
 	return out, repoIDs, nil
+}
+
+// suffixCollidingMemoryMounts makes the stores' mounts distinct (#671). The
+// reference was recorded giving the later of two stores that slug alike the
+// suffix -2; the rest is ours. It runs in two passes, so a suffix never
+// displaces a store whose own name slugs to it: every store first claims its
+// own slug — among identical ones the first in input order wins — and each
+// that lost then takes the first of slug-2, slug-3, … nothing has claimed. A
+// candidate past memoryMountNameMax is built from the slug cut short enough for
+// its suffix, a hyphen the cut leaves at the end dropped, and is checked like
+// any other.
+func suffixCollidingMemoryMounts(stores []memoryResourceJSON) {
+	claimed := make(map[string]bool, len(stores))
+	var lost []int
+	for i, el := range stores {
+		if claimed[el.MountPath] {
+			lost = append(lost, i)
+			continue
+		}
+		claimed[el.MountPath] = true
+	}
+	for _, i := range lost {
+		slug := strings.TrimPrefix(stores[i].MountPath, memoryMountParent+"/")
+		for n := 2; ; n++ {
+			suffix := "-" + strconv.Itoa(n)
+			stem := slug
+			if len(stem)+len(suffix) > memoryMountNameMax {
+				stem = strings.TrimSuffix(stem[:memoryMountNameMax-len(suffix)], "-")
+			}
+			if mount := memoryMountParent + "/" + stem + suffix; !claimed[mount] {
+				claimed[mount] = true
+				stores[i].MountPath = mount
+				break
+			}
+		}
+	}
 }
 
 // snapshotMemoryStore turns a validated memory element into its stored form
 // from the store row, read FOR SHARE so a concurrent archive or delete cannot
 // slip in between this check and the session INSERT (the environment row's
-// precedent in createSessionInTx). An unknown or archived store fails the create
-// with a 400, the vault_ids precedent (validateAttachedVaults) rather than the
-// file's 404 — statuses INFERRED, plan 36 decision 7. The mount path is
-// memoryMountParent + "/" + the slug of the snapshotted name (decision 8),
-// falling back to the store id's token for a name with no alphanumerics.
+// precedent in createSessionInTx). An archived store fails the create with a
+// 400, as the reference was recorded answering; an unknown one with a 404
+// (#668), inferred from the reference's 404s for absent ids elsewhere — its
+// one recorded attach of an unknown store used a malformed id — and the 404
+// GET /v1/memory_stores/{id} gives an unknown id here.
+// The mount path is memoryMountParent + "/" + the slug of the snapshotted name
+// (decision 8), falling back to the slug of the whole store id —
+// memstore-<token>, lowercased, as recorded (#671) — for a name with no
+// alphanumerics. It is the store's own slug: suffixCollidingMemoryMounts
+// suffixes it when another store in the same create keeps it.
 func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (memoryResourceJSON, error) {
 	var name, description string
 	var archivedAt *time.Time
@@ -728,7 +782,7 @@ func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (mem
 		// A missing store is §5.2's "other resource gone" arm; only an
 		// archived one has a type of its own.
 		return memoryResourceJSON{}, classified("session_resource_not_found_error",
-			errInvalid("memory store %s not found", in.memoryStoreID))
+			errNotFound("memory store %s not found", in.memoryStoreID))
 	}
 	if err != nil {
 		return memoryResourceJSON{}, err
@@ -737,7 +791,7 @@ func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (mem
 		return memoryResourceJSON{}, classified("memory_store_archived_error",
 			errInvalid("memory store %s is archived", in.memoryStoreID))
 	}
-	slug := memsync.Slug(name, strings.TrimPrefix(in.memoryStoreID, domain.PrefixMemoryStore+"_"))
+	slug := memsync.Slug(name, memsync.Slug(in.memoryStoreID, ""))
 	return memoryResourceJSON{
 		Access: in.access, Description: description, Instructions: in.instructions,
 		MemoryStoreID: in.memoryStoreID, MountPath: memoryMountParent + "/" + slug,

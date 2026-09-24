@@ -444,6 +444,13 @@ type ListQuery struct {
 	// and answer, and the only ones it can ever see (plan 35 decision 13 i).
 	// Read only under ScopeSession; the other scopes already carry them.
 	ThreadToolCalls bool
+	// HideTools names agent.tool_use calls a surface omits, together with the
+	// agent.tool_result answering each, under any scope. The key is the call's
+	// type and name alone, never its evaluated_permission or the answer's
+	// is_error; which names, on which sessions, is the caller's to decide
+	// (internal/api's eventsView, #675). The rows stay in the log, and a
+	// thread's replay, which never sets this, reads them.
+	HideTools []string
 }
 
 // threadToolCallTypes are the child-thread rows a self_hosted session's view
@@ -492,6 +499,18 @@ func (l *Log) List(ctx context.Context, sessionID domain.ID, q ListQuery) ([]dom
 		} else {
 			add("thread_id = ", q.ThreadID.String())
 		}
+	}
+	if len(q.HideTools) > 0 {
+		// Here rather than over the result, so a limit counts the rows a
+		// surface shows. A result names only its tool_use_id, so the call's
+		// name is read through the primary key; inside that subquery the
+		// alias hides the inner table's name, so `events` is the outer row.
+		args = append(args, q.HideTools)
+		n := "$" + strconv.Itoa(len(args))
+		sb.WriteString(` AND NOT (type = 'agent.tool_use' AND COALESCE(payload->>'name', '') = ANY(` + n + `))` +
+			` AND NOT (type = 'agent.tool_result' AND EXISTS (SELECT 1 FROM events tu` +
+			` WHERE tu.id = events.payload->>'tool_use_id' AND tu.session_id = events.session_id` +
+			` AND tu.type = 'agent.tool_use' AND tu.payload->>'name' = ANY(` + n + `)))`)
 	}
 	if len(q.Types) > 0 {
 		add("type = ANY(", q.Types)
