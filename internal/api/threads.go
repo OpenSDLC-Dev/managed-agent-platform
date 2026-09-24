@@ -524,17 +524,25 @@ func (s *server) streamThreadEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveThreadEvents settles a thread events request for the two handlers
-// above: the thread's own 404, then the self_hosted widening — which only the
-// primary can take, a child's surface being its own rows rather than the
-// session view the rule widens (plan 35 decision 13 i).
-func (s *server) resolveThreadEvents(sessionID, threadID string, scope events.ListQuery) func(context.Context) (bool, error) {
-	return func(ctx context.Context) (bool, error) {
-		if _, err := loadThread(ctx, s.pool, sessionID, threadID, false); err != nil {
-			return false, err
+// above: the thread's own 404, then its view. The primary's is the session's.
+// A child's is never widened, its surface being its own rows rather than the
+// session view the rule widens (plan 35 decision 13 i), and its filter is read
+// off the snapshot the thread row was loaded with: a child is only ever
+// spawned from a roster, but the row is at hand, so it is read, not assumed.
+func (s *server) resolveThreadEvents(sessionID, threadID string, scope events.ListQuery) func(context.Context) (eventsView, error) {
+	return func(ctx context.Context) (eventsView, error) {
+		row, err := loadThread(ctx, s.pool, sessionID, threadID, false)
+		if err != nil {
+			return eventsView{}, err
 		}
 		if scope.Scope != events.ScopeSession {
-			return false, nil
+			var snap struct {
+				Multiagent json.RawMessage `json:"multiagent"`
+			}
+			// An unreadable snapshot is no roster, as hasRoster reads one.
+			_ = json.Unmarshal(row.resolvedAgent, &snap)
+			return eventsView{delegates: hasRoster(snap.Multiagent)}, nil
 		}
-		return s.sessionSelfHosted(ctx, sessionID)
+		return s.sessionView(ctx, sessionID)
 	}
 }

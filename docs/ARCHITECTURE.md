@@ -204,14 +204,17 @@ thread is offered `create_agent` / `send_to_agent` / `list_agents` / `wait_for_a
 every child `submit_result` / `send_to_parent`, and the transaction that commits the turn
 calling one also does what it asked and answers it there — inserting a thread row, writing
 the `agent.thread_message_sent`/`_received` pair the agents talk through, enqueueing
-whatever turn follows. The session's skills are the roster's union, the coordinator's
-references first and each member's after, deduplicated by skill id. On a `self_hosted`
-session the session-level list and stream additionally carry every child thread's
-`agent.tool_use` and the results answering it, which is how the thread-unaware BYOC worker
-sees calls it must run on a thread it knows nothing about. A single-agent session is the
-one-thread case of the same machinery and its wire is unchanged. What is inferred versus
-documented is in [DIVERGENCES.md](./DIVERGENCES.md) ("Session status as a fold over
-threads", "Coordinator delegation", "The `self_hosted` session view").
+whatever turn follows. The call and its answer stay on the calling thread's log, where
+its replay reads them, but no events list or stream renders either, as none of the
+reference's recorded lists does. The session's skills are the roster's union, the
+coordinator's references first and each member's after, deduplicated by skill id. On a
+`self_hosted` session the session-level list and stream additionally carry every child
+thread's `agent.tool_use` but a delegation call, and the results answering it, which is
+how the thread-unaware BYOC worker sees calls it must run on a thread it knows nothing
+about. A single-agent session is the one-thread case of the same machinery and its wire
+is unchanged. What is inferred versus documented is in [DIVERGENCES.md](./DIVERGENCES.md)
+("Session status as a fold over threads", "Coordinator delegation", "The `self_hosted`
+session view").
 
 **Crash recovery is replay.** Sessions are never bound to a brain: any brain can pick up
 any session's next turn from the log. A sandbox container dying surfaces as one
