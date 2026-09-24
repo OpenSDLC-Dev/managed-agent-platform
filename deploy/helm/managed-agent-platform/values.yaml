@@ -409,7 +409,7 @@ minio:
   # internal/blob/blobtest carries the evidence. It keeps the MINIO_ROOT_*
   # variables and /minio/health/* routes this chart's StatefulSet uses. An
   # air-gapped operator mirroring this image pulls it from Docker Hub.
-  image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+  image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
   # -- REQUIRED when minio.enabled: the chart does NOT auto-generate credentials,
   # for the same GitOps-render-stability reason as postgresql.password. MinIO
   # requires a rootPassword of at least 8 characters.

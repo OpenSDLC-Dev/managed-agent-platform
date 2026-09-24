@@ -30,8 +30,8 @@ the Terraform:
 
 ## The two modes
 
-**Mode 1** runs the chart's bundled Postgres, MinIO and OpenBao as StatefulSets in the
-cluster. It is the fastest way to see the platform work and is what
+**Mode 1** runs the chart's bundled Postgres, object store (PGSTY Silo, a MinIO fork) and
+OpenBao as StatefulSets in the cluster. It is the fastest way to see the platform work and is what
 `terraform output -raw helm_values_mode1` produces. It is not what to run in production, and
 its PersistentVolumes are the thing the teardown section warns about.
 

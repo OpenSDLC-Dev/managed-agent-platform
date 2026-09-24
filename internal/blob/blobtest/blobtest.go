@@ -1,6 +1,7 @@
 // Package blobtest is test support for the blob.Store seam: it starts one
-// Dockerized MinIO per test binary and hands out per-test targets (endpoint,
-// credentials, fresh bucket name) for backends to construct stores against.
+// Dockerized Silo (a MinIO fork, see Image) per test binary and hands out
+// per-test targets (endpoint, credentials, fresh bucket name) for backends to
+// construct stores against.
 // Production code must never import it. A missing Docker daemon is a hard
 // failure, not a skip: skipped contract tests would silently hollow out the
 // coverage gate (the pgtest rule).
@@ -22,24 +23,28 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// Image is the pinned object store the harness runs — the same release
+// Image is the pinned object store the harness runs — the same image
 // deploy/compose and the helm chart default to, so the contract tests exercise
-// what ships.
+// what ships; pins_test.go fails when one of the three moves without the
+// others.
 //
 // It is PGSTY Silo, a maintained fork of the MinIO server, not MinIO itself,
 // and every one of those three pins changed for the same reason: MinIO took
 // its community images off both registries it had published them to. Docker
-// Hub stopped serving the `minio` namespace on 2026-09-12 (#701), and quay.io,
+// Hub stopped serving the `minio` namespace between 2026-09-11 and 2026-09-12
+// (#701), and quay.io,
 // which the pins moved to then, began refusing `minio/minio` with a 401 on
 // 2026-09-24 (#799) — each time a hard failure on any machine without the
 // image already cached. Silo keeps the server's wire and operator surface,
 // which is what the three pins depend on: the S3 API, the MINIO_ROOT_*
 // variables, the /minio/health/* routes, `server /data` as the container's
-// arguments, and `mc` in the image.
-const Image = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
+// arguments, and `mc` in the image. The digest pins the bytes as well as the
+// release: the image comes from one third-party publisher, and a re-pushed
+// tag would otherwise change the server every fresh machine pulls, unnoticed.
+const Image = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46"
 
-// Root credentials for the throwaway container (MinIO requires a password of
-// at least 8 characters).
+// Root credentials for the throwaway container (the server requires a password
+// of at least 8 characters).
 const (
 	RootUser     = "blobtest"
 	RootPassword = "blobtest-secret"
@@ -66,7 +71,7 @@ type Target struct {
 // readyTimeout, whose rule this follows).
 const readyTimeout = 150 * time.Second
 
-// Main wraps testing.M: it starts the shared MinIO container, runs the suite,
+// Main wraps testing.M: it starts the shared Silo container, runs the suite,
 // and tears the container down. Use from TestMain: os.Exit(blobtest.Main(m)).
 // The start is attempted twice, with a fresh container in between (#265; the
 // retry's rationale is on pgtest.Main, whose rule this follows). It opens by
@@ -86,7 +91,7 @@ func Main(m *testing.M) int {
 	return m.Run()
 }
 
-// startReady runs one MinIO container, waits for its object layer to serve
+// startReady runs one Silo container, waits for its object layer to serve
 // S3, and sets endpoint. On failure the container is removed and the error
 // carries its state and last log lines — the only forensics a dead start
 // leaves.
@@ -103,7 +108,7 @@ func startReady() (string, error) {
 		if errors.As(err, &exitErr) {
 			err = fmt.Errorf("%w: %s", err, exitErr.Stderr)
 		}
-		return "", fmt.Errorf("contract tests require Docker for MinIO: %w", err)
+		return "", fmt.Errorf("contract tests require Docker for Silo: %w", err)
 	}
 	containerID := strings.TrimSpace(string(out))
 	if containerID == "" {
@@ -112,20 +117,20 @@ func startReady() (string, error) {
 	port, err := hostPort(containerID)
 	if err != nil {
 		removeContainer(containerID)
-		return "", fmt.Errorf("resolve minio port: %w", err)
+		return "", fmt.Errorf("resolve silo port: %w", err)
 	}
 	candidate := "127.0.0.1:" + port
 	if err := waitReady(candidate, containerID, readyTimeout); err != nil {
 		diag := containerDiag(containerID)
 		removeContainer(containerID)
-		return "", fmt.Errorf("minio never became ready: %v (%s)", err, diag)
+		return "", fmt.Errorf("silo never became ready: %v (%s)", err, diag)
 	}
 	endpoint = candidate
 	return containerID, nil
 }
 
 // removeContainer force-removes with -v to reap the anonymous volume the
-// MinIO image declares (VOLUME /data, which `server /data` writes to) — the
+// Silo image declares (VOLUME /data, which `server /data` writes to) — the
 // container runs without --rm so a crash leaves evidence for containerDiag,
 // making removal wholly this function's job (the pgtest rule, where the full
 // rationale and the timeout's reason live). A failed removal is reported
@@ -181,7 +186,9 @@ func hostPort(containerID string) (string, error) {
 // alongside the 200. A suite admitted in that window fails its first call with
 // "Server not initialized yet, please try again", instantly — minio-go retries
 // that 503 on the bucket HEAD but not on the bucket-location lookup that
-// precedes it, which is the request s3.New actually died on (#208).
+// precedes it, which is the request s3.New actually died on (#208). That was
+// measured on MinIO; Silo's binary still carries both the header and the
+// error, and this gate holds whichever server answers.
 //
 // So gate on the call the suite itself makes, against a bucket name no test
 // uses. The client is built the way a backend under test builds it — no region

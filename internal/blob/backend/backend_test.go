@@ -12,9 +12,10 @@ import (
 )
 
 // The happy paths that need a live service are deliberately absent. The s3 arm's
-// is the blob/s3 suite's, against a real MinIO; the gcs arm's needs Application
-// Default Credentials and lives in the live tier (internal/blob/gcs). What is
-// here is everything the selector decides on its own.
+// is the blob/s3 suite's, against a real Silo (a MinIO fork); the gcs arm's
+// needs Application Default Credentials and lives in the live tier
+// (internal/blob/gcs). What is here is everything the selector decides on its
+// own.
 
 func TestUnconfiguredIsNoStore(t *testing.T) {
 	// Object storage is optional, and each binary decides what its absence
