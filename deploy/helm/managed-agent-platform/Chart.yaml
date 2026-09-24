@@ -3,9 +3,9 @@ name: managed-agent-platform
 description: >-
   Self-hostable platform for long-horizon agents — the control plane, the brain
   pool, and the platform executor (with the in-cluster Kubernetes sandbox
-  backend), plus optional in-cluster Postgres, MinIO and OpenBao and an optional
-  bundled Casdoor identity provider. Wire-compatible with Anthropic Claude
-  Managed Agents.
+  backend), plus optional in-cluster Postgres, object storage (PGSTY Silo, a
+  MinIO fork) and OpenBao and an optional bundled Casdoor identity provider.
+  Wire-compatible with Anthropic Claude Managed Agents.
 type: application
 # version is the chart version; appVersion is the default image tag (see values.yaml).
 version: 0.4.0
