@@ -834,32 +834,15 @@ func TestAgentArchiveCannotReadPastAConcurrentDeployment(t *testing.T) {
 		t.Fatalf("revive the deployment: %v", err)
 	}
 
-	// Its own client rather than s.do: a t.Fatalf from this goroutine would be
-	// the wrong kind of failure, and the transport error belongs on the channel.
-	done := make(chan int, 1)
-	go func() {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/agents/"+agentID+"/archive", nil)
-		if err != nil {
-			done <- 0
-			return
-		}
-		req.Header.Set("x-api-key", testKey)
-		res, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-		if err != nil {
-			done <- 0
-			return
-		}
-		_ = res.Body.Close()
-		done <- res.StatusCode
-	}()
+	done := s.sendAsync(http.MethodPost, "/v1/agents/"+agentID+"/archive", nil, map[string]string{"x-api-key": testKey})
 
 	waitUntilBlockedOnALock(t, s.pool, 0, done)
 
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the revived deployment: %v", err)
 	}
-	if status := <-done; status != http.StatusBadRequest {
-		t.Errorf("the archive answered %d, want 400 — it read the deployments before taking the agent lock", status)
+	if r := awaitReply(t, done); r.err != nil || r.code != http.StatusBadRequest {
+		t.Errorf("the archive answered %d (%v), want 400 — it read the deployments before taking the agent lock", r.code, r.err)
 	}
 }
 
@@ -876,7 +859,7 @@ func TestAgentArchiveCannotReadPastAConcurrentDeployment(t *testing.T) {
 // early, not the mechanism that catches a broken ordering — that is the
 // caller's assertion. 15s is generous by roughly fifty times: the archive's
 // wait was measured at under 300ms even under a verified 2.6x host slowdown.
-func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, blocker int, done <-chan int) int {
+func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, blocker int, done <-chan reply) int {
 	t.Helper()
 	// Its own deadline, so a pool that could not hand out a connection fails
 	// here rather than hanging until the package's timeout.
@@ -895,8 +878,8 @@ func waitUntilBlockedOnALock(t *testing.T, pool *pgxpool.Pool, blocker int, done
 			return waiter
 		}
 		select {
-		case status := <-done:
-			t.Fatalf("answered %d before ever waiting on a lock", status)
+		case r := <-done:
+			t.Fatalf("answered %d %s (%v) before ever waiting on a lock", r.code, r.body, r.err)
 		case <-time.After(20 * time.Millisecond):
 		}
 	}

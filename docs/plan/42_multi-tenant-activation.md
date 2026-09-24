@@ -1094,6 +1094,9 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
    (`0011_vaults.sql:20`), `session_gate_tokens` (`0012_session_gate_tokens.sql:12`),
    `session_resource_credentials` (`0020_session_resource_credentials.sql:14`), `mcp_catalogs`
    (`0023_mcp_catalogs.sql:35`) and `work_session_tokens` (`0030_work_session_tokens.sql:16`).
+   *Note (#643): `0043_work_session_tokens_unkeyed.sql` drops that table's key, so from then on
+   `work_session_tokens` is a logical child — `session_id` unkeyed, its rows deleted by a
+   trigger on `sessions` — which a walk that honours `DROP CONSTRAINT` does not find.*
    No predicate rule can reach any of them, because they hold no column to predicate on. What
    keeps their rows from crossing a workspace is the parent's read, and rule (g) below
    **checks** that rather than trusting it — for all eleven, from slice 2, with the statements a
@@ -1708,7 +1711,7 @@ statically: rule (g) checks that each unscoped child's parent is read under scop
 checks that the rows then land where the guard implies. A
 workspace-B credential reads its own `mcp_catalogs` (`0023:35-36`, `session_id` FK, no scope
 columns), its own `session_gate_tokens` (`0012:12-14`) and `work_session_tokens`
-(`0030:16-19`), and answers absent for A's. `memories`/`memory_versions` leave the
+(`0030:16-19`; unkeyed since 0043, §6.5), and answers absent for A's. `memories`/`memory_versions` leave the
 session-create fixture entirely — they hang off `memory_stores` (`0029:8-10`, `:35-37`), not off
 a session, so a session create writes neither; they are tested from a memory-store create. · A
 scheduled fire and a manual run in workspace B create a session in B, not `default` (via the

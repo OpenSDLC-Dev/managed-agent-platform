@@ -1555,15 +1555,8 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Its sessions tokens go with the row by migration 0043's trigger.
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
-		return nil, err
-	}
-	// The session's sessions tokens go by hand: they carry no foreign key to it
-	// (migration 0043, claimWork says why). After the DELETE above, not before:
-	// its cascade into work_items waits out any claim holding one of the
-	// session's items, so the token such a claim mints has committed by now and
-	// this statement, with a snapshot of its own, sees it.
-	if _, err := tx.Exec(ctx, `DELETE FROM work_session_tokens WHERE session_id = $1`, id); err != nil {
 		return nil, err
 	}
 	// The checkpoint marker row goes in the same transaction — it carries no

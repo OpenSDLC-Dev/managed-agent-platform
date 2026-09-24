@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -459,87 +457,50 @@ func TestSessionsTokenInsertFailureLeavesTheItemUnclaimed(t *testing.T) {
 // order the two can take their locks: the delete (the interrupt) holds the
 // session row and then needs the item, to cascade into it (to cancel it), and
 // the claim holds the item while it mints the session's token. Each order is
-// pinned, not raced for.
+// pinned by parking one side on an advisory lock, not raced for, and every
+// side is the real code: the handlers, and a raw DELETE FROM sessions — what
+// a replica still on the previous build, or any future path, does.
 //
-// Session first: the poll runs while a transaction holds the session row and
-// must hand the item out, token and all, without waiting for that row. The
-// holder is spelled out — requireNotRunning's lock, then the statement that
-// needs the item — because those are the ordering under test (#313's
-// precedent). Item first: a trigger parks the claim at its token insert, the
-// item already taken, while the real handler goes for the item; released, the
-// claim finishes and the handler after it, and a delete leaves none of the
-// session's tokens behind.
+// Session first: the holder parks with the session row held — the delete at
+// its tombstone, the interrupt at its event — and the poll must hand the item
+// out, token and all, without waiting for that row. Item first: the claim
+// parks at its token insert, the item already taken, while the holder goes
+// for the item; released, the claim finishes and the holder after it. A
+// delete leaves none of the session's tokens behind either way; item first is
+// the order where that depends on the cleanup running only after the cascade
+// into the item has waited the claim out.
 func TestPollDoesNotDeadlockAgainstTheSessionLock(t *testing.T) {
 	for _, h := range []struct {
 		name string
-		act  func(ctx context.Context, s *tserver, tx pgx.Tx, sessionID string) error
-		// The real handler: its method, its path under the session, its body.
-		method, path string
-		body         any
+		// parkAt is the table the holder inserts into while it holds the
+		// session row; "" runs no session-first case.
+		parkAt  string
+		deletes bool
+		start   func(s *tserver, sessionID string) <-chan reply
 	}{
-		{name: "delete", method: http.MethodDelete,
-			act: func(ctx context.Context, _ *tserver, tx pgx.Tx, sessionID string) error {
-				_, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sessionID)
-				return err
-			}},
-		{name: "interrupt", method: http.MethodPost, path: "/events",
-			body: map[string]any{"events": []any{map[string]any{"type": "user.interrupt"}}},
-			act: func(ctx context.Context, s *tserver, tx pgx.Tx, sessionID string) error {
-				return queue.New(s.pool).CancelSession(ctx, tx, domain.ID(sessionID))
-			}},
+		{"delete", "deleted_sessions", true, func(s *tserver, sessionID string) <-chan reply {
+			return s.sendAsync(http.MethodDelete, "/v1/sessions/"+sessionID, nil, map[string]string{"x-api-key": testKey})
+		}},
+		{"interrupt", "events", false, func(s *tserver, sessionID string) <-chan reply {
+			return s.sendAsync(http.MethodPost, "/v1/sessions/"+sessionID+"/events",
+				map[string]any{"events": []any{map[string]any{"type": "user.interrupt"}}}, map[string]string{"x-api-key": testKey})
+		}},
+		{"raw_delete", "", true, func(s *tserver, sessionID string) <-chan reply {
+			done := make(chan reply, 1)
+			go func() {
+				_, err := s.pool.Exec(context.Background(), `DELETE FROM sessions WHERE id = $1`, sessionID)
+				done <- reply{code: http.StatusOK, err: err}
+			}()
+			return done
+		}},
 	} {
-		t.Run(h.name+"/session_first", func(t *testing.T) {
-			s := newTestServer(t)
-			logs := captureWarnings(t)
-			ctx := context.Background()
-			envID, key, sessionID := waitingStoreSession(t, s)
-			tx, err := s.pool.Begin(ctx)
-			if err != nil {
-				t.Fatal(err)
+		check := func(t *testing.T, s *tserver, logs func() string, sessionID string, held, polled reply) {
+			t.Helper()
+			if held.err != nil || held.code != http.StatusOK {
+				t.Errorf("the %s = %d %s (%v)", h.name, held.code, held.body, held.err)
 			}
-			defer func() { _ = tx.Rollback(ctx) }()
-			if _, err := tx.Exec(ctx, `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, sessionID); err != nil {
-				t.Fatalf("hold the session row: %v", err)
-			}
-			polled, polledBody := s.sendAsync(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil, asBearer(key))
-			code := 0
-			select {
-			case code = <-polled:
-			case <-time.After(15 * time.Second):
-				t.Errorf("the poll waited for the session row the %s holds", h.name)
-			}
-			actErr := h.act(ctx, s, tx, sessionID)
-			if actErr == nil {
-				actErr = tx.Commit(ctx)
-			}
-			_ = tx.Rollback(ctx) // a failed act still holds its locks until its transaction ends
-			if code == 0 {
-				code = awaitStatus(t, polled)
-			}
-			if actErr != nil {
-				t.Errorf("the %s = %v", h.name, actErr)
-			}
-			wantItemWithToken(t, code, *polledBody)
-			if strings.Contains(logs(), "40P01") {
-				t.Errorf("aborted as a deadlock:\n%s", logs())
-			}
-		})
-
-		t.Run(h.name+"/item_first", func(t *testing.T) {
-			s := newTestServer(t)
-			logs := captureWarnings(t)
-			envID, key, sessionID := waitingStoreSession(t, s)
-			gate, release := parkTokenInsert(t, s)
-			polled, polledBody := s.sendAsync(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil, asBearer(key))
-			claim := waitUntilBlockedOnALock(t, s.pool, gate, polled)
-			held, heldBody := s.sendAsync(h.method, "/v1/sessions/"+sessionID+h.path, h.body, map[string]string{"x-api-key": testKey})
-			waitUntilBlockedOnALock(t, s.pool, claim, held)
-			release()
-			if code := awaitStatus(t, held); code != http.StatusOK {
-				t.Errorf("the %s = %d %s", h.name, code, *heldBody)
-			}
-			wantItemWithToken(t, awaitStatus(t, polled), *polledBody)
-			if h.name == "delete" {
+			wantItemWithToken(t, polled)
+			if h.deletes {
 				var left int
 				if err := s.pool.QueryRow(context.Background(),
 					`SELECT count(*) FROM work_session_tokens WHERE session_id = $1`, sessionID).Scan(&left); err != nil || left != 0 {
@@ -549,20 +510,59 @@ func TestPollDoesNotDeadlockAgainstTheSessionLock(t *testing.T) {
 			if strings.Contains(logs(), "40P01") {
 				t.Errorf("aborted as a deadlock:\n%s", logs())
 			}
+		}
+
+		if h.parkAt != "" {
+			t.Run(h.name+"/session_first", func(t *testing.T) {
+				s := newTestServer(t)
+				logs := captureWarnings(t)
+				envID, key, sessionID := waitingStoreSession(t, s)
+				gate, release := parkInsert(t, s, h.parkAt)
+				held := h.start(s, sessionID)
+				waitUntilBlockedOnALock(t, s.pool, gate, held)
+				polled := s.sendAsync(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil, asBearer(key))
+				var answer reply
+				answered := false
+				select {
+				case answer = <-polled:
+					answered = true
+				case <-time.After(15 * time.Second):
+					t.Errorf("the poll waited for the session row the %s holds", h.name)
+				}
+				release()
+				heldReply := awaitReply(t, held)
+				if !answered {
+					answer = awaitReply(t, polled)
+				}
+				check(t, s, logs, sessionID, heldReply, answer)
+			})
+		}
+
+		t.Run(h.name+"/item_first", func(t *testing.T) {
+			s := newTestServer(t)
+			logs := captureWarnings(t)
+			envID, key, sessionID := waitingStoreSession(t, s)
+			gate, release := parkInsert(t, s, "work_session_tokens")
+			polled := s.sendAsync(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil, asBearer(key))
+			claim := waitUntilBlockedOnALock(t, s.pool, gate, polled)
+			held := h.start(s, sessionID)
+			waitUntilBlockedOnALock(t, s.pool, claim, held)
+			release()
+			check(t, s, logs, sessionID, awaitReply(t, held), awaitReply(t, polled))
 		})
 	}
 }
 
-// wantItemWithToken asserts a poll answer is an item carrying a secret — a
+// wantItemWithToken asserts a poll's reply is an item carrying a secret — a
 // sessions token minted for its store session.
-func wantItemWithToken(t *testing.T, code int, body string) {
+func wantItemWithToken(t *testing.T, r reply) {
 	t.Helper()
 	var item struct {
 		ID     string  `json:"id"`
 		Secret *string `json:"secret"`
 	}
-	if code != http.StatusOK || json.Unmarshal([]byte(body), &item) != nil || item.ID == "" || item.Secret == nil {
-		t.Errorf("poll = %d %s; want the item, with its sessions token", code, body)
+	if r.err != nil || r.code != http.StatusOK || json.Unmarshal([]byte(r.body), &item) != nil || item.ID == "" || item.Secret == nil {
+		t.Errorf("poll = %d %s (%v); want the item, with its sessions token", r.code, r.body, r.err)
 	}
 }
 
@@ -593,17 +593,17 @@ func waitingStoreSession(t *testing.T, s *tserver) (envID, key, sessionID string
 	return envID, key, sessionID
 }
 
-// parkTokenInsert makes the claim's token insert wait until release is called
-// — a trigger takes an advisory lock that gate, a backend of this test, holds —
-// so a claim stops there with its item already taken.
-func parkTokenInsert(t *testing.T, s *tserver) (gate int, release func()) {
+// parkInsert makes every insert into table wait until release is called — a
+// trigger takes an advisory lock that gate, a backend of this test, holds — so
+// whatever makes one stops there, holding what it has already locked.
+func parkInsert(t *testing.T, s *tserver, table string) (gate int, release func()) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := s.pool.Exec(ctx, `
-		CREATE FUNCTION map_test_park_token() RETURNS trigger LANGUAGE plpgsql AS $$
+		CREATE FUNCTION map_test_park() RETURNS trigger LANGUAGE plpgsql AS $$
 		BEGIN PERFORM pg_advisory_xact_lock(643); RETURN NEW; END $$;
-		CREATE TRIGGER map_test_park_token BEFORE INSERT ON work_session_tokens
-		FOR EACH ROW EXECUTE FUNCTION map_test_park_token()`); err != nil {
+		CREATE TRIGGER map_test_park BEFORE INSERT ON `+table+`
+		FOR EACH ROW EXECUTE FUNCTION map_test_park()`); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -616,29 +616,4 @@ func parkTokenInsert(t *testing.T, s *tserver) (gate int, release func()) {
 	release = func() { _ = tx.Rollback(ctx) }
 	t.Cleanup(release)
 	return gate, release
-}
-
-// sendAsync is doRaw off the test's goroutine: the status arrives on the
-// channel, and the body is in *body once it has.
-func (s *tserver) sendAsync(method, path string, body any, headers map[string]string) (<-chan int, *string) {
-	done, got := make(chan int, 1), new(string)
-	go func() {
-		res := s.doRaw(method, path, body, headers)
-		raw, _ := io.ReadAll(res.Body)
-		res.Body.Close()
-		*got = strings.TrimSpace(string(raw))
-		done <- res.StatusCode
-	}()
-	return done, got
-}
-
-func awaitStatus(t *testing.T, done <-chan int) int {
-	t.Helper()
-	select {
-	case code := <-done:
-		return code
-	case <-time.After(30 * time.Second):
-		t.Fatal("no answer within 30s")
-		return 0
-	}
 }

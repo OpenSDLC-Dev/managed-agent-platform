@@ -3,11 +3,14 @@ package store
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"path"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -28,15 +31,50 @@ const migrateLockID int64 = 7355608041991001
 // filename order, all inside one transaction: either the database reaches
 // the current schema or it is left untouched. (Consequence: a migration can
 // never use statements Postgres forbids inside a transaction block, e.g.
-// CREATE INDEX CONCURRENTLY — extend the migrator if that day comes.)
+// CREATE INDEX CONCURRENTLY — extend the migrator if that day comes.) A
+// transaction that meets a lock conflict is retried; see migrateAttempts.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return migrate(ctx, pool, "")
 }
+
+// migrateAttempts and migrateBackoff bound the retry of a migration
+// transaction that met a lock conflict: a deadlock (40P01), or a migration's
+// own lock_timeout running out (55P03). 0043 sets one so that it yields to
+// live traffic rather than stalling it. The transaction has rolled back whole,
+// so a retry starts from the same schema. The wait before each retry doubles
+// from migrateBackoff, so five attempts span about fifteen seconds of waiting.
+// A conflict that outlasts them fails the start like any other migration
+// error.
+const (
+	migrateAttempts = 5
+	migrateBackoff  = time.Second
+)
 
 // migrate is Migrate stopping after the named migration file when through is
 // set — the test seam for exercising a data backfill against rows written
 // under the schema before it.
 func migrate(ctx context.Context, pool *pgxpool.Pool, through string) error {
+	wait := migrateBackoff
+	for attempt := 1; ; attempt++ {
+		err := migrateOnce(ctx, pool, through)
+		var pgErr *pgconn.PgError
+		if err == nil || attempt == migrateAttempts ||
+			!errors.As(err, &pgErr) || (pgErr.Code != "40P01" && pgErr.Code != "55P03") {
+			return err
+		}
+		slog.WarnContext(ctx, "store: migration met a lock conflict, retrying",
+			"attempt", attempt, "wait", wait, "error", err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+		wait *= 2
+	}
+}
+
+// migrateOnce is one attempt: every pending migration, in one transaction.
+func migrateOnce(ctx context.Context, pool *pgxpool.Pool, through string) error {
 	names, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {
 		return fmt.Errorf("store: list migrations: %w", err)

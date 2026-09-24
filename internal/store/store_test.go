@@ -1143,3 +1143,89 @@ func TestOpenRejectsUnreachableDatabase(t *testing.T) {
 		t.Errorf("Open with a malformed DSN must fail")
 	}
 }
+
+// TestMigrateRetriesALockConflict: a migration that cannot take a lock live
+// traffic holds gives up within its own lock_timeout rather than queueing
+// every reader of the table behind it, and Migrate retries the whole
+// transaction instead of failing the startup (#643). 0043 is such a migration
+// — it takes work_session_tokens and sessions ACCESS EXCLUSIVE — so a
+// transaction holding the tokens table is the traffic here. The holder lets go
+// only once Migrate has said it is retrying, so the test does not depend on
+// how long either side takes.
+func TestMigrateRetriesALockConflict(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, "0041_primary_thread_unarchived_check.sql"); err != nil {
+		t.Fatalf("migrate through 0041: %v", err)
+	}
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `LOCK TABLE work_session_tokens IN ACCESS SHARE MODE`); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags() // TestMigrateNamesTheDatabaseItChanges says why
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+
+	migrated := make(chan error, 1)
+	go func() { migrated <- store.Migrate(ctx, pool) }()
+	for deadline := time.Now().Add(15 * time.Second); !strings.Contains(logs.String(), "retrying"); {
+		select {
+		case err := <-migrated:
+			t.Fatalf("Migrate returned %v before retrying the migration the held lock stopped; log: %s", err, logs.String())
+		case <-time.After(20 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Migrate neither retried nor returned within 15s — it is waiting on the held lock; log: %s", logs.String())
+		}
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-migrated:
+		if err != nil {
+			t.Fatalf("Migrate after the holder let go = %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Migrate did not finish within 30s of the holder letting go")
+	}
+	var applied bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0043_work_session_tokens_unkeyed.sql')`).Scan(&applied); err != nil || !applied {
+		t.Errorf("0043 applied = %v (%v), want true", applied, err)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a log handler writing from one
+// goroutine while the test reads from another.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}

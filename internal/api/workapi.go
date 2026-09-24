@@ -109,9 +109,7 @@ func toWire(w *queue.Work) workWire {
 // two together: the turn that calls a worker's tools idles the session on
 // requires_action in the commit that queues the item, and requireNotRunning
 // lets an idle session's delete through. Postgres broke the cycle by aborting
-// either side (#643). What the key did is done without it: Authenticate joins
-// a token to its live item and unarchived session, and deleteSession removes
-// the session's tokens itself.
+// either side (#643). A deleted session's tokens go by 0043's trigger.
 func (s *server) claimWork(ctx context.Context, envID domain.ID, reclaim time.Duration) (*queue.Work, *string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

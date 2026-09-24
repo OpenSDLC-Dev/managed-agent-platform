@@ -1,18 +1,46 @@
--- A sessions token no longer carries a foreign key to its session (#643). The
--- key's check took the session row inside the poll's claim, after the claim
--- had taken the work item — the reverse of a session delete or interrupt — and
--- the two could deadlock; internal/api's claimWork says how. What the key did
--- is done without it: a token authenticates only through a join to its live
--- item and its unarchived session (internal/worktoken's Authenticate), so a
--- row whose session is gone is inert, and the session delete removes the
--- session's tokens itself (internal/api's deleteSession). The index on
--- session_id stays; that delete reads by it.
+-- A sessions token no longer carries a foreign key to its session (#643): the
+-- key's check locked the session row inside the poll's claim, after the work
+-- item, and deadlocked against a session delete or interrupt (internal/api's
+-- claimWork has the lock rule). A token whose session is gone cannot
+-- authenticate anyway: internal/worktoken's Authenticate joins the session.
 --
--- Dropping the key takes both tables ACCESS EXCLUSIVE. sessions is taken
--- first, the order a delete and a claim take them, so that during a rolling
--- upgrade a replica still on the previous build waits for this rather than
--- deadlocking with it — all but a token check, which takes the two in the
--- other order within one statement. If one does meet it, the migration rolls
--- back and a later start applies it.
-LOCK TABLE sessions, work_session_tokens IN ACCESS EXCLUSIVE MODE;
+-- The cascade's job passes to the trigger below: deleting a session row
+-- deletes its tokens on every path that deletes one — the API's delete, a
+-- replica still on the previous build, a hand-written DELETE. The index on
+-- session_id stays; the trigger's delete reads by it. The trigger has to run
+-- after the cascade into work_items, because that cascade is what waits out a
+-- claim holding one of the session's items; only then has the claim's token
+-- committed, and the token delete, a statement with a snapshot of its own,
+-- sees it. Postgres fires a row's AFTER triggers in name order, byte-wise,
+-- and the cascades are internal triggers named RI_ConstraintTrigger_a_<oid>;
+-- a lower-case name sorts after every one of them. A name sorting first
+-- leaves the claim's token behind, which the item_first delete cases of
+-- TestPollDoesNotDeadlockAgainstTheSessionLock catch.
+--
+-- Dropping the key takes work_session_tokens and then sessions ACCESS
+-- EXCLUSIVE, measured in that order. During a rolling upgrade a replica on
+-- the previous build takes the two tables in either order (its claim and its
+-- delete take sessions first; a token check takes work_session_tokens first),
+-- so waiting here can close a cycle, and no LOCK TABLE order avoids every
+-- one; the ALTER's own order at least holds only the token table while it
+-- waits for the busy one. A pending lock on sessions also queues every
+-- session read behind it. So this migration waits at most 500ms for each
+-- lock, below the deadlock_timeout default of a second, and it is the side
+-- that gives up, not live traffic. Migrate retries a transaction that gives
+-- up this way (migrate.go). The timeout is reset at the end, so no later
+-- migration in the same transaction inherits it.
+SET LOCAL lock_timeout = '500ms';
+
 ALTER TABLE work_session_tokens DROP CONSTRAINT work_session_tokens_session_id_fkey;
+
+CREATE FUNCTION work_session_tokens_follow_session() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM work_session_tokens WHERE session_id = OLD.id;
+    RETURN NULL;
+END $$;
+
+CREATE TRIGGER work_session_tokens_follow_session AFTER DELETE ON sessions
+    FOR EACH ROW EXECUTE FUNCTION work_session_tokens_follow_session();
+
+SET LOCAL lock_timeout TO DEFAULT;
