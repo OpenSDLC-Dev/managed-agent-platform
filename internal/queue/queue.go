@@ -416,6 +416,18 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // tool_exec to cloud. The two are therefore mutually exclusive by environment
 // kind, so an item a worker has polled is never also run by the executor even
 // if an environment key were misconfigured against a cloud environment.
+//
+// Poll takes the item's session row with the item, FOR KEY SHARE and SKIP
+// LOCKED like it, and so passes over an item whose session another
+// transaction holds FOR UPDATE. The work API's claim mints a sessions token in
+// the poll's transaction, and the token's foreign key needs that row, which a
+// claim must not wait for while it holds the item (internal/api's claimWork,
+// #643). A statement whose every lock is SKIP LOCKED waits for nothing, so it
+// joins no cycle whichever row it locks first; an item passed over may keep a
+// lock already taken on it until the poll's transaction ends. A locking clause
+// cannot pick which of its relation's rows to lock, so a storeless session's
+// item, which mints no token, is passed over too while its row is held — a
+// wait on its own session's holder, never another session's.
 func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration) (*Work, error) {
 	return q.PollOn(ctx, q.pool, envID, reclaim)
 }
@@ -428,6 +440,7 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 		`WITH picked AS (
 		    SELECT w.id AS pid FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
+		    JOIN sessions s ON s.id = w.session_id
 		    WHERE w.environment_id = $1 AND e.kind = 'self_hosted'
 		      AND w.kind = 'tool_exec'
 		      AND (
@@ -436,6 +449,7 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 		      )
 		    ORDER BY w.created_at
 		    FOR UPDATE OF w SKIP LOCKED
+		    FOR KEY SHARE OF s SKIP LOCKED
 		    LIMIT 1
 		 )
 		 UPDATE work_items t
