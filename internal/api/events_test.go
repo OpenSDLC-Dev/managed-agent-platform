@@ -79,16 +79,17 @@ func TestSendUserMessageEchoShape(t *testing.T) {
 		t.Fatalf("echoed %d events, want 1", len(echo))
 	}
 	ev := echo[0]
-	// Field-exact: BetaManagedAgentsUserMessageEvent has id, content, type and
-	// a nullable processed_at — and no session_thread_id. The message is not
-	// yet processed, and the echo omits the null stamp rather than rendering
-	// it, as every recorded user.message echo does (#674).
-	wantExactKeys(t, ev, "id", "type", "content")
+	// Field-exact: BetaManagedAgentsUserMessageEvent has id, content, type,
+	// processed_at — and no session_thread_id.
+	wantExactKeys(t, ev, "id", "type", "content", "processed_at")
 	if !strings.HasPrefix(ev["id"].(string), "sevt_") {
 		t.Errorf("id = %v, want sevt_ prefix", ev["id"])
 	}
 	if ev["type"] != "user.message" {
 		t.Errorf("type = %v", ev["type"])
+	}
+	if ev["processed_at"] != nil {
+		t.Errorf("processed_at = %v, want null (not yet processed)", ev["processed_at"])
 	}
 	content := ev["content"].([]any)
 	block := content[0].(map[string]any)
@@ -120,20 +121,21 @@ func TestSendEchoShapesPerType(t *testing.T) {
 		t.Fatalf("echoed %d events, want 7", len(echo))
 	}
 
-	// The nullable session_thread_id, deny_message and processed_at are
-	// omitted while null, never rendered null — the recorded interrupt echo is
-	// exactly {id, type} (#674). A value, where there is one, still renders.
+	// A null session_thread_id or deny_message is omitted, never rendered
+	// null (#674); a value, where there is one, still renders. processed_at
+	// renders null while unprocessed (docs/DIVERGENCES.md, "POST/history
+	// processed_at").
 	interrupt := echo[0]
-	wantExactKeys(t, interrupt, "id", "type")
+	wantExactKeys(t, interrupt, "id", "type", "processed_at")
 
 	confirm := echo[1]
-	wantExactKeys(t, confirm, "id", "type", "result", "tool_use_id", "deny_message")
+	wantExactKeys(t, confirm, "id", "type", "result", "tool_use_id", "deny_message", "processed_at")
 	if confirm["result"] != "deny" || confirm["deny_message"] != "too risky" || confirm["tool_use_id"] != riskyID {
 		t.Errorf("tool_confirmation echo = %v", confirm)
 	}
 
 	allow := echo[2]
-	wantExactKeys(t, allow, "id", "type", "result", "tool_use_id")
+	wantExactKeys(t, allow, "id", "type", "result", "tool_use_id", "processed_at")
 	if allow["result"] != "allow" || allow["tool_use_id"] != safeID {
 		t.Errorf("allow tool_confirmation echo = %v", allow)
 	}
@@ -151,7 +153,7 @@ func TestSendEchoShapesPerType(t *testing.T) {
 	}
 
 	system := echo[6]
-	wantExactKeys(t, system, "id", "type", "content")
+	wantExactKeys(t, system, "id", "type", "content", "processed_at")
 	if system["type"] != "system.message" {
 		t.Errorf("system echo = %v", system)
 	}
@@ -947,6 +949,47 @@ func TestSendMalformedBody(t *testing.T) {
 	sid := eventsFixture(t, s)
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", `{"events":`)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+// A stored null is dropped only where the recordings show the key omitted
+// (#674): session_thread_id on the thread-addressable types, deny_message on
+// user.tool_confirmation. Anywhere else it renders as stored, so a writer
+// storing a null the SDK forbids — session_thread_id is required on the
+// session.thread_* events — shows on the wire instead of being hidden.
+func TestNullOmissionIsScopedToTheEvidencedTypes(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	appended, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sid), []events.NewEvent{
+		{Type: domain.EventAgentToolUse, Payload: []byte(`{"name":"bash","input":{},"session_thread_id":null}`)},
+		{Type: domain.EventUserToolConfirm,
+			Payload: []byte(`{"result":"allow","tool_use_id":"sevt_x","deny_message":null,"session_thread_id":null}`)},
+		{Type: domain.EventSessionThreadStatusIdle,
+			Payload: []byte(`{"session_thread_id":null,"stop_reason":{"type":"end_turn"}}`)},
+		{Type: domain.EventAgentMessage, Payload: []byte(`{"content":[],"deny_message":null}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := eventsByID(t, s, "/v1/sessions/"+sid+"/events")
+	for _, tc := range []struct {
+		id, key string
+		kept    bool
+	}{
+		{appended[0].ID.String(), "session_thread_id", false},
+		{appended[1].ID.String(), "session_thread_id", false},
+		{appended[1].ID.String(), "deny_message", false},
+		{appended[2].ID.String(), "session_thread_id", true},
+		{appended[3].ID.String(), "deny_message", true},
+	} {
+		ev := listed[tc.id]
+		if ev == nil {
+			t.Fatalf("event %s missing from the list", tc.id)
+		}
+		v, ok := ev[tc.key]
+		if ok != tc.kept || v != nil {
+			t.Errorf("%s %s: present=%v value=%v, want present=%v and null", ev["type"], tc.key, ok, v, tc.kept)
+		}
+	}
 }
 
 func TestEventsCorruptRowRendering(t *testing.T) {

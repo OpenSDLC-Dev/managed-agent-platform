@@ -53,13 +53,9 @@ func TestDefineOutcomeEchoShape(t *testing.T) {
 	ev := echo[0]
 	// The persisted event's wire shape, field for field
 	// (checked against anthropic-sdk-go v1.66.0 — betasessionevent.go
-	// BetaManagedAgentsUserDefineOutcomeEvent) — less processed_at, by this
-	// platform's recorded processed_at divergence: the event is stamped when
-	// the consuming turn settles, not on receipt, and until then the echo
-	// omits the key, as the reference's echo of any unprocessed event does
-	// (#674).
+	// BetaManagedAgentsUserDefineOutcomeEvent).
 	wantExactKeys(t, ev, "id", "type", "description", "rubric", "max_iterations",
-		"outcome_id")
+		"outcome_id", "processed_at")
 	if !strings.HasPrefix(ev["id"].(string), "sevt_") {
 		t.Errorf("id = %v, want sevt_ prefix", ev["id"])
 	}
@@ -68,6 +64,11 @@ func TestDefineOutcomeEchoShape(t *testing.T) {
 	}
 	if ev["max_iterations"] != float64(3) {
 		t.Errorf("max_iterations = %v, want default 3", ev["max_iterations"])
+	}
+	// This platform's recorded processed_at divergence: echoed null, stamped
+	// when the consuming turn settles.
+	if ev["processed_at"] != nil {
+		t.Errorf("processed_at = %v, want null on echo", ev["processed_at"])
 	}
 	rubric := ev["rubric"].(map[string]any)
 	wantExactKeys(t, rubric, "type", "content")
