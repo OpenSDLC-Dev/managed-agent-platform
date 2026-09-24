@@ -36,6 +36,42 @@ func platformExecuted(name string) bool {
 	return toolset.IsWebTool(name) || toolset.IsDelegationTool(name)
 }
 
+// requireEnvironmentCredentialForToolResult is the credential gate on
+// user.tool_result (#662): answering a tool call is the worker's, so the event
+// is admitted only under environment credentials — the session's environment
+// key, or the per-item sessions token the reference worker sends its results
+// under — and a management credential (the x-api-key, or a human on the
+// identity lane) is refused 403 permission_error on any session, cloud or
+// self_hosted, as the reference refuses it. A tool_result anywhere refuses the whole batch, before
+// anything is read or written. The environment-kind refusal NormalizeInbound
+// keeps is what an environment credential then meets on a cloud session.
+//
+// The type is read exactly as normalizeOne reads it — the object's "type"
+// member, as a string — so no event this admits can normalize to a
+// user.tool_result; one that does not parse is left for NormalizeInbound to
+// refuse. Of the lanes that reach this route, only the two environment lanes
+// put an environment in the context (requireEnvironmentKeyForSession,
+// requireWorkToken), and both have already confined the credential to this
+// session.
+func requireEnvironmentCredentialForToolResult(ctx context.Context, rawEvents []json.RawMessage) error {
+	if environmentFrom(ctx) != "" {
+		return nil
+	}
+	for i, raw := range rawEvents {
+		var obj map[string]json.RawMessage
+		var typ string
+		if json.Unmarshal(raw, &obj) != nil || json.Unmarshal(obj["type"], &typ) != nil {
+			continue
+		}
+		if domain.EventType(typ) == domain.EventUserToolResult {
+			return errForbidden(fmt.Sprintf("events[%d]: `user.tool_result` may only be sent with environment credentials "+
+				"(the self-hosted worker's environment key or its sessions token); "+
+				"an API key or Console session cannot post this event type", i))
+		}
+	}
+	return nil
+}
+
 // sendSessionEvents implements POST /v1/sessions/{id}/events. The body is
 // always a batch ({"events":[…]}); the response echoes the persisted events
 // as {"data":[…]} with server-assigned ids.
@@ -55,6 +91,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if err := checkID(id, "session"); err != nil {
+		return nil, err
+	}
+	if err := requireEnvironmentCredentialForToolResult(ctx, rawEvents); err != nil {
 		return nil, err
 	}
 

@@ -170,6 +170,15 @@ func (h *harness) postToolResult(t *testing.T, eventType domain.EventType, paylo
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+h.sessionID.String()+"/events", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", "brain-test-key")
+	if eventType == domain.EventUserToolResult {
+		// A BYOC worker's event, admitted under its environment key alone (#662).
+		key, err := api.IssueEnvironmentKey(context.Background(), h.pool, h.envID.String(), "brain-test-worker")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Del("x-api-key")
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	rec := httptest.NewRecorder()
 	api.NewHandler(h.pool, nil, nil, nil).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

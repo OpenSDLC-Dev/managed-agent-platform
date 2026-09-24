@@ -117,6 +117,10 @@ func normalizeOne(envKind string, raw json.RawMessage) (NewEvent, error) {
 	case domain.EventUserCustomToolRes:
 		return normalizeToolResult(obj, et, "custom_tool_use_id")
 	case domain.EventUserToolResult:
+		// Who may send one is the API's credential gate, which runs first
+		// (#662): only an environment credential reaches this check, and
+		// what the reference answers one on a cloud session is unobserved —
+		// an inference in docs/DIVERGENCES.md.
 		if envKind != "self_hosted" {
 			return NewEvent{}, fmt.Errorf("user.tool_result is only valid on self_hosted environments")
 		}

@@ -502,9 +502,12 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **Auth is scoped.** Management calls carry `x-api-key` (hashed at rest,
   rotation-by-restart); workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's
-  sessions. Environment keys are hashed at rest too, issued one per host so a
-  compromised host is revoked alone, and expire a year after issue; revoked,
-  expired and unknown are one indistinguishable 401. Issuing and revoking them is
+  sessions. One event runs the other way: a `user.tool_result` is admitted only under
+  a worker's credential, and a management key or human posting one is refused 403 on
+  any session (#662) — answering a tool call is the worker's role, and management does
+  not reach into a turn's execution. Environment keys are hashed at rest too, issued
+  one per host so a compromised host is revoked alone, and expire a year after issue;
+  revoked, expired and unknown are one indistinguishable 401. Issuing and revoking them is
   a **management** operation on the off-wire console API, so an environment key
   can never mint or retire another — but equally, that surface delegates no
   authority the management key did not already hold, and is not a separate
