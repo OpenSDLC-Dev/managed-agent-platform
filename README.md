@@ -139,7 +139,7 @@ picks the object-storage backend — unset or `s3` for any S3-compatible endpoin
 which takes `BLOB_BUCKET` alone and authenticates with Application Default Credentials, so
 there is no key to distribute.
 
-**Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres, MinIO, and OpenBao (and an optional Jaeger):
+**Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres, object store (PGSTY Silo, a MinIO fork), and OpenBao (and an optional Jaeger):
 
 ```bash
 cd deploy/compose

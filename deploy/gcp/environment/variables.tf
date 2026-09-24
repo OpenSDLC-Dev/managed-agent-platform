@@ -340,9 +340,9 @@ variable "docker_hub_mirror" {
   description = <<-EOT
     Create an Artifact Registry remote repository that mirrors Docker Hub, so the
     chart's third-party images are pulled through the project's own registry
-    rather than from a rate-limited anonymous upstream. MinIO stopped being one
-    of them when Docker Hub stopped serving that namespace: the chart pins it at
-    quay.io now, which this remote cannot reach (#701).
+    rather than from a rate-limited anonymous upstream. The bundled object store
+    is one of them again: the chart pins PGSTY Silo, a MinIO fork on Docker Hub,
+    since MinIO's own images left both Docker Hub (#701) and quay.io (#799).
 
     It is a mirror, not a vendoring step: a cache miss still reaches Docker Hub,
     through Cloud NAT. What it buys is a stable pull path, one place to scan, and

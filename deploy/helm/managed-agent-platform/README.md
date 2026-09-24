@@ -9,8 +9,9 @@ Deploys the platform's three server processes into a Kubernetes namespace:
 | **executor** | Deployment + RBAC | independently | runs tools in a per-session **Kubernetes sandbox Pod** |
 
 An optional in-cluster **Postgres** (StatefulSet) is included for a batteries-included
-install, likewise an optional in-cluster **MinIO** (StatefulSet) — S3-compatible
-object storage for skill archives (consumed by the skills registry as
+install, likewise an optional in-cluster **MinIO** (StatefulSet, running PGSTY
+Silo, a maintained MinIO fork, since MinIO no longer publishes community images:
+#799) — S3-compatible object storage for skill archives (consumed by the skills registry as
 docs/plan/06_skills.md lands) — and an optional in-cluster **OpenBao**
 (StatefulSet) — the transit cipher for vault credential material
 (docs/plan/12_vaults-credentials.md). All three follow the same rule: bundled
