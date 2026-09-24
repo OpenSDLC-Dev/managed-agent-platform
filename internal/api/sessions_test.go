@@ -276,20 +276,27 @@ func TestSessionOverrideSystemCap(t *testing.T) {
 	// The bound binds what the override supplies, never the preserved value: an
 	// agent stored over it — which agent create has refused since #665, so it
 	// is planted here as one written before then sits — still resolves, via a
-	// plain reference and via an override that omits system (omit preserves).
+	// plain reference and via an override that omits system (omit preserves),
+	// with the preserved value intact.
 	big := createAgent(t, s, map[string]any{"name": "big-sys",
 		"model": "claude-opus-4-8", "system": "base system"})["id"].(string)
-	plantSystem(t, s, big, strings.Repeat("b", 100_001))
-	createSession(t, s, map[string]any{"agent": big, "environment_id": envID})
-	createSession(t, s, map[string]any{
-		"agent":          map[string]any{"type": "agent_with_overrides", "id": big},
-		"environment_id": envID,
-	})
+	over := strings.Repeat("b", 100_001)
+	plantAgent(t, s, big, map[string]string{"system": over})
+	resolvedSystem := func(agent any) string {
+		t.Helper()
+		res := createSession(t, s, map[string]any{"agent": agent, "environment_id": envID})
+		sys, _ := res["agent"].(map[string]any)["system"].(string)
+		return sys
+	}
+	for _, agent := range []any{big, map[string]any{"type": "agent_with_overrides", "id": big}} {
+		if got := resolvedSystem(agent); got != over {
+			t.Errorf("agent %v resolved a system of %d characters, want the preserved %d", agent, len(got), len(over))
+		}
+	}
 	// system:null (clear) is never counted, even over an over-cap stored system.
-	createSession(t, s, map[string]any{
-		"agent":          map[string]any{"type": "agent_with_overrides", "id": big, "system": nil},
-		"environment_id": envID,
-	})
+	if got := resolvedSystem(map[string]any{"type": "agent_with_overrides", "id": big, "system": nil}); got != "" {
+		t.Errorf("system:null resolved a system of %d characters, want it cleared", len(got))
+	}
 }
 
 // fixture creates an agent and an environment and returns their ids.

@@ -144,55 +144,125 @@ func TestAgentNameAndDescriptionCaps(t *testing.T) {
 	wantUpdateRejected(t, s, id, map[string]any{"description": strings.Repeat("d", 2049)}, "2048")
 }
 
-// An agent stored over the system bound — written before #665 enforced it,
-// and planted here in its agent row and its version row as such an agent
-// sits — is grandfathered: the bound binds what a request supplies, so nothing
-// that only reads the stored agent is stranded by it.
-func TestStoredOverCapSystemGrandfathered(t *testing.T) {
+// An agent stored over all three string bounds — written before #665 enforced
+// them, and planted here in its agent row and its version row as such an agent
+// sits — is grandfathered: the bounds bind what a request supplies, so nothing
+// that only reads the stored agent is stranded, and nothing that carries it
+// forward cuts it down. Every step asserts the planted values themselves, not
+// only a status.
+func TestStoredOverCapAgentGrandfathered(t *testing.T) {
 	s := newTestServer(t)
 	envID := createEnvironment(t, s, map[string]any{"name": "env"})["id"].(string)
 	legacy := createAgent(t, s, agentBody(map[string]any{"name": "legacy"}))["id"].(string)
 	coord := createAgent(t, s, map[string]any{"name": "coordinator", "model": "claude-opus-4-8",
 		"multiagent": map[string]any{"type": "coordinator", "agents": []any{legacy}}})["id"].(string)
-	over := strings.Repeat("b", 100_001)
-	plantSystem(t, s, legacy, over)
+	planted := map[string]string{
+		"name":        strings.Repeat("n", 257),
+		"description": strings.Repeat("d", 2049),
+		"system":      strings.Repeat("b", 100_001),
+	}
+	plantAgent(t, s, legacy, planted)
+	all := []string{"name", "description", "system"}
+	wantPlanted := func(what string, obj map[string]any, fields ...string) {
+		t.Helper()
+		for _, f := range fields {
+			if got, _ := obj[f].(string); got != planted[f] {
+				t.Errorf("%s: %s has %d characters, want the planted %d", what, f, len(got), len(planted[f]))
+			}
+		}
+	}
+	sessionAgent := func(id string) map[string]any {
+		t.Helper()
+		status, res := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+		if status != http.StatusOK {
+			t.Fatalf("get session %s: status %d (body %v)", id, status, res)
+		}
+		agent, _ := res["agent"].(map[string]any)
+		return agent
+	}
+	getAgent := func() map[string]any {
+		t.Helper()
+		_, res := s.do(http.MethodGet, "/v1/agents/"+legacy, nil)
+		return res
+	}
+	update := func(what string, body map[string]any) {
+		t.Helper()
+		if status, res := s.do(http.MethodPost, "/v1/agents/"+legacy, body); status != http.StatusOK {
+			t.Fatalf("%s: status %d (body %v)", what, status, res)
+		}
+	}
 
 	// Session create resolves it by plain reference (the agent row) and pinned
-	// to version 1 (the version row), and a coordinator whose roster pins it
-	// starts.
+	// to version 1 (the version row).
 	var sid string
-	for _, agent := range []any{legacy, map[string]any{"type": "agent", "id": legacy, "version": 1}} {
-		res := createSession(t, s, map[string]any{"agent": agent, "environment_id": envID})
-		if got, _ := res["agent"].(map[string]any)["system"].(string); got != over {
-			t.Fatalf("resolved system has %d characters, want the planted %d", len(got), len(over))
-		}
+	for _, c := range []struct {
+		what string
+		ref  any
+	}{
+		{"plain session create", legacy},
+		{"version-pinned session create", map[string]any{"type": "agent", "id": legacy, "version": 1}},
+	} {
+		res := createSession(t, s, map[string]any{"agent": c.ref, "environment_id": envID})
+		wantPlanted(c.what, res["agent"].(map[string]any), all...)
 		sid = res["id"].(string)
 	}
-	createSession(t, s, map[string]any{"agent": coord, "environment_id": envID})
-	// A session carrying it still takes an agent.tools patch.
-	if status, body := s.do(http.MethodPost, "/v1/sessions/"+sid,
-		map[string]any{"agent": map[string]any{"tools": []any{}}}); status != http.StatusOK {
-		t.Fatalf("session tools patch: status %d (body %v)", status, body)
+	// A coordinator whose roster pins it starts, the member snapshotted whole.
+	res := createSession(t, s, map[string]any{"agent": coord, "environment_id": envID})
+	roster, _ := res["agent"].(map[string]any)["multiagent"].(map[string]any)
+	members, _ := roster["agents"].([]any)
+	found := false
+	for _, m := range members {
+		if member, _ := m.(map[string]any); member["id"] == legacy {
+			wantPlanted("roster member", member, all...)
+			found = true
+		}
 	}
-	// An update that does not send system lands; one that supplies an over-cap
-	// system is refused.
-	if status, body := s.do(http.MethodPost, "/v1/agents/"+legacy,
-		map[string]any{"name": "renamed"}); status != http.StatusOK {
-		t.Fatalf("name-only update: status %d (body %v)", status, body)
+	if !found {
+		t.Fatalf("roster snapshot %v carries no member %s", members, legacy)
 	}
-	wantUpdateRejected(t, s, legacy, map[string]any{"system": over}, "100000")
+	// A session carrying it still takes both agent patches.
+	for _, patch := range []map[string]any{{"tools": []any{}}, {"mcp_servers": []any{}}} {
+		if status, body := s.do(http.MethodPost, "/v1/sessions/"+sid,
+			map[string]any{"agent": patch}); status != http.StatusOK {
+			t.Fatalf("session patch %v: status %d (body %v)", patch, status, body)
+		}
+		wantPlanted(fmt.Sprintf("session after patch %v", patch), sessionAgent(sid), all...)
+	}
+	// A deployment of it fires.
+	deplID := createDeployment(t, s, deploymentBody(legacy, envID))["id"].(string)
+	run := runDeployment(t, s, deplID)
+	wantPlanted("deployment-fired session", sessionAgent(run["session_id"].(string)), all...)
+
+	// An agent update that does not resend a field keeps it as stored...
+	update("metadata-only update", map[string]any{"metadata": map[string]any{"k": "v"}})
+	wantPlanted("after a metadata-only update", getAgent(), all...)
+	// ...while one that supplies an over-bound value is refused, even the very
+	// value stored — and leaves the planted values, asserted just above, whole.
+	for field, frag := range map[string]string{"name": "256", "description": "2048", "system": "100000"} {
+		wantUpdateRejected(t, s, legacy, map[string]any{field: planted[field]}, frag)
+	}
+	wantPlanted("after the refused updates", getAgent(), all...)
+	update("name-only update", map[string]any{"name": "renamed"})
+	wantPlanted("after a name-only update", getAgent(), "description", "system")
+	update("system-only update", map[string]any{"system": "short"})
+	wantPlanted("after a system-only update", getAgent(), "description")
 }
 
-// plantSystem writes sys as an agent's stored system around the API, into its
-// agent row and every one of its version rows.
-func plantSystem(t *testing.T, s *tserver, id, sys string) {
+// plantAgent writes values into an agent's stored name, description or system
+// around the API — into its agent row and every one of its version rows, where
+// an agent written before #665 keeps them.
+func plantAgent(t *testing.T, s *tserver, id string, values map[string]string) {
 	t.Helper()
-	for _, q := range []string{
-		`UPDATE agents SET spec = jsonb_set(spec, '{system}', to_jsonb($2::text)) WHERE id = $1`,
-		`UPDATE agent_versions SET spec = jsonb_set(spec, '{system}', to_jsonb($2::text)) WHERE agent_id = $1`,
-	} {
-		if _, err := s.pool.Exec(context.Background(), q, id, sys); err != nil {
-			t.Fatalf("plant stored system: %v", err)
+	for _, table := range []struct{ name, key string }{{"agents", "id"}, {"agent_versions", "agent_id"}} {
+		for field, val := range values {
+			q := `UPDATE ` + table.name + ` SET spec = jsonb_set(spec, '{` + field + `}', to_jsonb($2::text)) WHERE ` +
+				table.key + ` = $1`
+			if field == "name" {
+				q = `UPDATE ` + table.name + ` SET name = $2 WHERE ` + table.key + ` = $1`
+			}
+			if _, err := s.pool.Exec(context.Background(), q, id, val); err != nil {
+				t.Fatalf("plant stored %s in %s: %v", field, table.name, err)
+			}
 		}
 	}
 }
