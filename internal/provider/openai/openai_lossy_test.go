@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // requestFor drives a minimal streamed turn and returns the request body the
@@ -247,6 +249,53 @@ func TestBadToolSchemaErrors(t *testing.T) {
 		Tools:    []json.RawMessage{json.RawMessage(`{"description":"no name"}`)},
 	}); err == nil {
 		t.Error("a tool without a name should error")
+	}
+}
+
+// input_schema becomes a function's parameters verbatim, so the web tools'
+// JSON Schema constraints — format, minLength, additionalProperties (#682) —
+// survive the conversion. Two of them are outside the subset OpenAI's strict
+// mode accepts (its string formats exclude "uri", and minLength is not among
+// its string keywords), which is why the absence of "strict" is pinned too.
+func TestWebToolSchemaConstraintsReachParameters(t *testing.T) {
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`))
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:    defs,
+	})
+
+	sent, _ := body["tools"].([]any)
+	if len(sent) != len(defs) {
+		t.Fatalf("tools sent = %d, want %d", len(sent), len(defs))
+	}
+	for i, def := range defs {
+		var want struct {
+			InputSchema map[string]any `json:"input_schema"`
+		}
+		if err := json.Unmarshal(def, &want); err != nil {
+			t.Fatalf("definition %d: %v", i, err)
+		}
+		fn := sent[i].(map[string]any)["function"].(map[string]any)
+		if !reflect.DeepEqual(fn["parameters"], want.InputSchema) {
+			t.Errorf("tools[%d].function.parameters = %v, want the definition's input_schema %v verbatim", i, fn["parameters"], want.InputSchema)
+		}
+		if _, ok := fn["strict"]; ok {
+			t.Errorf("tools[%d].function carries strict = %v; strict mode would reject the schema", i, fn["strict"])
+		}
+	}
+	for i, tc := range []struct{ prop, key string }{{"url", "format"}, {"query", "minLength"}} {
+		params := sent[i].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
+		if params["additionalProperties"] != false {
+			t.Errorf("tools[%d].function.parameters.additionalProperties = %v, want false", i, params["additionalProperties"])
+		}
+		prop, _ := params["properties"].(map[string]any)[tc.prop].(map[string]any)
+		if _, ok := prop[tc.key]; !ok {
+			t.Errorf("tools[%d].function.parameters.properties.%s = %v, want it to carry %s", i, tc.prop, prop, tc.key)
+		}
 	}
 }
 
