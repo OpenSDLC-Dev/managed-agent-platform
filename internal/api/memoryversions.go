@@ -112,7 +112,10 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 	if err := checkID(storeID, "memory store"); err != nil {
 		return nil, err
 	}
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	view, err := parseMemoryView(q, viewBasic)
 	if err != nil {
 		return nil, err

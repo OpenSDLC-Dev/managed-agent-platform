@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -279,6 +280,25 @@ func pageEdges(n int, more, hadCursor, reversed bool, key func(i int) (time.Time
 		prev = &p
 	}
 	return next, prev
+}
+
+// queryValues is r.URL.Query() for a handler whose parameters narrow what it
+// lists, select what it serves, or guard what it does. URL.Query drops a pair
+// it cannot parse — an escape such as %zz, a pair holding a bare ";" — and,
+// past Go's 10,000-pair ceiling, the whole query, so a parameter sent that way
+// reads as never sent: a filtered list answers with everything, a delete
+// precondition deletes unconditionally. This refuses the request instead.
+//
+// A handler whose parameters lose nothing a caller relies on when dropped may
+// still read r.URL.Query(): paging alone, a view, event_deltas, the work API's
+// timing knobs, include_archived and force (whose loss only hides rows or
+// keeps a refusal), and expected_last_heartbeat (whose absence is a 400).
+func queryValues(r *http.Request) (url.Values, error) {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, errInvalid("malformed query string: %v", err)
+	}
+	return q, nil
 }
 
 // parseBoolParam parses an optional boolean query parameter.

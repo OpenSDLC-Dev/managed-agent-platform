@@ -229,7 +229,11 @@ func (s *server) getAgent(r *http.Request) (any, error) {
 	if err := checkID(id, "agent"); err != nil {
 		return nil, err
 	}
-	if v := r.URL.Query().Get("version"); v != "" {
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
+	if v := q.Get("version"); v != "" {
 		version, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || version < 1 {
 			return nil, errInvalid("version must be a positive integer")
@@ -244,7 +248,7 @@ func (s *server) getAgent(r *http.Request) (any, error) {
 		createdAt, updatedAt time.Time
 		archivedAt           *time.Time
 	)
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`SELECT name, version, spec, metadata, created_at, updated_at, archived_at
 		 FROM agents WHERE id = $1`+notInternal, id).
 		Scan(&name, &version, &specJSON, &metaJSON, &createdAt, &updatedAt, &archivedAt)
@@ -460,7 +464,10 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 
 func (s *server) listAgents(r *http.Request) (any, error) {
 	ctx := r.Context()
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	page, err := parsePage(q)
 	if err != nil {
 		return nil, err

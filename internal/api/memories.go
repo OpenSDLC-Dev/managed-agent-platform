@@ -508,7 +508,11 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	// not a digest shape check: any value that is not the stored one is a
 	// mismatch, and the only byte that must not reach the comparison is one
 	// Postgres cannot store (#135).
-	expected := r.URL.Query().Get("expected_content_sha256")
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
+	expected := q.Get("expected_content_sha256")
 	if !storableText(expected) {
 		return nil, errInvalid("expected_content_sha256 must be valid text")
 	}
@@ -557,7 +561,10 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if err := checkID(storeID, "memory store"); err != nil {
 		return nil, err
 	}
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	view, err := parseMemoryView(q, viewBasic)
 	if err != nil {
 		return nil, err
