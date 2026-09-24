@@ -72,6 +72,7 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error
 		}
 		spec.Model = m
 	}
+	limits := map[string]int{"system": maxAgentSystemRunes, "description": maxAgentDescriptionRunes}
 	for key, dst := range map[string]*string{"system": &spec.System, "description": &spec.Description} {
 		val, set, null, err := stringField(obj, key)
 		if err != nil {
@@ -80,6 +81,8 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error
 		if set {
 			if null {
 				val = ""
+			} else if err := capRunes(key, val, limits[key]); err != nil {
+				return err
 			}
 			*dst = val
 		}
@@ -174,6 +177,9 @@ func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMe
 	}
 	name, err := requiredString(obj, "name")
 	if err != nil {
+		return false, err
+	}
+	if err := capRunes("name", name, maxAgentNameRunes); err != nil {
 		return false, err
 	}
 	if raw, ok := obj["model"]; !ok || isNull(raw) {
@@ -399,6 +405,9 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	if set {
 		if null || newName == "" {
 			return nil, errInvalid("name cannot be cleared")
+		}
+		if err := capRunes("name", newName, maxAgentNameRunes); err != nil {
+			return nil, err
 		}
 		name = newName
 	}

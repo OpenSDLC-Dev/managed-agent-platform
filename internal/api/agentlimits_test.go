@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -80,58 +81,119 @@ func TestAgentMCPServerCap(t *testing.T) {
 		agentBody(map[string]any{"mcp_servers": servers[:20], "tools": tools[:20]}))
 }
 
-// An agent's own system prompt is bounded at 100,000 characters on create and
-// update alike — the spec's maxLength, which the generated Go doc comments
-// drop (checked against anthropic-sdk-go v1.70.1 — spec
-// components.schemas.BetaManagedAgentsCreateAgentParams.properties.system) —
-// and the reference refuses one past it with 400 invalid_request_error (#665).
-func TestAgentSystemCap(t *testing.T) {
-	s := newTestServer(t)
-	wantAgentRejected(t, s, agentBody(map[string]any{"system": strings.Repeat("a", 100_001)}), "100000")
-	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("a", 100_000)}))
+// The agent create and update params bound three strings the generated Go doc
+// comments leave unbounded — name at 256, description at 2,048 and system at
+// 100,000 characters — as the spec's maxLength (checked against
+// anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsCreateAgentParams.properties and checked
+// against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsUpdateAgentParams.properties). Each binds
+// the value a request supplies, never a stored one (#665).
 
-	// The unit is code points, which is what the 2026-09-02 recording measured:
-	// it accepted 100,000 "é" — 200,000 UTF-8 bytes — on agent create, and
-	// 50,001 astral characters — 100,002 UTF-16 code units — on the session
-	// override. One "é" past the bound rejects.
-	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("é", 100_000)}))
-	wantAgentRejected(t, s, agentBody(map[string]any{"system": strings.Repeat("é", 100_001)}), "100000")
-	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("😀", 50_001)}))
+// wantUpdateRejected asserts an agent update 400s with a message carrying frag,
+// and that the refused update changed nothing: same version, same agent.
+func wantUpdateRejected(t *testing.T, s *tserver, id string, body map[string]any, frag string) {
+	t.Helper()
+	_, before := s.do(http.MethodGet, "/v1/agents/"+id, nil)
+	status, res := s.do(http.MethodPost, "/v1/agents/"+id, body)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(res); !strings.Contains(msg, frag) {
+		t.Errorf("error message %q does not mention %q", msg, frag)
+	}
+	if _, after := s.do(http.MethodGet, "/v1/agents/"+id, nil); !reflect.DeepEqual(after, before) {
+		t.Errorf("refused update changed the agent (version %v, now %v)", before["version"], after["version"])
+	}
 }
 
-// Update is held to the same bound on the merged spec, like every other agent
-// cap: a replacement past it rejects without a version bump. An agent stored
-// over it before #665 — planted here around the API — refuses every update
-// that leaves its system in place, and the update that brings the system back
-// under the bound is the way out.
-func TestAgentUpdateSystemCap(t *testing.T) {
+func TestAgentSystemCap(t *testing.T) {
 	s := newTestServer(t)
-	id := createAgent(t, s, agentBody(nil))["id"].(string)
-	update := func(body map[string]any) (int, map[string]any) {
-		return s.do(http.MethodPost, "/v1/agents/"+id, body)
-	}
+	// Recorded 2026-09-02: agent create refused 100,001 ASCII characters with
+	// 400 invalid_request_error.
+	wantAgentRejected(t, s, agentBody(map[string]any{"system": strings.Repeat("a", 100_001)}), "100000")
+	id := createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("a", 100_000)}))["id"].(string)
 
-	status, body := update(map[string]any{"system": strings.Repeat("a", 100_001)})
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg := errMessage(body); !strings.Contains(msg, "100000") {
-		t.Errorf("error message %q does not name the limit", msg)
-	}
-	if _, got := s.do(http.MethodGet, "/v1/agents/"+id, nil); got["version"] != float64(1) {
-		t.Errorf("version after rejected update = %v, want 1", got["version"])
-	}
-	if status, body := update(map[string]any{"system": strings.Repeat("a", 100_000)}); status != http.StatusOK {
+	// Recorded: agent create took 100,000 "é", 200,000 UTF-8 bytes, so the unit
+	// is not bytes. One more is refused here.
+	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("é", 100_000)}))
+	wantAgentRejected(t, s, agentBody(map[string]any{"system": strings.Repeat("é", 100_001)}), "100000")
+	// Our choice, not a recording: agent create was never probed past the BMP,
+	// so counting code points rather than UTF-16 units carries over the session
+	// override's recorded unit. 50,001 astral characters are 100,002 UTF-16
+	// units and pass.
+	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("😀", 50_001)}))
+
+	// Update is bound on the system it supplies — the spec's maxLength; the
+	// reference's update was not probed.
+	wantUpdateRejected(t, s, id, map[string]any{"system": strings.Repeat("a", 100_001)}, "100000")
+	if status, body := s.do(http.MethodPost, "/v1/agents/"+id,
+		map[string]any{"system": strings.Repeat("b", 100_000)}); status != http.StatusOK {
 		t.Fatalf("update at the cap: status %d (body %v)", status, body)
 	}
+}
 
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE agents SET spec = jsonb_set(spec, '{system}', to_jsonb($2::text)) WHERE id = $1`,
-		id, strings.Repeat("b", 100_001)); err != nil {
-		t.Fatalf("plant over-cap system: %v", err)
+// Name and description: the spec's bounds, unprobed on the reference.
+func TestAgentNameAndDescriptionCaps(t *testing.T) {
+	s := newTestServer(t)
+	wantAgentRejected(t, s, agentBody(map[string]any{"name": strings.Repeat("n", 257)}), "256")
+	wantAgentRejected(t, s, agentBody(map[string]any{"description": strings.Repeat("d", 2049)}), "2048")
+	// At both bounds in code points, three times as many UTF-8 bytes.
+	id := createAgent(t, s, agentBody(map[string]any{
+		"name": strings.Repeat("界", 256), "description": strings.Repeat("界", 2048)}))["id"].(string)
+
+	wantUpdateRejected(t, s, id, map[string]any{"name": strings.Repeat("n", 257)}, "256")
+	wantUpdateRejected(t, s, id, map[string]any{"description": strings.Repeat("d", 2049)}, "2048")
+}
+
+// An agent stored over the system bound — written before #665 enforced it,
+// and planted here in its agent row and its version row as such an agent
+// sits — is grandfathered: the bound binds what a request supplies, so nothing
+// that only reads the stored agent is stranded by it.
+func TestStoredOverCapSystemGrandfathered(t *testing.T) {
+	s := newTestServer(t)
+	envID := createEnvironment(t, s, map[string]any{"name": "env"})["id"].(string)
+	legacy := createAgent(t, s, agentBody(map[string]any{"name": "legacy"}))["id"].(string)
+	coord := createAgent(t, s, map[string]any{"name": "coordinator", "model": "claude-opus-4-8",
+		"multiagent": map[string]any{"type": "coordinator", "agents": []any{legacy}}})["id"].(string)
+	over := strings.Repeat("b", 100_001)
+	plantSystem(t, s, legacy, over)
+
+	// Session create resolves it by plain reference (the agent row) and pinned
+	// to version 1 (the version row), and a coordinator whose roster pins it
+	// starts.
+	var sid string
+	for _, agent := range []any{legacy, map[string]any{"type": "agent", "id": legacy, "version": 1}} {
+		res := createSession(t, s, map[string]any{"agent": agent, "environment_id": envID})
+		if got, _ := res["agent"].(map[string]any)["system"].(string); got != over {
+			t.Fatalf("resolved system has %d characters, want the planted %d", len(got), len(over))
+		}
+		sid = res["id"].(string)
 	}
-	status, body = update(map[string]any{"name": "renamed"})
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if status, body := update(map[string]any{"system": "short"}); status != http.StatusOK {
-		t.Fatalf("update replacing the over-cap system: status %d (body %v)", status, body)
+	createSession(t, s, map[string]any{"agent": coord, "environment_id": envID})
+	// A session carrying it still takes an agent.tools patch.
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"agent": map[string]any{"tools": []any{}}}); status != http.StatusOK {
+		t.Fatalf("session tools patch: status %d (body %v)", status, body)
+	}
+	// An update that does not send system lands; one that supplies an over-cap
+	// system is refused.
+	if status, body := s.do(http.MethodPost, "/v1/agents/"+legacy,
+		map[string]any{"name": "renamed"}); status != http.StatusOK {
+		t.Fatalf("name-only update: status %d (body %v)", status, body)
+	}
+	wantUpdateRejected(t, s, legacy, map[string]any{"system": over}, "100000")
+}
+
+// plantSystem writes sys as an agent's stored system around the API, into its
+// agent row and every one of its version rows.
+func plantSystem(t *testing.T, s *tserver, id, sys string) {
+	t.Helper()
+	for _, q := range []string{
+		`UPDATE agents SET spec = jsonb_set(spec, '{system}', to_jsonb($2::text)) WHERE id = $1`,
+		`UPDATE agent_versions SET spec = jsonb_set(spec, '{system}', to_jsonb($2::text)) WHERE agent_id = $1`,
+	} {
+		if _, err := s.pool.Exec(context.Background(), q, id, sys); err != nil {
+			t.Fatalf("plant stored system: %v", err)
+		}
 	}
 }
 

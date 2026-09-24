@@ -475,39 +475,54 @@ func parseMCPServers(raw json.RawMessage) ([]json.RawMessage, error) {
 // 128 tools and 20 MCP servers. Its exact reject statuses
 // and messages are unobserved, so the messages here are ours, and 128 counts
 // entries of tools[] — both recorded in docs/DIVERGENCES.md (#66).
-//
-// The system cap is the spec's maxLength on both params, which the Go doc
-// comments drop (checked against anthropic-sdk-go v1.70.1 — spec
-// components.schemas.BetaManagedAgentsCreateAgentParams.properties.system and
-// checked against anthropic-sdk-go v1.70.1 — spec
-// components.schemas.BetaManagedAgentsUpdateAgentParams.properties.system).
-// The 2026-09-02 recording settles its reject as 400 invalid_request_error and
-// its unit as code points — runes here: agent create took 100,000 "é" (200,000
-// bytes), and the session override, bounded alike, took 50,001 astral
-// characters (100,002 UTF-16 units). The message is ours (#665).
 const (
-	maxAgentTools       = 128
-	maxAgentMCPServers  = 20
-	maxAgentSystemRunes = 100_000
+	maxAgentTools      = 128
+	maxAgentMCPServers = 20
 )
 
+// The agent create and update params' string bounds, which live in the spec's
+// maxLength and nowhere in the generated Go doc comments (checked against
+// anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsCreateAgentParams.properties and checked
+// against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsUpdateAgentParams.properties). They bind
+// the value a request supplies and never a stored one, because the spec puts
+// them on the request params: an agent stored over one before #665 enforced it
+// keeps resolving — at session create, in a roster, at a deployment fire,
+// under a session patch — and an update that does not resend the field lands.
+// Counted in runes. Recorded 2026-09-02 for system on agent create: 100,001
+// ASCII characters refused with 400 invalid_request_error, 100,000 "é" (200,000
+// bytes) accepted, which rules out bytes. Code points rather than UTF-16 units
+// is the session override's recorded unit, assumed here; update, name and
+// description were never probed. The messages are ours (#665).
+const (
+	maxAgentNameRunes        = 256
+	maxAgentDescriptionRunes = 2048
+	maxAgentSystemRunes      = 100_000
+)
+
+// capRunes refuses a request-supplied string of more than limit code points.
+func capRunes(key, val string, limit int) error {
+	if utf8.RuneCountInString(val) > limit {
+		return errInvalid("%s cannot exceed %d characters", key, limit)
+	}
+	return nil
+}
+
 // validateAgentSpec enforces the caps and cross-checks that need the whole
-// spec rather than one entry: the tools, mcp_servers and system caps,
-// server-name uniqueness, every server referenced by an mcp_toolset, and tool
-// names unique once the agent_toolset expands — a duplicate would otherwise
-// reach the Messages API, which 400s it on every turn of the agent. Runs on
-// the resulting spec — the create body, or the update merge — which is
-// exactly the reference's update wording ("the agent's resulting tools").
-// Entry shapes were already checked one-by-one (parseTools, parseMCPServers).
+// spec rather than one entry: the tools and mcp_servers caps, server-name
+// uniqueness, every server referenced by an mcp_toolset, and tool names
+// unique once the agent_toolset expands — a duplicate would otherwise reach
+// the Messages API, which 400s it on every turn of the agent. Runs on the
+// resulting spec — the create body, or the update merge — which is exactly
+// the reference's update wording ("the agent's resulting tools"). Entry
+// shapes were already checked one-by-one (parseTools, parseMCPServers).
 func validateAgentSpec(spec agentSpec) error {
 	if len(spec.Tools) > maxAgentTools {
 		return errInvalid("tools lists at most %d entries", maxAgentTools)
 	}
 	if len(spec.MCPServers) > maxAgentMCPServers {
 		return errInvalid("mcp_servers lists at most %d entries", maxAgentMCPServers)
-	}
-	if utf8.RuneCountInString(spec.System) > maxAgentSystemRunes {
-		return errInvalid("system cannot exceed %d characters", maxAgentSystemRunes)
 	}
 	serverNames := make([]string, 0, len(spec.MCPServers))
 	seen := map[string]bool{}
