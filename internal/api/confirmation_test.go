@@ -404,7 +404,7 @@ func TestConfirmationBatchedWithAToolResultDoesNotRunTheExecutorForIt(t *testing
 	askID := appendAskToolUse(t, s, sessionID, "bash")
 	otherID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
 
-	sendEvents(t, s, sessionID,
+	sendEventsAs(t, s, workerAuth(t, s, sessionID), sessionID,
 		confirm(askID, "deny", map[string]any{"deny_message": "no"}),
 		map[string]any{"type": "user.tool_result", "tool_use_id": otherID,
 			"content": []any{map[string]any{"type": "text", "text": "done"}}})
@@ -545,10 +545,10 @@ func TestConfirmationToolResultForUnconfirmedAskRejected(t *testing.T) {
 	sessionID := selfHostedSession(t, s) // user.tool_result is self_hosted-only
 	askID := appendAskToolUse(t, s, sessionID, "bash")
 
-	status, body := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events",
+	status, body := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+sessionID+"/events",
 		map[string]any{"events": []any{map[string]any{
 			"type": "user.tool_result", "tool_use_id": askID,
-			"content": []any{map[string]any{"type": "text", "text": "sneaky"}}}}})
+			"content": []any{map[string]any{"type": "text", "text": "sneaky"}}}}}, workerAuth(t, s, sessionID)))
 	if status != http.StatusBadRequest {
 		t.Errorf("tool_result for unconfirmed ask: status %d, want 400 (body %v)", status, body)
 	}
@@ -645,7 +645,7 @@ func TestToolResultResumeSchedulesAnOutstandingMCPCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sendEvents(t, s, sessionID, map[string]any{
+	sendEventsAs(t, s, workerAuth(t, s, sessionID), sessionID, map[string]any{
 		"type": "user.tool_result", "tool_use_id": toolUseID,
 		"content": []any{map[string]any{"type": "text", "text": "ok"}},
 	})

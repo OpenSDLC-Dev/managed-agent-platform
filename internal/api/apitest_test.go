@@ -32,6 +32,8 @@ type tserver struct {
 	url   string
 	pool  *pgxpool.Pool
 	blobs *blobtest.MemStore
+	// workerKeys holds workerAuth's one environment key per session.
+	workerKeys map[string]string
 }
 
 // newPoolWithKey is the database half of newTestServer, for tests that

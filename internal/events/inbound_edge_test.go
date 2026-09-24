@@ -2,19 +2,65 @@ package events_test
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
+// norm normalizes under a worker's credential, the one no event type refuses,
+// so a case isolates the rule it is about.
 func norm(t *testing.T, envKind string, evs ...string) ([]events.NewEvent, error) {
+	t.Helper()
+	return normAs(t, envKind, events.EnvironmentCredential, evs...)
+}
+
+func normAs(t *testing.T, envKind string, cred events.Credential, evs ...string) ([]events.NewEvent, error) {
 	t.Helper()
 	raws := make([]json.RawMessage, len(evs))
 	for i, e := range evs {
 		raws[i] = json.RawMessage(e)
 	}
-	return events.NormalizeInbound(envKind, raws)
+	return events.NormalizeInbound(envKind, cred, raws)
+}
+
+// TestNormalizeInboundToolResultCredential: a user.tool_result is a worker's
+// to post (#662). Under any other credential it is refused before anything
+// else about it is read — its environment kind and its own fields included —
+// with the sentinel the API answers 403, carrying the event's index. Only an
+// environment credential reaches the environment-kind rule behind it.
+func TestNormalizeInboundToolResultCredential(t *testing.T) {
+	const msg = `{"type":"user.message","content":[{"type":"text","text":"x"}]}`
+	const result = `{"type":"user.tool_result","tool_use_id":"tu"}`
+	for _, kind := range []string{"self_hosted", "cloud"} {
+		_, err := normAs(t, kind, events.ManagementCredential, msg, result)
+		if !errors.Is(err, events.ErrEnvironmentCredentialRequired) || !strings.HasPrefix(err.Error(), "events[1]: ") {
+			t.Errorf("%s, management: err = %v, want events[1] and ErrEnvironmentCredentialRequired", kind, err)
+		}
+	}
+	// Refused before its fields are read: a malformed result is the credential's refusal too.
+	if _, err := normAs(t, "self_hosted", events.ManagementCredential, `{"type":"user.tool_result","bogus":1}`); !errors.Is(err, events.ErrEnvironmentCredentialRequired) {
+		t.Errorf("malformed result, management: err = %v, want ErrEnvironmentCredentialRequired", err)
+	}
+	// The zero value is not a worker's.
+	if _, err := normAs(t, "self_hosted", events.Credential(0), result); !errors.Is(err, events.ErrEnvironmentCredentialRequired) {
+		t.Errorf("zero credential: err = %v, want ErrEnvironmentCredentialRequired", err)
+	}
+	// Every other type is the credential's to send.
+	if _, err := normAs(t, "cloud", events.ManagementCredential, msg,
+		`{"type":"user.custom_tool_result","custom_tool_use_id":"c"}`,
+		`{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu"}`,
+		`{"type":"user.interrupt"}`); err != nil {
+		t.Errorf("management batch without a tool_result: %v", err)
+	}
+	_, err := normAs(t, "cloud", events.EnvironmentCredential, result)
+	if err == nil || errors.Is(err, events.ErrEnvironmentCredentialRequired) || !strings.Contains(err.Error(), "only valid on self_hosted") {
+		t.Errorf("cloud, environment credential: err = %v, want the environment-kind refusal", err)
+	}
+	if _, err := normAs(t, "self_hosted", events.EnvironmentCredential, result); err != nil {
+		t.Errorf("self_hosted, environment credential: %v", err)
+	}
 }
 
 // The wire-shape edge cases: NormalizeInbound is pure, so every validation
