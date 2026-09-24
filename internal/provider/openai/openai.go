@@ -402,7 +402,10 @@ func compactJSON(raw json.RawMessage) (string, error) {
 	return buf.String(), nil
 }
 
-// anthropic tool def -> OpenAI function tool.
+// anthropic tool def -> OpenAI function tool. input_schema becomes parameters
+// verbatim, and strict is never set: strict mode accepts only a JSON Schema
+// subset, which excludes keywords the built-in web tools carry (the "uri"
+// format, minLength).
 func convertTools(tools []json.RawMessage) ([]chatTool, error) {
 	if len(tools) == 0 {
 		return nil, nil

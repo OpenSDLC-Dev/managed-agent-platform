@@ -115,24 +115,28 @@ var definitions = []toolDef{
 	// (docs/plan/15_web-tools.md) — web:true is what routes their work to the
 	// web_exec item and keeps their names out of every sandbox-tool scan.
 	// Unlike the six above, the wire carries no Input type for them (the
-	// official client toolset implements only the six), so these schemas are
-	// this platform's minimal reading, recorded INFERRED in docs/DIVERGENCES.md.
+	// official client toolset implements only the six); these schemas are the
+	// reference's as a 2026-09-02 recording echoed them, keyword for keyword —
+	// format, minLength and additionalProperties included. Their descriptions
+	// are still ours; docs/DIVERGENCES.md weighs the recording and tracks that.
 	{
 		name:        "web_fetch",
 		description: "Fetch a web page by absolute http(s) URL, returning its content as markdown text.",
 		props: map[string]any{
-			"url": prop("string", "Absolute http(s) URL of the page to fetch."),
+			"url": map[string]any{"type": "string", "format": "uri", "description": "Absolute http(s) URL of the page to fetch."},
 		},
 		required: []string{"url"},
+		closed:   true,
 		web:      true,
 	},
 	{
 		name:        "web_search",
 		description: "Search the web, returning the top results — title, source URL, and a content snippet for each.",
 		props: map[string]any{
-			"query": prop("string", "The search query."),
+			"query": map[string]any{"type": "string", "minLength": 2, "description": "The search query."},
 		},
 		required: []string{"query"},
+		closed:   true,
 		web:      true,
 	},
 }
@@ -155,6 +159,8 @@ type toolDef struct {
 	description string
 	props       map[string]any
 	required    []string
+	// closed renders additionalProperties:false on the schema.
+	closed bool
 	// web marks a tool that executes in the executor's process (web_exec
 	// work), never in the sandbox.
 	web bool
@@ -169,6 +175,9 @@ func (d toolDef) marshal() (json.RawMessage, error) {
 	schema := map[string]any{"type": "object", "properties": d.props}
 	if len(d.required) > 0 {
 		schema["required"] = d.required
+	}
+	if d.closed {
+		schema["additionalProperties"] = false
 	}
 	return json.Marshal(map[string]any{
 		"name": d.name, "description": d.description, "input_schema": schema,

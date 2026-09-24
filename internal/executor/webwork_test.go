@@ -224,7 +224,7 @@ func TestWebSearchBoundsAndNormalizesTheAnswer(t *testing.T) {
 		{"title": "no-url", "url": "", "content": "dropped"},
 	}})
 	h := webHarness(t, string(hits), "")
-	h.suspendWeb(t, searchUse("q"))
+	h.suspendWeb(t, searchUse("golang"))
 
 	h.stepOnce(t)
 
@@ -291,7 +291,7 @@ func TestWebFetchAnswersWithTextBlock(t *testing.T) {
 // worker polling tool_exec can never see an unanswered web call.
 func TestMixedTurnChainsToolExecAfterWebCalls(t *testing.T) {
 	h := webHarness(t, `{"results":[]}`, "")
-	h.suspendWeb(t, searchUse("q"), writeUse("out.txt", "hello"))
+	h.suspendWeb(t, searchUse("golang"), writeUse("out.txt", "hello"))
 
 	h.stepOnce(t)
 
@@ -332,7 +332,7 @@ func TestMixedTurnChainsToolExecAfterWebCalls(t *testing.T) {
 func TestWebPassChainsMCPAheadOfTheSandbox(t *testing.T) {
 	h := webHarness(t, `{"results":[]}`, "")
 	h.appendMCPToolUse(t, "docs", "search", `{}`)
-	h.suspendWeb(t, searchUse("q"), writeUse("out.txt", "hello"))
+	h.suspendWeb(t, searchUse("golang"), writeUse("out.txt", "hello"))
 
 	h.stepOnce(t)
 
@@ -358,7 +358,7 @@ func TestWebSearchUnconfiguredAnswersIsError(t *testing.T) {
 	prov := &fakeProvider{sb: &fakeSandbox{}}
 	h := newHarnessWith(t, prov, Config{})
 	h.prov = prov
-	h.suspendWeb(t, searchUse("q"))
+	h.suspendWeb(t, searchUse("golang"))
 
 	h.stepOnce(t)
 
@@ -433,13 +433,58 @@ func TestWebSearchDropsAHitWhoseMetadataBustsTheBudget(t *testing.T) {
 		{Title: "small", URL: "https://small.example/", Content: "snippet"},
 	}}}
 
-	res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"q"}`)})
+	res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
 
 	if res.IsError {
 		t.Fatalf("result = %+v, want a non-error answer", res)
 	}
 	if len(res.SearchResults) != 1 || res.SearchResults[0].Source != "https://small.example/" {
 		t.Errorf("blocks = %+v, want only the small hit — title and source charge the budget too", res.SearchResults)
+	}
+}
+
+// countingSearcher records whether the executor reached the backend at all.
+type countingSearcher struct{ calls int }
+
+func (s *countingSearcher) Search(context.Context, string) ([]webtool.SearchResult, error) {
+	s.calls++
+	return []webtool.SearchResult{{Title: "t", URL: "https://example.com/", Content: "c"}}, nil
+}
+
+// The schema the model is handed puts minLength 2 on query — the reference's,
+// as recorded (#682) — so the executor's own input check holds the same floor
+// rather than searching for what that schema calls invalid. It counts
+// characters, as minLength does, not bytes; and it counts them after trimming,
+// as the check always has, so padding cannot lift a one-character query over.
+func TestWebSearchHoldsTheSchemasMinimumQueryLength(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		ok    bool
+	}{
+		{"q", false},
+		{" q ", false},
+		{"天", false}, // one character, three bytes
+		{"天氣", true},
+		{"go", true},
+	} {
+		s := &countingSearcher{}
+		e := &Executor{searcher: s}
+		in, _ := json.Marshal(map[string]string{"query": tc.query})
+
+		res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: in})
+
+		if tc.ok {
+			if res.IsError || s.calls != 1 {
+				t.Errorf("query %q: result = %+v after %d searches, want one search and a non-error answer", tc.query, res, s.calls)
+			}
+			continue
+		}
+		if !res.IsError || !strings.Contains(res.Content, "at least 2 characters") {
+			t.Errorf("query %q: result = %+v, want is_error naming the 2-character minimum", tc.query, res)
+		}
+		if s.calls != 0 {
+			t.Errorf("query %q: searches = %d, want 0 — the check runs before the backend", tc.query, s.calls)
+		}
 	}
 }
 
@@ -482,7 +527,7 @@ func TestWebBackendErrorAnswersIsError(t *testing.T) {
 	prov := &fakeProvider{sb: &fakeSandbox{}}
 	h := newHarnessWith(t, prov, Config{TavilyAPIKey: "tvly-k", WebSearchBaseURL: srv.URL})
 	h.prov = prov
-	h.suspendWeb(t, searchUse("q"))
+	h.suspendWeb(t, searchUse("golang"))
 
 	h.stepOnce(t)
 
@@ -509,7 +554,7 @@ func TestWebBackendErrorAnswersIsError(t *testing.T) {
 // would otherwise strand the session permanently.
 func TestToolExecPassHealsAStrayWebCall(t *testing.T) {
 	h := webHarness(t, `{"results":[{"title":"t","url":"https://a.example/","content":"c"}]}`, "")
-	h.suspend(t, searchUse("q")) // enqueues tool_exec, not web_exec — the stray shape
+	h.suspend(t, searchUse("golang")) // enqueues tool_exec, not web_exec — the stray shape
 
 	// Claim the tool_exec directly so this exercises exactly the sandbox pass.
 	item, err := h.queue.Claim(context.Background(), queue.ToolExec, h.exec.cfg.LeaseTTL)
@@ -597,7 +642,7 @@ func TestWebSearchFiltersHitsOutsideAllowedDomains(t *testing.T) {
 		webAllowed: egress.NewHostSet([]string{"*.example.com"}),
 	}
 
-	res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"q"}`)})
+	res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
 
 	if res.IsError {
 		t.Fatalf("result = %+v, want a non-error answer", res)
@@ -609,7 +654,7 @@ func TestWebSearchFiltersHitsOutsideAllowedDomains(t *testing.T) {
 	// Every hit outside the list answers as the documented zero-hit shape, so
 	// the model reads an outcome, not an error.
 	e.searcher = stubSearcher{hits: []webtool.SearchResult{{Title: "out", URL: "https://evil.test/b", Content: "x"}}}
-	res = e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"q"}`)})
+	res = e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
 	if res.IsError || res.Content != "No results found." {
 		t.Errorf("all-filtered result = %+v, want the zero-hit text answer", res)
 	}

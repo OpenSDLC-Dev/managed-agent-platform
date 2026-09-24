@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -206,8 +207,10 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 		var in struct {
 			Query string `json:"query"`
 		}
-		if err := json.Unmarshal(u.input, &in); err != nil || strings.TrimSpace(in.Query) == "" {
-			return fail(`web_search: input requires a non-empty "query" string`)
+		// The floor is the schema's minLength 2 (toolset's web_search
+		// definition), counted in characters as minLength counts them.
+		if err := json.Unmarshal(u.input, &in); err != nil || utf8.RuneCountInString(strings.TrimSpace(in.Query)) < 2 {
+			return fail(`web_search: input requires a "query" string of at least 2 characters`)
 		}
 		hits, err := e.searcher.Search(ctx, in.Query)
 		if err != nil {

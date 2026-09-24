@@ -2,6 +2,7 @@ package toolset_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -140,8 +141,8 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 			required: []string{"file_path", "new_string", "old_string"}},
 		"glob": {props: []string{"path", "pattern"}, required: []string{"pattern"}},
 		"grep": {props: []string{"path", "pattern"}, required: []string{"pattern"}},
-		// The web tools' schemas are this platform's minimal reading — the wire
-		// carries no Input types for them (docs/DIVERGENCES.md, INFERRED).
+		// The wire carries no Input types for the web tools; their schemas are
+		// the recorded reference's (TestWebToolSchemasMatchTheRecording).
 		"web_fetch":  {props: []string{"url"}, required: []string{"url"}},
 		"web_search": {props: []string{"query"}, required: []string{"query"}},
 	}
@@ -182,8 +183,8 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 		if !equal(req, w.required) {
 			t.Errorf("%s: required = %v, want %v", d.Name, req, w.required)
 		}
-		// The web schemas are ours (INFERRED), so their property types are a
-		// contract this test owns, not one mirrored from the SDK.
+		// No SDK type mirrors the web schemas, so their property types are a
+		// contract this test owns.
 		if d.Name == "web_fetch" || d.Name == "web_search" {
 			for p, raw := range d.InputSchema.Properties {
 				var ps struct {
@@ -194,6 +195,57 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The web tools' input schemas are the reference's, keyword for keyword, as a
+// 2026-09-02 recording captured them: the agent echoed its tool definitions
+// (a model-mediated echo, not a captured provider request — docs/DIVERGENCES.md
+// weighs it). The property descriptions are stripped before comparing because
+// they are still this platform's own; whether to adopt the reference's is #682.
+func TestWebToolSchemasMatchTheRecording(t *testing.T) {
+	recorded := map[string]string{
+		"web_fetch": `{"type":"object","properties":{"url":{"type":"string","format":"uri"}},` +
+			`"required":["url"],"additionalProperties":false}`,
+		"web_search": `{"type":"object","properties":{"query":{"type":"string","minLength":2}},` +
+			`"required":["query"],"additionalProperties":false}`,
+	}
+
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`))
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	seen := 0
+	for _, raw := range defs {
+		var d struct {
+			Name        string         `json:"name"`
+			InputSchema map[string]any `json:"input_schema"`
+		}
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("definition: %v", err)
+		}
+		rec, ok := recorded[d.Name]
+		if !ok {
+			continue
+		}
+		seen++
+		props, _ := d.InputSchema["properties"].(map[string]any)
+		for _, p := range props {
+			if m, ok := p.(map[string]any); ok {
+				delete(m, "description")
+			}
+		}
+		var want map[string]any
+		if err := json.Unmarshal([]byte(rec), &want); err != nil {
+			t.Fatalf("recorded %s: %v", d.Name, err)
+		}
+		if !reflect.DeepEqual(d.InputSchema, want) {
+			got, _ := json.Marshal(d.InputSchema)
+			t.Errorf("%s input_schema, descriptions aside = %s, want the recorded %s", d.Name, got, rec)
+		}
+	}
+	if seen != len(recorded) {
+		t.Fatalf("saw %d of the %d web tools", seen, len(recorded))
 	}
 }
 
