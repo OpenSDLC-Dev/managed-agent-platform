@@ -187,16 +187,22 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			// so every replay of this log rebuilds the same block (rendering
 			// ours, INFERRED — docs/DIVERGENCES.md).
 			var p struct {
-				FromAgentName string `json:"from_agent_name"`
+				FromSessionThreadID domain.ID `json:"from_session_thread_id"`
+				FromAgentName       string    `json:"from_agent_name"`
 			}
 			if err := json.Unmarshal(ev.Body, &p); err != nil {
 				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
 			}
-			// The field is null when the sender is the primary agent, which has
-			// a role rather than a roster name.
-			from := "your coordinator"
-			if p.FromAgentName != "" {
-				from = p.FromAgentName
+			// The primary agent is named by its role, whatever the row holds.
+			// Its name was null before #675 and is the session agent's since,
+			// but this block heads every request a child assembles: keyed on
+			// the name, the change would have reworded that head for every
+			// child spawned after it, and a child whose log straddles it would
+			// hear one coordinator under two names. Old and new rows render
+			// alike.
+			from := p.FromAgentName
+			if from == "" || p.FromSessionThreadID == domain.PrimaryThreadID(ev.SessionID) {
+				from = "your coordinator"
 			}
 			blk, err := json.Marshal(map[string]any{
 				"type": "text",

@@ -24,8 +24,9 @@ import (
 // show on the session view as a message the primary itself exchanged.
 
 // ThreadPeer names one end of a message: the thread, and the agent it runs.
-// Both are empty for the primary thread, whose agent name is absent — null on
-// the wire — because it has a role rather than a roster name.
+// The primary thread's id is empty. Its agent name is the session agent's, and
+// only a message the primary sends carries it: a message to the primary names
+// no target at all.
 type ThreadPeer struct {
 	ThreadID  domain.ID
 	AgentName string
@@ -49,21 +50,30 @@ func (p ThreadPeer) wire(sessionID domain.ID) string {
 // faults the append, and the model supplies it on every path but the notices.
 func ThreadMessage(sessionID domain.ID, from, to ThreadPeer, text string) (sent, received NewEvent, err error) {
 	content := []map[string]any{{"type": "text", "text": text}}
-	// The nullable agent name is written as a present null rather than
-	// omitted, the convention the tool-use events' session_thread_id keeps, so
-	// the two directions render alike whichever way the message went.
-	sentPayload, err := json.Marshal(map[string]any{
+	// The peer names follow the recorded rule, which is asymmetric (#675):
+	// the sender is always named, the coordinator included, while the target
+	// is named only when it is a child — a message to the primary carries no
+	// to_agent_name key at all, not a null. The SDK documents both names as
+	// absent for the primary agent (checked against anthropic-sdk-go v1.70.1 —
+	// betasessionevent.go
+	// BetaManagedAgentsAgentThreadMessageReceivedEvent.FromAgentName and
+	// BetaManagedAgentsAgentThreadMessageSentEvent.ToAgentName); the recording
+	// bears out the second and contradicts the first.
+	sentBody := map[string]any{
 		"content":              content,
 		"to_session_thread_id": to.wire(sessionID),
-		"to_agent_name":        nullableName(to.AgentName),
-	})
+	}
+	if to.ThreadID != "" {
+		sentBody["to_agent_name"] = to.AgentName
+	}
+	sentPayload, err := json.Marshal(sentBody)
 	if err != nil {
 		return NewEvent{}, NewEvent{}, err
 	}
 	recvPayload, err := json.Marshal(map[string]any{
 		"content":                content,
 		"from_session_thread_id": from.wire(sessionID),
-		"from_agent_name":        nullableName(from.AgentName),
+		"from_agent_name":        from.AgentName,
 	})
 	if err != nil {
 		return NewEvent{}, NewEvent{}, err
@@ -71,14 +81,6 @@ func ThreadMessage(sessionID domain.ID, from, to ThreadPeer, text string) (sent,
 	return NewEvent{Type: domain.EventAgentThreadMessageSent, Payload: sentPayload, ThreadID: from.ThreadID},
 		NewEvent{Type: domain.EventAgentThreadMessageReceived, Payload: recvPayload, ThreadID: to.ThreadID},
 		nil
-}
-
-// nullableName binds the peer's agent name: NULL for the primary agent.
-func nullableName(name string) *string {
-	if name == "" {
-		return nil
-	}
-	return &name
 }
 
 // WakeThread decides the one question a delivered message raises: whether

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1131,6 +1132,76 @@ func TestSendToParentLeavesTheChildsTurnRunning(t *testing.T) {
 	}
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want 1", n)
+	}
+}
+
+// The peer names a message carries, both directions, as the reference was
+// recorded writing them (#675): every received row names its sender — the
+// coordinator by its session agent's name — and a sent row names its target
+// only when that target is a child, so a child's report has no to_agent_name
+// key at all. The child's first request is pinned as well: replay names the
+// coordinator by its role whatever the row now holds, so naming it on the wire
+// moves no child's request prefix.
+func TestThreadMessagesNameTheSenderAndOnlyAChildTarget(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"find the papers"}`),
+			toolCall("t2", "wait_for_agents", `{}`),
+			done("tool_use", 2),
+		},
+		{toolCall("t3", "send_to_parent", `{"message":"halfway there"}`), done("tool_use", 1)},
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "coordinate the work")
+	h.runOnce(t) // the spawn, and the wait parks the coordinator
+	kids := h.children(t)
+	if len(kids) != 1 {
+		t.Fatalf("child threads = %d, want 1", len(kids))
+	}
+	child := kids[0].id
+	h.runOnce(t) // the child's first turn, which reports
+
+	primary := domain.PrimaryThreadID(h.sessionID).String()
+	for _, tc := range []struct {
+		name   string
+		thread domain.ID
+		typ    domain.EventType
+		want   map[string]any
+	}{
+		{"the coordinator's send", "", domain.EventAgentThreadMessageSent,
+			map[string]any{"to_session_thread_id": child.String(), "to_agent_name": "researcher"}},
+		{"the child's task", child, domain.EventAgentThreadMessageReceived,
+			map[string]any{"from_session_thread_id": primary, "from_agent_name": "fixture"}},
+		{"the child's report", child, domain.EventAgentThreadMessageSent,
+			map[string]any{"to_session_thread_id": primary}},
+		{"the coordinator's copy", "", domain.EventAgentThreadMessageReceived,
+			map[string]any{"from_session_thread_id": child.String(), "from_agent_name": "researcher"}},
+	} {
+		evs, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{
+			Scope: events.ScopeThread, ThreadID: tc.thread, Types: []string{string(tc.typ)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(evs) != 1 {
+			t.Fatalf("%s: %d rows, want 1", tc.name, len(evs))
+		}
+		var got map[string]any
+		if err := json.Unmarshal(evs[0].Body, &got); err != nil {
+			t.Fatal(err)
+		}
+		delete(got, "content")
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	calls := h.provider.calls
+	if len(calls) != 2 {
+		t.Fatalf("%d model calls, want the coordinator's and the child's", len(calls))
+	}
+	if msgs := calls[1].Messages; len(msgs) == 0 ||
+		string(msgs[0].Content) != `[{"text":"[message from your coordinator]\n\nfind the papers","type":"text"}]` {
+		t.Errorf("the child's request opens with %v, want its task from your coordinator", requestJSON(t, msgs))
 	}
 }
 

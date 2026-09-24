@@ -291,7 +291,8 @@ func TestRenderDreamUnreadableToolUse(t *testing.T) {
 }
 
 // A received message whose sender carries no name — the primary agent's half
-// of the pair — still says who is speaking rather than trailing off.
+// of the pair, as rows written before #675 carry it — still says who is
+// speaking rather than trailing off.
 func TestThreadMessageWithoutSenderName(t *testing.T) {
 	d := renderEvents(t, mustEvent(t, 1, domain.EventAgentThreadMessageReceived,
 		map[string]any{"content": "done", "from_agent_name": nil}))
