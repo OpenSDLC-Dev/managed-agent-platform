@@ -967,7 +967,10 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 // and the view this surface renders under.
 func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool, resolve func(context.Context) (eventsView, error)) (any, error) {
 	ctx := r.Context()
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	if !filters {
 		for _, key := range []string{"order", "types", "types[]", "created_at[gt]", "created_at[gte]", "created_at[lt]", "created_at[lte]"} {
 			if _, ok := q[key]; ok {

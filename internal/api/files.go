@@ -240,7 +240,10 @@ func (s *server) getFile(r *http.Request) (any, error) {
 
 func (s *server) listFiles(r *http.Request) (any, error) {
 	ctx := r.Context()
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	afterID, beforeID := q.Get("after_id"), q.Get("before_id")
 	if afterID != "" && beforeID != "" {
 		return nil, errInvalid("after_id and before_id are mutually exclusive")

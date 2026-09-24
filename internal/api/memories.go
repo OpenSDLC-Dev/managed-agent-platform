@@ -524,9 +524,9 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	// SDK sends that for param.NewOpt("") — is refused like any other shape,
 	// and so is a query string that does not parse, since URL.Query drops a
 	// malformed pair and a corrupted precondition would read as absent.
-	q, err := url.ParseQuery(r.URL.RawQuery)
+	q, err := queryValues(r)
 	if err != nil {
-		return nil, errInvalid("malformed query string: %v", err)
+		return nil, err
 	}
 	expected := q.Get("expected_content_sha256")
 	if q.Has("expected_content_sha256") && !memsync.IsDigest([]byte(expected)) {
@@ -578,7 +578,10 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if err := checkID(storeID, "memory store"); err != nil {
 		return nil, err
 	}
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	view, err := parseMemoryView(q, viewBasic)
 	if err != nil {
 		return nil, err

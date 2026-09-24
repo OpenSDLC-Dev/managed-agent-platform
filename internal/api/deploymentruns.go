@@ -270,7 +270,10 @@ func (s *server) getDeploymentRun(r *http.Request) (any, error) {
 // the deployment_id filter is present, keyset-paged like the deployments list.
 func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 	ctx := r.Context()
-	q := r.URL.Query()
+	q, err := queryValues(r)
+	if err != nil {
+		return nil, err
+	}
 	// The one list whose published cap is 1000, not maxLimit (§2.6).
 	page, err := parsePageMax(q, maxRunLimit)
 	if err != nil {
