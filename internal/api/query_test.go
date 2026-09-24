@@ -71,8 +71,9 @@ func TestMalformedQueryStringIsRefused(t *testing.T) {
 		{"/v1/agents", "created_at[gte]", "2026-01-01T00:00:00Z"},
 		{"/v1/sessions", "agent_id", agent},
 		{"/v1/sessions/" + session + "/events", "types[]", "user.message"},
-		// The thread lists share the session list's handler, so they share
-		// its refusal although their own parameters only page.
+		// The thread-event list's own parameters only page, but it shares the
+		// session-event list's handler, which answers a filter key sent to a
+		// thread with a 400; one lost on the way would answer unfiltered.
 		{"/v1/sessions/" + session + "/threads/" + thread + "/events", "limit", "1"},
 		{"/v1/deployments", "agent_id", agent},
 		{"/v1/deployment_runs", "deployment_id", domain.NewID(domain.PrefixDeployment).String()},
