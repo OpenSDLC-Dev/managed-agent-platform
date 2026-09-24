@@ -249,12 +249,11 @@ func TestSessionViewWithThreadToolCalls(t *testing.T) {
 // HideTools drops the named agent.tool_use calls and the agent.tool_result
 // answering each from any scope (#675) — keyed on the call's name, which a
 // result carries only through its tool_use_id — inside the query, so a limit
-// still counts visible rows. The call's type and name together are the key: a
-// custom tool of the same name stays, and so does a name the model was never
-// offered, which the settlement answers exactly as it answers a delegation
-// call — even one of the hidden names, stamped deny on a session that does
-// not delegate. A scope that does not set it — a thread's replay — reads every
-// row.
+// still counts visible rows. The call's type and name together are the key,
+// and nothing else about the call: a custom tool of the same name stays, and so
+// does a name off the list, answered by the settlement exactly as a delegation
+// call is, while a named call goes whatever its evaluated_permission. A scope
+// that does not set it — a thread's replay — reads every row.
 func TestListHideTools(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -271,7 +270,7 @@ func TestListHideTools(t *testing.T) {
 	bash, bashBody := use("bash")
 	report, reportBody := use("submit_result")
 	unknown, unknownBody := use("frobnicate")
-	unoffered := domain.NewID(domain.PrefixEvent)
+	denied := domain.NewID(domain.PrefixEvent)
 
 	if _, err := log.Append(ctx, sid, []events.NewEvent{
 		{Type: domain.EventUserMessage, Payload: text("primary")},                                     // 1
@@ -287,9 +286,9 @@ func TestListHideTools(t *testing.T) {
 		{Type: domain.EventAgentToolUse, ThreadID: child, Payload: bashBody}, // 10
 		{ID: unknown, Type: domain.EventAgentToolUse, Payload: unknownBody},  // 11
 		{Type: domain.EventAgentToolResult, Payload: answer(unknown)},        // 12
-		{ID: unoffered, Type: domain.EventAgentToolUse,
+		{ID: denied, Type: domain.EventAgentToolUse,
 			Payload: []byte(`{"name":"submit_result","input":{},"evaluated_permission":"deny"}`)}, // 13
-		{Type: domain.EventAgentToolResult, Payload: answer(unoffered)}, // 14
+		{Type: domain.EventAgentToolResult, Payload: answer(denied)}, // 14
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -314,17 +313,17 @@ func TestListHideTools(t *testing.T) {
 		{"session, nothing hidden", events.ListQuery{Scope: events.ScopeSession},
 			[]int64{1, 2, 3, 4, 5, 6, 9, 11, 12, 13, 14}},
 		{"session", events.ListQuery{Scope: events.ScopeSession, HideTools: hide},
-			[]int64{1, 4, 5, 6, 9, 11, 12, 13, 14}},
+			[]int64{1, 4, 5, 6, 9, 11, 12}},
 		// The widening would pull the child's report and its answer back in.
 		{"session widened", events.ListQuery{Scope: events.ScopeSession, ThreadToolCalls: true, HideTools: hide},
-			[]int64{1, 4, 5, 6, 9, 10, 11, 12, 13, 14}},
+			[]int64{1, 4, 5, 6, 9, 10, 11, 12}},
 		{"the child's own surface", events.ListQuery{Scope: events.ScopeThread, ThreadID: child, HideTools: hide},
 			[]int64{9, 10}},
 		// What the primary's turn replays keeps the pair it answered.
 		{"primary replay", events.ListQuery{Scope: events.ScopeThread}, []int64{1, 2, 3, 4, 5, 6, 11, 12, 13, 14}},
 		// Two arrays bind ahead of the type filter; the placeholders still line up.
 		{"widened and typed", events.ListQuery{Scope: events.ScopeSession, ThreadToolCalls: true, HideTools: hide,
-			Types: []string{"agent.tool_result"}}, []int64{5, 12, 14}},
+			Types: []string{"agent.tool_result"}}, []int64{5, 12}},
 		{"a full first page", events.ListQuery{Scope: events.ScopeSession, HideTools: hide, Limit: 2}, []int64{1, 4}},
 		{"a full page after a hidden pair", events.ListQuery{Scope: events.ScopeSession, HideTools: hide,
 			AfterSeq: &one, Limit: 1}, []int64{4}},

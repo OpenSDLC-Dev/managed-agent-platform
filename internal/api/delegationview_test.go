@@ -245,11 +245,11 @@ func TestDelegationRowsNeverShortenAPage(t *testing.T) {
 }
 
 // The filter is taken only on a session whose snapshot carries a roster —
-// where the brain classes the six names as settlement work and stamps them
-// allow. A single-agent session is offered none of them and stamps one deny
-// (#567), which the filter would spare anyway, so its surfaces list without
-// it: an allow-stamped pair planted there, a state no brain writes, stays on
-// the session view, the primary thread's list and the stream alike.
+// where the brain classes the six names as delegation calls. A single-agent
+// session is offered none of them, and a call to one is an unknown tool like
+// any other (#567), so its surfaces list without the filter: a pair planted
+// there stays on the session view, the primary thread's list and the stream
+// alike.
 func TestASingleAgentSessionListsWithoutTheDelegationFilter(t *testing.T) {
 	s := newTestServer(t)
 	sid := eventsFixture(t, s)

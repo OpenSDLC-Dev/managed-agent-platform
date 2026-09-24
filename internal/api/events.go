@@ -52,9 +52,11 @@ type eventsView struct {
 	wide bool
 	// delegates: the session's snapshot carries a roster, so its surfaces hide
 	// wireHiddenTools. Only there does the brain class the six names as
-	// settlement work and stamp them allow; a single-agent session stamps any
-	// of them deny (#567), which the filter spares anyway, so its lists skip
-	// the filter — and the lookup it makes per tool result — outright.
+	// delegation calls — all six on every thread, the half a thread was never
+	// offered included, so a call across the roles is hidden with its is_error
+	// answer. On a single-agent session one of the names is an unknown tool
+	// like any other (#567) and renders as one, so its lists skip the filter —
+	// and the lookup it makes per tool result — outright.
 	delegates bool
 }
 
@@ -1382,9 +1384,9 @@ func (s *server) sessionView(ctx context.Context, id string) (eventsView, error)
 
 // hasRoster reports whether a session snapshot's multiagent is a non-empty
 // roster: the brain's own test for a coordinator (internal/brain/mcptools.go
-// hasRoster), spelled the same way, because it is what decides whether the
-// brain stamps a delegation call allow. Decoded rather than measured for the
-// reason that one gives — a single agent stores an explicit JSON null.
+// hasRoster), spelled the same way, because the two must agree on which
+// sessions delegate (eventsView.delegates). Decoded rather than measured for
+// the reason that one gives — a single agent stores an explicit JSON null.
 func hasRoster(multiagent []byte) bool {
 	var p struct {
 		Agents []json.RawMessage `json:"agents"`

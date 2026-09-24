@@ -402,12 +402,12 @@ scan:
 			//
 			// A delegation call is never anyone's to run — the settlement that
 			// emitted it answers it in the same commit — and a current control
-			// plane lists none: a session that delegates hides all six names
-			// (#675), and on one that does not they are stamped deny, which
-			// the runnable check below skips. The name check stays as the
-			// backstop for an older control plane, which lists them: there an
-			// answered call is passed over by its answer, and this catches a
-			// stray unanswered one.
+			// plane lists none a worker could run: a session that delegates
+			// hides all six names (#675), and on one that does not a call to
+			// one is stamped deny (#567), which the runnable check below
+			// skips. The name check stays as the backstop for an older control
+			// plane, which lists them: there an answered call is passed over by
+			// its answer, and this catches a stray unanswered one.
 			//
 			// Both filters keep the six-tool Runner from being fed a name it
 			// must answer unknown-tool — an answer the control plane would then
