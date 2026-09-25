@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/jackc/pgx/v5"
@@ -126,5 +128,52 @@ func TestAHistoryReadFailingAfterTheStartReleasesTheItemAtOnce(t *testing.T) {
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
 		t.Errorf("%d model_turn items live, want 0", n)
+	}
+}
+
+// A model with no route fails the turn before any request, so the failure
+// itself stamps the input the turn found — and only that. A message posted
+// after the failure was decided was read by nothing: it stays unprocessed,
+// and the failure chains a turn for it rather than idling past it. The hook
+// lands it just before the settlement takes the session lock.
+func TestAnUnroutedModelStampsOnlyWhatItFound(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	reg, err := provider.NewRegistry(
+		[]provider.Route{{Model: "some-other-model", Config: provider.Config{Protocol: "fake", BaseURL: "http://x"}}},
+		map[string]provider.Factory{"fake": func(provider.Config) (provider.Provider, error) {
+			t.Fatal("factory must not be called")
+			return nil, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.registry = reg
+	h.wake(t, "one")
+	h.tracedBrain(t, &onQuery{match: []string{"SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE"},
+		hook: func(context.Context) context.Context {
+			if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+				{Type: domain.EventUserMessage, Payload: json.RawMessage(`{"content":"two"}`)},
+			}); err != nil {
+				t.Errorf("append after the failure: %v", err)
+			}
+			return nil
+		}})
+	h.runOnce(t)
+
+	msgs := h.messages(t)
+	if len(msgs) != 2 {
+		t.Fatalf("%d messages", len(msgs))
+	}
+	if msgs[0].ProcessedAt == nil {
+		t.Error("the message the failed turn found is unprocessed; nothing else will stamp it")
+	}
+	if msgs[1].ProcessedAt != nil {
+		t.Errorf("the message posted after the failure is stamped %v, though nothing read it", msgs[1].ProcessedAt)
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status = %q, want running: the later message chains a turn", got)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("%d model_turn items live, want the chained one", n)
 	}
 }

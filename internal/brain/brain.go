@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"slices"
 	"time"
 
@@ -343,10 +342,15 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if err != nil {
 		// A model with no route is a configuration error, not a transient
 		// fault: fail the turn visibly rather than retry forever. No request
-		// starts, so none consumes the thread's input; the failure stamps it
-		// all instead (everything), since nothing else would and an unstamped
-		// input would read as pending forever.
-		return b.failTurn(ctx, sid, item, nil, everything, fmt.Sprintf("no provider for model %q", agent.Model.ID), envKind)
+		// starts, so none consumes the thread's input: the failure stamps what
+		// the thread held when it failed, which nothing else would, and chains
+		// on anything posted since, as any failed turn chains on input past
+		// what it read.
+		head, herr := b.threadHead(ctx, sid, item.ThreadID)
+		if herr != nil {
+			return fmt.Errorf("no provider: %w", herr)
+		}
+		return b.failTurn(ctx, sid, item, nil, head, fmt.Sprintf("no provider for model %q", agent.Model.ID), envKind)
 	}
 
 	// The route resolved above, named for telemetry. Provider() just succeeded,
@@ -615,11 +619,16 @@ func (b *Brain) releaseStartedTurn(ctx context.Context, sid domain.ID, item *que
 	return err
 }
 
-// everything is failTurn's watermark for a failure that stops a turn before
-// it reads its history and that no request will follow: the settlement stamps
-// every input the thread holds when it commits, and chains on none of them,
-// since a retry would fail the same way.
-const everything = math.MaxInt64
+// threadHead is the thread's newest seq: the watermark of a failure that
+// stops a turn before it reads its history, which stands for what the thread
+// held when the turn failed.
+func (b *Brain) threadHead(ctx context.Context, sid, threadID domain.ID) (int64, error) {
+	var head int64
+	err := b.pool.QueryRow(ctx,
+		`SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2`,
+		sid.String(), events.NullableThread(threadID)).Scan(&head)
+	return head, err
+}
 
 // pendingInputTypes are the inbound events whose arrival must chain the next
 // turn rather than let the session idle past them: a consumed input a client
@@ -1162,10 +1171,15 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 	}
 
 	// The stamp is for the one failure no request follows — no provider
-	// routes the model (span == nil, watermark everything) — where nothing
-	// else would ever stamp the thread's input and pendingInput would read it
-	// as queued forever. After a start it stamps nothing: the start did.
-	return b.settle(ctx, sid, item, watermark, envKind, events.AppendOptions{MarkProcessedThrough: watermark},
+	// routes the model (span == nil, watermark the thread's head when it
+	// failed) — where nothing else would ever stamp the thread's input and
+	// pendingInput would read it as queued forever. After a start there is
+	// nothing to stamp: the start did.
+	var opts events.AppendOptions
+	if span == nil {
+		opts.MarkProcessedThrough = watermark
+	}
+	return b.settle(ctx, sid, item, watermark, envKind, opts,
 		&domain.StopReason{Type: domain.StopRetriesExhausted},
 		func(chained bool) ([]events.NewEvent, error) {
 			// retry_status tells the client whether the platform will make
