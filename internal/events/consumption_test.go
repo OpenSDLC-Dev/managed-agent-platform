@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"unsafe"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -321,9 +322,11 @@ func TestConsumptionOrdererStreamsTheSameOrder(t *testing.T) {
 }
 
 // HeldBytes is what the held inputs weigh, so a streaming caller can bound
-// its memory; a flush releases them and resets it. An early flush degrades
-// the open window to seq order: what was held comes out now, and the rest of
-// that window is emitted as it arrives.
+// its memory: each one's body, and a charge for the event it is held as — an
+// empty body is no free row, or a window of many tiny inputs would hold far
+// more than the bytes say. A flush releases them and resets it. An early
+// flush degrades the open window to seq order: what was held comes out now,
+// and the rest of that window is emitted as it arrives.
 func TestConsumptionOrdererHeldBytes(t *testing.T) {
 	var o events.ConsumptionOrderer
 	if got := o.Push(nil, domain.Event{ID: "s1", Seq: 1, Type: domain.EventSpanModelRequestStart, Body: []byte("{}")}); len(got) != 1 {
@@ -332,9 +335,14 @@ func TestConsumptionOrdererHeldBytes(t *testing.T) {
 	if got := o.Push(nil, domain.Event{ID: "m1", Seq: 2, Type: evUser, Body: []byte("0123456789")}); len(got) != 0 {
 		t.Fatalf("held input emitted %v", ids(got))
 	}
+	one := o.HeldBytes()
 	o.Push(nil, domain.Event{ID: "m2", Seq: 3, Type: evUser, Body: []byte("01234")})
-	if got := o.HeldBytes(); got != 15 {
-		t.Errorf("HeldBytes = %d, want 15", got)
+	second := o.HeldBytes() - one
+	if one-second != 5 {
+		t.Errorf("rows of 10 and 5 body bytes weigh %d and %d, want 5 apart", one, second)
+	}
+	if header := int(unsafe.Sizeof(domain.Event{})); second < 5+header {
+		t.Errorf("a held row of 5 body bytes weighs %d, less than the %d-byte event it is held as", second, header)
 	}
 	wantOrder(t, o.Flush(nil), "m1", "m2")
 	if got := o.HeldBytes(); got != 0 {

@@ -12,9 +12,11 @@ package transcript
 // Events render in consumption order (events.ConsumptionOrderer, #793): a
 // message posted while a request was in flight renders after that request's
 // reply, where the agent read it. The inputs a window holds are memory the
-// cap does not see, so once they outweigh DreamTranscriptCap they are
-// released early and that window degrades to seq order: held inputs add at
-// most one cap (and one event) to the bound above, whatever the log's length.
+// cap does not see, so once their estimated weight — each one's body and a
+// fixed charge for the event it is held as (ConsumptionOrderer.HeldBytes) —
+// outweighs DreamTranscriptCap, they are released early and that window
+// degrades to seq order: held inputs add about one cap (and one event) to the
+// bound above, whatever the log's length and however small their bodies.
 
 import (
 	"context"

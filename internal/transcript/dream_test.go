@@ -584,6 +584,9 @@ type generatedLog struct {
 	// openWindow makes the first row a span.model_request_start that never
 	// ends, so every message after it lands in one open window.
 	openWindow bool
+	// tiny gives every message an empty body, so what a held row weighs is
+	// its event header alone.
+	tiny bool
 }
 
 func (g *generatedLog) List(_ context.Context, _ domain.ID, q events.ListQuery) ([]domain.Event, error) {
@@ -620,6 +623,9 @@ func (g *generatedLog) event(seq int64) domain.Event {
 		return domain.Event{ID: "sevt_start", Seq: seq, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)}
 	}
 	body := fmt.Sprintf(`{"content":"turn %d: %s"}`, seq, strings.Repeat("w", 120))
+	if g.tiny {
+		body = `{}`
+	}
 	return domain.Event{Seq: seq, Type: domain.EventUserMessage, Body: []byte(body)}
 }
 
@@ -692,30 +698,34 @@ func TestRenderDreamFlushesAWindowOpenAtTheMark(t *testing.T) {
 // early once they outweigh it: a window that never closes over a long log
 // degrades to seq order rather than holding the log. The peak measure of
 // TestRenderDreamMemoryBound, over a log whose first row opens a request that
-// never ends.
+// never ends — once with bodies of 140 bytes, and once with empty ones, whose
+// weight is their event headers alone: a bound on body bytes would hold
+// thousands of them.
 func TestRenderDreamHeldInputsStayBounded(t *testing.T) {
-	measure := func(n int) (uint64, *Dream) {
-		t.Helper()
-		log := &generatedLog{n: n, openWindow: true}
-		d, err := RenderDream(t.Context(), log, "sesn_held")
-		if err != nil {
-			t.Fatalf("RenderDream: %v", err)
+	for _, tiny := range []bool{false, true} {
+		measure := func(n int) (uint64, *Dream) {
+			t.Helper()
+			log := &generatedLog{n: n, openWindow: true, tiny: tiny}
+			d, err := RenderDream(t.Context(), log, "sesn_held")
+			if err != nil {
+				t.Fatalf("RenderDream: %v", err)
+			}
+			return log.peak, d
 		}
-		return log.peak, d
-	}
-	smallPeak, small := measure(500)
-	bigPeak, big := measure(50_000)
-	if small.Turns != 499 || big.Turns != 49_999 {
-		t.Fatalf("turns = %d and %d, want every message after the start", small.Turns, big.Turns)
-	}
-	for _, d := range []*Dream{small, big} {
-		if len(d.Text) > DreamTranscriptCap {
-			t.Errorf("rendered %d bytes, over the cap", len(d.Text))
+		smallPeak, small := measure(500)
+		bigPeak, big := measure(50_000)
+		if small.Turns != 499 || big.Turns != 49_999 {
+			t.Fatalf("tiny %v: turns = %d and %d, want every message after the start", tiny, small.Turns, big.Turns)
 		}
-	}
-	t.Logf("peak live heap at a page boundary: 500 events %d bytes, 50,000 events %d bytes", smallPeak, bigPeak)
-	if int64(bigPeak)-int64(smallPeak) > 1<<20 {
-		t.Errorf("peak live heap grew by %d bytes between 500 and 50,000 events; held inputs are not bounded",
-			int64(bigPeak)-int64(smallPeak))
+		for _, d := range []*Dream{small, big} {
+			if len(d.Text) > DreamTranscriptCap {
+				t.Errorf("tiny %v: rendered %d bytes, over the cap", tiny, len(d.Text))
+			}
+		}
+		t.Logf("tiny %v: peak live heap at a page boundary: 500 events %d bytes, 50,000 events %d bytes", tiny, smallPeak, bigPeak)
+		if int64(bigPeak)-int64(smallPeak) > 1<<20 {
+			t.Errorf("tiny %v: peak live heap grew by %d bytes between 500 and 50,000 events; held inputs are not bounded",
+				tiny, int64(bigPeak)-int64(smallPeak))
+		}
 	}
 }

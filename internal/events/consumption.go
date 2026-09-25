@@ -97,7 +97,7 @@ func (o *ConsumptionOrderer) Push(out []domain.Event, ev domain.Event) []domain.
 			o.held = map[domain.ID][]domain.Event{}
 		}
 		o.held[t] = append(o.held[t], ev)
-		o.heldBytes += len(ev.Body)
+		o.heldBytes += heldWeight(ev)
 		return out
 	case open && ev.Type == domain.EventSpanModelRequestEnd && endsRequest(ev, start):
 		delete(o.open, t)
@@ -121,13 +121,24 @@ func (o *ConsumptionOrderer) Flush(out []domain.Event) []domain.Event {
 	return out
 }
 
-// HeldBytes is the body size of the inputs held back so far.
+// HeldBytes estimates what the inputs held back so far weigh: each one's
+// body, and heldRowOverhead for the event it is held as.
 func (o *ConsumptionOrderer) HeldBytes() int { return o.heldBytes }
+
+// heldRowOverhead is what HeldBytes charges a held row beside its body: the
+// domain.Event it is held as (128 bytes on a 64-bit platform) and the small
+// allocations a row read from the log carries with it — its id, its type and
+// its processed_at — rounded up for the held slice's spare capacity. An
+// estimate rather than a measure, it keeps a window of many empty inputs as
+// bounded as a window of a few large ones.
+const heldRowOverhead = 256
+
+func heldWeight(ev domain.Event) int { return len(ev.Body) + heldRowOverhead }
 
 // release appends thread t's held inputs to out and forgets them.
 func (o *ConsumptionOrderer) release(out []domain.Event, t domain.ID) []domain.Event {
 	for _, ev := range o.held[t] {
-		o.heldBytes -= len(ev.Body)
+		o.heldBytes -= heldWeight(ev)
 		out = append(out, ev)
 	}
 	delete(o.held, t)
