@@ -143,8 +143,8 @@ func TestSessionCreateNamesEveryBlockedMCPHost(t *testing.T) {
 // session, with an MCP server or without one, and still refuses a blocked host
 // under a `limited` block beside it. A url whose authority names no host is not
 // a host the policy refuses, and a policy type nothing recognizes is not one
-// the message's advice could fix: both are left to the dial, which refuses them
-// with reasons of its own.
+// the message's advice could fix: both are left to the executor, which refuses
+// them before any dial, with reasons of its own.
 func TestSessionCreateJudgesOnlyWhatItCanRead(t *testing.T) {
 	s := newTestServer(t)
 	storeConfig := func(envID, config string) {

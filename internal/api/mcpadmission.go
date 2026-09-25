@@ -21,8 +21,8 @@ import (
 // with ", " in declaration order, which is ours (docs/DIVERGENCES.md). The
 // reference extracts the host from each url, so the host is judged whatever the
 // scheme: whether the dial can use the url is the dial's question. A url with no
-// host to judge is left to the dial, which refuses it as unusable — skipping it
-// here admits nothing. Only the session's own agent is checked: a
+// host to judge is left to the executor, which under the same policy refuses it
+// before any dial — skipping it here admits nothing. Only the session's own agent is checked: a
 // coordinator's roster members dial under the executor's check alone.
 //
 // Only a `limited` policy refuses here, because it is the only one the
