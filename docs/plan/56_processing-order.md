@@ -285,10 +285,12 @@ included:
   has run. The send then makes the settlement's move itself
   (`events.SettleTransition`, the rule `SettleToolFlow` applies for the executor
   and the brain) where the thread's answers are consumed, at the last answer its
-  walk processes, in receipt order with the interrupt arms, so no fold passes
-  through a state an earlier answer already changed: a denial received ahead of
-  an interrupt of a running child resumes the primary before the child idles,
-  and the session never folds idle on the gate the denial cleared. A resume's
+  walk processes, in receipt order with the interrupt arms: a denial received
+  ahead of an interrupt of a running child resumes the primary before the child
+  idles, so the session does not fold idle on the gate the denial cleared. One
+  case stays ours: a thread moves once, at its last processed answer, so answers
+  of one thread that straddle another thread's interrupt leave that interrupt's
+  fold naming a gate an earlier answer cleared (docs/DIVERGENCES.md). A resume's
   pair is listed among the wakes, after everything consumed on receipt. A thread
   the answers leave parked re-announces its gates right after that answer,
   ahead of the input the send leaves pending, as the reference re-idles it
@@ -398,7 +400,9 @@ included:
   providers' requests. The enqueue a resume makes is counted by attempt, which
   the live-work dedup would otherwise hide, and a child's resume enqueues the
   child's turn. Pinned, green before and after: a child's denial, its result
-  ahead of its running event on the session and the child's own list, and an
-  answer that leaves a gate open, which writes no pair.
+  ahead of its running event on the session and the child's own list; an answer
+  that leaves a gate open, which writes no running pair (only the re-idle beside
+  it); and answers straddling another thread's interrupt, which move their thread
+  once (registered as ours).
 - `make verify`, `make registry-check`, independent verification, both reviews and
   the PR's CI before squash merge.

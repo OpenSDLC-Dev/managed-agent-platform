@@ -380,6 +380,42 @@ func TestAResumeTakesItsPlaceAmongTheInterruptsInReceiptOrder(t *testing.T) {
 	}
 }
 
+// One thread's answers that straddle another thread's interrupt in one send
+// move that thread once, at its last processed answer, so the interrupt's fold
+// still reads the thread's stop reason from before the send: the session idle
+// it writes names a gate an answer listed ahead of it already cleared. A
+// processing-order reference would re-idle the thread on the remaining gate
+// first. Ours, registered in docs/DIVERGENCES.md (the primary thread's entry);
+// pinned so a change to it is deliberate.
+func TestAnswersStraddlingAnInterruptMoveTheirThreadOnce(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	ids := gatedPrimary(t, s, sid, askGate, askGate)
+	child := insertChild(t, s, sid, "running")
+	runningSession(t, s, sid)
+	seq := lastSeq(t, s, sid)
+
+	sendEvents(t, s, sid, confirm(ids[0], "deny", nil),
+		map[string]any{"type": "user.interrupt", "session_thread_id": child},
+		confirm(ids[1], "deny", nil))
+
+	want := []string{"agent.tool_use", "agent.tool_use", "user.tool_confirmation", "user.interrupt",
+		"session.thread_status_idle", "session.status_idle", "user.tool_confirmation",
+		"session.status_running", "session.thread_status_running", "agent.tool_result", "agent.tool_result",
+		"agent.thread_message_received"}
+	if got := wholeLogTypes(t, s, sid); !sameStrings(got, want) {
+		t.Fatalf("event log = %v, want %v", got, want)
+	}
+	stop, _ := lastEventOfType(t, s, sid, "session.status_idle")["stop_reason"].(map[string]any)
+	if got := fmt.Sprint(stop["event_ids"]); got != fmt.Sprint([]any{ids[0], ids[1]}) {
+		t.Errorf("session idle names %s, want both gates (the registered straddle)", got)
+	}
+	if st := s.sessionStatus(sid); st != "running" {
+		t.Errorf("session = %q, want running", st)
+	}
+	stampsRunForward(t, s, sid, seq)
+}
+
 // An answer that leaves a gate of its thread open resumes nothing, so the send
 // writes no running pair. A denial of the first of two gated calls is
 // processed, and the thread stays idle on the second, re-announcing the gate
@@ -387,7 +423,7 @@ func TestAResumeTakesItsPlaceAmongTheInterruptsInReceiptOrder(t *testing.T) {
 // writes it only once the thread resumes — docs/DIVERGENCES.md, the primary
 // thread's entry). An allow of the second waits behind the first, unprocessed,
 // at the tail.
-func TestAnAnswerThatLeavesAGateOpenWritesNoPair(t *testing.T) {
+func TestAnAnswerThatLeavesAGateOpenWritesNoRunningPair(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		call   int
