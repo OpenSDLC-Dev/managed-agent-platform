@@ -152,7 +152,12 @@ It does not move a message's list or stream position: seq stays the receipt orde
 across commits, and the difference that leaves is registered rather than chased,
 in docs/DIVERGENCES.md's entries on list order and on `processed_at`. Replay
 changes once for existing sessions, at one prompt-cache miss (accepted by the
-owner), and that repairs a session the prefill 400 had wedged.
+owner), and that repairs a session the prefill 400 had wedged. The rule reads
+every input below a start as that request's, which a log written before this PR
+can contradict: an input that landed between an older brain's history read and
+its span start was in the next request only, and replays one request early,
+ahead of a reply that never saw it. That window was milliseconds wide, so no
+special case is kept for it.
 
 ## Alternatives rejected
 

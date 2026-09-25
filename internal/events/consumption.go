@@ -23,7 +23,11 @@ import (
 // rebuilds the same order. Its one premise is that a request consumes every
 // row of its thread below its start that no earlier start consumed, which the
 // brain makes true by reading its history only after its start commits,
-// bounded by it (requestHistory).
+// bounded by it (requestHistory). A log written before #793 can break it: an
+// input that landed between an older brain's history read and its start was
+// in the next request only, yet replays with the request whose start it
+// precedes — one request early. That window was milliseconds wide, and no
+// special case is kept for it (docs/plan/56_processing-order.md).
 
 // ConsumedInput reports whether t is an input a model request consumes
 // (domain.ConsumedInputs), and so one a consumption window can hold. Nothing
