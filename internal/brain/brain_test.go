@@ -979,7 +979,7 @@ func TestCrashAfterTheSpanStartKeepsTheStamp(t *testing.T) {
 // A message posted while a tool turn's request is in flight joins the user
 // turn that answers the call, after the result, rather than the user turn
 // ahead of a call it never prompted (#793 item 4; 2026-09-02 batch2 sessT
-// idx 78 lists it after agent.tool_result, 1 µs before the next start).
+// idx 78 lists it after agent.tool_result, 58.8 ms before the next start).
 func TestMidRequestMessageOnAToolTurnFollowsTheResult(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		{toolUseChunk("toolu_a", "lookup"), done("tool_use", 3)},
