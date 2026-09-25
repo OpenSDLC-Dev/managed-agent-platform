@@ -155,8 +155,8 @@ func (m *ModelRequest) SetAttributes(attrs ...attribute.KeyValue) {
 func (m *ModelRequest) StartEventID() domain.ID { return m.startID }
 
 // StartSeq is the start event's seq. The request consumes every input of its
-// thread below it that no earlier request did (#793), which is how the brain
-// finds an input that landed between its history read and this start.
+// thread below it that no earlier request did (#793), so it bounds the history
+// the brain reads for the request once the start has committed.
 func (m *ModelRequest) StartSeq() int64 { return m.startSeq }
 
 // EndEvent renders the span.model_request_end wire event for the caller to
