@@ -85,7 +85,7 @@ func TestInterruptedTurnCommitsNothing(t *testing.T) {
 	// span.model_request_start is the turn's only trace on the log: it commits
 	// before the model is called, outside the settlement the interrupt undoes.
 	want := []string{
-		"user.message", "session.status_running", "span.model_request_start",
+		"session.status_running", "user.message", "span.model_request_start",
 		"user.interrupt", "session.status_idle",
 	}
 	if got := h.types(t); !typesEqual(got, want) {

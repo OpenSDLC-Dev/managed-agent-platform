@@ -845,16 +845,18 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		if err := s.snapshotRubrics(ctx, defs); err != nil {
 			return createdSession{}, err
 		}
-		// The log announces the status the session was born into, after the
-		// initial events it processes in order (placement ours, INFERRED).
-		// Both rows were inserted running above, so the transition moves
-		// nothing and Reemit is what emits the pair.
+		// The log announces the status the session was born into, then the
+		// initial events its first turn consumes, in order: processing order,
+		// which a recorded deployment run's list shows (#793 — 2026-09-12
+		// console-141 `deployment.run.final-events`, the pair at 0-1 and the
+		// message at 2). Both rows were inserted running above, so the
+		// transition moves nothing and Reemit is what emits the pair.
 		pair, _, err := events.TransitionThread(ctx, tx, domain.ID(id), events.ThreadTransition{
 			Status: domain.SessionRunning, Reemit: true})
 		if err != nil {
 			return createdSession{}, err
 		}
-		batch := append(initialEvents, pair...)
+		batch := append(pair, initialEvents...)
 		opts := events.AppendOptions{
 			Then: func(ctx context.Context, tx pgx.Tx) error {
 				_, err := s.queue.Enqueue(ctx, tx, domain.ID(in.envID), domain.ID(id), queue.ModelTurn)
@@ -1452,7 +1454,7 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 			if err != nil {
 				return sessionRow{}, nil, err
 			}
-			if _, err = s.log.AppendInTx(ctx, tx, domain.ID(id), out.batch, events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
+			if _, err = s.log.AppendInTx(ctx, tx, domain.ID(id), processingOrder(nil, out.settled, out.after, nil), events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
 				if _, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), "", platformExecuted); err != nil {
 					return err
 				}

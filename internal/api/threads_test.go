@@ -258,10 +258,11 @@ func TestPrimaryThreadEventsAreTheSessionView(t *testing.T) {
 	status, body = s.do(http.MethodGet, gone+"/stream?event_deltas[]=bogus", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
-	// The stream: the same frames as the session's, from connect time.
+	// The stream: the same frames as the session's, from connect time — the
+	// wake's running pair, then the message it consumes (#793).
 	st := s.stream(t, tpath+"/stream")
 	echo := sendEvents(t, s, sid, userMessage("m1"))
-	for _, want := range []string{"user.message", "session.status_running", "session.thread_status_running"} {
+	for _, want := range []string{"session.status_running", "session.thread_status_running", "user.message"} {
 		if f := st.next(t); f.name != want {
 			t.Errorf("thread stream frame = %q, want %q", f.name, want)
 		} else if want == "user.message" && f.data["id"] != echo[0]["id"] {

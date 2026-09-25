@@ -21,9 +21,12 @@ import (
 // session.status_running ahead of the thread's own event, every other session
 // event behind it (the fact, then the rollup) — the order the reference's
 // sequences show for the primary thread (#674), rescheduled unrecorded.
-// A child's move that wakes an idle session is ours, not a recorded pair: the
-// reference pairs that status_running with the primary (docs/DIVERGENCES.md,
-// "Session threads — a child's resume of an idle session"). A single-thread
+// A child's move that wakes an idle session is ours, deliberately, not a
+// recorded pair: the reference pairs that status_running with the primary and
+// briefly idles the session under a running child, where this fold keeps the
+// session truthfully running for the executor's liveness check, the MCP work
+// check and the archive/delete guards (docs/DIVERGENCES.md, "Session threads —
+// a child's resume of an idle session"; #793 item 2). A single-thread
 // session reduces to the pre-thread behavior exactly: every thread move is a
 // session move, so every pair is emitted; that reduction is the regression
 // gate. Every session has a primary thread, so every session.status_*
@@ -179,9 +182,17 @@ func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t Thr
 // AppendTransition is the self-committing form for callers with no other
 // decision to make under the lock (the brain's reclaim, test harnesses): one
 // transaction that locks the session, runs the transitions in order, appends
-// evs followed by what they emitted, with opts' side effects, and — after
-// the commit, never before — counts the session's net move, so a reclaim's
+// evs and what they emitted, with opts' side effects, and — after the commit,
+// never before — counts the session's net move, so a reclaim's
 // rescheduled+running pair on a running session counts nothing.
+//
+// The two are placed in processing order (#793), and only a wake moves
+// anything: when the transitions end in an unforced move to running, evs are
+// the input the woken turn consumes and follow the pair, as the API's message
+// trigger writes them — which is what the brain's test harnesses mimic. Any
+// other move keeps evs first. The reclaim's forced rescheduled+running pair is
+// not a wake (its thread was already running, and it consumes nothing), and
+// it passes no evs, so its batch is the pair alone either way.
 func (l *Log) AppendTransition(ctx context.Context, sessionID domain.ID, evs []NewEvent, transitions []ThreadTransition, opts AppendOptions) ([]domain.Event, error) {
 	tx, err := l.pool.Begin(ctx)
 	if err != nil {
@@ -196,14 +207,18 @@ func (l *Log) AppendTransition(ctx context.Context, sessionID domain.ID, evs []N
 	if err != nil {
 		return nil, err
 	}
-	batch := append([]NewEvent(nil), evs...)
 	opts.SetStatus = nil
+	var emitted []NewEvent
 	for _, t := range transitions {
 		out, _, err := TransitionThread(ctx, tx, sessionID, t)
 		if err != nil {
 			return nil, err
 		}
-		batch = append(batch, out...)
+		emitted = append(emitted, out...)
+	}
+	batch := append(append([]NewEvent(nil), evs...), emitted...)
+	if n := len(transitions); n > 0 && transitions[n-1].Status == domain.SessionRunning && !transitions[n-1].Force {
+		batch = append(emitted, evs...)
 	}
 	var after string
 	if err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1`, sessionID.String()).Scan(&after); err != nil {

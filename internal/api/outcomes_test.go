@@ -378,22 +378,24 @@ func TestCreateSessionInitialEvents(t *testing.T) {
 		t.Errorf("entry result = %v, want pending", entry["result"])
 	}
 
-	// The log holds the initial events in order, then the born-into status.
+	// The log holds the born-into status, then the initial events in order:
+	// the first turn consumes them, so they follow its running pair, as a
+	// recorded deployment run's initial message does (#793).
 	status, list := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
 	if status != http.StatusOK {
 		t.Fatalf("list events: %d", status)
 	}
 	evs := listData(t, list)
 	if len(evs) != 4 {
-		t.Fatalf("log has %d events, want 4 (message, define_outcome, status_running, thread_status_running)", len(evs))
+		t.Fatalf("log has %d events, want 4 (status_running, thread_status_running, message, define_outcome)", len(evs))
 	}
-	for i, wantType := range []string{"user.message", "user.define_outcome", "session.status_running", "session.thread_status_running"} {
+	for i, wantType := range []string{"session.status_running", "session.thread_status_running", "user.message", "user.define_outcome"} {
 		if evs[i]["type"] != wantType {
 			t.Errorf("log[%d].type = %v, want %s", i, evs[i]["type"], wantType)
 		}
 	}
-	if evs[1]["max_iterations"] != float64(5) {
-		t.Errorf("define_outcome max_iterations = %v, want 5", evs[1]["max_iterations"])
+	if evs[3]["max_iterations"] != float64(5) {
+		t.Errorf("define_outcome max_iterations = %v, want 5", evs[3]["max_iterations"])
 	}
 }
 

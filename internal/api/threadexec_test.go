@@ -210,7 +210,9 @@ func TestThreadScopedInterruptLeavesTheSharedExecItem(t *testing.T) {
 		t.Errorf("live tool_exec after A's interrupt = %d, want 1 — B's call still rides on it", n)
 	}
 	types := s.eventTypes(sid)
-	if !sameStrings(types, []string{"agent.tool_use", "agent.tool_use", "user.interrupt", "agent.tool_result",
+	// Processing order (#539): the result the interrupt synthesizes comes
+	// before it; the notice and A's idle follow it.
+	if !sameStrings(types, []string{"agent.tool_use", "agent.tool_use", "agent.tool_result", "user.interrupt",
 		"agent.thread_message_received", "session.thread_status_idle"}) {
 		t.Errorf("session view = %v, want A's call answered, its coordinator told, and A's thread event, "+
 			"no session event", types)

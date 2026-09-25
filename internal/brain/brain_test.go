@@ -138,7 +138,8 @@ func newHarnessEnv(t *testing.T, envKind string, scripts [][]provider.Chunk, err
 }
 
 // wake mimics the control plane's user.message trigger: append + flip to
-// running + enqueue, one transaction.
+// running + enqueue, one transaction, the running pair ahead of the message as
+// the trigger writes it (#793).
 func (h *harness) wake(t *testing.T, text string) {
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{
@@ -368,7 +369,7 @@ func TestSimpleTurn(t *testing.T) {
 	h.runOnce(t)
 
 	want := []string{
-		"user.message", "session.status_running",
+		"session.status_running", "user.message",
 		"span.model_request_start", "agent.thinking", "agent.message",
 		"span.model_request_end", "session.status_idle",
 	}
@@ -456,7 +457,7 @@ func TestToolUseSuspendsAndResumes(t *testing.T) {
 
 	// The custom call advertises its result wait to a cookbook client.
 	want := []string{
-		"user.message", "session.status_running",
+		"session.status_running", "user.message",
 		"span.model_request_start", "agent.custom_tool_use", "span.model_request_end", "session.status_idle",
 	}
 	if got := h.types(t); !typesEqual(got, want) {
@@ -540,7 +541,7 @@ func TestBuiltinToolUseEnqueuesToolExec(t *testing.T) {
 
 	// The intent is a platform tool_use, and the session is still running.
 	want := []string{
-		"user.message", "session.status_running",
+		"session.status_running", "user.message",
 		"span.model_request_start", "agent.tool_use", "span.model_request_end",
 	}
 	if got := h.types(t); !typesEqual(got, want) {
@@ -707,7 +708,7 @@ func TestAlwaysAskToolSuspendsWithRequiresAction(t *testing.T) {
 	h.runOnce(t)
 
 	want := []string{
-		"user.message", "session.status_running",
+		"session.status_running", "user.message",
 		"span.model_request_start", "agent.tool_use", "span.model_request_end",
 		"session.status_idle",
 	}
@@ -1093,7 +1094,7 @@ func TestLeaseLostTurnCommitsNothing(t *testing.T) {
 		t.Fatalf("RunOnce = (%v, %v), want found with a lease error", found, err)
 	}
 
-	want := []string{"user.message", "session.status_running", "span.model_request_start"}
+	want := []string{"session.status_running", "user.message", "span.model_request_start"}
 	if got := h.types(t); !typesEqual(got, want) {
 		t.Errorf("loser committed turn output:\n got %v\nwant %v", got, want)
 	}
@@ -1389,7 +1390,7 @@ func TestNonToolUseStopWithToolBlocksRunsThem(t *testing.T) {
 			// Suspended exactly as a tool_use stop would have: no status_idle,
 			// and the tool_exec an executor picks up.
 			want := []string{
-				"user.message", "session.status_running",
+				"session.status_running", "user.message",
 				"span.model_request_start", "agent.message", "agent.tool_use", "span.model_request_end",
 			}
 			if got := h.types(t); !typesEqual(got, want) {
@@ -1434,7 +1435,7 @@ func TestNonToolUseStopKeepsCustomAndAskRouting(t *testing.T) {
 		h.runOnce(t)
 
 		want := []string{
-			"user.message", "session.status_running",
+			"session.status_running", "user.message",
 			"span.model_request_start", "agent.custom_tool_use", "span.model_request_end", "session.status_idle",
 		}
 		if got := h.types(t); !typesEqual(got, want) {
@@ -1468,7 +1469,7 @@ func TestNonToolUseStopKeepsCustomAndAskRouting(t *testing.T) {
 		h.runOnce(t)
 
 		want := []string{
-			"user.message", "session.status_running",
+			"session.status_running", "user.message",
 			"span.model_request_start", "agent.tool_use", "span.model_request_end",
 			"session.status_idle",
 		}
@@ -1519,7 +1520,7 @@ func TestRefusalDropsItsToolBlocks(t *testing.T) {
 	h.runOnce(t)
 
 	want := []string{
-		"user.message", "session.status_running",
+		"session.status_running", "user.message",
 		"span.model_request_start", "agent.message", "span.model_request_end",
 		"session.status_idle",
 	}
@@ -1543,7 +1544,7 @@ func TestProviderErrorFailsTurnVisibly(t *testing.T) {
 
 	types := h.types(t)
 	want := []string{
-		"user.message", "session.status_running", "span.model_request_start",
+		"session.status_running", "user.message", "span.model_request_start",
 		"span.model_request_end", "session.error", "session.status_idle",
 	}
 	if !typesEqual(types, want) {
@@ -1758,7 +1759,7 @@ func TestReclaimedTurnSurfacesRecovery(t *testing.T) {
 
 	types := h.types(t)
 	want := []string{
-		"user.message", "session.status_running",
+		"session.status_running", "user.message",
 		"session.status_rescheduled", "session.status_running",
 		"span.model_request_start", "agent.message", "span.model_request_end",
 		"session.status_idle",

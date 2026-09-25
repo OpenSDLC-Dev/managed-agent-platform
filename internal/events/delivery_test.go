@@ -151,3 +151,44 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 		}
 	})
 }
+
+// AppendTransition writes a wake the way the API's message trigger now does
+// (#793 item 1): the running pair, then the input the woken turn consumes.
+// Every other move keeps the input first — an idle, and the reclaim's forced
+// pair, which consumes no input and is not a wake.
+func TestAppendTransitionWritesAWakeBeforeItsInput(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+
+	woke, err := log.AppendTransition(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("go")}},
+		[]events.ThreadTransition{{Status: domain.SessionRunning}}, events.AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameTypes(woke, domain.EventSessionStatusRunning, domain.EventSessionThreadStatusRunning, domain.EventUserMessage) {
+		t.Errorf("wake appended %v, want the running pair and then the message", types(woke))
+	}
+
+	reclaimed, err := log.AppendTransition(ctx, sid, nil, []events.ThreadTransition{
+		{Status: domain.SessionRescheduling, Force: true}, {Status: domain.SessionRunning, Force: true},
+	}, events.AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameTypes(reclaimed, domain.EventSessionThreadStatusRescheduled, domain.EventSessionStatusRescheduled,
+		domain.EventSessionStatusRunning, domain.EventSessionThreadStatusRunning) {
+		t.Errorf("reclaim appended %v, want the rescheduled pair and then the running pair", types(reclaimed))
+	}
+
+	idled, err := log.AppendTransition(ctx, sid, []events.NewEvent{{Type: domain.EventAgentMessage, Payload: text("done")}},
+		[]events.ThreadTransition{{Status: domain.SessionIdle, Stop: &domain.StopReason{Type: domain.StopEndTurn}}},
+		events.AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameTypes(idled, domain.EventAgentMessage, domain.EventSessionThreadStatusIdle, domain.EventSessionStatusIdle) {
+		t.Errorf("idle appended %v, want the reply and then the idle pair", types(idled))
+	}
+}

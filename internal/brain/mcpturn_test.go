@@ -84,7 +84,7 @@ func TestATurnWaitsForItsFirstMCPListing(t *testing.T) {
 	if got := h.status(t); got != "running" {
 		t.Errorf("status = %q, want running (waiting on a listing is working, not waiting on input)", got)
 	}
-	want := []string{"user.message", "session.status_running"}
+	want := []string{"session.status_running", "user.message"}
 	if got := h.types(t); !typesEqual(got, want) {
 		t.Errorf("log = %v, want %v — a suspend writes no conversation", got, want)
 	}
