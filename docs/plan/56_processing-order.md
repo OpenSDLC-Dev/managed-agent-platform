@@ -238,7 +238,9 @@ and stamps its `processed_at` there — this plan's second PR:
   later walk reaches that call. Every inbound type now has exactly one
   stamper: a request input the start, an answer its thread's walk (or the
   send, the interrupt or the archive that answers its call), an interrupt
-  its own send.
+  its own send. For rows an older build left null for its settle to stamp,
+  a start also repairs its thread's below it: a null interrupt, and a null
+  answer whose call already has a processed result.
 
 It does not move a message's list or stream position: seq stays the receipt order
 across commits, and the difference that leaves is registered rather than chased,
