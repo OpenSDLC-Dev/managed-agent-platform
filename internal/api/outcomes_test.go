@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
 // --- user.define_outcome over POST /v1/sessions/{id}/events (plan 21 slice 2) ---
@@ -450,5 +452,40 @@ func TestCreateSessionInitialEventsRejections(t *testing.T) {
 	status, res = create([]any{map[string]any{"type": "user.message", "content": "plain string"}})
 	if status != http.StatusOK || res["status"] != "running" {
 		t.Fatalf("string-content initial event: status %d session %v, want 200/running", status, res["status"])
+	}
+}
+
+// Archiving a session parked on a custom-tool wait while it pursues an outcome
+// ends the outcome with the turn: the archive closes the outstanding call as an
+// interrupt would, and writes the outcome's span.outcome_evaluation_end with
+// result interrupted — so the projection must say interrupted too, not leave
+// GET reporting an outcome still live on a session that can no longer work.
+func TestArchivingASessionParkedMidOutcomeInterruptsTheOutcome(t *testing.T) {
+	s := newTestServer(t)
+	a := createAgent(t, s, map[string]any{"name": "outcome-custom", "model": "claude-opus-4-8", "tools": []any{customTool("decide")}})
+	e := createEnvironment(t, s, map[string]any{"name": "outcome-env", "config": map[string]any{"type": "self_hosted"}})
+	sid := createSession(t, s, map[string]any{"agent": a["id"], "environment_id": e["id"]})["id"].(string)
+	sendEvents(t, s, sid, defineOutcome("decide something", nil))
+	if found, err := newScriptedBrain(t, s.pool, []provider.Chunk{
+		{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{ID: "toolu_decide", Name: "decide", Input: json.RawMessage(`{}`)}},
+		{Kind: provider.KindDone, StopReason: "tool_use", Usage: &domain.ModelUsage{InputTokens: 1, OutputTokens: 1}},
+	}).RunOnce(context.Background()); err != nil || !found {
+		t.Fatalf("brain: found=%v err=%v", found, err)
+	}
+	if got := s.sessionStatus(sid); got != "idle" {
+		t.Fatalf("session = %q, want idle on the custom-tool wait", got)
+	}
+
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, res)
+	}
+
+	end := lastEventOfType(t, s, sid, "span.outcome_evaluation_end")
+	if end["result"] != "interrupted" {
+		t.Fatalf("outcome end = %v, want interrupted", end)
+	}
+	outs := sessionOutcomes(t, s, sid)
+	if len(outs) != 1 || outs[0]["result"] != "interrupted" || outs[0]["completed_at"] == nil {
+		t.Errorf("outcome_evaluations = %v, want the one entry interrupted, with its completed_at", outs)
 	}
 }

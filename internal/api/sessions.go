@@ -1460,6 +1460,13 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 				}
 				return s.queue.CancelSession(ctx, tx, domain.ID(id))
 			}}
+			// The settlement ends an active outcome as an interrupt does,
+			// writing its span.outcome_evaluation_end, so the projection
+			// flips with it — or GET would report an outcome still live on a
+			// session that can no longer pursue it.
+			if out.outcomeFlip {
+				opts.MutateOutcomes = events.FlipNonTerminalOutcomes(time.Now().UTC())
+			}
 			// What settling wrote, then the idle it ends in: the order an
 			// interrupt's are written in (#539), with no interrupt event
 			// between, since none was posted.
