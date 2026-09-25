@@ -136,7 +136,7 @@ and fixes two older bugs on lines it touches (the last two items):
   (2026-09-19-custom-order-followup `setup[80]` and `[83]`). The settlement stamps
   answers only after the append has placed them, so what it will do with them is
   read first, by walking the thread's calls as the settlement will:
-  `events.PlanAnswers` and `AdvanceThreadTools` share one walk, and the plan drops
+  `events.AnswerPlan` and `AdvanceThreadTools` share one walk, and the plan drops
   the calls an interrupt's results answer, which are stamped as they are written,
   as the settlement's own read of the calls does. The denial results the walk
   reaches are built by the plan and written by the send, in the batch, so the
@@ -273,19 +273,30 @@ included. In 2026-09-12-archived-threads/batch1.json (`[5].body.data` idx 31 to
 later and 1 µs before `span.model_request_start`, then that start. This platform
 writes the resume's pair in the settlement that runs after the send's append, so
 the denial's result, which PR-A lays beside its confirmation, and any input
-posted beside the answer come ahead of the pair. PR-C predicts the resume in the
-send's layout and writes its pair ahead of the input the resumed turn consumes,
-the denial's result included:
+posted beside the answer come ahead of the pair. PR-C makes every move a send's
+answers cause in the send itself, where the answers are consumed, and writes a
+resume's pair ahead of the input the resumed turn consumes, the denial's result
+included:
 
-- `events.PlanAnswers` already walks each answered thread's calls as the
-  settlement will, so it also summarizes the flow that walk leaves
-  (`AnswerPlan.Flows`), and `ToolFlow.Running` is the one rule it and
-  `SettleToolFlow` read. A thread parked idle on its calls that its flow leaves
-  running is moved by the send, after every arm has run and before the append,
-  and its pair is listed among the wakes: after everything consumed on receipt,
-  the answers included. The settlement finds the thread running and writes no
-  second pair; a thread the answers leave waiting is re-announced by it, as
-  before.
+- The send plans each answered thread's settlement before the append, a thread
+  at a time (`events.AnswerPlan`): `Settle` walks a thread its answers settle as
+  `AdvanceThreadTools` will and returns the flow the walk leaves, and
+  `Interrupted` walks a thread an interrupt of the same send ends, once its arm
+  has run. The send then makes the settlement's move itself
+  (`events.SettleTransition`, the rule `SettleToolFlow` applies for the executor
+  and the brain) where the thread's answers are consumed, at the last answer its
+  walk processes, in receipt order with the interrupt arms, so no fold passes
+  through a state an earlier answer already changed: a denial received ahead of
+  an interrupt of a running child resumes the primary before the child idles,
+  and the session never folds idle on the gate the denial cleared. A resume's
+  pair is listed among the wakes, after everything consumed on receipt. A thread
+  the answers leave parked re-announces its gates right after that answer,
+  ahead of the input the send leaves pending, as the reference re-idles it
+  (2026-09-19-custom-order-followup `ask-first-deny` idx 11 to 14: the denial,
+  the thread's idle, `session.usage`, the session's idle). The plan is the one
+  source of the move: the settlement in Then only stamps what it processes and
+  enqueues what it releases, and fails the send if its walk leaves a flow other
+  than the one the plan read.
 - On the primary, the results of the denials the walk reaches follow the pair,
   ahead of the input posted beside the answer. All seven recorded primary
   denials list the result after the pair: six whose confirmation resumed the
@@ -298,11 +309,20 @@ the denial's result included:
   events, idx 7 to 9). The resume itself keeps item 2's shape: the child's own
   running event, behind `session.status_running` when the fold moves.
 - One placement stays ours, and is registered with the primary thread's entry:
-  a denial that leaves another gate of its thread open is answered in its own
-  commit, its result beside its confirmation. The reference writes nothing
-  until an answer resumes the thread (`ask-first-deny` idx 11 to 18). Deferring
-  it would leave a processed denial with no result on the log between commits,
-  which the ordered tool flow reads as a call released to run.
+  a denial that leaves another gate of its thread open writes its result in its
+  own commit, beside its confirmation and ahead of the re-idle. The reference
+  re-idles the thread at once but holds that result alone until a later answer
+  resumes the thread, then writes it behind that resume's pair (`ask-first-deny`
+  idx 11 to 18). Deferring it would leave a processed denial with no result on
+  the log between commits, which the ordered tool flow reads as a call released
+  to run.
+- Replay answers an assistant turn's tool uses in their order. The log keeps
+  results in the order they were processed, so a resumed primary's denial result
+  follows a later call's result posted beside it (`ask-first-deny` idx 15 to 18
+  lists them so), and a request replayed in log order answered `[c1, c2]` with
+  `[c2, c1]`. A user turn now carries its `tool_result` blocks in the preceding
+  assistant turn's `tool_use` order, which an OpenAI-compatible backend pairing
+  tool messages with calls by position needs.
 
 ## Alternatives rejected
 
@@ -370,8 +390,15 @@ the denial's result included:
   an answer that resumes the primary, listed after the pair, for a deny in both
   posted orders, an allow and a custom result; a denial and the result it
   unlocks, in both posted orders; and a child's resume, now ahead of an answer
-  queued at the tail. Pinned, green before and after: a child's denial, its
-  result ahead of its running event on the session and the child's own list,
-  and an answer that leaves a gate open, which writes no pair.
+  queued at the tail. After review: a re-idle listed beside the answer, ahead
+  of a message or of an answer queued behind the gate left open, in both posted
+  orders; a denial beside an interrupt of a running child, in both posted
+  orders, the session folding idle only when the interrupt comes first; and a
+  replayed user turn answering its calls in their order, through both
+  providers' requests. The enqueue a resume makes is counted by attempt, which
+  the live-work dedup would otherwise hide, and a child's resume enqueues the
+  child's turn. Pinned, green before and after: a child's denial, its result
+  ahead of its running event on the session and the child's own list, and an
+  answer that leaves a gate open, which writes no pair.
 - `make verify`, `make registry-check`, independent verification, both reviews and
   the PR's CI before squash merge.

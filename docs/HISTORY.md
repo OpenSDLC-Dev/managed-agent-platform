@@ -63,9 +63,12 @@ the three fragments carry what each PR changed.
 - **#806** placed an input that lands during a model request where the next request consumed
   it — in replay and in the grader and dream transcripts — which also ended the prefill a
   chained `end_turn` request sent, and moved `processed_at` to that point of consumption.
-- **This close-out** has the send move a thread its answers resume, so the resume pair precedes
-  what the resumed turn consumes: the recorded denial-result placement, and input posted beside
-  the answer, which #802 had registered as out of reach.
+- **This close-out** has the send make every move its answers cause, where they are consumed
+  and in receipt order with its interrupts. A resume pair precedes what the resumed turn
+  consumes: the recorded denial-result placement, and input posted beside the answer, which
+  #802 had registered as out of reach. A thread left parked re-idles beside the answer, ahead
+  of pending input. Replay answers a turn's tool uses in their order, whatever order the log
+  holds the results in.
 
 Two alternatives were rejected. A full processing-order log would have matched the reference
 everywhere at the price of re-keying seq, the stream cursor, paging and the chain checks, with
