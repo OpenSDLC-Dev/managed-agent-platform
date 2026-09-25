@@ -137,10 +137,14 @@ type AppendOptions struct {
 	// consumes (Consume); this is left for the one failure that read input
 	// without starting a request.
 	MarkProcessedThrough int64
-	// Consume stamps processed_at = *Consume on the thread's still-unprocessed
-	// request inputs below this batch's first seq: the ones the model request
-	// this batch opens consumes (#793). Only span.model_request_start sets it.
-	Consume *time.Time
+	// Consume stamps the thread's still-unprocessed request inputs below this
+	// batch's first row, the ones the model request that row opens consumes
+	// (#793). The row's processed_at is read from the database clock once the
+	// session row lock is held, the clock created_at comes from, and the inputs
+	// are stamped 1 µs before it, as the reference stamps them: an input that
+	// committed while this append waited on the lock is never dated before it
+	// arrived. Only span.model_request_start sets it.
+	Consume bool
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
 	// with the events that change it, so log and resource can never disagree.
@@ -193,7 +197,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		opts.MarkProcessedThrough == 0 && opts.MutateOutcomes == nil && opts.Then == nil {
 		return nil, errors.New("append requires at least one event")
 	}
-	if opts.Consume != nil && len(evs) == 0 {
+	if opts.Consume && len(evs) == 0 {
 		return nil, errors.New("consume requires the event that consumes")
 	}
 	for _, ev := range evs {
@@ -226,6 +230,14 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1`, sessionID.String()).Scan(&seq); err != nil {
 		return nil, err
 	}
+	// Under the lock, from created_at's clock (the INSERT's comment below).
+	var consumedAt time.Time
+	if opts.Consume {
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&consumedAt); err != nil {
+			return nil, err
+		}
+		consumedAt = consumedAt.UTC().Truncate(time.Microsecond)
+	}
 
 	// One multi-row INSERT: the session row lock is held for a single round
 	// trip however large the batch. created_at is clock_timestamp() — real
@@ -257,6 +269,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			if err != nil {
 				return nil, err
 			}
+		}
+		// The row a Consume opens is processed at the clock read above.
+		if i == 0 && opts.Consume {
+			ev.ProcessedAt = &consumedAt
 		}
 		// Platform-emitted events carry a required processed_at on the wire
 		// (only client events are nullable while queued): emission is
@@ -421,7 +437,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			return nil, err
 		}
 	}
-	if opts.Consume != nil {
+	if opts.Consume {
 		// Every earlier request stamped what it consumed in its own start's
 		// commit, so the thread's unstamped request inputs below this one are
 		// exactly the ones it consumes. Nothing else: an answer is its ordered
@@ -430,7 +446,8 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			`UPDATE events SET processed_at = $4
 			 WHERE session_id = $1 AND seq < $2 AND processed_at IS NULL
 			   AND thread_id IS NOT DISTINCT FROM $3 AND type = ANY($5)`,
-			sessionID.String(), out[0].Seq, nullableID(opts.ThreadID), opts.Consume.UTC(), RequestInputTypes); err != nil {
+			sessionID.String(), out[0].Seq, nullableID(opts.ThreadID),
+			consumedAt.Add(-time.Microsecond), RequestInputTypes); err != nil {
 			return nil, err
 		}
 	}

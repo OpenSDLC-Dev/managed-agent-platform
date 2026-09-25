@@ -236,6 +236,80 @@ func TestModelRequestStartStampsOnlyWhatARequestReads(t *testing.T) {
 	check("after MarkProcessedThrough")
 }
 
+// The stamp is taken after the session row lock, from the database clock
+// created_at comes from, so an input that commits while the start waits on
+// the lock is never dated before it arrived: the stamp follows its
+// created_at, and so does the start's own processed_at (#793).
+func TestModelRequestStartStampsAfterTheLock(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan error, 1)
+	go func() {
+		_, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil)
+		started <- err
+	}()
+	// The start is blocked on the lock this transaction holds.
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		var waiting int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the start never waited on the session lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Longer than any skew between this host's clock and the database's.
+	time.Sleep(300 * time.Millisecond)
+	if _, err := log.AppendInTx(ctx, tx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("raced")},
+	}, events.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].Type != domain.EventUserMessage || all[1].Type != domain.EventSpanModelRequestStart {
+		t.Fatalf("log = %v, want the message, then the start", all)
+	}
+	msg, start := all[0], all[1]
+	if msg.ProcessedAt == nil || start.ProcessedAt == nil {
+		t.Fatalf("message %v, start %v: want both stamped", msg.ProcessedAt, start.ProcessedAt)
+	}
+	if msg.ProcessedAt.Before(msg.CreatedAt) {
+		t.Errorf("message processed_at %v is before its created_at %v", msg.ProcessedAt, msg.CreatedAt)
+	}
+	if !start.ProcessedAt.After(msg.CreatedAt) {
+		t.Errorf("start processed_at %v is not after the message's created_at %v", start.ProcessedAt, msg.CreatedAt)
+	}
+	if want := start.ProcessedAt.Add(-time.Microsecond); !msg.ProcessedAt.Equal(want) {
+		t.Errorf("message processed_at = %v, want %v", msg.ProcessedAt, want)
+	}
+}
+
 // The start carries the claimant's lease proof in its own commit: a brain
 // that lost its item must not tell a client its inputs were consumed, and a
 // refused start writes neither the start nor a stamp.

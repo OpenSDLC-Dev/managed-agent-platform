@@ -129,9 +129,8 @@ func TestAppendLeavesAReceivedRowUnprocessed(t *testing.T) {
 func TestAppendConsumeNeedsABatch(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	sid := newSession(t, pool)
-	now := time.Now()
 	if _, err := events.NewLog(pool).AppendWith(context.Background(), sid, nil, events.AppendOptions{
-		Consume: &now, Then: func(context.Context, pgx.Tx) error { return nil },
+		Consume: true, Then: func(context.Context, pgx.Tx) error { return nil },
 	}); err == nil {
 		t.Error("Consume with an empty batch was accepted")
 	}

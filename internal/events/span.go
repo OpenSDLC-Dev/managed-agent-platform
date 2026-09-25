@@ -57,15 +57,10 @@ func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domai
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "model_request",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attrs...))
-	// Truncated to the microsecond Postgres stores, so the 1 µs between an
-	// input's stamp and the start survives the round trip.
-	startAt := time.Now().UTC().Truncate(time.Microsecond)
-	consumed := startAt.Add(-time.Microsecond)
 	evs, err := l.AppendWith(ctx, sessionID, []NewEvent{{
-		Type:        domain.EventSpanModelRequestStart,
-		ProcessedAt: &startAt,
-		ThreadID:    threadID,
-	}}, AppendOptions{ThreadID: threadID, Consume: &consumed, Then: then})
+		Type:     domain.EventSpanModelRequestStart,
+		ThreadID: threadID,
+	}}, AppendOptions{ThreadID: threadID, Consume: true, Then: then})
 	if err != nil {
 		// No wire event landed, so the exported span must say why it is
 		// alone: an errored, immediately-ended span records an aborted
