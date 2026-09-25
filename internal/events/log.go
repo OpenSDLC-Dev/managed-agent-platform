@@ -259,10 +259,14 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		}
 		// A batch is laid out in processing order (#793), so its stamps may
 		// not run backwards through it: an event stamped before the one
-		// listed ahead of it takes that one's stamp — a later interrupt's
-		// results, synthesized before an earlier interrupt's idle pair was
-		// stamped here, or a grading start, built before the wake it follows.
-		// A pending event (nil) stays pending.
+		// listed ahead of it takes that one's stamp. That holds for every
+		// append, so every commit's stamps agree with its order — an ordinary
+		// turn's span.model_request_end, stamped when it was built and listed
+		// after the agent.* rows stamped here, takes theirs, as do a later
+		// interrupt's results, synthesized before an earlier interrupt's idle
+		// pair, and a grading start, built before the wake it follows. Only
+		// the values move: no reader compares two stamps, they key on
+		// processed_at being null or not. A pending event (nil) stays pending.
 		if ev.ProcessedAt != nil {
 			if ev.ProcessedAt.Before(lastStamp) {
 				stamp := lastStamp

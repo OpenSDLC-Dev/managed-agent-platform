@@ -10,7 +10,7 @@ PRs; #793 stays open until the second, and #539 closes with the first.
 
 ## Tasks
 
-- [ ] PR-A — a wake's running pair before the `user.message` or `user.define_outcome` it
+- [x] PR-A — a wake's running pair before the `user.message` or `user.define_outcome` it
       consumes, an interrupt after the results it settles (#539), a delivered message
       after its target's running event, and the child-resume shape registered as
       deliberate

@@ -17,10 +17,13 @@ consumes an event, which is where every difference below was found.
 The evidence, from the recordings of 2026-09-02 to 2026-09-24
 (managed-agents-wire-recordings), read against the code at `2eb299a9`:
 
-- All 232 distinct recorded event lists (session and thread lists, counted by
-  content) sort by `processed_at` (6 look unsorted only under a string compare,
-  `.899Z` against `.899001Z`). Pending events sit at the tail with no
-  `processed_at`, in all seven lists that hold any, and one moves once processed:
+- Every recorded session and thread event list sorts by `processed_at`: every
+  array of `sevt_` events in the recordings' JSON, response bodies embedded as
+  strings included, runs non-decreasing with its stamps compared as timestamps
+  (non-increasing for an `order=desc` read), though a few look unsorted under a
+  string compare (`.899Z` against `.899001Z`). Pending events, with no
+  `processed_at`, sit at the tail of every list that holds any, and one moves
+  once processed:
   in 2026-09-12-console-141/api-fixtures.json, `user.message`
   `sevt_01C9bDZQjtPsLTqxCmq1YvKT` is at idx 21 of
   `observation.session.approval.events` and at idx 23 of
@@ -115,23 +118,37 @@ and fixes one older bug on a line it touches:
 
 - `processingOrder` (internal/api/events.go) lays a send out by what each event
   is, not where it was posted. First comes what is consumed on receipt, in
-  receipt order: the answers, and each interrupt behind the results and outcome
-  ends its settling wrote and ahead of the idle pairs it caused. Then, for each
-  thread the commit woke, its running pair and the input its woken turn consumes:
-  the posted message, outcome or system message addressed to it, and any notice
-  delivered to it, whichever arm made the wake. Last comes the input no wake is
-  for, a message to a primary already running or a notice to a coordinator left
-  parked, which a later turn consumes. The arms run in the same order (the
-  primary's own first unless it is interrupted, then the interrupted threads in
-  receipt order), so the status events their transitions emit read true in the
-  list. The client's events are found again by a pre-minted id, so the echo and
-  the `processed_at` re-read no longer assume they lead the batch.
+  receipt order: the answers the send's settlement processes, and each interrupt
+  behind the results and outcome ends its settling wrote and ahead of the idle
+  pairs it caused. A thread two interrupts reach is ended by the first received.
+  Then, for each thread the commit woke, its running pair and the input its woken
+  turn consumes: the posted message, outcome or system message addressed to it,
+  and any notice delivered to it, whichever arm made the wake. Last comes what
+  nothing in the commit consumes, in receipt order: a message to a primary
+  already running, a notice to a coordinator left parked, and an answer queued
+  behind an earlier call of its thread that is still waiting, which the ordered
+  tool flow does not pass. The reference also keeps such a result unprocessed at
+  the tail until the earlier call's answer arrives
+  (2026-09-19-custom-order-followup `setup[80]` and `[83]`). The settlement stamps
+  answers only after the append has placed them, so which ones it leaves queued
+  is read first, by walking the thread's calls as the settlement will:
+  `events.PendingAnswers` and `AdvanceThreadTools` share one walk. The arms run
+  in the same order (the primary's own first unless it is interrupted, then the
+  interrupted threads in receipt order), so the status events their transitions
+  emit read true in the list. The client's events are found again by a
+  pre-minted id, so the echo and the `processed_at` re-read no longer assume
+  they lead the batch.
 - `processed_at` agrees with that order within a commit. A child-scoped interrupt
-  is stamped once its arm has synthesized its results. `AppendInTx` raises a
-  stamp that would run backwards through a batch to the stamp ahead of it (a
-  later interrupt's results, listed behind an earlier interrupt's idle; the
-  grading start, listed behind the wake it runs on). An answer, stamped by the
-  settlement that runs after the append, is held inside its list slot.
+  is stamped once its arm has synthesized its results. Every commit's stamps are
+  raised to agree with its order: `AppendInTx` raises a stamp that would run
+  backwards through a batch to the stamp ahead of it, on every append. An
+  ordinary turn's `span.model_request_end`, stamped when built and listed after
+  the turn's `agent.*` rows, takes their stamp, as do a later interrupt's results
+  listed behind an earlier interrupt's idle and the grading start listed behind
+  the wake it runs on. No consumer compares stamp values; the readers key on
+  null or not null. An answer the settlement processes, stamped after the
+  append, is held inside its list slot by one statement over the batch; a queued
+  one stays unstamped.
 - Every delivery goes through `events.DeliverAndWake` or
   `events.DeliverThreadEnded`, and their wake rules are no longer exported. Their
   `Delivery` result owns the wake-then-row order for the emitters that append it
@@ -143,19 +160,27 @@ and fixes one older bug on a line it touches:
   last transition asked for. When one of its transitions wakes a thread, its
   events follow every pair; otherwise they precede them. The reclaim's forced
   pair is not a wake and carries no input, so it is unchanged.
-- Archiving a session parked mid-outcome, on a confirmation or a custom tool,
-  wrote the outcome's interrupted `span.outcome_evaluation_end` without flipping
-  the `outcome_evaluations` projection, so GET still reported the outcome live.
-  It now flips it, as an interrupt does. The bug predates #793.
+- Archiving a session with a live outcome ended the outcome only when the
+  primary was parked on a call the archive settles (a confirmation or a custom
+  tool), and even then wrote its interrupted `span.outcome_evaluation_end`
+  without flipping the `outcome_evaluations` projection, so GET still reported
+  the outcome live. The archive now ends every live outcome as an interrupt
+  does, the end and the flip together, whatever the primary is parked on: a call,
+  a `wait_for_agents` on children the archive terminates, or nothing at all
+  (`retries_exhausted`). The bug predates #793.
 
 Placements inside PR-A that are ours rather than recorded: the redirect batch (no
 recording carries an interrupt with a following message); a client's own answers
-posted beside an interrupt, which stay ahead of the synthesized results because
-they are consumed on receipt; a notice and a message that one woken turn both
-consumes, kept in receipt order; and input no wake is for, placed at the tail. One
-placement stays out of reach. A thread that an answer resumes moves after the
-append, once the answer is on the log, so an input posted beside that answer
-precedes the resume's running pair instead of following it.
+posted beside an interrupt, which interleave with it in receipt order, being
+consumed on receipt: an answer precedes the results only of an interrupt
+received after it, and an `[interrupt, answer]` send writes the interrupt's
+results, the interrupt and its idle before the answer; a notice and a message
+that one woken turn both consumes, kept in receipt order; and input nothing in
+the commit consumes, placed at the tail. One placement stays out of reach, and is
+registered in docs/DIVERGENCES.md (the primary thread's entry). A thread that an
+answer resumes moves after the append, once the answer is on the log, so an input
+posted beside that answer precedes the resume's running pair instead of following
+it.
 
 **PR-B** places a message posted mid-turn after the assistant reply it never saw,
 in what the model sees on replay only. It does not move the message's list or
@@ -197,7 +222,14 @@ registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
   message that wakes nothing beside an interrupt, an answer beside a wake and
   beside a redirect, the stamps of an interrupt's commit, the grading start after
   the wake it runs on, `AppendTransition` keyed on the wake, and the archive of a
-  session parked mid-outcome. Item 2's residual, a coordinator woken by a message
-  under a running child, is pinned rather than changed.
+  session parked mid-outcome. After the second review: an answer queued behind an
+  earlier call beside a wake, answers behind an allowed and a denied call, two
+  interrupts reaching one thread in both posted orders, the archive of a
+  coordinator waiting on a gated child and of a session idle on
+  `retries_exhausted`, and the clamp of many answers in one statement. Item 2's
+  residual, a coordinator woken by a message under a running child, is pinned
+  rather than changed, as is the placement out of reach, a message beside an
+  answer that resumes the primary; so is the archive of a primary parked on a
+  confirmation, which was already right.
 - `make verify`, `make registry-check`, independent verification, both reviews and
   the PR's CI before squash merge.
