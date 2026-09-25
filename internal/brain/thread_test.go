@@ -154,6 +154,55 @@ func TestOutcomeGradesAtSessionQuiescenceNotOnAChildsEndTurn(t *testing.T) {
 	if len(childCall.Messages) != 1 || !strings.Contains(string(childCall.Messages[0].Content), "build the model") {
 		t.Errorf("child's request messages = %+v, want the child's own message alone", childCall.Messages)
 	}
+	// The scheduling commit's own ending notice is on the primary's log, and
+	// with budget left the verdict idled the primary without reading it: it
+	// chains nothing (#801) and stays unprocessed until the next request.
+	recv := h.primaryReceived(t)
+	if len(recv) != 1 || !strings.Contains(string(recv[0].Body), "ended its turn without reporting") {
+		t.Fatalf("primary's received rows = %+v, want the child's ending notice alone", recv)
+	}
+	if recv[0].ProcessedAt != nil {
+		t.Errorf("notice processed_at = %v, want null: no request has read it", recv[0].ProcessedAt)
+	}
+}
+
+// The same quiescence on the budget's last cycle: the verdict is followed by
+// the acknowledgment turn (#670, reading (B)), and that turn is the request
+// that reads the child's ending notice, which the verdict itself chains on no
+// more than it does with budget left (#801).
+func TestOutcomeQuiescenceOnTheLastCycleAcknowledgesAndReadsTheNotice(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("delegated the work"),
+		agentReply("worker done"),
+		graderReply("all criteria met", "satisfied"),
+		agentReply("The outcome is complete."),
+	}, nil)
+	h.wakeOutcome(t, "Build a DCF model", 1)
+	h.childTurn(t, "build the model")
+	h.drain(t)
+
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle after the acknowledgment turn", got)
+	}
+	if evals := h.outcomes(t); len(evals) != 1 || evals[0].Result != domain.OutcomeResultSatisfied {
+		t.Fatalf("outcomes = %+v, want the one satisfied entry", evals)
+	}
+	if len(h.provider.calls) != 4 {
+		t.Fatalf("provider calls = %d, want primary + child + grader + acknowledgment", len(h.provider.calls))
+	}
+	var ack strings.Builder
+	for _, m := range h.provider.calls[3].Messages {
+		ack.Write(m.Content)
+	}
+	for _, want := range []string{"ended its turn without reporting", "satisfies the rubric"} {
+		if !strings.Contains(ack.String(), want) {
+			t.Errorf("acknowledgment request lacks %q", want)
+		}
+	}
+	recv := h.primaryReceived(t)
+	if len(recv) != 1 || recv[0].ProcessedAt == nil {
+		t.Errorf("primary's received rows = %+v, want the notice stamped by the request that read it", recv)
+	}
 }
 
 // The idle harvest waits for the session's own quiescence, not a thread's

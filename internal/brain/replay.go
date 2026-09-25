@@ -73,6 +73,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		uses       []string          // tool_use ids of the open assistant turn
 		answering  map[string]int    // the last assistant turn's, by position
 		systemTail string
+		budgets    = map[string]int64{} // max_iterations by outcome_id, from each definition
 	)
 	flush := func() error {
 		if role == "" {
@@ -154,10 +155,13 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 					Type    string `json:"type"`
 					Content string `json:"content"`
 				} `json:"rubric"`
+				MaxIterations int64  `json:"max_iterations"`
+				OutcomeID     string `json:"outcome_id"`
 			}
 			if err := json.Unmarshal(ev.Body, &p); err != nil {
 				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
 			}
+			budgets[p.OutcomeID] = p.MaxIterations
 			text := "Work toward this outcome: " + p.Description
 			if p.Rubric.Type == "text" {
 				text += "\n\nYour work will be evaluated against this rubric:\n" + p.Rubric.Content
@@ -182,24 +186,42 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			// from the log (no extra persisted event — crash-safe replay;
 			// renderings ours, INFERRED). needs_revision carries the failed
 			// criteria into the next revision cycle; max_iterations_reached
-			// prompts the one final acknowledgment turn the docs describe.
-			// Terminal satisfied/failed/interrupted ends are state, not
-			// conversation.
+			// prompts the one final acknowledgment turn the docs describe, and
+			// so does a satisfied or failed verdict on the budget's last cycle
+			// (iteration + 1 >= max_iterations, settleVerdict's lastCycle),
+			// which is followed by the same turn (#670, reading (B)): the
+			// model is told the verdict, as the recorded acknowledgment ("The
+			// outcome is complete. All criteria have been satisfied.") shows
+			// the reference's model was. With budget left a satisfied or
+			// failed verdict idles the session, "session goes idle" as the SDK
+			// says of satisfied, and it and an interrupted end are state, not
+			// conversation: nothing is rendered, so a later user.message
+			// replays as it always has.
 			var p struct {
+				OutcomeID   string `json:"outcome_id"`
+				Iteration   int64  `json:"iteration"`
 				Result      string `json:"result"`
 				Explanation string `json:"explanation"`
 			}
 			if err := json.Unmarshal(ev.Body, &p); err != nil {
 				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
 			}
+			budget, defined := budgets[p.OutcomeID]
+			lastCycle := defined && p.Iteration+1 >= budget
 			var text string
-			switch p.Result {
-			case verdictNeedsRevision:
+			switch {
+			case p.Result == verdictNeedsRevision:
 				text = "The outcome grader reviewed your work and found it does not yet satisfy the rubric:\n\n" +
 					p.Explanation + "\n\nRevise your work to address these findings."
-			case domain.OutcomeResultMaxIterationsReached:
+			case p.Result == domain.OutcomeResultMaxIterationsReached:
 				text = "The outcome's evaluation budget is exhausted and the rubric is still unmet:\n\n" +
 					p.Explanation + "\n\nDo not continue working. Briefly acknowledge what was completed and what remains."
+			case p.Result == domain.OutcomeResultSatisfied && lastCycle:
+				text = "The outcome grader reviewed your work and found it satisfies the rubric:\n\n" +
+					p.Explanation + "\n\nDo not continue working. Briefly acknowledge the outcome."
+			case p.Result == domain.OutcomeResultFailed && lastCycle:
+				text = "The outcome grader found that the rubric cannot be applied to your work:\n\n" +
+					p.Explanation + "\n\nDo not continue working. Briefly acknowledge the outcome."
 			}
 			if text != "" {
 				blk, err := json.Marshal(map[string]any{"type": "text", "text": text})

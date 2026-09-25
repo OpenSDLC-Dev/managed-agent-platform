@@ -138,17 +138,21 @@ downloadable through `GET /v1/files`) and chains the grading `model_turn`; on
 self_hosted by requeueing the turn item directly (the platform cannot reach a BYOC
 sandbox — grading is transcript-only there). The grading claim runs one grader call —
 rubric + deliverables + transcript, no tools — and settles the verdict under the
-session lock: satisfied/failed/max_iterations idle the session, needs_revision feeds
-the grader's findings back and runs another agent cycle.
+session lock: satisfied/failed with budget left idle the session, any verdict on the
+budget's last cycle (max_iterations_reached among them) runs one acknowledgment turn
+first (#670), and needs_revision feeds the grader's findings back and runs another
+agent cycle. A settlement that would idle the primary chains instead on client input or
+a live child's message, never on a child's ending notice (#801).
 
 **Deliverables at idle** (plan 38). Grading is not the only reason to harvest: five more
 settlements enqueue an `outputs_harvest` when they fold a *cloud* session to idle, with no
 outcome required (#263) — `settleEndTurn`'s tool-less ending, `settle`'s
 retries-exhausted fault, `commitTurn`'s confirmation gate, `commitDelegatedTurn`'s
 park, cut chain or gated ending, and `cutExhaustedRun`'s delegation-bound refusal. (The
-two that end an outcome cycle, `settleVerdict` and `settleGraderError`, fold idle too and
-deliberately do not: that cycle's own harvest already published the tree, and only a
-tool-less grader call ran since.) The two idle folds the *API* makes — a `user.interrupt`
+two that end an outcome cycle, `settleVerdict` with budget left and `settleGraderError`,
+fold idle too and deliberately do not: that cycle's own harvest already published the
+tree, and only a tool-less grader call ran since. A verdict on the last cycle folds
+nothing itself; its acknowledgment turn's `end_turn` harvests like any other.) The two idle folds the *API* makes — a `user.interrupt`
 and the archive of a session's last running thread — are out of scope here and tracked by
 #586: a session folded idle by either harvests nothing under this plan. The brain settlements share
 one gate (`brain.enqueueIdleHarvest`) keyed on each site's own net session-level fold, so

@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
@@ -1402,68 +1405,205 @@ func TestReportLandingMidTurnChainsTheCoordinator(t *testing.T) {
 	}
 }
 
-// A report that lands while the primary runs its GRADING turn is the same
-// unread message, and the grading settlement makes the same check: grading
-// consumes no input, so its inbound half stays unfiltered, and the report
-// half is found by seq past the head the cycle read.
+// childReport writes what a child's report writes (delegate.report): its sent
+// half on the child's own log, then the received half on the primary's. The
+// child stays unarchived, so its message is a live child's; a child that
+// reported with submit_result idles in the same commit, and its message is no
+// less live for that.
+func (h *harness) childReport(t *testing.T, child domain.ID, text string) {
+	t.Helper()
+	sent, received, err := events.ThreadMessage(h.sessionID,
+		events.ThreadPeer{ThreadID: child, AgentName: "worker"}, events.ThreadPeer{}, text)
+	if err != nil {
+		t.Errorf("build report: %v", err)
+		return
+	}
+	if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{sent, received}); err != nil {
+		t.Errorf("deliver report: %v", err)
+	}
+}
+
+// archiveChild archives a child through the API, which delivers the
+// coordinator the child's ending notice (notifyThreadArchived).
+func (h *harness) archiveChild(t *testing.T, child domain.ID) {
+	t.Helper()
+	if err := api.EnsureAPIKey(context.Background(), h.pool, "brain-test", "brain-test-key"); err != nil {
+		t.Error(err)
+		return
+	}
+	req := httptest.NewRequest(http.MethodPost,
+		"/v1/sessions/"+h.sessionID.String()+"/threads/"+child.String()+"/archive", nil)
+	req.Header.Set("x-api-key", "brain-test-key")
+	rec := httptest.NewRecorder()
+	api.NewHandler(h.pool, nil, nil, nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("archive child: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// primaryReceived lists the agent.thread_message_received rows on the
+// primary's own log.
+func (h *harness) primaryReceived(t *testing.T) []domain.Event {
+	t.Helper()
+	recv, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{
+		Scope: events.ScopeThread, Types: []string{string(domain.EventAgentThreadMessageReceived)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recv
+}
+
+// A live child's message that lands around the primary's GRADING turn is an
+// unread message, and a terminal settlement chains on it rather than idling
+// past it — whether it landed during the grader's call, above the head the
+// cycle read, or before the grading claim, below it (#801: the rule no longer
+// depends on which). Grading consumes no input, so the received row is still
+// unprocessed either way.
 func TestReportLandingDuringGradingChainsThePrimary(t *testing.T) {
+	for _, during := range []bool{false, true} {
+		name := map[bool]string{false: "before the grading claim", true: "during the grader's call"}[during]
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{
+				agentReply("delegated"),
+				graderReply("all criteria met", "satisfied"),
+				agentReply("read the report"),
+			}, nil)
+			child := pgtest.NewChildThread(t, h.pool, h.sessionID)
+			h.wakeOutcome(t, "Build a DCF model", 3)
+			h.runOnce(t) // the agent's end_turn schedules the evaluation cycle
+			if during {
+				h.provider.onGenerate = func(callIndex int) {
+					if callIndex == 1 { // the grader's own call
+						h.childReport(t, child, "found three papers")
+					}
+				}
+			} else {
+				h.childReport(t, child, "found three papers")
+			}
+			h.runOnce(t) // the grading turn
+
+			if s := h.status(t); s != "running" {
+				t.Errorf("session after the verdict = %q, want chained on the live child's message", s)
+			}
+			if n := h.liveWork(t); n != 1 {
+				t.Errorf("live items after the verdict = %d, want the chained turn", n)
+			}
+			if evals := h.outcomes(t); len(evals) != 1 || evals[0].Result != domain.OutcomeResultSatisfied {
+				t.Errorf("outcomes = %+v, want the verdict settled all the same", evals)
+			}
+		})
+	}
+}
+
+// After a terminal verdict or a failed grader call the primary never chains
+// on an ending notice (#801, option 2): the platform's own received row about
+// a child that stopped, which nothing sent. Before, the same archive notice
+// idled the primary when it landed before the grading claim and chained a
+// coordinator turn when it landed during the grader's call; now both idle, and
+// the notice stays unprocessed (processed_at null) until the next request
+// reads it. With budget left no acknowledgment turn follows, so none does yet.
+func TestAnEndingNoticeAroundGradingNeverChainsThePrimary(t *testing.T) {
+	for _, graderFails := range []bool{false, true} {
+		for _, during := range []bool{false, true} {
+			name := map[bool]string{false: "verdict", true: "failed grader call"}[graderFails] + "/" +
+				map[bool]string{false: "archived before the claim", true: "archived during the call"}[during]
+			t.Run(name, func(t *testing.T) {
+				scripts := [][]provider.Chunk{agentReply("done"), graderReply("all criteria met", "satisfied")}
+				var errs []error
+				if graderFails {
+					scripts[1] = nil
+					errs = []error{nil, contextualError("model endpoint 500")}
+				}
+				h := newHarness(t, append(scripts, agentReply("read the notice")), errs)
+				child := pgtest.NewChildThread(t, h.pool, h.sessionID)
+				if _, err := h.pool.Exec(context.Background(),
+					`UPDATE session_threads SET stop_reason = '{"type":"end_turn"}' WHERE id = $1`, child.String()); err != nil {
+					t.Fatal(err)
+				}
+				h.wakeOutcome(t, "Build a DCF model", 3)
+				h.runOnce(t) // the primary's end_turn is the quiescence: schedules the cycle
+				if during {
+					h.provider.onGenerate = func(callIndex int) {
+						if callIndex == 1 { // the grader's own call
+							h.archiveChild(t, child)
+						}
+					}
+				} else {
+					h.archiveChild(t, child)
+				}
+				h.runOnce(t) // the grading turn
+
+				if s := h.status(t); s != "idle" {
+					t.Errorf("session after the grading settlement = %q, want idle: an ending notice chains nothing", s)
+				}
+				if n := h.liveWork(t); n != 0 {
+					t.Errorf("live items = %d, want none", n)
+				}
+				if found, err := h.brain.RunOnce(context.Background()); err != nil || found {
+					t.Errorf("RunOnce after the settlement = %v, %v; want no coordinator turn", found, err)
+				}
+				if n := len(h.provider.calls); n != 2 {
+					t.Errorf("provider calls = %d, want 2 (agent + grader)", n)
+				}
+				recv := h.primaryReceived(t)
+				if len(recv) != 1 || !strings.Contains(string(recv[0].Body), "was archived") {
+					t.Fatalf("primary's received rows = %+v, want the archive notice alone", recv)
+				}
+				if recv[0].ProcessedAt != nil {
+					t.Errorf("notice processed_at = %v, want null: no request has read it", recv[0].ProcessedAt)
+				}
+			})
+		}
+	}
+}
+
+// "Live" is the sender's thread, not the message: a child's report that a
+// client's archive then overtook is a message from a child that is gone, and
+// the terminal settlement chains on neither it nor the archive's notice (#801).
+func TestAReportFromAChildArchivedSinceDoesNotChainATerminalVerdict(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		agentReply("delegated"),
 		graderReply("all criteria met", "satisfied"),
 		agentReply("read the report"),
 	}, nil)
+	child := pgtest.NewChildThread(t, h.pool, h.sessionID)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET stop_reason = '{"type":"end_turn"}' WHERE id = $1`, child.String()); err != nil {
+		t.Fatal(err)
+	}
 	h.wakeOutcome(t, "Build a DCF model", 3)
 	h.runOnce(t) // the agent's end_turn schedules the evaluation cycle
 	h.provider.onGenerate = func(callIndex int) {
-		if callIndex != 1 { // the grader's own call
-			return
-		}
-		_, received, err := events.ThreadMessage(h.sessionID,
-			events.ThreadPeer{ThreadID: "sthr_child", AgentName: "researcher"}, events.ThreadPeer{}, "found three papers")
-		if err != nil {
-			t.Errorf("build report: %v", err)
-			return
-		}
-		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{received}); err != nil {
-			t.Errorf("deliver report: %v", err)
+		if callIndex == 1 { // the grader's own call
+			h.childReport(t, child, "found three papers")
+			h.archiveChild(t, child)
 		}
 	}
 	h.runOnce(t) // the grading turn
 
-	if s := h.status(t); s != "running" {
-		t.Errorf("session after the verdict = %q, want chained on the report that landed mid-grade", s)
+	if s := h.status(t); s != "idle" {
+		t.Errorf("session after the verdict = %q, want idle: the report's sender is archived", s)
 	}
-	if n := h.liveWork(t); n != 1 {
-		t.Errorf("live items after the verdict = %d, want the chained turn", n)
-	}
-	if evals := h.outcomes(t); len(evals) != 1 || evals[0].Result != domain.OutcomeResultSatisfied {
-		t.Errorf("outcomes = %+v, want the verdict settled all the same", evals)
+	if n := h.liveWork(t); n != 0 {
+		t.Errorf("live items = %d, want none", n)
 	}
 }
 
 // The grading cycle's other settlement makes the same check: a grader call
-// that failed renders no verdict, but the report that landed while it ran is
-// still unread, so the failure chains the primary instead of idling it
-// retries_exhausted with a message nothing would ever read.
+// that failed renders no verdict, but the live child's report that landed
+// while it ran is still unread, so the failure chains the primary instead of
+// idling it retries_exhausted with a message nothing would ever read.
 func TestReportLandingDuringAFailedGradeChainsThePrimary(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		agentReply("delegated"),
 		{}, // the grader's own call fails
 	}, []error{nil, contextualError("model endpoint 500")})
+	child := pgtest.NewChildThread(t, h.pool, h.sessionID)
 	h.wakeOutcome(t, "Build a DCF model", 3)
 	h.runOnce(t) // the agent's end_turn schedules the evaluation cycle
 	h.provider.onGenerate = func(callIndex int) {
-		if callIndex != 1 { // the grader's own call
-			return
-		}
-		_, received, err := events.ThreadMessage(h.sessionID,
-			events.ThreadPeer{ThreadID: "sthr_child", AgentName: "researcher"}, events.ThreadPeer{}, "found three papers")
-		if err != nil {
-			t.Errorf("build report: %v", err)
-			return
-		}
-		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{received}); err != nil {
-			t.Errorf("deliver report: %v", err)
+		if callIndex == 1 { // the grader's own call
+			h.childReport(t, child, "found three papers")
 		}
 	}
 	h.runOnce(t) // the grading turn, whose call fails

@@ -399,6 +399,61 @@ func TestBuildRequestReplaysAMessagePostedDuringGradingAfterTheVerdict(t *testin
 	}
 }
 
+// A satisfied or failed verdict on the budget's last cycle is followed by one
+// acknowledgment turn (#670, reading (B)), and that turn is told the verdict:
+// replay renders it as a user turn, as it does max_iterations_reached's, so the
+// request never ends on the assistant's own reply. With budget left the same
+// verdict idles the session, and replay renders nothing for it: terminal ends
+// stay state, not conversation, as the SDK's "session goes idle" reads.
+func TestBuildRequestRendersATerminalVerdictOnlyOnTheLastCycle(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		maxIterations int
+		result        string
+		want          string // "" = nothing rendered
+	}{
+		{"satisfied on the last cycle", 1, "satisfied", "satisfies the rubric"},
+		{"failed on the last cycle", 1, "failed", "cannot be applied"},
+		{"satisfied with budget left", 3, "satisfied", ""},
+		{"failed with budget left", 3, "failed", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := ev(2, domain.EventSpanModelRequestStart, `{}`)
+			grading := ev(5, domain.EventSpanOutcomeEvalStart, `{"outcome_id":"outc_1","iteration":0}`)
+			history := []domain.Event{
+				ev(1, domain.EventUserDefineOutcome, fmt.Sprintf(
+					`{"description":"Build it","rubric":{"type":"text","content":"# Rubric"},"max_iterations":%d,"outcome_id":"outc_1"}`,
+					tc.maxIterations)),
+				start,
+				ev(3, domain.EventAgentMessage, `{"content":[{"type":"text","text":"draft"}]}`),
+				ev(4, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
+				grading,
+				ev(6, domain.EventSpanOutcomeEvalEnd, `{"outcome_id":"outc_1","outcome_evaluation_start_id":"`+
+					grading.ID.String()+`","iteration":0,"result":"`+tc.result+`","explanation":"the grader's reasons"}`),
+			}
+			req, _, err := buildRequest("", nil, history, "", "", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if len(req.Messages) != 2 || req.Messages[1].Role != "assistant" {
+					t.Fatalf("messages = %+v, want the outcome and the draft alone", req.Messages)
+				}
+				return
+			}
+			if len(req.Messages) != 3 || req.Messages[2].Role != "user" {
+				t.Fatalf("messages = %+v, want the outcome, the draft, then the verdict as a user turn", req.Messages)
+			}
+			text := string(req.Messages[2].Content)
+			for _, s := range []string{tc.want, "the grader's reasons", "Do not continue working"} {
+				if !strings.Contains(text, s) {
+					t.Errorf("acknowledgment prompt = %s, want %q in it", text, s)
+				}
+			}
+		})
+	}
+}
+
 // Held inputs now leave at the next start, after everything the in-flight
 // request produced, and a message posted between its end and its call's
 // async result joins them. The request stays valid: the call, then one user

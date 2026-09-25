@@ -95,10 +95,12 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 		}
 		// Deterministic corruption: the entry exists but its definition is
 		// not on the log. Retrying cannot fix it; settle the outcome failed.
+		// With no definition there is no budget to have exhausted, so no
+		// acknowledgment turn follows (replay could not prompt one either).
 		return b.settleVerdict(ctx, item, nil, active, startID,
 			domain.OutcomeResultFailed,
 			"The outcome's definition event is missing from the session log; the rubric cannot be applied.",
-			domain.ModelUsage{}, watermark)
+			domain.ModelUsage{}, watermark, false)
 	}
 
 	p, err := b.registry.Provider(agent.Model.ID)
@@ -204,8 +206,9 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	// The budget: up to max_iterations evaluation cycles total; a would-be
 	// needs_revision on the final cycle is reported as max_iterations_reached
 	// (boundary reading ours, INFERRED).
+	lastCycle := active.Iteration+1 >= d.MaxIterations
 	result := verdict
-	if verdict == verdictNeedsRevision && active.Iteration+1 >= d.MaxIterations {
+	if verdict == verdictNeedsRevision && lastCycle {
 		result = domain.OutcomeResultMaxIterationsReached
 	}
 
@@ -213,7 +216,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	if usage != nil {
 		u = *usage
 	}
-	err = b.settleVerdict(ctx, item, oe, active, startID, result, explanation, u, watermark)
+	err = b.settleVerdict(ctx, item, oe, active, startID, result, explanation, u, watermark, lastCycle)
 	oe.Finish(result, err)
 	return err
 }
@@ -253,43 +256,69 @@ func (b *Brain) gradingHistory(ctx context.Context, sid, outcomeID domain.ID) ([
 // verdict, never an entry state (the entry goes back to running).
 const verdictNeedsRevision = "needs_revision"
 
-// gradingChain is a grading cycle's chain-or-idle test on the primary thread,
-// and it is the union of the two an agent turn uses — because its halves pull
-// in opposite directions. Inbound input is unfiltered (pendingInput from zero):
-// grading marks nothing processed, the grader consuming no user input, so an
-// event that landed between the scheduling commit and the grading claim —
-// past what the cycle grades, but below the watermark, the log's head at the
-// claim — must still chain, where a seq-filtered probe would idle past it and
-// strand it forever. A report is
-// seq-filtered (chainInput from the head this cycle read) because from zero it
-// would match every report the session ever carried — and a report a build
-// before #793 wrote, stamped at write, can be found no other way.
+// gradingChain is the chain-or-idle test of a grading settlement that would
+// otherwise idle the primary — a satisfied or failed verdict with budget left,
+// or a failed grader call. It chains on two things only (#801, option 2):
+// client input, and a message from a child that is still live.
 //
-// So the halves leave a seam between them — the pre-claim stretch, where a
-// report would be below the watermark and of a type the inbound probe does
-// not ask for, matched by neither. (Since #793 a report stays unprocessed
-// until a request consumes it, so adding its type to the from-zero probe
-// would close the seam; that is not done, because it would add an agent turn
-// after a terminal verdict.) What closes it is not this probe but the rule
-// that schedules a cycle at all (settleEndTurn, decision 15): grading starts
-// only where the fold moves the SESSION to idle/end_turn, and requires_action
-// and retries_exhausted both outrank end_turn in that pick, so every live
-// thread is idle on end_turn when the cycle is scheduled. No child is running
-// to report, and a client cannot start one — user.message addresses the
-// primary (decision 9), which is the thread now grading. What can still land
-// there is the platform's own ending notice: the one the scheduling commit
-// carries when a child's end_turn is the quiescence, or one from a child
-// archived before the claim. It is bounded rather than stranded: a
-// needs_revision verdict replays the whole log into the coordinator's
-// revision turn, and a terminal one idles the primary with the notice unread
-// on the log, where the next user.message replays it — though the same
-// notice landing during the grader's call chains a turn instead (#801).
+// Client input is unfiltered (pendingInput from zero): grading marks nothing
+// processed, the grader consuming no user input, so an event that landed
+// between the scheduling commit and the grading claim — past what the cycle
+// grades, but below the watermark, the log's head at the claim — must still
+// chain, where a seq-filtered probe would idle past it and strand it forever.
+//
+// A child's message is liveChildMessage's, and it never matches an ending
+// notice. Two can sit on the primary's log here, unread. One is the
+// scheduling commit's own "[agent X ended its turn without reporting]", which
+// settleEndTurn writes when a child's end_turn is the quiescence, so every
+// outcome whose last working thread is a child carries one. The other is a
+// client's archive of an idle child, landing before the grading claim or
+// during the grader's call. Neither chains, wherever it landed, so a terminal
+// verdict runs no coordinator turn for it, and the notice stays unprocessed
+// until a request reads it: the acknowledgment turn when the verdict ended
+// the budget's last cycle (settleVerdict), else the next user.message's. Before
+// #801 the check was by seq alone, so the same notice idled the primary when
+// it landed before the claim and chained a turn when it landed during the
+// call.
+//
+// A live child's message is still read, before or after the claim, though the
+// rule that schedules a cycle (settleEndTurn, decision 15) leaves none to send
+// one: grading starts only where the fold moves the SESSION to idle/end_turn,
+// so every live thread is idle when the cycle is scheduled, and a client
+// cannot start a child — user.message addresses the primary (decision 9).
 func gradingChain(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {
 	pending, err := pendingInput(ctx, tx, sid, "")
 	if err != nil || pending {
 		return pending, err
 	}
-	return chainInput(ctx, tx, sid, "", watermark)
+	return liveChildMessage(ctx, tx, sid, watermark)
+}
+
+// liveChildMessage reports whether the primary holds an unread message from a
+// child that is still live. Unread is processed_at null, since #793 stamps a
+// received row only when a request consumes it, or a seq past the watermark,
+// which also finds a row a build before #793 stamped at write. A message is
+// one a child sent: its agent.thread_message_sent, with the same content, is
+// on the child's own log ahead of it. An ending notice has no such row —
+// "the received half of a message nothing sent" (events.ThreadEnded) — and
+// that absence, not the notice's text, is what tells the two apart, since a
+// model may write any text. Live is an unarchived child: an archive is the
+// one ending that closes the thread for good, and it is also what an
+// archive's own notice announces.
+func liveChildMessage(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {
+	var found bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM events r
+		   JOIN session_threads c ON c.session_id = r.session_id AND c.id = r.payload->>'from_session_thread_id'
+		  WHERE r.session_id = $1 AND r.thread_id IS NULL AND r.type = $3
+		    AND (r.processed_at IS NULL OR r.seq > $2)
+		    AND c.parent_thread_id IS NOT NULL AND c.archived_at IS NULL
+		    AND EXISTS (SELECT 1 FROM events s
+		                 WHERE s.session_id = $1 AND s.thread_id = c.id AND s.type = $4
+		                   AND s.seq < r.seq AND s.payload->'content' = r.payload->'content'))`,
+		sid.String(), watermark, string(domain.EventAgentThreadMessageReceived),
+		string(domain.EventAgentThreadMessageSent)).Scan(&found)
+	return found, err
 }
 
 // settleVerdict commits one evaluation cycle's outcome: the end event, the
@@ -297,9 +326,11 @@ func gradingChain(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64
 // row lock, mirroring the agent turn's settlement discipline. watermark is the
 // head of the log at the cycle's claim (gradingHistory), which is what tells a
 // report that landed while the grader ran from the ones already answered.
+// lastCycle is whether this cycle was the budget's last (iteration + 1 >=
+// max_iterations), after which no further evaluation can run.
 func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.OutcomeEvaluation,
 	active domain.OutcomeEvaluation, startID domain.ID,
-	result, explanation string, usage domain.ModelUsage, watermark int64) error {
+	result, explanation string, usage domain.ModelUsage, watermark int64, lastCycle bool) error {
 
 	sid := item.SessionID
 	tx, err := b.pool.Begin(ctx)
@@ -377,21 +408,27 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 		},
 	}
 
-	switch result {
-	case verdictNeedsRevision:
+	switch {
+	case result == verdictNeedsRevision:
 		// Another agent cycle: the session stays running and this item is the
 		// revision turn's slot. Replay injects the feedback from the end event.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Requeue(ctx, tx, item)
 		}
-	case domain.OutcomeResultMaxIterationsReached:
-		// Terminal, but "one final acknowledgment turn follows before the
-		// session goes idle" — the requeued item runs it; replay injects the
-		// acknowledgment prompt from this terminal end event.
+	case lastCycle:
+		// Terminal, and no further evaluation can run: "one final
+		// acknowledgment turn follows before the session goes idle", as the
+		// SDK says of max_iterations_reached — and, reading (B) of #670
+		// (INFERRED), after a satisfied or failed verdict on that last cycle
+		// too, since the one recorded verdict, satisfied at iteration 0 of
+		// max_iterations 1, was followed by such a turn. The requeued item
+		// runs it; replay injects the prompt from this end event. It is a
+		// request on the primary, so it also reads whatever landed unread,
+		// ending notices included.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Requeue(ctx, tx, item)
 		}
-	default: // satisfied | failed: the session idles — unless input arrived
+	default: // satisfied | failed with budget left: the session idles — unless input arrived
 		chained, err := gradingChain(ctx, tx, sid, watermark)
 		if err != nil {
 			return err
