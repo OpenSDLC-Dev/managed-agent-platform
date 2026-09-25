@@ -493,7 +493,8 @@ const (
 	// The item is still exclusively this worker's — Poll never re-offers a
 	// stopping item — so finishing the stop is this worker's job (see handleItem).
 	// The already-stopped half needs no finishing, and needs no branch of its own
-	// either: the stop it provokes is the 409 forceStop already ignores.
+	// either: the stop it provokes is answered 200 with the item unchanged (an
+	// older control plane's 409, which forceStop ignores).
 	hbExitStopRequested
 	// hbExitLeaseLost: ownership is gone or unprovable — a 412 (another worker
 	// reclaimed it), any other fatal 4xx, a lease the control plane declined to
@@ -645,8 +646,10 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (live, coord
 	return live, len(sess.Agent.Multiagent.Agents) > 0, nil
 }
 
-// forceStop stops the work item, ignoring a 409 (already stopping/stopped, which
-// the reference also ignores). It runs on a fresh background context so the item
+// forceStop stops the work item, ignoring a 409 — which this control plane no
+// longer sends, answering a repeat stop 200 as the recorded service does
+// (#804), but an older one did for an item already stopped, and the reference
+// poller ignores it too. It runs on a fresh background context so the item
 // is still stopped even when the worker is shutting down and ctx is cancelled.
 // A 404 is logged rather than ignored: it means this worker hung long enough for
 // the control plane to re-offer its item under a fresh identity (#62), so the
@@ -655,12 +658,16 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (live, coord
 // is by then unresolvable, so it carries the session too: that is the key an
 // operator can still follow, and the one the item's spans are joined on.
 //
-// Stop answers a bodiless 204, but the generated method is typed
-// *BetaSelfHostedWork, so the SDK's strict decoder fails a successful call with
-// "expected destination type of 'string' or '[]byte' …". Rebinding the response
-// destination to **http.Response trips the decoder bypass — the same workaround
-// the reference's own poller applies, for the same reason (checked against
-// anthropic-sdk-go v1.70.1 — poller.go stopWork).
+// Stop answers 200 with the work object, which the worker has no use for, so
+// the response destination is rebound to **http.Response and the body closed
+// unread. The rebinding is also what keeps an older control plane working: that
+// one answered a bodiless 204, and the generated method is typed
+// *BetaSelfHostedWork, so the SDK's strict decoder fails such a successful call
+// with "expected destination type of 'string' or '[]byte' …". The same bypass
+// is what the reference's own poller applies, on the reading that the service
+// sends 204 (checked against anthropic-sdk-go v1.70.1 — poller.go stopWork);
+// recordings of the service falsify that reading (#804), and the bypass serves
+// either answer.
 func (w *Worker) forceStop(workID, sessionID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
