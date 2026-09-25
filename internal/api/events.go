@@ -262,16 +262,16 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			opts.SetStatus = st
 		}
 	}
-	// wakeUnder moves one thread to running under the lock and records the
-	// pair it emits as that thread's wake, which the input it wakes on follows.
-	wakeUnder := func(t events.ThreadTransition) error {
+	// move moves one thread under the lock, recording the session move it
+	// makes, and returns the events it emits for the caller to place: a
+	// wake's pair, which the input it wakes on follows, or a settlement's.
+	move := func(t events.ThreadTransition) ([]events.NewEvent, error) {
 		pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(id), t)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		layout.woke(t.ThreadID, pair)
 		moveTo(moved)
-		return nil
+		return pair, nil
 	}
 	// Set when this batch clears a thread's last requires_action gate: the
 	// seconds it waited on the human, measured in the database so both ends
@@ -373,36 +373,66 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 		return sessionWide
 	}
+	// What the send's settlement will do with its answers, read before they
+	// are appended, thread by thread (events.AnswerPlan): which it leaves
+	// pending, which go where pending input goes; the order it processes each
+	// thread's others in; and the denials it reaches, whose results this send
+	// writes beside them, stamping their confirmations as the settlement would
+	// have.
+	layout.answers = events.NewAnswerPlan(newEvents)
+	// The threads the answers settle — answered, not interrupted, resting
+	// where a settlement can move them — each walked now as the settlement
+	// will walk it, since its walk reads its own calls alone. The send moves
+	// each where its answers are consumed, from the flow the walk leaves
+	// (#793): the plan is the one source of that move, and the settlement in
+	// Then only stamps what it processes and enqueues what it releases.
+	type settlement struct {
+		flow events.ToolFlow
+		// at is where the move is processed (sendLayout.settledAt).
+		at int
+	}
+	settling := map[domain.ID]settlement{}
+	for _, th := range threads {
+		a := at(th.id)
+		if a.interrupt || !(a.confirmation || a.toolResult) ||
+			(th.status != string(domain.SessionIdle) && th.status != string(domain.SessionRunning)) {
+			continue
+		}
+		flow, err := layout.answers.Settle(ctx, tx, domain.ID(id), th.id, newEvents, platformExecuted)
+		if err != nil {
+			return nil, err
+		}
+		settling[th.id] = settlement{flow: flow, at: layout.settledAt(th.id)}
+	}
 	// The arms run in the order the send is processed, so the status events
-	// their transitions emit read true where processingOrder lists them: the
-	// primary's own arm first unless it is interrupted — its one move in the
-	// batch is a message's wake, which a child's ending then finds already made
-	// — then the interrupted threads in the order their interrupts were
-	// received, then the rest, whose answers settle in Then; a thread those
-	// answers resume moves once every arm has run, and is listed after every
-	// interrupt, among the wakes. Were an
-	// interrupted child's idle to run before a sibling's while listed after
-	// it, a session.status_idle the second emits would precede the first
-	// thread's idle in the list.
+	// their transitions emit read true where processingOrder lists them, and no
+	// fold passes through a state an earlier answer already changed: the
+	// primary's own arm first when a message wakes it — its one move in the
+	// batch, which a child's ending then finds already made — then, in receipt
+	// order, the interrupted threads by the first interrupt that reaches each
+	// and the settled threads by where their answers settle, then the rest,
+	// which move nothing. Were an interrupted child's idle to run before a
+	// sibling's while listed after it, a session.status_idle the second emits
+	// would precede the first thread's idle in the list; were an answer's
+	// resume to run after an interrupt received behind it, the session could
+	// fold idle on the gate the answer had already cleared, then run again.
 	armOrder := func(th threadState) int {
-		switch {
-		case at(th.id).interrupt:
+		if at(th.id).interrupt {
 			return interruptAt(th.id)
-		case th.id == "":
+		}
+		if st, ok := settling[th.id]; ok {
+			return st.at
+		}
+		if th.id == "" {
 			return -1
 		}
 		return len(newEvents)
 	}
 	slices.SortStableFunc(threads, func(a, b threadState) int { return cmp.Compare(armOrder(a), armOrder(b)) })
-	// The threads whose tools the settlement in Then advances, which is what
-	// processes an answer: the interrupted ones and the answered ones.
-	advanced := map[domain.ID]bool{}
-	// The answered threads idle on their calls, in arm order: those the
-	// answers' settlement may resume.
-	var parked []domain.ID
 	for _, th := range threads {
 		a, tid, status := at(th.id), th.id, th.status
 		isPrimary := tid == ""
+		settle, settles := settling[tid]
 		switch {
 		case a.interrupt:
 			// The calls this send answers: every posted result, and every call
@@ -420,7 +450,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				return nil, err
 			}
 			layout.interrupted(interruptAt(tid), out)
-			advanced[tid] = true
+			if err := layout.answers.Interrupted(ctx, tx, domain.ID(id), tid, newEvents, out.settled); err != nil {
+				return nil, err
+			}
 			// A human may still have cleared the thread's approval gate: the
 			// confirmations received ahead of this interrupt, deny or allow,
 			// are consumed first, and if they leave no ask unconfirmed the
@@ -487,21 +519,40 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				thens = append(thens, startWorkCycle)
 			}
 			outcomeFlip = outcomeFlip || out.outcomeFlip
-		case (a.confirmation || a.toolResult) && (status == string(domain.SessionIdle) || status == string(domain.SessionRunning)):
-			advanced[tid] = true
-			if status == string(domain.SessionIdle) {
-				parked = append(parked, tid)
-			}
+		case settles:
 			// Read before the append: a denial this send writes answers its
 			// call on the log, which then no longer counts as awaiting approval.
 			pendingApproval, err := events.PendingThreadApprovals(ctx, tx, domain.ID(id), tid)
 			if err != nil {
 				return nil, err
 			}
+			// The settlement's move, made where the answers are consumed: a
+			// resume is a wake, listed with the input its turn consumes; a
+			// thread left parked re-announces its gates beside the answer.
+			t, err := events.SettleTransition(ctx, tx, domain.ID(id), tid, settle.flow)
+			if err != nil {
+				return nil, err
+			}
+			if t != nil {
+				pair, err := move(*t)
+				if err != nil {
+					return nil, err
+				}
+				if t.Status == domain.SessionRunning {
+					layout.resumed(tid, pair)
+				} else {
+					layout.reidled(settle.at, pair)
+				}
+			}
 			thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
 				flow, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), tid, platformExecuted)
 				if err != nil {
 					return err
+				}
+				// The send has moved the thread by its plan; a walk that
+				// disagrees would leave it resting where its calls do not.
+				if !flow.Equal(settle.flow) {
+					return fmt.Errorf("thread %q: the settlement left %+v, the send planned %+v", tid, flow, settle.flow)
 				}
 
 				if pendingApproval {
@@ -513,11 +564,6 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 						approvalWaits = append(approvalWaits, *secs)
 					}
 				}
-				moved, err := s.log.SettleToolFlow(ctx, tx, domain.ID(id), tid, flow)
-				if err != nil {
-					return err
-				}
-				moveTo(moved)
 				kind, err := execKindFor(ctx, tx, domain.ID(id), nil, nil)
 				if err != nil {
 					return err
@@ -542,9 +588,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				break
 			}
 
-			if err := wakeUnder(events.ThreadTransition{Status: domain.SessionRunning}); err != nil {
+			pair, err := move(events.ThreadTransition{Status: domain.SessionRunning})
+			if err != nil {
 				return nil, err
 			}
+			layout.woke("", pair)
 			thens = append(thens, startWorkCycle)
 
 		}
@@ -557,36 +605,6 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// ahead of it (#539); its idle pairs, stamped as they are inserted, follow
 	// it, and AppendInTx keeps a batch's stamps from running backwards.
 	events.StampInterrupts(newEvents)
-	// The settlement runs in Then, after the append, so what it will do with
-	// the answers is read now, off the walk it will make, with the answers and
-	// the results the interrupts above synthesized read as though on the log:
-	// which it leaves pending, which go where pending input goes; the order it
-	// processes each thread's others in; and the denials it reaches, whose
-	// results this send writes beside them, stamping their confirmations as
-	// the settlement would have.
-	var synthesized []events.NewEvent
-	for _, evs := range layout.settled {
-		synthesized = append(synthesized, evs...)
-	}
-	if layout.answers, err = events.PlanAnswers(ctx, tx, domain.ID(id), newEvents, synthesized, advanced, platformExecuted); err != nil {
-		return nil, err
-	}
-	// A parked thread the answers leave running is resumed here, not by the
-	// settlement after the append, so its running pair takes its place in the
-	// batch: after the answers, consumed on receipt, and ahead of what its
-	// resumed turn consumes (#793). The settlement then finds the thread
-	// running already and writes no second pair.
-	for _, tid := range parked {
-		if !layout.answers.Flows[tid].Running() {
-			continue
-		}
-		pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(id), events.ThreadTransition{ThreadID: tid, Status: domain.SessionRunning})
-		if err != nil {
-			return nil, err
-		}
-		layout.resumed(tid, pair)
-		moveTo(moved)
-	}
 	if stamp := slices.Concat(layout.answers.Denied, layout.answers.Moot); len(stamp) > 0 {
 		thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
 			return events.StampConfirmations(ctx, tx, domain.ID(id), stamp)
@@ -944,11 +962,14 @@ type sendLayout struct {
 	settled, idled map[int][]events.NewEvent
 	// wakes are the running pairs, in the order their threads woke.
 	wakes []threadWake
+	// parked are the moves of the threads a settlement leaves parked, keyed
+	// by where each is processed (settledAt): listed right after that answer.
+	parked map[int][]events.NewEvent
 	// delivered are the rows delivered to a thread (an ending notice), each
 	// with the index of the posted event whose processing delivered it.
 	delivered []deliveredRow
 	// answers is what this commit's settlement will do with the posted
-	// answers (events.PlanAnswers).
+	// answers (events.AnswerPlan).
 	answers events.AnswerPlan
 }
 
@@ -966,7 +987,8 @@ type deliveredRow struct {
 }
 
 func newSendLayout(posted []events.NewEvent) *sendLayout {
-	return &sendLayout{posted: posted, settled: map[int][]events.NewEvent{}, idled: map[int][]events.NewEvent{}}
+	return &sendLayout{posted: posted, settled: map[int][]events.NewEvent{}, idled: map[int][]events.NewEvent{},
+		parked: map[int][]events.NewEvent{}}
 }
 
 // interrupted records one thread's interrupt arm under the posted interrupt at
@@ -986,6 +1008,40 @@ func (l *sendLayout) woke(thread domain.ID, pair []events.NewEvent) {
 	if len(pair) > 0 {
 		l.wakes = append(l.wakes, threadWake{thread: thread, pair: pair})
 	}
+}
+
+// settledAt is where the settlement of thread's answers is processed: at the
+// last of them its walk processes, by receipt index — the walk ends there, and
+// processingOrder lists the thread's processed answers in the places they
+// were received in — or, when it processes none, after everything consumed on
+// receipt. So a thread's settlement follows an interrupt received before its
+// answers and precedes one received after them.
+func (l *sendLayout) settledAt(thread domain.ID) int {
+	steps := l.answers.Steps[thread]
+	if len(steps) == 0 {
+		return len(l.posted)
+	}
+	answers := make(map[domain.ID]bool, len(steps))
+	for _, st := range steps {
+		answers[st.Answer] = true
+	}
+	last := 0
+	for i, ev := range l.posted {
+		if answers[ev.ID] {
+			last = i
+		}
+	}
+	return last
+}
+
+// reidled records the move of a thread the send's answers leave parked, its
+// idle re-announcing the gates still open, where the settlement is processed
+// (settledAt): the reference re-idles a thread right after the answer that
+// leaves it parked (2026-09-19-custom-order-followup setup.json,
+// ask-first-deny.final-audit.events idx 11 to 14), so input the send leaves
+// pending stays behind it, at the tail.
+func (l *sendLayout) reidled(at int, pair []events.NewEvent) {
+	l.parked[at] = append(l.parked[at], pair...)
 }
 
 // resumed records the running pair of a thread the send's answers resume.
@@ -1023,7 +1079,10 @@ func (l *sendLayout) resumed(thread domain.ID, pair []events.NewEvent) {
 //     order its settlement processes them — its calls' order — and a denial
 //     the settlement reaches is followed by the result it writes, ahead of
 //     the answers the walk goes on to, unless the send resumes the primary
-//     (below).
+//     (below). A thread its answers leave parked re-announces its gates right
+//     after the last of them (sendLayout.reidled), or, when they process
+//     none, after everything else consumed on receipt; a thread they resume
+//     is a wake.
 //  2. For each thread this commit woke or resumed, in the order woken: its
 //     running pair (behind session.status_running when the fold moved), then
 //     what its woken turn consumes — a resumed primary's denial results
@@ -1082,7 +1141,7 @@ func (l *sendLayout) processingOrder() []events.NewEvent {
 		case ev.Type == domain.EventUserToolConfirm || ev.Type == domain.EventUserToolResult ||
 			ev.Type == domain.EventUserCustomToolRes:
 			if st, ok := step[i]; ok {
-				out = append(append(out, l.posted[at[st.Answer]]), st.Denials...)
+				out = append(append(append(out, l.posted[at[st.Answer]]), st.Denials...), l.parked[i]...)
 			} else {
 				// Consumed on receipt, but never walked: a confirmation for a
 				// call an interrupt of this send answers.
@@ -1094,6 +1153,7 @@ func (l *sendLayout) processingOrder() []events.NewEvent {
 			inputs = append(inputs, input{cause: i, thread: ev.ThreadID, ev: ev})
 		}
 	}
+	out = append(out, l.parked[len(l.posted)]...)
 	for _, d := range l.delivered {
 		inputs = append(inputs, input{cause: d.cause, thread: d.row.ThreadID, ev: d.row})
 	}

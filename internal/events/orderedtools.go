@@ -23,9 +23,15 @@ type ToolFlow struct {
 
 // Running reports whether the flow leaves its thread running: every call is
 // settled, or the first one left is the platform's to run. Otherwise the
-// thread waits on Pending (SettleToolFlow).
+// thread waits on Pending (SettleTransition).
 func (f ToolFlow) Running() bool {
 	return !f.Unsettled || f.PlatformRunnable
+}
+
+// Equal reports whether two flows leave their thread in the same place,
+// waiting on the same calls in the same order.
+func (f ToolFlow) Equal(g ToolFlow) bool {
+	return f.Unsettled == g.Unsettled && f.PlatformRunnable == g.PlatformRunnable && slices.Equal(f.Pending, g.Pending)
 }
 
 // ToolWaitIDs advertises every external input the just-emitted turn will need,
@@ -196,7 +202,7 @@ func (l *Log) AdvanceThreadTools(ctx context.Context, tx pgx.Tx, sid, tid domain
 // confirmation, and stops at the first call with neither. consume reports
 // whether the call is now resolved — a result or a denial resolves it, an
 // allow only releases it to run — and the walk goes on only past a resolved
-// call. AdvanceThreadTools stamps what it is handed; PlanAnswers only
+// call. AdvanceThreadTools stamps what it is handed; AnswerPlan only
 // notes it, so the two agree on where processing stops.
 func walkReady(calls []orderedCall, consume func(c *orderedCall) (bool, error)) error {
 	for i := range calls {
@@ -214,7 +220,8 @@ func walkReady(calls []orderedCall, consume func(c *orderedCall) (bool, error)) 
 
 // AnswerPlan is what a send's own settlement will do with the send's answers,
 // read before they are appended so the send can lay each out where it is
-// processed (#793).
+// processed (#793). It is built one thread at a time (Settle, Interrupted), as
+// the send reaches each thread.
 type AnswerPlan struct {
 	// Pending are the posted answers the settlement leaves unprocessed.
 	Pending map[domain.ID]bool
@@ -230,10 +237,6 @@ type AnswerPlan struct {
 	// is stamped where it was received, and the call keeps the one result the
 	// interrupt wrote.
 	Moot []domain.ID
-	// Flows are, per walked thread, the flow the settlement's walk leaves it
-	// in: what SettleToolFlow will move it to. A thread idle on its calls that
-	// its flow leaves Running is one this send resumes.
-	Flows map[domain.ID]ToolFlow
 }
 
 // AnswerStep is one posted answer the settlement processes, with the denial
@@ -243,102 +246,119 @@ type AnswerStep struct {
 	Denials []NewEvent
 }
 
-// PlanAnswers reads, before a send is appended, what its settlement will do
-// with its answers — among posted, its user.tool_result,
-// user.custom_tool_result and user.tool_confirmation events, routed to their
-// threads. advanced names the threads whose tools the settlement advances; on
-// those, the posted answers are read as though already on the log and walked
-// as AdvanceThreadTools will walk them. A call synthesized answers (an
-// interrupt's results, stamped as they are written) drops out of the walk, as
-// threadCalls drops any call whose result is processed. An answer past the
-// first call that must still wait is pending, as is every answer on a thread
-// the settlement does not advance. A posted confirmation for a call a
-// synthesized result answers is Moot.
-//
-// A denial the walk reaches after a posted answer is the send's to write:
-// processed there, its result belongs before the answers the walk goes on to.
-// Its result is built here (DenialResults) and its confirmation named in
-// Denied. A denial reached before any posted answer, which the walk's resting
-// place rules out, is left to the settlement, as before.
-//
-// Each walked thread's resulting flow is summarized as the settlement will
-// summarize it (Flows), platformOwned marking the calls no worker runs, so the
-// send can write a resume the settlement would otherwise write after it.
-func PlanAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesized []NewEvent, advanced map[domain.ID]bool, platformOwned func(string) bool) (AnswerPlan, error) {
-	plan := AnswerPlan{Pending: map[domain.ID]bool{}, Steps: map[domain.ID][]AnswerStep{}, Flows: map[domain.ID]ToolFlow{}}
-	threads := map[domain.ID]bool{}
+// NewAnswerPlan starts the plan of a send whose events are posted: each of its
+// user.tool_result, user.custom_tool_result and user.tool_confirmation events
+// is pending until a walk of its thread processes it. An answer on a thread
+// the send never walks — one neither settled nor interrupted — stays pending.
+func NewAnswerPlan(posted []NewEvent) AnswerPlan {
+	plan := AnswerPlan{Pending: map[domain.ID]bool{}, Steps: map[domain.ID][]AnswerStep{}}
 	for _, ev := range posted {
 		if isAnswer(ev.Type) {
 			plan.Pending[ev.ID] = true
-			threads[ev.ThreadID] = advanced[ev.ThreadID]
 		}
 	}
+	return plan
+}
+
+// Settle plans the settlement of thread tid, which the send answers and does
+// not interrupt: its calls are walked as AdvanceThreadTools will walk them,
+// the posted answers read as though already on the log, and the flow the walk
+// leaves the thread in is returned — the flow the settlement reads, and what
+// SettleTransition moves the thread to. platformOwned marks the calls no
+// worker runs.
+func (p *AnswerPlan) Settle(ctx context.Context, q Querier, sid, tid domain.ID, posted []NewEvent, platformOwned func(string) bool) (ToolFlow, error) {
+	calls, kind, err := p.walk(ctx, q, sid, tid, posted, nil)
+	if err != nil {
+		return ToolFlow{}, err
+	}
+	return summarizeTools(calls, kind, platformOwned), nil
+}
+
+// Interrupted plans the answers posted to thread tid, which an interrupt of
+// the same send ends, once that interrupt's arm has run: synthesized are the
+// results it wrote, stamped as they are written, so the calls they answer drop
+// out of the walk as threadCalls drops any call whose result is processed, and
+// a posted confirmation for such a call is Moot. The walk goes on over the
+// calls the send answers itself — its posted results, and the denials received
+// ahead of the interrupt. The thread's move is the interrupt's, so no flow is
+// read, and a thread the send posts no answer to is not walked at all.
+func (p *AnswerPlan) Interrupted(ctx context.Context, q Querier, sid, tid domain.ID, posted, synthesized []NewEvent) error {
+	if !slices.ContainsFunc(posted, func(ev NewEvent) bool { return isAnswer(ev.Type) && ev.ThreadID == tid }) {
+		return nil
+	}
+	_, _, err := p.walk(ctx, q, sid, tid, posted, synthesized)
+	return err
+}
+
+// walk walks thread tid's calls as the settlement will, and records in the
+// plan what it processes. An answer past the first call that must still wait
+// stays pending. A denial the walk reaches after a posted answer is the send's
+// to write: processed there, its result belongs before the answers the walk
+// goes on to. Its result is built here (DenialResults) and its confirmation
+// named in Denied. A denial reached before any posted answer, which the walk's
+// resting place rules out, is left to the settlement, as before. It returns
+// the calls as the walk leaves them, marked as AdvanceThreadTools marks them.
+func (p *AnswerPlan) walk(ctx context.Context, q Querier, sid, tid domain.ID, posted, synthesized []NewEvent) ([]orderedCall, string, error) {
 	answered := map[string]bool{}
 	for _, ev := range synthesized {
 		answered[answerRef(ev)] = true
 	}
-	for tid, walked := range threads {
-		if !walked {
-			continue
+	calls, kind, err := threadCalls(ctx, q, sid, tid)
+	if err != nil {
+		return nil, "", err
+	}
+	calls = slices.DeleteFunc(calls, func(c orderedCall) bool { return answered[c.id.String()] })
+	byID := make(map[string]*orderedCall, len(calls))
+	for i := range calls {
+		byID[calls[i].id.String()] = &calls[i]
+	}
+	for _, ev := range posted {
+		c := byID[answerRef(ev)]
+		switch {
+		case ev.Type == domain.EventUserToolConfirm && ev.ThreadID == tid && answered[answerRef(ev)]:
+			delete(p.Pending, ev.ID)
+			p.Moot = append(p.Moot, ev.ID)
+		case c == nil || !isAnswer(ev.Type):
+		case ev.Type == domain.EventUserToolConfirm:
+			if c.confirmationID == "" {
+				c.confirmationID, c.confirmation = ev.ID.String(), ev.Payload
+			}
+		case c.resultID == "":
+			c.resultID = ev.ID.String()
 		}
-		calls, kind, err := threadCalls(ctx, q, sid, tid)
-		if err != nil {
-			return AnswerPlan{}, err
-		}
-		calls = slices.DeleteFunc(calls, func(c orderedCall) bool { return answered[c.id.String()] })
-		byID := make(map[string]*orderedCall, len(calls))
-		for i := range calls {
-			byID[calls[i].id.String()] = &calls[i]
-		}
-		for _, ev := range posted {
-			c := byID[answerRef(ev)]
-			switch {
-			case ev.Type == domain.EventUserToolConfirm && ev.ThreadID == tid && answered[answerRef(ev)]:
-				delete(plan.Pending, ev.ID)
-				plan.Moot = append(plan.Moot, ev.ID)
-			case c == nil || !isAnswer(ev.Type):
-			case ev.Type == domain.EventUserToolConfirm:
-				if c.confirmationID == "" {
-					c.confirmationID, c.confirmation = ev.ID.String(), ev.Payload
-				}
-			case c.resultID == "":
-				c.resultID = ev.ID.String()
+	}
+	var steps []AnswerStep
+	err = walkReady(calls, func(c *orderedCall) (bool, error) {
+		for _, id := range []domain.ID{domain.ID(c.confirmationID), domain.ID(c.resultID)} {
+			if p.Pending[id] {
+				delete(p.Pending, id)
+				steps = append(steps, AnswerStep{Answer: id})
 			}
 		}
-		var steps []AnswerStep
-		err = walkReady(calls, func(c *orderedCall) (bool, error) {
-			for _, id := range []domain.ID{domain.ID(c.confirmationID), domain.ID(c.resultID)} {
-				if plan.Pending[id] {
-					delete(plan.Pending, id)
-					steps = append(steps, AnswerStep{Answer: id})
-				}
-			}
-			// Marked as AdvanceThreadTools marks it, for the flow below.
-			c.confirmed = c.confirmationID != ""
-			c.resolved = c.resultID != "" || denies(c.confirmation)
-			if !c.resolved || c.resultID != "" {
-				return c.resolved, nil
-			}
-			if len(steps) > 0 {
-				results, _, err := DenialResults(ctx, q, sid, []NewEvent{{Type: domain.EventUserToolConfirm, Payload: c.confirmation}})
-				if err != nil {
-					return false, err
-				}
-				last := &steps[len(steps)-1]
-				last.Denials = append(last.Denials, results...)
-				plan.Denied = append(plan.Denied, domain.ID(c.confirmationID))
-			}
-			return true, nil
-		})
-		if err != nil {
-			return AnswerPlan{}, err
+		// Marked as AdvanceThreadTools marks it, for the caller's flow.
+		c.confirmed = c.confirmationID != ""
+		c.resolved = c.resultID != "" || denies(c.confirmation)
+		if !c.resolved || c.resultID != "" {
+			return c.resolved, nil
 		}
 		if len(steps) > 0 {
-			plan.Steps[tid] = steps
+			results, _, err := DenialResults(ctx, q, sid, []NewEvent{{Type: domain.EventUserToolConfirm, Payload: c.confirmation}})
+			if err != nil {
+				return false, err
+			}
+			last := &steps[len(steps)-1]
+			last.Denials = append(last.Denials, results...)
+			p.Denied = append(p.Denied, domain.ID(c.confirmationID))
 		}
-		plan.Flows[tid] = summarizeTools(calls, kind, platformOwned)
+		return true, nil
+	})
+	if err != nil {
+		return nil, "", err
 	}
-	return plan, nil
+	if len(steps) > 0 {
+		p.Steps[tid] = steps
+	}
+	return calls, kind, nil
 }
 
 // StampConfirmations stamps the confirmations a send consumes that its
@@ -455,10 +475,32 @@ func ToolFlowThreads(ctx context.Context, q Querier, sid domain.ID) ([]domain.ID
 	return ids, rows.Err()
 }
 
-// SettleToolFlow emits only a changed status or changed blocker set. In
-// particular self-hosted approval keeps the same result blocker and emits no
-// artificial running transition. A platform call may run before a later wait.
+// SettleToolFlow emits only a changed status or changed blocker set, in its
+// own append: the settlement of a thread whose tools a worker, the executor or
+// the brain moved. A send settles the threads its answers move in its own
+// batch instead, from the flow its plan read (AnswerPlan.Settle), where the
+// answer is consumed (#793).
 func (l *Log) SettleToolFlow(ctx context.Context, tx pgx.Tx, sid, tid domain.ID, flow ToolFlow) (*domain.SessionStatus, error) {
+	t, err := SettleTransition(ctx, tx, sid, tid, flow)
+	if err != nil || t == nil {
+		return nil, err
+	}
+	evs, moved, err := TransitionThread(ctx, tx, sid, *t)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := l.AppendInTx(ctx, tx, sid, evs, AppendOptions{}); err != nil {
+		return nil, err
+	}
+	return moved, nil
+}
+
+// SettleTransition is the move a settlement makes for flow: to running, or to
+// idle on requires_action naming flow.Pending. Nil when the thread already
+// rests there with the same blockers — in particular, self-hosted approval
+// keeps the same result blocker and makes no artificial running move — or has
+// ended, or is being rescheduled. A platform call may run before a later wait.
+func SettleTransition(ctx context.Context, q Querier, sid, tid domain.ID, flow ToolFlow) (*ThreadTransition, error) {
 	want := domain.SessionRunning
 	var stop *domain.StopReason
 	if !flow.Running() {
@@ -474,9 +516,9 @@ func (l *Log) SettleToolFlow(ctx context.Context, tx pgx.Tx, sid, tid domain.ID,
 	if threadID == "" {
 		threadID = domain.PrimaryThreadID(sid)
 	}
-	err := tx.QueryRow(ctx, `SELECT status,stop_reason FROM session_threads WHERE session_id=$1 AND id=$2`, sid.String(), threadID.String()).Scan(&status, &oldStop)
+	err := q.QueryRow(ctx, `SELECT status,stop_reason FROM session_threads WHERE session_id=$1 AND id=$2`, sid.String(), threadID.String()).Scan(&status, &oldStop)
 	if err == pgx.ErrNoRows && tid == "" {
-		err = tx.QueryRow(ctx, `SELECT status,NULL::jsonb FROM sessions WHERE id=$1`, sid.String()).Scan(&status, &oldStop)
+		err = q.QueryRow(ctx, `SELECT status,NULL::jsonb FROM sessions WHERE id=$1`, sid.String()).Scan(&status, &oldStop)
 	}
 	if err != nil {
 		return nil, err
@@ -488,25 +530,10 @@ func (l *Log) SettleToolFlow(ctx context.Context, tx pgx.Tx, sid, tid domain.ID,
 	_ = json.Unmarshal(oldStop, &previous)
 	same := status == string(want)
 	if stop != nil {
-		same = same && previous.Type == stop.Type && len(previous.EventIDs) == len(stop.EventIDs)
-		if same {
-			for i, id := range stop.EventIDs {
-				if id != previous.EventIDs[i] {
-					same = false
-					break
-				}
-			}
-		}
+		same = same && previous.Type == stop.Type && slices.Equal(previous.EventIDs, stop.EventIDs)
 	}
 	if same {
 		return nil, nil
 	}
-	evs, moved, err := TransitionThread(ctx, tx, sid, ThreadTransition{ThreadID: tid, Status: want, Stop: stop, Reemit: want == domain.SessionIdle})
-	if err != nil {
-		return nil, err
-	}
-	if _, err := l.AppendInTx(ctx, tx, sid, evs, AppendOptions{}); err != nil {
-		return nil, err
-	}
-	return moved, nil
+	return &ThreadTransition{ThreadID: tid, Status: want, Stop: stop, Reemit: want == domain.SessionIdle}, nil
 }

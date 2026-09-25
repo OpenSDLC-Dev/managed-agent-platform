@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -13,8 +14,9 @@ import (
 // docs/plan/56_processing-order.md): the answer where it was consumed, on
 // receipt; then the resume's running pair; then what the resumed turn
 // consumes — on the primary, the result a denial writes and the input posted
-// beside the answer. The send writes the pair itself, so the settlement after
-// the append finds the thread running and writes no second one.
+// beside the answer. The send makes every move its answers cause itself, where
+// they are consumed; the settlement after the append only stamps and
+// enqueues.
 
 // gatedPrimary parks the primary on the given calls, planted on its own log,
 // idle on requires_action naming all of them, and returns their ids.
@@ -33,6 +35,31 @@ func gatedPrimary(t *testing.T, s *tserver, sid string, calls ...plantedCall) []
 	}
 	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle", stop+`]}`)
 	return ids
+}
+
+// liveItems lists the session's live work items as kind/thread, the thread
+// empty for the primary's and for the session-keyed exec kinds.
+func (s *tserver) liveItems(t *testing.T, sid string) []string {
+	t.Helper()
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT kind, COALESCE(thread_id, '') FROM work_items
+		 WHERE session_id = $1 AND state IN ('queued','starting','active') ORDER BY created_at, kind`, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var kind, tid string
+		if err := rows.Scan(&kind, &tid); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, kind+"/"+tid)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // plantedCall is one call gatedPrimary plants.
@@ -167,7 +194,8 @@ func TestAMessageBesideAnAnswerThatResumesThePrimaryFollowsTheResume(t *testing.
 func TestADenialAndTheAnswerItUnlocksResumeThePrimaryBeforeTheDenialsResult(t *testing.T) {
 	for _, first := range []string{"deny", "result"} {
 		t.Run(first+" first", func(t *testing.T) {
-			s := newTestServer(t)
+			var log statementLog
+			s := newTracedTestServer(t, &log)
 			sid := eventsFixture(t, s)
 			ids := gatedPrimary(t, s, sid, askGate, customGate)
 			seq := lastSeq(t, s, sid)
@@ -176,6 +204,7 @@ func TestADenialAndTheAnswerItUnlocksResumeThePrimaryBeforeTheDenialsResult(t *t
 			if first == "result" {
 				answers[0], answers[1] = answers[1], answers[0]
 			}
+			log.reset()
 			sendEvents(t, s, sid, answers...)
 
 			want := []string{"agent.tool_use", "agent.custom_tool_use", "user.tool_confirmation",
@@ -186,8 +215,14 @@ func TestADenialAndTheAnswerItUnlocksResumeThePrimaryBeforeTheDenialsResult(t *t
 			if n := countWhole(t, s, sid, "agent.tool_result"); n != 1 {
 				t.Errorf("%d denial results, want exactly one", n)
 			}
-			if n := s.liveWork(sid, queue.ModelTurn); n != 1 {
-				t.Errorf("live model_turn = %d, want 1", n)
+			// The live-work dedup index would hide a second enqueue, so the
+			// attempts are counted: one turn for the resumed primary, and no
+			// exec item, since nothing is left to run.
+			if got := s.liveItems(t, sid); !sameStrings(got, []string{"model_turn/"}) {
+				t.Errorf("live work = %q, want the primary's model_turn alone", got)
+			}
+			if n := log.count("INSERT INTO work_items"); n != 1 {
+				t.Errorf("%d enqueue attempts, want exactly one", n)
 			}
 			stampsRunForward(t, s, sid, seq)
 			pendingOnlyAtTail(t, s, sid, seq)
@@ -229,7 +264,120 @@ func TestAChildsDenialIsListedAheadOfItsResume(t *testing.T) {
 	if got := s.threadStatus(t, child); got != "running" {
 		t.Errorf("child = %q, want resumed", got)
 	}
+	if got := s.liveItems(t, sid); !sameStrings(got, []string{"model_turn/" + child}) {
+		t.Errorf("live work = %q, want the resumed child's model_turn alone", got)
+	}
 	stampsRunForward(t, s, sid, seq)
+}
+
+// An answer that leaves its thread parked on another gate re-idles it beside
+// the answer, where the reference re-idles it
+// (2026-09-19-custom-order-followup setup.json,
+// ask-first-deny.final-audit.events idx 11 to 14: the denial, then the
+// thread's idle on the gate left open, session.usage and the session's idle),
+// so what the send leaves pending stays at the tail behind it (#793): a
+// message the parked primary reads once it resumes, and an allow queued behind
+// the gate still open, in either posted order.
+func TestAReIdleIsListedBesideTheAnswerAheadOfPendingInput(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pending func(ids []string) map[string]any
+		want    string
+	}{
+		{"a message", func([]string) map[string]any { return userMessage("once you can") }, "user.message"},
+		{"a queued allow", func(ids []string) map[string]any { return confirm(ids[2], "allow", nil) }, "user.tool_confirmation"},
+	} {
+		for _, pendingFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, pending first %v", tc.name, pendingFirst), func(t *testing.T) {
+				s := newTestServer(t)
+				sid := eventsFixture(t, s)
+				ids := gatedPrimary(t, s, sid, askGate, askGate, askGate)
+				seq := lastSeq(t, s, sid)
+
+				posted := []map[string]any{confirm(ids[0], "deny", nil), tc.pending(ids)}
+				if pendingFirst {
+					posted[0], posted[1] = posted[1], posted[0]
+				}
+				sendEvents(t, s, sid, posted...)
+
+				want := []string{"agent.tool_use", "agent.tool_use", "agent.tool_use", "user.tool_confirmation",
+					"agent.tool_result", "session.thread_status_idle", "session.status_idle", tc.want}
+				if got := s.eventTypes(sid); !sameStrings(got, want) {
+					t.Fatalf("event log = %v, want %v", got, want)
+				}
+				for _, ty := range []string{"session.thread_status_idle", "session.status_idle"} {
+					stop, _ := lastEventOfType(t, s, sid, ty)["stop_reason"].(map[string]any)
+					if got := fmt.Sprint(stop["event_ids"]); got != fmt.Sprint([]any{ids[1], ids[2]}) {
+						t.Errorf("%s names %s, want the two gates left open", ty, got)
+					}
+				}
+				stampsRunForward(t, s, sid, seq)
+				pendingOnlyAtTail(t, s, sid, seq)
+			})
+		}
+	}
+}
+
+// A thread an answer moves moves where the answer is consumed, in receipt
+// order with the interrupts beside it, so no status event reads a fold the
+// answer already changed (#793). Denial first: the primary resumes before the
+// interrupt idles its running child, so the session, running throughout,
+// never folds idle — the fold used to pass through an idle on the gate just
+// denied, then run again. Interrupt first: the session does fold idle on the
+// primary's gate, which is still open then, and the denial received next
+// resumes it. Either way the resume's pair is listed among the wakes, ahead
+// of the denial's result and the notice the resumed turn reads.
+func TestAResumeTakesItsPlaceAmongTheInterruptsInReceiptOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		denyFirst bool
+		want      []string
+	}{
+		{"deny first", true, []string{"agent.tool_use", "user.tool_confirmation", "user.interrupt",
+			"session.thread_status_idle", "session.thread_status_running", "agent.tool_result",
+			"agent.thread_message_received"}},
+		{"interrupt first", false, []string{"agent.tool_use", "user.interrupt", "session.thread_status_idle",
+			"session.status_idle", "user.tool_confirmation", "session.status_running",
+			"session.thread_status_running", "agent.tool_result", "agent.thread_message_received"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			sid := eventsFixture(t, s)
+			ids := gatedPrimary(t, s, sid, askGate)
+			child := insertChild(t, s, sid, "running")
+			runningSession(t, s, sid)
+			seq := lastSeq(t, s, sid)
+
+			posted := []map[string]any{confirm(ids[0], "deny", nil),
+				{"type": "user.interrupt", "session_thread_id": child}}
+			if !tc.denyFirst {
+				posted[0], posted[1] = posted[1], posted[0]
+			}
+			sendEvents(t, s, sid, posted...)
+
+			if got := wholeLogTypes(t, s, sid); !sameStrings(got, tc.want) {
+				t.Fatalf("event log = %v, want %v", got, tc.want)
+			}
+			if tc.denyFirst {
+				owner, _ := lastEventOfType(t, s, sid, "session.thread_status_idle")["session_thread_id"].(string)
+				if owner != child {
+					t.Errorf("the idle is %v's, want the interrupted child's", owner)
+				}
+			} else {
+				stop, _ := lastEventOfType(t, s, sid, "session.status_idle")["stop_reason"].(map[string]any)
+				if got := fmt.Sprint(stop["event_ids"]); got != fmt.Sprint([]any{ids[0]}) {
+					t.Errorf("session idle names %s, want the primary's gate, open until the denial", got)
+				}
+			}
+			if st := s.sessionStatus(sid); st != "running" {
+				t.Errorf("session = %q, want running", st)
+			}
+			if got := s.liveTurns(t, sid); !sameStrings(got, []string{""}) {
+				t.Errorf("live model turns = %q, want the resumed primary's", got)
+			}
+			stampsRunForward(t, s, sid, seq)
+		})
+	}
 }
 
 // An answer that leaves a gate of its thread open resumes nothing, so the send
