@@ -281,6 +281,17 @@ func TestDefineOutcomeChainsMidTurn(t *testing.T) {
 	}
 }
 
+// pendingInputTypes derives from domain.ConsumedInputs, with the tool results
+// as its stated extra: the consumed inputs a client posts, and the answers a
+// live item's enqueue suppression leaves for the next turn. Pinned whole, as
+// events pins the sets beside it, so a hand-kept copy that drifts fails.
+func TestPendingInputTypesDeriveFromTheConsumedInputs(t *testing.T) {
+	want := []string{"user.custom_tool_result", "user.define_outcome", "user.message", "user.tool_result"}
+	if got := slices.Sorted(slices.Values(pendingInputTypes)); !slices.Equal(got, want) {
+		t.Errorf("pendingInputTypes = %v, want %v", got, want)
+	}
+}
+
 func TestPendingInputChainsDefineOutcome(t *testing.T) {
 	// The DB contract behind mid-turn chaining: an unprocessed
 	// user.define_outcome past the watermark reports pending input; at or

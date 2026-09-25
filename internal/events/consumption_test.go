@@ -139,6 +139,36 @@ func TestConsumptionOrderHoldsEveryConsumedInput(t *testing.T) {
 	}
 }
 
+// Every set built on what a request consumes derives from
+// domain.ConsumedInputs (#793), each with at most one stated extra: the
+// consumption rule holds exactly those, a start stamps them and a
+// system.message, and the brain's pending probe is pinned beside its own
+// derivation. Pinning each set whole makes a drift from the source — a
+// hand-kept copy, or a source changed without the sets being re-read — fail
+// here.
+func TestTheConsumedInputSetsShareOneSource(t *testing.T) {
+	consumed := []domain.EventType{evUser, evOutcome, evReceived}
+	if !slices.Equal(domain.ConsumedInputs, consumed) {
+		t.Fatalf("domain.ConsumedInputs = %v, want %v", domain.ConsumedInputs, consumed)
+	}
+	for _, typ := range consumed {
+		if !events.ConsumedInput(typ) {
+			t.Errorf("ConsumedInput(%q) = false", typ)
+		}
+	}
+	want := []string{"user.message", "user.define_outcome", "agent.thread_message_received", "system.message"}
+	if !slices.Equal(events.RequestInputTypes, want) {
+		t.Errorf("RequestInputTypes = %v, want %v", events.RequestInputTypes, want)
+	}
+	// What a start stamps must be written unprocessed, or it is stamped at
+	// write and no start ever consumes it.
+	for _, typ := range events.RequestInputTypes {
+		if !domain.EventType(typ).StampedOnConsumption() {
+			t.Errorf("%q is stamped at write, so no request's start can consume it", typ)
+		}
+	}
+}
+
 // Nothing else is held: a system.message goes to the system slot, an
 // interrupt and a confirmation are not conversation, a tool result cannot be
 // in a window, and a grader verdict is written between requests.

@@ -600,17 +600,22 @@ func (b *Brain) topUpHistory(ctx context.Context, sid, threadID domain.ID, histo
 }
 
 // pendingInputTypes are the inbound events whose arrival must chain the next
-// turn rather than let the session idle past them: a user.message appended
-// mid-turn (its trigger saw a running session and only appended), a tool
-// result whose enqueue this turn's live item suppressed, or a
-// user.define_outcome appended mid-turn (the agent begins work on it
-// immediately, so it chains for the same reason a message does).
-var pendingInputTypes = []string{
-	string(domain.EventUserMessage),
-	string(domain.EventUserToolResult),
-	string(domain.EventUserCustomToolRes),
-	string(domain.EventUserDefineOutcome),
-}
+// turn rather than let the session idle past them: a consumed input a client
+// posts (domain.ConsumedInputs' inbound half) — a user.message appended
+// mid-turn, whose trigger saw a running session and only appended, or a
+// user.define_outcome, which the agent begins work on immediately — and a tool
+// result whose enqueue this turn's live item suppressed. The consumed input
+// the platform writes, agent.thread_message_received, is chainInput's to find,
+// by seq.
+var pendingInputTypes = func() []string {
+	out := []string{string(domain.EventUserToolResult), string(domain.EventUserCustomToolRes)}
+	for _, t := range domain.ConsumedInputs {
+		if t.Inbound() {
+			out = append(out, string(t))
+		}
+	}
+	return out
+}()
 
 // pendingInput asks it for one thread's own rows (plan 35 decision 5): a
 // sibling's queued input is the sibling's turn to read. An unprocessed row is

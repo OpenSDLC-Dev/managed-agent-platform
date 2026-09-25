@@ -25,31 +25,31 @@ import (
 // no earlier start consumed (the brain's topUpHistory closes the gap between
 // its history read and the start).
 
-// ConsumedInput reports whether t is an input a model request consumes, and
-// so one a consumption window can hold: user.message, user.define_outcome and
-// agent.thread_message_received. Nothing else moves — a system.message goes
-// to the system slot wherever it sits, an interrupt or a confirmation is not
-// conversation, no tool result can land inside a window (its call is not
-// committed until the request ends), and a grader verdict is written between
-// requests.
+// ConsumedInput reports whether t is an input a model request consumes
+// (domain.ConsumedInputs), and so one a consumption window can hold. Nothing
+// else moves — a system.message goes to the system slot wherever it sits, an
+// interrupt or a confirmation is not conversation, no tool result can land
+// inside a window (its call is not committed until the request ends), and a
+// grader verdict is written between requests.
 func ConsumedInput(t domain.EventType) bool {
-	switch t {
-	case domain.EventUserMessage, domain.EventUserDefineOutcome, domain.EventAgentThreadMessageReceived:
-		return true
-	}
-	return false
+	return slices.Contains(domain.ConsumedInputs, t)
 }
 
-// RequestInputTypes are the rows a model request reads as input, and so the
-// ones a turn stamps processed (#793; AppendOptions.Consume): the three
-// ConsumedInput holds, and a system.message, which the request reads into its
-// system prompt wherever it sits. An answer — a confirmation or a tool result —
-// is stamped where its thread's ordered processor takes it, and an interrupt
-// is no input a request reads.
-var RequestInputTypes = []string{
-	string(domain.EventUserMessage), string(domain.EventUserDefineOutcome),
-	string(domain.EventAgentThreadMessageReceived), string(domain.EventSystemMessage),
-}
+// RequestInputTypes are the rows a model request's start stamps processed
+// (#793; AppendOptions.Consume): domain.ConsumedInputs, and a system.message.
+// That one extra is the only input a request reads that is not a consumed
+// input: the request folds it into its system prompt wherever it sits, so no
+// window holds it and replay never moves it, but it is read, and the start
+// that reads it stamps it. An answer — a confirmation or a tool result — is
+// stamped where its thread's ordered processor takes it, and an interrupt is
+// no input a request reads.
+var RequestInputTypes = func() []string {
+	out := make([]string, 0, len(domain.ConsumedInputs)+1)
+	for _, t := range domain.ConsumedInputs {
+		out = append(out, string(t))
+	}
+	return append(out, string(domain.EventSystemMessage))
+}()
 
 // ConsumptionOrderer is the streaming form of ConsumptionOrder, for a reader
 // that pages the log rather than holding it (RenderDream). Windows are keyed
