@@ -678,9 +678,9 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 			gated = true
 			kind = escalate(kind, queue.MCPExec)
 			// The wire carries the server and the bare tool in two fields; the
-			// prefixed name the model was offered exists only inside a provider
-			// request (resolveTools), and putting it on the log would make every
-			// consumer of the session stream decode a naming scheme of ours.
+			// prefixed name the model was offered (domain.MCPModelName) stays out
+			// of them — it reaches the log only as prose, in a denial's text — so
+			// no consumer of the session stream has to decode it from a field.
 			fields["name"] = c.tool
 			fields["mcp_server_name"] = c.server
 		}
