@@ -87,7 +87,10 @@ start commits, bounded by it, since that start consumes exactly those rows. `pro
 moved to the same point: the span start stamps what it consumes at its own `processed_at` minus
 1 µs, the reference's stamp on 139 of the 140 recorded consumptions, and a delivered
 message is written null until then — a present null on a field the pinned SDK types as
-required, registered under #78.
+required, registered under #78. What the old settle-time stamp had caught without a request
+reading it moved as well: every `user.interrupt` is stamped on receipt in its own send, and
+an interrupt or a child's archive stamps a confirmation it supersedes, held behind an
+earlier call, so each inbound type has one stamper and none is left null once consumed.
 
 Two alternatives were rejected. A full processing-order log — an ordering column or a
 pending-input queue, listed and streamed by consumption — would have matched the reference

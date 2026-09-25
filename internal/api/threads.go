@@ -356,6 +356,11 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 	if err != nil {
 		return row, nil, err
 	}
+	// As an interrupt does: an answer held behind one of those calls is
+	// consumed here, since no walk of the ended thread reaches it again.
+	if err := events.StampSupersededAnswers(ctx, tx, domain.ID(row.sessionID), uses); err != nil {
+		return row, nil, err
+	}
 	// The session's idle stop reason is a pick over its idle threads'
 	// (decision 4), this child's among them — its asks in the union, or its
 	// retries_exhausted outranking a sibling's end_turn. What the session

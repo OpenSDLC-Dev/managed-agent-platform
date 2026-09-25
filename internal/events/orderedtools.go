@@ -338,6 +338,36 @@ func StampConfirmations(ctx context.Context, tx pgx.Tx, sid domain.ID, ids []dom
 	return err
 }
 
+// StampSupersededAnswers stamps the answers still unprocessed for calls an
+// interrupt, or a child's archive, answers (InterruptResults): answers the
+// ordered walk held behind an earlier call of their thread, in an earlier
+// send. The interrupt's results
+// are processed as they are written, and threadCalls drops every call whose
+// result is processed, so no later walk would reach them; the interrupt that
+// supersedes them consumes them, in its own commit (#793). A call with any
+// result on the log is not one an interrupt answers, so in practice what this
+// finds is a confirmation. An answer posted in the interrupt's own send is not
+// on the log yet: AnswerPlan places and stamps that one (Moot).
+func StampSupersededAnswers(ctx context.Context, tx pgx.Tx, sid domain.ID, calls []ToolUseRef) error {
+	if len(calls) == 0 {
+		return nil
+	}
+	ids := make([]string, len(calls))
+	for i, c := range calls {
+		ids[i] = c.ID
+	}
+	_, err := tx.Exec(ctx, `UPDATE events SET processed_at=clock_timestamp()
+ WHERE session_id=$1 AND processed_at IS NULL AND type=ANY($2)
+   AND COALESCE(payload->>'tool_use_id',payload->>'custom_tool_use_id',payload->>'mcp_tool_use_id')=ANY($3)`,
+		sid.String(), answerTypes, ids)
+	return err
+}
+
+// answerTypes are the inbound events that answer a tool call (isAnswer).
+var answerTypes = []string{
+	string(domain.EventUserToolResult), string(domain.EventUserCustomToolRes), string(domain.EventUserToolConfirm),
+}
+
 // DeniedRefs are the calls the confirmations among evs refuse. A denial
 // answers its call, so an interrupt later in the same send leaves the call to
 // the denial's result rather than synthesizing its own.
@@ -353,7 +383,7 @@ func DeniedRefs(evs []NewEvent) []string {
 
 // isAnswer reports whether an inbound event answers a tool call.
 func isAnswer(t domain.EventType) bool {
-	return t == domain.EventUserToolResult || t == domain.EventUserCustomToolRes || t == domain.EventUserToolConfirm
+	return slices.Contains(answerTypes, string(t))
 }
 
 // answerRef is the tool call a result or confirmation answers: the reference

@@ -227,6 +227,16 @@ and stamps its `processed_at` there — this plan's last PR, which archives it:
   settle stops stamping, and the start carries the brain's lease proof. On the
   primary the same commit flips a pending outcome to `running`: the request
   that reads its `user.define_outcome` is the one that begins work on it.
+  The settle's stamp had also caught what no request reads, so those move
+  too. Every `user.interrupt` is stamped on receipt in its own send, where
+  PR-A stamped only a child-scoped one, as the reference stamps one (sessT
+  idx 36): after its results, before its idle pairs. An interrupt or a
+  child's archive also stamps an answer it supersedes — a confirmation held
+  behind an earlier call of its thread, whose call it answers — since no
+  later walk reaches that call. Every inbound type now has exactly one
+  stamper: a request input the start, an answer its thread's walk (or the
+  send, the interrupt or the archive that answers its call), an interrupt
+  its own send.
 
 It does not move a message's list or stream position: seq stays the receipt order
 across commits, and the difference that leaves is registered rather than chased,
@@ -295,6 +305,9 @@ special case is kept for it.
   outcome inputs, per-thread windows, the watermark), inputs landing just
   before the span start joining its request with their outcome running, the
   grader and dream transcripts, the stamp at request start and a crash after it,
-  and a received row null until its target's request starts.
+  a received row null until its target's request starts, an interrupt of each
+  scope stamped at receipt (and one with nothing to stop, and the dream
+  runner's), and a held confirmation an interrupt or a child's archive
+  supersedes.
 - `make verify`, `make registry-check`, independent verification, both reviews and
   the PR's CI before squash merge.
