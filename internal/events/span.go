@@ -64,7 +64,7 @@ func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domai
 		return ctx, nil, err
 	}
 	return ctx, &ModelRequest{
-		log: l, sessionID: sessionID, threadID: threadID, startID: evs[0].ID, span: span,
+		log: l, sessionID: sessionID, threadID: threadID, startID: evs[0].ID, startSeq: evs[0].Seq, span: span,
 		backend: backend, started: time.Now(),
 	}, nil
 }
@@ -75,6 +75,7 @@ type ModelRequest struct {
 	sessionID domain.ID
 	threadID  domain.ID // the turn's thread; empty for the primary
 	startID   domain.ID
+	startSeq  int64
 	span      trace.Span
 	usage     domain.ModelUsage // recorded by ModelDone for Finish's attributes
 	// hasUsage records whether ModelDone was given a reading. A turn that died
@@ -129,6 +130,11 @@ func (m *ModelRequest) SetAttributes(attrs ...attribute.KeyValue) {
 // StartEventID is the id of the span.model_request_start event, which the
 // end event references as model_request_start_id.
 func (m *ModelRequest) StartEventID() domain.ID { return m.startID }
+
+// StartSeq is the start event's seq. The request consumes every row of its
+// thread below it that no earlier request did (#793), which is how the brain
+// finds an input that landed between its history read and this start.
+func (m *ModelRequest) StartSeq() int64 { return m.startSeq }
 
 // EndEvent renders the span.model_request_end wire event for the caller to
 // append — the turn's settlement commits it atomically with the rest of the

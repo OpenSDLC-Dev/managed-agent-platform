@@ -367,11 +367,17 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err), envKind)
 	}
 	logToolNotes(ctx, sid, notes)
-	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
+	// replay runs again below when the span start finds rows this history
+	// read missed, so both builds share it.
+	replay := func(history []domain.Event) (provider.Request, int64, error) {
+		req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
+		req.Effort = agent.Model.Effort
+		return req, watermark, err
+	}
+	req, watermark, err := replay(history)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err), envKind)
 	}
-	req.Effort = agent.Model.Effort
 
 	p, err := b.registry.Provider(agent.Model.ID)
 	if err != nil {
@@ -401,6 +407,22 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		attribute.Int("memory.injected", memoryInjected),
 		attribute.Int("memory.block_chars", len(memoryBlock)),
 	)
+	// The request consumes every row of the thread below its start (#793),
+	// and the history above was read before the tools, skills and provider
+	// were resolved: an input appended in between is below the start but not
+	// in the request. Re-read that gap; it is almost always empty.
+	history, topped, err := b.topUpHistory(sctx, sid, item.ThreadID, history, watermark, span.StartSeq())
+	if err != nil {
+		// Abandoned like a lost lease: the reclaim replays a log this turn
+		// has only added a span start to.
+		span.Finish(sctx, true, err)
+		return fmt.Errorf("replay top-up: %w", err)
+	}
+	if topped {
+		if req, watermark, err = replay(history); err != nil {
+			return b.failTurn(sctx, sid, item, span, 0, fmt.Sprintf("replay: %v", err), envKind)
+		}
+	}
 
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
 	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req)
@@ -552,6 +574,25 @@ func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJS
 		return nil, nil, nil, "", false, nil
 	}
 	return agentJSON, resourcesJSON, outcomesJSON, envKind, true, tx.Commit(ctx)
+}
+
+// topUpHistory appends to history the thread's rows that landed after the
+// history read and before the request's span start: seq in (watermark,
+// startSeq). Seq is allocated under the session row lock, so every such row
+// had committed before the start did, and one keyset read finds them all.
+// It reports whether it found any; the caller rebuilds the request if so.
+func (b *Brain) topUpHistory(ctx context.Context, sid, threadID domain.ID, history []domain.Event, watermark, startSeq int64) ([]domain.Event, bool, error) {
+	rows, err := b.log.List(ctx, sid, events.ListQuery{Scope: events.ScopeThread, ThreadID: threadID, AfterSeq: &watermark})
+	if err != nil {
+		return history, false, err
+	}
+	topped := false
+	for _, ev := range rows {
+		if ev.Seq < startSeq {
+			history, topped = append(history, ev), true
+		}
+	}
+	return history, topped, nil
 }
 
 // pendingInputTypes are the inbound events whose arrival must chain the next
