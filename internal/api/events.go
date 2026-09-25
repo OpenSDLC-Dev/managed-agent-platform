@@ -570,18 +570,50 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// takes a stamp inside its slot: no earlier than this commit's rows listed
 	// ahead of it, no later than the first listed behind it, so the order and
 	// the stamps say the same (#539). An answer still queued stays unstamped.
+	//
+	// One statement for the whole batch, whose RETURNING is the echo's reread:
+	// the session's row lock is held, and a body can carry thousands of
+	// answers. An answer's floor leaves the other answers out. Clamped, one
+	// listed ahead of it could not raise the floor anyway — it is held at or
+	// below its own ceiling, which counts this answer's stamp — and
+	// unclamped, its stamp says only when its thread happened to settle. So
+	// one pass over the commit's rows gives what clamping the answers one by
+	// one, in list order, would.
+	var answerIDs []string
 	for _, ev := range newEvents {
 		if ev.Type == domain.EventUserToolResult || ev.Type == domain.EventUserCustomToolRes || ev.Type == domain.EventUserToolConfirm {
-			if _, err := tx.Exec(ctx, `UPDATE events a SET processed_at = LEAST(GREATEST(a.processed_at,
-			     (SELECT MAX(b.processed_at) FROM events b WHERE b.session_id = a.session_id AND b.seq >= $3 AND b.seq < a.seq)),
-			     (SELECT MIN(b.processed_at) FROM events b WHERE b.session_id = a.session_id AND b.seq > a.seq))
-			   WHERE a.session_id = $1 AND a.id = $2 AND a.processed_at IS NOT NULL`,
-				id, ev.ID.String(), appended[0].Seq); err != nil {
+			answerIDs = append(answerIDs, ev.ID.String())
+		}
+	}
+	if len(answerIDs) > 0 {
+		rows, err := tx.Query(ctx, `WITH answer AS (SELECT unnest($3::text[]) AS id),
+		   slot AS (
+		     SELECT e.id, e.processed_at, a.id IS NOT NULL AS is_answer,
+		            MAX(e.processed_at) FILTER (WHERE a.id IS NULL)
+		              OVER (ORDER BY e.seq ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS floor_at,
+		            MIN(e.processed_at)
+		              OVER (ORDER BY e.seq ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS ceiling_at
+		       FROM events e LEFT JOIN answer a ON a.id = e.id
+		      WHERE e.session_id = $1 AND e.seq >= $2)
+		 UPDATE events e SET processed_at = LEAST(GREATEST(slot.processed_at, slot.floor_at), slot.ceiling_at)
+		   FROM slot
+		  WHERE e.session_id = $1 AND e.id = slot.id AND slot.is_answer AND slot.processed_at IS NOT NULL
+		 RETURNING e.id, e.processed_at`,
+			id, appended[0].Seq, answerIDs)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var eid domain.ID
+			var at *time.Time
+			if err := rows.Scan(&eid, &at); err != nil {
+				rows.Close()
 				return nil, err
 			}
-			if err := tx.QueryRow(ctx, `SELECT processed_at FROM events WHERE session_id=$1 AND id=$2`, id, ev.ID.String()).Scan(&posted[ev.ID].ProcessedAt); err != nil {
-				return nil, err
-			}
+			posted[eid].ProcessedAt = at
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
