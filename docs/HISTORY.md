@@ -49,6 +49,38 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Processing order (plan 56, #793, #539) — archived 2026-09-26, delivered in three PRs (#802, #806 and this close-out)
+
+The reference lists every event in processing order — each recorded list sorts by
+`processed_at` — while this platform keeps seq as receipt order, list order and stream cursor
+at once. The plan kept seq and applied the rule wherever it could without re-keying anything;
+the three fragments carry what each PR changed.
+
+- **#802** wrote each commit in processing order: a wake's running pair before the input it
+  consumes (item 1), a delivered message after its target's running event (item 3), an
+  interrupt after the results it synthesizes (#539), with `processed_at` kept in list order
+  within the commit. Item 2, a child resuming an idle session, was registered as deliberate.
+- **#806** placed an input that lands during a model request where the next request consumed
+  it — in replay and in the grader and dream transcripts — which also ended the prefill a
+  chained `end_turn` request sent, and moved `processed_at` to that point of consumption.
+- **This close-out** has the send make every move its answers cause, where they are consumed
+  and in receipt order with its interrupts. A resume pair precedes what the resumed turn
+  consumes: the recorded denial-result placement, and input posted beside the answer, which
+  #802 had registered as out of reach. A thread left parked re-idles beside the answer, ahead
+  of pending input. Replay answers a turn's tool uses in their order, whatever order the log
+  holds the results in.
+
+Two alternatives were rejected. A full processing-order log would have matched the reference
+everywhere at the price of re-keying seq, the stream cursor, paging and the chain checks, with
+a migration; its one remaining gain, a mid-request input's list position, is registered in
+docs/DIVERGENCES.md instead. Mimicking item 2 would have idled the session under a working
+child to reproduce a shape no recording shows to be a contract.
+
+One follow-up is filed: a grading cycle's chain check misses an ending notice that lands before
+its claim (#801, predating the plan).
+
+---
+
 ## Binding to the SDK by symbol (plan 51, #722) — archived 2026-09-17, all four slices delivered (#736, #739, #740, #741 and this close-out)
 
 A citation into `anthropic-sdk-go`, go-jose or the `ant` CLI makes a temporal claim —

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -41,6 +42,19 @@ func (l *statementLog) total() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.sqls)
+}
+
+// count is how many recorded statements contain sql.
+func (l *statementLog) count(sql string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, s := range l.sqls {
+		if strings.Contains(s, sql) {
+			n++
+		}
+	}
+	return n
 }
 
 // newTracedTestServer is newTestServer with the handler's pool traced into
