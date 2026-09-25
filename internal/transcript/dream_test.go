@@ -729,3 +729,19 @@ func TestRenderDreamHeldInputsStayBounded(t *testing.T) {
 		}
 	}
 }
+
+// A dream reads a tool turn as its agent did: a message posted while the
+// request ran follows the call's result, written after the request's end,
+// not the call alone.
+func TestRenderDreamPlacesAMidRequestMessageAfterTheToolResult(t *testing.T) {
+	d := renderEvents(t,
+		mustEvent(t, 1, domain.EventUserMessage, content("one")),
+		span(2, "s1", ""),
+		mustEvent(t, 3, domain.EventUserMessage, content("posted mid-request")),
+		mustEvent(t, 4, domain.EventAgentToolUse, map[string]any{"name": "lookup", "input": map[string]any{}}),
+		span(5, "e1", "s1"),
+		mustEvent(t, 6, domain.EventAgentToolResult, map[string]any{"tool_use_id": "x", "content": "the result"}),
+		mustEvent(t, 7, domain.EventAgentMessage, content("the next reply")),
+	)
+	inOrder(t, d, "tool call: lookup", "the result", "posted mid-request", "the next reply")
+}

@@ -186,3 +186,24 @@ func TestInlineableMimePinsHarvestTableContract(t *testing.T) {
 		}
 	}
 }
+
+// A tool turn's result is written after its request's end, and a message
+// posted while that request ran reached neither the call nor its result: the
+// grader reads it after the result, where the next request consumed it and
+// the reference lists it (sessT idx 78), not between the call and the result.
+func TestRenderTranscriptPlacesAMidRequestMessageAfterTheToolResult(t *testing.T) {
+	history := []domain.Event{
+		{ID: "one", Seq: 1, Type: domain.EventUserMessage, Body: []byte(`{"content":"one"}`)},
+		{ID: "s1", Seq: 2, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+		{ID: "two", Seq: 3, Type: domain.EventUserMessage, Body: []byte(`{"content":"two"}`)},
+		{ID: "call", Seq: 4, Type: domain.EventAgentToolUse, Body: []byte(`{"name":"lookup","input":{}}`)},
+		{ID: "e1", Seq: 5, Type: domain.EventSpanModelRequestEnd, Body: []byte(`{"model_request_start_id":"s1"}`)},
+		{ID: "res", Seq: 6, Type: domain.EventAgentToolResult, Body: []byte(`{"tool_use_id":"call","content":"found"}`)},
+		{ID: "s2", Seq: 7, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+		{ID: "done", Seq: 8, Type: domain.EventAgentMessage, Body: []byte(`{"content":"done"}`)},
+	}
+	want := "## user\none\n\n## agent tool call\nlookup {}\n\n## tool result\nfound\n\n## user\ntwo\n\n## agent\ndone\n\n"
+	if out := transcript.Render(history); out != want {
+		t.Errorf("transcript =\n%q\nwant\n%q", out, want)
+	}
+}

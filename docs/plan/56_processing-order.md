@@ -209,9 +209,11 @@ and stamps its `processed_at` there — this plan's second PR:
 - **Replay by consumption window.** A `user.message`, `user.define_outcome` or
   `agent.thread_message_received` that landed while one of its thread's model
   requests was in flight replays after that request's `span.model_request_end`
-  and results, where the next request consumed it (`events.ConsumptionOrder`, a
-  pure function of the thread's rows; a dangling start is closed by the thread's
-  next start). The watermark stays the highest seq replayed. A chained request
+  and results — results written after the end included, as a delegated settle
+  or an executor writes them — where the next request consumed it
+  (`events.ConsumptionOrder`, a pure function of the thread's rows; a dangling
+  start is closed by the thread's next start). The grader's call is a window
+  on the primary too, so an input posted while it ran follows the verdict. The watermark stays the highest seq replayed. A chained request
   after an `end_turn` reply therefore ends on the new message instead of on the
   reply — a prefill, which Claude 4.6 and later reject with a 400. The request
   reads its history once, after its span start commits, bounded by it, so it

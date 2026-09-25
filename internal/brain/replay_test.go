@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -358,5 +359,40 @@ func TestBuildRequestReplaysAMidRequestInputAfterTheReply(t *testing.T) {
 	}
 	if !strings.Contains(string(req.Messages[2].Content), `"two"`) {
 		t.Errorf("last user turn = %s, want the mid-request message", req.Messages[2].Content)
+	}
+}
+
+// The grader's call is a window on the primary like a model request's: a
+// message posted while it ran never reached the verdict, so the revision
+// request reads the grader's feedback first and the message after it, in the
+// one user turn the two merge into.
+func TestBuildRequestReplaysAMessagePostedDuringGradingAfterTheVerdict(t *testing.T) {
+	start := ev(2, domain.EventSpanModelRequestStart, `{}`)
+	grading := ev(5, domain.EventSpanOutcomeEvalStart, `{"outcome_id":"outc_1","iteration":0}`)
+	history := []domain.Event{
+		ev(1, domain.EventUserDefineOutcome,
+			`{"description":"Build it","rubric":{"type":"text","content":"# Rubric"},"max_iterations":3,"outcome_id":"outc_1"}`),
+		start,
+		ev(3, domain.EventAgentMessage, `{"content":[{"type":"text","text":"draft"}]}`),
+		ev(4, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
+		grading,
+		ev(6, domain.EventUserMessage, `{"content":"also add a chart"}`),
+		ev(7, domain.EventSpanOutcomeEvalEnd, `{"outcome_id":"outc_1","outcome_evaluation_start_id":"`+
+			grading.ID.String()+`","result":"needs_revision","explanation":"missing the totals"}`),
+	}
+	req, _, err := buildRequest("", nil, history, "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 3 || req.Messages[2].Role != "user" {
+		t.Fatalf("messages = %+v, want the outcome, the draft, then one user turn", req.Messages)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(req.Messages[2].Content, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 || !strings.Contains(fmt.Sprint(blocks[0]["text"]), "missing the totals") ||
+		blocks[1]["text"] != "also add a chart" {
+		t.Errorf("revision turn = %v, want the grader's feedback, then the message", blocks)
 	}
 }

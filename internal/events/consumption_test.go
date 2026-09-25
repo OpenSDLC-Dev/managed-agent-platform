@@ -74,29 +74,66 @@ func TestConsumptionOrderEndTurnWindow(t *testing.T) {
 	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "reply", "e1", "two", "s2")
 }
 
-// On a tool turn the input moves after the call and its result is written
-// after it; replay merges the two into one user turn, results first
-// (2026-09-02 batch2 sessT idx 78: after agent.tool_result, before the next
-// start).
+// On a tool turn the input moves after the call and after the result that
+// answers it, which is written after the request's end: the reference lists
+// it there (2026-09-02 batch2 sessT idx 78: after agent.tool_result, before
+// the next start), and replay merges the two into one user turn, results
+// first, either way.
 func TestConsumptionOrderToolWindow(t *testing.T) {
 	b := (&logBuilder{}).
 		add("one", evUser, "", "").start("s1", "").
 		add("two", evUser, "", "").
 		add("call", evToolUse, "", "").end("e1", "s1", "").
 		add("result", evToolRes, "", "").start("s2", "")
-	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "call", "e1", "two", "result", "s2")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "call", "e1", "result", "two", "s2")
 }
 
 // A delegated settle commits the end and then the inline answers in one
-// batch: the input is released at the end, ahead of those answers on the
-// log, and replay still sorts the results first in the merged user turn.
+// batch: the held input follows those answers, the request's own results,
+// and precedes the first row of the thread that is not one.
 func TestConsumptionOrderDelegatedSettle(t *testing.T) {
 	b := (&logBuilder{}).
 		add("one", evUser, "", "").start("s1", "").
 		add("report", evReceived, "", "").
 		add("call", evToolUse, "", "").end("e1", "s1", "").
 		add("answer", evToolRes, "", "").add("spawned", domain.EventAgentThreadMessageSent, "", "")
-	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "call", "e1", "report", "answer", "spawned")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "call", "e1", "answer", "report", "spawned")
+}
+
+// What a request consumes after its window closes keeps receipt order: an
+// input held in the window precedes one posted after the window's results,
+// both consumed by the next start.
+func TestConsumptionOrderKeepsHeldInputsAheadOfLaterOnes(t *testing.T) {
+	b := (&logBuilder{}).
+		start("s1", "").add("held", evUser, "", "").
+		add("call", evToolUse, "", "").end("e1", "s1", "").
+		add("result", domain.EventUserCustomToolRes, "", "").
+		add("later", evUser, "", "").start("s2", "")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "call", "e1", "result", "held", "later", "s2")
+}
+
+// The grader's call is a window on the primary like a model request's: an
+// input posted while it ran never reached the verdict, so it follows
+// span.outcome_evaluation_end — which replay renders as the revision
+// feedback — where the revision request consumed it. Only the end naming its
+// start closes the window, and a model request's start closes a grading
+// window left dangling, as it closes its own.
+func TestConsumptionOrderGradingWindow(t *testing.T) {
+	gradeEnd := func(b *logBuilder, id, startID string) *logBuilder {
+		return b.add(id, domain.EventSpanOutcomeEvalEnd, "",
+			`{"outcome_evaluation_start_id":"`+startID+`","result":"needs_revision"}`)
+	}
+	b := (&logBuilder{}).
+		add("goal", evOutcome, "", "").start("s1", "").add("reply", evAgentMsg, "", "").end("e1", "s1", "").
+		add("g1", domain.EventSpanOutcomeEvalStart, "", "").
+		add("msg", evUser, "", "")
+	gradeEnd(b, "stale", "g0")
+	gradeEnd(b, "v1", "g1").start("s2", "")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "goal", "s1", "reply", "e1", "g1", "stale", "v1", "msg", "s2")
+
+	b = (&logBuilder{}).
+		add("g1", domain.EventSpanOutcomeEvalStart, "", "").add("msg", evUser, "", "").start("s2", "")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "g1", "msg", "s2")
 }
 
 // A start with no end — a crash, a lost lease, an interrupted request — is
@@ -210,8 +247,11 @@ func TestConsumptionOrderIsPerThread(t *testing.T) {
 		add("more", evReceived, child, "").
 		add("creply", evAgentMsg, child, "").end("ce1", "c1", child).
 		add("preply", evAgentMsg, "", "").end("pe1", "p1", "")
+	// The child's "more" waits for a row of its own thread that is not one of
+	// its request's results; none follows, so it comes out with the rest at
+	// the end, merged by seq.
 	wantOrder(t, events.ConsumptionOrder(nil, b.evs),
-		"p1", "task", "c1", "creply", "ce1", "more", "preply", "pe1", "msg")
+		"p1", "task", "c1", "creply", "ce1", "preply", "pe1", "msg", "more")
 }
 
 // Only the end that names the open start closes it; an end naming another
