@@ -56,14 +56,19 @@ func (m *ModelRequest) recordMetrics(ctx context.Context, isError bool, commitEr
 	case isError:
 		attrs = append(attrs, dur.AttrErrorType(errorTypeModel))
 	}
-	// The call to the provider, not the turn: ModelDone stamped the boundary
-	// when the stream ended. A turn abandoned mid-stream never stamped one, and
-	// there the request's whole elapsed IS the attempt.
-	elapsed := m.modelElapsed
-	if elapsed == 0 {
-		elapsed = time.Since(m.started)
+	// The call to the provider, not the turn: ModelCalling stamped where it
+	// began and ModelDone where the stream ended. A turn abandoned mid-stream
+	// never stamped the end, and there the call's whole elapsed IS the attempt.
+	// A request that never reached the provider — its replay failed after the
+	// start committed — made no call to time, so it records no reading rather
+	// than a platform-only one (absent is not zero, as for usage below).
+	if !m.called.IsZero() {
+		elapsed := m.modelElapsed
+		if elapsed == 0 {
+			elapsed = time.Since(m.called)
+		}
+		dur.Record(ctx, elapsed.Seconds(), genaiconv.OperationNameChat, provider, attrs...)
 	}
-	dur.Record(ctx, elapsed.Seconds(), genaiconv.OperationNameChat, provider, attrs...)
 
 	if !m.hasUsage {
 		return

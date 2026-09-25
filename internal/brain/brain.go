@@ -406,6 +406,9 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	req.Effort = agent.Model.Effort
 
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
+	// The call to the model begins here, and its latency with it: the history
+	// read and the replay above ran after the span start and are ours.
+	span.ModelCalling()
 	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked

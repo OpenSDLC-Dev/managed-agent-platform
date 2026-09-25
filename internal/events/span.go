@@ -71,7 +71,7 @@ func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domai
 	}
 	return ctx, &ModelRequest{
 		log: l, sessionID: sessionID, threadID: threadID, startID: evs[0].ID, startSeq: evs[0].Seq, span: span,
-		backend: backend, started: time.Now(),
+		backend: backend,
 	}, nil
 }
 
@@ -90,11 +90,25 @@ type ModelRequest struct {
 	// the token histogram with readings no model ever produced.
 	hasUsage bool
 	backend  Backend
-	started  time.Time
+	// called is when the call to the provider began, stamped by ModelCalling;
+	// zero for a request that never reached it.
+	called time.Time
 	// modelElapsed is how long the call to the provider took, stamped by
 	// ModelDone. Zero until then; see ModelDone for why Finish cannot measure
 	// this itself.
 	modelElapsed time.Duration
+}
+
+// ModelCalling marks the start of the call to the model provider, where the
+// model-latency clock starts. The caller invokes it just before the call, not
+// at the span start: the brain reads the request's history and builds it
+// after the start commits (#793), which is platform work, and the span's own
+// start and its wire timestamps stay where the start committed. Repeat calls
+// keep the first mark.
+func (m *ModelRequest) ModelCalling() {
+	if m.called.IsZero() {
+		m.called = time.Now()
+	}
 }
 
 // ModelDone records what the call to the model provider cost: how long it took,
@@ -115,12 +129,15 @@ type ModelRequest struct {
 // at all, so tokens the model really spent and really billed would go
 // unrecorded on exactly the paths that already cost money for nothing.
 //
-// Repeat calls keep the first reading.
+// Repeat calls keep the first reading. The duration runs from ModelCalling;
+// without that mark there was no call to time, and none is taken.
 func (m *ModelRequest) ModelDone(usage *domain.ModelUsage) {
 	if m.modelElapsed != 0 {
 		return
 	}
-	m.modelElapsed = time.Since(m.started)
+	if !m.called.IsZero() {
+		m.modelElapsed = time.Since(m.called)
+	}
 	if usage != nil {
 		m.usage, m.hasUsage = *usage, true
 	}
