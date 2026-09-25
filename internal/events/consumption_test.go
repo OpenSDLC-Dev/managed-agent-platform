@@ -1,6 +1,7 @@
 package events_test
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 
@@ -69,7 +70,7 @@ func TestConsumptionOrderEndTurnWindow(t *testing.T) {
 		add("two", evUser, "", "").
 		add("reply", evAgentMsg, "", "").end("e1", "s1", "").
 		start("s2", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "one", "s1", "reply", "e1", "two", "s2")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "reply", "e1", "two", "s2")
 }
 
 // On a tool turn the input moves after the call and its result is written
@@ -82,7 +83,7 @@ func TestConsumptionOrderToolWindow(t *testing.T) {
 		add("two", evUser, "", "").
 		add("call", evToolUse, "", "").end("e1", "s1", "").
 		add("result", evToolRes, "", "").start("s2", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "one", "s1", "call", "e1", "two", "result", "s2")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "call", "e1", "two", "result", "s2")
 }
 
 // A delegated settle commits the end and then the inline answers in one
@@ -94,7 +95,7 @@ func TestConsumptionOrderDelegatedSettle(t *testing.T) {
 		add("report", evReceived, "", "").
 		add("call", evToolUse, "", "").end("e1", "s1", "").
 		add("answer", evToolRes, "", "").add("spawned", domain.EventAgentThreadMessageSent, "", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "one", "s1", "call", "e1", "report", "answer", "spawned")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "call", "e1", "report", "answer", "spawned")
 }
 
 // A start with no end — a crash, a lost lease, an interrupted request — is
@@ -105,7 +106,7 @@ func TestConsumptionOrderDanglingStart(t *testing.T) {
 		add("one", evUser, "", "").start("s1", "").
 		add("two", evUser, "", "").
 		start("s2", "").add("reply", evAgentMsg, "", "").end("e2", "s2", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "one", "s1", "two", "s2", "reply", "e2")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "two", "s2", "reply", "e2")
 }
 
 // A redirect after a dangling start — the interrupt, its idle pair, the
@@ -120,7 +121,7 @@ func TestConsumptionOrderRedirectAfterDanglingStart(t *testing.T) {
 		add("running", domain.EventSessionStatusRunning, "", "").
 		add("redirect", evUser, "", "").
 		start("s2", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "one", "s1", "stop", "idle", "running", "redirect", "s2")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "stop", "idle", "running", "redirect", "s2")
 }
 
 // The three consumed inputs are held; two in one window keep their seq order.
@@ -131,7 +132,7 @@ func TestConsumptionOrderHoldsEveryConsumedInput(t *testing.T) {
 		add("goal", evOutcome, "", "").
 		add("report", evReceived, "", "").
 		add("reply", evAgentMsg, "", "").end("e1", "s1", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "s1", "reply", "e1", "msg", "goal", "report")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "reply", "e1", "msg", "goal", "report")
 	for _, typ := range []domain.EventType{evUser, evOutcome, evReceived} {
 		if !events.ConsumedInput(typ) {
 			t.Errorf("ConsumedInput(%q) = false, want true", typ)
@@ -183,7 +184,7 @@ func TestConsumptionOrderHoldsNothingElse(t *testing.T) {
 			t.Errorf("ConsumedInput(%q) = true, want false", typ)
 		}
 		b := (&logBuilder{}).start("s1", "").add("x", typ, "", "").add("reply", evAgentMsg, "", "").end("e1", "s1", "")
-		wantOrder(t, events.ConsumptionOrder(b.evs), "s1", "x", "reply", "e1")
+		wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "x", "reply", "e1")
 	}
 }
 
@@ -192,7 +193,7 @@ func TestConsumptionOrderInputBetweenWindows(t *testing.T) {
 	b := (&logBuilder{}).
 		add("one", evUser, "", "").start("s1", "").add("reply", evAgentMsg, "", "").end("e1", "s1", "").
 		add("two", evUser, "", "").start("s2", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "one", "s1", "reply", "e1", "two", "s2")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "reply", "e1", "two", "s2")
 }
 
 // Windows are per thread: the primary's open request never holds a child's
@@ -208,7 +209,7 @@ func TestConsumptionOrderIsPerThread(t *testing.T) {
 		add("more", evReceived, child, "").
 		add("creply", evAgentMsg, child, "").end("ce1", "c1", child).
 		add("preply", evAgentMsg, "", "").end("pe1", "p1", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs),
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs),
 		"p1", "task", "c1", "creply", "ce1", "more", "preply", "pe1", "msg")
 }
 
@@ -219,19 +220,19 @@ func TestConsumptionOrderEndMatching(t *testing.T) {
 		start("s1", "").add("msg", evUser, "", "").
 		end("stale", "s0", "").
 		add("reply", evAgentMsg, "", "").end("e1", "s1", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "s1", "stale", "reply", "e1", "msg")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "stale", "reply", "e1", "msg")
 
 	b = (&logBuilder{}).
 		start("s1", "").add("msg", evUser, "", "").
 		add("e1", domain.EventSpanModelRequestEnd, "", `not json`).
 		add("after", evAgentMsg, "", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "s1", "e1", "msg", "after")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "e1", "msg", "after")
 
 	b = (&logBuilder{}).
 		start("s1", "").add("msg", evUser, "", "").
 		add("e1", domain.EventSpanModelRequestEnd, "", `{"is_error":true}`).
 		add("after", evAgentMsg, "", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "s1", "e1", "msg", "after")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "e1", "msg", "after")
 }
 
 // A window still open when the log ends — a request in flight right now — is
@@ -242,22 +243,54 @@ func TestConsumptionOrderFlushesOpenWindows(t *testing.T) {
 	b := (&logBuilder{}).
 		start("p1", "").start("c1", child).
 		add("a", evUser, "", "").add("b", evReceived, child, "").add("c", evUser, "", "")
-	wantOrder(t, events.ConsumptionOrder(b.evs), "p1", "c1", "a", "b", "c")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "p1", "c1", "a", "b", "c")
 }
 
-// The function reorders a copy: the grader's watermark and outcome lookups
-// read the same slice afterwards and must see it in seq order.
+// Given a slice of its own, the function leaves its input alone: the
+// grader's watermark and outcome lookups read the same log afterwards and
+// must see it in seq order. Given the input's own slice, it reorders in place
+// to the same result, with no copy of the log — what replay does, on every
+// request.
 func TestConsumptionOrderLeavesItsInputAlone(t *testing.T) {
 	b := (&logBuilder{}).
 		add("one", evUser, "", "").start("s1", "").add("two", evUser, "", "").
-		add("reply", evAgentMsg, "", "").end("e1", "s1", "")
+		start("c1", "sthr_child").add("task", evReceived, "sthr_child", "").
+		add("reply", evAgentMsg, "", "").end("e1", "s1", "").add("three", evUser, "", "")
 	before := ids(b.evs)
-	_ = events.ConsumptionOrder(b.evs)
+	want := ids(events.ConsumptionOrder(make([]domain.Event, 0, len(b.evs)), b.evs))
 	if !slices.Equal(ids(b.evs), before) {
 		t.Errorf("input reordered to %v", ids(b.evs))
 	}
-	if got := events.ConsumptionOrder(nil); len(got) != 0 {
-		t.Errorf("ConsumptionOrder(nil) = %v", got)
+	if got := events.ConsumptionOrder(b.evs[:0], b.evs); !slices.Equal(ids(got), want) || &got[0] != &b.evs[0] {
+		t.Errorf("in place: %v\n want %v, in the input's own array", ids(got), want)
+	}
+	if got := events.ConsumptionOrder(nil, nil); len(got) != 0 {
+		t.Errorf("ConsumptionOrder(nil, nil) = %v", got)
+	}
+}
+
+// A row costs the orderer no allocation of its own: Push appends into the
+// caller's buffer, which a streaming reader hands back each time, and an
+// in-place reorder copies no log. (Deciding which start an end closes
+// decodes the end's payload, which allocates; that is per request, not per
+// row.)
+func TestConsumptionOrderAllocatesNothingPerRow(t *testing.T) {
+	var o events.ConsumptionOrderer
+	buf := make([]domain.Event, 0, 4)
+	row := domain.Event{ID: "m", Seq: 1, Type: evAgentMsg, Body: []byte("{}")}
+	if n := testing.AllocsPerRun(1000, func() { buf = o.Push(buf[:0], row) }); n != 0 {
+		t.Errorf("Push allocated %v times per row into a reused buffer, want 0", n)
+	}
+	var b logBuilder
+	for i := range 1000 {
+		b.add(fmt.Sprintf("m%d", i), evUser, "", "").add(fmt.Sprintf("r%d", i), evAgentMsg, "", "")
+	}
+	log := slices.Clone(b.evs)
+	if n := testing.AllocsPerRun(100, func() {
+		copy(log, b.evs)
+		_ = events.ConsumptionOrder(log[:0], log)
+	}); n != 0 {
+		t.Errorf("an in-place reorder of %d rows allocated %v times, want 0", len(log), n)
 	}
 }
 
@@ -271,16 +304,16 @@ func TestConsumptionOrdererStreamsTheSameOrder(t *testing.T) {
 		add("call", evToolUse, "", "").end("e1", "s1", "").add("result", evToolRes, "", "").
 		start("s2", "").add("three", evOutcome, "", "").add("reply", evAgentMsg, "", "").end("e2", "s2", "").
 		start("s3", "").add("four", evUser, "", "")
-	want := ids(events.ConsumptionOrder(b.evs))
+	want := ids(events.ConsumptionOrder(nil, b.evs))
 	for size := 1; size <= len(b.evs); size++ {
 		var o events.ConsumptionOrderer
 		var got []domain.Event
 		for i := 0; i < len(b.evs); i += size {
 			for _, ev := range b.evs[i:min(i+size, len(b.evs))] {
-				got = append(got, o.Push(ev)...)
+				got = o.Push(got, ev)
 			}
 		}
-		got = append(got, o.Flush()...)
+		got = o.Flush(got)
 		if !slices.Equal(ids(got), want) {
 			t.Errorf("chunk %d: %v\n want %v", size, ids(got), want)
 		}
@@ -293,21 +326,21 @@ func TestConsumptionOrdererStreamsTheSameOrder(t *testing.T) {
 // that window is emitted as it arrives.
 func TestConsumptionOrdererHeldBytes(t *testing.T) {
 	var o events.ConsumptionOrderer
-	if got := o.Push(domain.Event{ID: "s1", Seq: 1, Type: domain.EventSpanModelRequestStart, Body: []byte("{}")}); len(got) != 1 {
+	if got := o.Push(nil, domain.Event{ID: "s1", Seq: 1, Type: domain.EventSpanModelRequestStart, Body: []byte("{}")}); len(got) != 1 {
 		t.Fatalf("start emitted %v", ids(got))
 	}
-	if got := o.Push(domain.Event{ID: "m1", Seq: 2, Type: evUser, Body: []byte("0123456789")}); len(got) != 0 {
+	if got := o.Push(nil, domain.Event{ID: "m1", Seq: 2, Type: evUser, Body: []byte("0123456789")}); len(got) != 0 {
 		t.Fatalf("held input emitted %v", ids(got))
 	}
-	o.Push(domain.Event{ID: "m2", Seq: 3, Type: evUser, Body: []byte("01234")})
+	o.Push(nil, domain.Event{ID: "m2", Seq: 3, Type: evUser, Body: []byte("01234")})
 	if got := o.HeldBytes(); got != 15 {
 		t.Errorf("HeldBytes = %d, want 15", got)
 	}
-	wantOrder(t, o.Flush(), "m1", "m2")
+	wantOrder(t, o.Flush(nil), "m1", "m2")
 	if got := o.HeldBytes(); got != 0 {
 		t.Errorf("HeldBytes after flush = %d, want 0", got)
 	}
-	wantOrder(t, o.Push(domain.Event{ID: "m3", Seq: 4, Type: evUser, Body: []byte("{}")}), "m3")
-	wantOrder(t, o.Push(domain.Event{ID: "e1", Seq: 5, Type: domain.EventSpanModelRequestEnd,
+	wantOrder(t, o.Push(nil, domain.Event{ID: "m3", Seq: 4, Type: evUser, Body: []byte("{}")}), "m3")
+	wantOrder(t, o.Push(nil, domain.Event{ID: "e1", Seq: 5, Type: domain.EventSpanModelRequestEnd,
 		Body: []byte(`{"model_request_start_id":"s1"}`)}), "e1")
 }

@@ -97,6 +97,7 @@ func RenderDream(ctx context.Context, log Lister, sessionID string) (*Dream, err
 	// only its status, asks and answers), so only the primary's windows ever
 	// hold a row here.
 	var o events.ConsumptionOrderer
+	var buf []domain.Event // what one push emits, drained before the next
 	emit := func(evs []domain.Event) {
 		for _, ev := range evs {
 			if ev.Type == domain.EventUserMessage {
@@ -124,9 +125,11 @@ paging:
 			if ev.Seq > mark {
 				break paging
 			}
-			emit(o.Push(ev))
+			buf = o.Push(buf[:0], ev)
+			emit(buf)
 			if o.HeldBytes() > DreamTranscriptCap {
-				emit(o.Flush())
+				buf = o.Flush(buf[:0])
+				emit(buf)
 			}
 		}
 		last := page[len(page)-1].Seq
@@ -137,7 +140,7 @@ paging:
 	}
 	// A request still in flight at the mark holds its inputs to the end: they
 	// render after what it has streamed so far, never dropped.
-	emit(o.Flush())
+	emit(o.Flush(buf[:0]))
 
 	d.Text, d.ElidedBytes = w.result()
 	return d, nil

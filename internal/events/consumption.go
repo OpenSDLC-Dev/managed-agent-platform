@@ -61,8 +61,11 @@ type ConsumptionOrderer struct {
 	heldBytes int
 }
 
-// Push takes the next row in seq order and returns the rows to emit now, in
-// consumption order:
+// Push takes the next row in seq order and appends the rows to emit now to
+// out, in consumption order, returning the extended slice. It is append's
+// contract, so a caller that drains each result before the next push can
+// hand the same buffer back (buf[:0]) and a row costs no allocation of its
+// own:
 //   - a span.model_request_start releases its thread's held inputs ahead of
 //     itself, then opens a window. A start that never ended (a crash, a lost
 //     lease, an interrupted request) is closed this way: the retried request
@@ -74,12 +77,16 @@ type ConsumptionOrderer struct {
 //     cannot say which start it closes closes the open one, since a thread
 //     runs one request at a time.
 //   - everything else is emitted as it stands.
-func (o *ConsumptionOrderer) Push(ev domain.Event) []domain.Event {
+//
+// It never appends a row it has not been pushed, so the rows appended stay
+// at or behind the rows pushed — what lets ConsumptionOrder reorder a log in
+// place.
+func (o *ConsumptionOrderer) Push(out []domain.Event, ev domain.Event) []domain.Event {
 	t := ev.ThreadID
 	start, open := o.open[t]
 	switch {
 	case ev.Type == domain.EventSpanModelRequestStart:
-		out := append(o.release(t), ev)
+		out = append(o.release(out, t), ev)
 		if o.open == nil {
 			o.open = map[domain.ID]domain.ID{}
 		}
@@ -91,25 +98,25 @@ func (o *ConsumptionOrderer) Push(ev domain.Event) []domain.Event {
 		}
 		o.held[t] = append(o.held[t], ev)
 		o.heldBytes += len(ev.Body)
-		return nil
+		return out
 	case open && ev.Type == domain.EventSpanModelRequestEnd && endsRequest(ev, start):
 		delete(o.open, t)
-		return append([]domain.Event{ev}, o.release(t)...)
+		return o.release(append(out, ev), t)
 	}
-	return []domain.Event{ev}
+	return append(out, ev)
 }
 
-// Flush releases every held input, all threads merged by seq, and closes
-// every window. At the end of a log it is what a request still in flight
-// held. Called early, to bound memory (HeldBytes), it degrades the windows
-// it closes to seq order: what was held comes out now, and the rest of each
-// window is emitted as it arrives.
-func (o *ConsumptionOrderer) Flush() []domain.Event {
-	var out []domain.Event
+// Flush appends every held input to out, all threads merged by seq, and
+// closes every window. At the end of a log it is what a request still in
+// flight held. Called early, to bound memory (HeldBytes), it degrades the
+// windows it closes to seq order: what was held comes out now, and the rest
+// of each window is emitted as it arrives.
+func (o *ConsumptionOrderer) Flush(out []domain.Event) []domain.Event {
+	from := len(out)
 	for _, evs := range o.held {
 		out = append(out, evs...)
 	}
-	slices.SortFunc(out, func(a, b domain.Event) int { return cmp.Compare(a.Seq, b.Seq) })
+	slices.SortFunc(out[from:], func(a, b domain.Event) int { return cmp.Compare(a.Seq, b.Seq) })
 	o.open, o.held, o.heldBytes = nil, nil, 0
 	return out
 }
@@ -117,10 +124,11 @@ func (o *ConsumptionOrderer) Flush() []domain.Event {
 // HeldBytes is the body size of the inputs held back so far.
 func (o *ConsumptionOrderer) HeldBytes() int { return o.heldBytes }
 
-func (o *ConsumptionOrderer) release(t domain.ID) []domain.Event {
-	out := o.held[t]
-	for _, ev := range out {
+// release appends thread t's held inputs to out and forgets them.
+func (o *ConsumptionOrderer) release(out []domain.Event, t domain.ID) []domain.Event {
+	for _, ev := range o.held[t] {
 		o.heldBytes -= len(ev.Body)
+		out = append(out, ev)
 	}
 	delete(o.held, t)
 	return out
@@ -140,14 +148,16 @@ func endsRequest(end domain.Event, start domain.ID) bool {
 	return p.StartID == start
 }
 
-// ConsumptionOrder returns history, a log in seq order, in consumption order.
-// It builds a new slice and leaves history as it was: callers that also read
-// the log by position (a watermark, an outcome's start) keep reading seq.
-func ConsumptionOrder(history []domain.Event) []domain.Event {
+// ConsumptionOrder appends history, a log in seq order, to dst in
+// consumption order and returns the result. dst may be history[:0], which
+// reorders history in place without a copy: Push never appends a row before
+// it has read it, so the writes stay at or behind the reads. A caller that
+// still reads history by position afterwards (a watermark, an outcome's
+// start) passes a slice of its own instead and keeps history in seq order.
+func ConsumptionOrder(dst, history []domain.Event) []domain.Event {
 	var o ConsumptionOrderer
-	out := make([]domain.Event, 0, len(history))
 	for _, ev := range history {
-		out = append(out, o.Push(ev)...)
+		dst = o.Push(dst, ev)
 	}
-	return append(out, o.Flush()...)
+	return o.Flush(dst)
 }

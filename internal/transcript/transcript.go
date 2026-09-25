@@ -51,7 +51,7 @@ func Render(history []domain.Event) string {
 		}
 		sb.WriteString("## " + role + "\n" + text + "\n\n")
 	}
-	for _, ev := range events.ConsumptionOrder(history) {
+	for _, ev := range events.ConsumptionOrder(make([]domain.Event, 0, len(history)), history) {
 		switch ev.Type {
 		case domain.EventUserMessage:
 			add("user", ContentText(ev.Body))

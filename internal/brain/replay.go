@@ -14,7 +14,7 @@ import (
 // the conversation (plan component 3 — "replay = read events in order and
 // rebuild provider messages"). It returns the request and the replay
 // watermark (the highest seq replayed), past which the turn's settlement
-// looks for input that arrived while it ran.
+// looks for input that arrived while it ran. It reorders history in place.
 //
 // The tool definitions arrive already assembled (resolveTools), because what
 // the model may call is not a question the log answers: it comes from the
@@ -91,8 +91,10 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 	// after that request's reply and results, where the next request consumed
 	// it, not at its receipt seq ahead of a reply that never saw it (#793). So
 	// the row replayed last need not be the highest seq, and the watermark —
-	// what the settlement's chain check keys on — is taken as the max.
-	for _, ev := range events.ConsumptionOrder(history) {
+	// what the settlement's chain check keys on — is taken as the max. The
+	// order is built in history's own slice, which the turn reads for nothing
+	// else, rather than in a copy of the whole log on every request.
+	for _, ev := range events.ConsumptionOrder(history[:0], history) {
 		if ev.Seq > watermark {
 			watermark = ev.Seq
 		}
