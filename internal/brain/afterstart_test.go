@@ -23,15 +23,21 @@ import (
 // to run the query under (a cancelled one fails it), or nil to leave it be.
 type onQuery struct {
 	match []string // every one of these must be in the SQL
+	after bool     // run hook once the query has returned, not before it runs
 	once  sync.Once
 	hook  func(ctx context.Context) context.Context
 }
+
+type matchedQuery struct{}
 
 func (o *onQuery) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
 	for _, m := range o.match {
 		if !strings.Contains(d.SQL, m) {
 			return ctx
 		}
+	}
+	if o.after {
+		return context.WithValue(ctx, matchedQuery{}, true)
 	}
 	out := ctx
 	o.once.Do(func() {
@@ -42,7 +48,11 @@ func (o *onQuery) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQ
 	return out
 }
 
-func (o *onQuery) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (o *onQuery) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if o.after && ctx.Value(matchedQuery{}) != nil {
+		o.once.Do(func() { o.hook(ctx) })
+	}
+}
 
 // tracedBrain rebuilds the harness's brain over a pool of its own whose
 // queries o watches; the harness keeps its own pool for the test's writes.
@@ -72,6 +82,28 @@ func TestAClaimantThatLostItsItemAfterTheStartNeverCallsTheModel(t *testing.T) {
 	h.wake(t, "one")
 	h.tracedBrain(t, &onQuery{match: requestHistoryQuery, hook: func(context.Context) context.Context {
 		// What an interrupt's commit does to the turn it ends.
+		if err := h.queue.CancelSession(context.Background(), h.pool, h.sessionID); err != nil {
+			t.Errorf("cancel: %v", err)
+		}
+		return nil
+	}})
+
+	found, err := h.brain.RunOnce(context.Background())
+	if !found || !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("RunOnce = %v, %v; want the turn abandoned on a lost lease", found, err)
+	}
+	if n := len(h.provider.calls); n != 0 {
+		t.Errorf("provider called %d times by a claimant that had lost its item", n)
+	}
+}
+
+// The same when the stop lands after the history has loaded, in the stretch
+// between the read and the call: the renewal right before the call is what
+// finds it.
+func TestAClaimantStoppedAfterItsHistoryLoadedNeverCallsTheModel(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "must not run"), done("end_turn", 1)}}, nil)
+	h.wake(t, "one")
+	h.tracedBrain(t, &onQuery{match: requestHistoryQuery, after: true, hook: func(context.Context) context.Context {
 		if err := h.queue.CancelSession(context.Background(), h.pool, h.sessionID); err != nil {
 			t.Errorf("cancel: %v", err)
 		}

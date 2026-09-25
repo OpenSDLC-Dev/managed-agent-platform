@@ -564,6 +564,25 @@ func (q *Queue) Extend(ctx context.Context, item *Item, ttl time.Duration) error
 	return nil
 }
 
+// renewLive is Extend for a holder proving ownership rather than keeping it
+// (LeaseKeeper.Renew): it also requires the lease unexpired, where Extend
+// re-extends an overdue lease nobody reclaimed.
+func (q *Queue) renewLive(ctx context.Context, item *Item, ttl time.Duration) error {
+	err := q.pool.QueryRow(ctx,
+		`UPDATE work_items
+		 SET lease_expires_at = now() + make_interval(secs => $3), updated_at = now()
+		 WHERE id = $1 AND state = 'active' AND lease_expires_at = $2 AND lease_expires_at > now()
+		 RETURNING lease_expires_at`,
+		item.ID, item.Lease, ttl.Seconds()).Scan(&item.Lease)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("queue: renew %s: %w", item.ID, ErrLeaseLost)
+	}
+	if err != nil {
+		return fmt.Errorf("queue: renew %s: %w", item.ID, err)
+	}
+	return nil
+}
+
 // Requeue hands a claimed item back to the queue inside the caller's
 // transaction: the claimant discovered follow-on work for the same session
 // (input that arrived mid-turn) and chains it under the item's existing

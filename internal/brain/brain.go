@@ -429,11 +429,15 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	}
 	req.Effort = agent.Model.Effort
 	// The start proved the item was this claimant's, but an interrupt can have
-	// stopped it since (queue.CancelSession), or a reclaim taken it, and the
-	// keeper would not notice before its first renewal. A call made anyway is
-	// billed for a turn nobody may commit, so ownership is proven once more
-	// right before it.
-	if err := b.queue.Assert(kctx, b.pool, item); err != nil {
+	// stopped it since (queue.CancelSession), a reclaim taken it, or its lease
+	// lapsed, and the keeper would not notice before its first renewal. A call
+	// made anyway is billed for a turn nobody may commit, so ownership is
+	// proven once more right before it, by a renewal that fails unless the
+	// item is still this claimant's and unexpired — which also leaves the call
+	// a whole lease. The instant between that renewal and the call is
+	// inherent; the settlement's own lease proof is what rejects a stale
+	// claimant's output there.
+	if err := keeper.Renew(kctx); err != nil {
 		cerr := keeper.Close()
 		span.Finish(sctx, true, errors.Join(err, cerr))
 		return fmt.Errorf("model call: %w", err)

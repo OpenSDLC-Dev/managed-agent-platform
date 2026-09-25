@@ -218,7 +218,11 @@ and stamps its `processed_at` there — this plan's second PR:
   reply — a prefill, which Claude 4.6 and later reject with a 400. The request
   reads its history once, after its span start commits, bounded by it, so it
   is exactly the rows of its thread below the start, which that start
-  consumes.
+  consumes. The lease is kept from the start, and ownership is proven right
+  before the model call by a renewal that fails unless the item is still the
+  claimant's and unexpired, so an interrupt that lands after the start stops
+  the call. The instant between that renewal and the call is inherent; the
+  settlement's own lease proof rejects a stale claimant's output there.
 - **The grader's and the dream's transcripts** follow the same rule, per thread;
   the dream streams it and releases held inputs early once they outweigh its
   transcript cap.
