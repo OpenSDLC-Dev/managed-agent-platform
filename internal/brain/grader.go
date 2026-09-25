@@ -227,13 +227,15 @@ const verdictNeedsRevision = "needs_revision"
 // only where the fold moves the SESSION to idle/end_turn, and requires_action
 // and retries_exhausted both outrank end_turn in that pick, so every live
 // thread is idle on end_turn when the cycle is scheduled. No child is running
-// to report, and a client cannot start one — user.message addresses the primary (decision 9),
-// which is the thread now grading. The one agent.thread_message_received
-// that can still land there is the platform's own ending notice, from a
-// child archived while the cycle runs, and it is bounded rather than
-// stranded: a needs_revision verdict replays the whole log into the
-// coordinator's revision turn, and a terminal one idles the primary with the
-// notice unread on the log, where the next user.message replays it.
+// to report, and a client cannot start one — user.message addresses the
+// primary (decision 9), which is the thread now grading. What can still land
+// there is the platform's own ending notice: the one the scheduling commit
+// carries when a child's end_turn is the quiescence, or one from a child
+// archived before the claim. It is bounded rather than stranded: a
+// needs_revision verdict replays the whole log into the coordinator's
+// revision turn, and a terminal one idles the primary with the notice unread
+// on the log, where the next user.message replays it — though the same
+// notice landing during the grader's call chains a turn instead (#801).
 func gradingChain(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {
 	pending, err := pendingInput(ctx, tx, sid, "", 0)
 	if err != nil || pending {
