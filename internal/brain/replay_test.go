@@ -398,3 +398,43 @@ func TestBuildRequestReplaysAMessagePostedDuringGradingAfterTheVerdict(t *testin
 		t.Errorf("revision turn = %v, want the grader's feedback, then the message", blocks)
 	}
 }
+
+// Held inputs now leave at the next start, after everything the in-flight
+// request produced, and a message posted between its end and its call's
+// async result joins them. The request stays valid: the call, then one user
+// turn answering it with the result first and both messages after it, in
+// receipt order.
+func TestBuildRequestReplaysInputsHeldPastAnAsyncResult(t *testing.T) {
+	start := ev(2, domain.EventSpanModelRequestStart, `{}`)
+	call := ev(4, domain.EventAgentCustomToolUse, `{"name":"decide","input":{}}`)
+	history := []domain.Event{
+		ev(1, domain.EventUserMessage, `{"content":"one"}`),
+		start,
+		ev(3, domain.EventUserMessage, `{"content":"two"}`),
+		call,
+		ev(5, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
+		ev(6, domain.EventUserMessage, `{"content":"three"}`),
+		ev(7, domain.EventUserCustomToolRes, `{"custom_tool_use_id":"`+call.ID.String()+`","content":[{"type":"text","text":"decided"}]}`),
+	}
+	req, watermark, err := buildRequest("", nil, history, "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != 7 {
+		t.Errorf("watermark = %d, want 7", watermark)
+	}
+	var roles []string
+	for _, m := range req.Messages {
+		roles = append(roles, m.Role)
+	}
+	if !slices.Equal(roles, []string{"user", "assistant", "user"}) {
+		t.Fatalf("roles = %v, want user, assistant, user", roles)
+	}
+	var last []map[string]any
+	if err := json.Unmarshal(req.Messages[2].Content, &last); err != nil {
+		t.Fatal(err)
+	}
+	if len(last) != 3 || last[0]["type"] != "tool_result" || last[1]["text"] != "two" || last[2]["text"] != "three" {
+		t.Errorf("last user turn = %v, want the result, then two, then three", last)
+	}
+}

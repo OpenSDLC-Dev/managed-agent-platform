@@ -207,3 +207,22 @@ func TestRenderTranscriptPlacesAMidRequestMessageAfterTheToolResult(t *testing.T
 		t.Errorf("transcript =\n%q\nwant\n%q", out, want)
 	}
 }
+
+// A message a client posts after the request ended, before its call's result
+// arrives, is consumed by the next request as the one the request held is:
+// the grader reads both after the result, in receipt order.
+func TestRenderTranscriptPlacesAMessageBeforeAnAsyncResultAfterIt(t *testing.T) {
+	history := []domain.Event{
+		{ID: "s1", Seq: 1, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+		{ID: "two", Seq: 2, Type: domain.EventUserMessage, Body: []byte(`{"content":"two"}`)},
+		{ID: "call", Seq: 3, Type: domain.EventAgentCustomToolUse, Body: []byte(`{"name":"decide","input":{}}`)},
+		{ID: "e1", Seq: 4, Type: domain.EventSpanModelRequestEnd, Body: []byte(`{"model_request_start_id":"s1"}`)},
+		{ID: "three", Seq: 5, Type: domain.EventUserMessage, Body: []byte(`{"content":"three"}`)},
+		{ID: "res", Seq: 6, Type: domain.EventUserCustomToolRes, Body: []byte(`{"custom_tool_use_id":"call","content":"decided"}`)},
+		{ID: "s2", Seq: 7, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+	}
+	want := "## agent tool call\ndecide {}\n\n## tool result\ndecided\n\n## user\ntwo\n\n## user\nthree\n\n"
+	if out := transcript.Render(history); out != want {
+		t.Errorf("transcript =\n%q\nwant\n%q", out, want)
+	}
+}

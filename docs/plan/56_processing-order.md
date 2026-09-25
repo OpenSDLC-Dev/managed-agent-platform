@@ -208,9 +208,11 @@ and stamps its `processed_at` there — this plan's second PR:
 
 - **Replay by consumption window.** A `user.message`, `user.define_outcome` or
   `agent.thread_message_received` that landed while one of its thread's model
-  requests was in flight replays after that request's `span.model_request_end`
-  and results — results written after the end included, as a delegated settle
-  or an executor writes them — where the next request consumed it
+  requests was in flight replays right before the thread's next
+  `span.model_request_start`, where that request consumed it and the
+  reference stamps it — so after everything the in-flight request produced,
+  its results included, whatever a delegated settle or an executor wrote
+  around them — together with any input that joined it before that start
   (`events.ConsumptionOrder`, a pure function of the thread's rows; a dangling
   start is closed by the thread's next start). A grading cycle grades the log
   as it stood when the cycle was scheduled, below its

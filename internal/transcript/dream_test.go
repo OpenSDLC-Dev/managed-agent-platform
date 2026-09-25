@@ -669,7 +669,8 @@ func TestRenderDreamConsumptionOrderAcrossPages(t *testing.T) {
 		mustEvent(t, DreamPageSize+1, domain.EventUserMessage, content("posted mid-request")),
 		mustEvent(t, DreamPageSize+2, domain.EventAgentMessage, content("the reply")),
 		span(DreamPageSize+3, "e1", "s1"),
-		mustEvent(t, DreamPageSize+4, domain.EventAgentMessage, content("the next reply")),
+		span(DreamPageSize+4, "s2", ""),
+		mustEvent(t, DreamPageSize+5, domain.EventAgentMessage, content("the next reply")),
 	)
 	d := renderEvents(t, evs...)
 	inOrder(t, d, "the reply", "posted mid-request", "the next reply")
@@ -741,7 +742,26 @@ func TestRenderDreamPlacesAMidRequestMessageAfterTheToolResult(t *testing.T) {
 		mustEvent(t, 4, domain.EventAgentToolUse, map[string]any{"name": "lookup", "input": map[string]any{}}),
 		span(5, "e1", "s1"),
 		mustEvent(t, 6, domain.EventAgentToolResult, map[string]any{"tool_use_id": "x", "content": "the result"}),
-		mustEvent(t, 7, domain.EventAgentMessage, content("the next reply")),
+		span(7, "s2", ""),
+		mustEvent(t, 8, domain.EventAgentMessage, content("the next reply")),
 	)
 	inOrder(t, d, "tool call: lookup", "the result", "posted mid-request", "the next reply")
+}
+
+// Rows a delegated settle writes between a request's end and its call's
+// answer — a spawned thread's projection — do not release what the request
+// held: the dream reads the held message after the answer, where the next
+// request consumed it.
+func TestRenderDreamHoldsAMidRequestMessagePastTheSettlesProjections(t *testing.T) {
+	d := renderEvents(t,
+		span(1, "s1", ""),
+		mustEvent(t, 2, domain.EventUserMessage, content("posted mid-request")),
+		mustEvent(t, 3, domain.EventAgentToolUse, map[string]any{"name": "create_agent", "input": map[string]any{}}),
+		span(4, "e1", "s1"),
+		mustEvent(t, 5, domain.EventSessionThreadCreated, map[string]any{"session_thread_id": "sthr_x"}),
+		mustEvent(t, 6, domain.EventAgentToolResult, map[string]any{"tool_use_id": "x", "content": "spawned"}),
+		span(7, "s2", ""),
+		mustEvent(t, 8, domain.EventAgentMessage, content("the next reply")),
+	)
+	inOrder(t, d, "tool call: create_agent", "spawned", "posted mid-request", "the next reply")
 }

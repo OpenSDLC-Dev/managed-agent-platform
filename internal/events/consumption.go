@@ -64,11 +64,8 @@ var RequestInputTypes = func() []string {
 // by the row's own thread, so a session-wide read never lets one thread's
 // request hold another's input. The zero value is ready to use.
 type ConsumptionOrderer struct {
-	open map[domain.ID]window // thread -> the call in flight on it
-	held map[domain.ID][]domain.Event
-	// closing marks a thread whose window has closed but whose held inputs
-	// wait out the request's own results, written after its end.
-	closing   map[domain.ID]bool
+	open      map[domain.ID]window         // thread -> the call in flight on it
+	held      map[domain.ID][]domain.Event // thread -> inputs its next start consumes, seq order
 	heldBytes int
 }
 
@@ -101,16 +98,19 @@ func windowOf(ev domain.Event) (window, bool) {
 //     opens a window. A start that never ended (a crash, a lost lease, an
 //     interrupted request) is closed this way: the retried call saw what the
 //     dead one held.
-//   - a consumed input on a thread with a window open is held.
+//   - a consumed input on a thread with a window open is held, and so is one
+//     that lands on a thread still holding inputs after its window closed:
+//     the same next start consumes both, and they keep receipt order.
 //   - the end that names the open start (model_request_start_id, or
 //     outcome_evaluation_start_id) closes the window. An end naming another
 //     start leaves the window open; one whose payload cannot say which start
 //     it closes closes the open one, since a thread runs one call at a time.
-//     What the window held is not released at the end but after the
-//     request's own results that follow it — a delegated settle or an
-//     executor answers the request's calls after its end — and ahead of the
-//     thread's first row that is not one: where the next request consumed it,
-//     and where the reference lists it (2026-09-02 batch2 sessT idx 78).
+//     What the window held stays held: the next start releases it, right
+//     ahead of itself, which is where that request consumed it and where
+//     the reference stamps it, 1 µs before the start — after everything the
+//     in-flight request produced, its results included, whatever a delegated
+//     settle or an executor wrote around them (2026-09-02 batch2 sessT
+//     idx 78). With no next start, Flush releases it at the end.
 //   - everything else is emitted as it stands.
 //
 // It never appends a row it has not been pushed, so the rows appended stay
@@ -118,13 +118,6 @@ func windowOf(ev domain.Event) (window, bool) {
 // place.
 func (o *ConsumptionOrderer) Push(out []domain.Event, ev domain.Event) []domain.Event {
 	t := ev.ThreadID
-	if o.closing[t] {
-		if isResult(ev.Type) {
-			return append(out, ev)
-		}
-		delete(o.closing, t)
-		out = o.release(out, t)
-	}
 	w, open := o.open[t]
 	if opened, ok := windowOf(ev); ok {
 		out = append(o.release(out, t), ev)
@@ -135,7 +128,7 @@ func (o *ConsumptionOrderer) Push(out []domain.Event, ev domain.Event) []domain.
 		return out
 	}
 	switch {
-	case open && ConsumedInput(ev.Type):
+	case (open || len(o.held[t]) > 0) && ConsumedInput(ev.Type):
 		if o.held == nil {
 			o.held = map[domain.ID][]domain.Event{}
 		}
@@ -144,25 +137,8 @@ func (o *ConsumptionOrderer) Push(out []domain.Event, ev domain.Event) []domain.
 		return out
 	case open && ev.Type == w.end && closes(ev, w):
 		delete(o.open, t)
-		if len(o.held[t]) > 0 {
-			if o.closing == nil {
-				o.closing = map[domain.ID]bool{}
-			}
-			o.closing[t] = true
-		}
 	}
 	return append(out, ev)
-}
-
-// isResult reports whether t answers a tool call — the rows a request's
-// settlement, or the driver that ran its calls, writes after its end.
-func isResult(t domain.EventType) bool {
-	switch t {
-	case domain.EventAgentToolResult, domain.EventAgentMCPToolResult,
-		domain.EventUserToolResult, domain.EventUserCustomToolRes:
-		return true
-	}
-	return false
 }
 
 // Flush appends every held input to out, all threads merged by seq, and
@@ -176,7 +152,7 @@ func (o *ConsumptionOrderer) Flush(out []domain.Event) []domain.Event {
 		out = append(out, evs...)
 	}
 	slices.SortFunc(out[from:], func(a, b domain.Event) int { return cmp.Compare(a.Seq, b.Seq) })
-	o.open, o.held, o.closing, o.heldBytes = nil, nil, nil, 0
+	o.open, o.held, o.heldBytes = nil, nil, 0
 	return out
 }
 

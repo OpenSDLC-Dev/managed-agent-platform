@@ -89,15 +89,31 @@ func TestConsumptionOrderToolWindow(t *testing.T) {
 }
 
 // A delegated settle commits the end and then the inline answers in one
-// batch: the held input follows those answers, the request's own results,
-// and precedes the first row of the thread that is not one.
+// batch, with what they project — a spawned thread, a sent message — and the
+// next request consumes the held input at its start: it follows everything
+// the in-flight request produced, whatever lies between.
 func TestConsumptionOrderDelegatedSettle(t *testing.T) {
 	b := (&logBuilder{}).
 		add("one", evUser, "", "").start("s1", "").
 		add("report", evReceived, "", "").
 		add("call", evToolUse, "", "").end("e1", "s1", "").
-		add("answer", evToolRes, "", "").add("spawned", domain.EventAgentThreadMessageSent, "", "")
-	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "one", "s1", "call", "e1", "answer", "report", "spawned")
+		add("created", domain.EventSessionThreadCreated, "", "").
+		add("answer", evToolRes, "", "").add("spawned", domain.EventAgentThreadMessageSent, "", "").
+		start("s2", "")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs),
+		"one", "s1", "call", "e1", "created", "answer", "spawned", "report", "s2")
+}
+
+// A message a client posts after the request ended, while its call's result
+// is still coming, is consumed by the same next start as the one the request
+// held: both follow the result, in receipt order, released at that start.
+func TestConsumptionOrderHoldsALaterInputBesideAHeldOne(t *testing.T) {
+	b := (&logBuilder{}).
+		start("s1", "").add("held", evUser, "", "").
+		add("call", evToolUse, "", "").end("e1", "s1", "").
+		add("later", evUser, "", "").
+		add("result", domain.EventUserCustomToolRes, "", "").start("s2", "")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "call", "e1", "result", "held", "later", "s2")
 }
 
 // What a request consumes after its window closes keeps receipt order: an
@@ -256,6 +272,7 @@ func TestConsumptionOrderIsPerThread(t *testing.T) {
 
 // Only the end that names the open start closes it; an end naming another
 // start leaves the window open, and one whose payload cannot say closes it.
+// Either way the held input waits for the next start, or the log's end.
 func TestConsumptionOrderEndMatching(t *testing.T) {
 	b := (&logBuilder{}).
 		start("s1", "").add("msg", evUser, "", "").
@@ -267,13 +284,13 @@ func TestConsumptionOrderEndMatching(t *testing.T) {
 		start("s1", "").add("msg", evUser, "", "").
 		add("e1", domain.EventSpanModelRequestEnd, "", `not json`).
 		add("after", evAgentMsg, "", "")
-	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "e1", "msg", "after")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "e1", "after", "msg")
 
 	b = (&logBuilder{}).
 		start("s1", "").add("msg", evUser, "", "").
 		add("e1", domain.EventSpanModelRequestEnd, "", `{"is_error":true}`).
 		add("after", evAgentMsg, "", "")
-	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "e1", "msg", "after")
+	wantOrder(t, events.ConsumptionOrder(nil, b.evs), "s1", "e1", "after", "msg")
 }
 
 // A window still open when the log ends — a request in flight right now — is
