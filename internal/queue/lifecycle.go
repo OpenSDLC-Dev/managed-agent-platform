@@ -179,7 +179,6 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 		row = q.pool.QueryRow(ctx,
 			`UPDATE work_items
 			 SET last_heartbeat   = now(),
-			     started_at       = now(),
 			     state            = 'active',
 			     lease_expires_at = now() + make_interval(secs => ($3)::double precision),
 			     updated_at       = now()

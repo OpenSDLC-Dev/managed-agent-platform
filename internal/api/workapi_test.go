@@ -159,11 +159,20 @@ func TestWorkPollReturnsWireShape(t *testing.T) {
 	if body["secret"] != nil {
 		t.Errorf("secret = %v, want null", body["secret"])
 	}
-	// A still-queued item has reached none of the lifecycle timestamps.
-	for _, k := range []string{"acknowledged_at", "started_at", "stop_requested_at", "stopped_at", "latest_heartbeat_at"} {
+	// A still-queued item has reached none of the lifecycle timestamps — except
+	// started_at, which the reference stamps at enqueue and renders on a queued
+	// item (#542).
+	for _, k := range []string{"acknowledged_at", "stop_requested_at", "stopped_at", "latest_heartbeat_at"} {
 		if body[k] != nil {
 			t.Errorf("%s = %v, want null for a queued item", k, body[k])
 		}
+	}
+	started, _ := body["started_at"].(string)
+	created, _ := body["created_at"].(string)
+	if s, err := time.Parse(time.RFC3339Nano, started); err != nil {
+		t.Errorf("started_at = %v, want a timestamp on a queued item", body["started_at"])
+	} else if c, err := time.Parse(time.RFC3339Nano, created); err != nil || s.Before(c) {
+		t.Errorf("started_at %s precedes created_at %s", started, created)
 	}
 	data, _ := body["data"].(map[string]any)
 	if data == nil {

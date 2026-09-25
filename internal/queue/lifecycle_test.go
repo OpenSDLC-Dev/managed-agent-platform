@@ -83,9 +83,10 @@ func TestHeartbeatClaimsAndExtendsWithOptimisticConcurrency(t *testing.T) {
 	if hb1.State != "active" || !hb1.LeaseExtended || hb1.TTLSeconds != 30 {
 		t.Errorf("first heartbeat = %+v, want active/extended/ttl 30", hb1)
 	}
+	// started_at is the enqueue stamp (#542): the claim leaves it where it was.
 	got, _ := q.GetWork(ctx, env, w.ID)
-	if got.StartedAt == nil {
-		t.Error("started_at not set by first heartbeat")
+	if got.StartedAt == nil || w.StartedAt == nil || !got.StartedAt.Equal(*w.StartedAt) {
+		t.Errorf("started_at after first heartbeat = %v, want the enqueue stamp %v", got.StartedAt, w.StartedAt)
 	}
 
 	// A second NO_HEARTBEAT is rejected — the lease is already claimed.
@@ -423,9 +424,13 @@ func TestGetWorkScopingAndFields(t *testing.T) {
 	if got.SessionID != sessionID || got.State != "queued" {
 		t.Errorf("got = %+v", got)
 	}
-	// A queued item has reached no lifecycle timestamp.
-	if got.AcknowledgedAt != nil || got.StartedAt != nil || got.StopRequestedAt != nil || got.StoppedAt != nil || got.LastHeartbeat != nil {
+	// A queued item has reached no lifecycle timestamp — started_at aside, which
+	// enqueue stamps, as the reference renders it on a still-queued item (#542).
+	if got.AcknowledgedAt != nil || got.StopRequestedAt != nil || got.StoppedAt != nil || got.LastHeartbeat != nil {
 		t.Errorf("queued item has non-null lifecycle timestamps: %+v", got)
+	}
+	if got.StartedAt == nil || got.StartedAt.Before(got.CreatedAt) {
+		t.Errorf("queued item started_at = %v, want stamped at enqueue (created_at %v)", got.StartedAt, got.CreatedAt)
 	}
 	if _, err := q.GetWork(ctx, env, domain.NewID("work")); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("get unknown = %v, want ErrWorkNotFound", err)
@@ -459,7 +464,7 @@ func TestUpdateMetadataPatches(t *testing.T) {
 		t.Errorf("after upsert metadata = %v, want a=1 b=2", got.Metadata)
 	}
 	// The patch must not transition the item: still queued after a poll.
-	if got.State != "queued" || got.AcknowledgedAt != nil || got.StartedAt != nil {
+	if got.State != "queued" || got.AcknowledgedAt != nil || got.StartedAt == nil || w.StartedAt == nil || !got.StartedAt.Equal(*w.StartedAt) {
 		t.Errorf("metadata update disturbed lifecycle: %+v", got)
 	}
 
@@ -529,6 +534,11 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	if again.ID == first.ID {
 		t.Errorf("re-offered under the same id %s, want a fresh one", again.ID)
 	}
+	// started_at is stamped at enqueue and survives every hand-out of a
+	// still-queued item: no worker has taken it back out of the queue (#542).
+	if first.StartedAt == nil || again.StartedAt == nil || !again.StartedAt.Equal(*first.StartedAt) {
+		t.Errorf("re-offered queued item started_at = %v, want the enqueue stamp %v", again.StartedAt, first.StartedAt)
+	}
 
 	expireLease := func(id domain.ID) {
 		t.Helper()
@@ -560,6 +570,11 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	}
 	if reclaimed.ID == again.ID {
 		t.Errorf("reclaimed under the same id %s, want a fresh one", reclaimed.ID)
+	}
+	// A reclaim puts the item back in the queue, and re-entering the queue
+	// re-stamps started_at, as the reference's re-queue does (#542).
+	if reclaimed.StartedAt == nil || again.StartedAt == nil || !reclaimed.StartedAt.After(*again.StartedAt) {
+		t.Errorf("reclaimed active item started_at = %v, want re-stamped after %v", reclaimed.StartedAt, again.StartedAt)
 	}
 	if _, err := q.Ack(ctx, env, reclaimed.ID); err != nil {
 		t.Fatalf("reclaimed item cannot be re-acked: %v", err)
@@ -594,6 +609,9 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	}
 	if got.ID == w2.ID {
 		t.Errorf("reclaimed under the same id %s, want a fresh one", got.ID)
+	}
+	if got.StartedAt == nil || w2.StartedAt == nil || !got.StartedAt.After(*w2.StartedAt) {
+		t.Errorf("reclaimed starting item started_at = %v, want re-stamped after %v", got.StartedAt, w2.StartedAt)
 	}
 }
 

@@ -70,6 +70,8 @@ type workWire struct {
 
 // toWire maps a queue row onto the wire work item. Lifecycle timestamps a work
 // item has not reached are null; the state-transition endpoints populate them.
+// started_at is the exception: enqueue stamps it, so a queued item carries one
+// (queue.Work.StartedAt).
 func toWire(w *queue.Work) workWire {
 	meta := w.Metadata
 	if meta == nil {

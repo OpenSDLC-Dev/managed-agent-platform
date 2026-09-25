@@ -140,7 +140,8 @@ type Item struct {
 // internal executor), it carries the fields a BetaSelfHostedWork response
 // renders, including the lifecycle timestamps the state machine populates. Each
 // nullable timestamp is null until its transition is reached (a queued item has
-// none of them).
+// none of them but started_at, which marks entry to the queue, not a worker's
+// taking it — the reference's value, #542).
 type Work struct {
 	ID              domain.ID
 	EnvironmentID   domain.ID
@@ -149,7 +150,7 @@ type Work struct {
 	Metadata        map[string]string
 	CreatedAt       time.Time
 	AcknowledgedAt  *time.Time // set by ack (queued → starting)
-	StartedAt       *time.Time // set by the first heartbeat (→ active)
+	StartedAt       *time.Time // set at enqueue, re-set when Poll reclaims a held item into the queue
 	StopRequestedAt *time.Time // set by stop
 	StoppedAt       *time.Time // set when the item reaches stopped
 	// LastHeartbeat is the wire's latest_heartbeat_at — null until the worker
@@ -222,8 +223,8 @@ func (q *Queue) EnqueueThread(ctx context.Context, db DB, envID, sessionID, thre
 		traceCtx = traceContextArg(ctx)
 	}
 	tag, err := db.Exec(ctx,
-		`INSERT INTO work_items (id, environment_id, session_id, thread_id, kind, trace_context)
-		 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+		`INSERT INTO work_items (id, environment_id, session_id, thread_id, kind, trace_context, started_at)
+		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, now())
 		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
 		domain.NewID("work"), envID, sessionID, nullableThread(threadID), kind, traceCtx)
@@ -256,8 +257,8 @@ func (q *Queue) EnqueueThread(ctx context.Context, db DB, envID, sessionID, thre
 // than trust it (internal/executor/harvest.go's settleHarvest).
 func (q *Queue) EnqueueOutputsHarvest(ctx context.Context, db DB, envID, sessionID domain.ID, chainGrading bool) (bool, error) {
 	tag, err := db.Exec(ctx,
-		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context, metadata)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool))
+		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context, metadata, started_at)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool), now())
 		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
 		domain.NewID("work"), envID, sessionID, OutputsHarvest, traceContextArg(ctx), chainGrading)
@@ -352,9 +353,10 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // knob, carried in the reclaim argument. AND a dead worker's already-acked
 // (starting) or heartbeating (active) item whose lease has lapsed
 // (lease_expires_at < now(), i.e. the worker stopped heartbeating) is reclaimed:
-// it is reset to a fresh queued reservation (state → queued; last_heartbeat,
-// acknowledged_at, started_at cleared, so it is indistinguishable on the wire
-// from a never-run queued item) so the next worker can re-poll, re-ack, and
+// it is reset to a fresh queued reservation (state → queued; last_heartbeat and
+// acknowledged_at cleared, started_at re-stamped as the reference's re-queue
+// re-stamps it, so it is indistinguishable on the wire from a freshly enqueued
+// item) so the next worker can re-poll, re-ack, and
 // re-claim it with a fresh NO_HEARTBEAT — the mirror of Claim's expired-active
 // reclaim for cloud. Note the lease a starting/active item is reclaimed on is a
 // real lease (Ack installs a startup lease, heartbeats extend it), not the
@@ -443,7 +445,7 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 		     state            = 'queued',
 		     last_heartbeat   = NULL,
 		     acknowledged_at  = NULL,
-		     started_at       = NULL,
+		     started_at       = CASE WHEN t.state = 'queued' THEN t.started_at ELSE now() END,
 		     lease_expires_at = now() + make_interval(secs => $2),
 		     updated_at       = now()
 		 FROM picked p
