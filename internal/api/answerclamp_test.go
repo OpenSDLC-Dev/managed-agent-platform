@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 
@@ -37,17 +36,11 @@ func (l *statementLog) reset() {
 	l.sqls = nil
 }
 
-// count is how many recorded statements contain fragment.
-func (l *statementLog) count(fragment string) int {
+// total is how many statements were recorded.
+func (l *statementLog) total() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	n := 0
-	for _, sql := range l.sqls {
-		if strings.Contains(sql, fragment) {
-			n++
-		}
-	}
-	return n
+	return len(l.sqls)
 }
 
 // newTracedTestServer is newTestServer with the handler's pool traced into
@@ -73,31 +66,37 @@ func newTracedTestServer(t *testing.T, log *statementLog) *tserver {
 }
 
 // A send that answers many calls at once holds each answer's stamp inside its
-// list slot in one statement over the batch, re-reading the stamps it echoes
-// from that same statement: the session's row lock is held throughout, and a
-// request body can carry thousands of answers, so the clamp may not cost a
-// round trip (or a scan of the batch) per answer.
+// list slot, and re-reads the stamps it echoes, in statements whose number does
+// not grow with the answers: the session's row lock is held throughout, and a
+// request body can carry thousands of answers. So the send is measured twice,
+// with one answer and with many, and each answer past the first may cost only
+// the three statements it needs today whatever the clamp does — its routing
+// read, its validation read and the settlement's stamp. A clamp or a re-read
+// done once per answer, however it is spelled, adds to that and fails here.
 func TestManyAnswersAreClampedInOneStatement(t *testing.T) {
 	var log statementLog
 	s := newTracedTestServer(t, &log)
-	sid := eventsFixture(t, s)
-	const n = 40
-	answers := make([]map[string]any, n)
-	for i := range answers {
-		useID := appendOn(t, s, sid, "", false, domain.EventAgentCustomToolUse, `{"name":"decide","input":{}}`)
-		answers[i] = map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": useID,
-			"content": []any{map[string]any{"type": "text", "text": "done"}}}
+	// send answers n fresh calls on a new session and returns the statements
+	// the send ran, what it echoed and where the session's log stood before.
+	send := func(n int) (int, []map[string]any, string, int64) {
+		sid := eventsFixture(t, s)
+		answers := make([]map[string]any, n)
+		for i := range answers {
+			useID := appendOn(t, s, sid, "", false, domain.EventAgentCustomToolUse, `{"name":"decide","input":{}}`)
+			answers[i] = customResult(useID)
+		}
+		seq := lastSeq(t, s, sid)
+		log.reset()
+		echo := sendEvents(t, s, sid, answers...)
+		return log.total(), echo, sid, seq
 	}
-	seq := lastSeq(t, s, sid)
-	log.reset()
+	const n, perAnswer = 40, 3
+	one, _, _, _ := send(1)
+	many, echo, sid, seq := send(n)
 
-	echo := sendEvents(t, s, sid, answers...)
-
-	if got := log.count("processed_at = LEAST(GREATEST("); got != 1 {
-		t.Errorf("the answer clamp ran %d statements for %d answers, want 1", got, n)
-	}
-	if got := log.count("SELECT processed_at FROM events"); got != 0 {
-		t.Errorf("%d statements re-read one answer each, want the clamp's own RETURNING", got)
+	if grew := many - one; grew > perAnswer*(n-1) {
+		t.Errorf("%d answers ran %d statements and one ran %d: %d more per extra answer, want at most %d",
+			n, many, one, grew/(n-1), perAnswer)
 	}
 	_, list := s.do("GET", "/v1/sessions/"+sid+"/events?limit=1000", nil)
 	stamps := map[any]any{}
