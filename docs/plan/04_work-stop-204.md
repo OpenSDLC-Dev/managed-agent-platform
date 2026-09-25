@@ -11,6 +11,10 @@ issue: "#27"
 > **Everything below describes the state of the repository *before* that PR** — in particular, the
 > registry entry it calls wrong has since been replaced, so read it as the argument for the change
 > rather than as a description of the code.
+>
+> **Reversed 2026-09-26 by [plan 57](./57_work-stop-200.md) (#804), and not authority:** the
+> recordings answer every stop 200 with the work object, so the reading below, that the service
+> sends 204, is falsified. docs/DIVERGENCES.md holds the current entry.
 
 The plan for [#27](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/27). It needs a
 plan file rather than direct tasks because it **reverses a CONFIRMED entry in
