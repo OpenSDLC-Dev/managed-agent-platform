@@ -134,8 +134,8 @@ type AppendOptions struct {
 	// MarkProcessedThrough stamps processed_at on the thread's
 	// still-unprocessed request inputs (RequestInputTypes) at seq <= the
 	// watermark. Zero means no stamping. A request's start stamps what it
-	// consumes (Consume); this is left for the one failure that read input
-	// without starting a request.
+	// consumes (Consume); this is left for the one failure no request
+	// follows, the brain's unrouted model.
 	MarkProcessedThrough int64
 	// Consume stamps the thread's still-unprocessed request inputs below this
 	// batch's first row, the ones the model request that row opens consumes

@@ -1123,9 +1123,9 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 		head = append(head, endEv)
 	}
 
-	// The stamp is for the one failure that read input without starting a
-	// request — no provider routes the model (span == nil, watermark set) —
-	// where nothing else would ever stamp it and pendingInput would read it
+	// The stamp is for the one failure no request follows — no provider
+	// routes the model (span == nil, watermark everything) — where nothing
+	// else would ever stamp the thread's input and pendingInput would read it
 	// as queued forever. After a start it stamps nothing: the start did.
 	return b.settle(ctx, sid, item, watermark, envKind, events.AppendOptions{MarkProcessedThrough: watermark},
 		&domain.StopReason{Type: domain.StopRetriesExhausted},
