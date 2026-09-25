@@ -83,6 +83,10 @@ func TestModelRequestRecordsGenAIMetrics(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	mr.ModelCalling() // the provider call begins
+	// The call takes time. Back to back, the two marks can fall on one clock
+	// tick (darwin's is coarse), and a zero elapsed is then a true reading
+	// (TestAnInstantCallReadsAsInstant), not the positive sum asserted below.
+	time.Sleep(time.Millisecond)
 	usage := domain.ModelUsage{InputTokens: 11, OutputTokens: 7}
 	mr.ModelDone(&usage)
 	if _, err := mr.EndEvent(false, usage); err != nil {
