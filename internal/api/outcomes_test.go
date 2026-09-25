@@ -489,3 +489,78 @@ func TestArchivingASessionParkedMidOutcomeInterruptsTheOutcome(t *testing.T) {
 		t.Errorf("outcome_evaluations = %v, want the one entry interrupted, with its completed_at", outs)
 	}
 }
+
+// Archiving ends a live outcome whatever the primary is parked on, not only
+// when the archive has a call of the primary's to settle. Here the primary is a
+// coordinator parked by wait_for_agents (idle, end_turn) on a child that is
+// itself parked on a confirmation: the archive ends the child, and the outcome
+// the coordinator was pursuing ends with the session.
+func TestArchivingACoordinatorWaitingOnAGatedChildInterruptsTheOutcome(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	sendEvents(t, s, sid, defineOutcome("coordinate something", nil))
+	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle", `{"type":"end_turn"}`)
+	child := gatedChild(t, s, sid)
+	idleSession(t, s, sid)
+
+	archiveEndsTheOutcome(t, s, sid)
+	if got := s.threadStatus(t, child); got != "terminated" {
+		t.Errorf("child = %q, want terminated by the archive", got)
+	}
+}
+
+// A session idle on retries_exhausted has no call outstanding, yet its outcome
+// is still live until something ends it; archiving is that something.
+func TestArchivingASessionIdleOnRetriesExhaustedInterruptsTheOutcome(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	sendEvents(t, s, sid, defineOutcome("try something", nil))
+	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle", `{"type":"retries_exhausted"}`)
+	idleSession(t, s, sid)
+
+	archiveEndsTheOutcome(t, s, sid)
+}
+
+// The primary parked on a confirmation mid-outcome: the archive closes the
+// gated call as an interrupt would, and the outcome ends with it.
+func TestArchivingASessionParkedOnAConfirmationMidOutcomeInterruptsTheOutcome(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	sendEvents(t, s, sid, defineOutcome("ask first", nil))
+	askID := appendOn(t, s, sid, "", false, domain.EventAgentToolUse, askBashCall)
+	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle",
+		`{"type":"requires_action","event_ids":["`+askID+`"]}`)
+	idleSession(t, s, sid)
+
+	archiveEndsTheOutcome(t, s, sid)
+	if got := lastEventOfType(t, s, sid, "agent.tool_result")["tool_use_id"]; got != askID {
+		t.Errorf("last result answers %v, want the gated call %s closed by the archive", got, askID)
+	}
+}
+
+// idleSession moves the session column to idle under whatever threads the
+// caller parked idle — the fold the platform's own transitions would leave.
+func idleSession(t *testing.T, s *tserver, sid string) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(), `UPDATE sessions SET status = 'idle' WHERE id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// archiveEndsTheOutcome archives the session and requires its one outcome
+// ended as an interrupt ends it: a span.outcome_evaluation_end with result
+// interrupted on the log, and the projection GET reads flipped to match.
+func archiveEndsTheOutcome(t *testing.T, s *tserver, sid string) {
+	t.Helper()
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, res)
+	}
+	end := lastEventOfType(t, s, sid, "span.outcome_evaluation_end")
+	if end["result"] != "interrupted" {
+		t.Fatalf("outcome end = %v, want interrupted", end)
+	}
+	outs := sessionOutcomes(t, s, sid)
+	if len(outs) != 1 || outs[0]["result"] != "interrupted" || outs[0]["completed_at"] == nil {
+		t.Errorf("outcome_evaluations = %v, want the one entry interrupted, with its completed_at", outs)
+	}
+}

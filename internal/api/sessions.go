@@ -1449,31 +1449,41 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 		if err != nil {
 			return sessionRow{}, nil, err
 		}
+		// The archive ends an active outcome as an interrupt does, writing its
+		// span.outcome_evaluation_end, and the projection flips with it — or
+		// GET would report an outcome still live on a session that can no
+		// longer pursue it. That holds whatever the primary is parked on: a
+		// call the archive settles below, a wait_for_agents on children the
+		// archive has just ended, or nothing at all (retries_exhausted).
+		var batch []events.NewEvent
+		var opts events.AppendOptions
+		var flip bool
 		if flow.Unsettled {
 			out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{sessionID: domain.ID(id), status: string(domain.SessionIdle), all: true, primaryInterrupted: true})
 			if err != nil {
 				return sessionRow{}, nil, err
 			}
-			opts := events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
+			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 				if _, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), "", platformExecuted); err != nil {
 					return err
 				}
 				return s.queue.CancelSession(ctx, tx, domain.ID(id))
-			}}
-			// The settlement ends an active outcome as an interrupt does,
-			// writing its span.outcome_evaluation_end, so the projection
-			// flips with it — or GET would report an outcome still live on a
-			// session that can no longer pursue it.
-			if out.outcomeFlip {
-				opts.MutateOutcomes = events.FlipNonTerminalOutcomes(time.Now().UTC())
 			}
-			// What settling wrote, then the idle it ends in: the order an
-			// interrupt's are written in (#539), with no interrupt event
-			// between, since none was posted.
-			if _, err = s.log.AppendInTx(ctx, tx, domain.ID(id), append(out.settled, out.idled...), opts); err != nil {
+			// What settling wrote — the results and the outcome ends — then
+			// the idle it ends in: the order an interrupt's are written in
+			// (#539), with no interrupt event between, since none was posted.
+			batch, flip = append(out.settled, out.idled...), out.outcomeFlip
+			moves = append(moves, out.moves...)
+		} else if batch, flip, err = events.InterruptOutcomes(ctx, tx, domain.ID(id)); err != nil {
+			return sessionRow{}, nil, err
+		}
+		if flip {
+			opts.MutateOutcomes = events.FlipNonTerminalOutcomes(time.Now().UTC())
+		}
+		if len(batch) > 0 || opts.Then != nil {
+			if _, err := s.log.AppendInTx(ctx, tx, domain.ID(id), batch, opts); err != nil {
 				return sessionRow{}, nil, err
 			}
-			moves = append(moves, out.moves...)
 		}
 	}
 	row, err := scanSession(tx.QueryRow(ctx,
