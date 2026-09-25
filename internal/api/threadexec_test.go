@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -350,7 +351,7 @@ func TestWorkStopReArmsForRunnableCalls(t *testing.T) {
 	envID, sid, key := selfHostedWorker(t, s, "ek-rearm")
 	primary := domain.ID("")
 	stopForce := func(workID string) {
-		wantNoContent(t, s, "/v1/environments/"+envID+"/work/"+workID+"/stop", key, map[string]any{"force": true})
+		wantStopped(t, s, "/v1/environments/"+envID+"/work/"+workID, key, map[string]any{"force": true})
 	}
 
 	// Runnable bash call + an MCP call: the re-arm is an mcp_exec.
@@ -410,6 +411,42 @@ func TestWorkStopReArmsForRunnableCalls(t *testing.T) {
 	}
 }
 
+// A repeat stop of a tool_exec already stopped answers the current object and
+// owes no second re-arm: the first stop's commit re-armed the session, and
+// whatever became of that item since is the new item's business. Re-arming
+// again would hand the same calls out once more for each repeated stop, and
+// the recorded reference worker repeats them routinely: each of the ten force
+// stops of active work in the 2026-09-19 self-hosted recordings is followed by
+// a graceful one on the same item (#804).
+func TestWorkRepeatStopDoesNotReArm(t *testing.T) {
+	s := newTestServer(t)
+	envID, sid, key := selfHostedWorker(t, s, "ek-rearm-again")
+	appendOn(t, s, sid, "", false, domain.EventAgentToolUse, allowBashCall)
+	workID := s.enqueueAndPoll(t, envID, sid, key)
+	get := "/v1/environments/" + envID + "/work/" + workID
+
+	first := wantStopped(t, s, get, key, map[string]any{"force": true})
+	if n := s.liveWork(sid, queue.ToolExec); n != 1 {
+		t.Fatalf("live tool_exec after the first stop = %d, want the re-armed item", n)
+	}
+	// The re-armed item goes away by a path that owes no re-arm of its own,
+	// so the call is runnable and nothing live covers it: exactly what a
+	// second re-arm would act on.
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE work_items SET state = 'stopped' WHERE session_id = $1 AND id <> $2`, sid, workID); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, req := range []map[string]any{nil, {"force": true}} {
+		if again := wantStopped(t, s, get, key, req); !reflect.DeepEqual(again, first) {
+			t.Errorf("repeat stop %v = %v, want the unchanged %v", req, again, first)
+		}
+	}
+	if n := s.liveWork(sid, queue.ToolExec) + s.liveWork(sid, queue.MCPExec) + s.liveWork(sid, queue.WebExec); n != 0 {
+		t.Errorf("live exec items after repeat stops = %d, want 0 — a repeat stop re-armed the session", n)
+	}
+}
+
 // The re-arm is serialized with the settlements under the session row lock:
 // a stop racing a settlement that appends a call under the lock waits for
 // it, then sees the call — so the call never ends up without a live item.
@@ -466,8 +503,8 @@ func TestWorkStopWaitsForTheSessionLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	wg.Wait()
-	if status := <-stopped; status != http.StatusNoContent {
-		t.Fatalf("stop status = %d, want 204", status)
+	if status := <-stopped; status != http.StatusOK {
+		t.Fatalf("stop status = %d, want 200", status)
 	}
 	if n := s.liveWork(sid, queue.ToolExec); n != 1 {
 		t.Errorf("live tool_exec after the racing stop = %d, want the re-armed item for the call committed under the lock", n)
@@ -550,7 +587,7 @@ func TestWorkPollFinalizesAnAbandonedStopAndReArms(t *testing.T) {
 	if res, _, raw := s.workReq(t, http.MethodPost, get+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", key, nil); res.StatusCode != http.StatusOK {
 		t.Fatalf("heartbeat: %d %s", res.StatusCode, raw)
 	}
-	wantNoContent(t, s, get+"/stop", key, nil) // graceful: stopping
+	wantStopped(t, s, get, key, nil) // graceful: stopping
 	// The worker dies mid-wind-down: its lease lapses, and queue.WindDown passes.
 	if _, err := s.pool.Exec(context.Background(),
 		`UPDATE work_items SET lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '61 seconds' WHERE id = $1`, workID); err != nil {

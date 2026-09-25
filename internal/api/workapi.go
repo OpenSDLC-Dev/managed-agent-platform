@@ -380,14 +380,13 @@ func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error)
 }
 
 // mapWorkErr maps a queue state-machine error onto its wire status: a missing
-// item is 404, a conflicting-state stop is 409, a heartbeat precondition failure
-// is 412. Anything else is an internal fault.
+// item is 404, a heartbeat precondition failure is 412. Anything else is an
+// internal fault — including queue.ErrWorkConflict, which is no error on the
+// wire: stopWork answers it with the item as it stands.
 func mapWorkErr(err error) error {
 	switch {
 	case errors.Is(err, queue.ErrWorkNotFound):
 		return errNotFound("work item not found")
-	case errors.Is(err, queue.ErrWorkConflict):
-		return errConflict("work item is already stopping or stopped")
 	case errors.Is(err, queue.ErrHeartbeatMismatch):
 		return &apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
 			"expected_last_heartbeat does not match the current lease"}
@@ -495,29 +494,30 @@ func (s *server) heartbeatWork(r *http.Request) (any, error) {
 	}, nil
 }
 
-// stopWork stops a work item (POST .../work/{work_id}/stop). Success is a
-// bodiless 204: the reference service sends no body here even though the
-// generated SDK method is typed `*BetaSelfHostedWork`, which is why the SDK's
-// own work poller rebinds the response destination to bypass its strict decoder
-// (checked against anthropic-sdk-go v1.70.1 — poller.go stopWork). A caller
-// that needs the resulting state reads it back with GET .../work/{work_id}. An
-// already-stopped item is 409, which the reference worker ignores.
-func (s *server) stopWork(r *http.Request) error {
+// stopWork stops a work item (POST .../work/{work_id}/stop) and answers 200
+// with the BetaSelfHostedWork after the transition, rendered as GET
+// .../work/{work_id} renders it — the recorded service's answer to every one of
+// its recorded stops, and the spec's declared return (#804). A stop of an item
+// already at or past the requested transition — any stop of a stopped item, a
+// graceful stop of a stopping one — changes nothing and answers the item as it
+// stands, as every recorded repeat stop does, rather than the 409 this route
+// once gave.
+func (s *server) stopWork(r *http.Request) (any, error) {
 	envID, workID, err := s.workScope(r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := checkWorkID(workID); err != nil {
-		return err
+		return nil, err
 	}
 	force, err := parseStopForce(r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ctx := r.Context()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	// The session row lock first (plan 35 decision 13 iii): a one-pass worker
@@ -530,16 +530,25 @@ func (s *server) stopWork(r *http.Request) error {
 	err = tx.QueryRow(ctx, `SELECT session_id, kind FROM work_items WHERE id = $1 AND environment_id = $2`,
 		workID, envID).Scan(&sessionID, &kind)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return err
+		return nil, err
 	}
 	if err == nil {
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sessionID); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	w, err := s.queue.StopWith(ctx, tx, envID, workID, force)
+	if errors.Is(err, queue.ErrWorkConflict) {
+		// Nothing moved, so nothing is owed: the transition that stopped the
+		// item already re-armed its session, and a second re-arm would hand
+		// the same calls out again for every repeated stop.
+		if w, err = s.queue.GetWorkWith(ctx, tx, envID, workID); err != nil {
+			return nil, mapWorkErr(err)
+		}
+		return toWire(w), nil
+	}
 	if err != nil {
-		return mapWorkErr(err)
+		return nil, mapWorkErr(err)
 	}
 	// A tool_exec that reached stopped is re-armed. A graceful stop that
 	// parked the item stopping is not yet stopped; the worker's own stop after
@@ -547,10 +556,13 @@ func (s *server) stopWork(r *http.Request) error {
 	// finishes is finalized — and re-armed — by the next poll.
 	if w.State == "stopped" && kind == string(queue.ToolExec) {
 		if err := s.rearm(ctx, tx, envID, domain.ID(sessionID)); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return toWire(w), nil
 }
 
 // rearm queues a fresh exec item for the session's runnable platform calls

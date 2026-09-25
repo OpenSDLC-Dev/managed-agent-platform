@@ -230,8 +230,7 @@ func TestStopForceAndGraceful(t *testing.T) {
 	if err != nil || held.StartedAt == nil {
 		t.Fatalf("claimed item = %+v %v, want its enqueue started_at", held, err)
 	}
-	// Stop returns the updated item to in-process callers; the wire answers 204,
-	// so the API handler discards it.
+	// Stop returns the updated item, which the wire answers with (#804).
 	stopped, err := q.Stop(ctx, env, id, false)
 	if err != nil {
 		t.Fatalf("graceful stop: %v", err)

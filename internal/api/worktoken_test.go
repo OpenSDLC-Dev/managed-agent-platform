@@ -292,8 +292,8 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 	// with a lease the heartbeat no longer extends; the token rides the
 	// wind-down and the post-stop memory flush for a minute from the request,
 	// the lease and the force-stop aside, and is dead after.
-	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, tok); st != http.StatusNoContent {
-		t.Errorf("graceful stop with the token = %d, want 204", st)
+	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, tok); st != http.StatusOK {
+		t.Errorf("graceful stop with the token = %d, want 200", st)
 	}
 	var state string
 	if err := s.pool.QueryRow(context.Background(), `SELECT state FROM work_items WHERE id = $1`, workID).Scan(&state); err != nil || state != "stopping" {
@@ -308,8 +308,8 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 	if st := status(t, s, http.MethodPost, store+"/memories", map[string]any{"path": "/b2.md", "content": "the frozen lease lapsed"}, tok); st/100 != 2 {
 		t.Errorf("a memory write while stopping, the frozen lease lapsed = %d, want 2xx", st)
 	}
-	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{"force": true}, tok); st != http.StatusNoContent {
-		t.Errorf("force-stop with the token = %d, want 204", st)
+	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{"force": true}, tok); st != http.StatusOK {
+		t.Errorf("force-stop with the token = %d, want 200", st)
 	}
 	if st := status(t, s, http.MethodPost, store+"/memories", map[string]any{"path": "/c.md", "content": "the flush"}, tok); st/100 != 2 {
 		t.Errorf("a memory write in the post-stop grace = %d, want 2xx", st)
@@ -383,7 +383,7 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 	if st := status(t, s, http.MethodPost, work2+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", nil, asBearer(token2)); st != http.StatusOK {
 		t.Fatalf("heartbeat of the re-hand-out = %d", st)
 	}
-	if st := status(t, s, http.MethodPost, work2+"/stop", map[string]any{}, asBearer(token2)); st != http.StatusNoContent {
+	if st := status(t, s, http.MethodPost, work2+"/stop", map[string]any{}, asBearer(token2)); st != http.StatusOK {
 		t.Fatalf("graceful stop of the re-hand-out = %d", st)
 	}
 	if _, err := s.pool.Exec(ctx, `UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, workID2); err != nil {

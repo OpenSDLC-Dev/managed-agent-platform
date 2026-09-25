@@ -11,8 +11,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The wire work API's state-machine outcomes, mapped by the API layer onto HTTP
-// statuses: not-found → 404, conflict → 409, heartbeat mismatch → 412.
+// The wire work API's state-machine outcomes. The API layer maps not-found to
+// 404 and a heartbeat mismatch to 412; a conflict is Stop's "nothing to do",
+// which the wire answers 200 with the item as it stands (#804), not an error.
 var (
 	ErrWorkNotFound      = errors.New("queue: work item not found")
 	ErrWorkConflict      = errors.New("queue: work item is in a conflicting state")
@@ -86,7 +87,14 @@ func (q *Queue) HasUndrainedWork(ctx context.Context, envID domain.ID) (bool, er
 // GetWork returns one work item visible to the work API (see workAPIScope), or
 // ErrWorkNotFound.
 func (q *Queue) GetWork(ctx context.Context, envID, workID domain.ID) (*Work, error) {
-	w, err := scanWork(q.pool.QueryRow(ctx,
+	return q.GetWorkWith(ctx, q.pool, envID, workID)
+}
+
+// GetWorkWith is GetWork on the caller's db handle, so the stop route can
+// read back the item a no-op stop left as it was inside the transaction that
+// holds its session row lock.
+func (q *Queue) GetWorkWith(ctx context.Context, db DB, envID, workID domain.ID) (*Work, error) {
+	w, err := scanWork(db.QueryRow(ctx,
 		`SELECT `+workColumns+` FROM work_items
 		 WHERE id = $1 AND environment_id = $2`+workAPIScope,
 		workID, envID))
@@ -231,14 +239,14 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 	return nil, ErrHeartbeatMismatch
 }
 
-// Stop stops a work item and returns the updated item, which the wire never
-// carries: Stop answers a bodiless 204, unlike ack/heartbeat, so the API handler
-// discards it and only this package's state-machine tests read it. force
-// stops any not-yet-stopped item immediately (→ stopped); a graceful stop asks
-// the item's worker to wind down, so it moves the item to stopping only when a
-// worker has claimed the lease with a heartbeat (active). Whether that worker is
-// still alive is not knowable here, and does not need to be: an abandoned
-// wind-down is finalized by the next Poll of the environment (see Poll).
+// Stop stops a work item and returns the updated item, which the wire answers
+// with (200 and the BetaSelfHostedWork, as the recorded service does; #804).
+// force stops any not-yet-stopped item immediately (→ stopped); a graceful stop
+// asks the item's worker to wind down, so it moves the item to stopping only
+// when a worker has claimed the lease with a heartbeat (active). Whether that
+// worker is still alive is not knowable here, and does not need to be: an
+// abandoned wind-down is finalized by the next Poll of the environment (see
+// Poll).
 //
 // An item no worker has claimed is stopped outright instead, because it has no
 // way back out of stopping. That state is left by the holder learning of it from
@@ -262,9 +270,12 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 // answer is, and would reintroduce #25 in miniature: an item whose worker then
 // died would wait on a poll an emptied environment may never see.
 //
-// Stopping an item that is already past the requested transition (e.g.
-// graceful-stopping a stopping item, or stopping a stopped one) is
-// ErrWorkConflict; an item not visible to the work API is ErrWorkNotFound.
+// Stopping an item that is already at or past the requested transition
+// (graceful-stopping a stopping item, or stopping a stopped one) changes nothing
+// and is ErrWorkConflict, so a caller can tell it from a transition it owes
+// follow-up work for; the wire answers it 200 with the item unchanged, the
+// recorded service's answer to every repeat stop (#804). An item not visible to
+// the work API is ErrWorkNotFound.
 func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (*Work, error) {
 	return q.StopWith(ctx, q.pool, envID, workID, force)
 }
