@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: 793
 ---
 
@@ -122,24 +122,50 @@ recording carries an interrupt with a following message), and a client's own
 answers posted beside an interrupt, which stay ahead of the synthesized results
 because they are consumed on receipt.
 
-**PR-B** places a message posted mid-turn after the assistant reply it never saw,
-in what the model sees on replay only. It does not move the message's list or
-stream position: seq stays the receipt order across commits, and the difference
-that leaves is registered rather than chased. PR-B lands after PR-A, and owns the
-registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
-/v1/sessions/{id}/events — list filters and order keyed on created_at/seq").
+**PR-B** (the owner's decisions on item 4, 2026-09-25) places an input consumed
+later than it was received where it was consumed, in everything a model reads,
+and stamps its `processed_at` there — this plan's last PR, which archives it:
+
+- **Replay by consumption window.** A `user.message`, `user.define_outcome` or
+  `agent.thread_message_received` that landed while one of its thread's model
+  requests was in flight replays after that request's `span.model_request_end`
+  and results, where the next request consumed it (`events.ConsumptionOrder`, a
+  pure function of the thread's rows; a dangling start is closed by the thread's
+  next start). The watermark stays the highest seq replayed. A chained request
+  after an `end_turn` reply therefore ends on the new message instead of on the
+  reply — a prefill, which Claude 4.6 and later reject with a 400. The request
+  also reads the rows appended between its history read and its span start
+  (`topUpHistory`), because it consumes every row below its start.
+- **The grader's and the dream's transcripts** follow the same rule, per thread;
+  the dream streams it and releases held inputs early once they outweigh its
+  transcript cap.
+- **`processed_at` at consumption.** The span start's commit stamps the thread's
+  rows below it that no earlier start stamped, at the start's `processed_at`
+  minus 1 µs, as the reference stamps 139 of the 140 recorded consumptions.
+  `agent.thread_message_received` is written unprocessed until then. The turn's
+  settle stops stamping, and the start carries the brain's lease proof.
+
+It does not move a message's list or stream position: seq stays the receipt order
+across commits, and the difference that leaves is registered rather than chased,
+in docs/DIVERGENCES.md's entries on list order and on `processed_at`. Replay
+changes once for existing sessions, at one prompt-cache miss (accepted by the
+owner), and that repairs a session the prefill 400 had wedged.
 
 ## Alternatives rejected
 
 - **A full processing-order log.** Giving each inbound event its log position when
   it is processed — an ordering column or a pending-input queue, listing and
-  streaming by it, stamping `processed_at` at turn start — would match the
-  reference everywhere, mid-turn messages included. It breaks the invariant that
-  seq is at once the receipt order, the list order and the stream cursor, and the
-  one that every accepted event is on the log from receipt; it re-keys the SSE
-  cursor, list paging, `MarkProcessedThrough`, the chain and watermark checks, and
-  needs a migration. Its only gain over PR-A plus PR-B is the list position of a
-  mid-turn message.
+  streaming by it — would match the reference everywhere, mid-turn messages
+  included. It breaks the invariant that seq is at once the receipt order, the
+  list order and the stream cursor, and the one that every accepted event is on
+  the log from receipt; it re-keys the SSE cursor, list paging, the chain and
+  watermark checks, and needs a migration. Its only gain over PR-A plus PR-B is
+  the list position of a mid-turn message. (Stamping `processed_at` at request
+  start, once part of this alternative, was adopted on its own in PR-B.)
+- **Ordering replay by `processed_at`.** Under the old settle-time stamp it put a
+  mid-turn message after the reply it was answered in, and it would make replay
+  depend on wall clocks; the consumption window is a pure function of seq and
+  row types, so replay does not read the stamp at all.
 - **Mimicking item 2.** Pairing a child's resume with the primary and letting the
   session's events follow the primary would idle the session under a working
   child: an executor would drop a confirmed call unrun, and an archive or delete
@@ -158,5 +184,10 @@ registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
   an idle child, each ending-notice wake (archive, interrupt, retries exhausted,
   chain cap, delegation budget, ended without reporting, grading at quiescence)
   and the two helpers themselves.
+- For PR-B, also red on the old code: the consumption window's cases (an
+  `end_turn` and a tool turn, a delegated settle, a dangling start, received and
+  outcome inputs, per-thread windows, the watermark), the snapshot top-up, the
+  grader and dream transcripts, the stamp at request start and a crash after it,
+  and a received row null until its target's request starts.
 - `make verify`, `make registry-check`, independent verification, both reviews and
   the PR's CI before squash merge.
