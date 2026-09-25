@@ -548,7 +548,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// the arms have run, so no earlier than the results its arms synthesized
 	// ahead of it (#539); its idle pairs, stamped as they are inserted, follow
 	// it, and AppendInTx keeps a batch's stamps from running backwards.
-	stampInterrupts(newEvents)
+	events.StampInterrupts(newEvents)
 	// The settlement runs in Then, after the append, so what it will do with
 	// the answers is read now, off the walk it will make, with the answers and
 	// the results the interrupts above synthesized read as though on the log:
@@ -712,18 +712,6 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		data = append(data, wire)
 	}
 	return map[string]any{"data": data}, nil
-}
-
-// stampInterrupts stamps the user.interrupt events among evs processed now,
-// as their send consumes them on receipt. Called once the interrupt arms have
-// run, so no interrupt is stamped ahead of the results it synthesized.
-func stampInterrupts(evs []events.NewEvent) {
-	now := time.Now().UTC()
-	for i := range evs {
-		if evs[i].Type == domain.EventUserInterrupt {
-			evs[i].ProcessedAt = &now
-		}
-	}
 }
 
 // interruptThreadIn is one thread's slice of an interrupt: the thread itself
@@ -1171,7 +1159,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 		cancelSession = cancelSession || out.cancelSession
 		outcomeFlip = outcomeFlip || out.outcomeFlip
 	}
-	stampInterrupts(interrupt)
+	events.StampInterrupts(interrupt)
 	// In the order a client's session-wide interrupt is written (#539).
 	batch := keepLastSessionIdle(layout.processingOrder())
 	if cancelSession {

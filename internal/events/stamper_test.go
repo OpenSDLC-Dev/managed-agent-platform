@@ -21,7 +21,8 @@ import (
 //     interrupt of the same send (AnswerPlan), or the interrupt or child
 //     archive that answers its call in a later commit
 //     (StampSupersededAnswers);
-//   - user.interrupt: its own send, on receipt (internal/api stampInterrupts).
+//   - user.interrupt: its own send, on receipt (StampInterrupts, which this
+//     test runs rather than trusts).
 //
 // The inbound types are read from domain's source rather than listed here, so
 // a type added there fails this test until it is given a stamper.
@@ -65,7 +66,9 @@ func TestEveryInboundTypeHasOneStamper(t *testing.T) {
 		if slices.Contains(answerTypes, string(et)) {
 			stampers++
 		}
-		if et == domain.EventUserInterrupt {
+		// The send's own stamper, run over one event of this type.
+		posted := []NewEvent{{Type: et}}
+		if StampInterrupts(posted); posted[0].ProcessedAt != nil {
 			stampers++
 		}
 		if stampers != 1 {
