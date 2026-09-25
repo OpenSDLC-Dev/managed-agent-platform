@@ -605,6 +605,15 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// unclamped, its stamp says only when its thread happened to settle. So
 	// one pass over the commit's rows gives what clamping the answers one by
 	// one, in list order, would.
+	//
+	// Both windows keep their frame's start at the partition's first row, so
+	// PostgreSQL grows one aggregate row by row instead of recomputing each
+	// frame: min and max over timestamptz have no inverse transition, and a
+	// frame whose start moves (the suffix as 1 FOLLOWING to UNBOUNDED
+	// FOLLOWING) is rescanned from its new start for every row, quadratic in
+	// the commit's rows. The ceiling is that suffix read backwards, over seq
+	// descending, which is the same set of rows; MIN, GREATEST and LEAST all
+	// skip NULLs, so an empty or all-pending suffix is no ceiling, as before.
 	var answerIDs []string
 	for _, ev := range newEvents {
 		if ev.Type == domain.EventUserToolResult || ev.Type == domain.EventUserCustomToolRes || ev.Type == domain.EventUserToolConfirm {
@@ -618,7 +627,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		            MAX(e.processed_at) FILTER (WHERE a.id IS NULL)
 		              OVER (ORDER BY e.seq ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS floor_at,
 		            MIN(e.processed_at)
-		              OVER (ORDER BY e.seq ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS ceiling_at
+		              OVER (ORDER BY e.seq DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS ceiling_at
 		       FROM events e LEFT JOIN answer a ON a.id = e.id
 		      WHERE e.session_id = $1 AND e.seq >= $2)
 		 UPDATE events e SET processed_at = LEAST(GREATEST(slot.processed_at, slot.floor_at), slot.ceiling_at)
