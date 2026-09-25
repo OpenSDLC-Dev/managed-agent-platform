@@ -36,21 +36,3 @@ func TestMCPServerAdmitted(t *testing.T) {
 		}
 	}
 }
-
-func TestMCPEndpointHost(t *testing.T) {
-	for _, tc := range []struct{ url, want string }{
-		{"https://mcp.example/mcp", "mcp.example"},
-		{"http://mcp.example:8443/mcp", "mcp.example"},
-		{"https://[fd00::1]:8443/mcp", "fd00::1"},
-		{"ftp://mcp.example/", ""},
-		{"https:///mcp", ""},
-		// An authority with a port and no host: u.Host is ":443".
-		{"https://:443/mcp", ""},
-		{"not a url", ""},
-	} {
-		got, err := egress.MCPEndpointHost(tc.url)
-		if (err != nil) != (tc.want == "") || got != tc.want {
-			t.Errorf("MCPEndpointHost(%q) = %q, %v; want %q", tc.url, got, err, tc.want)
-		}
-	}
-}

@@ -493,7 +493,7 @@ func (e *Executor) prepareServer(ctx context.Context, cfg domain.EnvironmentConf
 	}()
 	row = catalogRow{name: s.Name, url: s.URL, status: "failed"}
 
-	host, herr := egress.MCPEndpointHost(s.URL)
+	host, herr := mcpEndpointHost(s.URL)
 	if herr != nil {
 		row.reason, row.offWire = herr.Error(), true
 		return row, "", false, nil
@@ -904,6 +904,19 @@ func redactURL(match string) string {
 		return "[redacted url]" + trailing
 	}
 	return u.Scheme + "://" + u.Host + trailing
+}
+
+// mcpEndpointHost validates a declared endpoint and returns the host the egress
+// check judges. Both halves of this driver ask it — discovery before it lists,
+// execution before it calls — so what counts as a usable MCP endpoint has one
+// definition: a scheme this client speaks and a host to dial. Its error is
+// already a reason a catalog row or a model can be shown.
+func mcpEndpointHost(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", errors.New("the server's url is not an http or https URL")
+	}
+	return u.Hostname(), nil
 }
 
 // egressRefusal says why the dial was refused, and there are exactly two

@@ -399,7 +399,7 @@ func callEndpoint(declared, ready map[string]string, server string) (string, str
 func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 	vaultIDs []string, endpoint string, u mcpToolUse) (mcpAnswer, mcpFailure, error) {
 
-	host, err := egress.MCPEndpointHost(endpoint)
+	host, err := mcpEndpointHost(endpoint)
 	if err != nil {
 		return mcpFailed("MCP server %q has an unusable url.", u.server), mcpFailure{}, nil
 	}

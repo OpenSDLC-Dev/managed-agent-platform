@@ -1,26 +1,8 @@
 package egress
 
 import (
-	"errors"
-	"net/url"
-
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
-
-// MCPEndpointHost validates a declared MCP endpoint and returns the host the
-// admission check judges. Every judge of one asks it — session create before
-// the session exists, the executor's discovery before it lists and its
-// execution before it calls — so what counts as a usable MCP endpoint has one
-// definition: a scheme the client speaks and a host to dial. Its error is
-// already a reason a catalog row or a model can be shown.
-func MCPEndpointHost(endpoint string) (string, error) {
-	u, err := url.Parse(endpoint)
-	// Hostname, not Host: `https://:443/mcp` has an authority and no host.
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		return "", errors.New("the server's url is not an http or https URL")
-	}
-	return u.Hostname(), nil
-}
 
 // MCPServerAdmitted reports whether the environment's networking policy admits
 // an MCP server the agent declares at host. Two places ask, and must never

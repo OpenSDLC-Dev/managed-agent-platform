@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -17,18 +18,25 @@ import (
 // before every dial, because mcp_servers is mid-session-mutable.
 //
 // The message is the reference's, recorded for one server; several are joined
-// with ", " in declaration order, which is ours (docs/DIVERGENCES.md). A url
-// with no host to judge is left to the dial, which refuses it with its own
-// reason — skipping it here admits nothing, since that server is never dialled.
-// Only the session's own agent is checked: a coordinator's roster members dial
-// under the executor's check alone.
+// with ", " in declaration order, which is ours (docs/DIVERGENCES.md). The
+// reference extracts the host from each url, so the host is judged whatever the
+// scheme: whether the dial can use the url is the dial's question. A url with no
+// host to judge is left to the dial, which refuses it as unusable — skipping it
+// here admits nothing. Only the session's own agent is checked: a
+// coordinator's roster members dial under the executor's check alone.
+//
+// Only a `limited` policy refuses here, because it is the only one the
+// message's advice can fix. unrestricted and a self_hosted config with no
+// networking admit everything; a type nothing recognizes — a row the API cannot
+// have written — admits nothing at the dial, whose refusal says why, where this
+// message would send its owner to a list and a flag that are not consulted.
 //
 // It reads only the two fields it judges by, and only when a server is declared,
 // so a stored config some other field of which will not decode — a tolerated
 // corrupt row — creates sessions as it did before the check existed. A type or
-// networking block that will not decode is one the API cannot have written; it
-// is left to the dial-time check, which reads the same row, rather than turning
-// every create on the environment into a 500.
+// networking block that will not decode is not judged either: the executor
+// cannot decode that row, so such a session fails its first work item, as it
+// did before, rather than every create on the environment becoming a 500.
 func admitMCPServers(config []byte, servers []json.RawMessage) error {
 	if len(servers) == 0 {
 		return nil
@@ -37,7 +45,7 @@ func admitMCPServers(config []byte, servers []json.RawMessage) error {
 		Type       domain.EnvironmentKind `json:"type"`
 		Networking domain.Networking      `json:"networking"`
 	}
-	if json.Unmarshal(config, &judged) != nil {
+	if json.Unmarshal(config, &judged) != nil || judged.Networking.Type != domain.NetLimited {
 		return nil
 	}
 	cfg := domain.EnvironmentConfig{Type: judged.Type, Networking: judged.Networking}
@@ -50,10 +58,11 @@ func admitMCPServers(config []byte, servers []json.RawMessage) error {
 		if json.Unmarshal(raw, &server) != nil {
 			continue
 		}
-		host, err := egress.MCPEndpointHost(server.URL)
-		if err != nil {
+		u, err := url.Parse(server.URL)
+		if err != nil || u.Hostname() == "" {
 			continue
 		}
+		host := u.Hostname()
 		if !egress.MCPServerAdmitted(cfg, host) {
 			blocked = append(blocked, fmt.Sprintf("%q (%s)", server.Name, host))
 		}

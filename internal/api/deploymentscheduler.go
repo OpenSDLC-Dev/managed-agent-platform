@@ -133,11 +133,10 @@ var deploymentFireHookInFire func() error
 // error types whose recording on a scheduled fire auto-pauses the deployment.
 // The run union's other two members — session_rate_limited_error and
 // session_creation_rejected_error — are absent deliberately; a pause carrying
-// either is unrepresentable on the wire. Six of the fourteen are produced
-// by no path in this platform (§5.2 counted seven; mcp_egress_blocked_error
-// has since gained one, #571; each other is registered in
-// docs/DIVERGENCES.md) and are listed anyway: the test asserts this map
-// against the migration's CHECK, so the two cannot drift.
+// either is unrepresentable on the wire. Some of the fourteen are produced
+// by no path in this platform (each is registered in docs/DIVERGENCES.md)
+// and are listed anyway: the test asserts this map against the migration's
+// CHECK, so the two cannot drift.
 var deploymentPausingErrorTypes = map[string]bool{
 	"agent_archived_error":                    true,
 	"environment_archived_error":              true,

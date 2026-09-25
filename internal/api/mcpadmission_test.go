@@ -109,6 +109,12 @@ func TestSessionCreateNamesEveryBlockedMCPHost(t *testing.T) {
 			[][2]string{{"srv", "https://mcp.notdeepwiki.com/mcp"}}, []string{"*.deepwiki.com"},
 			`"srv" (mcp.notdeepwiki.com)`,
 		},
+		// The host is judged whatever the scheme: whether the dial can use it
+		// is the dial's question, not the policy's.
+		"a scheme the dial cannot use": {
+			[][2]string{{"x", "wss://mcp.blocked.example/mcp"}}, []string{},
+			`"x" (mcp.blocked.example)`,
+		},
 		"two of three": {
 			[][2]string{{"a", "https://a.example/mcp"}, {"ok", "https://ok.example:8443/mcp"}, {"c", "https://c.example/mcp"}},
 			[]string{"ok.example"},
@@ -134,22 +140,39 @@ func TestSessionCreateNamesEveryBlockedMCPHost(t *testing.T) {
 // The check reads only what it judges by, and only when there is something to
 // judge: a stored config whose packages will not decode — a tolerated corrupt
 // row (TestEnvironmentPackagesTypeEchoSkipsACorruptRow) — still admits a
-// session, with an MCP server or without one. And a url whose authority names
-// no host is not a host the policy refuses: it is left to the dial, which
-// refuses it as an unusable url.
+// session, with an MCP server or without one, and still refuses a blocked host
+// under a `limited` block beside it. A url whose authority names no host is not
+// a host the policy refuses, and a policy type nothing recognizes is not one
+// the message's advice could fix: both are left to the dial, which refuses them
+// with reasons of its own.
 func TestSessionCreateJudgesOnlyWhatItCanRead(t *testing.T) {
 	s := newTestServer(t)
-	envID := envWith(t, s, map[string]any{"type": "cloud", "networking": map[string]any{"type": "unrestricted"}})
-	if _, err := s.pool.Exec(context.Background(), "UPDATE environments SET config = $2 WHERE id = $1", envID,
-		[]byte(`{"type":"cloud","networking":{"type":"unrestricted"},"packages":"not-an-object"}`)); err != nil {
-		t.Fatalf("corrupt the row: %v", err)
+	storeConfig := func(envID, config string) {
+		t.Helper()
+		if _, err := s.pool.Exec(context.Background(), "UPDATE environments SET config = $2 WHERE id = $1",
+			envID, []byte(config)); err != nil {
+			t.Fatalf("store config: %v", err)
+		}
 	}
+	mcp := mcpAgent(t, s, [2]string{"deepwiki", deepwiki})
+
+	open := envWith(t, s, map[string]any{"type": "cloud", "networking": map[string]any{"type": "unrestricted"}})
+	storeConfig(open, `{"type":"cloud","networking":{"type":"unrestricted"},"packages":"not-an-object"}`)
 	plain, _ := fixture(t, s)
-	createSession(t, s, map[string]any{"agent": plain, "environment_id": envID})
-	createSession(t, s, map[string]any{"agent": mcpAgent(t, s, [2]string{"deepwiki", deepwiki}), "environment_id": envID})
+	createSession(t, s, map[string]any{"agent": plain, "environment_id": open})
+	createSession(t, s, map[string]any{"agent": mcp, "environment_id": open})
+
+	closed := envWith(t, s, limited([]string{}, false))
+	storeConfig(closed, `{"type":"cloud","networking":{"type":"limited","allowed_hosts":[]},"packages":"not-an-object"}`)
+	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{"agent": mcp, "environment_id": closed})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 
 	hostless := mcpAgent(t, s, [2]string{"srv", "https://:443/mcp"})
 	createSession(t, s, map[string]any{"agent": hostless, "environment_id": envWith(t, s, limited([]string{}, false))})
+
+	unknown := envWith(t, s, limited([]string{}, false))
+	storeConfig(unknown, `{"type":"cloud","networking":{"type":"open","allowed_hosts":["mcp.deepwiki.com"]}}`)
+	createSession(t, s, map[string]any{"agent": mcp, "environment_id": unknown})
 }
 
 // A deployment fire goes through the same create, so a blocked host settles the
