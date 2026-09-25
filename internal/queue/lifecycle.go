@@ -150,6 +150,7 @@ func (q *Queue) Ack(ctx context.Context, envID, workID domain.ID) (*Work, error)
 		     lease_expires_at = CASE WHEN state = 'queued'
 		                             THEN now() + make_interval(secs => ($3)::double precision)
 		                             ELSE lease_expires_at END,
+		     started_at       = COALESCE(started_at, created_at),
 		     updated_at       = now()
 		 WHERE id = $1 AND environment_id = $2`+workAPIScope+`
 		 RETURNING `+workColumns,
@@ -180,6 +181,7 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 			`UPDATE work_items
 			 SET last_heartbeat   = now(),
 			     state            = 'active',
+			     started_at       = COALESCE(started_at, created_at),
 			     lease_expires_at = now() + make_interval(secs => ($3)::double precision),
 			     updated_at       = now()
 			 WHERE id = $1 AND environment_id = $2`+workAPIScope+`

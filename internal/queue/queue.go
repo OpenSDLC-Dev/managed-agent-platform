@@ -415,9 +415,10 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 //
 // started_at marks entry to the queue (#542): a still-queued item keeps its
 // enqueue stamp through every hand-out, and only the starting/active reclaim
-// re-stamps it. A queued row with no stamp — written before enqueue stamped
-// one, or handed out by a replica still running the code that cleared it —
-// takes its created_at instead of staying null.
+// re-stamps it. A row with no stamp — written before enqueue stamped one, or
+// handed out by a replica still running the code that cleared it — takes its
+// created_at instead of staying null: at its next hand-out, and at the Ack and
+// claim heartbeat that follow such a replica's hand-out. Nothing else moves it.
 //
 // Poll serves only self_hosted environments — the mirror of Claim scoping
 // tool_exec to cloud. The two are therefore mutually exclusive by environment

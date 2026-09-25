@@ -146,6 +146,45 @@ func TestHeartbeatOnStoppingLearnsWithoutExtending(t *testing.T) {
 // enqueue, poll, ack, first heartbeat — leaving it active under a claimed lease,
 // and returns its environment and id. That is the one state a graceful stop has
 // a worker to wind down from, so it is the shared setup of the stopping tests.
+// TestAckAndClaimHealAStamplessItem: during a rolling upgrade a replica still
+// running the code that cleared started_at at every hand-out can poll an item
+// whose ack and claim then land on an upgraded one. Neither may carry the null
+// on to the rest of the item's life (#542): each takes created_at for a
+// missing stamp and leaves an existing one alone.
+func TestAckAndClaimHealAStamplessItem(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := q.Poll(ctx, env, time.Minute)
+	clear := func() {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE work_items SET started_at = NULL WHERE id = $1`, w.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	healed := func(step string) {
+		t.Helper()
+		got, err := q.GetWork(ctx, env, w.ID)
+		if err != nil || got.StartedAt == nil || !got.StartedAt.Equal(got.CreatedAt) {
+			t.Errorf("after %s started_at = %v (%v), want created_at", step, got, err)
+		}
+	}
+	clear()
+	if _, err := q.Ack(ctx, env, w.ID); err != nil {
+		t.Fatal(err)
+	}
+	healed("ack")
+	clear()
+	if _, err := q.Heartbeat(ctx, env, w.ID, queue.NoHeartbeat, 30); err != nil {
+		t.Fatal(err)
+	}
+	healed("claim heartbeat")
+}
+
 func claimedItem(t *testing.T, pool *pgxpool.Pool, q *queue.Queue) (domain.ID, domain.ID) {
 	t.Helper()
 	ctx := context.Background()
