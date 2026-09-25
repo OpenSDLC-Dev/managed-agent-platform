@@ -225,9 +225,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	// waited on the lock write a higher seq with an earlier timestamp,
 	// breaking the seq/created_at agreement the list filters rely on.
 	var (
-		sb   strings.Builder
-		args []any
-		out  = make([]domain.Event, 0, len(evs))
+		sb        strings.Builder
+		args      []any
+		out       = make([]domain.Event, 0, len(evs))
+		lastStamp time.Time
 	)
 	sb.WriteString(`INSERT INTO events (id, session_id, seq, type, payload, processed_at, created_at, thread_id, cross_posted) VALUES `)
 	for i, ev := range evs {
@@ -255,6 +256,19 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		if ev.ProcessedAt == nil && !ev.Type.Inbound() {
 			now := time.Now().UTC()
 			ev.ProcessedAt = &now
+		}
+		// A batch is laid out in processing order (#793), so its stamps may
+		// not run backwards through it: an event stamped before the one
+		// listed ahead of it takes that one's stamp — a later interrupt's
+		// results, synthesized before an earlier interrupt's idle pair was
+		// stamped here, or a grading start, built before the wake it follows.
+		// A pending event (nil) stays pending.
+		if ev.ProcessedAt != nil {
+			if ev.ProcessedAt.Before(lastStamp) {
+				stamp := lastStamp
+				ev.ProcessedAt = &stamp
+			}
+			lastStamp = *ev.ProcessedAt
 		}
 		if i > 0 {
 			sb.WriteString(", ")
