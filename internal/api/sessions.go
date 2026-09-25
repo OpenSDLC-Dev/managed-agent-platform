@@ -750,11 +750,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	if err != nil {
 		return createdSession{}, err
 	}
-	var cfg domain.EnvironmentConfig
-	if err := json.Unmarshal(envConfig, &cfg); err != nil {
-		return createdSession{}, err
-	}
-	if err := admitMCPServers(cfg, agent.MCPServers); err != nil {
+	if err := admitMCPServers(envConfig, agent.MCPServers); err != nil {
 		return createdSession{}, err
 	}
 	agentJSON, err := json.Marshal(agent)

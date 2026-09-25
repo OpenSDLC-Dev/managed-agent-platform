@@ -131,6 +131,27 @@ func TestSessionCreateNamesEveryBlockedMCPHost(t *testing.T) {
 	}
 }
 
+// The check reads only what it judges by, and only when there is something to
+// judge: a stored config whose packages will not decode — a tolerated corrupt
+// row (TestEnvironmentPackagesTypeEchoSkipsACorruptRow) — still admits a
+// session, with an MCP server or without one. And a url whose authority names
+// no host is not a host the policy refuses: it is left to the dial, which
+// refuses it as an unusable url.
+func TestSessionCreateJudgesOnlyWhatItCanRead(t *testing.T) {
+	s := newTestServer(t)
+	envID := envWith(t, s, map[string]any{"type": "cloud", "networking": map[string]any{"type": "unrestricted"}})
+	if _, err := s.pool.Exec(context.Background(), "UPDATE environments SET config = $2 WHERE id = $1", envID,
+		[]byte(`{"type":"cloud","networking":{"type":"unrestricted"},"packages":"not-an-object"}`)); err != nil {
+		t.Fatalf("corrupt the row: %v", err)
+	}
+	plain, _ := fixture(t, s)
+	createSession(t, s, map[string]any{"agent": plain, "environment_id": envID})
+	createSession(t, s, map[string]any{"agent": mcpAgent(t, s, [2]string{"deepwiki", deepwiki}), "environment_id": envID})
+
+	hostless := mcpAgent(t, s, [2]string{"srv", "https://:443/mcp"})
+	createSession(t, s, map[string]any{"agent": hostless, "environment_id": envWith(t, s, limited([]string{}, false))})
+}
+
 // A deployment fire goes through the same create, so a blocked host settles the
 // run on the reference's own run-error type for it rather than rolling back.
 func TestDeploymentRunRecordsABlockedMCPHost(t *testing.T) {

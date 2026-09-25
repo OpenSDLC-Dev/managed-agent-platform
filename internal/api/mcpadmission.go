@@ -22,7 +22,25 @@ import (
 // reason — skipping it here admits nothing, since that server is never dialled.
 // Only the session's own agent is checked: a coordinator's roster members dial
 // under the executor's check alone.
-func admitMCPServers(cfg domain.EnvironmentConfig, servers []json.RawMessage) error {
+//
+// It reads only the two fields it judges by, and only when a server is declared,
+// so a stored config some other field of which will not decode — a tolerated
+// corrupt row — creates sessions as it did before the check existed. A type or
+// networking block that will not decode is one the API cannot have written; it
+// is left to the dial-time check, which reads the same row, rather than turning
+// every create on the environment into a 500.
+func admitMCPServers(config []byte, servers []json.RawMessage) error {
+	if len(servers) == 0 {
+		return nil
+	}
+	var judged struct {
+		Type       domain.EnvironmentKind `json:"type"`
+		Networking domain.Networking      `json:"networking"`
+	}
+	if json.Unmarshal(config, &judged) != nil {
+		return nil
+	}
+	cfg := domain.EnvironmentConfig{Type: judged.Type, Networking: judged.Networking}
 	var blocked []string
 	for _, raw := range servers {
 		var server struct {

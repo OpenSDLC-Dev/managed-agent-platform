@@ -15,7 +15,8 @@ import (
 // already a reason a catalog row or a model can be shown.
 func MCPEndpointHost(endpoint string) (string, error) {
 	u, err := url.Parse(endpoint)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	// Hostname, not Host: `https://:443/mcp` has an authority and no host.
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return "", errors.New("the server's url is not an http or https URL")
 	}
 	return u.Hostname(), nil

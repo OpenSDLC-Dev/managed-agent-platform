@@ -44,6 +44,8 @@ func TestMCPEndpointHost(t *testing.T) {
 		{"https://[fd00::1]:8443/mcp", "fd00::1"},
 		{"ftp://mcp.example/", ""},
 		{"https:///mcp", ""},
+		// An authority with a port and no host: u.Host is ":443".
+		{"https://:443/mcp", ""},
 		{"not a url", ""},
 	} {
 		got, err := egress.MCPEndpointHost(tc.url)
