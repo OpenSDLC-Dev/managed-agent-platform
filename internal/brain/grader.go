@@ -785,20 +785,23 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			if serr != nil {
 				return serr
 			}
-			batch = append(batch, startEv)
-			if item.ThreadID != "" {
+			if item.ThreadID == "" {
+				batch = append(batch, startEv)
+			} else {
 				// A child's end_turn is the quiescence: the parked primary
 				// wakes for the grading turn first, then the child idles — in
 				// that order so the session never idles between, exactly as a
-				// single-agent session never does. Its notice goes in the same
-				// commit, so the turn that wake schedules already has it;
+				// single-agent session never does. The grading runs on the
+				// woken primary's claim, so its start follows the primary's
+				// running pair (processing order, #793). The notice goes in the
+				// same commit, so the turn that wake schedules already has it;
 				// delivered to a primary this wake already runs, it wakes
-				// nothing more and is the received row alone, behind the wake.
+				// nothing more and is the received row alone.
 				wake, _, werr := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{Status: domain.SessionRunning})
 				if werr != nil {
 					return werr
 				}
-				batch = append(batch, wake...)
+				batch = append(append(batch, wake...), startEv)
 				if notice != nil {
 					told, derr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
 					if derr != nil {
