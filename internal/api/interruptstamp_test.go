@@ -196,6 +196,20 @@ func TestAnInterruptLeavesNoHeldAnswerUnprocessed(t *testing.T) {
 			if _, resultsA := storedAnswer(t, s, sid, a, a); resultsA != 1 {
 				t.Errorf("A carries %d results, want the interrupt's one", resultsA)
 			}
+			// A confirmation the interrupt superseded is processed as its
+			// call's result is written, on the clock that wrote it, so the
+			// commit's stamps say one thing on one clock.
+			if typ == domain.EventAgentToolUse && !tc.byWorker && at != nil {
+				var resultAt time.Time
+				if err := s.pool.QueryRow(context.Background(),
+					`SELECT processed_at FROM events WHERE session_id = $1 AND type = 'agent.tool_result'
+					   AND payload->>'tool_use_id' = $2`, sid, b).Scan(&resultAt); err != nil {
+					t.Fatal(err)
+				}
+				if !at.Equal(resultAt) {
+					t.Errorf("confirmation stamped %v, its call's interrupt result %v: want the one stamp", at, resultAt)
+				}
+			}
 		})
 	}
 }

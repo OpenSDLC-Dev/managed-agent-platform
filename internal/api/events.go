@@ -833,8 +833,10 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 		// An answer an earlier send left held behind another call of this
 		// thread — a confirmation for a call answered just above — is consumed
 		// here: once the calls are answered, no walk of the thread reaches it.
-		if err := events.StampSupersededAnswers(ctx, tx, in.sessionID, abandoned); err != nil {
-			return out, err
+		if len(results) > 0 {
+			if err := events.StampSupersededAnswers(ctx, tx, in.sessionID, abandoned, *results[0].ProcessedAt); err != nil {
+				return out, err
+			}
 		}
 		// A child stopped mid-turn and the report it owed will never
 		// come, so its coordinator is told (plan 35 decision 7) — and

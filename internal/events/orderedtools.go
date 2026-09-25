@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -348,7 +349,11 @@ func StampConfirmations(ctx context.Context, tx pgx.Tx, sid domain.ID, ids []dom
 // result on the log is not one an interrupt answers, so in practice what this
 // finds is a confirmation. An answer posted in the interrupt's own send is not
 // on the log yet: AnswerPlan places and stamps that one (Moot).
-func StampSupersededAnswers(ctx context.Context, tx pgx.Tx, sid domain.ID, calls []ToolUseRef) error {
+//
+// at is the stamp the calls' results were written with (InterruptResults), so
+// each answer reads as processed with its call's result, on the clock that
+// wrote it, and not on the database's, which can run behind it.
+func StampSupersededAnswers(ctx context.Context, tx pgx.Tx, sid domain.ID, calls []ToolUseRef, at time.Time) error {
 	if len(calls) == 0 {
 		return nil
 	}
@@ -356,10 +361,10 @@ func StampSupersededAnswers(ctx context.Context, tx pgx.Tx, sid domain.ID, calls
 	for i, c := range calls {
 		ids[i] = c.ID
 	}
-	_, err := tx.Exec(ctx, `UPDATE events SET processed_at=clock_timestamp()
+	_, err := tx.Exec(ctx, `UPDATE events SET processed_at=$4
  WHERE session_id=$1 AND processed_at IS NULL AND type=ANY($2)
    AND COALESCE(payload->>'tool_use_id',payload->>'custom_tool_use_id',payload->>'mcp_tool_use_id')=ANY($3)`,
-		sid.String(), answerTypes, ids)
+		sid.String(), answerTypes, ids, at.UTC())
 	return err
 }
 
