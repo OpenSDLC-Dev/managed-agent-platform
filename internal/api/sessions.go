@@ -845,16 +845,18 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		if err := s.snapshotRubrics(ctx, defs); err != nil {
 			return createdSession{}, err
 		}
-		// The log announces the status the session was born into, after the
-		// initial events it processes in order (placement ours, INFERRED).
-		// Both rows were inserted running above, so the transition moves
-		// nothing and Reemit is what emits the pair.
+		// The log announces the status the session was born into, then the
+		// initial events its first turn consumes, in order: processing order,
+		// which a recorded deployment run's list shows (#793 — 2026-09-12
+		// console-141 `deployment.run.final-events`, the pair at 0-1 and the
+		// message at 2). Both rows were inserted running above, so the
+		// transition moves nothing and Reemit is what emits the pair.
 		pair, _, err := events.TransitionThread(ctx, tx, domain.ID(id), events.ThreadTransition{
 			Status: domain.SessionRunning, Reemit: true})
 		if err != nil {
 			return createdSession{}, err
 		}
-		batch := append(initialEvents, pair...)
+		batch := append(pair, initialEvents...)
 		opts := events.AppendOptions{
 			Then: func(ctx context.Context, tx pgx.Tx) error {
 				_, err := s.queue.Enqueue(ctx, tx, domain.ID(in.envID), domain.ID(id), queue.ModelTurn)
@@ -1447,20 +1449,41 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 		if err != nil {
 			return sessionRow{}, nil, err
 		}
+		// The archive ends an active outcome as an interrupt does, writing its
+		// span.outcome_evaluation_end, and the projection flips with it — or
+		// GET would report an outcome still live on a session that can no
+		// longer pursue it. That holds whatever the primary is parked on: a
+		// call the archive settles below, a wait_for_agents on children the
+		// archive has just ended, or nothing at all (retries_exhausted).
+		var batch []events.NewEvent
+		var opts events.AppendOptions
+		var flip bool
 		if flow.Unsettled {
 			out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{sessionID: domain.ID(id), status: string(domain.SessionIdle), all: true, primaryInterrupted: true})
 			if err != nil {
 				return sessionRow{}, nil, err
 			}
-			if _, err = s.log.AppendInTx(ctx, tx, domain.ID(id), out.batch, events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
+			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 				if _, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), "", platformExecuted); err != nil {
 					return err
 				}
 				return s.queue.CancelSession(ctx, tx, domain.ID(id))
-			}}); err != nil {
+			}
+			// What settling wrote — the results and the outcome ends — then
+			// the idle it ends in: the order an interrupt's are written in
+			// (#539), with no interrupt event between, since none was posted.
+			batch, flip = append(out.settled, out.idled...), out.outcomeFlip
+			moves = append(moves, out.moves...)
+		} else if batch, flip, err = events.InterruptOutcomes(ctx, tx, domain.ID(id)); err != nil {
+			return sessionRow{}, nil, err
+		}
+		if flip {
+			opts.MutateOutcomes = events.FlipNonTerminalOutcomes(time.Now().UTC())
+		}
+		if len(batch) > 0 || opts.Then != nil {
+			if _, err := s.log.AppendInTx(ctx, tx, domain.ID(id), batch, opts); err != nil {
 				return sessionRow{}, nil, err
 			}
-			moves = append(moves, out.moves...)
 		}
 	}
 	row, err := scanSession(tx.QueryRow(ctx,

@@ -1213,6 +1213,12 @@ func TestDreamStageAdvance(t *testing.T) {
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
 		t.Errorf("%d live model_turn items, want the one the posted stage enqueued", n)
 	}
+	// The stage is a waking message, so it follows the running pair of the
+	// turn that consumes it (#793).
+	if got := wholeLogTypes(t, s, sessionID); len(got) < 3 || !sameStrings(got[len(got)-3:],
+		[]string{"session.status_running", "session.thread_status_running", "user.message"}) {
+		t.Errorf("the stage's commit ends %v, want the running pair and then the stage message", got)
+	}
 	rm := collect()
 	if got := apiStatusCount(t, rm, "running"); got != 1 {
 		t.Errorf("running transitions = %d, want 1 (the arm woke the session once)", got)

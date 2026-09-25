@@ -262,7 +262,7 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 		if row.status != string(domain.SessionIdle) {
 			return nil, errInvalid("thread %s is %s; only an idle thread can be archived", threadID, row.status)
 		}
-		// Notice and wake first, the child's own ending second — the order a
+		// Wake and notice first, the child's own ending second — the order a
 		// report takes (delegate.report) and for its reason: a session whose
 		// last live child is this one never folds idle between the two, so no
 		// client sees an idle it never rested at.
@@ -291,8 +291,8 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 // than part of terminateThread, which the session's own archive shares — a
 // notice per child there would be noise on a session about to be frozen.
 //
-// It also wakes a coordinator this archive has left with nothing coming —
-// events.WakeOnThreadEnded's rule, which is where that judgement is argued:
+// It also wakes a coordinator this archive has left with nothing coming — the
+// rule events.DeliverThreadEnded applies, argued where it is defined:
 // archiving a child parked on requires_action, with no other child still
 // working, takes away the last thing a wait_for_agents could have parked on.
 // Archiving a child nothing was waiting on stays what it looks like,
@@ -306,12 +306,12 @@ func (s *server) notifyThreadArchived(ctx context.Context, tx pgx.Tx, row thread
 	if err != nil {
 		return nil, err
 	}
-	pair, moved, woke, err := events.WakeOnThreadEnded(ctx, tx, sid, domain.ID(row.id))
+	told, err := events.DeliverThreadEnded(ctx, tx, sid, domain.ID(row.id), notice)
 	if err != nil {
 		return nil, err
 	}
-	opts := events.AppendOptions{SetStatus: moved}
-	if woke {
+	opts := events.AppendOptions{SetStatus: told.Moved}
+	if told.Woke() {
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			var envID string
 			if err := tx.QueryRow(ctx,
@@ -322,8 +322,8 @@ func (s *server) notifyThreadArchived(ctx context.Context, tx pgx.Tx, row thread
 			return err
 		}
 	}
-	_, err = s.log.AppendInTx(ctx, tx, sid, append([]events.NewEvent{notice}, pair...), opts)
-	return moved, err
+	_, err = s.log.AppendInTx(ctx, tx, sid, told.Events(), opts)
+	return told.Moved, err
 }
 
 // lockSession takes the session row lock (404 when the session is gone).

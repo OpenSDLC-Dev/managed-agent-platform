@@ -650,9 +650,9 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
 	// Four platform events sit on top of the six posted ones: the first
 	// user.message woke the idle session, and the interrupt ended the turn that
-	// woke, each a primary-thread + session status pair — m0,
-	// session.status_running, session.thread_status_running, m1..m4,
-	// user.interrupt, session.thread_status_idle, session.status_idle.
+	// woke, each a primary-thread + session status pair, in processing order
+	// (#793) — session.status_running, session.thread_status_running, m0,
+	// m1..m4, user.interrupt, session.thread_status_idle, session.status_idle.
 
 	// Default: chronological asc, everything, next_page null.
 	status, res := s.do(http.MethodGet, path, nil)
@@ -681,8 +681,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		seqOrder = append(seqOrder, ev["id"].(string))
 	}
 	stampCreatedAt(t, s, "events", seqOrder...)
-	if all[0]["content"].([]any)[0].(map[string]any)["text"] != "m0" {
-		t.Errorf("default order is not chronological: first = %v", all[0])
+	if all[2]["content"].([]any)[0].(map[string]any)["text"] != "m0" {
+		t.Errorf("default order is not chronological: first message = %v", all[2])
 	}
 	if np := nextPage(t, res); np != "" {
 		t.Errorf("next_page = %q, want null", np)
@@ -922,14 +922,15 @@ func TestStreamLiveTail(t *testing.T) {
 		t.Errorf("streamed text = %v", text)
 	}
 
-	// Batches arrive in order, the platform's reaction to them included: the
-	// interrupt ends the running turn and the message in the same batch starts
-	// the next one, so both status pairs — the idle one thread-first, the
-	// running one session-first — follow the two posted events.
+	// A batch streams in processing order, the platform's reaction included
+	// (#793, #539): the interrupt ends the running turn and the message in the
+	// same batch starts the next one, so the interrupt comes first whatever
+	// order it was posted in, then the idle pair it ends in (thread-first),
+	// the running pair (session-first), and the message the new turn consumes.
 	sendEvents(t, s, sid, userMessage("after-2"), map[string]any{"type": "user.interrupt"})
-	for i, want := range []string{"user.message", "user.interrupt",
+	for i, want := range []string{"user.interrupt",
 		"session.thread_status_idle", "session.status_idle",
-		"session.status_running", "session.thread_status_running"} {
+		"session.status_running", "session.thread_status_running", "user.message"} {
 		if f := st.next(t); f.name != want {
 			t.Errorf("frame %d = %q, want %q", i+2, f.name, want)
 		}

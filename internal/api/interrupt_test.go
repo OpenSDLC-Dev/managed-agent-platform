@@ -101,8 +101,10 @@ func TestInterruptEndsATurnStuckOnAnUnansweredToolUse(t *testing.T) {
 	if got := s.sessionStatus(sessionID); got != "idle" {
 		t.Errorf("status after interrupt = %q, want idle", got)
 	}
-	want := []string{"user.message", "session.status_running", "session.thread_status_running",
-		"agent.tool_use", "user.interrupt", "agent.tool_result",
+	// Processing order (#539): the result the interrupt synthesizes, then the
+	// interrupt, then the idle it ends in — the order the reference recorded.
+	want := []string{"session.status_running", "session.thread_status_running", "user.message",
+		"agent.tool_use", "agent.tool_result", "user.interrupt",
 		"session.thread_status_idle", "session.status_idle"}
 	if got := s.eventTypes(sessionID); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
@@ -215,10 +217,13 @@ func TestInterruptAndRedirectInOneBatch(t *testing.T) {
 	if got := s.sessionStatus(sessionID); got != "running" {
 		t.Errorf("status after interrupt+redirect = %q, want running", got)
 	}
-	want := []string{"user.message", "session.status_running", "session.thread_status_running",
-		"agent.tool_use", "user.interrupt", "user.message", "agent.tool_result",
+	// The log is in processing order (#793, #539), not the order posted: the
+	// synthesized result, the interrupt, the idle it ends in, the redirect's
+	// running pair, and only then the message the new turn consumes.
+	want := []string{"session.status_running", "session.thread_status_running", "user.message",
+		"agent.tool_use", "agent.tool_result", "user.interrupt",
 		"session.thread_status_idle", "session.status_idle",
-		"session.status_running", "session.thread_status_running"}
+		"session.status_running", "session.thread_status_running", "user.message"}
 	if got := s.eventTypes(sessionID); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
 	}

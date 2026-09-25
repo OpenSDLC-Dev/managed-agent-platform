@@ -21,9 +21,12 @@ import (
 // session.status_running ahead of the thread's own event, every other session
 // event behind it (the fact, then the rollup) — the order the reference's
 // sequences show for the primary thread (#674), rescheduled unrecorded.
-// A child's move that wakes an idle session is ours, not a recorded pair: the
-// reference pairs that status_running with the primary (docs/DIVERGENCES.md,
-// "Session threads — a child's resume of an idle session"). A single-thread
+// A child's move that wakes an idle session is ours, deliberately, not a
+// recorded pair: the reference pairs that status_running with the primary and
+// briefly idles the session under a running child, where this fold keeps the
+// session truthfully running for the executor's liveness check, the MCP work
+// check and the archive/delete guards (docs/DIVERGENCES.md, "Session threads —
+// a child's resume of an idle session"; #793 item 2). A single-thread
 // session reduces to the pre-thread behavior exactly: every thread move is a
 // session move, so every pair is emitted; that reduction is the regression
 // gate. Every session has a primary thread, so every session.status_*
@@ -179,9 +182,20 @@ func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t Thr
 // AppendTransition is the self-committing form for callers with no other
 // decision to make under the lock (the brain's reclaim, test harnesses): one
 // transaction that locks the session, runs the transitions in order, appends
-// evs followed by what they emitted, with opts' side effects, and — after
-// the commit, never before — counts the session's net move, so a reclaim's
+// evs and what they emitted, with opts' side effects, and — after the commit,
+// never before — counts the session's net move, so a reclaim's
 // rescheduled+running pair on a running session counts nothing.
+//
+// The two are placed in processing order (#793), keyed on whether a
+// transition actually woke a thread — an unforced move to running of a thread
+// that was not running. When one did, evs are the input the woken turn
+// consumes when it starts, after everything this commit processes, so they
+// follow every pair, as the API's message trigger writes them — which is what
+// the brain's test harnesses mimic. When none did, evs are the facts the pairs
+// report (a reply, then the idle it ends in) and precede them. The reclaim's
+// forced rescheduled+running pair is not a wake (its thread was already
+// running, and it consumes nothing), and it passes no evs, so its batch is
+// the pairs alone either way.
 func (l *Log) AppendTransition(ctx context.Context, sessionID domain.ID, evs []NewEvent, transitions []ThreadTransition, opts AppendOptions) ([]domain.Event, error) {
 	tx, err := l.pool.Begin(ctx)
 	if err != nil {
@@ -196,14 +210,27 @@ func (l *Log) AppendTransition(ctx context.Context, sessionID domain.ID, evs []N
 	if err != nil {
 		return nil, err
 	}
-	batch := append([]NewEvent(nil), evs...)
 	opts.SetStatus = nil
+	var emitted []NewEvent
+	woke := false
 	for _, t := range transitions {
+		if t.Status == domain.SessionRunning && !t.Force && !woke {
+			if woke, err = threadWakes(ctx, tx, sessionID, t.ThreadID, before); err != nil {
+				return nil, err
+			}
+		}
 		out, _, err := TransitionThread(ctx, tx, sessionID, t)
 		if err != nil {
 			return nil, err
 		}
-		batch = append(batch, out...)
+		emitted = append(emitted, out...)
+	}
+	var batch []NewEvent
+	if woke {
+		batch = append(emitted, evs...)
+	} else {
+		// Capped, so the append never writes into the caller's evs.
+		batch = append(evs[:len(evs):len(evs)], emitted...)
 	}
 	var after string
 	if err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1`, sessionID.String()).Scan(&after); err != nil {
@@ -224,6 +251,23 @@ func (l *Log) AppendTransition(ctx context.Context, sessionID domain.ID, evs []N
 		RecordSessionStatus(ctx, *opts.SetStatus)
 	}
 	return appended, nil
+}
+
+// threadWakes reports whether moving the thread to running wakes it: whether
+// it is anything but running now. A session from before the thread resource
+// has no primary row to read, and its own status stands in for one.
+func threadWakes(ctx context.Context, tx pgx.Tx, sessionID, threadID domain.ID, sessionStatus string) (bool, error) {
+	tid := threadID
+	if tid == "" {
+		tid = domain.PrimaryThreadID(sessionID)
+	}
+	status := sessionStatus
+	err := tx.QueryRow(ctx, `SELECT status FROM session_threads WHERE id = $1 AND session_id = $2`,
+		tid.String(), sessionID.String()).Scan(&status)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	return status != string(domain.SessionRunning), nil
 }
 
 // PreviewTransition is TransitionThread's fold without its writes: the

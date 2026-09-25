@@ -195,6 +195,22 @@ func (h *harness) threadTypes(t *testing.T, tid domain.ID) []string {
 	return out
 }
 
+// wakeThenDelivery asserts a thread's own list reads, among its running events
+// and its received rows, exactly want: a delivery that wakes the thread is
+// written after the thread's running event, in processing order (#793 item 3).
+func (h *harness) wakeThenDelivery(t *testing.T, tid domain.ID, want ...string) {
+	t.Helper()
+	var got []string
+	for _, ty := range h.threadTypes(t, tid) {
+		if ty == "session.thread_status_running" || ty == "agent.thread_message_received" {
+			got = append(got, ty)
+		}
+	}
+	if !slicesEq(got, want) {
+		t.Errorf("thread %q reads %v, want %v", tid, got, want)
+	}
+}
+
 // receivedTexts reads the messages delivered to one thread.
 func (h *harness) receivedTexts(t *testing.T, tid domain.ID) []string {
 	t.Helper()
@@ -472,6 +488,10 @@ func TestTwoReportsWakeTheIdleParentOnce(t *testing.T) {
 	if got := h.receivedTexts(t, ""); len(got) != 2 {
 		t.Errorf("reports on the parent's log = %v, want both", got)
 	}
+	// The first report woke the parent, so it follows the parent's running
+	// event, as all ten recorded report wakes do; the second found it running.
+	h.wakeThenDelivery(t, "", "session.thread_status_running",
+		"agent.thread_message_received", "agent.thread_message_received")
 	if n := h.countType(t, "session.status_idle"); n != 0 {
 		t.Errorf("the session idled between a child's report and the parent's wake")
 	}
@@ -592,6 +612,12 @@ func TestSendToAgentWakesAnIdleChild(t *testing.T) {
 	}
 	if got := h.receivedTexts(t, child); len(got) != 1 || got[0] != "one more thing" {
 		t.Errorf("target received %v", got)
+	}
+	// Its status, then the message: the order a spawned child's list opens
+	// with, now kept by a follow-up that wakes it too (#793 item 3).
+	if got := h.threadTypes(t, child); !slicesEq(got,
+		[]string{"session.thread_status_running", "agent.thread_message_received"}) {
+		t.Errorf("target log = %v, want its running and then the message", got)
 	}
 }
 
@@ -1330,6 +1356,7 @@ func TestChildTerminalFailureTellsTheCoordinator(t *testing.T) {
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want 1", n)
 	}
+	h.wakeThenDelivery(t, "", "session.thread_status_running", "agent.thread_message_received")
 	// The wake moved the session column and the child's own idle left it
 	// there: the net is what the settlement must record, not the last move.
 	if s := h.status(t); s != "running" {
@@ -2154,6 +2181,7 @@ func TestChainCapWakesTheParkedParentWhenTheCappingTurnIsUnoffered(t *testing.T)
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want 1 — a wake with no item is a wedge", n)
 	}
+	h.wakeThenDelivery(t, "", "session.thread_status_running", "agent.thread_message_received")
 }
 
 // The inverse history: 24 unoffered-only turns, then a genuine call caps the
@@ -2202,6 +2230,7 @@ func TestChainCapNoticeIsAccurateWhenTheCappingTurnIsGenuineButTheHistoryWasNot(
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want 1 — a wake with no item is a wedge", n)
 	}
+	h.wakeThenDelivery(t, "", "session.thread_status_running", "agent.thread_message_received")
 }
 
 // The session delegation bound (#447). #442's cap counts on the work_items
@@ -2616,6 +2645,7 @@ func TestARefusedChildTellsItsCoordinatorAndTheCascadeStops(t *testing.T) {
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Fatalf("coordinator turns queued = %d, want the one its wake enqueued", n)
 	}
+	h.wakeThenDelivery(t, "", "session.thread_status_running", "agent.thread_message_received")
 
 	// Hop two: the coordinator's own claim is refused too.
 	h.runOnce(t)
@@ -2794,6 +2824,7 @@ func TestACappedChildTellsItsCoordinatorAndWakesIt(t *testing.T) {
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want 1 — a wake with no item is a wedge", n)
 	}
+	h.wakeThenDelivery(t, "", "session.thread_status_running", "agent.thread_message_received")
 }
 
 // The idle harvest's third site (docs/plan/38 decision 4): a delegated turn

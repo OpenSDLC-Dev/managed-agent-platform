@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -90,6 +91,36 @@ func TestOutcomeGradesAtSessionQuiescenceNotOnAChildsEndTurn(t *testing.T) {
 	}
 	if got := h.status(t); got != "running" {
 		t.Errorf("session during grading = %q, want running", got)
+	}
+	// The primary's wake for grading comes before the notice the child's
+	// ending delivers it (#793 item 3); the first running is the outcome's.
+	h.wakeThenDelivery(t, "", "session.thread_status_running",
+		"session.thread_status_running", "agent.thread_message_received")
+	// And the start follows the wake too: the grading runs on the woken
+	// primary's claim, so its start is processed after the primary's running
+	// event, its stamp no earlier (processing order, #793).
+	primaryRows, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Scope: events.ScopeThread})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wakeAndStart []string
+	var lastRunning *time.Time
+	for _, ev := range primaryRows {
+		switch ev.Type {
+		case domain.EventSessionThreadStatusRunning:
+			lastRunning = ev.ProcessedAt
+			wakeAndStart = append(wakeAndStart, string(ev.Type))
+		case domain.EventSpanOutcomeEvalStart:
+			wakeAndStart = append(wakeAndStart, string(ev.Type))
+			if lastRunning != nil && ev.ProcessedAt != nil && ev.ProcessedAt.Before(*lastRunning) {
+				t.Errorf("start processed at %s, before the wake listed ahead of it (%s)",
+					ev.ProcessedAt.Format(time.RFC3339Nano), lastRunning.Format(time.RFC3339Nano))
+			}
+		}
+	}
+	if !typesEqual(wakeAndStart, []string{"session.thread_status_running", "session.thread_status_running",
+		"span.outcome_evaluation_start"}) {
+		t.Errorf("primary's own rows read %v, want the outcome's wake, the grading wake, then the start", wakeAndStart)
 	}
 	// The child's own view carries its message, its turn and its idle event
 	// — no grading artefact: the start is the primary's.

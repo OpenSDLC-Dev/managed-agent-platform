@@ -68,8 +68,10 @@ func TestUserMessageFlipsIdleToRunningAndEnqueues(t *testing.T) {
 		t.Errorf("status after user.message = %q, want running", got)
 	}
 	types := s.eventTypes(sessionID)
-	if !sameStrings(types, []string{"user.message", "session.status_running", "session.thread_status_running"}) {
-		t.Errorf("event log = %v, want [user.message session.status_running session.thread_status_running]", types)
+	// Processing order (#793): the wake's running pair, then the message the
+	// woken turn consumes — the order every recorded message wake lists.
+	if !sameStrings(types, []string{"session.status_running", "session.thread_status_running", "user.message"}) {
+		t.Errorf("event log = %v, want [session.status_running session.thread_status_running user.message]", types)
 	}
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn items = %d, want 1", n)
@@ -204,7 +206,9 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
 		t.Errorf("live model_turn items = %d, want 0", n)
 	}
-	want := []string{"user.message", "session.status_running", "session.thread_status_running", "agent.tool_use", "user.message"}
+	// The first message woke the session, so it follows its pair; the second
+	// woke nothing and sits where it was received.
+	want := []string{"session.status_running", "session.thread_status_running", "user.message", "agent.tool_use", "user.message"}
 	got := s.eventTypes(sessionID)
 	if len(got) != len(want) {
 		t.Fatalf("event log = %v, want %v", got, want)
