@@ -387,25 +387,53 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		attribute.Int("memory.injected", memoryInjected),
 		attribute.Int("memory.block_chars", len(memoryBlock)),
 	)
+	// The lease is kept from the start on: the history read and the build
+	// below can take a while on a long log, and the lease they run under must
+	// not lapse behind them.
+	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
 	// The history is read once, here, after the start committed: the request
 	// is then exactly what the start consumed, however late before it an input
 	// landed. Nothing assembled above reads it.
-	history, err := b.requestHistory(sctx, sid, item.ThreadID, span.StartSeq())
+	history, err := b.requestHistory(kctx, sid, item.ThreadID, span.StartSeq())
 	if err != nil {
-		// Abandoned like a lost lease: the reclaim replays a log this turn
-		// has only added a span start to.
-		span.Finish(sctx, true, err)
-		return fmt.Errorf("replay: %w", err)
+		if cerr := keeper.Close(); cerr != nil {
+			span.Finish(sctx, true, cerr)
+			return fmt.Errorf("lease keeper: %w", cerr)
+		}
+		// A fault of ours after the start committed — its inputs stamped, an
+		// outcome perhaps flipped — so the item is not left to its lease with
+		// a dangling start: the request is closed and the item handed straight
+		// back, and the retry's own start stamps nothing new.
+		rerr := b.releaseStartedTurn(sctx, sid, item, span)
+		span.Finish(sctx, true, errors.Join(err, rerr))
+		if rerr != nil {
+			return fmt.Errorf("replay: %w", errors.Join(err, rerr))
+		}
+		slog.WarnContext(sctx, "brain: history read failed after the span start; item released for retry",
+			"session_id", sid.String(), "error", err)
+		return nil
 	}
 	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
 	if err != nil {
+		if cerr := keeper.Close(); cerr != nil {
+			span.Finish(sctx, true, cerr)
+			return fmt.Errorf("lease keeper: %w", cerr)
+		}
 		// Deterministic: the same log fails the same way on every retry, so
 		// the watermark is zero and nothing chains.
 		return b.failTurn(sctx, sid, item, span, 0, fmt.Sprintf("replay: %v", err), envKind)
 	}
 	req.Effort = agent.Model.Effort
-
-	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
+	// The start proved the item was this claimant's, but an interrupt can have
+	// stopped it since (queue.CancelSession), or a reclaim taken it, and the
+	// keeper would not notice before its first renewal. A call made anyway is
+	// billed for a turn nobody may commit, so ownership is proven once more
+	// right before it.
+	if err := b.queue.Assert(kctx, b.pool, item); err != nil {
+		cerr := keeper.Close()
+		span.Finish(sctx, true, errors.Join(err, cerr))
+		return fmt.Errorf("model call: %w", err)
+	}
 	// The call to the model begins here, and its latency with it: the history
 	// read and the replay above ran after the span start and are ours.
 	span.ModelCalling()
@@ -567,14 +595,24 @@ func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJS
 // start committed before it did; a row past it landed mid-request and is the
 // next request's, though this read, made after the start, can see it.
 func (b *Brain) requestHistory(ctx context.Context, sid, threadID domain.ID, startSeq int64) ([]domain.Event, error) {
-	history, err := b.log.List(ctx, sid, events.ListQuery{Scope: events.ScopeThread, ThreadID: threadID})
+	return b.log.List(ctx, sid, events.ListQuery{Scope: events.ScopeThread, ThreadID: threadID, BeforeSeq: &startSeq})
+}
+
+// releaseStartedTurn closes a request that stopped short of the model on a
+// fault of the platform's, with an errored span.model_request_end, and hands
+// the item back to the queue in the same commit, under the lease proof
+// Requeue carries: the retry claims it at once instead of after the lease,
+// and no session.error is written for a fault that was not the model's.
+func (b *Brain) releaseStartedTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest) error {
+	endEv, err := span.EndEvent(true, domain.ModelUsage{})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if i := slices.IndexFunc(history, func(ev domain.Event) bool { return ev.Seq >= startSeq }); i >= 0 {
-		history = history[:i]
-	}
-	return history, nil
+	_, err = b.log.AppendWith(ctx, sid, []events.NewEvent{endEv}, events.AppendOptions{
+		ThreadID: item.ThreadID,
+		Then:     func(ctx context.Context, tx pgx.Tx) error { return b.queue.Requeue(ctx, tx, item) },
+	})
+	return err
 }
 
 // everything is failTurn's watermark for a failure that stops a turn before

@@ -500,8 +500,11 @@ type ListQuery struct {
 	Types                                        []string
 	CreatedGT, CreatedGTE, CreatedLT, CreatedLTE *time.Time
 	AfterSeq                                     *int64
-	Desc                                         bool
-	Limit                                        int // 0 = unlimited
+	// BeforeSeq keeps the rows below it (seq < BeforeSeq) whatever the sort:
+	// the log as it stood under a known row — a request's own span start.
+	BeforeSeq *int64
+	Desc      bool
+	Limit     int // 0 = unlimited
 	// Scope narrows the rows to one surface (plan 35 decision 2). ScopeAll,
 	// the zero value, reads the whole log — what every internal reader does.
 	Scope    Scope
@@ -601,6 +604,9 @@ func (l *Log) List(ctx context.Context, sessionID domain.ID, q ListQuery) ([]dom
 		} else {
 			add("seq > ", *q.AfterSeq)
 		}
+	}
+	if q.BeforeSeq != nil {
+		add("seq < ", *q.BeforeSeq)
 	}
 	if q.Desc {
 		sb.WriteString(" ORDER BY seq DESC")
