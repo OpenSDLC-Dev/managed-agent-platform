@@ -143,7 +143,8 @@ type AppendOptions struct {
 	// session row lock is held, the clock created_at comes from, and the inputs
 	// are stamped 1 µs before it, as the reference stamps them: an input that
 	// committed while this append waited on the lock is never dated before it
-	// arrived. Only span.model_request_start sets it.
+	// arrived. Only a span.model_request_start leading the batch may set it;
+	// AppendInTx refuses any other batch.
 	Consume bool
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
@@ -197,8 +198,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		opts.MarkProcessedThrough == 0 && opts.MutateOutcomes == nil && opts.Then == nil {
 		return nil, errors.New("append requires at least one event")
 	}
-	if opts.Consume && len(evs) == 0 {
-		return nil, errors.New("consume requires the event that consumes")
+	// A request's start is the only row that consumes (the option's comment):
+	// any other would date inputs processed that no request read.
+	if opts.Consume && (len(evs) == 0 || evs[0].Type != domain.EventSpanModelRequestStart) {
+		return nil, errors.New("consume requires a span.model_request_start first")
 	}
 	for _, ev := range evs {
 		if !ev.Type.Persisted() {

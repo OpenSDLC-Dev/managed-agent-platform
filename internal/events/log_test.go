@@ -123,16 +123,36 @@ func TestAppendLeavesAReceivedRowUnprocessed(t *testing.T) {
 	}
 }
 
-// Consume stamps what the batch's first row is consumed by, so a batch with
-// no row has nothing to stamp below and is refused, even beside a side effect
-// that would otherwise admit an empty batch.
-func TestAppendConsumeNeedsABatch(t *testing.T) {
+// Consume stamps what the model request its batch's first row opens
+// consumes, so that row must be a span.model_request_start: a batch with no
+// row has nothing to stamp below, even beside a side effect that would
+// otherwise admit an empty batch, and any other first row would stamp inputs
+// processed that no request read. Either is refused, and nothing is written.
+func TestAppendConsumeIsTheSpanStartsAlone(t *testing.T) {
+	ctx := context.Background()
 	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
 	sid := newSession(t, pool)
-	if _, err := events.NewLog(pool).AppendWith(context.Background(), sid, nil, events.AppendOptions{
+	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("queued")}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.AppendWith(ctx, sid, nil, events.AppendOptions{
 		Consume: true, Then: func(context.Context, pgx.Tx) error { return nil },
 	}); err == nil {
 		t.Error("Consume with an empty batch was accepted")
+	}
+	for _, typ := range []domain.EventType{domain.EventAgentMessage, domain.EventSpanModelRequestEnd} {
+		if _, err := log.AppendWith(ctx, sid, []events.NewEvent{{Type: typ, Payload: text("x")}},
+			events.AppendOptions{Consume: true}); err == nil {
+			t.Errorf("Consume with a %s first was accepted", typ)
+		}
+	}
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ProcessedAt != nil {
+		t.Errorf("log = %v, want the queued message alone, unstamped", all)
 	}
 }
 
