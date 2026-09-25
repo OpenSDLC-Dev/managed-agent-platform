@@ -94,9 +94,11 @@ type ModelRequest struct {
 	// zero for a request that never reached it.
 	called time.Time
 	// modelElapsed is how long the call to the provider took, stamped by
-	// ModelDone. Zero until then; see ModelDone for why Finish cannot measure
-	// this itself.
+	// ModelDone, and done says ModelDone ran: a call can end on the clock tick
+	// it began on, so a zero elapsed is a reading, not its absence. See
+	// ModelDone for why Finish cannot measure this itself.
 	modelElapsed time.Duration
+	done         bool
 }
 
 // ModelCalling marks the start of the call to the model provider, where the
@@ -132,9 +134,10 @@ func (m *ModelRequest) ModelCalling() {
 // Repeat calls keep the first reading. The duration runs from ModelCalling;
 // without that mark there was no call to time, and none is taken.
 func (m *ModelRequest) ModelDone(usage *domain.ModelUsage) {
-	if m.modelElapsed != 0 {
+	if m.done {
 		return
 	}
+	m.done = true
 	if !m.called.IsZero() {
 		m.modelElapsed = time.Since(m.called)
 	}

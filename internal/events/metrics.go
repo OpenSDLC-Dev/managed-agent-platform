@@ -64,7 +64,7 @@ func (m *ModelRequest) recordMetrics(ctx context.Context, isError bool, commitEr
 	// than a platform-only one (absent is not zero, as for usage below).
 	if !m.called.IsZero() {
 		elapsed := m.modelElapsed
-		if elapsed == 0 {
+		if !m.done {
 			elapsed = time.Since(m.called)
 		}
 		dur.Record(ctx, elapsed.Seconds(), genaiconv.OperationNameChat, provider, attrs...)
