@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -213,6 +214,21 @@ func normalizeUserMessage(obj map[string]json.RawMessage) (NewEvent, error) {
 		return NewEvent{}, err
 	}
 	return newEvent(domain.EventUserMessage, fields{"content": content})
+}
+
+// StampInterrupts stamps the user.interrupt events among evs processed now:
+// an interrupt is consumed on receipt, by the send that carries it, whatever
+// it reaches, as the reference processes one (2026-09-02/batch2.json
+// sessT.events.after-outcome idx 35-37), and nothing later would stamp it
+// (#793). The send calls it once its interrupt arms have run, so no interrupt
+// is stamped ahead of the results it synthesized.
+func StampInterrupts(evs []NewEvent) {
+	now := time.Now().UTC()
+	for i := range evs {
+		if evs[i].Type == domain.EventUserInterrupt {
+			evs[i].ProcessedAt = &now
+		}
+	}
 }
 
 func normalizeUserInterrupt(obj map[string]json.RawMessage) (NewEvent, error) {

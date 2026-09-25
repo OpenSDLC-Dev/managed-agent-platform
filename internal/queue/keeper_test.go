@@ -239,3 +239,83 @@ func TestAStallIsDetectedOnItsOwnBudgetNotTheLeasesThird(t *testing.T) {
 		t.Errorf("the lease moved to %v from the %v Claim wrote: the stall tick renewed before it checked, buying the wedge another interval", got, claimed)
 	}
 }
+
+// Renew is the proof a holder takes right before an action it cannot take
+// back: one statement that renews the lease for the keeper's whole TTL, and
+// fails unless the item is still active, its lease unexpired and still the
+// one this keeper holds. A cancelled item and a lapsed lease — one nobody
+// reclaimed, which the keeper's own Extend would re-extend — both fail it.
+func TestRenewProvesTheItemIsStillHeld(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	claim := func(ttl time.Duration) *queue.Item {
+		t.Helper()
+		sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+		if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+			t.Fatal(err)
+		}
+		item, err := q.Claim(ctx, queue.ModelTurn, ttl)
+		if err != nil || item == nil || item.SessionID != sessionID {
+			t.Fatalf("Claim: item=%v err=%v", item, err)
+		}
+		return item
+	}
+
+	held := claim(1500 * time.Millisecond)
+	_, keeper := q.KeepLease(ctx, held, time.Hour, 0)
+	if err := keeper.Renew(ctx); err != nil {
+		t.Errorf("Renew of a held item: %v", err)
+	}
+	if lease := currentLease(t, pool, held.ID); time.Until(lease) < 50*time.Minute {
+		t.Errorf("lease runs to %v, want a whole hour from the renewal", lease)
+	}
+	if err := keeper.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+
+	cancelled := claim(1500 * time.Millisecond)
+	_, keeper = q.KeepLease(ctx, cancelled, time.Hour, 0)
+	if err := q.CancelSession(ctx, pool, cancelled.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := keeper.Renew(ctx); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Errorf("Renew of a cancelled item = %v, want ErrLeaseLost", err)
+	}
+	_ = keeper.Close()
+
+	lapsed := claim(50 * time.Millisecond)
+	_, keeper = q.KeepLease(ctx, lapsed, time.Hour, 0) // no tick for twenty minutes
+	time.Sleep(200 * time.Millisecond)
+	if err := keeper.Renew(ctx); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Errorf("Renew of a lapsed lease = %v, want ErrLeaseLost", err)
+	}
+	_ = keeper.Close()
+}
+
+// A holder's Renew and the keeper's own renewals both write the item's lease;
+// they take one lock, so a holder may prove ownership while the keeper runs.
+// Run under -race.
+func TestRenewSharesTheLeaseWithTheKeeper(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, 1500*time.Millisecond)
+	if err != nil || item == nil {
+		t.Fatalf("Claim: item=%v err=%v", item, err)
+	}
+	_, keeper := q.KeepLease(ctx, item, 1500*time.Millisecond, 0) // a tick every 500ms
+	for deadline := time.Now().Add(1200 * time.Millisecond); time.Now().Before(deadline); {
+		if err := keeper.Renew(ctx); err != nil {
+			t.Fatalf("Renew beside the keeper's renewals: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := keeper.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}

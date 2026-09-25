@@ -94,6 +94,34 @@ func TestRenderTranscriptTotalBudget(t *testing.T) {
 	}
 }
 
+// The grader reads what the agent saw in the order it saw it (#793): a
+// message posted while the primary's request was in flight renders after the
+// reply that never saw it, not ahead of it. Windows are per thread, so a
+// child's request running inside the primary's window neither holds the
+// primary's message nor is held by it, and the message is not released at
+// the child's end.
+func TestRenderTranscriptConsumptionOrder(t *testing.T) {
+	const child domain.ID = "sthr_child"
+	history := []domain.Event{
+		{ID: "one", Seq: 1, Type: domain.EventUserMessage, Body: []byte(`{"content":"one"}`)},
+		{ID: "s1", Seq: 2, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+		{ID: "c1", Seq: 3, Type: domain.EventSpanModelRequestStart, ThreadID: child, Body: []byte(`{}`)},
+		{ID: "two", Seq: 4, Type: domain.EventUserMessage, Body: []byte(`{"content":"two"}`)},
+		{ID: "cw", Seq: 5, Type: domain.EventAgentMessage, ThreadID: child, Body: []byte(`{"content":"child work"}`)},
+		{ID: "ce", Seq: 6, Type: domain.EventSpanModelRequestEnd, ThreadID: child, Body: []byte(`{"model_request_start_id":"c1"}`)},
+		{ID: "fa", Seq: 7, Type: domain.EventAgentMessage, Body: []byte(`{"content":"first answer"}`)},
+		{ID: "e1", Seq: 8, Type: domain.EventSpanModelRequestEnd, Body: []byte(`{"model_request_start_id":"s1"}`)},
+	}
+	out := transcript.Render(history)
+	want := "## user\none\n\n## agent\nchild work\n\n## agent\nfirst answer\n\n## user\ntwo\n\n"
+	if out != want {
+		t.Errorf("transcript =\n%q\nwant\n%q", out, want)
+	}
+	if history[3].ID != "two" {
+		t.Error("Render reordered its input; the grader's watermark reads it by position")
+	}
+}
+
 // contentText's fallbacks: a bare string, a block array, an unknown content
 // shape kept raw, and bodies with no readable content at all. A search_result
 // block has no top-level text — its title, source, and nested text blocks
@@ -156,5 +184,45 @@ func TestInlineableMimePinsHarvestTableContract(t *testing.T) {
 		if inlineableMime(m) {
 			t.Errorf("inlineableMime(%q) = true, want false", m)
 		}
+	}
+}
+
+// A tool turn's result is written after its request's end, and a message
+// posted while that request ran reached neither the call nor its result: the
+// grader reads it after the result, where the next request consumed it and
+// the reference lists it (sessT idx 78), not between the call and the result.
+func TestRenderTranscriptPlacesAMidRequestMessageAfterTheToolResult(t *testing.T) {
+	history := []domain.Event{
+		{ID: "one", Seq: 1, Type: domain.EventUserMessage, Body: []byte(`{"content":"one"}`)},
+		{ID: "s1", Seq: 2, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+		{ID: "two", Seq: 3, Type: domain.EventUserMessage, Body: []byte(`{"content":"two"}`)},
+		{ID: "call", Seq: 4, Type: domain.EventAgentToolUse, Body: []byte(`{"name":"lookup","input":{}}`)},
+		{ID: "e1", Seq: 5, Type: domain.EventSpanModelRequestEnd, Body: []byte(`{"model_request_start_id":"s1"}`)},
+		{ID: "res", Seq: 6, Type: domain.EventAgentToolResult, Body: []byte(`{"tool_use_id":"call","content":"found"}`)},
+		{ID: "s2", Seq: 7, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+		{ID: "done", Seq: 8, Type: domain.EventAgentMessage, Body: []byte(`{"content":"done"}`)},
+	}
+	want := "## user\none\n\n## agent tool call\nlookup {}\n\n## tool result\nfound\n\n## user\ntwo\n\n## agent\ndone\n\n"
+	if out := transcript.Render(history); out != want {
+		t.Errorf("transcript =\n%q\nwant\n%q", out, want)
+	}
+}
+
+// A message a client posts after the request ended, before its call's result
+// arrives, is consumed by the next request as the one the request held is:
+// the grader reads both after the result, in receipt order.
+func TestRenderTranscriptPlacesAMessageBeforeAnAsyncResultAfterIt(t *testing.T) {
+	history := []domain.Event{
+		{ID: "s1", Seq: 1, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+		{ID: "two", Seq: 2, Type: domain.EventUserMessage, Body: []byte(`{"content":"two"}`)},
+		{ID: "call", Seq: 3, Type: domain.EventAgentCustomToolUse, Body: []byte(`{"name":"decide","input":{}}`)},
+		{ID: "e1", Seq: 4, Type: domain.EventSpanModelRequestEnd, Body: []byte(`{"model_request_start_id":"s1"}`)},
+		{ID: "three", Seq: 5, Type: domain.EventUserMessage, Body: []byte(`{"content":"three"}`)},
+		{ID: "res", Seq: 6, Type: domain.EventUserCustomToolRes, Body: []byte(`{"custom_tool_use_id":"call","content":"decided"}`)},
+		{ID: "s2", Seq: 7, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+	}
+	want := "## agent tool call\ndecide {}\n\n## tool result\ndecided\n\n## user\ntwo\n\n## user\nthree\n\n"
+	if out := transcript.Render(history); out != want {
+		t.Errorf("transcript =\n%q\nwant\n%q", out, want)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 const (
@@ -26,6 +27,13 @@ const (
 // Render renders the session's conversation-bearing events as the
 // role-labeled plain text the grader reads (shape ours, INFERRED). Long items
 // truncate at GraderItemBudget; the whole transcript at GraderTranscriptBudget.
+//
+// The events render in consumption order (events.ConsumptionOrderer, #793):
+// a message posted while one of its thread's requests was in flight renders
+// where that thread's next request consumed it, after the reply and the
+// results that never saw it. Windows are per thread, so on a whole-session history a child's
+// request never holds a primary row. history itself is left in seq order,
+// since the grader reads its watermark and outcome start off it.
 //
 // The agent-to-agent message pair (plan 35) is deliberately not rendered. The
 // grader reads the whole session rather than one thread, so a child's report is
@@ -43,27 +51,39 @@ func Render(history []domain.Event) string {
 		}
 		sb.WriteString("## " + role + "\n" + text + "\n\n")
 	}
-	for _, ev := range history {
-		switch ev.Type {
-		case domain.EventUserMessage:
-			add("user", ContentText(ev.Body))
-		case domain.EventSystemMessage:
-			add("system", ContentText(ev.Body))
-		case domain.EventAgentMessage:
-			add("agent", ContentText(ev.Body))
-		case domain.EventAgentToolUse, domain.EventAgentMCPToolUse, domain.EventAgentCustomToolUse:
-			var p struct {
-				Name  string          `json:"name"`
-				Input json.RawMessage `json:"input"`
+	// Streamed through the orderer, as RenderDream streams, rather than
+	// reordering a copy of the whole history: a push emits a few rows at most
+	// into a buffer drained before the next.
+	render := func(evs []domain.Event) {
+		for _, ev := range evs {
+			switch ev.Type {
+			case domain.EventUserMessage:
+				add("user", ContentText(ev.Body))
+			case domain.EventSystemMessage:
+				add("system", ContentText(ev.Body))
+			case domain.EventAgentMessage:
+				add("agent", ContentText(ev.Body))
+			case domain.EventAgentToolUse, domain.EventAgentMCPToolUse, domain.EventAgentCustomToolUse:
+				var p struct {
+					Name  string          `json:"name"`
+					Input json.RawMessage `json:"input"`
+				}
+				if json.Unmarshal(ev.Body, &p) == nil {
+					add("agent tool call", p.Name+" "+string(p.Input))
+				}
+			case domain.EventUserToolResult, domain.EventUserCustomToolRes,
+				domain.EventAgentToolResult, domain.EventAgentMCPToolResult:
+				add("tool result", ContentText(ev.Body))
 			}
-			if json.Unmarshal(ev.Body, &p) == nil {
-				add("agent tool call", p.Name+" "+string(p.Input))
-			}
-		case domain.EventUserToolResult, domain.EventUserCustomToolRes,
-			domain.EventAgentToolResult, domain.EventAgentMCPToolResult:
-			add("tool result", ContentText(ev.Body))
 		}
 	}
+	var o events.ConsumptionOrderer
+	var buf []domain.Event
+	for _, ev := range history {
+		buf = o.Push(buf[:0], ev)
+		render(buf)
+	}
+	render(o.Flush(buf[:0]))
 	out := sb.String()
 	if len(out) > GraderTranscriptBudget {
 		out = out[:GraderTranscriptBudget] + "\n[transcript truncated]"

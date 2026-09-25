@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -845,6 +846,11 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 		if call != 0 {
 			return
 		}
+		// The input is processed when the request that consumes it starts,
+		// not when its turn settles (#793): "one" is stamped already.
+		if one := h.messages(t); len(one) != 1 || one[0].ProcessedAt == nil {
+			t.Errorf("while request 1 runs, messages = %v, want \"one\" stamped", one)
+		}
 		payload, _ := json.Marshal(map[string]any{"content": "two"})
 		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
 			{Type: domain.EventUserMessage, Payload: payload},
@@ -854,6 +860,11 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 	}
 	h.wake(t, "one")
 	h.runOnce(t)
+	// Request 1 did not consume "two", so it is still queued: the request
+	// that does has not started.
+	if msgs := h.messages(t); len(msgs) != 2 || msgs[1].ProcessedAt != nil {
+		t.Errorf("after turn 1, messages = %v, want \"two\" unprocessed", msgs)
+	}
 
 	// Turn 1 settled without idling: the pending message chained a turn.
 	if got := h.status(t); got != "running" {
@@ -883,24 +894,224 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 	if running != 1 {
 		t.Errorf("session.status_running count = %d, want 1", running)
 	}
-	// Turn 2's replay saw both messages. On the log, "two" landed before
-	// the first answer (that is the true chronology), so the adjacent user
-	// events merge into one user turn ahead of the assistant's reply.
+	// Turn 2's replay saw both messages. "two" is on the log ahead of the
+	// first answer, where it was received, but request 1 never saw it:
+	// request 2 consumed it, so it replays after the answer, as its own user
+	// turn (#793 item 4). Replayed at its seq, it would merge into "one" and
+	// leave the chained request ending on the assistant's reply — a prefill.
 	req := h.provider.calls[1]
-	if len(req.Messages) != 2 || req.Messages[0].Role != "user" || req.Messages[1].Role != "assistant" {
+	if len(req.Messages) != 3 || req.Messages[0].Role != "user" ||
+		req.Messages[1].Role != "assistant" || req.Messages[2].Role != "user" {
 		t.Fatalf("chained request messages = %d: %+v", len(req.Messages), req.Messages)
 	}
-	var merged []map[string]any
-	_ = json.Unmarshal(req.Messages[0].Content, &merged)
-	if len(merged) != 2 || merged[0]["text"] != "one" || merged[1]["text"] != "two" {
-		t.Errorf("merged user turn = %v", merged)
-	}
-	// Everything consumed is stamped.
-	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"user.message"}})
-	for i, ev := range evs {
-		if ev.ProcessedAt == nil {
-			t.Errorf("user.message[%d] not stamped", i)
+	for i, want := range map[int]string{0: "one", 1: "first answer", 2: "two"} {
+		var blocks []map[string]any
+		_ = json.Unmarshal(req.Messages[i].Content, &blocks)
+		if len(blocks) != 1 || blocks[0]["text"] != want {
+			t.Errorf("message %d = %v, want %q alone", i, blocks, want)
 		}
+	}
+	// Each message is stamped 1 µs before the start of the request that
+	// consumed it, as the reference stamps it: "one" by request 1, "two" by
+	// request 2.
+	starts, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"span.model_request_start"}})
+	msgs := h.messages(t)
+	if len(starts) != 2 || len(msgs) != 2 {
+		t.Fatalf("%d starts, %d messages", len(starts), len(msgs))
+	}
+	for i, m := range msgs {
+		want := starts[i].ProcessedAt.Add(-time.Microsecond)
+		if m.ProcessedAt == nil || !m.ProcessedAt.Equal(want) {
+			t.Errorf("message %d processed_at = %v, want %v", i, m.ProcessedAt, want)
+		}
+	}
+}
+
+// messages lists the session's user.message rows in seq order.
+func (h *harness) messages(t *testing.T) []domain.Event {
+	t.Helper()
+	evs, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"user.message"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evs
+}
+
+// A brain that dies after its span start leaves the start, and the stamps it
+// wrote, on the log (docs/DIVERGENCES.md, the crash-window entry). The reclaim
+// replays the message by its row — replay never reads processed_at — into the
+// retried request, the settle does not chain on it (it is below the
+// watermark), and its stamp stays the dead start's: that request is where
+// the reference would say it was consumed.
+func TestCrashAfterTheSpanStartKeepsTheStamp(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "answered"), done("end_turn", 1)},
+	}, nil)
+	h.wake(t, "one")
+	ctx := context.Background()
+	if item, err := h.queue.Claim(ctx, queue.ModelTurn, 30*time.Millisecond); err != nil || item == nil {
+		t.Fatalf("pre-claim: %+v %v", item, err)
+	}
+	if _, _, err := h.log.StartModelRequestOn(ctx, h.sessionID, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	stamped := h.messages(t)[0].ProcessedAt
+	if stamped == nil {
+		t.Fatal("the dead start did not stamp its input")
+	}
+	time.Sleep(40 * time.Millisecond)
+
+	h.runOnce(t)
+	if len(h.provider.calls) != 1 {
+		t.Fatalf("provider calls = %d, want the one retried request", len(h.provider.calls))
+	}
+	req := h.provider.calls[0]
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" || !strings.Contains(string(req.Messages[0].Content), "one") {
+		t.Errorf("retried request = %+v, want the message", req.Messages)
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle: nothing is pending", got)
+	}
+	if got := h.messages(t)[0].ProcessedAt; got == nil || !got.Equal(*stamped) {
+		t.Errorf("processed_at = %v, want the dead start's %v", got, stamped)
+	}
+}
+
+// A message and a user.define_outcome that land after the turn's claim and
+// before its span start have seqs below the start, so that start consumes
+// them: it stamps both (#793), and the request it opens must carry both,
+// which it does because the turn reads its history once, after the start
+// commits, bounded by it. The outcome begins work with the request that reads
+// its definition, so it reads running for that whole cycle, not pending. The
+// route's factory runs in exactly that gap — the provider is resolved after
+// the claim and before the start — so the inputs land there.
+func TestInputsLandingBeforeTheSpanStartJoinTheRequest(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "answered both"), done("end_turn", 2)},
+	}, nil)
+	outcomeID := domain.NewID(domain.PrefixOutcome)
+	landed := false
+	reg, err := provider.NewRegistry(
+		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake"}}},
+		map[string]provider.Factory{"fake": func(provider.Config) (provider.Provider, error) {
+			if !landed {
+				landed = true
+				msg, _ := json.Marshal(map[string]any{"content": "two"})
+				goal, _ := json.Marshal(map[string]any{
+					"description": "Build it", "rubric": map[string]any{"type": "text", "content": "# Rubric"},
+					"max_iterations": 3, "outcome_id": outcomeID,
+				})
+				// As the API accepts a define_outcome: the event and its
+				// pending entry in one commit.
+				if _, err := h.log.AppendWith(context.Background(), h.sessionID, []events.NewEvent{
+					{Type: domain.EventUserMessage, Payload: msg},
+					{Type: domain.EventUserDefineOutcome, Payload: goal},
+				}, events.AppendOptions{MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+					return append(evals, domain.OutcomeEvaluation{
+						Type: "outcome_evaluation", OutcomeID: outcomeID,
+						Description: "Build it", Result: domain.OutcomeResultPending,
+					}), nil
+				}}); err != nil {
+					t.Errorf("append before the start: %v", err)
+				}
+			}
+			return h.provider, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.brain, h.registry = brain.New(h.pool, reg, nil, brain.Config{}), reg
+	var during []domain.OutcomeEvaluation
+	h.provider.onGenerate = func(call int) {
+		if call == 0 {
+			during = h.outcomes(t)
+		}
+	}
+	h.wake(t, "one")
+	h.runOnce(t)
+
+	if !landed || len(h.provider.calls) != 1 {
+		t.Fatalf("landed %v, provider calls = %d; want the inputs landed and one request", landed, len(h.provider.calls))
+	}
+	req := h.provider.calls[0]
+	var blocks []map[string]any
+	if len(req.Messages) == 1 {
+		_ = json.Unmarshal(req.Messages[0].Content, &blocks)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" || len(blocks) != 3 ||
+		blocks[0]["text"] != "one" || blocks[1]["text"] != "two" ||
+		!strings.Contains(fmt.Sprint(blocks[2]["text"]), "Work toward this outcome: Build it") {
+		t.Fatalf("request messages = %+v, want one user turn holding \"one\", \"two\" and the outcome", req.Messages)
+	}
+	if len(during) != 1 || during[0].OutcomeID != outcomeID || during[0].Result != domain.OutcomeResultRunning {
+		t.Errorf("outcome during the request = %+v, want %s running", during, outcomeID)
+	}
+	// The one start consumed all three.
+	starts, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"span.model_request_start"}})
+	inputs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{
+		Types: []string{"user.message", "user.define_outcome"}})
+	if len(starts) != 1 || len(inputs) != 3 {
+		t.Fatalf("%d starts, %d inputs", len(starts), len(inputs))
+	}
+	want := starts[0].ProcessedAt.Add(-time.Microsecond)
+	for _, in := range inputs {
+		if in.ProcessedAt == nil || !in.ProcessedAt.Equal(want) {
+			t.Errorf("%s %s processed_at = %v, want %v", in.Type, in.ID, in.ProcessedAt, want)
+		}
+	}
+}
+
+// A message posted while a tool turn's request is in flight joins the user
+// turn that answers the call, after the result, rather than the user turn
+// ahead of a call it never prompted (#793 item 4; 2026-09-02 batch2 sessT
+// idx 78 lists it after agent.tool_result, 58.8 ms before the next start).
+func TestMidRequestMessageOnAToolTurnFollowsTheResult(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolUseChunk("toolu_a", "lookup"), done("tool_use", 3)},
+		{textChunk(0, "done"), done("end_turn", 2)},
+	}, nil)
+	h.customTool(t, "lookup")
+	h.provider.onGenerate = func(call int) {
+		if call != 0 {
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{"content": "two"})
+		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+			{Type: domain.EventUserMessage, Payload: payload},
+		}); err != nil {
+			t.Errorf("mid-request append: %v", err)
+		}
+	}
+	h.wake(t, "one")
+	h.runOnce(t)
+
+	uses, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
+	if len(uses) != 1 {
+		t.Fatalf("tool intents = %d, want 1", len(uses))
+	}
+	h.postToolResult(t, domain.EventUserCustomToolRes, map[string]any{
+		"custom_tool_use_id": uses[0].ID.String(),
+		"content":            []map[string]string{{"type": "text", "text": "found"}},
+	})
+	h.runOnce(t)
+
+	req := h.provider.calls[1]
+	if len(req.Messages) != 3 {
+		t.Fatalf("resumed request messages = %d: %+v", len(req.Messages), req.Messages)
+	}
+	var first, call, answer []map[string]any
+	_ = json.Unmarshal(req.Messages[0].Content, &first)
+	_ = json.Unmarshal(req.Messages[1].Content, &call)
+	_ = json.Unmarshal(req.Messages[2].Content, &answer)
+	if len(first) != 1 || first[0]["text"] != "one" {
+		t.Errorf("first user turn = %v, want \"one\" alone", first)
+	}
+	if req.Messages[1].Role != "assistant" || len(call) != 1 || call[0]["type"] != "tool_use" {
+		t.Errorf("assistant turn = %v, want the tool call", call)
+	}
+	if req.Messages[2].Role != "user" || len(answer) != 2 ||
+		answer[0]["type"] != "tool_result" || answer[1]["text"] != "two" {
+		t.Errorf("answering user turn = %v, want the result, then \"two\"", answer)
 	}
 }
 
@@ -1738,6 +1949,53 @@ func TestUnroutedModelFailsTurn(t *testing.T) {
 	evs, _ := h.log.List(context.Background(), sid, events.ListQuery{Types: []string{"session.error"}})
 	if len(evs) != 1 {
 		t.Fatalf("session.error events = %d", len(evs))
+	}
+	// No request started to stamp the message, so the failure does: nothing
+	// else would, and an unstamped message would read as pending forever.
+	if msgs := h.messages(t); len(msgs) != 1 || msgs[0].ProcessedAt == nil {
+		t.Errorf("messages = %v, want the one message stamped", msgs)
+	}
+}
+
+// A log the replay cannot read fails the turn with the span it started: the
+// history is read after the start commits (#793), so the start is already on
+// the log, and the failure closes it with an errored end rather than leaving
+// it dangling. The provider is never called, and nothing chains, because the
+// same log fails the same way on every retry.
+func TestAReplayFailureFailsTheTurnWithItsSpan(t *testing.T) {
+	h := newHarness(t, nil, nil) // no scripts: the provider must not be called
+	if _, err := h.log.AppendTransition(context.Background(), h.sessionID,
+		// Content that is neither a string nor a block array: unreplayable.
+		[]events.NewEvent{{Type: domain.EventUserMessage, Payload: json.RawMessage(`{"content":5}`)}},
+		[]events.ThreadTransition{{Status: domain.SessionRunning}},
+		events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
+			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
+			return err
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	h.runOnce(t)
+
+	if n := len(h.provider.calls); n != 0 {
+		t.Errorf("provider called %d times on an unreplayable log", n)
+	}
+	want := []string{"span.model_request_start", "span.model_request_end", "session.error",
+		"session.thread_status_idle", "session.status_idle"}
+	if got := h.types(t); len(got) < len(want) || !slices.Equal(got[len(got)-len(want):], want) {
+		t.Errorf("event log = %v, want it to end %v", got, want)
+	}
+	ends, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"span.model_request_end"}})
+	var end struct {
+		IsError bool `json:"is_error"`
+	}
+	if len(ends) != 1 || json.Unmarshal(ends[0].Body, &end) != nil || !end.IsError {
+		t.Errorf("span ends = %d, want one errored end", len(ends))
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("%d model_turn items live, want 0: the failure must not chain", n)
 	}
 }
 

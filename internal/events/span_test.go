@@ -3,11 +3,14 @@ package events_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/jackc/pgx/v5"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -113,5 +116,296 @@ func TestModelRequestSameSourceEmission(t *testing.T) {
 	// Failure path: a start against a dead session emits no span leak.
 	if _, _, err := log.StartModelRequest(ctx, domain.NewID("sesn"), events.Backend{Provider: "anthropic", Model: "claude-x"}); err == nil {
 		t.Error("start on unknown session should fail")
+	}
+}
+
+// An input is processed when the request that consumes it starts, as the
+// reference stamps it: 1 µs before that request's span.model_request_start
+// (#793; every recorded consumption but one). The start's own commit stamps
+// the thread's inputs below it that no earlier start stamped — and nothing
+// else: not a row already stamped, not another thread's, not a row at or
+// after the start.
+func TestModelRequestStartStampsWhatItConsumes(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	child := domain.NewID(domain.PrefixSessionThread)
+	earlier := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	appended, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("queued")},
+		{Type: domain.EventUserMessage, Payload: text("already"), ProcessedAt: &earlier},
+		{Type: domain.EventAgentThreadMessageReceived, Payload: text("report")},
+		{Type: domain.EventUserMessage, ThreadID: child, Payload: text("the child's")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, mr, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("after")}}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[domain.ID]domain.Event{}
+	var start domain.Event
+	for _, ev := range all {
+		byID[ev.ID] = ev
+		if ev.Type == domain.EventSpanModelRequestStart {
+			start = ev
+		}
+	}
+	if start.Seq != mr.StartSeq() || start.ID != mr.StartEventID() {
+		t.Fatalf("start row %s at %d, ModelRequest says %s at %d", start.ID, start.Seq, mr.StartEventID(), mr.StartSeq())
+	}
+	if start.ProcessedAt == nil {
+		t.Fatal("the start carries no processed_at")
+	}
+	consumed := start.ProcessedAt.Add(-time.Microsecond)
+	for i, want := range []*time.Time{&consumed, &earlier, &consumed, nil} {
+		got := byID[appended[i].ID].ProcessedAt
+		if (got == nil) != (want == nil) || (got != nil && !got.Equal(*want)) {
+			t.Errorf("row %d processed_at = %v, want %v", i, got, want)
+		}
+	}
+	for _, ev := range all {
+		if ev.Seq > start.Seq && ev.ProcessedAt != nil {
+			t.Errorf("row after the start (%s) stamped %v", ev.Type, ev.ProcessedAt)
+		}
+	}
+}
+
+// A start stamps only what its request reads: a user.message, a
+// user.define_outcome, a system.message and a delivered
+// agent.thread_message_received. An answer is its thread's ordered
+// processor's to stamp, and a held one must stay null until that processor
+// reaches it (#793). An interrupt is no input a request reads: its own send
+// stamps it on receipt, so one still null below a start is a row an older
+// build left, which the start repairs (the next test). The no-provider
+// failure's stamp, MarkProcessedThrough, stamps request inputs alone.
+func TestModelRequestStartStampsOnlyWhatARequestReads(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	appended, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("message")},
+		{Type: domain.EventUserDefineOutcome, Payload: json.RawMessage(`{"description":"d"}`)},
+		{Type: domain.EventSystemMessage, Payload: text("system")},
+		{Type: domain.EventAgentThreadMessageReceived, Payload: text("report")},
+		{Type: domain.EventUserInterrupt, Payload: json.RawMessage(`{}`)},
+		{Type: domain.EventUserToolConfirm, Payload: json.RawMessage(`{"tool_use_id":"sevt_x","result":"allow"}`)},
+		{Type: domain.EventUserToolResult, Payload: json.RawMessage(`{"tool_use_id":"sevt_x"}`)},
+		{Type: domain.EventUserCustomToolRes, Payload: json.RawMessage(`{"custom_tool_use_id":"sevt_y"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first four rows are what a request reads; the interrupt is the
+	// start's repair, not the failure's stamp.
+	check := func(when string, interruptStamped bool) {
+		t.Helper()
+		all, err := log.List(ctx, sid, events.ListQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		byID := map[domain.ID]domain.Event{}
+		for _, ev := range all {
+			byID[ev.ID] = ev
+		}
+		for i, a := range appended {
+			got := byID[a.ID].ProcessedAt
+			want := i < 4 || (a.Type == domain.EventUserInterrupt && interruptStamped)
+			if stamped := got != nil; stamped != want {
+				t.Errorf("%s: %s processed_at = %v, want stamped %v", when, a.Type, got, want)
+			}
+		}
+	}
+	if _, err := log.AppendWith(ctx, sid, nil, events.AppendOptions{
+		MarkProcessedThrough: appended[len(appended)-1].Seq,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check("after MarkProcessedThrough", false)
+	if _, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	check("after the start", true)
+}
+
+// The stamp is taken after the session row lock, on the clock of the process
+// writing the start — the brain's, which also stamps the request's reply and
+// end — so an input that commits while the start waits on the lock is never
+// dated before the start was free to run (#793). Everything asserted here is
+// on this process's clock: created_at is the database's, and comparing across
+// the two would measure their skew, not the order.
+func TestModelRequestStartStampsAfterTheLock(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan error, 1)
+	go func() {
+		_, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil)
+		started <- err
+	}()
+	// The start is blocked on the lock this transaction holds.
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		var waiting int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the start never waited on the session lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Long enough that a stamp taken when the start began, before the lock,
+	// could not pass for one taken after it.
+	time.Sleep(50 * time.Millisecond)
+	if _, err := log.AppendInTx(ctx, tx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("raced")},
+	}, events.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	released := time.Now()
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	returned := time.Now()
+
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].Type != domain.EventUserMessage || all[1].Type != domain.EventSpanModelRequestStart {
+		t.Fatalf("log = %v, want the message, then the start", all)
+	}
+	msg, start := all[0], all[1]
+	if msg.ProcessedAt == nil || start.ProcessedAt == nil {
+		t.Fatalf("message %v, start %v: want both stamped", msg.ProcessedAt, start.ProcessedAt)
+	}
+	if start.ProcessedAt.Before(released.Truncate(time.Microsecond)) || start.ProcessedAt.After(returned) {
+		t.Errorf("start processed_at %v is outside [%v, %v], from the lock's release to the start's return",
+			start.ProcessedAt, released, returned)
+	}
+	if want := start.ProcessedAt.Add(-time.Microsecond); !msg.ProcessedAt.Equal(want) {
+		t.Errorf("message processed_at = %v, want %v", msg.ProcessedAt, want)
+	}
+}
+
+// A build before #793 stamped what a turn left unprocessed at the turn's
+// settle, whatever its type, and left to that stamp what nothing else
+// processes: a session-wide or primary-scoped user.interrupt, which the API
+// wrote unstamped for "the primary's next turn" — as an old API replica still
+// does during a rolling deploy — and an answer an interrupt superseded. With
+// the settle's stamp gone, such a row would stay null for good, so a start
+// repairs its thread's: an interrupt below it is stamped, since an interrupt
+// is always processed on receipt, and so is an answer whose call already has
+// a processed result below it, since nothing is left for it to wait for. An
+// answer to a call still open stays null, and so does another thread's row.
+func TestModelRequestStartRepairsWhatALegacyBuildLeftUnstamped(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	child := domain.NewID(domain.PrefixSessionThread)
+
+	calls, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventAgentToolUse, Payload: json.RawMessage(`{"name":"bash","input":{},"evaluated_permission":"ask"}`)},
+		{Type: domain.EventAgentToolUse, Payload: json.RawMessage(`{"name":"bash","input":{},"evaluated_permission":"ask"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered, open := calls[0].ID.String(), calls[1].ID.String()
+	legacy, err := log.Append(ctx, sid, []events.NewEvent{
+		// What an interrupt wrote for the first call, processed as written.
+		{Type: domain.EventAgentToolResult, Payload: json.RawMessage(`{"tool_use_id":"` + answered + `","is_error":true}`)},
+		{Type: domain.EventUserInterrupt, Payload: json.RawMessage(`{}`)},
+		{Type: domain.EventUserToolConfirm, Payload: json.RawMessage(`{"tool_use_id":"` + answered + `","result":"allow"}`)},
+		{Type: domain.EventUserToolConfirm, Payload: json.RawMessage(`{"tool_use_id":"` + open + `","result":"allow"}`)},
+		{Type: domain.EventUserInterrupt, ThreadID: child, Payload: json.RawMessage(`{}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserInterrupt, Payload: json.RawMessage(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamped := map[domain.ID]bool{}
+	for _, ev := range all {
+		stamped[ev.ID] = ev.ProcessedAt != nil
+	}
+	for _, c := range []struct {
+		id   domain.ID
+		want bool
+		what string
+	}{
+		{legacy[1].ID, true, "the primary's interrupt below the start"},
+		{legacy[2].ID, true, "a confirmation whose call an interrupt answered"},
+		{legacy[3].ID, false, "a confirmation whose call is still open"},
+		{legacy[4].ID, false, "another thread's interrupt"},
+		{after[0].ID, false, "an interrupt past the start"},
+	} {
+		if stamped[c.id] != c.want {
+			t.Errorf("%s: stamped %v, want %v", c.what, stamped[c.id], c.want)
+		}
+	}
+}
+
+// The start carries the claimant's lease proof in its own commit: a brain
+// that lost its item must not tell a client its inputs were consumed, and a
+// refused start writes neither the start nor a stamp.
+func TestModelRequestStartThenFailingWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("queued")}}); err != nil {
+		t.Fatal(err)
+	}
+	lost := errors.New("lease lost")
+	_, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, func(context.Context, pgx.Tx) error { return lost })
+	if !errors.Is(err, lost) {
+		t.Fatalf("err = %v, want the Then's", err)
+	}
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ProcessedAt != nil {
+		t.Errorf("log = %v, want the queued message alone, unstamped", all)
 	}
 }

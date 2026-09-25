@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -482,8 +483,8 @@ func TestGraderReplyNULSanitized(t *testing.T) {
 
 func TestOutcomePendingFlipsRunningAtTurnStart(t *testing.T) {
 	// "pending" is before the agent begins work; "running" while producing.
-	// The flip commits when the turn claims, so a client polling mid-turn
-	// sees running, not pending.
+	// The flip commits with the span start of the request that reads the
+	// define_outcome, so a client polling mid-turn sees running, not pending.
 	h := newHarness(t, [][]provider.Chunk{
 		agentReply("work"),
 		graderReply("fine", "satisfied"),
@@ -795,4 +796,69 @@ func TestChildEndingThatWakesItsCoordinatorSkipsHarvest(t *testing.T) {
 		t.Errorf("live outputs_harvest = %d, want 0 (the session did not idle)", n)
 	}
 	h.wakeThenDelivery(t, "", "session.thread_status_running", "agent.thread_message_received")
+}
+
+// A grading cycle grades the log as it stood when the cycle was scheduled,
+// below its span.outcome_evaluation_start (#793): a message that lands after
+// that — here before the grader has even read the log — is not what the
+// verdict is about. The grader never sees it; the turn that follows the
+// verdict reads it.
+func TestAGradingCycleGradesTheLogAsItStoodWhenScheduled(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("built it"),
+		graderReply("fine", "satisfied"),
+		agentReply("noted"),
+	}, nil)
+	h.wakeOutcome(t, "Build it", 3)
+	h.runOnce(t) // the agent's end_turn schedules the cycle
+	if n := len(h.eventsOfType(t, domain.EventSpanOutcomeEvalStart)); n != 1 {
+		t.Fatalf("outcome evaluation starts = %d, want the scheduled one", n)
+	}
+	if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: json.RawMessage(`{"content":"a late note"}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h.runOnce(t) // the grading cycle
+	if len(h.provider.calls) != 2 {
+		t.Fatalf("provider calls = %d, want the agent's and the grader's", len(h.provider.calls))
+	}
+	if grader := string(h.provider.calls[1].Messages[0].Content); strings.Contains(grader, "a late note") {
+		t.Errorf("the grader read a message that landed after its cycle was scheduled:\n%s", grader)
+	}
+	h.runOnce(t) // the message chains the turn after the verdict
+	if len(h.provider.calls) != 3 {
+		t.Fatalf("provider calls = %d, want the turn the late message chained", len(h.provider.calls))
+	}
+	if last := h.provider.calls[2].Messages; !strings.Contains(string(last[len(last)-1].Content), "a late note") {
+		t.Errorf("the chained turn's last message = %s, want the late note", last[len(last)-1].Content)
+	}
+}
+
+// The grader's call is billed like any model call, so it is made only on a
+// proven lease: stopped after its log was read, the cycle never calls the
+// grader's model.
+func TestAGraderThatLostItsItemNeverCallsItsModel(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("built it"),
+		graderReply("must not run", "satisfied"),
+	}, nil)
+	h.wakeOutcome(t, "Build it", 3)
+	h.runOnce(t)
+	h.tracedBrain(t, &onQuery{match: []string{"SELECT id, seq, type, payload", "AND seq < $"}, after: true,
+		hook: func(context.Context) context.Context {
+			if err := h.queue.CancelSession(context.Background(), h.pool, h.sessionID); err != nil {
+				t.Errorf("cancel: %v", err)
+			}
+			return nil
+		}})
+
+	found, err := h.brain.RunOnce(context.Background())
+	if !found || !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("RunOnce = %v, %v; want the cycle abandoned on a lost lease", found, err)
+	}
+	if n := len(h.provider.calls); n != 1 {
+		t.Errorf("provider calls = %d, want the agent's alone", n)
+	}
 }

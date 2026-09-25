@@ -541,18 +541,14 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 
 		}
 	}
-	// A child-scoped interrupt is consumed right here, by its arm: the child's
-	// turn it ends is the only turn that could ever stamp it, so it is stamped
-	// processed on append — now the arms have run, so no earlier than the
-	// results its arm synthesized ahead of it (#539; AppendInTx keeps a
-	// batch's stamps from running backwards). A session-wide one is the
-	// primary's next turn's to stamp, as before.
-	now := time.Now().UTC()
-	for i := range newEvents {
-		if newEvents[i].Type == domain.EventUserInterrupt && newEvents[i].ThreadID != "" {
-			newEvents[i].ProcessedAt = &now
-		}
-	}
+	// An interrupt is consumed right here, on receipt, whatever it reaches, as
+	// the reference processes one (2026-09-02/batch2.json
+	// sessT.events.after-outcome idx 35-37): nothing later would stamp it, a
+	// request's start stamping only the inputs it reads (#793). Stamped now
+	// the arms have run, so no earlier than the results its arms synthesized
+	// ahead of it (#539); its idle pairs, stamped as they are inserted, follow
+	// it, and AppendInTx keeps a batch's stamps from running backwards.
+	events.StampInterrupts(newEvents)
 	// The settlement runs in Then, after the append, so what it will do with
 	// the answers is read now, off the walk it will make, with the answers and
 	// the results the interrupts above synthesized read as though on the log:
@@ -822,6 +818,14 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 			return out, err
 		}
 		out.settled = append(out.settled, results...)
+		// An answer an earlier send left held behind another call of this
+		// thread — a confirmation for a call answered just above — is consumed
+		// here: once the calls are answered, no walk of the thread reaches it.
+		if len(results) > 0 {
+			if err := events.StampSupersededAnswers(ctx, tx, in.sessionID, abandoned, *results[0].ProcessedAt); err != nil {
+				return out, err
+			}
+		}
 		// A child stopped mid-turn and the report it owed will never
 		// come, so its coordinator is told (plan 35 decision 7) — and
 		// woken when this was the last child it could have been
@@ -1125,8 +1129,8 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 	}
 	// The interrupt goes on the log as a client's would, so a reader sees why
 	// the session stopped. It is threadless, which is the session-wide spelling
-	// RouteInbound would leave untouched, and unstamped, as the handler leaves
-	// a session-wide interrupt.
+	// RouteInbound would leave untouched, and stamped once the arms have run,
+	// as the handler stamps one.
 	interrupt, err := events.NormalizeInbound(envKind, events.ManagementCredential, []json.RawMessage{json.RawMessage(`{"type":"user.interrupt"}`)})
 	if err != nil {
 		return nil, err
@@ -1155,6 +1159,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 		cancelSession = cancelSession || out.cancelSession
 		outcomeFlip = outcomeFlip || out.outcomeFlip
 	}
+	events.StampInterrupts(interrupt)
 	// In the order a client's session-wide interrupt is written (#539).
 	batch := keepLastSessionIdle(layout.processingOrder())
 	if cancelSession {

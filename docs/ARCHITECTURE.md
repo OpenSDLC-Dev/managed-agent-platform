@@ -80,6 +80,16 @@ they point at is a committed row the listener re-reads for itself.
 2. A brain claims it, replays the log into provider messages, and streams the model's
    response — writing `agent.message` / `agent.thinking` events (with opt-in
    `event_start`/`event_delta` SSE previews) and `span.model_request_start/_end`.
+   Replay, like the grader's and dreams' transcripts, follows consumption order
+   (`events.ConsumptionOrder`): an input that landed while an earlier request was in
+   flight renders after that request's reply and results, and one that landed after a
+   grading cycle was scheduled — the cycle grades the log below its
+   `span.outcome_evaluation_start` — after the verdict, where the next request read it, though
+   the list keeps it at its receipt seq. The start's commit stamps `processed_at` on
+   the inputs the request consumes and, on the primary, flips a pending outcome to
+   `running`, the request being the first to read its `user.define_outcome`; the brain
+   reads the history only after that commit, bounded by the start, so the request is
+   exactly what the start consumed.
 3. Tool calls commit as events with stable IDs. Custom calls and self-hosted
    sandbox calls wait on external results; ask-policy calls wait for authorization.
    A thread advertises these as idle/requires_action. The shared events-layer

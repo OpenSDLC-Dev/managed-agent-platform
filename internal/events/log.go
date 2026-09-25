@@ -132,9 +132,26 @@ type AppendOptions struct {
 	// thread's.
 	AddUsage *domain.ModelUsage
 	// MarkProcessedThrough stamps processed_at on the thread's
-	// still-unprocessed events at seq <= the watermark — the brain recording
-	// which inbound events its turn consumed. Zero means no stamping.
+	// still-unprocessed request inputs (RequestInputTypes) at seq <= the
+	// watermark. Zero means no stamping. A request's start stamps what it
+	// consumes (Consume); this is left for the one failure no request
+	// follows, the brain's unrouted model.
 	MarkProcessedThrough int64
+	// Consume stamps the thread's still-unprocessed request inputs below this
+	// batch's first row, the ones the model request that row opens consumes
+	// (#793). The row's processed_at is taken from this process's clock once
+	// the session row lock is held, and the inputs are stamped 1 µs before it,
+	// as the reference stamps them. After the lock, so an input that committed
+	// while this append waited on it is never dated before the start was free
+	// to run; this process's clock, because the brain stamps the request's
+	// agent.thinking, agent.message and span.model_request_end on it too, so
+	// the request's inputs and outputs read in order whatever the database's
+	// clock says. A stamp another process writes — created_at, from the
+	// database, or an answer's processed_at, from whichever process took it —
+	// can still skew against these by the difference between the two hosts'
+	// clocks, as it could before #793. Only a span.model_request_start
+	// leading the batch may set it; AppendInTx refuses any other batch.
+	Consume bool
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
 	// with the events that change it, so log and resource can never disagree.
@@ -187,6 +204,11 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		opts.MarkProcessedThrough == 0 && opts.MutateOutcomes == nil && opts.Then == nil {
 		return nil, errors.New("append requires at least one event")
 	}
+	// A request's start is the only row that consumes (the option's comment):
+	// any other would date inputs processed that no request read.
+	if opts.Consume && (len(evs) == 0 || evs[0].Type != domain.EventSpanModelRequestStart) {
+		return nil, errors.New("consume requires a span.model_request_start first")
+	}
 	for _, ev := range evs {
 		if !ev.Type.Persisted() {
 			return nil, fmt.Errorf("event type %q is stream-only and cannot be persisted", ev.Type)
@@ -216,6 +238,11 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	var seq int64
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1`, sessionID.String()).Scan(&seq); err != nil {
 		return nil, err
+	}
+	// Under the lock, on this process's clock (the option's comment).
+	var consumedAt time.Time
+	if opts.Consume {
+		consumedAt = time.Now().UTC().Truncate(time.Microsecond)
 	}
 
 	// One multi-row INSERT: the session row lock is held for a single round
@@ -250,10 +277,18 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 				return nil, err
 			}
 		}
+		// The row a Consume opens is processed at the stamp taken above.
+		if i == 0 && opts.Consume {
+			ev.ProcessedAt = &consumedAt
+		}
 		// Platform-emitted events carry a required processed_at on the wire
 		// (only client events are nullable while queued): emission is
-		// processing, so default it rather than stream a malformed shape.
-		if ev.ProcessedAt == nil && !ev.Type.Inbound() {
+		// processing, so default it rather than stream a malformed shape. The
+		// exception is the input the platform delivers,
+		// agent.thread_message_received: it is processed when a request
+		// consumes it, as the reference stamps it, so it stays null until
+		// then — a present null the SDK types as required (#78).
+		if ev.ProcessedAt == nil && !ev.Type.StampedOnConsumption() {
 			now := time.Now().UTC()
 			ev.ProcessedAt = &now
 		}
@@ -421,8 +456,40 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		if _, err := tx.Exec(ctx,
 			`UPDATE events SET processed_at = clock_timestamp()
 			 WHERE session_id = $1 AND seq <= $2 AND processed_at IS NULL
-			   AND thread_id IS NOT DISTINCT FROM $3`,
-			sessionID.String(), opts.MarkProcessedThrough, nullableID(opts.ThreadID)); err != nil {
+			   AND thread_id IS NOT DISTINCT FROM $3 AND type = ANY($4)`,
+			sessionID.String(), opts.MarkProcessedThrough, nullableID(opts.ThreadID), RequestInputTypes); err != nil {
+			return nil, err
+		}
+	}
+	if opts.Consume {
+		// Every earlier request stamped what it consumed in its own start's
+		// commit, so the thread's unstamped request inputs below this one are
+		// exactly the ones it consumes. Nothing else of this build's: an answer
+		// is its ordered processor's to stamp, and an interrupt its own send's,
+		// on receipt.
+		//
+		// The same statement repairs what a build before #793 left to its
+		// settle-time stamp, which stamped everything a turn left unprocessed
+		// and is gone: a user.interrupt it wrote unstamped for "the primary's
+		// next turn" (an old API replica still does, during a rolling deploy),
+		// and an answer an interrupt superseded. An interrupt is always
+		// processed on receipt, and an answer whose call already has a
+		// processed result has nothing left to wait for, so either is stamped
+		// here, with the inputs; an answer to a call still open is left to the
+		// walk.
+		if _, err := tx.Exec(ctx,
+			`UPDATE events e SET processed_at = $4
+			 WHERE e.session_id = $1 AND e.seq < $2 AND e.processed_at IS NULL
+			   AND e.thread_id IS NOT DISTINCT FROM $3
+			   AND (e.type = ANY($5) OR e.type = $6
+			     OR (e.type = ANY($7) AND EXISTS (
+			          SELECT 1 FROM events r
+			           WHERE r.session_id = $1 AND r.seq < $2 AND r.processed_at IS NOT NULL AND r.type = ANY($8)
+			             AND COALESCE(r.payload->>'tool_use_id', r.payload->>'custom_tool_use_id', r.payload->>'mcp_tool_use_id')
+			               = COALESCE(e.payload->>'tool_use_id', e.payload->>'custom_tool_use_id', e.payload->>'mcp_tool_use_id'))))`,
+			sessionID.String(), out[0].Seq, nullableID(opts.ThreadID),
+			consumedAt.Add(-time.Microsecond), RequestInputTypes, string(domain.EventUserInterrupt),
+			answerTypes, toolResultTypes); err != nil {
 			return nil, err
 		}
 	}
@@ -451,8 +518,11 @@ type ListQuery struct {
 	Types                                        []string
 	CreatedGT, CreatedGTE, CreatedLT, CreatedLTE *time.Time
 	AfterSeq                                     *int64
-	Desc                                         bool
-	Limit                                        int // 0 = unlimited
+	// BeforeSeq keeps the rows below it (seq < BeforeSeq) whatever the sort:
+	// the log as it stood under a known row — a request's own span start.
+	BeforeSeq *int64
+	Desc      bool
+	Limit     int // 0 = unlimited
 	// Scope narrows the rows to one surface (plan 35 decision 2). ScopeAll,
 	// the zero value, reads the whole log — what every internal reader does.
 	Scope    Scope
@@ -552,6 +622,9 @@ func (l *Log) List(ctx context.Context, sessionID domain.ID, q ListQuery) ([]dom
 		} else {
 			add("seq > ", *q.AfterSeq)
 		}
+	}
+	if q.BeforeSeq != nil {
+		add("seq < ", *q.BeforeSeq)
 	}
 	if q.Desc {
 		sb.WriteString(" ORDER BY seq DESC")

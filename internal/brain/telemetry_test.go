@@ -2,6 +2,7 @@ package brain_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"log/slog"
@@ -12,9 +13,11 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -145,6 +148,41 @@ func floatPoints(t *testing.T, rm metricdata.ResourceMetrics, name string) []met
 		}
 	}
 	return nil
+}
+
+// gen_ai.client.operation.duration times the call to the provider and
+// nothing else. The span start commits before the history is read and the
+// request built (#793), so a clock started there would file that platform
+// work under model latency: the brain marks the call's start instead, and a
+// turn records exactly one reading — and a turn whose replay failed after its
+// start, which never called the provider, records none.
+func TestATurnTimesOnlyItsModelCall(t *testing.T) {
+	collect := collectBrainMetrics(t)
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "hi"), done("end_turn", 5)}}, nil)
+	h.wake(t, "hello")
+	h.runOnce(t)
+	if pts := floatPoints(t, collect(), "gen_ai.client.operation.duration"); len(pts) != 1 || pts[0].Count != 1 {
+		t.Fatalf("duration points = %+v, want one reading for the one call", pts)
+	}
+
+	collect = collectBrainMetrics(t)
+	h = newHarness(t, nil, nil) // no scripts: the provider must not be called
+	if _, err := h.log.AppendTransition(context.Background(), h.sessionID,
+		[]events.NewEvent{{Type: domain.EventUserMessage, Payload: json.RawMessage(`{"content":5}`)}},
+		[]events.ThreadTransition{{Status: domain.SessionRunning}},
+		events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
+			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
+			return err
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	h.runOnce(t)
+	if n := h.countType(t, "span.model_request_start"); n != 1 {
+		t.Fatalf("span starts = %d, want the one the failed replay followed", n)
+	}
+	if pts := floatPoints(t, collect(), "gen_ai.client.operation.duration"); len(pts) != 0 {
+		t.Errorf("a turn that never called the provider recorded %d duration point(s), want none", len(pts))
+	}
 }
 
 // Time to first token is the platform's responsiveness signal, and it is a brain

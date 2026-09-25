@@ -85,6 +85,18 @@ func TestArchivingAChildWakesTheParkedCoordinator(t *testing.T) {
 		"agent.thread_message_received", "session.thread_status_terminated"}) {
 		t.Errorf("archive wrote %v, want the wake, the notice, then the ending", got)
 	}
+	// The notice is an input, not an emission: it lists unprocessed — the key
+	// present, null (#78) — until the coordinator's woken request starts, which
+	// stamps it 1 µs before its own start, as the reference does (#793).
+	if v, ok := notice["processed_at"]; !ok || v != nil {
+		t.Errorf("notice processed_at = %v (present %v), want a present null until consumed", v, ok)
+	}
+	if _, _, err := events.NewLog(s.pool).StartModelRequestOn(context.Background(), domain.ID(sid), "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastEventOfType(t, s, sid, "agent.thread_message_received")["processed_at"]; got == nil {
+		t.Error("notice still unprocessed after the coordinator's request started")
+	}
 }
 
 // The wake is exactly as wide as the wedge, and these are the two ways it is

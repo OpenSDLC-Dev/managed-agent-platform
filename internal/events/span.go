@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -33,13 +34,20 @@ type Backend struct {
 // records the turn's metrics from the same point, for the same reason. The
 // returned context carries the span for downstream propagation.
 func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
-	return l.StartModelRequestOn(ctx, sessionID, "", backend)
+	return l.StartModelRequestOn(ctx, sessionID, "", backend, nil)
 }
 
 // StartModelRequestOn is StartModelRequest for one thread's turn (plan 35):
 // the start and end events are written on that thread's own log; an empty
 // threadID is the primary.
-func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
+//
+// The start's commit also processes what the request consumes (#793): the
+// thread's request inputs below it that no earlier start stamped are stamped
+// 1 µs before the start's own processed_at, as the reference stamps a
+// consumed input (AppendOptions.Consume). then runs in that commit — the
+// brain passes its lease proof, so a claimant that lost its item neither
+// stamps nor calls the model; nil is none.
+func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domain.ID, backend Backend, then func(context.Context, pgx.Tx) error) (context.Context, *ModelRequest, error) {
 	// A child's turn names its thread, so two concurrent turns of one
 	// session stay distinguishable in a trace.
 	attrs := []attribute.KeyValue{attribute.String("session.id", sessionID.String())}
@@ -49,12 +57,10 @@ func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domai
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "model_request",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attrs...))
-	now := time.Now().UTC()
-	evs, err := l.Append(ctx, sessionID, []NewEvent{{
-		Type:        domain.EventSpanModelRequestStart,
-		ProcessedAt: &now,
-		ThreadID:    threadID,
-	}})
+	evs, err := l.AppendWith(ctx, sessionID, []NewEvent{{
+		Type:     domain.EventSpanModelRequestStart,
+		ThreadID: threadID,
+	}}, AppendOptions{ThreadID: threadID, Consume: true, Then: then})
 	if err != nil {
 		// No wire event landed, so the exported span must say why it is
 		// alone: an errored, immediately-ended span records an aborted
@@ -64,8 +70,8 @@ func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domai
 		return ctx, nil, err
 	}
 	return ctx, &ModelRequest{
-		log: l, sessionID: sessionID, threadID: threadID, startID: evs[0].ID, span: span,
-		backend: backend, started: time.Now(),
+		log: l, sessionID: sessionID, threadID: threadID, startID: evs[0].ID, startSeq: evs[0].Seq, span: span,
+		backend: backend,
 	}, nil
 }
 
@@ -75,6 +81,7 @@ type ModelRequest struct {
 	sessionID domain.ID
 	threadID  domain.ID // the turn's thread; empty for the primary
 	startID   domain.ID
+	startSeq  int64
 	span      trace.Span
 	usage     domain.ModelUsage // recorded by ModelDone for Finish's attributes
 	// hasUsage records whether ModelDone was given a reading. A turn that died
@@ -83,11 +90,27 @@ type ModelRequest struct {
 	// the token histogram with readings no model ever produced.
 	hasUsage bool
 	backend  Backend
-	started  time.Time
+	// called is when the call to the provider began, stamped by ModelCalling;
+	// zero for a request that never reached it.
+	called time.Time
 	// modelElapsed is how long the call to the provider took, stamped by
-	// ModelDone. Zero until then; see ModelDone for why Finish cannot measure
-	// this itself.
+	// ModelDone, and done says ModelDone ran: a call can end on the clock tick
+	// it began on, so a zero elapsed is a reading, not its absence. See
+	// ModelDone for why Finish cannot measure this itself.
 	modelElapsed time.Duration
+	done         bool
+}
+
+// ModelCalling marks the start of the call to the model provider, where the
+// model-latency clock starts. The caller invokes it just before the call, not
+// at the span start: the brain reads the request's history and builds it
+// after the start commits (#793), which is platform work, and the span's own
+// start and its wire timestamps stay where the start committed. Repeat calls
+// keep the first mark.
+func (m *ModelRequest) ModelCalling() {
+	if m.called.IsZero() {
+		m.called = time.Now()
+	}
 }
 
 // ModelDone records what the call to the model provider cost: how long it took,
@@ -108,12 +131,16 @@ type ModelRequest struct {
 // at all, so tokens the model really spent and really billed would go
 // unrecorded on exactly the paths that already cost money for nothing.
 //
-// Repeat calls keep the first reading.
+// Repeat calls keep the first reading. The duration runs from ModelCalling;
+// without that mark there was no call to time, and none is taken.
 func (m *ModelRequest) ModelDone(usage *domain.ModelUsage) {
-	if m.modelElapsed != 0 {
+	if m.done {
 		return
 	}
-	m.modelElapsed = time.Since(m.started)
+	m.done = true
+	if !m.called.IsZero() {
+		m.modelElapsed = time.Since(m.called)
+	}
 	if usage != nil {
 		m.usage, m.hasUsage = *usage, true
 	}
@@ -129,6 +156,11 @@ func (m *ModelRequest) SetAttributes(attrs ...attribute.KeyValue) {
 // StartEventID is the id of the span.model_request_start event, which the
 // end event references as model_request_start_id.
 func (m *ModelRequest) StartEventID() domain.ID { return m.startID }
+
+// StartSeq is the start event's seq. The request consumes every input of its
+// thread below it that no earlier request did (#793), so it bounds the history
+// the brain reads for the request once the start has committed.
+func (m *ModelRequest) StartSeq() int64 { return m.startSeq }
 
 // EndEvent renders the span.model_request_end wire event for the caller to
 // append — the turn's settlement commits it atomically with the rest of the

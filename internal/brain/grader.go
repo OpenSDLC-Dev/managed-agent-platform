@@ -77,19 +77,22 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 		return b.completeStaleItem(ctx, item)
 	}
 
-	history, err := b.log.List(ctx, sid, events.ListQuery{})
+	// The lease is kept from the claim: the reads, the deliverables and the
+	// rubric below all come before the grader's call, and the lease they run
+	// under must not lapse behind them. Every return before the call closes
+	// the keeper first, since a settlement reads the lease it maintains.
+	kctx, keeper := b.queue.KeepLease(ctx, item, b.cfg.LeaseTTL, 0)
+	history, start, watermark, err := b.gradingHistory(kctx, sid, active.OutcomeID)
 	if err != nil {
+		_ = keeper.Close()
 		return fmt.Errorf("grading replay: %w", err)
 	}
-	// The head this cycle read: what lands past it arrived while the grader
-	// ran, and this cycle's settlement is the one that must not idle past it.
-	var watermark int64
-	if n := len(history); n > 0 {
-		watermark = history[n-1].Seq
-	}
-	startID := events.LatestOutcomeStartID(history, active.OutcomeID)
+	startID := start.ID
 	d, found := events.FindDefineOutcome(history, active.OutcomeID)
 	if !found {
+		if err := keeper.Close(); err != nil {
+			return fmt.Errorf("grader lease keeper: %w", err)
+		}
 		// Deterministic corruption: the entry exists but its definition is
 		// not on the log. Retrying cannot fix it; settle the outcome failed.
 		return b.settleVerdict(ctx, item, nil, active, startID,
@@ -100,6 +103,9 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 
 	p, err := b.registry.Provider(agent.Model.ID)
 	if err != nil {
+		if err := keeper.Close(); err != nil {
+			return fmt.Errorf("grader lease keeper: %w", err)
+		}
 		return b.settleGraderError(ctx, item, active,
 			fmt.Sprintf("no provider for grader model %q: %v", agent.Model.ID, err), watermark)
 	}
@@ -108,12 +114,13 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	// Read the harvested snapshot before the start event: a transient registry
 	// read faults the item here and the reclaim retries a cycle that has not
 	// visibly begun.
-	deliverables, err := b.deliverablesSection(ctx, sid)
+	deliverables, err := b.deliverablesSection(kctx, sid)
 	if err != nil {
+		_ = keeper.Close()
 		return err
 	}
 
-	sctx, oe := b.log.StartOutcomeEvaluation(ctx, sid, active.OutcomeID, active.Iteration, startID,
+	sctx, oe := b.log.StartOutcomeEvaluation(kctx, sid, active.OutcomeID, active.Iteration, startID,
 		events.Backend{Provider: desc.Protocol, Model: desc.Model})
 
 	req := provider.Request{
@@ -127,7 +134,16 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 		}},
 	}
 
-	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
+	// Ownership proven right before the call, by a renewal that fails unless
+	// the item is still this claimant's and unexpired (an interrupt cancels
+	// it), as the agent turn proves it: a grader call made anyway is billed
+	// for a verdict nobody may commit. The instant after the renewal is
+	// inherent; settleVerdict's own lease proof rejects a stale verdict.
+	if err := keeper.Renew(sctx); err != nil {
+		cerr := keeper.Close()
+		oe.Finish("", errors.Join(err, cerr))
+		return fmt.Errorf("grader call: %w", err)
+	}
 	hbStop := make(chan struct{})
 	hbDone := make(chan struct{})
 	go func() {
@@ -145,7 +161,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 			}
 		}
 	}()
-	text, usage, streamErr := consumeGraderStream(kctx, p, req)
+	text, usage, streamErr := consumeGraderStream(sctx, p, req)
 	close(hbStop)
 	// Join before settling: a tick in flight as the stream ended must commit
 	// (or be fenced) before the end event does, never after it.
@@ -202,6 +218,37 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	return err
 }
 
+// gradingHistory reads what a grading cycle grades: the log as it stood when
+// the cycle was scheduled, below its span.outcome_evaluation_start, which
+// committed then (#793). What lands after that start — before the claim or
+// during the call — is not what the verdict is about: it is input for the next
+// turn, and replay and the transcripts place it after the verdict, the
+// grading window's close (events.ConsumptionOrderer). It also returns that
+// start, which the verdict's end event names, and the watermark: the log's
+// head at the claim, past which input arrives while the grader runs and the
+// cycle's settlement must not idle past it (gradingChain).
+func (b *Brain) gradingHistory(ctx context.Context, sid, outcomeID domain.ID) ([]domain.Event, domain.Event, int64, error) {
+	starts, err := b.log.List(ctx, sid, events.ListQuery{Types: []string{string(domain.EventSpanOutcomeEvalStart)}})
+	if err != nil {
+		return nil, domain.Event{}, 0, err
+	}
+	start := events.LatestOutcomeStart(starts, outcomeID)
+	q := events.ListQuery{}
+	if start.Seq > 0 {
+		q.BeforeSeq = &start.Seq
+	}
+	history, err := b.log.List(ctx, sid, q)
+	if err != nil {
+		return nil, domain.Event{}, 0, err
+	}
+	var head int64
+	if err := b.pool.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1`, sid.String()).
+		Scan(&head); err != nil {
+		return nil, domain.Event{}, 0, err
+	}
+	return history, start, head, nil
+}
+
 // verdictNeedsRevision is the end event's needs_revision result — a cycle
 // verdict, never an entry state (the entry goes back to running).
 const verdictNeedsRevision = "needs_revision"
@@ -210,29 +257,35 @@ const verdictNeedsRevision = "needs_revision"
 // and it is the union of the two an agent turn uses — because its halves pull
 // in opposite directions. Inbound input is unfiltered (pendingInput from zero):
 // grading marks nothing processed, the grader consuming no user input, so an
-// event that landed between the scheduling commit and the grading claim — its
-// seq below everything this cycle read — must still chain, where a
-// seq-filtered probe would idle past it and strand it forever. A report is
-// seq-filtered (chainInput from the head this cycle read) because it can be
-// found no other way, an agent.* event being stamped processed_at at write,
-// and because from zero it would match every report the session ever carried.
+// event that landed between the scheduling commit and the grading claim —
+// past what the cycle grades, but below the watermark, the log's head at the
+// claim — must still chain, where a seq-filtered probe would idle past it and
+// strand it forever. A report is
+// seq-filtered (chainInput from the head this cycle read) because from zero it
+// would match every report the session ever carried — and a report a build
+// before #793 wrote, stamped at write, can be found no other way.
 //
 // So the halves leave a seam between them — the pre-claim stretch, where a
-// report would be below the watermark and stamped, matched by neither — and
-// what closes it is not this probe but the rule that schedules a cycle at
-// all (settleEndTurn, decision 15): grading starts only where the fold moves
-// the SESSION to idle/end_turn, and requires_action and retries_exhausted
-// both outrank end_turn in that pick, so every live thread is idle on
-// end_turn when the cycle is scheduled. No child is running to report, and a
-// client cannot start one — user.message addresses the primary (decision 9),
-// which is the thread now grading. The one agent.thread_message_received
-// that can still land there is the platform's own ending notice, from a
-// child archived while the cycle runs, and it is bounded rather than
-// stranded: a needs_revision verdict replays the whole log into the
-// coordinator's revision turn, and a terminal one idles the primary with the
-// notice unread on the log, where the next user.message replays it.
+// report would be below the watermark and of a type the inbound probe does
+// not ask for, matched by neither. (Since #793 a report stays unprocessed
+// until a request consumes it, so adding its type to the from-zero probe
+// would close the seam; that is not done, because it would add an agent turn
+// after a terminal verdict.) What closes it is not this probe but the rule
+// that schedules a cycle at all (settleEndTurn, decision 15): grading starts
+// only where the fold moves the SESSION to idle/end_turn, and requires_action
+// and retries_exhausted both outrank end_turn in that pick, so every live
+// thread is idle on end_turn when the cycle is scheduled. No child is running
+// to report, and a client cannot start one — user.message addresses the
+// primary (decision 9), which is the thread now grading. What can still land
+// there is the platform's own ending notice: the one the scheduling commit
+// carries when a child's end_turn is the quiescence, or one from a child
+// archived before the claim. It is bounded rather than stranded: a
+// needs_revision verdict replays the whole log into the coordinator's
+// revision turn, and a terminal one idles the primary with the notice unread
+// on the log, where the next user.message replays it — though the same
+// notice landing during the grader's call chains a turn instead (#801).
 func gradingChain(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {
-	pending, err := pendingInput(ctx, tx, sid, "", 0)
+	pending, err := pendingInput(ctx, tx, sid, "")
 	if err != nil || pending {
 		return pending, err
 	}
@@ -242,8 +295,8 @@ func gradingChain(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64
 // settleVerdict commits one evaluation cycle's outcome: the end event, the
 // entry mutation, and the item's fate — one transaction under the session
 // row lock, mirroring the agent turn's settlement discipline. watermark is the
-// head of the log this cycle read, which is what tells a report that landed
-// while the grader ran from the ones already answered.
+// head of the log at the cycle's claim (gradingHistory), which is what tells a
+// report that landed while the grader ran from the ones already answered.
 func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.OutcomeEvaluation,
 	active domain.OutcomeEvaluation, startID domain.ID,
 	result, explanation string, usage domain.ModelUsage, watermark int64) error {

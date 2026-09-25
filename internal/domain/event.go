@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
@@ -111,6 +112,28 @@ func (t EventType) Inbound() bool {
 	default:
 		return false
 	}
+}
+
+// ConsumedInputs are the inputs a model request consumes when it starts
+// (#793), and the one list every set built on that fact derives from: the
+// consumption rule (events.ConsumedInput), what a request's start stamps
+// (events.RequestInputTypes), what may be written unprocessed
+// (StampedOnConsumption) and what chains a thread's next turn (the brain's
+// pendingInputTypes). The start stamps each 1 µs before its
+// span.model_request_start, as the reference stamps it, and one that lands
+// while a request is in flight is the next request's.
+var ConsumedInputs = []EventType{EventUserMessage, EventUserDefineOutcome, EventAgentThreadMessageReceived}
+
+// StampedOnConsumption reports whether this event may be written unprocessed,
+// its processed_at left null until whatever consumes it stamps it — every
+// inbound event, and every consumed input the platform writes itself: a
+// delivered agent-to-agent message, read by its target's next request (#793).
+// What consumes each differs: an answer is stamped by its thread's ordered
+// processor, and an input a model request reads by that request's start, 1 µs
+// before it, as the reference stamps it (events.RequestInputTypes).
+// Everything else the platform writes is processed on emission.
+func (t EventType) StampedOnConsumption() bool {
+	return t.Inbound() || slices.Contains(ConsumedInputs, t)
 }
 
 // StartsNewWork reports whether this event is somebody outside the session

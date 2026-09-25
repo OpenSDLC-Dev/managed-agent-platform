@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -45,6 +46,26 @@ func TestEventInbound(t *testing.T) {
 	for _, et := range outbound {
 		if et.Inbound() {
 			t.Errorf("%q should not be inbound", et)
+		}
+	}
+}
+
+// Every inbound event is written unprocessed, and so is the one platform
+// event that is an input: a delivered agent-to-agent message, consumed by its
+// target's next request (#793). Everything else the platform writes is
+// processed on emission.
+func TestEventStampedOnConsumption(t *testing.T) {
+	for _, et := range append(slices.Clone(inboundTypes), EventAgentThreadMessageReceived) {
+		if !et.StampedOnConsumption() {
+			t.Errorf("%q should be stamped on consumption", et)
+		}
+	}
+	for _, et := range []EventType{
+		EventAgentThreadMessageSent, EventAgentMessage, EventAgentToolResult,
+		EventSessionThreadStatusRunning, EventSpanModelRequestStart,
+	} {
+		if et.StampedOnConsumption() {
+			t.Errorf("%q is processed on emission", et)
 		}
 	}
 }

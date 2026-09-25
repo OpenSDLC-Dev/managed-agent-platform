@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -281,37 +282,159 @@ func TestDefineOutcomeChainsMidTurn(t *testing.T) {
 	}
 }
 
+// pendingInputTypes derives from domain.ConsumedInputs, with the tool results
+// as its stated extra: the consumed inputs a client posts, and the answers a
+// live item's enqueue suppression leaves for the next turn. Pinned whole, as
+// events pins the sets beside it, so a hand-kept copy that drifts fails.
+func TestPendingInputTypesDeriveFromTheConsumedInputs(t *testing.T) {
+	want := []string{"user.custom_tool_result", "user.define_outcome", "user.message", "user.tool_result"}
+	if got := slices.Sorted(slices.Values(pendingInputTypes)); !slices.Equal(got, want) {
+		t.Errorf("pendingInputTypes = %v, want %v", got, want)
+	}
+}
+
 func TestPendingInputChainsDefineOutcome(t *testing.T) {
-	// The DB contract behind mid-turn chaining: an unprocessed
-	// user.define_outcome past the watermark reports pending input; at or
-	// before the watermark (or once processed) it does not.
+	// The DB contract behind chaining where no watermark applies (the grading
+	// probe, the delegation bound): an unprocessed user.define_outcome is
+	// input no request has started on, so it is pending; once a request's
+	// start has stamped it, it is not.
 	pool := pgtest.NewPool(t)
 	sid, _ := pgtest.NewSession(t, pool, "cloud")
 	log := events.NewLog(pool)
-	appended, err := log.Append(context.Background(), sid, []events.NewEvent{{
+	if _, err := log.Append(context.Background(), sid, []events.NewEvent{{
 		Type:    domain.EventUserDefineOutcome,
 		Payload: []byte(`{"description":"d","rubric":{"type":"text","content":"r"},"max_iterations":3,"outcome_id":"outc_1"}`),
-	}})
-	if err != nil {
+	}}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	seq := appended[0].Seq
 
-	check := func(watermark int64, want bool) {
+	check := func(want bool) {
 		t.Helper()
 		tx, err := pool.Begin(context.Background())
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(context.Background())
-		got, err := pendingInput(context.Background(), tx, sid, "", watermark)
+		got, err := pendingInput(context.Background(), tx, sid, "")
 		if err != nil {
 			t.Fatalf("pendingInput: %v", err)
 		}
 		if got != want {
-			t.Errorf("pendingInput(watermark=%d) = %v, want %v", watermark, got, want)
+			t.Errorf("pendingInput = %v, want %v", got, want)
 		}
 	}
-	check(seq-1, true) // unprocessed define_outcome past the watermark chains
-	check(seq, false)  // at the watermark: already consumed by this turn
+	check(true)
+	if _, _, err := log.StartModelRequestOn(context.Background(), sid, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+}
+
+// A message posted while request k was in flight replays after reply k, which
+// never saw it (#793 item 4): the chained request ends on that message as a
+// user turn instead of on the assistant's reply — an assistant turn last is a
+// prefill, which current Anthropic models refuse with a 400. The watermark is
+// still the highest seq replayed although the row replayed last is not it:
+// the settlement's chain check keys on it.
+func TestBuildRequestReplaysAMidRequestInputAfterTheReply(t *testing.T) {
+	start := ev(2, domain.EventSpanModelRequestStart, `{}`)
+	history := []domain.Event{
+		ev(1, domain.EventUserMessage, `{"content":"one"}`),
+		start,
+		ev(3, domain.EventUserMessage, `{"content":"two"}`),
+		ev(4, domain.EventAgentMessage, `{"content":[{"type":"text","text":"first answer"}]}`),
+		ev(5, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
+	}
+	req, watermark, err := buildRequest("", nil, history, "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != 5 {
+		t.Errorf("watermark = %d, want 5, the max seq", watermark)
+	}
+	var roles []string
+	for _, m := range req.Messages {
+		roles = append(roles, m.Role)
+	}
+	if !slices.Equal(roles, []string{"user", "assistant", "user"}) {
+		t.Fatalf("roles = %v, want user, assistant, user", roles)
+	}
+	if !strings.Contains(string(req.Messages[2].Content), `"two"`) {
+		t.Errorf("last user turn = %s, want the mid-request message", req.Messages[2].Content)
+	}
+}
+
+// The grader's call is a window on the primary like a model request's: a
+// message posted while it ran never reached the verdict, so the revision
+// request reads the grader's feedback first and the message after it, in the
+// one user turn the two merge into.
+func TestBuildRequestReplaysAMessagePostedDuringGradingAfterTheVerdict(t *testing.T) {
+	start := ev(2, domain.EventSpanModelRequestStart, `{}`)
+	grading := ev(5, domain.EventSpanOutcomeEvalStart, `{"outcome_id":"outc_1","iteration":0}`)
+	history := []domain.Event{
+		ev(1, domain.EventUserDefineOutcome,
+			`{"description":"Build it","rubric":{"type":"text","content":"# Rubric"},"max_iterations":3,"outcome_id":"outc_1"}`),
+		start,
+		ev(3, domain.EventAgentMessage, `{"content":[{"type":"text","text":"draft"}]}`),
+		ev(4, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
+		grading,
+		ev(6, domain.EventUserMessage, `{"content":"also add a chart"}`),
+		ev(7, domain.EventSpanOutcomeEvalEnd, `{"outcome_id":"outc_1","outcome_evaluation_start_id":"`+
+			grading.ID.String()+`","result":"needs_revision","explanation":"missing the totals"}`),
+	}
+	req, _, err := buildRequest("", nil, history, "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 3 || req.Messages[2].Role != "user" {
+		t.Fatalf("messages = %+v, want the outcome, the draft, then one user turn", req.Messages)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(req.Messages[2].Content, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 || !strings.Contains(fmt.Sprint(blocks[0]["text"]), "missing the totals") ||
+		blocks[1]["text"] != "also add a chart" {
+		t.Errorf("revision turn = %v, want the grader's feedback, then the message", blocks)
+	}
+}
+
+// Held inputs now leave at the next start, after everything the in-flight
+// request produced, and a message posted between its end and its call's
+// async result joins them. The request stays valid: the call, then one user
+// turn answering it with the result first and both messages after it, in
+// receipt order.
+func TestBuildRequestReplaysInputsHeldPastAnAsyncResult(t *testing.T) {
+	start := ev(2, domain.EventSpanModelRequestStart, `{}`)
+	call := ev(4, domain.EventAgentCustomToolUse, `{"name":"decide","input":{}}`)
+	history := []domain.Event{
+		ev(1, domain.EventUserMessage, `{"content":"one"}`),
+		start,
+		ev(3, domain.EventUserMessage, `{"content":"two"}`),
+		call,
+		ev(5, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
+		ev(6, domain.EventUserMessage, `{"content":"three"}`),
+		ev(7, domain.EventUserCustomToolRes, `{"custom_tool_use_id":"`+call.ID.String()+`","content":[{"type":"text","text":"decided"}]}`),
+	}
+	req, watermark, err := buildRequest("", nil, history, "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != 7 {
+		t.Errorf("watermark = %d, want 7", watermark)
+	}
+	var roles []string
+	for _, m := range req.Messages {
+		roles = append(roles, m.Role)
+	}
+	if !slices.Equal(roles, []string{"user", "assistant", "user"}) {
+		t.Fatalf("roles = %v, want user, assistant, user", roles)
+	}
+	var last []map[string]any
+	if err := json.Unmarshal(req.Messages[2].Content, &last); err != nil {
+		t.Fatal(err)
+	}
+	if len(last) != 3 || last[0]["type"] != "tool_result" || last[1]["text"] != "two" || last[2]["text"] != "three" {
+		t.Errorf("last user turn = %v, want the result, then two, then three", last)
+	}
 }

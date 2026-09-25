@@ -227,6 +227,27 @@ func FlipNonTerminalOutcomes(now time.Time) func([]domain.OutcomeEvaluation) ([]
 	}
 }
 
+// BeginOutcomeWork flips every pending outcome entry to running, inside the
+// caller's transaction and under the session row lock it holds: the primary's
+// model request start calls it, because that request is the one that reads
+// each pending entry's user.define_outcome — the entry and its event commit
+// together, so every entry pending at the start has its event below it
+// (#793). Entry state only, as no wire event exists for the flip.
+//
+// One guarded statement rather than the read-modify-write MutateOutcomes
+// runs: it runs on every primary start, and on all but the one that begins an
+// outcome there is nothing pending, so the guard leaves the row — updated_at
+// included — untouched, with nothing decoded.
+func BeginOutcomeWork(ctx context.Context, tx pgx.Tx, sessionID domain.ID) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE sessions SET updated_at = now(), outcome_evaluations = (
+		   SELECT jsonb_agg(CASE WHEN e->>'result' = $2 THEN jsonb_set(e, '{result}', to_jsonb($3::text)) ELSE e END ORDER BY i)
+		     FROM jsonb_array_elements(outcome_evaluations) WITH ORDINALITY AS entry(e, i))
+		 WHERE id = $1 AND outcome_evaluations @> jsonb_build_array(jsonb_build_object('result', $2::text))`,
+		sessionID.String(), domain.OutcomeResultPending, domain.OutcomeResultRunning)
+	return err
+}
+
 // ActiveOutcome returns the first non-terminal outcome entry, if any. The
 // reference allows one active outcome at a time, so first is only.
 func ActiveOutcome(evals []domain.OutcomeEvaluation) (domain.OutcomeEvaluation, bool) {
@@ -254,14 +275,15 @@ func FindDefineOutcome(history []domain.Event, outcomeID domain.ID) (DefineOutco
 	return DefineOutcome{}, false
 }
 
-// LatestOutcomeStartID returns the id of the most recent
-// span.outcome_evaluation_start for outcomeID in the history — the start the
-// cycle's end event references. A reclaimed cycle re-grades under a fresh
-// start, so the latest is the live one; earlier dangling starts are the
-// recorded crash-window residue.
-func LatestOutcomeStartID(history []domain.Event, outcomeID domain.ID) domain.ID {
-	var id domain.ID
-	for _, ev := range history {
+// LatestOutcomeStart returns the most recent span.outcome_evaluation_start
+// for outcomeID among evs, or the zero event when there is none — the start
+// the cycle's end event references, and the row whose seq bounds what the
+// cycle grades. A reclaimed cycle re-grades under a fresh start, so the latest
+// is the live one; earlier dangling starts are the recorded crash-window
+// residue.
+func LatestOutcomeStart(evs []domain.Event, outcomeID domain.ID) domain.Event {
+	var start domain.Event
+	for _, ev := range evs {
 		if ev.Type != domain.EventSpanOutcomeEvalStart {
 			continue
 		}
@@ -269,10 +291,10 @@ func LatestOutcomeStartID(history []domain.Event, outcomeID domain.ID) domain.ID
 			OutcomeID string `json:"outcome_id"`
 		}
 		if json.Unmarshal(ev.Body, &p) == nil && p.OutcomeID == outcomeID.String() {
-			id = ev.ID
+			start = ev
 		}
 	}
-	return id
+	return start
 }
 
 // NewOutcomeStartEvent renders a span.outcome_evaluation_start with a

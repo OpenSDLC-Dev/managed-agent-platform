@@ -969,10 +969,11 @@ func sessionStatusNow(ctx context.Context, tx pgx.Tx, sid domain.ID) (domain.Ses
 // watermark: unprocessed inbound input, or an agent-to-agent message
 // delivered to this thread past the head its turn replayed. The second half
 // is what makes a report reach a parent that was running when it landed — the
-// delivering child saw the parent running and correctly did not wake it — and
-// it must be detected by seq rather than by processed_at, because an agent.*
-// event is stamped at write and pendingInput's predicate can never see one
-// (plan 35 decision 7).
+// delivering child saw the parent running and correctly did not wake it (plan
+// 35 decision 7). It is found by seq rather than by processed_at: a report is
+// unprocessed until a request consumes it (#793), but one past the watermark
+// cannot have been consumed while this thread's item is held, so the seq test
+// is exact, and it still finds a report an older build stamped at write.
 func chainInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, watermark int64) (bool, error) {
 	var chained bool
 	err := tx.QueryRow(ctx,
@@ -1114,7 +1115,7 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 	// are deliberately not resets, and idling a thread that holds one
 	// unprocessed would strand it with no trigger left, breaking the
 	// chain-or-idle contract every other terminal settlement honours.
-	pending, err := pendingInput(ctx, tx, sid, item.ThreadID, 0)
+	pending, err := pendingInput(ctx, tx, sid, item.ThreadID)
 	if err != nil {
 		return false, err
 	}

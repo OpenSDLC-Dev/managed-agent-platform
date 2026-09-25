@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -28,6 +29,16 @@ type LeaseKeeper struct {
 	// provider.StallGuard measures the model endpoint the same way.
 	start time.Time
 	last  atomic.Int64 // nanoseconds since start of the last reported progress
+
+	// mu serializes every write of the item's lease while the keeper runs —
+	// its own renewals and a holder's Renew — and guards bought, when the
+	// lease currently held was bought. The holder reads item.Lease again only
+	// after Close.
+	mu     sync.Mutex
+	bought time.Time
+	q      *Queue
+	item   *Item
+	ttl    time.Duration
 }
 
 // KeepLease starts a keeper that extends item's lease to ttl at every ttl/3 until
@@ -60,7 +71,8 @@ type LeaseKeeper struct {
 // and only the error naming it differs.
 func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl, stall time.Duration) (context.Context, *LeaseKeeper) {
 	kctx, cancel := context.WithCancel(ctx)
-	k := &LeaseKeeper{cancel: cancel, quit: make(chan struct{}), done: make(chan struct{}), start: time.Now()}
+	k := &LeaseKeeper{cancel: cancel, quit: make(chan struct{}), done: make(chan struct{}), start: time.Now(),
+		q: q, item: item, ttl: ttl}
 	// Renew at a third of the lease. Guard the degenerate case: a sub-3ns TTL
 	// (operator misconfiguration — a lease that short is unusable anyway) would
 	// otherwise make the interval zero and panic time.NewTicker.
@@ -93,7 +105,7 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl, stall time.Durat
 	// covers a reclaim landing after the keeper has closed healthy. What the
 	// overstatement does cost is a holder working past the point that could
 	// happen, so the gap is worth keeping small rather than calling it free.
-	bought := time.Now()
+	k.bought = time.Now()
 	go func() {
 		defer close(k.done)
 		t := time.NewTicker(interval)
@@ -148,8 +160,10 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl, stall time.Durat
 				// time of day. Measuring elapsed time still asks them to agree on
 				// the rate of a second, which is a far weaker assumption and the
 				// only one this can be built on.
-				budget := ttl - time.Since(bought)
+				k.mu.Lock()
+				budget := ttl - time.Since(k.bought)
 				if budget <= 0 {
+					k.mu.Unlock()
 					// A tick this late means the goroutine was starved for a whole
 					// lease; there is nothing left to renew.
 					k.failed = fmt.Errorf("queue: keep lease %s: %w", item.ID, ErrLeaseLost)
@@ -160,6 +174,7 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl, stall time.Durat
 				err := q.Extend(ectx, item, ttl)
 				ecancel()
 				if err != nil {
+					k.mu.Unlock()
 					k.failed = err
 					k.cancel() // aborts the in-flight tool run or provider stream
 					return
@@ -180,11 +195,34 @@ func (q *Queue) KeepLease(ctx context.Context, item *Item, ttl, stall time.Durat
 				// it is replacing, not the wall clock, so an item nobody reclaimed
 				// is simply re-extended. It is a reclaim, never the clock, that
 				// turns a renewal into ErrLeaseLost.
-				bought = time.Now()
+				k.bought = time.Now()
+				k.mu.Unlock()
 			}
 		}
 	}()
 	return kctx, k
+}
+
+// Renew proves, right now, that the item is still this holder's, by renewing
+// its lease for a whole TTL in one statement that succeeds only while the item
+// is active, its lease unexpired and still the value this keeper holds. A
+// cancelled item (a user.interrupt's queue.CancelSession), a reclaimed one and
+// a lapsed one all fail it with ErrLeaseLost. It is the proof a holder takes
+// right before an action it cannot take back — a billed model call — and it
+// leaves that action a full lease. The instant between its statement and the
+// action stays open, as it must between any check and any act; what closes
+// that one is the settling commit's own lease proof, which rejects a stale
+// holder's output whatever it did in between. It goes through the keeper,
+// under the lock the keeper's own renewals take, because both write the
+// item's lease.
+func (k *LeaseKeeper) Renew(ctx context.Context) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.q.renewLive(ctx, k.item, k.ttl); err != nil {
+		return err
+	}
+	k.bought = time.Now()
+	return nil
 }
 
 // Progress reports that the work has moved: another tool answered, another mount

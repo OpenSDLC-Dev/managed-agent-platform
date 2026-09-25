@@ -82,6 +82,7 @@ func TestModelRequestRecordsGenAIMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	mr.ModelCalling() // the provider call begins
 	usage := domain.ModelUsage{InputTokens: 11, OutputTokens: 7}
 	mr.ModelDone(&usage)
 	if _, err := mr.EndEvent(false, usage); err != nil {
@@ -150,6 +151,7 @@ func TestModelRequestCountsCachedTokensAsInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	mr.ModelCalling() // the provider call begins
 	// A replayed session: a big cache read, a little cache creation, and only a
 	// few genuinely fresh tokens.
 	usage := domain.ModelUsage{
@@ -199,6 +201,7 @@ func TestModelRequestRecordsCacheTokenBreakdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	mr.ModelCalling() // the provider call begins
 	usage := domain.ModelUsage{
 		InputTokens:              30,
 		CacheReadInputTokens:     9000,
@@ -275,6 +278,7 @@ func TestModelRequestRecordsFailureWithoutTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	mr.ModelCalling() // the provider call begins
 	ev, err := mr.EndEvent(true, domain.ModelUsage{})
 	if err != nil {
 		t.Fatalf("end event: %v", err)
@@ -322,6 +326,7 @@ func TestModelRequestRecordsUsageEvenWhenTheTurnNeverSettles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	mr.ModelCalling() // the provider call begins
 	// The stream completed and reported usage...
 	mr.ModelDone(&domain.ModelUsage{InputTokens: 400, OutputTokens: 90})
 	// ...then the lease was lost, so nothing settles and no end event is ever
@@ -358,6 +363,7 @@ func TestModelRequestDurationExcludesSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	mr.ModelCalling()                                                 // the provider call begins
 	mr.ModelDone(&domain.ModelUsage{InputTokens: 1, OutputTokens: 1}) // the stream ended here
 	settle := 60 * time.Millisecond
 	time.Sleep(settle) // a slow settlement transaction
@@ -376,9 +382,62 @@ func TestModelRequestDurationExcludesSettlement(t *testing.T) {
 	}
 }
 
+// The span start commits before the brain reads the request's history and
+// builds it (#793), and that is platform work: the model-latency clock starts
+// at ModelCalling, just before the provider call, and the span start's wire
+// timestamp stays where the start committed.
+func TestModelRequestDurationExcludesTheWorkBeforeTheCall(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	collect := collectMetrics(t)
+
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	replay := 60 * time.Millisecond
+	time.Sleep(replay) // the history read and the request build
+	mr.ModelCalling()
+	mr.ModelDone(&domain.ModelUsage{InputTokens: 1, OutputTokens: 1})
+	mr.Finish(ctx, false, nil)
+
+	dur := floatPoints(collect(), "gen_ai.client.operation.duration")
+	if len(dur) != 1 {
+		t.Fatalf("duration points = %d, want 1", len(dur))
+	}
+	if dur[0].Sum >= replay.Seconds() {
+		t.Errorf("duration = %vs, which includes the %v of platform work before the call", dur[0].Sum, replay)
+	}
+}
+
+// A request that never reached the provider — its replay failed after the
+// start committed — made no call, so the latency instrument gets no reading:
+// the span still ends in error, but a platform-only duration filed as a model
+// call would be a latency and an error no model produced.
+func TestModelRequestThatNeverCalledRecordsNoDuration(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	collect := collectMetrics(t)
+
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	mr.ModelDone(nil) // no call: nothing to time
+	mr.Finish(ctx, true, nil)
+
+	if dur := floatPoints(collect(), "gen_ai.client.operation.duration"); len(dur) != 0 {
+		t.Errorf("duration points = %d on a request that never called the provider, want 0", len(dur))
+	}
+}
+
 // A turn that died before the stream ever finished never marks a model
 // boundary. It still has a duration worth recording — the attempt — so the
-// measure must fall back to the request's own elapsed rather than report zero.
+// measure must fall back to the call's own elapsed rather than report zero.
 func TestModelRequestDurationFallsBackWhenTheStreamNeverEnded(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
@@ -390,6 +449,7 @@ func TestModelRequestDurationFallsBackWhenTheStreamNeverEnded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	mr.ModelCalling()         // the provider call begins
 	mr.Finish(ctx, true, nil) // no ModelDone: the turn was abandoned mid-stream
 
 	dur := floatPoints(collect(), "gen_ai.client.operation.duration")

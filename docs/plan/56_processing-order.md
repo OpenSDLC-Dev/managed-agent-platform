@@ -202,24 +202,96 @@ answer resumes moves after the append, once the answer is on the log, so an inpu
 posted beside that answer precedes the resume's running pair instead of following
 it.
 
-**PR-B** places a message posted mid-turn after the assistant reply it never saw,
-in what the model sees on replay only. It does not move the message's list or
-stream position: seq stays the receipt order across commits, and the difference
-that leaves is registered rather than chased. PR-B lands after PR-A, and owns the
-registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
-/v1/sessions/{id}/events — list filters and order keyed on created_at/seq").
+**PR-B** (the owner's decisions on item 4, 2026-09-25) places an input consumed
+later than it was received where it was consumed, in everything a model reads,
+and stamps its `processed_at` there — this plan's second PR:
+
+- **Replay by consumption window.** A `user.message`, `user.define_outcome` or
+  `agent.thread_message_received` that landed while one of its thread's model
+  requests was in flight replays right before the thread's next
+  `span.model_request_start`, where that request consumed it and the
+  reference stamps it — so after everything the in-flight request produced,
+  its results included, whatever a delegated settle or an executor wrote
+  around them — together with any input that joined it before that start
+  (`events.ConsumptionOrder`, a pure function of the thread's rows; a dangling
+  start is closed by the thread's next start). A grading cycle grades the log
+  as it stood when the cycle was scheduled, below its
+  `span.outcome_evaluation_start`, so that start and the verdict's end are a
+  window on the primary too: an input that lands after scheduling follows the
+  verdict, where the next turn reads it. The watermark stays the highest seq
+  replayed. A chained request after an `end_turn` reply therefore ends on the
+  new message instead of on the reply — a prefill, which Claude 4.6 and later
+  reject with a 400. The request
+  reads its history once, after its span start commits, bounded by it, so it
+  is exactly the rows of its thread below the start, which that start
+  consumes. The lease is kept from the start, and ownership is proven right
+  before the model call by a renewal that fails unless the item is still the
+  claimant's and unexpired, so an interrupt that lands after the start stops
+  the call; a grading cycle proves its lease the same way before the grader's
+  call. The instant between that renewal and the call is inherent; the
+  settlement's own lease proof rejects a stale claimant's output there.
+- **The grader's and the dream's transcripts** follow the same rule, per thread;
+  the dream streams it and releases held inputs early once they outweigh its
+  transcript cap.
+- **`processed_at` at consumption.** The span start's commit stamps the thread's
+  inputs below it that no earlier start stamped, at the start's `processed_at`
+  minus 1 µs, as the reference stamps 139 of the 140 recorded consumptions.
+  `agent.thread_message_received` is written unprocessed until then. The turn's
+  settle stops stamping, and the start carries the brain's lease proof. On the
+  primary the same commit flips a pending outcome to `running`: the request
+  that reads its `user.define_outcome` is the one that begins work on it.
+  The settle's stamp had also caught what no request reads, so those move
+  too. Every `user.interrupt` is stamped on receipt in its own send, where
+  PR-A stamped only a child-scoped one, as the reference stamps one (sessT
+  idx 36): after its results, before its idle pairs. An interrupt or a
+  child's archive also stamps an answer it supersedes — a confirmation held
+  behind an earlier call of its thread, whose call it answers — since no
+  later walk reaches that call. Every inbound type now has exactly one
+  stamper: a request input the start, an answer its thread's walk (or the
+  send, the interrupt or the archive that answers its call), an interrupt
+  its own send. For rows an older build left null for its settle to stamp,
+  a start also repairs its thread's below it: a null interrupt, and a null
+  answer whose call already has a processed result.
+
+It does not move a message's list or stream position: seq stays the receipt order
+across commits, and the difference that leaves is registered rather than chased,
+in docs/DIVERGENCES.md's entries on list order and on `processed_at`. Replay
+changes once for existing sessions, at one prompt-cache miss (accepted by the
+owner), and that repairs a session the prefill 400 had wedged. The rule reads
+every input below a start as that request's, which a log written before this PR
+can contradict: an input that landed between an older brain's history read and
+its span start was in the next request only, and replays one request early,
+ahead of a reply that never saw it. That window was milliseconds wide, so no
+special case is kept for it.
+
+**PR-C** (added 2026-09-26; this plan's last PR, which archives it) takes the
+placement PR-A left out of reach: a thread an answer resumes. The reference writes
+a resumed turn's running pair ahead of what that turn consumes, a denial's result
+included. In 2026-09-12-archived-threads/batch1.json (`[5].body.data` idx 31 to
+35) a primary's deny reads `user.tool_confirmation`, `session.status_running`,
+`session.thread_status_running`, then the denial's `agent.tool_result`, 117 ms
+later and 1 µs before `span.model_request_start`, then that start. This platform
+writes the resume's pair in the settlement that runs after the send's append, so
+the denial's result, which PR-A lays beside its confirmation, and any input
+posted beside the answer come ahead of the pair. PR-C predicts the resume in the
+send's layout and writes its pair ahead of the input the resumed turn consumes,
+the denial's result included.
 
 ## Alternatives rejected
 
 - **A full processing-order log.** Giving each inbound event its log position when
   it is processed — an ordering column or a pending-input queue, listing and
-  streaming by it, stamping `processed_at` at turn start — would match the
-  reference everywhere, mid-turn messages included. It breaks the invariant that
-  seq is at once the receipt order, the list order and the stream cursor, and the
-  one that every accepted event is on the log from receipt; it re-keys the SSE
-  cursor, list paging, `MarkProcessedThrough`, the chain and watermark checks, and
-  needs a migration. Its only gain over PR-A plus PR-B is the list position of a
-  mid-turn message.
+  streaming by it — would match the reference everywhere, mid-turn messages
+  included. It breaks the invariant that seq is at once the receipt order, the
+  list order and the stream cursor, and the one that every accepted event is on
+  the log from receipt; it re-keys the SSE cursor, list paging, the chain and
+  watermark checks, and needs a migration. Its only gain over PR-A plus PR-B is
+  the list position of a mid-turn message. (Stamping `processed_at` at request
+  start, once part of this alternative, was adopted on its own in PR-B.)
+- **Ordering replay by `processed_at`.** Under the old settle-time stamp it put a
+  mid-turn message after the reply it was answered in, and it would make replay
+  depend on wall clocks; the consumption window is a pure function of seq and
+  row types, so replay does not read the stamp at all.
 - **Mimicking item 2.** Pairing a child's resume with the primary and letting the
   session's events follow the primary would idle the session under a working
   child: an executor would drop a confirmed call unrun, and an archive or delete
@@ -256,5 +328,17 @@ registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
   rather than changed, as is the placement out of reach, a message beside an
   answer that resumes the primary; so is the archive of a primary parked on a
   confirmation, which was already right.
+- For PR-B, also red on the old code: the consumption window's cases (an
+  `end_turn` and a tool turn, a delegated settle, a dangling start, received and
+  outcome inputs, per-thread windows, the watermark), inputs landing just
+  before the span start joining its request with their outcome running, the
+  grader and dream transcripts, the stamp at request start and a crash after it,
+  a received row null until its target's request starts, an interrupt of each
+  scope stamped at receipt (and one with nothing to stop, and the dream
+  runner's), and a held confirmation an interrupt or a child's archive
+  supersedes.
+- For PR-C, red on the old code: a denial that resumes the primary, listed as the
+  recording lists it (confirmation, running pair, the denial's result), and an
+  input posted beside an answer that resumes a thread, listed after the pair.
 - `make verify`, `make registry-check`, independent verification, both reviews and
   the PR's CI before squash merge.

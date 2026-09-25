@@ -267,9 +267,10 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// silently miss the first turn — and it costs one round trip per session,
 	// since only a server with no row at all gets here.
 	//
-	// It sits above the outcome flip below because a suspended turn is a turn
-	// that never begins: flipping first would record that the agent started work
-	// on the outcome and then produce nothing at all until a listing arrives.
+	// It sits above the span start below, whose commit flips a pending outcome
+	// to running, because a suspended turn is a turn that never begins: flipping
+	// first would record that the agent started work on the outcome and then
+	// produce nothing at all until a listing arrives.
 	declared, err := declaredMCPServers(agent)
 	if err != nil {
 		// Deterministic, exactly as the agent decode above is: this is a spec
@@ -285,37 +286,6 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return b.suspendForDiscovery(ctx, sid, item, undiscovered)
 	}
 
-	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultPending {
-		// The agent begins work now: the entry leaves pending for running
-		// (the SDK: "pending" before the agent begins work, "running" while
-		// producing or revising). Entry state only — no wire event exists
-		// for the flip.
-		if _, err := b.log.AppendWith(ctx, sid, nil, events.AppendOptions{
-			MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
-				for i := range evals {
-					if evals[i].OutcomeID == active.OutcomeID && evals[i].Result == domain.OutcomeResultPending {
-						evals[i].Result = domain.OutcomeResultRunning
-					}
-				}
-				return evals, nil
-			},
-			// The same lease discipline as the reclaim events above: a
-			// claimant that already lost the item must not write entry state
-			// another brain now owns.
-			Then: func(ctx context.Context, tx pgx.Tx) error {
-				return b.queue.Assert(ctx, tx, item)
-			},
-		}); err != nil {
-			return fmt.Errorf("outcome running flip: %w", err)
-		}
-	}
-
-	// The thread's own rows (plan 35 decision 5): a sibling's events — a
-	// child's cross-posted ask included — are not this conversation's.
-	history, err := b.log.List(ctx, sid, events.ListQuery{Scope: events.ScopeThread, ThreadID: item.ThreadID})
-	if err != nil {
-		return fmt.Errorf("replay: %w", err)
-	}
 	// Level-1 skill injection: resolve the agent's skills[] to a system-prompt
 	// block at request-assembly time (plan design decision 5). Best-effort — an
 	// unresolvable reference is a logged miss, not a failed turn.
@@ -367,25 +337,45 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err), envKind)
 	}
 	logToolNotes(ctx, sid, notes)
-	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
-	if err != nil {
-		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err), envKind)
-	}
-	req.Effort = agent.Model.Effort
 
 	p, err := b.registry.Provider(agent.Model.ID)
 	if err != nil {
 		// A model with no route is a configuration error, not a transient
-		// fault: fail the turn visibly rather than retry forever.
-		return b.failTurn(ctx, sid, item, nil, watermark, fmt.Sprintf("no provider for model %q", agent.Model.ID), envKind)
+		// fault: fail the turn visibly rather than retry forever. No request
+		// starts, so none consumes the thread's input: the failure stamps what
+		// the thread held when it failed, which nothing else would, and chains
+		// on anything posted since, as any failed turn chains on input past
+		// what it read.
+		head, herr := b.threadHead(ctx, sid, item.ThreadID)
+		if herr != nil {
+			return fmt.Errorf("no provider: %w", herr)
+		}
+		return b.failTurn(ctx, sid, item, nil, head, fmt.Sprintf("no provider for model %q", agent.Model.ID), envKind)
 	}
 
 	// The route resolved above, named for telemetry. Provider() just succeeded,
 	// so Describe cannot miss; an empty backend would only mean unlabelled
 	// metrics, never a failed turn.
 	desc, _ := b.registry.Describe(agent.Model.ID)
+	// The start's commit processes what this request consumes (#793), which a
+	// client sees: it stamps the thread's inputs below it, and on the primary
+	// it flips a pending outcome to running — every pending entry's
+	// user.define_outcome committed with it, so it is below the start, and
+	// this request is the one that reads it (the SDK: "pending" before the
+	// agent begins work, "running" while producing or revising). Both carry
+	// the lease proof, so a claimant that already lost the item writes
+	// neither and stops here, before the model.
 	sctx, span, err := b.log.StartModelRequestOn(ctx, sid, item.ThreadID,
-		events.Backend{Provider: desc.Protocol, Model: desc.Model})
+		events.Backend{Provider: desc.Protocol, Model: desc.Model},
+		func(ctx context.Context, tx pgx.Tx) error {
+			if err := b.queue.Assert(ctx, tx, item); err != nil {
+				return err
+			}
+			if item.ThreadID != "" {
+				return nil // a child's request reads no user.define_outcome
+			}
+			return events.BeginOutcomeWork(ctx, tx, sid)
+		})
 	if err != nil {
 		return fmt.Errorf("span start: %w", err)
 	}
@@ -401,8 +391,60 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		attribute.Int("memory.injected", memoryInjected),
 		attribute.Int("memory.block_chars", len(memoryBlock)),
 	)
-
+	// The lease is kept from the start on: the history read and the build
+	// below can take a while on a long log, and the lease they run under must
+	// not lapse behind them.
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL, 0)
+	// The history is read once, here, after the start committed: the request
+	// is then exactly what the start consumed, however late before it an input
+	// landed. Nothing assembled above reads it.
+	history, err := b.requestHistory(kctx, sid, item.ThreadID, span.StartSeq())
+	if err != nil {
+		if cerr := keeper.Close(); cerr != nil {
+			span.Finish(sctx, true, cerr)
+			return fmt.Errorf("lease keeper: %w", cerr)
+		}
+		// A fault of ours after the start committed — its inputs stamped, an
+		// outcome perhaps flipped — so the item is not left to its lease with
+		// a dangling start: the request is closed and the item handed straight
+		// back, and the retry's own start stamps nothing new.
+		rerr := b.releaseStartedTurn(sctx, sid, item, span)
+		span.Finish(sctx, true, errors.Join(err, rerr))
+		if rerr != nil {
+			return fmt.Errorf("replay: %w", errors.Join(err, rerr))
+		}
+		slog.WarnContext(sctx, "brain: history read failed after the span start; item released for retry",
+			"session_id", sid.String(), "error", err)
+		return nil
+	}
+	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
+	if err != nil {
+		if cerr := keeper.Close(); cerr != nil {
+			span.Finish(sctx, true, cerr)
+			return fmt.Errorf("lease keeper: %w", cerr)
+		}
+		// Deterministic: the same log fails the same way on every retry, so
+		// the watermark is zero and nothing chains.
+		return b.failTurn(sctx, sid, item, span, 0, fmt.Sprintf("replay: %v", err), envKind)
+	}
+	req.Effort = agent.Model.Effort
+	// The start proved the item was this claimant's, but an interrupt can have
+	// stopped it since (queue.CancelSession), a reclaim taken it, or its lease
+	// lapsed, and the keeper would not notice before its first renewal. A call
+	// made anyway is billed for a turn nobody may commit, so ownership is
+	// proven once more right before it, by a renewal that fails unless the
+	// item is still this claimant's and unexpired — which also leaves the call
+	// a whole lease. The instant between that renewal and the call is
+	// inherent; the settlement's own lease proof is what rejects a stale
+	// claimant's output there.
+	if err := keeper.Renew(kctx); err != nil {
+		cerr := keeper.Close()
+		span.Finish(sctx, true, errors.Join(err, cerr))
+		return fmt.Errorf("model call: %w", err)
+	}
+	// The call to the model begins here, and its latency with it: the history
+	// read and the replay above ran after the span start and are ours.
+	span.ModelCalling()
 	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
@@ -554,31 +596,79 @@ func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJS
 	return agentJSON, resourcesJSON, outcomesJSON, envKind, true, tx.Commit(ctx)
 }
 
-// pendingInputTypes are the inbound events whose arrival must chain the next
-// turn rather than let the session idle past them: a user.message appended
-// mid-turn (its trigger saw a running session and only appended), a tool
-// result whose enqueue this turn's live item suppressed, or a
-// user.define_outcome appended mid-turn (the agent begins work on it
-// immediately, so it chains for the same reason a message does).
-var pendingInputTypes = []string{
-	string(domain.EventUserMessage),
-	string(domain.EventUserToolResult),
-	string(domain.EventUserCustomToolRes),
-	string(domain.EventUserDefineOutcome),
+// requestHistory reads what the request its span start opened consumes: the
+// thread's own rows (plan 35 decision 5) — a sibling's events, a child's
+// cross-posted ask included, are not this conversation's — below the start
+// (#793). Seq is allocated under the session row lock, so every row below the
+// start committed before it did; a row past it landed mid-request and is the
+// next request's, though this read, made after the start, can see it.
+func (b *Brain) requestHistory(ctx context.Context, sid, threadID domain.ID, startSeq int64) ([]domain.Event, error) {
+	return b.log.List(ctx, sid, events.ListQuery{Scope: events.ScopeThread, ThreadID: threadID, BeforeSeq: &startSeq})
 }
 
+// releaseStartedTurn closes a request that stopped short of the model on a
+// fault of the platform's, with an errored span.model_request_end, and hands
+// the item back to the queue in the same commit, under the lease proof
+// Requeue carries: the retry claims it at once instead of after the lease,
+// and no session.error is written for a fault that was not the model's.
+func (b *Brain) releaseStartedTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest) error {
+	endEv, err := span.EndEvent(true, domain.ModelUsage{})
+	if err != nil {
+		return err
+	}
+	_, err = b.log.AppendWith(ctx, sid, []events.NewEvent{endEv}, events.AppendOptions{
+		ThreadID: item.ThreadID,
+		Then:     func(ctx context.Context, tx pgx.Tx) error { return b.queue.Requeue(ctx, tx, item) },
+	})
+	return err
+}
+
+// threadHead is the thread's newest seq: the watermark of a failure that
+// stops a turn before it reads its history, which stands for what the thread
+// held when the turn failed.
+func (b *Brain) threadHead(ctx context.Context, sid, threadID domain.ID) (int64, error) {
+	var head int64
+	err := b.pool.QueryRow(ctx,
+		`SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2`,
+		sid.String(), events.NullableThread(threadID)).Scan(&head)
+	return head, err
+}
+
+// pendingInputTypes are the inbound events whose arrival must chain the next
+// turn rather than let the session idle past them: a consumed input a client
+// posts (domain.ConsumedInputs' inbound half) — a user.message appended
+// mid-turn, whose trigger saw a running session and only appended, or a
+// user.define_outcome, which the agent begins work on immediately — and a tool
+// result whose enqueue this turn's live item suppressed. The consumed input
+// the platform writes, agent.thread_message_received, is chainInput's to find,
+// by seq.
+var pendingInputTypes = func() []string {
+	out := []string{string(domain.EventUserToolResult), string(domain.EventUserCustomToolRes)}
+	for _, t := range domain.ConsumedInputs {
+		if t.Inbound() {
+			out = append(out, string(t))
+		}
+	}
+	return out
+}()
+
 // pendingInput asks it for one thread's own rows (plan 35 decision 5): a
-// sibling's queued input is the sibling's turn to read.
-func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, watermark int64) (bool, error) {
+// sibling's queued input is the sibling's turn to read. It is the probe for a
+// settlement with no watermark of its own (the grading chain, the delegation
+// bound): an unprocessed row is one no request of the thread has started on
+// since it landed — a request's start stamps what it consumes (#793) — and a
+// tool result counts, processed or not, while no request has started since it
+// landed.
+func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID) (bool, error) {
 	var pending bool
 	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM events
-		  WHERE session_id = $1 AND type = ANY($2) AND seq > $3
+		  WHERE session_id = $1 AND type = ANY($2)
 		    AND (processed_at IS NULL OR (type IN ('user.tool_result','user.custom_tool_result')
- AND ($3>0 OR seq>COALESCE((SELECT max(start.seq) FROM events start
- WHERE start.session_id=$1 AND start.thread_id IS NOT DISTINCT FROM $4 AND start.type='span.model_request_start'),0))))
-		    AND thread_id IS NOT DISTINCT FROM $4)`,
-		sid.String(), pendingInputTypes, watermark, events.NullableThread(threadID)).Scan(&pending)
+ AND seq>COALESCE((SELECT max(start.seq) FROM events start
+ WHERE start.session_id=$1 AND start.thread_id IS NOT DISTINCT FROM $3 AND start.type='span.model_request_start'),0)))
+		    AND thread_id IS NOT DISTINCT FROM $3)`,
+		sid.String(), pendingInputTypes, events.NullableThread(threadID)).Scan(&pending)
 	return pending, err
 }
 
@@ -818,10 +908,12 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	}
 	head = append(head, endEv)
 	stampThread(head, item.ThreadID, askIDs)
+	// No MarkProcessedThrough: the request's start stamped everything this
+	// turn replayed (the watermark is below the start), and what landed
+	// since is the next request's to stamp.
 	opts := events.AppendOptions{
-		ThreadID:             item.ThreadID,
-		AddUsage:             &usage,
-		MarkProcessedThrough: watermark,
+		ThreadID: item.ThreadID,
+		AddUsage: &usage,
 	}
 
 	// A turn that called tools suspends on them, whatever stop reason came
@@ -1084,7 +1176,16 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 		head = append(head, endEv)
 	}
 
-	return b.settle(ctx, sid, item, watermark, envKind, events.AppendOptions{MarkProcessedThrough: watermark},
+	// The stamp is for the one failure no request follows — no provider
+	// routes the model (span == nil, watermark the thread's head when it
+	// failed) — where nothing else would ever stamp the thread's input and
+	// pendingInput would read it as queued forever. After a start there is
+	// nothing to stamp: the start did.
+	var opts events.AppendOptions
+	if span == nil {
+		opts.MarkProcessedThrough = watermark
+	}
+	return b.settle(ctx, sid, item, watermark, envKind, opts,
 		&domain.StopReason{Type: domain.StopRetriesExhausted},
 		func(chained bool) ([]events.NewEvent, error) {
 			// retry_status tells the client whether the platform will make
