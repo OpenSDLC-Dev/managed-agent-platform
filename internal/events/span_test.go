@@ -122,7 +122,7 @@ func TestModelRequestSameSourceEmission(t *testing.T) {
 // An input is processed when the request that consumes it starts, as the
 // reference stamps it: 1 µs before that request's span.model_request_start
 // (#793; every recorded consumption but one). The start's own commit stamps
-// the thread's rows below it that no earlier start stamped — and nothing
+// the thread's inputs below it that no earlier start stamped — and nothing
 // else: not a row already stamped, not another thread's, not a row at or
 // after the start.
 func TestModelRequestStartStampsWhatItConsumes(t *testing.T) {
@@ -179,6 +179,61 @@ func TestModelRequestStartStampsWhatItConsumes(t *testing.T) {
 			t.Errorf("row after the start (%s) stamped %v", ev.Type, ev.ProcessedAt)
 		}
 	}
+}
+
+// A start stamps only what its request reads: a user.message, a
+// user.define_outcome, a system.message and a delivered
+// agent.thread_message_received. An answer is its thread's ordered
+// processor's to stamp, and a held one must stay null until that processor
+// reaches it; an interrupt is no input a request reads, so a later request
+// stamping it would date it to a request that never saw it (#793). The
+// no-provider failure's stamp, MarkProcessedThrough, keeps the same rule.
+func TestModelRequestStartStampsOnlyWhatARequestReads(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	appended, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("message")},
+		{Type: domain.EventUserDefineOutcome, Payload: json.RawMessage(`{"description":"d"}`)},
+		{Type: domain.EventSystemMessage, Payload: text("system")},
+		{Type: domain.EventAgentThreadMessageReceived, Payload: text("report")},
+		{Type: domain.EventUserInterrupt, Payload: json.RawMessage(`{}`)},
+		{Type: domain.EventUserToolConfirm, Payload: json.RawMessage(`{"tool_use_id":"sevt_x","result":"allow"}`)},
+		{Type: domain.EventUserToolResult, Payload: json.RawMessage(`{"tool_use_id":"sevt_x"}`)},
+		{Type: domain.EventUserCustomToolRes, Payload: json.RawMessage(`{"custom_tool_use_id":"sevt_y"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const read = 4 // the first four rows are what a request reads
+	check := func(when string) {
+		t.Helper()
+		all, err := log.List(ctx, sid, events.ListQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		byID := map[domain.ID]domain.Event{}
+		for _, ev := range all {
+			byID[ev.ID] = ev
+		}
+		for i, a := range appended {
+			got := byID[a.ID].ProcessedAt
+			if stamped := got != nil; stamped != (i < read) {
+				t.Errorf("%s: %s processed_at = %v, want stamped %v", when, a.Type, got, i < read)
+			}
+		}
+	}
+	if _, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	check("after the start")
+	if _, err := log.AppendWith(ctx, sid, nil, events.AppendOptions{
+		MarkProcessedThrough: appended[len(appended)-1].Seq,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check("after MarkProcessedThrough")
 }
 
 // The start carries the claimant's lease proof in its own commit: a brain

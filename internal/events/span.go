@@ -42,11 +42,11 @@ func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backen
 // threadID is the primary.
 //
 // The start's commit also processes what the request consumes (#793): the
-// thread's rows below it that no earlier start stamped are stamped 1 µs
-// before the start's own processed_at, as the reference stamps a consumed
-// input. then runs in that commit — the brain passes its lease proof, so a
-// claimant that lost its item neither stamps nor calls the model; nil is
-// none.
+// thread's request inputs below it that no earlier start stamped are stamped
+// 1 µs before the start's own processed_at, as the reference stamps a
+// consumed input (AppendOptions.Consume). then runs in that commit — the
+// brain passes its lease proof, so a claimant that lost its item neither
+// stamps nor calls the model; nil is none.
 func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domain.ID, backend Backend, then func(context.Context, pgx.Tx) error) (context.Context, *ModelRequest, error) {
 	// A child's turn names its thread, so two concurrent turns of one
 	// session stay distinguishable in a trace.
@@ -142,7 +142,7 @@ func (m *ModelRequest) SetAttributes(attrs ...attribute.KeyValue) {
 // end event references as model_request_start_id.
 func (m *ModelRequest) StartEventID() domain.ID { return m.startID }
 
-// StartSeq is the start event's seq. The request consumes every row of its
+// StartSeq is the start event's seq. The request consumes every input of its
 // thread below it that no earlier request did (#793), which is how the brain
 // finds an input that landed between its history read and this start.
 func (m *ModelRequest) StartSeq() int64 { return m.startSeq }

@@ -140,7 +140,7 @@ and stamps its `processed_at` there — this plan's last PR, which archives it:
   the dream streams it and releases held inputs early once they outweigh its
   transcript cap.
 - **`processed_at` at consumption.** The span start's commit stamps the thread's
-  rows below it that no earlier start stamped, at the start's `processed_at`
+  inputs below it that no earlier start stamped, at the start's `processed_at`
   minus 1 µs, as the reference stamps 139 of the 140 recorded consumptions.
   `agent.thread_message_received` is written unprocessed until then. The turn's
   settle stops stamping, and the start carries the brain's lease proof.

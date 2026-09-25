@@ -113,13 +113,14 @@ func (t EventType) Inbound() bool {
 	}
 }
 
-// StampedOnConsumption reports whether this event is written unprocessed and
-// stamped processed_at only when a model request consumes it — every inbound
-// event, and the one platform event that is an input: a delivered
-// agent-to-agent message, read by its target's next request (#793). The
-// reference stamps a consumed input 1 µs before the span.model_request_start
-// that consumes it; everything else the platform writes is processed on
-// emission.
+// StampedOnConsumption reports whether this event may be written unprocessed,
+// its processed_at left null until whatever consumes it stamps it — every
+// inbound event, and the one platform event that is an input: a delivered
+// agent-to-agent message, read by its target's next request (#793). What
+// consumes each differs: an answer is stamped by its thread's ordered
+// processor, and an input a model request reads by that request's start, 1 µs
+// before it, as the reference stamps it (events.RequestInputTypes).
+// Everything else the platform writes is processed on emission.
 func (t EventType) StampedOnConsumption() bool {
 	return t.Inbound() || t == EventAgentThreadMessageReceived
 }

@@ -215,8 +215,13 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	for i := range newEvents {
 		// A child-scoped interrupt is consumed right here, by this arm: the
 		// child's turn it ends is the only turn that could ever stamp it, so
-		// it is stamped processed on append (a session-wide one is the
-		// primary's next turn's to stamp, as before).
+		// it is stamped processed on append.
+		//
+		// TODO(#793, #539): stamp a session-wide or primary-scoped interrupt
+		// at receipt too, in this transaction, as the reference processes
+		// it. Until then nothing stamps one and it stays processed_at null:
+		// a request's start stamps only the inputs it reads
+		// (events.RequestInputTypes), and an interrupt is not one.
 		if newEvents[i].Type == domain.EventUserInterrupt && newEvents[i].ThreadID != "" {
 			newEvents[i].ProcessedAt = &now
 		}

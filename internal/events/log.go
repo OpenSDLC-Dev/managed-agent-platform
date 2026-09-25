@@ -132,13 +132,14 @@ type AppendOptions struct {
 	// thread's.
 	AddUsage *domain.ModelUsage
 	// MarkProcessedThrough stamps processed_at on the thread's
-	// still-unprocessed events at seq <= the watermark. Zero means no
-	// stamping. A request's start stamps what it consumes (Consume); this is
-	// left for the one failure that read input without starting a request.
+	// still-unprocessed request inputs (RequestInputTypes) at seq <= the
+	// watermark. Zero means no stamping. A request's start stamps what it
+	// consumes (Consume); this is left for the one failure that read input
+	// without starting a request.
 	MarkProcessedThrough int64
 	// Consume stamps processed_at = *Consume on the thread's still-unprocessed
-	// rows below this batch's first seq: the inputs the model request this
-	// batch opens consumes (#793). Only span.model_request_start sets it.
+	// request inputs below this batch's first seq: the ones the model request
+	// this batch opens consumes (#793). Only span.model_request_start sets it.
 	Consume *time.Time
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
@@ -415,21 +416,21 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		if _, err := tx.Exec(ctx,
 			`UPDATE events SET processed_at = clock_timestamp()
 			 WHERE session_id = $1 AND seq <= $2 AND processed_at IS NULL
-			   AND thread_id IS NOT DISTINCT FROM $3`,
-			sessionID.String(), opts.MarkProcessedThrough, nullableID(opts.ThreadID)); err != nil {
+			   AND thread_id IS NOT DISTINCT FROM $3 AND type = ANY($4)`,
+			sessionID.String(), opts.MarkProcessedThrough, nullableID(opts.ThreadID), RequestInputTypes); err != nil {
 			return nil, err
 		}
 	}
 	if opts.Consume != nil {
 		// Every earlier request stamped what it consumed in its own start's
-		// commit, so the thread's unstamped rows below this one are exactly
-		// the ones it consumes. Type-agnostic, like MarkProcessedThrough: the
-		// inputs, and anything else of the thread's still unstamped.
+		// commit, so the thread's unstamped request inputs below this one are
+		// exactly the ones it consumes. Nothing else: an answer is its ordered
+		// processor's to stamp, and an interrupt is no request's input.
 		if _, err := tx.Exec(ctx,
 			`UPDATE events SET processed_at = $4
 			 WHERE session_id = $1 AND seq < $2 AND processed_at IS NULL
-			   AND thread_id IS NOT DISTINCT FROM $3`,
-			sessionID.String(), out[0].Seq, nullableID(opts.ThreadID), opts.Consume.UTC()); err != nil {
+			   AND thread_id IS NOT DISTINCT FROM $3 AND type = ANY($5)`,
+			sessionID.String(), out[0].Seq, nullableID(opts.ThreadID), opts.Consume.UTC(), RequestInputTypes); err != nil {
 			return nil, err
 		}
 	}

@@ -448,7 +448,8 @@ func TestAppendFoldsUsagePerThread(t *testing.T) {
 	}
 }
 
-// The thread-scoped watermark never stamps a sibling's queued input.
+// The thread-scoped watermark never stamps a sibling's queued input. (It
+// stamps only request inputs, so the child's is a message.)
 func TestMarkProcessedThroughIsThreadScoped(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -457,7 +458,7 @@ func TestMarkProcessedThroughIsThreadScoped(t *testing.T) {
 	child := pgtest.NewChildThread(t, pool, sid)
 	got, err := log.Append(ctx, sid, []events.NewEvent{
 		{Type: domain.EventUserMessage, Payload: text("to the primary")},
-		{Type: domain.EventUserToolConfirm, ThreadID: child, Payload: []byte(`{"result":"allow","tool_use_id":"sevt_x","deny_message":null,"session_thread_id":null}`)},
+		{Type: domain.EventUserMessage, ThreadID: child, Payload: text("to the child")},
 	})
 	if err != nil {
 		t.Fatal(err)

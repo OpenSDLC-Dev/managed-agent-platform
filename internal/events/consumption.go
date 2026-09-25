@@ -40,6 +40,17 @@ func ConsumedInput(t domain.EventType) bool {
 	return false
 }
 
+// RequestInputTypes are the rows a model request reads as input, and so the
+// ones a turn stamps processed (#793; AppendOptions.Consume): the three
+// ConsumedInput holds, and a system.message, which the request reads into its
+// system prompt wherever it sits. An answer — a confirmation or a tool result —
+// is stamped where its thread's ordered processor takes it, and an interrupt
+// is no input a request reads.
+var RequestInputTypes = []string{
+	string(domain.EventUserMessage), string(domain.EventUserDefineOutcome),
+	string(domain.EventAgentThreadMessageReceived), string(domain.EventSystemMessage),
+}
+
 // ConsumptionOrderer is the streaming form of ConsumptionOrder, for a reader
 // that pages the log rather than holding it (RenderDream). Windows are keyed
 // by the row's own thread, so a session-wide read never lets one thread's
