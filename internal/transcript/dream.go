@@ -8,6 +8,13 @@ package transcript
 // are kept, so peak memory is the cap whatever the log's length; and every
 // rendered byte passes Redact before any truncation, so an elision can never
 // split a match and leave a fragment behind.
+//
+// Events render in consumption order (events.ConsumptionOrderer, #793): a
+// message posted while a request was in flight renders after that request's
+// reply, where the agent read it. The inputs a window holds are memory the
+// cap does not see, so once they outweigh DreamTranscriptCap they are
+// released early and that window degrades to seq order: held inputs add at
+// most one cap (and one event) to the bound above, whatever the log's length.
 
 import (
 	"context"
@@ -86,6 +93,21 @@ func RenderDream(ctx context.Context, log Lister, sessionID string) (*Dream, err
 		return nil, err
 	}
 
+	// The session view carries no child's span starts (a child cross-posts
+	// only its status, asks and answers), so only the primary's windows ever
+	// hold a row here.
+	var o events.ConsumptionOrderer
+	emit := func(evs []domain.Event) {
+		for _, ev := range evs {
+			if ev.Type == domain.EventUserMessage {
+				d.Turns++
+				if d.Turns == 1 {
+					d.FirstUser = preview(dreamContentText(ev.Body))
+				}
+			}
+			w.write(renderDreamEvent(ev))
+		}
+	}
 	q := events.ListQuery{Scope: events.ScopeSession, Limit: DreamPageSize}
 paging:
 	for hasEvents {
@@ -102,13 +124,10 @@ paging:
 			if ev.Seq > mark {
 				break paging
 			}
-			if ev.Type == domain.EventUserMessage {
-				d.Turns++
-				if d.Turns == 1 {
-					d.FirstUser = preview(dreamContentText(ev.Body))
-				}
+			emit(o.Push(ev))
+			if o.HeldBytes() > DreamTranscriptCap {
+				emit(o.Flush())
 			}
-			w.write(renderDreamEvent(ev))
 		}
 		last := page[len(page)-1].Seq
 		if len(page) < DreamPageSize || last >= mark {
@@ -116,6 +135,9 @@ paging:
 		}
 		q.AfterSeq = &last
 	}
+	// A request still in flight at the mark holds its inputs to the end: they
+	// render after what it has streamed so far, never dropped.
+	emit(o.Flush())
 
 	d.Text, d.ElidedBytes = w.result()
 	return d, nil

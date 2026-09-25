@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 const (
@@ -26,6 +27,13 @@ const (
 // Render renders the session's conversation-bearing events as the
 // role-labeled plain text the grader reads (shape ours, INFERRED). Long items
 // truncate at GraderItemBudget; the whole transcript at GraderTranscriptBudget.
+//
+// The events render in consumption order (events.ConsumptionOrder, #793): a
+// message posted while one of its thread's requests was in flight renders
+// where that thread's next request consumed it, after the reply that never
+// saw it. Windows are per thread, so on a whole-session history a child's
+// request never holds a primary row. history itself is left in seq order,
+// since the grader reads its watermark and outcome start off it.
 //
 // The agent-to-agent message pair (plan 35) is deliberately not rendered. The
 // grader reads the whole session rather than one thread, so a child's report is
@@ -43,7 +51,7 @@ func Render(history []domain.Event) string {
 		}
 		sb.WriteString("## " + role + "\n" + text + "\n\n")
 	}
-	for _, ev := range history {
+	for _, ev := range events.ConsumptionOrder(history) {
 		switch ev.Type {
 		case domain.EventUserMessage:
 			add("user", ContentText(ev.Body))

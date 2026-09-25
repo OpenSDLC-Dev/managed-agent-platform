@@ -94,6 +94,34 @@ func TestRenderTranscriptTotalBudget(t *testing.T) {
 	}
 }
 
+// The grader reads what the agent saw in the order it saw it (#793): a
+// message posted while the primary's request was in flight renders after the
+// reply that never saw it, not ahead of it. Windows are per thread, so a
+// child's request running inside the primary's window neither holds the
+// primary's message nor is held by it, and the message is not released at
+// the child's end.
+func TestRenderTranscriptConsumptionOrder(t *testing.T) {
+	const child domain.ID = "sthr_child"
+	history := []domain.Event{
+		{ID: "one", Seq: 1, Type: domain.EventUserMessage, Body: []byte(`{"content":"one"}`)},
+		{ID: "s1", Seq: 2, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)},
+		{ID: "c1", Seq: 3, Type: domain.EventSpanModelRequestStart, ThreadID: child, Body: []byte(`{}`)},
+		{ID: "two", Seq: 4, Type: domain.EventUserMessage, Body: []byte(`{"content":"two"}`)},
+		{ID: "cw", Seq: 5, Type: domain.EventAgentMessage, ThreadID: child, Body: []byte(`{"content":"child work"}`)},
+		{ID: "ce", Seq: 6, Type: domain.EventSpanModelRequestEnd, ThreadID: child, Body: []byte(`{"model_request_start_id":"c1"}`)},
+		{ID: "fa", Seq: 7, Type: domain.EventAgentMessage, Body: []byte(`{"content":"first answer"}`)},
+		{ID: "e1", Seq: 8, Type: domain.EventSpanModelRequestEnd, Body: []byte(`{"model_request_start_id":"s1"}`)},
+	}
+	out := transcript.Render(history)
+	want := "## user\none\n\n## agent\nchild work\n\n## agent\nfirst answer\n\n## user\ntwo\n\n"
+	if out != want {
+		t.Errorf("transcript =\n%q\nwant\n%q", out, want)
+	}
+	if history[3].ID != "two" {
+		t.Error("Render reordered its input; the grader's watermark reads it by position")
+	}
+}
+
 // contentText's fallbacks: a bare string, a block array, an unknown content
 // shape kept raw, and bodies with no readable content at all. A search_result
 // block has no top-level text — its title, source, and nested text blocks

@@ -581,6 +581,9 @@ func TestRenderDreamMemoryBound(t *testing.T) {
 type generatedLog struct {
 	n    int
 	peak uint64
+	// openWindow makes the first row a span.model_request_start that never
+	// ends, so every message after it lands in one open window.
+	openWindow bool
 }
 
 func (g *generatedLog) List(_ context.Context, _ domain.ID, q events.ListQuery) ([]domain.Event, error) {
@@ -613,6 +616,106 @@ func (g *generatedLog) sample() {
 }
 
 func (g *generatedLog) event(seq int64) domain.Event {
+	if g.openWindow && seq == 1 {
+		return domain.Event{ID: "sevt_start", Seq: seq, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)}
+	}
 	body := fmt.Sprintf(`{"content":"turn %d: %s"}`, seq, strings.Repeat("w", 120))
 	return domain.Event{Seq: seq, Type: domain.EventUserMessage, Body: []byte(body)}
+}
+
+// span builds a request's start row, or, given the start it closes, its end.
+func span(seq int64, id, endOf string) domain.Event {
+	if endOf == "" {
+		return domain.Event{ID: domain.ID(id), Seq: seq, Type: domain.EventSpanModelRequestStart, Body: []byte(`{}`)}
+	}
+	return domain.Event{ID: domain.ID(id), Seq: seq, Type: domain.EventSpanModelRequestEnd,
+		Body: []byte(`{"model_request_start_id":"` + endOf + `"}`)}
+}
+
+// inOrder fails unless each needle appears in the rendered text, each after
+// the one before it.
+func inOrder(t *testing.T, d *Dream, needles ...string) {
+	t.Helper()
+	last := -1
+	for _, n := range needles {
+		i := strings.Index(string(d.Text), n)
+		if i < 0 {
+			t.Fatalf("%q missing from:\n%s", n, d.Text)
+		}
+		if i < last {
+			t.Errorf("%q rendered before the needle ahead of it in %v:\n%s", n, needles, d.Text)
+		}
+		last = i
+	}
+}
+
+// A dream reads the session in the order its agent consumed it (#793): a
+// message posted while a request was in flight renders after that request's
+// reply, even when the window straddles a page boundary — the start on one
+// page, the message, reply and end on the next.
+func TestRenderDreamConsumptionOrderAcrossPages(t *testing.T) {
+	var evs []domain.Event
+	for i := range DreamPageSize - 1 {
+		evs = append(evs, mustEvent(t, int64(i+1), domain.EventAgentMessage, content(fmt.Sprintf("filler %d", i))))
+	}
+	evs = append(evs,
+		span(DreamPageSize, "s1", ""),
+		mustEvent(t, DreamPageSize+1, domain.EventUserMessage, content("posted mid-request")),
+		mustEvent(t, DreamPageSize+2, domain.EventAgentMessage, content("the reply")),
+		span(DreamPageSize+3, "e1", "s1"),
+		mustEvent(t, DreamPageSize+4, domain.EventAgentMessage, content("the next reply")),
+	)
+	d := renderEvents(t, evs...)
+	inOrder(t, d, "the reply", "posted mid-request", "the next reply")
+	if d.Turns != 1 || d.FirstUser != "posted mid-request" {
+		t.Errorf("Turns %d, FirstUser %q", d.Turns, d.FirstUser)
+	}
+}
+
+// A request still in flight at the mark — the session runs while the dream
+// reads it — holds its input to the end of the render, which flushes it: the
+// input is not lost, and it follows the reply streamed so far.
+func TestRenderDreamFlushesAWindowOpenAtTheMark(t *testing.T) {
+	d := renderEvents(t,
+		mustEvent(t, 1, domain.EventUserMessage, content("one")),
+		span(2, "s1", ""),
+		mustEvent(t, 3, domain.EventUserMessage, content("two")),
+		mustEvent(t, 4, domain.EventAgentMessage, content("partial")),
+	)
+	inOrder(t, d, "one", "partial", "two")
+	if d.Turns != 2 {
+		t.Errorf("Turns = %d, want 2", d.Turns)
+	}
+}
+
+// Held inputs are memory the cap does not see, so the renderer releases them
+// early once they outweigh it: a window that never closes over a long log
+// degrades to seq order rather than holding the log. The peak measure of
+// TestRenderDreamMemoryBound, over a log whose first row opens a request that
+// never ends.
+func TestRenderDreamHeldInputsStayBounded(t *testing.T) {
+	measure := func(n int) (uint64, *Dream) {
+		t.Helper()
+		log := &generatedLog{n: n, openWindow: true}
+		d, err := RenderDream(t.Context(), log, "sesn_held")
+		if err != nil {
+			t.Fatalf("RenderDream: %v", err)
+		}
+		return log.peak, d
+	}
+	smallPeak, small := measure(500)
+	bigPeak, big := measure(50_000)
+	if small.Turns != 499 || big.Turns != 49_999 {
+		t.Fatalf("turns = %d and %d, want every message after the start", small.Turns, big.Turns)
+	}
+	for _, d := range []*Dream{small, big} {
+		if len(d.Text) > DreamTranscriptCap {
+			t.Errorf("rendered %d bytes, over the cap", len(d.Text))
+		}
+	}
+	t.Logf("peak live heap at a page boundary: 500 events %d bytes, 50,000 events %d bytes", smallPeak, bigPeak)
+	if int64(bigPeak)-int64(smallPeak) > 1<<20 {
+		t.Errorf("peak live heap grew by %d bytes between 500 and 50,000 events; held inputs are not bounded",
+			int64(bigPeak)-int64(smallPeak))
+	}
 }
