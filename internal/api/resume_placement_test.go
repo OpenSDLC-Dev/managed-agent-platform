@@ -161,8 +161,9 @@ func TestAMessageBesideAnAnswerThatResumesThePrimaryFollowsTheResume(t *testing.
 // order the walk processes them; then the pair; then the denial's result,
 // which the resumed turn consumes. The reference lists a denial held behind a
 // later answer the same way once that answer arrives
-// (2026-09-19-custom-order-followup analysis.json ask-first-deny idx 15 to 19:
-// the custom result, the pair, the denial's result, the request).
+// (2026-09-19-custom-order-followup setup.json,
+// ask-first-deny.final-audit.events idx 15 to 19: the custom result, the pair,
+// the denial's result, the request).
 func TestADenialAndTheAnswerItUnlocksResumeThePrimaryBeforeTheDenialsResult(t *testing.T) {
 	for _, first := range []string{"deny", "result"} {
 		t.Run(first+" first", func(t *testing.T) {
