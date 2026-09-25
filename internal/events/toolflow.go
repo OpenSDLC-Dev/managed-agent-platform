@@ -887,10 +887,11 @@ func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 }
 
 // denialText is the text a refused call is answered with — the reference's
-// sentence, naming the call's tool, with the client's deny_message after it when
-// one was given (#60). Never an empty text block, for the reason
-// InterruptResultText is not: a Messages endpoint rejects one, and the denial is
-// replayed into every later request this session assembles.
+// sentence, naming the tool as the model was offered it, with the client's
+// deny_message after it verbatim when one was given (#60); an empty one is none.
+// Never an empty text block, for the reason InterruptResultText is not: a
+// Messages endpoint rejects one, and the denial is replayed into every later
+// request this session assembles.
 func denialText(name, denyMessage string) string {
 	text := "Permission to use " + name + " has been rejected."
 	if denyMessage != "" {
@@ -916,9 +917,10 @@ func denialText(name, denyMessage string) string {
 // family is answered by an agent.* event, which the store stamps as it inserts.
 // The white-box table test is what keeps that true.
 //
-// The built-in family's result — is_error, and the text denialText composes — is
-// the reference's as recorded; the MCP family's text is an inference that it
-// names the call the same way (docs/DIVERGENCES.md).
+// A denied bash call's result — is_error, and the text denialText composes — is
+// the reference's as recorded; any other tool's text is an inference that it
+// names the call the same way, an MCP call by the name the model was offered it
+// under (docs/DIVERGENCES.md).
 func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent) ([]NewEvent, []string, error) {
 	type denial struct{ id, msg string }
 	var denials []denial
@@ -971,7 +973,7 @@ func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []Ne
 		}
 		payload, err := json.Marshal(map[string]any{
 			answer.refKey: d.id,
-			"content":     []map[string]any{{"type": "text", "text": denialText(use.name, d.msg)}},
+			"content":     []map[string]any{{"type": "text", "text": denialText(use.modelName(), d.msg)}},
 			"is_error":    true,
 		})
 		if err != nil {
@@ -990,7 +992,16 @@ func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []Ne
 // (the ToolUseRef) and the tool's name, which the answer's text names.
 type deniedUse struct {
 	ToolUseRef
-	name string
+	name, server string
+}
+
+// modelName is the name the model called the tool by: an MCP call's event
+// splits it into mcp_server_name and the bare name, which replay recomposes.
+func (u deniedUse) modelName() string {
+	if u.Type == domain.EventAgentMCPToolUse {
+		return domain.MCPModelName(u.server, u.name)
+	}
+	return u.name
 }
 
 // toolUsesByID reads the event types, threads and tool names of ids in one
@@ -998,7 +1009,8 @@ type deniedUse struct {
 // than an error here — the caller decides what a miss means.
 func toolUsesByID(ctx context.Context, q Querier, sessionID domain.ID, ids []string) (map[string]deniedUse, error) {
 	rows, err := q.Query(ctx,
-		`SELECT id, type, COALESCE(thread_id, ''), cross_posted, COALESCE(payload->>'name', '')
+		`SELECT id, type, COALESCE(thread_id, ''), cross_posted,
+		        COALESCE(payload->>'name', ''), COALESCE(payload->>'mcp_server_name', '')
 		 FROM events WHERE session_id = $1 AND id = ANY($2)`,
 		sessionID.String(), ids)
 	if err != nil {
@@ -1009,7 +1021,7 @@ func toolUsesByID(ctx context.Context, q Querier, sessionID domain.ID, ids []str
 	for rows.Next() {
 		var use deniedUse
 		var thread string
-		if err := rows.Scan(&use.ID, &use.Type, &thread, &use.CrossPosted, &use.name); err != nil {
+		if err := rows.Scan(&use.ID, &use.Type, &thread, &use.CrossPosted, &use.name, &use.server); err != nil {
 			return nil, fmt.Errorf("denied tool uses: %w", err)
 		}
 		use.ThreadID = domain.ID(thread)

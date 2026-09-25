@@ -711,7 +711,7 @@ func TestADenialAndAnInterruptOfItsThreadAnswerTheCallInReceiptOrder(t *testing.
 			}
 			text := askResults[0]["content"].([]any)[0].(map[string]any)["text"]
 			if got := text == "Permission to use bash has been rejected. Rejection message: not that one"; got != tc.denialText {
-				t.Errorf("denied call answered with %q; want the denial's deny_message = %v", text, tc.denialText)
+				t.Errorf("denied call answered with %q; want the denial's text = %v", text, tc.denialText)
 			}
 			for _, ev := range echo {
 				if ev["type"] == "user.tool_confirmation" && processedAt(t, s, ev["id"].(string)) == nil {

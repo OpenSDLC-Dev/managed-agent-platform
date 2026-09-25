@@ -89,27 +89,15 @@ func hasRoster(raw json.RawMessage) bool {
 	return len(p.Agents) > 0
 }
 
-// The model-facing name of an MCP tool, and the shape a Messages endpoint takes
-// a tool name in.
-//
-// The prefix is ours and it is forced by architecture rather than chosen. The
-// reference's own MCP protocol carries a call's server in its own field
-// (`mcp_server_name` on agent.mcp_tool_use, `server_name` on the connector's
-// block), so the name it shows the model is bare. This brain has no such field:
-// it assembles one flat tools[] for an ordinary Messages endpoint, where two
-// servers offering `search` would be two definitions under one name. Recorded in
-// docs/DIVERGENCES.md.
+// The shape a Messages endpoint takes a tool name in; the model-facing name of
+// an MCP tool is domain.MCPModelName's.
 //
 // maxModelToolName and the character class are the documented Messages
 // constraint — "Must match the regex ^[a-zA-Z0-9_-]{1,64}$" (the tool-use
 // guide's parameter table; the API reference and the SDK types state neither).
 // An MCP server is bound by nothing of the sort: 255 characters of server name
 // and 128 of tool name are both within what its own wire allows.
-const (
-	mcpNamePrefix    = "mcp__"
-	mcpNameSeparator = "__"
-	maxModelToolName = 64
-)
+const maxModelToolName = 64
 
 // The two tools[] entry types that expand to more than themselves.
 const (
@@ -131,43 +119,7 @@ func mcpNameFits(server, tool string) bool {
 	if tool == "" {
 		return false
 	}
-	return len(mcpNamePrefix)+len(server)+len(mcpNameSeparator)+len(tool) <= maxModelToolName
-}
-
-// mcpModelName composes the name an MCP tool is offered to the model under. A
-// caller deciding whether to offer one asks mcpNameFits first; replay composes
-// unconditionally, because the assistant block it rebuilds has to name the tool
-// that call was committed under.
-//
-// Bytes outside the documented class become '_', one for one, so the length
-// mcpNameFits settled is the length produced. Mangling rather than dropping is
-// what keeps a whole server's tools from vanishing over a naming convention:
-// internal/mcp admits the SDK's own tool-name class, which includes '.', so a
-// server publishing `github.create_issue` would otherwise offer nothing at all.
-// The model's name is not the wire's — agent.mcp_tool_use carries the server and
-// the bare tool in two fields of its own, and the class map keeps the pair — so
-// a mangled model-facing name costs nothing a reader of the log can see, while
-// two tools that sanitize to one name contest it exactly as two that composed to
-// one do.
-func mcpModelName(server, tool string) string {
-	b := make([]byte, 0, len(mcpNamePrefix)+len(server)+len(mcpNameSeparator)+len(tool))
-	b = append(b, mcpNamePrefix...)
-	b = appendModelName(b, server)
-	b = append(b, mcpNameSeparator...)
-	b = appendModelName(b, tool)
-	return string(b)
-}
-
-func appendModelName(b []byte, s string) []byte {
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
-			b = append(b, c)
-		default:
-			b = append(b, '_')
-		}
-	}
-	return b
+	return len(domain.MCPModelNamePrefix)+len(server)+len(domain.MCPModelNameSeparator)+len(tool) <= maxModelToolName
 }
 
 // maxNoteLabel bounds a name a note quotes. Nothing caps either half of an MCP
@@ -378,7 +330,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 					noteLabel(r.Name), noteLabel(probe.Server), maxModelToolName)
 				continue
 			}
-			name := mcpModelName(probe.Server, r.Name)
+			name := domain.MCPModelName(probe.Server, r.Name)
 			if _, taken := class[name]; taken {
 				// Nothing here needs noteLabel: this branch is past
 				// mcpNameFits, so the composed name is at most

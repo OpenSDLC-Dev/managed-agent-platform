@@ -285,7 +285,8 @@ func TestConfirmationDenyOfAnMCPCallAnswersInItsOwnFamily(t *testing.T) {
 	if !ok || len(content) != 1 {
 		t.Fatalf("content = %v, want one block", res["content"])
 	}
-	if want := "Permission to use search has been rejected. Rejection message: not allowed"; content[0].(map[string]any)["text"] != want {
+	// The name the model was offered the call under, not the event's bare one.
+	if want := "Permission to use mcp__docs__search has been rejected. Rejection message: not allowed"; content[0].(map[string]any)["text"] != want {
 		t.Errorf("text = %v, want %q", content[0].(map[string]any)["text"], want)
 	}
 	// The built-in shape must not be written alongside it.
