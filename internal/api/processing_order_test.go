@@ -393,7 +393,9 @@ func TestAnAnswerQueuedBehindAnEarlierCallGoesToTheTail(t *testing.T) {
 // included: a result behind an allowed call waits for that call to run, so it
 // is pending and goes to the tail; behind a denied call, which the denial
 // answers, it is consumed and stays with the answers, after the denial's
-// result, which the walk writes before it goes on to the next call.
+// result, which the walk writes before it goes on to the next call. Either way
+// the child resumes, and the send writes its running event (#793 PR-C), after
+// the coordinator's wake and ahead of the tail.
 func TestAnAnswerBehindAConfirmedCallIsPlacedByWhatTheConfirmationSays(t *testing.T) {
 	for _, tc := range []struct {
 		result    string
@@ -401,8 +403,8 @@ func TestAnAnswerBehindAConfirmedCallIsPlacedByWhatTheConfirmationSays(t *testin
 		processed bool
 	}{
 		{"allow", []string{"agent.tool_use", "agent.custom_tool_use", "user.tool_confirmation",
-			"session.status_running", "session.thread_status_running", "user.message", "user.custom_tool_result",
-			"session.thread_status_running"}, false},
+			"session.status_running", "session.thread_status_running", "user.message",
+			"session.thread_status_running", "user.custom_tool_result"}, false},
 		{"deny", []string{"agent.tool_use", "agent.custom_tool_use", "user.tool_confirmation", "agent.tool_result",
 			"user.custom_tool_result", "session.status_running", "session.thread_status_running", "user.message",
 			"session.thread_status_running"}, true},
@@ -544,27 +546,6 @@ func countWhole(t *testing.T, s *tserver, sid, typ string) int {
 		}
 	}
 	return n
-}
-
-// The one placement out of reach, pinned rather than changed
-// (docs/DIVERGENCES.md, the primary thread's entry): an answer that resumes
-// the primary moves it in the settlement that runs after the send's append, so
-// a message posted beside it, which the resumed turn consumes, is listed ahead
-// of the resume's running pair. The rule would list it after.
-func TestAMessageBesideAnAnswerThatResumesThePrimaryPrecedesTheResume(t *testing.T) {
-	s := newTestServer(t)
-	sid := eventsFixture(t, s)
-	useID := appendOn(t, s, sid, "", false, domain.EventAgentCustomToolUse, customCall)
-	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle",
-		`{"type":"requires_action","event_ids":["`+useID+`"]}`)
-
-	sendEvents(t, s, sid, customResult(useID), userMessage("and also"))
-
-	want := []string{"agent.custom_tool_use", "user.custom_tool_result", "user.message",
-		"session.status_running", "session.thread_status_running"}
-	if got := s.eventTypes(sid); !sameStrings(got, want) {
-		t.Fatalf("event log = %v, want %v", got, want)
-	}
 }
 
 // A thread two interrupts of one send both reach is ended by the first of them

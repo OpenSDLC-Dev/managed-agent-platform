@@ -21,6 +21,13 @@ type ToolFlow struct {
 	PlatformRunnable bool
 }
 
+// Running reports whether the flow leaves its thread running: every call is
+// settled, or the first one left is the platform's to run. Otherwise the
+// thread waits on Pending (SettleToolFlow).
+func (f ToolFlow) Running() bool {
+	return !f.Unsettled || f.PlatformRunnable
+}
+
 // ToolWaitIDs advertises every external input the just-emitted turn will need,
 // including calls beyond its current processing position.
 func ToolWaitIDs(batch []NewEvent, kind string, platformOwned func(string) bool) []domain.ID {
@@ -223,6 +230,10 @@ type AnswerPlan struct {
 	// is stamped where it was received, and the call keeps the one result the
 	// interrupt wrote.
 	Moot []domain.ID
+	// Flows are, per walked thread, the flow the settlement's walk leaves it
+	// in: what SettleToolFlow will move it to. A thread idle on its calls that
+	// its flow leaves Running is one this send resumes.
+	Flows map[domain.ID]ToolFlow
 }
 
 // AnswerStep is one posted answer the settlement processes, with the denial
@@ -249,8 +260,12 @@ type AnswerStep struct {
 // Its result is built here (DenialResults) and its confirmation named in
 // Denied. A denial reached before any posted answer, which the walk's resting
 // place rules out, is left to the settlement, as before.
-func PlanAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesized []NewEvent, advanced map[domain.ID]bool) (AnswerPlan, error) {
-	plan := AnswerPlan{Pending: map[domain.ID]bool{}, Steps: map[domain.ID][]AnswerStep{}}
+//
+// Each walked thread's resulting flow is summarized as the settlement will
+// summarize it (Flows), platformOwned marking the calls no worker runs, so the
+// send can write a resume the settlement would otherwise write after it.
+func PlanAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesized []NewEvent, advanced map[domain.ID]bool, platformOwned func(string) bool) (AnswerPlan, error) {
+	plan := AnswerPlan{Pending: map[domain.ID]bool{}, Steps: map[domain.ID][]AnswerStep{}, Flows: map[domain.ID]ToolFlow{}}
 	threads := map[domain.ID]bool{}
 	for _, ev := range posted {
 		if isAnswer(ev.Type) {
@@ -266,7 +281,7 @@ func PlanAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesi
 		if !walked {
 			continue
 		}
-		calls, _, err := threadCalls(ctx, q, sid, tid)
+		calls, kind, err := threadCalls(ctx, q, sid, tid)
 		if err != nil {
 			return AnswerPlan{}, err
 		}
@@ -298,8 +313,11 @@ func PlanAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesi
 					steps = append(steps, AnswerStep{Answer: id})
 				}
 			}
-			if c.resultID != "" || !denies(c.confirmation) {
-				return c.resultID != "", nil
+			// Marked as AdvanceThreadTools marks it, for the flow below.
+			c.confirmed = c.confirmationID != ""
+			c.resolved = c.resultID != "" || denies(c.confirmation)
+			if !c.resolved || c.resultID != "" {
+				return c.resolved, nil
 			}
 			if len(steps) > 0 {
 				results, _, err := DenialResults(ctx, q, sid, []NewEvent{{Type: domain.EventUserToolConfirm, Payload: c.confirmation}})
@@ -318,6 +336,7 @@ func PlanAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesi
 		if len(steps) > 0 {
 			plan.Steps[tid] = steps
 		}
+		plan.Flows[tid] = summarizeTools(calls, kind, platformOwned)
 	}
 	return plan, nil
 }
@@ -442,7 +461,7 @@ func ToolFlowThreads(ctx context.Context, q Querier, sid domain.ID) ([]domain.ID
 func (l *Log) SettleToolFlow(ctx context.Context, tx pgx.Tx, sid, tid domain.ID, flow ToolFlow) (*domain.SessionStatus, error) {
 	want := domain.SessionRunning
 	var stop *domain.StopReason
-	if flow.Unsettled && !flow.PlatformRunnable {
+	if !flow.Running() {
 		if len(flow.Pending) == 0 {
 			return nil, fmt.Errorf("thread %s has unsettled tools without a wait or runnable call", tid)
 		}
