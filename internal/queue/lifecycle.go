@@ -137,7 +137,8 @@ func (q *Queue) ListWork(ctx context.Context, envID domain.ID, after bool, after
 // Ack acknowledges a polled work item, transitioning queued → starting. It is
 // idempotent: only the queued→starting edge stamps acknowledged_at and installs
 // the startup lease, so a re-ack of an already-advanced item returns it
-// unchanged. The startup lease (ackStartupLeaseSeconds) governs a starting item
+// unchanged — save a missing started_at, which any ack heals to created_at
+// (see Poll). The startup lease (ackStartupLeaseSeconds) governs a starting item
 // until its first heartbeat replaces it, so Poll reclaims a dead worker's
 // starting item on a real lease, not the short un-acked poll reservation. An
 // item not visible to the work API (missing, wrong environment, or not a

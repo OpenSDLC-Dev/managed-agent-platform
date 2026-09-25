@@ -150,7 +150,7 @@ type Work struct {
 	Metadata        map[string]string
 	CreatedAt       time.Time
 	AcknowledgedAt  *time.Time // set by ack (queued → starting)
-	StartedAt       *time.Time // set by EnqueueThread, re-set when Poll reclaims a held item into the queue
+	StartedAt       *time.Time // set by EnqueueThread, re-set by Poll's reclaim; a missing one is healed (see Poll)
 	StopRequestedAt *time.Time // set by stop
 	StoppedAt       *time.Time // set when the item reaches stopped
 	// LastHeartbeat is the wire's latest_heartbeat_at — null until the worker

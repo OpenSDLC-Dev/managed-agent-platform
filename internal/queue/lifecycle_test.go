@@ -142,10 +142,6 @@ func TestHeartbeatOnStoppingLearnsWithoutExtending(t *testing.T) {
 	}
 }
 
-// claimedItem drives a fresh tool_exec item through the worker handshake —
-// enqueue, poll, ack, first heartbeat — leaving it active under a claimed lease,
-// and returns its environment and id. That is the one state a graceful stop has
-// a worker to wind down from, so it is the shared setup of the stopping tests.
 // TestAckAndClaimHealAStamplessItem: during a rolling upgrade a replica still
 // running the code that cleared started_at at every hand-out can poll an item
 // whose ack and claim then land on an upgraded one. Neither may carry the null
@@ -185,6 +181,10 @@ func TestAckAndClaimHealAStamplessItem(t *testing.T) {
 	healed("claim heartbeat")
 }
 
+// claimedItem drives a fresh tool_exec item through the worker handshake —
+// enqueue, poll, ack, first heartbeat — leaving it active under a claimed lease,
+// and returns its environment and id. That is the one state a graceful stop has
+// a worker to wind down from, so it is the shared setup of the stopping tests.
 func claimedItem(t *testing.T, pool *pgxpool.Pool, q *queue.Queue) (domain.ID, domain.ID) {
 	t.Helper()
 	ctx := context.Background()
@@ -643,6 +643,12 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	}
 	if _, err := q.Heartbeat(ctx, env, reclaimed.ID, queue.NoHeartbeat, 30); err != nil {
 		t.Fatalf("reclaimed item cannot be re-claimed with NO_HEARTBEAT: %v", err)
+	}
+	// The re-stamp is later than created_at, so here — unlike on a fresh item —
+	// an ack or claim that overwrote the stamp rather than healing a missing one
+	// would show.
+	if got, err := q.GetWork(ctx, env, reclaimed.ID); err != nil || got.StartedAt == nil || !got.StartedAt.Equal(*reclaimed.StartedAt) {
+		t.Errorf("re-acked, re-claimed item = %+v %v, want started_at still the reclaim's %v", got, err, reclaimed.StartedAt)
 	}
 
 	// A freshly-acked `starting` item (a worker that has not sent its first
