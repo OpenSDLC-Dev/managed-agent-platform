@@ -217,6 +217,11 @@ type AnswerPlan struct {
 	// send writes those results itself, so it stamps these itself too: once a
 	// call's result is on the log, the settlement's walk no longer reaches it.
 	Denied []domain.ID
+	// Moot are the posted confirmations for calls an interrupt of the same
+	// send answers. Each is consumed on receipt with nothing left to do, so it
+	// is stamped where it was received, and the call keeps the one result the
+	// interrupt wrote.
+	Moot []domain.ID
 }
 
 // AnswerStep is one posted answer the settlement processes, with the denial
@@ -235,7 +240,8 @@ type AnswerStep struct {
 // interrupt's results, stamped as they are written) drops out of the walk, as
 // threadCalls drops any call whose result is processed. An answer past the
 // first call that must still wait is pending, as is every answer on a thread
-// the settlement does not advance.
+// the settlement does not advance. A posted confirmation for a call a
+// synthesized result answers is Moot.
 //
 // A denial the walk reaches after a posted answer is the send's to write:
 // processed there, its result belongs before the answers the walk goes on to.
@@ -271,6 +277,9 @@ func PlanAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesi
 		for _, ev := range posted {
 			c := byID[answerRef(ev)]
 			switch {
+			case ev.Type == domain.EventUserToolConfirm && ev.ThreadID == tid && answered[answerRef(ev)]:
+				delete(plan.Pending, ev.ID)
+				plan.Moot = append(plan.Moot, ev.ID)
 			case c == nil || !isAnswer(ev.Type):
 			case ev.Type == domain.EventUserToolConfirm:
 				if c.confirmationID == "" {
@@ -312,10 +321,11 @@ func PlanAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesi
 	return plan, nil
 }
 
-// StampDenied stamps the confirmations a send answered with its own denial
-// results (AnswerPlan.Denied), as AdvanceThreadTools stamps the ones it
-// reaches: in the settlement of the commit that processes them.
-func StampDenied(ctx context.Context, tx pgx.Tx, sid domain.ID, ids []domain.ID) error {
+// StampConfirmations stamps the confirmations a send consumes that its
+// settlement's walk will not reach (AnswerPlan.Denied and AnswerPlan.Moot), as
+// AdvanceThreadTools stamps the ones it does: in the settlement of the commit
+// that processes them.
+func StampConfirmations(ctx context.Context, tx pgx.Tx, sid domain.ID, ids []domain.ID) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -326,6 +336,19 @@ func StampDenied(ctx context.Context, tx pgx.Tx, sid domain.ID, ids []domain.ID)
 	_, err := tx.Exec(ctx, `UPDATE events SET processed_at=clock_timestamp() WHERE session_id=$1 AND id=ANY($2) AND processed_at IS NULL`,
 		sid.String(), strs)
 	return err
+}
+
+// DeniedRefs are the calls the confirmations among evs refuse. A denial
+// answers its call, so an interrupt later in the same send leaves the call to
+// the denial's result rather than synthesizing its own.
+func DeniedRefs(evs []NewEvent) []string {
+	var refs []string
+	for _, ev := range evs {
+		if ev.Type == domain.EventUserToolConfirm && denies(ev.Payload) {
+			refs = append(refs, answerRef(ev))
+		}
+	}
+	return refs
 }
 
 // isAnswer reports whether an inbound event answers a tool call.

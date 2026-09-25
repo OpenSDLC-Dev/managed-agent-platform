@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -644,4 +645,118 @@ func TestAWakeUnderARunningChildWritesTheThreadEventAlone(t *testing.T) {
 	if got := s.sessionStatus(sid); got != "running" {
 		t.Errorf("session = %q, want running", got)
 	}
+}
+
+// A denial and an interrupt of the denied call's thread in one send: receipt
+// order decides which answers the call. Denied first, the denial is consumed
+// first, so the call is answered with the denial's result, carrying its
+// deny_message, beside the confirmation, and the interrupt answers only the
+// thread's other open calls. Interrupted first, the interrupt answers the call,
+// so the confirmation arrives for an answered call and is consumed on receipt
+// with nothing left to do: stamped where it was received, no second result.
+func TestADenialAndAnInterruptOfItsThreadAnswerTheCallInReceiptOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		scoped     bool
+		denyFirst  bool
+		want       []string
+		denialText bool
+	}{
+		{"child deny first", true, true, []string{"agent.tool_use", "agent.custom_tool_use", "user.tool_confirmation",
+			"agent.tool_result", "user.custom_tool_result", "user.interrupt", "session.thread_status_idle",
+			"agent.thread_message_received"}, true},
+		{"child interrupt first", true, false, []string{"agent.tool_use", "agent.custom_tool_use", "agent.tool_result",
+			"user.custom_tool_result", "user.interrupt", "session.thread_status_idle", "user.tool_confirmation",
+			"agent.thread_message_received"}, false},
+		{"session-wide deny first", false, true, []string{"agent.tool_use", "agent.custom_tool_use",
+			"user.tool_confirmation", "agent.tool_result", "user.custom_tool_result", "user.interrupt",
+			"session.thread_status_idle", "session.status_idle"}, true},
+		{"session-wide interrupt first", false, false, []string{"agent.tool_use", "agent.custom_tool_use",
+			"agent.tool_result", "user.custom_tool_result", "user.interrupt", "session.thread_status_idle",
+			"session.status_idle", "user.tool_confirmation"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			sid := eventsFixture(t, s)
+			primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+			// The thread holding the two calls: a child parked on them under a
+			// running coordinator, or the primary itself.
+			var thread domain.ID
+			holder, interrupt := primary, map[string]any{"type": "user.interrupt"}
+			if tc.scoped {
+				setThread(t, s, primary, "running", "")
+				child := insertChild(t, s, sid, "idle")
+				thread, holder = domain.ID(child), child
+				interrupt["session_thread_id"] = child
+				runningSession(t, s, sid)
+			}
+			ask := appendOn(t, s, sid, thread, tc.scoped, domain.EventAgentToolUse, askBashCall)
+			custom := appendOn(t, s, sid, thread, tc.scoped, domain.EventAgentCustomToolUse, customCall)
+			setThread(t, s, holder, "idle", `{"type":"requires_action","event_ids":["`+ask+`","`+custom+`"]}`)
+			seq := lastSeq(t, s, sid)
+
+			deny := confirm(ask, "deny", map[string]any{"deny_message": "not that one"})
+			posted := []map[string]any{interrupt, deny}
+			if tc.denyFirst {
+				posted = []map[string]any{deny, interrupt}
+			}
+			echo := sendEvents(t, s, sid, posted...)
+
+			if got := wholeLogTypes(t, s, sid); !sameStrings(got, tc.want) {
+				t.Fatalf("event log = %v, want %v", got, tc.want)
+			}
+			askResults, customResults := resultsFor(t, s, sid, ask), resultsFor(t, s, sid, custom)
+			if len(askResults) != 1 || len(customResults) != 1 {
+				t.Fatalf("results: %d for the denied call, %d for the other, want exactly one each", len(askResults), len(customResults))
+			}
+			text := askResults[0]["content"].([]any)[0].(map[string]any)["text"]
+			if got := text == "not that one"; got != tc.denialText {
+				t.Errorf("denied call answered with %q; want the denial's deny_message = %v", text, tc.denialText)
+			}
+			for _, ev := range echo {
+				if ev["type"] == "user.tool_confirmation" && processedAt(t, s, ev["id"].(string)) == nil {
+					t.Errorf("confirmation left unprocessed; this send consumes it")
+				}
+			}
+			stampsRunForward(t, s, sid, seq)
+			if tc.scoped {
+				// A session-wide interrupt waits for the primary's next turn to
+				// be stamped (docs/DIVERGENCES.md), so only here is every row
+				// this send wrote processed.
+				pendingOnlyAtTail(t, s, sid, seq)
+			}
+		})
+	}
+}
+
+// resultsFor is the payload of every result on the log that answers useID.
+func resultsFor(t *testing.T, s *tserver, sid, useID string) []map[string]any {
+	t.Helper()
+	evs, err := events.NewLog(s.pool).List(context.Background(), domain.ID(sid), events.ListQuery{Scope: events.ScopeAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, ev := range evs {
+		var p map[string]any
+		if err := json.Unmarshal(ev.Body, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p["tool_use_id"] == useID || p["custom_tool_use_id"] == useID {
+			if ev.Type != domain.EventUserToolConfirm {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// processedAt is an event's stored stamp, nil while it is pending.
+func processedAt(t *testing.T, s *tserver, id string) *time.Time {
+	t.Helper()
+	var at *time.Time
+	if err := s.pool.QueryRow(context.Background(), `SELECT processed_at FROM events WHERE id = $1`, id).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at
 }

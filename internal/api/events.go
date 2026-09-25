@@ -333,7 +333,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// Order matters twice here. The interrupt comes first because it ends the
 	// turn in progress, so a batch carrying one settles on its terms whatever
 	// else the batch says: a confirmation alongside it does not run its tool (the
-	// user asked to stop), and a user.message alongside it is the documented
+	// user asked to stop) — though a denial received ahead of it still answers
+	// its call with the denial — and a user.message alongside it is the documented
 	// redirect, handled inside that case rather than by the message trigger.
 	// Confirmation then comes before the message for the original reason: a batch
 	// that mixes the two must resolve the gate and run the confirmed tools, not
@@ -399,9 +400,14 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		isPrimary := tid == ""
 		switch {
 		case a.interrupt:
+			// The calls this send answers: every posted result, and every call
+			// a denial received ahead of this interrupt refuses — that denial
+			// is consumed first, so its result, not the interrupt's, answers
+			// the call. A denial received after it finds the call answered.
+			answered := append(events.ToolResultRefs(newEvents), events.DeniedRefs(newEvents[:interruptAt(tid)])...)
 			out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{
 				sessionID: domain.ID(id), threadID: tid, agentName: th.agentName,
-				status: status, answered: events.ToolResultRefs(newEvents),
+				status: status, answered: answered,
 				all: interruptAll, primaryInterrupted: primaryInterrupted,
 				resume: hasUserMessage || hasDefineOutcome,
 			})
@@ -528,9 +534,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if layout.answers, err = events.PlanAnswers(ctx, tx, domain.ID(id), newEvents, synthesized, advanced); err != nil {
 		return nil, err
 	}
-	if denied := layout.answers.Denied; len(denied) > 0 {
+	if stamp := slices.Concat(layout.answers.Denied, layout.answers.Moot); len(stamp) > 0 {
 		thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
-			return events.StampDenied(ctx, tx, domain.ID(id), denied)
+			return events.StampConfirmations(ctx, tx, domain.ID(id), stamp)
 		})
 	}
 	batch := layout.processingOrder()
@@ -998,6 +1004,8 @@ func (l *sendLayout) processingOrder() []events.NewEvent {
 			if st, ok := step[i]; ok {
 				out = append(append(out, l.posted[at[st.Answer]]), st.Denials...)
 			} else {
+				// Consumed on receipt, but never walked: a confirmation for a
+				// call an interrupt of this send answers.
 				out = append(out, ev)
 			}
 		case ev.Type == domain.EventUserInterrupt:
