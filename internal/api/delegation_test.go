@@ -156,14 +156,14 @@ func TestInterruptingAChildWakesTheParkedCoordinator(t *testing.T) {
 	if n := s.liveWork(sid, queue.ModelTurn); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want the woken one", n)
 	}
-	// Processing order (#793 item 3, #539): the interrupt, then the
-	// coordinator's running event, then the notice its woken turn reads, then
-	// the child's idle. The session was already running under the child, so
-	// the wake is the thread event alone.
+	// Processing order (#793 item 3, #539): the interrupt and the child's idle
+	// it ends in, consumed on receipt, then the coordinator's running event
+	// and the notice its woken turn reads. The session was already running
+	// under the child, so the wake is the thread event alone.
 	if got := typesAmong(wholeLogTypes(t, s, sid), "user.interrupt", "session.status_running",
 		"session.thread_status_running", "agent.thread_message_received", "session.thread_status_idle"); !sameStrings(got,
-		[]string{"user.interrupt", "session.thread_status_running", "agent.thread_message_received", "session.thread_status_idle"}) {
-		t.Errorf("interrupt wrote %v, want the interrupt, the wake, the notice, then the child's idle", got)
+		[]string{"user.interrupt", "session.thread_status_idle", "session.thread_status_running", "agent.thread_message_received"}) {
+		t.Errorf("interrupt wrote %v, want the interrupt, the child's idle, the wake, then the notice", got)
 	}
 }
 
@@ -234,7 +234,6 @@ func TestInterruptingThePrimaryAndAChildLeavesTheCoordinatorStopped(t *testing.T
 	}
 }
 
-// noticeText flattens a thread message's single text block.
 // typesAmong keeps the types in keep, in log order.
 func typesAmong(types []string, keep ...string) []string {
 	want := map[string]bool{}
@@ -265,6 +264,7 @@ func wholeLogTypes(t *testing.T, s *tserver, sid string) []string {
 	return out
 }
 
+// noticeText flattens a thread message's single text block.
 func noticeText(t *testing.T, ev map[string]any) string {
 	t.Helper()
 	blocks, _ := ev["content"].([]any)

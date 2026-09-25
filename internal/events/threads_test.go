@@ -337,10 +337,10 @@ func TestListHideTools(t *testing.T) {
 	}
 }
 
-// WakeThread refuses a thread whose replay carries an assistant tool_use no
-// result answers — the guard the API's message trigger gates all three of its
-// enqueues on, which the wake paths (send_to_agent, a child's report, an
-// ending) reached the same transition without (#442 item 2).
+// A delivery refuses to wake a thread whose replay carries an assistant
+// tool_use no result answers — the guard the API's message trigger gates all
+// three of its enqueues on, which the wake paths (send_to_agent, a child's
+// report, an ending) reached the same transition without (#442 item 2).
 //
 // No product path produces this state: a tool-carrying turn never reaches the
 // end_turn settle (#181), delegation answers every call in the commit that
@@ -348,7 +348,7 @@ func TestListHideTools(t *testing.T) {
 // already refuses. So the test forges it, exactly as the API's own regression
 // test forges its side with pgtest.SetSessionStatus. The answered half is the
 // control: it proves the outstanding call is what refuses, not the fixture.
-func TestWakeThreadRefusesAThreadWithAnUnansweredToolUse(t *testing.T) {
+func TestDeliveryRefusesToWakeAThreadWithAnUnansweredToolUse(t *testing.T) {
 	ctx := context.Background()
 
 	wake := func(t *testing.T, answered bool) bool {
@@ -377,11 +377,16 @@ func TestWakeThreadRefusesAThreadWithAnUnansweredToolUse(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
-		_, _, woke, err := events.WakeThread(ctx, tx, sid, "")
+		_, received, err := events.ThreadMessage(sid, events.ThreadPeer{ThreadID: "sthr_reporter", AgentName: "worker"},
+			events.ThreadPeer{}, "done")
 		if err != nil {
 			t.Fatal(err)
 		}
-		return woke
+		d, err := events.DeliverAndWake(ctx, tx, sid, received)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.Woke()
 	}
 
 	t.Run("unanswered call refuses the wake", func(t *testing.T) {

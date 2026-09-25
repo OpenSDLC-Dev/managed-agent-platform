@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
@@ -211,16 +213,6 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			interruptAll = interruptAll && at(th.id).interrupt
 		}
 	}
-	now := time.Now().UTC()
-	for i := range newEvents {
-		// A child-scoped interrupt is consumed right here, by this arm: the
-		// child's turn it ends is the only turn that could ever stamp it, so
-		// it is stamped processed on append (a session-wide one is the
-		// primary's next turn's to stamp, as before).
-		if newEvents[i].Type == domain.EventUserInterrupt && newEvents[i].ThreadID != "" {
-			newEvents[i].ProcessedAt = &now
-		}
-	}
 	primaryStatus := status
 	for _, th := range threads {
 		if th.id == "" {
@@ -254,9 +246,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			newEvents[i].ID = domain.NewID(domain.PrefixEvent)
 		}
 	}
-	// The platform's reaction, by where processingOrder places it: what an
-	// interrupt settles before it, what follows it, and a wake's running pair.
-	var settled, after, wake []events.NewEvent
+	// The platform's reaction, recorded by what processingOrder needs to place
+	// it.
+	layout := newSendLayout(newEvents)
 	var opts events.AppendOptions
 	// The status transitions this batch actually makes, in order, recorded once
 	// the commit that made them lands. Usually one — but an interrupt that a
@@ -270,14 +262,14 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			opts.SetStatus = st
 		}
 	}
-	// wakeUnder moves one thread to running under the lock and keeps the pair
-	// it emits, which the input it wakes on follows.
+	// wakeUnder moves one thread to running under the lock and records the
+	// pair it emits as that thread's wake, which the input it wakes on follows.
 	wakeUnder := func(t events.ThreadTransition) error {
 		pair, moved, err := events.TransitionThread(ctx, tx, domain.ID(id), t)
 		if err != nil {
 			return err
 		}
-		wake = append(wake, pair...)
+		layout.woke(t.ThreadID, pair)
 		moveTo(moved)
 		return nil
 	}
@@ -356,6 +348,47 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// session-wide interrupt reaches the primary through the expansion above,
 	// and a thread-scoped one naming the primary keys straight to "".
 	primaryInterrupted := at("").interrupt
+	// The posted interrupt each interrupted thread's arm answers to: the first
+	// that names the thread, else the first session-wide one.
+	named, sessionWide := map[domain.ID]int{}, -1
+	for i, ev := range newEvents {
+		switch {
+		case ev.Type != domain.EventUserInterrupt:
+		case !scoped[i]:
+			if sessionWide < 0 {
+				sessionWide = i
+			}
+		default:
+			if _, ok := named[ev.ThreadID]; !ok {
+				named[ev.ThreadID] = i
+			}
+		}
+	}
+	interruptAt := func(tid domain.ID) int {
+		if i, ok := named[tid]; ok {
+			return i
+		}
+		return sessionWide
+	}
+	// The arms run in the order the send is processed, so the status events
+	// their transitions emit read true where processingOrder lists them: the
+	// primary's own arm first unless it is interrupted — its one move in the
+	// batch is a message's wake, which a child's ending then finds already made
+	// — then the interrupted threads in the order their interrupts were
+	// received, then the rest, whose answers settle in Then. Were an
+	// interrupted child's idle to run before a sibling's while listed after
+	// it, a session.status_idle the second emits would precede the first
+	// thread's idle in the list.
+	armOrder := func(th threadState) int {
+		switch {
+		case at(th.id).interrupt:
+			return interruptAt(th.id)
+		case th.id == "":
+			return -1
+		}
+		return len(newEvents)
+	}
+	slices.SortStableFunc(threads, func(a, b threadState) int { return cmp.Compare(armOrder(a), armOrder(b)) })
 	for _, th := range threads {
 		a, tid, status := at(th.id), th.id, th.status
 		isPrimary := tid == ""
@@ -370,9 +403,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			settled = append(settled, out.settled...)
-			after = append(after, out.after...)
-			wake = append(wake, out.resume...)
+			layout.interrupted(interruptAt(tid), out)
 			thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
 				_, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), tid, platformExecuted)
 				return err
@@ -463,7 +494,19 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 
 		}
 	}
-	batch := processingOrder(newEvents, settled, after, wake)
+	// A child-scoped interrupt is consumed right here, by its arm: the child's
+	// turn it ends is the only turn that could ever stamp it, so it is stamped
+	// processed on append — now the arms have run, so no earlier than the
+	// results its arm synthesized ahead of it (#539; AppendInTx keeps a
+	// batch's stamps from running backwards). A session-wide one is the
+	// primary's next turn's to stamp, as before.
+	now := time.Now().UTC()
+	for i := range newEvents {
+		if newEvents[i].Type == domain.EventUserInterrupt && newEvents[i].ThreadID != "" {
+			newEvents[i].ProcessedAt = &now
+		}
+	}
+	batch := layout.processingOrder()
 	if interruptAll {
 		batch = keepLastSessionIdle(batch)
 	}
@@ -518,8 +561,22 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// A tool reply may have been processed by Then, together with an earlier
 	// queued reply. Echo the persisted timestamp rather than the pre-settlement
 	// copy returned by the first append.
+	//
+	// An answer is consumed on receipt, and processingOrder lists it there, but
+	// the settlement that stamps it runs in Then, after the append — later than
+	// the rows this commit lists behind it. So an answer this commit consumed
+	// takes a stamp inside its slot: no earlier than this commit's rows listed
+	// ahead of it, no later than the first listed behind it, so the order and
+	// the stamps say the same (#539). An answer still queued stays unstamped.
 	for _, ev := range newEvents {
 		if ev.Type == domain.EventUserToolResult || ev.Type == domain.EventUserCustomToolRes || ev.Type == domain.EventUserToolConfirm {
+			if _, err := tx.Exec(ctx, `UPDATE events a SET processed_at = LEAST(GREATEST(a.processed_at,
+			     (SELECT MAX(b.processed_at) FROM events b WHERE b.session_id = a.session_id AND b.seq >= $3 AND b.seq < a.seq)),
+			     (SELECT MIN(b.processed_at) FROM events b WHERE b.session_id = a.session_id AND b.seq > a.seq))
+			   WHERE a.session_id = $1 AND a.id = $2 AND a.processed_at IS NOT NULL`,
+				id, ev.ID.String(), appended[0].Seq); err != nil {
+				return nil, err
+			}
 			if err := tx.QueryRow(ctx, `SELECT processed_at FROM events WHERE session_id=$1 AND id=$2`, id, ev.ID.String()).Scan(&posted[ev.ID].ProcessedAt); err != nil {
 				return nil, err
 			}
@@ -576,17 +633,19 @@ type interruptThreadIn struct {
 }
 
 // interruptThreadOut is what the arm leaves its caller to place: the events to
-// append, by where processingOrder puts them, the status moves to record after
-// the commit, and the work to schedule — cancels before enqueues, the order the
-// caller keeps.
+// append, by what processingOrder needs to place them, the status moves to
+// record after the commit, and the work to schedule — cancels before enqueues,
+// the order the caller keeps.
 type interruptThreadOut struct {
 	// settled is what the interrupt settles before it is itself processed:
 	// the results it synthesizes for the calls it abandons and the ends of
 	// the outcomes it interrupts (#539).
 	settled []events.NewEvent
-	// after follows the interrupt: a told coordinator's wake and notice, then
-	// this thread's idle pair.
-	after []events.NewEvent
+	// idled is this thread's idle pair, which follows the interrupt.
+	idled []events.NewEvent
+	// told is the notice a coordinator gets when this interrupt stopped its
+	// child, with the coordinator's wake when the ending caused one.
+	told *events.Delivery
 	// resume is a redirect's running pair, which the waking input follows.
 	resume        []events.NewEvent
 	moves         []domain.SessionStatus
@@ -658,9 +717,9 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 		// A child stopped mid-turn and the report it owed will never
 		// come, so its coordinator is told (plan 35 decision 7) — and
 		// woken when this was the last child it could have been
-		// waiting on, the rule events.WakeOnThreadEnded argues. The
-		// wake and its notice go in before this thread's own idle
-		// below, so the session never folds idle between the two. A
+		// waiting on, the rule events.DeliverThreadEnded applies. The
+		// wake runs before this thread's own idle below, so the
+		// session never folds idle between the two. A
 		// session-wide interrupt says nothing at all: it idles the
 		// coordinator in this same loop, one notice per child would be
 		// noise on a session the human just stopped, and a wake would
@@ -681,15 +740,15 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 			if err != nil {
 				return out, err
 			}
-			delivered, moved, woke, err := events.DeliverThreadEnded(ctx, tx, in.sessionID, in.threadID, notice)
+			told, err := events.DeliverThreadEnded(ctx, tx, in.sessionID, in.threadID, notice)
 			if err != nil {
 				return out, err
 			}
-			out.after = append(out.after, delivered...)
-			if moved != nil {
-				out.moves = append(out.moves, *moved)
+			out.told = &told
+			if told.Moved != nil {
+				out.moves = append(out.moves, *told.Moved)
 			}
-			out.wakeParent = woke
+			out.wakeParent = told.Woke()
 		}
 		// end_turn, not a stop reason of its own: the reference documents an
 		// interrupted turn as ending on the same stop reason as one that
@@ -699,7 +758,7 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 		// thread is already idle and its clients still need the new stop
 		// reason — and so is the session's when it stays idle (Reemit);
 		// the column only moves when the fold really changes.
-		if err := transition(&out.after, events.ThreadTransition{ThreadID: in.threadID, Status: domain.SessionIdle,
+		if err := transition(&out.idled, events.ThreadTransition{ThreadID: in.threadID, Status: domain.SessionIdle,
 			Stop: &domain.StopReason{Type: domain.StopEndTurn}, Reemit: true}); err != nil {
 			return out, err
 		}
@@ -737,54 +796,127 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 	return out, nil
 }
 
-// processingOrder lays a send out in the order its events are processed within
-// the commit — the order the reference lists them in (#793, #539;
-// docs/plan/56_processing-order.md) — rather than the order they were posted:
-//
-//  1. the posted events nothing below places, in the order posted: answers the
-//     confirmation and result arms consume on receipt, and input that wakes
-//     nothing, which keeps its receipt position;
-//  2. settled: what the interrupts settle — the results they synthesize and
-//     the outcome ends they write;
-//  3. the posted interrupts;
-//  4. after: what follows them — a told coordinator's wake and notice, then
-//     the idle pairs;
-//  5. wake: the running pair, when the send wakes the primary;
-//  6. and the input that wake's turn consumes — the posted events from the
-//     first user.message or user.define_outcome on, in the order posted, so a
-//     system.message stays behind the event it follows.
-//
-// A send the platform writes nothing for in this commit — a message to a
-// running session, an interrupt with nothing to stop — is its posted events in
-// the order posted, as it always was: nothing was processed to order them by.
-// The POST echo keeps the posted order; only the log and the stream read this.
-func processingOrder(posted, settled, after, wake []events.NewEvent) []events.NewEvent {
-	if len(settled)+len(after)+len(wake) == 0 {
-		return posted
+// sendLayout records what one send writes, by what processingOrder needs to
+// place it: the client's events as posted, what each posted interrupt's arms
+// wrote around it, the running pair of each thread the send woke, and the rows
+// it delivered.
+type sendLayout struct {
+	posted []events.NewEvent
+	// settled and idled are keyed by the posted interrupt's index: what
+	// settling it wrote ahead of it (the results it synthesized, the outcome
+	// ends) and behind it (the idle pairs of the threads it ended).
+	settled, idled map[int][]events.NewEvent
+	// wakes are the running pairs, in the order their threads woke.
+	wakes []threadWake
+	// delivered are the rows delivered to a thread (an ending notice), each
+	// with the index of the posted event whose processing delivered it.
+	delivered []deliveredRow
+}
+
+type threadWake struct {
+	thread domain.ID
+	pair   []events.NewEvent
+}
+
+type deliveredRow struct {
+	cause int
+	row   events.NewEvent
+}
+
+func newSendLayout(posted []events.NewEvent) *sendLayout {
+	return &sendLayout{posted: posted, settled: map[int][]events.NewEvent{}, idled: map[int][]events.NewEvent{}}
+}
+
+// interrupted records one thread's interrupt arm under the posted interrupt at
+// index at.
+func (l *sendLayout) interrupted(at int, out interruptThreadOut) {
+	l.settled[at] = append(l.settled[at], out.settled...)
+	l.idled[at] = append(l.idled[at], out.idled...)
+	if out.told != nil {
+		l.woke(out.told.Received.ThreadID, out.told.Wake)
+		l.delivered = append(l.delivered, deliveredRow{cause: at, row: out.told.Received})
 	}
-	first := len(posted)
-	if len(wake) > 0 {
-		for i, ev := range posted {
-			if ev.Type == domain.EventUserMessage || ev.Type == domain.EventUserDefineOutcome {
-				first = i
-				break
+	l.woke("", out.resume)
+}
+
+// woke records a thread's running pair; an empty pair is no wake.
+func (l *sendLayout) woke(thread domain.ID, pair []events.NewEvent) {
+	if len(pair) > 0 {
+		l.wakes = append(l.wakes, threadWake{thread: thread, pair: pair})
+	}
+}
+
+// processingOrder lays the send out in the order its events are processed
+// within the commit — the order the reference lists them in (#793, #539;
+// docs/plan/56_processing-order.md) — rather than the order they were posted.
+// Every event goes where it is consumed, whatever its posted position:
+//
+//  1. What is consumed on receipt, in receipt order: the answers
+//     (user.tool_confirmation, user.tool_result, user.custom_tool_result) and
+//     the interrupts. Each interrupt is preceded by what settling it wrote —
+//     the results it synthesized and the outcome ends — and followed by the
+//     idle pairs of the threads it ended. An answer stays where it was
+//     received, ahead of any result a later interrupt of the send synthesizes.
+//  2. For each thread this commit woke, in the order woken: its running pair
+//     (behind session.status_running when the fold moved), then the input its
+//     woken turn consumes, in receipt order — the posted user.message,
+//     user.define_outcome and system.message addressed to it, and every row
+//     delivered to it in this commit, placed by the posted event whose
+//     processing delivered it, whichever arm made the wake. So a notice
+//     follows its coordinator's running event even when a message woke the
+//     coordinator, or another child's ending did.
+//  3. The input no wake in this commit is for, in receipt order: a message or
+//     system.message to a primary already running, and a notice to a
+//     coordinator this commit did not wake (it is running, parked on its
+//     human, or still has a busy child). A later turn consumes it, so it
+//     follows everything the send processes.
+//
+// A system.message is input, never a wake: it follows the running pair of a
+// turn this send starts, and otherwise waits at the tail for the next one. A
+// notice is input to the thread it names, placed wherever that thread's other
+// input goes.
+//
+// One placement stays out of reach. A thread an answer resumes moves in Then,
+// once the answer is on the log and its flow can settle, so its running pair
+// follows the whole batch: an input posted beside the answer precedes that
+// resume instead of following it.
+//
+// The POST echo keeps the posted order; only the log and the stream read this.
+func (l *sendLayout) processingOrder() []events.NewEvent {
+	type input struct {
+		cause  int
+		thread domain.ID
+		ev     events.NewEvent
+	}
+	var out []events.NewEvent
+	var inputs []input
+	for i, ev := range l.posted {
+		switch ev.Type {
+		case domain.EventUserToolConfirm, domain.EventUserToolResult, domain.EventUserCustomToolRes:
+			out = append(out, ev)
+		case domain.EventUserInterrupt:
+			out = append(append(append(out, l.settled[i]...), ev), l.idled[i]...)
+		default:
+			inputs = append(inputs, input{cause: i, thread: ev.ThreadID, ev: ev})
+		}
+	}
+	for _, d := range l.delivered {
+		inputs = append(inputs, input{cause: d.cause, thread: d.row.ThreadID, ev: d.row})
+	}
+	slices.SortStableFunc(inputs, func(a, b input) int { return cmp.Compare(a.cause, b.cause) })
+	placed := make([]bool, len(inputs))
+	for _, w := range l.wakes {
+		out = append(out, w.pair...)
+		for j, in := range inputs {
+			if !placed[j] && in.thread == w.thread {
+				out, placed[j] = append(out, in.ev), true
 			}
 		}
 	}
-	var head, interrupts, consumed []events.NewEvent
-	for i, ev := range posted {
-		switch {
-		case ev.Type == domain.EventUserInterrupt:
-			interrupts = append(interrupts, ev)
-		case i >= first:
-			consumed = append(consumed, ev)
-		default:
-			head = append(head, ev)
+	for j, in := range inputs {
+		if !placed[j] {
+			out = append(out, in.ev)
 		}
-	}
-	out := make([]events.NewEvent, 0, len(posted)+len(settled)+len(after)+len(wake))
-	for _, part := range [][]events.NewEvent{head, settled, interrupts, after, wake, consumed} {
-		out = append(out, part...)
 	}
 	return out
 }
@@ -858,7 +990,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 	}
 	var opts events.AppendOptions
 	var moves []domain.SessionStatus
-	var settled, after []events.NewEvent
+	layout := newSendLayout(interrupt)
 	var cancelSession, outcomeFlip bool
 	for _, th := range threads {
 		out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{
@@ -868,8 +1000,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 		if err != nil {
 			return nil, err
 		}
-		settled = append(settled, out.settled...)
-		after = append(after, out.after...)
+		layout.interrupted(0, out)
 		moves = append(moves, out.moves...)
 		for i := range out.moves {
 			opts.SetStatus = &out.moves[i]
@@ -878,7 +1009,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 		outcomeFlip = outcomeFlip || out.outcomeFlip
 	}
 	// In the order a client's session-wide interrupt is written (#539).
-	batch := keepLastSessionIdle(processingOrder(interrupt, settled, after, nil))
+	batch := keepLastSessionIdle(layout.processingOrder())
 	if cancelSession {
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return s.queue.CancelSession(ctx, tx, domain.ID(sessionID))

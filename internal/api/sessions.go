@@ -1454,12 +1454,16 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 			if err != nil {
 				return sessionRow{}, nil, err
 			}
-			if _, err = s.log.AppendInTx(ctx, tx, domain.ID(id), processingOrder(nil, out.settled, out.after, nil), events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
+			opts := events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
 				if _, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), "", platformExecuted); err != nil {
 					return err
 				}
 				return s.queue.CancelSession(ctx, tx, domain.ID(id))
-			}}); err != nil {
+			}}
+			// What settling wrote, then the idle it ends in: the order an
+			// interrupt's are written in (#539), with no interrupt event
+			// between, since none was posted.
+			if _, err = s.log.AppendInTx(ctx, tx, domain.ID(id), append(out.settled, out.idled...), opts); err != nil {
 				return sessionRow{}, nil, err
 			}
 			moves = append(moves, out.moves...)
