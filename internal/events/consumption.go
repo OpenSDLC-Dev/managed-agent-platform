@@ -20,10 +20,10 @@ import (
 // transcripts — follows that order; the list and the stream keep seq.
 //
 // The rule is a pure function of a thread's rows, so every replay of a log
-// rebuilds the same order. Its one premise is the replay snapshot's
-// invariant: a request consumes every row of its thread below its start that
-// no earlier start consumed (the brain's topUpHistory closes the gap between
-// its history read and the start).
+// rebuilds the same order. Its one premise is that a request consumes every
+// row of its thread below its start that no earlier start consumed, which the
+// brain makes true by reading its history only after its start commits,
+// bounded by it (requestHistory).
 
 // ConsumedInput reports whether t is an input a model request consumes
 // (domain.ConsumedInputs), and so one a consumption window can hold. Nothing

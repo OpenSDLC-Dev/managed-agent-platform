@@ -227,6 +227,43 @@ func FlipNonTerminalOutcomes(now time.Time) func([]domain.OutcomeEvaluation) ([]
 	}
 }
 
+// BeginOutcomeWork flips every pending outcome entry to running, inside the
+// caller's transaction and under the session row lock it holds: the primary's
+// model request start calls it, because that request is the one that reads
+// each pending entry's user.define_outcome — the entry and its event commit
+// together, so every entry pending at the start has its event below it
+// (#793). Entry state only, as no wire event exists for the flip, and it
+// writes nothing when no entry is pending, which is every start but the one
+// that begins an outcome.
+func BeginOutcomeWork(ctx context.Context, tx pgx.Tx, sessionID domain.ID) error {
+	var raw []byte
+	if err := tx.QueryRow(ctx,
+		`SELECT outcome_evaluations FROM sessions WHERE id = $1`, sessionID.String()).Scan(&raw); err != nil {
+		return err
+	}
+	var evals []domain.OutcomeEvaluation
+	if err := json.Unmarshal(raw, &evals); err != nil {
+		return fmt.Errorf("decode stored outcome_evaluations: %w", err)
+	}
+	began := false
+	for i := range evals {
+		if evals[i].Result == domain.OutcomeResultPending {
+			evals[i].Result, began = domain.OutcomeResultRunning, true
+		}
+	}
+	if !began {
+		return nil
+	}
+	buf, err := json.Marshal(evals)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE sessions SET outcome_evaluations = $2, updated_at = now() WHERE id = $1`,
+		sessionID.String(), buf)
+	return err
+}
+
 // ActiveOutcome returns the first non-terminal outcome entry, if any. The
 // reference allows one active outcome at a time, so first is only.
 func ActiveOutcome(evals []domain.OutcomeEvaluation) (domain.OutcomeEvaluation, bool) {

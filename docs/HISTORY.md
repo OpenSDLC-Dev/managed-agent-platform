@@ -69,8 +69,8 @@ The second PR took the case no single commit holds: an input that lands while a 
 request is in flight, which had replayed merged ahead of the reply it never saw.
 `events.ConsumptionOrder`, a pure function of a thread's rows, places it after that
 request's end and results instead, and replay, the grader's transcript and the dream's
-streamed transcript all read through it; a request also re-reads the rows appended between
-its history read and its span start, since its start consumes them. `processed_at` moved to
+streamed transcript all read through it; a request reads its history only after its span
+start commits, bounded by it, since that start consumes exactly those rows. `processed_at` moved to
 the same point: the span start stamps what it consumes at its own `processed_at` minus
 1 µs, the reference's stamp on 139 of the 140 recorded consumptions, and a delivered
 message is written null until then — a present null on a field the pinned SDK types as

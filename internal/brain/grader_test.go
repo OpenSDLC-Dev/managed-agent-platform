@@ -482,8 +482,8 @@ func TestGraderReplyNULSanitized(t *testing.T) {
 
 func TestOutcomePendingFlipsRunningAtTurnStart(t *testing.T) {
 	// "pending" is before the agent begins work; "running" while producing.
-	// The flip commits when the turn claims, so a client polling mid-turn
-	// sees running, not pending.
+	// The flip commits with the span start of the request that reads the
+	// define_outcome, so a client polling mid-turn sees running, not pending.
 	h := newHarness(t, [][]provider.Chunk{
 		agentReply("work"),
 		graderReply("fine", "satisfied"),

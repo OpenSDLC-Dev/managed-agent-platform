@@ -134,8 +134,9 @@ and stamps its `processed_at` there — this plan's last PR, which archives it:
   next start). The watermark stays the highest seq replayed. A chained request
   after an `end_turn` reply therefore ends on the new message instead of on the
   reply — a prefill, which Claude 4.6 and later reject with a 400. The request
-  also reads the rows appended between its history read and its span start
-  (`topUpHistory`), because it consumes every row below its start.
+  reads its history once, after its span start commits, bounded by it, so it
+  is exactly the rows of its thread below the start, which that start
+  consumes.
 - **The grader's and the dream's transcripts** follow the same rule, per thread;
   the dream streams it and releases held inputs early once they outweigh its
   transcript cap.
@@ -143,7 +144,9 @@ and stamps its `processed_at` there — this plan's last PR, which archives it:
   inputs below it that no earlier start stamped, at the start's `processed_at`
   minus 1 µs, as the reference stamps 139 of the 140 recorded consumptions.
   `agent.thread_message_received` is written unprocessed until then. The turn's
-  settle stops stamping, and the start carries the brain's lease proof.
+  settle stops stamping, and the start carries the brain's lease proof. On the
+  primary the same commit flips a pending outcome to `running`: the request
+  that reads its `user.define_outcome` is the one that begins work on it.
 
 It does not move a message's list or stream position: seq stays the receipt order
 across commits, and the difference that leaves is registered rather than chased,
@@ -186,7 +189,8 @@ owner), and that repairs a session the prefill 400 had wedged.
   and the two helpers themselves.
 - For PR-B, also red on the old code: the consumption window's cases (an
   `end_turn` and a tool turn, a delegated settle, a dangling start, received and
-  outcome inputs, per-thread windows, the watermark), the snapshot top-up, the
+  outcome inputs, per-thread windows, the watermark), inputs landing just
+  before the span start joining its request with their outcome running, the
   grader and dream transcripts, the stamp at request start and a crash after it,
   and a received row null until its target's request starts.
 - `make verify`, `make registry-check`, independent verification, both reviews and

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -976,26 +977,41 @@ func TestCrashAfterTheSpanStartKeepsTheStamp(t *testing.T) {
 	}
 }
 
-// A message that lands after the turn's history read and before its span
-// start has a seq below the start, so that start consumes it: it stamps the
-// message (#793), and the settle does not chain on it. The request must
-// therefore carry it. The route's factory runs in exactly that gap — the
-// provider is resolved after the history read and before the start — so the
-// message lands there, and the request is rebuilt from the topped-up history.
-func TestAMessageLandingBeforeTheSpanStartJoinsTheRequest(t *testing.T) {
+// A message and a user.define_outcome that land after the turn's claim and
+// before its span start have seqs below the start, so that start consumes
+// them: it stamps both (#793), and the request it opens must carry both,
+// which it does because the turn reads its history once, after the start
+// commits, bounded by it. The outcome begins work with the request that reads
+// its definition, so it reads running for that whole cycle, not pending. The
+// route's factory runs in exactly that gap — the provider is resolved after
+// the claim and before the start — so the inputs land there.
+func TestInputsLandingBeforeTheSpanStartJoinTheRequest(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		{textChunk(0, "answered both"), done("end_turn", 2)},
 	}, nil)
+	outcomeID := domain.NewID(domain.PrefixOutcome)
 	landed := false
 	reg, err := provider.NewRegistry(
 		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake"}}},
 		map[string]provider.Factory{"fake": func(provider.Config) (provider.Provider, error) {
 			if !landed {
 				landed = true
-				payload, _ := json.Marshal(map[string]any{"content": "two"})
-				if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
-					{Type: domain.EventUserMessage, Payload: payload},
-				}); err != nil {
+				msg, _ := json.Marshal(map[string]any{"content": "two"})
+				goal, _ := json.Marshal(map[string]any{
+					"description": "Build it", "rubric": map[string]any{"type": "text", "content": "# Rubric"},
+					"max_iterations": 3, "outcome_id": outcomeID,
+				})
+				// As the API accepts a define_outcome: the event and its
+				// pending entry in one commit.
+				if _, err := h.log.AppendWith(context.Background(), h.sessionID, []events.NewEvent{
+					{Type: domain.EventUserMessage, Payload: msg},
+					{Type: domain.EventUserDefineOutcome, Payload: goal},
+				}, events.AppendOptions{MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+					return append(evals, domain.OutcomeEvaluation{
+						Type: "outcome_evaluation", OutcomeID: outcomeID,
+						Description: "Build it", Result: domain.OutcomeResultPending,
+					}), nil
+				}}); err != nil {
 					t.Errorf("append before the start: %v", err)
 				}
 			}
@@ -1005,34 +1021,42 @@ func TestAMessageLandingBeforeTheSpanStartJoinsTheRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.brain, h.registry = brain.New(h.pool, reg, nil, brain.Config{}), reg
+	var during []domain.OutcomeEvaluation
+	h.provider.onGenerate = func(call int) {
+		if call == 0 {
+			during = h.outcomes(t)
+		}
+	}
 	h.wake(t, "one")
 	h.runOnce(t)
 
 	if !landed || len(h.provider.calls) != 1 {
-		t.Fatalf("landed %v, provider calls = %d; want the message landed and one request", landed, len(h.provider.calls))
+		t.Fatalf("landed %v, provider calls = %d; want the inputs landed and one request", landed, len(h.provider.calls))
 	}
 	req := h.provider.calls[0]
 	var blocks []map[string]any
 	if len(req.Messages) == 1 {
 		_ = json.Unmarshal(req.Messages[0].Content, &blocks)
 	}
-	if len(req.Messages) != 1 || req.Messages[0].Role != "user" || len(blocks) != 2 ||
-		blocks[0]["text"] != "one" || blocks[1]["text"] != "two" {
-		t.Fatalf("request messages = %+v, want one user turn holding \"one\", then \"two\"", req.Messages)
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" || len(blocks) != 3 ||
+		blocks[0]["text"] != "one" || blocks[1]["text"] != "two" ||
+		!strings.Contains(fmt.Sprint(blocks[2]["text"]), "Work toward this outcome: Build it") {
+		t.Fatalf("request messages = %+v, want one user turn holding \"one\", \"two\" and the outcome", req.Messages)
 	}
-	// The one start consumed both, so nothing is left to chain.
-	if got := h.status(t); got != "idle" {
-		t.Errorf("status = %q, want idle", got)
+	if len(during) != 1 || during[0].OutcomeID != outcomeID || during[0].Result != domain.OutcomeResultRunning {
+		t.Errorf("outcome during the request = %+v, want %s running", during, outcomeID)
 	}
+	// The one start consumed all three.
 	starts, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"span.model_request_start"}})
-	msgs := h.messages(t)
-	if len(starts) != 1 || len(msgs) != 2 {
-		t.Fatalf("%d starts, %d messages", len(starts), len(msgs))
+	inputs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{
+		Types: []string{"user.message", "user.define_outcome"}})
+	if len(starts) != 1 || len(inputs) != 3 {
+		t.Fatalf("%d starts, %d inputs", len(starts), len(inputs))
 	}
 	want := starts[0].ProcessedAt.Add(-time.Microsecond)
-	for i, m := range msgs {
-		if m.ProcessedAt == nil || !m.ProcessedAt.Equal(want) {
-			t.Errorf("message %d processed_at = %v, want %v", i, m.ProcessedAt, want)
+	for _, in := range inputs {
+		if in.ProcessedAt == nil || !in.ProcessedAt.Equal(want) {
+			t.Errorf("%s %s processed_at = %v, want %v", in.Type, in.ID, in.ProcessedAt, want)
 		}
 	}
 }
@@ -1926,10 +1950,52 @@ func TestUnroutedModelFailsTurn(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("session.error events = %d", len(evs))
 	}
-	// No request started to stamp the message, so the failure does: the
-	// turn read it, and an unstamped message would read as pending forever.
+	// No request started to stamp the message, so the failure does: nothing
+	// else would, and an unstamped message would read as pending forever.
 	if msgs := h.messages(t); len(msgs) != 1 || msgs[0].ProcessedAt == nil {
 		t.Errorf("messages = %v, want the one message stamped", msgs)
+	}
+}
+
+// A log the replay cannot read fails the turn with the span it started: the
+// history is read after the start commits (#793), so the start is already on
+// the log, and the failure closes it with an errored end rather than leaving
+// it dangling. The provider is never called, and nothing chains, because the
+// same log fails the same way on every retry.
+func TestAReplayFailureFailsTheTurnWithItsSpan(t *testing.T) {
+	h := newHarness(t, nil, nil) // no scripts: the provider must not be called
+	if _, err := h.log.AppendTransition(context.Background(), h.sessionID,
+		// Content that is neither a string nor a block array: unreplayable.
+		[]events.NewEvent{{Type: domain.EventUserMessage, Payload: json.RawMessage(`{"content":5}`)}},
+		[]events.ThreadTransition{{Status: domain.SessionRunning}},
+		events.AppendOptions{Then: func(ctx context.Context, tx pgx.Tx) error {
+			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
+			return err
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	h.runOnce(t)
+
+	if n := len(h.provider.calls); n != 0 {
+		t.Errorf("provider called %d times on an unreplayable log", n)
+	}
+	want := []string{"span.model_request_start", "span.model_request_end", "session.error",
+		"session.thread_status_idle", "session.status_idle"}
+	if got := h.types(t); len(got) < len(want) || !slices.Equal(got[len(got)-len(want):], want) {
+		t.Errorf("event log = %v, want it to end %v", got, want)
+	}
+	ends, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"span.model_request_end"}})
+	var end struct {
+		IsError bool `json:"is_error"`
+	}
+	if len(ends) != 1 || json.Unmarshal(ends[0].Body, &end) != nil || !end.IsError {
+		t.Errorf("span ends = %d, want one errored end", len(ends))
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("%d model_turn items live, want 0: the failure must not chain", n)
 	}
 }
 
