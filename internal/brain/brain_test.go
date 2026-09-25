@@ -976,6 +976,67 @@ func TestCrashAfterTheSpanStartKeepsTheStamp(t *testing.T) {
 	}
 }
 
+// A message that lands after the turn's history read and before its span
+// start has a seq below the start, so that start consumes it: it stamps the
+// message (#793), and the settle does not chain on it. The request must
+// therefore carry it. The route's factory runs in exactly that gap — the
+// provider is resolved after the history read and before the start — so the
+// message lands there, and the request is rebuilt from the topped-up history.
+func TestAMessageLandingBeforeTheSpanStartJoinsTheRequest(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "answered both"), done("end_turn", 2)},
+	}, nil)
+	landed := false
+	reg, err := provider.NewRegistry(
+		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake"}}},
+		map[string]provider.Factory{"fake": func(provider.Config) (provider.Provider, error) {
+			if !landed {
+				landed = true
+				payload, _ := json.Marshal(map[string]any{"content": "two"})
+				if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+					{Type: domain.EventUserMessage, Payload: payload},
+				}); err != nil {
+					t.Errorf("append before the start: %v", err)
+				}
+			}
+			return h.provider, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.brain, h.registry = brain.New(h.pool, reg, nil, brain.Config{}), reg
+	h.wake(t, "one")
+	h.runOnce(t)
+
+	if !landed || len(h.provider.calls) != 1 {
+		t.Fatalf("landed %v, provider calls = %d; want the message landed and one request", landed, len(h.provider.calls))
+	}
+	req := h.provider.calls[0]
+	var blocks []map[string]any
+	if len(req.Messages) == 1 {
+		_ = json.Unmarshal(req.Messages[0].Content, &blocks)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" || len(blocks) != 2 ||
+		blocks[0]["text"] != "one" || blocks[1]["text"] != "two" {
+		t.Fatalf("request messages = %+v, want one user turn holding \"one\", then \"two\"", req.Messages)
+	}
+	// The one start consumed both, so nothing is left to chain.
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	starts, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"span.model_request_start"}})
+	msgs := h.messages(t)
+	if len(starts) != 1 || len(msgs) != 2 {
+		t.Fatalf("%d starts, %d messages", len(starts), len(msgs))
+	}
+	want := starts[0].ProcessedAt.Add(-time.Microsecond)
+	for i, m := range msgs {
+		if m.ProcessedAt == nil || !m.ProcessedAt.Equal(want) {
+			t.Errorf("message %d processed_at = %v, want %v", i, m.ProcessedAt, want)
+		}
+	}
+}
+
 // A message posted while a tool turn's request is in flight joins the user
 // turn that answers the call, after the result, rather than the user turn
 // ahead of a call it never prompted (#793 item 4; 2026-09-02 batch2 sessT
