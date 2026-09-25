@@ -315,3 +315,37 @@ func TestPendingInputChainsDefineOutcome(t *testing.T) {
 	check(seq-1, true) // unprocessed define_outcome past the watermark chains
 	check(seq, false)  // at the watermark: already consumed by this turn
 }
+
+// A message posted while request k was in flight replays after reply k, which
+// never saw it (#793 item 4): the chained request ends on that message as a
+// user turn instead of on the assistant's reply — an assistant turn last is a
+// prefill, which current Anthropic models refuse with a 400. The watermark is
+// still the highest seq replayed although the row replayed last is not it:
+// the settlement's chain check keys on it.
+func TestBuildRequestReplaysAMidRequestInputAfterTheReply(t *testing.T) {
+	start := ev(2, domain.EventSpanModelRequestStart, `{}`)
+	history := []domain.Event{
+		ev(1, domain.EventUserMessage, `{"content":"one"}`),
+		start,
+		ev(3, domain.EventUserMessage, `{"content":"two"}`),
+		ev(4, domain.EventAgentMessage, `{"content":[{"type":"text","text":"first answer"}]}`),
+		ev(5, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
+	}
+	req, watermark, err := buildRequest("", nil, history, "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != 5 {
+		t.Errorf("watermark = %d, want 5, the max seq", watermark)
+	}
+	var roles []string
+	for _, m := range req.Messages {
+		roles = append(roles, m.Role)
+	}
+	if !slices.Equal(roles, []string{"user", "assistant", "user"}) {
+		t.Fatalf("roles = %v, want user, assistant, user", roles)
+	}
+	if !strings.Contains(string(req.Messages[2].Content), `"two"`) {
+		t.Errorf("last user turn = %s, want the mid-request message", req.Messages[2].Content)
+	}
+}

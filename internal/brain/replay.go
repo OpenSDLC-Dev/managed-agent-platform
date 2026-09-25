@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
 )
@@ -12,8 +13,8 @@ import (
 // buildRequest replays the event log into one provider request: the log IS
 // the conversation (plan component 3 — "replay = read events in order and
 // rebuild provider messages"). It returns the request and the replay
-// watermark (the highest seq consumed), which the turn's settlement stamps
-// as processed.
+// watermark (the highest seq replayed), past which the turn's settlement
+// looks for input that arrived while it ran.
 //
 // The tool definitions arrive already assembled (resolveTools), because what
 // the model may call is not a question the log answers: it comes from the
@@ -85,8 +86,16 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		return nil
 	}
 
-	for _, ev := range history {
-		watermark = ev.Seq
+	// Rows replay in consumption order (events.ConsumptionOrder): an input
+	// that landed while one of this thread's requests was in flight renders
+	// after that request's reply and results, where the next request consumed
+	// it, not at its receipt seq ahead of a reply that never saw it (#793). So
+	// the row replayed last need not be the highest seq, and the watermark —
+	// what the settlement's chain check keys on — is taken as the max.
+	for _, ev := range events.ConsumptionOrder(history) {
+		if ev.Seq > watermark {
+			watermark = ev.Seq
+		}
 		switch ev.Type {
 		case domain.EventUserMessage:
 			var p struct {

@@ -883,17 +883,22 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 	if running != 1 {
 		t.Errorf("session.status_running count = %d, want 1", running)
 	}
-	// Turn 2's replay saw both messages. On the log, "two" landed before
-	// the first answer (that is the true chronology), so the adjacent user
-	// events merge into one user turn ahead of the assistant's reply.
+	// Turn 2's replay saw both messages. "two" is on the log ahead of the
+	// first answer, where it was received, but request 1 never saw it:
+	// request 2 consumed it, so it replays after the answer, as its own user
+	// turn (#793 item 4). Replayed at its seq, it would merge into "one" and
+	// leave the chained request ending on the assistant's reply — a prefill.
 	req := h.provider.calls[1]
-	if len(req.Messages) != 2 || req.Messages[0].Role != "user" || req.Messages[1].Role != "assistant" {
+	if len(req.Messages) != 3 || req.Messages[0].Role != "user" ||
+		req.Messages[1].Role != "assistant" || req.Messages[2].Role != "user" {
 		t.Fatalf("chained request messages = %d: %+v", len(req.Messages), req.Messages)
 	}
-	var merged []map[string]any
-	_ = json.Unmarshal(req.Messages[0].Content, &merged)
-	if len(merged) != 2 || merged[0]["text"] != "one" || merged[1]["text"] != "two" {
-		t.Errorf("merged user turn = %v", merged)
+	for i, want := range map[int]string{0: "one", 1: "first answer", 2: "two"} {
+		var blocks []map[string]any
+		_ = json.Unmarshal(req.Messages[i].Content, &blocks)
+		if len(blocks) != 1 || blocks[0]["text"] != want {
+			t.Errorf("message %d = %v, want %q alone", i, blocks, want)
+		}
 	}
 	// Everything consumed is stamped.
 	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"user.message"}})
@@ -901,6 +906,60 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 		if ev.ProcessedAt == nil {
 			t.Errorf("user.message[%d] not stamped", i)
 		}
+	}
+}
+
+// A message posted while a tool turn's request is in flight joins the user
+// turn that answers the call, after the result, rather than the user turn
+// ahead of a call it never prompted (#793 item 4; 2026-09-02 batch2 sessT
+// idx 78 lists it after agent.tool_result, 1 µs before the next start).
+func TestMidRequestMessageOnAToolTurnFollowsTheResult(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolUseChunk("toolu_a", "lookup"), done("tool_use", 3)},
+		{textChunk(0, "done"), done("end_turn", 2)},
+	}, nil)
+	h.customTool(t, "lookup")
+	h.provider.onGenerate = func(call int) {
+		if call != 0 {
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{"content": "two"})
+		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+			{Type: domain.EventUserMessage, Payload: payload},
+		}); err != nil {
+			t.Errorf("mid-request append: %v", err)
+		}
+	}
+	h.wake(t, "one")
+	h.runOnce(t)
+
+	uses, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
+	if len(uses) != 1 {
+		t.Fatalf("tool intents = %d, want 1", len(uses))
+	}
+	h.postToolResult(t, domain.EventUserCustomToolRes, map[string]any{
+		"custom_tool_use_id": uses[0].ID.String(),
+		"content":            []map[string]string{{"type": "text", "text": "found"}},
+	})
+	h.runOnce(t)
+
+	req := h.provider.calls[1]
+	if len(req.Messages) != 3 {
+		t.Fatalf("resumed request messages = %d: %+v", len(req.Messages), req.Messages)
+	}
+	var first, call, answer []map[string]any
+	_ = json.Unmarshal(req.Messages[0].Content, &first)
+	_ = json.Unmarshal(req.Messages[1].Content, &call)
+	_ = json.Unmarshal(req.Messages[2].Content, &answer)
+	if len(first) != 1 || first[0]["text"] != "one" {
+		t.Errorf("first user turn = %v, want \"one\" alone", first)
+	}
+	if req.Messages[1].Role != "assistant" || len(call) != 1 || call[0]["type"] != "tool_use" {
+		t.Errorf("assistant turn = %v, want the tool call", call)
+	}
+	if req.Messages[2].Role != "user" || len(answer) != 2 ||
+		answer[0]["type"] != "tool_result" || answer[1]["text"] != "two" {
+		t.Errorf("answering user turn = %v, want the result, then \"two\"", answer)
 	}
 }
 
