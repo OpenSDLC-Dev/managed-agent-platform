@@ -1,5 +1,5 @@
 ---
-status: archived
+status: in-progress
 issue: 793
 ---
 
@@ -204,7 +204,7 @@ it.
 
 **PR-B** (the owner's decisions on item 4, 2026-09-25) places an input consumed
 later than it was received where it was consumed, in everything a model reads,
-and stamps its `processed_at` there — this plan's last PR, which archives it:
+and stamps its `processed_at` there — this plan's second PR:
 
 - **Replay by consumption window.** A `user.message`, `user.define_outcome` or
   `agent.thread_message_received` that landed while one of its thread's model
@@ -248,6 +248,19 @@ can contradict: an input that landed between an older brain's history read and
 its span start was in the next request only, and replays one request early,
 ahead of a reply that never saw it. That window was milliseconds wide, so no
 special case is kept for it.
+
+**PR-C** (added 2026-09-26; this plan's last PR, which archives it) takes the
+placement PR-A left out of reach: a thread an answer resumes. The reference writes
+a resumed turn's running pair ahead of what that turn consumes, a denial's result
+included. In 2026-09-12-archived-threads/batch1.json (`[5].body.data` idx 31 to
+35) a primary's deny reads `user.tool_confirmation`, `session.status_running`,
+`session.thread_status_running`, then the denial's `agent.tool_result`, 117 ms
+later and 1 µs before `span.model_request_start`, then that start. This platform
+writes the resume's pair in the settlement that runs after the send's append, so
+the denial's result, which PR-A lays beside its confirmation, and any input
+posted beside the answer come ahead of the pair. PR-C predicts the resume in the
+send's layout and writes its pair ahead of the input the resumed turn consumes,
+the denial's result included.
 
 ## Alternatives rejected
 
@@ -309,5 +322,8 @@ special case is kept for it.
   scope stamped at receipt (and one with nothing to stop, and the dream
   runner's), and a held confirmation an interrupt or a child's archive
   supersedes.
+- For PR-C, red on the old code: a denial that resumes the primary, listed as the
+  recording lists it (confirmation, running pair, the denial's result), and an
+  input posted beside an answer that resumes a thread, listed after the pair.
 - `make verify`, `make registry-check`, independent verification, both reviews and
   the PR's CI before squash merge.
