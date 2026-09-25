@@ -5,7 +5,9 @@
 // matcher sits the one host list that is neither an operator's nor a
 // credential's: the curated package-registry set allow_package_managers opens
 // (registries.go), which lives here because the gate and the control plane both
-// have to be told it. It holds no I/O, and that is the invariant to preserve:
+// have to be told it. So does the MCP admission predicate (mcphost.go), which
+// session create and the executor's dial both ask and must never disagree on.
+// It holds no I/O, and that is the invariant to preserve:
 // internal/gate drives it against real HTTP requests — constructing the
 // substitution engine (gate.go) and calling Substitute for header and body
 // locations — while internal/gate/policy.go reuses NewHostSet and

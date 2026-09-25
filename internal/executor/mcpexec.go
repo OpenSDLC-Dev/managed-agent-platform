@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -402,7 +403,7 @@ func (e *Executor) runMCPTool(ctx context.Context, cfg domain.EnvironmentConfig,
 	if err != nil {
 		return mcpFailed("MCP server %q has an unusable url.", u.server), mcpFailure{}, nil
 	}
-	if !mcpEgressAllowed(cfg, host) {
+	if !egress.MCPServerAdmitted(cfg, host) {
 		reason := egressRefusal(cfg, host)
 		return mcpFailed("MCP server %q could not be reached: %s", u.server, reason),
 			mcpFailure{message: storableReason(reason, endpoint)}, nil

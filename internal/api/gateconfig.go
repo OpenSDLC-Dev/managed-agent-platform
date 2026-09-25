@@ -161,7 +161,7 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 // `host:port`, so a process inside the sandbox can reach the same servers the
 // platform dials on its behalf. The platform's own dial is gated separately, in
 // the executor, because it happens outside the sandbox entirely
-// (internal/executor, mcpEgressAllowed).
+// (egress.MCPServerAdmitted, asked at session create and before each dial).
 //
 // Host **and** port, unlike `allowed_hosts`: the reference widens by "MCP server
 // endpoints configured on the agent", an endpoint is what an agent declares, and

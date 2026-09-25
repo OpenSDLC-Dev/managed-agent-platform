@@ -459,8 +459,11 @@ func TestNullFieldLeniency(t *testing.T) {
 		"config": map[string]any{
 			"type": "cloud",
 			// The flag is what lets packages ride with limited networking (plan
-			// 40 decision 9); this case is about the null lists beside it.
-			"networking": map[string]any{"type": "limited", "allow_package_managers": true},
+			// 40 decision 9); this case is about the null lists beside it. The
+			// MCP flag admits the session's declared server at create (#571),
+			// with allowed_hosts still absent.
+			"networking": map[string]any{"type": "limited", "allow_package_managers": true,
+				"allow_mcp_servers": true},
 			"packages": map[string]any{
 				"apt": []any{"jq"}, "cargo": nil, "gem": []any{}, "go": []any{"golang.org/x/tools"},
 				"npm": []any{"left-pad"}, "pip": []any{"requests"},
