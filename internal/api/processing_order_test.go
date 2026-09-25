@@ -348,6 +348,83 @@ func TestAnInterruptIsStampedAfterItsResults(t *testing.T) {
 	stampsRunForward(t, s, sid, seq)
 }
 
+// customCall is a child's agent.custom_tool_use, cross-posted as the platform
+// posts one a client must answer.
+const customCall = `{"name":"decide","input":{},"session_thread_id":null}`
+
+// customResult answers a custom tool call.
+func customResult(useID string) map[string]any {
+	return map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": useID,
+		"content": []any{map[string]any{"type": "text", "text": "done"}}}
+}
+
+// An answer the send does not process is pending, so it goes to the tail with
+// the other input no turn of this commit consumes, not where it was received:
+// the ordered tool flow consumes a child's calls in the order the model made
+// them, and a result for its second call waits behind the first. Here it is
+// posted ahead of a message that wakes the coordinator, and is listed after
+// the coordinator's running pair and the message the woken turn reads.
+func TestAnAnswerQueuedBehindAnEarlierCallGoesToTheTail(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle", `{"type":"end_turn"}`)
+	child := insertChild(t, s, sid, "idle")
+	first := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentCustomToolUse, customCall)
+	second := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentCustomToolUse, customCall)
+	setThread(t, s, child, "idle", `{"type":"requires_action","event_ids":["`+first+`","`+second+`"]}`)
+	seq := lastSeq(t, s, sid)
+
+	echo := sendEvents(t, s, sid, customResult(second), userMessage("meanwhile"))
+
+	want := []string{"agent.custom_tool_use", "agent.custom_tool_use", "session.status_running",
+		"session.thread_status_running", "user.message", "user.custom_tool_result"}
+	if got := s.eventTypes(sid); !sameStrings(got, want) {
+		t.Fatalf("event log = %v, want %v", got, want)
+	}
+	if echo[0]["processed_at"] != nil {
+		t.Errorf("result echoed processed at %v, want null: it waits behind the first call", echo[0]["processed_at"])
+	}
+	stampsRunForward(t, s, sid, seq)
+}
+
+// Whether an answer is consumed is the ordered flow's to say, confirmation
+// included: a result behind an allowed call waits for that call to run, so it
+// is pending and goes to the tail; behind a denied call, which the denial
+// answers, it is consumed and stays where it was received.
+func TestAnAnswerBehindAConfirmedCallIsPlacedByWhatTheConfirmationSays(t *testing.T) {
+	for _, tc := range []struct {
+		result    string
+		want      []string
+		processed bool
+	}{
+		{"allow", []string{"user.tool_confirmation", "session.status_running", "user.message", "user.custom_tool_result"}, false},
+		{"deny", []string{"user.tool_confirmation", "user.custom_tool_result", "session.status_running", "user.message"}, true},
+	} {
+		t.Run(tc.result, func(t *testing.T) {
+			s := newTestServer(t)
+			sid := eventsFixture(t, s)
+			setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle", `{"type":"end_turn"}`)
+			child := insertChild(t, s, sid, "idle")
+			ask := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentToolUse, askBashCall)
+			custom := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentCustomToolUse, customCall)
+			setThread(t, s, child, "idle", `{"type":"requires_action","event_ids":["`+ask+`","`+custom+`"]}`)
+			seq := lastSeq(t, s, sid)
+
+			echo := sendEvents(t, s, sid, confirm(ask, tc.result, nil), customResult(custom), userMessage("meanwhile"))
+
+			if got := typesAmong(s.eventTypes(sid), "user.tool_confirmation", "user.custom_tool_result",
+				"session.status_running", "user.message"); !sameStrings(got, tc.want) {
+				t.Fatalf("event log holds %v, want %v", got, tc.want)
+			}
+			if got := echo[1]["processed_at"] != nil; got != tc.processed {
+				t.Errorf("result processed = %v (%v), want %v: its place and its stamp must agree",
+					got, echo[1]["processed_at"], tc.processed)
+			}
+			stampsRunForward(t, s, sid, seq)
+		})
+	}
+}
+
 // A thread two interrupts of one send both reach is ended by the first of them
 // received: its results come before that interrupt and its idle after it, and
 // the later one, which finds the thread already stopped, settles nothing. Here

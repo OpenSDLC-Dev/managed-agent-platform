@@ -1,9 +1,11 @@
 package events
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -148,40 +150,129 @@ func (l *Log) AdvanceThreadTools(ctx context.Context, tx pgx.Tx, sid, tid domain
 		_, err := tx.Exec(ctx, `UPDATE events SET processed_at=clock_timestamp() WHERE session_id=$1 AND id=$2 AND processed_at IS NULL`, sid.String(), id)
 		return err
 	}
-	for i := range calls {
-		c := &calls[i]
+	err = walkReady(calls, func(c *orderedCall) (bool, error) {
 		if c.resultID != "" {
 			if c.confirmationID != "" {
 				if err := stamp(c.confirmationID); err != nil {
-					return ToolFlow{}, err
+					return false, err
 				}
 			}
 			if err := stamp(c.resultID); err != nil {
-				return ToolFlow{}, err
+				return false, err
 			}
 			c.resolved = true
-			continue
+			return true, nil
 		}
-		if c.permission == string(domain.EvalPermAsk) && c.confirmationID != "" {
-			if err := stamp(c.confirmationID); err != nil {
-				return ToolFlow{}, err
-			}
-			c.confirmed = true
-			results, _, err := DenialResults(ctx, tx, sid, []NewEvent{{Type: domain.EventUserToolConfirm, Payload: c.confirmation}})
-			if err != nil {
-				return ToolFlow{}, err
-			}
-			if len(results) > 0 {
-				if _, err := l.AppendInTx(ctx, tx, sid, results, AppendOptions{}); err != nil {
-					return ToolFlow{}, err
-				}
-				c.resolved = true
-				continue
-			}
+		if err := stamp(c.confirmationID); err != nil {
+			return false, err
 		}
-		break
+		c.confirmed = true
+		results, _, err := DenialResults(ctx, tx, sid, []NewEvent{{Type: domain.EventUserToolConfirm, Payload: c.confirmation}})
+		if err != nil || len(results) == 0 {
+			return false, err
+		}
+		if _, err := l.AppendInTx(ctx, tx, sid, results, AppendOptions{}); err != nil {
+			return false, err
+		}
+		c.resolved = true
+		return true, nil
+	})
+	if err != nil {
+		return ToolFlow{}, err
 	}
 	return summarizeTools(calls, kind, platformOwned), nil
+}
+
+// walkReady walks a thread's calls in log order as far as processing can go:
+// it hands consume each call that has its result, or an ask gate that has its
+// confirmation, and stops at the first call with neither. consume reports
+// whether the call is now resolved — a result or a denial resolves it, an
+// allow only releases it to run — and the walk goes on only past a resolved
+// call. AdvanceThreadTools stamps what it is handed; PendingAnswers only
+// notes it, so the two agree on where processing stops.
+func walkReady(calls []orderedCall, consume func(c *orderedCall) (bool, error)) error {
+	for i := range calls {
+		c := &calls[i]
+		if c.resultID == "" && (c.permission != string(domain.EvalPermAsk) || c.confirmationID == "") {
+			return nil
+		}
+		resolved, err := consume(c)
+		if err != nil || !resolved {
+			return err
+		}
+	}
+	return nil
+}
+
+// PendingAnswers is which of a send's answers — among posted, its
+// user.tool_result, user.custom_tool_result and user.tool_confirmation events,
+// routed to their threads — the send's own settlement leaves unprocessed. It is
+// read before they are appended, so the send can lay each out where it
+// belongs. advanced names the threads whose tools the settlement advances; on
+// those, the posted answers and synthesized (the results an interrupt of the
+// same send writes) are read as though already on the log and walked as
+// AdvanceThreadTools will walk them, so an answer past the first call that
+// must still wait is pending. Every answer on a thread the settlement does not
+// advance is pending.
+func PendingAnswers(ctx context.Context, q Querier, sid domain.ID, posted, synthesized []NewEvent, advanced map[domain.ID]bool) (map[domain.ID]bool, error) {
+	pending := map[domain.ID]bool{}
+	threads := map[domain.ID]bool{}
+	for _, ev := range posted {
+		switch ev.Type {
+		case domain.EventUserToolResult, domain.EventUserCustomToolRes, domain.EventUserToolConfirm:
+			pending[ev.ID] = true
+			threads[ev.ThreadID] = advanced[ev.ThreadID]
+		}
+	}
+	for tid, walked := range threads {
+		if !walked {
+			continue
+		}
+		calls, _, err := threadCalls(ctx, q, sid, tid)
+		if err != nil {
+			return nil, err
+		}
+		byID := make(map[string]*orderedCall, len(calls))
+		for i := range calls {
+			byID[calls[i].id.String()] = &calls[i]
+		}
+		for _, ev := range slices.Concat(posted, synthesized) {
+			var ref struct {
+				ToolUseID       string `json:"tool_use_id"`
+				CustomToolUseID string `json:"custom_tool_use_id"`
+				MCPToolUseID    string `json:"mcp_tool_use_id"`
+			}
+			_ = json.Unmarshal(ev.Payload, &ref)
+			c := byID[cmp.Or(ref.ToolUseID, ref.CustomToolUseID, ref.MCPToolUseID)]
+			switch {
+			case c == nil:
+			case ev.Type == domain.EventUserToolConfirm:
+				if c.confirmationID == "" {
+					c.confirmationID, c.confirmation = ev.ID.String(), ev.Payload
+				}
+			case c.resultID == "":
+				c.resultID = ev.ID.String()
+			}
+		}
+		if err := walkReady(calls, func(c *orderedCall) (bool, error) {
+			delete(pending, domain.ID(c.confirmationID))
+			delete(pending, domain.ID(c.resultID))
+			return c.resultID != "" || denies(c.confirmation), nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return pending, nil
+}
+
+// denies reports whether a confirmation refuses its call, the one confirmation
+// that answers the call as well as settling its gate (DenialResults).
+func denies(confirmation json.RawMessage) bool {
+	var c struct {
+		Result string `json:"result"`
+	}
+	_ = json.Unmarshal(confirmation, &c)
+	return c.Result == "deny"
 }
 
 // ToolFlowThreads selects threads whose tool state can advance. Idle end_turn

@@ -391,6 +391,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return len(newEvents)
 	}
 	slices.SortStableFunc(threads, func(a, b threadState) int { return cmp.Compare(armOrder(a), armOrder(b)) })
+	// The threads whose tools the settlement in Then advances, which is what
+	// processes an answer: the interrupted ones and the answered ones.
+	advanced := map[domain.ID]bool{}
 	for _, th := range threads {
 		a, tid, status := at(th.id), th.id, th.status
 		isPrimary := tid == ""
@@ -406,6 +409,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				return nil, err
 			}
 			layout.interrupted(interruptAt(tid), out)
+			advanced[tid] = true
 			thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
 				_, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), tid, platformExecuted)
 				return err
@@ -440,6 +444,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			}
 			outcomeFlip = outcomeFlip || out.outcomeFlip
 		case (a.confirmation || a.toolResult) && (status == string(domain.SessionIdle) || status == string(domain.SessionRunning)):
+			advanced[tid] = true
 			thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
 
 				pendingApproval, err := events.PendingThreadApprovals(ctx, tx, domain.ID(id), tid)
@@ -508,6 +513,18 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			newEvents[i].ProcessedAt = &now
 		}
 	}
+	// An answer the settlement will not reach is pending, and goes where
+	// pending input goes. The settlement runs in Then, after the append, so
+	// which answers it leaves pending is read now, off the walk it will make:
+	// the answers and the results the interrupts above synthesized, read as
+	// though on the log.
+	var synthesized []events.NewEvent
+	for _, evs := range layout.settled {
+		synthesized = append(synthesized, evs...)
+	}
+	if layout.pending, err = events.PendingAnswers(ctx, tx, domain.ID(id), newEvents, synthesized, advanced); err != nil {
+		return nil, err
+	}
 	batch := layout.processingOrder()
 	if interruptAll {
 		batch = keepLastSessionIdle(batch)
@@ -564,12 +581,13 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// queued reply. Echo the persisted timestamp rather than the pre-settlement
 	// copy returned by the first append.
 	//
-	// An answer is consumed on receipt, and processingOrder lists it there, but
-	// the settlement that stamps it runs in Then, after the append — later than
-	// the rows this commit lists behind it. So an answer this commit consumed
-	// takes a stamp inside its slot: no earlier than this commit's rows listed
-	// ahead of it, no later than the first listed behind it, so the order and
-	// the stamps say the same (#539). An answer still queued stays unstamped.
+	// An answer this commit processes is consumed on receipt, and
+	// processingOrder lists it there, but the settlement that stamps it runs in
+	// Then, after the append — later than the rows this commit lists behind it.
+	// So an answer this commit consumed takes a stamp inside its slot: no
+	// earlier than this commit's rows listed ahead of it, no later than the
+	// first listed behind it, so the order and the stamps say the same (#539).
+	// An answer still queued stays unstamped, at the tail.
 	//
 	// One statement for the whole batch, whose RETURNING is the echo's reread:
 	// the session's row lock is held, and a body can carry thousands of
@@ -845,6 +863,9 @@ type sendLayout struct {
 	// delivered are the rows delivered to a thread (an ending notice), each
 	// with the index of the posted event whose processing delivered it.
 	delivered []deliveredRow
+	// pending are the posted answers this commit's settlement leaves
+	// unprocessed (events.PendingAnswers).
+	pending map[domain.ID]bool
 }
 
 type threadWake struct {
@@ -886,11 +907,12 @@ func (l *sendLayout) woke(thread domain.ID, pair []events.NewEvent) {
 // Every event goes where it is consumed, whatever its posted position:
 //
 //  1. What is consumed on receipt, in receipt order: the answers
-//     (user.tool_confirmation, user.tool_result, user.custom_tool_result) and
-//     the interrupts. Each interrupt is preceded by what settling it wrote —
-//     the results it synthesized and the outcome ends — and followed by the
-//     idle pairs of the threads it ended. An answer stays where it was
-//     received, ahead of any result a later interrupt of the send synthesizes.
+//     (user.tool_confirmation, user.tool_result, user.custom_tool_result) the
+//     settlement processes, and the interrupts. Each interrupt is preceded by
+//     what settling it wrote — the results it synthesized and the outcome
+//     ends — and followed by the idle pairs of the threads it ended. So an
+//     answer precedes the results of an interrupt received after it, and
+//     follows an earlier interrupt's results, the interrupt and its idle.
 //  2. For each thread this commit woke, in the order woken: its running pair
 //     (behind session.status_running when the fold moved), then the input its
 //     woken turn consumes, in receipt order — the posted user.message,
@@ -900,20 +922,22 @@ func (l *sendLayout) woke(thread domain.ID, pair []events.NewEvent) {
 //     follows its coordinator's running event even when a message woke the
 //     coordinator, or another child's ending did.
 //  3. The input no wake in this commit is for, in receipt order: a message or
-//     system.message to a primary already running, and a notice to a
+//     system.message to a primary already running, a notice to a
 //     coordinator this commit did not wake (it is running, parked on its
-//     human, or still has a busy child). A later turn consumes it, so it
-//     follows everything the send processes.
+//     human, or still has a busy child), and an answer the settlement does
+//     not reach, queued behind an earlier call of its thread still waiting.
+//     Something later consumes it, so it follows everything the send
+//     processes.
 //
 // A system.message is input, never a wake: it follows the running pair of a
 // turn this send starts, and otherwise waits at the tail for the next one. A
 // notice is input to the thread it names, placed wherever that thread's other
 // input goes.
 //
-// One placement stays out of reach. A thread an answer resumes moves in Then,
-// once the answer is on the log and its flow can settle, so its running pair
-// follows the whole batch: an input posted beside the answer precedes that
-// resume instead of following it.
+// One placement stays out of reach (docs/DIVERGENCES.md). A thread an answer
+// resumes moves in Then, once the answer is on the log and its flow can
+// settle, so its running pair follows the whole batch: an input posted beside
+// the answer precedes that resume instead of following it.
 //
 // The POST echo keeps the posted order; only the log and the stream read this.
 func (l *sendLayout) processingOrder() []events.NewEvent {
@@ -921,14 +945,19 @@ func (l *sendLayout) processingOrder() []events.NewEvent {
 		cause  int
 		thread domain.ID
 		ev     events.NewEvent
+		// queued: no turn this commit starts consumes it, whatever its thread.
+		queued bool
 	}
 	var out []events.NewEvent
 	var inputs []input
 	for i, ev := range l.posted {
-		switch ev.Type {
-		case domain.EventUserToolConfirm, domain.EventUserToolResult, domain.EventUserCustomToolRes:
+		switch {
+		case l.pending[ev.ID]:
+			inputs = append(inputs, input{cause: i, ev: ev, queued: true})
+		case ev.Type == domain.EventUserToolConfirm || ev.Type == domain.EventUserToolResult ||
+			ev.Type == domain.EventUserCustomToolRes:
 			out = append(out, ev)
-		case domain.EventUserInterrupt:
+		case ev.Type == domain.EventUserInterrupt:
 			out = append(append(append(out, l.settled[i]...), ev), l.idled[i]...)
 		default:
 			inputs = append(inputs, input{cause: i, thread: ev.ThreadID, ev: ev})
@@ -942,7 +971,7 @@ func (l *sendLayout) processingOrder() []events.NewEvent {
 	for _, w := range l.wakes {
 		out = append(out, w.pair...)
 		for j, in := range inputs {
-			if !placed[j] && in.thread == w.thread {
+			if !placed[j] && !in.queued && in.thread == w.thread {
 				out, placed[j] = append(out, in.ev), true
 			}
 		}
