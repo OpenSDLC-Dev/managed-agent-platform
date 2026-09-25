@@ -298,13 +298,17 @@ func gradingChain(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64
 // child that is still live. Unread is processed_at null, since #793 stamps a
 // received row only when a request consumes it, or a seq past the watermark,
 // which also finds a row a build before #793 stamped at write. A message is
-// one a child sent: its agent.thread_message_sent, with the same content, is
-// on the child's own log ahead of it. An ending notice has no such row —
-// "the received half of a message nothing sent" (events.ThreadEnded) — and
-// that absence, not the notice's text, is what tells the two apart, since a
-// model may write any text. Live is an unarchived child: an archive is the
-// one ending that closes the thread for good, and it is also what an
-// archive's own notice announces.
+// one a child sent: its agent.thread_message_sent to the primary, with the
+// same content, is on the child's own log ahead of it, and no other row the
+// primary received from that child sits between the two — the send and its
+// received row are one delivery, appended together (events.ThreadMessage), so
+// a later row with the same text cannot claim a send an earlier one answered.
+// An ending notice has no send of its own — "the received half of a message
+// nothing sent" (events.ThreadEnded) — and that absence, not the notice's
+// text, is what tells the two apart, since a model may write any text,
+// including a notice's, to the coordinator or to a sibling. Live is an
+// unarchived child: an archive is the one ending that closes the thread for
+// good, and it is also what an archive's own notice announces.
 func liveChildMessage(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {
 	var found bool
 	err := tx.QueryRow(ctx,
@@ -315,9 +319,14 @@ func liveChildMessage(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark i
 		    AND c.parent_thread_id IS NOT NULL AND c.archived_at IS NULL
 		    AND EXISTS (SELECT 1 FROM events s
 		                 WHERE s.session_id = $1 AND s.thread_id = c.id AND s.type = $4
-		                   AND s.seq < r.seq AND s.payload->'content' = r.payload->'content'))`,
+		                   AND s.payload->>'to_session_thread_id' = $5
+		                   AND s.seq < r.seq AND s.payload->'content' = r.payload->'content'
+		                   AND NOT EXISTS (SELECT 1 FROM events o
+		                                    WHERE o.session_id = $1 AND o.thread_id IS NULL AND o.type = $3
+		                                      AND o.payload->>'from_session_thread_id' = c.id
+		                                      AND o.seq > s.seq AND o.seq < r.seq)))`,
 		sid.String(), watermark, string(domain.EventAgentThreadMessageReceived),
-		string(domain.EventAgentThreadMessageSent)).Scan(&found)
+		string(domain.EventAgentThreadMessageSent), domain.PrimaryThreadID(sid).String()).Scan(&found)
 	return found, err
 }
 

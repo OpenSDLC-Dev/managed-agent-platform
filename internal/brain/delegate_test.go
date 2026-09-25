@@ -1589,6 +1589,75 @@ func TestAReportFromAChildArchivedSinceDoesNotChainATerminalVerdict(t *testing.T
 	}
 }
 
+// A notice is told from a message by the send that pairs with it, never by
+// its text (#801): an ending notice that repeats, word for word, a message the
+// child sent earlier — to the coordinator, whose own received row already
+// answered that send, or to a sibling — has no send of its own, and a terminal
+// settlement chains on neither.
+func TestAnEndingNoticeRepeatingAMessageDoesNotChainATerminalVerdict(t *testing.T) {
+	const text = "[agent worker ended its turn without reporting]"
+	for _, toSibling := range []bool{false, true} {
+		name := map[bool]string{false: "sent to the coordinator", true: "sent to a sibling"}[toSibling]
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{
+				agentReply("done"),
+				graderReply("all criteria met", "satisfied"),
+				agentReply("read the notice"),
+			}, nil)
+			child := pgtest.NewChildThread(t, h.pool, h.sessionID)
+			if _, err := h.pool.Exec(context.Background(),
+				`UPDATE session_threads SET stop_reason = '{"type":"end_turn"}' WHERE id = $1`, child.String()); err != nil {
+				t.Fatal(err)
+			}
+			if toSibling {
+				sibling := pgtest.NewChildThread(t, h.pool, h.sessionID)
+				sent, received, err := events.ThreadMessage(h.sessionID,
+					events.ThreadPeer{ThreadID: child, AgentName: "worker"},
+					events.ThreadPeer{ThreadID: sibling, AgentName: "worker"}, text)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{sent, received}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.wakeOutcome(t, "Build a DCF model", 3)
+			if !toSibling {
+				h.childReport(t, child, text) // read by the agent's own turn
+			}
+			h.runOnce(t) // the primary's end_turn is the quiescence: schedules the cycle
+			for _, r := range h.primaryReceived(t) {
+				if r.ProcessedAt == nil {
+					t.Fatalf("the earlier message is unread before grading: %+v", r)
+				}
+			}
+			h.provider.onGenerate = func(callIndex int) {
+				if callIndex == 1 { // the grader's own call
+					notice, err := events.ThreadEnded(h.sessionID, child, "worker", text)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{notice}); err != nil {
+						t.Error(err)
+					}
+				}
+			}
+			h.runOnce(t) // the grading turn
+
+			if s := h.status(t); s != "idle" {
+				t.Errorf("session after the verdict = %q, want idle: the notice has no send of its own", s)
+			}
+			if n := h.liveWork(t); n != 0 {
+				t.Errorf("live items = %d, want none", n)
+			}
+			if n := len(h.provider.calls); n != 2 {
+				t.Errorf("provider calls = %d, want 2 (agent + grader)", n)
+			}
+		})
+	}
+}
+
 // The grading cycle's other settlement makes the same check: a grader call
 // that failed renders no verdict, but the live child's report that landed
 // while it ran is still unread, so the failure chains the primary instead of
