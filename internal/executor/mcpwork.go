@@ -50,7 +50,7 @@ import (
 // dials. web_fetch and web_search are documented as unaffected by networking;
 // an MCP server is not — `limited` networking's own `allow_mcp_servers` field
 // exists to admit exactly these endpoints, which would have nothing to admit if
-// the policy did not reach them. See mcpEgressAllowed.
+// the policy did not reach them. See egress.MCPServerAdmitted.
 
 // mcpServerRef is one entry of the resolved agent's mcp_servers array, whose
 // wire shape is exactly {type: "url", name, url} (checked against
@@ -447,7 +447,7 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 // already had at any width above one. The wire cap is not the right number here
 // anyway: it is enforced where an agent spec is written, and this array is read
 // back out of a stored resolved_agent, which an import, a restore or a
-// hand-written UPDATE can have filled — the provenance mcpEgressAllowed already
+// hand-written UPDATE can have filled — the provenance egress.MCPServerAdmitted already
 // refuses to assume away.
 const maxConcurrentDials = 8
 
@@ -498,7 +498,7 @@ func (e *Executor) prepareServer(ctx context.Context, cfg domain.EnvironmentConf
 		row.reason, row.offWire = herr.Error(), true
 		return row, "", false, nil
 	}
-	if !mcpEgressAllowed(cfg, host) {
+	if !egress.MCPServerAdmitted(cfg, host) {
 		row.reason = egressRefusal(cfg, host)
 		return row, "", false, nil
 	}
@@ -920,7 +920,7 @@ func mcpEndpointHost(endpoint string) (string, error) {
 }
 
 // egressRefusal says why the dial was refused, and there are exactly two
-// reasons because mcpEgressAllowed has exactly two ways to say no.
+// reasons because egress.MCPServerAdmitted has exactly two ways to say no.
 //
 // They are told apart because the advice differs and one of them is advice an
 // operator cannot act on: a config whose networking names no recognized policy
@@ -935,52 +935,6 @@ func egressRefusal(cfg domain.EnvironmentConfig, host string) string {
 	}
 	return fmt.Sprintf("this environment's networking policy is %q, which the platform does not recognize, "+
 		"so it admits no host at all — %q included", cfg.Networking.Type, host)
-}
-
-// mcpEgressAllowed reports whether the environment's networking policy admits a
-// dial to host.
-//
-// What decides is the policy's type, not which kind of environment carries it
-// — and type rather than presence, because a value struct cannot tell an
-// absent networking block from one that names no type: both decode to an
-// empty type, and both read here as no policy. A self_hosted environment has no networking block by
-// construction — its config normalizes to exactly {"type":"self_hosted"}, the
-// REST surface rejecting every other field, and the reference documents
-// networking on cloud environments only — so with no block there is nothing to
-// apply and the dial goes through. A cloud environment always has one through
-// the API. Either way a block that *is* present is a policy somebody meant, and
-// one naming no recognized type is malformed rather than permissive: it admits
-// nothing, which is `gate.newPolicy`'s shape and the safe direction.
-//
-// Reading a missing discriminator as "unrestricted" would make the malformed
-// row the one that reaches everything: the schema constrains `config->>'type'`
-// against the kind and nothing constrains `config->'networking'`, and a
-// config-preserving update (packages, description) carries a stored value
-// forward without revalidating it. Deciding on the kind first would do the same
-// thing one arm at a time — a `self_hosted` row is exactly the one the API
-// cannot have written a block onto, so a block found there came from an import,
-// a restore or a hand-written UPDATE, and skipping it because of the kind
-// would leave the refusal reachable on cloud rows alone.
-//
-// allow_mcp_servers "allows access to MCP server endpoints configured on the
-// agent" on top of allowed_hosts, and this is only ever asked about a server the
-// agent declared — discoverServers walks that array and nothing else — so under
-// the flag the host is admitted without a second list to check it against.
-func mcpEgressAllowed(cfg domain.EnvironmentConfig, host string) bool {
-	if cfg.Type == domain.EnvSelfHosted && cfg.Networking.Type == "" {
-		return true
-	}
-	switch cfg.Networking.Type {
-	case domain.NetUnrestricted:
-		return true
-	case domain.NetLimited:
-		if cfg.Networking.AllowMCPServers {
-			return true
-		}
-		return egress.NewHostSet(cfg.Networking.AllowedHosts).Match(host)
-	default:
-		return false
-	}
 }
 
 // settleMCP commits the catalog rows, the follow-on turn, and the item's fate

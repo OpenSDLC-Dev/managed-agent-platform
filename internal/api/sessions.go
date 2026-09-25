@@ -716,13 +716,14 @@ func (c createdSession) recordCreated(ctx context.Context) {
 func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSessionIn) (createdSession, error) {
 	var envArchivedAt *time.Time
 	var envKind string
+	var envConfig []byte
 	hidden := notInternal
 	if in.internal {
 		hidden = ""
 	}
 	err := tx.QueryRow(ctx,
-		`SELECT archived_at, kind FROM environments WHERE id = $1`+hidden+` FOR SHARE`, in.envID).
-		Scan(&envArchivedAt, &envKind)
+		`SELECT archived_at, kind, config FROM environments WHERE id = $1`+hidden+` FOR SHARE`, in.envID).
+		Scan(&envArchivedAt, &envKind, &envConfig)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return createdSession{}, errNotFound("environment %s not found", in.envID)
 	}
@@ -747,6 +748,9 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 
 	agent, err := s.resolveAgent(ctx, tx, in.agentRaw, in.internal)
 	if err != nil {
+		return createdSession{}, err
+	}
+	if err := admitMCPServers(envConfig, agent.MCPServers); err != nil {
 		return createdSession{}, err
 	}
 	agentJSON, err := json.Marshal(agent)
