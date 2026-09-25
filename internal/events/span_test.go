@@ -236,10 +236,12 @@ func TestModelRequestStartStampsOnlyWhatARequestReads(t *testing.T) {
 	check("after MarkProcessedThrough")
 }
 
-// The stamp is taken after the session row lock, from the database clock
-// created_at comes from, so an input that commits while the start waits on
-// the lock is never dated before it arrived: the stamp follows its
-// created_at, and so does the start's own processed_at (#793).
+// The stamp is taken after the session row lock, on the clock of the process
+// writing the start — the brain's, which also stamps the request's reply and
+// end — so an input that commits while the start waits on the lock is never
+// dated before the start was free to run (#793). Everything asserted here is
+// on this process's clock: created_at is the database's, and comparing across
+// the two would measure their skew, not the order.
 func TestModelRequestStartStampsAfterTheLock(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -274,19 +276,22 @@ func TestModelRequestStartStampsAfterTheLock(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// Longer than any skew between this host's clock and the database's.
-	time.Sleep(300 * time.Millisecond)
+	// Long enough that a stamp taken when the start began, before the lock,
+	// could not pass for one taken after it.
+	time.Sleep(50 * time.Millisecond)
 	if _, err := log.AppendInTx(ctx, tx, sid, []events.NewEvent{
 		{Type: domain.EventUserMessage, Payload: text("raced")},
 	}, events.AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	released := time.Now()
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-started; err != nil {
 		t.Fatal(err)
 	}
+	returned := time.Now()
 
 	all, err := log.List(ctx, sid, events.ListQuery{})
 	if err != nil {
@@ -299,11 +304,9 @@ func TestModelRequestStartStampsAfterTheLock(t *testing.T) {
 	if msg.ProcessedAt == nil || start.ProcessedAt == nil {
 		t.Fatalf("message %v, start %v: want both stamped", msg.ProcessedAt, start.ProcessedAt)
 	}
-	if msg.ProcessedAt.Before(msg.CreatedAt) {
-		t.Errorf("message processed_at %v is before its created_at %v", msg.ProcessedAt, msg.CreatedAt)
-	}
-	if !start.ProcessedAt.After(msg.CreatedAt) {
-		t.Errorf("start processed_at %v is not after the message's created_at %v", start.ProcessedAt, msg.CreatedAt)
+	if start.ProcessedAt.Before(released.Truncate(time.Microsecond)) || start.ProcessedAt.After(returned) {
+		t.Errorf("start processed_at %v is outside [%v, %v], from the lock's release to the start's return",
+			start.ProcessedAt, released, returned)
 	}
 	if want := start.ProcessedAt.Add(-time.Microsecond); !msg.ProcessedAt.Equal(want) {
 		t.Errorf("message processed_at = %v, want %v", msg.ProcessedAt, want)

@@ -139,12 +139,18 @@ type AppendOptions struct {
 	MarkProcessedThrough int64
 	// Consume stamps the thread's still-unprocessed request inputs below this
 	// batch's first row, the ones the model request that row opens consumes
-	// (#793). The row's processed_at is read from the database clock once the
-	// session row lock is held, the clock created_at comes from, and the inputs
-	// are stamped 1 µs before it, as the reference stamps them: an input that
-	// committed while this append waited on the lock is never dated before it
-	// arrived. Only a span.model_request_start leading the batch may set it;
-	// AppendInTx refuses any other batch.
+	// (#793). The row's processed_at is taken from this process's clock once
+	// the session row lock is held, and the inputs are stamped 1 µs before it,
+	// as the reference stamps them. After the lock, so an input that committed
+	// while this append waited on it is never dated before the start was free
+	// to run; this process's clock, because the brain stamps the request's
+	// agent.thinking, agent.message and span.model_request_end on it too, so
+	// the request's inputs and outputs read in order whatever the database's
+	// clock says. A stamp another process writes — created_at, from the
+	// database, or an answer's processed_at, from whichever process took it —
+	// can still skew against these by the difference between the two hosts'
+	// clocks, as it could before #793. Only a span.model_request_start leading the batch may
+	// set it; AppendInTx refuses any other batch.
 	Consume bool
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
@@ -233,13 +239,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1`, sessionID.String()).Scan(&seq); err != nil {
 		return nil, err
 	}
-	// Under the lock, from created_at's clock (the INSERT's comment below).
+	// Under the lock, on this process's clock (the option's comment).
 	var consumedAt time.Time
 	if opts.Consume {
-		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&consumedAt); err != nil {
-			return nil, err
-		}
-		consumedAt = consumedAt.UTC().Truncate(time.Microsecond)
+		consumedAt = time.Now().UTC().Truncate(time.Microsecond)
 	}
 
 	// One multi-row INSERT: the session row lock is held for a single round
@@ -273,7 +276,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 				return nil, err
 			}
 		}
-		// The row a Consume opens is processed at the clock read above.
+		// The row a Consume opens is processed at the stamp taken above.
 		if i == 0 && opts.Consume {
 			ev.ProcessedAt = &consumedAt
 		}
