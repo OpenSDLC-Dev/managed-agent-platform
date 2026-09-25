@@ -137,7 +137,8 @@ func (q *Queue) ListWork(ctx context.Context, envID domain.ID, after bool, after
 // Ack acknowledges a polled work item, transitioning queued → starting. It is
 // idempotent: only the queued→starting edge stamps acknowledged_at and installs
 // the startup lease, so a re-ack of an already-advanced item returns it
-// unchanged. The startup lease (ackStartupLeaseSeconds) governs a starting item
+// unchanged — save a missing started_at, which any ack heals to created_at
+// (see Poll). The startup lease (ackStartupLeaseSeconds) governs a starting item
 // until its first heartbeat replaces it, so Poll reclaims a dead worker's
 // starting item on a real lease, not the short un-acked poll reservation. An
 // item not visible to the work API (missing, wrong environment, or not a
@@ -150,6 +151,7 @@ func (q *Queue) Ack(ctx context.Context, envID, workID domain.ID) (*Work, error)
 		     lease_expires_at = CASE WHEN state = 'queued'
 		                             THEN now() + make_interval(secs => ($3)::double precision)
 		                             ELSE lease_expires_at END,
+		     started_at       = COALESCE(started_at, created_at),
 		     updated_at       = now()
 		 WHERE id = $1 AND environment_id = $2`+workAPIScope+`
 		 RETURNING `+workColumns,
@@ -179,8 +181,8 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 		row = q.pool.QueryRow(ctx,
 			`UPDATE work_items
 			 SET last_heartbeat   = now(),
-			     started_at       = now(),
 			     state            = 'active',
+			     started_at       = COALESCE(started_at, created_at),
 			     lease_expires_at = now() + make_interval(secs => ($3)::double precision),
 			     updated_at       = now()
 			 WHERE id = $1 AND environment_id = $2`+workAPIScope+`

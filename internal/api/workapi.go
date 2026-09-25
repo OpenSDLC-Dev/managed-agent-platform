@@ -45,7 +45,8 @@ type workData struct {
 // workWire is the BetaSelfHostedWork response shape, field for field. Every
 // field is required on the wire, including the lifecycle timestamps that a
 // still-queued item has not reached — those render as null (a queued item has
-// not been acknowledged, started, or stopped).
+// not been acknowledged or stopped; its started_at is the enqueue stamp, see
+// toWire).
 type workWire struct {
 	ID                string            `json:"id"`
 	AcknowledgedAt    *time.Time        `json:"acknowledged_at"`
@@ -70,6 +71,8 @@ type workWire struct {
 
 // toWire maps a queue row onto the wire work item. Lifecycle timestamps a work
 // item has not reached are null; the state-transition endpoints populate them.
+// started_at is the exception: enqueue stamps it, so a queued item carries one
+// (queue.Work.StartedAt).
 func toWire(w *queue.Work) workWire {
 	meta := w.Metadata
 	if meta == nil {
