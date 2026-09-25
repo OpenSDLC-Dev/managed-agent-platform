@@ -187,6 +187,10 @@ func TestStopForceAndGraceful(t *testing.T) {
 	// Graceful stop of an item a worker holds → stopping; force then escalates →
 	// stopped.
 	env, id := claimedItem(t, pool, q)
+	held, err := q.GetWork(ctx, env, id)
+	if err != nil || held.StartedAt == nil {
+		t.Fatalf("claimed item = %+v %v, want its enqueue started_at", held, err)
+	}
 	// Stop returns the updated item to in-process callers; the wire answers 204,
 	// so the API handler discards it.
 	stopped, err := q.Stop(ctx, env, id, false)
@@ -195,6 +199,10 @@ func TestStopForceAndGraceful(t *testing.T) {
 	}
 	if stopped.State != "stopping" || stopped.StopRequestedAt == nil || stopped.StoppedAt != nil {
 		t.Errorf("graceful stop returned %+v, want stopping with stop_requested_at and no stopped_at", stopped)
+	}
+	// Neither stop moves started_at, as no reference stop does (#542).
+	if stopped.StartedAt == nil || !stopped.StartedAt.Equal(*held.StartedAt) {
+		t.Errorf("graceful stop started_at = %v, want %v", stopped.StartedAt, held.StartedAt)
 	}
 	// The lease stays: the worker holds it while it winds down, and its lapsing
 	// past WindDown is what tells the control plane the wind-down was abandoned.
@@ -212,6 +220,9 @@ func TestStopForceAndGraceful(t *testing.T) {
 	}
 	if stopped.State != "stopped" || stopped.StoppedAt == nil {
 		t.Errorf("force stop returned %+v, want stopped with stopped_at", stopped)
+	}
+	if stopped.StartedAt == nil || !stopped.StartedAt.Equal(*held.StartedAt) {
+		t.Errorf("force stop started_at = %v, want %v", stopped.StartedAt, held.StartedAt)
 	}
 	if leaseHeld(t, pool, id) {
 		t.Error("force stop left a lease behind, want it cleared")
@@ -539,6 +550,18 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	if first.StartedAt == nil || again.StartedAt == nil || !again.StartedAt.Equal(*first.StartedAt) {
 		t.Errorf("re-offered queued item started_at = %v, want the enqueue stamp %v", again.StartedAt, first.StartedAt)
 	}
+	// A queued row with no stamp — enqueued before the upgrade, or handed out by
+	// a replica still running the code that cleared it — takes its created_at at
+	// its next hand-out rather than staying null.
+	if _, err := pool.Exec(ctx,
+		`UPDATE work_items SET started_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`, again.ID); err != nil {
+		t.Fatal(err)
+	}
+	healed, err := q.Poll(ctx, env, time.Minute)
+	if err != nil || healed == nil || healed.StartedAt == nil || !healed.StartedAt.Equal(healed.CreatedAt) {
+		t.Fatalf("stampless queued row re-offered as %+v %v, want started_at = created_at", healed, err)
+	}
+	again = healed
 
 	expireLease := func(id domain.ID) {
 		t.Helper()

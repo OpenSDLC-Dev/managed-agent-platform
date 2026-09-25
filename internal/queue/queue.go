@@ -150,7 +150,7 @@ type Work struct {
 	Metadata        map[string]string
 	CreatedAt       time.Time
 	AcknowledgedAt  *time.Time // set by ack (queued → starting)
-	StartedAt       *time.Time // set at enqueue, re-set when Poll reclaims a held item into the queue
+	StartedAt       *time.Time // set by EnqueueThread, re-set when Poll reclaims a held item into the queue
 	StopRequestedAt *time.Time // set by stop
 	StoppedAt       *time.Time // set when the item reaches stopped
 	// LastHeartbeat is the wire's latest_heartbeat_at — null until the worker
@@ -257,8 +257,8 @@ func (q *Queue) EnqueueThread(ctx context.Context, db DB, envID, sessionID, thre
 // than trust it (internal/executor/harvest.go's settleHarvest).
 func (q *Queue) EnqueueOutputsHarvest(ctx context.Context, db DB, envID, sessionID domain.ID, chainGrading bool) (bool, error) {
 	tag, err := db.Exec(ctx,
-		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context, metadata, started_at)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool), now())
+		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context, metadata)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool))
 		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
 		domain.NewID("work"), envID, sessionID, OutputsHarvest, traceContextArg(ctx), chainGrading)
@@ -355,8 +355,7 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // (lease_expires_at < now(), i.e. the worker stopped heartbeating) is reclaimed:
 // it is reset to a fresh queued reservation (state → queued; last_heartbeat and
 // acknowledged_at cleared, started_at re-stamped as the reference's re-queue
-// re-stamps it, so it is indistinguishable on the wire from a freshly enqueued
-// item) so the next worker can re-poll, re-ack, and
+// re-stamps it) so the next worker can re-poll, re-ack, and
 // re-claim it with a fresh NO_HEARTBEAT — the mirror of Claim's expired-active
 // reclaim for cloud. Note the lease a starting/active item is reclaimed on is a
 // real lease (Ack installs a startup lease, heartbeats extend it), not the
@@ -414,6 +413,12 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // are opaque to the client, so the wire is unchanged. Claim needs no equivalent:
 // the cloud executor proves ownership with the lease itself (see Item.Lease).
 //
+// started_at marks entry to the queue (#542): a still-queued item keeps its
+// enqueue stamp through every hand-out, and only the starting/active reclaim
+// re-stamps it. A queued row with no stamp — written before enqueue stamped
+// one, or handed out by a replica still running the code that cleared it —
+// takes its created_at instead of staying null.
+//
 // Poll serves only self_hosted environments — the mirror of Claim scoping
 // tool_exec to cloud. The two are therefore mutually exclusive by environment
 // kind, so an item a worker has polled is never also run by the executor even
@@ -445,7 +450,7 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 		     state            = 'queued',
 		     last_heartbeat   = NULL,
 		     acknowledged_at  = NULL,
-		     started_at       = CASE WHEN t.state = 'queued' THEN t.started_at ELSE now() END,
+		     started_at       = CASE WHEN t.state = 'queued' THEN COALESCE(t.started_at, t.created_at) ELSE now() END,
 		     lease_expires_at = now() + make_interval(secs => $2),
 		     updated_at       = now()
 		 FROM picked p
