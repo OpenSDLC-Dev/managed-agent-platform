@@ -349,7 +349,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// and a thread-scoped one naming the primary keys straight to "".
 	primaryInterrupted := at("").interrupt
 	// The posted interrupt each interrupted thread's arm answers to: the first
-	// that names the thread, else the first session-wide one.
+	// received of those that reach it — the first that names the thread and
+	// the first session-wide one, whichever came first. A later one finds the
+	// thread already stopped, so what ending it writes belongs to the earlier.
 	named, sessionWide := map[domain.ID]int{}, -1
 	for i, ev := range newEvents {
 		switch {
@@ -365,7 +367,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 	}
 	interruptAt := func(tid domain.ID) int {
-		if i, ok := named[tid]; ok {
+		if i, ok := named[tid]; ok && (sessionWide < 0 || i < sessionWide) {
 			return i
 		}
 		return sessionWide

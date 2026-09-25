@@ -348,6 +348,59 @@ func TestAnInterruptIsStampedAfterItsResults(t *testing.T) {
 	stampsRunForward(t, s, sid, seq)
 }
 
+// A thread two interrupts of one send both reach is ended by the first of them
+// received: its results come before that interrupt and its idle after it, and
+// the later one, which finds the thread already stopped, settles nothing. Here
+// the session-wide interrupt arrives first, so the child's ending belongs to it
+// and not to the child-scoped interrupt that follows.
+func TestTheFirstInterruptReceivedEndsTheThread(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+	setThread(t, s, primary, "running", "")
+	child := insertChild(t, s, sid, "running")
+	appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentToolUse, allowBashCall)
+	runningSession(t, s, sid)
+	seq := lastSeq(t, s, sid)
+
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"},
+		map[string]any{"type": "user.interrupt", "session_thread_id": child})
+
+	want := []string{"agent.tool_use", "agent.tool_result", "user.interrupt",
+		"session.thread_status_idle", "session.thread_status_idle", "session.status_idle", "user.interrupt"}
+	if got := wholeLogTypes(t, s, sid); !sameStrings(got, want) {
+		t.Fatalf("event log = %v, want %v", got, want)
+	}
+	_, list := s.do("GET", "/v1/sessions/"+sid+"/events", nil)
+	if evs := listData(t, list); evs[len(evs)-1]["session_thread_id"] != child {
+		t.Errorf("last event = %v, want the redundant child-scoped interrupt", evs[len(evs)-1])
+	}
+	stampsRunForward(t, s, sid, seq)
+}
+
+// The same two interrupts posted the other way round: the child-scoped one is
+// first, so it ends the child, and the session-wide one ends the primary.
+func TestTheFirstInterruptReceivedEndsTheThreadScopedFirst(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+	setThread(t, s, primary, "running", "")
+	child := insertChild(t, s, sid, "running")
+	appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentToolUse, allowBashCall)
+	runningSession(t, s, sid)
+	seq := lastSeq(t, s, sid)
+
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt", "session_thread_id": child},
+		map[string]any{"type": "user.interrupt"})
+
+	want := []string{"agent.tool_use", "agent.tool_result", "user.interrupt", "session.thread_status_idle",
+		"user.interrupt", "session.thread_status_idle", "session.status_idle"}
+	if got := wholeLogTypes(t, s, sid); !sameStrings(got, want) {
+		t.Fatalf("event log = %v, want %v", got, want)
+	}
+	stampsRunForward(t, s, sid, seq)
+}
+
 // Item 2's residual, deliberately (docs/DIVERGENCES.md, "Session threads — a
 // child's resume of an idle session"): a message that wakes the coordinator
 // while a child keeps the session running writes the coordinator's running
