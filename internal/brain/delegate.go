@@ -537,8 +537,8 @@ func (d *delegate) sendToAgent(ctx context.Context, tx pgx.Tx, call delegatedCal
 	if err != nil {
 		return "", false, err
 	}
-	d.out.events = append(d.out.events, sent, received)
-	if err := d.wake(ctx, tx, target.id); err != nil {
+	d.out.events = append(d.out.events, sent)
+	if err := d.deliver(ctx, tx, received); err != nil {
 		return "", false, err
 	}
 	return answerMessageSent, false, nil
@@ -676,26 +676,27 @@ func (d *delegate) sendToParent(ctx context.Context, tx pgx.Tx, call delegatedCa
 
 // report delivers a child's text to the primary thread and wakes it. The wake
 // runs before the caller idles the child, so a session whose last running
-// thread is this child never folds idle between the two.
+// thread is this child never folds idle between the two. The child's sent row
+// stays first: it is the child's own, written before the coordinator wakes.
 func (d *delegate) report(ctx context.Context, tx pgx.Tx, text string) error {
 	sent, received, err := events.ThreadMessage(d.sid, d.caller, events.ThreadPeer{}, text)
 	if err != nil {
 		return err
 	}
-	d.out.events = append(d.out.events, sent, received)
-	return d.wake(ctx, tx, "")
+	d.out.events = append(d.out.events, sent)
+	return d.deliver(ctx, tx, received)
 }
 
-// wake flips a target that nothing else will move and records the turn its
-// caller must enqueue.
-func (d *delegate) wake(ctx context.Context, tx pgx.Tx, target domain.ID) error {
-	pair, _, woke, err := events.WakeThread(ctx, tx, d.sid, target)
+// deliver appends a received row with the wake it causes, in the order
+// events.DeliverAndWake owns, and records the turn its caller must enqueue.
+func (d *delegate) deliver(ctx context.Context, tx pgx.Tx, received events.NewEvent) error {
+	evs, _, woke, err := events.DeliverAndWake(ctx, tx, d.sid, received)
 	if err != nil {
 		return err
 	}
-	d.out.events = append(d.out.events, pair...)
+	d.out.events = append(d.out.events, evs...)
 	if woke {
-		d.out.wakes = append(d.out.wakes, target)
+		d.out.wakes = append(d.out.wakes, received.ThreadID)
 	}
 	return nil
 }
@@ -826,8 +827,8 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			// it a coordinator parked on a wait has nothing left to wake it —
 			// WakeOnThreadEnded fires on a child that stopped, and a child
 			// merely going idle is not something anyone else watches. That is
-			// the W1 wedge. Notice, then the wake, then the idle below, in
-			// that order so the session never folds idle in between.
+			// the W1 wedge. The wake, then the notice (processing order, #793),
+			// then the idle below, so the session never folds idle in between.
 			notice, nerr := childEndedNotice(ctx, tx, sid, item.ThreadID, func(agentName string) string {
 				return fmt.Sprintf("[agent %s stopped: %d consecutive turns resolved entirely by "+
 					"settlement-owned answers — delegation calls, names it was never offered — with "+
@@ -839,11 +840,11 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 				return nil, opts, nerr
 			}
 			if notice != nil {
-				pair, _, parentWoke, werr := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
+				delivered, _, parentWoke, werr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
 				if werr != nil {
 					return nil, opts, werr
 				}
-				batch = append(append(batch, *notice), pair...)
+				batch = append(batch, delivered...)
 				if parentWoke {
 					// Through the same loop every other wake this settlement
 					// takes goes through, so a woken thread never ends up
@@ -1138,8 +1139,8 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 	batch := []events.NewEvent{ev}
 	// A refused child ends without a report, so it owes its coordinator the
 	// notice every other ending owes it — the same W1 wedge chainCapped's cut
-	// closes. Notice, then the wake, then the idle, in that order so the
-	// session never folds idle in between.
+	// closes. The wake, then the notice (processing order, #793), then the
+	// idle, so the session never folds idle in between.
 	notice, err := childEndedNotice(ctx, tx, sid, item.ThreadID, func(agentName string) string {
 		return fmt.Sprintf("[agent %s stopped: the session spent its delegation budget of %d "+
 			"turns]\n\nNothing was reported on them; anything it reported earlier stands. The "+
@@ -1150,11 +1151,11 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 	}
 	wokeParent := false
 	if notice != nil {
-		pair, _, parentWoke, werr := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
+		delivered, _, parentWoke, werr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
 		if werr != nil {
 			return false, werr
 		}
-		batch = append(append(batch, *notice), pair...)
+		batch = append(batch, delivered...)
 		wokeParent = parentWoke
 	}
 	pair, _, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{

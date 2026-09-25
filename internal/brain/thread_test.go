@@ -91,6 +91,10 @@ func TestOutcomeGradesAtSessionQuiescenceNotOnAChildsEndTurn(t *testing.T) {
 	if got := h.status(t); got != "running" {
 		t.Errorf("session during grading = %q, want running", got)
 	}
+	// The primary's wake for grading comes before the notice the child's
+	// ending delivers it (#793 item 3); the first running is the outcome's.
+	h.wakeThenDelivery(t, "", "session.thread_status_running",
+		"session.thread_status_running", "agent.thread_message_received")
 	// The child's own view carries its message, its turn and its idle event
 	// — no grading artefact: the start is the primary's.
 	own, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Scope: events.ScopeThread, ThreadID: child})

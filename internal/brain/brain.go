@@ -955,11 +955,11 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 				// events.WakeOnThreadEnded's, shared by every ending). It hangs off
 				// the notice because both answer one question — whether a
 				// coordinator is owed anything by this ending.
-				pair, wokeMoved, woke, err := events.WakeOnThreadEnded(ctx, tx, sid, item.ThreadID)
+				delivered, wokeMoved, woke, err := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
 				if err != nil {
 					return err
 				}
-				batch = append(append(batch, *notice), pair...)
+				batch = append(batch, delivered...)
 				wakeParent, wokeTo = woke, wokeMoved
 			}
 		}

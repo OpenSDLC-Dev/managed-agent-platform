@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -75,6 +76,14 @@ func TestArchivingAChildWakesTheParkedCoordinator(t *testing.T) {
 		if ty == "session.status_idle" {
 			t.Fatalf("the session idled between the notice and the wake: %v", s.eventTypes(sid))
 		}
+	}
+	// And in processing order (#793 item 3): the coordinator's running pair,
+	// then the notice its woken turn reads, then the child's ending.
+	if got := typesAmong(s.eventTypes(sid), "session.status_running", "session.thread_status_running",
+		"agent.thread_message_received", "session.thread_status_terminated"); !sameStrings(got, []string{
+		"session.status_running", "session.thread_status_running",
+		"agent.thread_message_received", "session.thread_status_terminated"}) {
+		t.Errorf("archive wrote %v, want the wake, the notice, then the ending", got)
 	}
 }
 
@@ -147,6 +156,15 @@ func TestInterruptingAChildWakesTheParkedCoordinator(t *testing.T) {
 	if n := s.liveWork(sid, queue.ModelTurn); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want the woken one", n)
 	}
+	// Processing order (#793 item 3, #539): the interrupt, then the
+	// coordinator's running event, then the notice its woken turn reads, then
+	// the child's idle. The session was already running under the child, so
+	// the wake is the thread event alone.
+	if got := typesAmong(wholeLogTypes(t, s, sid), "user.interrupt", "session.status_running",
+		"session.thread_status_running", "agent.thread_message_received", "session.thread_status_idle"); !sameStrings(got,
+		[]string{"user.interrupt", "session.thread_status_running", "agent.thread_message_received", "session.thread_status_idle"}) {
+		t.Errorf("interrupt wrote %v, want the interrupt, the wake, the notice, then the child's idle", got)
+	}
 }
 
 // gatedChild plants a child parked on requires_action — idle, so it can be
@@ -217,6 +235,36 @@ func TestInterruptingThePrimaryAndAChildLeavesTheCoordinatorStopped(t *testing.T
 }
 
 // noticeText flattens a thread message's single text block.
+// typesAmong keeps the types in keep, in log order.
+func typesAmong(types []string, keep ...string) []string {
+	want := map[string]bool{}
+	for _, k := range keep {
+		want[k] = true
+	}
+	var out []string
+	for _, ty := range types {
+		if want[ty] {
+			out = append(out, ty)
+		}
+	}
+	return out
+}
+
+// wholeLogTypes reads every row of the session's log in seq order, a child's
+// own rows included — what no single wire surface shows.
+func wholeLogTypes(t *testing.T, s *tserver, sid string) []string {
+	t.Helper()
+	evs, err := events.NewLog(s.pool).List(context.Background(), domain.ID(sid), events.ListQuery{Scope: events.ScopeAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, len(evs))
+	for i, ev := range evs {
+		out[i] = string(ev.Type)
+	}
+	return out
+}
+
 func noticeText(t *testing.T, ev map[string]any) string {
 	t.Helper()
 	blocks, _ := ev["content"].([]any)

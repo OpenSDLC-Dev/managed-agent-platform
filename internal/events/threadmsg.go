@@ -163,14 +163,45 @@ func WakeThread(ctx context.Context, tx pgx.Tx, sessionID, threadID domain.ID) (
 	return pair, moved, err == nil, err
 }
 
+// Every wake a delivered message causes is written in processing order (#793
+// item 3): the target's running event first, then the received row its woken
+// turn consumes — the order all ten recorded report wakes list, and the one a
+// spawn writes a child's task in. The two helpers below own that order, so no
+// emitter picks its own; a delivery that wakes nothing is the received row
+// alone. Nothing downstream reads the swap: replay skips status rows, and the
+// chain test is by seq over received rows, all in the one commit either way.
+
+// DeliverAndWake delivers received to the thread it names and wakes that
+// thread when nothing else will move it (WakeThread's rule), returning the
+// events to append in processing order.
+func DeliverAndWake(ctx context.Context, tx pgx.Tx, sessionID domain.ID, received NewEvent) ([]NewEvent, *domain.SessionStatus, bool, error) {
+	pair, moved, woke, err := WakeThread(ctx, tx, sessionID, received.ThreadID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return append(pair, received), moved, woke, nil
+}
+
+// DeliverThreadEnded delivers a ThreadEnded notice about child to the primary
+// and wakes it on WakeOnThreadEnded's rule, returning the events to append in
+// processing order. Like WakeOnThreadEnded, it runs before the ending thread's
+// own transition.
+func DeliverThreadEnded(ctx context.Context, tx pgx.Tx, sessionID, child domain.ID, notice NewEvent) ([]NewEvent, *domain.SessionStatus, bool, error) {
+	pair, moved, woke, err := WakeOnThreadEnded(ctx, tx, sessionID, child)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return append(pair, notice), moved, woke, nil
+}
+
 // ThreadEnded is the notice a coordinator gets about a child that stopped:
 // the received half of a message nothing sent, on the primary's log (plan 35
 // decision 7 — an ending condition is delivered as text, like a report). The
 // convention is a bracketed line naming the agent and what happened, then the
 // next action open to the coordinator.
 //
-// It delivers; waking is WakeOnThreadEnded's, and the endings a client drives
-// pair the two. A session-wide interrupt appends no notice at all — it ends
+// It builds the notice; waking is WakeOnThreadEnded's, and every ending pairs
+// the two through DeliverThreadEnded. A session-wide interrupt appends no notice at all — it ends
 // the primary in the same batch, so there is nobody left to tell.
 func ThreadEnded(sessionID, child domain.ID, agentName, text string) (NewEvent, error) {
 	_, received, err := ThreadMessage(sessionID, ThreadPeer{ThreadID: child, AgentName: agentName}, ThreadPeer{}, text)

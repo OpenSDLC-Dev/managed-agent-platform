@@ -794,4 +794,5 @@ func TestChildEndingThatWakesItsCoordinatorSkipsHarvest(t *testing.T) {
 	if n := h.liveOf(t, queue.OutputsHarvest); n != 0 {
 		t.Errorf("live outputs_harvest = %d, want 0 (the session did not idle)", n)
 	}
+	h.wakeThenDelivery(t, "", "session.thread_status_running", "agent.thread_message_received")
 }

@@ -262,7 +262,7 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 		if row.status != string(domain.SessionIdle) {
 			return nil, errInvalid("thread %s is %s; only an idle thread can be archived", threadID, row.status)
 		}
-		// Notice and wake first, the child's own ending second — the order a
+		// Wake and notice first, the child's own ending second — the order a
 		// report takes (delegate.report) and for its reason: a session whose
 		// last live child is this one never folds idle between the two, so no
 		// client sees an idle it never rested at.
@@ -306,7 +306,7 @@ func (s *server) notifyThreadArchived(ctx context.Context, tx pgx.Tx, row thread
 	if err != nil {
 		return nil, err
 	}
-	pair, moved, woke, err := events.WakeOnThreadEnded(ctx, tx, sid, domain.ID(row.id))
+	delivered, moved, woke, err := events.DeliverThreadEnded(ctx, tx, sid, domain.ID(row.id), notice)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +322,7 @@ func (s *server) notifyThreadArchived(ctx context.Context, tx pgx.Tx, row thread
 			return err
 		}
 	}
-	_, err = s.log.AppendInTx(ctx, tx, sid, append([]events.NewEvent{notice}, pair...), opts)
+	_, err = s.log.AppendInTx(ctx, tx, sid, delivered, opts)
 	return moved, err
 }
 

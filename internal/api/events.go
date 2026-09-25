@@ -629,12 +629,12 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 		// come, so its coordinator is told (plan 35 decision 7) — and
 		// woken when this was the last child it could have been
 		// waiting on, the rule events.WakeOnThreadEnded argues. The
-		// wake goes in before this thread's own idle below, so the
-		// session never folds idle between the two. A session-wide
-		// interrupt says nothing at all: it idles the coordinator in
-		// this same loop, one notice per child would be noise on a
-		// session the human just stopped, and a wake would restart
-		// what the interrupt stopped.
+		// wake and its notice go in before this thread's own idle
+		// below, so the session never folds idle between the two. A
+		// session-wide interrupt says nothing at all: it idles the
+		// coordinator in this same loop, one notice per child would be
+		// noise on a session the human just stopped, and a wake would
+		// restart what the interrupt stopped.
 		//
 		// `all` is not that test on its own: it means every live
 		// thread was named, so it is false the moment one idle sibling
@@ -651,12 +651,11 @@ func (s *server) interruptThreadInTx(ctx context.Context, tx pgx.Tx, in interrup
 			if err != nil {
 				return out, err
 			}
-			out.batch = append(out.batch, notice)
-			pair, moved, woke, err := events.WakeOnThreadEnded(ctx, tx, in.sessionID, in.threadID)
+			delivered, moved, woke, err := events.DeliverThreadEnded(ctx, tx, in.sessionID, in.threadID, notice)
 			if err != nil {
 				return out, err
 			}
-			out.batch = append(out.batch, pair...)
+			out.batch = append(out.batch, delivered...)
 			if moved != nil {
 				out.moves = append(out.moves, *moved)
 			}
