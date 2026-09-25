@@ -17,26 +17,31 @@ consumes an event, which is where every difference below was found.
 The evidence, from the recordings of 2026-09-02 to 2026-09-24
 (managed-agents-wire-recordings), read against the code at `2eb299a9`:
 
-- All 228 distinct recorded event lists sort by `processed_at` (6 look unsorted
-  only under a string compare, `.899Z` against `.899001Z`). Pending events sit at
-  the tail with no `processed_at`, and one moves once processed: in
-  2026-09-12-console-141/api-fixtures.json, `user.message`
+- All 232 distinct recorded event lists (session and thread lists, counted by
+  content) sort by `processed_at` (6 look unsorted only under a string compare,
+  `.899Z` against `.899001Z`). Pending events sit at the tail with no
+  `processed_at`, in all seven lists that hold any, and one moves once processed:
+  in 2026-09-12-console-141/api-fixtures.json, `user.message`
   `sevt_01C9bDZQjtPsLTqxCmq1YvKT` is at idx 21 of
   `observation.session.approval.events` and at idx 23 of
   `session.approval.final-events`, after the new running pair.
-- A waking message is consumed at turn start: 109 `user.message` wakes and the one
-  recorded `user.define_outcome` wake (2026-09-02/batch2.json
-  `sessT.events.after-outcome`) list `session.status_running`, the primary's
-  `session.thread_status_running`, the waking event, then
-  `span.model_request_start` 1 µs later. Five more message wakes put a
-  `session.error` between the two running events, the message still after both. A
-  deployment run's list reads the same (console-141 `deployment.run.final-events`,
-  idx 0 to 2), and so does the live 2026-09-12-console-followups/streams/ui-00.sse,
-  which never echoes a message at receipt.
-- An answer is consumed on receipt: on the primary thread, 12
-  `user.tool_confirmation`s, 7 `user.tool_result`s and 9
-  `user.custom_tool_result`s are listed before the pair they cause (for example
-  console-141 `session.approval.final-events` idx 10 to 13).
+- A waking message is consumed at turn start. All 115 recorded `user.message`
+  wakes and the one recorded `user.define_outcome` wake (2026-09-02/batch2.json
+  `sessT.events.after-outcome`) list the waking event after
+  `session.status_running` and the primary's `session.thread_status_running`:
+  110 of the message wakes with the pair directly ahead of the message, five with
+  session-start `session.error`s between the two running events, and none with
+  the message first (each wake counted once by its `sevt_` id). In all 116 the
+  turn's `span.model_request_start` follows the waking event 1 µs later. Both
+  recorded deployment runs are among the 110 (console-141
+  `deployment.run.final-events` reads the pair at idx 0 to 1 and the message at
+  2), and the live 2026-09-12-console-followups/streams/ui-00.sse, which never
+  echoes a message at receipt, reads the same.
+- An answer is consumed on receipt: all 32 recorded wakes by an answer on the
+  primary thread list the answer before the pair it causes — 12 by a
+  `user.tool_confirmation` (six of them denies), 9 by a `user.tool_result` and 11
+  by a `user.custom_tool_result`; three of the 32 carry two answers each, 35 in
+  all (for example console-141 `session.approval.final-events` idx 10 to 13).
 - An interrupt is consumed after the results it causes (#539):
   `sessT.events.after-outcome` idx 35 to 37 reads `agent.tool_result`,
   `user.interrupt`, `session.thread_status_idle`, and the live
@@ -64,7 +69,10 @@ The evidence, from the recordings of 2026-09-02 to 2026-09-24
    session keeps this platform's shape: `session.status_running` with the child's
    own running event, the primary left idle. Session `status` stays a fold that
    answers whether any work is happening in the session; the executor's liveness
-   check, the MCP work check and the archive/delete guards depend on that.
+   check, the MCP work check and the archive/delete guards depend on that. Its
+   residual is registered with it: a coordinator woken while a child keeps the
+   fold running writes its own running event without a `session.status_running`,
+   because the session never left running.
 3. **Item 3, fixed for every wake a delivered message causes.** The target's
    running event is written before the `received` row: a child's report, a
    `send_to_agent` that wakes an idle child, and every ending notice that wakes a
@@ -102,25 +110,52 @@ as #675 part 3 accepted, and the POST echo keeps the order the client posted in.
 
 ## The split
 
-**PR-A** (this plan's first PR) lands items 1 and 3 and #539, and registers
-item 2:
+**PR-A** (this plan's first PR) lands items 1 and 3 and #539, registers item 2,
+and fixes one older bug on a line it touches:
 
-- `processingOrder` lays a send out as: the posted events nothing else places, what
-  an interrupt settles, the interrupts, what follows them (a told coordinator's
-  wake and notice, the idle pairs), a wake's running pair, then the posted events
-  from the first waking event on. The client's events are found again by a
-  pre-minted id, so the echo and the `processed_at` re-read no longer assume they
-  lead the batch. A send the platform writes nothing for keeps its posted order.
-- `events.DeliverAndWake` and `events.DeliverThreadEnded` own the order of a
-  delivery and its wake, so no emitter picks its own.
-- `events.AppendTransition` writes a wake's pair ahead of the input it consumes,
-  so the brain's harnesses model the trigger; the reclaim's forced pair is not a
-  wake and carries no input, so it is unchanged.
+- `processingOrder` (internal/api/events.go) lays a send out by what each event
+  is, not where it was posted. First comes what is consumed on receipt, in
+  receipt order: the answers, and each interrupt behind the results and outcome
+  ends its settling wrote and ahead of the idle pairs it caused. Then, for each
+  thread the commit woke, its running pair and the input its woken turn consumes:
+  the posted message, outcome or system message addressed to it, and any notice
+  delivered to it, whichever arm made the wake. Last comes the input no wake is
+  for, a message to a primary already running or a notice to a coordinator left
+  parked, which a later turn consumes. The arms run in the same order (the
+  primary's own first unless it is interrupted, then the interrupted threads in
+  receipt order), so the status events their transitions emit read true in the
+  list. The client's events are found again by a pre-minted id, so the echo and
+  the `processed_at` re-read no longer assume they lead the batch.
+- `processed_at` agrees with that order within a commit. A child-scoped interrupt
+  is stamped once its arm has synthesized its results. `AppendInTx` raises a
+  stamp that would run backwards through a batch to the stamp ahead of it (a
+  later interrupt's results, listed behind an earlier interrupt's idle; the
+  grading start, listed behind the wake it runs on). An answer, stamped by the
+  settlement that runs after the append, is held inside its list slot.
+- Every delivery goes through `events.DeliverAndWake` or
+  `events.DeliverThreadEnded`, and their wake rules are no longer exported. Their
+  `Delivery` result owns the wake-then-row order for the emitters that append it
+  whole. For the send, which lays it out with `processingOrder`, it names the
+  row's target. A wake that consumes an input rather than a delivery (a create's
+  initial events, a dream stage, a spawn's task, the grading wake) writes its pair
+  and then its input at its own site, with one transition and one append each.
+- `events.AppendTransition` keys on a wake that happened, not on the status the
+  last transition asked for. When one of its transitions wakes a thread, its
+  events follow every pair; otherwise they precede them. The reclaim's forced
+  pair is not a wake and carries no input, so it is unchanged.
+- Archiving a session parked mid-outcome, on a confirmation or a custom tool,
+  wrote the outcome's interrupted `span.outcome_evaluation_end` without flipping
+  the `outcome_evaluations` projection, so GET still reported the outcome live.
+  It now flips it, as an interrupt does. The bug predates #793.
 
-Two placements inside PR-A are ours rather than recorded: the redirect batch (no
-recording carries an interrupt with a following message), and a client's own
-answers posted beside an interrupt, which stay ahead of the synthesized results
-because they are consumed on receipt.
+Placements inside PR-A that are ours rather than recorded: the redirect batch (no
+recording carries an interrupt with a following message); a client's own answers
+posted beside an interrupt, which stay ahead of the synthesized results because
+they are consumed on receipt; a notice and a message that one woken turn both
+consumes, kept in receipt order; and input no wake is for, placed at the tail. One
+placement stays out of reach. A thread that an answer resumes moves after the
+append, once the answer is on the log, so an input posted beside that answer
+precedes the resume's running pair instead of following it.
 
 **PR-B** places a message posted mid-turn after the assistant reply it never saw,
 in what the model sees on replay only. It does not move the message's list or
@@ -157,6 +192,12 @@ registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
   from the dream runner, and, for item 3, a report wake, a `send_to_agent` wake of
   an idle child, each ending-notice wake (archive, interrupt, retries exhausted,
   chain cap, delegation budget, ended without reporting, grading at quiescence)
-  and the two helpers themselves.
+  and the two helpers themselves. After review: a notice beside the message that
+  wakes its coordinator, two notices whose second ending wakes the coordinator, a
+  message that wakes nothing beside an interrupt, an answer beside a wake and
+  beside a redirect, the stamps of an interrupt's commit, the grading start after
+  the wake it runs on, `AppendTransition` keyed on the wake, and the archive of a
+  session parked mid-outcome. Item 2's residual, a coordinator woken by a message
+  under a running child, is pinned rather than changed.
 - `make verify`, `make registry-check`, independent verification, both reviews and
   the PR's CI before squash merge.
