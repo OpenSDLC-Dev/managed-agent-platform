@@ -249,8 +249,8 @@ func TestConfirmationDenyAnswersWithErrorAndResumesBrain(t *testing.T) {
 	if !ok || len(content) != 1 {
 		t.Fatalf("deny result content = %v", res["content"])
 	}
-	if block := content[0].(map[string]any); block["text"] != "not allowed" {
-		t.Errorf("deny result text = %v, want the deny_message", block["text"])
+	if want := "Permission to use bash has been rejected. Rejection message: not allowed"; content[0].(map[string]any)["text"] != want {
+		t.Errorf("deny result text = %v, want %q", content[0].(map[string]any)["text"], want)
 	}
 }
 
@@ -285,8 +285,8 @@ func TestConfirmationDenyOfAnMCPCallAnswersInItsOwnFamily(t *testing.T) {
 	if !ok || len(content) != 1 {
 		t.Fatalf("content = %v, want one block", res["content"])
 	}
-	if block := content[0].(map[string]any); block["text"] != "not allowed" {
-		t.Errorf("text = %v, want the deny_message", block["text"])
+	if want := "Permission to use search has been rejected. Rejection message: not allowed"; content[0].(map[string]any)["text"] != want {
+		t.Errorf("text = %v, want %q", content[0].(map[string]any)["text"], want)
 	}
 	// The built-in shape must not be written alongside it.
 	if n := countEventType(t, s, sessionID, "agent.tool_result"); n != 0 {

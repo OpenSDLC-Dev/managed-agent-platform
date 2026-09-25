@@ -24,6 +24,13 @@ func inDeny(ref, msg string) events.NewEvent {
 		fmt.Sprintf(`{"result":"deny","tool_use_id":%q,"deny_message":%q}`, ref, msg))
 }
 
+// namedToolUse appends an ask-gated call of typ carrying the tool's name, which
+// the denial's text names. toolUse's payload has none.
+func namedToolUse(t *testing.T, log *events.Log, sid domain.ID, typ domain.EventType, name string) domain.ID {
+	t.Helper()
+	return appendEvent(t, log, sid, "", typ, fmt.Sprintf(`{"name":%q,"evaluated_permission":"ask"}`, name))
+}
+
 // payloadOf decodes a synthesized result so its wire fields can be asserted one
 // by one — including the keys that must be absent.
 func payloadOf(t *testing.T, ev events.NewEvent) map[string]any {
@@ -51,13 +58,14 @@ func TestDenialAnswersInTheDeniedCallsOwnFamily(t *testing.T) {
 		use    domain.EventType
 		result domain.EventType
 		refKey string
+		name   string
 	}{
-		{domain.EventAgentToolUse, domain.EventAgentToolResult, "tool_use_id"},
-		{domain.EventAgentMCPToolUse, domain.EventAgentMCPToolResult, "mcp_tool_use_id"},
+		{domain.EventAgentToolUse, domain.EventAgentToolResult, "tool_use_id", "bash"},
+		{domain.EventAgentMCPToolUse, domain.EventAgentMCPToolResult, "mcp_tool_use_id", "search_docs"},
 	} {
 		t.Run(string(tc.use), func(t *testing.T) {
 			sid := newSession(t, pool)
-			id := toolUse(t, log, sid, tc.use, `"ask"`)
+			id := namedToolUse(t, log, sid, tc.use, tc.name)
 
 			results, denied, err := events.DenialResults(ctx, pool, sid,
 				[]events.NewEvent{inDeny(id.String(), "not allowed")})
@@ -100,8 +108,12 @@ func TestDenialAnswersInTheDeniedCallsOwnFamily(t *testing.T) {
 			if !ok || len(content) != 1 {
 				t.Fatalf("content = %v, want one block", obj["content"])
 			}
-			if block := content[0].(map[string]any); block["type"] != "text" || block["text"] != "not allowed" {
-				t.Errorf("content block = %v, want the deny_message as text", block)
+			// The reference's sentence, with the client's deny_message after it
+			// (2026-09-12 recordings). The MCP family's is unrecorded: it names
+			// the call's own name, as the built-in one does.
+			wantText := "Permission to use " + tc.name + " has been rejected. Rejection message: not allowed"
+			if block := content[0].(map[string]any); block["type"] != "text" || block["text"] != wantText {
+				t.Errorf("content block = %v, want text %q", block, wantText)
 			}
 			if len(denied) != 1 || denied[0] != id.String() {
 				t.Errorf("denied = %v, want [%s]", denied, id)
@@ -116,16 +128,16 @@ func TestDenialAnswersInTheDeniedCallsOwnFamily(t *testing.T) {
 	}
 }
 
-// TestDenialWithoutAMessageStillCarriesText pins the default. A Messages
-// endpoint rejects an empty text block, and the denial is replayed into every
-// later request the brain assembles, so an empty deny_message must not become an
-// empty block.
+// TestDenialWithoutAMessageStillCarriesText pins the default: the reference's
+// sentence alone (2026-09-12 and 2026-09-19 recordings), never an empty block —
+// a Messages endpoint rejects one, and the denial is replayed into every later
+// request the brain assembles.
 func TestDenialWithoutAMessageStillCarriesText(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	ctx := context.Background()
 	sid := newSession(t, pool)
-	id := toolUse(t, log, sid, domain.EventAgentMCPToolUse, `"ask"`)
+	id := namedToolUse(t, log, sid, domain.EventAgentToolUse, "bash")
 
 	results, _, err := events.DenialResults(ctx, pool, sid, []events.NewEvent{inDeny(id.String(), "")})
 	if err != nil {
@@ -135,8 +147,8 @@ func TestDenialWithoutAMessageStillCarriesText(t *testing.T) {
 		t.Fatalf("results = %v, want one", results)
 	}
 	block := payloadOf(t, results[0])["content"].([]any)[0].(map[string]any)
-	if block["text"] == "" || block["text"] == nil {
-		t.Errorf("content block = %v, want a non-empty default text", block)
+	if want := "Permission to use bash has been rejected."; block["text"] != want {
+		t.Errorf("content block = %v, want text %q", block, want)
 	}
 }
 
@@ -177,9 +189,9 @@ func TestDenialsFollowBatchOrder(t *testing.T) {
 	log := events.NewLog(pool)
 	ctx := context.Background()
 	sid := newSession(t, pool)
-	first := toolUse(t, log, sid, domain.EventAgentMCPToolUse, `"ask"`)
-	second := toolUse(t, log, sid, domain.EventAgentToolUse, `"ask"`)
-	third := toolUse(t, log, sid, domain.EventAgentMCPToolUse, `"ask"`)
+	first := namedToolUse(t, log, sid, domain.EventAgentMCPToolUse, "search_docs")
+	second := namedToolUse(t, log, sid, domain.EventAgentToolUse, "bash")
+	third := namedToolUse(t, log, sid, domain.EventAgentMCPToolUse, "fetch_page")
 
 	results, denied, err := events.DenialResults(ctx, pool, sid, []events.NewEvent{
 		inDeny(first.String(), "a"), inDeny(second.String(), "b"), inDeny(third.String(), "c"),
@@ -190,7 +202,11 @@ func TestDenialsFollowBatchOrder(t *testing.T) {
 	wantTypes := []domain.EventType{
 		domain.EventAgentMCPToolResult, domain.EventAgentToolResult, domain.EventAgentMCPToolResult,
 	}
-	wantText := []string{"a", "b", "c"}
+	wantText := []string{
+		"Permission to use search_docs has been rejected. Rejection message: a",
+		"Permission to use bash has been rejected. Rejection message: b",
+		"Permission to use fetch_page has been rejected. Rejection message: c",
+	}
 	wantIDs := []string{first.String(), second.String(), third.String()}
 	if len(results) != 3 || len(denied) != 3 {
 		t.Fatalf("results = %v, denied = %v; want three of each", results, denied)

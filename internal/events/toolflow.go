@@ -886,11 +886,18 @@ func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 	return out, nil
 }
 
-// DenialResultText is what a refused call is answered with when the client gives
-// no deny_message. Never an empty text block, for the reason InterruptResultText
-// is not: a Messages endpoint rejects one, and the denial is replayed into every
-// later request this session assembles.
-const DenialResultText = "The user declined this tool call."
+// denialText is the text a refused call is answered with — the reference's
+// sentence, naming the call's tool, with the client's deny_message after it when
+// one was given (#60). Never an empty text block, for the reason
+// InterruptResultText is not: a Messages endpoint rejects one, and the denial is
+// replayed into every later request this session assembles.
+func denialText(name, denyMessage string) string {
+	text := "Permission to use " + name + " has been rejected."
+	if denyMessage != "" {
+		text += " Rejection message: " + denyMessage
+	}
+	return text
+}
 
 // DenialResults answers each tool call a batch's user.tool_confirmation events
 // refuse, with an error result carrying the client's deny_message. The model
@@ -909,8 +916,9 @@ const DenialResultText = "The user declined this tool call."
 // family is answered by an agent.* event, which the store stamps as it inserts.
 // The white-box table test is what keeps that true.
 //
-// The denial's result shape is an inference: the reference documents the
-// confirmation event, not the result a denial produces (docs/DIVERGENCES.md).
+// The built-in family's result — is_error, and the text denialText composes — is
+// the reference's as recorded; the MCP family's text is an inference that it
+// names the call the same way (docs/DIVERGENCES.md).
 func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent) ([]NewEvent, []string, error) {
 	type denial struct{ id, msg string }
 	var denials []denial
@@ -929,11 +937,7 @@ func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []Ne
 		if c.Result != "deny" {
 			continue
 		}
-		msg := c.DenyMessage
-		if msg == "" {
-			msg = DenialResultText
-		}
-		denials = append(denials, denial{c.ToolUseID, msg})
+		denials = append(denials, denial{c.ToolUseID, c.DenyMessage})
 	}
 	if len(denials) == 0 {
 		return nil, nil, nil
@@ -967,7 +971,7 @@ func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []Ne
 		}
 		payload, err := json.Marshal(map[string]any{
 			answer.refKey: d.id,
-			"content":     []map[string]any{{"type": "text", "text": d.msg}},
+			"content":     []map[string]any{{"type": "text", "text": denialText(use.name, d.msg)}},
 			"is_error":    true,
 		})
 		if err != nil {
@@ -982,26 +986,34 @@ func DenialResults(ctx context.Context, q Querier, sessionID domain.ID, evs []Ne
 	return results, answered, nil
 }
 
-// toolUsesByID reads the event types and threads of ids in one round trip.
-// Ids absent from the session are absent from the result rather than an error
-// here — the caller decides what a miss means.
-func toolUsesByID(ctx context.Context, q Querier, sessionID domain.ID, ids []string) (map[string]ToolUseRef, error) {
+// deniedUse is what a denial needs of the call it refuses: where its answer goes
+// (the ToolUseRef) and the tool's name, which the answer's text names.
+type deniedUse struct {
+	ToolUseRef
+	name string
+}
+
+// toolUsesByID reads the event types, threads and tool names of ids in one
+// round trip. Ids absent from the session are absent from the result rather
+// than an error here — the caller decides what a miss means.
+func toolUsesByID(ctx context.Context, q Querier, sessionID domain.ID, ids []string) (map[string]deniedUse, error) {
 	rows, err := q.Query(ctx,
-		`SELECT id, type, COALESCE(thread_id, ''), cross_posted FROM events WHERE session_id = $1 AND id = ANY($2)`,
+		`SELECT id, type, COALESCE(thread_id, ''), cross_posted, COALESCE(payload->>'name', '')
+		 FROM events WHERE session_id = $1 AND id = ANY($2)`,
 		sessionID.String(), ids)
 	if err != nil {
 		return nil, fmt.Errorf("denied tool uses: %w", err)
 	}
 	defer rows.Close()
-	out := make(map[string]ToolUseRef, len(ids))
+	out := make(map[string]deniedUse, len(ids))
 	for rows.Next() {
-		var ref ToolUseRef
+		var use deniedUse
 		var thread string
-		if err := rows.Scan(&ref.ID, &ref.Type, &thread, &ref.CrossPosted); err != nil {
+		if err := rows.Scan(&use.ID, &use.Type, &thread, &use.CrossPosted, &use.name); err != nil {
 			return nil, fmt.Errorf("denied tool uses: %w", err)
 		}
-		ref.ThreadID = domain.ID(thread)
-		out[ref.ID] = ref
+		use.ThreadID = domain.ID(thread)
+		out[use.ID] = use
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("denied tool uses: %w", err)
