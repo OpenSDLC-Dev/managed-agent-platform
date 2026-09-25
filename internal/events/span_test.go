@@ -185,9 +185,10 @@ func TestModelRequestStartStampsWhatItConsumes(t *testing.T) {
 // user.define_outcome, a system.message and a delivered
 // agent.thread_message_received. An answer is its thread's ordered
 // processor's to stamp, and a held one must stay null until that processor
-// reaches it; an interrupt is no input a request reads, so a later request
-// stamping it would date it to a request that never saw it (#793). The
-// no-provider failure's stamp, MarkProcessedThrough, keeps the same rule.
+// reaches it (#793). An interrupt is no input a request reads: its own send
+// stamps it on receipt, so one still null below a start is a row an older
+// build left, which the start repairs (the next test). The no-provider
+// failure's stamp, MarkProcessedThrough, stamps request inputs alone.
 func TestModelRequestStartStampsOnlyWhatARequestReads(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -206,8 +207,9 @@ func TestModelRequestStartStampsOnlyWhatARequestReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const read = 4 // the first four rows are what a request reads
-	check := func(when string) {
+	// The first four rows are what a request reads; the interrupt is the
+	// start's repair, not the failure's stamp.
+	check := func(when string, interruptStamped bool) {
 		t.Helper()
 		all, err := log.List(ctx, sid, events.ListQuery{})
 		if err != nil {
@@ -219,21 +221,22 @@ func TestModelRequestStartStampsOnlyWhatARequestReads(t *testing.T) {
 		}
 		for i, a := range appended {
 			got := byID[a.ID].ProcessedAt
-			if stamped := got != nil; stamped != (i < read) {
-				t.Errorf("%s: %s processed_at = %v, want stamped %v", when, a.Type, got, i < read)
+			want := i < 4 || (a.Type == domain.EventUserInterrupt && interruptStamped)
+			if stamped := got != nil; stamped != want {
+				t.Errorf("%s: %s processed_at = %v, want stamped %v", when, a.Type, got, want)
 			}
 		}
 	}
-	if _, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil); err != nil {
-		t.Fatal(err)
-	}
-	check("after the start")
 	if _, err := log.AppendWith(ctx, sid, nil, events.AppendOptions{
 		MarkProcessedThrough: appended[len(appended)-1].Seq,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	check("after MarkProcessedThrough")
+	check("after MarkProcessedThrough", false)
+	if _, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	check("after the start", true)
 }
 
 // The stamp is taken after the session row lock, on the clock of the process
@@ -310,6 +313,75 @@ func TestModelRequestStartStampsAfterTheLock(t *testing.T) {
 	}
 	if want := start.ProcessedAt.Add(-time.Microsecond); !msg.ProcessedAt.Equal(want) {
 		t.Errorf("message processed_at = %v, want %v", msg.ProcessedAt, want)
+	}
+}
+
+// A build before #793 stamped what a turn left unprocessed at the turn's
+// settle, whatever its type, and left to that stamp what nothing else
+// processes: a session-wide or primary-scoped user.interrupt, which the API
+// wrote unstamped for "the primary's next turn" — as an old API replica still
+// does during a rolling deploy — and an answer an interrupt superseded. With
+// the settle's stamp gone, such a row would stay null for good, so a start
+// repairs its thread's: an interrupt below it is stamped, since an interrupt
+// is always processed on receipt, and so is an answer whose call already has
+// a processed result below it, since nothing is left for it to wait for. An
+// answer to a call still open stays null, and so does another thread's row.
+func TestModelRequestStartRepairsWhatALegacyBuildLeftUnstamped(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	child := domain.NewID(domain.PrefixSessionThread)
+
+	calls, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventAgentToolUse, Payload: json.RawMessage(`{"name":"bash","input":{},"evaluated_permission":"ask"}`)},
+		{Type: domain.EventAgentToolUse, Payload: json.RawMessage(`{"name":"bash","input":{},"evaluated_permission":"ask"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered, open := calls[0].ID.String(), calls[1].ID.String()
+	legacy, err := log.Append(ctx, sid, []events.NewEvent{
+		// What an interrupt wrote for the first call, processed as written.
+		{Type: domain.EventAgentToolResult, Payload: json.RawMessage(`{"tool_use_id":"` + answered + `","is_error":true}`)},
+		{Type: domain.EventUserInterrupt, Payload: json.RawMessage(`{}`)},
+		{Type: domain.EventUserToolConfirm, Payload: json.RawMessage(`{"tool_use_id":"` + answered + `","result":"allow"}`)},
+		{Type: domain.EventUserToolConfirm, Payload: json.RawMessage(`{"tool_use_id":"` + open + `","result":"allow"}`)},
+		{Type: domain.EventUserInterrupt, ThreadID: child, Payload: json.RawMessage(`{}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserInterrupt, Payload: json.RawMessage(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamped := map[domain.ID]bool{}
+	for _, ev := range all {
+		stamped[ev.ID] = ev.ProcessedAt != nil
+	}
+	for _, c := range []struct {
+		id   domain.ID
+		want bool
+		what string
+	}{
+		{legacy[1].ID, true, "the primary's interrupt below the start"},
+		{legacy[2].ID, true, "a confirmation whose call an interrupt answered"},
+		{legacy[3].ID, false, "a confirmation whose call is still open"},
+		{legacy[4].ID, false, "another thread's interrupt"},
+		{after[0].ID, false, "an interrupt past the start"},
+	} {
+		if stamped[c.id] != c.want {
+			t.Errorf("%s: stamped %v, want %v", c.what, stamped[c.id], c.want)
+		}
 	}
 }
 

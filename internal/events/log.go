@@ -464,14 +464,32 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	if opts.Consume {
 		// Every earlier request stamped what it consumed in its own start's
 		// commit, so the thread's unstamped request inputs below this one are
-		// exactly the ones it consumes. Nothing else: an answer is its ordered
-		// processor's to stamp, and an interrupt is no request's input.
+		// exactly the ones it consumes. Nothing else of this build's: an answer
+		// is its ordered processor's to stamp, and an interrupt its own send's,
+		// on receipt.
+		//
+		// The same statement repairs what a build before #793 left to its
+		// settle-time stamp, which stamped everything a turn left unprocessed
+		// and is gone: a user.interrupt it wrote unstamped for "the primary's
+		// next turn" (an old API replica still does, during a rolling deploy),
+		// and an answer an interrupt superseded. An interrupt is always
+		// processed on receipt, and an answer whose call already has a
+		// processed result has nothing left to wait for, so either is stamped
+		// here, with the inputs; an answer to a call still open is left to the
+		// walk.
 		if _, err := tx.Exec(ctx,
-			`UPDATE events SET processed_at = $4
-			 WHERE session_id = $1 AND seq < $2 AND processed_at IS NULL
-			   AND thread_id IS NOT DISTINCT FROM $3 AND type = ANY($5)`,
+			`UPDATE events e SET processed_at = $4
+			 WHERE e.session_id = $1 AND e.seq < $2 AND e.processed_at IS NULL
+			   AND e.thread_id IS NOT DISTINCT FROM $3
+			   AND (e.type = ANY($5) OR e.type = $6
+			     OR (e.type = ANY($7) AND EXISTS (
+			          SELECT 1 FROM events r
+			           WHERE r.session_id = $1 AND r.seq < $2 AND r.processed_at IS NOT NULL AND r.type = ANY($8)
+			             AND COALESCE(r.payload->>'tool_use_id', r.payload->>'custom_tool_use_id', r.payload->>'mcp_tool_use_id')
+			               = COALESCE(e.payload->>'tool_use_id', e.payload->>'custom_tool_use_id', e.payload->>'mcp_tool_use_id'))))`,
 			sessionID.String(), out[0].Seq, nullableID(opts.ThreadID),
-			consumedAt.Add(-time.Microsecond), RequestInputTypes); err != nil {
+			consumedAt.Add(-time.Microsecond), RequestInputTypes, string(domain.EventUserInterrupt),
+			answerTypes, toolResultTypes); err != nil {
 			return nil, err
 		}
 	}
