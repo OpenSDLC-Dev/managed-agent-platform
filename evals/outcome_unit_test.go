@@ -160,9 +160,9 @@ func TestHarvestedDeliverableVacuousUnlessSatisfied(t *testing.T) {
 	if err := g.Check(t, trialWith(nil)); err != nil {
 		t.Errorf("no ends: unexpected error %v", err)
 	}
-	// A non-satisfied terminal leaves the post-terminal acknowledgment window
-	// open (a file written there correctly has no registry row), so the check
-	// must not proceed to the sandbox.
+	// A non-satisfied terminal proves nothing about what the grader saw (a
+	// file first written in the acknowledgment turn after it need not have a
+	// registry row), so the check must not proceed to the sandbox.
 	tr := trialWith([]map[string]any{evalEnd("s1", 1, "max_iterations_reached", "")})
 	if err := g.Check(t, tr); err != nil {
 		t.Errorf("non-satisfied terminal: unexpected error %v", err)

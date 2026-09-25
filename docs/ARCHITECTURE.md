@@ -141,8 +141,10 @@ rubric + deliverables + transcript, no tools — and settles the verdict under t
 session lock: satisfied/failed with budget left idle the session, any verdict on the
 budget's last cycle (max_iterations_reached among them) runs one acknowledgment turn
 first (#670), and needs_revision feeds the grader's findings back and runs another
-agent cycle. A settlement that would idle the primary chains instead on client input or
-a live child's message, never on a child's ending notice (#801).
+agent cycle. A grading settlement that would idle the primary — a verdict with budget
+left, or a failed grader call — chains instead on client input or a live child's message,
+never on a child's ending notice (#801); an agent turn's own settlement still chains on
+any row that landed past what it read, notices included.
 
 **Deliverables at idle** (plan 38). Grading is not the only reason to harvest: five more
 settlements enqueue an `outputs_harvest` when they fold a *cloud* session to idle, with no

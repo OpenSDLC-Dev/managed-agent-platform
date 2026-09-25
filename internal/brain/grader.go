@@ -206,7 +206,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	// The budget: up to max_iterations evaluation cycles total; a would-be
 	// needs_revision on the final cycle is reported as max_iterations_reached
 	// (boundary reading ours, INFERRED).
-	lastCycle := active.Iteration+1 >= d.MaxIterations
+	lastCycle := lastOutcomeCycle(active.Iteration, d.MaxIterations)
 	result := verdict
 	if verdict == verdictNeedsRevision && lastCycle {
 		result = domain.OutcomeResultMaxIterationsReached
@@ -255,6 +255,14 @@ func (b *Brain) gradingHistory(ctx context.Context, sid, outcomeID domain.ID) ([
 // verdictNeedsRevision is the end event's needs_revision result — a cycle
 // verdict, never an entry state (the entry goes back to running).
 const verdictNeedsRevision = "needs_revision"
+
+// lastOutcomeCycle is whether evaluation cycle iteration (0-based) is the last
+// of a budget of maxIterations, after which no further evaluation can run.
+// settleVerdict queues the acknowledgment turn on it and replay renders the
+// verdict that turn reads on it, so both read this one rule.
+func lastOutcomeCycle(iteration, maxIterations int64) bool {
+	return iteration+1 >= maxIterations
+}
 
 // gradingChain is the chain-or-idle test of a grading settlement that would
 // otherwise idle the primary — a satisfied or failed verdict with budget left,
@@ -424,8 +432,10 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Requeue(ctx, tx, item)
 		}
-	case lastCycle:
-		// Terminal, and no further evaluation can run: "one final
+	case lastCycle || result == domain.OutcomeResultMaxIterationsReached:
+		// Terminal, and no further evaluation can run (max_iterations_reached
+		// is only ever a last cycle's, and replay renders its prompt
+		// whatever the budget, so it is named too): "one final
 		// acknowledgment turn follows before the session goes idle", as the
 		// SDK says of max_iterations_reached — and, reading (B) of #670
 		// (INFERRED), after a satisfied or failed verdict on that last cycle
@@ -437,7 +447,7 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Requeue(ctx, tx, item)
 		}
-	default: // satisfied | failed with budget left: the session idles — unless input arrived
+	default: // satisfied or failed with budget left, or the definition-missing failed: the session idles — unless input arrived
 		chained, err := gradingChain(ctx, tx, sid, watermark)
 		if err != nil {
 			return err

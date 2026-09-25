@@ -454,6 +454,81 @@ func TestBuildRequestRendersATerminalVerdictOnlyOnTheLastCycle(t *testing.T) {
 	}
 }
 
+// The acknowledgment's "Do not continue working" closes a verdict only when
+// the verdict is the last thing in its user turn. Input that shares the turn —
+// a message posted around the verdict, the next outcome a client defines once
+// it sees the end event, or a message sent to a session whose acknowledgment
+// never ran — is what the model must answer, so the verdict renders without
+// the instruction that would tell it not to. A turn the acknowledgment's own
+// reply closed keeps it, as every later replay of that turn must.
+func TestBuildRequestDropsTheStopInstructionWhenInputSharesTheVerdictsTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name, result, verdict string
+		after                 []string // the rows after the verdict: "ack", "message", "outcome"
+		keep                  bool     // whether the verdict keeps "Do not continue working"
+	}{
+		{"satisfied, a message follows", "satisfied", "satisfies the rubric", []string{"message"}, false},
+		{"failed, a message follows", "failed", "cannot be applied", []string{"message"}, false},
+		{"budget exhausted, a message follows", "max_iterations_reached", "budget is exhausted", []string{"message"}, false},
+		{"satisfied, the next outcome follows", "satisfied", "satisfies the rubric", []string{"outcome"}, false},
+		{"satisfied, acknowledged, then a message", "satisfied", "satisfies the rubric", []string{"ack", "message"}, true},
+		{"satisfied, nothing follows", "satisfied", "satisfies the rubric", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := ev(2, domain.EventSpanModelRequestStart, `{}`)
+			grading := ev(5, domain.EventSpanOutcomeEvalStart, `{"outcome_id":"outc_1","iteration":0}`)
+			history := []domain.Event{
+				ev(1, domain.EventUserDefineOutcome,
+					`{"description":"Build it","rubric":{"type":"text","content":"# Rubric"},"max_iterations":1,"outcome_id":"outc_1"}`),
+				start,
+				ev(3, domain.EventAgentMessage, `{"content":[{"type":"text","text":"draft"}]}`),
+				ev(4, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
+				grading,
+				ev(6, domain.EventSpanOutcomeEvalEnd, `{"outcome_id":"outc_1","outcome_evaluation_start_id":"`+
+					grading.ID.String()+`","iteration":0,"result":"`+tc.result+`","explanation":"the grader's reasons"}`),
+			}
+			seq := int64(7)
+			for _, row := range tc.after {
+				switch row {
+				case "ack":
+					ack := ev(seq, domain.EventSpanModelRequestStart, `{}`)
+					history = append(history, ack,
+						ev(seq+1, domain.EventAgentMessage, `{"content":[{"type":"text","text":"acknowledged"}]}`),
+						ev(seq+2, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+ack.ID.String()+`"}`))
+					seq += 3
+				case "message":
+					history = append(history, ev(seq, domain.EventUserMessage, `{"content":"now add a sensitivity tab"}`))
+					seq++
+				case "outcome":
+					history = append(history, ev(seq, domain.EventUserDefineOutcome,
+						`{"description":"Add a sensitivity tab","rubric":{"type":"text","content":"# Next"},"max_iterations":1,"outcome_id":"outc_2"}`))
+					seq++
+				}
+			}
+			req, _, err := buildRequest("", nil, history, "", "", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(req.Messages) < 3 || req.Messages[2].Role != "user" {
+				t.Fatalf("messages = %+v, want the outcome, the draft, then the verdict's user turn", req.Messages)
+			}
+			var turn []map[string]any
+			if err := json.Unmarshal(req.Messages[2].Content, &turn); err != nil {
+				t.Fatal(err)
+			}
+			text, _ := turn[0]["text"].(string)
+			for _, s := range []string{tc.verdict, "the grader's reasons"} {
+				if !strings.Contains(text, s) {
+					t.Errorf("verdict block = %q, want %q in it", text, s)
+				}
+			}
+			if got := strings.Contains(text, "Do not continue working"); got != tc.keep {
+				t.Errorf("verdict block = %q; carries the stop instruction = %v, want %v", text, got, tc.keep)
+			}
+		})
+	}
+}
+
 // Held inputs now leave at the next start, after everything the in-flight
 // request produced, and a message posted between its end and its call's
 // async result joins them. The request stays valid: the call, then one user

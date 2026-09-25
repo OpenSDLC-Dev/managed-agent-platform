@@ -335,11 +335,13 @@ func RubricConfidential(token string, class Class) Grader {
 // platform machinery (docs/DIVERGENCES.md, "The outputs harvest"): the file
 // sitting in the sandbox with no registry row is ours. Vacuous when the
 // sandbox file is absent (the model never wrote it) — and vacuous unless the
-// outcome settled satisfied, because a harvest only runs on a settlement that
-// schedules grading: a file first written in the post-terminal acknowledgment
-// turn correctly has no row, and only a satisfied verdict proves the grader
-// saw the deliverable through the registry. The non-satisfied broken-harvest
-// case is the Either verdict grader's to surface.
+// outcome settled satisfied, because only a satisfied verdict proves the
+// grader saw the deliverable through the registry, which the harvest on the
+// settlement that scheduled grading filled. After any other terminal the file
+// may first have been written in the acknowledgment turn that follows it —
+// after max_iterations_reached, or any verdict on the budget's last cycle —
+// and need not have a row. The non-satisfied broken-harvest case is the
+// Either verdict grader's to surface.
 func HarvestedDeliverable(filename string, class Class) Grader {
 	return Grader{
 		Name:  "harvested-deliverable",

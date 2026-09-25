@@ -74,10 +74,22 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		answering  map[string]int    // the last assistant turn's, by position
 		systemTail string
 		budgets    = map[string]int64{} // max_iterations by outcome_id, from each definition
+		acks       []ackBlock           // acknowledgment prompts of the open user turn
 	)
 	flush := func() error {
 		if role == "" {
 			return nil
+		}
+		// A prompt that input followed in its turn loses its stop instruction.
+		for _, a := range acks {
+			if a.at == len(blocks)-1 {
+				continue
+			}
+			blk, err := json.Marshal(map[string]any{"type": "text", "text": a.verdict})
+			if err != nil {
+				return err
+			}
+			blocks[a.at] = blk
 		}
 		// Stable, so a result answering no call of the last assistant turn
 		// keeps its place after the ones that do.
@@ -99,7 +111,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				answering[id] = i
 			}
 		}
-		role, results, blocks, uses = "", nil, nil, nil
+		role, results, blocks, uses, acks = "", nil, nil, nil, nil
 		return nil
 	}
 	turn := func(r string) error {
@@ -197,6 +209,16 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			// says of satisfied, and it and an interrupted end are state, not
 			// conversation: nothing is rendered, so a later user.message
 			// replays as it always has.
+			//
+			// An acknowledgment prompt closes on "Do not continue working" only
+			// while the verdict is the last block of its user turn (ackBlock,
+			// settled at flush). Input sharing the turn — a message posted
+			// around the verdict, the next outcome a client defined on seeing
+			// the end event, or the next message of a session whose
+			// acknowledgment never ran or predates the turn — is what the
+			// model must answer, and the instruction would tell it not to.
+			// Which it is is fixed once the turn's reply is on the log, so
+			// every later replay renders the turn as its request did.
 			var p struct {
 				OutcomeID   string `json:"outcome_id"`
 				Iteration   int64  `json:"iteration"`
@@ -207,29 +229,32 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
 			}
 			budget, defined := budgets[p.OutcomeID]
-			lastCycle := defined && p.Iteration+1 >= budget
-			var text string
+			lastCycle := defined && lastOutcomeCycle(p.Iteration, budget)
+			var text, stop string
 			switch {
 			case p.Result == verdictNeedsRevision:
 				text = "The outcome grader reviewed your work and found it does not yet satisfy the rubric:\n\n" +
 					p.Explanation + "\n\nRevise your work to address these findings."
 			case p.Result == domain.OutcomeResultMaxIterationsReached:
-				text = "The outcome's evaluation budget is exhausted and the rubric is still unmet:\n\n" +
-					p.Explanation + "\n\nDo not continue working. Briefly acknowledge what was completed and what remains."
+				text = "The outcome's evaluation budget is exhausted and the rubric is still unmet:\n\n" + p.Explanation
+				stop = "\n\nDo not continue working. Briefly acknowledge what was completed and what remains."
 			case p.Result == domain.OutcomeResultSatisfied && lastCycle:
-				text = "The outcome grader reviewed your work and found it satisfies the rubric:\n\n" +
-					p.Explanation + "\n\nDo not continue working. Briefly acknowledge the outcome."
+				text = "The outcome grader reviewed your work and found it satisfies the rubric:\n\n" + p.Explanation
+				stop = "\n\nDo not continue working. Briefly acknowledge the outcome."
 			case p.Result == domain.OutcomeResultFailed && lastCycle:
-				text = "The outcome grader found that the rubric cannot be applied to your work:\n\n" +
-					p.Explanation + "\n\nDo not continue working. Briefly acknowledge the outcome."
+				text = "The outcome grader found that the rubric cannot be applied to your work:\n\n" + p.Explanation
+				stop = "\n\nDo not continue working. Briefly acknowledge the outcome."
 			}
 			if text != "" {
-				blk, err := json.Marshal(map[string]any{"type": "text", "text": text})
+				blk, err := json.Marshal(map[string]any{"type": "text", "text": text + stop})
 				if err != nil {
 					return req, 0, err
 				}
 				if err := turn("user"); err != nil {
 					return req, 0, err
+				}
+				if stop != "" {
+					acks = append(acks, ackBlock{at: len(blocks), verdict: text})
 				}
 				blocks = append(blocks, blk)
 			}
@@ -382,6 +407,14 @@ func contentBlocks(raw json.RawMessage) ([]json.RawMessage, error) {
 		return nil, fmt.Errorf("content must be a string or an array of blocks")
 	}
 	return items, nil
+}
+
+// ackBlock is an acknowledgment prompt in the open user turn: blocks[at],
+// rendered with its stop instruction, which flush takes off (leaving verdict)
+// when anything follows it in the turn.
+type ackBlock struct {
+	at      int
+	verdict string
 }
 
 // toolAnswer is one tool_result block and the tool-use event id it answers.
