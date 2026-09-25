@@ -1,8 +1,10 @@
 package brain
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -57,23 +59,46 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 
 	// Merge runs of same-role events into single messages; within a user
 	// message, tool_result blocks sort first (the Messages API requires
-	// results ahead of other content).
+	// results ahead of other content), in the order of the tool_use blocks
+	// they answer. The log holds results in the order they were processed,
+	// which is not always the calls' order — a denial that resumes a thread
+	// beside a later call's result is written behind the resume, after that
+	// result (#793) — and a backend that pairs results with calls by position,
+	// as an OpenAI-compatible endpoint reads its tool messages, needs them as
+	// the calls ran.
 	var (
 		role       string
-		results    []json.RawMessage // tool_result blocks of the open user turn
+		results    []toolAnswer      // tool_result blocks of the open user turn
 		blocks     []json.RawMessage // other blocks of the open turn
+		uses       []string          // tool_use ids of the open assistant turn
+		answering  map[string]int    // the last assistant turn's, by position
 		systemTail string
 	)
 	flush := func() error {
 		if role == "" {
 			return nil
 		}
-		content, err := json.Marshal(append(results, blocks...))
+		// Stable, so a result answering no call of the last assistant turn
+		// keeps its place after the ones that do.
+		slices.SortStableFunc(results, func(a, b toolAnswer) int {
+			return cmp.Compare(callPosition(answering, a.id), callPosition(answering, b.id))
+		})
+		content := make([]json.RawMessage, 0, len(results)+len(blocks))
+		for _, r := range results {
+			content = append(content, r.block)
+		}
+		raw, err := json.Marshal(append(content, blocks...))
 		if err != nil {
 			return err
 		}
-		req.Messages = append(req.Messages, provider.Message{Role: role, Content: content})
-		role, results, blocks = "", nil, nil
+		req.Messages = append(req.Messages, provider.Message{Role: role, Content: raw})
+		if role == "assistant" {
+			answering = make(map[string]int, len(uses))
+			for i, id := range uses {
+				answering[id] = i
+			}
+		}
+		role, results, blocks, uses = "", nil, nil, nil
 		return nil
 	}
 	turn := func(r string) error {
@@ -290,17 +315,18 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				return req, 0, err
 			}
 			blocks = append(blocks, blk)
+			uses = append(uses, ev.ID.String())
 
 		case domain.EventUserToolResult, domain.EventUserCustomToolRes,
 			domain.EventAgentToolResult, domain.EventAgentMCPToolResult:
-			blk, err := toolResultBlock(ev)
+			answer, err := toolResultBlock(ev)
 			if err != nil {
 				return req, 0, err
 			}
 			if err := turn("user"); err != nil {
 				return req, 0, err
 			}
-			results = append(results, blk)
+			results = append(results, answer)
 
 		default:
 			// Lifecycle, spans, interrupts, confirmations: state, not
@@ -336,10 +362,25 @@ func contentBlocks(raw json.RawMessage) ([]json.RawMessage, error) {
 	return items, nil
 }
 
+// toolAnswer is one tool_result block and the tool-use event id it answers.
+type toolAnswer struct {
+	id    string
+	block json.RawMessage
+}
+
+// callPosition is where id's tool_use sits in the assistant turn uses indexes,
+// every id it does not hold after every id it does.
+func callPosition(uses map[string]int, id string) int {
+	if i, ok := uses[id]; ok {
+		return i
+	}
+	return len(uses)
+}
+
 // toolResultBlock maps any of the four result event shapes onto the wire
 // tool_result block. The *_use_id field name varies per event type; the
 // value is always the tool-use EVENT id.
-func toolResultBlock(ev domain.Event) (json.RawMessage, error) {
+func toolResultBlock(ev domain.Event) (toolAnswer, error) {
 	var p struct {
 		ToolUseID       string          `json:"tool_use_id"`
 		CustomToolUseID string          `json:"custom_tool_use_id"`
@@ -348,7 +389,7 @@ func toolResultBlock(ev domain.Event) (json.RawMessage, error) {
 		IsError         *bool           `json:"is_error"`
 	}
 	if err := json.Unmarshal(ev.Body, &p); err != nil {
-		return nil, fmt.Errorf("event %s: %w", ev.ID, err)
+		return toolAnswer{}, fmt.Errorf("event %s: %w", ev.ID, err)
 	}
 	id := p.ToolUseID
 	if id == "" {
@@ -364,5 +405,6 @@ func toolResultBlock(ev domain.Event) (json.RawMessage, error) {
 	if p.IsError != nil {
 		blk["is_error"] = *p.IsError
 	}
-	return json.Marshal(blk)
+	raw, err := json.Marshal(blk)
+	return toolAnswer{id: id, block: raw}, err
 }
