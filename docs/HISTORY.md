@@ -49,6 +49,50 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Processing order (plan 56, #793, #539) — archived 2026-09-25, delivered in two PRs
+
+The reference sorts every event list by `processed_at` — all 228 distinct recorded lists
+do — so a client event sits where it was consumed, not where it arrived. This platform keeps
+seq as the receipt order, the list order and the stream cursor at once, and #793 found four
+places where the two orders disagreed. The plan kept seq and applied the rule wherever it
+could without re-keying anything.
+
+The first PR wrote each commit in processing order. A wake's running pair now precedes the
+`user.message` or `user.define_outcome` it consumes, at all four wake sites (item 1); a
+target's running event precedes the delivered message that woke it, for a report, a
+`send_to_agent` and every ending notice, with `events.DeliverAndWake` and
+`events.DeliverThreadEnded` owning that order so no emitter picks its own (item 3); and an
+interrupt follows the results it synthesizes and precedes its idle pair (#539). Item 2, a
+child resuming an idle session, was registered as deliberate rather than matched.
+
+The second PR took the case no single commit holds: an input that lands while a model
+request is in flight, which had replayed merged ahead of the reply it never saw.
+`events.ConsumptionOrder`, a pure function of a thread's rows, places it after that
+request's end and results instead, and replay, the grader's transcript and the dream's
+streamed transcript all read through it; a request also re-reads the rows appended between
+its history read and its span start, since its start consumes them. `processed_at` moved to
+the same point: the span start stamps what it consumes at its own `processed_at` minus
+1 µs, the reference's stamp on 139 of the 140 recorded consumptions, and a delivered
+message is written null until then — a present null on a field the pinned SDK types as
+required, registered under #78.
+
+Two alternatives were rejected. A full processing-order log — an ordering column or a
+pending-input queue, listed and streamed by consumption — would have matched the reference
+everywhere, at the price of re-keying seq, the SSE cursor, list paging and the chain and
+watermark checks, with a migration; after the two PRs its one remaining gain was the list
+position of a mid-request input, which docs/DIVERGENCES.md registers instead. Stamping at
+request start, once part of it, was adopted on its own. Mimicking item 2 would have idled
+the session under a working child — an executor dropping a confirmed call unrun, an archive
+or delete admitted mid-work — to reproduce a stale stop reason and a sibling-dependent idle
+that no recording shows to be a contract rather than an artefact.
+
+One follow-up is filed. A grading cycle's chain check misses an ending notice that lands
+before its claim, so a terminal verdict idles the coordinator with the notice unread; that
+predates the plan, but since the second PR the notice also stays `processed_at: null` until
+the next request (#801).
+
+---
+
 ## Binding to the SDK by symbol (plan 51, #722) — archived 2026-09-17, all four slices delivered (#736, #739, #740, #741 and this close-out)
 
 A citation into `anthropic-sdk-go`, go-jose or the `ant` CLI makes a temporal claim —
