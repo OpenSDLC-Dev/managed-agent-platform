@@ -1115,7 +1115,7 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 	// are deliberately not resets, and idling a thread that holds one
 	// unprocessed would strand it with no trigger left, breaking the
 	// chain-or-idle contract every other terminal settlement honours.
-	pending, err := pendingInput(ctx, tx, sid, item.ThreadID, 0)
+	pending, err := pendingInput(ctx, tx, sid, item.ThreadID)
 	if err != nil {
 		return false, err
 	}

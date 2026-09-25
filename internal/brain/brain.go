@@ -649,20 +649,22 @@ var pendingInputTypes = func() []string {
 }()
 
 // pendingInput asks it for one thread's own rows (plan 35 decision 5): a
-// sibling's queued input is the sibling's turn to read. An unprocessed row is
-// one no request of the thread has started on since it landed — a request's
-// start stamps what it consumes (#793) — so from watermark 0, its only use,
-// it asks whether input is waiting for a request that has not begun.
-func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, watermark int64) (bool, error) {
+// sibling's queued input is the sibling's turn to read. It is the probe for a
+// settlement with no watermark of its own (the grading chain, the delegation
+// bound): an unprocessed row is one no request of the thread has started on
+// since it landed — a request's start stamps what it consumes (#793) — and a
+// tool result counts, processed or not, while no request has started since it
+// landed.
+func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID) (bool, error) {
 	var pending bool
 	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM events
-		  WHERE session_id = $1 AND type = ANY($2) AND seq > $3
+		  WHERE session_id = $1 AND type = ANY($2)
 		    AND (processed_at IS NULL OR (type IN ('user.tool_result','user.custom_tool_result')
- AND ($3>0 OR seq>COALESCE((SELECT max(start.seq) FROM events start
- WHERE start.session_id=$1 AND start.thread_id IS NOT DISTINCT FROM $4 AND start.type='span.model_request_start'),0))))
-		    AND thread_id IS NOT DISTINCT FROM $4)`,
-		sid.String(), pendingInputTypes, watermark, events.NullableThread(threadID)).Scan(&pending)
+ AND seq>COALESCE((SELECT max(start.seq) FROM events start
+ WHERE start.session_id=$1 AND start.thread_id IS NOT DISTINCT FROM $3 AND start.type='span.model_request_start'),0)))
+		    AND thread_id IS NOT DISTINCT FROM $3)`,
+		sid.String(), pendingInputTypes, events.NullableThread(threadID)).Scan(&pending)
 	return pending, err
 }
 

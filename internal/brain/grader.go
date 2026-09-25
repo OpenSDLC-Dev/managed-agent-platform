@@ -237,7 +237,7 @@ const verdictNeedsRevision = "needs_revision"
 // on the log, where the next user.message replays it — though the same
 // notice landing during the grader's call chains a turn instead (#801).
 func gradingChain(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {
-	pending, err := pendingInput(ctx, tx, sid, "", 0)
+	pending, err := pendingInput(ctx, tx, sid, "")
 	if err != nil || pending {
 		return pending, err
 	}

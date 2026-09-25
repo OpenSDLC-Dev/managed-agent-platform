@@ -294,38 +294,40 @@ func TestPendingInputTypesDeriveFromTheConsumedInputs(t *testing.T) {
 }
 
 func TestPendingInputChainsDefineOutcome(t *testing.T) {
-	// The DB contract behind mid-turn chaining: an unprocessed
-	// user.define_outcome past the watermark reports pending input; at or
-	// before the watermark (or once processed) it does not.
+	// The DB contract behind chaining where no watermark applies (the grading
+	// probe, the delegation bound): an unprocessed user.define_outcome is
+	// input no request has started on, so it is pending; once a request's
+	// start has stamped it, it is not.
 	pool := pgtest.NewPool(t)
 	sid, _ := pgtest.NewSession(t, pool, "cloud")
 	log := events.NewLog(pool)
-	appended, err := log.Append(context.Background(), sid, []events.NewEvent{{
+	if _, err := log.Append(context.Background(), sid, []events.NewEvent{{
 		Type:    domain.EventUserDefineOutcome,
 		Payload: []byte(`{"description":"d","rubric":{"type":"text","content":"r"},"max_iterations":3,"outcome_id":"outc_1"}`),
-	}})
-	if err != nil {
+	}}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	seq := appended[0].Seq
 
-	check := func(watermark int64, want bool) {
+	check := func(want bool) {
 		t.Helper()
 		tx, err := pool.Begin(context.Background())
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(context.Background())
-		got, err := pendingInput(context.Background(), tx, sid, "", watermark)
+		got, err := pendingInput(context.Background(), tx, sid, "")
 		if err != nil {
 			t.Fatalf("pendingInput: %v", err)
 		}
 		if got != want {
-			t.Errorf("pendingInput(watermark=%d) = %v, want %v", watermark, got, want)
+			t.Errorf("pendingInput = %v, want %v", got, want)
 		}
 	}
-	check(seq-1, true) // unprocessed define_outcome past the watermark chains
-	check(seq, false)  // at the watermark: already consumed by this turn
+	check(true)
+	if _, _, err := log.StartModelRequestOn(context.Background(), sid, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
 }
 
 // A message posted while request k was in flight replays after reply k, which
