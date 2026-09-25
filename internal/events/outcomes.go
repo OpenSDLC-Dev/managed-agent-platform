@@ -275,14 +275,15 @@ func FindDefineOutcome(history []domain.Event, outcomeID domain.ID) (DefineOutco
 	return DefineOutcome{}, false
 }
 
-// LatestOutcomeStartID returns the id of the most recent
-// span.outcome_evaluation_start for outcomeID in the history — the start the
-// cycle's end event references. A reclaimed cycle re-grades under a fresh
-// start, so the latest is the live one; earlier dangling starts are the
-// recorded crash-window residue.
-func LatestOutcomeStartID(history []domain.Event, outcomeID domain.ID) domain.ID {
-	var id domain.ID
-	for _, ev := range history {
+// LatestOutcomeStart returns the most recent span.outcome_evaluation_start
+// for outcomeID among evs, or the zero event when there is none — the start
+// the cycle's end event references, and the row whose seq bounds what the
+// cycle grades. A reclaimed cycle re-grades under a fresh start, so the latest
+// is the live one; earlier dangling starts are the recorded crash-window
+// residue.
+func LatestOutcomeStart(evs []domain.Event, outcomeID domain.ID) domain.Event {
+	var start domain.Event
+	for _, ev := range evs {
 		if ev.Type != domain.EventSpanOutcomeEvalStart {
 			continue
 		}
@@ -290,10 +291,10 @@ func LatestOutcomeStartID(history []domain.Event, outcomeID domain.ID) domain.ID
 			OutcomeID string `json:"outcome_id"`
 		}
 		if json.Unmarshal(ev.Body, &p) == nil && p.OutcomeID == outcomeID.String() {
-			id = ev.ID
+			start = ev
 		}
 	}
-	return id
+	return start
 }
 
 // NewOutcomeStartEvent renders a span.outcome_evaluation_start with a

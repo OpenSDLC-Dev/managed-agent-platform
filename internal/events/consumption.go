@@ -12,12 +12,14 @@ import (
 // but an input that lands while one of its thread's model requests is in
 // flight — after that request's span.model_request_start, before its
 // span.model_request_end — was not in that request: the thread's next request
-// consumed it, after the in-flight request's reply and results. The grader's
-// call on the primary is such a window too: a message posted while it ran
-// never reached the verdict, which replay renders as the revision feedback. That is where
-// the reference lists it (2026-09-02 batch2 sessT idx 78; 2026-09-03 batch2
-// conflict.turn3 idx 18, dead-five-turns idx 30) and where it stamps its
-// processed_at, 1 µs before the consuming start (StartModelRequestOn). What
+// consumed it, after the in-flight request's reply and results. A grading
+// cycle on the primary is such a window too: it grades the log below its
+// span.outcome_evaluation_start, so a message that lands after that start
+// never reached the verdict, which replay renders as the revision feedback.
+// That is where the reference lists it (2026-09-02 batch2 sessT idx 78;
+// 2026-09-03 batch2 conflict.turn3 idx 18, dead-five-turns idx 30) and where
+// it stamps its processed_at, 1 µs before the consuming start
+// (StartModelRequestOn). What
 // the model reads — the brain's replay, the grader's and the dream's
 // transcripts — follows that order; the list and the stream keep seq.
 //
