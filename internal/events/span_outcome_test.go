@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -115,5 +116,62 @@ func TestOutcomeEvaluationHeartbeatAndFailedFinish(t *testing.T) {
 	}
 	if result != domain.OutcomeResultFailed {
 		t.Errorf("outcome.result attribute = %q, want failed", result)
+	}
+}
+
+// BeginOutcomeWork is the primary's span start beginning work on every
+// pending outcome: it flips each pending entry to running, keeps every other
+// entry and the order they are in, and writes nothing at all when no entry
+// is pending — which is every start but the one that begins an outcome, so
+// the session row it would rewrite, updated_at included, is left alone.
+func TestBeginOutcomeWorkFlipsPendingAndWritesNothingOtherwise(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sid := newSession(t, pool)
+	set := func(evals string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE sessions SET outcome_evaluations = $2, updated_at = '2026-01-01T00:00:00Z' WHERE id = $1`,
+			sid.String(), evals); err != nil {
+			t.Fatal(err)
+		}
+	}
+	begin := func() (evals []domain.OutcomeEvaluation, updated time.Time) {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if err := events.BeginOutcomeWork(ctx, tx, sid); err != nil {
+			t.Fatal(err)
+		}
+		var raw []byte
+		if err := tx.QueryRow(ctx, `SELECT outcome_evaluations, updated_at FROM sessions WHERE id = $1`, sid.String()).
+			Scan(&raw, &updated); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &evals); err != nil {
+			t.Fatal(err)
+		}
+		return evals, updated
+	}
+
+	set(`[{"outcome_id":"outc_a","result":"satisfied"},{"outcome_id":"outc_b","result":"interrupted"}]`)
+	evals, updated := begin()
+	if len(evals) != 2 || evals[0].Result != "satisfied" || evals[1].Result != "interrupted" {
+		t.Errorf("entries = %+v, want them untouched", evals)
+	}
+	if !updated.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("updated_at = %v: a start with nothing pending rewrote the session row", updated)
+	}
+
+	set(`[{"outcome_id":"outc_a","result":"satisfied","explanation":"done"},{"outcome_id":"outc_b","result":"pending","description":"next"}]`)
+	evals, updated = begin()
+	if len(evals) != 2 || evals[0].OutcomeID != "outc_a" || evals[0].Result != "satisfied" || evals[0].Explanation != "done" ||
+		evals[1].OutcomeID != "outc_b" || evals[1].Result != "running" || evals[1].Description != "next" {
+		t.Errorf("entries = %+v, want outc_a untouched and outc_b running, in order", evals)
+	}
+	if updated.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Error("updated_at unmoved by a flip")
 	}
 }
