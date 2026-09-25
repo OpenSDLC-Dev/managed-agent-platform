@@ -121,6 +121,10 @@ and fixes one older bug on a line it touches:
   receipt order: the answers the send's settlement processes, and each interrupt
   behind the results and outcome ends its settling wrote and ahead of the idle
   pairs it caused. A thread two interrupts reach is ended by the first received.
+  A thread's processed answers fill the places its answers were received in, in
+  the order the settlement processes them, which is its calls' order, and a
+  denial the settlement reaches is followed by the result it writes, ahead of
+  the answers the denial lets it go on to.
   Then, for each thread the commit woke, its running pair and the input its woken
   turn consumes: the posted message, outcome or system message addressed to it,
   and any notice delivered to it, whichever arm made the wake. Last comes what
@@ -130,9 +134,13 @@ and fixes one older bug on a line it touches:
   tool flow does not pass. The reference also keeps such a result unprocessed at
   the tail until the earlier call's answer arrives
   (2026-09-19-custom-order-followup `setup[80]` and `[83]`). The settlement stamps
-  answers only after the append has placed them, so which ones it leaves queued
-  is read first, by walking the thread's calls as the settlement will:
-  `events.PendingAnswers` and `AdvanceThreadTools` share one walk. The arms run
+  answers only after the append has placed them, so what it will do with them is
+  read first, by walking the thread's calls as the settlement will:
+  `events.PlanAnswers` and `AdvanceThreadTools` share one walk, and the plan drops
+  the calls an interrupt's results answer, which are stamped as they are written,
+  as the settlement's own read of the calls does. The denial results the walk
+  reaches are built by the plan and written by the send, in the batch, so the
+  settlement finds those calls answered and writes nothing twice. The arms run
   in the same order (the primary's own first unless it is interrupted, then the
   interrupted threads in receipt order), so the status events their transitions
   emit read true in the list. The client's events are found again by a
@@ -223,7 +231,9 @@ registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
   beside a redirect, the stamps of an interrupt's commit, the grading start after
   the wake it runs on, `AppendTransition` keyed on the wake, and the archive of a
   session parked mid-outcome. After the second review: an answer queued behind an
-  earlier call beside a wake, answers behind an allowed and a denied call, two
+  earlier call beside a wake, answers behind an allowed and a denied call (the
+  full order, the denial's result included, in both posted orders), an answer
+  beside an interrupt of its own thread, the approval wait a denial records, two
   interrupts reaching one thread in both posted orders, the archive of a
   coordinator waiting on a gated child and of a session idle on
   `retries_exhausted`, and the clamp of many answers in one statement. Item 2's

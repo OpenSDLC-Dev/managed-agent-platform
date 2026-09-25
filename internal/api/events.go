@@ -921,7 +921,8 @@ func (l *sendLayout) woke(thread domain.ID, pair []events.NewEvent) {
 // processingOrder lays the send out in the order its events are processed
 // within the commit — the order the reference lists them in (#793, #539;
 // docs/plan/56_processing-order.md) — rather than the order they were posted.
-// Every event goes where it is consumed, whatever its posted position:
+// Every event goes where it is consumed, whatever its posted position, but for
+// the one placement out of reach named below:
 //
 //  1. What is consumed on receipt, in receipt order: the answers
 //     (user.tool_confirmation, user.tool_result, user.custom_tool_result) the
