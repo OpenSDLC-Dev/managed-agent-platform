@@ -11,6 +11,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/jackc/pgx/v5"
 )
 
 func text(s string) json.RawMessage {
@@ -91,6 +92,48 @@ func TestAppendCallerSuppliedIDAndProcessedAt(t *testing.T) {
 	}
 	if auto[0].ProcessedAt == nil {
 		t.Error("platform event processed_at defaulted to nil; want emission time")
+	}
+}
+
+// The one platform event not processed when it is written: a delivered
+// message is an input its target's next request consumes, and it is stamped
+// then, as the reference stamps it (#793). Its sent half, like every other
+// platform event, is processed on emission.
+func TestAppendLeavesAReceivedRowUnprocessed(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	got, err := log.Append(context.Background(), sid, []events.NewEvent{
+		{Type: domain.EventAgentThreadMessageReceived, Payload: text("report")},
+		{Type: domain.EventAgentThreadMessageSent, Payload: text("report")},
+		{Type: domain.EventAgentMessage, Payload: text("reply")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].ProcessedAt != nil {
+		t.Errorf("received processed_at = %v, want null until consumed", got[0].ProcessedAt)
+	}
+	if got[1].ProcessedAt == nil || got[2].ProcessedAt == nil {
+		t.Errorf("sent %v, agent.message %v: want both stamped on emission", got[1].ProcessedAt, got[2].ProcessedAt)
+	}
+	stored, err := log.List(context.Background(), sid, events.ListQuery{})
+	if err != nil || stored[0].ProcessedAt != nil {
+		t.Errorf("stored received processed_at = %v (%v), want null", stored[0].ProcessedAt, err)
+	}
+}
+
+// Consume stamps what the batch's first row is consumed by, so a batch with
+// no row has nothing to stamp below and is refused, even beside a side effect
+// that would otherwise admit an empty batch.
+func TestAppendConsumeNeedsABatch(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	sid := newSession(t, pool)
+	now := time.Now()
+	if _, err := events.NewLog(pool).AppendWith(context.Background(), sid, nil, events.AppendOptions{
+		Consume: &now, Then: func(context.Context, pgx.Tx) error { return nil },
+	}); err == nil {
+		t.Error("Consume with an empty batch was accepted")
 	}
 }
 

@@ -47,7 +47,7 @@ func TestTopUpHistoryClosesTheSnapshotRace(t *testing.T) {
 	watermark := history[len(history)-1].Seq
 	msg("two", "")        // the race: below the start, missed by the read
 	msg("sibling", child) // another thread's row in the same gap
-	_, span, err := b.log.StartModelRequestOn(ctx, sid, "", events.Backend{})
+	_, span, err := b.log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

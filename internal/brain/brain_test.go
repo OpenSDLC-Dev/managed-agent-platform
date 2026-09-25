@@ -845,6 +845,11 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 		if call != 0 {
 			return
 		}
+		// The input is processed when the request that consumes it starts,
+		// not when its turn settles (#793): "one" is stamped already.
+		if one := h.messages(t); len(one) != 1 || one[0].ProcessedAt == nil {
+			t.Errorf("while request 1 runs, messages = %v, want \"one\" stamped", one)
+		}
 		payload, _ := json.Marshal(map[string]any{"content": "two"})
 		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
 			{Type: domain.EventUserMessage, Payload: payload},
@@ -854,6 +859,11 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 	}
 	h.wake(t, "one")
 	h.runOnce(t)
+	// Request 1 did not consume "two", so it is still queued: the request
+	// that does has not started.
+	if msgs := h.messages(t); len(msgs) != 2 || msgs[1].ProcessedAt != nil {
+		t.Errorf("after turn 1, messages = %v, want \"two\" unprocessed", msgs)
+	}
 
 	// Turn 1 settled without idling: the pending message chained a turn.
 	if got := h.status(t); got != "running" {
@@ -900,12 +910,69 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 			t.Errorf("message %d = %v, want %q alone", i, blocks, want)
 		}
 	}
-	// Everything consumed is stamped.
-	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"user.message"}})
-	for i, ev := range evs {
-		if ev.ProcessedAt == nil {
-			t.Errorf("user.message[%d] not stamped", i)
+	// Each message is stamped 1 µs before the start of the request that
+	// consumed it, as the reference stamps it: "one" by request 1, "two" by
+	// request 2.
+	starts, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"span.model_request_start"}})
+	msgs := h.messages(t)
+	if len(starts) != 2 || len(msgs) != 2 {
+		t.Fatalf("%d starts, %d messages", len(starts), len(msgs))
+	}
+	for i, m := range msgs {
+		want := starts[i].ProcessedAt.Add(-time.Microsecond)
+		if m.ProcessedAt == nil || !m.ProcessedAt.Equal(want) {
+			t.Errorf("message %d processed_at = %v, want %v", i, m.ProcessedAt, want)
 		}
+	}
+}
+
+// messages lists the session's user.message rows in seq order.
+func (h *harness) messages(t *testing.T) []domain.Event {
+	t.Helper()
+	evs, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"user.message"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evs
+}
+
+// A brain that dies after its span start leaves the start, and the stamps it
+// wrote, on the log (docs/DIVERGENCES.md, the crash-window entry). The reclaim
+// replays the message by its row — replay never reads processed_at — into the
+// retried request, the settle does not chain on it (it is below the
+// watermark), and its stamp stays the dead start's: that request is where
+// the reference would say it was consumed.
+func TestCrashAfterTheSpanStartKeepsTheStamp(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "answered"), done("end_turn", 1)},
+	}, nil)
+	h.wake(t, "one")
+	ctx := context.Background()
+	if item, err := h.queue.Claim(ctx, queue.ModelTurn, 30*time.Millisecond); err != nil || item == nil {
+		t.Fatalf("pre-claim: %+v %v", item, err)
+	}
+	if _, _, err := h.log.StartModelRequestOn(ctx, h.sessionID, "", events.Backend{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	stamped := h.messages(t)[0].ProcessedAt
+	if stamped == nil {
+		t.Fatal("the dead start did not stamp its input")
+	}
+	time.Sleep(40 * time.Millisecond)
+
+	h.runOnce(t)
+	if len(h.provider.calls) != 1 {
+		t.Fatalf("provider calls = %d, want the one retried request", len(h.provider.calls))
+	}
+	req := h.provider.calls[0]
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" || !strings.Contains(string(req.Messages[0].Content), "one") {
+		t.Errorf("retried request = %+v, want the message", req.Messages)
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle: nothing is pending", got)
+	}
+	if got := h.messages(t)[0].ProcessedAt; got == nil || !got.Equal(*stamped) {
+		t.Errorf("processed_at = %v, want the dead start's %v", got, stamped)
 	}
 }
 
@@ -1797,6 +1864,11 @@ func TestUnroutedModelFailsTurn(t *testing.T) {
 	evs, _ := h.log.List(context.Background(), sid, events.ListQuery{Types: []string{"session.error"}})
 	if len(evs) != 1 {
 		t.Fatalf("session.error events = %d", len(evs))
+	}
+	// No request started to stamp the message, so the failure does: the
+	// turn read it, and an unstamped message would read as pending forever.
+	if msgs := h.messages(t); len(msgs) != 1 || msgs[0].ProcessedAt == nil {
+		t.Errorf("messages = %v, want the one message stamped", msgs)
 	}
 }
 

@@ -65,8 +65,8 @@ func TestDefineOutcomeEchoShape(t *testing.T) {
 	if ev["max_iterations"] != float64(3) {
 		t.Errorf("max_iterations = %v, want default 3", ev["max_iterations"])
 	}
-	// This platform's recorded processed_at divergence: echoed null, stamped
-	// when the consuming turn settles.
+	// Echoed null, as a queued input: it is stamped when the request that
+	// consumes it starts (#793).
 	if ev["processed_at"] != nil {
 		t.Errorf("processed_at = %v, want null on echo", ev["processed_at"])
 	}

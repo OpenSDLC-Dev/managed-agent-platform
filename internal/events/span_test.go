@@ -3,11 +3,14 @@ package events_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/jackc/pgx/v5"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -113,5 +116,92 @@ func TestModelRequestSameSourceEmission(t *testing.T) {
 	// Failure path: a start against a dead session emits no span leak.
 	if _, _, err := log.StartModelRequest(ctx, domain.NewID("sesn"), events.Backend{Provider: "anthropic", Model: "claude-x"}); err == nil {
 		t.Error("start on unknown session should fail")
+	}
+}
+
+// An input is processed when the request that consumes it starts, as the
+// reference stamps it: 1 µs before that request's span.model_request_start
+// (#793; every recorded consumption but one). The start's own commit stamps
+// the thread's rows below it that no earlier start stamped — and nothing
+// else: not a row already stamped, not another thread's, not a row at or
+// after the start.
+func TestModelRequestStartStampsWhatItConsumes(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	child := domain.NewID(domain.PrefixSessionThread)
+	earlier := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	appended, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("queued")},
+		{Type: domain.EventUserMessage, Payload: text("already"), ProcessedAt: &earlier},
+		{Type: domain.EventAgentThreadMessageReceived, Payload: text("report")},
+		{Type: domain.EventUserMessage, ThreadID: child, Payload: text("the child's")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, mr, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("after")}}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[domain.ID]domain.Event{}
+	var start domain.Event
+	for _, ev := range all {
+		byID[ev.ID] = ev
+		if ev.Type == domain.EventSpanModelRequestStart {
+			start = ev
+		}
+	}
+	if start.Seq != mr.StartSeq() || start.ID != mr.StartEventID() {
+		t.Fatalf("start row %s at %d, ModelRequest says %s at %d", start.ID, start.Seq, mr.StartEventID(), mr.StartSeq())
+	}
+	if start.ProcessedAt == nil {
+		t.Fatal("the start carries no processed_at")
+	}
+	consumed := start.ProcessedAt.Add(-time.Microsecond)
+	for i, want := range []*time.Time{&consumed, &earlier, &consumed, nil} {
+		got := byID[appended[i].ID].ProcessedAt
+		if (got == nil) != (want == nil) || (got != nil && !got.Equal(*want)) {
+			t.Errorf("row %d processed_at = %v, want %v", i, got, want)
+		}
+	}
+	for _, ev := range all {
+		if ev.Seq > start.Seq && ev.ProcessedAt != nil {
+			t.Errorf("row after the start (%s) stamped %v", ev.Type, ev.ProcessedAt)
+		}
+	}
+}
+
+// The start carries the claimant's lease proof in its own commit: a brain
+// that lost its item must not tell a client its inputs were consumed, and a
+// refused start writes neither the start nor a stamp.
+func TestModelRequestStartThenFailingWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("queued")}}); err != nil {
+		t.Fatal(err)
+	}
+	lost := errors.New("lease lost")
+	_, _, err := log.StartModelRequestOn(ctx, sid, "", events.Backend{}, func(context.Context, pgx.Tx) error { return lost })
+	if !errors.Is(err, lost) {
+		t.Fatalf("err = %v, want the Then's", err)
+	}
+	all, err := log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ProcessedAt != nil {
+		t.Errorf("log = %v, want the queued message alone, unstamped", all)
 	}
 }

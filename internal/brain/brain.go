@@ -390,8 +390,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// so Describe cannot miss; an empty backend would only mean unlabelled
 	// metrics, never a failed turn.
 	desc, _ := b.registry.Describe(agent.Model.ID)
+	// The start stamps the inputs this request consumes (#793), which a client
+	// sees: the same lease discipline as the outcome flip above, so a
+	// claimant that already lost the item stops here, before the model.
 	sctx, span, err := b.log.StartModelRequestOn(ctx, sid, item.ThreadID,
-		events.Backend{Provider: desc.Protocol, Model: desc.Model})
+		events.Backend{Provider: desc.Protocol, Model: desc.Model},
+		func(ctx context.Context, tx pgx.Tx) error { return b.queue.Assert(ctx, tx, item) })
 	if err != nil {
 		return fmt.Errorf("span start: %w", err)
 	}
@@ -609,7 +613,10 @@ var pendingInputTypes = []string{
 }
 
 // pendingInput asks it for one thread's own rows (plan 35 decision 5): a
-// sibling's queued input is the sibling's turn to read.
+// sibling's queued input is the sibling's turn to read. An unprocessed row is
+// one no request of the thread has started on since it landed — a request's
+// start stamps what it consumes (#793) — so from watermark 0, its only use,
+// it asks whether input is waiting for a request that has not begun.
 func pendingInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, watermark int64) (bool, error) {
 	var pending bool
 	err := tx.QueryRow(ctx,
@@ -859,10 +866,12 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	}
 	head = append(head, endEv)
 	stampThread(head, item.ThreadID, askIDs)
+	// No MarkProcessedThrough: the request's start stamped everything this
+	// turn replayed (the watermark is below the start), and what landed
+	// since is the next request's to stamp.
 	opts := events.AppendOptions{
-		ThreadID:             item.ThreadID,
-		AddUsage:             &usage,
-		MarkProcessedThrough: watermark,
+		ThreadID: item.ThreadID,
+		AddUsage: &usage,
 	}
 
 	// A turn that called tools suspends on them, whatever stop reason came
@@ -1125,6 +1134,10 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 		head = append(head, endEv)
 	}
 
+	// The stamp is for the one failure that read input without starting a
+	// request — no provider routes the model (span == nil, watermark set) —
+	// where nothing else would ever stamp it and pendingInput would read it
+	// as queued forever. After a start it stamps nothing: the start did.
 	return b.settle(ctx, sid, item, watermark, envKind, events.AppendOptions{MarkProcessedThrough: watermark},
 		&domain.StopReason{Type: domain.StopRetriesExhausted},
 		func(chained bool) ([]events.NewEvent, error) {

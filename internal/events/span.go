@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -33,13 +34,20 @@ type Backend struct {
 // records the turn's metrics from the same point, for the same reason. The
 // returned context carries the span for downstream propagation.
 func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
-	return l.StartModelRequestOn(ctx, sessionID, "", backend)
+	return l.StartModelRequestOn(ctx, sessionID, "", backend, nil)
 }
 
 // StartModelRequestOn is StartModelRequest for one thread's turn (plan 35):
 // the start and end events are written on that thread's own log; an empty
 // threadID is the primary.
-func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
+//
+// The start's commit also processes what the request consumes (#793): the
+// thread's rows below it that no earlier start stamped are stamped 1 µs
+// before the start's own processed_at, as the reference stamps a consumed
+// input. then runs in that commit — the brain passes its lease proof, so a
+// claimant that lost its item neither stamps nor calls the model; nil is
+// none.
+func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domain.ID, backend Backend, then func(context.Context, pgx.Tx) error) (context.Context, *ModelRequest, error) {
 	// A child's turn names its thread, so two concurrent turns of one
 	// session stay distinguishable in a trace.
 	attrs := []attribute.KeyValue{attribute.String("session.id", sessionID.String())}
@@ -49,12 +57,15 @@ func (l *Log) StartModelRequestOn(ctx context.Context, sessionID, threadID domai
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "model_request",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attrs...))
-	now := time.Now().UTC()
-	evs, err := l.Append(ctx, sessionID, []NewEvent{{
+	// Truncated to the microsecond Postgres stores, so the 1 µs between an
+	// input's stamp and the start survives the round trip.
+	startAt := time.Now().UTC().Truncate(time.Microsecond)
+	consumed := startAt.Add(-time.Microsecond)
+	evs, err := l.AppendWith(ctx, sessionID, []NewEvent{{
 		Type:        domain.EventSpanModelRequestStart,
-		ProcessedAt: &now,
+		ProcessedAt: &startAt,
 		ThreadID:    threadID,
-	}})
+	}}, AppendOptions{ThreadID: threadID, Consume: &consumed, Then: then})
 	if err != nil {
 		// No wire event landed, so the exported span must say why it is
 		// alone: an errored, immediately-ended span records an aborted

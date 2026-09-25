@@ -213,18 +213,21 @@ const verdictNeedsRevision = "needs_revision"
 // event that landed between the scheduling commit and the grading claim — its
 // seq below everything this cycle read — must still chain, where a
 // seq-filtered probe would idle past it and strand it forever. A report is
-// seq-filtered (chainInput from the head this cycle read) because it can be
-// found no other way, an agent.* event being stamped processed_at at write,
-// and because from zero it would match every report the session ever carried.
+// seq-filtered (chainInput from the head this cycle read) because from zero it
+// would match every report the session ever carried — and a report a build
+// before #793 wrote, stamped at write, can be found no other way.
 //
 // So the halves leave a seam between them — the pre-claim stretch, where a
-// report would be below the watermark and stamped, matched by neither — and
-// what closes it is not this probe but the rule that schedules a cycle at
-// all (settleEndTurn, decision 15): grading starts only where the fold moves
-// the SESSION to idle/end_turn, and requires_action and retries_exhausted
-// both outrank end_turn in that pick, so every live thread is idle on
-// end_turn when the cycle is scheduled. No child is running to report, and a
-// client cannot start one — user.message addresses the primary (decision 9),
+// report would be below the watermark and of a type the inbound probe does
+// not ask for, matched by neither. (Since #793 a report stays unprocessed
+// until a request consumes it, so adding its type to the from-zero probe
+// would close the seam; that is not done, because it would add an agent turn
+// after a terminal verdict.) What closes it is not this probe but the rule
+// that schedules a cycle at all (settleEndTurn, decision 15): grading starts
+// only where the fold moves the SESSION to idle/end_turn, and requires_action
+// and retries_exhausted both outrank end_turn in that pick, so every live
+// thread is idle on end_turn when the cycle is scheduled. No child is running
+// to report, and a client cannot start one — user.message addresses the primary (decision 9),
 // which is the thread now grading. The one agent.thread_message_received
 // that can still land there is the platform's own ending notice, from a
 // child archived while the cycle runs, and it is bounded rather than

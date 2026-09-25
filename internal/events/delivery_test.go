@@ -76,6 +76,15 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 			domain.EventAgentThreadMessageReceived}) {
 			t.Errorf("woke %v, appended %v, want the coordinator's running and then the report", woke, got)
 		}
+		// The running event is processed on emission; the report is not
+		// processed until the woken turn's request starts (#793).
+		rows, err := events.NewLog(pool).List(ctx, sid, events.ListQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 2 || rows[0].ProcessedAt == nil || rows[1].ProcessedAt != nil {
+			t.Errorf("stored %v, want the running event stamped and the report null", rows)
+		}
 	})
 
 	t.Run("a message wakes an idle child of an idle session", func(t *testing.T) {

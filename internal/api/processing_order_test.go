@@ -44,10 +44,10 @@ func TestAWakingMessageFollowsItsRunningPair(t *testing.T) {
 		if got := echo[i]["content"].([]any)[0].(map[string]any)["text"]; got != text {
 			t.Errorf("echo[%d] text = %v, want %q", i, got, text)
 		}
-		// A waking message is consumed at turn start and stamped when that
-		// turn settles, so it is still queued when echoed.
+		// A waking message is stamped when the request that consumes it
+		// starts (#793), which is after the echo, so it is still queued then.
 		if echo[i]["processed_at"] != nil {
-			t.Errorf("echo[%d] processed_at = %v, want null until its turn settles", i, echo[i]["processed_at"])
+			t.Errorf("echo[%d] processed_at = %v, want null until its request starts", i, echo[i]["processed_at"])
 		}
 	}
 }

@@ -113,6 +113,17 @@ func (t EventType) Inbound() bool {
 	}
 }
 
+// StampedOnConsumption reports whether this event is written unprocessed and
+// stamped processed_at only when a model request consumes it — every inbound
+// event, and the one platform event that is an input: a delivered
+// agent-to-agent message, read by its target's next request (#793). The
+// reference stamps a consumed input 1 µs before the span.model_request_start
+// that consumes it; everything else the platform writes is processed on
+// emission.
+func (t EventType) StampedOnConsumption() bool {
+	return t.Inbound() || t == EventAgentThreadMessageReceived
+}
+
 // StartsNewWork reports whether this event is somebody outside the session
 // asking it to do something new — the narrower sibling of Inbound, and the
 // reset for the session delegation bound (#447).

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -1665,6 +1666,126 @@ func TestWaitDoesNotParkOnAMessageDeliveredMidTurn(t *testing.T) {
 	}
 	if n := h.liveTurns(t, ""); n != 1 {
 		t.Errorf("coordinator turns queued = %d, want the chained one", n)
+	}
+}
+
+// deliverMidRequest appends a child's report to the primary the way a
+// delivery to a running coordinator does — the received row alone — from
+// inside the coordinator's first request.
+func (h *harness) deliverMidRequest(t *testing.T, text string) {
+	h.provider.onGenerate = func(callIndex int) {
+		if callIndex != 0 {
+			return
+		}
+		_, received, err := events.ThreadMessage(h.sessionID,
+			events.ThreadPeer{ThreadID: "sthr_child", AgentName: "researcher"}, events.ThreadPeer{}, text)
+		if err != nil {
+			t.Errorf("build report: %v", err)
+			return
+		}
+		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{received}); err != nil {
+			t.Errorf("deliver report: %v", err)
+		}
+	}
+}
+
+// threadRows lists one thread's rows of one type; the empty id is the primary.
+func (h *harness) threadRows(t *testing.T, tid domain.ID, typ domain.EventType) []domain.Event {
+	t.Helper()
+	evs, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{
+		Scope: events.ScopeThread, ThreadID: tid, Types: []string{string(typ)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evs
+}
+
+// A report that lands while the coordinator's request is in flight is read by
+// the chained request after the reply that never saw it (#793 item 4), so
+// that request ends on the report rather than on the assistant's reply. The
+// report is unprocessed until then — delivery is not consumption — and is
+// stamped 1 µs before the start of the request that reads it.
+func TestAReportLandingMidRequestReplaysAfterTheReply(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("still thinking"),
+		agentReply("read the report"),
+	}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "coordinate")
+	h.deliverMidRequest(t, "found three papers")
+	h.runOnce(t)
+	if got := h.threadRows(t, "", domain.EventAgentThreadMessageReceived); len(got) != 1 || got[0].ProcessedAt != nil {
+		t.Fatalf("after the first turn, received = %v, want one unprocessed report", got)
+	}
+	h.runOnce(t)
+
+	req := h.provider.calls[1]
+	if len(req.Messages) != 3 || req.Messages[1].Role != "assistant" || req.Messages[2].Role != "user" ||
+		!strings.Contains(string(req.Messages[2].Content), "found three papers") {
+		t.Fatalf("chained request = %+v, want coordinate, the reply, then the report", req.Messages)
+	}
+	starts := h.threadRows(t, "", domain.EventSpanModelRequestStart)
+	got := h.threadRows(t, "", domain.EventAgentThreadMessageReceived)
+	if len(starts) != 2 || got[0].ProcessedAt == nil ||
+		!got[0].ProcessedAt.Equal(starts[1].ProcessedAt.Add(-time.Microsecond)) {
+		t.Errorf("report processed_at = %v, want 1 µs before the second start (%v)", got[0].ProcessedAt, starts)
+	}
+}
+
+// The same report landing while the coordinator's wait_for_agents request is
+// in flight: the wait does not park (it is unread), and the chained request
+// reads it after the wait's answer, in the user turn that answers the call.
+func TestAReportLandingDuringAWaitReplaysAfterTheWaitsAnswer(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "wait_for_agents", `{}`), done("tool_use", 1)},
+		agentReply("read the report"),
+	}, nil)
+	h.roster(t, "researcher")
+	h.runningChild(t)
+	h.wake(t, "coordinate")
+	h.deliverMidRequest(t, "found three papers")
+	h.runOnce(t)
+	if got := h.answers(t); len(got) != 1 || got[0].text != waitStartedAnswer {
+		t.Fatalf("answer = %+v, want %s", got, waitStartedAnswer)
+	}
+	h.runOnce(t)
+
+	req := h.provider.calls[1]
+	if len(req.Messages) != 3 {
+		t.Fatalf("chained request = %+v, want coordinate, the wait, its answer", req.Messages)
+	}
+	var answer []map[string]any
+	_ = json.Unmarshal(req.Messages[2].Content, &answer)
+	if len(answer) != 2 || answer[0]["type"] != "tool_result" ||
+		!strings.Contains(fmt.Sprint(answer[1]["text"]), "found three papers") {
+		t.Errorf("answering user turn = %v, want the wait's result, then the report", answer)
+	}
+}
+
+// A delivery that wakes its target writes the received row unprocessed; the
+// woken target's first request stamps it, 1 µs before its start.
+func TestAWakingDeliveryIsProcessedWhenTheWokenRequestStarts(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{toolCall("t1", "send_to_agent", `{"agent_name":"worker","message":"one more thing"}`), done("tool_use", 1)},
+		agentReply("ok"),
+		agentReply("ok"),
+	}, nil)
+	h.roster(t, "worker")
+	child := pgtest.NewChildThread(t, h.pool, h.sessionID)
+	h.wake(t, "follow up")
+	h.runOnce(t)
+	if got := h.threadRows(t, child, domain.EventAgentThreadMessageReceived); len(got) != 1 || got[0].ProcessedAt != nil {
+		t.Fatalf("delivered = %v, want one unprocessed message", got)
+	}
+	// The coordinator's chained turn and the child's woken one, in the
+	// queue's order.
+	h.runOnce(t)
+	h.runOnce(t)
+	starts := h.threadRows(t, child, domain.EventSpanModelRequestStart)
+	got := h.threadRows(t, child, domain.EventAgentThreadMessageReceived)
+	if len(starts) != 1 || got[0].ProcessedAt == nil ||
+		!got[0].ProcessedAt.Equal(starts[0].ProcessedAt.Add(-time.Microsecond)) {
+		t.Errorf("delivered processed_at = %v, want 1 µs before the child's start (%v)", got[0].ProcessedAt, starts)
 	}
 }
 
