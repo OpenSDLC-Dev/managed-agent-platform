@@ -775,6 +775,9 @@ constrains none of it. `allow_mcp_servers` is what the environment's networking
 policy is consulted for on that path: under a `limited` policy the executor
 admits a declared server's host only if the flag is set (or the host is in
 `allowed_hosts`), and it is asked only about servers the agent itself declared.
+The same check runs at session create, where a server the policy does not admit
+refuses the session with a 400; the executor asks again before every dial,
+because an agent patch can add a server to a running session.
 Read the asymmetry deliberately — a `self_hosted` environment carries no
 networking block at all by construction, so on that kind the dial is not
 policy-restricted here in the first place. What the platform guarantees

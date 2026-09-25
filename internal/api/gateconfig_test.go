@@ -119,12 +119,15 @@ func TestGateConfigServesTheAgentsMCPEndpointsUnderTheFlag(t *testing.T) {
 		want       []string
 	}{
 		"limited with the flag": {
-			map[string]any{"type": "limited", "allowed_hosts": []any{"api.example.com"},
+			map[string]any{"type": "limited", "allowed_hosts": []string{"api.example.com"},
 				"allow_mcp_servers": true},
 			[]string{"mcp.example:443"},
 		},
+		// The server's host is on the operator's list, which is what admits the
+		// session at create (#571); the endpoint is still not sent, because the
+		// list reaches the gate as itself and only the flag widens it.
 		"limited without it": {
-			map[string]any{"type": "limited", "allowed_hosts": []any{"api.example.com"}},
+			map[string]any{"type": "limited", "allowed_hosts": []string{"api.example.com", "mcp.example"}},
 			nil,
 		},
 		// Nothing to widen: every host is admitted already.
@@ -155,9 +158,9 @@ func TestGateConfigServesTheAgentsMCPEndpointsUnderTheFlag(t *testing.T) {
 				t.Errorf("mcp_server_endpoints = %v, want %v", cfg.MCPServerEndpoints, tc.want)
 			}
 			// Whatever the flag says, the operator's own list is served as written.
-			if tc.networking["type"] == "limited" &&
-				(len(cfg.Networking.AllowedHosts) != 1 || cfg.Networking.AllowedHosts[0] != "api.example.com") {
-				t.Errorf("allowed_hosts = %v, want the configured list untouched", cfg.Networking.AllowedHosts)
+			if want, _ := tc.networking["allowed_hosts"].([]string); tc.networking["type"] == "limited" &&
+				!slices.Equal(cfg.Networking.AllowedHosts, want) {
+				t.Errorf("allowed_hosts = %v, want the configured list untouched (%v)", cfg.Networking.AllowedHosts, want)
 			}
 		})
 	}

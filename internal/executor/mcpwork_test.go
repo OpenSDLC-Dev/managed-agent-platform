@@ -1506,7 +1506,7 @@ func TestEveryDeclaredServerGetsARowPastTheFanOutWidth(t *testing.T) {
 		// ones all landing before the channel could fill.
 		declared = append(declared,
 			[2]string{fmt.Sprintf("ok%d", i), mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})},
-			// Not http(s): refused by mcpEndpointHost, so this entry is a row
+			// Not http(s): refused by egress.MCPEndpointHost, so this entry is a row
 			// with no dial behind it.
 			[2]string{fmt.Sprintf("bad%d", i), fmt.Sprintf("ftp://example.invalid/%d", i)})
 	}
