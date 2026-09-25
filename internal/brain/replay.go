@@ -274,7 +274,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				// together again: a tool_use block naming a tool this request
 				// does not offer is a conversation the endpoint may refuse, and
 				// every later turn replays this same block.
-				p.Name = mcpModelName(p.Server, p.Name)
+				p.Name = domain.MCPModelName(p.Server, p.Name)
 			}
 			input := p.Input
 			if len(input) == 0 || string(input) == "null" {

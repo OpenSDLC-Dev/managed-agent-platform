@@ -66,7 +66,7 @@ var modelToolName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 func TestAComposedMCPNameMatchesTheDocumentedRule(t *testing.T) {
 	// mcp__ and __ frame the pair, so the two names together may spend
 	// maxModelToolName less that frame.
-	frame := len(mcpNamePrefix) + len(mcpNameSeparator)
+	frame := len(domain.MCPModelNamePrefix) + len(domain.MCPModelNameSeparator)
 	exact := strings.Repeat("t", maxModelToolName-frame-len("docs"))
 
 	cases := []struct {
@@ -97,12 +97,12 @@ func TestAComposedMCPNameMatchesTheDocumentedRule(t *testing.T) {
 		if !tc.fits {
 			continue
 		}
-		got := mcpModelName(tc.server, tc.tool)
+		got := domain.MCPModelName(tc.server, tc.tool)
 		if got != tc.want {
-			t.Errorf("mcpModelName(%q, %q) = %q, want %q", tc.server, tc.tool, got, tc.want)
+			t.Errorf("MCPModelName(%q, %q) = %q, want %q", tc.server, tc.tool, got, tc.want)
 		}
 		if !modelToolName.MatchString(got) {
-			t.Errorf("mcpModelName(%q, %q) = %q, which the documented rule rejects", tc.server, tc.tool, got)
+			t.Errorf("MCPModelName(%q, %q) = %q, which the documented rule rejects", tc.server, tc.tool, got)
 		}
 	}
 }
