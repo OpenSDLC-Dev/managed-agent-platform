@@ -245,7 +245,8 @@ registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
   session parked mid-outcome. After the second review: an answer queued behind an
   earlier call beside a wake, answers behind an allowed and a denied call (the
   full order, the denial's result included, in both posted orders), an answer
-  beside an interrupt of its own thread, the approval wait a denial records, two
+  beside an interrupt of its own thread, the approval wait a denial records (and,
+  beside an interrupt, only a confirmation received ahead of it records one), two
   interrupts reaching one thread in both posted orders, the archive of a
   coordinator waiting on a gated child and of a session idle on
   `retries_exhausted`, and the clamp of many answers in one statement. After the

@@ -60,6 +60,45 @@ func TestApprovalWaitRecordedOnDenial(t *testing.T) {
 	}
 }
 
+// A confirmation posted with an interrupt of its thread: receipt order says
+// who cleared the gate. Received first, the confirmation cleared it — the
+// human answered before stopping the session — so the wait is recorded, deny
+// or allow. Received after, the interrupt had already cleared it, so the
+// confirmation ends no wait and nothing is recorded.
+func TestApprovalWaitBesideAnInterruptFollowsReceiptOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		result       string
+		confirmFirst bool
+		want         int
+	}{
+		{"deny then interrupt", "deny", true, 1},
+		{"allow then interrupt", "allow", true, 1},
+		{"interrupt then deny", "deny", false, 0},
+		{"interrupt then allow", "allow", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			collect := collectMetrics(t)
+			s := newTestServer(t)
+			sessionID, askID := suspendViaBrain(t, s)
+
+			posted := []map[string]any{{"type": "user.interrupt"}, confirm(askID, tc.result, nil)}
+			if tc.confirmFirst {
+				posted[0], posted[1] = posted[1], posted[0]
+			}
+			sendEvents(t, s, sessionID, posted...)
+
+			n := 0
+			for _, pt := range apiFloatPoints(t, collect(), events.MetricApprovalWait) {
+				n += int(pt.Count)
+			}
+			if n != tc.want {
+				t.Errorf("%s readings = %d, want %d", events.MetricApprovalWait, n, tc.want)
+			}
+		})
+	}
+}
+
 // A user.message resuming an idle session is not an approval, so it records no
 // approval wait — only a confirmation clearing a requires_action gate does.
 func TestUserMessageResumeRecordsNoApprovalWait(t *testing.T) {

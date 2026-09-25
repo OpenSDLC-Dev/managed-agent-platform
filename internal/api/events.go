@@ -416,8 +416,41 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			}
 			layout.interrupted(interruptAt(tid), out)
 			advanced[tid] = true
+			// A human may still have cleared the thread's approval gate: the
+			// confirmations received ahead of this interrupt, deny or allow,
+			// are consumed first, and if they leave no ask unconfirmed the
+			// wait they ended is recorded as any resume records it. Received
+			// after it, a confirmation ends no wait — the interrupt had
+			// already answered every call — so nothing is recorded.
+			var confirmedFirst []string
+			for _, ev := range newEvents[:interruptAt(tid)] {
+				if ev.Type == domain.EventUserToolConfirm && ev.ThreadID == tid {
+					var c struct {
+						ToolUseID string `json:"tool_use_id"`
+					}
+					_ = json.Unmarshal(ev.Payload, &c)
+					confirmedFirst = append(confirmedFirst, c.ToolUseID)
+				}
+			}
+			humanCleared := false
+			if len(confirmedFirst) > 0 {
+				left, err := events.UnconfirmedThreadAskEvents(ctx, tx, domain.ID(id), tid, confirmedFirst)
+				if err != nil {
+					return nil, err
+				}
+				humanCleared = len(left) == 0
+			}
 			thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), tid, platformExecuted)
+				if _, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), tid, platformExecuted); err != nil {
+					return err
+				}
+				if !humanCleared {
+					return nil
+				}
+				secs, err := events.ClearedApprovalWait(ctx, tx, domain.ID(id), tid)
+				if secs != nil {
+					approvalWaits = append(approvalWaits, *secs)
+				}
 				return err
 			})
 			for i := range out.moves {
