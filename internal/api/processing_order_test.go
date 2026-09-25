@@ -425,6 +425,27 @@ func TestAnAnswerBehindAConfirmedCallIsPlacedByWhatTheConfirmationSays(t *testin
 	}
 }
 
+// The one placement out of reach, pinned rather than changed
+// (docs/DIVERGENCES.md, the primary thread's entry): an answer that resumes
+// the primary moves it in the settlement that runs after the send's append, so
+// a message posted beside it, which the resumed turn consumes, is listed ahead
+// of the resume's running pair. The rule would list it after.
+func TestAMessageBesideAnAnswerThatResumesThePrimaryPrecedesTheResume(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	useID := appendOn(t, s, sid, "", false, domain.EventAgentCustomToolUse, customCall)
+	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle",
+		`{"type":"requires_action","event_ids":["`+useID+`"]}`)
+
+	sendEvents(t, s, sid, customResult(useID), userMessage("and also"))
+
+	want := []string{"agent.custom_tool_use", "user.custom_tool_result", "user.message",
+		"session.status_running", "session.thread_status_running"}
+	if got := s.eventTypes(sid); !sameStrings(got, want) {
+		t.Fatalf("event log = %v, want %v", got, want)
+	}
+}
+
 // A thread two interrupts of one send both reach is ended by the first of them
 // received: its results come before that interrupt and its idle after it, and
 // the later one, which finds the thread already stopped, settles nothing. Here
