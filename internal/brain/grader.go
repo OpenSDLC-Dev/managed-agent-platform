@@ -790,22 +790,29 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			if serr != nil {
 				return serr
 			}
-			batch = append(batch, startEv)
-			if item.ThreadID != "" {
+			if item.ThreadID == "" {
+				batch = append(batch, startEv)
+			} else {
 				// A child's end_turn is the quiescence: the parked primary
 				// wakes for the grading turn first, then the child idles — in
 				// that order so the session never idles between, exactly as a
-				// single-agent session never does. Its notice goes in the same
-				// commit, so the turn that wake schedules already has it, and
-				// behind the wake, the order every delivery that wakes its
-				// target is written in (processing order, #793).
+				// single-agent session never does. The grading runs on the
+				// woken primary's claim, so its start follows the primary's
+				// running pair (processing order, #793). The notice goes in the
+				// same commit, so the turn that wake schedules already has it;
+				// delivered to a primary this wake already runs, it wakes
+				// nothing more and is the received row alone.
 				wake, _, werr := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{Status: domain.SessionRunning})
 				if werr != nil {
 					return werr
 				}
-				batch = append(batch, wake...)
+				batch = append(append(batch, wake...), startEv)
 				if notice != nil {
-					batch = append(batch, *notice)
+					told, derr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
+					if derr != nil {
+						return derr
+					}
+					batch = append(batch, told.Events()...)
 				}
 				park, _, perr := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
 					ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: endTurn})
@@ -861,18 +868,18 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 		// order), before the child idles for the reason settle's
 		// retries-exhausted ending gives: a session whose last running thread
 		// is this one never folds idle in between. Whether it wakes at all is
-		// events.WakeOnThreadEnded's rule, the one every ending shares — a
+		// the rule DeliverThreadEnded applies, the one every ending shares — a
 		// running coordinator chains on the notice by seq instead, and one
 		// with a sibling still working has a report coming that will wake it.
 		woke := false
 		var wokeTo *domain.SessionStatus
 		if notice != nil {
-			delivered, wokeMoved, wokeOK, werr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
+			told, werr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
 			if werr != nil {
 				return werr
 			}
-			batch = append(batch, delivered...)
-			woke, wokeTo = wokeOK, wokeMoved
+			batch = append(batch, told.Events()...)
+			woke, wokeTo = told.Woke(), told.Moved
 		}
 		pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
 			ThreadID: item.ThreadID, Status: domain.SessionIdle, Stop: endTurn})

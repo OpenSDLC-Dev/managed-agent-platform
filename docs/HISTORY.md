@@ -57,21 +57,34 @@ seq as the receipt order, the list order and the stream cursor at once, and #793
 places where the two orders disagreed. The plan kept seq and applied the rule wherever it
 could without re-keying anything.
 
-The first PR wrote each commit in processing order. A wake's running pair now precedes the
-`user.message` or `user.define_outcome` it consumes, at all four wake sites (item 1); a
-target's running event precedes the delivered message that woke it, for a report, a
-`send_to_agent` and every ending notice, with `events.DeliverAndWake` and
+The first PR (#802) wrote each commit in processing order. A wake's running pair now
+precedes the `user.message` or `user.define_outcome` it consumes, at all four wake sites
+(item 1); a target's running event precedes the delivered message that woke it, for a
+report, a `send_to_agent` and every ending notice, with `events.DeliverAndWake` and
 `events.DeliverThreadEnded` owning that order so no emitter picks its own (item 3); and an
-interrupt follows the results it synthesizes and precedes its idle pair (#539). Item 2, a
-child resuming an idle session, was registered as deliberate rather than matched.
+interrupt follows the results and outcome ends it synthesizes and precedes its idle pairs
+(#539). Item 2, a child resuming an idle session, was registered as deliberate rather than
+matched. Review turned the send's layout into a rule about what each event is:
+`processingOrder` lists first what is consumed on receipt, in receipt order — the answers
+the send's settlement processes, each thread's filling its answer slots in the order its
+calls are processed with a denial's result beside its confirmation, and each interrupt
+between its results and its idle pairs — then each woken thread's pair and the input its
+turn consumes, and last what nothing in the commit consumes. `processed_at` agrees with
+that order within every commit: `AppendInTx` raises a stamp that would run backwards, and
+one set-based statement clamps the settlement's answer stamps into their slots. Two older
+bugs fell on the lines it touched and were fixed: archiving a session now ends any live
+outcome, end event and projection together, whatever the primary is parked on, and a
+denial posted beside an interrupt of its thread is no longer swallowed. One placement stayed
+out of reach and is registered: input posted beside an answer that resumes a thread
+precedes that resume's running pair.
 
 The second PR took the case no single commit holds: an input that lands while a model
 request is in flight, which had replayed merged ahead of the reply it never saw.
 `events.ConsumptionOrder`, a pure function of a thread's rows, places it after that
 request's end and results instead, and replay, the grader's transcript and the dream's
 streamed transcript all read through it; a request reads its history only after its span
-start commits, bounded by it, since that start consumes exactly those rows. `processed_at` moved to
-the same point: the span start stamps what it consumes at its own `processed_at` minus
+start commits, bounded by it, since that start consumes exactly those rows. `processed_at`
+moved to the same point: the span start stamps what it consumes at its own `processed_at` minus
 1 µs, the reference's stamp on 139 of the 140 recorded consumptions, and a delivered
 message is written null until then — a present null on a field the pinned SDK types as
 required, registered under #78.

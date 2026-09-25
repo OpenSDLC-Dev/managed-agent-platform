@@ -22,7 +22,7 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 	// deliver runs one helper under the session lock and appends what it
 	// returns, reporting the appended types and whether it woke.
 	deliver := func(t *testing.T, pool *pgxpool.Pool, sid domain.ID,
-		fn func(tx pgx.Tx) ([]events.NewEvent, *domain.SessionStatus, bool, error)) ([]domain.EventType, bool) {
+		fn func(tx pgx.Tx) (events.Delivery, error)) ([]domain.EventType, bool) {
 		t.Helper()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -32,18 +32,18 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
 			t.Fatal(err)
 		}
-		batch, moved, woke, err := fn(tx)
+		d, err := fn(tx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		appended, err := events.NewLog(pool).AppendInTx(ctx, tx, sid, batch, events.AppendOptions{SetStatus: moved})
+		appended, err := events.NewLog(pool).AppendInTx(ctx, tx, sid, d.Events(), events.AppendOptions{SetStatus: d.Moved})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
-		return types(appended), woke
+		return types(appended), d.Woke()
 	}
 	setStatus := func(t *testing.T, pool *pgxpool.Pool, id domain.ID, status, stop string) {
 		t.Helper()
@@ -67,7 +67,7 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) ([]events.NewEvent, *domain.SessionStatus, bool, error) {
+		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) (events.Delivery, error) {
 			return events.DeliverAndWake(ctx, tx, sid, received)
 		})
 		// No session.status_running: the reporting child still runs, so the
@@ -95,7 +95,7 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) ([]events.NewEvent, *domain.SessionStatus, bool, error) {
+		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) (events.Delivery, error) {
 			return events.DeliverAndWake(ctx, tx, sid, received)
 		})
 		if !woke || !slices.Equal(got, []domain.EventType{domain.EventSessionStatusRunning,
@@ -113,7 +113,7 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) ([]events.NewEvent, *domain.SessionStatus, bool, error) {
+		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) (events.Delivery, error) {
 			return events.DeliverAndWake(ctx, tx, sid, received)
 		})
 		if woke || !slices.Equal(got, []domain.EventType{domain.EventAgentThreadMessageReceived}) {
@@ -131,7 +131,7 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) ([]events.NewEvent, *domain.SessionStatus, bool, error) {
+		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) (events.Delivery, error) {
 			return events.DeliverThreadEnded(ctx, tx, sid, child, notice)
 		})
 		if !woke || !slices.Equal(got, []domain.EventType{domain.EventSessionStatusRunning,
@@ -152,7 +152,7 @@ func TestDeliveryWritesTheWakeBeforeTheMessage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) ([]events.NewEvent, *domain.SessionStatus, bool, error) {
+		got, woke := deliver(t, pool, sid, func(tx pgx.Tx) (events.Delivery, error) {
 			return events.DeliverThreadEnded(ctx, tx, sid, child, notice)
 		})
 		if woke || !slices.Equal(got, []domain.EventType{domain.EventAgentThreadMessageReceived}) {
@@ -199,5 +199,40 @@ func TestAppendTransitionWritesAWakeBeforeItsInput(t *testing.T) {
 	}
 	if !sameTypes(idled, domain.EventAgentMessage, domain.EventSessionThreadStatusIdle, domain.EventSessionStatusIdle) {
 		t.Errorf("idle appended %v, want the reply and then the idle pair", types(idled))
+	}
+}
+
+// The order keys on a wake that happened, not on the status the last
+// transition asked for. A wake anywhere in the transitions puts evs behind
+// every pair — the input is consumed when the woken turn starts, after all this
+// commit processes — and a move to running that finds its thread already
+// running is no wake, so evs stay the fact the pairs report, ahead of them.
+func TestAppendTransitionKeysOnTheWakeThatHappened(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	child := pgtest.NewChildThread(t, pool, sid)
+	endTurn := &domain.StopReason{Type: domain.StopEndTurn}
+
+	woke, err := log.AppendTransition(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("go")}},
+		[]events.ThreadTransition{{Status: domain.SessionRunning}, {ThreadID: child, Status: domain.SessionIdle, Stop: endTurn}},
+		events.AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameTypes(woke, domain.EventSessionStatusRunning, domain.EventSessionThreadStatusRunning,
+		domain.EventSessionThreadStatusIdle, domain.EventUserMessage) {
+		t.Errorf("a wake followed by an idle appended %v, want both pairs and then the message", types(woke))
+	}
+
+	rerun, err := log.AppendTransition(ctx, sid, []events.NewEvent{{Type: domain.EventAgentMessage, Payload: text("done")}},
+		[]events.ThreadTransition{{ThreadID: child, Status: domain.SessionIdle, Stop: endTurn}, {Status: domain.SessionRunning}},
+		events.AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameTypes(rerun, domain.EventAgentMessage, domain.EventSessionThreadStatusIdle, domain.EventSessionThreadStatusRunning) {
+		t.Errorf("a running thread asked to run again appended %v, want the reply ahead of both thread events", types(rerun))
 	}
 }

@@ -149,8 +149,8 @@ type AppendOptions struct {
 	// clock says. A stamp another process writes — created_at, from the
 	// database, or an answer's processed_at, from whichever process took it —
 	// can still skew against these by the difference between the two hosts'
-	// clocks, as it could before #793. Only a span.model_request_start leading the batch may
-	// set it; AppendInTx refuses any other batch.
+	// clocks, as it could before #793. Only a span.model_request_start
+	// leading the batch may set it; AppendInTx refuses any other batch.
 	Consume bool
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
@@ -252,9 +252,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	// waited on the lock write a higher seq with an earlier timestamp,
 	// breaking the seq/created_at agreement the list filters rely on.
 	var (
-		sb   strings.Builder
-		args []any
-		out  = make([]domain.Event, 0, len(evs))
+		sb        strings.Builder
+		args      []any
+		out       = make([]domain.Event, 0, len(evs))
+		lastStamp time.Time
 	)
 	sb.WriteString(`INSERT INTO events (id, session_id, seq, type, payload, processed_at, created_at, thread_id, cross_posted) VALUES `)
 	for i, ev := range evs {
@@ -290,6 +291,23 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		if ev.ProcessedAt == nil && !ev.Type.StampedOnConsumption() {
 			now := time.Now().UTC()
 			ev.ProcessedAt = &now
+		}
+		// A batch is laid out in processing order (#793), so its stamps may
+		// not run backwards through it: an event stamped before the one
+		// listed ahead of it takes that one's stamp. That holds for every
+		// append, so every commit's stamps agree with its order — an ordinary
+		// turn's span.model_request_end, stamped when it was built and listed
+		// after the agent.* rows stamped here, takes theirs, as do a later
+		// interrupt's results, synthesized before an earlier interrupt's idle
+		// pair, and a grading start, built before the wake it follows. Only
+		// the values move: no reader compares two stamps, they key on
+		// processed_at being null or not. A pending event (nil) stays pending.
+		if ev.ProcessedAt != nil {
+			if ev.ProcessedAt.Before(lastStamp) {
+				stamp := lastStamp
+				ev.ProcessedAt = &stamp
+			}
+			lastStamp = *ev.ProcessedAt
 		}
 		if i > 0 {
 			sb.WriteString(", ")

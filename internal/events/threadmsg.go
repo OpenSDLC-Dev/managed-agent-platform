@@ -83,7 +83,7 @@ func ThreadMessage(sessionID domain.ID, from, to ThreadPeer, text string) (sent,
 		nil
 }
 
-// WakeThread decides the one question a delivered message raises: whether
+// wakeThread decides the one question a delivered message raises: whether
 // anything else will ever move the target thread. A thread idle on end_turn —
 // or on no reason at all, which a primary row the thread migration backfilled
 // can be — has no turn coming, so it is flipped to running here and the
@@ -91,38 +91,40 @@ func ThreadMessage(sessionID domain.ID, from, to ThreadPeer, text string) (sent,
 // only until its human answers and replays the message when its turn resumes;
 // a running one reads it at its next settle (plan 35 decision 6). A thread
 // that exhausted its retries is not woken: nothing here can make its turn
-// succeed, and its coordinator was already told it stopped.
+// succeed, and its coordinator was already told it stopped. It returns the
+// running pair the wake emitted, none when it woke nothing, and the session
+// status the move made.
 //
 // It runs in the caller's transaction, under the session row lock every
 // settlement and trigger holds, which is what serializes two children
 // reporting at once: the first finds the parent idle and wakes it, the second
 // finds it running and leaves the chain to the parent's own settlement.
-func WakeThread(ctx context.Context, tx pgx.Tx, sessionID, threadID domain.ID) (pair []NewEvent, moved *domain.SessionStatus, woke bool, err error) {
+func wakeThread(ctx context.Context, tx pgx.Tx, sessionID, threadID domain.ID) ([]NewEvent, *domain.SessionStatus, error) {
 	tid := threadID
 	if tid == "" {
 		tid = domain.PrimaryThreadID(sessionID)
 	}
 	var status string
 	var stopJSON []byte
-	err = tx.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT status, stop_reason FROM session_threads WHERE id = $1 AND session_id = $2`,
 		tid.String(), sessionID.String()).Scan(&status, &stopJSON)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil, false, fmt.Errorf("thread %s not found in session %s", tid, sessionID)
+		return nil, nil, fmt.Errorf("thread %s not found in session %s", tid, sessionID)
 	}
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
 	if domain.SessionStatus(status) != domain.SessionIdle {
-		return nil, nil, false, nil
+		return nil, nil, nil
 	}
 	if len(stopJSON) > 0 {
 		var stop domain.StopReason
 		if err := json.Unmarshal(stopJSON, &stop); err != nil {
-			return nil, nil, false, fmt.Errorf("thread %s stop_reason: %w", tid, err)
+			return nil, nil, fmt.Errorf("thread %s stop_reason: %w", tid, err)
 		}
 		if stop.Type != domain.StopEndTurn {
-			return nil, nil, false, nil
+			return nil, nil, nil
 		}
 	}
 	// The last thing the API's message trigger checks before resuming a
@@ -144,7 +146,7 @@ func WakeThread(ctx context.Context, tx pgx.Tx, sessionID, threadID domain.ID) (
 	// matches none of them.
 	unanswered, err := HasUnansweredThreadToolUse(ctx, tx, sessionID, threadID, nil)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
 	if unanswered {
 		// Logged, not returned silently, and the one refusal here that is:
@@ -156,42 +158,67 @@ func WakeThread(ctx context.Context, tx pgx.Tx, sessionID, threadID domain.ID) (
 		// writes for the same state.
 		slog.WarnContext(ctx, "thread not woken: it is idle with an unanswered tool_use",
 			"session_id", sessionID, "session_thread_id", tid)
-		return nil, nil, false, nil
+		return nil, nil, nil
 	}
-	pair, moved, err = TransitionThread(ctx, tx, sessionID, ThreadTransition{
+	return TransitionThread(ctx, tx, sessionID, ThreadTransition{
 		ThreadID: threadID, Status: domain.SessionRunning})
-	return pair, moved, err == nil, err
 }
 
 // Every wake a delivered message causes is written in processing order (#793
 // item 3): the target's running event first, then the received row its woken
 // turn consumes — the order all ten recorded report wakes list, and the one a
-// spawn writes a child's task in. The two helpers below own that order, so no
-// emitter picks its own; a delivery that wakes nothing is the received row
-// alone. Nothing downstream reads the swap: replay skips status rows, and the
-// chain test is by seq over received rows, all in the one commit either way.
+// spawn writes a child's task in. Every delivery goes through DeliverAndWake or
+// DeliverThreadEnded, whose rules (wakeThread, wakeOnThreadEnded) are not
+// exported, and returns a Delivery, whose Events is that order — so no emitter
+// picks its own. A caller that interleaves a delivery with other writes (the
+// API's send, laid out by processingOrder) reads its parts instead: the row
+// names its target thread, and Wake is that thread's running pair. A delivery
+// that wakes nothing is the received row alone. Nothing downstream reads the
+// swap: replay skips status rows, and the chain test is by seq over received
+// rows, all in the one commit either way.
+
+// Delivery is one delivered row and the wake it caused.
+type Delivery struct {
+	// Received is the delivered row, on its target's thread
+	// (Received.ThreadID; empty for the primary).
+	Received NewEvent
+	// Wake is the target's running pair — behind a session.status_running when
+	// the session was idle — and empty when nothing woke it.
+	Wake []NewEvent
+	// Moved is the session status the wake moved the column to, nil when it
+	// moved nothing: what the caller's post-commit metric counts.
+	Moved *domain.SessionStatus
+}
+
+// Woke reports whether the delivery woke its target, which the caller answers
+// by enqueueing the target's turn.
+func (d Delivery) Woke() bool { return len(d.Wake) > 0 }
+
+// Events is the delivery in processing order: the wake, then the row the woken
+// turn consumes.
+func (d Delivery) Events() []NewEvent {
+	return append(append(make([]NewEvent, 0, len(d.Wake)+1), d.Wake...), d.Received)
+}
 
 // DeliverAndWake delivers received to the thread it names and wakes that
-// thread when nothing else will move it (WakeThread's rule), returning the
-// events to append in processing order.
-func DeliverAndWake(ctx context.Context, tx pgx.Tx, sessionID domain.ID, received NewEvent) ([]NewEvent, *domain.SessionStatus, bool, error) {
-	pair, moved, woke, err := WakeThread(ctx, tx, sessionID, received.ThreadID)
+// thread when nothing else will move it (wakeThread's rule).
+func DeliverAndWake(ctx context.Context, tx pgx.Tx, sessionID domain.ID, received NewEvent) (Delivery, error) {
+	pair, moved, err := wakeThread(ctx, tx, sessionID, received.ThreadID)
 	if err != nil {
-		return nil, nil, false, err
+		return Delivery{}, err
 	}
-	return append(pair, received), moved, woke, nil
+	return Delivery{Received: received, Wake: pair, Moved: moved}, nil
 }
 
 // DeliverThreadEnded delivers a ThreadEnded notice about child to the primary
-// and wakes it on WakeOnThreadEnded's rule, returning the events to append in
-// processing order. Like WakeOnThreadEnded, it runs before the ending thread's
-// own transition.
-func DeliverThreadEnded(ctx context.Context, tx pgx.Tx, sessionID, child domain.ID, notice NewEvent) ([]NewEvent, *domain.SessionStatus, bool, error) {
-	pair, moved, woke, err := WakeOnThreadEnded(ctx, tx, sessionID, child)
+// and wakes it on wakeOnThreadEnded's rule. Like that rule, it runs before the
+// ending thread's own transition.
+func DeliverThreadEnded(ctx context.Context, tx pgx.Tx, sessionID, child domain.ID, notice NewEvent) (Delivery, error) {
+	pair, moved, err := wakeOnThreadEnded(ctx, tx, sessionID, child)
 	if err != nil {
-		return nil, nil, false, err
+		return Delivery{}, err
 	}
-	return append(pair, notice), moved, woke, nil
+	return Delivery{Received: notice, Wake: pair, Moved: moved}, nil
 }
 
 // ThreadEnded is the notice a coordinator gets about a child that stopped:
@@ -200,9 +227,10 @@ func DeliverThreadEnded(ctx context.Context, tx pgx.Tx, sessionID, child domain.
 // convention is a bracketed line naming the agent and what happened, then the
 // next action open to the coordinator.
 //
-// It builds the notice; waking is WakeOnThreadEnded's, and every ending pairs
-// the two through DeliverThreadEnded. A session-wide interrupt appends no notice at all — it ends
-// the primary in the same batch, so there is nobody left to tell.
+// It builds the notice; waking is wakeOnThreadEnded's, and every ending pairs
+// the two through DeliverThreadEnded. A session-wide interrupt appends no
+// notice at all — it ends the primary in the same batch, so there is nobody
+// left to tell.
 func ThreadEnded(sessionID, child domain.ID, agentName, text string) (NewEvent, error) {
 	_, received, err := ThreadMessage(sessionID, ThreadPeer{ThreadID: child, AgentName: agentName}, ThreadPeer{}, text)
 	return received, err
@@ -240,11 +268,12 @@ func BusyChild(ctx context.Context, q Querier, sessionID, except domain.ID) (boo
 	return busy, nil
 }
 
-// WakeOnThreadEnded wakes the primary when the child that just ended was the
+// wakeOnThreadEnded wakes the primary when the child that just ended was the
 // last thing a parked coordinator could have been waiting for, and returns the
-// events to append, the session status the wake moved to, and whether it woke
-// (the caller enqueues the primary's model_turn then). Run before the ending
-// thread's own transition, so this reads the status it ended from.
+// running pair it emitted (none when it woke nothing; the caller enqueues the
+// primary's model_turn otherwise) and the session status the wake moved to.
+// Run before the ending thread's own transition, so this reads the status it
+// ended from.
 //
 // Both halves of the test are load-bearing. A wait parks only while some busy
 // child exists, so an ending that removes the last one is the last chance to
@@ -257,7 +286,7 @@ func BusyChild(ctx context.Context, q Querier, sessionID, except domain.ID) (boo
 // costs a model call, blocks the session's own archive behind it, and puts the
 // archive path's idle re-advertisement (decision 4's pick) out of reach.
 //
-// The primary is woken on the rule a report uses (WakeThread): idle on
+// The primary is woken on the rule a report uses (wakeThread): idle on
 // end_turn only. A running coordinator chains on the notice by seq at its own
 // settle, and one parked on requires_action stays parked until its human
 // answers.
@@ -269,16 +298,16 @@ func BusyChild(ctx context.Context, q Querier, sessionID, except domain.ID) (boo
 // notice a turn earlier than it otherwise would. That costs a model call the
 // client did not ask for; the other direction costs a coordinator parked on a
 // child that no longer exists, which nothing can end.
-func WakeOnThreadEnded(ctx context.Context, tx pgx.Tx, sessionID, child domain.ID) ([]NewEvent, *domain.SessionStatus, bool, error) {
+func wakeOnThreadEnded(ctx context.Context, tx pgx.Tx, sessionID, child domain.ID) ([]NewEvent, *domain.SessionStatus, error) {
 	var wasBusy, othersBusy bool
 	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE(bool_or(id = $2), false), COALESCE(bool_or(id <> $2), false)
 		   FROM session_threads WHERE `+busyChild,
 		sessionID.String(), child.String()).Scan(&wasBusy, &othersBusy); err != nil {
-		return nil, nil, false, fmt.Errorf("ending wake check for %s: %w", child, err)
+		return nil, nil, fmt.Errorf("ending wake check for %s: %w", child, err)
 	}
 	if !wasBusy || othersBusy {
-		return nil, nil, false, nil
+		return nil, nil, nil
 	}
-	return WakeThread(ctx, tx, sessionID, "")
+	return wakeThread(ctx, tx, sessionID, "")
 }

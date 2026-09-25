@@ -17,26 +17,34 @@ consumes an event, which is where every difference below was found.
 The evidence, from the recordings of 2026-09-02 to 2026-09-24
 (managed-agents-wire-recordings), read against the code at `2eb299a9`:
 
-- All 228 distinct recorded event lists sort by `processed_at` (6 look unsorted
-  only under a string compare, `.899Z` against `.899001Z`). Pending events sit at
-  the tail with no `processed_at`, and one moves once processed: in
-  2026-09-12-console-141/api-fixtures.json, `user.message`
+- Every recorded session and thread event list sorts by `processed_at`: every
+  array of `sevt_` events in the recordings' JSON, response bodies embedded as
+  strings included, runs non-decreasing with its stamps compared as timestamps
+  (non-increasing for an `order=desc` read), though a few look unsorted under a
+  string compare (`.899Z` against `.899001Z`). Pending events, with no
+  `processed_at`, sit at the tail of every list that holds any, and one moves
+  once processed:
+  in 2026-09-12-console-141/api-fixtures.json, `user.message`
   `sevt_01C9bDZQjtPsLTqxCmq1YvKT` is at idx 21 of
   `observation.session.approval.events` and at idx 23 of
   `session.approval.final-events`, after the new running pair.
-- A waking message is consumed at turn start: 109 `user.message` wakes and the one
-  recorded `user.define_outcome` wake (2026-09-02/batch2.json
-  `sessT.events.after-outcome`) list `session.status_running`, the primary's
-  `session.thread_status_running`, the waking event, then
-  `span.model_request_start` 1 µs later. Five more message wakes put a
-  `session.error` between the two running events, the message still after both. A
-  deployment run's list reads the same (console-141 `deployment.run.final-events`,
-  idx 0 to 2), and so does the live 2026-09-12-console-followups/streams/ui-00.sse,
-  which never echoes a message at receipt.
-- An answer is consumed on receipt: on the primary thread, 12
-  `user.tool_confirmation`s, 7 `user.tool_result`s and 9
-  `user.custom_tool_result`s are listed before the pair they cause (for example
-  console-141 `session.approval.final-events` idx 10 to 13).
+- A waking message is consumed at turn start. All 115 recorded `user.message`
+  wakes and the one recorded `user.define_outcome` wake (2026-09-02/batch2.json
+  `sessT.events.after-outcome`) list the waking event after
+  `session.status_running` and the primary's `session.thread_status_running`:
+  110 of the message wakes with the pair directly ahead of the message, five with
+  session-start `session.error`s between the two running events, and none with
+  the message first (each wake counted once by its `sevt_` id). In all 116 the
+  turn's `span.model_request_start` follows the waking event 1 µs later. Both
+  recorded deployment runs are among the 110 (console-141
+  `deployment.run.final-events` reads the pair at idx 0 to 1 and the message at
+  2), and the live 2026-09-12-console-followups/streams/ui-00.sse, which never
+  echoes a message at receipt, reads the same.
+- An answer is consumed on receipt: all 32 recorded wakes by an answer on the
+  primary thread list the answer before the pair it causes — 12 by a
+  `user.tool_confirmation` (six of them denies), 9 by a `user.tool_result` and 11
+  by a `user.custom_tool_result`; three of the 32 carry two answers each, 35 in
+  all (for example console-141 `session.approval.final-events` idx 10 to 13).
 - An interrupt is consumed after the results it causes (#539):
   `sessT.events.after-outcome` idx 35 to 37 reads `agent.tool_result`,
   `user.interrupt`, `session.thread_status_idle`, and the live
@@ -64,7 +72,10 @@ The evidence, from the recordings of 2026-09-02 to 2026-09-24
    session keeps this platform's shape: `session.status_running` with the child's
    own running event, the primary left idle. Session `status` stays a fold that
    answers whether any work is happening in the session; the executor's liveness
-   check, the MCP work check and the archive/delete guards depend on that.
+   check, the MCP work check and the archive/delete guards depend on that. Its
+   residual is registered with it: a coordinator woken while a child keeps the
+   fold running writes its own running event without a `session.status_running`,
+   because the session never left running.
 3. **Item 3, fixed for every wake a delivered message causes.** The target's
    running event is written before the `received` row: a child's report, a
    `send_to_agent` that wakes an idle child, and every ending notice that wakes a
@@ -102,25 +113,94 @@ as #675 part 3 accepted, and the POST echo keeps the order the client posted in.
 
 ## The split
 
-**PR-A** (this plan's first PR) lands items 1 and 3 and #539, and registers
-item 2:
+**PR-A** (this plan's first PR) lands items 1 and 3 and #539, registers item 2,
+and fixes two older bugs on lines it touches (the last two items):
 
-- `processingOrder` lays a send out as: the posted events nothing else places, what
-  an interrupt settles, the interrupts, what follows them (a told coordinator's
-  wake and notice, the idle pairs), a wake's running pair, then the posted events
-  from the first waking event on. The client's events are found again by a
-  pre-minted id, so the echo and the `processed_at` re-read no longer assume they
-  lead the batch. A send the platform writes nothing for keeps its posted order.
-- `events.DeliverAndWake` and `events.DeliverThreadEnded` own the order of a
-  delivery and its wake, so no emitter picks its own.
-- `events.AppendTransition` writes a wake's pair ahead of the input it consumes,
-  so the brain's harnesses model the trigger; the reclaim's forced pair is not a
-  wake and carries no input, so it is unchanged.
+- `processingOrder` (internal/api/events.go) lays a send out by what each event
+  is, not where it was posted. First comes what is consumed on receipt, in
+  receipt order: the answers the send's settlement processes, and each interrupt
+  behind the results and outcome ends its settling wrote and ahead of the idle
+  pairs it caused. A thread two interrupts reach is ended by the first received.
+  A thread's processed answers fill the places its answers were received in, in
+  the order the settlement processes them, which is its calls' order, and a
+  denial the settlement reaches is followed by the result it writes, ahead of
+  the answers the denial lets it go on to.
+  Then, for each thread the commit woke, its running pair and the input its woken
+  turn consumes: the posted message, outcome or system message addressed to it,
+  and any notice delivered to it, whichever arm made the wake. Last comes what
+  nothing in the commit consumes, in receipt order: a message to a primary
+  already running, a notice to a coordinator left parked, and an answer queued
+  behind an earlier call of its thread that is still waiting, which the ordered
+  tool flow does not pass. The reference also keeps such a result unprocessed at
+  the tail until the earlier call's answer arrives
+  (2026-09-19-custom-order-followup `setup[80]` and `[83]`). The settlement stamps
+  answers only after the append has placed them, so what it will do with them is
+  read first, by walking the thread's calls as the settlement will:
+  `events.PlanAnswers` and `AdvanceThreadTools` share one walk, and the plan drops
+  the calls an interrupt's results answer, which are stamped as they are written,
+  as the settlement's own read of the calls does. The denial results the walk
+  reaches are built by the plan and written by the send, in the batch, so the
+  settlement finds those calls answered and writes nothing twice. The arms run
+  in the same order (the primary's own first unless it is interrupted, then the
+  interrupted threads in receipt order), so the status events their transitions
+  emit read true in the list. The client's events are found again by a
+  pre-minted id, so the echo and the `processed_at` re-read no longer assume
+  they lead the batch.
+- `processed_at` agrees with that order within a commit. A child-scoped interrupt
+  is stamped once its arm has synthesized its results. Every commit's stamps are
+  raised to agree with its order: `AppendInTx` raises a stamp that would run
+  backwards through a batch to the stamp ahead of it, on every append. An
+  ordinary turn's `span.model_request_end`, stamped when built and listed after
+  the turn's `agent.*` rows, takes their stamp, as do a later interrupt's results
+  listed behind an earlier interrupt's idle and the grading start listed behind
+  the wake it runs on. No consumer compares stamp values; the readers key on
+  null or not null. An answer the settlement processes, stamped after the
+  append, is held inside its list slot by one statement over the batch; a queued
+  one stays unstamped.
+- Every delivery goes through `events.DeliverAndWake` or
+  `events.DeliverThreadEnded`, and their wake rules are no longer exported. Their
+  `Delivery` result owns the wake-then-row order for the emitters that append it
+  whole. For the send, which lays it out with `processingOrder`, it names the
+  row's target. A wake that consumes an input rather than a delivery (a create's
+  initial events, a dream stage, a spawn's task, the grading wake) writes its pair
+  and then its input at its own site, with one transition and one append each.
+- `events.AppendTransition` keys on a wake that happened, not on the status the
+  last transition asked for. When one of its transitions wakes a thread, its
+  events follow every pair; otherwise they precede them. The reclaim's forced
+  pair is not a wake and carries no input, so it is unchanged.
+- Archiving a session with a live outcome ended the outcome only when the
+  primary was parked on a call the archive settles (a confirmation or a custom
+  tool), and even then wrote its interrupted `span.outcome_evaluation_end`
+  without flipping the `outcome_evaluations` projection, so GET still reported
+  the outcome live. The archive now ends every live outcome as an interrupt
+  does, the end and the flip together, whatever the primary is parked on: a call,
+  a `wait_for_agents` on children the archive terminates, or nothing at all
+  (`retries_exhausted`). The bug predates #793.
+- A denial posted beside an interrupt of its call's thread was swallowed: the
+  interrupt counted only posted results as answers, so it wrote its own result
+  for the denied call, and nothing ever wrote the denial's result, carried its
+  `deny_message` or stamped the confirmation. Receipt order now decides. A
+  denial received ahead of the interrupt is consumed first, so the call is
+  answered by the denial's result beside the confirmation, and the interrupt
+  answers only the thread's other open calls. A confirmation received after the
+  interrupt, like any allow beside one, is for a call the interrupt answers: it
+  is consumed on receipt with nothing left to do, stamped where it was received,
+  and the call keeps its one result. The bug predates #793 (origin/main at
+  `2eb299a9` answers the denied call with the interrupt's text in either order
+  and never stamps the confirmation).
 
-Two placements inside PR-A are ours rather than recorded: the redirect batch (no
-recording carries an interrupt with a following message), and a client's own
-answers posted beside an interrupt, which stay ahead of the synthesized results
-because they are consumed on receipt.
+Placements inside PR-A that are ours rather than recorded: the redirect batch (no
+recording carries an interrupt with a following message); a client's own answers
+posted beside an interrupt, which interleave with it in receipt order, being
+consumed on receipt: an answer precedes the results only of an interrupt
+received after it, and an `[interrupt, answer]` send writes the interrupt's
+results, the interrupt and its idle before the answer; a notice and a message
+that one woken turn both consumes, kept in receipt order; and input nothing in
+the commit consumes, placed at the tail. One placement stays out of reach, and is
+registered in docs/DIVERGENCES.md (the primary thread's entry). A thread that an
+answer resumes moves after the append, once the answer is on the log, so an input
+posted beside that answer precedes the resume's running pair instead of following
+it.
 
 **PR-B** (the owner's decisions on item 4, 2026-09-25) places an input consumed
 later than it was received where it was consumed, in everything a model reads,
@@ -191,7 +271,25 @@ special case is kept for it.
   from the dream runner, and, for item 3, a report wake, a `send_to_agent` wake of
   an idle child, each ending-notice wake (archive, interrupt, retries exhausted,
   chain cap, delegation budget, ended without reporting, grading at quiescence)
-  and the two helpers themselves.
+  and the two helpers themselves. After review: a notice beside the message that
+  wakes its coordinator, two notices whose second ending wakes the coordinator, a
+  message that wakes nothing beside an interrupt, an answer beside a wake and
+  beside a redirect, the stamps of an interrupt's commit, the grading start after
+  the wake it runs on, `AppendTransition` keyed on the wake, and the archive of a
+  session parked mid-outcome. After the second review: an answer queued behind an
+  earlier call beside a wake, answers behind an allowed and a denied call (the
+  full order, the denial's result included, in both posted orders), an answer
+  beside an interrupt of its own thread, the approval wait a denial records (and,
+  beside an interrupt, only a confirmation received ahead of it records one), two
+  interrupts reaching one thread in both posted orders, the archive of a
+  coordinator waiting on a gated child and of a session idle on
+  `retries_exhausted`, and the clamp of many answers in one statement. After the
+  third: a denial beside an interrupt of its thread, both posted orders, for a
+  child-scoped and a session-wide interrupt. Item 2's
+  residual, a coordinator woken by a message under a running child, is pinned
+  rather than changed, as is the placement out of reach, a message beside an
+  answer that resumes the primary; so is the archive of a primary parked on a
+  confirmation, which was already right.
 - For PR-B, also red on the old code: the consumption window's cases (an
   `end_turn` and a tool turn, a delegated settle, a dangling start, received and
   outcome inputs, per-thread windows, the watermark), inputs landing just

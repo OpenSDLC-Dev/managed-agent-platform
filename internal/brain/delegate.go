@@ -599,9 +599,9 @@ func (d *delegate) listAgents(ctx context.Context, tx pgx.Tx) (string, bool, err
 // thread). Either chains the turn, so the test here is the one every
 // settlement chains on — a wait that has something to read parks on nothing.
 //
-// events.BusyChild is what "still working" means, and the same call decides
-// whether a child's ending must wake a coordinator already parked
-// (events.WakeOnThreadEnded): a park taken on one notion and released on
+// events.BusyChild is what "still working" means, and the same predicate
+// decides whether a child's ending must wake a coordinator already parked
+// (events.DeliverThreadEnded): a park taken on one notion and released on
 // another is a coordinator waiting for nothing.
 func (d *delegate) waitForAgents(ctx context.Context, tx pgx.Tx) (string, bool, error) {
 	if d.waited == nil {
@@ -690,12 +690,12 @@ func (d *delegate) report(ctx context.Context, tx pgx.Tx, text string) error {
 // deliver appends a received row with the wake it causes, in the order
 // events.DeliverAndWake owns, and records the turn its caller must enqueue.
 func (d *delegate) deliver(ctx context.Context, tx pgx.Tx, received events.NewEvent) error {
-	evs, _, woke, err := events.DeliverAndWake(ctx, tx, d.sid, received)
+	delivered, err := events.DeliverAndWake(ctx, tx, d.sid, received)
 	if err != nil {
 		return err
 	}
-	d.out.events = append(d.out.events, evs...)
-	if woke {
+	d.out.events = append(d.out.events, delivered.Events()...)
+	if delivered.Woke() {
 		d.out.wakes = append(d.out.wakes, received.ThreadID)
 	}
 	return nil
@@ -781,7 +781,7 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		// its own requeued item keeps its created_at and stays the oldest
 		// queued turn, so no spawned child runs in between to break the run,
 		// and without this the 24th spawn of a 25-thread roster would trip it.
-		// d.out.wakes holds only the wakes that actually took (delegate.wake),
+		// d.out.wakes holds only the wakes that actually took (delegate.deliver),
 		// so a send_to_agent at a child already running counts, as it should.
 		woke := len(d.out.wakes) > 0
 		capped := chain && !woke && item.Chain+1 >= maxSettlementChain
@@ -825,7 +825,7 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			// The two idles this branch was written for do not: a park is the
 			// coordinator's own, and a submit_result already reported. Without
 			// it a coordinator parked on a wait has nothing left to wake it —
-			// WakeOnThreadEnded fires on a child that stopped, and a child
+			// DeliverThreadEnded wakes on a child that stopped, and a child
 			// merely going idle is not something anyone else watches. That is
 			// the W1 wedge. The wake, then the notice (processing order, #793),
 			// then the idle below, so the session never folds idle in between.
@@ -840,12 +840,12 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 				return nil, opts, nerr
 			}
 			if notice != nil {
-				delivered, _, parentWoke, werr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
+				told, werr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
 				if werr != nil {
 					return nil, opts, werr
 				}
-				batch = append(batch, delivered...)
-				if parentWoke {
+				batch = append(batch, told.Events()...)
+				if told.Woke() {
 					// Through the same loop every other wake this settlement
 					// takes goes through, so a woken thread never ends up
 					// running with no item.
@@ -1065,7 +1065,7 @@ func runExhausted(threadID domain.ID, agentName string) (events.NewEvent, error)
 // which is what both exec drivers drain through — and the one site that is
 // not, the API's new-work-cycle arm, rides a user.message or
 // user.define_outcome, which resets this counter in the same transaction. It
-// also needs no gate on delegate.wake, so send_to_agent still
+// also needs no gate on delegate.deliver, so send_to_agent still
 // answers its byte-pinned "Message sent." truthfully — the peer really is woken,
 // and it is its own next claim that is refused.
 //
@@ -1152,12 +1152,12 @@ func (b *Brain) cutExhaustedRun(ctx context.Context, sid domain.ID, item *queue.
 	}
 	wokeParent := false
 	if notice != nil {
-		delivered, _, parentWoke, werr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
+		told, werr := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
 		if werr != nil {
 			return false, werr
 		}
-		batch = append(batch, delivered...)
-		wokeParent = parentWoke
+		batch = append(batch, told.Events()...)
+		wokeParent = told.Woke()
 	}
 	pair, _, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
 		ThreadID: item.ThreadID, Status: domain.SessionIdle,

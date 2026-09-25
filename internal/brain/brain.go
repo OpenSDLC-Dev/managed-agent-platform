@@ -990,16 +990,16 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 			if notice != nil {
 				// Without the wake a coordinator parked on this child waits for a
 				// report that will never come; with a sibling still working there
-				// is one coming, and that one's arrival wakes it (the rule is
-				// events.WakeOnThreadEnded's, shared by every ending). It hangs off
-				// the notice because both answer one question — whether a
-				// coordinator is owed anything by this ending.
-				delivered, wokeMoved, woke, err := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
+				// is one coming, and that one's arrival wakes it (the rule
+				// events.DeliverThreadEnded applies, shared by every ending). It
+				// hangs off the notice because both answer one question — whether
+				// a coordinator is owed anything by this ending.
+				told, err := events.DeliverThreadEnded(ctx, tx, sid, item.ThreadID, *notice)
 				if err != nil {
 					return err
 				}
-				batch = append(batch, delivered...)
-				wakeParent, wokeTo = woke, wokeMoved
+				batch = append(batch, told.Events()...)
+				wakeParent, wokeTo = told.Woke(), told.Moved
 			}
 		}
 		pair, moved, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{
