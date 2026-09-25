@@ -445,12 +445,13 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			outcomeFlip = outcomeFlip || out.outcomeFlip
 		case (a.confirmation || a.toolResult) && (status == string(domain.SessionIdle) || status == string(domain.SessionRunning)):
 			advanced[tid] = true
+			// Read before the append: a denial this send writes answers its
+			// call on the log, which then no longer counts as awaiting approval.
+			pendingApproval, err := events.PendingThreadApprovals(ctx, tx, domain.ID(id), tid)
+			if err != nil {
+				return nil, err
+			}
 			thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
-
-				pendingApproval, err := events.PendingThreadApprovals(ctx, tx, domain.ID(id), tid)
-				if err != nil {
-					return err
-				}
 				flow, err := s.log.AdvanceThreadTools(ctx, tx, domain.ID(id), tid, platformExecuted)
 				if err != nil {
 					return err
@@ -513,17 +514,24 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			newEvents[i].ProcessedAt = &now
 		}
 	}
-	// An answer the settlement will not reach is pending, and goes where
-	// pending input goes. The settlement runs in Then, after the append, so
-	// which answers it leaves pending is read now, off the walk it will make:
-	// the answers and the results the interrupts above synthesized, read as
-	// though on the log.
+	// The settlement runs in Then, after the append, so what it will do with
+	// the answers is read now, off the walk it will make, with the answers and
+	// the results the interrupts above synthesized read as though on the log:
+	// which it leaves pending, which go where pending input goes; the order it
+	// processes each thread's others in; and the denials it reaches, whose
+	// results this send writes beside them, stamping their confirmations as
+	// the settlement would have.
 	var synthesized []events.NewEvent
 	for _, evs := range layout.settled {
 		synthesized = append(synthesized, evs...)
 	}
-	if layout.pending, err = events.PendingAnswers(ctx, tx, domain.ID(id), newEvents, synthesized, advanced); err != nil {
+	if layout.answers, err = events.PlanAnswers(ctx, tx, domain.ID(id), newEvents, synthesized, advanced); err != nil {
 		return nil, err
+	}
+	if denied := layout.answers.Denied; len(denied) > 0 {
+		thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
+			return events.StampDenied(ctx, tx, domain.ID(id), denied)
+		})
 	}
 	batch := layout.processingOrder()
 	if interruptAll {
@@ -863,9 +871,9 @@ type sendLayout struct {
 	// delivered are the rows delivered to a thread (an ending notice), each
 	// with the index of the posted event whose processing delivered it.
 	delivered []deliveredRow
-	// pending are the posted answers this commit's settlement leaves
-	// unprocessed (events.PendingAnswers).
-	pending map[domain.ID]bool
+	// answers is what this commit's settlement will do with the posted
+	// answers (events.PlanAnswers).
+	answers events.AnswerPlan
 }
 
 type threadWake struct {
@@ -912,7 +920,11 @@ func (l *sendLayout) woke(thread domain.ID, pair []events.NewEvent) {
 //     what settling it wrote — the results it synthesized and the outcome
 //     ends — and followed by the idle pairs of the threads it ended. So an
 //     answer precedes the results of an interrupt received after it, and
-//     follows an earlier interrupt's results, the interrupt and its idle.
+//     follows an earlier interrupt's results, the interrupt and its idle. A
+//     thread's answers take the places its answers were received in, in the
+//     order its settlement processes them — its calls' order — and a denial
+//     the settlement reaches is followed by the result it writes, ahead of
+//     the answers the walk goes on to.
 //  2. For each thread this commit woke, in the order woken: its running pair
 //     (behind session.status_running when the fold moved), then the input its
 //     woken turn consumes, in receipt order — the posted user.message,
@@ -948,15 +960,36 @@ func (l *sendLayout) processingOrder() []events.NewEvent {
 		// queued: no turn this commit starts consumes it, whatever its thread.
 		queued bool
 	}
+	// Each thread's processed answers, in the order processed, into the places
+	// its answers were received in.
+	at := map[domain.ID]int{}
+	for i, ev := range l.posted {
+		at[ev.ID] = i
+	}
+	step := map[int]events.AnswerStep{}
+	for _, steps := range l.answers.Steps {
+		slots := make([]int, len(steps))
+		for j, st := range steps {
+			slots[j] = at[st.Answer]
+		}
+		slices.Sort(slots)
+		for j, st := range steps {
+			step[slots[j]] = st
+		}
+	}
 	var out []events.NewEvent
 	var inputs []input
 	for i, ev := range l.posted {
 		switch {
-		case l.pending[ev.ID]:
+		case l.answers.Pending[ev.ID]:
 			inputs = append(inputs, input{cause: i, ev: ev, queued: true})
 		case ev.Type == domain.EventUserToolConfirm || ev.Type == domain.EventUserToolResult ||
 			ev.Type == domain.EventUserCustomToolRes:
-			out = append(out, ev)
+			if st, ok := step[i]; ok {
+				out = append(append(out, l.posted[at[st.Answer]]), st.Denials...)
+			} else {
+				out = append(out, ev)
+			}
 		case ev.Type == domain.EventUserInterrupt:
 			out = append(append(append(out, l.settled[i]...), ev), l.idled[i]...)
 		default:

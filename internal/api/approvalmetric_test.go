@@ -45,6 +45,21 @@ func TestApprovalWaitRecordedOnResume(t *testing.T) {
 	}
 }
 
+// A denial clears the gate too, and records the wait the same way — though
+// the send now writes the denial's result itself, answering the call on the
+// log before the settlement looks at the gate.
+func TestApprovalWaitRecordedOnDenial(t *testing.T) {
+	collect := collectMetrics(t)
+	s := newTestServer(t)
+	sessionID, askID := suspendViaBrain(t, s)
+
+	sendEvents(t, s, sessionID, confirm(askID, "deny", nil))
+
+	if pts := apiFloatPoints(t, collect(), events.MetricApprovalWait); len(pts) != 1 || pts[0].Count != 1 {
+		t.Fatalf("%s points = %v, want one reading", events.MetricApprovalWait, pts)
+	}
+}
+
 // A user.message resuming an idle session is not an approval, so it records no
 // approval wait — only a confirmation clearing a requires_action gate does.
 func TestUserMessageResumeRecordsNoApprovalWait(t *testing.T) {

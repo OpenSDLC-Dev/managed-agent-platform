@@ -7,6 +7,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 // Within one commit the log is written in processing order, as the reference
@@ -390,15 +391,20 @@ func TestAnAnswerQueuedBehindAnEarlierCallGoesToTheTail(t *testing.T) {
 // Whether an answer is consumed is the ordered flow's to say, confirmation
 // included: a result behind an allowed call waits for that call to run, so it
 // is pending and goes to the tail; behind a denied call, which the denial
-// answers, it is consumed and stays where it was received.
+// answers, it is consumed and stays with the answers, after the denial's
+// result, which the walk writes before it goes on to the next call.
 func TestAnAnswerBehindAConfirmedCallIsPlacedByWhatTheConfirmationSays(t *testing.T) {
 	for _, tc := range []struct {
 		result    string
 		want      []string
 		processed bool
 	}{
-		{"allow", []string{"user.tool_confirmation", "session.status_running", "user.message", "user.custom_tool_result"}, false},
-		{"deny", []string{"user.tool_confirmation", "user.custom_tool_result", "session.status_running", "user.message"}, true},
+		{"allow", []string{"agent.tool_use", "agent.custom_tool_use", "user.tool_confirmation",
+			"session.status_running", "session.thread_status_running", "user.message", "user.custom_tool_result",
+			"session.thread_status_running"}, false},
+		{"deny", []string{"agent.tool_use", "agent.custom_tool_use", "user.tool_confirmation", "agent.tool_result",
+			"user.custom_tool_result", "session.status_running", "session.thread_status_running", "user.message",
+			"session.thread_status_running"}, true},
 	} {
 		t.Run(tc.result, func(t *testing.T) {
 			s := newTestServer(t)
@@ -412,17 +418,131 @@ func TestAnAnswerBehindAConfirmedCallIsPlacedByWhatTheConfirmationSays(t *testin
 
 			echo := sendEvents(t, s, sid, confirm(ask, tc.result, nil), customResult(custom), userMessage("meanwhile"))
 
-			if got := typesAmong(s.eventTypes(sid), "user.tool_confirmation", "user.custom_tool_result",
-				"session.status_running", "user.message"); !sameStrings(got, tc.want) {
-				t.Fatalf("event log holds %v, want %v", got, tc.want)
+			if got := wholeLogTypes(t, s, sid); !sameStrings(got, tc.want) {
+				t.Fatalf("event log = %v, want %v", got, tc.want)
 			}
 			if got := echo[1]["processed_at"] != nil; got != tc.processed {
 				t.Errorf("result processed = %v (%v), want %v: its place and its stamp must agree",
 					got, echo[1]["processed_at"], tc.processed)
 			}
+			if echo[0]["processed_at"] == nil {
+				t.Errorf("confirmation echoed unprocessed; the settlement consumes it in this commit")
+			}
 			stampsRunForward(t, s, sid, seq)
 		})
 	}
+}
+
+// A denial answers its call before the walk goes on to the next one, so its
+// result comes before the answers it unlocks — and a thread's answers take
+// the places they were received in, in the order its calls are processed, so
+// the same holds whichever the client posted first.
+func TestADenialIsListedAheadOfTheAnswersItUnlocks(t *testing.T) {
+	for _, first := range []string{"deny", "result"} {
+		t.Run(first+" first", func(t *testing.T) {
+			s := newTestServer(t)
+			sid := eventsFixture(t, s)
+			setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "idle", `{"type":"end_turn"}`)
+			child := insertChild(t, s, sid, "idle")
+			ask := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentToolUse, askBashCall)
+			custom := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentCustomToolUse, customCall)
+			setThread(t, s, child, "idle", `{"type":"requires_action","event_ids":["`+ask+`","`+custom+`"]}`)
+			seq := lastSeq(t, s, sid)
+
+			answers := []map[string]any{confirm(ask, "deny", nil), customResult(custom)}
+			if first == "result" {
+				answers[0], answers[1] = answers[1], answers[0]
+			}
+			sendEvents(t, s, sid, answers...)
+
+			want := []string{"agent.tool_use", "agent.custom_tool_use", "user.tool_confirmation", "agent.tool_result",
+				"user.custom_tool_result", "session.status_running", "session.thread_status_running"}
+			if got := wholeLogTypes(t, s, sid); !sameStrings(got, want) {
+				t.Fatalf("event log = %v, want %v", got, want)
+			}
+			if n := countWhole(t, s, sid, "agent.tool_result"); n != 1 {
+				t.Errorf("%d denial results, want exactly one", n)
+			}
+			stampsRunForward(t, s, sid, seq)
+			pendingOnlyAtTail(t, s, sid, seq)
+		})
+	}
+}
+
+// An interrupt answers the calls it abandons with results stamped as they are
+// written, so the settlement never walks those calls again: an answer to a
+// later call of the same thread, posted beside the interrupt, is consumed in
+// this commit and stays in its slot, not at the tail.
+func TestAnAnswerBesideAnInterruptOfItsThreadIsConsumedInItsSlot(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	setThread(t, s, domain.PrimaryThreadID(domain.ID(sid)).String(), "running", "")
+	child := insertChild(t, s, sid, "running")
+	appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentCustomToolUse, customCall)
+	second := appendOn(t, s, sid, domain.ID(child), true, domain.EventAgentCustomToolUse, customCall)
+	runningSession(t, s, sid)
+	seq := lastSeq(t, s, sid)
+
+	echo := sendEvents(t, s, sid, customResult(second), map[string]any{"type": "user.interrupt", "session_thread_id": child})
+
+	want := []string{"agent.custom_tool_use", "agent.custom_tool_use", "user.custom_tool_result",
+		"user.custom_tool_result", "user.interrupt", "session.thread_status_idle", "agent.thread_message_received"}
+	if got := wholeLogTypes(t, s, sid); !sameStrings(got, want) {
+		t.Fatalf("event log = %v, want %v", got, want)
+	}
+	evs, err := events.NewLog(s.pool).List(context.Background(), domain.ID(sid), events.ListQuery{Scope: events.ScopeAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := evs[2].ID.String(); got != echo[0]["id"] {
+		t.Errorf("row 2 is %s, want the posted result %v ahead of the one the interrupt synthesized", got, echo[0]["id"])
+	}
+	if echo[0]["processed_at"] == nil {
+		t.Errorf("posted result echoed unprocessed; the interrupt's settlement consumes it")
+	}
+	stampsRunForward(t, s, sid, seq)
+	pendingOnlyAtTail(t, s, sid, seq)
+}
+
+// pendingOnlyAtTail fails if a row written past seq is still pending while a
+// processed row is listed after it: pending input goes to the tail.
+func pendingOnlyAtTail(t *testing.T, s *tserver, sid string, seq int64) {
+	t.Helper()
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT type, processed_at IS NULL FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq`, sid, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var pending string
+	for rows.Next() {
+		var typ string
+		var isPending bool
+		if err := rows.Scan(&typ, &isPending); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case isPending && pending == "":
+			pending = typ
+		case !isPending && pending != "":
+			t.Errorf("processed %s listed after the pending %s", typ, pending)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countWhole counts a type across the whole log, a child's own rows included.
+func countWhole(t *testing.T, s *tserver, sid, typ string) int {
+	t.Helper()
+	n := 0
+	for _, got := range wholeLogTypes(t, s, sid) {
+		if got == typ {
+			n++
+		}
+	}
+	return n
 }
 
 // The one placement out of reach, pinned rather than changed
