@@ -114,7 +114,7 @@ as #675 part 3 accepted, and the POST echo keeps the order the client posted in.
 ## The split
 
 **PR-A** (this plan's first PR) lands items 1 and 3 and #539, registers item 2,
-and fixes one older bug on a line it touches:
+and fixes two older bugs on lines it touches (the last two items):
 
 - `processingOrder` (internal/api/events.go) lays a send out by what each event
   is, not where it was posted. First comes what is consumed on receipt, in
@@ -176,6 +176,18 @@ and fixes one older bug on a line it touches:
   does, the end and the flip together, whatever the primary is parked on: a call,
   a `wait_for_agents` on children the archive terminates, or nothing at all
   (`retries_exhausted`). The bug predates #793.
+- A denial posted beside an interrupt of its call's thread was swallowed: the
+  interrupt counted only posted results as answers, so it wrote its own result
+  for the denied call, and nothing ever wrote the denial's result, carried its
+  `deny_message` or stamped the confirmation. Receipt order now decides. A
+  denial received ahead of the interrupt is consumed first, so the call is
+  answered by the denial's result beside the confirmation, and the interrupt
+  answers only the thread's other open calls. A confirmation received after the
+  interrupt, like any allow beside one, is for a call the interrupt answers: it
+  is consumed on receipt with nothing left to do, stamped where it was received,
+  and the call keeps its one result. The bug predates #793 (origin/main at
+  `2eb299a9` answers the denied call with the interrupt's text in either order
+  and never stamps the confirmation).
 
 Placements inside PR-A that are ours rather than recorded: the redirect batch (no
 recording carries an interrupt with a following message); a client's own answers
@@ -236,7 +248,9 @@ registry entry on list order and `processed_at` (docs/DIVERGENCES.md, "GET
   beside an interrupt of its own thread, the approval wait a denial records, two
   interrupts reaching one thread in both posted orders, the archive of a
   coordinator waiting on a gated child and of a session idle on
-  `retries_exhausted`, and the clamp of many answers in one statement. Item 2's
+  `retries_exhausted`, and the clamp of many answers in one statement. After the
+  third: a denial beside an interrupt of its thread, both posted orders, for a
+  child-scoped and a session-wide interrupt. Item 2's
   residual, a coordinator woken by a message under a running child, is pinned
   rather than changed, as is the placement out of reach, a message beside an
   answer that resumes the primary; so is the archive of a primary parked on a
