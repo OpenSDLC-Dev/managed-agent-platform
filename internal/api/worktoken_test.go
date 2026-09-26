@@ -289,9 +289,10 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 	}
 
 	// Its own item's stop. A graceful stop parks the active item in stopping
-	// with a lease the heartbeat no longer extends; the token rides the
-	// wind-down while the item is stopping, the lease aside, and the post-stop
-	// memory flush until a minute from the request, and is dead after.
+	// with a lease the heartbeat no longer extends; the token keeps its reach
+	// for a minute from the request, the lease aside — the wind-down and the
+	// post-stop memory flush — after which a stopping item's token reaches
+	// only its heartbeat and stop and a stopped item's is dead.
 	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, tok); st != http.StatusOK {
 		t.Errorf("graceful stop with the token = %d, want 200", st)
 	}
