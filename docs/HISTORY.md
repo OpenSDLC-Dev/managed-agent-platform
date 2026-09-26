@@ -49,6 +49,43 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Work Stop answers 200 (plan 57, #804) — archived 2026-09-26, delivered in one PR
+
+The recordings reversed plan 04. All 27 recorded stops answer 200 with the work object and
+none is refused, so the route answers what the spec declares, and a stop that moves nothing
+answers the item unchanged. Plan 57 holds the census and the owner's decisions, and the
+fragment says what changed.
+
+The new tests fail against the old handler, every one of them at its 204; the typed SDK
+`Stop` fails with the decoder error the poller works around. Each rule was then broken on its
+own, and the test that pins it failed each time. The mutations were: a repeat stop answered
+409 again; a stop that moved nothing re-arming (one live exec item left, where the tests want
+none); a forced repeat that re-stamps `stopped_at`; a graceful stop that moves `stopping`
+work; a forced stop of `stopping` work that re-stamps `stop_requested_at`, or one that leaves
+`stopped_at` null; a stop answering a rendering other than GET's; and the worker without its
+decoder bypass, closing the 200's body unread, or no longer ignoring 409. A stop of `stopped`
+work is answered before the session lock is taken, so the re-arm mutation is caught by a stop
+that loses a race to another, not by a plain repeat. The worker's 200 test catches the unread
+body, and its 204 test the missing bypass. Its 409 test stops the item before the worker's
+own stop, so that the worker's stop is the repeat an older server refused.
+
+The real `ant beta:environments:work stop` was built from anthropic-cli v1.30.0 and run
+against the branch. It exited 0 and printed the object for five stops in turn: a graceful
+stop of active work (`stopping`), a graceful repeat (unchanged), a forced stop (`stopped`,
+with the first `stop_requested_at` kept), and a forced and a graceful repeat (unchanged).
+Against main it printed nothing for the 204 and exited 1 on each repeat's 409.
+
+The full `make verify` gate passed on the branch: build, cross-build, vet, format check and
+61 test packages, with about 90.2% total statement coverage (90.19–90.20% across runs). `tools/registrycheck` was clean on
+shape and issue state. The `tools/sdkref` report counted 649 citations, with no findings and
+no transitions awaiting a disposition. Afterwards, the container set matched the one taken
+before the run.
+
+One follow-up is filed, split out by the owner: #810, for the stop semantics the recordings
+contradict. Review results and CI are recorded in the pull request.
+
+---
+
 ## Processing order (plan 56, #793, #539) — archived 2026-09-26, delivered in three PRs (#802, #806 and this close-out)
 
 The reference lists every event in processing order — each recorded list sorts by

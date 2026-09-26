@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -638,19 +639,21 @@ func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 	wantErr(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error")
 }
 
-// TestWorkStopGracefulThenForce pins POST .../work/{work_id}/stop: success is a
-// bodiless 204 with no JSON Content-Type — the reference service sends no body
-// even though the generated SDK method is typed *BetaSelfHostedWork, which is
-// exactly why its work poller bypasses the strict decoder (checked against
-// anthropic-sdk-go v1.70.1 — poller.go stopWork). The resulting state is read
-// back with GET: a graceful stop moves an item a worker holds to stopping,
-// re-stopping a stopping item is 409, and force escalates it to stopped.
-func TestWorkStopGracefulThenForce(t *testing.T) {
+// TestWorkStopAnswersTheWorkObject pins POST .../work/{work_id}/stop: success
+// is 200 with the BetaSelfHostedWork after the transition, rendered exactly as
+// GET .../work/{work_id} renders it — the recorded service's answer to all 27
+// of its recorded stops (2026-09-02 batch2 and the four 2026-09-19 self-hosted
+// sets, #804). A stop of work already at or past the requested transition is
+// not refused: every recorded repeat stop is a 200 carrying the current object
+// with its stop_requested_at and stopped_at untouched, and this platform
+// answers a graceful stop of stopping work — the one repeat the recordings do
+// not reach — the same way. force escalates stopping to stopped and keeps the
+// first stop_requested_at, as recorded (custom-mixed-tools #23 then #47).
+func TestWorkStopAnswersTheWorkObject(t *testing.T) {
 	s := newTestServer(t)
 	envID, sessionID, key := selfHostedWorker(t, s, "ek-stop")
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 	get := "/v1/environments/" + envID + "/work/" + workID
-	stop := get + "/stop"
 
 	// Ack and claim the lease first. A graceful stop asks the item's *worker* to
 	// wind down, so only a claimed item has anyone to leave the stopping state
@@ -663,41 +666,52 @@ func TestWorkStopGracefulThenForce(t *testing.T) {
 		t.Fatalf("claim heartbeat = %d %v (body %q), want 200 with state active", res.StatusCode, body, raw)
 	}
 
-	wantNoContent(t, s, stop, key, nil)
-	_, body, _ = s.workReq(t, http.MethodGet, get, key, nil)
-	if body["type"] != "work" || body["state"] != "stopping" || body["stop_requested_at"] == nil {
-		t.Errorf("after graceful stop GET returned %v, want a work object in state stopping", body)
+	body = wantStopped(t, s, get, key, nil)
+	if body["state"] != "stopping" || body["stop_requested_at"] == nil || body["stopped_at"] != nil {
+		t.Errorf("graceful stop = %v, want stopping with stop_requested_at and no stopped_at", body)
+	}
+	requested := body["stop_requested_at"]
+
+	// A graceful stop of stopping work is the current object again, unchanged.
+	if again := wantStopped(t, s, get, key, nil); !reflect.DeepEqual(again, body) {
+		t.Errorf("graceful stop of stopping work = %v, want the unchanged %v", again, body)
 	}
 
-	// Re-graceful-stopping a stopping item is a conflict — errors keep the JSON envelope.
-	res, body, _ = s.workReq(t, http.MethodPost, stop, key, nil)
-	wantErr(t, res.StatusCode, body, http.StatusConflict, "invalid_request_error")
+	// force escalates stopping → stopped, keeping the first stop request.
+	body = wantStopped(t, s, get, key, map[string]any{"force": true})
+	if body["state"] != "stopped" || body["stopped_at"] == nil || body["stop_requested_at"] != requested {
+		t.Errorf("force stop of stopping work = %v, want stopped with stopped_at and stop_requested_at %v", body, requested)
+	}
 
-	// force escalates stopping → stopped, again with no response body.
-	wantNoContent(t, s, stop, key, map[string]any{"force": true})
-	_, body, _ = s.workReq(t, http.MethodGet, get, key, nil)
-	if body["state"] != "stopped" || body["stopped_at"] == nil {
-		t.Errorf("after force stop GET returned %v, want stopped with stopped_at", body)
+	// Stopping stopped work, forced or not, is the current object, unchanged.
+	for _, req := range []map[string]any{{"force": true}, nil, {"force": false}} {
+		if again := wantStopped(t, s, get, key, req); !reflect.DeepEqual(again, body) {
+			t.Errorf("stop %v of stopped work = %v, want the unchanged %v", req, again, body)
+		}
 	}
 }
 
-// wantNoContent posts a stop and asserts the wire's success shape: 204, zero
-// body bytes, and no Content-Type header at all (not merely a non-JSON one) —
-// the strict Go decoder in the reference SDK keys off exactly that absence.
-func wantNoContent(t *testing.T, s *tserver, path, key string, reqBody map[string]any) {
+// wantStopped posts a stop to the work item at get and asserts the wire's
+// success shape: 200, a JSON Content-Type, the full BetaSelfHostedWork field
+// set, and a body identical to what GET answers for the item straight after —
+// the one renderer both routes share. It returns the decoded body.
+func wantStopped(t *testing.T, s *tserver, get, key string, reqBody map[string]any) map[string]any {
 	t.Helper()
-	res, _, raw := s.workReq(t, http.MethodPost, path, key, reqBody)
-	if res.StatusCode != http.StatusNoContent {
-		t.Fatalf("stop status = %d, want 204 (body %q)", res.StatusCode, raw)
+	res, body, raw := s.workReq(t, http.MethodPost, get+"/stop", key, reqBody)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("stop status = %d, want 200 (body %q)", res.StatusCode, raw)
 	}
-	if len(raw) != 0 {
-		t.Errorf("stop returned %d body bytes (%q), want an empty body", len(raw), raw)
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("stop Content-Type = %q, want application/json", ct)
 	}
-	// Check the header map directly: Header.Get returns "" for an absent header
-	// and for a present-but-empty one alike, so it cannot prove absence.
-	if ct, ok := res.Header["Content-Type"]; ok {
-		t.Errorf("stop set Content-Type %q, want the header absent entirely", ct)
+	wantFields(t, body,
+		"id", "acknowledged_at", "created_at", "data", "environment_id",
+		"latest_heartbeat_at", "metadata", "secret", "started_at", "state",
+		"stop_requested_at", "stopped_at", "type")
+	if _, got, _ := s.workReq(t, http.MethodGet, get, key, nil); !reflect.DeepEqual(body, got) {
+		t.Errorf("stop answered %v, GET answers %v; want the same rendering", body, got)
 	}
+	return body
 }
 
 // TestWorkLifecycleRoutesScopeAndMethod pins that the new lifecycle routes share

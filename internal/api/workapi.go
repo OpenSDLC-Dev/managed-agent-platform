@@ -380,14 +380,12 @@ func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error)
 }
 
 // mapWorkErr maps a queue state-machine error onto its wire status: a missing
-// item is 404, a conflicting-state stop is 409, a heartbeat precondition failure
-// is 412. Anything else is an internal fault.
+// item is 404, a heartbeat precondition failure is 412. Anything else is an
+// internal fault.
 func mapWorkErr(err error) error {
 	switch {
 	case errors.Is(err, queue.ErrWorkNotFound):
 		return errNotFound("work item not found")
-	case errors.Is(err, queue.ErrWorkConflict):
-		return errConflict("work item is already stopping or stopped")
 	case errors.Is(err, queue.ErrHeartbeatMismatch):
 		return &apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
 			"expected_last_heartbeat does not match the current lease"}
@@ -495,62 +493,73 @@ func (s *server) heartbeatWork(r *http.Request) (any, error) {
 	}, nil
 }
 
-// stopWork stops a work item (POST .../work/{work_id}/stop). Success is a
-// bodiless 204: the reference service sends no body here even though the
-// generated SDK method is typed `*BetaSelfHostedWork`, which is why the SDK's
-// own work poller rebinds the response destination to bypass its strict decoder
-// (checked against anthropic-sdk-go v1.70.1 — poller.go stopWork). A caller
-// that needs the resulting state reads it back with GET .../work/{work_id}. An
-// already-stopped item is 409, which the reference worker ignores.
-func (s *server) stopWork(r *http.Request) error {
+// stopWork stops a work item (POST .../work/{work_id}/stop) and answers 200
+// with the BetaSelfHostedWork after the transition, rendered as GET
+// .../work/{work_id} renders it — the recorded service's answer to every one of
+// its recorded stops, and the spec's declared return (#804). A stop of an item
+// already at or past the requested transition — any stop of a stopped item, a
+// graceful stop of a stopping one — changes nothing and answers the item as it
+// stands, as every recorded repeat stop does, rather than the 409 this route
+// once gave.
+func (s *server) stopWork(r *http.Request) (any, error) {
 	envID, workID, err := s.workScope(r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := checkWorkID(workID); err != nil {
-		return err
+		return nil, err
 	}
 	force, err := parseStopForce(r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ctx := r.Context()
+	// stopped is terminal: no statement moves a stopped row to another state.
+	// So a stop of a stopped item moves nothing and owes nothing, and is
+	// answered as it stands without the lock below. It is the routine repeat,
+	// not an edge: the reference worker follows each force stop with a graceful
+	// one.
+	cur, err := s.queue.GetWork(ctx, envID, workID)
+	if err != nil {
+		return nil, mapWorkErr(err)
+	}
+	if cur.State == "stopped" {
+		return toWire(cur), nil
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	// The session row lock first (plan 35 decision 13 iii): a one-pass worker
 	// that stops its item after its found set may leave calls a sibling
 	// thread committed under the live item, and the re-arm below must be
 	// serialized with every settlement and trigger that appends calls or
-	// enqueues — not rest on ON CONFLICT's wait-and-recheck. An item outside
-	// the work API's view has no session to lock; Stop reports it.
-	var sessionID, kind string
-	err = tx.QueryRow(ctx, `SELECT session_id, kind FROM work_items WHERE id = $1 AND environment_id = $2`,
-		workID, envID).Scan(&sessionID, &kind)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return err
+	// enqueues — not rest on ON CONFLICT's wait-and-recheck.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, cur.SessionID); err != nil {
+		return nil, err
 	}
-	if err == nil {
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sessionID); err != nil {
-			return err
-		}
-	}
-	w, err := s.queue.StopWith(ctx, tx, envID, workID, force)
+	w, moved, err := s.queue.StopWith(ctx, tx, envID, workID, force)
 	if err != nil {
-		return mapWorkErr(err)
+		return nil, mapWorkErr(err)
 	}
-	// A tool_exec that reached stopped is re-armed. A graceful stop that
-	// parked the item stopping is not yet stopped; the worker's own stop after
-	// its wind-down lands here again, and a wind-down the worker never
-	// finishes is finalized — and re-armed — by the next poll.
-	if w.State == "stopped" && kind == string(queue.ToolExec) {
-		if err := s.rearm(ctx, tx, envID, domain.ID(sessionID)); err != nil {
-			return err
+	// A tool_exec (the only kind the work API serves) that the stop moved to
+	// stopped is re-armed. A stop that moved nothing owes nothing: the
+	// transition that stopped the item already re-armed its session, and a
+	// second re-arm would hand the same calls out again for every repeated
+	// stop. A graceful stop that parked the item stopping is not yet stopped;
+	// the worker's own stop after its wind-down lands here again, and a
+	// wind-down the worker never finishes is finalized — and re-armed — by the
+	// next poll.
+	if moved && w.State == "stopped" {
+		if err := s.rearm(ctx, tx, envID, cur.SessionID); err != nil {
+			return nil, err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return toWire(w), nil
 }
 
 // rearm queues a fresh exec item for the session's runnable platform calls

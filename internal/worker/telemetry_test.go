@@ -110,7 +110,7 @@ func TestWorkerToolSpanIgnoresACancelledRun(t *testing.T) {
 	<-sb.entered // the tool is held open, mid-run
 	// The control plane asks the item to stop; the next heartbeat sees the
 	// stopping state and cancels the run, so the held tool unwinds via ctx.
-	if _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), false); err != nil {
+	if _, _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), false); err != nil {
 		t.Fatalf("graceful stop: %v", err)
 	}
 

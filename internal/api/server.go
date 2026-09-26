@@ -301,7 +301,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}", s.handle(identity.RoleNone, s.updateWork)) // metadata patch
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(identity.RoleNone, s.ackWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/heartbeat", s.handle(identity.RoleNone, s.heartbeatWork))
-	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handleNoContent(identity.RoleNone, s.stopWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handle(identity.RoleNone, s.stopWork))
 	// Method-less 405 fallbacks. No explicit ".../work/poll" or ".../work/stats"
 	// entry: it would be ambiguous against "GET .../work/{work_id}" (more specific
 	// in path, less in method — neither dominates, so the mux panics). The
@@ -688,8 +688,8 @@ func roleGate(min identity.Role, h http.HandlerFunc) http.HandlerFunc {
 
 // handle adapts a typed handler to http.HandlerFunc: JSON out, error envelope
 // on failure. The reference returns 200 for every successful call it answers
-// with a body, including creates; the bodiless exception is Stop, which uses
-// handleNoContent.
+// with a body, including creates — work Stop among them (#804). The bodiless
+// exception is the console dialect's key revoke, which uses handleNoContent.
 //
 // min is the route's authorization requirement, and it sits here — beside the
 // path, at the single place every route is declared — for the reason

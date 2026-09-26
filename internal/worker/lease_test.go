@@ -1,12 +1,15 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -170,17 +173,120 @@ func TestWorkerPollsRunsAndStops(t *testing.T) {
 	waitExit(t, cancel, errc)
 }
 
-// TestWorkerForceStopAcceptsNoContent pins the worker half of the wire's
-// bodiless-204 Stop. The control plane's success carries no body, but the
-// generated SDK method is typed *BetaSelfHostedWork, so without the response-body
-// bypass the strict Go decoder fails a call that in fact succeeded — the item
-// still reaches stopped, and the only visible damage is the worker crying wolf
-// on every clean finish. Asserting the state alone therefore cannot catch a
-// missing bypass; this asserts the absence of the false warning, against the
-// real control plane rather than a hand-written 204 fixture.
+// TestWorkerForceStopAcceptsTheWorkObject pins the worker half of the wire's
+// Stop against the current control plane, which answers 200 with the work
+// object, as the recorded reference service does (#804). The worker binds the
+// response to **http.Response rather than decoding it, since the body is of no
+// use to it, so what it owes the body is a read to EOF before the close: Go's
+// transport returns a connection to the pool only once its body has been read
+// to the end, and one closed unread costs the worker's next request a new
+// connection. A probe around each 200 stop body the worker receives records
+// whether it was, and that the probe saw one proves the test's premise. A
+// mishandled 200 could also cry wolf on a clean finish, so the absence of a
+// false warning is asserted too. Work metadata has no size cap of its own, so
+// the object can run past any bound a drain might set; the large case is one
+// well past 64 KiB, and it is read to the end all the same.
+func TestWorkerForceStopAcceptsTheWorkObject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pad  int // bytes of metadata on the item
+	}{{"a small object", 0}, {"an object past 64 KiB", 100_000}} {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			h.suspend(t, writeUse("out.txt", "hello"))
+			h.enqueueWork(t)
+			if tc.pad > 0 {
+				if _, err := h.pool.Exec(context.Background(),
+					`UPDATE work_items SET metadata = jsonb_build_object('pad', repeat('x', $2))
+					  WHERE session_id = $1 AND kind = 'tool_exec'`, h.sid.String(), tc.pad); err != nil {
+					t.Fatalf("pad metadata: %v", err)
+				}
+			}
+			var mu sync.Mutex
+			var bodies []*drainProbe
+			h.client = sdk.NewClient(
+				option.WithoutEnvironmentDefaults(),
+				option.WithBaseURL(h.serverURL),
+				option.WithAuthToken(h.key),
+				option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+					res, err := next(req)
+					if err == nil && strings.HasSuffix(req.URL.Path, "/stop") && res.StatusCode == http.StatusOK &&
+						strings.HasPrefix(res.Header.Get("Content-Type"), "application/json") {
+						p := &drainProbe{ReadCloser: res.Body}
+						res.Body = p
+						mu.Lock()
+						bodies = append(bodies, p)
+						mu.Unlock()
+					}
+					return res, err
+				}),
+			)
+
+			warnings := captureWarnings(t)
+
+			w, done := h.newWorker(Config{})
+			cancel, errc := runWorker(w)
+			waitDone(t, done)
+			waitExit(t, cancel, errc)
+
+			if got := h.workState(t); got != "stopped" {
+				t.Fatalf("work item state = %q, want stopped", got)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(bodies) == 0 {
+				t.Fatal("no stop was answered 200 with a JSON body; the test proves nothing")
+			}
+			for i, p := range bodies {
+				if !p.closed.Load() || !p.drained.Load() {
+					t.Errorf("stop body %d: closed %v, read to EOF before the close %v; want both, or the connection is dropped",
+						i, p.closed.Load(), p.drained.Load())
+				}
+			}
+			if out := warnings(); strings.Contains(out, "force-stop failed") {
+				t.Errorf("a successful 200 stop logged a failure:\n%s", out)
+			}
+		})
+	}
+}
+
+// drainProbe wraps a response body and records whether it was read to EOF
+// before it was first closed.
+type drainProbe struct {
+	io.ReadCloser
+	eof, drained, closed atomic.Bool
+}
+
+func (p *drainProbe) Read(b []byte) (int, error) {
+	n, err := p.ReadCloser.Read(b)
+	if err == io.EOF {
+		p.eof.Store(true)
+	}
+	return n, err
+}
+
+func (p *drainProbe) Close() error {
+	if !p.closed.Swap(true) {
+		p.drained.Store(p.eof.Load())
+	}
+	return p.ReadCloser.Close()
+}
+
+// TestWorkerForceStopAcceptsNoContent pins the worker against an older
+// control plane, which answered a successful Stop with a bodiless 204 and no
+// Content-Type (#27, reversed by #804). The generated SDK method is typed
+// *BetaSelfHostedWork, so without the response-body bypass the strict Go
+// decoder fails a call that in fact succeeded — the item still reaches stopped,
+// and the only visible damage is the worker crying wolf on every clean finish.
+// Asserting the state alone therefore cannot catch a missing bypass; this
+// asserts the absence of the false warning. The real control plane runs the
+// stop and olderServer answers it as the old one did, so the item's state is
+// the real transition's.
 func TestWorkerForceStopAcceptsNoContent(t *testing.T) {
+	older, noContent, _ := olderServer()
 	sb := &fakeSandbox{}
-	h := newHarness(t, sb)
+	h := newHarnessWrapped(t, sb, older)
 	h.suspend(t, writeUse("out.txt", "hello"))
 	h.enqueueWork(t)
 
@@ -194,8 +300,130 @@ func TestWorkerForceStopAcceptsNoContent(t *testing.T) {
 	if got := h.workState(t); got != "stopped" {
 		t.Fatalf("work item state = %q, want stopped", got)
 	}
+	if noContent.Load() == 0 {
+		t.Fatal("no stop was answered 204; the test proves nothing")
+	}
 	if out := warnings(); strings.Contains(out, "force-stop failed") {
 		t.Errorf("a successful 204 stop logged a failure; the SDK decoder bypass is missing:\n%s", out)
+	}
+}
+
+// TestWorkerForceStopIgnoresAnOlderServersConflict pins the other half of an
+// older control plane's Stop: it refused a stop that moved nothing with 409
+// invalid_request_error, where this one and the recorded reference answer 200
+// with the item unchanged (#804). The reference's poller ignores that 409
+// (checked against anthropic-sdk-go v1.70.1 — poller.go
+// WorkPoller.discardUnprocessable), and so does forceStop: a warning for it
+// would cry wolf on every finish whose item something else had already
+// stopped. That is the case staged here. The control plane force-stops the
+// item while the worker runs it, the worker's next heartbeat learns of it and
+// winds the run down, and the stop the worker then sends is the repeat that
+// olderServer refuses. The SDK retries a 409 twice with backoff, as it would
+// against a real older server, so this test takes about a second and a half.
+func TestWorkerForceStopIgnoresAnOlderServersConflict(t *testing.T) {
+	older, _, conflicts := olderServer()
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarnessWrapped(t, sb, older)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+
+	warnings := captureWarnings(t)
+
+	w, done := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+
+	<-sb.entered // the tool is held open, mid-run
+	// The claim beat first, as TestWorkerControlPlaneStopWindsDown argues: a
+	// still-starting item's claim would be refused, and the worker would read
+	// that as a lost lease and send no stop at all.
+	waitForState(t, h, "active")
+	if _, _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), true); err != nil {
+		t.Fatalf("force stop: %v", err)
+	}
+
+	waitDone(t, done)
+	close(sb.gate) // release, though the tool already returned via cancellation
+	waitExit(t, cancel, errc)
+
+	if conflicts.Load() == 0 {
+		t.Fatal("no stop was answered 409; the test proves nothing")
+	}
+	if out := warnings(); strings.Contains(out, "force-stop failed") {
+		t.Errorf("an older server's 409 stop logged a failure; forceStop no longer ignores it:\n%s", out)
+	}
+}
+
+// olderServer wraps the control plane in the Stop answers an older one gave: a
+// bodiless 204 with no Content-Type for a stop that moved the item (#27), and
+// 409 invalid_request_error for one that moved nothing. The real stop runs
+// first, so the item's state is the real transition's. Whether it moved the
+// item is read off the item itself: a GET just before the stop renders exactly
+// what a stop that moves nothing answers. Every other request, and a stop the
+// control plane refused, passes through unchanged. The counts let a test prove
+// its own premise.
+func olderServer() (wrap func(http.Handler) http.Handler, noContent, conflicts *atomic.Int32) {
+	noContent, conflicts = new(atomic.Int32), new(atomic.Int32)
+	wrap = func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/stop") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			get := httptest.NewRequest(http.MethodGet, strings.TrimSuffix(r.URL.Path, "/stop"), nil)
+			get.Header = r.Header.Clone()
+			before := httptest.NewRecorder()
+			next.ServeHTTP(before, get)
+			rec := httptest.NewRecorder()
+			next.ServeHTTP(rec, r)
+			switch {
+			case rec.Code != http.StatusOK:
+				for k, v := range rec.Header() {
+					w.Header()[k] = v
+				}
+				w.WriteHeader(rec.Code)
+				_, _ = w.Write(rec.Body.Bytes())
+			case bytes.Equal(rec.Body.Bytes(), before.Body.Bytes()):
+				conflicts.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"work item is already stopping or stopped"}}`)
+			default:
+				noContent.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			}
+		})
+	}
+	return wrap, noContent, conflicts
+}
+
+// TestSDKTypedStopDecodesTheWorkObject drives the generated Stop with no
+// bypass at all, as a caller of the typed SDK method would: the 200 decodes
+// into the BetaSelfHostedWork it is typed as, and a repeat stop of the stopped
+// item is the same object again rather than an error (#804).
+func TestSDKTypedStopDecodesTheWorkObject(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	h.enqueueWork(t)
+	ctx := context.Background()
+	id := h.workID(t)
+	params := sdk.BetaEnvironmentWorkStopParams{
+		EnvironmentID:                 h.envID.String(),
+		BetaSelfHostedWorkStopRequest: sdk.BetaSelfHostedWorkStopRequestParam{Force: sdk.Bool(true)},
+	}
+
+	first, err := h.client.Beta.Environments.Work.Stop(ctx, id, params)
+	if err != nil {
+		t.Fatalf("typed stop: %v", err)
+	}
+	if first.ID != id || first.State != sdk.BetaSelfHostedWorkStateStopped || first.StoppedAt == "" ||
+		first.Data.ID != h.sid.String() {
+		t.Errorf("typed stop = %+v, want work %s stopped with stopped_at, for session %s", first, id, h.sid)
+	}
+	again, err := h.client.Beta.Environments.Work.Stop(ctx, id, sdk.BetaEnvironmentWorkStopParams{EnvironmentID: h.envID.String()})
+	if err != nil {
+		t.Fatalf("typed repeat stop: %v", err)
+	}
+	if again.State != first.State || again.StoppedAt != first.StoppedAt || again.StopRequestedAt != first.StopRequestedAt {
+		t.Errorf("typed repeat stop = %+v, want the unchanged %+v", again, first)
 	}
 }
 
@@ -678,7 +906,7 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 	// The control plane asks the item to stop. The next heartbeat sees the
 	// stopping state and cancels the run; the held tool unblocks via ctx and
 	// never completes, so no result is posted.
-	if _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), false); err != nil {
+	if _, _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), false); err != nil {
 		t.Fatalf("graceful stop: %v", err)
 	}
 

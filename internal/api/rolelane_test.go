@@ -231,10 +231,11 @@ func TestRoleMatrixIsEnforcedOnEveryRoute(t *testing.T) {
 // Who is denied on this surface is already pinned over real HTTP by
 // TestIdentityLaneEnvironmentKeyRoutesRequireAdmin (viewer and developer on the
 // list, the issue and the revoke). What nothing asserted is the allow path of
-// handleNoContent, which exactly two routes use — this revoke at admin, and the
-// work-API stop, whose lane has no role to check. So a regression that made
-// handleNoContent deny every human would have passed the whole suite, and the
-// completeness test cannot see it either: parsing the route table proves a role
+// handleNoContent, which this revoke at admin is now the only route to use —
+// the work-API stop, whose lane has no role to check, left it for a 200 with a
+// body (#804). So a regression that made handleNoContent deny every human
+// would have passed the whole suite, and the completeness test cannot see it
+// either: parsing the route table proves a role
 // is DECLARED, never that the adapter honours it at runtime.
 func TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd(t *testing.T) {
 	s := newLaneServer(t)

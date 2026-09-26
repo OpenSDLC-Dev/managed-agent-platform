@@ -12,10 +12,10 @@ import (
 )
 
 // The wire work API's state-machine outcomes, mapped by the API layer onto HTTP
-// statuses: not-found → 404, conflict → 409, heartbeat mismatch → 412.
+// statuses: not-found → 404, heartbeat mismatch → 412. A stop that moves
+// nothing is no error (see Stop).
 var (
 	ErrWorkNotFound      = errors.New("queue: work item not found")
-	ErrWorkConflict      = errors.New("queue: work item is in a conflicting state")
 	ErrHeartbeatMismatch = errors.New("queue: heartbeat precondition failed")
 )
 
@@ -231,14 +231,14 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 	return nil, ErrHeartbeatMismatch
 }
 
-// Stop stops a work item and returns the updated item, which the wire never
-// carries: Stop answers a bodiless 204, unlike ack/heartbeat, so the API handler
-// discards it and only this package's state-machine tests read it. force
-// stops any not-yet-stopped item immediately (→ stopped); a graceful stop asks
-// the item's worker to wind down, so it moves the item to stopping only when a
-// worker has claimed the lease with a heartbeat (active). Whether that worker is
-// still alive is not knowable here, and does not need to be: an abandoned
-// wind-down is finalized by the next Poll of the environment (see Poll).
+// Stop stops a work item and returns the item after the stop, which the wire
+// answers with (200 and the BetaSelfHostedWork, as the recorded service does;
+// #804), and whether the stop moved it. force stops any not-yet-stopped item
+// immediately (→ stopped); a graceful stop asks the item's worker to wind down,
+// so it moves the item to stopping only when a worker has claimed the lease with
+// a heartbeat (active). Whether that worker is still alive is not knowable here,
+// and does not need to be: an abandoned wind-down is finalized by the next Poll
+// of the environment (see Poll).
 //
 // An item no worker has claimed is stopped outright instead, because it has no
 // way back out of stopping. That state is left by the holder learning of it from
@@ -262,10 +262,13 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 // answer is, and would reintroduce #25 in miniature: an item whose worker then
 // died would wait on a poll an emptied environment may never see.
 //
-// Stopping an item that is already past the requested transition (e.g.
-// graceful-stopping a stopping item, or stopping a stopped one) is
-// ErrWorkConflict; an item not visible to the work API is ErrWorkNotFound.
-func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (*Work, error) {
+// Stopping an item that is already at or past the requested transition
+// (graceful-stopping a stopping item, or stopping a stopped one) changes nothing:
+// it returns the item as it stands with moved false, so a caller can tell it
+// from a transition it owes follow-up work for. The wire answers it 200 with the
+// item unchanged, the recorded service's answer to every repeat stop (#804). An
+// item not visible to the work API is ErrWorkNotFound.
+func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (w *Work, moved bool, err error) {
 	return q.StopWith(ctx, q.pool, envID, workID, force)
 }
 
@@ -273,7 +276,7 @@ func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (
 // an item inside a transaction that holds the session row lock and re-arms
 // the session's remaining runnable calls in the same commit (plan 35
 // decision 13 iii).
-func (q *Queue) StopWith(ctx context.Context, db DB, envID, workID domain.ID, force bool) (*Work, error) {
+func (q *Queue) StopWith(ctx context.Context, db DB, envID, workID domain.ID, force bool) (w *Work, moved bool, err error) {
 	var sql string
 	if force {
 		sql = `UPDATE work_items
@@ -299,22 +302,25 @@ func (q *Queue) StopWith(ctx context.Context, db DB, envID, workID domain.ID, fo
 		         AND state IN ('queued', 'starting', 'active')
 		       RETURNING ` + workColumns
 	}
-	w, err := scanWork(db.QueryRow(ctx, sql, workID, envID))
+	w, err = scanWork(db.QueryRow(ctx, sql, workID, envID))
 	if err == nil {
-		return w, nil
+		return w, true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("queue: stop %s: %w", workID, err)
+		return nil, false, fmt.Errorf("queue: stop %s: %w", workID, err)
 	}
-	// No row updated: distinguish a missing item from a conflicting state.
-	present, verr := q.visibleOn(ctx, db, envID, workID)
-	if verr != nil {
-		return nil, fmt.Errorf("queue: stop %s: %w", workID, verr)
+	// No row moved: the item as it stands, if the work API can see it.
+	w, err = scanWork(db.QueryRow(ctx,
+		`SELECT `+workColumns+` FROM work_items
+		 WHERE id = $1 AND environment_id = $2`+workAPIScope,
+		workID, envID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, ErrWorkNotFound
 	}
-	if !present {
-		return nil, ErrWorkNotFound
+	if err != nil {
+		return nil, false, fmt.Errorf("queue: stop %s: %w", workID, err)
 	}
-	return nil, ErrWorkConflict
+	return w, false, nil
 }
 
 // UpdateMetadata applies a metadata patch to a work item and returns the updated
@@ -355,16 +361,12 @@ func (q *Queue) UpdateMetadata(ctx context.Context, envID, workID domain.ID, ups
 }
 
 // visible reports whether a work item is visible to the wire work API (see
-// workAPIScope), scoped to envID. It lets Heartbeat/Stop tell a genuinely absent
-// item (→ ErrWorkNotFound) apart from one whose state-machine precondition
-// simply did not hold (→ mismatch/conflict).
+// workAPIScope), scoped to envID. It lets Heartbeat tell a genuinely absent
+// item (→ ErrWorkNotFound) apart from one whose precondition simply did not
+// hold (→ mismatch).
 func (q *Queue) visible(ctx context.Context, envID, workID domain.ID) (bool, error) {
-	return q.visibleOn(ctx, q.pool, envID, workID)
-}
-
-func (q *Queue) visibleOn(ctx context.Context, db DB, envID, workID domain.ID) (bool, error) {
 	var one int
-	err := db.QueryRow(ctx,
+	err := q.pool.QueryRow(ctx,
 		`SELECT 1 FROM work_items WHERE id = $1 AND environment_id = $2`+workAPIScope,
 		workID, envID).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
