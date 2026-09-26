@@ -86,8 +86,8 @@ func Secret(token string) string {
 // the token is unknown or no longer names a live item: the item's id must
 // still be the one the token was minted for (a re-hand-out rewrites it), its
 // lease unexpired while it runs, or its stop requested within queue.WindDown
-// once it is stopping or stopped (a graceful stop parks an active item in
-// stopping with a lease the heartbeat no longer extends, so the window counts
+// once it is stopping or stopped (a graceful stop parks a starting or active
+// item in stopping with a lease no heartbeat extends, so the window counts
 // from the request rather than from the lease or the stop's completion: the
 // wind-down and the post-stop flush both ride it), and its session
 // unarchived. WindDown is sized to the reference worker's flow (its doc), and

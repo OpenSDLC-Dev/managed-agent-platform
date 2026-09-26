@@ -371,10 +371,14 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // is the signal: a stopping item whose lease has lapsed has nobody left to finish
 // it, so the poll settles it terminally (→ stopped, stopped_at stamped, lease
 // cleared) instead of leaving it non-terminal forever (#25). Such an item always
-// carries a lease to lapse, because a graceful stop only enters stopping from
-// active (see Stop); the lapse counts only once WindDown has passed since the
-// request, a live worker having stopped heartbeating the moment it learned of
-// the stop. The null-lease arm is not for it, but for the one row the
+// carries a lease to lapse, because a graceful stop enters stopping only from
+// starting or active and keeps the lease it finds (see Stop): an active item's
+// claimed lease, or the startup lease a starting item's ack installed, which
+// is what settles a wind-down whose worker died before its claim. The lapse
+// counts only once WindDown has passed since the request, a live worker having
+// stopped heartbeating the moment it learned of the stop — which for a
+// starting item is its claim, answered with the stop until the item settles
+// (see Heartbeat). The null-lease arm is not for it, but for the one row the
 // new state machine does not write: during a rolling upgrade a not-yet-upgraded
 // replica can still park a never-polled queued item, which has no lease at all,
 // in stopping. Migration 0014 finalizes the ones written before the upgrade;

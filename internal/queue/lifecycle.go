@@ -47,9 +47,11 @@ const ackStartupLeaseSeconds = 30
 const workAPIScope = ` AND kind = 'tool_exec'
 	AND EXISTS (SELECT 1 FROM environments e WHERE e.id = environment_id AND e.kind = 'self_hosted')`
 
-// HeartbeatResult is the wire heartbeat response projection.
+// HeartbeatResult is the wire heartbeat response projection. LastHeartbeat is
+// nil when no beat has ever reached the item, which only the claim on a
+// never-claimed stopping item answers (see Heartbeat).
 type HeartbeatResult struct {
-	LastHeartbeat time.Time
+	LastHeartbeat *time.Time
 	State         string
 	LeaseExtended bool
 	TTLSeconds    int64
@@ -169,12 +171,13 @@ func (q *Queue) Ack(ctx context.Context, envID, workID domain.ID) (*Work, error)
 // heartbeat (expected == NoHeartbeat) claims the lease of a just-acked
 // (starting) item and moves it to active; subsequent heartbeats echo the
 // server's prior last_heartbeat and extend the lease while the item is active.
-// A heartbeat on an active item the control plane has since moved to
-// stopping/stopped succeeds without extending the lease, so the worker learns
-// to wind down. An item not visible to the work API is ErrWorkNotFound; a
-// visible item whose precondition does not hold (the expected value is not the
-// row's current last_heartbeat, or the first-heartbeat preconditions fail) is
-// ErrHeartbeatMismatch (412).
+// A heartbeat on an item the control plane has since moved to stopping or
+// stopped succeeds without extending the lease, so the worker learns to wind
+// down: the echo of a worker that claimed the item, and the claim of one that
+// had not yet when a graceful stop parked it in stopping. An item not visible
+// to the work API is ErrWorkNotFound; a visible item whose precondition does
+// not hold (the expected value is not the row's current last_heartbeat, or the
+// first-heartbeat preconditions fail) is ErrHeartbeatMismatch (412).
 func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected string, ttlSeconds int64) (*HeartbeatResult, error) {
 	var row pgx.Row
 	if expected == NoHeartbeat {
@@ -219,14 +222,28 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("queue: heartbeat %s: %w", workID, err)
 	}
-	// No row updated: a genuinely absent item is not-found; a present one whose
-	// claim/extend precondition did not hold is a mismatch.
-	present, verr := q.visible(ctx, envID, workID)
-	if verr != nil {
-		return nil, fmt.Errorf("queue: heartbeat %s: %w", workID, verr)
-	}
-	if !present {
+	// No row updated. A genuinely absent item is not-found, and a present one
+	// whose claim or extend precondition did not hold is a mismatch — save one
+	// claim. On stopping work no beat has reached, a graceful stop landed
+	// between the ack and the claim, and the claim is the one beat that item's
+	// worker still sends, so it is answered with the stop, as the reference
+	// answers it (2026-09-19 custom-mixed-tools #44): not extended, stopping,
+	// no last heartbeat, and nothing written. Every other failed claim keeps
+	// its 412 — before the ack, on active work, on once-claimed stopping work
+	// (whose worker learns from its echo), on stopped work.
+	var state string
+	var last *time.Time
+	err = q.pool.QueryRow(ctx,
+		`SELECT state, last_heartbeat FROM work_items WHERE id = $1 AND environment_id = $2`+workAPIScope,
+		workID, envID).Scan(&state, &last)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrWorkNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("queue: heartbeat %s: %w", workID, err)
+	}
+	if expected == NoHeartbeat && state == "stopping" && last == nil {
+		return &HeartbeatResult{State: state, TTLSeconds: ttlSeconds}, nil
 	}
 	return nil, ErrHeartbeatMismatch
 }
@@ -235,32 +252,26 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 // answers with (200 and the BetaSelfHostedWork, as the recorded service does;
 // #804), and whether the stop moved it. force stops any not-yet-stopped item
 // immediately (→ stopped); a graceful stop asks the item's worker to wind down,
-// so it moves the item to stopping only when a worker has claimed the lease with
-// a heartbeat (active). Whether that worker is still alive is not knowable here,
-// and does not need to be: an abandoned wind-down is finalized by the next Poll
-// of the environment (see Poll).
+// so it moves the item to stopping whenever a worker has acked it — starting or
+// active — as the reference does (2026-09-19 recordings; #810). Stopping is
+// left by that worker: it learns of the stop from its next heartbeat, winds its
+// tools down and stops the item (internal/worker/lease.go). An active item's
+// next beat is an echo, which reports the state without extending the lease; a
+// starting item's is its claim, which on stopping work no beat has reached
+// answers the stop too (see Heartbeat). Whether that worker is still alive is
+// not knowable here, and does not need to be: a wind-down nobody finishes is
+// finalized by a Poll of the environment once its lease — for a starting item,
+// the startup lease its ack installed — has lapsed and WindDown has passed
+// since the request (see Poll). moved is true for the move to stopping, though
+// the item is not stopped yet: the re-arm a finished stop owes the session
+// (plan 35 decision 13 iii) is owed by whichever path later finishes it — the
+// worker's own force stop, or the finalizing poll, in its own transaction.
 //
-// An item no worker has claimed is stopped outright instead, because it has no
-// way back out of stopping. That state is left by the holder learning of it from
-// its next heartbeat, winding its tools down and stopping the item
-// (internal/worker/lease.go). A still-queued item has no holder to learn; an
-// acked-but-never-heartbeated (starting) one does have a worker, but no channel
-// left to be told on — its only remaining beat is the claim, which Heartbeat
-// refuses once the row is no longer starting. Parking either in stopping would
-// strand it there forever with a null stopped_at: Poll never re-offers a stopping
-// item, and nothing else would ever finish the transition (#25). Neither has
-// anything in flight to wind down, so the graceful stop simply completes.
-//
-// Completing it can outrun a worker that was handed the item by one round trip:
-// the worker starts its run concurrently with its claim beat (the reference's own
-// ordering), so one that polled and acked may already be provisioning when the
-// beat comes back 412 and cancels it. That window costs nothing — a stopped item
-// is never re-offered by Poll, so no second worker can be handed it, and it is
-// the same window force: true has always had ("immediately stop work without
-// graceful shutdown"). Parking the item in stopping instead would not shorten it
-// by a microsecond, since the worker cancels when its beat returns whatever the
-// answer is, and would reintroduce #25 in miniature: an item whose worker then
-// died would wait on a poll an emptied environment may never see.
+// A queued item, polled or not, has no worker to ask — nobody acked it — and
+// nothing in flight to wind down, so a graceful stop of one completes outright
+// (→ stopped) rather than wait non-terminal for a poll to finalize it, one an
+// emptied environment may never see (#25). What the reference does with one
+// is unrecorded (docs/DIVERGENCES.md).
 //
 // Stopping an item that is already at or past the requested transition
 // (graceful-stopping a stopping item, or stopping a stopped one) changes nothing:
@@ -289,14 +300,17 @@ func (q *Queue) StopWith(ctx context.Context, db DB, envID, workID domain.ID, fo
 		       RETURNING ` + workColumns
 	} else {
 		// Every CASE reads the row's pre-update state, so all four agree on which
-		// branch they are in. An active item keeps its lease: the worker holds it
-		// while it winds down, and its lapsing past WindDown is what tells the
-		// control plane the wind-down was abandoned (see Poll).
+		// branch they are in. An item a worker has acked keeps its lease — an
+		// active item's claimed one, a starting item's startup lease: its
+		// lapsing past WindDown is what tells the control plane the wind-down was
+		// abandoned (see Poll). A starting item's would not survive clearing: a
+		// null lease is the finalizer's legacy arm, which would settle the item
+		// at the next poll, before a claim as late as the recorded one.
 		sql = `UPDATE work_items
-		       SET state             = CASE WHEN state = 'active' THEN 'stopping' ELSE 'stopped' END,
+		       SET state             = CASE WHEN state IN ('starting', 'active') THEN 'stopping' ELSE 'stopped' END,
 		           stop_requested_at = COALESCE(stop_requested_at, now()),
-		           stopped_at        = CASE WHEN state = 'active' THEN stopped_at ELSE now() END,
-		           lease_expires_at  = CASE WHEN state = 'active' THEN lease_expires_at ELSE NULL END,
+		           stopped_at        = CASE WHEN state IN ('starting', 'active') THEN stopped_at ELSE now() END,
+		           lease_expires_at  = CASE WHEN state IN ('starting', 'active') THEN lease_expires_at ELSE NULL END,
 		           updated_at        = now()
 		       WHERE id = $1 AND environment_id = $2` + workAPIScope + `
 		         AND state IN ('queued', 'starting', 'active')
@@ -358,22 +372,4 @@ func (q *Queue) UpdateMetadata(ctx context.Context, envID, workID domain.ID, ups
 		return nil, fmt.Errorf("queue: update metadata %s: %w", workID, err)
 	}
 	return w, nil
-}
-
-// visible reports whether a work item is visible to the wire work API (see
-// workAPIScope), scoped to envID. It lets Heartbeat tell a genuinely absent
-// item (→ ErrWorkNotFound) apart from one whose precondition simply did not
-// hold (→ mismatch).
-func (q *Queue) visible(ctx context.Context, envID, workID domain.ID) (bool, error) {
-	var one int
-	err := q.pool.QueryRow(ctx,
-		`SELECT 1 FROM work_items WHERE id = $1 AND environment_id = $2`+workAPIScope,
-		workID, envID).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
 }
