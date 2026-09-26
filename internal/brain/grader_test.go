@@ -336,6 +336,90 @@ func TestOutcomeFailed(t *testing.T) {
 	if got := h.status(t); got != "idle" {
 		t.Errorf("status = %q, want idle", got)
 	}
+	if len(h.provider.calls) != 2 {
+		t.Errorf("provider calls = %d, want 2 (agent + grader): with budget left a failed verdict idles directly", len(h.provider.calls))
+	}
+}
+
+// When no further evaluation cycle can run — iteration + 1 >= max_iterations —
+// one acknowledgment turn follows the verdict whatever it is (#670, reading
+// (B)): the one recorded verdict, satisfied at iteration 0 of max_iterations 1,
+// was followed by an unprompted agent turn before idle. With budget left a
+// satisfied or failed verdict still idles directly (TestOutcomeSatisfied,
+// TestOutcomeFailed).
+func TestOutcomeTerminalVerdictOnTheLastCycleRunsAnAcknowledgmentTurn(t *testing.T) {
+	for _, tc := range []struct {
+		verdict string
+		prompt  string
+	}{
+		{domain.OutcomeResultSatisfied, "satisfies the rubric"},
+		{domain.OutcomeResultFailed, "cannot be applied"},
+	} {
+		t.Run(tc.verdict, func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{
+				agentReply("only attempt"),
+				graderReply("the grader's reasons", tc.verdict),
+				agentReply("The outcome is complete."), // the acknowledgment turn
+			}, nil)
+			h.wakeOutcome(t, "Build it", 1)
+			h.drain(t)
+
+			evals := h.outcomes(t)
+			if len(evals) != 1 || evals[0].Result != tc.verdict || evals[0].CompletedAt == nil {
+				t.Fatalf("outcomes = %+v, want one terminal %s entry", evals, tc.verdict)
+			}
+			if got := h.status(t); got != "idle" {
+				t.Errorf("status = %q, want idle after the acknowledgment turn", got)
+			}
+			if ends := h.eventsOfType(t, domain.EventSpanOutcomeEvalEnd); len(ends) != 1 {
+				t.Fatalf("end events = %d, want 1: no evaluation follows the acknowledgment", len(ends))
+			}
+			if len(h.provider.calls) != 3 {
+				t.Fatalf("provider calls = %d, want 3 (agent, grader, acknowledgment)", len(h.provider.calls))
+			}
+			ack := h.provider.calls[2]
+			last := ack.Messages[len(ack.Messages)-1]
+			if last.Role != "user" || !strings.Contains(string(last.Content), tc.prompt) {
+				t.Errorf("acknowledgment request ends on %s %s, want the verdict as a user turn", last.Role, last.Content)
+			}
+			// The idle is the acknowledgment turn's own end_turn.
+			idles := h.eventsOfType(t, domain.EventSessionStatusIdle)
+			if len(idles) != 1 || stopReasonType(t, idles[0].Body) != "end_turn" {
+				t.Errorf("session.status_idle events = %d, want one end_turn", len(idles))
+			}
+		})
+	}
+}
+
+// The rule is the cycle's position in the budget, not the verdict's first
+// appearance: a revision cycle runs as before (needs_revision is unchanged),
+// and the satisfied verdict that then ends the budget's last cycle is
+// acknowledged.
+func TestOutcomeSatisfiedAfterARevisionOnTheLastCycleIsAcknowledged(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("first draft"),
+		graderReply("missing sensitivity analysis", "needs_revision"),
+		agentReply("added sensitivity analysis"),
+		graderReply("now complete", "satisfied"),
+		agentReply("The outcome is complete."),
+	}, nil)
+	h.wakeOutcome(t, "Build it", 2)
+	h.drain(t)
+
+	evals := h.outcomes(t)
+	if evals[0].Result != domain.OutcomeResultSatisfied || evals[0].Iteration != 1 {
+		t.Fatalf("entry = %+v, want satisfied at iteration 1", evals[0])
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	if len(h.provider.calls) != 5 {
+		t.Fatalf("provider calls = %d, want 5 (agent, grader, revision, grader, acknowledgment)", len(h.provider.calls))
+	}
+	if !strings.Contains(string(h.provider.calls[2].Messages[len(h.provider.calls[2].Messages)-1].Content),
+		"missing sensitivity analysis") {
+		t.Errorf("revision turn did not end on the grader's feedback")
+	}
 }
 
 func TestOutcomeGraderError(t *testing.T) {

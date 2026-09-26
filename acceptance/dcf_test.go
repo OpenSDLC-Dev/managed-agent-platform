@@ -280,8 +280,9 @@ func pollTerminal(ctx context.Context, t *testing.T, client anthropic.Client, se
 
 // streamWatch tails the session's SSE stream through the SDK's typed decoder,
 // completing once a terminal span.outcome_evaluation_end has been followed by
-// session.status_idle (max_iterations_reached runs one acknowledgment turn
-// between the two; needs_revision ends keep the watch open).
+// session.status_idle (an acknowledgment turn runs between the two after
+// max_iterations_reached, and after any verdict on the budget's last cycle;
+// needs_revision ends keep the watch open).
 type streamWatch struct {
 	mu     sync.Mutex
 	frames []anthropic.BetaManagedAgentsStreamSessionEventsUnion
