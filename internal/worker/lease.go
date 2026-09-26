@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	mrand "math/rand/v2"
 	"net/http"
@@ -659,15 +660,18 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (live, coord
 // operator can still follow, and the one the item's spans are joined on.
 //
 // Stop answers 200 with the work object, which the worker has no use for, so
-// the response destination is rebound to **http.Response and the body closed
-// unread. The rebinding is also what keeps an older control plane working: that
-// one answered a bodiless 204, and the generated method is typed
-// *BetaSelfHostedWork, so the SDK's strict decoder fails such a successful call
-// with "expected destination type of 'string' or '[]byte' …". The same bypass
-// is what the reference's own poller applies, on the reading that the service
-// sends 204 (checked against anthropic-sdk-go v1.70.1 — poller.go stopWork);
-// recordings of the service falsify that reading (#804), and the bypass serves
-// either answer.
+// the response destination is rebound to **http.Response and the body drained
+// rather than decoded: the transport reuses a connection only once its body has
+// been read to the end, so a body closed unread would cost the next request a
+// new connection. The drain is bounded, since a work object is small and a
+// body past the bound is not one. The rebinding is also what keeps an older
+// control plane working: that one answered a bodiless 204, and the generated
+// method is typed *BetaSelfHostedWork, so the SDK's strict decoder fails such a
+// successful call with "expected destination type of 'string' or '[]byte' …".
+// The same bypass is what the reference's own poller applies, on the reading
+// that the service sends 204 (checked against anthropic-sdk-go v1.70.1 —
+// poller.go stopWork); recordings of the service falsify that reading (#804),
+// and the bypass serves either answer.
 func (w *Worker) forceStop(workID, sessionID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
@@ -679,6 +683,7 @@ func (w *Worker) forceStop(workID, sessionID string) {
 		slog.Warn("worker: force-stop failed", "work", workID, "session", sessionID, "err", err)
 	}
 	if raw != nil && raw.Body != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(raw.Body, 1<<16))
 		_ = raw.Body.Close()
 	}
 }

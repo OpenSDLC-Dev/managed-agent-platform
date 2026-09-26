@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -174,35 +175,39 @@ func TestWorkerPollsRunsAndStops(t *testing.T) {
 
 // TestWorkerForceStopAcceptsTheWorkObject pins the worker half of the wire's
 // Stop against the current control plane, which answers 200 with the work
-// object, as the recorded reference service does (#804). The worker still
-// binds the response to **http.Response rather than decoding it — the body is
-// of no use to it — so the only visible damage a mishandled 200 could do is a
-// false warning on a clean finish, which is what this asserts the absence of.
-// The recorder makes the test prove its own premise: a stop answered 200.
+// object, as the recorded reference service does (#804). The worker binds the
+// response to **http.Response rather than decoding it, since the body is of no
+// use to it, so what it owes the body is a read to EOF before the close: Go's
+// transport returns a connection to the pool only once its body has been read
+// to the end, and one closed unread costs the worker's next request a new
+// connection. A probe around each 200 stop body the worker receives records
+// whether it was, and that the probe saw one proves the test's premise. A
+// mishandled 200 could also cry wolf on a clean finish, so the absence of a
+// false warning is asserted too.
 func TestWorkerForceStopAcceptsTheWorkObject(t *testing.T) {
-	var ok200 atomic.Int32
-	record := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !strings.HasSuffix(r.URL.Path, "/stop") {
-				next.ServeHTTP(w, r)
-				return
-			}
-			rec := httptest.NewRecorder()
-			next.ServeHTTP(rec, r)
-			if rec.Code == http.StatusOK && strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
-				ok200.Add(1)
-			}
-			for k, v := range rec.Header() {
-				w.Header()[k] = v
-			}
-			w.WriteHeader(rec.Code)
-			_, _ = w.Write(rec.Body.Bytes())
-		})
-	}
 	sb := &fakeSandbox{}
-	h := newHarnessWrapped(t, sb, record)
+	h := newHarness(t, sb)
 	h.suspend(t, writeUse("out.txt", "hello"))
 	h.enqueueWork(t)
+	var mu sync.Mutex
+	var bodies []*drainProbe
+	h.client = sdk.NewClient(
+		option.WithoutEnvironmentDefaults(),
+		option.WithBaseURL(h.serverURL),
+		option.WithAuthToken(h.key),
+		option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+			res, err := next(req)
+			if err == nil && strings.HasSuffix(req.URL.Path, "/stop") && res.StatusCode == http.StatusOK &&
+				strings.HasPrefix(res.Header.Get("Content-Type"), "application/json") {
+				p := &drainProbe{ReadCloser: res.Body}
+				res.Body = p
+				mu.Lock()
+				bodies = append(bodies, p)
+				mu.Unlock()
+			}
+			return res, err
+		}),
+	)
 
 	warnings := captureWarnings(t)
 
@@ -214,12 +219,42 @@ func TestWorkerForceStopAcceptsTheWorkObject(t *testing.T) {
 	if got := h.workState(t); got != "stopped" {
 		t.Fatalf("work item state = %q, want stopped", got)
 	}
-	if ok200.Load() == 0 {
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) == 0 {
 		t.Fatal("no stop was answered 200 with a JSON body; the test proves nothing")
+	}
+	for i, p := range bodies {
+		if !p.closed.Load() || !p.drained.Load() {
+			t.Errorf("stop body %d: closed %v, read to EOF before the close %v; want both, or the connection is dropped",
+				i, p.closed.Load(), p.drained.Load())
+		}
 	}
 	if out := warnings(); strings.Contains(out, "force-stop failed") {
 		t.Errorf("a successful 200 stop logged a failure:\n%s", out)
 	}
+}
+
+// drainProbe wraps a response body and records whether it was read to EOF
+// before it was first closed.
+type drainProbe struct {
+	io.ReadCloser
+	eof, drained, closed atomic.Bool
+}
+
+func (p *drainProbe) Read(b []byte) (int, error) {
+	n, err := p.ReadCloser.Read(b)
+	if err == io.EOF {
+		p.eof.Store(true)
+	}
+	return n, err
+}
+
+func (p *drainProbe) Close() error {
+	if !p.closed.Swap(true) {
+		p.drained.Store(p.eof.Load())
+	}
+	return p.ReadCloser.Close()
 }
 
 // TestWorkerForceStopAcceptsNoContent pins the worker against an older
@@ -230,12 +265,12 @@ func TestWorkerForceStopAcceptsTheWorkObject(t *testing.T) {
 // and the only visible damage is the worker crying wolf on every clean finish.
 // Asserting the state alone therefore cannot catch a missing bypass; this
 // asserts the absence of the false warning. The real control plane runs the
-// stop and a wrapper replaces its 200 with the old 204, so the item's state is
+// stop and olderServer answers it as the old one did, so the item's state is
 // the real transition's.
 func TestWorkerForceStopAcceptsNoContent(t *testing.T) {
-	olderServer, rewritten := answerStopAs(http.StatusNoContent, "")
+	older, noContent, _ := olderServer()
 	sb := &fakeSandbox{}
-	h := newHarnessWrapped(t, sb, olderServer)
+	h := newHarnessWrapped(t, sb, older)
 	h.suspend(t, writeUse("out.txt", "hello"))
 	h.enqueueWork(t)
 
@@ -249,7 +284,7 @@ func TestWorkerForceStopAcceptsNoContent(t *testing.T) {
 	if got := h.workState(t); got != "stopped" {
 		t.Fatalf("work item state = %q, want stopped", got)
 	}
-	if rewritten.Load() == 0 {
+	if noContent.Load() == 0 {
 		t.Fatal("no stop was answered 204; the test proves nothing")
 	}
 	if out := warnings(); strings.Contains(out, "force-stop failed") {
@@ -258,33 +293,43 @@ func TestWorkerForceStopAcceptsNoContent(t *testing.T) {
 }
 
 // TestWorkerForceStopIgnoresAnOlderServersConflict pins the other half of an
-// older control plane's Stop: it refused a stop of work already stopping or
-// stopped with 409 invalid_request_error, where this one and the recorded
-// reference answer 200 with the item unchanged (#804). The reference's poller
-// ignores that 409 (checked against anthropic-sdk-go v1.70.1 — poller.go
+// older control plane's Stop: it refused a stop that moved nothing with 409
+// invalid_request_error, where this one and the recorded reference answer 200
+// with the item unchanged (#804). The reference's poller ignores that 409
+// (checked against anthropic-sdk-go v1.70.1 — poller.go
 // WorkPoller.discardUnprocessable), and so does forceStop: a warning for it
 // would cry wolf on every finish whose item something else had already
-// stopped. The real control plane runs the stop and a wrapper answers it with
-// the old refusal, so the item's state is the real transition's.
+// stopped. That is the case staged here. The control plane force-stops the
+// item while the worker runs it, the worker's next heartbeat learns of it and
+// winds the run down, and the stop the worker then sends is the repeat that
+// olderServer refuses. The SDK retries a 409 twice with backoff, as it would
+// against a real older server, so this test takes about a second and a half.
 func TestWorkerForceStopIgnoresAnOlderServersConflict(t *testing.T) {
-	olderServer, rewritten := answerStopAs(http.StatusConflict,
-		`{"type":"error","error":{"type":"invalid_request_error","message":"work item is already stopping or stopped"}}`)
-	sb := &fakeSandbox{}
-	h := newHarnessWrapped(t, sb, olderServer)
-	h.suspend(t, writeUse("out.txt", "hello"))
+	older, _, conflicts := olderServer()
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarnessWrapped(t, sb, older)
+	h.suspend(t, writeUse("out.txt", "hi"))
 	h.enqueueWork(t)
 
 	warnings := captureWarnings(t)
 
 	w, done := h.newWorker(Config{})
 	cancel, errc := runWorker(w)
+
+	<-sb.entered // the tool is held open, mid-run
+	// The claim beat first, as TestWorkerControlPlaneStopWindsDown argues: a
+	// still-starting item's claim would be refused, and the worker would read
+	// that as a lost lease and send no stop at all.
+	waitForState(t, h, "active")
+	if _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), true); err != nil {
+		t.Fatalf("force stop: %v", err)
+	}
+
 	waitDone(t, done)
+	close(sb.gate) // release, though the tool already returned via cancellation
 	waitExit(t, cancel, errc)
 
-	if got := h.workState(t); got != "stopped" {
-		t.Fatalf("work item state = %q, want stopped", got)
-	}
-	if rewritten.Load() == 0 {
+	if conflicts.Load() == 0 {
 		t.Fatal("no stop was answered 409; the test proves nothing")
 	}
 	if out := warnings(); strings.Contains(out, "force-stop failed") {
@@ -292,36 +337,47 @@ func TestWorkerForceStopIgnoresAnOlderServersConflict(t *testing.T) {
 	}
 }
 
-// answerStopAs wraps the control plane so that every stop it answers 200 is
-// answered to the client as an older control plane answered it instead:
-// status, with body as JSON when there is one. The real stop still runs first.
-// The count it returns lets a test prove its own premise.
-func answerStopAs(status int, body string) (func(http.Handler) http.Handler, *atomic.Int32) {
-	var rewritten atomic.Int32
-	return func(next http.Handler) http.Handler {
+// olderServer wraps the control plane in the Stop answers an older one gave: a
+// bodiless 204 with no Content-Type for a stop that moved the item (#27), and
+// 409 invalid_request_error for one that moved nothing. The real stop runs
+// first, so the item's state is the real transition's. Whether it moved the
+// item is read off the item itself: a GET just before the stop renders exactly
+// what a stop that moves nothing answers. Every other request, and a stop the
+// control plane refused, passes through unchanged. The counts let a test prove
+// its own premise.
+func olderServer() (wrap func(http.Handler) http.Handler, noContent, conflicts *atomic.Int32) {
+	noContent, conflicts = new(atomic.Int32), new(atomic.Int32)
+	wrap = func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasSuffix(r.URL.Path, "/stop") {
 				next.ServeHTTP(w, r)
 				return
 			}
+			get := httptest.NewRequest(http.MethodGet, strings.TrimSuffix(r.URL.Path, "/stop"), nil)
+			get.Header = r.Header.Clone()
+			before := httptest.NewRecorder()
+			next.ServeHTTP(before, get)
 			rec := httptest.NewRecorder()
 			next.ServeHTTP(rec, r)
-			if rec.Code != http.StatusOK {
+			switch {
+			case rec.Code != http.StatusOK:
 				for k, v := range rec.Header() {
 					w.Header()[k] = v
 				}
 				w.WriteHeader(rec.Code)
 				_, _ = w.Write(rec.Body.Bytes())
-				return
-			}
-			rewritten.Add(1)
-			if body != "" {
+			case bytes.Equal(rec.Body.Bytes(), before.Body.Bytes()):
+				conflicts.Add(1)
 				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"work item is already stopping or stopped"}}`)
+			default:
+				noContent.Add(1)
+				w.WriteHeader(http.StatusNoContent)
 			}
-			w.WriteHeader(status)
-			_, _ = io.WriteString(w, body)
 		})
-	}, &rewritten
+	}
+	return wrap, noContent, conflicts
 }
 
 // TestSDKTypedStopDecodesTheWorkObject drives the generated Stop with no
