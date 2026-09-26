@@ -64,6 +64,17 @@ ordinary recorded claim and echo answers `ttl_seconds: 300`; the stopping claim 
   412. Kept, the lease lets the finalizer treat never-claimed work like an abandoned claimed
   wind-down. It settles the item only once the lease has lapsed and `queue.WindDown` has
   passed since the request. Poll never re-offers `stopping` work.
+- **The price, accepted to match the recordings.** A graceful stop of `starting` work whose
+  worker has already died no longer settles and re-arms at the stop. It settles at the
+  first poll of its environment after the lease and WindDown have both run out, a minute or
+  more later, or never if nothing polls. Until then an environment delete answers 409
+  unless it passes `?force=true`, and a `force: true` stop settles the item at once.
+- **The sessions token lives while the item is `stopping`.** It used to die WindDown after
+  the request, `stopping` or `stopped`. The reference worker beats and force-stops with the
+  token when the item carries one, and the recorded claim was sent 58.9 s after its stop,
+  the force stop at 60.1 s. With a token, that force stop would have been refused 401,
+  leaving the item to the finalizer. Once `stopped`, the token keeps the minute from the
+  request, so a settlement still never re-arms a session while its token works.
 - **The claim writes nothing.** The recorded force stop that follows still carries a null
   `latest_heartbeat_at`, so the answer records no beat and extends no lease. The claim is
   answered from the row read after the claim's update matched nothing. Its test is
@@ -85,21 +96,24 @@ ordinary recorded claim and echo answers `ttl_seconds: 300`; the stopping claim 
 ## Scope
 
 - **Control plane:** `queue.StopWith`'s graceful arm, `queue.Heartbeat`'s failed-claim
-  path, the heartbeat wire type, and the comments on `Stop`, `Poll`, `stopWork`'s re-arm
-  and the sessions token's window.
+  path, the heartbeat wire type, `worktoken.Authenticate`'s window for `stopping` work, and
+  the comments on `Stop`, `Poll` and `stopWork`'s re-arm.
 - **Worker:** comments only, on `hbExitStopRequested` and in its tests.
 - **Registry:** the graceful-vs-force entry is rewritten as a dated reversal, confirmed by
   recording, and keeps the old rule's argument. The #804 response-shape entry stops saying
-  that such work is stopped outright. Three INFERRED neighbours are added under #78, and
-  the two TTL differences are added as CONFIRMED divergences.
+  that such work is stopped outright. The sessions-token entry states the token's new
+  window. Three INFERRED neighbours are added under #78, and the two TTL differences are
+  added as CONFIRMED divergences.
 
 ## Verification
 
 - Tests written first fail against the old rule: the queue's stop, claim and finalization
   window; the API replay of #22, #23, #44 and #47; exactly one re-arm on the force-stop path
   and on the abandoned path; the typed SDK decoding the claim as it decodes the recorded
-  body; and the worker, stopped between its ack and its claim, running no tool and
-  force-stopping the item. The neighbouring 412s and the queued stop are pinned too, and
-  each rule is broken on its own to show its test catches it.
+  body; the worker, stopped between its ack and its claim, cancelling its run on the
+  claim's answer, posting no tool result, and force-stopping the item; and a sessions token
+  authenticating that claim and force stop past WindDown. The neighbouring 412s and the
+  queued stop are pinned too, and each rule is broken on its own to show its test catches
+  it.
 - `make verify`, `tools/registrycheck` against GitHub and `make sdk-bump-report`, then
   independent verification, both reviews and the PR's CI before the squash merge.

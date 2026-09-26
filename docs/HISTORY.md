@@ -70,6 +70,17 @@ work; the graceful stop clearing a `starting` item's lease, which also let the f
 settle it under the startup lease; queued work parked in `stopping`; and `stopWork`
 re-arming every stop that moved an item.
 
+Review then found that the sessions token still died a minute after the stop request while
+its item was `stopping`. The reference worker beats and force-stops with that token, so
+after a claim as late as the recorded one its force stop would have been refused 401,
+leaving the item to the finalizer. The token now lives while the item is `stopping`, and
+keeps the minute from the request once it is `stopped`. The new API test failed first with
+that claim refused 401, and with `stopped` given the same freedom it failed on both stopped
+items. Review also moved the finalizer test's inside-the-window probe from 59 s, a second
+short of WindDown, to 45 s, and narrowed the worker test's claim that the worker "runs no
+tool" to what the test shows: the run is cancelled on the claim's answer and posts no tool
+result.
+
 The full `make verify` gate passed on the branch: build, cross-build, vet, format check and
 61 test packages, with 90.21% total statement coverage. `tools/registrycheck` was clean on
 shape and issue state, and the `tools/sdkref` report counted 655 citations, with no findings
