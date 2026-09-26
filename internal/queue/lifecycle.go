@@ -31,7 +31,9 @@ const NoHeartbeat = "NO_HEARTBEAT"
 // otherwise a slow-but-live worker's item could be reclaimed in the ack →
 // first-heartbeat gap. It matches the default heartbeat TTL (api's
 // defaultHeartbeatTTLSeconds), so a starting item's window equals an active
-// one's; the queue cannot import api, so the value is mirrored here.
+// one's; the queue cannot import api, so the value is mirrored here. The
+// finalizer also waits for it, beside WindDown, to settle a wind-down stopped
+// before its claim (see StopWith), so raising it past WindDown delays that.
 const ackStartupLeaseSeconds = 30
 
 // workAPIScope restricts a work-API query to the wire's notion of a work item —
@@ -231,19 +233,12 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 	// no last heartbeat, and nothing written. Every other failed claim keeps
 	// its 412 — before the ack, on active work, on once-claimed stopping work
 	// (whose worker learns from its echo), on stopped work.
-	var state string
-	var last *time.Time
-	err = q.pool.QueryRow(ctx,
-		`SELECT state, last_heartbeat FROM work_items WHERE id = $1 AND environment_id = $2`+workAPIScope,
-		workID, envID).Scan(&state, &last)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrWorkNotFound
-	}
+	w, err := q.GetWork(ctx, envID, workID)
 	if err != nil {
-		return nil, fmt.Errorf("queue: heartbeat %s: %w", workID, err)
+		return nil, err
 	}
-	if expected == NoHeartbeat && state == "stopping" && last == nil {
-		return &HeartbeatResult{State: state, TTLSeconds: ttlSeconds}, nil
+	if expected == NoHeartbeat && w.State == "stopping" && w.LastHeartbeat == nil {
+		return &HeartbeatResult{State: w.State, TTLSeconds: ttlSeconds}, nil
 	}
 	return nil, ErrHeartbeatMismatch
 }
@@ -260,12 +255,12 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 // starting item's is its claim, which on stopping work no beat has reached
 // answers the stop too (see Heartbeat). Whether that worker is still alive is
 // not knowable here, and does not need to be: a wind-down nobody finishes is
-// finalized by a Poll of the environment once its lease — for a starting item,
-// the startup lease its ack installed — has lapsed and WindDown has passed
-// since the request (see Poll). moved is true for the move to stopping, though
-// the item is not stopped yet: the re-arm a finished stop owes the session
-// (plan 35 decision 13 iii) is owed by whichever path later finishes it — the
-// worker's own force stop, or the finalizing poll, in its own transaction.
+// finalized by a Poll of the environment once the lease the stop kept (see
+// StopWith) has lapsed and WindDown has passed since the request (see Poll).
+// moved is true for the move to stopping, though the item is not stopped yet:
+// the re-arm a finished stop owes the session (plan 35 decision 13 iii) is
+// owed by whichever path later finishes it — the worker's own force stop, or
+// the finalizing poll, in its own transaction.
 //
 // A queued item, polled or not, has no worker to ask — nobody acked it — and
 // nothing in flight to wind down, so a graceful stop of one completes outright
