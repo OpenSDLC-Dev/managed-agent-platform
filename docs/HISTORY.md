@@ -70,8 +70,11 @@ work; the graceful stop clearing a `starting` item's lease, which also let the f
 settle it under the startup lease; queued work parked in `stopping`; and `stopWork`
 re-arming every stop that moved an item.
 
-`tools/registrycheck` was clean on shape, and the `tools/sdkref` report counted 655
-citations, with no findings and no transitions awaiting a disposition.
+The full `make verify` gate passed on the branch: build, cross-build, vet, format check and
+61 test packages, with 90.21% total statement coverage. `tools/registrycheck` was clean on
+shape and issue state, and the `tools/sdkref` report counted 655 citations, with no findings
+and no transitions awaiting a disposition. Review results and CI are recorded in the pull
+request.
 
 ---
 
