@@ -61,24 +61,30 @@ graceful stop of the same item, and 2026-09-02's `work.stop.graceful`, `work.sto
 ## Scope
 
 - **Control plane:** the route moves from `handleNoContent` to `handle`. `stopWork` answers
-  through `toWire`. A stop that `queue.StopWith` reports as `ErrWorkConflict` is read back in
-  the same transaction and answered without the re-arm.
+  through `toWire`. `queue.StopWith` returns the item after the stop and whether the stop
+  moved it, and only a move to `stopped` re-arms. `stopped` is terminal, so a stop of
+  `stopped` work is answered with the item as it stands before the session row lock is taken.
 - **Worker:** `forceStop` keeps the poller's `WithResponseBodyInto` bypass. It serves this
-  200 and an older server's 204, and the worker still ignores an older server's 409.
+  200 and an older server's 204, and the worker still ignores an older server's 409. It reads
+  the 200's body to the end before closing it, so the transport can reuse the connection.
 - **Clients:** the generated SDK's typed `Stop`, which a 204 failed, now decodes the answer,
   and `ant beta:environments:work stop` prints the object.
 - **Registry:** the response-shape entry moves from the CONFIRMED divergences to the
   compatibility notes, with the chain of reversals kept auditable. The graceful stop of
   `stopping` work gets its own INFERRED entry, and the graceful-vs-force entry names #810.
+  Two differences every recorded work body shows, on every work surface and older than this
+  plan, get CONFIRMED entries: the `actor: null` no surface here renders, and an `id` that is
+  the session's there and a `work_` id here.
 
 ## Verification
 
 - The tests fail against the old handler, and each rule also fails under its own mutation:
   the stop answers GET's rendering; repeat stops of `stopped` work, forced and graceful,
   leave the object unchanged; a graceful stop of `stopping` work leaves it unchanged; a
-  forced stop of `stopping` work stamps `stopped_at` and keeps `stop_requested_at`; a repeat
-  stop re-arms nothing; the typed SDK `Stop` decodes the answer; the worker takes a 200, a
-  204 and a 409 without a warning.
+  forced stop of `stopping` work stamps `stopped_at` and keeps `stop_requested_at`; a stop
+  that moves nothing re-arms nothing, one that loses a race to another stop included; the
+  typed SDK `Stop` decodes the answer; the worker takes a 200, a 204 and a 409 without a
+  warning, and reads the 200's body to the end.
 - The real `ant beta:environments:work stop` runs against the branch. Then `make verify`,
   `tools/registrycheck` and `tools/sdkref`, independent verification, both reviews and the
   PR's CI, before the squash merge.

@@ -511,6 +511,100 @@ func TestWorkStopWaitsForTheSessionLock(t *testing.T) {
 	}
 }
 
+// Two stops of one live item race: the second reads the item live, waits on
+// the session lock the first holds, and finds the item stopped once it gets
+// it. It moved nothing, so it owes no re-arm; the first stop's commit carried
+// that. A stop of an item already stopped is answered before any lock is
+// taken, so this race is the one path on which a stop that moved nothing
+// finds a stopped item it could re-arm for (#804).
+func TestWorkStopLosingARaceDoesNotReArm(t *testing.T) {
+	s := newTestServer(t)
+	envID, sid, key := selfHostedWorker(t, s, "ek-race-lost")
+	appendOn(t, s, sid, "", false, domain.EventAgentToolUse, allowBashCall)
+	workID := s.enqueueAndPoll(t, envID, sid, key)
+	get := "/v1/environments/" + envID + "/work/" + workID
+	ctx := context.Background()
+
+	// The first stop, holding the session lock.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid); err != nil {
+		t.Fatal(err)
+	}
+	// The second, over the wire. A raw request, for the reason
+	// TestWorkStopWaitsForTheSessionLock gives.
+	type answer struct {
+		status int
+		body   map[string]any
+	}
+	second := make(chan answer, 1)
+	go func() {
+		var a answer
+		defer func() { second <- a }()
+		req, err := http.NewRequest(http.MethodPost, s.url+get+"/stop", strings.NewReader(`{"force":true}`))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return
+		}
+		defer res.Body.Close()
+		a.status = res.StatusCode
+		_ = json.NewDecoder(res.Body).Decode(&a.body)
+	}()
+	// Move the item only once the second stop is observably waiting on the
+	// lock, so it has read the item live: had it read the item stopped, it
+	// would have answered without reaching the re-arm at all.
+	waitSQL := `SELECT EXISTS (
+		SELECT 1 FROM pg_stat_activity
+		WHERE datname = current_database()
+		  AND wait_event_type = 'Lock'
+		  AND query LIKE '%FROM sessions%FOR UPDATE%')`
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		select {
+		case a := <-second:
+			t.Fatalf("the second stop answered %d without waiting for the session lock", a.status)
+		default:
+		}
+		var waiting bool
+		if err := s.pool.QueryRow(ctx, waitSQL).Scan(&waiting); err != nil {
+			t.Fatalf("poll pg_stat_activity: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second stop never waited on the session lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The first stop moves the item and commits. Its own re-arm is left out,
+	// so the call stays runnable with nothing live covering it: exactly what
+	// a second re-arm would act on.
+	if _, moved, err := queue.New(s.pool).StopWith(ctx, tx, domain.ID(envID), domain.ID(workID), true); err != nil || !moved {
+		t.Fatalf("the first stop: moved %v, %v", moved, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	a := <-second
+	if a.status != http.StatusOK || a.body["state"] != "stopped" {
+		t.Fatalf("the second stop = %d %v, want 200 with the stopped item", a.status, a.body)
+	}
+	if _, now, _ := s.workReq(t, http.MethodGet, get, key, nil); !reflect.DeepEqual(a.body, now) {
+		t.Errorf("the second stop answered %v, GET answers %v; want the item as it stands", a.body, now)
+	}
+	if n := s.liveWork(sid, queue.ToolExec) + s.liveWork(sid, queue.MCPExec) + s.liveWork(sid, queue.WebExec); n != 0 {
+		t.Errorf("live exec items after the lost race = %d, want 0 — the second stop re-armed the session", n)
+	}
+}
+
 // An interrupt naming the primary's own id on a single-agent session is the
 // session-wide interrupt spelled out: every live item is cancelled, the shared
 // exec item included, exactly as the unnamed form does.

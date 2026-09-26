@@ -381,8 +381,7 @@ func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error)
 
 // mapWorkErr maps a queue state-machine error onto its wire status: a missing
 // item is 404, a heartbeat precondition failure is 412. Anything else is an
-// internal fault — including queue.ErrWorkConflict, which is no error on the
-// wire: stopWork answers it with the item as it stands.
+// internal fault.
 func mapWorkErr(err error) error {
 	switch {
 	case errors.Is(err, queue.ErrWorkNotFound):
@@ -515,6 +514,18 @@ func (s *server) stopWork(r *http.Request) (any, error) {
 		return nil, err
 	}
 	ctx := r.Context()
+	// stopped is terminal: no statement moves a stopped row to another state.
+	// So a stop of a stopped item moves nothing and owes nothing, and is
+	// answered as it stands without the lock below. It is the routine repeat,
+	// not an edge: the reference worker follows each force stop with a graceful
+	// one.
+	cur, err := s.queue.GetWork(ctx, envID, workID)
+	if err != nil {
+		return nil, mapWorkErr(err)
+	}
+	if cur.State == "stopped" {
+		return toWire(cur), nil
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -524,38 +535,24 @@ func (s *server) stopWork(r *http.Request) (any, error) {
 	// that stops its item after its found set may leave calls a sibling
 	// thread committed under the live item, and the re-arm below must be
 	// serialized with every settlement and trigger that appends calls or
-	// enqueues — not rest on ON CONFLICT's wait-and-recheck. An item outside
-	// the work API's view has no session to lock; Stop reports it.
-	var sessionID, kind string
-	err = tx.QueryRow(ctx, `SELECT session_id, kind FROM work_items WHERE id = $1 AND environment_id = $2`,
-		workID, envID).Scan(&sessionID, &kind)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	// enqueues — not rest on ON CONFLICT's wait-and-recheck.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, cur.SessionID); err != nil {
 		return nil, err
 	}
-	if err == nil {
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sessionID); err != nil {
-			return nil, err
-		}
-	}
-	w, err := s.queue.StopWith(ctx, tx, envID, workID, force)
-	if errors.Is(err, queue.ErrWorkConflict) {
-		// Nothing moved, so nothing is owed: the transition that stopped the
-		// item already re-armed its session, and a second re-arm would hand
-		// the same calls out again for every repeated stop.
-		if w, err = s.queue.GetWorkWith(ctx, tx, envID, workID); err != nil {
-			return nil, mapWorkErr(err)
-		}
-		return toWire(w), nil
-	}
+	w, moved, err := s.queue.StopWith(ctx, tx, envID, workID, force)
 	if err != nil {
 		return nil, mapWorkErr(err)
 	}
-	// A tool_exec that reached stopped is re-armed. A graceful stop that
-	// parked the item stopping is not yet stopped; the worker's own stop after
-	// its wind-down lands here again, and a wind-down the worker never
-	// finishes is finalized — and re-armed — by the next poll.
-	if w.State == "stopped" && kind == string(queue.ToolExec) {
-		if err := s.rearm(ctx, tx, envID, domain.ID(sessionID)); err != nil {
+	// A tool_exec (the only kind the work API serves) that the stop moved to
+	// stopped is re-armed. A stop that moved nothing owes nothing: the
+	// transition that stopped the item already re-armed its session, and a
+	// second re-arm would hand the same calls out again for every repeated
+	// stop. A graceful stop that parked the item stopping is not yet stopped;
+	// the worker's own stop after its wind-down lands here again, and a
+	// wind-down the worker never finishes is finalized — and re-armed — by the
+	// next poll.
+	if moved && w.State == "stopped" {
+		if err := s.rearm(ctx, tx, envID, cur.SessionID); err != nil {
 			return nil, err
 		}
 	}

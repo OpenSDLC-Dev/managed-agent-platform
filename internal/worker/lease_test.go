@@ -321,7 +321,7 @@ func TestWorkerForceStopIgnoresAnOlderServersConflict(t *testing.T) {
 	// still-starting item's claim would be refused, and the worker would read
 	// that as a lost lease and send no stop at all.
 	waitForState(t, h, "active")
-	if _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), true); err != nil {
+	if _, _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), true); err != nil {
 		t.Fatalf("force stop: %v", err)
 	}
 
@@ -890,7 +890,7 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 	// The control plane asks the item to stop. The next heartbeat sees the
 	// stopping state and cancels the run; the held tool unblocks via ctx and
 	// never completes, so no result is posted.
-	if _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), false); err != nil {
+	if _, _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), false); err != nil {
 		t.Fatalf("graceful stop: %v", err)
 	}
 

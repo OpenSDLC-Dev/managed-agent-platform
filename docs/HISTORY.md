@@ -59,13 +59,15 @@ fragment says what changed.
 The new tests fail against the old handler, every one of them at its 204; the typed SDK
 `Stop` fails with the decoder error the poller works around. Each rule was then broken on its
 own, and the test that pins it failed each time. The mutations were: a repeat stop answered
-409 again; a repeat that re-arms (one live exec item after the repeats, where the test wants
+409 again; a stop that moved nothing re-arming (one live exec item left, where the tests want
 none); a forced repeat that re-stamps `stopped_at`; a graceful stop that moves `stopping`
 work; a forced stop of `stopping` work that re-stamps `stop_requested_at`, or one that leaves
 `stopped_at` null; a stop answering a rendering other than GET's; and the worker without its
-decoder bypass, or no longer ignoring 409. Without the bypass, the worker's 200 test still
-passes, as it should, because the typed decoder accepts a 200. The worker's 204 test is what
-catches it.
+decoder bypass, closing the 200's body unread, or no longer ignoring 409. A stop of `stopped`
+work is answered before the session lock is taken, so the re-arm mutation is caught by a stop
+that loses a race to another, not by a plain repeat. The worker's 200 test catches the unread
+body, and its 204 test the missing bypass. Its 409 test stops the item before the worker's
+own stop, so that the worker's stop is the repeat an older server refused.
 
 The real `ant beta:environments:work stop` was built from anthropic-cli v1.30.0 and run
 against the branch. It exited 0 and printed the object for five stops in turn: a graceful
@@ -74,8 +76,8 @@ with the first `stop_requested_at` kept), and a forced and a graceful repeat (un
 Against main it printed nothing for the 204 and exited 1 on each repeat's 409.
 
 The full `make verify` gate passed on the branch: build, cross-build, vet, format check and
-61 test packages, with 90.19% total statement coverage. `tools/registrycheck` was clean on
-shape and issue state. The `tools/sdkref` report counted 644 citations, with no findings and
+61 test packages, with 90.20% total statement coverage. `tools/registrycheck` was clean on
+shape and issue state. The `tools/sdkref` report counted 649 citations, with no findings and
 no transitions awaiting a disposition. Afterwards, the container set matched the one taken
 before the run.
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -128,7 +129,7 @@ func TestHeartbeatOnStoppingLearnsWithoutExtending(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Control plane requests a graceful stop.
-	if _, err := q.Stop(ctx, env, w.ID, false); err != nil {
+	if _, _, err := q.Stop(ctx, env, w.ID, false); err != nil {
 		t.Fatalf("graceful stop: %v", err)
 	}
 	// The worker's next heartbeat (echoing the prior value) still matches, but
@@ -231,12 +232,12 @@ func TestStopForceAndGraceful(t *testing.T) {
 		t.Fatalf("claimed item = %+v %v, want its enqueue started_at", held, err)
 	}
 	// Stop returns the updated item, which the wire answers with (#804).
-	stopped, err := q.Stop(ctx, env, id, false)
+	stopped, moved, err := q.Stop(ctx, env, id, false)
 	if err != nil {
 		t.Fatalf("graceful stop: %v", err)
 	}
-	if stopped.State != "stopping" || stopped.StopRequestedAt == nil || stopped.StoppedAt != nil {
-		t.Errorf("graceful stop returned %+v, want stopping with stop_requested_at and no stopped_at", stopped)
+	if !moved || stopped.State != "stopping" || stopped.StopRequestedAt == nil || stopped.StoppedAt != nil {
+		t.Errorf("graceful stop returned %+v (moved %v), want stopping with stop_requested_at and no stopped_at", stopped, moved)
 	}
 	// Neither stop moves started_at, as no reference stop does (#542).
 	if stopped.StartedAt == nil || !stopped.StartedAt.Equal(*held.StartedAt) {
@@ -247,17 +248,18 @@ func TestStopForceAndGraceful(t *testing.T) {
 	if !leaseHeld(t, pool, id) {
 		t.Error("graceful stop cleared the lease the winding-down worker still holds")
 	}
-	// Re-graceful-stopping a stopping item is a conflict.
-	if _, err := q.Stop(ctx, env, id, false); !errors.Is(err, queue.ErrWorkConflict) {
-		t.Errorf("re-graceful-stop = %v, want ErrWorkConflict", err)
+	// Re-graceful-stopping a stopping item moves nothing, and says so: it
+	// returns the item as it stands.
+	if again, moved, err := q.Stop(ctx, env, id, false); err != nil || moved || !reflect.DeepEqual(again, stopped) {
+		t.Errorf("re-graceful-stop = %+v, moved %v, %v; want the unchanged %+v, not moved", again, moved, err, stopped)
 	}
 	// force escalates stopping → stopped.
-	stopped, err = q.Stop(ctx, env, id, true)
+	stopped, moved, err = q.Stop(ctx, env, id, true)
 	if err != nil {
 		t.Fatalf("force stop: %v", err)
 	}
-	if stopped.State != "stopped" || stopped.StoppedAt == nil {
-		t.Errorf("force stop returned %+v, want stopped with stopped_at", stopped)
+	if !moved || stopped.State != "stopped" || stopped.StoppedAt == nil {
+		t.Errorf("force stop returned %+v (moved %v), want stopped with stopped_at", stopped, moved)
 	}
 	if stopped.StartedAt == nil || !stopped.StartedAt.Equal(*held.StartedAt) {
 		t.Errorf("force stop started_at = %v, want %v", stopped.StartedAt, held.StartedAt)
@@ -265,12 +267,14 @@ func TestStopForceAndGraceful(t *testing.T) {
 	if leaseHeld(t, pool, id) {
 		t.Error("force stop left a lease behind, want it cleared")
 	}
-	// Stopping an already-stopped item is a conflict.
-	if _, err := q.Stop(ctx, env, id, true); !errors.Is(err, queue.ErrWorkConflict) {
-		t.Errorf("stop of stopped = %v, want ErrWorkConflict", err)
+	// Stopping an already-stopped item, forced or not, moves nothing either.
+	for _, force := range []bool{true, false} {
+		if again, moved, err := q.Stop(ctx, env, id, force); err != nil || moved || !reflect.DeepEqual(again, stopped) {
+			t.Errorf("stop (force %v) of stopped = %+v, moved %v, %v; want the unchanged %+v, not moved", force, again, moved, err, stopped)
+		}
 	}
 	// A missing item is not-found.
-	if _, err := q.Stop(ctx, env, domain.NewID("work"), true); !errors.Is(err, queue.ErrWorkNotFound) {
+	if _, _, err := q.Stop(ctx, env, domain.NewID("work"), true); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("stop unknown = %v, want ErrWorkNotFound", err)
 	}
 }
@@ -325,11 +329,11 @@ func TestGracefulStopWithoutALeaseHolderStopsOutright(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			stopped, err := q.Stop(ctx, env, id, false)
+			stopped, moved, err := q.Stop(ctx, env, id, false)
 			if err != nil {
 				t.Fatalf("graceful stop: %v", err)
 			}
-			if stopped.State != "stopped" || stopped.StoppedAt == nil || stopped.StopRequestedAt == nil {
+			if !moved || stopped.State != "stopped" || stopped.StoppedAt == nil || stopped.StopRequestedAt == nil {
 				t.Errorf("graceful stop of a %s item returned %+v, want stopped with both timestamps", tc.name, stopped)
 			}
 			// The poll reservation, or the ack's startup lease, is released with it.
@@ -353,7 +357,7 @@ func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	q := queue.New(pool)
 	env, id := claimedItem(t, pool, q)
-	if _, err := q.Stop(ctx, env, id, false); err != nil {
+	if _, _, err := q.Stop(ctx, env, id, false); err != nil {
 		t.Fatalf("graceful stop: %v", err)
 	}
 
@@ -773,7 +777,7 @@ func TestEveryReHandOutMintsAFreshWorkIdentity(t *testing.T) {
 
 	// The stale worker revives. Every lifecycle call it makes under the identity
 	// it was handed is not-found — none of them reaches the replacement's item.
-	if _, err := q.Stop(ctx, env, stale.ID, true); !errors.Is(err, queue.ErrWorkNotFound) {
+	if _, _, err := q.Stop(ctx, env, stale.ID, true); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("stale force-stop = %v, want ErrWorkNotFound", err)
 	}
 	if _, err := q.Ack(ctx, env, stale.ID); !errors.Is(err, queue.ErrWorkNotFound) {
@@ -816,7 +820,7 @@ func TestLifecycleEndpointsRejectModelTurn(t *testing.T) {
 	if _, err := q.Heartbeat(ctx, env, mtID, queue.NoHeartbeat, 30); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("Heartbeat(model_turn) = %v, want ErrWorkNotFound", err)
 	}
-	if _, err := q.Stop(ctx, env, mtID, true); !errors.Is(err, queue.ErrWorkNotFound) {
+	if _, _, err := q.Stop(ctx, env, mtID, true); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("Stop(model_turn) = %v, want ErrWorkNotFound", err)
 	}
 	if _, err := q.UpdateMetadata(ctx, env, mtID, map[string]string{"x": "1"}, nil); !errors.Is(err, queue.ErrWorkNotFound) {
@@ -853,7 +857,7 @@ func TestLifecycleEndpointsRejectCloudToolExec(t *testing.T) {
 	if _, err := q.Ack(ctx, cloudEnv, id); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("Ack(cloud tool_exec) = %v, want ErrWorkNotFound", err)
 	}
-	if _, err := q.Stop(ctx, cloudEnv, id, true); !errors.Is(err, queue.ErrWorkNotFound) {
+	if _, _, err := q.Stop(ctx, cloudEnv, id, true); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("Stop(cloud tool_exec) = %v, want ErrWorkNotFound", err)
 	}
 	if _, err := q.UpdateMetadata(ctx, cloudEnv, id, map[string]string{"x": "1"}, nil); !errors.Is(err, queue.ErrWorkNotFound) {
@@ -944,7 +948,7 @@ func TestFinalizeAbandonedRechecksUnderTheTransaction(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	q := queue.New(pool)
 	env, id := claimedItem(t, pool, q)
-	if _, err := q.Stop(ctx, env, id, false); err != nil {
+	if _, _, err := q.Stop(ctx, env, id, false); err != nil {
 		t.Fatal(err)
 	}
 	// The flip re-checks the window itself, whatever a listing said: a lapsed
@@ -1024,7 +1028,7 @@ func TestHasUndrainedWork(t *testing.T) {
 
 	// Stopped is drained. Stop's force arm is what draws that boundary, so it is
 	// what the test uses to reach it.
-	if _, err := q.Stop(ctx, env, w.ID, true); err != nil {
+	if _, _, err := q.Stop(ctx, env, w.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	assertUndrained(t, q, ctx, env, false, "a stopped item")
