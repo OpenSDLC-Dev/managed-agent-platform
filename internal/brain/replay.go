@@ -217,8 +217,13 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			// the end event, or the next message of a session whose
 			// acknowledgment never ran or predates the turn — is what the
 			// model must answer, and the instruction would tell it not to.
-			// Which it is is fixed once the turn's reply is on the log, so
-			// every later replay renders the turn as its request did.
+			// Which it is is fixed once a reply closes the turn, so every later
+			// replay renders it as its request did. A reply that persisted
+			// nothing — an empty end_turn, or thinking alone, neither of which
+			// replays — closes nothing: a later message joins the open turn, as
+			// it joins any user turn such a reply left open, and the
+			// instruction goes, since that message is then what the model
+			// must answer.
 			var p struct {
 				OutcomeID   string `json:"outcome_id"`
 				Iteration   int64  `json:"iteration"`

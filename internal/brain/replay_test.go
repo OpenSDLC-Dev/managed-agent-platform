@@ -460,11 +460,12 @@ func TestBuildRequestRendersATerminalVerdictOnlyOnTheLastCycle(t *testing.T) {
 // it sees the end event, or a message sent to a session whose acknowledgment
 // never ran — is what the model must answer, so the verdict renders without
 // the instruction that would tell it not to. A turn the acknowledgment's own
-// reply closed keeps it, as every later replay of that turn must.
+// reply closed keeps it, as every later replay of that turn must; a reply that
+// persisted nothing closes no turn, so a later message still joins it.
 func TestBuildRequestDropsTheStopInstructionWhenInputSharesTheVerdictsTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name, result, verdict string
-		after                 []string // the rows after the verdict: "ack", "message", "outcome"
+		after                 []string // the rows after the verdict: "ack", "empty ack", "message", "outcome"
 		keep                  bool     // whether the verdict keeps "Do not continue working"
 	}{
 		{"satisfied, a message follows", "satisfied", "satisfies the rubric", []string{"message"}, false},
@@ -472,6 +473,7 @@ func TestBuildRequestDropsTheStopInstructionWhenInputSharesTheVerdictsTurn(t *te
 		{"budget exhausted, a message follows", "max_iterations_reached", "budget is exhausted", []string{"message"}, false},
 		{"satisfied, the next outcome follows", "satisfied", "satisfies the rubric", []string{"outcome"}, false},
 		{"satisfied, acknowledged, then a message", "satisfied", "satisfies the rubric", []string{"ack", "message"}, true},
+		{"satisfied, an empty acknowledgment, then a message", "satisfied", "satisfies the rubric", []string{"empty ack", "message"}, false},
 		{"satisfied, nothing follows", "satisfied", "satisfies the rubric", nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -496,6 +498,11 @@ func TestBuildRequestDropsTheStopInstructionWhenInputSharesTheVerdictsTurn(t *te
 						ev(seq+1, domain.EventAgentMessage, `{"content":[{"type":"text","text":"acknowledged"}]}`),
 						ev(seq+2, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+ack.ID.String()+`"}`))
 					seq += 3
+				case "empty ack": // an end_turn that persisted no agent.message
+					ack := ev(seq, domain.EventSpanModelRequestStart, `{}`)
+					history = append(history, ack,
+						ev(seq+1, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+ack.ID.String()+`"}`))
+					seq += 2
 				case "message":
 					history = append(history, ev(seq, domain.EventUserMessage, `{"content":"now add a sensitivity tab"}`))
 					seq++
