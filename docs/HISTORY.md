@@ -81,11 +81,11 @@ short of WindDown, to 45 s, and narrowed the worker test's claim that the worker
 tool" to what the test shows: the run is cancelled on the claim's answer and posts no tool
 result.
 
-The full `make verify` gate passed on the branch: build, cross-build, vet, format check and
-61 test packages, with 90.21% total statement coverage. `tools/registrycheck` was clean on
-shape and issue state, and the `tools/sdkref` report counted 655 citations, with no findings
-and no transitions awaiting a disposition. Review results and CI are recorded in the pull
-request.
+After the review fixes the full `make verify` gate passed on the branch: build, cross-build,
+vet, format check and 61 test packages, with 90.20% total statement coverage.
+`tools/registrycheck` was clean on shape and issue state, and the `tools/sdkref` report
+counted 656 citations, with no findings and no transitions awaiting a disposition. Review
+results and CI are recorded in the pull request.
 
 ---
 
