@@ -81,10 +81,26 @@ short of WindDown, to 45 s, and narrowed the worker test's claim that the worker
 tool" to what the test shows: the run is cancelled on the claim's answer and posts no tool
 result.
 
-After the review fixes the full `make verify` gate passed on the branch: build, cross-build,
-vet, format check and 61 test packages, with 90.20% total statement coverage.
+A second Codex review found that fix too wide. With no time bound on `stopping`, the
+token's whole matrix outlived WindDown, its session's read and events, the skill reads and
+the memory calls, for as long as no poll came to finalize the item. Past WindDown a
+`stopping` item's token now reaches only its item's heartbeat and stop
+(`worktoken.Principal.StopOnly`, computed in `Authenticate`'s own statement). The extended
+API test failed first with all six calls it now refuses answered 200: the session read, the
+events list and send, a skill read, and a memory list and create. A new unit row failed on
+`StopOnly` itself. Dropping the lane's gate, or computing `StopOnly` without the WindDown
+bound, each failed a test. The same review found an overclaim the first fix had repeated:
+that no settlement re-arms a session while the old item's token works. That holds for the
+finalizer alone. A force stop and `queue.CancelSession` settle at once, and the stopped
+item's token can work for the rest of its minute beside the session's next item, as it
+could before #810. The docs now say so and the API test pins it. The verifier's notes on the same text
+were folded in: the finalizer needs a poll, and the minute covers a worker told of the stop
+promptly.
+
+After the second review's fixes the full `make verify` gate passed on the branch: build,
+cross-build, vet, format check and 61 test packages, with 90.21% total statement coverage.
 `tools/registrycheck` was clean on shape and issue state, and the `tools/sdkref` report
-counted 656 citations, with no findings and no transitions awaiting a disposition. Review
+counted 657 citations, with no findings and no transitions awaiting a disposition. Review
 results and CI are recorded in the pull request.
 
 ---
