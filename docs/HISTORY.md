@@ -49,6 +49,32 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## A graceful stop of acked work goes stopping (plan 58, #810) — archived 2026-09-26, delivered in one PR
+
+The recordings reversed #25's rule that only `active` work may enter `stopping`. A graceful
+stop of acked `starting` work parks it there, keeping its startup lease, and the worker's
+`NO_HEARTBEAT` claim on it answers 200 `stopping` with an empty `last_heartbeat`, as
+`-custom-mixed-tools` #44 does, where it used to answer 412. Plan 58 holds the evidence and
+the owner's scope decision, and the fragment says what changed.
+
+The new tests failed against the old rule, each at its first assertion of it. The graceful
+stop answered `stopped` and cleared the lease. The claim answered 412. The finalization test
+found the item `stopped` under its startup lease. The re-arm test found a live exec item
+straight after the graceful stop. The typed SDK stop decoded `stopped`. And the worker test,
+stopped between its ack and its claim, got a 412 and sent no force stop. The API, re-arm and
+worker tests were also run red against an unmodified export of origin/main. The queue tests
+use the new pointer type, so they were run red with only that type change applied. Then each
+rule was broken on its own, and the test that pins it failed each time. The mutations were:
+the claim answering the stop on once-claimed `stopping` work, or on never-claimed `stopped`
+work; the graceful stop clearing a `starting` item's lease, which also let the finalizer
+settle it under the startup lease; queued work parked in `stopping`; and `stopWork`
+re-arming every stop that moved an item.
+
+`tools/registrycheck` was clean on shape, and the `tools/sdkref` report counted 655
+citations, with no findings and no transitions awaiting a disposition.
+
+---
+
 ## Work Stop answers 200 (plan 57, #804) — archived 2026-09-26, delivered in one PR
 
 The recordings reversed plan 04. All 27 recorded stops answer 200 with the work object and
