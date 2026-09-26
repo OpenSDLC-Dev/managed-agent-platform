@@ -74,13 +74,15 @@ func TestMintAndAuthenticate(t *testing.T) {
 		t.Errorf("an unknown token authenticated as %+v", p)
 	}
 
-	// A stop keeps the token for a minute from its request, the lease aside:
-	// the reference worker's wind-down and post-stop memory flush ride it.
+	// A stop keeps the token, the lease aside, while the item is stopping and
+	// for a minute from the request once it is stopped: the reference worker's
+	// wind-down and post-stop memory flush ride it.
 	for _, tc := range []struct {
 		name, sql string
 	}{
 		{"a just-stopped item", `UPDATE work_items SET state = 'stopped', stop_requested_at = now(), stopped_at = now(), lease_expires_at = NULL WHERE id = $1`},
 		{"a stopping item whose frozen lease lapsed", `UPDATE work_items SET state = 'stopping', stop_requested_at = now(), stopped_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`},
+		{"a stopping item whose stop was requested a minute ago", `UPDATE work_items SET state = 'stopping', stop_requested_at = now() - interval '61 seconds', stopped_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`},
 		// The worker's whole notice-and-flush (15 s + 30 s) fits the window.
 		{"an item whose stop was requested 45 s ago", `UPDATE work_items SET state = 'stopped', stop_requested_at = now() - interval '45 seconds', stopped_at = now(), lease_expires_at = NULL WHERE id = $1`},
 	} {

@@ -477,8 +477,8 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 // flush pass bounded at 30 s — 45 s of the 60). A stopping item is settled
 // as abandoned only once its lease lapsed AND this has passed since the stop
 // was requested: a live worker stops heartbeating the moment it learns of
-// the stop, so the lapse alone proves nothing inside the window. The
-// sessions token (internal/worktoken) lives exactly this long past the
+// the stop, so the lapse alone proves nothing inside the window. A stopped
+// item's sessions token (internal/worktoken) lives exactly this long past the
 // request, so no settlement re-arms a session while its token still works.
 // The cost: a session whose worker died mid-wind-down waits this long to be
 // re-armed, where the lease lapse alone would have done in half the time; a

@@ -290,8 +290,8 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 
 	// Its own item's stop. A graceful stop parks the active item in stopping
 	// with a lease the heartbeat no longer extends; the token rides the
-	// wind-down and the post-stop memory flush for a minute from the request,
-	// the lease and the force-stop aside, and is dead after.
+	// wind-down while the item is stopping, the lease aside, and the post-stop
+	// memory flush until a minute from the request, and is dead after.
 	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, tok); st != http.StatusOK {
 		t.Errorf("graceful stop with the token = %d, want 200", st)
 	}
@@ -418,6 +418,78 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 	}
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token3)); st != http.StatusUnauthorized {
 		t.Errorf("the token after its session archived = %d, want 401", st)
+	}
+}
+
+// TestSessionsTokenOutlivesWindDownWhileStopping: the reference worker beats
+// and force-stops with its item's sessions token (checked against
+// anthropic-sdk-go v1.70.1 — worker.go EnvironmentWorker.handleItem), and a
+// claim can reach stopping work past WindDown: the recorded one was answered
+// 60.06 s after its stop, and its force stop sent at 60.11 s (2026-09-19
+// custom-mixed-tools #23, #44 and #47). So the token lives while the item is
+// stopping, and that force stop settles it and re-arms once. Once stopped,
+// the token keeps only the minute from the request, whoever stopped the item.
+func TestSessionsTokenOutlivesWindDownWhileStopping(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	envID, sessionID, key := selfHostedWorker(t, s, "late-claim")
+	attachStoreBySeam(t, s, sessionID, "Notes late-claim")
+	appendOn(t, s, sessionID, "", false, domain.EventAgentToolUse, allowBashCall)
+	enqueueOn(t, s, envID, sessionID)
+	workID, _, token := pollItem(t, s, envID, key)
+	if token == "" {
+		t.Fatal("the store session's item carried no sessions token")
+	}
+	work := "/v1/environments/" + envID + "/work/" + workID
+	session := "/v1/sessions/" + sessionID
+	backdate := func(id, assign string) {
+		t.Helper()
+		if _, err := s.pool.Exec(ctx, `UPDATE work_items SET `+assign+` WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st := status(t, s, http.MethodPost, work+"/ack", nil, asBearer(key)); st != http.StatusOK {
+		t.Fatalf("ack = %d", st)
+	}
+	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, asBearer(key)); st != http.StatusOK {
+		t.Fatalf("graceful stop = %d", st)
+	}
+	// Past WindDown and the startup lease, and no poll has settled it.
+	backdate(workID, `stop_requested_at = now() - interval '61 seconds', lease_expires_at = now() - interval '1 second'`)
+
+	res, beat, raw := s.workReq(t, http.MethodPost, work+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", token, nil)
+	if res.StatusCode != http.StatusOK || beat["state"] != "stopping" {
+		t.Fatalf("the token's claim past WindDown = %d %s, want 200 stopping", res.StatusCode, raw)
+	}
+	res, stopped, raw := s.workReq(t, http.MethodPost, work+"/stop", token, map[string]any{"force": true})
+	if res.StatusCode != http.StatusOK || stopped["state"] != "stopped" {
+		t.Fatalf("the token's force stop past WindDown = %d %s, want 200 stopped", res.StatusCode, raw)
+	}
+	var others int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM work_items WHERE session_id = $1 AND id <> $2 AND kind <> 'model_turn'`, sessionID, workID).Scan(&others); err != nil {
+		t.Fatal(err)
+	}
+	if live := s.liveWork(sessionID, queue.ToolExec); others != 1 || live != 1 {
+		t.Errorf("after the force stop: %d other exec items, %d live; want exactly the one re-armed item", others, live)
+	}
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token)); st != http.StatusUnauthorized {
+		t.Errorf("the token once its item stopped past WindDown = %d, want 401", st)
+	}
+
+	// The re-armed item, stopped outright by the control plane: its token
+	// keeps the minute from the request, and not a moment past it.
+	workID2, _, token2 := pollItem(t, s, envID, key)
+	work2 := "/v1/environments/" + envID + "/work/" + workID2
+	if st := status(t, s, http.MethodPost, work2+"/stop", map[string]any{"force": true}, asBearer(key)); st != http.StatusOK {
+		t.Fatalf("force stop of the re-armed item = %d", st)
+	}
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusOK {
+		t.Errorf("the token of a just-stopped item = %d, want 200", st)
+	}
+	backdate(workID2, `stop_requested_at = now() - interval '61 seconds'`)
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusUnauthorized {
+		t.Errorf("the token of an item stopped past WindDown = %d, want 401", st)
 	}
 }
 

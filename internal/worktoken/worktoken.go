@@ -12,15 +12,16 @@
 // stored hash-only. It carries neither an expiry nor a revocation column: it
 // is valid while the item it names is live — the join conditions Authenticate
 // runs — so a re-hand-out (a fresh work id, #62), a lapsed lease and a session
-// archive each end it without an event, and a stop ends it queue.WindDown (a
-// minute) after it was requested: the reference worker flushes its unsynced
-// memory writes once the control plane has reported the stop, on a context of
-// its own bounded by 30 seconds (checked against anthropic-sdk-go v1.66.0 —
-// memories.go SessionMemoryStores.Cleanup), and a token dead at that instant
-// would lose them — a BYOC workdir is removed at the item's end, with no held
-// sandbox to sync from later as a cloud session has. The value itself is
-// gatetoken's mint under another prefix, so every internal bearer the
-// platform issues shares one entropy and one alphabet.
+// archive each end it without an event, and a stop ends it once the item is
+// stopped and queue.WindDown (a minute) has passed since the request: the
+// reference worker flushes its unsynced memory writes once the control plane
+// has reported the stop, on a context of its own bounded by 30 seconds
+// (checked against anthropic-sdk-go v1.66.0 — memories.go
+// SessionMemoryStores.Cleanup), and a token dead at that instant would lose
+// them — a BYOC workdir is removed at the item's end, with no held sandbox to
+// sync from later as a cloud session has. The value itself is gatetoken's
+// mint under another prefix, so every internal bearer the platform issues
+// shares one entropy and one alphabet.
 package worktoken
 
 import (
@@ -85,14 +86,19 @@ func Secret(token string) string {
 // Authenticate resolves a token to its principal, or the zero Principal when
 // the token is unknown or no longer names a live item: the item's id must
 // still be the one the token was minted for (a re-hand-out rewrites it), its
-// lease unexpired while it runs, or its stop requested within queue.WindDown
-// once it is stopping or stopped (a graceful stop parks a starting or active
-// item in stopping with a lease no heartbeat extends, so the window counts
-// from the request rather than from the lease or the stop's completion: the
-// wind-down and the post-stop flush both ride it), and its session
-// unarchived. WindDown is sized to the reference worker's flow (its doc), and
-// the queue settles an abandoned wind-down only once the same window has
-// passed, so no settlement re-arms a session while its token still works.
+// session unarchived, and the item
+//
+//   - before any stop: its lease unexpired;
+//   - stopping: unconditionally, until a force stop or the finalizer moves it
+//     on. Its worker still has the stop to finish, and may learn of it only
+//     about WindDown after the request: the recorded claim on such work was
+//     sent 58.9 s after it, its force stop at 60.1 s (2026-09-19
+//     custom-mixed-tools #23, #44 and #47);
+//   - stopped: its stop requested within queue.WindDown, the window the
+//     reference worker's post-stop flush rides (its doc). The finalizer
+//     settles only past that window, so no settlement re-arms a session while
+//     its token still works.
+//
 // The CASE rests on one invariant held two packages away: stop_requested_at
 // is set by every stop but Queue.Complete, and Complete settles only Claim's
 // items — the brain's turns and the cloud executor's tool runs — never a
@@ -105,8 +111,9 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Princi
 		   JOIN work_items w ON w.id = t.work_id AND w.session_id = t.session_id
 		   JOIN sessions s ON s.id = t.session_id
 		  WHERE t.token_hash = $1
-		    AND CASE WHEN w.state IN ('stopping', 'stopped')
-		             THEN w.stop_requested_at > now() - make_interval(secs => $2)
+		    AND CASE w.state
+		             WHEN 'stopping' THEN true
+		             WHEN 'stopped' THEN w.stop_requested_at > now() - make_interval(secs => $2)
 		             ELSE w.lease_expires_at > now() END
 		    AND s.archived_at IS NULL`,
 		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID)
