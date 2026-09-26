@@ -52,11 +52,14 @@ type DB interface {
 }
 
 // Principal is what a token authenticates — the item, its session, and the
-// environment both belong to.
+// environment both belong to. StopOnly marks a stopping item whose stop was
+// requested more than queue.WindDown ago: its worker has only the stop left
+// to finish, so the lane admits it on the item's heartbeat and stop alone.
 type Principal struct {
 	WorkID        string
 	SessionID     string
 	EnvironmentID string
+	StopOnly      bool
 }
 
 // Mint issues the token for workID's claim of sessionID's item and stores its
@@ -93,20 +96,24 @@ func Secret(token string) string {
 //     on. Its worker still has the stop to finish, and may learn of it only
 //     about WindDown after the request: the recorded claim on such work was
 //     sent 58.9 s after it, its force stop at 60.1 s (2026-09-19
-//     custom-mixed-tools #23, #44 and #47);
+//     custom-mixed-tools #23, #44 and #47). Past WindDown the principal is
+//     StopOnly: the finalizer runs only on a poll of the environment, which
+//     may never come, and until then a gone worker's token must not keep its
+//     session and memories;
 //   - stopped: its stop requested within queue.WindDown, the window the
 //     reference worker's post-stop flush rides (its doc). The finalizer
 //     settles only past that window, so no settlement re-arms a session while
 //     its token still works.
 //
-// The CASE rests on one invariant held two packages away: stop_requested_at
-// is set by every stop but Queue.Complete, and Complete settles only Claim's
-// items — the brain's turns and the cloud executor's tool runs — never a
-// polled one.
+// The CASE and StopOnly rest on one invariant held two packages away:
+// stop_requested_at is set by every stop but Queue.Complete, and Complete
+// settles only Claim's items — the brain's turns and the cloud executor's
+// tool runs — never a polled one.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,
-		`SELECT t.work_id, t.session_id, w.environment_id
+		`SELECT t.work_id, t.session_id, w.environment_id,
+		        w.state = 'stopping' AND w.stop_requested_at <= now() - make_interval(secs => $2)
 		   FROM work_session_tokens t
 		   JOIN work_items w ON w.id = t.work_id AND w.session_id = t.session_id
 		   JOIN sessions s ON s.id = t.session_id
@@ -116,7 +123,7 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Princi
 		             WHEN 'stopped' THEN w.stop_requested_at > now() - make_interval(secs => $2)
 		             ELSE w.lease_expires_at > now() END
 		    AND s.archived_at IS NULL`,
-		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID)
+		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID, &p.StopOnly)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, nil
 	}

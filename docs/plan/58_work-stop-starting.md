@@ -73,7 +73,12 @@ ordinary recorded claim and echo answers `ttl_seconds: 300`; the stopping claim 
   the request, `stopping` or `stopped`. The reference worker beats and force-stops with the
   token when the item carries one, and the recorded claim was sent 58.9 s after its stop,
   the force stop at 60.1 s. With a token, that force stop would have been refused 401,
-  leaving the item to the finalizer. Once `stopped`, the token keeps the minute from the
+  leaving the item to the finalizer. Past WindDown it reaches only the item's heartbeat
+  and stop: the finalizer runs only on a poll, which may never come, and a gone worker's
+  token must not keep the session and its memories until then. The reference worker's
+  memory flush runs before its force stop, so a claim that late cannot flush, as before
+  #810; but its session read is refused too, which fails the item before its run starts,
+  so nothing was written to flush. Once `stopped`, the token keeps the minute from the
   request, so a settlement still never re-arms a session while its token works.
 - **The claim writes nothing.** The recorded force stop that follows still carries a null
   `latest_heartbeat_at`, so the answer records no beat and extends no lease. The claim is
@@ -96,8 +101,9 @@ ordinary recorded claim and echo answers `ttl_seconds: 300`; the stopping claim 
 ## Scope
 
 - **Control plane:** `queue.StopWith`'s graceful arm, `queue.Heartbeat`'s failed-claim
-  path, the heartbeat wire type, `worktoken.Authenticate`'s window for `stopping` work, and
-  the comments on `Stop`, `Poll` and `stopWork`'s re-arm.
+  path, the heartbeat wire type, `worktoken.Authenticate`'s window for `stopping` work and
+  the sessions-token lane's stop-only admission past WindDown, and the comments on `Stop`,
+  `Poll` and `stopWork`'s re-arm.
 - **Worker:** comments only, on `hbExitStopRequested` and in its tests.
 - **Registry:** the graceful-vs-force entry is rewritten as a dated reversal, confirmed by
   recording, and keeps the old rule's argument. The #804 response-shape entry stops saying
@@ -112,8 +118,8 @@ ordinary recorded claim and echo answers `ttl_seconds: 300`; the stopping claim 
   and on the abandoned path; the typed SDK decoding the claim as it decodes the recorded
   body; the worker, stopped between its ack and its claim, cancelling its run on the
   claim's answer, posting no tool result, and force-stopping the item; and a sessions token
-  authenticating that claim and force stop past WindDown. The neighbouring 412s and the
-  queued stop are pinned too, and each rule is broken on its own to show its test catches
-  it.
+  authenticating that claim and force stop past WindDown, and refused everywhere else
+  there. The neighbouring 412s and the queued stop are pinned too, and each rule is broken
+  on its own to show its test catches it.
 - `make verify`, `tools/registrycheck` against GitHub and `make sdk-bump-report`, then
   independent verification, both reviews and the PR's CI before the squash merge.

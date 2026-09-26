@@ -427,13 +427,17 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 // claim can reach stopping work past WindDown: the recorded one was answered
 // 60.06 s after its stop, and its force stop sent at 60.11 s (2026-09-19
 // custom-mixed-tools #23, #44 and #47). So the token lives while the item is
-// stopping, and that force stop settles it and re-arms once. Once stopped,
-// the token keeps only the minute from the request, whoever stopped the item.
+// stopping, and that force stop settles it and re-arms once. Past WindDown the
+// stop is all it has left to finish, so it reaches the item's heartbeat and
+// stop alone: an item nothing polls must not keep a decommissioned worker in
+// its session and memories. Once stopped, the token keeps only the minute from
+// the request, whoever stopped the item.
 func TestSessionsTokenOutlivesWindDownWhileStopping(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 	envID, sessionID, key := selfHostedWorker(t, s, "late-claim")
-	attachStoreBySeam(t, s, sessionID, "Notes late-claim")
+	memories := "/v1/memory_stores/" + attachStoreBySeam(t, s, sessionID, "Notes late-claim") + "/memories"
+	skill := "/v1/skills/" + s.createSkill(t)["id"].(string)
 	appendOn(t, s, sessionID, "", false, domain.EventAgentToolUse, allowBashCall)
 	enqueueOn(t, s, envID, sessionID)
 	workID, _, token := pollItem(t, s, envID, key)
@@ -454,8 +458,30 @@ func TestSessionsTokenOutlivesWindDownWhileStopping(t *testing.T) {
 	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, asBearer(key)); st != http.StatusOK {
 		t.Fatalf("graceful stop = %d", st)
 	}
-	// Past WindDown and the startup lease, and no poll has settled it.
+	// Inside WindDown, the startup lease lapsed, the whole matrix still works.
+	reads := []string{session, session + "/events", skill, memories}
+	backdate(workID, `stop_requested_at = now() - interval '45 seconds', lease_expires_at = now() - interval '1 second'`)
+	for _, path := range reads {
+		if st := status(t, s, http.MethodGet, path, nil, asBearer(token)); st != http.StatusOK {
+			t.Errorf("GET %s with the token inside WindDown = %d, want 200", path, st)
+		}
+	}
+	// Past WindDown and the startup lease, and no poll has settled it: every
+	// route but the item's heartbeat and stop refuses the token.
 	backdate(workID, `stop_requested_at = now() - interval '61 seconds', lease_expires_at = now() - interval '1 second'`)
+	for _, path := range reads {
+		if st := status(t, s, http.MethodGet, path, nil, asBearer(token)); st != http.StatusUnauthorized {
+			t.Errorf("GET %s with the token past WindDown = %d, want 401", path, st)
+		}
+	}
+	for path, body := range map[string]any{
+		session + "/events": map[string]any{"events": []any{userMessage("late")}},
+		memories:            map[string]any{"path": "/late.md", "content": "late"},
+	} {
+		if st := status(t, s, http.MethodPost, path, body, asBearer(token)); st != http.StatusUnauthorized {
+			t.Errorf("POST %s with the token past WindDown = %d, want 401", path, st)
+		}
+	}
 
 	res, beat, raw := s.workReq(t, http.MethodPost, work+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", token, nil)
 	if res.StatusCode != http.StatusOK || beat["state"] != "stopping" {
@@ -473,8 +499,14 @@ func TestSessionsTokenOutlivesWindDownWhileStopping(t *testing.T) {
 	if live := s.liveWork(sessionID, queue.ToolExec); others != 1 || live != 1 {
 		t.Errorf("after the force stop: %d other exec items, %d live; want exactly the one re-armed item", others, live)
 	}
-	if st := status(t, s, http.MethodGet, session, nil, asBearer(token)); st != http.StatusUnauthorized {
-		t.Errorf("the token once its item stopped past WindDown = %d, want 401", st)
+	for _, probe := range []struct{ method, path string }{
+		{http.MethodGet, session},
+		{http.MethodPost, work + "/heartbeat?expected_last_heartbeat=NO_HEARTBEAT"},
+		{http.MethodPost, work + "/stop"},
+	} {
+		if st := status(t, s, probe.method, probe.path, map[string]any{}, asBearer(token)); st != http.StatusUnauthorized {
+			t.Errorf("%s %s with the token once its item stopped past WindDown = %d, want 401", probe.method, probe.path, st)
+		}
 	}
 
 	// The re-armed item, stopped outright by the control plane: its token

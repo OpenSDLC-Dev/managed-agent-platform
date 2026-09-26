@@ -95,12 +95,13 @@ func memoryRouteForWorker(method, rest string) bool {
 // requireWorkToken is the lane: it resolves the token (a 401 when it is
 // unknown or no longer names a live item — worktoken.Authenticate's join
 // conditions), then admits the request only on the route family the token's
-// principal reaches. A session other than its own — a sibling in the same
-// environment included — and an unattached store answer the not-found the
-// environment-key lane gives for another environment's session, so a worker
-// can neither reach them nor learn they exist. The request continues with the
-// environment in context (workScope's check) and the session for the memory
-// handlers' attribution.
+// principal reaches, which for a StopOnly principal is its own item's
+// heartbeat and stop alone. A session other than its own — a sibling in the
+// same environment included — and an unattached store answer the not-found
+// the environment-key lane gives for another environment's session, so a
+// worker can neither reach them nor learn they exist. The request continues
+// with the environment in context (workScope's check) and the session for the
+// memory handlers' attribution.
 func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, _ := bearerToken(r)
@@ -116,6 +117,9 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 		refused := errAuth("the sessions token does not authorize this route")
 		p := r.URL.EscapedPath()
 		switch {
+		case principal.StopOnly && !isWorkPath(p):
+			writeError(w, r, errAuth("the sessions token's work is past its wind-down; it authorizes only the work's heartbeat and stop"))
+			return
 		case isWorkPath(p):
 			env, work, action := splitWork(p)
 			if r.Method != http.MethodPost || env != principal.EnvironmentID || work != principal.WorkID ||
