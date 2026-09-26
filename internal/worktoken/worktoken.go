@@ -12,16 +12,22 @@
 // stored hash-only. It carries neither an expiry nor a revocation column: it
 // is valid while the item it names is live — the join conditions Authenticate
 // runs — so a re-hand-out (a fresh work id, #62), a lapsed lease and a session
-// archive each end it without an event, and a stop ends it once the item is
-// stopped and queue.WindDown (a minute) has passed since the request: the
-// reference worker flushes its unsynced memory writes once the control plane
-// has reported the stop, on a context of its own bounded by 30 seconds
-// (checked against anthropic-sdk-go v1.66.0 — memories.go
-// SessionMemoryStores.Cleanup), and a token dead at that instant would lose
-// them — a BYOC workdir is removed at the item's end, with no held sandbox to
-// sync from later as a cloud session has. The value itself is gatetoken's
-// mint under another prefix, so every internal bearer the platform issues
-// shares one entropy and one alphabet.
+// archive each end it without an event. A stop leaves it whole for a minute
+// from the request (queue.WindDown), then ends it once the item is stopped,
+// or keeps only the item's heartbeat and stop while it is still stopping
+// (Authenticate). The reference worker's memory flush rides that minute: it
+// flushes its unsynced memory writes once the control plane has reported the
+// stop, on a context of its own bounded by 30 seconds (checked against
+// anthropic-sdk-go v1.66.0 — memories.go SessionMemoryStores.Cleanup), and a
+// token dead at that instant would lose them — a BYOC workdir is removed at
+// the item's end, with no held sandbox to sync from later as a cloud session
+// has. The minute covers a worker told of the stop promptly, the usual case:
+// a claimed item's worker learns of it at its next heartbeat, within 15 s
+// here. One told late, like the recorded never-claimed one (its force stop
+// 60.1 s after the request), loses the flush, but its run was cancelled at
+// its claim, before any tool ran, so it has nothing to flush. The value
+// itself is gatetoken's mint under another prefix, so every internal bearer
+// the platform issues shares one entropy and one alphabet.
 package worktoken
 
 import (
@@ -92,14 +98,14 @@ func Secret(token string) string {
 // session unarchived, and the item
 //
 //   - before any stop: its lease unexpired;
-//   - stopping: unconditionally, until a force stop or the finalizer moves it
-//     on. Its worker still has the stop to finish, and may learn of it only
-//     about WindDown after the request: the recorded claim on such work was
-//     sent 58.9 s after it, its force stop at 60.1 s (2026-09-19
+//   - stopping: until a force stop settles it, or a poll of the environment
+//     once its lease and WindDown have passed — never, if nothing polls. Its
+//     worker still has the stop to finish, and may learn of it only about
+//     WindDown after the request: the recorded claim on such work was sent
+//     58.9 s after it, its force stop at 60.1 s (2026-09-19
 //     custom-mixed-tools #23, #44 and #47). Past WindDown the principal is
-//     StopOnly: the finalizer runs only on a poll of the environment, which
-//     may never come, and until then a gone worker's token must not keep its
-//     session and memories;
+//     StopOnly, so a stranded item's token can still finish the stop and
+//     reach nothing else;
 //   - stopped: its stop requested within queue.WindDown, the window the
 //     reference worker's post-stop flush rides (its doc). The finalizer
 //     settles an abandoned wind-down only past that window, so its re-arm
