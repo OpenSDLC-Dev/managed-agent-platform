@@ -194,7 +194,10 @@ func TestOutcomeQuiescenceOnTheLastCycleAcknowledgesAndReadsTheNotice(t *testing
 	for _, m := range h.provider.calls[3].Messages {
 		ack.Write(m.Content)
 	}
-	for _, want := range []string{"ended its turn without reporting", "satisfies the rubric"} {
+	// The notice, held through the grading window, reads after the verdict,
+	// and the verdict keeps its stop instruction: a platform notice is no
+	// client input the acknowledgment must answer (#801).
+	for _, want := range []string{"ended its turn without reporting", "satisfies the rubric", "Do not continue working"} {
 		if !strings.Contains(ack.String(), want) {
 			t.Errorf("acknowledgment request lacks %q", want)
 		}

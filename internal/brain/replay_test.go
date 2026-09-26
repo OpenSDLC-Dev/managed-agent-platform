@@ -454,24 +454,28 @@ func TestBuildRequestRendersATerminalVerdictOnlyOnTheLastCycle(t *testing.T) {
 	}
 }
 
-// The acknowledgment's "Do not continue working" closes a verdict only when
-// the verdict is the last thing in its user turn. Input that shares the turn —
-// a message posted around the verdict, the next outcome a client defines once
-// it sees the end event, or a message sent to a session whose acknowledgment
-// never ran — is what the model must answer, so the verdict renders without
-// the instruction that would tell it not to. A turn the acknowledgment's own
-// reply closed keeps it, as every later replay of that turn must; a reply that
-// persisted nothing closes no turn, so a later message still joins it.
+// The acknowledgment's "Do not continue working" closes a verdict unless
+// client input follows it in its user turn. That input — a message posted
+// around the verdict, the next outcome a client defines once it sees the end
+// event, or a message sent to a session whose acknowledgment never ran — is
+// what the model must answer, so the verdict renders without the instruction
+// that would tell it not to. A child's ending notice held through the grading
+// window is no such input (#801), so the verdict keeps it. A turn the
+// acknowledgment's own reply closed keeps it, as every later replay of that
+// turn must; a reply that persisted nothing closes no turn, so a later
+// message still joins it.
 func TestBuildRequestDropsTheStopInstructionWhenInputSharesTheVerdictsTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name, result, verdict string
-		after                 []string // the rows after the verdict: "ack", "empty ack", "message", "outcome"
+		after                 []string // the rows after the verdict: "ack", "empty ack", "message", "notice", "outcome"
 		keep                  bool     // whether the verdict keeps "Do not continue working"
 	}{
 		{"satisfied, a message follows", "satisfied", "satisfies the rubric", []string{"message"}, false},
 		{"failed, a message follows", "failed", "cannot be applied", []string{"message"}, false},
 		{"budget exhausted, a message follows", "max_iterations_reached", "budget is exhausted", []string{"message"}, false},
 		{"satisfied, the next outcome follows", "satisfied", "satisfies the rubric", []string{"outcome"}, false},
+		{"satisfied, a child's notice follows", "satisfied", "satisfies the rubric", []string{"notice"}, true},
+		{"satisfied, a notice then a message", "satisfied", "satisfies the rubric", []string{"notice", "message"}, false},
 		{"satisfied, acknowledged, then a message", "satisfied", "satisfies the rubric", []string{"ack", "message"}, true},
 		{"satisfied, an empty acknowledgment, then a message", "satisfied", "satisfies the rubric", []string{"empty ack", "message"}, false},
 		{"satisfied, nothing follows", "satisfied", "satisfies the rubric", nil, true},
@@ -505,6 +509,10 @@ func TestBuildRequestDropsTheStopInstructionWhenInputSharesTheVerdictsTurn(t *te
 					seq += 2
 				case "message":
 					history = append(history, ev(seq, domain.EventUserMessage, `{"content":"now add a sensitivity tab"}`))
+					seq++
+				case "notice":
+					history = append(history, ev(seq, domain.EventAgentThreadMessageReceived,
+						`{"content":[{"type":"text","text":"[agent worker ended its turn without reporting]"}],"from_session_thread_id":"sthr_child","from_agent_name":"worker"}`))
 					seq++
 				case "outcome":
 					history = append(history, ev(seq, domain.EventUserDefineOutcome,

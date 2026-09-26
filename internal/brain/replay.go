@@ -80,9 +80,9 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		if role == "" {
 			return nil
 		}
-		// A prompt that input followed in its turn loses its stop instruction.
+		// A prompt client input followed in its turn loses its stop instruction.
 		for _, a := range acks {
-			if a.at == len(blocks)-1 {
+			if !a.answered {
 				continue
 			}
 			blk, err := json.Marshal(map[string]any{"type": "text", "text": a.verdict})
@@ -113,6 +113,13 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		}
 		role, results, blocks, uses, acks = "", nil, nil, nil, nil
 		return nil
+	}
+	// clientInput marks the open turn's acknowledgment prompts as followed by
+	// client input, which flush takes their stop instruction off for.
+	clientInput := func() {
+		for i := range acks {
+			acks[i].answered = true
+		}
 	}
 	turn := func(r string) error {
 		if role != r {
@@ -152,6 +159,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				return req, 0, err
 			}
 			blocks = append(blocks, items...)
+			clientInput()
 
 		case domain.EventUserDefineOutcome:
 			// The outcome definition renders as a user-role message built
@@ -192,6 +200,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				return req, 0, err
 			}
 			blocks = append(blocks, blk)
+			clientInput()
 
 		case domain.EventSpanOutcomeEvalEnd:
 			// Grader feedback re-enters the conversation deterministically
@@ -210,13 +219,17 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			// conversation: nothing is rendered, so a later user.message
 			// replays as it always has.
 			//
-			// An acknowledgment prompt closes on "Do not continue working" only
-			// while the verdict is the last block of its user turn (ackBlock,
-			// settled at flush). Input sharing the turn — a message posted
+			// An acknowledgment prompt closes on "Do not continue working"
+			// unless client input follows the verdict in its user turn
+			// (ackBlock, settled at flush). That input — a message posted
 			// around the verdict, the next outcome a client defined on seeing
 			// the end event, or the next message of a session whose
 			// acknowledgment never ran or predates the turn — is what the
-			// model must answer, and the instruction would tell it not to.
+			// model must answer, and the instruction would tell it not to. A
+			// child's row does not count: the ending notice a grading window
+			// held reads after the verdict, and a notice is no input worth a
+			// turn after a terminal verdict (#801, gradingChain), so the
+			// acknowledgment is still told to stop.
 			// Which it is is fixed once a reply closes the turn, so every later
 			// replay renders it as its request did. A reply that persisted
 			// nothing — an empty end_turn, or thinking alone, neither of which
@@ -416,10 +429,11 @@ func contentBlocks(raw json.RawMessage) ([]json.RawMessage, error) {
 
 // ackBlock is an acknowledgment prompt in the open user turn: blocks[at],
 // rendered with its stop instruction, which flush takes off (leaving verdict)
-// when anything follows it in the turn.
+// when client input followed it in the turn (answered).
 type ackBlock struct {
-	at      int
-	verdict string
+	at       int
+	verdict  string
+	answered bool
 }
 
 // toolAnswer is one tool_result block and the tool-use event id it answers.
