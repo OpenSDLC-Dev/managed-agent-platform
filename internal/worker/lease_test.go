@@ -183,55 +183,71 @@ func TestWorkerPollsRunsAndStops(t *testing.T) {
 // connection. A probe around each 200 stop body the worker receives records
 // whether it was, and that the probe saw one proves the test's premise. A
 // mishandled 200 could also cry wolf on a clean finish, so the absence of a
-// false warning is asserted too.
+// false warning is asserted too. Work metadata has no size cap of its own, so
+// the object can run past any bound a drain might set; the large case is one
+// well past 64 KiB, and it is read to the end all the same.
 func TestWorkerForceStopAcceptsTheWorkObject(t *testing.T) {
-	sb := &fakeSandbox{}
-	h := newHarness(t, sb)
-	h.suspend(t, writeUse("out.txt", "hello"))
-	h.enqueueWork(t)
-	var mu sync.Mutex
-	var bodies []*drainProbe
-	h.client = sdk.NewClient(
-		option.WithoutEnvironmentDefaults(),
-		option.WithBaseURL(h.serverURL),
-		option.WithAuthToken(h.key),
-		option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
-			res, err := next(req)
-			if err == nil && strings.HasSuffix(req.URL.Path, "/stop") && res.StatusCode == http.StatusOK &&
-				strings.HasPrefix(res.Header.Get("Content-Type"), "application/json") {
-				p := &drainProbe{ReadCloser: res.Body}
-				res.Body = p
-				mu.Lock()
-				bodies = append(bodies, p)
-				mu.Unlock()
+	for _, tc := range []struct {
+		name string
+		pad  int // bytes of metadata on the item
+	}{{"a small object", 0}, {"an object past 64 KiB", 100_000}} {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			h.suspend(t, writeUse("out.txt", "hello"))
+			h.enqueueWork(t)
+			if tc.pad > 0 {
+				if _, err := h.pool.Exec(context.Background(),
+					`UPDATE work_items SET metadata = jsonb_build_object('pad', repeat('x', $2))
+					  WHERE session_id = $1 AND kind = 'tool_exec'`, h.sid.String(), tc.pad); err != nil {
+					t.Fatalf("pad metadata: %v", err)
+				}
 			}
-			return res, err
-		}),
-	)
+			var mu sync.Mutex
+			var bodies []*drainProbe
+			h.client = sdk.NewClient(
+				option.WithoutEnvironmentDefaults(),
+				option.WithBaseURL(h.serverURL),
+				option.WithAuthToken(h.key),
+				option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+					res, err := next(req)
+					if err == nil && strings.HasSuffix(req.URL.Path, "/stop") && res.StatusCode == http.StatusOK &&
+						strings.HasPrefix(res.Header.Get("Content-Type"), "application/json") {
+						p := &drainProbe{ReadCloser: res.Body}
+						res.Body = p
+						mu.Lock()
+						bodies = append(bodies, p)
+						mu.Unlock()
+					}
+					return res, err
+				}),
+			)
 
-	warnings := captureWarnings(t)
+			warnings := captureWarnings(t)
 
-	w, done := h.newWorker(Config{})
-	cancel, errc := runWorker(w)
-	waitDone(t, done)
-	waitExit(t, cancel, errc)
+			w, done := h.newWorker(Config{})
+			cancel, errc := runWorker(w)
+			waitDone(t, done)
+			waitExit(t, cancel, errc)
 
-	if got := h.workState(t); got != "stopped" {
-		t.Fatalf("work item state = %q, want stopped", got)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(bodies) == 0 {
-		t.Fatal("no stop was answered 200 with a JSON body; the test proves nothing")
-	}
-	for i, p := range bodies {
-		if !p.closed.Load() || !p.drained.Load() {
-			t.Errorf("stop body %d: closed %v, read to EOF before the close %v; want both, or the connection is dropped",
-				i, p.closed.Load(), p.drained.Load())
-		}
-	}
-	if out := warnings(); strings.Contains(out, "force-stop failed") {
-		t.Errorf("a successful 200 stop logged a failure:\n%s", out)
+			if got := h.workState(t); got != "stopped" {
+				t.Fatalf("work item state = %q, want stopped", got)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(bodies) == 0 {
+				t.Fatal("no stop was answered 200 with a JSON body; the test proves nothing")
+			}
+			for i, p := range bodies {
+				if !p.closed.Load() || !p.drained.Load() {
+					t.Errorf("stop body %d: closed %v, read to EOF before the close %v; want both, or the connection is dropped",
+						i, p.closed.Load(), p.drained.Load())
+				}
+			}
+			if out := warnings(); strings.Contains(out, "force-stop failed") {
+				t.Errorf("a successful 200 stop logged a failure:\n%s", out)
+			}
+		})
 	}
 }
 

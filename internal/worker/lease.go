@@ -663,11 +663,13 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (live, coord
 // the response destination is rebound to **http.Response and the body drained
 // rather than decoded: the transport reuses a connection only once its body has
 // been read to the end, so a body closed unread would cost the next request a
-// new connection. The drain is bounded, since a work object is small and a
-// body past the bound is not one. The rebinding is also what keeps an older
-// control plane working: that one answered a bodiless 204, and the generated
-// method is typed *BetaSelfHostedWork, so the SDK's strict decoder fails such a
-// successful call with "expected destination type of 'string' or '[]byte' …".
+// new connection. The drain reads to the end, bounded only by the stop's own
+// timeout: work metadata has no size cap, so any shorter bound would drop the
+// connection for exactly the items that carry the most. The rebinding is also
+// what keeps an older control plane working: that one answered a bodiless 204,
+// and the generated method is typed *BetaSelfHostedWork, so the SDK's strict
+// decoder fails such a successful call with "expected destination type of
+// 'string' or '[]byte' …".
 // The same bypass is what the reference's own poller applies, on the reading
 // that the service sends 204 (checked against anthropic-sdk-go v1.70.1 —
 // poller.go stopWork); recordings of the service falsify that reading (#804),
@@ -683,7 +685,7 @@ func (w *Worker) forceStop(workID, sessionID string) {
 		slog.Warn("worker: force-stop failed", "work", workID, "session", sessionID, "err", err)
 	}
 	if raw != nil && raw.Body != nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(raw.Body, 1<<16))
+		_, _ = io.Copy(io.Discard, raw.Body)
 		_ = raw.Body.Close()
 	}
 }

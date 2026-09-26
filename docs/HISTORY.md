@@ -76,7 +76,7 @@ with the first `stop_requested_at` kept), and a forced and a graceful repeat (un
 Against main it printed nothing for the 204 and exited 1 on each repeat's 409.
 
 The full `make verify` gate passed on the branch: build, cross-build, vet, format check and
-61 test packages, with 90.20% total statement coverage. `tools/registrycheck` was clean on
+61 test packages, with about 90.2% total statement coverage (90.19–90.20% across runs). `tools/registrycheck` was clean on
 shape and issue state. The `tools/sdkref` report counted 649 citations, with no findings and
 no transitions awaiting a disposition. Afterwards, the container set matched the one taken
 before the run.
