@@ -79,7 +79,9 @@ ordinary recorded claim and echo answers `ttl_seconds: 300`; the stopping claim 
   memory flush runs before its force stop, so a claim that late cannot flush, as before
   #810; but its session read is refused too, which fails the item before its run starts,
   so nothing was written to flush. Once `stopped`, the token keeps the minute from the
-  request, so a settlement still never re-arms a session while its token works.
+  request, so the finalizer, which settles only past it, still never re-arms a session
+  while the abandoned item's token works. A force stop re-arms at once, so its item's
+  token can work for the rest of the minute beside the next item, as before #810.
 - **The claim writes nothing.** The recorded force stop that follows still carries a null
   `latest_heartbeat_at`, so the answer records no beat and extends no lease. The claim is
   answered from the row read after the claim's update matched nothing. Its test is

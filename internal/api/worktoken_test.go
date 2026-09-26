@@ -509,15 +509,16 @@ func TestSessionsTokenOutlivesWindDownWhileStopping(t *testing.T) {
 		}
 	}
 
-	// The re-armed item, stopped outright by the control plane: its token
-	// keeps the minute from the request, and not a moment past it.
+	// The re-armed item, stopped outright by the control plane, which re-arms
+	// the session at once: its token keeps the minute from the request beside
+	// the session's next item, and not a moment past it.
 	workID2, _, token2 := pollItem(t, s, envID, key)
 	work2 := "/v1/environments/" + envID + "/work/" + workID2
 	if st := status(t, s, http.MethodPost, work2+"/stop", map[string]any{"force": true}, asBearer(key)); st != http.StatusOK {
 		t.Fatalf("force stop of the re-armed item = %d", st)
 	}
-	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusOK {
-		t.Errorf("the token of a just-stopped item = %d, want 200", st)
+	if st, live := status(t, s, http.MethodGet, session, nil, asBearer(token2)), s.liveWork(sessionID, queue.ToolExec); st != http.StatusOK || live != 1 {
+		t.Errorf("the token of a just-stopped item = %d beside %d live exec items, want 200 beside 1", st, live)
 	}
 	backdate(workID2, `stop_requested_at = now() - interval '61 seconds'`)
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusUnauthorized {

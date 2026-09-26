@@ -102,8 +102,10 @@ func Secret(token string) string {
 //     session and memories;
 //   - stopped: its stop requested within queue.WindDown, the window the
 //     reference worker's post-stop flush rides (its doc). The finalizer
-//     settles only past that window, so no settlement re-arms a session while
-//     its token still works.
+//     settles an abandoned wind-down only past that window, so its re-arm
+//     never runs beside the abandoned item's token. A force stop and
+//     queue.CancelSession settle at once, so an old item's token can work for
+//     the rest of the window beside the session's next item.
 //
 // The CASE and StopOnly rest on one invariant held two packages away:
 // stop_requested_at is set by every stop but Queue.Complete, and Complete

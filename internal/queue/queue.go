@@ -476,7 +476,10 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 // was requested: a live worker stops heartbeating the moment it learns of
 // the stop, so the lapse alone proves nothing inside the window. A stopped
 // item's sessions token (internal/worktoken) lives exactly this long past the
-// request, so no settlement re-arms a session while its token still works.
+// request, so that settlement never re-arms a session while the abandoned
+// item's token still works. A force stop or CancelSession does not wait: its
+// item's token keeps working for up to this long after the request, while the
+// session's next item may already run.
 // The cost: a session whose worker died mid-wind-down waits this long to be
 // re-armed, where the lease lapse alone would have done in half the time; a
 // death mid-run is still reclaimed by Poll at lease expiry.

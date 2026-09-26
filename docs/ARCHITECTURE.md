@@ -552,10 +552,12 @@ and holds the two OS-touching adapters `gaterun/` declares.
   though past a minute from the request only on the item's heartbeat and stop (a
   finalizing poll may never come), and, once it is `stopped`, for a minute from the
   request (the reference worker learns of the stop at its next heartbeat, then
-  flushes its memory writes for up to 30 s on a context of its own), and the queue
+  flushes its memory writes for up to 30 s on a context of its own). The queue
   settles a wind-down whose worker went silent only once that same minute
-  (`queue.WindDown`) is over, so no settlement re-arms a session while its token
-  works.
+  (`queue.WindDown`) is over, so that re-arm never runs beside the silent worker's
+  token; a force stop or a session-wide interrupt (`queue.CancelSession`) settles at
+  once, so for the rest of the minute an old item's token can work beside the
+  session's next item.
   On the memory routes the environment key itself is refused, a token's write is the
   session's version (`session_actor`), and `read_only` is enforced at the hands on
   both deployment points — the executor's pull-only sync, the reference worker's
