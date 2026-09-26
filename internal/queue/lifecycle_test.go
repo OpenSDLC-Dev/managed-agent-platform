@@ -103,7 +103,7 @@ func TestHeartbeatClaimsAndExtendsWithOptimisticConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second heartbeat: %v", err)
 	}
-	if hb2.State != "active" || !hb2.LeaseExtended || !hb2.LastHeartbeat.After(hb1.LastHeartbeat) {
+	if hb2.State != "active" || !hb2.LeaseExtended || hb2.LastHeartbeat == nil || !hb2.LastHeartbeat.After(*hb1.LastHeartbeat) {
 		t.Errorf("second heartbeat = %+v (prev %v), want active/extended/rolled", hb2, hb1.LastHeartbeat)
 	}
 	// The old value no longer matches (optimistic concurrency).
@@ -184,9 +184,21 @@ func TestAckAndClaimHealAStamplessItem(t *testing.T) {
 
 // claimedItem drives a fresh tool_exec item through the worker handshake —
 // enqueue, poll, ack, first heartbeat — leaving it active under a claimed lease,
-// and returns its environment and id. That is the one state a graceful stop has
-// a worker to wind down from, so it is the shared setup of the stopping tests.
+// and returns its environment and id: the shared setup of the tests of a
+// wind-down whose worker already beats.
 func claimedItem(t *testing.T, pool *pgxpool.Pool, q *queue.Queue) (domain.ID, domain.ID) {
+	t.Helper()
+	env, id := ackedItem(t, pool, q)
+	if _, err := q.Heartbeat(context.Background(), env, id, queue.NoHeartbeat, 30); err != nil {
+		t.Fatalf("claim heartbeat: %v", err)
+	}
+	return env, id
+}
+
+// ackedItem is claimedItem short of the claim: the item is starting, under
+// the ack's startup lease, and no beat has reached it — the state a graceful
+// stop reaches before the worker's claim does.
+func ackedItem(t *testing.T, pool *pgxpool.Pool, q *queue.Queue) (domain.ID, domain.ID) {
 	t.Helper()
 	ctx := context.Background()
 	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
@@ -200,9 +212,6 @@ func claimedItem(t *testing.T, pool *pgxpool.Pool, q *queue.Queue) (domain.ID, d
 	if _, err := q.Ack(ctx, env, w.ID); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
-	if _, err := q.Heartbeat(ctx, env, w.ID, queue.NoHeartbeat, 30); err != nil {
-		t.Fatalf("claim heartbeat: %v", err)
-	}
 	return env, w.ID
 }
 
@@ -211,12 +220,31 @@ func claimedItem(t *testing.T, pool *pgxpool.Pool, q *queue.Queue) (domain.ID, d
 // observable only on the row.
 func leaseHeld(t *testing.T, pool *pgxpool.Pool, id domain.ID) bool {
 	t.Helper()
+	return leaseOf(t, pool, id) != nil
+}
+
+// leaseOf reads the item's lease expiry, nil when it carries none.
+func leaseOf(t *testing.T, pool *pgxpool.Pool, id domain.ID) *time.Time {
+	t.Helper()
 	var lease *time.Time
 	if err := pool.QueryRow(context.Background(),
 		`SELECT lease_expires_at FROM work_items WHERE id = $1`, id).Scan(&lease); err != nil {
 		t.Fatalf("read lease: %v", err)
 	}
-	return lease != nil
+	return lease
+}
+
+// rowSnapshot renders the item's whole row, the columns the wire never carries
+// (the lease, updated_at) included, so a test can hold a call to having
+// written nothing at all.
+func rowSnapshot(t *testing.T, pool *pgxpool.Pool, id domain.ID) string {
+	t.Helper()
+	var row string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT to_jsonb(w)::text FROM work_items w WHERE id = $1`, id).Scan(&row); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	return row
 }
 
 func TestStopForceAndGraceful(t *testing.T) {
@@ -279,16 +307,14 @@ func TestStopForceAndGraceful(t *testing.T) {
 	}
 }
 
-// TestGracefulStopWithoutALeaseHolderStopsOutright: stopping is a state only a
-// live lease holder can leave — the worker learns of it from its next heartbeat,
-// winds its tools down, and stops the item. An item no worker holds has no such
-// actor: still queued (nobody acked it), or acked but never heartbeated (its
-// first beat can only be the claim, which a stopping item refuses). Parking one
-// in stopping would leave it non-terminal forever with a null stopped_at, and
-// Poll deliberately never re-offers a stopping item, so nothing would ever
-// finish it (#25). A graceful stop of one therefore finalizes it outright —
-// there is nothing in flight to wind down.
-func TestGracefulStopWithoutALeaseHolderStopsOutright(t *testing.T) {
+// TestGracefulStopOfQueuedWorkStopsOutright: a graceful stop asks the item's
+// worker to wind down, and a queued item has no worker to ask — nobody acked
+// it. Parking one in stopping would leave it non-terminal with a null
+// stopped_at until a poll finalized it, and one never handed out has no lease
+// to lapse at all (#25). A graceful stop of one therefore finalizes it
+// outright — there is nothing in flight to wind down. No recording reaches
+// this case; docs/DIVERGENCES.md registers it as an inference.
+func TestGracefulStopOfQueuedWorkStopsOutright(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	q := queue.New(pool)
@@ -296,13 +322,11 @@ func TestGracefulStopWithoutALeaseHolderStopsOutright(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		poll bool
-		ack  bool
 	}{
 		// Never handed out is the starkest case: no worker has even seen the item,
 		// and with no lease to lapse not even a timeout could rescue it later.
-		{"queued, never handed out", false, false},
-		{"queued, polled but not acked", true, false},
-		{"starting", true, true},
+		{"queued, never handed out", false},
+		{"queued, polled but not acked", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
@@ -324,11 +348,6 @@ func TestGracefulStopWithoutALeaseHolderStopsOutright(t *testing.T) {
 				}
 				id = w.ID
 			}
-			if tc.ack {
-				if _, err := q.Ack(ctx, env, id); err != nil {
-					t.Fatal(err)
-				}
-			}
 			stopped, moved, err := q.Stop(ctx, env, id, false)
 			if err != nil {
 				t.Fatalf("graceful stop: %v", err)
@@ -336,11 +355,202 @@ func TestGracefulStopWithoutALeaseHolderStopsOutright(t *testing.T) {
 			if !moved || stopped.State != "stopped" || stopped.StoppedAt == nil || stopped.StopRequestedAt == nil {
 				t.Errorf("graceful stop of a %s item returned %+v, want stopped with both timestamps", tc.name, stopped)
 			}
-			// The poll reservation, or the ack's startup lease, is released with it.
+			// The poll reservation, where there is one, is released with it.
 			if leaseHeld(t, pool, id) {
 				t.Error("the finalized item still carries a lease, want it cleared")
 			}
 		})
+	}
+}
+
+// TestGracefulStopOfStartingWorkWindsDown: an acked item has a worker — the
+// one that acked it — before any beat of its lands, and that worker's claim is
+// the channel it is told on (TestClaimOnNeverClaimedStoppingWorkLearnsTheStop).
+// So a graceful stop parks it in stopping, as the reference does (2026-09-19
+// custom-mixed-tools #22 and #23, self-hosted-latest-cli #2 and #5):
+// stop_requested_at stamped, stopped_at and the last heartbeat still null, the
+// ack's stamps untouched. The startup lease its ack installed is kept, and is
+// load-bearing: cleared, the item would meet the finalizer's null-lease arm at
+// the very next poll and be settled before a claim as late as the recorded one
+// (59 s after the stop) could arrive.
+func TestGracefulStopOfStartingWorkWindsDown(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	env, id := ackedItem(t, pool, q)
+	acked, err := q.GetWork(ctx, env, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := leaseOf(t, pool, id)
+	if lease == nil {
+		t.Fatal("the ack installed no startup lease")
+	}
+
+	stopping, moved, err := q.Stop(ctx, env, id, false)
+	if err != nil {
+		t.Fatalf("graceful stop: %v", err)
+	}
+	if !moved || stopping.State != "stopping" || stopping.StopRequestedAt == nil || stopping.StoppedAt != nil || stopping.LastHeartbeat != nil {
+		t.Errorf("graceful stop of starting work = %+v (moved %v), want stopping with stop_requested_at, no stopped_at, no heartbeat",
+			stopping, moved)
+	}
+	if !reflect.DeepEqual(stopping.AcknowledgedAt, acked.AcknowledgedAt) || !reflect.DeepEqual(stopping.StartedAt, acked.StartedAt) {
+		t.Errorf("graceful stop moved acknowledged_at %v -> %v or started_at %v -> %v",
+			acked.AcknowledgedAt, stopping.AcknowledgedAt, acked.StartedAt, stopping.StartedAt)
+	}
+	if got := leaseOf(t, pool, id); got == nil || !got.Equal(*lease) {
+		t.Errorf("lease after the graceful stop = %v, want the ack's startup lease %v kept", got, lease)
+	}
+	// A graceful stop of it again moves nothing, as for any stopping item.
+	if again, moved, err := q.Stop(ctx, env, id, false); err != nil || moved || !reflect.DeepEqual(again, stopping) {
+		t.Errorf("repeat graceful stop = %+v, moved %v, %v; want the unchanged %+v, not moved", again, moved, err, stopping)
+	}
+}
+
+// TestClaimOnNeverClaimedStoppingWorkLearnsTheStop: when a graceful stop
+// reaches acked work before its worker's claim does, the claim is the one beat
+// that worker still sends, so it is where the worker learns of the stop. The
+// reference answers it 200 — lease_extended false, state stopping, and no last
+// heartbeat (2026-09-19 custom-mixed-tools #44) — and its worker then
+// force-stops the item (#47). The claim writes nothing: it records no beat
+// (the force stop the recording answers next still carries a null
+// latest_heartbeat_at), extends no lease, and repeating it answers the same.
+// ttl_seconds echoes the TTL the claim asked for, as every non-extending beat
+// here does.
+func TestClaimOnNeverClaimedStoppingWorkLearnsTheStop(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	env, id := ackedItem(t, pool, q)
+	if _, _, err := q.Stop(ctx, env, id, false); err != nil {
+		t.Fatalf("graceful stop: %v", err)
+	}
+	before := rowSnapshot(t, pool, id)
+
+	for i, ttl := range []int64{30, 45} {
+		hb, err := q.Heartbeat(ctx, env, id, queue.NoHeartbeat, ttl)
+		if err != nil {
+			t.Fatalf("claim %d on never-claimed stopping work = %v, want the stop reported", i, err)
+		}
+		if hb.State != "stopping" || hb.LeaseExtended || hb.LastHeartbeat != nil || hb.TTLSeconds != ttl {
+			t.Errorf("claim %d = %+v, want stopping, not extended, no last heartbeat, ttl %d", i, hb, ttl)
+		}
+		if after := rowSnapshot(t, pool, id); after != before {
+			t.Errorf("claim %d wrote the row:\nbefore %s\nafter  %s", i, before, after)
+		}
+	}
+}
+
+// TestClaimRefusalsAroundAStop: a claim answers a stop only on never-claimed
+// stopping work. Every neighbour keeps the 412 of a claim whose preconditions
+// fail, and writes nothing: once-claimed stopping work, whose worker learns of
+// the stop from its next echo beat instead, and stopped work, whether a beat
+// ever reached it or not. No recording reaches these; docs/DIVERGENCES.md
+// registers each as an inference. An item the work API cannot see stays a 404.
+func TestClaimRefusalsAroundAStop(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	for _, tc := range []struct {
+		name         string
+		claimed      bool // a beat claimed the item before the stop
+		force        bool
+		wantStopping bool
+	}{
+		{"once-claimed stopping work", true, false, true},
+		{"stopped work no beat reached", false, true, false},
+		{"stopped work once claimed", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, id := ackedItem(t, pool, q)
+			if tc.claimed {
+				if _, err := q.Heartbeat(ctx, env, id, queue.NoHeartbeat, 30); err != nil {
+					t.Fatalf("claim: %v", err)
+				}
+			}
+			w, _, err := q.Stop(ctx, env, id, tc.force)
+			if err != nil {
+				t.Fatalf("stop: %v", err)
+			}
+			if (w.State == "stopping") != tc.wantStopping {
+				t.Fatalf("the stop left %s, which is not the case under test", w.State)
+			}
+			before := rowSnapshot(t, pool, id)
+			if _, err := q.Heartbeat(ctx, env, id, queue.NoHeartbeat, 30); !errors.Is(err, queue.ErrHeartbeatMismatch) {
+				t.Errorf("claim on %s = %v, want ErrHeartbeatMismatch", tc.name, err)
+			}
+			if after := rowSnapshot(t, pool, id); after != before {
+				t.Errorf("the refused claim wrote the row:\nbefore %s\nafter  %s", before, after)
+			}
+		})
+	}
+	env, _ := ackedItem(t, pool, q)
+	if _, err := q.Heartbeat(ctx, env, domain.NewID("work"), queue.NoHeartbeat, 30); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("claim on a missing item = %v, want ErrWorkNotFound", err)
+	}
+}
+
+// TestPollFinalizesANeverClaimedWindDown: a worker that acked an item and died
+// before its claim never learns of a graceful stop, so only the finalizer ends
+// that wind-down, on the signal an abandoned claimed one gives: the lease —
+// here the ack's startup lease, which the stop kept — lapsed AND WindDown
+// passed since the request. Until both hold, a poll neither finalizes the item
+// nor re-offers it (a stopping item never is), so a claim late in the window
+// still finds it stopping. Past both, the next poll settles it, and a claim
+// that arrives after that meets stopped work, which is refused. The re-arm
+// the settlement owes is the work API's, pinned by internal/api's
+// TestWorkGracefulStopOfStartingWorkReArmsOnce.
+func TestPollFinalizesANeverClaimedWindDown(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	env, id := ackedItem(t, pool, q)
+	if _, _, err := q.Stop(ctx, env, id, false); err != nil {
+		t.Fatalf("graceful stop: %v", err)
+	}
+	set := func(assign string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE work_items SET `+assign+` WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leftAlone := func(when string) {
+		t.Helper()
+		if done := finalizeAbandoned(t, pool, q, env); len(done) != 0 {
+			t.Fatalf("finalize %s = %v, want nothing", when, done)
+		}
+		if next, err := q.Poll(ctx, env, time.Minute); err != nil || next != nil {
+			t.Fatalf("poll %s = %+v %v, want no work (a stopping item is never re-offered)", when, next, err)
+		}
+		if w, err := q.GetWork(ctx, env, id); err != nil || w.State != "stopping" {
+			t.Fatalf("item %s = %+v %v, want it left stopping", when, w, err)
+		}
+	}
+
+	leftAlone("under the startup lease")
+	set(`lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '45 seconds'`)
+	leftAlone("45 s into the wind-down, its lease lapsed")
+	if hb, err := q.Heartbeat(ctx, env, id, queue.NoHeartbeat, 30); err != nil || hb.State != "stopping" {
+		t.Fatalf("claim 45 s after the stop = %+v %v, want the stop reported", hb, err)
+	}
+
+	set(`stop_requested_at = now() - interval '61 seconds'`)
+	if done := finalizeAbandoned(t, pool, q, env); len(done) != 1 {
+		t.Fatalf("finalize past WindDown and the lease = %v, want the item's session", done)
+	}
+	w, err := q.GetWork(ctx, env, id)
+	if err != nil || w.State != "stopped" || w.StoppedAt == nil || w.LastHeartbeat != nil {
+		t.Fatalf("settled wind-down = %+v %v, want stopped with stopped_at and no heartbeat", w, err)
+	}
+	if leaseHeld(t, pool, id) {
+		t.Error("the settled item still carries a lease, want it cleared")
+	}
+	if next, err := q.Poll(ctx, env, time.Minute); err != nil || next != nil {
+		t.Fatalf("poll after the settle = %+v %v, want no work", next, err)
+	}
+	if _, err := q.Heartbeat(ctx, env, id, queue.NoHeartbeat, 30); !errors.Is(err, queue.ErrHeartbeatMismatch) {
+		t.Errorf("claim after the settle = %v, want ErrHeartbeatMismatch", err)
 	}
 }
 

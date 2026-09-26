@@ -493,6 +493,14 @@ const (
 	// hbExitStopRequested: the control plane moved the item to stopping/stopped.
 	// The item is still exclusively this worker's — Poll never re-offers a
 	// stopping item — so finishing the stop is this worker's job (see handleItem).
+	// The first beat can bring it: a graceful stop that lands between the ack and
+	// the claim parks the item in stopping, and the claim answers 200 stopping
+	// with lease_extended false, as the reference answers it (#810), so the run
+	// is cancelled and the item force-stopped — the reference worker's own
+	// sequence (checked against anthropic-sdk-go v1.70.1 — worker.go
+	// runHeartbeat). That is why heartbeat checks the state before
+	// lease_extended: read as a lease not extended, that claim would leave the
+	// stop unfinished.
 	// The already-stopped half needs no finishing, and needs no branch of its own
 	// either: the stop it provokes is answered 200 with the item unchanged (an
 	// older control plane's 409, which forceStop ignores).

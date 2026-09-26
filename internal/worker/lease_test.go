@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -333,9 +334,9 @@ func TestWorkerForceStopIgnoresAnOlderServersConflict(t *testing.T) {
 	cancel, errc := runWorker(w)
 
 	<-sb.entered // the tool is held open, mid-run
-	// The claim beat first, as TestWorkerControlPlaneStopWindsDown argues: a
-	// still-starting item's claim would be refused, and the worker would read
-	// that as a lost lease and send no stop at all.
+	// The claim beat first: a force stop leaves a still-starting item stopped,
+	// and a claim on stopped work is refused (an inference docs/DIVERGENCES.md
+	// registers), which the worker reads as a lost lease, sending no stop at all.
 	waitForState(t, h, "active")
 	if _, _, err := queue.New(h.pool).Stop(context.Background(), h.envID, domain.ID(h.workID(t)), true); err != nil {
 		t.Fatalf("force stop: %v", err)
@@ -424,6 +425,68 @@ func TestSDKTypedStopDecodesTheWorkObject(t *testing.T) {
 	}
 	if again.State != first.State || again.StoppedAt != first.StoppedAt || again.StopRequestedAt != first.StopRequestedAt {
 		t.Errorf("typed repeat stop = %+v, want the unchanged %+v", again, first)
+	}
+}
+
+// TestSDKTypedHeartbeatDecodesAStoppingClaim drives the generated Heartbeat
+// with no bypass, as the reference worker's heartbeat loop does, for a claim
+// on work a graceful stop reached first. This control plane's answer decodes
+// into BetaSelfHostedWorkHeartbeatResponse as the recorded one does (2026-09-19
+// custom-mixed-tools #44, served verbatim here by a stub): state stopping, the
+// lease not extended, and last_heartbeat present as the empty string. The SDK
+// types that field a string, so a null would decode to the same "" — only the
+// raw field tells them apart. ttl_seconds is the one field that differs: the
+// recording's 120 against the TTL this platform echoes, a difference
+// docs/DIVERGENCES.md registers.
+func TestSDKTypedHeartbeatDecodesAStoppingClaim(t *testing.T) {
+	const recorded = `{"type":"work_heartbeat","lease_extended":false,"state":"stopping","last_heartbeat":"","ttl_seconds":120}`
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, recorded)
+	}))
+	t.Cleanup(stub.Close)
+
+	h := newHarness(t, &fakeSandbox{})
+	h.enqueueWork(t)
+	ctx := context.Background()
+	q := queue.New(h.pool)
+	w, err := q.Poll(ctx, h.envID, time.Minute)
+	if err != nil || w == nil {
+		t.Fatalf("poll: %+v %v", w, err)
+	}
+	if _, err := q.Ack(ctx, h.envID, w.ID); err != nil {
+		t.Fatal(err)
+	}
+	id := w.ID.String()
+	stopped, err := h.client.Beta.Environments.Work.Stop(ctx, id, sdk.BetaEnvironmentWorkStopParams{EnvironmentID: h.envID.String()})
+	if err != nil || stopped.State != sdk.BetaSelfHostedWorkStateStopping {
+		t.Fatalf("typed graceful stop of starting work = %+v %v, want stopping", stopped, err)
+	}
+
+	params := sdk.BetaEnvironmentWorkHeartbeatParams{
+		EnvironmentID:         h.envID.String(),
+		ExpectedLastHeartbeat: sdk.String(noHeartbeat),
+	}
+	ours, err := h.client.Beta.Environments.Work.Heartbeat(ctx, id, params)
+	if err != nil {
+		t.Fatalf("typed claim on never-claimed stopping work: %v", err)
+	}
+	recording := NewClient(stub.URL, "ek-stub")
+	theirs, err := recording.Beta.Environments.Work.Heartbeat(ctx, id, params)
+	if err != nil {
+		t.Fatalf("typed decode of the recorded answer: %v", err)
+	}
+	for _, got := range []struct {
+		name string
+		resp *sdk.BetaSelfHostedWorkHeartbeatResponse
+		ttl  int64
+	}{{"this control plane's", ours, 30}, {"the recorded", theirs, 120}} {
+		r := got.resp
+		if r.State != sdk.BetaSelfHostedWorkHeartbeatResponseStateStopping || r.LeaseExtended ||
+			r.LastHeartbeat != "" || r.JSON.LastHeartbeat.Raw() != `""` || r.TTLSeconds != got.ttl {
+			t.Errorf("%s claim decodes to %+v (last_heartbeat raw %q), want stopping, not extended, last_heartbeat \"\", ttl %d",
+				got.name, r, r.JSON.LastHeartbeat.Raw(), got.ttl)
+		}
 	}
 }
 
@@ -896,11 +959,11 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 	cancel, errc := runWorker(w)
 
 	<-sb.entered // the tool is held open, mid-run
-	// Wait for the claim beat before stopping, or the test can prove nothing: a
-	// stop landing on a still-starting item takes the control plane's own
-	// stopped-outright path (internal/queue/lifecycle.go), which satisfies every
-	// assertion below with the worker's wind-down never exercised. Tool entry
-	// costs several round trips against the claim's one, so the beat wins in
+	// Wait for the claim beat before stopping, so the stop reaches a worker that
+	// holds the lease and is told by an echo beat — the channel this test is
+	// about. A stop landing on a still-starting item is told by the claim
+	// instead, TestWorkerStopBeforeTheClaimWindsDown's case. Tool entry costs
+	// several round trips against the claim's one, so the beat wins in
 	// practice — this makes it certain.
 	waitForState(t, h, "active")
 	// The control plane asks the item to stop. The next heartbeat sees the
@@ -930,6 +993,141 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 	}
 	close(sb.gate) // release, though the tool already returned via cancellation
 	waitExit(t, cancel, errc)
+}
+
+// TestWorkerStopBeforeTheClaimWindsDown runs the recorded wind-down of an item
+// stopped before its worker's first beat (2026-09-19 custom-mixed-tools #22,
+// #23, #44 and #47) with this worker: a graceful stop lands between the ack
+// and the claim. The claim answers 200 stopping, not the 412 of a lost lease,
+// so the worker takes it for the control plane's stop: it cancels the run on
+// that answer, posts no tool result, and force-stops the item itself, the
+// reference worker's own sequence (checked against anthropic-sdk-go v1.70.1 —
+// worker.go runHeartbeat). The run starts beside the claim, as the reference
+// worker's does, so a tool may be entered before the answer; the held tool
+// makes a cancelled run unable to finish one. Exactly one re-arm follows, from
+// that force stop. The poll hands out one item only, so the re-armed one stays
+// queued to be counted rather than run.
+func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	var (
+		h         *harness // set before the worker sends its first request
+		handedOut atomic.Bool
+		mu        sync.Mutex
+		graceful  map[string]any // the graceful stop's answer
+		liveAfter = -1           // live tool_exec items right after it
+		claims    []string       // each heartbeat's status and body
+		forced    []string       // each stop the worker sent: body, status, answered state
+	)
+	relay := func(w http.ResponseWriter, rec *httptest.ResponseRecorder) {
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(rec.Body.Bytes())
+	}
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec := httptest.NewRecorder()
+			switch path := r.URL.Path; {
+			case strings.HasSuffix(path, "/work/poll") && handedOut.Load():
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, "null")
+				return
+			case strings.HasSuffix(path, "/work/poll"):
+				next.ServeHTTP(rec, r)
+				handedOut.Store(strings.TrimSpace(rec.Body.String()) != "null")
+			case strings.HasSuffix(path, "/ack"):
+				next.ServeHTTP(rec, r)
+				stop := httptest.NewRequest(http.MethodPost, strings.TrimSuffix(path, "/ack")+"/stop", strings.NewReader("{}"))
+				stop.Header = r.Header.Clone()
+				stopRec := httptest.NewRecorder()
+				next.ServeHTTP(stopRec, stop)
+				var n int
+				_ = h.pool.QueryRow(r.Context(),
+					`SELECT count(*) FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'
+					    AND state IN ('queued', 'starting', 'active')`, h.sid.String()).Scan(&n)
+				mu.Lock()
+				_ = json.Unmarshal(stopRec.Body.Bytes(), &graceful)
+				liveAfter = n
+				mu.Unlock()
+			case strings.HasSuffix(path, "/heartbeat"):
+				next.ServeHTTP(rec, r)
+				mu.Lock()
+				claims = append(claims, fmt.Sprintf("%d %s", rec.Code, rec.Body.String()))
+				mu.Unlock()
+			case strings.HasSuffix(path, "/stop"):
+				body, _ := io.ReadAll(r.Body)
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				next.ServeHTTP(rec, r)
+				var answer struct{ State string }
+				_ = json.Unmarshal(rec.Body.Bytes(), &answer)
+				mu.Lock()
+				forced = append(forced, fmt.Sprintf("%s %d %s", body, rec.Code, answer.State))
+				mu.Unlock()
+			default:
+				next.ServeHTTP(w, r)
+				return
+			}
+			relay(w, rec)
+		})
+	}
+	h = newHarnessWrapped(t, sb, wrap)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+	workID := h.workID(t)
+
+	w, done := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+	defer cancel() // so a failure below still unblocks a held tool via ctx
+	waitDone(t, done)
+	close(sb.gate)
+	waitExit(t, cancel, errc)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if graceful["state"] != "stopping" || graceful["stop_requested_at"] == nil || graceful["stopped_at"] != nil {
+		t.Errorf("graceful stop between the ack and the claim = %v, want stopping with stop_requested_at and no stopped_at", graceful)
+	}
+	if liveAfter != 0 {
+		t.Errorf("live tool_exec items after the graceful stop = %d, want 0 (nothing re-armed yet)", liveAfter)
+	}
+	if len(claims) != 1 || !strings.HasPrefix(claims[0], "200 ") ||
+		!strings.Contains(claims[0], `"state":"stopping"`) || !strings.Contains(claims[0], `"lease_extended":false`) ||
+		!strings.Contains(claims[0], `"last_heartbeat":""`) {
+		t.Errorf("heartbeats = %q, want the one claim answered 200 stopping, not extended, last_heartbeat \"\"", claims)
+	}
+	if len(forced) != 1 || forced[0] != `{"force":true} 200 stopped` {
+		t.Errorf("stops the worker sent = %q, want its one force stop, answered 200 stopped", forced)
+	}
+
+	if got := h.workState(t); got != "stopped" {
+		t.Errorf("work item state = %q, want stopped (the worker finished the stop it was told of)", got)
+	}
+	var requested time.Time
+	var beat *time.Time
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT stop_requested_at, last_heartbeat FROM work_items WHERE id = $1`, workID).Scan(&requested, &beat); err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := json.Marshal(requested.UTC()); graceful["stop_requested_at"] != strings.Trim(string(want), `"`) || beat != nil {
+		t.Errorf("stop_requested_at %s, last_heartbeat %v; want the graceful stop's %v kept, and no beat recorded",
+			want, beat, graceful["stop_requested_at"])
+	}
+	if got := len(h.results(t)); got != 0 {
+		t.Errorf("user.tool_result = %d, want 0 (the run was cancelled on the claim's answer)", got)
+	}
+	if _, ran := sb.files["/workspace/out.txt"]; ran {
+		t.Error("the tool finished its write; the run must be cancelled on the claim's answer")
+	}
+	var others, queued int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT count(*), count(*) FILTER (WHERE state = 'queued') FROM work_items
+		  WHERE session_id = $1 AND kind = 'tool_exec' AND id <> $2`, h.sid.String(), workID).Scan(&others, &queued); err != nil {
+		t.Fatal(err)
+	}
+	if others != 1 || queued != 1 {
+		t.Errorf("tool_exec items besides the stopped one = %d (%d queued), want exactly the one re-armed item", others, queued)
+	}
 }
 
 // stopFinality reads the two row fields a finished stop settles and the wire's

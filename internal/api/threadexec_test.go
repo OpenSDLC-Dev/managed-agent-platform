@@ -705,6 +705,94 @@ func TestWorkPollFinalizesAnAbandonedStopAndReArms(t *testing.T) {
 	}
 }
 
+// A graceful stop of starting work parks it stopping and re-arms nothing: the
+// calls it covers are still its worker's until that worker, told by its
+// claim, finishes the stop. The wind-down then owes exactly one re-arm, from
+// whichever path finishes it — the worker's force stop, or the poll that
+// settles a wind-down nobody finished once its startup lease and WindDown
+// have both run out — and nothing after that re-arms again.
+func TestWorkGracefulStopOfStartingWorkReArmsOnce(t *testing.T) {
+	for _, finish := range []string{"the worker's force stop", "an abandoned wind-down"} {
+		t.Run(finish, func(t *testing.T) {
+			s := newTestServer(t)
+			envID, sid, key := selfHostedWorker(t, s, "ek-rearm-starting")
+			appendOn(t, s, sid, "", false, domain.EventAgentToolUse, allowBashCall)
+			workID := s.enqueueAndPoll(t, envID, sid, key)
+			get := "/v1/environments/" + envID + "/work/" + workID
+			bearer := map[string]string{"Authorization": "Bearer " + key}
+			liveExec := func() int {
+				return s.liveWork(sid, queue.ToolExec) + s.liveWork(sid, queue.MCPExec) + s.liveWork(sid, queue.WebExec)
+			}
+			if res, _, raw := s.workReq(t, http.MethodPost, get+"/ack", key, nil); res.StatusCode != http.StatusOK {
+				t.Fatalf("ack: %d %s", res.StatusCode, raw)
+			}
+
+			if body := wantStopped(t, s, get, key, map[string]any{}); body["state"] != "stopping" {
+				t.Errorf("graceful stop of starting work = %v, want stopping", body["state"])
+			}
+			if n := liveExec(); n != 0 {
+				t.Fatalf("live exec items after the graceful stop = %d, want 0 — the stop re-armed calls its worker still covers", n)
+			}
+
+			switch finish {
+			case "the worker's force stop":
+				res, beat, raw := s.workReq(t, http.MethodPost, get+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", key, nil)
+				if res.StatusCode != http.StatusOK || beat["state"] != "stopping" {
+					t.Fatalf("claim = %d %s, want 200 stopping", res.StatusCode, raw)
+				}
+				if n := liveExec(); n != 0 {
+					t.Fatalf("live exec items after the claim = %d, want 0", n)
+				}
+				wantStopped(t, s, get, key, map[string]any{"force": true})
+			case "an abandoned wind-down":
+				// Inside WindDown a poll settles nothing and hands nothing out.
+				if res, raw := s.poll(t, envID, bearer); res.StatusCode != http.StatusOK || strings.TrimSpace(raw) != "null" {
+					t.Fatalf("poll inside the wind-down = %d %s, want 200 null", res.StatusCode, raw)
+				}
+				if n := liveExec(); n != 0 {
+					t.Fatalf("live exec items after a poll inside the wind-down = %d, want 0", n)
+				}
+				if _, err := s.pool.Exec(context.Background(),
+					`UPDATE work_items SET lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '61 seconds' WHERE id = $1`,
+					workID); err != nil {
+					t.Fatal(err)
+				}
+				// Past both, the poll settles the item, re-arms, and hands the fresh item out.
+				res, raw := s.poll(t, envID, bearer)
+				var handed map[string]any
+				if err := json.Unmarshal([]byte(raw), &handed); res.StatusCode != http.StatusOK || err != nil {
+					t.Fatalf("poll past the wind-down = %d %s", res.StatusCode, raw)
+				}
+				if id, _ := handed["id"].(string); id == "" || id == workID {
+					t.Fatalf("poll handed back %q, want the fresh re-armed item (the settled one was %s)", id, workID)
+				}
+				if _, old, _ := s.workReq(t, http.MethodGet, get, key, nil); old["state"] != "stopped" {
+					t.Errorf("the settled item = %v, want stopped", old["state"])
+				}
+			}
+			rearms := func(when string) {
+				t.Helper()
+				var n int
+				if err := s.pool.QueryRow(context.Background(),
+					`SELECT count(*) FROM work_items WHERE session_id = $1 AND id <> $2 AND kind <> 'model_turn'`, sid, workID).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				if n != 1 || liveExec() != 1 {
+					t.Errorf("%s: %d other exec items, %d of them live; want exactly the one re-armed item", when, n, liveExec())
+				}
+			}
+			rearms("after " + finish)
+
+			// Nothing that follows re-arms again: a repeat stop, and another poll.
+			wantStopped(t, s, get, key, nil)
+			if res, raw := s.poll(t, envID, bearer); res.StatusCode != http.StatusOK {
+				t.Fatalf("poll: %d %s", res.StatusCode, raw)
+			}
+			rearms("after a repeat stop and a poll")
+		})
+	}
+}
+
 // A session-wide interrupt ending several parked children re-idles the
 // session once, with the fold after the last of them — not once per child.
 func TestSessionWideInterruptReidlesOnce(t *testing.T) {

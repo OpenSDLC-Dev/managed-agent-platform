@@ -49,6 +49,62 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## A graceful stop of acked work goes stopping (plan 58, #810) — archived 2026-09-26, delivered in one PR
+
+The recordings reversed #25's rule that only `active` work may enter `stopping`. A graceful
+stop of acked `starting` work parks it there, keeping its startup lease, and the worker's
+`NO_HEARTBEAT` claim on it answers 200 `stopping` with an empty `last_heartbeat`, as
+`-custom-mixed-tools` #44 does, where it used to answer 412. Plan 58 holds the evidence and
+the owner's scope decision, and the fragment says what changed.
+
+The new tests failed against the old rule, each at its first assertion of it. The graceful
+stop answered `stopped` and cleared the lease. The claim answered 412. The finalization test
+found the item `stopped` under its startup lease. The re-arm test found a live exec item
+straight after the graceful stop. The typed SDK stop decoded `stopped`. And the worker test,
+stopped between its ack and its claim, got a 412 and sent no force stop. The API, re-arm and
+worker tests were also run red against an unmodified export of origin/main. The queue tests
+use the new pointer type, so they were run red with only that type change applied. Then each
+rule was broken on its own, and the test that pins it failed each time. The mutations were:
+the claim answering the stop on once-claimed `stopping` work, or on never-claimed `stopped`
+work; the graceful stop clearing a `starting` item's lease, which also let the finalizer
+settle it under the startup lease; queued work parked in `stopping`; and `stopWork`
+re-arming every stop that moved an item.
+
+Review then found that the sessions token still died a minute after the stop request while
+its item was `stopping`. The reference worker beats and force-stops with that token, so
+after a claim as late as the recorded one its force stop would have been refused 401,
+leaving the item to the finalizer. The token now lives while the item is `stopping`, and
+keeps the minute from the request once it is `stopped`. The new API test failed first with
+that claim refused 401, and with `stopped` given the same freedom it failed on both stopped
+items. Review also moved the finalizer test's inside-the-window probe from 59 s, a second
+short of WindDown, to 45 s, and narrowed the worker test's claim that the worker "runs no
+tool" to what the test shows: the run is cancelled on the claim's answer and posts no tool
+result.
+
+A second Codex review found that fix too wide. With no time bound on `stopping`, the
+token's whole matrix outlived WindDown, its session's read and events, the skill reads and
+the memory calls, for as long as no poll came to finalize the item. Past WindDown a
+`stopping` item's token now reaches only its item's heartbeat and stop
+(`worktoken.Principal.StopOnly`, computed in `Authenticate`'s own statement). The extended
+API test failed first with all six calls it now refuses answered 200: the session read, the
+events list and send, a skill read, and a memory list and create. A new unit row failed on
+`StopOnly` itself. Dropping the lane's gate, or computing `StopOnly` without the WindDown
+bound, each failed a test. The same review found an overclaim the first fix had repeated:
+that no settlement re-arms a session while the old item's token works. That holds for the
+finalizer alone. A force stop and `queue.CancelSession` settle at once, and the stopped
+item's token can work for the rest of its minute beside the session's next item, as it
+could before #810. The docs now say so and the API test pins it. The verifier's notes on the same text
+were folded in: the finalizer needs a poll, and the minute covers a worker told of the stop
+promptly.
+
+After the second review's fixes the full `make verify` gate passed on the branch: build,
+cross-build, vet, format check and 61 test packages, with 90.21% total statement coverage.
+`tools/registrycheck` was clean on shape and issue state, and the `tools/sdkref` report
+counted 657 citations, with no findings and no transitions awaiting a disposition. Review
+results and CI are recorded in the pull request.
+
+---
+
 ## Work Stop answers 200 (plan 57, #804) — archived 2026-09-26, delivered in one PR
 
 The recordings reversed plan 04. All 27 recorded stops answer 200 with the work object and

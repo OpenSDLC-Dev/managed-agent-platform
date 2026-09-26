@@ -622,6 +622,16 @@ func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 	if prev == "" {
 		t.Fatal("claim heartbeat returned no last_heartbeat to echo")
 	}
+	// The value is the row's, rendered byte for byte as encoding/json renders a
+	// UTC time.Time, which is what the field carried when it was typed as one.
+	var beat time.Time
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT last_heartbeat FROM work_items WHERE id = $1`, workID).Scan(&beat); err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := json.Marshal(beat.UTC()); `"`+prev+`"` != string(want) || !strings.Contains(raw, `"last_heartbeat":`+string(want)) {
+		t.Errorf("last_heartbeat = %q in %s, want the row's %s as time.Time's JSON", prev, raw, want)
+	}
 
 	// Echo the server's value to extend; an over-large TTL is clamped to the max.
 	res, body, raw = s.workReq(t, http.MethodPost, base+"?expected_last_heartbeat="+url.QueryEscape(prev)+"&desired_ttl_seconds=100000", key, nil)
@@ -655,9 +665,10 @@ func TestWorkStopAnswersTheWorkObject(t *testing.T) {
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 	get := "/v1/environments/" + envID + "/work/" + workID
 
-	// Ack and claim the lease first. A graceful stop asks the item's *worker* to
-	// wind down, so only a claimed item has anyone to leave the stopping state
-	// again; one no worker holds is stopped outright instead (#25).
+	// Ack and claim the lease first, so the wind-down below is one a beating
+	// worker is asked for. A graceful stop of acked work its worker has not
+	// claimed yet goes stopping too, and its claim is how that worker learns
+	// of it: TestWorkGracefulStopOfStartingWorkWindsDownThroughTheClaim.
 	if res, _, raw := s.workReq(t, http.MethodPost, get+"/ack", key, nil); res.StatusCode != http.StatusOK {
 		t.Fatalf("ack status = %d, want 200 (body %q)", res.StatusCode, raw)
 	}
@@ -712,6 +723,69 @@ func wantStopped(t *testing.T, s *tserver, get, key string, reqBody map[string]a
 		t.Errorf("stop answered %v, GET answers %v; want the same rendering", body, got)
 	}
 	return body
+}
+
+// TestWorkGracefulStopOfStartingWorkWindsDownThroughTheClaim replays one
+// recorded item's whole wind-down (2026-09-19 custom-mixed-tools #22, #23, #44
+// and #47): acked, then stopped gracefully before any beat, then claimed, then
+// force-stopped by the worker the claim told. The claim is the recorded
+// answer's field for field but ttl_seconds, which echoes this platform's TTL
+// where the recording shows 120 (docs/DIVERGENCES.md registers the
+// difference).
+func TestWorkGracefulStopOfStartingWorkWindsDownThroughTheClaim(t *testing.T) {
+	s := newTestServer(t)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-stop-starting")
+	workID := s.enqueueAndPoll(t, envID, sessionID, key)
+	get := "/v1/environments/" + envID + "/work/" + workID
+
+	// #22: the ack — starting, acknowledged, no beat.
+	res, acked, raw := s.workReq(t, http.MethodPost, get+"/ack", key, nil)
+	if res.StatusCode != http.StatusOK || acked["state"] != "starting" || acked["acknowledged_at"] == nil || acked["latest_heartbeat_at"] != nil {
+		t.Fatalf("ack = %d %s, want 200 starting with acknowledged_at and no heartbeat", res.StatusCode, raw)
+	}
+	unmoved := func(step string, body map[string]any) {
+		t.Helper()
+		for _, k := range []string{"acknowledged_at", "started_at", "created_at"} {
+			if body[k] != acked[k] {
+				t.Errorf("%s moved %s: %v, want the ack's %v", step, k, body[k], acked[k])
+			}
+		}
+	}
+
+	// #23: the graceful stop, sent as recorded with the body {} — stopping,
+	// stop_requested_at stamped, stopped_at and latest_heartbeat_at null.
+	stopping := wantStopped(t, s, get, key, map[string]any{})
+	if stopping["state"] != "stopping" || stopping["stop_requested_at"] == nil || stopping["stopped_at"] != nil || stopping["latest_heartbeat_at"] != nil {
+		t.Errorf("graceful stop of starting work = %v, want stopping with stop_requested_at, no stopped_at, no heartbeat", stopping)
+	}
+	unmoved("the graceful stop", stopping)
+
+	// #44: the claim — 200, not extended, stopping, and last_heartbeat the empty
+	// string: neither null nor absent.
+	res, beat, raw := s.workReq(t, http.MethodPost, get+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", key, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("claim on never-claimed stopping work = %d %s, want 200", res.StatusCode, raw)
+	}
+	if !strings.Contains(raw, `"last_heartbeat":""`) {
+		t.Errorf("claim answered %s, want the literal \"last_heartbeat\":\"\"", raw)
+	}
+	wantFields(t, beat, "last_heartbeat", "lease_extended", "state", "ttl_seconds", "type")
+	if beat["type"] != "work_heartbeat" || beat["lease_extended"] != false || beat["state"] != "stopping" || beat["ttl_seconds"] != float64(30) {
+		t.Errorf("claim = %v, want work_heartbeat, lease_extended false, stopping, ttl_seconds 30", beat)
+	}
+	// The claim wrote nothing: the item reads as the stop left it.
+	if _, got, _ := s.workReq(t, http.MethodGet, get, key, nil); !reflect.DeepEqual(got, stopping) {
+		t.Errorf("after the claim the item reads %v, want the stop's %v", got, stopping)
+	}
+
+	// #47: the worker's force stop — stopped, stopped_at stamped, the first
+	// stop_requested_at kept, latest_heartbeat_at still null.
+	stopped := wantStopped(t, s, get, key, map[string]any{"force": true})
+	if stopped["state"] != "stopped" || stopped["stopped_at"] == nil || stopped["stop_requested_at"] != stopping["stop_requested_at"] || stopped["latest_heartbeat_at"] != nil {
+		t.Errorf("force stop after the claim = %v, want stopped with stopped_at, stop_requested_at %v, no heartbeat",
+			stopped, stopping["stop_requested_at"])
+	}
+	unmoved("the force stop", stopped)
 }
 
 // TestWorkLifecycleRoutesScopeAndMethod pins that the new lifecycle routes share

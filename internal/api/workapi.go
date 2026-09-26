@@ -351,13 +351,16 @@ func (s *server) statsWork(r *http.Request) (any, error) {
 	}, nil
 }
 
-// heartbeatWire is the BetaSelfHostedWorkHeartbeatResponse shape.
+// heartbeatWire is the BetaSelfHostedWorkHeartbeatResponse shape. The SDK
+// types last_heartbeat as a string, and the reference answers the empty
+// string, neither null nor absent, for an item no beat has reached
+// (2026-09-19 custom-mixed-tools #44).
 type heartbeatWire struct {
-	LastHeartbeat time.Time `json:"last_heartbeat"`
-	LeaseExtended bool      `json:"lease_extended"`
-	State         string    `json:"state"`
-	TTLSeconds    int64     `json:"ttl_seconds"`
-	Type          string    `json:"type"` // always "work_heartbeat"
+	LastHeartbeat string `json:"last_heartbeat"`
+	LeaseExtended bool   `json:"lease_extended"`
+	State         string `json:"state"`
+	TTLSeconds    int64  `json:"ttl_seconds"`
+	Type          string `json:"type"` // always "work_heartbeat"
 }
 
 const (
@@ -484,8 +487,15 @@ func (s *server) heartbeatWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, mapWorkErr(err)
 	}
+	// Byte for byte what encoding/json renders a UTC time.Time as — the form
+	// this field had before it could be empty, and the one the worker echoes
+	// back for Heartbeat to parse as its next precondition.
+	last := ""
+	if res.LastHeartbeat != nil {
+		last = res.LastHeartbeat.UTC().Format(time.RFC3339Nano)
+	}
 	return heartbeatWire{
-		LastHeartbeat: res.LastHeartbeat.UTC(),
+		LastHeartbeat: last,
 		LeaseExtended: res.LeaseExtended,
 		State:         res.State,
 		TTLSeconds:    res.TTLSeconds,
@@ -547,10 +557,13 @@ func (s *server) stopWork(r *http.Request) (any, error) {
 	// stopped is re-armed. A stop that moved nothing owes nothing: the
 	// transition that stopped the item already re-armed its session, and a
 	// second re-arm would hand the same calls out again for every repeated
-	// stop. A graceful stop that parked the item stopping is not yet stopped;
-	// the worker's own stop after its wind-down lands here again, and a
-	// wind-down the worker never finishes is finalized — and re-armed — by the
-	// next poll.
+	// stop. A graceful stop that parked the item stopping — starting or
+	// active, whether or not a beat ever reached it — is not yet stopped and
+	// owes nothing yet: the calls are still its worker's. The re-arm is owed
+	// once, by whichever path finishes the wind-down: the worker's own stop,
+	// which lands here again once its heartbeat or its claim has told it, or,
+	// for a wind-down nobody finishes, the poll that finalizes it past its
+	// lease and WindDown (finalizeAbandoned), in the same transaction.
 	if moved && w.State == "stopped" {
 		if err := s.rearm(ctx, tx, envID, cur.SessionID); err != nil {
 			return nil, err

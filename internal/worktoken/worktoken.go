@@ -12,15 +12,22 @@
 // stored hash-only. It carries neither an expiry nor a revocation column: it
 // is valid while the item it names is live — the join conditions Authenticate
 // runs — so a re-hand-out (a fresh work id, #62), a lapsed lease and a session
-// archive each end it without an event, and a stop ends it queue.WindDown (a
-// minute) after it was requested: the reference worker flushes its unsynced
-// memory writes once the control plane has reported the stop, on a context of
-// its own bounded by 30 seconds (checked against anthropic-sdk-go v1.66.0 —
-// memories.go SessionMemoryStores.Cleanup), and a token dead at that instant
-// would lose them — a BYOC workdir is removed at the item's end, with no held
-// sandbox to sync from later as a cloud session has. The value itself is
-// gatetoken's mint under another prefix, so every internal bearer the
-// platform issues shares one entropy and one alphabet.
+// archive each end it without an event. A stop leaves it whole for a minute
+// from the request (queue.WindDown), then ends it once the item is stopped,
+// or keeps only the item's heartbeat and stop while it is still stopping
+// (Authenticate). The reference worker's memory flush rides that minute: it
+// flushes its unsynced memory writes once the control plane has reported the
+// stop, on a context of its own bounded by 30 seconds (checked against
+// anthropic-sdk-go v1.66.0 — memories.go SessionMemoryStores.Cleanup), and a
+// token dead at that instant would lose them — a BYOC workdir is removed at
+// the item's end, with no held sandbox to sync from later as a cloud session
+// has. The minute covers a worker told of the stop promptly, the usual case:
+// a claimed item's worker learns of it at its next heartbeat, within 15 s
+// here. One told late, like the recorded never-claimed one (its force stop
+// 60.1 s after the request), loses the flush, but its run was cancelled at
+// its claim, before any tool ran, so it has nothing to flush. The value
+// itself is gatetoken's mint under another prefix, so every internal bearer
+// the platform issues shares one entropy and one alphabet.
 package worktoken
 
 import (
@@ -51,11 +58,14 @@ type DB interface {
 }
 
 // Principal is what a token authenticates — the item, its session, and the
-// environment both belong to.
+// environment both belong to. StopOnly marks a stopping item whose stop was
+// requested more than queue.WindDown ago: its worker has only the stop left
+// to finish, so the lane admits it on the item's heartbeat and stop alone.
 type Principal struct {
 	WorkID        string
 	SessionID     string
 	EnvironmentID string
+	StopOnly      bool
 }
 
 // Mint issues the token for workID's claim of sessionID's item and stores its
@@ -85,31 +95,43 @@ func Secret(token string) string {
 // Authenticate resolves a token to its principal, or the zero Principal when
 // the token is unknown or no longer names a live item: the item's id must
 // still be the one the token was minted for (a re-hand-out rewrites it), its
-// lease unexpired while it runs, or its stop requested within queue.WindDown
-// once it is stopping or stopped (a graceful stop parks an active item in
-// stopping with a lease the heartbeat no longer extends, so the window counts
-// from the request rather than from the lease or the stop's completion: the
-// wind-down and the post-stop flush both ride it), and its session
-// unarchived. WindDown is sized to the reference worker's flow (its doc), and
-// the queue settles an abandoned wind-down only once the same window has
-// passed, so no settlement re-arms a session while its token still works.
-// The CASE rests on one invariant held two packages away: stop_requested_at
-// is set by every stop but Queue.Complete, and Complete settles only Claim's
-// items — the brain's turns and the cloud executor's tool runs — never a
-// polled one.
+// session unarchived, and the item
+//
+//   - before any stop: its lease unexpired;
+//   - stopping: until a force stop settles it, or a poll of the environment
+//     once its lease and WindDown have passed — never, if nothing polls. Its
+//     worker still has the stop to finish, and may learn of it only about
+//     WindDown after the request: the recorded claim on such work was sent
+//     58.9 s after it, its force stop at 60.1 s (2026-09-19
+//     custom-mixed-tools #23, #44 and #47). Past WindDown the principal is
+//     StopOnly, so a stranded item's token can still finish the stop and
+//     reach nothing else;
+//   - stopped: its stop requested within queue.WindDown, the window the
+//     reference worker's post-stop flush rides (its doc). The finalizer
+//     settles an abandoned wind-down only past that window, so its re-arm
+//     never runs beside the abandoned item's token. A force stop and
+//     queue.CancelSession settle at once, so an old item's token can work for
+//     the rest of the window beside the session's next item.
+//
+// The CASE and StopOnly rest on one invariant held two packages away:
+// stop_requested_at is set by every stop but Queue.Complete, and Complete
+// settles only Claim's items — the brain's turns and the cloud executor's
+// tool runs — never a polled one.
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,
-		`SELECT t.work_id, t.session_id, w.environment_id
+		`SELECT t.work_id, t.session_id, w.environment_id,
+		        w.state = 'stopping' AND w.stop_requested_at <= now() - make_interval(secs => $2)
 		   FROM work_session_tokens t
 		   JOIN work_items w ON w.id = t.work_id AND w.session_id = t.session_id
 		   JOIN sessions s ON s.id = t.session_id
 		  WHERE t.token_hash = $1
-		    AND CASE WHEN w.state IN ('stopping', 'stopped')
-		             THEN w.stop_requested_at > now() - make_interval(secs => $2)
+		    AND CASE w.state
+		             WHEN 'stopping' THEN true
+		             WHEN 'stopped' THEN w.stop_requested_at > now() - make_interval(secs => $2)
 		             ELSE w.lease_expires_at > now() END
 		    AND s.archived_at IS NULL`,
-		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID)
+		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID, &p.StopOnly)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, nil
 	}

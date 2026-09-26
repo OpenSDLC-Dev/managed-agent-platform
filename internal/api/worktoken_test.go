@@ -289,9 +289,10 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 	}
 
 	// Its own item's stop. A graceful stop parks the active item in stopping
-	// with a lease the heartbeat no longer extends; the token rides the
-	// wind-down and the post-stop memory flush for a minute from the request,
-	// the lease and the force-stop aside, and is dead after.
+	// with a lease the heartbeat no longer extends; the token keeps its reach
+	// for a minute from the request, the lease aside — the wind-down and the
+	// post-stop memory flush — after which a stopping item's token reaches
+	// only its heartbeat and stop and a stopped item's is dead.
 	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, tok); st != http.StatusOK {
 		t.Errorf("graceful stop with the token = %d, want 200", st)
 	}
@@ -418,6 +419,111 @@ func TestSessionsTokenJoinConditions(t *testing.T) {
 	}
 	if st := status(t, s, http.MethodGet, session, nil, asBearer(token3)); st != http.StatusUnauthorized {
 		t.Errorf("the token after its session archived = %d, want 401", st)
+	}
+}
+
+// TestSessionsTokenOutlivesWindDownWhileStopping: the reference worker beats
+// and force-stops with its item's sessions token (checked against
+// anthropic-sdk-go v1.70.1 — worker.go EnvironmentWorker.handleItem), and a
+// claim can reach stopping work past WindDown: the recorded one was answered
+// 60.06 s after its stop, and its force stop sent at 60.11 s (2026-09-19
+// custom-mixed-tools #23, #44 and #47). So the token lives while the item is
+// stopping, and that force stop settles it and re-arms once. Past WindDown the
+// stop is all it has left to finish, so it reaches the item's heartbeat and
+// stop alone: an item nothing polls must not keep a decommissioned worker in
+// its session and memories. Once stopped, the token keeps only the minute from
+// the request, whoever stopped the item.
+func TestSessionsTokenOutlivesWindDownWhileStopping(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	envID, sessionID, key := selfHostedWorker(t, s, "late-claim")
+	memories := "/v1/memory_stores/" + attachStoreBySeam(t, s, sessionID, "Notes late-claim") + "/memories"
+	skill := "/v1/skills/" + s.createSkill(t)["id"].(string)
+	appendOn(t, s, sessionID, "", false, domain.EventAgentToolUse, allowBashCall)
+	enqueueOn(t, s, envID, sessionID)
+	workID, _, token := pollItem(t, s, envID, key)
+	if token == "" {
+		t.Fatal("the store session's item carried no sessions token")
+	}
+	work := "/v1/environments/" + envID + "/work/" + workID
+	session := "/v1/sessions/" + sessionID
+	backdate := func(id, assign string) {
+		t.Helper()
+		if _, err := s.pool.Exec(ctx, `UPDATE work_items SET `+assign+` WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st := status(t, s, http.MethodPost, work+"/ack", nil, asBearer(key)); st != http.StatusOK {
+		t.Fatalf("ack = %d", st)
+	}
+	if st := status(t, s, http.MethodPost, work+"/stop", map[string]any{}, asBearer(key)); st != http.StatusOK {
+		t.Fatalf("graceful stop = %d", st)
+	}
+	// Inside WindDown, the startup lease lapsed, the whole matrix still works.
+	reads := []string{session, session + "/events", skill, memories}
+	backdate(workID, `stop_requested_at = now() - interval '45 seconds', lease_expires_at = now() - interval '1 second'`)
+	for _, path := range reads {
+		if st := status(t, s, http.MethodGet, path, nil, asBearer(token)); st != http.StatusOK {
+			t.Errorf("GET %s with the token inside WindDown = %d, want 200", path, st)
+		}
+	}
+	// Past WindDown and the startup lease, and no poll has settled it: every
+	// route but the item's heartbeat and stop refuses the token.
+	backdate(workID, `stop_requested_at = now() - interval '61 seconds', lease_expires_at = now() - interval '1 second'`)
+	for _, path := range reads {
+		if st := status(t, s, http.MethodGet, path, nil, asBearer(token)); st != http.StatusUnauthorized {
+			t.Errorf("GET %s with the token past WindDown = %d, want 401", path, st)
+		}
+	}
+	for path, body := range map[string]any{
+		session + "/events": map[string]any{"events": []any{userMessage("late")}},
+		memories:            map[string]any{"path": "/late.md", "content": "late"},
+	} {
+		if st := status(t, s, http.MethodPost, path, body, asBearer(token)); st != http.StatusUnauthorized {
+			t.Errorf("POST %s with the token past WindDown = %d, want 401", path, st)
+		}
+	}
+
+	res, beat, raw := s.workReq(t, http.MethodPost, work+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", token, nil)
+	if res.StatusCode != http.StatusOK || beat["state"] != "stopping" {
+		t.Fatalf("the token's claim past WindDown = %d %s, want 200 stopping", res.StatusCode, raw)
+	}
+	res, stopped, raw := s.workReq(t, http.MethodPost, work+"/stop", token, map[string]any{"force": true})
+	if res.StatusCode != http.StatusOK || stopped["state"] != "stopped" {
+		t.Fatalf("the token's force stop past WindDown = %d %s, want 200 stopped", res.StatusCode, raw)
+	}
+	var others int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM work_items WHERE session_id = $1 AND id <> $2 AND kind <> 'model_turn'`, sessionID, workID).Scan(&others); err != nil {
+		t.Fatal(err)
+	}
+	if live := s.liveWork(sessionID, queue.ToolExec); others != 1 || live != 1 {
+		t.Errorf("after the force stop: %d other exec items, %d live; want exactly the one re-armed item", others, live)
+	}
+	for _, probe := range []struct{ method, path string }{
+		{http.MethodGet, session},
+		{http.MethodPost, work + "/heartbeat?expected_last_heartbeat=NO_HEARTBEAT"},
+		{http.MethodPost, work + "/stop"},
+	} {
+		if st := status(t, s, probe.method, probe.path, map[string]any{}, asBearer(token)); st != http.StatusUnauthorized {
+			t.Errorf("%s %s with the token once its item stopped past WindDown = %d, want 401", probe.method, probe.path, st)
+		}
+	}
+
+	// The re-armed item, stopped outright by the control plane, which re-arms
+	// the session at once: its token keeps the minute from the request beside
+	// the session's next item, and not a moment past it.
+	workID2, _, token2 := pollItem(t, s, envID, key)
+	work2 := "/v1/environments/" + envID + "/work/" + workID2
+	if st := status(t, s, http.MethodPost, work2+"/stop", map[string]any{"force": true}, asBearer(key)); st != http.StatusOK {
+		t.Fatalf("force stop of the re-armed item = %d", st)
+	}
+	if st, live := status(t, s, http.MethodGet, session, nil, asBearer(token2)), s.liveWork(sessionID, queue.ToolExec); st != http.StatusOK || live != 1 {
+		t.Errorf("the token of a just-stopped item = %d beside %d live exec items, want 200 beside 1", st, live)
+	}
+	backdate(workID2, `stop_requested_at = now() - interval '61 seconds'`)
+	if st := status(t, s, http.MethodGet, session, nil, asBearer(token2)); st != http.StatusUnauthorized {
+		t.Errorf("the token of an item stopped past WindDown = %d, want 401", st)
 	}
 }
 

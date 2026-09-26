@@ -548,11 +548,17 @@ and holds the two OS-touching adapters `gaterun/` declares.
   polled it everywhere but the memories, which are what it exists for. It dies with
   the item, by join condition, for every request after — a stream already open runs
   to its end, as one opened with any credential here does: a re-hand-out, a lapsed
-  lease or an archive ends it; a stop, graceful or not, leaves it a minute from the
-  request (the reference worker learns of the stop at its next heartbeat, then
-  flushes its memory writes for up to 30 s on a context of its own), and the queue
-  settles a wind-down whose worker went silent only once that same minute
-  (`queue.WindDown`) is over, so no settlement re-arms a session while its token works.
+  lease or an archive ends it. A stop leaves it whole for a minute from the request
+  (`queue.WindDown`: the reference worker learns of the stop at its next heartbeat,
+  then flushes its memory writes for up to 30 s on a context of its own). Past that
+  minute a `stopped` item's token is dead, and a `stopping` item's reaches only the
+  item's heartbeat and stop: such an item settles at a force stop, or at a poll of its
+  environment once its lease and the minute have passed, and never if nothing polls,
+  so stranded, its token can still finish the stop and nothing else. The queue
+  settles a wind-down whose worker went silent only once that same minute is over,
+  so that re-arm never runs beside the silent worker's token; a force stop or a
+  session-wide interrupt (`queue.CancelSession`) settles at once, so for the rest of
+  the minute an old item's token can work beside the session's next item.
   On the memory routes the environment key itself is refused, a token's write is the
   session's version (`session_actor`), and `read_only` is enforced at the hands on
   both deployment points — the executor's pull-only sync, the reference worker's

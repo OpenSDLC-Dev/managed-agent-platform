@@ -371,11 +371,12 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // is the signal: a stopping item whose lease has lapsed has nobody left to finish
 // it, so the poll settles it terminally (→ stopped, stopped_at stamped, lease
 // cleared) instead of leaving it non-terminal forever (#25). Such an item always
-// carries a lease to lapse, because a graceful stop only enters stopping from
-// active (see Stop); the lapse counts only once WindDown has passed since the
-// request, a live worker having stopped heartbeating the moment it learned of
-// the stop. The null-lease arm is not for it, but for the one row the
-// new state machine does not write: during a rolling upgrade a not-yet-upgraded
+// carries a lease to lapse, because a graceful stop enters stopping only from
+// starting or active and keeps the lease it finds (see StopWith); the lapse
+// counts only once WindDown has passed since the request, a live worker having
+// stopped heartbeating the moment it learned of the stop. The null-lease arm
+// is not for it, but for the one row the new state machine does not write:
+// during a rolling upgrade a not-yet-upgraded
 // replica can still park a never-polled queued item, which has no lease at all,
 // in stopping. Migration 0014 finalizes the ones written before the upgrade;
 // ListAbandoned + FinalizeAbandoned — run by the work API ahead of every
@@ -473,9 +474,12 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 // flush pass bounded at 30 s — 45 s of the 60). A stopping item is settled
 // as abandoned only once its lease lapsed AND this has passed since the stop
 // was requested: a live worker stops heartbeating the moment it learns of
-// the stop, so the lapse alone proves nothing inside the window. The
-// sessions token (internal/worktoken) lives exactly this long past the
-// request, so no settlement re-arms a session while its token still works.
+// the stop, so the lapse alone proves nothing inside the window. A stopped
+// item's sessions token (internal/worktoken) lives exactly this long past the
+// request, so that settlement never re-arms a session while the abandoned
+// item's token still works. A force stop or CancelSession does not wait: its
+// item's token keeps working for up to this long after the request, while the
+// session's next item may already run.
 // The cost: a session whose worker died mid-wind-down waits this long to be
 // re-armed, where the lease lapse alone would have done in half the time; a
 // death mid-run is still reclaimed by Poll at lease expiry.

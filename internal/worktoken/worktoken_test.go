@@ -74,21 +74,26 @@ func TestMintAndAuthenticate(t *testing.T) {
 		t.Errorf("an unknown token authenticated as %+v", p)
 	}
 
-	// A stop keeps the token for a minute from its request, the lease aside:
-	// the reference worker's wind-down and post-stop memory flush ride it.
+	// A stop keeps the token, the lease aside, while the item is stopping and
+	// for a minute from the request once it is stopped: the reference worker's
+	// wind-down and post-stop memory flush ride it. A stopping item past that
+	// minute has only the stop left to finish, and its principal says so.
 	for _, tc := range []struct {
 		name, sql string
+		stopOnly  bool
 	}{
-		{"a just-stopped item", `UPDATE work_items SET state = 'stopped', stop_requested_at = now(), stopped_at = now(), lease_expires_at = NULL WHERE id = $1`},
-		{"a stopping item whose frozen lease lapsed", `UPDATE work_items SET state = 'stopping', stop_requested_at = now(), stopped_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`},
+		{"a just-stopped item", `UPDATE work_items SET state = 'stopped', stop_requested_at = now(), stopped_at = now(), lease_expires_at = NULL WHERE id = $1`, false},
+		{"a stopping item whose frozen lease lapsed", `UPDATE work_items SET state = 'stopping', stop_requested_at = now(), stopped_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`, false},
+		{"a stopping item whose stop was requested a minute ago", `UPDATE work_items SET state = 'stopping', stop_requested_at = now() - interval '61 seconds', stopped_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`, true},
 		// The worker's whole notice-and-flush (15 s + 30 s) fits the window.
-		{"an item whose stop was requested 45 s ago", `UPDATE work_items SET state = 'stopped', stop_requested_at = now() - interval '45 seconds', stopped_at = now(), lease_expires_at = NULL WHERE id = $1`},
+		{"an item whose stop was requested 45 s ago", `UPDATE work_items SET state = 'stopped', stop_requested_at = now() - interval '45 seconds', stopped_at = now(), lease_expires_at = NULL WHERE id = $1`, false},
+		{"a stopping item whose stop was requested 45 s ago", `UPDATE work_items SET state = 'stopping', stop_requested_at = now() - interval '45 seconds', stopped_at = NULL, lease_expires_at = now() - interval '1 second' WHERE id = $1`, false},
 	} {
 		if _, err := pool.Exec(ctx, tc.sql, item.ID.String()); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		if p, err := worktoken.Authenticate(ctx, pool, token); err != nil || p.WorkID != item.ID.String() {
-			t.Errorf("%s: the token does not authenticate (%+v, %v)", tc.name, p, err)
+		if p, err := worktoken.Authenticate(ctx, pool, token); err != nil || p.WorkID != item.ID.String() || p.StopOnly != tc.stopOnly {
+			t.Errorf("%s: the token authenticates as %+v (%v); want its item, StopOnly %v", tc.name, p, err, tc.stopOnly)
 		}
 	}
 	// The join conditions, one at a time on the same row.
