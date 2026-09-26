@@ -24,7 +24,7 @@ const turnTimeout = 5 * time.Minute
 // outcomeTurnBudget bounds a user.define_outcome → idle round trip, which is
 // a whole outcome loop rather than one turn: up to MaxIterations cycles of an
 // agent turn plus a separate grader model call (two turn-sized calls, so two
-// budgets each), plus the acknowledgment turn a max_iterations_reached
+// budgets each), plus the acknowledgment turn a verdict on the last cycle
 // appends — the budget scales with the cycles the outcome allows instead of
 // pretending the loop is one turn. Non-positive MaxIterations gets the server
 // default (3), matching turnEvent, which omits the field for those values.
