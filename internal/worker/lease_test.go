@@ -999,12 +999,14 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 // stopped before its worker's first beat (2026-09-19 custom-mixed-tools #22,
 // #23, #44 and #47) with this worker: a graceful stop lands between the ack
 // and the claim. The claim answers 200 stopping, not the 412 of a lost lease,
-// so the worker takes it for the control plane's stop: it cancels the run,
-// runs no tool, and force-stops the item itself, the reference worker's own
-// sequence (checked against anthropic-sdk-go v1.70.1 — worker.go
-// runHeartbeat). Exactly one re-arm follows, from that force stop. The poll
-// hands out one item only, so the re-armed one stays queued to be counted
-// rather than run; the held tool makes a cancelled run unable to answer.
+// so the worker takes it for the control plane's stop: it cancels the run on
+// that answer, posts no tool result, and force-stops the item itself, the
+// reference worker's own sequence (checked against anthropic-sdk-go v1.70.1 —
+// worker.go runHeartbeat). The run starts beside the claim, as the reference
+// worker's does, so a tool may be entered before the answer; the held tool
+// makes a cancelled run unable to finish one. Exactly one re-arm follows, from
+// that force stop. The poll hands out one item only, so the re-armed one stays
+// queued to be counted rather than run.
 func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
 	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
 	var (
@@ -1112,10 +1114,10 @@ func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
 			want, beat, graceful["stop_requested_at"])
 	}
 	if got := len(h.results(t)); got != 0 {
-		t.Errorf("user.tool_result = %d, want 0 (the worker ran no tool)", got)
+		t.Errorf("user.tool_result = %d, want 0 (the run was cancelled on the claim's answer)", got)
 	}
 	if _, ran := sb.files["/workspace/out.txt"]; ran {
-		t.Error("the tool wrote its file; the worker must run no tool on an item it was told to stop")
+		t.Error("the tool finished its write; the run must be cancelled on the claim's answer")
 	}
 	var others, queued int
 	if err := h.pool.QueryRow(context.Background(),

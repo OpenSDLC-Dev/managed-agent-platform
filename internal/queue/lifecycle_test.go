@@ -496,11 +496,11 @@ func TestClaimRefusalsAroundAStop(t *testing.T) {
 // that wind-down, on the signal an abandoned claimed one gives: the lease —
 // here the ack's startup lease, which the stop kept — lapsed AND WindDown
 // passed since the request. Until both hold, a poll neither finalizes the item
-// nor re-offers it (a stopping item never is), so a claim as late as the
-// recorded one, 59 s after the stop, still finds it stopping. Past both, the
-// next poll settles it, and a claim that arrives after that meets stopped
-// work, which is refused. The re-arm the settlement owes is the work API's,
-// pinned by internal/api's TestWorkGracefulStopOfStartingWorkReArmsOnce.
+// nor re-offers it (a stopping item never is), so a claim late in the window
+// still finds it stopping. Past both, the next poll settles it, and a claim
+// that arrives after that meets stopped work, which is refused. The re-arm
+// the settlement owes is the work API's, pinned by internal/api's
+// TestWorkGracefulStopOfStartingWorkReArmsOnce.
 func TestPollFinalizesANeverClaimedWindDown(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -529,10 +529,10 @@ func TestPollFinalizesANeverClaimedWindDown(t *testing.T) {
 	}
 
 	leftAlone("under the startup lease")
-	set(`lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '59 seconds'`)
-	leftAlone("59 s into the wind-down, its lease lapsed")
+	set(`lease_expires_at = now() - interval '1 second', stop_requested_at = now() - interval '45 seconds'`)
+	leftAlone("45 s into the wind-down, its lease lapsed")
 	if hb, err := q.Heartbeat(ctx, env, id, queue.NoHeartbeat, 30); err != nil || hb.State != "stopping" {
-		t.Fatalf("claim 59 s after the stop = %+v %v, want the stop reported", hb, err)
+		t.Fatalf("claim 45 s after the stop = %+v %v, want the stop reported", hb, err)
 	}
 
 	set(`stop_requested_at = now() - interval '61 seconds'`)
