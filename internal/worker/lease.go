@@ -144,8 +144,19 @@ func NewWorker(client sdk.Client, provider sandbox.Provider, cfg Config) *Worker
 // error; any other poll error backs off and retries, so a transient network
 // blip does not kill the worker. Cancellation (SIGINT/SIGTERM via the caller's
 // signal context) ends the loop with a nil error.
+//
+// An item its heartbeat stopped before any beat extended the lease is followed
+// by the same backoff. That stop re-queues the session's unanswered calls as a
+// new item (the work API's stopWork), so against a control plane that refuses
+// every beat the next poll would hand them straight back, and the worker would
+// cycle poll, ack, refused claim, stop at the speed of a round trip. The
+// reference worker polls again at once (checked against anthropic-sdk-go
+// v1.70.1 — worker.go EnvironmentWorker.Run); its poller backs off this way
+// only after an item it could not ack (checked against anthropic-sdk-go
+// v1.70.1 — poller.go WorkPoller.discardUnprocessable). The count resets on the
+// next item that does not end this way.
 func (w *Worker) Run(ctx context.Context) error {
-	fails := 0
+	fails, refusals := 0, 0
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -178,7 +189,16 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		w.handleItem(ctx, work, parent)
+		if !w.handleItem(ctx, work, parent) {
+			refusals = 0
+			continue
+		}
+		refusals++
+		slog.Warn("worker: item stopped before its lease was extended, backing off",
+			"work", work.ID, "attempt", refusals)
+		if sleep(ctx, backoff(refusals)) != nil {
+			return nil
+		}
 	}
 }
 
@@ -254,8 +274,12 @@ const (
 	// work unanswered, or the run was cancelled) — leave the item live so it can
 	// be reclaimed. Once its heartbeat lease lapses, queue.Poll reclaims the
 	// stranded starting/active item (resets it to a fresh queued reservation) and
-	// a worker re-runs its still-unanswered tools. Force-stopping instead would
-	// move it to the terminal stopped state that no reclaim recovers.
+	// a worker re-runs its still-unanswered tools. A force stop would end the
+	// item for good, since no reclaim recovers a stopped one, and leave those
+	// tools to the work API's stopWork, which re-queues the session's runnable
+	// unanswered calls as a new item when a stop reaches stopped. That re-queue
+	// is what recovers a run the heartbeat cancelled and handleItem then stopped
+	// (see hbExit.mustStop); this outcome does not depend on it.
 	outcomeReclaim itemOutcome = iota
 	// outcomeDrain: the session is definitively dead (archived/terminated) — run
 	// nothing and force-stop the item. Safe regardless of lease ownership: a dead
@@ -304,7 +328,10 @@ const (
 //     the item, a stop under the identity this one was handed can only 404.
 //   - reclaim: leave the item live (mirrors the executor completing only when
 //     faultErr is nil).
-func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, parent map[string]string) {
+//
+// It reports whether the heartbeat stopped the item before any beat extended
+// its lease, which Run backs off after.
+func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, parent map[string]string) (refused bool) {
 	sessCtx, cancel := context.WithCancel(ctx)
 	// The run's progress, watched by the heartbeat: the beat is the one loop
 	// that keeps ticking while the run is wedged, so it is where the item's
@@ -312,9 +339,10 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 	prog := newProgress()
 	hbDone := make(chan struct{})
 	var hb hbExit
+	var extended bool
 	go func() {
 		defer close(hbDone)
-		hb = w.heartbeat(sessCtx, cancel, work.ID, prog)
+		hb, extended = w.heartbeat(sessCtx, cancel, work.ID, prog)
 	}()
 
 	// Parent the tool-exec span on the turn that enqueued the work (its trace
@@ -343,7 +371,7 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 	cancel()
 	<-hbDone
 
-	if hb == hbExitStopRequested || hb == hbExitRejected {
+	if hb.mustStop() {
 		// The run has wound down; finish the stop the control plane asked for,
 		// or send the one the reference sends after a rejected beat.
 		w.forceStop(work.ID, work.Data.ID)
@@ -366,6 +394,7 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 	if w.onItemDone != nil {
 		w.onItemDone(work.ID)
 	}
+	return hb.mustStop() && !extended
 }
 
 // runItem does the item's work and reports what to do with it (see itemOutcome),
@@ -494,10 +523,7 @@ func (p *progress) stalledFor(budget time.Duration) bool {
 // must stop from one it must leave alone. Every exit but hbExitCancelled cancels
 // the run identically, but they are opposite instructions about the item
 // afterwards: a requested stop or a rejected beat is finished with a force
-// stop, a lost or stalled lease is left alone. That is the reference worker's
-// split, which stops every item whose lease it did not lose (checked against
-// anthropic-sdk-go v1.70.1 — worker.go EnvironmentWorker.handleItem), plus the
-// stall it has no analogue for.
+// stop, a lost or stalled lease is left alone (see mustStop).
 type hbExit int
 
 const (
@@ -548,20 +574,31 @@ const (
 // that worker's run.
 func (e hbExit) ownershipGone() bool { return e == hbExitLeaseLost || e == hbExitStalled }
 
+// mustStop reports the exits after which handleItem stops the item whatever the
+// run's outcome. It is the reference worker's rule, which stops every item whose
+// lease it did not lose (checked against anthropic-sdk-go v1.70.1 — worker.go
+// leaseEndReason.lost), written the same way round, by the exits it excludes,
+// so an exit added later stops the item until it is excluded here. Ours
+// excludes two more: the stall the reference has no analogue for, which
+// ownershipGone counts with a lost lease (#383), and the loop's own
+// cancellation, after which the run's outcome decides (see handleItem).
+func (e hbExit) mustStop() bool { return e != hbExitCancelled && !e.ownershipGone() }
+
 // heartbeat keeps the item's lease alive on the wire's optimistic-concurrency
 // protocol: the first beat sends NO_HEARTBEAT to claim the lease (starting →
 // active), each later beat echoes the server's prior last_heartbeat to extend
 // it. It cancels the run (via cancel) and returns when the item stops being this
 // worker's to run — the control plane moved it to stopping/stopped, declined to
 // extend the lease, or rejected the precondition (412, another worker reclaimed
-// it) — or on any other fatal 4xx. Which of those it was is the return value,
-// and it decides whether handleItem stops the item (see hbExit). A transient
-// error is retried, but only until the lease's TTL has elapsed with no
-// successful beat: past that staleness ceiling the lease has lapsed server-side
-// and may be reclaimed, so the run is cancelled rather than left executing
-// against a lease this worker no longer holds. While retrying
-// transiently, the wait shrinks so the ceiling is checked right at the deadline,
-// not up to a full interval late. The first beat fires immediately.
+// it) — or on any other fatal 4xx. Which of those it was is the first return
+// value, and it decides whether handleItem stops the item (see hbExit); the
+// second reports whether any beat extended the lease. A transient error is
+// retried, but only until the lease's TTL has elapsed with no successful beat:
+// past that staleness ceiling the lease has lapsed server-side and may be
+// reclaimed, so the run is cancelled rather than left executing against a
+// lease this worker no longer holds. While retrying transiently, the wait
+// shrinks so the ceiling is checked right at the deadline, not up to a full
+// interval late. The first beat fires immediately.
 //
 // It is also where the run's own liveness is bounded: before each beat it asks
 // prog whether the run has reported anything within Config.StallTimeout, and a
@@ -569,7 +606,7 @@ func (e hbExit) ownershipGone() bool { return e == hbExitLeaseLost || e == hbExi
 // The check sits before the beat, never after, so a wedged item's lease is never
 // bought another interval it cannot use. Detection costs up to one interval on
 // top of the budget, since both live on this loop.
-func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workID string, prog *progress) hbExit {
+func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workID string, prog *progress) (exit hbExit, extended bool) {
 	last := noHeartbeat
 	interval := heartbeatCap
 	if w.cfg.HeartbeatInterval > 0 {
@@ -586,7 +623,7 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 			slog.Warn("worker: run reported no progress within its stall budget, leaving its lease to lapse",
 				"work", workID, "budget", w.cfg.StallTimeout)
 			cancel()
-			return hbExitStalled
+			return hbExitStalled, extended
 		}
 		// Bound each call so a hung heartbeat cannot silently let the lease lapse,
 		// but never below a second: the derived interval is already clamped to
@@ -602,25 +639,29 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 		}, option.WithRequestTimeout(callTimeout))
 		wait := interval
 		if err != nil {
-			if ctx.Err() != nil {
-				return hbExitCancelled
-			}
+			// A 412 is read before the context, as the reference reads it, so one
+			// that races the run's finish still counts as a lost lease and the
+			// item is not stopped (checked against anthropic-sdk-go v1.70.1 —
+			// worker.go runHeartbeat).
 			if isStatus(err, 412) {
 				slog.Warn("worker: heartbeat lost the lease", "work", workID, "err", err)
 				cancel()
-				return hbExitLeaseLost
+				return hbExitLeaseLost, extended
+			}
+			if ctx.Err() != nil {
+				return hbExitCancelled, extended
 			}
 			if isFatalHeartbeat(err) {
 				slog.Warn("worker: heartbeat rejected, stopping the item", "work", workID, "err", err)
 				cancel()
-				return hbExitRejected
+				return hbExitRejected, extended
 			}
 			if leaseLapsed(time.Since(lastSuccess), ttl) {
 				// The lease TTL elapsed with no successful beat: it has lapsed
 				// server-side and may be reclaimed, so stop running against it.
 				slog.Warn("worker: heartbeat stale beyond lease TTL, releasing", "work", workID, "err", err)
 				cancel()
-				return hbExitLeaseLost
+				return hbExitLeaseLost, extended
 			}
 			slog.Warn("worker: transient heartbeat error, retrying", "work", workID, "err", err)
 			// Shrink the wait so the next iteration re-checks the ceiling at the
@@ -629,16 +670,13 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 				wait = untilDeadline
 			}
 		} else {
-			if resp.State == "stopping" || resp.State == "stopped" {
-				slog.Info("worker: control plane stopped the item, winding down", "work", workID, "state", string(resp.State))
+			if resp.State == "stopping" || resp.State == "stopped" || !resp.LeaseExtended {
+				slog.Info("worker: control plane stopped the item or declined its lease, winding down",
+					"work", workID, "state", string(resp.State), "lease_extended", resp.LeaseExtended)
 				cancel()
-				return hbExitStopRequested
+				return hbExitStopRequested, extended
 			}
-			if !resp.LeaseExtended {
-				slog.Warn("worker: lease not extended, winding down", "work", workID)
-				cancel()
-				return hbExitStopRequested
-			}
+			extended = true
 			last = resp.LastHeartbeat
 			lastSuccess = time.Now()
 			if resp.TTLSeconds > 0 {
@@ -653,7 +691,7 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 			}
 		}
 		if sleep(ctx, wait) != nil {
-			return hbExitCancelled
+			return hbExitCancelled, extended
 		}
 	}
 }

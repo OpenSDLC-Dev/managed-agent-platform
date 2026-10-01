@@ -1334,7 +1334,9 @@ func TestWorkerLeaseNotExtendedStopsTheItem(t *testing.T) {
 // item. The reference worker ends its heartbeat on such a refusal with a reason
 // that is not a lost lease, so it force-stops the item on its way out (checked
 // against anthropic-sdk-go v1.70.1 — worker.go runHeartbeat) (#813). Only a 412
-// and a lapsed lease release the item unstopped.
+// and a lapsed lease release the item unstopped. The refusal staged here comes
+// after a claim that landed, so the worker polls on without the backoff an item
+// refused from its claim earns (TestWorkerBacksOffAfterItemsRefusedFromTheirClaim).
 func TestWorkerRejectedHeartbeatStopsTheItem(t *testing.T) {
 	for _, tc := range []struct {
 		status  int
@@ -1345,6 +1347,7 @@ func TestWorkerRejectedHeartbeatStopsTheItem(t *testing.T) {
 		{http.StatusUnauthorized, "authentication_error"},
 	} {
 		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			warnings := captureWarnings(t)
 			o := &beatOverride{beatStatus: tc.status,
 				beatBody: `{"type":"error","error":{"type":"` + tc.errType + `","message":"refused"}}`}
 			h, sb, done, cancel, errc := heldRun(t, o.wrap)
@@ -1362,6 +1365,10 @@ func TestWorkerRejectedHeartbeatStopsTheItem(t *testing.T) {
 			}
 			close(sb.gate)
 			waitExit(t, cancel, errc)
+			// Run has returned, so a backoff it began is logged by now.
+			if out := warnings(); strings.Contains(out, "before its lease was extended") {
+				t.Errorf("an item whose claim landed was followed by a backoff:\n%s", out)
+			}
 		})
 	}
 }
@@ -1496,6 +1503,106 @@ func TestWorkerRejectedBeatOnAReissuedIDLeavesTheReplacementAlone(t *testing.T) 
 		t.Errorf("the replacement's next beat = %+v, %v; want its lease extended", beat, err)
 	}
 	close(sb.gate)
+	waitExit(t, cancel, errc)
+}
+
+// TestWorkerLeaseLostAsTheRunFinishesIsNotStopped: a 412 read as the run
+// finishes still counts as a lost lease, so the completed item is not stopped.
+// The reference checks a beat's 412 before its context for this race (checked
+// against anthropic-sdk-go v1.70.1 — worker.go runHeartbeat). It is made
+// certain at the one point it can happen: the SDK hands a status back only if
+// the caller's context was live when the response arrived, so the claim is
+// answered 412 at once, but its body is held until the run's finish cancels
+// the beat.
+func TestWorkerLeaseLostAsTheRunFinishesIsNotStopped(t *testing.T) {
+	o := &beatOverride{} // never armed: it only counts the stops
+	h := newHarnessWrapped(t, &fakeSandbox{}, o.wrap)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+	released := make(chan error, 1)
+	h.client = h.noRetryClient(option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		if !strings.HasSuffix(r.URL.Path, "/heartbeat") {
+			return next(r)
+		}
+		return &http.Response{
+			StatusCode: http.StatusPreconditionFailed,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body: &heldBody{ctx: r.Context(), released: released,
+				body: `{"type":"error","error":{"type":"invalid_request_error","message":"lease lost"}}`},
+			Request: r,
+		}, nil
+	}))
+	// A long interval, so the claim's request timeout cannot end the hold first.
+	w, done := h.newWorker(Config{HeartbeatInterval: time.Minute})
+	cancel, errc := runWorker(w)
+
+	waitDone(t, done)
+	if err := <-released; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the claim's body was released by %v, want the run's finish", err)
+	}
+	if got := len(h.results(t)); got != 1 {
+		t.Errorf("user.tool_result = %d, want 1 (the run finished)", got)
+	}
+	if got := o.stops.Load(); got != 0 {
+		t.Errorf("stops sent = %d, want none for a lost lease", got)
+	}
+	if got := h.workState(t); got != "starting" {
+		t.Errorf("work item state = %q, want it left starting", got)
+	}
+	waitExit(t, cancel, errc)
+}
+
+// heldBody yields nothing until ctx ends, then body, and reports on released
+// what ended ctx.
+type heldBody struct {
+	ctx      context.Context
+	released chan<- error
+	body     string
+	r        io.Reader
+}
+
+func (b *heldBody) Read(p []byte) (int, error) {
+	if b.r == nil {
+		<-b.ctx.Done()
+		b.released <- b.ctx.Err()
+		b.r = strings.NewReader(b.body)
+	}
+	return b.r.Read(p)
+}
+
+func (b *heldBody) Close() error { return nil }
+
+// TestWorkerBacksOffAfterItemsRefusedFromTheirClaim: an item the heartbeat stops
+// before any beat extended its lease is followed by a backoff before the next
+// poll. The stop re-arms the session's unanswered call as a new item, so
+// without one a control plane that refuses every beat spins the worker at the
+// speed of a round trip (#813). Every beat is refused here, the claim included,
+// and the tool never answers, so each stop re-arms it; the second item ends at
+// least the first backoff's floor after the first.
+func TestWorkerBacksOffAfterItemsRefusedFromTheirClaim(t *testing.T) {
+	o := &beatOverride{beatStatus: http.StatusNotFound, repoll: true,
+		beatBody: `{"type":"error","error":{"type":"not_found_error","message":"refused"}}`}
+	o.armed.Store(true)
+	sb := &fakeSandbox{gate: make(chan struct{})} // never released: no run answers its tool
+	h := newHarnessWrapped(t, sb, o.wrap)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+	h.client = h.noRetryClient()
+	w, done := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+	defer cancel()
+
+	waitDone(t, done)
+	first := time.Now()
+	waitDone(t, done)
+	// The floor is backoffBase/2, jitter's; the margin absorbs this goroutine
+	// reading the first item late.
+	if gap := time.Since(first); gap < backoffBase/2-100*time.Millisecond {
+		t.Errorf("the second refused item ended %v after the first, want a backoff of at least %v between them", gap, backoffBase/2)
+	}
+	if got := o.stops.Load(); got != 2 {
+		t.Errorf("stops sent = %d, want one per item", got)
+	}
 	waitExit(t, cancel, errc)
 }
 
@@ -1657,6 +1764,26 @@ func TestErrorClassification(t *testing.T) {
 	}
 	if !isStatus(conflict, 409) || isStatus(conflict, 412) {
 		t.Error("isStatus must match the exact code")
+	}
+}
+
+// TestHbExitMustStop pins which heartbeat exits stop the item whatever the
+// run's outcome. The rule is written as the reference's is, by the exits that
+// must not stop it (checked against anthropic-sdk-go v1.70.1 — worker.go
+// leaseEndReason.lost), so an exit added later stops the item until it is
+// listed among them.
+func TestHbExitMustStop(t *testing.T) {
+	for exit, want := range map[hbExit]bool{
+		hbExitCancelled:     false,
+		hbExitStopRequested: true,
+		hbExitRejected:      true,
+		hbExitLeaseLost:     false,
+		hbExitStalled:       false,
+		hbExitStalled + 1:   true, // one added later
+	} {
+		if got := exit.mustStop(); got != want {
+			t.Errorf("hbExit(%d).mustStop() = %v, want %v", exit, got, want)
+		}
 	}
 }
 
