@@ -295,30 +295,42 @@ func TestGeneratePassthroughPreservesFields(t *testing.T) {
 	}
 }
 
-// The web tools' JSON Schema constraints — format, minLength,
-// additionalProperties (#682) — reach the endpoint untouched: the adapter
-// hands each tool definition to the SDK as raw JSON, so input_schema arrives
-// value-for-value as the toolset rendered it. The request marks both as
-// built-ins, as the brain does: that marking licenses the openai adapter's
-// strip, and this adapter ignores it.
-func TestGenerateWebToolSchemaConstraintsReachTheWire(t *testing.T) {
+// The built-in tools' JSON Schema constraints — the web tools' format,
+// minLength and additionalProperties (#682), the sandbox tools'
+// additionalProperties and edit's minLength (#822) — reach the endpoint
+// untouched: the adapter hands each tool definition to the SDK as raw JSON, so
+// input_schema arrives value-for-value as the toolset rendered it. The request
+// marks every one as a built-in, as the brain does: that marking licenses the
+// openai adapter's strip, and this adapter ignores it.
+func TestGenerateBuiltinToolSchemaConstraintsReachTheWire(t *testing.T) {
 	f := &fakeServer{sse: []string{
 		`{"type":"message_start","message":{"id":"msg_8","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
 		`{"type":"message_stop"}`,
 	}}
 	p := start(t, f)
-	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
-		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`)
-	defs, err := toolset.Tools(entry, time.Now())
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
+	}
+	builtins := map[string]bool{}
+	for _, def := range defs {
+		var d struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(def, &d); err != nil {
+			t.Fatalf("definition: %v", err)
+		}
+		builtins[d.Name] = true
+	}
+	if len(builtins) != 8 {
+		t.Fatalf("built-ins = %v, want all eight enabled", builtins)
 	}
 
 	stream, err := p.Generate(context.Background(), provider.Request{
 		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 		Tools:        defs,
-		BuiltinTools: map[string]bool{"web_fetch": true, "web_search": true},
+		BuiltinTools: builtins,
 	})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -349,16 +361,19 @@ func TestGenerateWebToolSchemaConstraintsReachTheWire(t *testing.T) {
 			t.Errorf("%s input_schema = %v, want the definition's %v verbatim", want.Name, got, want.InputSchema)
 		}
 	}
+	for name, schema := range sent {
+		if schema["additionalProperties"] != false {
+			t.Errorf("%s input_schema.additionalProperties = %v, want false", name, schema["additionalProperties"])
+		}
+	}
 	for _, tc := range []struct{ tool, prop, key string }{
 		{"web_fetch", "url", "format"},
 		{"web_search", "query", "minLength"},
+		{"edit", "old_string", "minLength"},
 	} {
 		schema, ok := sent[tc.tool]
 		if !ok {
 			t.Fatalf("no %s tool was sent", tc.tool)
-		}
-		if schema["additionalProperties"] != false {
-			t.Errorf("%s input_schema.additionalProperties = %v, want false", tc.tool, schema["additionalProperties"])
 		}
 		prop, _ := schema["properties"].(map[string]any)[tc.prop].(map[string]any)
 		if _, ok := prop[tc.key]; !ok {

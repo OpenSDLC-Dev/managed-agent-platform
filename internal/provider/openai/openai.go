@@ -445,15 +445,19 @@ func convertTools(tools []json.RawMessage, builtin map[string]bool) ([]chatTool,
 }
 
 // strippedKeywords leave the built-in tools' parameters on this route (#682, an
-// owner decision). The built-in web tools carry all three, as the reference was
-// recorded handing them to the model, and the anthropic adapter sends them on;
-// but an OpenAI-compatible backend that accepts only part of JSON Schema —
-// Gemini's compatibility endpoint and vLLM's guided decoding were the cases
-// raised — can refuse the whole tool list over one of them, and both web tools
-// are on by default. The executor validates the web tools' input itself, so
-// what the model loses here is a hint, not the check. A custom or MCP tool's
-// schema is never touched: it is a contract its author set, which no platform
-// check stands behind, and whatever it carries it carried before #682.
+// owner decision). The built-in web tools carry all three, and since #822 the
+// six sandbox tools carry additionalProperties and edit's old_string minLength,
+// as the reference was recorded handing them to the model, and the anthropic
+// adapter sends them on; but an OpenAI-compatible backend that accepts only
+// part of JSON Schema — Gemini's compatibility endpoint and vLLM's guided
+// decoding were the cases raised — can refuse the whole tool list over one of
+// them, and the built-ins are on by default. What the model loses here is a
+// hint, not the check: the executor validates the web tools' input, the edit
+// tool refuses an empty old_string wherever it runs (executor or BYOC
+// worker), and a property a closed schema would have refused is one the tools
+// ignore. A custom or MCP tool's schema is never touched: it is a contract
+// its author set, which no platform check stands behind, and whatever it
+// carries it carried before #682.
 // unevaluatedProperties goes with additionalProperties: it is the 2019-09
 // keyword that closes an object the same way, and no built-in carries it yet.
 var strippedKeywords = []string{"format", "minLength", "additionalProperties", "unevaluatedProperties"}
