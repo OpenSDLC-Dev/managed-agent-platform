@@ -200,6 +200,23 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	if raw, ok := obj["metadata"]; ok && isNull(raw) {
 		return nil, errInvalid(`Failed to parse request: params: field "metadata": null is not a valid value for a map field; omit the field to preserve, or set individual keys to null to delete them`)
 	}
+	// Every other shape refusal is a parse error too, so it is judged here as
+	// well: a non-string name or description, a metadata bag that is not an
+	// object of strings and nulls. The value rules wait for the row.
+	name, nameSet, nameNull, err := stringField(obj, "name")
+	if err != nil {
+		return nil, err
+	}
+	description, descriptionSet, descriptionNull, err := stringField(obj, "description")
+	if err != nil {
+		return nil, err
+	}
+	metadataRaw, metadataSet := obj["metadata"]
+	if metadataSet {
+		if _, err := patchMetadata(map[string]string{}, metadataRaw, false); err != nil {
+			return nil, err
+		}
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -218,8 +235,8 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Archived is read-only (the vault rule — plan 36 decision 3; the reference
-	// says only "read-only", with no status, registered as INFERRED).
+	// Archived is read-only (the vault rule — plan 36 decision 3), the 400 the
+	// reference was recorded answering (docs/DIVERGENCES.md).
 	if row.archivedAt != nil {
 		return nil, errInvalid("memory store %s is archived", id)
 	}
@@ -235,26 +252,19 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	// `store.update.description-null`, `store.update.metadata-null`): a null
 	// name is a 400 worded as recorded, a null description clears like its
 	// documented "", and a null metadata bag is refused above. An empty name
-	// is unrecorded and keeps the sibling resources' wording (updateAgent and
-	// updateEnvironment) — registered as INFERRED in docs/DIVERGENCES.md.
-	if name, set, null, err := stringField(obj, "name"); err != nil {
-		return nil, err
-	} else if set {
-		if null {
+	// is unrecorded on update and takes the null's wording, the one this
+	// route was recorded using (docs/DIVERGENCES.md).
+	if nameSet {
+		if nameNull || name == "" {
 			return nil, errInvalid("name cannot be empty")
-		}
-		if name == "" {
-			return nil, errInvalid("name cannot be cleared")
 		}
 		if err := validateMemoryStoreName(name); err != nil {
 			return nil, err
 		}
 		row.name = name
 	}
-	if description, set, null, err := stringField(obj, "description"); err != nil {
-		return nil, err
-	} else if set {
-		if null {
+	if descriptionSet {
+		if descriptionNull {
 			description = ""
 		}
 		if err := validateMemoryStoreDescription(description); err != nil {
@@ -262,11 +272,11 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 		}
 		row.description = description
 	}
-	if raw, ok := obj["metadata"]; ok {
+	if metadataSet {
 		// Patch semantics: string upserts, null deletes, omitted keys keep
 		// (emptyDeletes=false — the environments empty-string rule is
 		// documented for environments only).
-		metadata, err = patchMetadata(metadata, raw, false)
+		metadata, err = patchMetadata(metadata, metadataRaw, false)
 		if err != nil {
 			return nil, err
 		}

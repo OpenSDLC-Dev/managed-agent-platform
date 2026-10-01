@@ -282,7 +282,7 @@ func TestMemoryStoreUpdateSemantics(t *testing.T) {
 	// meaning; the reference was recorded answering each (2026-09-03 batch1
 	// `store.update.name-null`, `store.update.description-null`,
 	// `store.update.metadata-null`). A null name is the recorded 400; an empty
-	// one, unrecorded, keeps the sibling resources' wording. A null
+	// one, unrecorded on update, takes the same words. A null
 	// description clears like "". A null metadata bag is the recorded parse
 	// refusal, while a null inside the bag still deletes its key (above).
 	_, before := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil)
@@ -291,7 +291,7 @@ func TestMemoryStoreUpdateSemantics(t *testing.T) {
 		msg   string
 	}{
 		{map[string]any{"name": nil}, "name cannot be empty"},
-		{map[string]any{"name": ""}, "name cannot be cleared"},
+		{map[string]any{"name": ""}, "name cannot be empty"},
 		{map[string]any{"metadata": nil}, nullMetadataRefusal},
 		{map[string]any{"name": "renamed", "metadata": nil}, nullMetadataRefusal},
 	} {
@@ -372,6 +372,22 @@ func TestMemoryStoreEmptyUpdate(t *testing.T) {
 	for _, storeID := range []string{missing, archived} {
 		status, body := s.do(http.MethodPost, "/v1/memory_stores/"+storeID, map[string]any{"metadata": nil})
 		wantInvalidRequest(t, "null metadata on "+storeID, status, body, nullMetadataRefusal)
+	}
+
+	// A request with no body, or a JSON null for one, reads as {} and draws the
+	// same 400; neither was recorded.
+	for _, body := range []any{nil, "null"} {
+		status, res := s.do(http.MethodPost, "/v1/memory_stores/"+id, body)
+		wantInvalidRequest(t, fmt.Sprintf("update with body %v", body), status, res,
+			"at least one of name, description, or metadata must be provided")
+	}
+
+	// Every shape refusal is a parse error, judged before the lookup as the
+	// null bag is: a missing store answers it rather than its 404.
+	for _, body := range []map[string]any{{"name": 5}, {"description": true}, {"metadata": "x"}, {"metadata": map[string]any{"k": 1}}} {
+		if status, res := s.do(http.MethodPost, "/v1/memory_stores/"+missing, body); status != http.StatusBadRequest {
+			t.Errorf("%v on a missing store: status %d (%v), want the shape's 400", body, status, res)
+		}
 	}
 
 	// A null name or description is a field's value, judged after the
