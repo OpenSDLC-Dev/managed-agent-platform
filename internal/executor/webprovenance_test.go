@@ -42,7 +42,12 @@ func TestNormalizeFetchURL(t *testing.T) {
 // for one string.
 func textHolds(text, url string) bool {
 	want, ok := normalizeFetchURL(url)
-	return ok && givenIn(text, want, url) != ""
+	m, ok := newURLMatcher(url)
+	if !ok || want == "" {
+		return false
+	}
+	m.scan(text)
+	return m.found != ""
 }
 
 func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
@@ -75,6 +80,7 @@ func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
 		{"https://example.com/wide\u3000次", []string{"https://example.com/wide"}},
 		// No space before what follows: CJK text, an em dash, a possessive.
 		{"请看https://example.com/docs，然后总结", []string{"https://example.com/docs"}},
+		{"看https://example.com/docs然后总结", []string{"https://example.com/docs"}},
 		{"見てhttps://example.com/a。お願いします", []string{"https://example.com/a"}},
 		{"https://example.com/a—see", []string{"https://example.com/a"}},
 		{"https://example.com/a's", []string{"https://example.com/a"}},
@@ -119,6 +125,34 @@ func fetchOutcome(t *testing.T, h *harness, url string) (res struct {
 	return res, f.calls > 0
 }
 
+// A page built to make reading quadratic — 100 KiB of URLs on one host run
+// together, each cut at every punctuation mark to the end of the run — costs a
+// lookup a parse count linear in its length, not the tens of millions the
+// unbounded reading spent; a request long enough to widen the window past use
+// spends the budget and stops.
+func TestURLMatcherStaysLinearOnAHostileRun(t *testing.T) {
+	run := strings.Repeat("https://docs.example.com/,", 4000)
+	m, ok := newURLMatcher("https://docs.example.com/not-given")
+	if !ok {
+		t.Fatal("matcher refused a plain URL")
+	}
+	m.scan(run)
+	if spent := readingBudget - m.budget; m.found != "" || spent > 200_000 {
+		t.Errorf("found %q after %d parses of a %d-byte run, want nothing found in a linear count", m.found, spent, len(run))
+	}
+
+	long, ok := newURLMatcher("https://docs.example.com/" + strings.Repeat("a", maxFetchURL-len("https://docs.example.com/")))
+	if !ok {
+		t.Fatal("matcher refused a URL at maxFetchURL")
+	}
+	if !long.scan(run) || long.budget > 0 || long.found != "" {
+		t.Errorf("a window-wide request: budget left %d, found %q; want the budget spent and nothing found", long.budget, long.found)
+	}
+	if _, ok := newURLMatcher("https://docs.example.com/" + strings.Repeat("a", maxFetchURL)); ok {
+		t.Error("a request longer than maxFetchURL was accepted")
+	}
+}
+
 // fetchedAs runs one web_fetch of url against the harness's session and
 // returns the URL the fetcher was handed, or "" when nothing was fetched.
 func fetchedAs(t *testing.T, h *harness, url string) string {
@@ -140,6 +174,9 @@ func TestWebFetchFetchesTheGivenSpellingNotTheModels(t *testing.T) {
 	h := webHarness(t, "", "")
 	h.userSays(t, "Read https://docs.example.com/guide, https://x.example/a%5C..%5Cadmin, "+
 		"https://bücher.de/x and https://Ünicode.example/page")
+	// A full-width letter folds to its ASCII form, so the payload never holds
+	// the request's ASCII host and the prefilter must not drop it.
+	h.userSays(t, "And https://ｅxample.org/path.")
 
 	for _, tc := range []struct{ request, fetched string }{
 		{"https://docs.example.com/guide#d=secret", "https://docs.example.com/guide"},
@@ -147,6 +184,7 @@ func TestWebFetchFetchesTheGivenSpellingNotTheModels(t *testing.T) {
 		{`https://x.example/a\..\admin`, "https://x.example/a%5C..%5Cadmin"},
 		{"https://xn--bcher-kva.de/x", "https://bücher.de/x"},
 		{"https://Ünicode.example/page", "https://Ünicode.example/page"},
+		{"https://example.org/path", "https://ｅxample.org/path"},
 	} {
 		if got := fetchedAs(t, h, tc.request); got != tc.fetched {
 			t.Errorf("request %s fetched %q, want the given %q", tc.request, got, tc.fetched)
@@ -326,11 +364,19 @@ func TestWebFetchCountsOnlyThisSession(t *testing.T) {
 		"tool_use_id": theirs.String(), "is_error": false, "content": text("https://other.example/their-result")})
 	appendTo(h.sid, domain.EventAgentToolResult, map[string]any{
 		"tool_use_id": theirs.String(), "is_error": false, "content": text("https://other.example/borrowed-call")})
+	// A web_fetch a person confirmed in another session, and a call here that
+	// only another session's confirmation names, are not confirmed here.
+	confirmedThere := appendTo(other, domain.EventAgentToolUse, map[string]any{"name": "web_fetch", "input": map[string]string{"url": "https://other.example/confirmed-there"}})
+	appendTo(other, domain.EventUserToolConfirm, map[string]any{"tool_use_id": confirmedThere.String(), "result": "allow"})
+	ours := appendTo(h.sid, domain.EventAgentToolUse, map[string]any{"name": "web_fetch", "input": map[string]string{"url": "https://other.example/confirmed-elsewhere"}})
+	appendTo(other, domain.EventUserToolConfirm, map[string]any{"tool_use_id": ours.String(), "result": "allow"})
 
 	for _, url := range []string{
 		"https://other.example/message",
 		"https://other.example/their-result",
 		"https://other.example/borrowed-call",
+		"https://other.example/confirmed-there",
+		"https://other.example/confirmed-elsewhere",
 	} {
 		if res, fetched := fetchOutcome(t, h, url); !res.IsError || fetched {
 			t.Errorf("fetch %s = %+v (fetched %v), want it refused", url, res, fetched)

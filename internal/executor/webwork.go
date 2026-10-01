@@ -313,6 +313,9 @@ func (e *Executor) runWebTool(ctx context.Context, sid domain.ID, u toolUse) too
 		// model's spelling of it. A failed lookup refuses too: the rule is a
 		// guard, and an unchecked fetch is what it guards against.
 		given, err := e.webFetchSource(ctx, sid, target)
+		if errors.Is(err, errReadingBudget) {
+			return fail("web_fetch: " + err.Error() + "; fetch a URL exactly as it was given, or find this page with web_search first")
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				slog.WarnContext(ctx, "executor: web_fetch provenance check failed", "session", sid, "error", err)
