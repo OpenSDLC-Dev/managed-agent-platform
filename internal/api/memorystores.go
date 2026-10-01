@@ -372,15 +372,17 @@ func (s *server) archiveMemoryStore(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// Idempotent, the vault rule: archived_at is set once and never cleared, so
-	// a second archive returns the store with the first call's timestamp.
-	// Unlike archiveVault this leaves updated_at alone on the first call too:
-	// the spec defines the field as when name, description or metadata last
-	// changed (checked against anthropic-sdk-go v1.70.1 — spec
-	// components.schemas.BetaManagedAgentsMemoryStore.properties.updated_at),
-	// and an archive changes none of them.
+	// a second archive returns the store with the first call's timestamps. The
+	// first call also moves updated_at to archived_at, as archiveVault does and
+	// as the reference recorded (#685), though the spec defines the field as
+	// when name, description or metadata last changed (checked against
+	// anthropic-sdk-go v1.70.1 — spec
+	// components.schemas.BetaManagedAgentsMemoryStore.properties.updated_at).
 	var row memoryStoreRow
 	err := s.pool.QueryRow(ctx,
-		`UPDATE memory_stores SET archived_at = COALESCE(archived_at, now())
+		`UPDATE memory_stores SET
+		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
+		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1
 		 RETURNING name, description, metadata, created_at, updated_at, archived_at`, id).
 		Scan(&row.name, &row.description, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
