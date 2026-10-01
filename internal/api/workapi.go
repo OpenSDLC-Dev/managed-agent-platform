@@ -184,13 +184,9 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 	// The queue would hand such a poll nothing anyway (queue.Poll serves
 	// self_hosted items alone); this says so instead of answering null.
 	// Archival is not consulted, so an archived self_hosted environment's
-	// worker drains what is left in its queue.
-	selfHosted, err := s.selfHostedWork(r.Context(), envID)
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	if !selfHosted {
+	// worker drains what is left in its queue. The kind is the one the key's
+	// own lookup read (authenticateEnvironmentKey), not a second query.
+	if !selfHostedKeyFrom(r.Context()) {
 		writeError(w, r, errInvalid("environment %s is not a self_hosted environment; only a self_hosted environment's work is polled by a worker", envID))
 		return
 	}
@@ -305,11 +301,7 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	// A cloud environment has no worker's queue to list: the reference's 404,
 	// archived or not (2026-09-05 batch2 `rec83.active-key.work.list.beta`,
 	// `rec83.archived-key.work.list.beta`).
-	selfHosted, err := s.selfHostedWork(r.Context(), envID)
-	if err != nil {
-		return nil, err
-	}
-	if !selfHosted {
+	if !selfHostedKeyFrom(r.Context()) {
 		return nil, errNotFound("environment %s has no work list; the work API serves self_hosted environments only", envID)
 	}
 	page, err := parsePage(r.URL.Query())
@@ -362,49 +354,30 @@ type workStatsWire struct {
 // oldest queued item's timestamp, and the number of workers that have polled in
 // the last 30s. Scoped and authed like the rest of the work API — a worker sees
 // only its own environment's self_hosted queue. A cloud environment's stats are
-// served, as the reference serves them: the counts are zero, since Stats counts
-// the worker's queue alone, and workers_polling is null, the reference's value
-// there (2026-09-05 batch2 `rec83.active-key.work.stats.beta`,
-// `rec83.archived-key.work.stats.beta`, `rec83.orphan.stats.before-delete`).
+// served, as the reference serves them: zero counts and a null
+// workers_polling, the reference's values there (2026-09-05 batch2
+// `rec83.active-key.work.stats.beta`, `rec83.archived-key.work.stats.beta`,
+// `rec83.orphan.stats.before-delete`). They are answered without asking the
+// queue, which counts the worker's queue alone and so has nothing to count.
 func (s *server) statsWork(r *http.Request) (any, error) {
 	envID, _, err := s.workScope(r) // stats has no work_id path value; ignore it
 	if err != nil {
 		return nil, err
 	}
-	selfHosted, err := s.selfHostedWork(r.Context(), envID)
-	if err != nil {
-		return nil, err
+	if !selfHostedKeyFrom(r.Context()) {
+		return workStatsWire{Type: "work_queue_stats"}, nil
 	}
 	st, err := s.queue.Stats(r.Context(), envID)
 	if err != nil {
 		return nil, err
 	}
-	out := workStatsWire{
+	return workStatsWire{
 		Depth:          st.Depth,
 		OldestQueuedAt: utcPtr(st.OldestQueuedAt),
 		Pending:        st.Pending,
 		Type:           "work_queue_stats",
-	}
-	if selfHosted {
-		out.WorkersPolling = &st.WorkersPolling
-	}
-	return out, nil
-}
-
-// selfHostedWork reports whether the environment a work route addresses is
-// self_hosted — the only kind whose queue a worker serves. workScope has
-// already matched it to the caller's key, and a key dies with its environment
-// (ON DELETE CASCADE), so a missing row is a delete racing the request.
-func (s *server) selfHostedWork(ctx context.Context, envID domain.ID) (bool, error) {
-	var kind string
-	err := s.pool.QueryRow(ctx, `SELECT kind FROM environments WHERE id = $1`, envID).Scan(&kind)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, errNotFound("environment %s not found", envID)
-	}
-	if err != nil {
-		return false, err
-	}
-	return kind == string(domain.EnvSelfHosted), nil
+		WorkersPolling: &st.WorkersPolling,
+	}, nil
 }
 
 // heartbeatWire is the BetaSelfHostedWorkHeartbeatResponse shape. The SDK

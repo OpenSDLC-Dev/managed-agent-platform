@@ -47,13 +47,15 @@
 // versions, a version, and a version's /content (isSkillReadPath, server.go);
 // and the GET /v1/files/{id}/content download, which is the
 // worker's own SetupSkills and SetupFiles path. Skill content and file content
-// therefore do NOT need a management key. What keeps the lane narrow is
-// per-resource scoping inside the handlers rather than the dispatcher: a
-// session route's key must own the session
-// (requireEnvironmentKeyForSession), a file download's key must belong to an
-// environment in which some session mounts that file (downloadFile), and
-// skills, workspace-global resources every environment's sandboxes consume,
-// need no scoping at all. Everything else on /v1 — the collections, the file
+// therefore do NOT need a management key. What keeps the lane narrow is the
+// key's environment and then per-resource scoping. On every one of these routes
+// the environment must be self_hosted: a cloud environment's key, which the
+// console issues as the reference does, has no worker to serve and gets one 404
+// (errNotSelfHostedKey, envauth.go). Past that, a session route's key must own
+// the session (requireEnvironmentKeyForSession), a file download's key must
+// belong to an environment in which some session mounts that file
+// (downloadFile), and skills, workspace-global resources every environment's
+// sandboxes consume, need no further scoping. Everything else on /v1 — the collections, the file
 // metadata read, every mutation — is management-only, the work API excepted:
 // it runs the other way, taking the environment key and nothing else, since
 // resolveEnvironmentKey demands a Bearer and a management x-api-key never

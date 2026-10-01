@@ -57,6 +57,15 @@ func TestACloudEnvironmentKeyCannotTakeItsWork(t *testing.T) {
 				wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
 				wantDetails(t, body, nil)
 			}
+			// Refused before anything is recorded: the polls carried a worker id,
+			// and none of them counts toward workers_polling.
+			var polls int
+			if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM worker_polls WHERE environment_id = $1`, envID).Scan(&polls); err != nil {
+				t.Fatalf("count worker polls: %v", err)
+			}
+			if polls != 0 {
+				t.Errorf("worker_polls holds %d rows for the cloud environment after its refused polls; want none", polls)
+			}
 
 			status, body := readJSON(t, s.doRaw(http.MethodGet, base, nil, bearer))
 			wantErr(t, status, body, http.StatusNotFound, "not_found_error")

@@ -1195,7 +1195,7 @@ func TestSkillVersionAddressing(t *testing.T) {
 // installation actually runs.
 func TestSkillLatestAliasRoundTripsToDownload(t *testing.T) {
 	s := newTestServer(t)
-	_, envID := fixture(t, s)
+	_, envID := selfHostedFixture(t, s)
 	wkey := issueKey(t, s.pool, envID, "skills-latest-lane")
 
 	created := s.createSkill(t)

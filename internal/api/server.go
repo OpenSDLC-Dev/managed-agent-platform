@@ -354,8 +354,8 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 		human = requireIdentity(pool, v, next)
 	}
 	sessionEvents := dispatchSessionEventsAuth(pool, v, human, next)
-	skillReads := dualAuth(v, requireEnvironmentKey(pool, next), human, mgmt)
-	fileReads := dualAuth(v, requireEnvironmentKey(pool, next), human, mgmt)
+	skillReads := dualAuth(v, requireSelfHostedEnvironmentKey(pool, next), human, mgmt)
+	fileReads := dualAuth(v, requireSelfHostedEnvironmentKey(pool, next), human, mgmt)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Classify on the escaped path, splitting only on real '/' — the segment
 		// structure ServeMux routes on (an encoded %2F stays within one segment).
@@ -614,10 +614,12 @@ func isSessionEventsPath(p string) bool {
 // key (a version get resolving whatever the pin says, then a download by the
 // concrete id it answered with), so they join the dual-auth set; skills are
 // workspace-global resources every environment's sandboxes consume, so a valid
-// key from any environment may read them — there is no per-environment scoping
-// to enforce. The collection list /v1/skills and every mutation stay
-// management-only. Like the other predicates this sees the escaped path, so a
-// %2F can never smuggle a skills segment past the router's view.
+// key from any self_hosted environment may read them — there is no
+// per-environment scoping to enforce, only the kind
+// (requireSelfHostedEnvironmentKey). The collection list /v1/skills and every
+// mutation stay management-only. Like the other predicates this sees the
+// escaped path, so a %2F can never smuggle a skills segment past the router's
+// view.
 func isSkillReadPath(p string) bool {
 	const prefix = "/v1/skills/"
 	if !strings.HasPrefix(p, prefix) {

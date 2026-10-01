@@ -319,7 +319,7 @@ func TestExpiredFileLifecycle(t *testing.T) {
 // BYOC worker and bytes the wire contract calls gone.
 func TestExpiredFileEnvironmentKeyLane(t *testing.T) {
 	s := newTestServer(t)
-	agentID, envID := fixture(t, s)
+	agentID, envID := selfHostedFixture(t, s)
 	bearer := map[string]string{"Authorization": "Bearer " + issueKey(t, s.pool, envID, "expiry-lane")}
 	oct := "application/octet-stream"
 

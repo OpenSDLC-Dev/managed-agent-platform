@@ -537,10 +537,11 @@ func TestToolResultTypeSpellingsUnderAManagementKey(t *testing.T) {
 // too — the reference refused a Console session's result there with the same
 // 403 (2026-09-02 batch2.json, sessT.send.user.tool_result.for-platform-call).
 // What it answers an environment credential on a cloud session is unobserved,
-// because every recorded cloud probe was refused by that gate first, so the
-// environment-kind refusal this platform keeps behind it is an inference
-// (docs/DIVERGENCES.md). The console issues no key for a cloud environment;
-// this one is seeded directly.
+// because every recorded cloud probe was refused by that gate first. Here a
+// cloud environment's key, which the console issues as the reference does
+// (#820), never reaches the batch: the session lane refuses it first, so the
+// environment-kind refusal NormalizeInbound keeps behind it is a backstop
+// (docs/DIVERGENCES.md).
 func TestToolResultOnACloudSession(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -554,11 +555,8 @@ func TestToolResultOnACloudSession(t *testing.T) {
 	st, res := readJSON(t, s.doRaw(http.MethodPost, path, body, map[string]string{"x-api-key": testKey}))
 	wantErrMsg(t, st, res, http.StatusForbidden, "permission_error", toolResultRefusal(0))
 
-	st, res = readJSON(t, s.doRaw(http.MethodPost, path, body, asBearer(issueKey(t, s.pool, envID, "cloud"))))
-	wantErr(t, st, res, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := res["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "self_hosted") {
-		t.Errorf("message %q must name the environment kind that admits a tool result", msg)
-	}
+	st, res = readJSON(t, s.doRaw(http.MethodPost, path, body, asBearer(issueViaConsole(t, s, envID, "cloud"))))
+	wantErrMsg(t, st, res, http.StatusNotFound, "not_found_error", cloudKeyRefusal(envID))
 	if got := s.eventTypes(sid); strings.Join(got, ",") != strings.Join(before, ",") {
 		t.Errorf("the log is %v after two refusals, want it unchanged at %v", got, before)
 	}
