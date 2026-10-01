@@ -152,10 +152,10 @@ func TestIDValid(t *testing.T) {
 	}
 }
 
-// TestValidWithPrefix pins the off-wire spelling directly. It exists because
-// PrefixEnvironmentKey is deliberately absent from knownPrefixes — so Valid can
-// never answer for an envkey_ id, and the only thing standing between a
-// malformed one and a bind parameter is this function.
+// TestValidWithPrefix pins the prefix-narrowed spelling directly, on envkey_
+// because that prefix is deliberately absent from knownPrefixes: it shows the
+// function answers for a prefix Valid never can, and that admitting one here
+// widens nothing on the wire.
 func TestValidWithPrefix(t *testing.T) {
 	if id := NewID(PrefixEnvironmentKey).String(); !ValidWithPrefix(id, PrefixEnvironmentKey) {
 		t.Errorf("NewID(%q) = %q must satisfy ValidWithPrefix", PrefixEnvironmentKey, id)

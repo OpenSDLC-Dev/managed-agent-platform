@@ -1303,7 +1303,7 @@ rule (b)'s same-function check cannot admit, each naming where its parent *is* r
 `internal/api/workapi.go:515` (`SELECT session_id, kind FROM work_items WHERE id = $1 AND
 environment_id = $2` — that environment id is the env-key choke point's own, §6.1);
 `internal/api/envkeys.go:121`, `:132` and `:163`, whose environment is gated by
-`consoleEnvironment` (`internal/api/consoleapi.go:138`, statement `:145`, which slice 4 gives
+`consoleEnvironment` (`internal/api/consoleapi.go:227`, statement `:234`, which slice 4 gives
 the predicate — §7.4); and `internal/api/threadstate.go:38`, whose session is the one
 `sendSessionEvents` (`internal/api/events.go:43`) locked at `:77-81` in the same transaction.
 An entry is a commented site group as this paragraph groups them — the boot import's three
@@ -1804,14 +1804,14 @@ agent→roster (`roster.go:180`, `:222`), session resource→memory store
 version→skill (`skills.go:559`, `:750`), vault credential→vault (`vaultcredentials.go:152`,
 `:433`), memory→store (`memories.go:138`, `:168`), thread→session (`threads.go:189`, `:324` —
 **not** `:181`, which is `loadThread`'s join-based by-id read, the rule-(b) case §6.5 names),
-environment key→environment (`consoleapi.go:204`).
+environment key→environment (`consoleapi.go:297`).
 
 · **The console's environment existence check is a tenant gate too**, and the whole gate for two
-routes: `consoleEnvironment` (`internal/api/consoleapi.go:138`, statement `:145`,
-`SELECT true FROM environments WHERE id = $1`) is where `listEnvironmentKeys` (`:231`) and
-`revokeEnvironmentKey` (`:267`) resolve `{environment_id}`, so without the predicate an admin in
+routes: `consoleEnvironment` (`internal/api/consoleapi.go:227`, statement `:234`,
+`SELECT true FROM environments WHERE id = $1`) is where `listEnvironmentKeys` (`:324`) and
+`revokeEnvironmentKey` (`:360`) resolve `{environment_id}`, so without the predicate an admin in
 one workspace lists — and revokes — another's worker credentials. It gains the predicate here,
-beside `consoleapi.go:204`.
+beside `consoleapi.go:297`.
 
 · **Three have no existing site and must be created**: agent spec→skills, because `parseSkills`
 is shape-only (`internal/api/wire.go:565-569` the doc, `:570` the func) and `agents.go` has
@@ -1944,8 +1944,8 @@ they *contrast* against skills' globality — `internal/api/files.go:339` and
 inherited sizing misses entirely are cross-tenant *writes* or reads by bare id**:
 `updateManagementKey` (`internal/api/apikeys.go:157`, statement `:159-161`, `UPDATE api_keys SET
 status = coalesce($2, status), name = coalesce($3, name) WHERE id = $1`) and the **console
-patch**'s locked read (`internal/api/consoleapikeys.go:239`,
-`FROM api_keys WHERE id = $1 FOR UPDATE`, inside `updateAPIKey` at `:193` — there is no console
+patch**'s locked read (`internal/api/consoleapikeys.go:265`,
+`FROM api_keys WHERE id = $1 FOR UPDATE`, inside `updateAPIKey` at `:216` — there is no console
 *revoke* route: `server.go:192-194` registers POST and GET on the collection and POST on the
 item only, so revocation is a `status` patch through this same handler) —
 without them a workspace-bound key can rename or archive another workspace's management key by
@@ -2082,7 +2082,7 @@ an SSO `admin` (an org-wide role, per plan 31) and by the **env-var-managed boot
 distinguished by the `created_by IS NULL` bit slice 1 put on the context (§6.8), the same
 predicate `0024:77-78` keys on, with that marker's own writability stated as a bound. A
 console-*issued* key cannot, and no credential gains a wider *resource* scope. · `consoleWorkspace`
-(`internal/api/consoleapikeys.go:127-135`) resolves `{workspace}` against the registry instead
+(`internal/api/consoleapikeys.go:131-139`) resolves `{workspace}` against the registry instead
 of comparing to `reservedWorkspace` (`:34`), which is deleted — **and the caller's own scope
 constrains that resolution only for a credential without the administration capability**: a
 console-issued key may address its own workspace and no other, while the bootstrap key and an
@@ -2097,8 +2097,8 @@ same key issues B's first management key at
 there B's own key administers B's resources. The human lane is a **separate, later** step with
 its own cliff: `IDENTITY_WORKSPACE_MAP` cannot name B before B exists, so an operator maps the
 IdP group to B's id and restarts, and until then decision 4's 403 refuses every human — which
-is the order the release note carries. · `consoleOrganization` (`internal/api/consoleapi.go:59-64`) is **unchanged** — `org_id`
-is frozen, so its constant is still correct — but its **doc comment at `:53-58` is not**: it
+is the order the release note carries. · `consoleOrganization` (`internal/api/consoleapi.go:60-65`) is **unchanged** — `org_id`
+is frozen, so its constant is still correct — but its **doc comment at `:54-59` is not**: it
 argues the two console surfaces must answer alike "once #56 makes org a real tenancy key and
 someone updates one of them", a future decision 2 cancels. That comment is on the doc-edit list;
 leaving it would ship a document predicting a future the plan declined. · `renderAPIKey`
@@ -2132,17 +2132,17 @@ workspace's are untouched. · An attempted archive of the `default` workspace is
 authentication and its deployments unchanged. · **One test is redesigned, not three.** Of the three that pin "any
 org or workspace other than `default` is 404", **two exercise the organization segment and stay
 exactly as they are** — which is a point in decision 2's favour, not a cost:
-`internal/api/consoleapikeys_test.go:653-659` aims a real key id at
+`internal/api/consoleapikeys_test.go:661-667` aims a real key id at
 `/api/console/organizations/other/workspaces/default/api_keys/{id}` under the comment "The real
 id under the wrong scope is refused by the scope, not by the id", and
 `internal/api/consoleapi_test.go:252` (`TestConsoleKeyRoutesRejectOtherOrganizations`, the org
 substitution at `:258`) additionally asserts at `:272-274` that the message *names the
 organization* — an assertion a workspace rewrite would break for nothing. The one workspace case
-is `internal/api/consoleapikeys_test.go:603`
+is `internal/api/consoleapikeys_test.go:608`
 (`"unknown workspace": "/api/console/organizations/default/workspaces/other/api_keys"`, inside
-`TestAPIKeyRoutesRejectUnknownScopesAndIDs` at `:597`); it keeps its meaning and gains a sibling
+`TestAPIKeyRoutesRejectUnknownScopesAndIDs` at `:602`); it keeps its meaning and gains a sibling
 case for "a **real** workspace the credential does not cover", with the identical 404 shape that
-preserves the enumeration-oracle argument `consoleapikeys.go:123-126` makes. ·
+preserves the enumeration-oracle argument `consoleapikeys.go:123-130` makes. ·
 `internal/api/consoleapikeys_test.go`: `workspace_id` becomes the row's value in the **create**
 response, where `:153-159` asserts it null today; the **listing** test asserts field presence
 only (`wantExactFields` at `:252-254`, no value check), so it needs a value assertion added
