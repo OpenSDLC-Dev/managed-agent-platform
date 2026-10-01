@@ -35,20 +35,22 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if !strings.HasPrefix(id, "memstore_") {
 		t.Fatalf("id %q lacks the memstore_ prefix", id)
 	}
-	wantFields(t, body, "type", "id", "name", "created_at", "updated_at", "archived_at", "description", "metadata")
+	wantFields(t, body, "type", "id", "name", "created_at", "updated_at", "description", "metadata")
 	if body["type"] != "memory_store" || body["name"] != "User preferences" {
 		t.Fatalf("unexpected create body: %v", body)
 	}
-	// description renders "" when unset (never null), metadata {}, archived_at null.
+	// description renders "" when unset (never null), metadata {}, and
+	// archived_at not at all until the store is archived, as the reference's
+	// recorded create, get, list and update do (2026-09-02 free_batch1
+	// `store.create`, `store.get`, `store.list.include_archived`,
+	// `store.update.name+description`; #817).
 	if body["description"] != "" {
 		t.Errorf("description = %v, want the empty string", body["description"])
 	}
 	if md, ok := body["metadata"].(map[string]any); !ok || len(md) != 0 {
 		t.Errorf("metadata = %v, want an empty object", body["metadata"])
 	}
-	if body["archived_at"] != nil {
-		t.Errorf("archived_at should render null, got %v", body["archived_at"])
-	}
+	wantNoFields(t, body, "archived_at")
 	if body["updated_at"] != body["created_at"] {
 		t.Errorf("updated_at = %v on create, want created_at %v", body["updated_at"], body["created_at"])
 	}
@@ -56,9 +58,11 @@ func TestMemoryStoreCRUD(t *testing.T) {
 
 	// Get returns the same shape; an unknown well-formed id 404s from the row
 	// lookup, a wrong-prefix or malformed one from checkID before it.
-	if status, got := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil); status != http.StatusOK || got["id"] != id {
+	status, got := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil)
+	if status != http.StatusOK || got["id"] != id {
 		t.Fatalf("get: status %d (%v)", status, got)
 	}
+	wantNoFields(t, got, "archived_at")
 	// The NUL case proves checkID runs: without it the byte reaches Postgres,
 	// which refuses it as a 500 rather than a miss.
 	token := strings.Repeat("a", len(strings.TrimPrefix(id, "memstore_")))
@@ -85,6 +89,7 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if md := body["metadata"].(map[string]any); md["team"] != "infra" {
 		t.Fatalf("metadata not round-tripped: %v", md)
 	}
+	wantNoFields(t, body, "archived_at")
 	// updated_at advances when name, description or metadata change ...
 	if got := stamp(t, body["updated_at"]); !got.After(updatedAt) {
 		t.Errorf("updated_at = %v after update, want later than %v", got, updatedAt)
@@ -343,6 +348,13 @@ func TestMemoryStoreList(t *testing.T) {
 	rows := listData(t, body)
 	if rows[0]["id"] != ids[2] || rows[2]["id"] != ids[0] {
 		t.Errorf("list order = %v %v %v, want newest first", rows[0]["id"], rows[1]["id"], rows[2]["id"])
+	}
+	// Only the archived item carries archived_at, as in the recorded
+	// `store.list.include_archived` (2026-09-02 free_batch1; #817).
+	wantNoFields(t, rows[0], "archived_at")
+	wantNoFields(t, rows[1], "archived_at")
+	if _, ok := rows[2]["archived_at"].(string); !ok {
+		t.Errorf("archived item's archived_at = %v, want a timestamp", rows[2]["archived_at"])
 	}
 
 	// Keyset paging walks every store exactly once, one page at a time.

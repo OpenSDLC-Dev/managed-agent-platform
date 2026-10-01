@@ -21,7 +21,11 @@ import (
 // neither, but always render — "" and {} when unset, per "Empty string when
 // unset" (checked against anthropic-sdk-go v1.66.0 — betamemorystore.go
 // BetaManagedAgentsMemoryStore.Description) — so no client sees null where the
-// schema types a string or an object.
+// schema types a string or an object. archived_at, optional as well as
+// nullable, is left out until the store is archived: the reference's recorded
+// create, get, list and update carry no key on an unarchived store (2026-09-02
+// `store.create`, `store.get`, `store.list.include_archived`,
+// `store.update.name+description`; #817).
 type memoryStoreJSON struct {
 	ID          string            `json:"id"`
 	Type        string            `json:"type"`
@@ -30,7 +34,7 @@ type memoryStoreJSON struct {
 	Metadata    map[string]string `json:"metadata"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
-	ArchivedAt  *time.Time        `json:"archived_at"`
+	ArchivedAt  *time.Time        `json:"archived_at,omitempty"`
 }
 
 // The documented store-surface limits (checked against anthropic-sdk-go
