@@ -296,15 +296,20 @@ func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.
 		{"web_fetch", "url", "format"},
 		{"web_search", "query", "minLength"},
 	} {
-		var def struct {
+		type definition struct {
 			Name        string         `json:"name"`
 			InputSchema map[string]any `json:"input_schema"`
 		}
+		var def definition
 		for _, raw := range defs {
-			if err := json.Unmarshal(raw, &def); err != nil {
+			// A fresh value per decode: decoding into a reused one merges
+			// the earlier tool's schema keys into this one's.
+			var d definition
+			if err := json.Unmarshal(raw, &d); err != nil {
 				t.Fatalf("definition: %v", err)
 			}
-			if def.Name == tc.tool {
+			if d.Name == tc.tool {
+				def = d
 				break
 			}
 		}
@@ -334,10 +339,12 @@ func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.
 	}
 }
 
-// The strip is schema-aware, not a key search. It removes the three keywords
-// from every subschema of a built-in definition — properties, items, the
-// anyOf/oneOf/allOf branches, $defs — and leaves a property that is merely
-// *named* format, and instance data — enum, default, const, examples —
+// The strip is schema-aware, not a key search. It removes the keywords from
+// every subschema of a built-in definition — properties, items, the
+// anyOf/oneOf/allOf branches, $defs, draft-07's schema-form dependencies,
+// contentSchema — and unevaluatedProperties with additionalProperties; it
+// leaves a property that is merely *named* format, a dependencies entry that
+// is a list of names, and instance data — enum, default, const, examples —
 // whatever keys that data holds. No built-in nests a schema today (the web
 // tools' are flat); this pins the walk for one that does.
 func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
@@ -350,7 +357,10 @@ func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
 		`"choice":{"anyOf":[{"type":"string","format":"uri"},{"type":"integer"}]},` +
 		`"opts":{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false,` +
 		`"default":{"format":"kept","minLength":3},"const":{"additionalProperties":false},"examples":[{"format":"kept"}]}},` +
-		`"$defs":{"link":{"type":"string","format":"uri"}}}`
+		`"$defs":{"link":{"type":"string","format":"uri"}},` +
+		`"dependencies":{"when":{"properties":{"zone":{"type":"string","minLength":1}}},"tags":["when"]},` +
+		`"contentSchema":{"type":"object","additionalProperties":false,"unevaluatedProperties":false},` +
+		`"unevaluatedProperties":false}`
 	want := `{"type":"object","required":["format"],` +
 		`"properties":{` +
 		`"format":{"type":"string","enum":["json","text"]},` +
@@ -360,7 +370,9 @@ func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
 		`"choice":{"anyOf":[{"type":"string"},{"type":"integer"}]},` +
 		`"opts":{"type":"object","properties":{"n":{"type":"integer"}},` +
 		`"default":{"format":"kept","minLength":3},"const":{"additionalProperties":false},"examples":[{"format":"kept"}]}},` +
-		`"$defs":{"link":{"type":"string"}}}`
+		`"$defs":{"link":{"type":"string"}},` +
+		`"dependencies":{"when":{"properties":{"zone":{"type":"string"}}},"tags":["when"]},` +
+		`"contentSchema":{"type":"object"}}`
 
 	body := requestFor(t, provider.Request{
 		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},

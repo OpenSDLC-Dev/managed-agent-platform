@@ -454,7 +454,9 @@ func convertTools(tools []json.RawMessage, builtin map[string]bool) ([]chatTool,
 // what the model loses here is a hint, not the check. A custom or MCP tool's
 // schema is never touched: it is a contract its author set, which no platform
 // check stands behind, and whatever it carries it carried before #682.
-var strippedKeywords = []string{"format", "minLength", "additionalProperties"}
+// unevaluatedProperties goes with additionalProperties: it is the 2019-09
+// keyword that closes an object the same way, and no built-in carries it yet.
+var strippedKeywords = []string{"format", "minLength", "additionalProperties", "unevaluatedProperties"}
 
 // stripSchemaKeywords removes strippedKeywords from a schema and from every
 // subschema in it, at any depth. A schema with none of them is returned as it
@@ -477,9 +479,10 @@ func stripSchemaKeywords(raw json.RawMessage) (json.RawMessage, error) {
 }
 
 // stripSchema strips one schema in place, reporting whether anything went. It
-// descends only through the keywords whose values are subschemas, so a
-// property merely named "format" survives, and so does instance data — enum,
-// const, default, examples — whatever keys that data happens to hold.
+// descends through every keyword whose value is a subschema, a list of them or
+// a map of them — drafts 07 to 2020-12 — and only through those, so a property
+// merely named "format" survives, and so does instance data — enum, const,
+// default, examples — whatever keys that data happens to hold.
 func stripSchema(v any) bool {
 	schema, ok := v.(map[string]any)
 	if !ok {
@@ -494,15 +497,17 @@ func stripSchema(v any) bool {
 	}
 	for k, sub := range schema {
 		switch k {
-		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
-			// A map from names to subschemas: the names are data.
+		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies":
+			// A map from names to subschemas: the names are data. draft-07's
+			// dependencies maps a name to a schema or to a list of names, and
+			// a list is no schema, so stripSchema leaves it be.
 			if m, ok := sub.(map[string]any); ok {
 				for _, s := range m {
 					stripped = stripSchema(s) || stripped
 				}
 			}
 		case "items", "prefixItems", "additionalItems", "contains", "unevaluatedItems",
-			"propertyNames", "unevaluatedProperties", "not", "if", "then", "else",
+			"propertyNames", "contentSchema", "not", "if", "then", "else",
 			"anyOf", "oneOf", "allOf":
 			// One subschema, or a list of them (items' tuple form among them).
 			if list, ok := sub.([]any); ok {
