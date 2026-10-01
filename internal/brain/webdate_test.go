@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
@@ -105,6 +106,24 @@ func TestWebSearchDateComesFromTheWallClock(t *testing.T) {
 	if !strings.Contains(d.Description, "\n- Today's date is "+before+"\n") &&
 		!strings.Contains(d.Description, "\n- Today's date is "+after+"\n") {
 		t.Errorf("web_search's date line is not today's UTC date (%s):\n%s", before, d.Description)
+	}
+}
+
+// The wall-clock test above catches a clock frozen at some other day, but not
+// one read once in New: inside one test process that reading is today too. So
+// the clock New wires in must also advance, and track the wall clock while it
+// does — two reads a little apart differ, and the later is within a second of
+// time.Now.
+func TestBrainClockAdvances(t *testing.T) {
+	b := brain.New(nil, nil, nil, brain.Config{})
+	first := b.Now()
+	time.Sleep(20 * time.Millisecond)
+	second := b.Now()
+	if !second.After(first) {
+		t.Errorf("clock read %s and then %s, 20ms apart: it does not advance", first, second)
+	}
+	if skew := time.Since(second); skew < 0 || skew > time.Second {
+		t.Errorf("clock reads %s, %s from the wall clock", second, skew)
 	}
 }
 
