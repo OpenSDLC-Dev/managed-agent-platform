@@ -117,6 +117,26 @@ func TestWorkPollEmptyQueueReturnsNull(t *testing.T) {
 	}
 }
 
+// workKeys is the recorded work object's key set: the typed BetaSelfHostedWork's
+// 13 and `actor`, which every recorded body carries as null and the schema
+// lacks (#680).
+var workKeys = []string{
+	"id", "acknowledged_at", "actor", "created_at", "data", "environment_id",
+	"latest_heartbeat_at", "metadata", "secret", "started_at", "state",
+	"stop_requested_at", "stopped_at", "type"}
+
+// wantWorkKeys asserts a work object carries exactly workKeys, `actor` null.
+func wantWorkKeys(t *testing.T, body map[string]any) {
+	t.Helper()
+	wantFields(t, body, workKeys...)
+	if len(body) != len(workKeys) {
+		t.Errorf("work object has %d keys, want the recorded %d: %v", len(body), len(workKeys), body)
+	}
+	if v := body["actor"]; v != nil {
+		t.Errorf("actor = %v, want null", v)
+	}
+}
+
 // TestWorkPollReturnsWireShape pins the BetaSelfHostedWork response: a queued
 // tool_exec item is handed out with every required field present, its data a
 // reference to the session the worker attaches to, and its state still queued
@@ -138,10 +158,7 @@ func TestWorkPollReturnsWireShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &body); err != nil {
 		t.Fatalf("decode work: %v (body %q)", err, raw)
 	}
-	wantFields(t, body,
-		"id", "acknowledged_at", "created_at", "data", "environment_id",
-		"latest_heartbeat_at", "metadata", "secret", "started_at", "state",
-		"stop_requested_at", "stopped_at", "type")
+	wantWorkKeys(t, body)
 
 	if id, _ := body["id"].(string); !domain.ID(id).HasPrefix("work") {
 		t.Errorf("work id = %v, want work_-prefixed", body["id"])
@@ -293,6 +310,7 @@ func TestWorkUpdateMetadata(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("update status = %d, want 200 (body %q)", res.StatusCode, raw)
 	}
+	wantWorkKeys(t, body)
 	if body["type"] != "work" || body["id"] != workID {
 		t.Errorf("update returned %v, want the work object", body)
 	}
@@ -555,10 +573,7 @@ func TestWorkGetReturnsItem(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("get status = %d, want 200 (body %q)", res.StatusCode, raw)
 	}
-	wantFields(t, body,
-		"id", "acknowledged_at", "created_at", "data", "environment_id",
-		"latest_heartbeat_at", "metadata", "secret", "started_at", "state",
-		"stop_requested_at", "stopped_at", "type")
+	wantWorkKeys(t, body)
 	if body["secret"] != nil {
 		t.Errorf("secret = %v, want null on a non-poll retrieval path", body["secret"])
 	}
@@ -582,6 +597,7 @@ func TestWorkAckTransitionsToStarting(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("ack status = %d, want 200 (body %q)", res.StatusCode, raw)
 	}
+	wantWorkKeys(t, body)
 	if body["state"] != "starting" {
 		t.Errorf("state after ack = %v, want starting", body["state"])
 	}
@@ -715,10 +731,7 @@ func wantStopped(t *testing.T, s *tserver, get, key string, reqBody map[string]a
 	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("stop Content-Type = %q, want application/json", ct)
 	}
-	wantFields(t, body,
-		"id", "acknowledged_at", "created_at", "data", "environment_id",
-		"latest_heartbeat_at", "metadata", "secret", "started_at", "state",
-		"stop_requested_at", "stopped_at", "type")
+	wantWorkKeys(t, body)
 	if _, got, _ := s.workReq(t, http.MethodGet, get, key, nil); !reflect.DeepEqual(body, got) {
 		t.Errorf("stop answered %v, GET answers %v; want the same rendering", body, got)
 	}

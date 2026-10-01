@@ -42,14 +42,16 @@ type workData struct {
 	Type string `json:"type"` // always "session"
 }
 
-// workWire is the BetaSelfHostedWork response shape, field for field. Every
-// field is required on the wire, including the lifecycle timestamps that a
-// still-queued item has not reached — those render as null (a queued item has
-// not been acknowledged or stopped; its started_at is the enqueue stamp, see
-// toWire).
+// workWire is the BetaSelfHostedWork response shape, field for field, plus
+// the `actor` key every recorded work body carries and the schema lacks
+// (#680). Every field is required on the wire, including the lifecycle
+// timestamps that a still-queued item has not reached — those render as null
+// (a queued item has not been acknowledged or stopped; its started_at is the
+// enqueue stamp, see toWire).
 type workWire struct {
 	ID                string            `json:"id"`
 	AcknowledgedAt    *time.Time        `json:"acknowledged_at"`
+	Actor             *struct{}         `json:"actor"` // always null: no recording holds another value
 	CreatedAt         time.Time         `json:"created_at"`
 	Data              workData          `json:"data"`
 	EnvironmentID     string            `json:"environment_id"`
