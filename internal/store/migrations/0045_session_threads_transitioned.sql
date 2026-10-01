@@ -1,8 +1,8 @@
 -- A session thread's stats and usage render null until its first status
 -- transition (#674), as the reference renders a primary that has never run.
 -- Most threads show from their own row that they have moved: a child is born
--- running, a status other than idle is itself a move, and a thread whose usage
--- has been written has run a model request. An idle primary is the one case
+-- running, a status other than idle is itself a move, and a thread with
+-- nonzero usage has run a model request. An idle primary is the one case
 -- the row cannot tell (never run, or run and idle again), so this flag records
 -- it: events.TransitionThread sets it on the thread's first real status
 -- change, and nothing clears it. The renderer reads all four signals
@@ -21,9 +21,9 @@
 -- A rolling upgrade can leave one kind of thread unflagged for good: an idle
 -- primary that a replica on an earlier build, which writes no flag, both
 -- started and stopped after this has run, with no model request settling
--- usage on it. It renders null until its next transition, which a one-shot
--- session never makes. Every other thread an earlier replica writes or moves
--- is caught by the derived signals.
+-- nonzero usage on it. It renders null until its next transition, which a
+-- one-shot session never makes. Every other thread an earlier replica writes
+-- or moves is caught by the derived signals.
 --
 -- The ALTER takes session_threads ACCESS EXCLUSIVE while replicas on the
 -- earlier build are serving, and a pending request queues every reader of the

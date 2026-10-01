@@ -118,10 +118,11 @@ func renderThread(r threadRow) (threadJSON, error) {
 
 // moved reports whether the thread has made its first status transition. The
 // row shows it for every thread but an idle primary: a child is born running,
-// a status other than idle is itself a move, and written usage means a model
+// a status other than idle is itself a move, and nonzero usage means a model
 // request ran. Only an idle primary needs the transitioned flag (migration
-// 0045), and reading the row first keeps every thread a replica on an earlier
-// build wrote or moved, unflagged, from rendering null.
+// 0045), and reading the row first keeps the threads a replica on an earlier
+// build wrote or moved, unflagged, from rendering null, but for the one kind
+// the migration's comment names.
 func (r threadRow) moved(usage usageJSON) bool {
 	return r.transitioned || r.parent != nil || r.status != string(domain.SessionIdle) ||
 		usage != (usageJSON{})

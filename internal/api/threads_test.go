@@ -237,7 +237,7 @@ func TestAThreadBornRunningRendersItsStats(t *testing.T) {
 // The row shows a move for every thread but an idle primary, so a thread a
 // replica on an earlier build wrote or moved, which never sets the flag,
 // renders objects all the same: a child (born running), a primary in any
-// status but idle, and an idle primary whose usage was written. Only an idle
+// status but idle, and an idle primary with nonzero usage. Only an idle
 // primary with none of these is null.
 func TestAnUnflaggedThreadThatTheRowShowsMovedRendersItsStats(t *testing.T) {
 	s := newTestServer(t)
