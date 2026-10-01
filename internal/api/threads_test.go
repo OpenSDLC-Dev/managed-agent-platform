@@ -220,9 +220,7 @@ func TestPrimaryThreadEventsAreTheSessionView(t *testing.T) {
 	}
 	// Paging with the seq cursor, ascending only.
 	_, p1 := s.do(http.MethodGet, tpath+"/events?limit=4", nil)
-	if np := nextPage(t, p1); np == "" {
-		t.Fatal("no next_page at limit=4 over 6 events")
-	} else if _, p2 := s.do(http.MethodGet, tpath+"/events?limit=4&page="+np, nil); len(listData(t, p2)) != 2 {
+	if _, p2 := s.do(http.MethodGet, tpath+"/events?limit=4&page="+wantCursor(t, p1), nil); len(listData(t, p2)) != 2 {
 		t.Errorf("second page = %v, want the last 2", p2)
 	}
 	for _, qs := range []string{"?order=desc", "?types[]=user.message", "?created_at[gt]=2020-01-01T00:00:00Z"} {
@@ -235,7 +233,7 @@ func TestPrimaryThreadEventsAreTheSessionView(t *testing.T) {
 	// A descending cursor minted by the session list is foreign here: it
 	// would walk backwards past the order refusal.
 	_, desc := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events?order=desc&limit=2", nil)
-	status, body := s.do(http.MethodGet, tpath+"/events?page="+nextPage(t, desc), nil)
+	status, body := s.do(http.MethodGet, tpath+"/events?page="+wantCursor(t, desc), nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/sthr_0000000000000000000000000/events", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
@@ -462,7 +460,7 @@ func TestThreadArchive(t *testing.T) {
 		t.Errorf("cursor walk = %v, want [%s %s %s]", walked, primary, running, idle)
 	}
 	_, evres := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events?limit=1", nil)
-	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads?page="+nextPage(t, evres), nil)
+	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads?page="+wantCursor(t, evres), nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
 	// The session's archive: the running child is terminated and archived with

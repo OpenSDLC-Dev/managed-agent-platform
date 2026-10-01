@@ -539,17 +539,14 @@ func TestDreamListPaging(t *testing.T) {
 	if len(page1) != 20 {
 		t.Fatalf("default page holds %d rows, want 20", len(page1))
 	}
-	cursor := nextPage(t, first)
-	if cursor == "" {
-		t.Fatal("next_page is empty with a row still unread")
-	}
+	cursor := wantCursor(t, first)
 	_, second := s.do(http.MethodGet, "/v1/dreams?page="+url.QueryEscape(cursor), nil)
 	page2 := listData(t, second)
 	if len(page2) != 1 {
 		t.Fatalf("second page holds %d rows, want 1", len(page2))
 	}
 	if c := nextPage(t, second); c != "" {
-		t.Errorf("next_page = %q at the end of the list, want null", c)
+		t.Errorf("next_page = %q at the end of the list, want none", c)
 	}
 
 	// Every row once, newest first, ids descending within a tie.

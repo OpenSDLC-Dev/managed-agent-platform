@@ -1227,9 +1227,11 @@ func TestCoordinatorSkipsDelegationCalls(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 			next.ServeHTTP(rec, r)
+			// omitempty, so a re-encoded last page omits next_page as the
+			// real handler's does (#676) instead of turning it into a null.
 			var page struct {
 				Data     []json.RawMessage `json:"data"`
-				NextPage *string           `json:"next_page"`
+				NextPage *string           `json:"next_page,omitempty"`
 			}
 			// Passed through untouched unless this is the last page and the
 			// real handler hid the call — so reexposed also proves it did.
