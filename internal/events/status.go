@@ -82,7 +82,8 @@ type ThreadTransition struct {
 // TransitionThread moves one thread's status and folds the session's over its
 // live threads', in the caller's transaction under the session row lock (the
 // API's trigger, the brain's settlements and the thread archive all hold it).
-// It writes the thread row (status, stop_reason) and sessions.status, and
+// It writes the thread row (status, stop_reason, and first_transition_at on the
+// thread's first real move) and sessions.status, and
 // returns the events to append — the thread's own (a child's is cross-posted
 // to the session view and names its agent; the primary's is completed with
 // the session's agent name by AppendInTx) and, when the folded value changed

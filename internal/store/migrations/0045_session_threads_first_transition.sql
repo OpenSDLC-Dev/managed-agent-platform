@@ -20,9 +20,11 @@
 -- lock the ALTER takes; DROP DEFAULT then leaves later inserts unmarked,
 -- while existing rows keep the stored value.
 --
--- A rolling upgrade can leave a thread unmarked that has moved. A replica on
--- an earlier build writes no marker, so a thread it moves, spawns or creates
--- running after this has run renders null until a replica on this build next
--- moves it.
+-- A rolling upgrade mixes the two renderings. A replica on an earlier build
+-- renders objects for every thread and writes no marker, so while both builds
+-- serve, an unmarked thread (one created after this has run and not yet
+-- moved, or one an earlier replica moved, spawned or created running) reads
+-- as objects from an old replica and null from a new one, with no transition
+-- between the reads, until a replica on this build marks it.
 ALTER TABLE session_threads ADD COLUMN first_transition_at timestamptz DEFAULT now();
 ALTER TABLE session_threads ALTER COLUMN first_transition_at DROP DEFAULT;
