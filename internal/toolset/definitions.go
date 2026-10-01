@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -41,8 +42,10 @@ const (
 // BetaManagedAgentsAgentToolset20260401GlobInput and
 // BetaManagedAgentsAgentToolset20260401GrepInput) are what the model's tool
 // calls are validated against on the other side, so a property this platform
-// invents is a property no reference client would send. The two web tools have
-// no such Input types (see their own comment below).
+// invents is a property no reference client would send. What the reference
+// itself hands the model differs from these six in places, as a 2026-09-02
+// recording showed; docs/DIVERGENCES.md registers how, and #822 tracks it. The
+// two web tools have no such Input types (see their own comment below).
 var definitions = []toolDef{
 	{
 		name: "bash",
@@ -115,27 +118,37 @@ var definitions = []toolDef{
 	// (docs/plan/15_web-tools.md) — web:true is what routes their work to the
 	// web_exec item and keeps their names out of every sandbox-tool scan.
 	// Unlike the six above, the wire carries no Input type for them (the
-	// official client toolset implements only the six), so these schemas are
-	// this platform's minimal reading, recorded INFERRED in docs/DIVERGENCES.md.
+	// official client toolset implements only the six); these definitions are
+	// the reference's as a 2026-09-02 recording echoed them — schemas keyword
+	// for keyword, format, minLength and additionalProperties included, and
+	// descriptions word for word (webdescriptions.go). docs/DIVERGENCES.md
+	// weighs the recording.
 	{
 		name:        "web_fetch",
-		description: "Fetch a web page by absolute http(s) URL, returning its content as markdown text.",
+		description: webFetchDescription,
 		props: map[string]any{
-			"url": prop("string", "Absolute http(s) URL of the page to fetch."),
+			"url": map[string]any{"type": "string", "format": "uri", "description": "The URL to fetch content from"},
 		},
 		required: []string{"url"},
+		closed:   true,
 		web:      true,
 	},
 	{
-		name:        "web_search",
-		description: "Search the web, returning the top results — title, source URL, and a content snippet for each.",
+		name:     "web_search",
+		describe: webSearchDescription,
 		props: map[string]any{
-			"query": prop("string", "The search query."),
+			"query": map[string]any{"type": "string", "minLength": WebSearchMinQueryLength, "description": "The search query to use"},
 		},
 		required: []string{"query"},
+		closed:   true,
 		web:      true,
 	},
 }
+
+// WebSearchMinQueryLength is web_search's minLength on query, as the reference
+// was recorded handing it to the model (#682). The executor's input check holds
+// the same floor, counted as minLength counts: code points, untrimmed.
+const WebSearchMinQueryLength = 2
 
 // IsWebTool reports whether name is a built-in tool that executes in the
 // executor's process rather than the sandbox. The executor's sandbox scan, the
@@ -155,6 +168,11 @@ type toolDef struct {
 	description string
 	props       map[string]any
 	required    []string
+	// describe, when set, renders the description per request in place of
+	// description: web_search's carries the day's date.
+	describe func(now time.Time) string
+	// closed renders additionalProperties:false on the schema.
+	closed bool
 	// web marks a tool that executes in the executor's process (web_exec
 	// work), never in the sandbox.
 	web bool
@@ -164,14 +182,22 @@ func prop(typ, description string) map[string]any {
 	return map[string]any{"type": typ, "description": description}
 }
 
-// marshal renders the definition as the provider request's tool shape.
-func (d toolDef) marshal() (json.RawMessage, error) {
+// marshal renders the definition as the provider request's tool shape, for a
+// request made at now.
+func (d toolDef) marshal(now time.Time) (json.RawMessage, error) {
 	schema := map[string]any{"type": "object", "properties": d.props}
 	if len(d.required) > 0 {
 		schema["required"] = d.required
 	}
+	if d.closed {
+		schema["additionalProperties"] = false
+	}
+	description := d.description
+	if d.describe != nil {
+		description = d.describe(now)
+	}
 	return json.Marshal(map[string]any{
-		"name": d.name, "description": d.description, "input_schema": schema,
+		"name": d.name, "description": description, "input_schema": schema,
 	})
 }
 
@@ -459,19 +485,44 @@ func Validate(raw json.RawMessage) error {
 }
 
 // Tools returns the model-facing definitions of the built-in tools an
-// agent_toolset_20260401 entry enables, in the wire's order.
-func Tools(raw json.RawMessage) ([]json.RawMessage, error) {
-	rs, err := resolveToolset(raw)
+// agent_toolset_20260401 entry enables, in the wire's order, for a request made
+// at now. now matters to one definition: web_search's description carries the
+// day's date, so the brain builds them per request rather than once.
+func Tools(raw json.RawMessage, now time.Time) ([]json.RawMessage, error) {
+	bs, err := Resolve(raw, now)
 	if err != nil {
 		return nil, err
 	}
 	var out []json.RawMessage
+	for _, b := range bs {
+		out = append(out, b.Definition)
+	}
+	return out, nil
+}
+
+// Builtin is one built-in tool an agent_toolset_20260401 entry enables: its
+// name, its model-facing definition, and its resolved permission policy.
+type Builtin struct {
+	Name       string
+	Definition json.RawMessage
+	Policy     domain.PermissionPolicyType
+}
+
+// Resolve is Tools and Policies in one pass over the entry, for a caller that
+// needs both: the enabled built-ins in the wire's order, each rendered for a
+// request made at now.
+func Resolve(raw json.RawMessage, now time.Time) ([]Builtin, error) {
+	rs, err := resolveToolset(raw)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Builtin, 0, len(rs))
 	for _, r := range rs {
-		def, err := r.def.marshal()
+		def, err := r.def.marshal(now)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, def)
+		out = append(out, Builtin{Name: r.def.name, Definition: def, Policy: r.policy})
 	}
 	return out, nil
 }

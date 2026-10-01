@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // requestFor drives a minimal streamed turn and returns the request body the
@@ -247,6 +250,189 @@ func TestBadToolSchemaErrors(t *testing.T) {
 		Tools:    []json.RawMessage{json.RawMessage(`{"description":"no name"}`)},
 	}); err == nil {
 		t.Error("a tool without a name should error")
+	}
+}
+
+// sentFunctions indexes a request's function tools by name, so an assertion
+// about one tool does not lean on where the list happened to put it.
+func sentFunctions(t *testing.T, body map[string]any) map[string]map[string]any {
+	t.Helper()
+	sent, _ := body["tools"].([]any)
+	out := make(map[string]map[string]any, len(sent))
+	for i, raw := range sent {
+		fn, _ := raw.(map[string]any)["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		if name == "" {
+			t.Fatalf("tools[%d] carries no function name: %v", i, raw)
+		}
+		out[name] = fn
+	}
+	return out
+}
+
+// The built-in web tools' input schemas carry three keywords as the reference
+// was recorded sending them — "format": "uri" on url, "minLength": 2 on query,
+// and "additionalProperties": false on both objects (#682) — and the anthropic
+// adapter sends them on. This one strips all three from those built-ins (owner
+// decision, #682): an OpenAI-compatible backend that accepts only part of JSON
+// Schema can reject the whole tool list over one of them, and both web tools
+// are on by default. Everything else in the schema arrives as the definition
+// wrote it, and no "strict" is set.
+func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.T) {
+	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`)
+	defs, err := toolset.Tools(entry, time.Now())
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	body := requestFor(t, provider.Request{
+		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:        defs,
+		BuiltinTools: map[string]bool{"web_fetch": true, "web_search": true},
+	})
+	fns := sentFunctions(t, body)
+
+	for _, tc := range []struct{ tool, prop, key string }{
+		{"web_fetch", "url", "format"},
+		{"web_search", "query", "minLength"},
+	} {
+		type definition struct {
+			Name        string         `json:"name"`
+			InputSchema map[string]any `json:"input_schema"`
+		}
+		var def definition
+		for _, raw := range defs {
+			// A fresh value per decode: decoding into a reused one merges
+			// the earlier tool's schema keys into this one's.
+			var d definition
+			if err := json.Unmarshal(raw, &d); err != nil {
+				t.Fatalf("definition: %v", err)
+			}
+			if d.Name == tc.tool {
+				def = d
+				break
+			}
+		}
+		if def.Name != tc.tool {
+			t.Fatalf("no %s definition among %d", tc.tool, len(defs))
+		}
+		// The definition must carry what the adapter is meant to strip, or
+		// this test passes over a schema that never had it.
+		prop := def.InputSchema["properties"].(map[string]any)[tc.prop].(map[string]any)
+		if _, ok := prop[tc.key]; !ok || def.InputSchema["additionalProperties"] != false {
+			t.Fatalf("%s input_schema = %v, want %s on %s and additionalProperties false to strip", tc.tool, def.InputSchema, tc.key, tc.prop)
+		}
+		delete(prop, tc.key)
+		delete(def.InputSchema, "additionalProperties")
+
+		fn, ok := fns[tc.tool]
+		if !ok {
+			t.Fatalf("no %s function was sent", tc.tool)
+		}
+		if !reflect.DeepEqual(fn["parameters"], def.InputSchema) {
+			t.Errorf("%s parameters = %v, want the input_schema without %s and additionalProperties: %v",
+				tc.tool, fn["parameters"], tc.key, def.InputSchema)
+		}
+		if _, ok := fn["strict"]; ok {
+			t.Errorf("%s carries strict = %v, want none", tc.tool, fn["strict"])
+		}
+	}
+}
+
+// The strip is schema-aware, not a key search. It removes the keywords from
+// every subschema of a built-in definition — properties, items, the
+// anyOf/oneOf/allOf branches, $defs, draft-07's schema-form dependencies,
+// contentSchema — and unevaluatedProperties with additionalProperties; it
+// leaves a property that is merely *named* format, a dependencies entry that
+// is a list of names, and instance data — enum, default, const, examples —
+// whatever keys that data holds. No built-in nests a schema today (the web
+// tools' are flat); this pins the walk for one that does.
+func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
+	in := `{"type":"object","additionalProperties":false,"required":["format"],` +
+		`"properties":{` +
+		`"format":{"type":"string","enum":["json","text"],"minLength":1},` +
+		`"when":{"type":"string","format":"date-time","default":"now"},` +
+		`"tags":{"type":"array","items":{"type":"string","minLength":2}},` +
+		`"meta":{"type":"object","additionalProperties":{"type":"string","format":"email"}},` +
+		`"choice":{"anyOf":[{"type":"string","format":"uri"},{"type":"integer"}]},` +
+		`"opts":{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false,` +
+		`"default":{"format":"kept","minLength":3},"const":{"additionalProperties":false},"examples":[{"format":"kept"}]}},` +
+		`"$defs":{"link":{"type":"string","format":"uri"}},` +
+		`"dependencies":{"when":{"properties":{"zone":{"type":"string","minLength":1}}},"tags":["when"]},` +
+		`"contentSchema":{"type":"object","additionalProperties":false,"unevaluatedProperties":false},` +
+		`"unevaluatedProperties":false}`
+	want := `{"type":"object","required":["format"],` +
+		`"properties":{` +
+		`"format":{"type":"string","enum":["json","text"]},` +
+		`"when":{"type":"string","default":"now"},` +
+		`"tags":{"type":"array","items":{"type":"string"}},` +
+		`"meta":{"type":"object"},` +
+		`"choice":{"anyOf":[{"type":"string"},{"type":"integer"}]},` +
+		`"opts":{"type":"object","properties":{"n":{"type":"integer"}},` +
+		`"default":{"format":"kept","minLength":3},"const":{"additionalProperties":false},"examples":[{"format":"kept"}]}},` +
+		`"$defs":{"link":{"type":"string"}},` +
+		`"dependencies":{"when":{"properties":{"zone":{"type":"string"}}},"tags":["when"]},` +
+		`"contentSchema":{"type":"object"}}`
+
+	body := requestFor(t, provider.Request{
+		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:        []json.RawMessage{json.RawMessage(`{"name":"nested","description":"d","input_schema":` + in + `}`)},
+		BuiltinTools: map[string]bool{"nested": true},
+	})
+	fns := sentFunctions(t, body)
+
+	var wantSchema map[string]any
+	if err := json.Unmarshal([]byte(want), &wantSchema); err != nil {
+		t.Fatal(err)
+	}
+	if got := fns["nested"]["parameters"]; !reflect.DeepEqual(got, wantSchema) {
+		gotJSON, _ := json.Marshal(got)
+		t.Errorf("nested parameters =\n%s\nwant\n%s", gotJSON, want)
+	}
+}
+
+// Only the platform's built-ins are stripped, and which those are is the
+// request's BuiltinTools — provenance the brain records, never a name the
+// adapter recognizes. A custom tool may take a built-in's name once that
+// built-in is disabled, and an MCP tool's schema is its server's: both are
+// contracts their authors set, so both reach the endpoint with every keyword
+// they wrote, beside a built-in that loses them. The comparison is of content:
+// encoding/json compacts (and HTML-escapes) a schema on its way out, as it did
+// before any of this.
+func TestUserToolSchemasPassThroughUntouched(t *testing.T) {
+	custom := `{"type":"object","properties":{"query":{"type":"string","minLength":3,"format":"hostname"}},` +
+		`"required":["query"],"additionalProperties":false}`
+	mcp := `{"type":"object","properties":{"since":{"type":"string","format":"date-time"},` +
+		`"tags":{"type":"object","additionalProperties":{"type":"string","minLength":1}}},"additionalProperties":false}`
+	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_fetch","enabled":true}]}`)
+	builtins, err := toolset.Tools(entry, time.Now())
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: append(builtins,
+			json.RawMessage(`{"name":"web_search","description":"ours","input_schema":`+custom+`}`),
+			json.RawMessage(`{"name":"mcp__docs__search","description":"theirs","input_schema":`+mcp+`}`)),
+		BuiltinTools: map[string]bool{"web_fetch": true},
+	})
+	fns := sentFunctions(t, body)
+
+	for name, schema := range map[string]string{"web_search": custom, "mcp__docs__search": mcp} {
+		var want map[string]any
+		if err := json.Unmarshal([]byte(schema), &want); err != nil {
+			t.Fatal(err)
+		}
+		if got := fns[name]["parameters"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s parameters = %v, want the schema as written: %s", name, got, schema)
+		}
+	}
+	// The built-in beside them still loses its keywords, so the request did
+	// carry provenance and the pass-through above is not the strip switched off.
+	fetch := fns["web_fetch"]["parameters"].(map[string]any)
+	if _, ok := fetch["additionalProperties"]; ok {
+		t.Errorf("built-in web_fetch parameters = %v, want additionalProperties stripped", fetch)
 	}
 }
 

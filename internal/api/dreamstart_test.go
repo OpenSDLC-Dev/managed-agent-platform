@@ -330,7 +330,7 @@ func toolNames(t *testing.T, tools []json.RawMessage) []string {
 	if len(tools) != 1 {
 		t.Fatalf("the snapshot carries %d tools entries, want the one toolset", len(tools))
 	}
-	defs, err := toolset.Tools(tools[0])
+	defs, err := toolset.Tools(tools[0], time.Now())
 	if err != nil {
 		t.Fatalf("resolve the snapshot's toolset: %v", err)
 	}

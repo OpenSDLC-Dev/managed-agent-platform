@@ -1080,18 +1080,24 @@ func TestEnvironmentDeleteBlockedByBothNamesEachOfThem(t *testing.T) {
 // kind is fixed at creation: a config update that flips the kind is rejected.
 // The queue routes work by kind (the executor claims cloud tool_exec, a BYOC
 // worker polls self_hosted), so a mid-life switch could hand one item to both.
+// Both flips carry the details the reference attaches to its own refusal of
+// them (2026-09-12 batch1 `rec91.kind.cloud-to-self-hosted` and
+// `rec91.kind.self-hosted-to-cloud`; #664).
 func TestEnvironmentKindIsImmutable(t *testing.T) {
 	s := newTestServer(t)
+	recorded := map[string]any{"error_code": "invalid_config_type_change"}
 
 	cloud := createEnvironment(t, s, map[string]any{"name": "c", "config": map[string]any{"type": "cloud"}})
 	status, body := s.do(http.MethodPost, "/v1/environments/"+cloud["id"].(string),
 		map[string]any{"config": map[string]any{"type": "self_hosted"}})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantDetails(t, body, recorded)
 
 	self := createEnvironment(t, s, map[string]any{"name": "s", "config": map[string]any{"type": "self_hosted"}})
 	status, body = s.do(http.MethodPost, "/v1/environments/"+self["id"].(string),
 		map[string]any{"config": map[string]any{"type": "cloud"}})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantDetails(t, body, recorded)
 
 	// A same-kind config update still works (kind unchanged).
 	status, _ = s.do(http.MethodPost, "/v1/environments/"+self["id"].(string),
