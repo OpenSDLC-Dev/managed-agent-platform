@@ -458,8 +458,8 @@ var strippedKeywords = []string{"format", "minLength", "additionalProperties"}
 
 // stripSchemaKeywords removes strippedKeywords from a schema and from every
 // subschema in it, at any depth. A schema with none of them is returned as it
-// came, bytes and key order included; one that loses any is re-encoded, its
-// numbers kept as written.
+// came; one that loses any is re-encoded, its numbers kept as written. Either
+// way the request's encoding then compacts it, as it does every schema.
 func stripSchemaKeywords(raw json.RawMessage) (json.RawMessage, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return raw, nil

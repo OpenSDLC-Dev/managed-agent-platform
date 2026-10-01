@@ -383,8 +383,10 @@ func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
 // request's BuiltinTools — provenance the brain records, never a name the
 // adapter recognizes. A custom tool may take a built-in's name once that
 // built-in is disabled, and an MCP tool's schema is its server's: both are
-// contracts their authors set, so both reach the endpoint byte for byte, the
-// keywords included, beside a built-in that loses them.
+// contracts their authors set, so both reach the endpoint with every keyword
+// they wrote, beside a built-in that loses them. The comparison is of content:
+// encoding/json compacts (and HTML-escapes) a schema on its way out, as it did
+// before any of this.
 func TestUserToolSchemasPassThroughUntouched(t *testing.T) {
 	custom := `{"type":"object","properties":{"query":{"type":"string","minLength":3,"format":"hostname"}},` +
 		`"required":["query"],"additionalProperties":false}`
@@ -396,33 +398,27 @@ func TestUserToolSchemasPassThroughUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
 	}
-	f := &fakeServer{sse: []string{
-		`{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}`,
-		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
-		`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
-	}}
-	p := start(t, f)
-	stream, err := p.Generate(context.Background(), provider.Request{
+	body := requestFor(t, provider.Request{
 		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 		Tools: append(builtins,
 			json.RawMessage(`{"name":"web_search","description":"ours","input_schema":`+custom+`}`),
 			json.RawMessage(`{"name":"mcp__docs__search","description":"theirs","input_schema":`+mcp+`}`)),
 		BuiltinTools: map[string]bool{"web_fetch": true},
 	})
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-	_ = collect(t, stream)
+	fns := sentFunctions(t, body)
 
 	for name, schema := range map[string]string{"web_search": custom, "mcp__docs__search": mcp} {
-		if !strings.Contains(string(f.gotRaw), `"name":"`+name+`"`) ||
-			!strings.Contains(string(f.gotRaw), `"parameters":`+schema) {
-			t.Errorf("%s parameters were not sent byte for byte as %s:\n%s", name, schema, f.gotRaw)
+		var want map[string]any
+		if err := json.Unmarshal([]byte(schema), &want); err != nil {
+			t.Fatal(err)
+		}
+		if got := fns[name]["parameters"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s parameters = %v, want the schema as written: %s", name, got, schema)
 		}
 	}
 	// The built-in beside them still loses its keywords, so the request did
 	// carry provenance and the pass-through above is not the strip switched off.
-	fetch := sentFunctions(t, f.gotBody)["web_fetch"]["parameters"].(map[string]any)
+	fetch := fns["web_fetch"]["parameters"].(map[string]any)
 	if _, ok := fetch["additionalProperties"]; ok {
 		t.Errorf("built-in web_fetch parameters = %v, want additionalProperties stripped", fetch)
 	}
