@@ -145,16 +145,22 @@ func consoleIDShape(id, prefix string) bool {
 	return ok && token != "" && storableText(token)
 }
 
-// isUUID reports whether s is a UUID in its hyphenated 8-4-4-4-12 hex form, in
-// either case — the shape the reference's environment key ids take.
+// isUUID reports whether s is a UUID in a form the reference's own refusal of
+// a key id documents — "an optional prefix of `urn:uuid:` followed by
+// [0-9a-fA-F-]" (2026-09-05 batch2 `rec83.edge4.revoke.malformed-id`): 32 hex
+// digits in either case, bare or grouped 8-4-4-4-12 by hyphens, with or without
+// that prefix. Braces fall outside the class it names, so a braced UUID is
+// malformed here.
 func isUUID(s string) bool {
-	if len(s) != 36 {
+	s = strings.TrimPrefix(s, "urn:uuid:")
+	hyphenated := len(s) == 36
+	if !hyphenated && len(s) != 32 {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case i == 8 || i == 13 || i == 18 || i == 23:
+		case hyphenated && (i == 8 || i == 13 || i == 18 || i == 23):
 			if c != '-' {
 				return false
 			}

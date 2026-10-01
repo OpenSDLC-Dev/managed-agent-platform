@@ -589,6 +589,10 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 		"no prefix":             "envkey",
 		"empty token":           "envkey_",
 		"UUID, one digit short": "11111111-2222-3333-4444-55555555555",
+		// Braces are outside the class the reference's refusal names.
+		"braced UUID":       "%7B11111111-2222-3333-4444-555555555555%7D",
+		"urn prefix alone":  "urn:uuid:",
+		"misplaced hyphens": "1111111-12222-3333-4444-555555555555",
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(http.MethodPost, consoleRevoke(mine, id), nil)
@@ -600,6 +604,9 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 		"unknown id":          "envkey_0123456789abcdefghjkmnp",
 		"recorded unknown id": "11111111-2222-3333-4444-555555555555",
 		"uppercase UUID":      "AAAAAAAA-2222-3333-4444-555555555555",
+		"urn:uuid: UUID":      "urn:uuid:11111111-2222-3333-4444-555555555555",
+		"32-digit UUID":       "11111111222233334444555555555555",
+		"urn:uuid: 32 digits": "urn:uuid:11111111222233334444555555555555",
 		"another alphabet":    "envkey_NOPE!",
 		"another env's key":   theirID,
 	}
@@ -701,6 +708,12 @@ func TestConsoleKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 			"revoke, malformed environment": {http.MethodPost, consoleRevoke("not-an-env-id", theirID),
 				nil, http.StatusBadRequest, "invalid_request_error", envMalformed},
 			"revoke, our own unknown key": {http.MethodPost, consoleRevoke(mine, "envkey_0123456789abcdefghjkmnp"),
+				nil, http.StatusNotFound, "not_found_error", keyGone},
+			// The recorded refusal of `not-a-uuid` (idx 19) names the form it
+			// wanted: "an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-]".
+			"revoke, the recorded unknown UUID under urn:uuid:": {http.MethodPost, consoleRevoke(mine, "urn:uuid:11111111-2222-3333-4444-555555555555"),
+				nil, http.StatusNotFound, "not_found_error", keyGone},
+			"revoke, the recorded unknown UUID as 32 digits": {http.MethodPost, consoleRevoke(mine, "11111111222233334444555555555555"),
 				nil, http.StatusNotFound, "not_found_error", keyGone},
 			"revoke, unstorable key": {http.MethodPost, consoleRevoke(mine, "envkey_%00"),
 				nil, http.StatusBadRequest, "invalid_request_error", nil},
