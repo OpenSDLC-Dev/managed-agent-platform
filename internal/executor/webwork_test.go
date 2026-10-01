@@ -105,6 +105,17 @@ func (h *harness) toolResults(t *testing.T) []resultBody {
 	return out
 }
 
+// userSays appends a user.message carrying text, the way the API records one —
+// the place a URL the user provides comes from (#823).
+func (h *harness) userSays(t *testing.T, text string) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"content": []map[string]string{{"type": "text", "text": text}}})
+	if _, err := h.log.Append(context.Background(), h.sid,
+		[]events.NewEvent{{Type: domain.EventUserMessage, Payload: payload}}); err != nil {
+		t.Fatalf("userSays: %v", err)
+	}
+}
+
 func (h *harness) stepOnce(t *testing.T) {
 	t.Helper()
 	worked, err := h.exec.step(context.Background())
@@ -266,6 +277,7 @@ func TestWebSearchBoundsAndNormalizesTheAnswer(t *testing.T) {
 
 func TestWebFetchAnswersWithTextBlock(t *testing.T) {
 	h := webHarness(t, "", "# The Page\n\nBody text.")
+	h.userSays(t, "Summarize https://example.com/page please.")
 	uses := h.suspendWeb(t, fetchUse("https://example.com/page"))
 
 	h.stepOnce(t)
@@ -433,7 +445,7 @@ func TestWebSearchDropsAHitWhoseMetadataBustsTheBudget(t *testing.T) {
 		{Title: "small", URL: "https://small.example/", Content: "snippet"},
 	}}}
 
-	res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
+	res := e.runWebTool(context.Background(), "", toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
 
 	if res.IsError {
 		t.Fatalf("result = %+v, want a non-error answer", res)
@@ -476,7 +488,7 @@ func TestWebSearchHoldsTheSchemasMinimumQueryLength(t *testing.T) {
 		e := &Executor{searcher: s}
 		in, _ := json.Marshal(map[string]string{"query": tc.query})
 
-		res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: in})
+		res := e.runWebTool(context.Background(), "", toolUse{name: "web_search", input: in})
 
 		if tc.ok {
 			if res.IsError || s.calls != 1 {
@@ -497,7 +509,7 @@ func TestWebFetchRejectsNonHTTPSchemesBeforeTheFetch(t *testing.T) {
 	f := &recordingFetcher{}
 	e := &Executor{fetcher: f}
 
-	res := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"file:///etc/passwd"}`)})
+	res := e.runWebTool(context.Background(), "", toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"file:///etc/passwd"}`)})
 
 	if !res.IsError || !strings.Contains(res.Content, "http or https") {
 		t.Fatalf("result = %+v, want is_error naming the http-or-https requirement", res)
@@ -508,10 +520,12 @@ func TestWebFetchRejectsNonHTTPSchemesBeforeTheFetch(t *testing.T) {
 }
 
 func TestWebFetchHandsTheAdapterTheTrimmedURL(t *testing.T) {
+	h := webHarness(t, "", "")
 	f := &recordingFetcher{}
-	e := &Executor{fetcher: f}
+	h.exec.fetcher = f
+	h.userSays(t, "https://example.com/page")
 
-	res := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"  https://example.com/page  "}`)})
+	res := h.exec.runWebTool(context.Background(), h.sid, toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"  https://example.com/page  "}`)})
 
 	if res.IsError {
 		t.Fatalf("result = %+v, want a non-error answer", res)
@@ -621,10 +635,14 @@ func TestWebFetchUnconfiguredAnswersIsError(t *testing.T) {
 }
 
 func TestWebFetchOutsideAllowedDomainsAnswersIsError(t *testing.T) {
+	h := webHarness(t, "", "")
 	f := &recordingFetcher{}
-	e := &Executor{fetcher: f, webAllowed: egress.NewHostSet([]string{"example.com", "*.example.com"})}
+	e := h.exec
+	e.fetcher, e.webAllowed = f, egress.NewHostSet([]string{"example.com", "*.example.com"})
+	// Both provided, so only the allowlist decides.
+	h.userSays(t, "https://evil.test/x and https://docs.example.com/page")
 
-	denied := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"https://evil.test/x"}`)})
+	denied := e.runWebTool(context.Background(), h.sid, toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"https://evil.test/x"}`)})
 	if !denied.IsError || !strings.Contains(denied.Content, "allowed domains") {
 		t.Fatalf("denied result = %+v, want is_error naming the allowlist", denied)
 	}
@@ -632,7 +650,7 @@ func TestWebFetchOutsideAllowedDomainsAnswersIsError(t *testing.T) {
 		t.Errorf("fetcher calls = %d, want 0 — a denied host must never be fetched", f.calls)
 	}
 
-	allowed := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"https://docs.example.com/page"}`)})
+	allowed := e.runWebTool(context.Background(), h.sid, toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"https://docs.example.com/page"}`)})
 	if allowed.IsError || f.calls != 1 {
 		t.Errorf("allowed result = %+v (fetcher calls %d), want a fetch of the in-list host", allowed, f.calls)
 	}
@@ -647,7 +665,7 @@ func TestWebSearchFiltersHitsOutsideAllowedDomains(t *testing.T) {
 		webAllowed: egress.NewHostSet([]string{"*.example.com"}),
 	}
 
-	res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
+	res := e.runWebTool(context.Background(), "", toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
 
 	if res.IsError {
 		t.Fatalf("result = %+v, want a non-error answer", res)
@@ -659,7 +677,7 @@ func TestWebSearchFiltersHitsOutsideAllowedDomains(t *testing.T) {
 	// Every hit outside the list answers as the documented zero-hit shape, so
 	// the model reads an outcome, not an error.
 	e.searcher = stubSearcher{hits: []webtool.SearchResult{{Title: "out", URL: "https://evil.test/b", Content: "x"}}}
-	res = e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
+	res = e.runWebTool(context.Background(), "", toolUse{name: "web_search", input: json.RawMessage(`{"query":"golang"}`)})
 	if res.IsError || res.Content != "No results found." {
 		t.Errorf("all-filtered result = %+v, want the zero-hit text answer", res)
 	}

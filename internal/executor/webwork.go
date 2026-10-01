@@ -169,7 +169,7 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func
 		}
 		cctx, stop := e.answeredWatch(ctx, sid, u.id, e.cfg.LeaseTTL/3)
 		start := time.Now()
-		res := e.runWebTool(cctx, u)
+		res := e.runWebTool(cctx, sid, u)
 		if stop() {
 			toolset.RecordRun(ctx, u.name, time.Since(start), res, context.Canceled)
 			continue
@@ -197,7 +197,7 @@ func (e *Executor) runWebTools(ctx context.Context, sid domain.ID, progress func
 // reclaim-loop the item forever, and the model can read the error and try
 // something else — the same recovery contract as a sandbox tool's nonzero
 // exit. The backends' errors already redact credentials (webtool.HTTPError).
-func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
+func (e *Executor) runWebTool(ctx context.Context, sid domain.ID, u toolUse) toolset.Result {
 	fail := func(msg string) toolset.Result { return toolset.Result{Content: msg, IsError: true} }
 	switch u.name {
 	case "web_search":
@@ -307,7 +307,27 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 		if e.webAllowed != nil && !e.webAllowed.Match(parsed.Hostname()) {
 			return fail(fmt.Sprintf("web_fetch: host %q is outside the operator's allowed domains (WEBTOOL_ALLOWED_DOMAINS)", parsed.Hostname()))
 		}
-		page, err := e.fetcher.Fetch(ctx, target)
+		// The description's provenance rule (#823, webprovenance.go): a URL
+		// the session was not given is refused before anything is fetched,
+		// and what is fetched is the given URL as it was written, never the
+		// model's spelling of it. A failed lookup refuses too: the rule is a
+		// guard, and an unchecked fetch is what it guards against.
+		given, err := e.webFetchSource(ctx, sid, target)
+		if errors.Is(err, errReadingBudget) {
+			return fail("web_fetch: " + err.Error() + "; fetch a URL exactly as it was given, or find this page with web_search first")
+		}
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.WarnContext(ctx, "executor: web_fetch provenance check failed", "session", sid, "error", err)
+			}
+			return fail("web_fetch: could not check where this URL came from; try again")
+		}
+		if given == "" {
+			return fail("web_fetch: this URL was not provided by the user or returned by a web_search or " +
+				"web_fetch result in this session, and web_fetch fetches only such URLs, exactly as given. " +
+				"Use one of those URLs, or find this page with web_search first.")
+		}
+		page, err := e.fetcher.Fetch(ctx, given)
 		if err != nil {
 			return fail("web_fetch: " + err.Error())
 		}
