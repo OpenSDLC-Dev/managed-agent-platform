@@ -307,7 +307,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// rendered fact already lives in the stored resource, so there is no join
 	// to miss.
 	reposBlock, reposInjected := b.resolveReposBlock(ctx, sid, resourcesJSON, envKind)
-	// Memory-store injection: a "Memory stores" block after the repositories
+	// Memory-store injection: the Memory-stores block after the repositories
 	// block, on both environment kinds (plan 36 decision 9; the worker's half
 	// is slice 6's). A deleted store is a counted miss rendered hedged; the
 	// count is flushed now for the skills' reason.
