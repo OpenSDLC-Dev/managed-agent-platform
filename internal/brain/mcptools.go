@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -193,7 +194,9 @@ const maxMCPToolBytes = 256 << 10
 // an agent_toolset entry expands to the built-in tools it enables (bash, read,
 // write, edit, glob, grep, web_fetch, web_search), which the executor runs in
 // the sandbox; an mcp_toolset expands to the tools its server reported, resolved
-// against the entry's default_config and configs[].
+// against the entry's default_config and configs[]. now is the request's
+// clock, which the built-ins render from: web_search's description carries the
+// day's date, so the list is built for each request, never once and reused.
 //
 // The agent's own tools follow, and the MCP ones last, so a name declared by the
 // agent's author always beats a name a third-party server chose — whatever order
@@ -208,7 +211,7 @@ const maxMCPToolBytes = 256 << 10
 // over a third party's listing it does not control. The one hard error is a
 // permission policy this platform cannot evaluate, which is the #26 fail-open:
 // defaulting it would run an unconfirmed tool.
-func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRole) ([]json.RawMessage, map[string]toolClass, []string, error) {
+func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRole, now time.Time) ([]json.RawMessage, map[string]toolClass, []string, error) {
 	var defs []json.RawMessage
 	class := map[string]toolClass{}
 	var notes toolNotes
@@ -278,7 +281,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			defs = append(defs, def)
 			class[probe.Name] = toolClass{kind: domain.EventAgentCustomToolUse}
 		case agentToolsetType:
-			builtins, err := toolset.Tools(raw)
+			builtins, err := toolset.Tools(raw, now)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
 			}

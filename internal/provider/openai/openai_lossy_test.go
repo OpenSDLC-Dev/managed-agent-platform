@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
@@ -278,8 +279,9 @@ func sentFunctions(t *testing.T, body map[string]any) map[string]map[string]any 
 // Everything else in the schema arrives as the definition wrote it, and no
 // "strict" is set.
 func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.T) {
-	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
-		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`))
+	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`)
+	defs, err := toolset.Tools(entry, time.Now())
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
 	}

@@ -3,6 +3,7 @@ package toolset
 import (
 	"encoding/json"
 	"slices"
+	"time"
 )
 
 // The six delegation tools, by name. They are the platform's own: no agent
@@ -100,7 +101,8 @@ var (
 func renderDefs(defs []toolDef) []json.RawMessage {
 	out := make([]json.RawMessage, len(defs))
 	for i, d := range defs {
-		raw, err := d.marshal()
+		// No delegation definition sets describe, so the clock is unread.
+		raw, err := d.marshal(time.Time{})
 		if err != nil {
 			panic(err)
 		}

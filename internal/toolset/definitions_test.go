@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
@@ -97,7 +98,7 @@ func TestTools(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			defs, err := toolset.Tools(json.RawMessage(tc.entry))
+			defs, err := toolset.Tools(json.RawMessage(tc.entry), time.Now())
 			if err != nil {
 				t.Fatalf("Tools: %v", err)
 			}
@@ -115,7 +116,7 @@ func TestToolsRejectsMalformedEntry(t *testing.T) {
 		`{"type":"agent_toolset_20260401","configs":[{"name":"bash","enabled":"yes"}]}`,
 		`{"type":"agent_toolset_20260401","configs":"all"}`,
 	} {
-		if _, err := toolset.Tools(json.RawMessage(entry)); err == nil {
+		if _, err := toolset.Tools(json.RawMessage(entry), time.Now()); err == nil {
 			t.Fatalf("Tools(%s) = nil error, want a rejection", entry)
 		}
 	}
@@ -147,7 +148,7 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 		"web_search": {props: []string{"query"}, required: []string{"query"}},
 	}
 
-	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`))
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
 	}
@@ -198,20 +199,20 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 	}
 }
 
-// The web tools' input schemas are the reference's, keyword for keyword, as a
-// 2026-09-02 recording captured them: the agent echoed its tool definitions
-// (a model-mediated echo, not a captured provider request — docs/DIVERGENCES.md
-// weighs it). The property descriptions are stripped before comparing because
-// they are still this platform's own; whether to adopt the reference's is #682.
+// The web tools' input schemas are the reference's, keyword for keyword and
+// property description for property description, as a 2026-09-02 recording
+// captured them: the agent echoed its tool definitions (a model-mediated echo,
+// not a captured provider request — docs/DIVERGENCES.md weighs it). The tool
+// descriptions are TestWebToolDescriptionsMatchTheRecording's.
 func TestWebToolSchemasMatchTheRecording(t *testing.T) {
 	recorded := map[string]string{
-		"web_fetch": `{"type":"object","properties":{"url":{"type":"string","format":"uri"}},` +
-			`"required":["url"],"additionalProperties":false}`,
-		"web_search": `{"type":"object","properties":{"query":{"type":"string","minLength":2}},` +
-			`"required":["query"],"additionalProperties":false}`,
+		"web_fetch": `{"type":"object","properties":{"url":{"type":"string","format":"uri",` +
+			`"description":"The URL to fetch content from"}},"required":["url"],"additionalProperties":false}`,
+		"web_search": `{"type":"object","properties":{"query":{"type":"string","minLength":2,` +
+			`"description":"The search query to use"}},"required":["query"],"additionalProperties":false}`,
 	}
 
-	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`))
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
 	}
@@ -229,19 +230,13 @@ func TestWebToolSchemasMatchTheRecording(t *testing.T) {
 			continue
 		}
 		seen++
-		props, _ := d.InputSchema["properties"].(map[string]any)
-		for _, p := range props {
-			if m, ok := p.(map[string]any); ok {
-				delete(m, "description")
-			}
-		}
 		var want map[string]any
 		if err := json.Unmarshal([]byte(rec), &want); err != nil {
 			t.Fatalf("recorded %s: %v", d.Name, err)
 		}
 		if !reflect.DeepEqual(d.InputSchema, want) {
 			got, _ := json.Marshal(d.InputSchema)
-			t.Errorf("%s input_schema, descriptions aside = %s, want the recorded %s", d.Name, got, rec)
+			t.Errorf("%s input_schema = %s, want the recorded %s", d.Name, got, rec)
 		}
 	}
 	if seen != len(recorded) {

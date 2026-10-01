@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
@@ -305,8 +306,9 @@ func TestGenerateWebToolSchemaConstraintsReachTheWire(t *testing.T) {
 		`{"type":"message_stop"}`,
 	}}
 	p := start(t, f)
-	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
-		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`))
+	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`)
+	defs, err := toolset.Tools(entry, time.Now())
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
 	}
