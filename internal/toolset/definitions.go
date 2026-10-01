@@ -44,8 +44,11 @@ const (
 // calls are validated against on the other side, so a property this platform
 // invents is a property no reference client would send. What the reference
 // itself hands the model differs from these six in places, as a 2026-09-02
-// recording showed; docs/DIVERGENCES.md registers how, and #822 tracks it. The
-// two web tools have no such Input types (see their own comment below).
+// recording showed. Two of its keywords are adopted (#822, an owner decision):
+// all six are closed with additionalProperties:false, and edit's old_string
+// carries minLength:1, the floor the edit tool already holds (file.go). The
+// rest stays the SDK's, and docs/DIVERGENCES.md says why. The two web tools
+// have no such Input types (see their own comment below).
 var definitions = []toolDef{
 	{
 		name: "bash",
@@ -62,6 +65,7 @@ var definitions = []toolDef{
 			"restart":    prop("boolean", "Restart the persistent shell before running."),
 			"timeout_ms": prop("integer", "Per-call timeout in milliseconds."),
 		},
+		closed: true,
 	},
 	{
 		name:        "read",
@@ -75,6 +79,7 @@ var definitions = []toolDef{
 			},
 		},
 		required: []string{"file_path"},
+		closed:   true,
 	},
 	{
 		name:        "write",
@@ -84,17 +89,19 @@ var definitions = []toolDef{
 			"content":   prop("string", "Full file contents to write."),
 		},
 		required: []string{"file_path", "content"},
+		closed:   true,
 	},
 	{
 		name:        "edit",
 		description: "Replace a unique occurrence of old_string with new_string in a file (set replace_all to replace every occurrence).",
 		props: map[string]any{
 			"file_path":   prop("string", "Path of the file to edit."),
-			"old_string":  prop("string", "Substring to find and replace."),
+			"old_string":  map[string]any{"type": "string", "minLength": 1, "description": "Substring to find and replace."},
 			"new_string":  prop("string", "Replacement text."),
 			"replace_all": prop("boolean", "Replace every occurrence instead of requiring a unique match."),
 		},
 		required: []string{"file_path", "old_string", "new_string"},
+		closed:   true,
 	},
 	{
 		name:        "glob",
@@ -104,6 +111,7 @@ var definitions = []toolDef{
 			"path":    prop("string", "Directory to search in. Defaults to the workdir."),
 		},
 		required: []string{"pattern"},
+		closed:   true,
 	},
 	{
 		name:        "grep",
@@ -113,6 +121,7 @@ var definitions = []toolDef{
 			"path":    prop("string", "Directory to search in. Defaults to the workdir."),
 		},
 		required: []string{"pattern"},
+		closed:   true,
 	},
 	// The two web tools execute in the executor's own process, not the sandbox
 	// (docs/plan/15_web-tools.md) — web:true is what routes their work to the
