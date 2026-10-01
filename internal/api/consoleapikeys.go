@@ -207,10 +207,39 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	// This is its local equivalent, closing the unstorable-byte class before the
 	// id binds into a query, and answering the reference's 400. It runs before
 	// the body is read, as the reference refuses the id whatever the body says.
-	if !domain.ValidWithPrefix(keyID, domain.PrefixAPIKey) {
+	if !consoleIDShape(keyID, domain.PrefixAPIKey) {
 		return nil, withDetails(errInvalid("%q is not an api key id", keyID), userFacingDetails)
 	}
-	obj, err := decodeObject(r)
+	// The body is read before the transaction opens, so a slow client cannot hold
+	// the row lock for the length of its upload, and judged only after the
+	// lookup: the reference answers a key that does not exist with its 404
+	// whatever the body says (2026-09-05 batch5
+	// `rec86.keys.update.wellformed-id.bad-field`; #664).
+	raw, err := readBody(r)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := r.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var createdBy *string
+	var current string
+	var lapsed bool
+	err = tx.QueryRow(ctx,
+		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now())
+		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, withDetails(errNotFound("api key %s not found", keyID), userFacingDetails)
+	}
+	if err != nil {
+		return nil, err
+	}
+	obj, err := decodeBodyObject(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -232,25 +261,6 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	// archived or lapsed row is refused for that reason rather than for its shape,
 	// which is the ordering the reference's own messages imply.
 
-	ctx := r.Context()
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var createdBy *string
-	var current string
-	var lapsed bool
-	err = tx.QueryRow(ctx,
-		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now())
-		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, withDetails(errNotFound("api key %s not found", keyID), userFacingDetails)
-	}
-	if err != nil {
-		return nil, err
-	}
 	// The env-var-managed refusal comes FIRST, before the archived one, because a
 	// rotated deployment holds archived rows with no issuer — EnsureAPIKey archives
 	// the incumbent on every rotation — and for those the environment variable is

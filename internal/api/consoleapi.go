@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -125,10 +126,43 @@ func consoleEnvironmentID(r *http.Request) (string, error) {
 		return "", err
 	}
 	id := r.PathValue("id")
-	if !domain.ValidWithPrefix(id, domain.PrefixEnvironment) {
+	if !consoleIDShape(id, domain.PrefixEnvironment) {
 		return "", errConsoleEnvironmentMalformed(id)
 	}
 	return id, nil
+}
+
+// consoleIDShape is how this namespace tells a malformed id from an unknown
+// one: the prefix, then a non-empty token of bytes Postgres can store. It is
+// not domain.ValidWithPrefix, which holds an id to the alphabet this platform
+// mints. The reference's ids are not in that alphabet — env_01MQbDnwtRB9MBhtuxWAHq1M
+// and apikey_01ABCDEFGHJKMNPQRSTVWXYZ were answered 404, not 400 (2026-09-05
+// batch8 idx 22, batch5 idx 10–12; #664) — so the alphabet cannot be what
+// makes an id malformed here. The storable-bytes rule is what keeps the id out
+// of a query that would fail on it.
+func consoleIDShape(id, prefix string) bool {
+	token, ok := strings.CutPrefix(id, prefix+"_")
+	return ok && token != "" && storableText(token)
+}
+
+// isUUID reports whether s is a UUID in its hyphenated 8-4-4-4-12 hex form, in
+// either case — the shape the reference's environment key ids take.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return false
+			}
+		case !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'):
+			return false
+		}
+	}
+	return true
 }
 
 // errConsoleEnvironmentMalformed is the 400 the reference answers an id without
@@ -310,10 +344,12 @@ func (s *server) revokeEnvironmentKey(r *http.Request) error {
 	// answer for it: checkID validates shape without asking which resource a
 	// prefix names, and admitting a private identifier there would widen the id
 	// shape every /v1 path accepts. This is its local equivalent — the same
-	// unstorable-byte class closed before the id binds into a query — and it
-	// answers the reference's 400, which carries no details (2026-09-05 batch2
-	// `rec83.edge4.revoke.malformed-id`; #664).
-	if !domain.ValidWithPrefix(keyID, domain.PrefixEnvironmentKey) {
+	// unstorable-byte class closed before the id binds into a query. A key id is
+	// one of ours or one of the reference's, which are UUIDs; one that is
+	// neither gets the reference's 400, which carries no details, and the
+	// recorded UUID that names nothing its 404 (2026-09-05 batch2
+	// `rec83.edge4.revoke.malformed-id` and `.unknown-uuid`; #664).
+	if !consoleIDShape(keyID, domain.PrefixEnvironmentKey) && !isUUID(keyID) {
 		return errInvalid("%q is not an environment key id", keyID)
 	}
 	found, err := RevokeEnvironmentKey(r.Context(), s.pool, envID, keyID)
