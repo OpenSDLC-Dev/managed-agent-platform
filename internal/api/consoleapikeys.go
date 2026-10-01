@@ -122,14 +122,18 @@ func renderAPIKey(k ManagementKey) apiKeyJSON {
 
 // consoleWorkspace resolves the {org}/{workspace} pair every route here
 // addresses, without touching the database. An unrecognized value on either
-// segment answers with the same 404 shape, so the namespace is no better an
-// enumeration oracle than /v1 is.
+// segment is a 404, so the namespace is no better an enumeration oracle than
+// /v1 is. Only the details differ, as recorded: the workspace's 404 carries
+// the reference's `{error_visibility}` (2026-09-05 batch8
+// `item6.after-archive.workspaceB.api_keys`), and the organization's carries
+// none, because the reference answers a foreign organization with a 401
+// instead (batch2 `rec83.edge6.foreign-org-uuid`; #820).
 func consoleWorkspace(r *http.Request) error {
 	if err := consoleOrganization(r); err != nil {
 		return err
 	}
 	if ws := r.PathValue("workspace"); ws != reservedWorkspace {
-		return errNotFound("workspace %s not found", ws)
+		return withDetails(errNotFound("workspace %s not found", ws), userFacingDetails)
 	}
 	return nil
 }
@@ -185,6 +189,25 @@ func (s *server) listAPIKeys(r *http.Request) (any, error) {
 	return out, nil
 }
 
+// apiKeyPatch decodes and validates an update body: the status and name it
+// sets, either nil when the body leaves it alone.
+func apiKeyPatch(raw json.RawMessage) (status, name *string, err error) {
+	obj, err := decodeBodyObject(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := rejectUnknownKeys(obj, "status", "name"); err != nil {
+		return nil, nil, err
+	}
+	if status, err = apiKeyStatus(obj); err != nil {
+		return nil, nil, err
+	}
+	if name, err = consoleKeyName(obj, false); err != nil {
+		return nil, nil, err
+	}
+	return status, name, nil
+}
+
 // updateAPIKey changes a key's status, its name, or both.
 //
 // The transaction exists for the check below, not for the write: the row is read
@@ -198,33 +221,36 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	// apikey_ is deliberately outside domain.knownPrefixes, so checkID cannot
 	// answer for it — the same reasoning revokeEnvironmentKey states for envkey_.
 	// This is its local equivalent, closing the unstorable-byte class before the
-	// id binds into a query.
-	if !domain.ValidWithPrefix(keyID, domain.PrefixAPIKey) {
-		return nil, errNotFound("api key not found")
+	// id binds into a query, and answering the reference's 400. It runs before
+	// the body is read, as the reference refuses the id whatever the body says.
+	if !consoleIDShape(keyID, domain.PrefixAPIKey) {
+		return nil, withDetails(errInvalid("%q is not an api key id", keyID), userFacingDetails)
 	}
-	obj, err := decodeObject(r)
+	// The body is read and judged before any row is locked, so neither a slow
+	// upload nor an invalid body holds the lock. Its refusal is reported only
+	// once the key is known to exist, because the reference answers a key that
+	// does not exist with its 404 whatever the body says (2026-09-05 batch5
+	// `rec86.keys.update.wellformed-id.bad-field`; #664) — save a body too large
+	// to read, which readBody refuses first.
+	raw, err := readBody(r)
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknownKeys(obj, "status", "name"); err != nil {
-		return nil, err
-	}
-	status, err := apiKeyStatus(obj)
-	if err != nil {
-		return nil, err
-	}
-	name, err := consoleKeyName(obj, false)
-	if err != nil {
-		return nil, err
-	}
-	// An empty patch is NOT refused. It used to be — "at least one of status, name
-	// is required" — which read like a helpful guard and is not what the reference
-	// does: `POST …/{id} {}` there answers 200 with the unchanged resource (#389).
-	// The state guards below still apply to it, so an empty patch aimed at an
-	// archived or lapsed row is refused for that reason rather than for its shape,
-	// which is the ordering the reference's own messages imply.
-
+	notFound := withDetails(errNotFound("api key %s not found", keyID), userFacingDetails)
 	ctx := r.Context()
+	status, name, bodyErr := apiKeyPatch(raw)
+	if bodyErr != nil {
+		var exists bool
+		err := s.pool.QueryRow(ctx, `SELECT true FROM api_keys WHERE id = $1`, keyID).Scan(&exists)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, notFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, bodyErr
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -238,11 +264,18 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now())
 		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("api key %s not found", keyID)
+		return nil, notFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	// An empty patch is NOT refused. It used to be — "at least one of status, name
+	// is required" — which read like a helpful guard and is not what the reference
+	// does: `POST …/{id} {}` there answers 200 with the unchanged resource (#389).
+	// The state guards below still apply to it, so an empty patch aimed at an
+	// archived or lapsed row is refused for that reason rather than for its shape,
+	// which is the ordering the reference's own messages imply.
+
 	// The env-var-managed refusal comes FIRST, before the archived one, because a
 	// rotated deployment holds archived rows with no issuer — EnsureAPIKey archives
 	// the incumbent on every rotation — and for those the environment variable is

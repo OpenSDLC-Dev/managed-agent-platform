@@ -32,7 +32,8 @@ const (
 	// The memory surface's own two types (plan 36 slice 2), both 409s. Unlike
 	// every other error here they are named by the reference's schema rather
 	// than shared across resources, and the path conflict is the only wire
-	// error in this platform that carries fields beyond type and message.
+	// error in this platform whose schema declares fields beyond type and
+	// message.
 	errTypeMemoryPathConflict       = "memory_path_conflict_error"
 	errTypeMemoryPreconditionFailed = "memory_precondition_failed_error"
 	// The dream surface's own 409 (plan 41 §5.3), named by the reference
@@ -51,16 +52,43 @@ type apiError struct {
 	message string
 }
 
-// apiErrorWithFields is an apiError whose schema carries members beyond type
-// and message inside the error object. Exactly one does — the memory path
-// conflict, whose {conflicting_path, conflicting_memory_id} tell a sync client
-// which memory blocked the write without a second round trip — so the extra
-// map lives in its own type rather than on apiError, where it would be nil on
-// every other error the platform raises and would turn each of the package's
-// positional apiError literals into a keyed one.
+// apiErrorWithFields is an apiError whose body carries members beyond type
+// and message inside the error object. Two kinds do: the memory path conflict,
+// whose schema declares a flat {conflicting_path, conflicting_memory_id} that
+// tells a sync client which memory blocked the write without a second round
+// trip, and the few errors the reference was recorded nesting a `details`
+// object under (withDetails). The map lives in its own type rather than on
+// apiError, where it would be nil on every other error the platform raises and
+// would turn each of the package's positional apiError literals into a keyed
+// one.
 type apiErrorWithFields struct {
 	apiError
-	fields map[string]string
+	fields map[string]any
+}
+
+// Unwrap exposes the apiError underneath, so a caller that classifies an error
+// by its status with errors.As sees through the extra members.
+func (e *apiErrorWithFields) Unwrap() error { return &e.apiError }
+
+// errorDetails is the `details` object the reference nests inside `error` on
+// some errors (#664). No schema declares it, so its members are what the
+// recordings hold: these three, in the order every recorded body lists them,
+// each present only where recorded.
+type errorDetails struct {
+	CurrentState    any    `json:"current_state,omitempty"`
+	ErrorVisibility string `json:"error_visibility,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty"`
+}
+
+// visibilityUserFacing is the one error_visibility value recorded.
+const visibilityUserFacing = "user_facing"
+
+// withDetails is e carrying details, for an error the reference was recorded
+// answering with them. Which errors those are is the recordings' call, not a
+// rule: the same condition answers without details on another surface (an
+// unknown environment's 404 carries them under /api/oauth and not under /v1).
+func withDetails(e *apiError, d errorDetails) error {
+	return &apiErrorWithFields{apiError: *e, fields: map[string]any{"details": d}}
 }
 
 // apiErrorWithHeaders is an apiError the reference pins response headers to.
@@ -93,7 +121,7 @@ func errConflict(format string, args ...any) *apiError {
 func errMemoryPathConflict(conflictingID, conflictingPath, format string, args ...any) error {
 	return &apiErrorWithFields{
 		apiError: apiError{http.StatusConflict, errTypeMemoryPathConflict, fmt.Sprintf(format, args...)},
-		fields: map[string]string{
+		fields: map[string]any{
 			"conflicting_memory_id": conflictingID,
 			"conflicting_path":      conflictingPath,
 		},
@@ -165,7 +193,7 @@ func requestIDFrom(ctx context.Context) string {
 // Non-apiError values are internal faults: logged, reported as api_error
 // without leaking internals.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
-	inner := map[string]string{}
+	inner := map[string]any{}
 	// Both decorations are matched against the error as it arrived, because
 	// either match narrows err to the plain apiError underneath: taking one
 	// first would hide the other from an error that ever carried both.
