@@ -407,7 +407,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := pageJSON{Data: data}
+	out := nullPageJSON{Data: data}
 	if out.Data == nil {
 		out.Data = []any{}
 	}
@@ -693,7 +693,7 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := pageJSON{Data: data}
+	out := nullPageJSON{Data: data}
 	if out.Data == nil {
 		out.Data = []any{}
 	}

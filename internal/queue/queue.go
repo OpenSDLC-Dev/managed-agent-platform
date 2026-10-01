@@ -401,11 +401,12 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // worker's force-stop land on whatever worker held the item next, re-stranding
 // the session. Under a rotated id that worker's stop, ack, and heartbeat all
 // address an id that no longer exists (ErrWorkNotFound → 404) while the
-// replacement's item is untouched. The three 404s are safe by different routes,
-// not one: our worker's heartbeat reads a 4xx as a lost lease and cancels the
-// run, a 404 stop is logged and dropped, and a 404 ack is dropped as an empty
-// poll (routine hand-off, not a fault to back off from). The row, and with it
-// the item's metadata and trace context, carries over unchanged.
+// replacement's item is untouched. Our worker logs and drops a 404 stop, and
+// drops a 404 ack as an empty poll (routine hand-off, not a fault to back off
+// from). A 404 heartbeat is safe only through the stop: the worker cancels the
+// run and, as the reference worker does, force-stops under the same id (#813),
+// which 404s in turn. The row, and with it the item's metadata and trace
+// context, carries over unchanged.
 //
 // The FIRST hand-out keeps the id enqueue minted — no worker has ever held it, so
 // there is nothing to invalidate, and a client that listed the queued item can

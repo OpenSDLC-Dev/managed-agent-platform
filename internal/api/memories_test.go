@@ -46,7 +46,7 @@ func createMemory(t *testing.T, s *tserver, storeID, path, content string) map[s
 func memoryPaths(t *testing.T, body map[string]any) []string {
 	t.Helper()
 	var out []string
-	for _, row := range listData(t, body) {
+	for _, row := range memoryRows(t, body) {
 		path, _ := row["path"].(string)
 		if row["type"] == "memory_prefix" {
 			path = "prefix:" + path
@@ -54,6 +54,25 @@ func memoryPaths(t *testing.T, body map[string]any) []string {
 		out = append(out, path)
 	}
 	return out
+}
+
+// memoryRows is listData for a memories list page, which it first holds to
+// wantEmptyPrefixes; every memories list read in this file goes through it.
+func memoryRows(t *testing.T, body map[string]any) []map[string]any {
+	t.Helper()
+	wantEmptyPrefixes(t, body)
+	return listData(t, body)
+}
+
+// wantEmptyPrefixes holds a memories list page to the recorded `"prefixes": []`
+// — an empty array on every page and at every depth, never null or omitted
+// (#676).
+func wantEmptyPrefixes(t *testing.T, body map[string]any) {
+	t.Helper()
+	v, ok := body["prefixes"]
+	if arr, isArr := v.([]any); !ok || !isArr || len(arr) != 0 {
+		t.Errorf(`memories list "prefixes" = %v (present %v), want []`, v, ok)
+	}
 }
 
 func TestMemoryCRUD(t *testing.T) {
@@ -241,13 +260,13 @@ func TestMemoryPathRules(t *testing.T) {
 		t.Fatalf("list: status %d (%v)", status, body)
 	}
 	listed := false
-	for _, row := range listData(t, body) {
+	for _, row := range memoryRows(t, body) {
 		if row["path"] == "/.anthropic-memory-store" {
 			listed = row["type"] == "memory" && row["id"] == marker && row["content"] == "m"
 		}
 	}
 	if !listed {
-		t.Errorf("the memory at the marker's path is not listed as an ordinary memory: %v", listData(t, body))
+		t.Errorf("the memory at the marker's path is not listed as an ordinary memory: %v", memoryRows(t, body))
 	}
 	// An update naming the path the memory already holds is no rename, and
 	// renaming it away is an ordinary rename.
@@ -566,11 +585,9 @@ func TestMemoryList(t *testing.T) {
 	if got := memoryPaths(t, body); !slices.Equal(got, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
 		t.Errorf("list order = %v, want byte-wise path order", got)
 	}
-	if _, ok := body["next_page"]; !ok {
-		t.Fatal("next_page must be present (null) in the page envelope")
-	}
+	wantExactKeys(t, body, "data", "prefixes")
 	// The list defaults to basic.
-	for _, row := range listData(t, body) {
+	for _, row := range memoryRows(t, body) {
 		if row["content"] != nil {
 			t.Errorf("list defaults to basic, but %v carries content", row["path"])
 		}
@@ -582,7 +599,7 @@ func TestMemoryList(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("list view=full: status %d (%v)", status, body)
 	}
-	for _, row := range listData(t, body) {
+	for _, row := range memoryRows(t, body) {
 		if row["content"] != row["path"] {
 			t.Errorf("view=full should carry content: %v", row)
 		}
@@ -613,15 +630,16 @@ func TestMemoryList(t *testing.T) {
 		createMemory(t, s, bulk, fmt.Sprintf("/n%02d.md", i), "x")
 	}
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memories?view=full&limit=100", nil)
-	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
-		t.Fatalf("view=full limit: status %d, %d rows, cursor %q — want 20 and a cursor", status, n, nextPage(t, body))
+	if n := len(memoryRows(t, body)); status != http.StatusOK || n != 20 {
+		t.Fatalf("view=full limit: status %d, %d rows — want 20 and a cursor", status, n)
 	}
+	wantCursor(t, body)
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memories?limit=100", nil)
-	if n := len(listData(t, body)); status != http.StatusOK || n != 25 {
+	if n := len(memoryRows(t, body)); status != http.StatusOK || n != 25 {
 		t.Fatalf("view=basic limit=100: status %d, %d rows, want 25", status, n)
 	}
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memories", nil)
-	if n := len(listData(t, body)); status != http.StatusOK || n != 20 {
+	if n := len(memoryRows(t, body)); status != http.StatusOK || n != 20 {
 		t.Fatalf("the default limit: status %d, %d rows, want 20", status, n)
 	}
 
@@ -637,10 +655,8 @@ func TestMemoryList(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("store list: status %d (%v)", status, body)
 	}
-	if c := nextPage(t, body); c != "" {
-		status, resp := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?page="+c, nil)
-		wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
-	}
+	status, resp := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?page="+wantCursor(t, body), nil)
+	wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
 }
 
 // path_prefix is a literal prefix match, and depth=1 rolls everything below the
@@ -784,7 +800,7 @@ func TestMemoryArchivedStoreRefusesNewContentAdmitsDelete(t *testing.T) {
 	if status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories/"+id, nil); status != http.StatusOK || body["content"] != "bytes" {
 		t.Fatalf("read on an archived store: status %d (%v)", status, body)
 	}
-	if status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories", nil); status != http.StatusOK || len(listData(t, body)) != 1 {
+	if status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories", nil); status != http.StatusOK || len(memoryRows(t, body)) != 1 {
 		t.Fatalf("list on an archived store: status %d (%v)", status, body)
 	}
 

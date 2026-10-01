@@ -97,15 +97,17 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if status != http.StatusOK || body["archived_at"] == nil {
 		t.Fatalf("archive: status %d (%v)", status, body)
 	}
-	// ... and only then: an archive is not one of the three (the spec's
-	// definition of the field), so it leaves updated_at where the update put it.
-	if got := stamp(t, body["updated_at"]); !got.Equal(updatedAt) {
-		t.Errorf("updated_at = %v after archive, want unchanged %v", got, updatedAt)
+	// ... and so does the first archive, to archived_at itself, as the
+	// reference's does (#685) — though the spec's definition of the field names
+	// only the three. A repeat archive moves neither.
+	if got := stamp(t, body["updated_at"]); !got.Equal(stamp(t, body["archived_at"])) || !got.After(updatedAt) {
+		t.Errorf("updated_at = %v after archive, want archived_at %v, later than %v", got, body["archived_at"], updatedAt)
 	}
-	first := body["archived_at"]
+	first, firstUpdated := body["archived_at"], body["updated_at"]
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id+"/archive", nil)
-	if status != http.StatusOK || body["archived_at"] != first {
-		t.Fatalf("archive not idempotent: status %d, %v vs %v", status, body["archived_at"], first)
+	if status != http.StatusOK || body["archived_at"] != first || body["updated_at"] != firstUpdated {
+		t.Fatalf("archive not idempotent: status %d, archived_at %v vs %v, updated_at %v vs %v",
+			status, body["archived_at"], first, body["updated_at"], firstUpdated)
 	}
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id, map[string]any{"name": "X"})
 	if status != http.StatusBadRequest {
@@ -332,9 +334,7 @@ func TestMemoryStoreList(t *testing.T) {
 	if n := len(listData(t, body)); n != 2 {
 		t.Fatalf("default list returned %d stores, want the 2 active ones", n)
 	}
-	if _, ok := body["next_page"]; !ok {
-		t.Fatal("next_page must be present (null) in the page envelope")
-	}
+	wantNoFields(t, body, "next_page")
 	status, body = s.do(http.MethodGet, "/v1/memory_stores?include_archived=true", nil)
 	if n := len(listData(t, body)); status != http.StatusOK || n != 3 {
 		t.Fatalf("include_archived: status %d, %d rows", status, n)
@@ -413,9 +413,10 @@ func TestMemoryStoreList(t *testing.T) {
 		t.Fatalf("tie every created_at: %v", err)
 	}
 	status, body = s.do(http.MethodGet, "/v1/memory_stores?include_archived=true", nil)
-	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
-		t.Fatalf("default limit: status %d, %d rows, next_page %q — want 20 rows and a cursor", status, n, nextPage(t, body))
+	if n := len(listData(t, body)); status != http.StatusOK || n != 20 {
+		t.Fatalf("default limit: status %d, %d rows — want 20 rows and a cursor", status, n)
 	}
+	wantCursor(t, body)
 	status, body = s.do(http.MethodGet, "/v1/memory_stores?include_archived=true&limit=100", nil)
 	if n := len(listData(t, body)); status != http.StatusOK || n != 21 {
 		t.Fatalf("limit=100: status %d, %d rows, want all 21", status, n)

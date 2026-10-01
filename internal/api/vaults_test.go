@@ -157,9 +157,7 @@ func TestVaultListPagination(t *testing.T) {
 	if n := len(body["data"].([]any)); n != 2 {
 		t.Fatalf("expected 2 active vaults, got %d", n)
 	}
-	if _, ok := body["next_page"]; !ok {
-		t.Fatal("next_page must be present (null) in the page envelope")
-	}
+	wantNoFields(t, body, "next_page")
 	status, body = s.do("GET", "/v1/vaults?include_archived=true", nil)
 	if n := len(body["data"].([]any)); status != http.StatusOK || n != 3 {
 		t.Fatalf("include_archived: status %d, %d rows", status, n)
@@ -172,9 +170,10 @@ func TestVaultListPagination(t *testing.T) {
 	}
 	next := body["next_page"].(string)
 	status, body = s.do("GET", "/v1/vaults?include_archived=true&limit=2&page="+next, nil)
-	if n := len(body["data"].([]any)); status != http.StatusOK || n != 1 || body["next_page"] != nil {
-		t.Fatalf("page 2: status %d, %d rows, next %v", status, n, body["next_page"])
+	if n := len(body["data"].([]any)); status != http.StatusOK || n != 1 {
+		t.Fatalf("page 2: status %d, %d rows", status, n)
 	}
+	wantNoFields(t, body, "next_page")
 }
 
 // --- credentials ---

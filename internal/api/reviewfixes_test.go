@@ -148,7 +148,7 @@ func TestKeysetPaginationSurvivesConcurrentInsert(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("page 1: %d", status)
 	}
-	cursor := nextPage(t, page1)
+	cursor := wantCursor(t, page1)
 
 	// A newer agent lands between page fetches.
 	createAgent(t, s, map[string]any{"name": "newcomer", "model": "m"})
