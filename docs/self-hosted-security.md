@@ -859,7 +859,11 @@ What you own:
   the reference issues them. A `cloud` environment's key cannot take that
   environment's work — the platform's own executor runs it in-process, and the
   work API refuses the key's poll and listing — so there is no reason to issue
-  one, and the console offers no control for it. An archived `self_hosted`
+  one, and the console offers no control for it. It is not inert, though: like
+  any environment key it still reads that environment's sessions and posts
+  events to them (a `user.message`, a `user.interrupt`; only a
+  `user.tool_result` is refused on a `cloud` session), so revoke one you did not
+  mean to issue. An archived `self_hosted`
   environment's key keeps polling, so a worker can drain what the archive left
   queued. **This
   is a management-credential surface, not a separate permission tier** — anyone holding
