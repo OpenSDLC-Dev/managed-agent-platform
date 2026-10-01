@@ -384,16 +384,24 @@ func TestMemoryStoreEmptyUpdate(t *testing.T) {
 
 	// Every shape refusal is a parse error, judged before the lookup as the
 	// null bag is: a missing store answers it rather than its 404.
-	for _, body := range []map[string]any{{"name": 5}, {"description": true}, {"metadata": "x"}, {"metadata": map[string]any{"k": 1}}} {
-		if status, res := s.do(http.MethodPost, "/v1/memory_stores/"+missing, body); status != http.StatusBadRequest {
-			t.Errorf("%v on a missing store: status %d (%v), want the shape's 400", body, status, res)
-		}
+	const badBag = "metadata must be an object of string-or-null values"
+	for _, tc := range []struct {
+		body map[string]any
+		msg  string
+	}{
+		{map[string]any{"name": 5}, "name must be a string"},
+		{map[string]any{"description": true}, "description must be a string"},
+		{map[string]any{"metadata": "x"}, badBag},
+		{map[string]any{"metadata": map[string]any{"k": 1}}, badBag},
+	} {
+		status, res := s.do(http.MethodPost, "/v1/memory_stores/"+missing, tc.body)
+		wantInvalidRequest(t, fmt.Sprintf("%v on a missing store", tc.body), status, res, tc.msg)
 	}
 
 	// A null name or description is a field's value, judged after the
 	// lookup: a missing store is the 404 and an archived one the archived
 	// refusal, never the null's own answer.
-	for _, body := range []map[string]any{{"name": nil}, {"description": nil}} {
+	for _, body := range []map[string]any{{"name": nil}, {"name": ""}, {"description": nil}} {
 		if status, res := s.do(http.MethodPost, "/v1/memory_stores/"+missing, body); status != http.StatusNotFound {
 			t.Errorf("%v on a missing store: status %d (%v), want 404", body, status, res)
 		}
@@ -623,5 +631,19 @@ func TestMemoryStoreMethodNotAllowed(t *testing.T) {
 	} {
 		status, body := s.do(call.method, call.path, nil)
 		wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
+	}
+}
+
+// A create's null metadata bag reads as {}, as every create here does; the
+// update's recorded refusal of one was never sent to the reference's create
+// (docs/DIVERGENCES.md, the memory-store update INFERRED entry, reading 4).
+func TestMemoryStoreCreateReadsANullBagAsEmpty(t *testing.T) {
+	s := newTestServer(t)
+	status, body := s.do(http.MethodPost, "/v1/memory_stores", map[string]any{"name": "nullbag", "metadata": nil})
+	if status != http.StatusOK {
+		t.Fatalf("create with a null bag: status %d (%v)", status, body)
+	}
+	if md, ok := body["metadata"].(map[string]any); !ok || len(md) != 0 {
+		t.Errorf("metadata = %v, want {}", body["metadata"])
 	}
 }
