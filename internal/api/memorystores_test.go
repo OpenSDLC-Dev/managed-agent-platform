@@ -97,15 +97,17 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if status != http.StatusOK || body["archived_at"] == nil {
 		t.Fatalf("archive: status %d (%v)", status, body)
 	}
-	// ... and only then: an archive is not one of the three (the spec's
-	// definition of the field), so it leaves updated_at where the update put it.
-	if got := stamp(t, body["updated_at"]); !got.Equal(updatedAt) {
-		t.Errorf("updated_at = %v after archive, want unchanged %v", got, updatedAt)
+	// ... and so does the first archive, to archived_at itself, as the
+	// reference's does (#685) — though the spec's definition of the field names
+	// only the three. A repeat archive moves neither.
+	if got := stamp(t, body["updated_at"]); !got.Equal(stamp(t, body["archived_at"])) || !got.After(updatedAt) {
+		t.Errorf("updated_at = %v after archive, want archived_at %v, later than %v", got, body["archived_at"], updatedAt)
 	}
-	first := body["archived_at"]
+	first, firstUpdated := body["archived_at"], body["updated_at"]
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id+"/archive", nil)
-	if status != http.StatusOK || body["archived_at"] != first {
-		t.Fatalf("archive not idempotent: status %d, %v vs %v", status, body["archived_at"], first)
+	if status != http.StatusOK || body["archived_at"] != first || body["updated_at"] != firstUpdated {
+		t.Fatalf("archive not idempotent: status %d, archived_at %v vs %v, updated_at %v vs %v",
+			status, body["archived_at"], first, body["updated_at"], firstUpdated)
 	}
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id, map[string]any{"name": "X"})
 	if status != http.StatusBadRequest {
