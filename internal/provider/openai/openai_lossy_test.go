@@ -278,9 +278,13 @@ func sentFunctions(t *testing.T, body map[string]any) map[string]map[string]any 
 // Schema can reject the whole tool list over one of them, and both web tools
 // are on by default. Everything else in the schema arrives as the definition
 // wrote it, and no "strict" is set.
-func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.T) {
+//
+// The six sandbox tools carry two of them since #822 — additionalProperties on
+// all six, minLength on edit's old_string — and lose them the same way; edit
+// stands for the six.
+func TestBuiltinToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.T) {
 	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
-		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`)
+		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true},{"name":"edit","enabled":true}]}`)
 	defs, err := toolset.Tools(entry, time.Now())
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
@@ -288,13 +292,14 @@ func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.
 	body := requestFor(t, provider.Request{
 		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 		Tools:        defs,
-		BuiltinTools: map[string]bool{"web_fetch": true, "web_search": true},
+		BuiltinTools: map[string]bool{"web_fetch": true, "web_search": true, "edit": true},
 	})
 	fns := sentFunctions(t, body)
 
 	for _, tc := range []struct{ tool, prop, key string }{
 		{"web_fetch", "url", "format"},
 		{"web_search", "query", "minLength"},
+		{"edit", "old_string", "minLength"},
 	} {
 		type definition struct {
 			Name        string         `json:"name"`
