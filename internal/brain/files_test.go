@@ -122,6 +122,27 @@ func TestResolveFilesBlockNamesOnlyLegacyMountsWithoutThePointer(t *testing.T) {
 	}
 }
 
+// TestResolveFilesBlockCountsEachMountOfOneFile: the API admits one file at two
+// paths, and each mount is its own — counted live, and named when it lies
+// outside the uploads directory — though one lookup answers both.
+func TestResolveFilesBlockCountsEachMountOfOneFile(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	b := &Brain{pool: pool}
+	ctx := context.Background()
+
+	seedFileRow(t, b, "file_twice", "data.csv", "text/csv", 8)
+	block, n, misses := b.resolveFilesBlock(ctx, mustResourcesJSON(t,
+		map[string]string{"type": "file", "file_id": "file_twice", "mount_path": "/mnt/session/uploads/data.csv"},
+		map[string]string{"type": "file", "file_id": "file_twice", "mount_path": "/workspace/data.csv"},
+	))
+	if want := wantUploadsPointer + `` + "\n" + `Files are also mounted at: "/workspace/data.csv"`; block != want {
+		t.Errorf("block = %q\nwant    %q", block, want)
+	}
+	if n != 2 || misses != 0 {
+		t.Errorf("injected, misses = %d, %d; want 2, 0", n, misses)
+	}
+}
+
 // TestResolveFilesBlockStoreErrorIsAMissPerMount: a failed lookup leaves the
 // block out and counts every file mount it could not judge, never failing the
 // turn.

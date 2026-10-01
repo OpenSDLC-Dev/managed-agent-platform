@@ -38,7 +38,8 @@ const uploadsPointer = "User uploads (files uploaded to the session by the user)
 // uploadsRoot is the directory api.resolveMountPath has rooted every file mount
 // in since #323. A mount stored before that, by an unreleased build, can lie
 // elsewhere and still materializes there, so its path alone is named beside the
-// pointer — never a filename, MIME type or size.
+// pointer, or in its place when no live mount is under this directory — never
+// a filename, MIME type or size.
 const uploadsRoot = "/mnt/session/uploads"
 
 // resolveFilesBlock returns the uploads pointer when the session's resources[]
