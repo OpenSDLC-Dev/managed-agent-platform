@@ -15,8 +15,9 @@ import (
 
 // TestFilesInjectedIntoModelRequest is the file-injection wiring's own test, the
 // twin of TestSkillsInjectedIntoModelRequest: a session whose resources[] mount a
-// file must have the "Mounted files" block reach the actual provider request's
-// system prompt, and a dangling mount must be skipped without failing the turn.
+// file must have the uploads pointer reach the actual provider request's system
+// prompt — and nothing about the file itself, which the reference never lists
+// (#681) — and a dangling mount must be skipped without failing the turn.
 // resolveFilesBlock's resolution is proven in the unit tests; this proves the
 // brain actually calls it, threads the result into buildRequest, and records the
 // injection on the model_request span — so a dropped call, a passed-through "",
@@ -70,11 +71,15 @@ func TestFilesInjectedIntoModelRequest(t *testing.T) {
 	if !strings.HasPrefix(sys, "base prompt") {
 		t.Errorf("system dropped the agent prompt: %q", sys)
 	}
-	if !strings.Contains(sys, "Mounted files.") {
-		t.Errorf("system missing the mounted-files block: %q", sys)
+	if !strings.Contains(sys, uploadsPointer) {
+		t.Errorf("system missing the uploads pointer: %q", sys)
 	}
-	if !strings.Contains(sys, "/mnt/session/uploads/notes.txt (notes.txt, text/plain, 12 bytes)") {
-		t.Errorf("system missing the mount bullet: %q", sys)
+	// The mount's path, filename, MIME type and size all stay out of the prompt:
+	// the agent finds the file with ls, as the reference tells it to.
+	for _, leak := range []string{"notes.txt", "text/plain", "12 bytes", "file_inj"} {
+		if strings.Contains(sys, leak) {
+			t.Errorf("system carries the mount's %q: %q", leak, sys)
+		}
 	}
 	// The dangling mount was skipped: exactly one file injected.
 	if got := spanIntAttr(t, recorder, "model_request", "files.injected"); got != 1 {
@@ -88,6 +93,57 @@ func TestFilesInjectedIntoModelRequest(t *testing.T) {
 	// The dangling mount is one counted resolve miss, the skills-parity metric.
 	if got := fileResolveMissCount(t, collect()); got != 1 {
 		t.Errorf("files.resolve.misses = %d, want 1", got)
+	}
+}
+
+// uploadsPointer is the reference's sentence as the 2026-09-02 recording quoted
+// it (probe sessF.events.after-ls-after-delete); files_test.go pins the same
+// wording on the resolver.
+const uploadsPointer = "User uploads (files uploaded to the session by the user) are available at " +
+	"`/mnt/session/uploads`. Use `ls` on that directory to see available files."
+
+// TestFileAddedMidSessionLeavesSystemPromptUnchanged: a file added to a session
+// that already mounts one changes nothing in the next request's system prompt,
+// because the pointer names the directory rather than its contents — so the
+// cached request prefix survives the add.
+func TestFileAddedMidSessionLeavesSystemPromptUnchanged(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "one"), done("end_turn", 3)},
+		{textChunk(0, "two"), done("end_turn", 3)},
+	}, nil)
+	ctx := context.Background()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable)
+		 VALUES ('file_first','first.txt','text/plain',5,false),
+		        ('file_second','second.csv','text/csv',9,false)`); err != nil {
+		t.Fatal(err)
+	}
+	setResources := func(resources string) {
+		t.Helper()
+		if _, err := h.pool.Exec(ctx, `UPDATE sessions SET resources=$1 WHERE id=$2`,
+			resources, h.sessionID.String()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := `{"type":"file","file_id":"file_first","mount_path":"/mnt/session/uploads/first.txt"}`
+	second := `{"type":"file","file_id":"file_second","mount_path":"/mnt/session/uploads/second.csv"}`
+
+	setResources(`[` + first + `]`)
+	h.wake(t, "one")
+	h.runOnce(t)
+	setResources(`[` + first + `,` + second + `]`)
+	h.wake(t, "two")
+	h.runOnce(t)
+
+	calls := h.provider.calls
+	if len(calls) != 2 {
+		t.Fatalf("%d model calls, want 2", len(calls))
+	}
+	if calls[1].System != calls[0].System {
+		t.Errorf("adding a file moved the system prompt:\n%q\n%q", calls[0].System, calls[1].System)
+	}
+	if !strings.Contains(calls[0].System, uploadsPointer) {
+		t.Errorf("first turn's system carries no uploads pointer, so the comparison proves nothing: %q", calls[0].System)
 	}
 }
 

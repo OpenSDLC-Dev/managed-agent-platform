@@ -111,10 +111,11 @@ func (b *Brain) cloneFailures(ctx context.Context, sid domain.ID) map[string]str
 	return out
 }
 
-// renderReposBlock formats the repository mounts as a system-prompt block. The
-// wording and placement are inferences (docs/DIVERGENCES.md), mirroring the
-// files block; the checkout descriptor names the branch, the commit, or the
-// repository's default branch, which is what the clone resolved.
+// renderReposBlock formats the repository mounts as a system-prompt block, one
+// bullet per mount, placed after the files block. The wording and placement
+// are inferences (docs/DIVERGENCES.md); the checkout descriptor names the
+// branch, the commit, or the repository's default branch, which is what the
+// clone resolved.
 func renderReposBlock(mounts []repoMount) string {
 	if len(mounts) == 0 {
 		return ""

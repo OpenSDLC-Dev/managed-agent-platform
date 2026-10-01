@@ -199,6 +199,58 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 	}
 }
 
+// Two of the keywords a 2026-09-02 recording showed the reference closing its
+// six sandbox tools with are adopted (#822, an owner decision):
+// additionalProperties:false on all six, and minLength:1 on edit's old_string.
+// The recording's ^\/ pattern on file_path is not: paths stay relative, as the
+// skills block hands the model one (docs/DIVERGENCES.md).
+func TestSandboxToolSchemasCarryTheAdoptedRecordedKeywords(t *testing.T) {
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	seen := 0
+	for _, raw := range defs {
+		var d struct {
+			Name        string `json:"name"`
+			InputSchema struct {
+				Properties           map[string]map[string]any `json:"properties"`
+				AdditionalProperties *bool                     `json:"additionalProperties"`
+			} `json:"input_schema"`
+		}
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("definition: %v", err)
+		}
+		if toolset.IsWebTool(d.Name) {
+			continue
+		}
+		seen++
+		if ap := d.InputSchema.AdditionalProperties; ap == nil {
+			t.Errorf("%s: additionalProperties absent, want false", d.Name)
+		} else if *ap {
+			t.Errorf("%s: additionalProperties = true, want false", d.Name)
+		}
+		if fp, ok := d.InputSchema.Properties["file_path"]; ok {
+			if _, ok := fp["pattern"]; ok {
+				t.Errorf("%s: file_path carries a pattern %v, want relative paths admitted", d.Name, fp["pattern"])
+			}
+		}
+		for prop, schema := range d.InputSchema.Properties {
+			minLen, has := schema["minLength"]
+			if d.Name == "edit" && prop == "old_string" {
+				if minLen != float64(1) {
+					t.Errorf("edit.old_string: minLength = %v, want 1", minLen)
+				}
+			} else if has {
+				t.Errorf("%s.%s: minLength = %v, want none", d.Name, prop, minLen)
+			}
+		}
+	}
+	if seen != 6 {
+		t.Fatalf("checked %d sandbox tools, want 6", seen)
+	}
+}
+
 // The web tools' input schemas are the reference's, keyword for keyword and
 // property description for property description, as a 2026-09-02 recording
 // captured them: the agent echoed its tool definitions (a model-mediated echo,
