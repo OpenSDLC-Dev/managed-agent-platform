@@ -145,26 +145,36 @@ func consoleIDShape(id, prefix string) bool {
 	return ok && token != "" && storableText(token)
 }
 
-// isUUID reports whether s is a UUID in a form the reference's own refusal of
-// a key id documents — "an optional prefix of `urn:uuid:` followed by
-// [0-9a-fA-F-]" (2026-09-05 batch2 `rec83.edge4.revoke.malformed-id`): 32 hex
-// digits in either case, bare or grouped 8-4-4-4-12 by hyphens, with or without
-// that prefix. Braces fall outside the class it names, so a braced UUID is
-// malformed here.
+// isUUID reports whether s is a UUID in one of the four forms the reference's
+// parser takes. Its refusal of a key id — "invalid character: expected an
+// optional prefix of `urn:uuid:` followed by [0-9a-fA-F-]" (2026-09-05 batch2
+// `rec83.edge4.revoke.malformed-id`) — is the Rust uuid crate's, whose parser
+// accepts exactly 32 hex digits bare, 36 grouped 8-4-4-4-12 by hyphens, that
+// grouping in braces (38), or it after a lowercase `urn:uuid:` (45); hex in
+// either case (uuid 1.8.0 and 1.10.0, src/parser.rs try_parse). That reading
+// is an inference from the error string, registered in docs/DIVERGENCES.md.
+// github.com/google/uuid's Parse is not used: it is only an indirect dependency
+// here, and it is looser on two counts — any case for the prefix, and any
+// first and last byte in place of the braces.
 func isUUID(s string) bool {
-	s = strings.TrimPrefix(s, "urn:uuid:")
-	hyphenated := len(s) == 36
-	if !hyphenated && len(s) != 32 {
+	switch {
+	case len(s) == 32:
+		return isHex(s)
+	case len(s) == 38 && s[0] == '{' && s[37] == '}':
+		s = s[1:37]
+	case len(s) == 45 && s[:9] == "urn:uuid:":
+		s = s[9:]
+	case len(s) != 36:
 		return false
 	}
+	return s[8] == '-' && s[13] == '-' && s[18] == '-' && s[23] == '-' &&
+		isHex(s[:8]+s[9:13]+s[14:18]+s[19:23]+s[24:])
+}
+
+func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		switch {
-		case hyphenated && (i == 8 || i == 13 || i == 18 || i == 23):
-			if c != '-' {
-				return false
-			}
-		case !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'):
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
 			return false
 		}
 	}
@@ -194,9 +204,16 @@ func errConsoleEnvironmentNotFound(id string) error {
 // both (2026-09-05 batch2 `rec83.edge4.revoke.unknown-uuid` and
 // `.cross-environment`; #664).
 func errEnvironmentKeyNotFound() error {
-	return withDetails(errNotFound("environment key not found"),
-		errorDetails{ErrorVisibility: visibilityUserFacing})
+	return withDetails(errNotFound("environment key not found"), userFacingDetails)
 }
+
+// userFacingDetails is what the reference attaches to most of this namespace's
+// refusals: an unknown environment key (above), and an unknown workspace or API
+// key and an id without the apikey_ prefix (consoleapikeys.go) — 2026-09-05
+// batch2 `rec83.edge4.revoke.unknown-uuid`, batch5
+// `rec86.keys.update.wellformed-id.*` and `.bogus-id.*`, batch8
+// `item6.after-archive.workspaceB.api_keys`; #664.
+var userFacingDetails = errorDetails{ErrorVisibility: visibilityUserFacing}
 
 // consoleEnvironment is consoleEnvironmentID plus the existence check the two
 // read-mostly routes need. Neither consults kind nor archive state: an operator
@@ -341,8 +358,7 @@ func (s *server) listEnvironmentKeys(r *http.Request) (any, error) {
 // environment takes the same branch as one that never existed, so revocation can
 // neither reach across environments nor confirm that an id exists elsewhere.
 func (s *server) revokeEnvironmentKey(r *http.Request) error {
-	envID, err := s.consoleEnvironment(r)
-	if err != nil {
+	if err := consoleOrganization(r); err != nil {
 		return err
 	}
 	keyID := r.PathValue("token_id")
@@ -355,8 +371,18 @@ func (s *server) revokeEnvironmentKey(r *http.Request) error {
 	// neither gets the reference's 400, which carries no details, and the
 	// recorded UUID that names nothing its 404 (2026-09-05 batch2
 	// `rec83.edge4.revoke.malformed-id` and `.unknown-uuid`; #664).
+	//
+	// It runs before the environment is resolved. The reference refuses a
+	// malformed key id as path validation — pydantic's `path.token_uuid`, with
+	// no details — and a malformed environment id in its handler, with details
+	// (`rec83.edge3.issue.malformed-env`), so the key id's shape is judged first,
+	// and a malformed one costs no query.
 	if !consoleIDShape(keyID, domain.PrefixEnvironmentKey) && !isUUID(keyID) {
 		return errInvalid("%q is not an environment key id", keyID)
+	}
+	envID, err := s.consoleEnvironment(r)
+	if err != nil {
+		return err
 	}
 	found, err := RevokeEnvironmentKey(r.Context(), s.pool, envID, keyID)
 	if err != nil {

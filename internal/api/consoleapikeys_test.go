@@ -593,7 +593,9 @@ func TestAPIKeyNamesNeedNotBeUnique(t *testing.T) {
 
 // TestAPIKeyRoutesRejectUnknownScopesAndIDs keeps the namespace from becoming an
 // enumeration oracle: an unknown organization, an unknown workspace and an
-// unknown key id all answer with the same 404 shape. A malformed key id — no
+// unknown key id all answer 404 — the workspace's and the key's with the
+// reference's details, the organization's without, since the reference
+// answers a foreign organization with a 401 instead (#820). A malformed key id — no
 // apikey_ prefix, or bytes that cannot be stored — is the reference's 400
 // instead (2026-09-05 batch5 `rec86.keys.update.bogus-id.*`), which says only
 // that the id cannot be a key's.
@@ -705,6 +707,40 @@ func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 	status, body := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"nonexistent_field": 1})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	wantDetails(t, body, nil)
+}
+
+// TestAPIKeyUpdateJudgesTheBodyWithoutTheRowLock: an invalid body on a key
+// that exists is refused without taking the key's row lock, so it neither
+// waits behind a writer holding the row nor holds one up. Only a body too
+// large to read is refused before the lookup, unknown key or not.
+func TestAPIKeyUpdateJudgesTheBodyWithoutTheRowLock(t *testing.T) {
+	s := newTestServer(t)
+	id := issueAPIKey(t, s, map[string]any{"name": "locked"})["id"].(string)
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM api_keys WHERE id = $1 FOR UPDATE`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	res, err := s.roundTrip(reqCtx, http.MethodPost, consoleAPIKey(id), map[string]any{"nonexistent_field": 1},
+		map[string]string{"x-api-key": testKey})
+	if err != nil {
+		t.Fatalf("an invalid body waited on the row lock: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("invalid body on a locked key: status %d, want 400", res.StatusCode)
+	}
+
+	oversize := `{"name":"` + strings.Repeat("x", 4<<20) + `"}`
+	status, body := s.do(http.MethodPost, consoleAPIKey("apikey_01ABCDEFGHJKMNPQRSTVWXYZ"), oversize)
+	wantErr(t, status, body, http.StatusRequestEntityTooLarge, "request_too_large")
 }
 
 // TestAPIKeyRoutesRejectWrongMethods proves the 405 fallbacks are registered

@@ -589,10 +589,15 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 		"no prefix":             "envkey",
 		"empty token":           "envkey_",
 		"UUID, one digit short": "11111111-2222-3333-4444-55555555555",
-		// Braces are outside the class the reference's refusal names.
-		"braced UUID":       "%7B11111111-2222-3333-4444-555555555555%7D",
-		"urn prefix alone":  "urn:uuid:",
-		"misplaced hyphens": "1111111-12222-3333-4444-555555555555",
+		// The four forms the reference's UUID parser takes are exact: the urn
+		// prefix only before the hyphenated form, in lowercase, and braces only
+		// as a pair around it.
+		"urn:uuid: 32 digits":  "urn:uuid:11111111222233334444555555555555",
+		"uppercase urn prefix": "URN:UUID:11111111-2222-3333-4444-555555555555",
+		"brackets, not braces": "%5B11111111-2222-3333-4444-555555555555%5D",
+		"braced 32 digits":     "%7B11111111222233334444555555555555%7D",
+		"urn prefix alone":     "urn:uuid:",
+		"misplaced hyphens":    "1111111-12222-3333-4444-555555555555",
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(http.MethodPost, consoleRevoke(mine, id), nil)
@@ -606,7 +611,7 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 		"uppercase UUID":      "AAAAAAAA-2222-3333-4444-555555555555",
 		"urn:uuid: UUID":      "urn:uuid:11111111-2222-3333-4444-555555555555",
 		"32-digit UUID":       "11111111222233334444555555555555",
-		"urn:uuid: 32 digits": "urn:uuid:11111111222233334444555555555555",
+		"braced UUID":         "%7B11111111-2222-3333-4444-555555555555%7D",
 		"another alphabet":    "envkey_NOPE!",
 		"another env's key":   theirID,
 	}
@@ -717,6 +722,16 @@ func TestConsoleKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 				nil, http.StatusNotFound, "not_found_error", keyGone},
 			"revoke, unstorable key": {http.MethodPost, consoleRevoke(mine, "envkey_%00"),
 				nil, http.StatusBadRequest, "invalid_request_error", nil},
+			// The reference refuses a malformed key id as path validation —
+			// pydantic's `path.token_uuid`, no details (idx 19) — and a malformed
+			// environment id in its handler, with details (idx 3). So the key id's
+			// shape is judged first, before any environment is looked up.
+			"revoke, malformed key under an unknown environment": {http.MethodPost, consoleRevoke("env_01Wxn9vm6spKKooSdNch7e92", "not-a-uuid"),
+				nil, http.StatusBadRequest, "invalid_request_error", nil},
+			"revoke, malformed key under a malformed environment": {http.MethodPost, consoleRevoke("not-an-env-id", "not-a-uuid"),
+				nil, http.StatusBadRequest, "invalid_request_error", nil},
+			"revoke, the recorded unknown UUID braced": {http.MethodPost, consoleRevoke(mine, "%7B11111111-2222-3333-4444-555555555555%7D"),
+				nil, http.StatusNotFound, "not_found_error", keyGone},
 		})
 	})
 
