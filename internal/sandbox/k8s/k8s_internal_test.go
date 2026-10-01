@@ -1138,26 +1138,39 @@ func TestReadStdoutRequiresTheMarker(t *testing.T) {
 	})
 }
 
-// classifyTimeout is where #95 and #110 were lost: the watchdog's SIGKILL landed
-// (exit 137) and the call still reported TimedOut false, because the only
-// evidence that the kill was the deadline's came from a probe that had raced an
-// apiserver round trip and lost. Pinning the decision here costs no clock and no
-// cluster, which is the point — on a live cluster the losing case is exactly the
-// one that cannot be staged on demand.
+// classifier is a pod handle with Exec's default slop and lead and nothing
+// else: all classifyTimeout reads off its receiver.
+var classifier = &pod{overrunSlop: defaultOverrunSlop, probeLead: defaultProbeLead}
+
+// classifyTimeout is where #95, #110 and #832 were lost: a timeout the call
+// reported as none, because the only evidence for it came from a probe that had
+// raced an apiserver round trip and lost. Pinning the decision here costs no
+// clock and no cluster, which is the point — on a live cluster the losing case is
+// exactly the one that cannot be staged on demand.
 func TestClassifyTimeout(t *testing.T) {
-	const other = 7
+	const (
+		other = 7
+		sec   = time.Second
+		slop  = defaultOverrunSlop
+		lead  = defaultProbeLead
+		ms    = time.Millisecond
+	)
 	cases := []struct {
 		name          string
-		undeadlined   bool
+		untimed       bool
+		timeout       time.Duration // the 1s most rows use when 0
 		code          int
 		watchdogFired bool
+		ran           time.Duration
 		v             verdict
 		want          bool
 	}{
 		// A command given no deadline has no watchdog to mark it, so a mark it is
 		// found wearing is one it planted — and an untimed command must not be
-		// able to call itself timed out by planting one and exiting 137.
-		{name: "NoDeadlineIgnoresAPlantedMark", undeadlined: true, code: sigkillExit, watchdogFired: true, want: false},
+		// able to call itself timed out by planting one and exiting 137, nor by
+		// writing a run time as long as it likes.
+		{name: "NoDeadlineIgnoresAPlantedMark", untimed: true, code: sigkillExit, watchdogFired: true, want: false},
+		{name: "NoDeadlineIgnoresALongRun", untimed: true, code: sigkillExit, ran: time.Hour, want: false},
 		// The regression. The watchdog says it fired and the exit code agrees a
 		// SIGKILL landed; no probe needs to have caught the command alive.
 		{name: "WatchdogFiredAndProbeMissedIt", code: sigkillExit, watchdogFired: true, want: true},
@@ -1176,6 +1189,7 @@ func TestClassifyTimeout(t *testing.T) {
 		// The self-inflicted kill the contract suite pins: exit 137, but the
 		// watchdog never fired and the command was already gone when Exec looked.
 		{name: "SelfInflictedKillIsNotATimeout", code: sigkillExit},
+		{name: "SelfInflictedKillWithItsRunRecorded", code: sigkillExit, ran: 10 * ms},
 
 		// A mark without a SIGKILL is not a timeout. This is the window between
 		// the watchdog's last `kill -0` and its `kill -9`, where the command exits
@@ -1187,12 +1201,45 @@ func TestClassifyTimeout(t *testing.T) {
 		// An honest command that finished inside its deadline.
 		{name: "CleanExit"},
 		{name: "CleanExitSeenAliveJustBefore", v: verdict{aliveAtDeadline: true}},
+
+		// #832: the wrapper's record answers the overrun probe's question when the
+		// probe answered too late to. Strictly longer than the deadline plus the
+		// slop, whatever the exit code, and the probe's own "gone" changes nothing.
+		{name: "RecordJustUnderTheOverrun", ran: sec + slop - ms},
+		{name: "RecordAtTheOverrun", ran: sec + slop},
+		{name: "RecordJustOverTheOverrun", ran: sec + slop + ms, want: true},
+		{name: "RecordOverranWithItsOwnCode", code: other, ran: 2 * sec, want: true},
+		// ...and the pre-deadline probe's question, against a SIGKILL: alive
+		// probeLead before the deadline makes the kill the deadline's even with no
+		// mark (the tenant killed the watchdog, or the node did the killing), and
+		// not alive then leaves it the command's own.
+		{name: "RecordKilledJustBeforeTheProbeLead", code: sigkillExit, ran: sec - lead - ms},
+		{name: "RecordKilledAtTheProbeLead", code: sigkillExit, ran: sec - lead},
+		{name: "RecordKilledJustAfterTheProbeLead", code: sigkillExit, ran: sec - lead + ms, want: true},
+		{name: "RecordKilledOnTheDeadlineUnmarked", code: sigkillExit, ran: sec + 10*ms, want: true},
+		// The record's alive-at-deadline only ever reads a SIGKILL: a clean exit
+		// that merely reached the deadline is not a timeout until it overruns.
+		{name: "RecordReachedTheDeadlineAndExitedClean", ran: sec + 10*ms},
+
+		// The deadline the record is read against is the watchdog's, rounded up to
+		// whole seconds, not the caller's fraction: 1.2s is a 2s watchdog.
+		{name: "FractionalTimeoutRanPastTheRequestNotTheDeadline", timeout: 1200 * ms, ran: 1200*ms + slop + ms},
+		{name: "FractionalTimeoutRanPastTheRoundedDeadline", timeout: 1200 * ms, ran: 2*sec + slop + ms, want: true},
+		{name: "FractionalTimeoutKilledBeforeTheRoundedDeadline", timeout: 1200 * ms, code: sigkillExit, ran: 1300 * ms},
+		{name: "FractionalTimeoutKilledOnTheRoundedDeadline", timeout: 1200 * ms, code: sigkillExit, ran: 2 * sec, want: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := classifyTimeout(!c.undeadlined, c.code, c.watchdogFired, c.v); got != c.want {
-				t.Errorf("classifyTimeout(%v, %d, %v, %+v) = %v, want %v",
-					!c.undeadlined, c.code, c.watchdogFired, c.v, got, c.want)
+			timeout := c.timeout
+			if timeout == 0 {
+				timeout = sec
+			}
+			if c.untimed {
+				timeout = 0
+			}
+			if got := classifier.classifyTimeout(timeout, c.code, c.watchdogFired, c.ran, c.v); got != c.want {
+				t.Errorf("classifyTimeout(%s, %d, %v, %s, %+v) = %v, want %v",
+					timeout, c.code, c.watchdogFired, c.ran, c.v, got, c.want)
 			}
 		})
 	}
@@ -1236,6 +1283,16 @@ func TestParseExitReadsTheWatchdogsMark(t *testing.T) {
 		{name: "UnreadableReading", out: " 0 x 102.75\n", code: 0},
 		{name: "NegativeReading", out: " 0 -5.00 102.75\n", code: 0},
 		{name: "ExtraField", out: " 0 100.25 102.75 9\n", code: 0},
+		// A reading is decimal seconds and nothing else. Each of these would parse
+		// as a duration — or as a float — if the record took them at face value.
+		{name: "ReadingWithAUnit", out: " 0 1h0 102.75\n", code: 0},
+		{name: "ReadingInMinutes", out: " 0 100.25 5m\n", code: 0},
+		{name: "ReadingWithASign", out: " 0 +100.25 102.75\n", code: 0},
+		{name: "ReadingWithAnExponent", out: " 0 1e2 102.75\n", code: 0},
+		{name: "ReadingWithNoWholePart", out: " 0 .25 102.75\n", code: 0},
+		{name: "ReadingWithAnEmptyFraction", out: " 0 100. 102.75\n", code: 0},
+		{name: "ReadingWithTwoPoints", out: " 0 100.25 102.7.5\n", code: 0},
+		{name: "WholeSecondReadings", out: " 0 100 103\n", code: 0, ran: 3 * time.Second},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1319,11 +1376,16 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	// parse and classification the provider uses, a punctual kill is a timeout
 	// with no probe involved at all.
 	t.Run("KilledOnItsDeadline", func(t *testing.T) {
-		code, killed, _, err := parseExit(run(t, "killed", "sleep 30", 1))
+		code, killed, ran, err := parseExit(run(t, "killed", "sleep 30", 1))
 		if err != nil || code != sigkillExit || !killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
-		if !classifyTimeout(true, code, killed, verdict{}) {
+		// The watchdog sleeps its whole deadline before it kills, so the run is
+		// the deadline — never under it by more than the clock's hundredth of a
+		// second, and never past the slop, or a punctual kill would read as an
+		// overrun.
+		wantRan(t, ran, time.Second-uptimeTick, time.Second+defaultOverrunSlop)
+		if !classifier.classifyTimeout(time.Second, code, killed, ran, verdict{}) {
 			t.Error("a command the watchdog killed on its deadline did not classify as a timeout")
 		}
 	})
@@ -1332,11 +1394,12 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	// stands. Its watchdog is still asleep when it exits, so this also pins that
 	// the wrapper never waits for the watchdog to notice.
 	t.Run("FinishedInsideItsDeadline", func(t *testing.T) {
-		code, killed, _, err := parseExit(run(t, "clean", "exit 7", 5))
+		code, killed, ran, err := parseExit(run(t, "clean", "exit 7", 5))
 		if err != nil || code != 7 || killed {
 			t.Fatalf("parseExit = %d, %v, %v; want 7, false, nil", code, killed, err)
 		}
-		if classifyTimeout(true, code, killed, verdict{}) {
+		wantRan(t, ran, 0, 5*time.Second)
+		if classifier.classifyTimeout(5*time.Second, code, killed, ran, verdict{}) {
 			t.Error("a command that finished inside its deadline classified as a timeout")
 		}
 	})
@@ -1344,11 +1407,11 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	// A command that SIGKILLs itself exits 137 without the watchdog firing, so
 	// the mark is what keeps 137 from meaning "timeout" on its own.
 	t.Run("SelfInflictedKillLeavesNoMark", func(t *testing.T) {
-		code, killed, _, err := parseExit(run(t, "selfkill", "kill -9 $$", 30))
+		code, killed, ran, err := parseExit(run(t, "selfkill", "kill -9 $$", 30))
 		if err != nil || code != sigkillExit || killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, false, nil", code, killed, err, sigkillExit)
 		}
-		if classifyTimeout(true, code, killed, verdict{}) {
+		if classifier.classifyTimeout(30*time.Second, code, killed, ran, verdict{}) {
 			t.Error("a self-inflicted SIGKILL classified as a timeout")
 		}
 	})
@@ -1358,7 +1421,7 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	// command can read it out of /proc and plant whatever it likes there before
 	// the watchdog fires. Each of these makes the mark fail; each must still
 	// leave the command dead on its deadline, with the classification falling
-	// back to the probes, which is where it stood before the mark existed.
+	// back to the probes and the wrapper's record of the run.
 	//
 	// The FIFO is the one that matters. `: > "$3.killed"` — the obvious way to
 	// write a mark — blocks forever opening a FIFO for writing, so the watchdog
@@ -1440,27 +1503,55 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		if err != nil || code != sigkillExit || !killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
-		if !classifyTimeout(true, code, killed, verdict{}) {
+		if !classifier.classifyTimeout(time.Second, code, killed, 0, verdict{}) {
 			t.Error("a watchdog kill whose wrapper was sabotaged did not classify as a timeout")
 		}
 	})
 }
 
-// The wrapper's record of how long the command ran is what still sees an overrun
-// that the probe answered too late to catch (#832), so what it writes is pinned
-// here, on the host's shell, like the mark. Its clock is /proc/uptime, which a
-// pod always has and a macOS host does not. On such a host the row pins the other
-// half instead: without a clock nothing is recorded, and the exit code still
-// stands.
+// uptimeTick is /proc/uptime's resolution: two readings of it can lose up to
+// this much of the time between them.
+const uptimeTick = 10 * time.Millisecond
+
+// wantRan checks a run time the wrapper recorded on the host's shell. Its clock
+// is /proc/uptime, which a pod always has and a macOS host does not; there the
+// check is the other half of the contract instead — no clock, no record, and
+// never a reading made up from somewhere else.
+func wantRan(t *testing.T, ran, atLeast, under time.Duration) {
+	t.Helper()
+	if _, err := os.Stat("/proc/uptime"); err != nil {
+		if ran != 0 {
+			t.Errorf("no /proc/uptime on this host, yet the wrapper recorded a run time of %s", ran)
+		}
+		return
+	}
+	if ran < atLeast || ran >= under {
+		t.Errorf("recorded run time = %s, want at least %s and under %s", ran, atLeast, under)
+	}
+}
+
+// What the wrapper records of a run (#832; classifyTimeout argues its weight),
+// pinned on the host's shell like the mark. Both bounds matter: one too short
+// hides an overrun, one too long reports a timeout that never happened.
+//
+// The command's environment plants both reading names, as a tenant's Spec.Env
+// could. A reading that failed must not fall back on them — on a host without
+// /proc/uptime that would record 899s — and the wrapper's own readings must not
+// reach the command.
 func TestExecWrapperRecordsHowLongTheCommandRan(t *testing.T) {
 	env := setsidEnv(t)
-	state := t.TempDir() + "/state"
-	wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", "sleep 0.3; exit 7", "30", state)
-	if env != nil {
-		wrapper.Env = env
+	if env == nil {
+		env = os.Environ()
 	}
-	if err := wrapper.Run(); err != nil {
+	state := t.TempDir() + "/state"
+	wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", `echo "$t0 $t1"; sleep 0.3; exit 7`, "30", state)
+	wrapper.Env = append(append([]string{}, env...), "t0=100.00", "t1=999.00")
+	stdout, err := wrapper.Output()
+	if err != nil {
 		t.Fatalf("run execWrapper: %v", err)
+	}
+	if got := strings.TrimSpace(string(stdout)); got != "100.00 999.00" {
+		t.Errorf("the command saw t0 t1 = %q, want the %q its environment carried — the wrapper's readings leaked into it", got, "100.00 999.00")
 	}
 	out, err := exec.Command("/bin/bash", "-c", exitScript, "map-exit", state).Output()
 	if err != nil {
@@ -1470,18 +1561,11 @@ func TestExecWrapperRecordsHowLongTheCommandRan(t *testing.T) {
 	if err != nil || code != 7 || killed {
 		t.Fatalf("parseExit(%q) = %d, %v, %s, %v; want 7, false", out, code, killed, ran, err)
 	}
-	if _, err := os.Stat("/proc/uptime"); err != nil {
-		if ran != 0 {
-			t.Errorf("no /proc/uptime on this host, yet the wrapper recorded a run time of %s", ran)
-		}
-		return
-	}
-	// The lower bound is the point: the command slept 300ms, less the one
-	// hundredth of a second two /proc/uptime readings can lose between them. The
-	// upper one is the deadline, which the watchdog would have enforced.
-	if ran < 290*time.Millisecond || ran >= 30*time.Second {
-		t.Errorf("recorded run time = %s, want at least the command's 300ms and under its 30s deadline (%q)", ran, out)
-	}
+	// At least the 300ms the command slept, less one tick. Under a second: what
+	// the record adds beyond the sleep is a fork and a reap, single-digit
+	// milliseconds on an idle host, so 700ms of headroom is load, not slack for a
+	// record that counts something it should not.
+	wantRan(t, ran, 300*time.Millisecond-uptimeTick, time.Second)
 }
 
 // The watchdog must not still be holding the exec's stderr when the command has

@@ -1111,24 +1111,25 @@ func (pd *pod) execErr(ctx context.Context, err error) error {
 // treats any command that outlived its deadline as timed out no matter what exit
 // code it chose.
 //
-// Where it does not mirror docker is what says a punctual kill *was* the
-// deadline's: docker asks its daemon out of band, this backend has the watchdog
-// mark its own firing (#95, #110). classifyTimeout is where that is weighed and
+// Where it does not mirror docker is what says a timeout happened when the
+// liveness probes answer too late to: docker asks its daemon out of band, this
+// backend has the watchdog mark its own firing (#95, #110) and the wrapper record
+// how long the command ran (#832). classifyTimeout is where both are weighed and
 // argued.
 //
 // One axis is weaker than the docker backend. The state Exec reads — the pid it
-// watches, and the watchdog's mark — lives inside the sandbox, since Kubernetes
-// exposes no out-of-band handle on a running exec the way Docker's exec-inspect
-// does. So a command that both kills its watchdog and overwrites the pid file to
-// look dead can hide an overrun, and one that plants the mark and contrives a
-// SIGKILL can claim a timeout it never hit. Both are deliberately malicious
-// commands, the same case the derived-name adoption check (`ours`) does not
-// defend, and the second only mislabels the tenant's own tool call. The honest
-// runaway the deadline exists for forges nothing: its real pid stays in the
-// file, and killing its watchdog alone buys only overrunSlop of unnoticed
-// overrun — caught by the probe while it runs, or by the wrapper's record of how
-// long it ran once it has exited, which is what still sees an exit the probe's
-// round trip was too slow for (#832).
+// watches, the watchdog's mark and the wrapper's exit line — lives inside the
+// sandbox, since Kubernetes exposes no out-of-band handle on a running exec the
+// way Docker's exec-inspect does. So a command that kills its watchdog and
+// overwrites the pid file to look dead can still hide an overrun — by still
+// running when Exec gives up on it, or by killing the wrapper so that nothing
+// records how long it ran — and one that writes its own exit line, or plants the
+// mark and contrives a SIGKILL, can claim a timeout it never hit. Both are
+// deliberately malicious commands, the same case the derived-name adoption check
+// (`ours`) does not defend, and the second only mislabels the tenant's own tool
+// call. The honest runaway the deadline exists for forges nothing: its real pid
+// stays in the file, the wrapper records its run, and killing its watchdog alone
+// buys only overrunSlop of unnoticed overrun.
 //
 // The command runs in a background goroutine because it may block: a straggler
 // the command backgrounds inherits the exec's stdout and holds the stream open
@@ -1137,13 +1138,8 @@ func (pd *pod) execErr(ctx context.Context, err error) error {
 // instead — the Kubernetes analogue of docker's exec-inspect — which the stream
 // close cannot delay.
 func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	seconds := 0
-	if req.Timeout > 0 {
-		seconds = int(math.Ceil(req.Timeout.Seconds()))
-	}
-	// The watchdog can only sleep whole seconds, so its deadline — not the
-	// caller's unrounded request — is the one a kill has to have arrived after.
-	deadline := time.Duration(seconds) * time.Second
+	deadline := watchdogDeadline(req.Timeout)
+	seconds := int(deadline / time.Second)
 
 	runCtx := ctx
 	if seconds > 0 {
@@ -1220,23 +1216,7 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 		return sandbox.ExecResult{}, pd.execErr(ctx, err)
 	}
 
-	// The overrun probe's question — was the command still there at the
-	// deadline plus the slop? — answered from the pod's side. The probe is an
-	// in-pod exec, so its answer describes the pod an apiserver round trip after
-	// it was asked, and on a loaded cluster a command that overran and exited
-	// inside that round trip read as gone (#832). The wrapper's record has no round
-	// trip in it: its clock starts after Exec's, which only shortens what it
-	// measures, and stops when the command is reaped, which is when `kill -0`
-	// stops finding it too. So it can only ever add an overrun the probe would
-	// have seen had it answered at once — never one it would not — and it is
-	// in-pod state for the same reason the mark may be (see classifyTimeout): a
-	// tenant that forges it mislabels its own call, and one that erases it is back
-	// to the probe alone.
-	if seconds > 0 && ran > deadline+pd.overrunSlop {
-		v.overran = true
-	}
-
-	timedOut := classifyTimeout(seconds > 0, code, watchdogFired, v)
+	timedOut := pd.classifyTimeout(req.Timeout, code, watchdogFired, ran, v)
 	return sandbox.ExecResult{
 		Stdout:    stdout.String(),
 		Stderr:    stderr.String(),
@@ -1246,25 +1226,52 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 	}, nil
 }
 
-// classifyTimeout decides TimedOut from the three things Exec can know about a
-// finished command, and nothing else — no clock, so what it decides is testable
-// without one.
+// watchdogDeadline is the deadline the watchdog enforces for a requested
+// timeout, 0 for none. The watchdog can only sleep whole seconds, so it is the
+// request rounded up to one — and it, not the caller's unrounded request, is the
+// one a kill has to have arrived after.
+func watchdogDeadline(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 0
+	}
+	return time.Duration(math.Ceil(timeout.Seconds())) * time.Second
+}
+
+// classifyTimeout decides TimedOut from what Exec knows about a finished
+// command — the timeout it was given, its exit code, the watchdog's mark, how
+// long the wrapper recorded it ran, and the probes' verdict — and reads no clock
+// of its own, so what it decides is testable without one.
 //
-// Three ways a finished command can have hit its deadline, and an exit code of
-// 137 is what two of them are read against. It is evidence, not proof: bash
+// A finished command hit its deadline if it was still running once the
+// deadline and the slop had both passed and exited anyway — which on the honest
+// path the watchdog would have prevented, so that needs no exit code, since none
+// it chose can be believed — or if a SIGKILL ended it and the kill was the
+// deadline's. An exit code of 137 is evidence, not proof, of that SIGKILL: bash
 // reports it for a job SIGKILLed out from under it, and a command is free to
 // choose it. What it rules out is a command that reports some other code and
-// calls itself killed.
-// The watchdog reports having fired — the only witness that is not a guess,
-// which is why it exists: the pre-deadline probe is a second in-pod exec, so its
-// answer describes the pod an apiserver round trip after it was asked, and on a
-// loaded cluster that lands past the kill it was sent to see (#95, #110). Or the
-// command was still alive when that probe looked, which covers a SIGKILL the
-// watchdog did not deliver — the tenant killed the watchdog, or the node did the
-// killing — so the probe stays as extra reach, never as a veto. Or it outlived
-// the deadline and the slop and exited anyway, which on the honest path the
-// watchdog would have prevented; that one needs no exit code, since none it
-// chose can be believed.
+// calls itself killed. The kill was the deadline's if the watchdog reports
+// having fired, or if the command was still alive probeLead before the deadline,
+// which covers a SIGKILL the watchdog did not deliver — the tenant killed the
+// watchdog, or the node did the killing.
+//
+// "Still alive at" each of those two instants has two witnesses, and this is the
+// one place the reason is argued. The liveness probes ask from outside, but each
+// is a second in-pod exec, so its answer describes the pod an apiserver round
+// trip after it was asked; on a loaded cluster that lands past what it was sent
+// to see — past the watchdog's punctual kill (#95, #110), which is what the mark
+// is for, and past the exit of a command that overran and then finished, which
+// read as finishing on time (#832). The wrapper's record of how long the command
+// ran answers the same two questions with no round trip in it. Its clock starts
+// after Exec's — the exec request has to reach the pod first — which can only
+// shorten what it measures. It stops at the wrapper's second reading, just after
+// it reaps the command, and reaping is the moment `kill -0` stops finding a
+// command too. So the record adds only a timeout an instantly answered probe
+// would also have given, with one bounded exception: a wrapper that stalls
+// between the reap and that reading for longer than the exec took to start
+// over-reports by no more than the stall, plus /proc/uptime's hundredth of a
+// second — a cost paid in the direction of the label. Asked at the same lead, the
+// record pays the lead's cost too: a command that SIGKILLs itself, or exits 137,
+// within probeLead of its deadline reads as a timeout.
 //
 // The mark is not quite proof of authorship: the watchdog marks after `kill -0`
 // says the command is there, and a command that exits in the moment between
@@ -1274,23 +1281,28 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 // inside that window, which is the same unconditional cost the probe lead has
 // always paid.
 //
-// Every term only ever adds a timeout. That is what lets the mark be in-pod
-// state at all — the thing docker keeps out of its container on purpose
+// Every term only ever adds a timeout. That is what lets the mark and the record
+// be in-pod state at all — the thing docker keeps out of its container on purpose
 // (docs/history/2026-07.md § "`internal/sandbox` — the hands (slice 6, first part)").
 // Kubernetes exposes no out-of-band handle on a running exec, so this backend's
-// verdict already rested on in-pod state (the pid file) before the mark existed;
-// what the mark adds is a tenant that forges it mislabelling its own tool call,
-// while one that erases it is back to the probes — exactly where this backend
-// stood before.
-func classifyTimeout(deadlined bool, code int, watchdogFired bool, v verdict) bool {
+// verdict already rested on in-pod state (the pid file) before either existed. A
+// tenant that forges them mislabels its own tool call — the record makes that
+// as cheap as writing its own exit line, with no mark or SIGKILL needed — while
+// one that erases them is back to the probes, exactly where this backend stood
+// before.
+func (pd *pod) classifyTimeout(timeout time.Duration, code int, watchdogFired bool, ran time.Duration, v verdict) bool {
 	// A command with no deadline was never given a watchdog, so nothing can
-	// honestly have marked it and no probe ever ran. Saying so here rather than
-	// trusting the terms to come out false keeps a planted mark from labelling an
-	// untimed command as timed out.
-	if !deadlined {
+	// honestly have marked it, no probe ever ran, and no run of it is too long.
+	// Saying so here rather than trusting the terms to come out false keeps a
+	// planted mark or a forged record from labelling an untimed command as timed
+	// out.
+	deadline := watchdogDeadline(timeout)
+	if deadline == 0 {
 		return false
 	}
-	return (code == sigkillExit && (watchdogFired || v.aliveAtDeadline)) || v.overran
+	aliveAtDeadline := v.aliveAtDeadline || ran > deadline-pd.probeLead
+	overran := v.overran || ran > deadline+pd.overrunSlop
+	return (code == sigkillExit && (watchdogFired || aliveAtDeadline)) || overran
 }
 
 // readExit reads the line the wrapper recorded once the command finished, and
@@ -1314,7 +1326,7 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Dura
 // The readings are evidence that only ever adds a timeout, so anything short of
 // two that parse, in order, is no record (0) rather than an error: a pod whose
 // /proc/uptime would not read, a stream that lost its tail, and a tenant who
-// rewrote the line all leave the decision to the probe, where it stood before
+// rewrote the line all leave the decision to the probes, where it stood before
 // the record existed.
 func parseExit(out string) (int, bool, time.Duration, error) {
 	fields := strings.Fields(out)
@@ -1332,18 +1344,34 @@ func parseExit(out string) (int, bool, time.Duration, error) {
 	return code, watchdogFired, ranFor(fields[1:]), nil
 }
 
-// ranFor is how long the command ran by the two /proc/uptime readings — decimal
-// seconds — the wrapper took around it, or 0 when they do not make a record.
+// ranFor is how long the command ran by the two /proc/uptime readings the
+// wrapper took around it, or 0 when they do not make a record.
 func ranFor(readings []string) time.Duration {
 	if len(readings) != 2 {
 		return 0
 	}
-	t0, err0 := time.ParseDuration(readings[0] + "s")
-	t1, err1 := time.ParseDuration(readings[1] + "s")
-	if err0 != nil || err1 != nil || t0 < 0 || t1 < t0 {
+	t0, ok0 := uptime(readings[0])
+	t1, ok1 := uptime(readings[1])
+	if !ok0 || !ok1 || t1 < t0 {
 		return 0
 	}
 	return t1 - t0
+}
+
+// uptime parses one /proc/uptime reading: decimal seconds, digits with an
+// optional fraction, and nothing else — no sign, no exponent, no unit.
+func uptime(reading string) (time.Duration, bool) {
+	whole, frac, dotted := strings.Cut(reading, ".")
+	if !decimalDigits(whole) || (dotted && !decimalDigits(frac)) {
+		return 0, false
+	}
+	d, err := time.ParseDuration(reading + "s")
+	return d, err == nil
+}
+
+// decimalDigits reports whether s is one or more ASCII digits.
+func decimalDigits(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
 // nonce is a per-exec random token: the suffix for the wrapper's state files, so

@@ -1118,7 +1118,9 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 // finished command, and nothing else — no clock, so what it decides is testable
 // without one. It is the k8s backend's function, case for case: the two backends
 // share a contract suite, and a shared suite is worth little if they disagree
-// about what a timeout is.
+// about what a timeout is. The k8s one also weighs its wrapper's record of how
+// long the command ran (#832), a witness this backend cannot keep: its wrapper
+// execs the command in place, so nothing outlives the command to time it.
 //
 // An exit code of 137 is evidence, not proof: bash reports it for a job
 // SIGKILLed out from under it, and a command is free to choose it. What it rules
