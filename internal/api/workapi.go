@@ -177,6 +177,19 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	// A cloud environment's work is the platform executor's, and its key's poll
+	// is refused before anything is recorded or reserved — the reference's
+	// answer, archived or not (2026-09-05 batch2
+	// `rec83.active-key.work.poll.beta`, `rec83.archived-key.work.poll.beta`).
+	// The queue would hand such a poll nothing anyway (queue.Poll serves
+	// self_hosted items alone); this says so instead of answering null.
+	// Archival is not consulted, so an archived self_hosted environment's
+	// worker drains what is left in its queue. The kind is the one the key's
+	// own lookup read (authenticateEnvironmentKey), not a second query.
+	if !selfHostedKeyFrom(r.Context()) {
+		writeError(w, r, errInvalid("environment %s is not a self_hosted environment; only a self_hosted environment's work is polled by a worker", envID))
+		return
+	}
 	block, err := blockWindow(r)
 	if err != nil {
 		writeError(w, r, err)
@@ -285,6 +298,12 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A cloud environment has no worker's queue to list: the reference's 404,
+	// archived or not (2026-09-05 batch2 `rec83.active-key.work.list.beta`,
+	// `rec83.archived-key.work.list.beta`).
+	if !selfHostedKeyFrom(r.Context()) {
+		return nil, errNotFound("environment %s has no work list; the work API serves self_hosted environments only", envID)
+	}
 	page, err := parsePage(r.URL.Query())
 	if err != nil {
 		return nil, err
@@ -321,24 +340,32 @@ func (s *server) listWork(r *http.Request) (any, error) {
 
 // workStatsWire is the BetaSelfHostedWorkQueueStats response shape. oldest_queued_at
 // is an RFC3339 timestamp or null (an empty queue); the other counts are always
-// present.
+// present, and workers_polling is null on a cloud environment, as recorded.
 type workStatsWire struct {
 	Depth          int64      `json:"depth"`
 	OldestQueuedAt *time.Time `json:"oldest_queued_at"`
 	Pending        int64      `json:"pending"`
 	Type           string     `json:"type"` // always "work_queue_stats"
-	WorkersPolling int64      `json:"workers_polling"`
+	WorkersPolling *int64     `json:"workers_polling"`
 }
 
 // statsWork reports work-queue statistics (GET .../work/stats): the queue depth
 // (items waiting to be picked up), the pending count (polled but not acked), the
 // oldest queued item's timestamp, and the number of workers that have polled in
 // the last 30s. Scoped and authed like the rest of the work API — a worker sees
-// only its own environment's self_hosted queue.
+// only its own environment's self_hosted queue. A cloud environment's stats are
+// served, as the reference serves them: zero counts and a null
+// workers_polling, the reference's values there (2026-09-05 batch2
+// `rec83.active-key.work.stats.beta`, `rec83.archived-key.work.stats.beta`,
+// `rec83.orphan.stats.before-delete`). They are answered without asking the
+// queue, which counts the worker's queue alone and so has nothing to count.
 func (s *server) statsWork(r *http.Request) (any, error) {
 	envID, _, err := s.workScope(r) // stats has no work_id path value; ignore it
 	if err != nil {
 		return nil, err
+	}
+	if !selfHostedKeyFrom(r.Context()) {
+		return workStatsWire{Type: "work_queue_stats"}, nil
 	}
 	st, err := s.queue.Stats(r.Context(), envID)
 	if err != nil {
@@ -349,7 +376,7 @@ func (s *server) statsWork(r *http.Request) (any, error) {
 		OldestQueuedAt: utcPtr(st.OldestQueuedAt),
 		Pending:        st.Pending,
 		Type:           "work_queue_stats",
-		WorkersPolling: st.WorkersPolling,
+		WorkersPolling: &st.WorkersPolling,
 	}, nil
 }
 

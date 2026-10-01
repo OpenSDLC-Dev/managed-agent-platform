@@ -176,11 +176,12 @@ type ctxKey int
 const (
 	ctxKeyRequestID ctxKey = iota
 	ctxKeyPrincipal
-	ctxKeyEnvironment // the environment a worker's Bearer key is scoped to
-	ctxKeySession     // the session a gate's Bearer token is scoped to
-	ctxKeyIdentity    // the verified human a request authenticated as (plan 31)
-	ctxKeyWorkSession // the session a worker's sessions token is scoped to (plan 36)
-	ctxKeyCredential  // the class of credential that signed the request (#662); see credentialFrom
+	ctxKeyEnvironment     // the environment a worker's Bearer key is scoped to
+	ctxKeyEnvironmentKind // that environment's kind, where an environment key resolved it; see selfHostedKeyFrom
+	ctxKeySession         // the session a gate's Bearer token is scoped to
+	ctxKeyIdentity        // the verified human a request authenticated as (plan 31)
+	ctxKeyWorkSession     // the session a worker's sessions token is scoped to (plan 36)
+	ctxKeyCredential      // the class of credential that signed the request (#662); see credentialFrom
 )
 
 func requestIDFrom(ctx context.Context) string {

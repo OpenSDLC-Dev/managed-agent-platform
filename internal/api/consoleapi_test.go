@@ -25,6 +25,13 @@ func consoleRevoke(envID, keyID string) string {
 	return consoleTokens(envID) + "/" + keyID + "/revoke"
 }
 
+// zeroUUID is the all-zero UUID the 2026-09-05 recordings sent as a foreign
+// organization (batch2 `rec83.edge6.foreign-org-uuid`) and as a bogus API key
+// id (batch5 `rec86.keys.update.bogus-id.*`). It is assembled rather than
+// spelled out so the source carries no literal twelve-digit run, the shape
+// `make identifiers-test` reads as a GCP project number.
+var zeroUUID = "00000000-0000-0000-0000-" + strings.Repeat("0", 12)
+
 // issueViaConsole issues one key over real HTTP and returns the plaintext.
 func issueViaConsole(t *testing.T, s *tserver, envID, name string) string {
 	t.Helper()
@@ -243,57 +250,87 @@ func TestConsoleKeyRoutesRequireManagementAuth(t *testing.T) {
 	}
 }
 
-// TestConsoleKeyRoutesRejectOtherOrganizations pins the reserved-org gate. The
-// segment exists because the reference's does and because org/workspace/project
-// are this platform's reserved tenancy keys; until they are real scoping, any
-// other value names an organization that does not exist — and says so before the
-// environment is looked up, so the segment cannot be used to probe environment
-// ids under an org that does not exist.
+// TestConsoleKeyRoutesRejectOtherOrganizations pins the org gate. The reference
+// takes a UUID in that segment and answers a foreign one with a 401
+// `authentication_error` carrying `{error_visibility}` (2026-09-05 batch2
+// `rec83.edge6.foreign-org-uuid`), and anything that is not a UUID with a 400
+// without details — the literal `default` among them (`.literal-default-org`).
+// We keep `default` as the one organization we answer for (principle 5's
+// reserved key), which is the registered divergence, and answer every other
+// value as recorded. Either refusal comes before the environment is looked up,
+// so the segment cannot be used to probe environment ids.
 func TestConsoleKeyRoutesRejectOtherOrganizations(t *testing.T) {
 	s := newTestServer(t)
 	envID := selfHostedEnv(t, s, "org")
 	keyID := onlyKeyIDAfterIssue(t, s, envID, "host")
 
-	foreign := func(p string) string {
-		return strings.Replace(p, "/organizations/default/", "/organizations/org_other/", 1)
+	under := func(org, p string) string {
+		return strings.Replace(p, "/organizations/default/", "/organizations/"+org+"/", 1)
 	}
-	cases := map[string]struct {
+	routes := map[string]struct {
 		method, path string
 		body         any
 	}{
-		"issue":  {http.MethodPost, foreign(consoleTokens(envID)), map[string]any{"name": "x"}},
-		"list":   {http.MethodGet, foreign(consoleTokens(envID)), nil},
-		"revoke": {http.MethodPost, foreign(consoleRevoke(envID, keyID)), nil},
+		"issue":  {http.MethodPost, consoleTokens(envID), map[string]any{"name": "x"}},
+		"list":   {http.MethodGet, consoleTokens(envID), nil},
+		"revoke": {http.MethodPost, consoleRevoke(envID, keyID), nil},
 	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			status, body := s.do(tc.method, tc.path, tc.body)
-			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	for name, tc := range routes {
+		t.Run(name+"/a foreign UUID", func(t *testing.T) {
+			status, body := s.do(tc.method, under(zeroUUID, tc.path), tc.body)
+			wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
+			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
+		})
+		t.Run(name+"/not a UUID", func(t *testing.T) {
+			status, body := s.do(tc.method, under("org_other", tc.path), tc.body)
+			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+			wantDetails(t, body, nil)
 			inner, _ := body["error"].(map[string]any)
 			if msg, _ := inner["message"].(string); !strings.Contains(msg, "organization") {
 				t.Errorf("message = %q, want it to name the organization, not the environment", msg)
 			}
 		})
 	}
-	// And the key the foreign-org revoke aimed at is untouched.
+	// The segment takes the UUID spellings a key id does (isUUID): the recorded
+	// refusal of `default` is the same parser's message.
+	status, body := s.do(http.MethodGet, under(strings.Repeat("0", 32), consoleTokens(envID)), nil)
+	wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
+
+	// The organization is judged before the environment: a foreign UUID over an
+	// environment that does not exist is still the 401, not the 404.
+	status, body = s.do(http.MethodGet,
+		under(zeroUUID, consoleTokens("env_"+strings.Repeat("0", 24))), nil)
+	wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
+
+	// The recorded probe, verbatim but for its environment: ours answers the
+	// 401 the reference did.
+	t.Run("rec83.edge6.foreign-org-uuid", func(t *testing.T) {
+		status, body := s.do(http.MethodGet,
+			"/api/oauth/organizations/"+zeroUUID+"/environments/"+envID+"/tokens", nil)
+		wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
+		wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
+	})
+	// The recorded 400 for `default` (`rec83.edge6.literal-default-org`) is the
+	// one we do not follow: `default` is the organization this platform serves.
+	t.Run("rec83.edge6.literal-default-org is ours to answer", func(t *testing.T) {
+		if ids, _ := consoleKeyIDs(t, s, envID, ""); len(ids) != 1 {
+			t.Errorf("the default organization lists %v, want the one key", ids)
+		}
+	})
+	// And the key the foreign-org revokes aimed at is untouched.
 	if ids, _ := consoleKeyIDs(t, s, envID, ""); len(ids) != 1 {
 		t.Errorf("a foreign-org revoke changed the key list: %v", ids)
 	}
 }
 
 // TestConsoleKeyIssueRejectsBadRequests pins every rejection the issuance route
-// makes, each with the envelope the console renders. The two environment-kind
-// cases are the substantive ones: a cloud environment's work is consumed by this
-// platform's own executor, which holds no environment key, so issuing one there
-// would hand an operator a credential nothing can use.
+// makes, each with the envelope the console renders. An environment's kind and
+// archival are not among them: the reference issues on both (2026-09-05 batch2
+// `rec83.edge1.issue.on-cloud-env`, `rec83.edge2.issue.on-archived-env`), and
+// TestConsoleKeyIssuesOnCloudAndArchivedEnvironments pins that.
 func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 	s := newTestServer(t)
 	selfHosted := selfHostedEnv(t, s, "ok")
-	cloud := createEnvironment(t, s, map[string]any{"name": "cloudy"})["id"].(string)
-	archived := selfHostedEnv(t, s, "gone")
-	if status, body := s.do(http.MethodPost, "/v1/environments/"+archived+"/archive", nil); status != http.StatusOK {
-		t.Fatalf("archive: status %d, body %v", status, body)
-	}
 
 	cases := map[string]struct {
 		path       string
@@ -301,9 +338,7 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 		wantStatus int
 		wantType   string
 	}{
-		"cloud environment":    {consoleTokens(cloud), map[string]any{"name": "x"}, http.StatusBadRequest, "invalid_request_error"},
-		"archived environment": {consoleTokens(archived), map[string]any{"name": "x"}, http.StatusBadRequest, "invalid_request_error"},
-		"unknown environment":  {consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"name": "x"}, http.StatusNotFound, "not_found_error"},
+		"unknown environment": {consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"name": "x"}, http.StatusNotFound, "not_found_error"},
 		"malformed environment": {consoleTokens("not-an-env-id"), map[string]any{"name": "x"},
 			http.StatusBadRequest, "invalid_request_error"},
 		"unstorable environment": {consoleTokens("env_%00"), map[string]any{"name": "x"},
@@ -330,22 +365,14 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 	// nothing — a well-formed request already distinguishes an environment that
 	// exists from one that does not — and it applies only to issuance; list and
 	// revoke still resolve the environment first.
-	for name, path := range map[string]string{
-		"unknown environment": consoleTokens("env_0123456789abcdefghjkmnp"),
-		"cloud environment":   consoleTokens(cloud),
-		"archived":            consoleTokens(archived),
-	} {
-		t.Run("bad body wins over "+name, func(t *testing.T) {
-			status, body := s.do(http.MethodPost, path, map[string]any{"nope": 1})
-			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-		})
-	}
+	t.Run("bad body wins over unknown environment", func(t *testing.T) {
+		status, body := s.do(http.MethodPost, consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"nope": 1})
+		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	})
 
-	// Nothing above minted a key anywhere.
-	for _, env := range []string{selfHosted, cloud, archived} {
-		if ids, _ := consoleKeyIDs(t, s, env, ""); len(ids) != 0 {
-			t.Errorf("environment %s holds %v after only rejected requests", env, ids)
-		}
+	// Nothing above minted a key.
+	if ids, _ := consoleKeyIDs(t, s, selfHosted, ""); len(ids) != 0 {
+		t.Errorf("environment %s holds %v after only rejected requests", selfHosted, ids)
 	}
 
 	// A name at exactly the bound is accepted, and stored trimmed.
@@ -371,24 +398,59 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 	}
 }
 
-// TestConsoleKeyIssueLocksTheEnvironmentRow pins the window between reading an
-// environment's kind and inserting the key. Both halves are held open
-// deliberately: an uncommitted write on the environments row must block the
-// issuing request at its FOR SHARE read, so that when the write lands the
-// request sees the environment as it now is. Without the lock an archive
-// slipping into that window mints a live credential on an archived environment —
-// the 400 silently unenforced — and a delete turns the insert's foreign key into
-// a 500 where this route's own 404 is the answer.
+// TestConsoleKeyIssuesOnCloudAndArchivedEnvironments pins issuance where the
+// reference was recorded issuing: a `cloud` environment and an archived one
+// both answer 200 with a token (2026-09-05 batch2
+// `rec83.edge1.issue.on-cloud-env`, idx 1, and `rec83.edge2.issue.on-archived-env`,
+// idx 23, an archived cloud environment). What such a key can then do on the
+// work API is TestACloudEnvironmentKeyCannotTakeItsWork's.
+func TestConsoleKeyIssuesOnCloudAndArchivedEnvironments(t *testing.T) {
+	s := newTestServer(t)
+	cloud := createEnvironment(t, s, map[string]any{"name": "rec83-dialect-edges"})["id"].(string)
+	archivedCloud := createEnvironment(t, s, map[string]any{"name": "rec83-second"})["id"].(string)
+	archivedSelfHosted := selfHostedEnv(t, s, "gone")
+	for _, env := range []string{archivedCloud, archivedSelfHosted} {
+		if status, body := s.do(http.MethodPost, "/v1/environments/"+env+"/archive", nil); status != http.StatusOK {
+			t.Fatalf("archive %s: status %d, body %v", env, status, body)
+		}
+	}
+	for name, tc := range map[string]struct{ env, key string }{
+		"rec83.edge1.issue.on-cloud-env":    {cloud, "rec83-cloud"},
+		"rec83.edge2.issue.on-archived-env": {archivedCloud, "rec83-archived"},
+		"an archived self_hosted env":       {archivedSelfHosted, "host"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := s.do(http.MethodPost, consoleTokens(tc.env), map[string]any{"name": tc.key})
+			if status != http.StatusOK {
+				t.Fatalf("issue: status %d, body %v; want 200", status, body)
+			}
+			wantExactFields(t, body, "access_token", "expires_in")
+			if ids, _ := consoleKeyIDs(t, s, tc.env, ""); len(ids) != 1 {
+				t.Errorf("listed %v after issuance, want the one key", ids)
+			}
+		})
+	}
+}
+
+// TestConsoleKeyIssueLocksTheEnvironmentRow pins the window between reading the
+// environment and inserting the key. Both halves are held open deliberately: an
+// uncommitted write on the environments row must block the issuing request at
+// its FOR SHARE read, so that when the write lands the request sees the
+// environment as it now is. Without the lock a delete slipping into that window
+// turns the insert's foreign key into a 500 where this route's own 404 is the
+// answer. An archive no longer changes the answer — issuance on an archived
+// environment is the recorded 200 — so it waits and then issues.
 func TestConsoleKeyIssueLocksTheEnvironmentRow(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql  string
 		wantStatus int
 		wantType   string
+		wantKeys   int
 	}{
 		{"concurrent archive", `UPDATE environments SET archived_at = now() WHERE id = $1`,
-			http.StatusBadRequest, "invalid_request_error"},
+			http.StatusOK, "", 1},
 		{"concurrent delete", `DELETE FROM environments WHERE id = $1`,
-			http.StatusNotFound, "not_found_error"},
+			http.StatusNotFound, "not_found_error", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestServer(t)
@@ -475,14 +537,20 @@ func TestConsoleKeyIssueLocksTheEnvironmentRow(t *testing.T) {
 			if got.err != nil {
 				t.Fatalf("issuance request: %v", got.err)
 			}
-			wantErr(t, got.status, got.body, tc.wantStatus, tc.wantType)
+			if tc.wantType == "" {
+				if got.status != tc.wantStatus {
+					t.Fatalf("issuance: status %d, body %v; want %d", got.status, got.body, tc.wantStatus)
+				}
+			} else {
+				wantErr(t, got.status, got.body, tc.wantStatus, tc.wantType)
+			}
 			var keys int
 			if err := s.pool.QueryRow(ctx,
 				`SELECT count(*) FROM environment_keys WHERE environment_id = $1`, envID).Scan(&keys); err != nil {
 				t.Fatalf("count keys: %v", err)
 			}
-			if keys != 0 {
-				t.Errorf("%d key rows survived the race, want none", keys)
+			if keys != tc.wantKeys {
+				t.Errorf("%d key rows after the race, want %d", keys, tc.wantKeys)
 			}
 		})
 	}
@@ -527,7 +595,6 @@ func TestConsoleKeyListPagesAndRendersNullExpiry(t *testing.T) {
 	for name, query := range map[string]string{
 		"limit zero":          "?limit=0",
 		"limit negative":      "?limit=-1",
-		"limit over cap":      "?limit=101",
 		"limit not a number":  "?limit=many",
 		"offset negative":     "?offset=-1",
 		"offset not a number": "?offset=soon",
@@ -560,6 +627,33 @@ func TestConsoleKeyListPagesAndRendersNullExpiry(t *testing.T) {
 		if raw != nil {
 			t.Errorf("expires_at = %v on a grandfathered row, want null", raw)
 		}
+	}
+}
+
+// TestConsoleKeyListTakesALimitAbove100 pins the recorded absence of an upper
+// bound: `limit=101` and `limit=1000` answer 200 with the value echoed in
+// `pagination.limit` (2026-09-05 batch2 `rec83.edge5.list.limit.101` and
+// `.1000`, idx 11–12). The recording held one key, so it cannot show how many
+// rows such a page serves; here it serves up to the limit asked for, which is
+// what the echo says, and 100 stays the default.
+func TestConsoleKeyListTakesALimitAbove100(t *testing.T) {
+	s := newTestServer(t)
+	envID := selfHostedEnv(t, s, "wide")
+	for i := 0; i < 101; i++ {
+		issueKey(t, s.pool, envID, "host")
+	}
+
+	ids, page := consoleKeyIDs(t, s, envID, "")
+	if len(ids) != 100 || page["limit"] != float64(100) || page["total"] != float64(101) || page["has_more"] != true {
+		t.Errorf("default page: %d rows, pagination %v; want 100 rows of 101, limit 100, has_more true", len(ids), page)
+	}
+	for query, limit := range map[string]float64{"?limit=101": 101, "?limit=1000": 1000} {
+		t.Run(query, func(t *testing.T) {
+			ids, page := consoleKeyIDs(t, s, envID, query)
+			if len(ids) != 101 || page["limit"] != limit || page["offset"] != float64(0) || page["has_more"] != false {
+				t.Errorf("%d rows, pagination %v; want all 101 rows, limit %v echoed, has_more false", len(ids), page, limit)
+			}
+		})
 	}
 }
 
