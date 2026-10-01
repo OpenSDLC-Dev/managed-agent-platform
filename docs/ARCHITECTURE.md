@@ -242,10 +242,11 @@ skills: uploaded files, and `github_repository` entries cloned in-process by the
 `/v1/sessions/{id}/resources` with the mount path it lands on; a private repository's
 token is sealed through the same credential cipher the vaults use
 (`session_resource_credentials`). Both halves work the same way at both ends — the
-executor materializes them into the sandbox beside the skills, and the brain renders a
-"Mounted files" / "Mounted repositories" block into the request so the model knows what
-is there. A resource that has gone missing costs its own mount and a log line, never the
-turn.
+executor materializes them into the sandbox beside the skills, and the brain tells the
+model where they are: for files, the reference's one sentence pointing at
+`/mnt/session/uploads`, which lists none of them; for repositories, a
+"Mounted repositories" block naming each one. A resource that has gone missing costs its
+own mount and a log line, never the turn.
 
 **Memory stores** (plan 36) ride the same array as an id-less element that snapshots
 the store's name and its `/mnt/memory/<slug>` mount. The sandbox lands the store's

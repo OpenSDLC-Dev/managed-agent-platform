@@ -83,9 +83,9 @@ type Task struct {
 	Skills []SkillFixture
 	// Files are uploaded to the /v1/files registry and mounted as session
 	// resources before the first turn, so the executor materializes each into
-	// the sandbox at its mount path and the brain injects the Mounted-files
-	// block. Exercises the whole file-mount chain — registry, session resource,
-	// materialization, Level-1 injection.
+	// the sandbox at its mount path and the brain injects the uploads pointer,
+	// which names /mnt/session/uploads and lists no file. Exercises the whole
+	// file-mount chain — registry, session resource, materialization, injection.
 	Files []FileFixture
 	// Repo, when set, attaches a github_repository resource at session create —
 	// the only place repositories may be attached, since the add endpoint stays
@@ -395,7 +395,7 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 
 	// Files are uploaded and mounted as session resources before the first turn,
 	// so the executor materializes each into the sandbox when the first tool runs
-	// and the brain injects the Mounted-files block from turn one.
+	// and the brain injects the uploads pointer from turn one.
 	for _, ff := range task.Files {
 		fileID := s.uploadFile(t, ff, tr)
 		s.addResource(t, tr.SessionID, fileID, tr.fill(ff.MountPath))
