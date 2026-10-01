@@ -20,9 +20,12 @@ func TestNormalizeFetchURL(t *testing.T) {
 		{"https://example.com#top", "https://example.com/"},
 		{"https://example.com/a?q=1&r=2", "https://example.com/a?q=1&r=2"},
 		{"http://[::1]:8080/x", "http://[::1]:8080/x"},
-		// Only ASCII folds: "İ" lowercases to "i" in Unicode, which would make
-		// a look-alike host equal a given one.
-		{"https://WİKİPEDİA.org/x", "https://w%C4%B0k%C4%B0ped%C4%B0a.org/x"},
+		// The host takes egress.CanonicalHost's form: ASCII case folded and a
+		// Unicode name as its A-label, so a look-alike "İ" host stays distinct
+		// and a name and its A-label are one host.
+		{"https://WİKİPEDİA.org/x", "https://xn--wikipedia-6jfce.org/x"},
+		{"https://BÜCHER.de/x", "https://xn--bcher-kva.de/x"},
+		{"https://xn--bcher-kva.de/x", "https://xn--bcher-kva.de/x"},
 	} {
 		if got, ok := normalizeFetchURL(tc.in); !ok || got != tc.want {
 			t.Errorf("normalizeFetchURL(%q) = %q, %v; want %q", tc.in, got, ok, tc.want)
@@ -39,7 +42,7 @@ func TestNormalizeFetchURL(t *testing.T) {
 // for one string.
 func textHolds(text, url string) bool {
 	want, ok := normalizeFetchURL(url)
-	return ok && mentionsURL(text, want)
+	return ok && givenIn(text, want, url) != ""
 }
 
 func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
@@ -70,6 +73,17 @@ func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
 		// CJK text ends a URL with its own punctuation and spaces.
 		{"看 https://example.com/cjk。", []string{"https://example.com/cjk"}},
 		{"https://example.com/wide\u3000次", []string{"https://example.com/wide"}},
+		// No space before what follows: CJK text, an em dash, a possessive.
+		{"请看https://example.com/docs，然后总结", []string{"https://example.com/docs"}},
+		{"見てhttps://example.com/a。お願いします", []string{"https://example.com/a"}},
+		{"https://example.com/a—see", []string{"https://example.com/a"}},
+		{"https://example.com/a's", []string{"https://example.com/a"}},
+		// A URL's own punctuation followed by the sentence's, and a closing
+		// parenthesis that is the URL's own inside a link's.
+		{"see https://example.com/release!.", []string{"https://example.com/release!", "https://example.com/release"}},
+		{"(https://example.com/a))", []string{"https://example.com/a)", "https://example.com/a"}},
+		// A search hit's source with characters running text rarely carries.
+		{"https://fonts.googleapis.com/css?family=Roboto|Open+Sans", []string{"https://fonts.googleapis.com/css?family=Roboto|Open+Sans"}},
 	} {
 		for _, u := range tc.urls {
 			if !textHolds(tc.text, u) {
@@ -103,6 +117,41 @@ func fetchOutcome(t *testing.T, h *harness, url string) (res struct {
 	r := h.exec.runWebTool(context.Background(), h.sid, toolUse{name: "web_fetch", input: in})
 	res.IsError, res.Content = r.IsError, r.Content
 	return res, f.calls > 0
+}
+
+// fetchedAs runs one web_fetch of url against the harness's session and
+// returns the URL the fetcher was handed, or "" when nothing was fetched.
+func fetchedAs(t *testing.T, h *harness, url string) string {
+	t.Helper()
+	f := &recordingFetcher{}
+	h.exec.fetcher = f
+	in, _ := json.Marshal(map[string]string{"url": url})
+	h.exec.runWebTool(context.Background(), h.sid, toolUse{name: "web_fetch", input: in})
+	if f.calls == 0 {
+		return ""
+	}
+	return f.lastURL
+}
+
+// What is fetched is the given URL as written, never the model's spelling of
+// it: a fragment the model appends, a path Go would re-encode into the same
+// form, or another case or alphabet for the host is matched, and dropped.
+func TestWebFetchFetchesTheGivenSpellingNotTheModels(t *testing.T) {
+	h := webHarness(t, "", "")
+	h.userSays(t, "Read https://docs.example.com/guide, https://x.example/a%5C..%5Cadmin, "+
+		"https://bücher.de/x and https://Ünicode.example/page")
+
+	for _, tc := range []struct{ request, fetched string }{
+		{"https://docs.example.com/guide#d=secret", "https://docs.example.com/guide"},
+		{"HTTPS://DOCS.example.com/guide", "https://docs.example.com/guide"},
+		{`https://x.example/a\..\admin`, "https://x.example/a%5C..%5Cadmin"},
+		{"https://xn--bcher-kva.de/x", "https://bücher.de/x"},
+		{"https://Ünicode.example/page", "https://Ünicode.example/page"},
+	} {
+		if got := fetchedAs(t, h, tc.request); got != tc.fetched {
+			t.Errorf("request %s fetched %q, want the given %q", tc.request, got, tc.fetched)
+		}
+	}
 }
 
 // A URL nobody provided is refused before anything is fetched: the
@@ -209,6 +258,47 @@ func TestWebFetchCountsNoOtherSource(t *testing.T) {
 		if res, fetched := fetchOutcome(t, h, url); !res.IsError || fetched {
 			t.Errorf("fetch %s = %+v (fetched %v), want it refused", url, res, fetched)
 		}
+	}
+}
+
+// A person writes into a session in more places than a user.message: an
+// outcome's description, a denial's message, an operator's system message, and
+// a confirmation that allows a web_fetch of a URL they were shown. A denied
+// call's URL is not given.
+func TestWebFetchCountsWhatAPersonWrote(t *testing.T) {
+	h := webHarness(t, "", "")
+	ctx := context.Background()
+	appendOne := func(typ domain.EventType, payload any) domain.ID {
+		t.Helper()
+		raw, _ := json.Marshal(payload)
+		out, err := h.log.Append(ctx, h.sid, []events.NewEvent{{Type: typ, Payload: raw}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out[0].ID
+	}
+	text := func(s string) []map[string]string { return []map[string]string{{"type": "text", "text": s}} }
+
+	appendOne(domain.EventUserDefineOutcome, map[string]any{"description": "Summarize https://corp.example/q3.pdf"})
+	appendOne(domain.EventSystemMessage, map[string]any{"content": text("Prefer https://ops.example/runbook")})
+	denied := appendOne(domain.EventAgentToolUse, map[string]any{"name": "web_fetch", "input": map[string]string{"url": "https://denied.example/x"}})
+	appendOne(domain.EventUserToolConfirm, map[string]any{"tool_use_id": denied.String(), "result": "deny",
+		"deny_message": "No, use https://good.example/doc instead"})
+	allowed := appendOne(domain.EventAgentToolUse, map[string]any{"name": "web_fetch", "input": map[string]string{"url": "https://approved.example/x"}})
+	appendOne(domain.EventUserToolConfirm, map[string]any{"tool_use_id": allowed.String(), "result": "allow"})
+
+	for _, url := range []string{
+		"https://corp.example/q3.pdf",
+		"https://ops.example/runbook",
+		"https://good.example/doc",
+		"https://approved.example/x",
+	} {
+		if got := fetchedAs(t, h, url); got != url {
+			t.Errorf("fetch %s fetched %q, want it given", url, got)
+		}
+	}
+	if got := fetchedAs(t, h, "https://denied.example/x"); got != "" {
+		t.Errorf("a denied call's URL was fetched as %q, want it refused", got)
 	}
 }
 

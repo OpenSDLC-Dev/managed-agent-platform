@@ -308,18 +308,23 @@ func (e *Executor) runWebTool(ctx context.Context, sid domain.ID, u toolUse) too
 			return fail(fmt.Sprintf("web_fetch: host %q is outside the operator's allowed domains (WEBTOOL_ALLOWED_DOMAINS)", parsed.Hostname()))
 		}
 		// The description's provenance rule (#823, webprovenance.go): a URL
-		// the user did not provide and no web result returned is refused
-		// before anything is fetched. A failed lookup refuses too: the rule
-		// is a guard, and an unchecked fetch is what it guards against.
-		if ok, err := e.fetchProvenanced(ctx, sid, parsed); err != nil {
-			slog.WarnContext(ctx, "executor: web_fetch provenance check failed", "session", sid, "error", err)
+		// the session was not given is refused before anything is fetched,
+		// and what is fetched is the given URL as it was written, never the
+		// model's spelling of it. A failed lookup refuses too: the rule is a
+		// guard, and an unchecked fetch is what it guards against.
+		given, err := e.webFetchSource(ctx, sid, target)
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.WarnContext(ctx, "executor: web_fetch provenance check failed", "session", sid, "error", err)
+			}
 			return fail("web_fetch: could not check where this URL came from; try again")
-		} else if !ok {
+		}
+		if given == "" {
 			return fail("web_fetch: this URL was not provided by the user or returned by a web_search or " +
 				"web_fetch result in this session, and web_fetch fetches only such URLs, exactly as given. " +
 				"Use one of those URLs, or find this page with web_search first.")
 		}
-		page, err := e.fetcher.Fetch(ctx, target)
+		page, err := e.fetcher.Fetch(ctx, given)
 		if err != nil {
 			return fail("web_fetch: " + err.Error())
 		}

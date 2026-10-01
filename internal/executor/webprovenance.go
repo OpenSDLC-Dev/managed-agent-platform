@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 	"unicode"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
 
 // The web_fetch provenance rule (#823). The tool's description, the reference's
@@ -17,108 +17,168 @@ import (
 // provided directly by the user or have been returned in results from the
 // web_search and web_fetch tools". This is where that holds: a model a prompt
 // injection has turned cannot build a URL of its own — one carrying a secret in
-// its query, say — and have the executor fetch it.
+// its query or fragment, say — and have the executor fetch it.
 //
-// A URL is provided when it appears in a user.message the session holds, on
-// any thread, or in a web_search or web_fetch result that is not an error. An
-// agent's message to another thread is an agent.thread_message_received, never
-// a user.message, so a coordinator cannot launder a URL through a child. Every
-// string in those payloads counts — a text block, a document's URL source, a
-// search hit's source, title and snippet, a fetched page's text — and a URL in
-// one is found at each "http://" or "https://" and read every way running text
-// allows (urlReadings). Matching is exact after normalizeFetchURL on both
-// sides.
+// The model's URL only chooses: what is fetched is the given URL itself, as it
+// was written in the session, so nothing the model adds — a fragment, a
+// spelling Go would re-encode into the same form — reaches the reader.
+//
+// A URL is given when it appears in what a person wrote into the session — a
+// user.message, a user.define_outcome, a user.tool_confirmation (its
+// deny_message) or an operator's system.message, on any thread — in a
+// web_search or web_fetch result that is not an error, or as the input of a
+// web_fetch call a person allowed by confirmation. An agent's message to
+// another thread is an agent.thread_message_received, so a coordinator cannot
+// launder a URL through a child; other tools' results, client-side tool results
+// included, are not counted. Every string in those payloads is read (a text
+// block, a document's URL source, a search hit's source, title and snippet, a
+// fetched page's text), and a URL in one is read every way running text allows
+// (urlReadings). Two URLs are the same when normalizeFetchURL says so.
 
-// fetchProvenanced reports whether target, a URL web_fetch was asked for, was
-// provided in the session sid. It reads the committed log: only the payloads
-// that mention the target's host, so a long session is not decoded whole for
-// one fetch.
-func (e *Executor) fetchProvenanced(ctx context.Context, sid domain.ID, target *url.URL) (bool, error) {
-	want, ok := normalizeFetchURL(target.String())
+// webFetchSource returns the given URL that raw, the URL web_fetch was asked
+// for, names in the session sid, exactly as it was written there, or "" when
+// none does. It reads the committed log: only the payloads that mention the
+// host, when the host is plain ASCII, so a long session is not decoded whole
+// for one fetch.
+func (e *Executor) webFetchSource(ctx context.Context, sid domain.ID, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	want, ok := normalizeFetchURL(raw)
 	if !ok {
-		return false, nil
+		return "", nil
+	}
+	// The prefilter only narrows, so it is skipped wherever a payload could
+	// spell the host differently from the request: a Unicode name or its
+	// A-label, a percent-escape. strpos with "" matches every row.
+	key := ""
+	if u, err := url.Parse(raw); err == nil {
+		if h := u.Hostname(); isPlainASCIIHost(h) && !strings.Contains(strings.ToLower(h), "xn--") {
+			key = h
+		}
 	}
 	rows, err := e.pool.Query(ctx, `
 		SELECT m.payload FROM events m
-		 WHERE m.session_id = $1 AND m.type = $3
-		   AND strpos(lower(m.payload::text), $2) > 0
+		 WHERE m.session_id = $1 AND m.type = ANY($3)
+		   AND strpos(lower(m.payload::text), lower($2)) > 0
 		UNION ALL
 		SELECT r.payload FROM events r
 		  JOIN events u ON u.session_id = r.session_id AND u.id = r.payload->>'tool_use_id'
 		 WHERE r.session_id = $1 AND r.type = $4
 		   AND u.type = $5 AND u.payload->>'name' IN ('web_search', 'web_fetch')
 		   AND NOT COALESCE((r.payload->>'is_error')::boolean, false)
-		   AND strpos(lower(r.payload::text), $2) > 0`,
-		sid.String(), asciiLower(target.Hostname()),
-		string(domain.EventUserMessage), string(domain.EventAgentToolResult), string(domain.EventAgentToolUse))
+		   AND strpos(lower(r.payload::text), lower($2)) > 0
+		UNION ALL
+		SELECT u.payload->'input' FROM events u
+		 WHERE u.session_id = $1 AND u.type = $5 AND u.payload->>'name' = 'web_fetch'
+		   AND EXISTS (SELECT 1 FROM events c
+		                WHERE c.session_id = u.session_id AND c.type = $6
+		                  AND c.payload->>'tool_use_id' = u.id AND c.payload->>'result' = 'allow')`,
+		sid.String(), key,
+		[]string{string(domain.EventUserMessage), string(domain.EventUserDefineOutcome),
+			string(domain.EventUserToolConfirm), string(domain.EventSystemMessage)},
+		string(domain.EventAgentToolResult), string(domain.EventAgentToolUse), string(domain.EventUserToolConfirm))
 	if err != nil {
-		return false, fmt.Errorf("read the session's provided URLs: %w", err)
+		return "", fmt.Errorf("read the session's given URLs: %w", err)
 	}
 	defer rows.Close()
+	found := ""
 	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
-			return false, fmt.Errorf("read the session's provided URLs: %w", err)
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return "", fmt.Errorf("read the session's given URLs: %w", err)
 		}
 		var v any
-		if err := json.Unmarshal(raw, &v); err != nil {
-			return false, fmt.Errorf("decode a payload naming the host: %w", err)
+		if err := json.Unmarshal(payload, &v); err != nil {
+			return "", fmt.Errorf("decode a payload naming the host: %w", err)
 		}
-		if mentionsURL(v, want) {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-
-// mentionsURL reports whether any string in the decoded JSON value v holds a
-// URL that normalizes to want.
-func mentionsURL(v any, want string) bool {
-	switch v := v.(type) {
-	case string:
-		for _, found := range urlsIn(v) {
-			if got, ok := normalizeFetchURL(found); ok && got == want {
-				return true
-			}
-		}
-	case []any:
-		for _, x := range v {
-			if mentionsURL(x, want) {
-				return true
-			}
-		}
-	case map[string]any:
-		for _, x := range v {
-			if mentionsURL(x, want) {
-				return true
-			}
+		if given := givenIn(v, want, raw); given == raw {
+			return given, rows.Err()
+		} else if given != "" && found == "" {
+			found = given
 		}
 	}
-	return false
+	return found, rows.Err()
 }
 
-// normalizeFetchURL is the form two URLs are compared in: the scheme and host
-// lowercased, as RFC 3986 makes them case-insensitive (ASCII only: Unicode
-// folding maps "İ" to "i", which would let a look-alike host IDNA reads as
-// another label match a given one), the fragment dropped,
-// since it never reaches the server, and an empty path read as "/". The path
-// and query stay exactly as given. It reports false for anything but an
-// absolute http(s) URL.
+// givenIn returns a URL reading in any string of the decoded JSON value v that
+// normalizes to want, preferring one spelled exactly as raw, or "".
+func givenIn(v any, want, raw string) string {
+	found := ""
+	var walk func(any) bool
+	walk = func(v any) bool {
+		switch v := v.(type) {
+		case string:
+			for _, r := range urlsIn(v) {
+				if got, ok := normalizeFetchURL(r); ok && got == want {
+					if r == raw {
+						found = r
+						return true
+					}
+					if found == "" {
+						found = r
+					}
+				}
+			}
+		case []any:
+			for _, x := range v {
+				if walk(x) {
+					return true
+				}
+			}
+		case map[string]any:
+			for _, x := range v {
+				if walk(x) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	walk(v)
+	return found
+}
+
+// normalizeFetchURL is the form two URLs are compared in: the scheme lowercased,
+// the host in the form the egress allowlist compares (egress.CanonicalHost:
+// ASCII case folded, a Unicode name as its A-label, so a look-alike such as
+// "wİkİpedİa" stays a different host), the fragment dropped, and an empty path
+// read as "/". The rest is compared as Go's URL type spells it. It reports
+// false for anything but an absolute http(s) URL with a host.
 func normalizeFetchURL(raw string) (string, bool) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.Opaque != "" {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Opaque != "" || u.Host == "" {
 		return "", false
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", false
 	}
-	u.Host = asciiLower(u.Host)
+	host := egress.CanonicalHost(u.Hostname())
+	if host == "" {
+		return "", false
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" {
+		host += ":" + port
+	}
+	u.Host = host
 	u.Fragment, u.RawFragment = "", ""
 	if u.Path == "" && u.RawPath == "" {
 		u.Path = "/"
 	}
 	return u.String(), true
+}
+
+// isPlainASCIIHost reports whether h is spelled in ASCII with no escape, so its
+// lowercase form is how any payload naming it spells it.
+func isPlainASCIIHost(h string) bool {
+	for i := range len(h) {
+		if h[i] > unicode.MaxASCII || h[i] == '%' {
+			return false
+		}
+	}
+	return h != ""
 }
 
 // urlsIn returns every reading of every URL that starts at an "http://" or
@@ -135,70 +195,44 @@ func urlsIn(s string) []string {
 	return out
 }
 
-// asciiLower lowercases the ASCII letters of s and nothing else.
-func asciiLower(s string) string {
-	return strings.Map(func(r rune) rune {
-		if 'A' <= r && r <= 'Z' {
-			return r + 'a' - 'A'
-		}
-		return r
-	}, s)
-}
-
 // hasPrefixFold is strings.HasPrefix ignoring ASCII case.
 func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
 
-// trailingPunct is what a sentence or markup can put after a URL; each is
-// also a character a URL may end with. Non-ASCII punctuation, a CJK full
-// stop say, is trimmed as well (isTrailing).
-const trailingPunct = ".,;:!?*'"
-
-// isTrailing reports whether r is punctuation a reading may drop from a
-// URL's end.
-func isTrailing(r rune) bool {
-	return strings.ContainsRune(trailingPunct, r) || (r > unicode.MaxASCII && unicode.IsPunct(r))
-}
-
 // urlReadings returns the ways the URL at the start of s can be read. Running
-// text does not say where a URL ends: a full stop or a markdown link's closing
-// parenthesis follows one, yet either can also be its last character, as in a
-// search hit's source ending in "?". So every reading is kept — the run to
-// whitespace or a character no URL carries, the run to a closing parenthesis
-// or bracket it did not open (so a balanced pair, as in a Wikipedia title,
-// stays), and each without trailing punctuation — and a URL matching any of
-// them is one the text holds. Each is a prefix of the text as written.
+// text does not say where a URL ends. It runs to whitespace or a character no
+// URL carries unescaped (<, >, a double quote, a backtick), but a sentence's
+// full stop, a markdown link's closing parenthesis, a CJK comma with more text
+// after it, or a possessive's apostrophe can follow it inside that run — and
+// each of those can also be part of a URL, as a search hit's source ending in
+// "?" or a Wikipedia title's parentheses are. So every reading is kept: the
+// whole run, and the run cut just before each character that can end a URL in
+// text. Each is a prefix of the text as written, so none carries anything the
+// text does not.
 func urlReadings(s string) []string {
-	run := s[:strings.IndexFunc(s+" ", func(r rune) bool {
-		return r <= ' ' || unicode.IsSpace(r) || strings.ContainsRune("<>\"`{}|\\^", r)
-	})]
-	parens, brackets, end := 0, 0, 0
-scan:
-	for ; end < len(run); end++ {
-		switch run[end] {
-		case '(':
-			parens++
-		case '[':
-			brackets++
-		case ')':
-			if parens == 0 {
-				break scan
-			}
-			parens--
-		case ']':
-			if brackets == 0 {
-				break scan
-			}
-			brackets--
-		}
+	end := strings.IndexFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || r < ' ' || strings.ContainsRune("<>\"`", r)
+	})
+	if end < 0 {
+		end = len(s)
 	}
-	balanced := run[:end]
-	var out []string
-	for _, r := range []string{run, strings.TrimRightFunc(run, isTrailing), balanced, strings.TrimRightFunc(balanced, isTrailing)} {
-		if !slices.Contains(out, r) {
-			out = append(out, r)
+	run := s[:end]
+	out := []string{run}
+	for i, r := range run {
+		if i > 0 && endsURLInText(r) && out[len(out)-1] != run[:i] {
+			out = append(out, run[:i])
 		}
 	}
 	return out
+}
+
+// endsURLInText reports whether r is a character running text can put right
+// after a URL: ASCII sentence punctuation, a quote or bracket, or any non-ASCII
+// punctuation or symbol (a CJK comma or full stop, an em dash).
+func endsURLInText(r rune) bool {
+	if r > unicode.MaxASCII {
+		return unicode.IsPunct(r) || unicode.IsSymbol(r)
+	}
+	return strings.ContainsRune(".,;:!?*'()[]{}|\\^", r)
 }
