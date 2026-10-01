@@ -306,9 +306,7 @@ func TestSessionResourceListPagination(t *testing.T) {
 	if status != http.StatusOK || len(listData(t, all)) != 3 {
 		t.Fatalf("list all: %d, %d rows", status, len(listData(t, all)))
 	}
-	if all["next_page"] != nil {
-		t.Errorf("next_page = %v, want null when all returned", all["next_page"])
-	}
+	wantNoFields(t, all, "next_page")
 
 	// limit=2 → two rows and a cursor; following it yields the last row.
 	status, page1 := s.do("GET", "/v1/sessions/"+sid+"/resources?limit=2", nil)
@@ -326,9 +324,7 @@ func TestSessionResourceListPagination(t *testing.T) {
 	if status != http.StatusOK || len(listData(t, page2)) != 1 {
 		t.Errorf("page 2: %d, %d rows (want 1)", status, len(listData(t, page2)))
 	}
-	if page2["next_page"] != nil {
-		t.Errorf("page 2 next_page = %v, want null", page2["next_page"])
-	}
+	wantNoFields(t, page2, "next_page")
 }
 
 // TestSessionResourceEdgeCases exercises the sub-resource routes' shape

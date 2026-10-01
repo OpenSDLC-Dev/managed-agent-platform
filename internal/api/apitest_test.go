@@ -251,9 +251,31 @@ func listData(t *testing.T, body map[string]any) []map[string]any {
 	return out
 }
 
-// nextPage returns the next_page cursor, asserting the field is present
-// (nullable but required on the wire).
+// nextPage returns the next_page cursor of a list whose envelope sends the key
+// only when a further page exists, and "" on a terminal page — where the key,
+// and a prev_page with nothing before it, must be absent rather than null.
+// That is most lists; the reference sends an explicit null on five, which read
+// it with nextPageOrNull (#676).
 func nextPage(t *testing.T, body map[string]any) string {
+	t.Helper()
+	if v, ok := body["prev_page"]; ok && v == nil {
+		t.Fatalf(`list response carries "prev_page": null, want the key omitted: %v`, body)
+	}
+	v, ok := body["next_page"]
+	if !ok {
+		return ""
+	}
+	if v == nil {
+		t.Fatalf(`list response carries "next_page": null, want the key omitted on a terminal page: %v`, body)
+	}
+	return cursorString(t, v)
+}
+
+// nextPageOrNull is nextPage for the lists the reference answers with an
+// explicit "next_page": null on a terminal page — files, skills, skill
+// versions, environments and an environment's work: there the key is
+// required, null when no page follows.
+func nextPageOrNull(t *testing.T, body map[string]any) string {
 	t.Helper()
 	v, ok := body["next_page"]
 	if !ok {
@@ -262,6 +284,11 @@ func nextPage(t *testing.T, body map[string]any) string {
 	if v == nil {
 		return ""
 	}
+	return cursorString(t, v)
+}
+
+func cursorString(t *testing.T, v any) string {
+	t.Helper()
 	// Without this, every non-string decoded to "" and satisfied a "want null"
 	// assertion — false and 0 among them, on a key whose whole contract is
 	// string-or-null.

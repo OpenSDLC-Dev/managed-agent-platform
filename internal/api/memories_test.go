@@ -566,9 +566,7 @@ func TestMemoryList(t *testing.T) {
 	if got := memoryPaths(t, body); !slices.Equal(got, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
 		t.Errorf("list order = %v, want byte-wise path order", got)
 	}
-	if _, ok := body["next_page"]; !ok {
-		t.Fatal("next_page must be present (null) in the page envelope")
-	}
+	wantNoFields(t, body, "next_page")
 	// The list defaults to basic.
 	for _, row := range listData(t, body) {
 		if row["content"] != nil {

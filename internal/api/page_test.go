@@ -6,6 +6,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	sdk "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 // listLabel turns a request path into a subtest name. "/" is testing's own
@@ -106,4 +109,115 @@ func TestWorkListRejectsForeignCursors(t *testing.T) {
 			wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
+}
+
+// TestListTerminalPageEnvelope pins next_page on a terminal page, route by
+// route, because the reference keeps two envelopes (#676): most lists omit the
+// key when no page follows, and five send an explicit null. A prev_page with
+// nothing before it is omitted as well. Some lists hold a row and some are
+// empty; both are terminal pages, and the envelope follows the route, not the
+// rows.
+func TestListTerminalPageEnvelope(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sessionID := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	_, threads := s.do(http.MethodGet, "/v1/sessions/"+sessionID+"/threads", nil)
+	threadID := listData(t, threads)[0]["id"].(string)
+	storeID := createMemoryStore(t, s, "envelope-store")
+	vaultID := createVault(t, s, "envelope-vault")
+	skillID := s.createSkill(t)["id"].(string)
+	uploadOneFile(t, s, "envelope")
+	workEnvID, _, key := selfHostedWorker(t, s, "ek-envelope")
+	enqueueToolExec(t, s, agentID, workEnvID)
+
+	for _, path := range []string{
+		"/v1/agents",
+		"/v1/agents/" + agentID + "/versions",
+		"/v1/sessions",
+		"/v1/sessions/" + sessionID + "/events",
+		"/v1/sessions/" + sessionID + "/threads",
+		"/v1/sessions/" + sessionID + "/threads/" + threadID + "/events",
+		"/v1/sessions/" + sessionID + "/resources",
+		"/v1/deployments",
+		"/v1/deployment_runs",
+		"/v1/dreams",
+		"/v1/memory_stores",
+		"/v1/memory_stores/" + storeID + "/memories",
+		"/v1/memory_stores/" + storeID + "/memory_versions",
+		"/v1/vaults",
+		"/v1/vaults/" + vaultID + "/credentials",
+	} {
+		t.Run(listLabel(path), func(t *testing.T) {
+			status, body := s.do(http.MethodGet, path, nil)
+			if status != http.StatusOK {
+				t.Fatalf("list: %d %v", status, body)
+			}
+			wantNoFields(t, body, "next_page", "prev_page")
+		})
+	}
+
+	wantNullNext := func(t *testing.T, body map[string]any) {
+		t.Helper()
+		if v, ok := body["next_page"]; !ok || v != nil {
+			t.Errorf("next_page = %v (present %v), want an explicit null", v, ok)
+		}
+		wantNoFields(t, body, "prev_page")
+	}
+	for _, path := range []string{
+		"/v1/files",
+		"/v1/skills",
+		"/v1/skills/" + skillID + "/versions",
+		"/v1/environments",
+	} {
+		t.Run(listLabel(path), func(t *testing.T) {
+			status, body := s.do(http.MethodGet, path, nil)
+			if status != http.StatusOK {
+				t.Fatalf("list: %d %v", status, body)
+			}
+			wantNullNext(t, body)
+		})
+	}
+	t.Run("environments_work", func(t *testing.T) {
+		res, body, raw := s.workReq(t, http.MethodGet, "/v1/environments/"+workEnvID+"/work", key, nil)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("list: %d %s", res.StatusCode, raw)
+		}
+		wantNullNext(t, body)
+	})
+}
+
+// TestSDKPagersEndOnEitherTerminalEnvelope is the compatibility half of #676:
+// the typed SDK's pagers read an omitted next_page and a null one alike, as the
+// end of the list. Each walk crosses a cursor page into a terminal one — the
+// agents list (PageCursor) and the sessions list (BidirectionalPageCursor)
+// omitting the key, the environments list sending null.
+func TestSDKPagersEndOnEitherTerminalEnvelope(t *testing.T) {
+	s := newTestServer(t)
+	client := sdk.NewClient(option.WithoutEnvironmentDefaults(), option.WithBaseURL(s.url), option.WithAPIKey(testKey))
+	for range 3 {
+		agentID, envID := fixture(t, s)
+		createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	}
+	walk := func(name string, pager interface {
+		Next() bool
+		Err() error
+	}) {
+		t.Helper()
+		n := 0
+		for pager.Next() {
+			if n++; n > 3 {
+				t.Fatalf("%s: the walk read past the last row", name)
+			}
+		}
+		if err := pager.Err(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if n != 3 {
+			t.Errorf("%s: walked %d rows, want 3", name, n)
+		}
+	}
+	ctx := t.Context()
+	walk("agents", client.Beta.Agents.ListAutoPaging(ctx, sdk.BetaAgentListParams{Limit: sdk.Int(2)}))
+	walk("sessions", client.Beta.Sessions.ListAutoPaging(ctx, sdk.BetaSessionListParams{Limit: sdk.Int(2)}))
+	walk("environments", client.Beta.Environments.ListAutoPaging(ctx, sdk.BetaEnvironmentListParams{Limit: sdk.Int(2)}))
 }

@@ -827,7 +827,7 @@ func TestEnvironmentListPaginationAndArchive(t *testing.T) {
 	if pkgs, _ := cfg1["packages"].(map[string]any); pkgs["type"] != "packages" {
 		t.Errorf("list packages type = %v, want %q", pkgs["type"], "packages")
 	}
-	status, page2 := s.do(http.MethodGet, "/v1/environments?limit=2&page="+nextPage(t, page1), nil)
+	status, page2 := s.do(http.MethodGet, "/v1/environments?limit=2&page="+nextPageOrNull(t, page1), nil)
 	if status != http.StatusOK {
 		t.Fatalf("page 2: %d", status)
 	}

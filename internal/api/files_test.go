@@ -373,7 +373,7 @@ func TestFileList(t *testing.T) {
 	}
 	// Five rows fit one page, so the cursor is present and null — the shape
 	// every recorded reference response carries (#544).
-	if np := nextPage(t, body); np != "" {
+	if np := nextPageOrNull(t, body); np != "" {
 		t.Errorf("next_page on a terminal page = %q, want null", np)
 	}
 
@@ -389,7 +389,7 @@ func TestFileList(t *testing.T) {
 	if body["has_more"] != true {
 		t.Errorf("page 1 has_more = %v, want true", body["has_more"])
 	}
-	if nextPage(t, body) == "" {
+	if nextPageOrNull(t, body) == "" {
 		t.Error("page 1 next_page is null while has_more is true, want a cursor")
 	}
 	status, body = s.do("GET", "/v1/files?limit=2&after_id="+ids[3], nil)
@@ -436,7 +436,7 @@ func TestFileList(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("cursor fetch: %d %v", status, body)
 	}
-	cur := nextPage(t, body)
+	cur := nextPageOrNull(t, body)
 	if cur == "" {
 		t.Fatal("expected a cursor to test exclusivity with")
 	}
@@ -485,7 +485,7 @@ func TestFileListIDs(t *testing.T) {
 			t.Errorf("%s = %v, want [%s %s] newest-first", key, got, ids[2], ids[0])
 		}
 		wantFields(t, body, "data", "next_page", "has_more", "first_id", "last_id")
-		if np := nextPage(t, body); np != "" {
+		if np := nextPageOrNull(t, body); np != "" {
 			t.Errorf("%s next_page = %q, want null: an ids page is always terminal", key, np)
 		}
 		if body["has_more"] != false {
@@ -545,7 +545,7 @@ func TestFileListIDs(t *testing.T) {
 	if body["has_more"] != false {
 		t.Errorf("all-malformed has_more = %v, want false", body["has_more"])
 	}
-	if np := nextPage(t, body); np != "" {
+	if np := nextPageOrNull(t, body); np != "" {
 		t.Errorf("all-malformed next_page = %q, want null", np)
 	}
 
@@ -620,7 +620,7 @@ func TestFileListIDs(t *testing.T) {
 	if body["has_more"] != false {
 		t.Errorf("bulk ids has_more = %v, want false", body["has_more"])
 	}
-	if np := nextPage(t, body); np != "" {
+	if np := nextPageOrNull(t, body); np != "" {
 		t.Errorf("bulk ids next_page = %q, want null", np)
 	}
 
@@ -628,7 +628,7 @@ func TestFileListIDs(t *testing.T) {
 	// name in the same breath ("not combinable with `page` or `ids[]`"). The
 	// page arm needs a real cursor, or it would fail on the decode instead.
 	_, first := s.do("GET", "/v1/files?limit=2", nil)
-	cursor := nextPage(t, first)
+	cursor := nextPageOrNull(t, first)
 	if cursor == "" {
 		t.Fatalf("expected a cursor from a limit=2 page over 6 files: %v", first)
 	}
@@ -694,7 +694,7 @@ func TestFileListNextPageCursor(t *testing.T) {
 		for _, d := range data {
 			walked = append(walked, d["id"])
 		}
-		cur := nextPage(t, body)
+		cur := nextPageOrNull(t, body)
 		// has_more and next_page answer the same question and must agree: the
 		// bug this test pins is a page that says "more rows" and hands back a
 		// null cursor (#544).
@@ -717,7 +717,7 @@ func TestFileListNextPageCursor(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("limit=4: %d %v", status, body)
 	}
-	status, body = s.do("GET", "/v1/files?limit=1&page="+nextPage(t, body), nil)
+	status, body = s.do("GET", "/v1/files?limit=1&page="+nextPageOrNull(t, body), nil)
 	if status != http.StatusOK {
 		t.Fatalf("replay: %d %v", status, body)
 	}
@@ -754,7 +754,7 @@ func TestFileListBeforeIDCursor(t *testing.T) {
 	if body["has_more"] != false {
 		t.Errorf("before page has_more = %v, want false", body["has_more"])
 	}
-	cur := nextPage(t, body)
+	cur := nextPageOrNull(t, body)
 	if cur == "" {
 		t.Fatal("before page next_page is null; want the cursor row's own position")
 	}
@@ -768,7 +768,7 @@ func TestFileListBeforeIDCursor(t *testing.T) {
 	if len(data) != 3 || data[0]["id"] != ids[2] || data[2]["id"] != ids[0] {
 		t.Fatalf("continuation = %v, want [%s %s %s]", pageIDs(data), ids[2], ids[1], ids[0])
 	}
-	if np := nextPage(t, body); np != "" {
+	if np := nextPageOrNull(t, body); np != "" {
 		t.Errorf("continuation next_page = %q, want null at the end of the list", np)
 	}
 
@@ -784,7 +784,7 @@ func TestFileListBeforeIDCursor(t *testing.T) {
 	if body["has_more"] != true {
 		t.Errorf("before page 2 has_more = %v, want true", body["has_more"])
 	}
-	status, body = s.do("GET", "/v1/files?limit=1&page="+nextPage(t, body), nil)
+	status, body = s.do("GET", "/v1/files?limit=1&page="+nextPageOrNull(t, body), nil)
 	if status != http.StatusOK {
 		t.Fatalf("continuation 2: %d %v", status, body)
 	}
@@ -803,7 +803,7 @@ func TestFileListBeforeIDCursor(t *testing.T) {
 	if data := listData(t, body); len(data) != 0 {
 		t.Errorf("empty before page = %v, want none", pageIDs(data))
 	}
-	if np := nextPage(t, body); np != "" {
+	if np := nextPageOrNull(t, body); np != "" {
 		t.Errorf("empty before page next_page = %q, want null", np)
 	}
 }

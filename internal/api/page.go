@@ -13,8 +13,9 @@ import (
 )
 
 // The managed-agents lists paginate with an opaque cursor: the response
-// carries {"data":[…],"next_page":<cursor|null>} (sessions additionally carry
-// "prev_page"), and clients pass the cursor back as ?page=…. Cursors are
+// carries {"data":[…],"next_page":<cursor>} (sessions additionally carry
+// "prev_page"; a last page omits next_page or sends it null, by route — see
+// pageJSON), and clients pass the cursor back as ?page=…. Cursors are
 // keyset positions — (created_at, id) for resource lists, the version number
 // for agent-version lists — so concurrent inserts and deletes never duplicate
 // or skip rows the way row offsets would.
@@ -328,18 +329,31 @@ func parseTimeParam(q url.Values, key string) (*time.Time, error) {
 	return &t, nil
 }
 
-// pageJSON is the unidirectional list envelope (agents, environments,
-// agent versions).
+// pageJSON is the unidirectional list envelope. It omits next_page on a
+// terminal page, as the reference does on most lists — recorded on the memory
+// store, memory, memory version and session event lists, inferred on the rest
+// (#676). The lists the reference answers with an explicit null use
+// nullPageJSON instead.
 type pageJSON struct {
+	Data     []any   `json:"data"`
+	NextPage *string `json:"next_page,omitempty"`
+}
+
+// nullPageJSON is pageJSON for the lists recorded sending "next_page": null on
+// a terminal page: skills, skill versions, environments and an environment's
+// work (#676). The files list carries the same null in filePageJSON.
+type nullPageJSON struct {
 	Data     []any   `json:"data"`
 	NextPage *string `json:"next_page"`
 }
 
-// biPageJSON is the bidirectional list envelope (sessions).
+// biPageJSON is the bidirectional list envelope (sessions). Like pageJSON it
+// omits a cursor it does not have: the reference's sessions list omits
+// next_page on a terminal page and was never recorded sending prev_page.
 type biPageJSON struct {
 	Data     []any   `json:"data"`
-	NextPage *string `json:"next_page"`
-	PrevPage *string `json:"prev_page"`
+	NextPage *string `json:"next_page,omitempty"`
+	PrevPage *string `json:"prev_page,omitempty"`
 }
 
 // filePageJSON is the Files API list envelope — {data, next_page, has_more,

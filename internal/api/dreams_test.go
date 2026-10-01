@@ -549,7 +549,7 @@ func TestDreamListPaging(t *testing.T) {
 		t.Fatalf("second page holds %d rows, want 1", len(page2))
 	}
 	if c := nextPage(t, second); c != "" {
-		t.Errorf("next_page = %q at the end of the list, want null", c)
+		t.Errorf("next_page = %q at the end of the list, want none", c)
 	}
 
 	// Every row once, newest first, ids descending within a tie.

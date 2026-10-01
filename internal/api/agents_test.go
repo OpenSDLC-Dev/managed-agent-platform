@@ -556,7 +556,7 @@ func TestAgentVersionsSnapshotHistory(t *testing.T) {
 		t.Errorf("versions page 2 = %v, want just version 1", entries)
 	}
 	if got := nextPage(t, page2); got != "" {
-		t.Errorf("versions final page next_page = %q, want null", got)
+		t.Errorf("versions final page next_page = %q, want none", got)
 	}
 }
 
@@ -595,7 +595,7 @@ func TestAgentListPagination(t *testing.T) {
 		t.Errorf("page 2 = %v", d2)
 	}
 	if got := nextPage(t, page2); got != "" {
-		t.Errorf("next_page on final page = %q, want null", got)
+		t.Errorf("next_page on final page = %q, want none", got)
 	}
 
 	// Limit bounds: 0 and 101 are invalid; a bogus cursor is invalid.

@@ -559,12 +559,10 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	// The whole list, in one page, at the published maximum limit — 1000 is
 	// legal here where the shared cap would 400 it (§2.6).
 	full := listRuns(t, s, "limit=1000")
-	wantFields(t, full, "data", "next_page")
+	wantFields(t, full, "data")
+	wantNoFields(t, full, "next_page")
 	if got := runIDs(t, full); !slices.Equal(got, expected) {
 		t.Errorf("list order = %v, want %v", got, expected)
-	}
-	if full["next_page"] != nil {
-		t.Errorf("next_page = %v on a complete page, want null", full["next_page"])
 	}
 
 	// The scheduled run renders its occurrence in the list, not just the get.

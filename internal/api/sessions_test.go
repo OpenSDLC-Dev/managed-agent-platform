@@ -661,9 +661,7 @@ func TestSessionListFiltersAndBidirectionalPagination(t *testing.T) {
 	if len(d1) != 2 || d1[0]["id"] != ids[2] || d1[1]["id"] != ids[1] {
 		t.Errorf("page 1 = %v, want newest first", d1)
 	}
-	if v, ok := page1["prev_page"]; !ok || v != nil {
-		t.Errorf("page 1 prev_page = %v (present %v), want null", v, ok)
-	}
+	wantNoFields(t, page1, "prev_page")
 	status, page2 := s.do(http.MethodGet, "/v1/sessions?agent_id="+agentID+"&limit=2&page="+nextPage(t, page1), nil)
 	if status != http.StatusOK {
 		t.Fatalf("page 2: %d", status)
@@ -688,9 +686,7 @@ func TestSessionListFiltersAndBidirectionalPagination(t *testing.T) {
 	}
 	// Walking backwards from page 2 there is nothing before page 1, and the
 	// forward cursor must lead back to page 2.
-	if v, ok := back["prev_page"]; !ok || v != nil {
-		t.Errorf("prev_page of first page = %v (present %v), want null", v, ok)
-	}
+	wantNoFields(t, back, "prev_page")
 	next2, _ := back["next_page"].(string)
 	if next2 == "" {
 		t.Fatalf("next_page after backwards walk missing: %v", back)
