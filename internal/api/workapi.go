@@ -385,18 +385,61 @@ func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error)
 }
 
 // mapWorkErr maps a queue state-machine error onto its wire status: a missing
-// item is 404, a heartbeat precondition failure is 412. Anything else is an
-// internal fault.
+// item is 404, a heartbeat precondition failure is 412, carrying the details
+// the reference's 412 does (2026-09-02 batch2 `work.heartbeat.NO_HEARTBEAT`,
+// `work.heartbeat.wrong-expected`; #664). Anything else is an internal fault.
 func mapWorkErr(err error) error {
+	var mismatch *queue.HeartbeatMismatchError
 	switch {
 	case errors.Is(err, queue.ErrWorkNotFound):
 		return errNotFound("work item not found")
+	case errors.As(err, &mismatch):
+		return withDetails(&apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
+			"expected_last_heartbeat does not match the current lease"},
+			errorDetails{
+				CurrentState:    refusedBeatState(mismatch),
+				ErrorVisibility: visibilityUserFacing,
+				ErrorCode:       "heartbeat_precondition_failed",
+			})
 	case errors.Is(err, queue.ErrHeartbeatMismatch):
+		// The sentinel without the item the queue's refusals carry: still the
+		// 412, with nothing to report as current_state.
 		return &apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
 			"expected_last_heartbeat does not match the current lease"}
 	default:
 		return err
 	}
+}
+
+// refusedBeatStateWire is a 412's details.current_state: the heartbeat
+// response's members less its type, in the order the reference lists them,
+// plus lease_updated_at. Its ttl_seconds is the refused beat's own, as every
+// beat here that extends nothing reports it. Once a beat has claimed the item,
+// lease_updated_at is its started_at: the only recorded value equals it to the
+// microsecond, and the reference's started_at, like ours, stamps the item's
+// entry to the queue. Until one has — never claimed, or re-queued, which
+// clears last_heartbeat — both timestamps are null, as in the pinned SDK's own
+// fixture for such a 412 (checked against anthropic-sdk-go v1.70.1 —
+// lib/environments/worker_test.go leaseLostBody).
+type refusedBeatStateWire struct {
+	LeaseExtended  bool       `json:"lease_extended"`
+	State          string     `json:"state"`
+	LastHeartbeat  *time.Time `json:"last_heartbeat"`
+	TTLSeconds     int64      `json:"ttl_seconds"`
+	LeaseUpdatedAt *time.Time `json:"lease_updated_at"`
+}
+
+func refusedBeatState(m *queue.HeartbeatMismatchError) refusedBeatStateWire {
+	out := refusedBeatStateWire{
+		LeaseExtended: false,
+		State:         m.Item.State,
+		LastHeartbeat: utcPtr(m.Item.LastHeartbeat),
+		TTLSeconds:    m.TTLSeconds,
+	}
+	if out.LastHeartbeat != nil {
+		out.LeaseUpdatedAt = utcPtr(m.Item.StartedAt)
+	}
+	return out
 }
 
 // getWork returns one work item (GET .../work/{work_id}).

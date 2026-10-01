@@ -166,12 +166,12 @@ func (id ID) Valid() bool {
 	return ok && knownPrefixes[prefix] && validToken(token)
 }
 
-// ValidWithPrefix is Valid for an identifier this platform mints but never puts
-// on the /v1 wire — envkey_ and its kin, which stay out of knownPrefixes so that
-// admitting one cannot widen the id shape every wire path accepts. It answers
-// the same question against a prefix the caller names: the exact shape NewID
-// emits. Callers off the wire use it to reject a malformed id before it binds
-// into a query, which is the whole reason Valid exists.
+// ValidWithPrefix is Valid narrowed to one prefix the caller names, whether or
+// not knownPrefixes holds it: the exact shape NewID emits for that prefix. Its
+// one caller holds an inbound session_thread_id to a thread's sthr_ shape
+// (internal/events/inbound.go threadClaim). The console's envkey_ and apikey_
+// ids no longer use it: the reference's own ids are not in this alphabet, so
+// the console checks their prefix and storable bytes instead (#664).
 func ValidWithPrefix(id, prefix string) bool {
 	p, token, ok := strings.Cut(id, "_")
 	return ok && p == prefix && validToken(token)

@@ -667,6 +667,76 @@ func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 	wantErr(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error")
 }
 
+// TestWorkHeartbeatRefusalReportsTheItem pins the 412's details as recorded
+// for a second claim and a wrong echo on active work (2026-09-02 batch2
+// `work.heartbeat.NO_HEARTBEAT`, `work.heartbeat.wrong-expected`; #664):
+// current_state is the item as the refused beat found it — the heartbeat
+// response's members less its type, never extended, plus lease_updated_at,
+// which the recording shows equal to the item's started_at once a beat has
+// claimed it.
+func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
+	s := newTestServer(t)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-hb-412")
+	workID := s.enqueueAndPoll(t, envID, sessionID, key)
+	item := "/v1/environments/" + envID + "/work/" + workID
+	_, polled, _ := s.workReq(t, http.MethodGet, item, key, nil)
+	startedAt, _ := polled["started_at"].(string)
+	if startedAt == "" {
+		t.Fatalf("polled item has no started_at: %v", polled)
+	}
+	refused := func(t *testing.T, query string, want map[string]any) {
+		t.Helper()
+		res, body, raw := s.workReq(t, http.MethodPost, item+"/heartbeat?"+query, key, nil)
+		wantErr(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error")
+		wantDetails(t, body, map[string]any{
+			"current_state":    want,
+			"error_visibility": "user_facing",
+			"error_code":       "heartbeat_precondition_failed",
+		})
+		// The message is ours and stays so until #540 settles message parity.
+		if !strings.Contains(raw, `"message":"expected_last_heartbeat does not match the current lease"`) {
+			t.Errorf("412 body %s, want the message unchanged", raw)
+		}
+	}
+
+	// A claim before the ack, on work no beat has reached. No recording holds a
+	// 412 on such an item; the pinned SDK's own fixture for one renders both
+	// last_heartbeat and lease_updated_at null (checked against anthropic-sdk-go
+	// v1.70.1 — lib/environments/worker_test.go leaseLostBody).
+	refused(t, "expected_last_heartbeat=NO_HEARTBEAT", map[string]any{
+		"lease_extended": false, "state": "queued", "last_heartbeat": nil,
+		"ttl_seconds": float64(30), "lease_updated_at": nil,
+	})
+
+	if res, _, raw := s.workReq(t, http.MethodPost, item+"/ack", key, nil); res.StatusCode != http.StatusOK {
+		t.Fatalf("ack status = %d (body %q)", res.StatusCode, raw)
+	}
+	res, claim, raw := s.workReq(t, http.MethodPost, item+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", key, nil)
+	last, _ := claim["last_heartbeat"].(string)
+	if res.StatusCode != http.StatusOK || last == "" {
+		t.Fatalf("claim = %d (body %q), want 200 with a last_heartbeat", res.StatusCode, raw)
+	}
+	active := func(ttl float64) map[string]any {
+		return map[string]any{
+			"lease_extended": false, "state": "active", "last_heartbeat": last,
+			"ttl_seconds": ttl, "lease_updated_at": startedAt,
+		}
+	}
+	for name, tc := range map[string]struct {
+		query string
+		ttl   float64
+	}{
+		"a second claim":   {"expected_last_heartbeat=NO_HEARTBEAT", 30},
+		"a wrong echo":     {"expected_last_heartbeat=2020-01-01T00:00:00Z", 30},
+		"a malformed echo": {"expected_last_heartbeat=not-a-timestamp", 30},
+		// ttl_seconds is the refused beat's effective TTL, as every beat here
+		// that extends nothing reports it (docs/DIVERGENCES.md).
+		"a TTL of its own": {"expected_last_heartbeat=NO_HEARTBEAT&desired_ttl_seconds=120", 120},
+	} {
+		t.Run(name, func(t *testing.T) { refused(t, tc.query, active(tc.ttl)) })
+	}
+}
+
 // TestWorkStopAnswersTheWorkObject pins POST .../work/{work_id}/stop: success
 // is 200 with the BetaSelfHostedWork after the transition, rendered exactly as
 // GET .../work/{work_id} renders it — the recorded service's answer to all 27

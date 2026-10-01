@@ -626,8 +626,9 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if !downloadable {
-		writeError(w, r, errInvalid(
-			"file %s is not downloadable; only files created by skills or the code execution tool can be downloaded", id))
+		writeError(w, r, withDetails(errInvalid(
+			"file %s is not downloadable; only files created by skills or the code execution tool can be downloaded", id),
+			errorDetails{ErrorCode: "file_not_downloadable"}))
 		return
 	}
 	rc, size, err := s.blobs.Get(ctx, blob.FilesKey(id))
