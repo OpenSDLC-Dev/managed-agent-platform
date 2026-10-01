@@ -41,8 +41,8 @@ import (
 // a run, cut at every punctuation mark, is quadratic. urlMatcher reads an
 // occurrence's authority a fixed number of ways and what follows only within
 // the window a match can fit in, goes no further for another host, and charges
-// every byte it scans or parses to readingBudget: a lookup past it refuses the
-// fetch rather than stall the executor. What people wrote is read first, then
+// what it scans and parses to readingBudget: a lookup past it refuses the fetch
+// rather than stall the executor. What people wrote is read first, then
 // the newest results, so a page that spends the budget costs the URLs given
 // before it last.
 
@@ -50,10 +50,11 @@ import (
 // reading is read in, and no browser or reader takes a longer one.
 const maxFetchURL = 8 << 10
 
-// readingBudget is the most bytes of URL one lookup parses. A session past it
-// — in practice a page built to exhaust it — refuses the fetch. Counted in
-// bytes, not parses, because a parse costs its length and a request may be
-// long.
+// readingBudget is the most one lookup spends, in bytes parsed: a parse costs
+// its length, a scan an eighth of what it scans, and a plain tail's string
+// comparison a sixteenth of its length. A session past it — in practice a page
+// built to exhaust it — refuses the fetch. Counted in bytes, not parses,
+// because a parse costs its length and a request may be long.
 const readingBudget = 64 << 20
 
 // errReadingBudget is a lookup that spent readingBudget before deciding.

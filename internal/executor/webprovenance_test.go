@@ -92,6 +92,10 @@ func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
 		{"See https://example.com's docs, (https://example.org), https://example.net.",
 			[]string{"https://example.com", "https://example.org", "https://example.net"}},
 		{"https://example.com/a?" + strings.Repeat("b", 2048), []string{"https://example.com/a"}},
+		// A bare host, or a query straight after it, reads with the "/" an
+		// empty path normalizes to.
+		{"https://example.com", []string{"https://example.com/"}},
+		{"https://example.com?q=1", []string{"https://example.com/?q=1"}},
 		// A URL's own punctuation followed by the sentence's, and a closing
 		// parenthesis that is the URL's own inside a link's.
 		{"see https://example.com/release!.", []string{"https://example.com/release!", "https://example.com/release"}},
@@ -190,6 +194,75 @@ func TestWebFetchRefusesWhenTheLookupWouldSpendItsBudget(t *testing.T) {
 	}
 }
 
+// The scan is charged too: a long request, whose window is wide, over text of
+// bare "https://" — nothing the matcher would parse — still spends the budget,
+// where scanning it uncharged ran for seconds.
+func TestURLMatcherChargesTheScan(t *testing.T) {
+	long := "https://docs.example.com/" + strings.Repeat("a", maxFetchURL-len("https://docs.example.com/"))
+	m, ok := newURLMatcher(long)
+	if !ok {
+		t.Fatal("matcher refused a URL at maxFetchURL")
+	}
+	m.scan(strings.Repeat("https://", 200<<10/len("https://")))
+	if m.budget > 0 {
+		t.Errorf("budget left %d after scanning 200 KiB of bare schemes in a %d-byte window, want it spent", m.budget, m.authMax+m.tailMax)
+	}
+}
+
+// appendWebResult appends a web tool call and its successful result.
+func appendWebResult(t *testing.T, h *harness, name string, input map[string]string, content any) {
+	t.Helper()
+	ctx := context.Background()
+	use, _ := json.Marshal(map[string]any{"name": name, "input": input})
+	out, err := h.log.Append(ctx, h.sid, []events.NewEvent{{Type: domain.EventAgentToolUse, Payload: use}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _ := json.Marshal(map[string]any{"tool_use_id": out[0].ID.String(), "is_error": false, "content": content})
+	if _, err := h.log.Append(ctx, h.sid, []events.NewEvent{{Type: domain.EventAgentToolResult, Payload: result}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// appendPoison appends enough fetched pages of URLs on req's host to spend a
+// lookup's budget for req on their own.
+func appendPoison(t *testing.T, h *harness, req string) {
+	t.Helper()
+	page := strings.Repeat("https://docs.example.com/日,", (100<<10)/len("https://docs.example.com/日,"))
+	m, _ := newURLMatcher(req)
+	m.scan(page)
+	for range readingBudget/(readingBudget-m.budget) + 2 {
+		appendWebResult(t, h, "web_fetch", map[string]string{"url": "https://docs.example.com/"},
+			[]map[string]string{{"type": "text", "text": page}})
+	}
+}
+
+// What people wrote is read before any web result, so pages that spend the
+// budget cannot cost a URL a person gave, whenever they arrived.
+func TestWebFetchReadsWhatPeopleWroteFirst(t *testing.T) {
+	h := webHarness(t, "", "")
+	req := "https://docs.example.com/b"
+	h.userSays(t, "Please read https://docs.example.com/b carefully.")
+	appendPoison(t, h, req)
+	if got := fetchedAs(t, h, req); got != req {
+		t.Errorf("a URL the user gave before budget-spending pages fetched %q, want %q", got, req)
+	}
+}
+
+// Among web results the newest is read first, so a fresh search hit is found
+// before older pages that would spend the budget.
+func TestWebFetchReadsNewerResultsFirst(t *testing.T) {
+	h := webHarness(t, "", "")
+	req := "https://docs.example.com/b"
+	appendPoison(t, h, req)
+	appendWebResult(t, h, "web_search", map[string]string{"query": "docs"}, []map[string]any{{
+		"type": "search_result", "source": req, "title": "B",
+		"content": []map[string]string{{"type": "text", "text": "b"}}}})
+	if got := fetchedAs(t, h, req); got != req {
+		t.Errorf("a newer search hit behind older budget-spending pages fetched %q, want %q", got, req)
+	}
+}
+
 // fetchedAs runs one web_fetch of url against the harness's session and
 // returns the URL the fetcher was handed, or "" when nothing was fetched.
 func fetchedAs(t *testing.T, h *harness, url string) string {
@@ -214,8 +287,9 @@ func TestWebFetchFetchesTheGivenSpellingNotTheModels(t *testing.T) {
 	// A full-width letter folds to its ASCII form, so the payload never holds
 	// the request's ASCII host and the prefilter must not drop it.
 	h.userSays(t, "And https://ｅxample.org/path.")
-	// A sentence's colon after a bare host is not sent as an empty port.
-	h.userSays(t, "See https://colon.example: it is.")
+	// A sentence's colon after a bare host is not sent as an empty port,
+	// even where another character follows it.
+	h.userSays(t, "See https://colon.example: it is. (https://paren.example:)")
 
 	for _, tc := range []struct{ request, fetched string }{
 		{"https://docs.example.com/guide#d=secret", "https://docs.example.com/guide"},
@@ -225,6 +299,7 @@ func TestWebFetchFetchesTheGivenSpellingNotTheModels(t *testing.T) {
 		{"https://Ünicode.example/page", "https://Ünicode.example/page"},
 		{"https://example.org/path", "https://ｅxample.org/path"},
 		{"https://colon.example/", "https://colon.example"},
+		{"https://paren.example/", "https://paren.example"},
 	} {
 		if got := fetchedAs(t, h, tc.request); got != tc.fetched {
 			t.Errorf("request %s fetched %q, want the given %q", tc.request, got, tc.fetched)
