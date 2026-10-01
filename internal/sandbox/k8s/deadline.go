@@ -6,10 +6,10 @@ import "time"
 // the way the docker backend's does — but adapted to Kubernetes, which (unlike
 // Docker's exec-inspect) exposes no out-of-band handle on a running exec. So the
 // command runs as a background child rather than via `exec`, and the wrapper
-// records the three things the provider needs to judge the deadline from
-// outside: the command's pid ($3.pid), its exit code once it finishes ($3.exit),
-// and — written by the watchdog, not the wrapper — whether the deadline's own
-// kill was what ended it ($3.killed).
+// records the four things the provider needs to judge the deadline from
+// outside: the command's pid ($3.pid), its exit code once it finishes and how
+// long it ran ($3.exit), and — written by the watchdog, not the wrapper — whether
+// the deadline's own kill was what ended it ($3.killed).
 //
 // $1 is the command, $2 the timeout in whole seconds ("0" = no limit), $3 the
 // state-file base path (unique per exec).
@@ -64,8 +64,19 @@ import "time"
 // exec's stderr open, so the stream EOFs the moment the command finishes — a
 // watchdog still asleep in `sleep 1` must not pin it open and delay every timed
 // command's return by up to a poll interval.
+//
+// How long the command ran rides on the exit line, after the code, as two
+// readings of /proc/uptime: one taken before the command is launched, one after
+// it is reaped. It is the witness to an overrun that the probe answered too late
+// to see (#832); Exec weighs it. /proc/uptime because every pod has it — it is
+// the kernel's, not the image's, and its clock does not step the way the wall
+// clock can — and `read` because it is a builtin, so taking a reading forks
+// nothing, and a regular one, so a missing file cannot abort the wrapper even
+// under a POSIX-mode bash: it only leaves the reading empty, and the exit line
+// then carries no record, which Exec reads as no evidence either way.
 const execWrapper = `
 exec 3>&2 2>/dev/null
+read -r t0 _ </proc/uptime
 setsid /bin/bash -c "$1" 2>&3 3>&- &
 cmd=$!
 echo "$cmd" > "$3.pid"
@@ -84,7 +95,9 @@ if [ "$2" != "0" ]; then
   ) >/dev/null 2>&1 3>&- &
 fi
 wait "$cmd"
-echo "$?" > "$3.exit"
+c=$?
+read -r t1 _ </proc/uptime
+echo "$c $t0 $t1" > "$3.exit"
 `
 
 // aliveScript answers whether the command pid recorded in $1.pid is still alive.
@@ -106,13 +119,13 @@ p=$(cat "$1.pid" 2>/dev/null)
 if [ -z "$p" ] || kill -0 "$p" 2>/dev/null; then echo A; else echo D; fi
 `
 
-// exitScript collects both halves of the answer in one exec and takes the whole
-// exec's state with it: the watchdog's mark if it fired, then the exit code the
-// wrapper recorded (nothing, if the command never finished or the wrapper was
-// killed before it could write one). The read happens once the probes are done
-// (Exec has the verdict before it calls this), so the cleanup cannot race a
-// probe, and it keeps /tmp from accumulating three entries per command over a
-// session's thousands of execs.
+// exitScript collects the rest of the answer in one exec and takes the whole
+// exec's state with it: the watchdog's mark if it fired, then the line the
+// wrapper recorded — the exit code and how long the command ran — or nothing, if
+// the command never finished or the wrapper was killed before it could write
+// one. The read happens once the probes are done (Exec has the verdict before it
+// calls this), so the cleanup cannot race a probe, and it keeps /tmp from
+// accumulating three entries per command over a session's thousands of execs.
 //
 // The mark is printed *first* because it is the more load-bearing of the two and
 // this stream is unframed: client-go stops copying stdout at its first error, so
@@ -121,7 +134,11 @@ if [ -z "$p" ] || kill -0 "$p" 2>/dev/null; then echo A; else echo D; fi
 // the mark instead would put a real timeout back on the probe race #95 was filed
 // for. Reading the mark here rather than in the wrapper is what lets it survive
 // the wrapper's own sabotage: a command that kills its parent before the exit
-// code is recorded leaves the mark, and the timeout still shows.
+// code is recorded leaves the mark, and the timeout still shows. The run time
+// rides last because it is the cheapest to lose: the probe still stands without
+// it, and a reading the loss cuts short only ever shortens the record — a prefix
+// of a number is never a larger one — so it can never lengthen a command into a
+// timeout.
 //
 // `rm -rf` on the mark, because the tenant chooses what type of thing sits at
 // that path; `rm -f` would leave a directory or a planted FIFO behind forever.
@@ -148,7 +165,9 @@ const (
 	defaultKillGrace = 2 * time.Second
 	// defaultOverrunSlop is how much of the measured time Exec charges to itself
 	// rather than the command: the API round trips and the poll interval blur the
-	// moment a command exited. It must stay under killGrace.
+	// moment a command exited. It must stay under killGrace. The wrapper's record
+	// of how long the command ran is held to the same slop, though it has no
+	// round trip to absorb, so that it and the probe answer one question.
 	defaultOverrunSlop = 500 * time.Millisecond
 	// defaultProbeLead is how far before the deadline Exec asks whether the
 	// command is still alive — before, not at, since a command the watchdog has

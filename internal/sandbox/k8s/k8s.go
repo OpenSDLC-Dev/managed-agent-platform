@@ -1126,7 +1126,9 @@ func (pd *pod) execErr(ctx context.Context, err error) error {
 // defend, and the second only mislabels the tenant's own tool call. The honest
 // runaway the deadline exists for forges nothing: its real pid stays in the
 // file, and killing its watchdog alone buys only overrunSlop of unnoticed
-// overrun before the probe catches it.
+// overrun — caught by the probe while it runs, or by the wrapper's record of how
+// long it ran once it has exited, which is what still sees an exit the probe's
+// round trip was too slow for (#832).
 //
 // The command runs in a background goroutine because it may block: a straggler
 // the command backgrounds inherits the exec's stdout and holds the stream open
@@ -1213,9 +1215,25 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 		return sandbox.ExecResult{}, pd.execErr(ctx, streamErr)
 	}
 
-	code, watchdogFired, err := pd.readExit(ctx, state)
+	code, watchdogFired, ran, err := pd.readExit(ctx, state)
 	if err != nil {
 		return sandbox.ExecResult{}, pd.execErr(ctx, err)
+	}
+
+	// The overrun probe's question — was the command still there at the
+	// deadline plus the slop? — answered from the pod's side. The probe is an
+	// in-pod exec, so its answer describes the pod an apiserver round trip after
+	// it was asked, and on a loaded cluster a command that overran and exited
+	// inside that round trip read as gone (#832). The wrapper's record has no round
+	// trip in it: its clock starts after Exec's, which only shortens what it
+	// measures, and stops when the command is reaped, which is when `kill -0`
+	// stops finding it too. So it can only ever add an overrun the probe would
+	// have seen had it answered at once — never one it would not — and it is
+	// in-pod state for the same reason the mark may be (see classifyTimeout): a
+	// tenant that forges it mislabels its own call, and one that erases it is back
+	// to the probe alone.
+	if seconds > 0 && ran > deadline+pd.overrunSlop {
+		v.overran = true
 	}
 
 	timedOut := classifyTimeout(seconds > 0, code, watchdogFired, v)
@@ -1276,34 +1294,56 @@ func classifyTimeout(deadlined bool, code int, watchdogFired bool, v verdict) bo
 }
 
 // readExit reads the line the wrapper recorded once the command finished, and
-// reports the exit code and whether the watchdog marked itself the killer.
-func (pd *pod) readExit(ctx context.Context, state string) (int, bool, error) {
+// reports the exit code, whether the watchdog marked itself the killer, and how
+// long the command ran (0 when the line carries no record of it).
+func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Duration, error) {
 	out, _, err := pd.client.execOutput(ctx, pd.name, containerName,
 		[]string{"/bin/bash", "-c", exitScript, "map-exit", state})
 	if err != nil {
-		return 0, false, err
+		return 0, false, 0, err
 	}
 	return parseExit(out)
 }
 
 // parseExit reads exitScript's output: killedMark if the watchdog fired, then
-// the exit code. No code means the wrapper was killed before it could record one
-// (its own $PPID sabotage) — the command left no honest code, so it reads as the
+// the exit code, then the two /proc/uptime readings the wrapper took around the
+// command. No code means the wrapper was killed before it could record one (its
+// own $PPID sabotage) — the command left no honest code, so it reads as the
 // kill's, and the mark, which the watchdog left independently, still says whose.
-func parseExit(out string) (int, bool, error) {
+//
+// The readings are evidence that only ever adds a timeout, so anything short of
+// two that parse, in order, is no record (0) rather than an error: a pod whose
+// /proc/uptime would not read, a stream that lost its tail, and a tenant who
+// rewrote the line all leave the decision to the probe, where it stood before
+// the record existed.
+func parseExit(out string) (int, bool, time.Duration, error) {
 	fields := strings.Fields(out)
 	watchdogFired := len(fields) > 0 && fields[0] == killedMark
 	if watchdogFired {
 		fields = fields[1:]
 	}
 	if len(fields) == 0 {
-		return sigkillExit, watchdogFired, nil
+		return sigkillExit, watchdogFired, 0, nil
 	}
 	code, err := strconv.Atoi(fields[0])
 	if err != nil {
-		return 0, false, fmt.Errorf("k8s: unparseable exit code %q: %w", fields[0], err)
+		return 0, false, 0, fmt.Errorf("k8s: unparseable exit code %q: %w", fields[0], err)
 	}
-	return code, watchdogFired, nil
+	return code, watchdogFired, ranFor(fields[1:]), nil
+}
+
+// ranFor is how long the command ran by the two /proc/uptime readings — decimal
+// seconds — the wrapper took around it, or 0 when they do not make a record.
+func ranFor(readings []string) time.Duration {
+	if len(readings) != 2 {
+		return 0
+	}
+	t0, err0 := time.ParseDuration(readings[0] + "s")
+	t1, err1 := time.ParseDuration(readings[1] + "s")
+	if err0 != nil || err1 != nil || t0 < 0 || t1 < t0 {
+		return 0
+	}
+	return t1 - t0
 }
 
 // nonce is a per-exec random token: the suffix for the wrapper's state files, so

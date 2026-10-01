@@ -19,7 +19,9 @@ type verdict struct {
 	// follows is the watchdog's and not the command's own.
 	aliveAtDeadline bool
 	// overran: still running once the deadline and the measurement slop had both
-	// passed, so no exit code it later reports can be believed.
+	// passed, so no exit code it later reports can be believed. Exec also sets it
+	// from the wrapper's record of how long the command ran, the same question
+	// answered without the probe's round trip (#832).
 	overran bool
 }
 

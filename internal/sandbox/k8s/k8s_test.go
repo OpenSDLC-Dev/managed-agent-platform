@@ -367,3 +367,51 @@ func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 			pairs, median, costs)
 	}
 }
+
+// A command that disarms its watchdog, overruns its deadline and then exits
+// clean is a timeout — the shared contract's "overrunning its deadline then
+// exiting clean" row. The overrun probe alone cannot be relied on to see it: the
+// probe is an in-pod exec, so it looks at the pod an apiserver round trip after
+// Exec asked, and on a loaded cluster a command that exited inside that round
+// trip read as finished on time (#832). What still sees the overrun is the
+// wrapper's own record of how long the command ran.
+//
+// No cluster can be told to answer a probe late, so this row blinds the probe
+// instead, which is the same thing as far as the probe can tell: with its
+// watchdog gone, the command points the pid file — all the probe reads — at a
+// process that has already exited. It waits for the watchdog to exist before
+// killing it, so the watchdog cannot outlive the sabotage and kill the command on
+// its deadline, which would make the timeout the watchdog's mark rather than the
+// record's; and Exec is given a kill grace no cluster's latency approaches, so the
+// command exits before Exec gives up on it, and the row stays on the path it
+// pins. The exit code, the command's own 0, is asserted as proof of both.
+func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
+	sb := liveSandbox(t)
+	k8s.SetKillGraceForTest(sb, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const blindTheProbe = `
+	  state=$(tr '\0' '\n' < /proc/$PPID/cmdline | tail -n 1)
+	  w=
+	  while [ -z "$w" ]; do
+	    for p in $(cat /proc/$PPID/task/$PPID/children); do [ "$p" != "$$" ] && w=$p; done
+	  done
+	  kill -9 "$w"
+	  true & gone=$!
+	  wait "$gone"
+	  echo "$gone" > "$state.pid"
+	  sleep 2
+	`
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: blindTheProbe, Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit = %d, want the command's own 0 — it was killed or given up on, so this row proved nothing: %+v",
+			res.ExitCode, res)
+	}
+	if !res.TimedOut {
+		t.Errorf("a command that ran 2s against a 1s deadline and exited where the probe could not see it was not a timeout: %+v", res)
+	}
+}
