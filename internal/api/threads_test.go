@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -71,8 +72,10 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 		th["parent_thread_id"] != nil || th["status"] != "idle" || th["archived_at"] != nil {
 		t.Errorf("primary thread = %v", th)
 	}
-	if st, _ := th["stats"].(map[string]any); st["active_seconds"] != float64(0) || st["startup_seconds"] != float64(0) {
-		t.Errorf("stats = %v, want the empty shape", th["stats"])
+	// A thread that has never moved has nothing to report yet
+	// (TestThreadStatsAndUsageAreNullUntilTheFirstTransition).
+	if th["stats"] != nil || th["usage"] != nil {
+		t.Errorf("stats = %v, usage = %v on a fresh primary, want both null", th["stats"], th["usage"])
 	}
 	// The agent is the session's resolved agent minus the roster — the
 	// SessionThreadAgent shape, tools materialized.
@@ -121,6 +124,98 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 	cagent, _ := listThreads(t, s, csid)[0]["agent"].(map[string]any)
 	if _, ok := cagent["multiagent"]; ok || cagent["name"] != "coordinator" {
 		t.Errorf("coordinator primary agent = %v, want no multiagent key", cagent)
+	}
+}
+
+// firstTransition reads a thread's first_transition_at marker (migration 0045).
+func firstTransition(t *testing.T, s *tserver, tid string) *time.Time {
+	t.Helper()
+	var at *time.Time
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT first_transition_at FROM session_threads WHERE id = $1`, tid).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at
+}
+
+// threadStatsKeys are the three keys the recorded reference renders in a
+// thread's stats once it has moved (2026-09-02 batch2.json, sessK.threads.list).
+var threadStatsKeys = []string{"active_seconds", "duration_seconds", "startup_seconds"}
+
+// A thread's stats and usage are null until its first status transition, and
+// objects from then on (#674): both keys present on a fresh thread, both null,
+// as the reference renders a never-run primary (2026-09-02 batch2.json,
+// session.threads.list.fresh and session.threads.get.primary). The SDK's spec
+// keeps usage null until the first *idle* transition; every recording shows
+// the two fields null or present together, a running child's usage included,
+// and this follows the recordings (docs/DIVERGENCES.md, the session threads
+// entry). The marker is set once: a later move leaves it where it was.
+func TestThreadStatsAndUsageAreNullUntilTheFirstTransition(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+	get := func() map[string]any {
+		t.Helper()
+		status, th := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/"+primary, nil)
+		if status != http.StatusOK {
+			t.Fatalf("get thread: %d %v", status, th)
+		}
+		return th
+	}
+
+	for surface, th := range map[string]map[string]any{"list": listThreads(t, s, sid)[0], "get": get()} {
+		wantFields(t, th, "stats", "usage")
+		if len(th) != 11 || th["stats"] != nil || th["usage"] != nil {
+			t.Errorf("fresh thread on %s = %v, want the 11 keys with stats and usage null", surface, th)
+		}
+	}
+	if at := firstTransition(t, s, primary); at != nil {
+		t.Fatalf("fresh thread's first_transition_at = %v, want NULL", at)
+	}
+
+	// Its first transition, idle to running: both are objects, stats exactly
+	// the reference's three keys.
+	sendEvents(t, s, sid, userMessage("go"))
+	for surface, th := range map[string]map[string]any{"list": listThreads(t, s, sid)[0], "get": get()} {
+		st, ok := th["stats"].(map[string]any)
+		if !ok || len(st) != len(threadStatsKeys) {
+			t.Errorf("stats on %s after the first transition = %v, want an object of %v", surface, th["stats"], threadStatsKeys)
+		}
+		wantFields(t, st, threadStatsKeys...)
+		if _, ok := th["usage"].(map[string]any); !ok {
+			t.Errorf("usage on %s after the first transition = %v, want an object", surface, th["usage"])
+		}
+	}
+	first := firstTransition(t, s, primary)
+	if first == nil {
+		t.Fatal("first_transition_at is NULL after the thread moved")
+	}
+
+	// Later moves, to idle and back to running, leave the marker alone.
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	sendEvents(t, s, sid, userMessage("again"))
+	if at := firstTransition(t, s, primary); at == nil || !at.Equal(*first) {
+		t.Errorf("first_transition_at = %v after later moves, want it set once at %v", at, *first)
+	}
+	if th := get(); th["status"] != "running" || th["stats"] == nil || th["usage"] == nil {
+		t.Errorf("thread after later moves = %v, want running with stats and usage objects", th)
+	}
+}
+
+// A thread born running has transitioned at birth: a session created with
+// initial_events, whose primary starts running in the create's own commit
+// (the recorded deployment run's list opens with the running pair), and a
+// spawned child (internal/brain's TestASpawnedChildIsBornTransitioned).
+func TestAThreadBornRunningRendersItsStats(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sid := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"initial_events": []any{userMessage("go")},
+	})["id"].(string)
+	th := listThreads(t, s, sid)[0]
+	if th["status"] != "running" || th["stats"] == nil || th["usage"] == nil {
+		t.Errorf("primary born running = %v, want running with stats and usage objects", th)
 	}
 }
 

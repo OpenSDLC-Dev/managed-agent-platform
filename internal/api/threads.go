@@ -21,22 +21,23 @@ import (
 // sessions.resolved_agent minus the roster, so a session update never leaves a
 // stale duplicate; child threads (slice 3) hold their spawn-time snapshot. The
 // primary's events are the session's: its list and stream serve the session
-// view; a child's serve that child's own rows. Thread stats render the empty
-// shape, the precedent session stats set (docs/DIVERGENCES.md).
+// view; a child's serve that child's own rows. Thread stats and usage render
+// null until the thread's first status transition (#674), then stats the
+// empty shape, the precedent session stats set (docs/DIVERGENCES.md).
 
 // threadJSON is BetaManagedAgentsSessionThread.
 type threadJSON struct {
-	ID             string          `json:"id"`
-	Type           string          `json:"type"` // "session_thread"
-	SessionID      string          `json:"session_id"`
-	ParentThreadID *string         `json:"parent_thread_id"`
-	Agent          threadAgentJSON `json:"agent"`
-	Status         string          `json:"status"`
-	Usage          usageJSON       `json:"usage"`
-	Stats          threadStatsJSON `json:"stats"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	ArchivedAt     *time.Time      `json:"archived_at"`
+	ID             string           `json:"id"`
+	Type           string           `json:"type"` // "session_thread"
+	SessionID      string           `json:"session_id"`
+	ParentThreadID *string          `json:"parent_thread_id"`
+	Agent          threadAgentJSON  `json:"agent"`
+	Status         string           `json:"status"`
+	Usage          *usageJSON       `json:"usage"`
+	Stats          *threadStatsJSON `json:"stats"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	ArchivedAt     *time.Time       `json:"archived_at"`
 }
 
 type threadStatsJSON struct {
@@ -55,16 +56,17 @@ type threadRow struct {
 	usageJSON            []byte
 	createdAt, updatedAt time.Time
 	archivedAt           *time.Time
+	firstTransitionAt    *time.Time // NULL until the thread first moves (migration 0045)
 	resolvedAgent        []byte
 }
 
 const threadColumns = `t.id, t.session_id, t.parent_thread_id, t.agent, t.agent_name, t.status, t.usage,
-	t.created_at, t.updated_at, t.archived_at, s.resolved_agent`
+	t.created_at, t.updated_at, t.archived_at, t.first_transition_at, s.resolved_agent`
 
 func scanThread(row pgx.Row) (threadRow, error) {
 	var r threadRow
 	err := row.Scan(&r.id, &r.sessionID, &r.parent, &r.agentJSON, &r.agentName, &r.status, &r.usageJSON,
-		&r.createdAt, &r.updatedAt, &r.archivedAt, &r.resolvedAgent)
+		&r.createdAt, &r.updatedAt, &r.archivedAt, &r.firstTransitionAt, &r.resolvedAgent)
 	return r, err
 }
 
@@ -95,15 +97,23 @@ func renderThread(r threadRow) (threadJSON, error) {
 	if agent.Tools == nil {
 		agent.Tools = []json.RawMessage{}
 	}
-	var usage usageJSON
-	if err := json.Unmarshal(r.usageJSON, &usage); err != nil {
-		return threadJSON{}, fmt.Errorf("decode stored thread usage: %w", err)
-	}
-	return threadJSON{
+	out := threadJSON{
 		ID: r.id, Type: "session_thread", SessionID: r.sessionID, ParentThreadID: r.parent,
-		Agent: agent, Status: r.status, Usage: usage, Stats: threadStatsJSON{},
+		Agent: agent, Status: r.status,
 		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),
-	}, nil
+	}
+	// Both null until the thread's first status transition. The spec holds
+	// usage back to the first idle; every recording shows the two null or
+	// present together, a running child's usage included, and this follows
+	// the recordings (docs/DIVERGENCES.md, the session threads entry).
+	if r.firstTransitionAt != nil {
+		var usage usageJSON
+		if err := json.Unmarshal(r.usageJSON, &usage); err != nil {
+			return threadJSON{}, fmt.Errorf("decode stored thread usage: %w", err)
+		}
+		out.Usage, out.Stats = &usage, &threadStatsJSON{}
+	}
+	return out, nil
 }
 
 // threadMaxLimit is the threads list's cap and default: the list param
@@ -418,8 +428,8 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 	}
 	if err := tx.QueryRow(ctx,
 		`UPDATE session_threads SET archived_at = now(), updated_at = now()
-		  WHERE id = $1 RETURNING status, archived_at, updated_at`, row.id).
-		Scan(&row.status, &row.archivedAt, &row.updatedAt); err != nil {
+		  WHERE id = $1 RETURNING status, archived_at, updated_at, first_transition_at`, row.id).
+		Scan(&row.status, &row.archivedAt, &row.updatedAt, &row.firstTransitionAt); err != nil {
 		return row, nil, err
 	}
 	switch _, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), batch, events.AppendOptions{SetStatus: moved, Then: func(ctx context.Context, tx pgx.Tx) error {
