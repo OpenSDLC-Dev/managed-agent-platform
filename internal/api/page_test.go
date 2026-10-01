@@ -2,11 +2,13 @@ package api_test
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"maps"
 	"net/http"
 	"net/url"
-	"os"
-	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -156,14 +158,7 @@ var listRoutes = map[string]listEnvelope{
 // running mux, which cannot be enumerated: every `GET /v1/…` served by a
 // list* handler must be in listRoutes, and listRoutes must name nothing else.
 func TestListRoutesAreClassified(t *testing.T) {
-	src, err := os.ReadFile("server.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	registered := map[string]bool{}
-	for _, m := range regexp.MustCompile(`HandleFunc\("GET (/v1/[^"]+)", s\.handle\([\w.]+, s\.list\w+\)\)`).FindAllSubmatch(src, -1) {
-		registered[string(m[1])] = true
-	}
+	registered := registeredLists(t, "server.go")
 	for pattern := range registered {
 		if _, ok := listRoutes[pattern]; !ok {
 			t.Errorf("list route %s has no terminal envelope in listRoutes", pattern)
@@ -174,6 +169,56 @@ func TestListRoutesAreClassified(t *testing.T) {
 			t.Errorf("listRoutes names %s, which server.go does not register as a list", pattern)
 		}
 	}
+}
+
+// registeredLists parses a file and returns the pattern of every call that
+// takes a `"GET /v1/…"` string literal and, anywhere among its arguments, a
+// function or method named list* — so a handler wrapped in noStore, roleGate or
+// any other call, or held in a variable named list*, still counts. The two
+// console lists (the environment-key and API-key listings) are left out on
+// purpose: their paths are built from constants, not literals, and they page
+// with the console's offset envelope rather than next_page.
+func registeredLists(t *testing.T, file string) map[string]bool {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		pattern := ""
+		for _, arg := range call.Args {
+			if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				if v, err := strconv.Unquote(lit.Value); err == nil && strings.HasPrefix(v, "GET /v1/") {
+					pattern = strings.TrimPrefix(v, "GET ")
+				}
+			}
+		}
+		if pattern == "" {
+			return true
+		}
+		for _, arg := range call.Args {
+			ast.Inspect(arg, func(n ast.Node) bool {
+				var name string
+				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					name = x.Sel.Name
+				case *ast.Ident:
+					name = x.Name
+				}
+				if strings.HasPrefix(name, "list") {
+					out[pattern] = true
+				}
+				return true
+			})
+		}
+		return true
+	})
+	return out
 }
 
 // TestListTerminalPageEnvelope pins next_page route by route, because the
