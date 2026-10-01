@@ -244,7 +244,8 @@ token is sealed through the same credential cipher the vaults use
 (`session_resource_credentials`). Both halves work the same way at both ends — the
 executor materializes them into the sandbox beside the skills, and the brain tells the
 model where they are: for files, the reference's one sentence pointing at
-`/mnt/session/uploads`, which lists none of them; for repositories, a
+`/mnt/session/uploads`, which lists none of them (only a legacy mount stored outside
+that directory is named, by path); for repositories, a
 "Mounted repositories" block naming each one. A resource that has gone missing costs its
 own mount and a log line, never the turn.
 

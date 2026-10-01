@@ -84,7 +84,8 @@ type Task struct {
 	// Files are uploaded to the /v1/files registry and mounted as session
 	// resources before the first turn, so the executor materializes each into
 	// the sandbox at its mount path and the brain injects the uploads pointer,
-	// which names /mnt/session/uploads and lists no file. Exercises the whole
+	// which names /mnt/session/uploads — where the API roots every fixture's
+	// mount — and lists no file. Exercises the whole
 	// file-mount chain — registry, session resource, materialization, injection.
 	Files []FileFixture
 	// Repo, when set, attaches a github_repository resource at session create —
