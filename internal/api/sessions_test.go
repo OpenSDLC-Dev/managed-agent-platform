@@ -307,6 +307,16 @@ func fixture(t *testing.T, s *tserver) (agentID, envID string) {
 	return a["id"].(string), e["id"].(string)
 }
 
+// selfHostedFixture is fixture with a self_hosted environment: the kind whose
+// key a worker holds, and so the one whose key reaches a session, a mounted
+// file or a skill (#820).
+func selfHostedFixture(t *testing.T, s *tserver) (agentID, envID string) {
+	t.Helper()
+	a := createAgent(t, s, map[string]any{"name": "task-agent", "model": "claude-opus-4-8", "system": "base system"})
+	e := createEnvironment(t, s, map[string]any{"name": "task-env", "config": map[string]any{"type": "self_hosted"}})
+	return a["id"].(string), e["id"].(string)
+}
+
 func createSession(t *testing.T, s *tserver, body map[string]any) map[string]any {
 	t.Helper()
 	status, res := s.do(http.MethodPost, "/v1/sessions", body)

@@ -16,7 +16,7 @@ import (
 // the environment mounts is answered as absent.
 func TestFileContentEnvironmentKeyLane(t *testing.T) {
 	s := newTestServer(t)
-	agentID, envID := fixture(t, s)
+	agentID, envID := selfHostedFixture(t, s)
 	wkey := issueKey(t, s.pool, envID, "files-lane")
 	bearer := map[string]string{"Authorization": "Bearer " + wkey}
 	oct := "application/octet-stream"

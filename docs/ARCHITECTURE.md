@@ -527,7 +527,11 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **Auth is scoped.** Management calls carry `x-api-key` (hashed at rest,
   rotation-by-restart); workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's
-  sessions. One event runs the other way: a `user.tool_result`, the result of a
+  sessions. A `cloud` environment's key, which the console issues as the reference
+  does, has no worker to serve and reaches nothing of its own environment either: the
+  work API refuses it its work, and its sessions and their mounted files answer it one
+  404; only the workspace-global skill reads serve it, as the reference's do (#820).
+  One event runs the other way: a `user.tool_result`, the result of a
   built-in toolset call, is admitted only under a worker's credential, and a management
   key or human posting one is refused 403 on any session (#662). The rule is that
   event's alone: management still posts `user.custom_tool_result` and

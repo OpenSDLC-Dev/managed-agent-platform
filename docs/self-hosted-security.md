@@ -855,9 +855,26 @@ What you own:
     -H "x-api-key: $MANAGEMENT_KEY"
   ```
 
-  Only a `self_hosted` environment gets a key: a cloud environment's work is run
-  by the platform's own executor, which holds no environment key, so issuing one
-  there is refused rather than handing you a credential nothing can use. **This
+  Any environment can be issued a key, a `cloud` or an archived one included, as
+  the reference issues them. A `cloud` environment's key has nothing to do: the
+  platform's own executor runs that environment's work in-process, so the work
+  API refuses the key's poll (400) and work listing (404) and answers its stats
+  with zeros, and that environment's sessions, their events and event stream,
+  and the files they mount refuse it with one 404. It still reads the skills,
+  which are workspace-global, as the reference's does. So there is no reason
+  to issue one, and the console neither offers it nor shows a `cloud`
+  environment's keys: revoking one is API-only.
+
+  ```sh
+  curl -s "$CONTROLPLANE/api/oauth/organizations/default/environments/$CLOUD_ENV/tokens" \
+    -H "x-api-key: $MANAGEMENT_KEY"
+  curl -sX POST "$CONTROLPLANE/api/oauth/organizations/default/environments/$CLOUD_ENV/tokens/$KEY_ID/revoke" \
+    -H "x-api-key: $MANAGEMENT_KEY"
+  ```
+
+  An archived `self_hosted` environment's key keeps polling and keeps its
+  session, file and skill reads, so a worker can drain what the archive left
+  queued. **This
   is a management-credential surface, not a separate permission tier** — anyone holding
   the management `x-api-key` can mint worker keys, so guard that key
   accordingly, and let the console's BFF hold it server-side rather than
@@ -1152,10 +1169,14 @@ stated this precisely.
 
 What you own:
 
-- **Who may mint one.** The three console routes are gated at the **admin** role —
-  the tier that bounds writing a secret: environment-key issuance, and vault
-  *credential* mutation and validation (a vault itself is `developer` to write and
-  `viewer` to read; only what it holds is admin-gated). Read that gate precisely: it
+- **Who may mint one.** The five console routes are gated at the **admin** role —
+  create and list at `…/workspaces/{workspace}/api_keys`, update at
+  `…/api_keys/{key_id}` (the reference's route) and at its workspace-scoped
+  alias `…/workspaces/{workspace}/api_keys/{key_id}`, and the workspace read
+  `…/workspaces/{workspace}`. Admin is the tier that bounds writing a secret:
+  environment-key issuance, and vault *credential* mutation and validation (a
+  vault itself is `developer` to write and `viewer` to read; only what it holds
+  is admin-gated). Read that gate precisely: it
   binds the *human* lane. `requireRole` applies only to identity-authenticated
   requests, so with `IDENTITY_MODE` unset or `disabled` — the default — anyone
   holding the management `x-api-key` reaches these routes, and **a management key
@@ -1180,6 +1201,7 @@ What you own:
   curl -s "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys" \
     -H "x-api-key: $MANAGEMENT_KEY"
   # disable reversibly; swap for "archived" to retire one for good
+  # (…/organizations/default/api_keys/$KEY_ID, the reference's own spelling, takes the same update)
   curl -sX POST "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys/$KEY_ID" \
     -H "x-api-key: $MANAGEMENT_KEY" -H 'content-type: application/json' \
     -d '{"status":"inactive"}'

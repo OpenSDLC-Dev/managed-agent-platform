@@ -21,6 +21,10 @@ const consoleAPIKeysPath = "/api/console/organizations/default/workspaces/defaul
 
 func consoleAPIKey(id string) string { return consoleAPIKeysPath + "/" + id }
 
+// consoleOrgAPIKey is the update route as the reference serves it, with no
+// workspace segment (2026-09-05 batch5 `rec86.keys.update.*`; #820).
+func consoleOrgAPIKey(id string) string { return "/api/console/organizations/default/api_keys/" + id }
+
 // listAPIKeys reads the listing. It goes through doRaw rather than do because
 // the response is a **bare array** — `do` decodes into a map and would hand back
 // nil, which is itself worth stating: this surface's collection shape is not the
@@ -402,8 +406,7 @@ func TestAPIKeyIssuanceRejectsBadRequests(t *testing.T) {
 		want string
 	}{
 		{"no name", map[string]any{}, "name is required"},
-		{"blank name", map[string]any{"name": "   "}, "name must be"},
-		{"name too long", map[string]any{"name": strings.Repeat("x", 129)}, "name must be"},
+		{"name too long", map[string]any{"name": strings.Repeat("x", 501)}, "at most 500 characters"},
 		{"name not a string", map[string]any{"name": 7}, "name must be a string"},
 		{"unknown field", map[string]any{"name": "n", "nope": 1}, `unknown field "nope"`},
 		{"expiry not a timestamp", map[string]any{"name": "n", "expires_at": "tomorrow"}, "RFC 3339"},
@@ -445,7 +448,7 @@ func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
 		{"null status", map[string]any{"status": nil}, "status cannot be null"},
 		{"null name", map[string]any{"name": nil}, "name cannot be null"},
 		{"unknown field", map[string]any{"status": "active", "nope": 1}, `unknown field "nope"`},
-		{"blank name", map[string]any{"name": " "}, "name must be"},
+		{"name too long", map[string]any{"name": strings.Repeat("x", 501)}, "at most 500 characters"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, obj := s.do(http.MethodPost, consoleAPIKey(id), tc.body)
@@ -592,24 +595,28 @@ func TestAPIKeyNamesNeedNotBeUnique(t *testing.T) {
 }
 
 // TestAPIKeyRoutesRejectUnknownScopesAndIDs keeps the namespace from becoming an
-// enumeration oracle: an unknown organization, an unknown workspace and an
-// unknown key id all answer 404 — the workspace's and the key's with the
-// reference's details, the organization's without, since the reference
-// answers a foreign organization with a 401 instead (#820). A malformed key id — no
-// apikey_ prefix, or bytes that cannot be stored — is the reference's 400
-// instead (2026-09-05 batch5 `rec86.keys.update.bogus-id.*`), which says only
-// that the id cannot be a key's.
+// enumeration oracle: an unknown workspace and an unknown key id answer 404
+// with the reference's details. The organization segment answers as the
+// environment-key surface's does (TestConsoleKeyRoutesRejectOtherOrganizations):
+// a foreign UUID is the reference's 401, anything else but `default` its 400.
+// A malformed key id — no apikey_ prefix, or bytes that cannot be stored — is
+// the reference's 400 (2026-09-05 batch5 `rec86.keys.update.bogus-id.*`),
+// which says only that the id cannot be a key's.
 func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 	s := newTestServer(t)
 	id := issueAPIKey(t, s, map[string]any{"name": "scoped"})["id"].(string)
 
-	for name, path := range map[string]string{
-		"unknown organization": "/api/console/organizations/other/workspaces/default/api_keys",
-		"unknown workspace":    "/api/console/organizations/default/workspaces/other/api_keys",
+	for name, tc := range map[string]struct {
+		path string
+		want int
+	}{
+		"organization not a UUID": {"/api/console/organizations/other/workspaces/default/api_keys", http.StatusBadRequest},
+		"foreign organization":    {"/api/console/organizations/" + zeroUUID + "/workspaces/default/api_keys", http.StatusUnauthorized},
+		"unknown workspace":       {"/api/console/organizations/default/workspaces/other/api_keys", http.StatusNotFound},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if status, obj := s.do(http.MethodGet, path, nil); status != http.StatusNotFound {
-				t.Errorf("status %d, want 404 (body %v)", status, obj)
+			if status, obj := s.do(http.MethodGet, tc.path, nil); status != tc.want {
+				t.Errorf("status %d, want %d (body %v)", status, tc.want, obj)
 			}
 		})
 	}
@@ -658,46 +665,71 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 		}
 	})
 
-	// The real id under the wrong scope is refused by the scope, not by the id.
-	status, _ := s.do(http.MethodPost,
-		"/api/console/organizations/other/workspaces/default/api_keys/"+id,
-		map[string]any{"status": "active"})
-	if status != http.StatusNotFound {
-		t.Errorf("a real key under an unknown organization: %d, want 404", status)
+	// The real id under the wrong scope is refused by the scope, not by the id,
+	// on both update routes.
+	for path, want := range map[string]int{
+		"/api/console/organizations/other/workspaces/default/api_keys/" + id:            http.StatusBadRequest,
+		"/api/console/organizations/" + zeroUUID + "/api_keys/" + id:                    http.StatusUnauthorized,
+		"/api/console/organizations/default/workspaces/other/api_keys/" + id:            http.StatusNotFound,
+		"/api/console/organizations/" + zeroUUID + "/workspaces/default/api_keys/" + id: http.StatusUnauthorized,
+	} {
+		if status, obj := s.do(http.MethodPost, path, map[string]any{"status": "inactive"}); status != want {
+			t.Errorf("a real key under %s: %d, want %d (body %v)", path, status, want, obj)
+		}
+	}
+	if row := rowByID(listAPIKeys(t, s), id); row == nil || row["status"] != api.KeyStatusActive {
+		t.Errorf("a refused update changed the key: %v", row)
 	}
 }
 
 // TestAPIKeyErrorsCarryTheRecordedDetails replays each recorded input on this
 // surface and pins its recorded answer, details included (2026-09-05 batch5
-// idx 7–12, batch8 idx 34; #664), on our path, which carries the workspace
-// segment the reference's update path does not (#820). An id without the
-// apikey_ prefix is a 400 whatever the body says; a well-formed id that names
-// nothing is a 404 whatever the body says, so the lookup precedes the body's
-// validation (`rec86.keys.update.wellformed-id.bad-field`).
+// idx 7–12, batch8 idx 33–34; #664), on the recorded update route, which has
+// no workspace segment, and on ours, which keeps one as an alias (#820). An id
+// without the apikey_ prefix is a 400 whatever the body says; a well-formed id
+// that names nothing is a 404 whatever the body says, so the lookup precedes
+// the body's validation (`rec86.keys.update.wellformed-id.bad-field`).
 func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 	s := newTestServer(t)
-	bogus := consoleAPIKey("00000000-0000-0000-0000-000000000000")
-	unknown := consoleAPIKey("apikey_01ABCDEFGHJKMNPQRSTVWXYZ")
+	for route, keyPath := range map[string]func(string) string{
+		"recorded route":  consoleOrgAPIKey,
+		"workspace alias": consoleAPIKey,
+	} {
+		bogus := keyPath(zeroUUID)
+		unknown := keyPath("apikey_01ABCDEFGHJKMNPQRSTVWXYZ")
+		for name, tc := range map[string]struct {
+			method, path string
+			body         any
+			status       int
+			errType      string
+		}{
+			"rec86.keys.update.bogus-id.empty-body":           {http.MethodPost, bogus, map[string]any{}, http.StatusBadRequest, "invalid_request_error"},
+			"rec86.keys.update.bogus-id.status":               {http.MethodPost, bogus, map[string]any{"status": "inactive"}, http.StatusBadRequest, "invalid_request_error"},
+			"rec86.keys.update.bogus-id.bad-status":           {http.MethodPost, bogus, map[string]any{"status": "not-a-real-status"}, http.StatusBadRequest, "invalid_request_error"},
+			"rec86.keys.update.wellformed-id.empty-body":      {http.MethodPost, unknown, map[string]any{}, http.StatusNotFound, "not_found_error"},
+			"rec86.keys.update.wellformed-id.status-inactive": {http.MethodPost, unknown, map[string]any{"status": "inactive"}, http.StatusNotFound, "not_found_error"},
+			"rec86.keys.update.wellformed-id.bad-field":       {http.MethodPost, unknown, map[string]any{"nonexistent_field": 1}, http.StatusNotFound, "not_found_error"},
+			"unprobed: update, wrong-prefix id":               {http.MethodPost, keyPath("envkey_" + strings.Repeat("a", 24)), map[string]any{"status": "active"}, http.StatusBadRequest, "invalid_request_error"},
+			"unprobed: update, unknown id, malformed body":    {http.MethodPost, unknown, "{", http.StatusNotFound, "not_found_error"},
+		} {
+			t.Run(route+"/"+name, func(t *testing.T) {
+				status, body := s.do(tc.method, tc.path, tc.body)
+				wantErr(t, status, body, tc.status, tc.errType)
+				wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
+			})
+		}
+	}
 	for name, tc := range map[string]struct {
 		method, path string
 		body         any
-		status       int
-		errType      string
 	}{
-		"rec86.keys.update.bogus-id.empty-body":           {http.MethodPost, bogus, map[string]any{}, http.StatusBadRequest, "invalid_request_error"},
-		"rec86.keys.update.bogus-id.status":               {http.MethodPost, bogus, map[string]any{"status": "inactive"}, http.StatusBadRequest, "invalid_request_error"},
-		"rec86.keys.update.bogus-id.bad-status":           {http.MethodPost, bogus, map[string]any{"status": "not-a-real-status"}, http.StatusBadRequest, "invalid_request_error"},
-		"rec86.keys.update.wellformed-id.empty-body":      {http.MethodPost, unknown, map[string]any{}, http.StatusNotFound, "not_found_error"},
-		"rec86.keys.update.wellformed-id.status-inactive": {http.MethodPost, unknown, map[string]any{"status": "inactive"}, http.StatusNotFound, "not_found_error"},
-		"rec86.keys.update.wellformed-id.bad-field":       {http.MethodPost, unknown, map[string]any{"nonexistent_field": 1}, http.StatusNotFound, "not_found_error"},
-		"item6.after-archive.workspaceB.api_keys":         {http.MethodGet, "/api/console/organizations/default/workspaces/wrkspc_01Spc4DriXcw2C5LMAYvNNkp/api_keys", nil, http.StatusNotFound, "not_found_error"},
-		"unprobed: issue, unknown workspace":              {http.MethodPost, "/api/console/organizations/default/workspaces/other/api_keys", map[string]any{"name": "x"}, http.StatusNotFound, "not_found_error"},
-		"unprobed: update, wrong-prefix id":               {http.MethodPost, consoleAPIKey("envkey_" + strings.Repeat("a", 24)), map[string]any{"status": "active"}, http.StatusBadRequest, "invalid_request_error"},
-		"unprobed: update, unknown id, malformed body":    {http.MethodPost, unknown, "{", http.StatusNotFound, "not_found_error"},
+		"item6.after-archive.workspaceB.get":      {http.MethodGet, "/api/console/organizations/default/workspaces/wrkspc_01Spc4DriXcw2C5LMAYvNNkp", nil},
+		"item6.after-archive.workspaceB.api_keys": {http.MethodGet, "/api/console/organizations/default/workspaces/wrkspc_01Spc4DriXcw2C5LMAYvNNkp/api_keys", nil},
+		"unprobed: issue, unknown workspace":      {http.MethodPost, "/api/console/organizations/default/workspaces/other/api_keys", map[string]any{"name": "x"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(tc.method, tc.path, tc.body)
-			wantErr(t, status, body, tc.status, tc.errType)
+			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
 		})
 	}
@@ -771,6 +803,7 @@ func TestAPIKeyRoutesRequireManagementAuth(t *testing.T) {
 		{http.MethodGet, consoleAPIKeysPath},
 		{http.MethodPost, consoleAPIKeysPath},
 		{http.MethodPost, consoleAPIKey("apikey_" + strings.Repeat("a", 24))},
+		{http.MethodPost, consoleOrgAPIKey("apikey_" + strings.Repeat("a", 24))},
 	} {
 		res := s.doRaw(tc.method, tc.path, map[string]any{"name": "x"}, nil)
 		res.Body.Close()
@@ -793,4 +826,175 @@ func TestAPIKeyIssuanceIsNotCacheable(t *testing.T) {
 	}
 	// The listing is not a secret-bearing response and carries no such promise;
 	// asserting it here would pin a header nothing needs.
+}
+
+// TestAPIKeyNameIsTheRecordedBound pins the name rule the reference was
+// recorded applying (2026-09-05 batch5 `rec86.create.name.*`, idx 13–23): 1
+// to 500 characters, counted as characters, with nothing trimmed — a
+// whitespace-only name passes, and is stored and echoed as sent (2026-09-24
+// `api-key`, a key named three spaces). 501 and 1,000 are refused with the
+// recorded message. A rename is held to the same rule, which no recording
+// shows.
+func TestAPIKeyNameIsTheRecordedBound(t *testing.T) {
+	s := newTestServer(t)
+	for name, sent := range map[string]string{
+		"rec86.create.name.1char":      "x",
+		"rec86.create.name.129":        strings.Repeat("x", 129),
+		"rec86.create.name.500":        strings.Repeat("x", 500),
+		"rec86.create.name.whitespace": "   ",
+		"rec86.create.name.tab-nl":     "\t\n ",
+		"rec86.create.name.unicode":    "中文名称 🚀",
+		"500 characters, 1,500 bytes":  strings.Repeat("主", 500),
+	} {
+		t.Run(name, func(t *testing.T) {
+			issued := issueAPIKey(t, s, map[string]any{"name": sent})
+			if issued["name"] != sent {
+				t.Errorf("echoed name %q, want %q as sent", issued["name"], sent)
+			}
+			if row := rowByID(listAPIKeys(t, s), issued["id"].(string)); row == nil || row["name"] != sent {
+				t.Errorf("listed %v, want the name stored as sent", row)
+			}
+		})
+	}
+	for name, body := range map[string]map[string]any{
+		"rec86.create.name.501":        {"name": strings.Repeat("x", 501)},
+		"rec86.create.name.1000":       {"name": strings.Repeat("x", 1000)},
+		"501 characters":               {"name": strings.Repeat("主", 501)},
+		"rec86.create.name.missing":    {},
+		"rec86.create.name.empty":      {"name": ""},
+		"rec86.create.name.wrong-type": {"name": 123},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, obj := s.do(http.MethodPost, consoleAPIKeysPath, body)
+			wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+			wantDetails(t, obj, nil)
+			if strings.HasPrefix(name, "rec86.create.name.501") || strings.HasPrefix(name, "rec86.create.name.1000") {
+				if msg := errMessage(obj); !strings.Contains(msg, "at most 500 characters") {
+					t.Errorf("message %q, want the recorded \"at most 500 characters\"", msg)
+				}
+			}
+		})
+	}
+
+	id := issueAPIKey(t, s, map[string]any{"name": "rename-me"})["id"].(string)
+	status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"name": strings.Repeat("x", 501)})
+	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+	if status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"name": "  "}); status != http.StatusOK || obj["name"] != "  " {
+		t.Errorf("rename to two spaces: %d %v, want 200 with the name as sent", status, obj)
+	}
+}
+
+// TestAPIKeyPrincipalIDIsJudgedAsRecorded pins `principal_id` on create as far
+// as the recordings reach. Its shape is recorded: a value that is not a `user_`
+// or `svac_` id is a 400 with `{error_visibility}` (2026-09-05 batch5
+// `rec86.create.principal_id.bogus-string`, idx 26), whose message names the
+// two families. What a well-formed one does — link the key to that user or
+// service account — is not, and this platform has neither, so one names
+// nothing here: the namespace's 404 with the same details, inferred. Nothing
+// refused mints a key.
+func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
+	s := newTestServer(t)
+	before := len(listAPIKeys(t, s))
+	for name, tc := range map[string]struct {
+		principal any
+		status    int
+		errType   string
+		details   map[string]any
+	}{
+		"rec86.create.principal_id.bogus-string": {"zzz-not-a-principal", http.StatusBadRequest, "invalid_request_error", map[string]any{"error_visibility": "user_facing"}},
+		"one of our principal_ ids":              {"principal_01ABCDEFGHJKMNPQRSTVWXYZ", http.StatusBadRequest, "invalid_request_error", map[string]any{"error_visibility": "user_facing"}},
+		"an empty user_ id":                      {"user_", http.StatusBadRequest, "invalid_request_error", map[string]any{"error_visibility": "user_facing"}},
+		"empty":                                  {"", http.StatusBadRequest, "invalid_request_error", map[string]any{"error_visibility": "user_facing"}},
+		"not a string":                           {7, http.StatusBadRequest, "invalid_request_error", nil},
+		// The user id the reference stamped as a key's created_by (batch9
+		// `setup.keyC.create`), and a service account id in the same alphabet.
+		"a user id":            {"user_014nwQChpX4bYXrKwPAEUM47", http.StatusNotFound, "not_found_error", map[string]any{"error_visibility": "user_facing"}},
+		"a service account id": {"svac_01ABCDEFGHJKMNPQRSTVWXYZ", http.StatusNotFound, "not_found_error", map[string]any{"error_visibility": "user_facing"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := s.do(http.MethodPost, consoleAPIKeysPath,
+				map[string]any{"name": "rec86 probe", "principal_id": tc.principal})
+			wantErr(t, status, body, tc.status, tc.errType)
+			wantDetails(t, body, tc.details)
+		})
+	}
+	if after := len(listAPIKeys(t, s)); after != before {
+		t.Errorf("refused creates changed the listing from %d keys to %d", before, after)
+	}
+	// The name is judged first. That order is inferred, not recorded: idx 21's
+	// body holds the 501-character name alone, and no recording pairs a bad
+	// name with a bad principal_id. Its refusal reads as the reference's schema
+	// validation (pydantic's message, no details), and the principal_id one
+	// (idx 26, with details) as its handler's, which would run after.
+	status, body := s.do(http.MethodPost, consoleAPIKeysPath,
+		map[string]any{"name": strings.Repeat("x", 501), "principal_id": "zzz-not-a-principal"})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantDetails(t, body, nil)
+	// An explicit null is no principal at all.
+	issued := issueAPIKey(t, s, map[string]any{"name": "unlinked", "principal_id": nil})
+	if issued["principal"] != nil {
+		t.Errorf("principal = %v, want null", issued["principal"])
+	}
+}
+
+// TestAPIKeyUpdatesOnTheRecordedRoute pins the update route the reference
+// serves, `POST …/organizations/{org}/api_keys/{id}` with no workspace segment
+// (2026-09-05 batch5 `rec86.keys.update.*`), driven with the body the
+// reference console's own Disable sends (2026-09-24 `api-key`,
+// `{"status":"inactive"}`, answered 200 with the key inactive). It is the same
+// update as the workspace route ours kept as an alias, which re-enables the key
+// here. Every other method is a 405, as recorded (`rec86.keys.method.*` and
+// `rec86.keys.revoke.route-probe.bogus-id`, idx 2 and 4–6).
+func TestAPIKeyUpdatesOnTheRecordedRoute(t *testing.T) {
+	s := newTestServer(t)
+	issued := issueAPIKey(t, s, map[string]any{"name": "   "})
+	id := issued["id"].(string)
+	raw := issued["raw_key"].(string)
+
+	status, obj := s.do(http.MethodPost, consoleOrgAPIKey(id), map[string]any{"status": "inactive"})
+	if status != http.StatusOK || obj["status"] != api.KeyStatusInactive || obj["name"] != "   " || obj["id"] != id {
+		t.Fatalf("disable on the recorded route: %d %v, want 200 with the key inactive", status, obj)
+	}
+	res := s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": raw})
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a disabled key still authenticates: %d", res.StatusCode)
+	}
+	if status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"status": "active"}); status != http.StatusOK || obj["status"] != api.KeyStatusActive {
+		t.Errorf("re-enable on the workspace alias: %d %v", status, obj)
+	}
+
+	for _, method := range []string{http.MethodDelete, http.MethodPatch, http.MethodPut, http.MethodGet} {
+		status, body := s.do(method, consoleOrgAPIKey(zeroUUID), map[string]any{"status": "inactive"})
+		wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
+	}
+}
+
+// TestConsoleWorkspaceReadIsTheRecordedNotFound pins `GET
+// …/organizations/{org}/workspaces/{id}`. The one recorded read answered 404
+// with `{error_visibility}` (2026-09-05 batch8
+// `item6.after-archive.workspaceB.get`, idx 33), and every other recorded
+// workspace body is a `wrkspc_` row whose fields — a display color, a data
+// residency, a compartment id — this platform has no values for. The reserved
+// `default` workspace is no such row: the reference's own Default workspace
+// never appears in its workspace listing (batch9 idx 4). So every id answers
+// that 404, `default` included, and none renders a workspace.
+func TestConsoleWorkspaceReadIsTheRecordedNotFound(t *testing.T) {
+	s := newTestServer(t)
+	for _, ws := range []string{"wrkspc_01Spc4DriXcw2C5LMAYvNNkp", "default", "other"} {
+		t.Run(ws, func(t *testing.T) {
+			status, body := s.do(http.MethodGet, "/api/console/organizations/default/workspaces/"+ws, nil)
+			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
+		})
+	}
+	status, body := s.do(http.MethodGet, "/api/console/organizations/"+zeroUUID+"/workspaces/default", nil)
+	wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
+	status, body = s.do(http.MethodPost, "/api/console/organizations/default/workspaces/default", map[string]any{})
+	wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
+	res := s.doRaw(http.MethodGet, "/api/console/organizations/default/workspaces/default", nil, nil)
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("the workspace read with no credential: %d, want 401", res.StatusCode)
+	}
 }

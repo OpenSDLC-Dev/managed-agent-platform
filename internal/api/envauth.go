@@ -9,25 +9,33 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 // authenticateEnvironmentKey resolves a Bearer token to the environment it is
-// scoped to, or "" if the key is unknown, revoked, or expired. Those three take
-// the same branch on purpose: the caller turns "" into one 401 with one message,
-// so a probing client learns nothing about which of them it hit. A key minted
-// before keys carried expiries has a NULL expires_at and never expires.
-func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (string, error) {
-	var envID string
-	err := pool.QueryRow(ctx,
-		`SELECT environment_id FROM environment_keys
-		  WHERE key_hash = $1 AND revoked_at IS NULL
-		    AND (expires_at IS NULL OR expires_at > now())`,
-		hashKey(key)).Scan(&envID)
+// scoped to and that environment's kind, or "" if the key is unknown, revoked,
+// or expired. Those three take the same branch on purpose: the caller turns ""
+// into one 401 with one message, so a probing client learns nothing about which
+// of them it hit. A key minted before keys carried expiries has a NULL
+// expires_at and never expires.
+//
+// The kind rides the same lookup because every lane gates on it, and a second
+// query on every poll would be its price. A key dies with its environment (ON
+// DELETE CASCADE) and a kind never changes (updateEnvironment), so the join
+// drops no live key and the kind cannot go stale within a request.
+func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (envID string, kind domain.EnvironmentKind, err error) {
+	var k string
+	err = pool.QueryRow(ctx,
+		`SELECT k.environment_id, e.kind FROM environment_keys k
+		   JOIN environments e ON e.id = k.environment_id
+		  WHERE k.key_hash = $1 AND k.revoked_at IS NULL
+		    AND (k.expires_at IS NULL OR k.expires_at > now())`,
+		hashKey(key)).Scan(&envID, &k)
 	if err == pgx.ErrNoRows {
-		return "", nil
+		return "", "", nil
 	}
-	return envID, err
+	return envID, domain.EnvironmentKind(k), err
 }
 
 // bearerToken extracts a non-empty Authorization: Bearer token. ok reports
@@ -39,40 +47,82 @@ func bearerToken(r *http.Request) (token string, ok bool) {
 }
 
 // resolveEnvironmentKey authenticates a request's Authorization: Bearer
-// environment key, returning the environment it is scoped to. On a missing/empty
-// header or an unknown/revoked key it writes the wire auth error and returns
-// ok=false. Both worker-auth middlewares share it so the Bearer-resolution rules
-// live in one place.
-func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, ok bool) {
+// environment key, returning the environment it is scoped to and its kind. On a
+// missing/empty header or an unknown/revoked key it writes the wire auth error
+// and returns ok=false. Every environment-key middleware shares it so the
+// Bearer-resolution rules live in one place.
+func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, kind domain.EnvironmentKind, ok bool) {
 	token, hasBearer := bearerToken(r)
 	if !hasBearer || token == "" {
 		writeError(w, r, errAuth("missing Authorization: Bearer environment key"))
-		return "", false
+		return "", "", false
 	}
-	envID, err := authenticateEnvironmentKey(r.Context(), pool, token)
+	envID, kind, err := authenticateEnvironmentKey(r.Context(), pool, token)
 	if err != nil {
 		writeError(w, r, err)
-		return "", false
+		return "", "", false
 	}
 	if envID == "" {
 		writeError(w, r, errAuth("invalid environment key"))
-		return "", false
+		return "", "", false
 	}
-	return envID, true
+	return envID, kind, true
+}
+
+// withEnvironmentKey records what an environment key resolved to: its
+// environment, and that environment's kind beside it.
+func withEnvironmentKey(ctx context.Context, envID string, kind domain.EnvironmentKind) context.Context {
+	return context.WithValue(context.WithValue(ctx, ctxKeyEnvironment, envID), ctxKeyEnvironmentKind, kind)
+}
+
+// errNotSelfHostedKey is the one refusal a key on an environment that is not
+// self_hosted gets on the session lane and the file content download. Since
+// #820 the console issues a key on a cloud environment, as the reference does,
+// and that environment's work is the platform executor's: the key has no
+// worker to serve, so it must not read the environment's sessions, post to
+// them — a tool confirmation the executor would act on included — stream
+// their events, or download the files they mount. A 404, as the work listing
+// answers such a key, with a message of ours; it is answered before any
+// session or file is looked up, so it says nothing about either. The skill
+// reads are not refused: they are workspace-global, and the reference was
+// recorded serving them to a cloud environment's key.
+func errNotSelfHostedKey(envID string) error {
+	return errNotFound("environment %s is not a self_hosted environment; only a self_hosted environment's key reaches its sessions and the files they mount", envID)
 }
 
 // requireEnvironmentKey is the worker-auth middleware guarding the work API:
 // every /work route needs a valid Authorization: Bearer environment key. The
 // resolved environment is stored in the request context; handlers assert it
 // matches the path's {id}, so a key scoped to one environment cannot drive
-// another's queue.
+// another's queue. A key of any kind is admitted, because the work API answers
+// a cloud environment's key route by route, as the reference was recorded
+// answering it (pollWork, listWork, statsWork read the kind from the context).
+// It is the skill reads' environment-key lane too, where a cloud key is
+// served, as recorded (2026-09-05 batch2 idx 57, 59, 62).
 func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		envID, ok := resolveEnvironmentKey(w, r, pool)
+		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
 		if !ok {
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyEnvironment, envID)))
+		next.ServeHTTP(w, r.WithContext(withEnvironmentKey(r.Context(), envID, kind)))
+	})
+}
+
+// requireSelfHostedEnvironmentKey is the environment-key lane of the file
+// content download: requireEnvironmentKey, refusing a key whose environment is
+// not self_hosted (errNotSelfHostedKey).
+func requireSelfHostedEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
+		if !ok {
+			return
+		}
+		if kind != domain.EnvSelfHosted {
+			writeError(w, r, errNotSelfHostedKey(envID))
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(withEnvironmentKey(r.Context(), envID, kind)))
 	})
 }
 
@@ -86,11 +136,17 @@ func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 // a worker probing an id cannot tell "exists elsewhere" from "does not exist" —
 // it can neither reach another environment's sessions nor learn they exist.
 // Mutating session CRUD stays management-only; only these worker routes are
-// dual-auth.
+// dual-auth. A key whose environment is not self_hosted is refused before the
+// session is looked up (errNotSelfHostedKey), so it neither reaches nor probes
+// any session.
 func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		envID, ok := resolveEnvironmentKey(w, r, pool)
+		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
 		if !ok {
+			return
+		}
+		if kind != domain.EnvSelfHosted {
+			writeError(w, r, errNotSelfHostedKey(envID))
 			return
 		}
 		// Extract the id from the decoded path so that, for a real (slashless)
@@ -118,7 +174,7 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 			writeError(w, r, err)
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxKeyEnvironment, envID)
+		ctx := withEnvironmentKey(r.Context(), envID, kind)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxKeyCredential, events.EnvironmentCredential)))
 	})
 }
@@ -128,6 +184,15 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 func environmentFrom(ctx context.Context) string {
 	e, _ := ctx.Value(ctxKeyEnvironment).(string)
 	return e
+}
+
+// selfHostedKeyFrom reports whether the request's environment key resolved to
+// a self_hosted environment. False outside the environment-key lanes — the
+// sessions-token lane included, whose routes on the work API (an item's
+// heartbeat and stop) never ask — so a handler gating on it fails closed.
+func selfHostedKeyFrom(ctx context.Context) bool {
+	k, _ := ctx.Value(ctxKeyEnvironmentKind).(domain.EnvironmentKind)
+	return k == domain.EnvSelfHosted
 }
 
 // credentialFrom returns the class of credential that signed the request:
