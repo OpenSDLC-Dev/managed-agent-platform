@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // fakeServer speaks just enough Anthropic Messages protocol to prove the
@@ -289,6 +292,78 @@ func TestGeneratePassthroughPreservesFields(t *testing.T) {
 	}
 	if tools[1].(map[string]any)["type"] != "web_search_20990101" || tools[1].(map[string]any)["max_uses"] != float64(3) {
 		t.Errorf("unknown tool type mangled: %v", tools[1])
+	}
+}
+
+// The web tools' JSON Schema constraints — format, minLength,
+// additionalProperties (#682) — reach the endpoint untouched: the adapter
+// hands each tool definition to the SDK as raw JSON, so input_schema arrives
+// value-for-value as the toolset rendered it. The request marks both as
+// built-ins, as the brain does: that marking licenses the openai adapter's
+// strip, and this adapter ignores it.
+func TestGenerateWebToolSchemaConstraintsReachTheWire(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_8","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`)
+	defs, err := toolset.Tools(entry, time.Now())
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:        defs,
+		BuiltinTools: map[string]bool{"web_fetch": true, "web_search": true},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	collect(t, stream)
+
+	// Both sides are indexed by name, so no assertion leans on list order.
+	sent := map[string]map[string]any{}
+	tools, _ := f.gotBody["tools"].([]any)
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		name, _ := tool["name"].(string)
+		schema, _ := tool["input_schema"].(map[string]any)
+		sent[name] = schema
+	}
+	if len(sent) != len(defs) {
+		t.Fatalf("tools sent = %d, want %d", len(sent), len(defs))
+	}
+	for i, def := range defs {
+		var want struct {
+			Name        string         `json:"name"`
+			InputSchema map[string]any `json:"input_schema"`
+		}
+		if err := json.Unmarshal(def, &want); err != nil {
+			t.Fatalf("definition %d: %v", i, err)
+		}
+		if got := sent[want.Name]; !reflect.DeepEqual(got, want.InputSchema) {
+			t.Errorf("%s input_schema = %v, want the definition's %v verbatim", want.Name, got, want.InputSchema)
+		}
+	}
+	for _, tc := range []struct{ tool, prop, key string }{
+		{"web_fetch", "url", "format"},
+		{"web_search", "query", "minLength"},
+	} {
+		schema, ok := sent[tc.tool]
+		if !ok {
+			t.Fatalf("no %s tool was sent", tc.tool)
+		}
+		if schema["additionalProperties"] != false {
+			t.Errorf("%s input_schema.additionalProperties = %v, want false", tc.tool, schema["additionalProperties"])
+		}
+		prop, _ := schema["properties"].(map[string]any)[tc.prop].(map[string]any)
+		if _, ok := prop[tc.key]; !ok {
+			t.Errorf("%s input_schema.properties.%s = %v, want it to carry %s", tc.tool, tc.prop, prop, tc.key)
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
@@ -181,7 +182,7 @@ func TestIsDelegationTool(t *testing.T) {
 	// excludes every name this predicate admits, so a built-in that ever
 	// collided with a delegation name would be classed as nobody's work and
 	// its calls would hang unanswered instead of failing loudly.
-	builtins, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`))
+	builtins, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

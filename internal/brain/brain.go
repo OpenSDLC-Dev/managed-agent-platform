@@ -63,6 +63,9 @@ type Brain struct {
 	// The brain still never touches a sandbox.
 	blobs blob.Store
 	cfg   Config
+	// now is the clock request assembly reads: web_search's description
+	// carries the day's date (toolset.Tools). time.Now outside tests.
+	now func() time.Time
 }
 
 func New(pool *pgxpool.Pool, registry *provider.Registry, blobs blob.Store, cfg Config) *Brain {
@@ -79,6 +82,7 @@ func New(pool *pgxpool.Pool, registry *provider.Registry, blobs blob.Store, cfg 
 		registry: registry,
 		blobs:    blobs,
 		cfg:      cfg,
+		now:      time.Now,
 	}
 }
 
@@ -332,7 +336,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	case hasRoster(agent.Multiagent):
 		role = delegationCoordinator
 	}
-	toolDefs, class, notes, err := resolveTools(agent, cat, role)
+	toolDefs, class, notes, err := resolveTools(agent, cat, role, b.now())
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err), envKind)
 	}
@@ -428,6 +432,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return b.failTurn(sctx, sid, item, span, 0, fmt.Sprintf("replay: %v", err), envKind)
 	}
 	req.Effort = agent.Model.Effort
+	req.BuiltinTools = builtinTools(class)
 	// The start proved the item was this claimant's, but an interrupt can have
 	// stopped it since (queue.CancelSession), a reclaim taken it, or its lease
 	// lapsed, and the keeper would not notice before its first renewal. A call

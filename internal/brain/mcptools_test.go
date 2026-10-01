@@ -3,8 +3,10 @@ package brain
 import (
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -140,7 +142,7 @@ func TestMCPToolsAreOfferedUnderAPrefixedName(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"), mcpTool("fetch"))}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -183,7 +185,7 @@ func TestAnOverlongMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -213,7 +215,7 @@ func TestTwoToolNamesThatSanitizeAlikeContestOneName(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -243,7 +245,7 @@ func TestTheNotesOneTurnWritesAreBounded(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, _, notes, err := resolveTools(agent, cat, delegationNone)
+	defs, _, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -277,7 +279,7 @@ func TestOneRequestCarriesABoundedSetOfMCPDefinitions(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -336,7 +338,7 @@ func TestANoteQuotesABoundedName(t *testing.T) {
 			agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
 				Tools: []json.RawMessage{json.RawMessage(tc.tools)},
 			}}
-			defs, _, notes, err := resolveTools(agent, tc.cat, delegationNone)
+			defs, _, notes, err := resolveTools(agent, tc.cat, delegationNone, time.Now())
 			if err != nil {
 				t.Fatalf("resolveTools: %v", err)
 			}
@@ -366,7 +368,7 @@ func TestAnMCPToolLosesAContestedName(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"), mcpTool("fetch"))}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -396,7 +398,7 @@ func TestTwoServersCanContestOneComposedName(t *testing.T) {
 		"a":    listingOf(t, mcpTool("b__c"), mcpTool("d")),
 	}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone)
+	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -420,7 +422,7 @@ func TestAServerWithNoListingOffersNothing(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, mcpCatalog{}, delegationNone)
+	defs, class, notes, err := resolveTools(agent, mcpCatalog{}, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -450,7 +452,7 @@ func TestUnknownConfigNamesAreNotedNotFatal(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"))}
 
-	defs, _, notes, err := resolveTools(agent, cat, delegationNone)
+	defs, _, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -471,7 +473,7 @@ func TestAnUnevaluableMCPPolicyFailsAssembly(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"))}
 
-	if _, _, _, err := resolveTools(agent, cat, delegationNone); err == nil {
+	if _, _, _, err := resolveTools(agent, cat, delegationNone, time.Now()); err == nil {
 		t.Fatal("resolveTools accepted a policy it cannot evaluate")
 	}
 }
@@ -485,7 +487,7 @@ func TestACorruptListingFailsAssembly(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": json.RawMessage(`{"not":"a listing"}`)}
 
-	if _, _, _, err := resolveTools(agent, cat, delegationNone); err == nil {
+	if _, _, _, err := resolveTools(agent, cat, delegationNone, time.Now()); err == nil {
 		t.Fatal("resolveTools accepted a listing it could not decode")
 	}
 }
@@ -523,7 +525,7 @@ func TestAMalformedToolEntryFailsAssembly(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`"not an object"`),
 	}}}
-	if _, _, _, err := resolveTools(agent, nil, delegationNone); err == nil {
+	if _, _, _, err := resolveTools(agent, nil, delegationNone, time.Now()); err == nil {
 		t.Fatal("resolveTools accepted a malformed tools[] entry")
 	}
 }
@@ -538,4 +540,89 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// A custom tool sharing a name with an enabled built-in can reach here only in
+// a snapshot stored before the API refused the pairing. Before, both were
+// offered and the later entry in tools[] owned the name's class, so calls went
+// to it. That stays the rule — the later entry wins, whichever kind it is — but
+// only the winner is offered now, so no request carries the name twice, and the
+// loser is dropped with an operator note. The name is marked built-in
+// (builtinTools, the provenance a lossy adapter reads) only when the built-in
+// wins. With the built-in disabled the name is free, and the custom tool keeps
+// it, schema and all.
+func TestALegacyNameCollisionKeepsTheLaterEntry(t *testing.T) {
+	const custom = `{"type":"custom","name":"web_search","description":"ours",` +
+		`"input_schema":{"type":"object","properties":{"q":{"type":"string","minLength":3}},"additionalProperties":false}}`
+	const toolsetOn = `{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_search","enabled":true},{"name":"web_fetch","enabled":true}]}`
+	const toolsetOff = `{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_fetch","enabled":true}]}`
+	const (
+		builtinWins = `the agent's custom tool "web_search" was not offered: the built-in tool of that name, listed after it in tools[], takes the name`
+		customWins  = `the built-in tool "web_search" was not offered: the agent's custom tool of that name, listed after it in tools[], takes the name`
+	)
+	for _, tc := range []struct {
+		name       string
+		tools      []string
+		wantCustom bool
+		wantNote   string
+	}{
+		{"custom first: the built-in wins", []string{custom, toolsetOn}, false, builtinWins},
+		{"toolset first: the custom tool wins", []string{toolsetOn, custom}, true, customWins},
+		{"built-in disabled", []string{toolsetOff, custom}, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var agent domain.ResolvedAgent
+			for _, raw := range tc.tools {
+				agent.Tools = append(agent.Tools, json.RawMessage(raw))
+			}
+			defs, class, notes, err := resolveTools(agent, nil, delegationNone, time.Now())
+			if err != nil {
+				t.Fatalf("resolveTools: %v", err)
+			}
+			var offered []json.RawMessage
+			for i, name := range defNames(t, defs) {
+				if name == "web_search" {
+					offered = append(offered, defs[i])
+				}
+			}
+			if len(offered) != 1 {
+				t.Fatalf("web_search offered %d times, want once: %v", len(offered), defNames(t, defs))
+			}
+			if !slices.Contains(defNames(t, defs), "web_fetch") {
+				t.Errorf("offered %v, want web_fetch: a collision costs only the name it is on", defNames(t, defs))
+			}
+			var d struct {
+				Description string `json:"description"`
+				InputSchema struct {
+					Properties map[string]json.RawMessage `json:"properties"`
+				} `json:"input_schema"`
+			}
+			if err := json.Unmarshal(offered[0], &d); err != nil {
+				t.Fatal(err)
+			}
+			c := class["web_search"]
+			if tc.wantCustom {
+				if d.Description != "ours" || !strings.Contains(string(d.InputSchema.Properties["q"]), `"minLength":3`) {
+					t.Errorf("offered %s, want the custom definition with its schema as written", offered[0])
+				}
+				if c.kind != domain.EventAgentCustomToolUse || c.builtin || builtinTools(class)["web_search"] {
+					t.Errorf("class = %+v, want the custom tool's, unmarked", c)
+				}
+			} else {
+				if d.Description == "ours" {
+					t.Error("the custom definition was offered over the later built-in")
+				}
+				if c.kind != domain.EventAgentToolUse || !c.builtin || !builtinTools(class)["web_search"] {
+					t.Errorf("class = %+v, want the built-in's, marked", c)
+				}
+			}
+			for _, n := range []string{builtinWins, customWins} {
+				if got := hasNote(notes, n); got != (n == tc.wantNote) {
+					t.Errorf("note %q written = %v; notes = %v", n, got, notes)
+				}
+			}
+		})
+	}
 }
