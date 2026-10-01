@@ -268,6 +268,33 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 		}
 	}
 
+	// The built-ins the agent's toolset enables, read before any custom tool
+	// is, so that a custom tool sharing a name with one is dropped whichever
+	// of the two tools[] lists first. The API refuses such a spec at every
+	// write (internal/api validateAgentSpec), so only a snapshot stored before
+	// that check reaches here with one; offering both would put two tools of
+	// one name in a request the Messages API refuses, and leave the name's
+	// class — the provenance builtinTools reads — to whichever came last.
+	enabledBuiltins := map[string]bool{}
+	for _, raw := range agent.Tools {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
+		}
+		if probe.Type != agentToolsetType {
+			continue
+		}
+		policies, err := toolset.Policies(raw)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
+		}
+		for name := range policies {
+			enabledBuiltins[name] = true
+		}
+	}
+
 	for _, raw := range agent.Tools {
 		var probe struct {
 			Type        string          `json:"type"`
@@ -287,6 +314,11 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 				// like a delegation tool, and every MCP name is mcp__-prefixed,
 				// so neither of the other two expansions can collide.
 				notes.add("the agent's custom tool %q was not offered: the platform's delegation tool of that name shadows it",
+					noteLabel(probe.Name))
+				continue
+			}
+			if enabledBuiltins[probe.Name] {
+				notes.add("the agent's custom tool %q was not offered: the built-in tool of that name shadows it",
 					noteLabel(probe.Name))
 				continue
 			}
