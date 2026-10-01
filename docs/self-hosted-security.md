@@ -855,9 +855,13 @@ What you own:
     -H "x-api-key: $MANAGEMENT_KEY"
   ```
 
-  Only a `self_hosted` environment gets a key: a cloud environment's work is run
-  by the platform's own executor, which holds no environment key, so issuing one
-  there is refused rather than handing you a credential nothing can use. **This
+  Any environment can be issued a key, a `cloud` or an archived one included, as
+  the reference issues them. A `cloud` environment's key cannot take that
+  environment's work — the platform's own executor runs it in-process, and the
+  work API refuses the key's poll and listing — so there is no reason to issue
+  one, and the console offers no control for it. An archived `self_hosted`
+  environment's key keeps polling, so a worker can drain what the archive left
+  queued. **This
   is a management-credential surface, not a separate permission tier** — anyone holding
   the management `x-api-key` can mint worker keys, so guard that key
   accordingly, and let the console's BFF hold it server-side rather than
@@ -1180,6 +1184,7 @@ What you own:
   curl -s "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys" \
     -H "x-api-key: $MANAGEMENT_KEY"
   # disable reversibly; swap for "archived" to retire one for good
+  # (…/organizations/default/api_keys/$KEY_ID, the reference's own spelling, takes the same update)
   curl -sX POST "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys/$KEY_ID" \
     -H "x-api-key: $MANAGEMENT_KEY" -H 'content-type: application/json' \
     -d '{"status":"inactive"}'
