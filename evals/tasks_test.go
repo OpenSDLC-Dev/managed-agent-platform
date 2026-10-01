@@ -272,10 +272,11 @@ func mcpAnswer() Task {
 
 // fileAnswer is the file-mount chain end to end (plan E2E-2): a passphrase lives
 // only in an uploaded file mounted into the sandbox, so a correct answer proves
-// upload → session resource → executor materialization → Level-1 injection →
-// the agent reading the mounted path. The Recall token appears nowhere in any
-// prompt — only in the file's bytes — so the model cannot spell it without
-// reading the mount.
+// upload → session resource → executor materialization → the uploads pointer →
+// the agent finding the file under /mnt/session/uploads and reading it. The
+// pointer lists no file (#681), so the agent has to ls the directory first. The
+// Recall token appears nowhere in any prompt — only in the file's bytes — so
+// the model cannot spell it without reading the mount.
 func fileAnswer() Task {
 	const mount = "/mnt/session/uploads/answer.txt"
 	return Task{
