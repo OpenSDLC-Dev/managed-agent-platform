@@ -373,6 +373,19 @@ func TestMemoryStoreEmptyUpdate(t *testing.T) {
 		status, body := s.do(http.MethodPost, "/v1/memory_stores/"+storeID, map[string]any{"metadata": nil})
 		wantInvalidRequest(t, "null metadata on "+storeID, status, body, nullMetadataRefusal)
 	}
+
+	// A null name or description is a field's value, judged after the
+	// lookup: a missing store is the 404 and an archived one the archived
+	// refusal, never the null's own answer.
+	for _, body := range []map[string]any{{"name": nil}, {"description": nil}} {
+		if status, res := s.do(http.MethodPost, "/v1/memory_stores/"+missing, body); status != http.StatusNotFound {
+			t.Errorf("%v on a missing store: status %d (%v), want 404", body, status, res)
+		}
+		status, res := s.do(http.MethodPost, "/v1/memory_stores/"+archived, body)
+		if status != http.StatusBadRequest || !strings.Contains(errMessage(res), "is archived") {
+			t.Errorf("%v on an archived store: status %d (%v), want the archived refusal", body, status, res)
+		}
+	}
 }
 
 // nullMetadataRefusal is the reference's recorded answer to a null metadata
