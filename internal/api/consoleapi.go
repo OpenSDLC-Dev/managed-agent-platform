@@ -143,11 +143,11 @@ type paginationJSON struct {
 }
 
 // consoleEnvironmentID resolves the {organization_id}/{environment_id} pair every
-// console-API environment route addresses, without touching the database. An
-// unrecognized organization answers with the same 404 shape an absent
-// environment gets, so the namespace is no better an enumeration oracle than
-// /v1 is. An id that cannot be an environment's is the reference's 400 instead,
-// which says nothing about which environments exist.
+// console-API environment route addresses, without touching the database. The
+// organization is consoleOrganization's: a foreign UUID is the reference's 401
+// and any other value but `default` its 400, so it says nothing about which
+// environments exist. Neither does an id that cannot be an environment's, the
+// reference's 400 too; a well-formed one is the caller's to look up.
 func consoleEnvironmentID(r *http.Request) (string, error) {
 	if err := consoleOrganization(r); err != nil {
 		return "", err
@@ -235,11 +235,17 @@ func errEnvironmentKeyNotFound() error {
 }
 
 // userFacingDetails is what the reference attaches to most of this namespace's
-// refusals: an unknown environment key (above), and an unknown workspace or API
-// key and an id without the apikey_ prefix (consoleapikeys.go) — 2026-09-05
-// batch2 `rec83.edge4.revoke.unknown-uuid`, batch5
-// `rec86.keys.update.wellformed-id.*` and `.bogus-id.*`, batch8
-// `item6.after-archive.workspaceB.api_keys`; #664.
+// refusals: a foreign organization (consoleOrganization) and an unknown
+// environment key (above); and on the management-key surface
+// (consoleapikeys.go), an unknown workspace on its key routes and on its own
+// read, an unknown API key, an id without the apikey_ prefix, and a
+// principal_id that is not a user_ or svac_ id — 2026-09-05 batch2
+// `rec83.edge6.foreign-org-uuid` and `rec83.edge4.revoke.unknown-uuid`, batch5
+// `rec86.keys.update.wellformed-id.*`, `.bogus-id.*` and
+// `rec86.create.principal_id.bogus-string`, batch8
+// `item6.after-archive.workspaceB.api_keys` and `.get`; #664, #820. The 404 a
+// well-formed principal_id gets carries it too, by inference: no recording
+// names one (apiKeyPrincipal).
 var userFacingDetails = errorDetails{ErrorVisibility: visibilityUserFacing}
 
 // consoleEnvironment is consoleEnvironmentID plus the existence check the two

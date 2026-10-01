@@ -921,8 +921,11 @@ func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
 	if after := len(listAPIKeys(t, s)); after != before {
 		t.Errorf("refused creates changed the listing from %d keys to %d", before, after)
 	}
-	// The name is judged first, as the reference's validators run (idx 21's
-	// 501 is refused for the name whatever else the body holds).
+	// The name is judged first. That order is inferred, not recorded: idx 21's
+	// body holds the 501-character name alone, and no recording pairs a bad
+	// name with a bad principal_id. Its refusal reads as the reference's schema
+	// validation (pydantic's message, no details), and the principal_id one
+	// (idx 26, with details) as its handler's, which would run after.
 	status, body := s.do(http.MethodPost, consoleAPIKeysPath,
 		map[string]any{"name": strings.Repeat("x", 501), "principal_id": "zzz-not-a-principal"})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
