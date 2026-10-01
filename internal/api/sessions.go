@@ -819,11 +819,17 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 
 	// The primary thread is born with the session (plan 35 decision 1): its
 	// id derived from the session's, no agent of its own (read through
-	// resolved_agent), status and timestamps the session's.
+	// resolved_agent), status and timestamps the session's. Born running, it
+	// is past its first status transition at birth, which the Reemit below
+	// does not mark (#674); born idle, it has made none.
+	var firstTransition *time.Time
+	if row.status == string(domain.SessionRunning) {
+		firstTransition = &row.createdAt
+	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_threads (id, session_id, agent_name, status, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $5)`,
-		domain.PrimaryThreadID(domain.ID(id)).String(), id, agent.Name, row.status, row.createdAt); err != nil {
+		`INSERT INTO session_threads (id, session_id, agent_name, status, created_at, updated_at, first_transition_at)
+		 VALUES ($1, $2, $3, $4, $5, $5, $6)`,
+		domain.PrimaryThreadID(domain.ID(id)).String(), id, agent.Name, row.status, row.createdAt, firstTransition); err != nil {
 		return createdSession{}, err
 	}
 	// After the session INSERT (the rows FK it), inside the same transaction:

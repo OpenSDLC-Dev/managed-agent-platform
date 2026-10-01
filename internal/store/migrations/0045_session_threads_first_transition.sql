@@ -1,0 +1,28 @@
+-- A session thread's stats and usage render null until its first status
+-- transition (#674), as the reference renders a primary that has never run;
+-- the row kept no history to tell that from, so this marker records it. It is
+-- set once and never moves: events.TransitionThread fills it on the thread's
+-- first real status change, and a thread born running — a spawned child, a
+-- primary whose session was created with initial_events — is born with it.
+-- One marker serves both fields: the spec keeps usage null until the first
+-- idle, but every recording shows the two null or present together
+-- (docs/DIVERGENCES.md, the session threads entry).
+--
+-- Every row that exists now is marked, so nothing that rendered objects
+-- before this migration renders null after it: a thread that ran is right to
+-- keep them, and a primary that never ran keeps them too, the conservative
+-- side the owner chose over guessing from row state (#674). The mark is this
+-- migration's own time, not created_at: the renderer reads only whether it is
+-- set, and a value that is no later than the truth for every such row costs
+-- nothing to write. ADD COLUMN with a non-volatile default stores it once in
+-- the catalog instead of rewriting every row, inside the one transaction
+-- migrate.go applies every pending migration in, under the ACCESS EXCLUSIVE
+-- lock the ALTER takes; DROP DEFAULT then leaves later inserts unmarked,
+-- while existing rows keep the stored value.
+--
+-- A rolling upgrade can leave a thread unmarked that has moved. A replica on
+-- an earlier build writes no marker, so a thread it moves, spawns or creates
+-- running after this has run renders null until a replica on this build next
+-- moves it.
+ALTER TABLE session_threads ADD COLUMN first_transition_at timestamptz DEFAULT now();
+ALTER TABLE session_threads ALTER COLUMN first_transition_at DROP DEFAULT;

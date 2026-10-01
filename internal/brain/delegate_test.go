@@ -559,6 +559,33 @@ func TestSpawnOfAnUnknownAgentIsRefused(t *testing.T) {
 	}
 }
 
+// A spawned child is born running, so it has made its first status transition
+// at birth and its thread view renders stats and usage (#674): every recorded
+// running child shows both as objects before its first idle.
+func TestASpawnedChildIsBornTransitioned(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"go"}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "spawn one")
+	h.runOnce(t)
+
+	kids := h.children(t)
+	if len(kids) != 1 || kids[0].status != "running" {
+		t.Fatalf("children = %+v, want one running", kids)
+	}
+	var marked bool
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT first_transition_at IS NOT NULL FROM session_threads WHERE id = $1`,
+		kids[0].id.String()).Scan(&marked); err != nil {
+		t.Fatal(err)
+	}
+	if !marked {
+		t.Error("a spawned child's first_transition_at is NULL, want it set at birth")
+	}
+}
+
 // Reporting and working at once would end the turn with its other calls
 // unanswered, so the report is refused and nothing ends.
 func TestSubmitResultSharingItsTurnWithAToolCallReportsNothing(t *testing.T) {

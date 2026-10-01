@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -479,5 +480,54 @@ func TestMarkProcessedThroughIsThreadScoped(t *testing.T) {
 	}
 	if !processed(got[1].ID) {
 		t.Error("child watermark did not stamp the child's own input")
+	}
+}
+
+// firstTransition reads a thread's first_transition_at marker.
+func firstTransition(t *testing.T, pool *pgxpool.Pool, tid domain.ID) *time.Time {
+	t.Helper()
+	var at *time.Time
+	if err := pool.QueryRow(context.Background(),
+		`SELECT first_transition_at FROM session_threads WHERE id = $1`, tid.String()).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at
+}
+
+// TransitionThread marks a thread's first real status move, once (#674): the
+// marker is what the thread view keys stats and usage on. A move that leaves
+// the status where it was — the payload-only re-idle — is no transition and
+// marks nothing; a later move never moves the marker.
+func TestTransitionThreadMarksTheFirstMoveOnce(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	primary := domain.PrimaryThreadID(sid)
+	ask := &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: []domain.ID{"sevt_a"}}
+
+	if at := firstTransition(t, pool, primary); at != nil {
+		t.Fatalf("born idle: first_transition_at = %v, want NULL", at)
+	}
+	transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionIdle, Stop: ask, Reemit: true})
+	if at := firstTransition(t, pool, primary); at != nil {
+		t.Fatalf("after an idle→idle re-emit: first_transition_at = %v, want NULL", at)
+	}
+
+	transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionRunning})
+	first := firstTransition(t, pool, primary)
+	if first == nil {
+		t.Fatal("after idle→running: first_transition_at is NULL")
+	}
+	for _, tr := range []events.ThreadTransition{
+		{Status: domain.SessionIdle, Stop: ask},
+		{Status: domain.SessionRunning},
+		{Status: domain.SessionRescheduling},
+		{Status: domain.SessionRunning, Force: true},
+		{Status: domain.SessionIdle, Stop: ask},
+	} {
+		transition(t, pool, log, sid, tr)
+		if at := firstTransition(t, pool, primary); at == nil || !at.Equal(*first) {
+			t.Fatalf("after %+v: first_transition_at = %v, want it unmoved at %v", tr, at, *first)
+		}
 	}
 }

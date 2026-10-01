@@ -101,9 +101,15 @@ func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t Thr
 	if t.Status == domain.SessionIdle && t.Stop != nil {
 		stopJSON = mustJSON(t.Stop)
 	}
+	// first_transition_at marks the thread's first real status change, once
+	// (migration 0045): the thread view renders stats and usage null until it
+	// is set (#674). A move to the status the row already holds — the re-idle,
+	// the reclaim's forced pair, a birth into running re-announced — marks
+	// nothing; SET reads the row's old status.
 	var agentName string
 	err := tx.QueryRow(ctx,
-		`UPDATE session_threads SET status = $2, stop_reason = $3, updated_at = now()
+		`UPDATE session_threads SET status = $2, stop_reason = $3, updated_at = now(),
+		        first_transition_at = COALESCE(first_transition_at, CASE WHEN status <> $2 THEN now() END)
 		  WHERE id = $1 AND session_id = $4 RETURNING agent_name`,
 		tid.String(), string(t.Status), stopJSON, sessionID.String()).Scan(&agentName)
 	rowFound := err == nil

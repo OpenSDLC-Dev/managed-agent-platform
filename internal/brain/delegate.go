@@ -358,12 +358,14 @@ func (d *delegate) createAgent(ctx context.Context, tx pgx.Tx, call delegatedCal
 	// children outside its own scope, which is why migration 0025's backfill
 	// copies them too. The row is born running — it and the child's queued
 	// turn commit together, so there is no window in which a turn is queued
-	// for a thread that is not yet running.
+	// for a thread that is not yet running — and so is born past its first
+	// status transition, which TransitionThread below, a move to the status
+	// the row already holds, would not mark (#674).
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_threads (id, session_id, parent_thread_id, org_id, workspace_id, project_id,
-		                              agent, agent_name, status, created_at, updated_at)
+		                              agent, agent_name, status, created_at, updated_at, first_transition_at)
 		 SELECT $1, s.id, $2, s.org_id, s.workspace_id, s.project_id, $3::jsonb, $4, 'running',
-		        clock_timestamp(), clock_timestamp()
+		        clock_timestamp(), clock_timestamp(), clock_timestamp()
 		   FROM sessions s WHERE s.id = $5`,
 		child.String(), domain.PrimaryThreadID(d.sid).String(), []byte(member), name, d.sid.String()); err != nil {
 		return "", false, err
