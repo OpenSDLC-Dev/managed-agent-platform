@@ -82,7 +82,7 @@ type ThreadTransition struct {
 // TransitionThread moves one thread's status and folds the session's over its
 // live threads', in the caller's transaction under the session row lock (the
 // API's trigger, the brain's settlements and the thread archive all hold it).
-// It writes the thread row (status, stop_reason, and first_transition_at on the
+// It writes the thread row (status, stop_reason, and transitioned on the
 // thread's first real move) and sessions.status, and
 // returns the events to append — the thread's own (a child's is cross-posted
 // to the session view and names its agent; the primary's is completed with
@@ -102,15 +102,16 @@ func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t Thr
 	if t.Status == domain.SessionIdle && t.Stop != nil {
 		stopJSON = mustJSON(t.Stop)
 	}
-	// first_transition_at marks the thread's first real status change, once
-	// (migration 0045): the thread view renders stats and usage null until it
-	// is set (#674). A move to the status the row already holds — the re-idle,
-	// the reclaim's forced pair, a birth into running re-announced — marks
-	// nothing; SET reads the row's old status.
+	// transitioned records the thread's first real status change (migration
+	// 0045), which the thread view needs to render an idle primary's stats
+	// and usage (#674). A move to the status the row already holds — the
+	// re-idle, a birth into running re-announced — sets nothing; SET reads the
+	// row's old status. The reclaim's forced pair does change it, running to
+	// rescheduling, and sets it on a thread an earlier build left unflagged.
 	var agentName string
 	err := tx.QueryRow(ctx,
 		`UPDATE session_threads SET status = $2, stop_reason = $3, updated_at = now(),
-		        first_transition_at = COALESCE(first_transition_at, CASE WHEN status <> $2 THEN now() END)
+		        transitioned = transitioned OR status <> $2
 		  WHERE id = $1 AND session_id = $4 RETURNING agent_name`,
 		tid.String(), string(t.Status), stopJSON, sessionID.String()).Scan(&agentName)
 	rowFound := err == nil

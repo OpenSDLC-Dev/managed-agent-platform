@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -127,20 +126,36 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 	}
 }
 
-// firstTransition reads a thread's first_transition_at marker (migration 0045).
-func firstTransition(t *testing.T, s *tserver, tid string) *time.Time {
+// transitioned reads a thread's transitioned flag (migration 0045).
+func transitioned(t *testing.T, s *tserver, tid string) bool {
 	t.Helper()
-	var at *time.Time
+	var flagged bool
 	if err := s.pool.QueryRow(context.Background(),
-		`SELECT first_transition_at FROM session_threads WHERE id = $1`, tid).Scan(&at); err != nil {
+		`SELECT transitioned FROM session_threads WHERE id = $1`, tid).Scan(&flagged); err != nil {
 		t.Fatal(err)
 	}
-	return at
+	return flagged
 }
 
 // threadStatsKeys are the three keys the recorded reference renders in a
 // thread's stats once it has moved (2026-09-02 batch2.json, sessK.threads.list).
 var threadStatsKeys = []string{"active_seconds", "duration_seconds", "startup_seconds"}
+
+// wantEmptyThreadStats fails unless stats is exactly the empty shape: the
+// reference's three keys, every one zero.
+func wantEmptyThreadStats(t *testing.T, where string, stats any) {
+	t.Helper()
+	st, ok := stats.(map[string]any)
+	if !ok || len(st) != len(threadStatsKeys) {
+		t.Errorf("stats %s = %v, want an object of %v", where, stats, threadStatsKeys)
+		return
+	}
+	for _, k := range threadStatsKeys {
+		if st[k] != float64(0) {
+			t.Errorf("stats %s: %s = %v, want 0", where, k, st[k])
+		}
+	}
+}
 
 // A thread's stats and usage are null until its first status transition, and
 // objects from then on (#674): both keys present on a fresh thread, both null,
@@ -149,7 +164,7 @@ var threadStatsKeys = []string{"active_seconds", "duration_seconds", "startup_se
 // keeps usage null until the first *idle* transition; every recording shows
 // the two fields null or present together, a running child's usage included,
 // and this follows the recordings (docs/DIVERGENCES.md, the session threads
-// entry). The marker is set once: a later move leaves it where it was.
+// entry). The flag is what keeps them after the primary idles again.
 func TestThreadStatsAndUsageAreNullUntilTheFirstTransition(t *testing.T) {
 	s := newTestServer(t)
 	sid := eventsFixture(t, s)
@@ -169,43 +184,38 @@ func TestThreadStatsAndUsageAreNullUntilTheFirstTransition(t *testing.T) {
 			t.Errorf("fresh thread on %s = %v, want the 11 keys with stats and usage null", surface, th)
 		}
 	}
-	if at := firstTransition(t, s, primary); at != nil {
-		t.Fatalf("fresh thread's first_transition_at = %v, want NULL", at)
+	if transitioned(t, s, primary) {
+		t.Fatal("a fresh thread is flagged transitioned")
 	}
 
 	// Its first transition, idle to running: both are objects, stats exactly
-	// the reference's three keys.
+	// the reference's three keys at zero.
 	sendEvents(t, s, sid, userMessage("go"))
 	for surface, th := range map[string]map[string]any{"list": listThreads(t, s, sid)[0], "get": get()} {
-		st, ok := th["stats"].(map[string]any)
-		if !ok || len(st) != len(threadStatsKeys) {
-			t.Errorf("stats on %s after the first transition = %v, want an object of %v", surface, th["stats"], threadStatsKeys)
-		}
-		wantFields(t, st, threadStatsKeys...)
+		wantEmptyThreadStats(t, "on "+surface+" after the first transition", th["stats"])
 		if _, ok := th["usage"].(map[string]any); !ok {
 			t.Errorf("usage on %s after the first transition = %v, want an object", surface, th["usage"])
 		}
 	}
-	first := firstTransition(t, s, primary)
-	if first == nil {
-		t.Fatal("first_transition_at is NULL after the thread moved")
+	if !transitioned(t, s, primary) {
+		t.Fatal("the thread moved and is not flagged transitioned")
 	}
 
-	// Later moves, to idle and back to running, leave the marker alone.
+	// Idle again, with no usage written: only the flag can say it ran, and it
+	// does.
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
-	sendEvents(t, s, sid, userMessage("again"))
-	if at := firstTransition(t, s, primary); at == nil || !at.Equal(*first) {
-		t.Errorf("first_transition_at = %v after later moves, want it set once at %v", at, *first)
-	}
-	if th := get(); th["status"] != "running" || th["stats"] == nil || th["usage"] == nil {
-		t.Errorf("thread after later moves = %v, want running with stats and usage objects", th)
+	if th := get(); th["status"] != "idle" || th["usage"] == nil {
+		t.Errorf("thread idle again = %v, want idle with stats and usage objects", th)
+	} else {
+		wantEmptyThreadStats(t, "idle again", th["stats"])
 	}
 }
 
 // A thread born running has transitioned at birth: a session created with
 // initial_events, whose primary starts running in the create's own commit
-// (the recorded deployment run's list opens with the running pair), and a
-// spawned child (internal/brain's TestASpawnedChildIsBornTransitioned).
+// (the recorded deployment run's list opens with the running pair). Its
+// status says so while it runs, and its move to idle sets the flag that says
+// so afterwards.
 func TestAThreadBornRunningRendersItsStats(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -216,6 +226,65 @@ func TestAThreadBornRunningRendersItsStats(t *testing.T) {
 	th := listThreads(t, s, sid)[0]
 	if th["status"] != "running" || th["stats"] == nil || th["usage"] == nil {
 		t.Errorf("primary born running = %v, want running with stats and usage objects", th)
+	}
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	th = listThreads(t, s, sid)[0]
+	if th["status"] != "idle" || th["stats"] == nil || th["usage"] == nil {
+		t.Errorf("primary born running, now idle = %v, want stats and usage objects", th)
+	}
+}
+
+// The row shows a move for every thread but an idle primary, so a thread a
+// replica on an earlier build wrote or moved, which never sets the flag,
+// renders objects all the same: a child (born running), a primary in any
+// status but idle, and an idle primary whose usage was written. Only an idle
+// primary with none of these is null.
+func TestAnUnflaggedThreadThatTheRowShowsMovedRendersItsStats(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
+	child := insertChild(t, s, sid, "idle")
+	render := func(tid string) map[string]any {
+		t.Helper()
+		status, th := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/"+tid, nil)
+		if status != http.StatusOK {
+			t.Fatalf("get thread %s: %d %v", tid, status, th)
+		}
+		return th
+	}
+	exec := func(q string) {
+		t.Helper()
+		if _, err := s.pool.Exec(context.Background(), q, primary); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if transitioned(t, s, child) {
+		t.Fatal("the fixture child is flagged; this test needs it unflagged")
+	}
+	if th := render(child); th["status"] != "idle" || th["usage"] == nil {
+		t.Errorf("unflagged idle child = %v, want stats and usage objects", th)
+	} else {
+		wantEmptyThreadStats(t, "on an unflagged child", th["stats"])
+	}
+
+	exec(`UPDATE session_threads SET status = 'running' WHERE id = $1`)
+	if th := render(primary); th["stats"] == nil || th["usage"] == nil {
+		t.Errorf("unflagged running primary = %v, want stats and usage objects", th)
+	}
+
+	exec(`UPDATE session_threads SET status = 'idle', usage = '{"input_tokens": 3}' WHERE id = $1`)
+	th := render(primary)
+	if u, _ := th["usage"].(map[string]any); u["input_tokens"] != float64(3) || th["stats"] == nil {
+		t.Errorf("unflagged idle primary with usage = %v, want its usage and stats", th)
+	}
+
+	exec(`UPDATE session_threads SET usage = '{}' WHERE id = $1`)
+	if th := render(primary); th["stats"] != nil || th["usage"] != nil {
+		t.Errorf("unflagged idle primary without usage = %v, want stats and usage null", th)
+	}
+	if transitioned(t, s, primary) {
+		t.Error("the direct updates flagged the primary; the rendering above proved nothing about the flag")
 	}
 }
 
@@ -496,6 +565,11 @@ func TestThreadArchive(t *testing.T) {
 	if status != http.StatusOK || res["status"] != "terminated" || res["archived_at"] == nil {
 		t.Fatalf("archive idle child: %d %v", status, res)
 	}
+	// A child has moved by birth, so the archive's own response renders both.
+	if res["usage"] == nil {
+		t.Errorf("archive response usage = null, want an object")
+	}
+	wantEmptyThreadStats(t, "in the archive response", res["stats"])
 	archivedAt := res["archived_at"]
 	status, again := s.do(http.MethodPost, path+idle+"/archive", nil)
 	if status != http.StatusOK || again["archived_at"] != archivedAt {

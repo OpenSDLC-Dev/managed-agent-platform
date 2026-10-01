@@ -56,17 +56,17 @@ type threadRow struct {
 	usageJSON            []byte
 	createdAt, updatedAt time.Time
 	archivedAt           *time.Time
-	firstTransitionAt    *time.Time // NULL until the thread first moves (migration 0045)
+	transitioned         bool // set by the thread's first status transition (migration 0045)
 	resolvedAgent        []byte
 }
 
 const threadColumns = `t.id, t.session_id, t.parent_thread_id, t.agent, t.agent_name, t.status, t.usage,
-	t.created_at, t.updated_at, t.archived_at, t.first_transition_at, s.resolved_agent`
+	t.created_at, t.updated_at, t.archived_at, t.transitioned, s.resolved_agent`
 
 func scanThread(row pgx.Row) (threadRow, error) {
 	var r threadRow
 	err := row.Scan(&r.id, &r.sessionID, &r.parent, &r.agentJSON, &r.agentName, &r.status, &r.usageJSON,
-		&r.createdAt, &r.updatedAt, &r.archivedAt, &r.firstTransitionAt, &r.resolvedAgent)
+		&r.createdAt, &r.updatedAt, &r.archivedAt, &r.transitioned, &r.resolvedAgent)
 	return r, err
 }
 
@@ -106,14 +106,25 @@ func renderThread(r threadRow) (threadJSON, error) {
 	// usage back to the first idle; every recording shows the two null or
 	// present together, a running child's usage included, and this follows
 	// the recordings (docs/DIVERGENCES.md, the session threads entry).
-	if r.firstTransitionAt != nil {
-		var usage usageJSON
-		if err := json.Unmarshal(r.usageJSON, &usage); err != nil {
-			return threadJSON{}, fmt.Errorf("decode stored thread usage: %w", err)
-		}
+	var usage usageJSON
+	if err := json.Unmarshal(r.usageJSON, &usage); err != nil {
+		return threadJSON{}, fmt.Errorf("decode stored thread usage: %w", err)
+	}
+	if r.moved(usage) {
 		out.Usage, out.Stats = &usage, &threadStatsJSON{}
 	}
 	return out, nil
+}
+
+// moved reports whether the thread has made its first status transition. The
+// row shows it for every thread but an idle primary: a child is born running,
+// a status other than idle is itself a move, and written usage means a model
+// request ran. Only an idle primary needs the transitioned flag (migration
+// 0045), and reading the row first keeps every thread a replica on an earlier
+// build wrote or moved, unflagged, from rendering null.
+func (r threadRow) moved(usage usageJSON) bool {
+	return r.transitioned || r.parent != nil || r.status != string(domain.SessionIdle) ||
+		usage != (usageJSON{})
 }
 
 // threadMaxLimit is the threads list's cap and default: the list param
@@ -428,8 +439,8 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 	}
 	if err := tx.QueryRow(ctx,
 		`UPDATE session_threads SET archived_at = now(), updated_at = now()
-		  WHERE id = $1 RETURNING status, archived_at, updated_at, first_transition_at`, row.id).
-		Scan(&row.status, &row.archivedAt, &row.updatedAt, &row.firstTransitionAt); err != nil {
+		  WHERE id = $1 RETURNING status, archived_at, updated_at`, row.id).
+		Scan(&row.status, &row.archivedAt, &row.updatedAt); err != nil {
 		return row, nil, err
 	}
 	switch _, err = log.AppendInTx(ctx, tx, domain.ID(row.sessionID), batch, events.AppendOptions{SetStatus: moved, Then: func(ctx context.Context, tx pgx.Tx) error {

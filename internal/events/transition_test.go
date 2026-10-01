@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -483,40 +482,39 @@ func TestMarkProcessedThroughIsThreadScoped(t *testing.T) {
 	}
 }
 
-// firstTransition reads a thread's first_transition_at marker.
-func firstTransition(t *testing.T, pool *pgxpool.Pool, tid domain.ID) *time.Time {
+// transitioned reads a thread's transitioned flag (migration 0045).
+func transitioned(t *testing.T, pool *pgxpool.Pool, tid domain.ID) bool {
 	t.Helper()
-	var at *time.Time
+	var flagged bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT first_transition_at FROM session_threads WHERE id = $1`, tid.String()).Scan(&at); err != nil {
+		`SELECT transitioned FROM session_threads WHERE id = $1`, tid.String()).Scan(&flagged); err != nil {
 		t.Fatal(err)
 	}
-	return at
+	return flagged
 }
 
-// TransitionThread marks a thread's first real status move, once (#674): the
-// marker is what the thread view keys stats and usage on. A move that leaves
-// the status where it was — the payload-only re-idle — is no transition and
-// marks nothing; a later move never moves the marker.
-func TestTransitionThreadMarksTheFirstMoveOnce(t *testing.T) {
+// TransitionThread flags a thread's first real status move, and nothing
+// clears the flag (#674): it is what the thread view needs to render an idle
+// primary's stats and usage. A move that leaves the status where it was — the
+// payload-only re-idle — is no transition and sets nothing.
+func TestTransitionThreadFlagsTheFirstMove(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newThreadedSession(t, pool)
 	primary := domain.PrimaryThreadID(sid)
 	ask := &domain.StopReason{Type: domain.StopRequiresAction, EventIDs: []domain.ID{"sevt_a"}}
 
-	if at := firstTransition(t, pool, primary); at != nil {
-		t.Fatalf("born idle: first_transition_at = %v, want NULL", at)
+	if transitioned(t, pool, primary) {
+		t.Fatal("born idle: flagged transitioned")
 	}
 	transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionIdle, Stop: ask, Reemit: true})
-	if at := firstTransition(t, pool, primary); at != nil {
-		t.Fatalf("after an idle→idle re-emit: first_transition_at = %v, want NULL", at)
+	if transitioned(t, pool, primary) {
+		t.Fatal("an idle→idle re-emit flagged the thread")
 	}
 
 	transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionRunning})
-	first := firstTransition(t, pool, primary)
-	if first == nil {
-		t.Fatal("after idle→running: first_transition_at is NULL")
+	if !transitioned(t, pool, primary) {
+		t.Fatal("idle→running left the thread unflagged")
 	}
 	for _, tr := range []events.ThreadTransition{
 		{Status: domain.SessionIdle, Stop: ask},
@@ -526,8 +524,28 @@ func TestTransitionThreadMarksTheFirstMoveOnce(t *testing.T) {
 		{Status: domain.SessionIdle, Stop: ask},
 	} {
 		transition(t, pool, log, sid, tr)
-		if at := firstTransition(t, pool, primary); at == nil || !at.Equal(*first) {
-			t.Fatalf("after %+v: first_transition_at = %v, want it unmoved at %v", tr, at, *first)
+		if !transitioned(t, pool, primary) {
+			t.Fatalf("after %+v: the flag cleared", tr)
 		}
+	}
+}
+
+// The reclaim's forced pair is a real move, running to rescheduling, so it
+// flags a running thread a replica on an earlier build left unflagged.
+func TestTheReclaimsForcedPairFlagsAnUnflaggedRunningThread(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	primary := domain.PrimaryThreadID(sid)
+	transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionRunning})
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE session_threads SET transitioned = false WHERE id = $1`, primary.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionRescheduling, Force: true})
+	transition(t, pool, log, sid, events.ThreadTransition{Status: domain.SessionRunning, Force: true})
+	if !transitioned(t, pool, primary) {
+		t.Error("the forced running→rescheduling→running pair left the thread unflagged")
 	}
 }

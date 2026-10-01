@@ -10,12 +10,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Migration 0045 marks every thread that existed before it as already moved
+// Migration 0045 flags every thread that existed before it as transitioned
 // (#674), so the stats and usage it rendered as objects stay objects — a
 // primary that never ran included, the conservative side the owner chose —
-// while a thread written after it starts unmarked, for its first status
-// transition to mark.
-func TestThreadsBeforeTheMarkerAreMarkedMoved(t *testing.T) {
+// while a thread written after it starts unflagged, for its first status
+// transition to flag.
+func TestThreadsBeforeTheFlagAreFlaggedTransitioned(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
 	if err != nil {
@@ -43,28 +43,29 @@ func TestThreadsBeforeTheMarkerAreMarkedMoved(t *testing.T) {
 		t.Fatalf("migrate the rest: %v", err)
 	}
 	for _, id := range []string{"sthr_primary", "sthr_child"} {
-		var at *time.Time
+		var flagged bool
 		if err := pool.QueryRow(ctx,
-			`SELECT first_transition_at FROM session_threads WHERE id = $1`, id).Scan(&at); err != nil {
+			`SELECT transitioned FROM session_threads WHERE id = $1`, id).Scan(&flagged); err != nil {
 			t.Fatalf("read %s: %v", id, err)
 		}
-		if at == nil || at.Before(created) {
-			t.Errorf("%s first_transition_at = %v after migrating, want a mark no earlier than its creation %v", id, at, created)
+		if !flagged {
+			t.Errorf("%s is unflagged after migrating, want transitioned", id)
 		}
 	}
 
-	// The backfill is not a default: a row written afterwards starts unmarked.
+	// The backfill is not the default: a row written afterwards starts
+	// unflagged.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO session_threads (id, session_id, parent_thread_id, agent, agent_name, status)
 		 VALUES ('sthr_new', 'sesn_1', 'sthr_primary', '{}', 'n', 'idle')`); err != nil {
 		t.Fatalf("insert after migrating: %v", err)
 	}
-	var marked bool
+	var flagged bool
 	if err := pool.QueryRow(ctx,
-		`SELECT first_transition_at IS NOT NULL FROM session_threads WHERE id = 'sthr_new'`).Scan(&marked); err != nil {
+		`SELECT transitioned FROM session_threads WHERE id = 'sthr_new'`).Scan(&flagged); err != nil {
 		t.Fatal(err)
 	}
-	if marked {
-		t.Error("a thread inserted after 0045 is born marked, want first_transition_at NULL")
+	if flagged {
+		t.Error("a thread inserted after 0045 is born flagged, want transitioned false")
 	}
 }
