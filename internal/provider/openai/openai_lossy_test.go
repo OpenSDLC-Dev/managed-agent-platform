@@ -252,12 +252,32 @@ func TestBadToolSchemaErrors(t *testing.T) {
 	}
 }
 
-// input_schema becomes a function's parameters verbatim, so the web tools'
-// JSON Schema constraints — format, minLength, additionalProperties (#682) —
-// survive the conversion. Two of them are outside the subset OpenAI's strict
-// mode accepts (its string formats exclude "uri", and minLength is not among
-// its string keywords), which is why the absence of "strict" is pinned too.
-func TestWebToolSchemaConstraintsReachParameters(t *testing.T) {
+// sentFunctions indexes a request's function tools by name, so an assertion
+// about one tool does not lean on where the list happened to put it.
+func sentFunctions(t *testing.T, body map[string]any) map[string]map[string]any {
+	t.Helper()
+	sent, _ := body["tools"].([]any)
+	out := make(map[string]map[string]any, len(sent))
+	for i, raw := range sent {
+		fn, _ := raw.(map[string]any)["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		if name == "" {
+			t.Fatalf("tools[%d] carries no function name: %v", i, raw)
+		}
+		out[name] = fn
+	}
+	return out
+}
+
+// The web tools' input schemas carry three keywords as the reference was
+// recorded sending them — "format": "uri" on url, "minLength": 2 on query, and
+// "additionalProperties": false on both objects (#682) — and the anthropic
+// adapter sends them on. This one strips all three (owner decision, #682): an
+// OpenAI-compatible backend that accepts only part of JSON Schema can reject the
+// whole tool list over one of them, and both web tools are on by default.
+// Everything else in the schema arrives as the definition wrote it, and no
+// "strict" is set.
+func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.T) {
 	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
 		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`))
 	if err != nil {
@@ -267,35 +287,91 @@ func TestWebToolSchemaConstraintsReachParameters(t *testing.T) {
 		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 		Tools:    defs,
 	})
+	fns := sentFunctions(t, body)
 
-	sent, _ := body["tools"].([]any)
-	if len(sent) != len(defs) {
-		t.Fatalf("tools sent = %d, want %d", len(sent), len(defs))
-	}
-	for i, def := range defs {
-		var want struct {
+	for _, tc := range []struct{ tool, prop, key string }{
+		{"web_fetch", "url", "format"},
+		{"web_search", "query", "minLength"},
+	} {
+		var def struct {
+			Name        string         `json:"name"`
 			InputSchema map[string]any `json:"input_schema"`
 		}
-		if err := json.Unmarshal(def, &want); err != nil {
-			t.Fatalf("definition %d: %v", i, err)
+		for _, raw := range defs {
+			if err := json.Unmarshal(raw, &def); err != nil {
+				t.Fatalf("definition: %v", err)
+			}
+			if def.Name == tc.tool {
+				break
+			}
 		}
-		fn := sent[i].(map[string]any)["function"].(map[string]any)
-		if !reflect.DeepEqual(fn["parameters"], want.InputSchema) {
-			t.Errorf("tools[%d].function.parameters = %v, want the definition's input_schema %v verbatim", i, fn["parameters"], want.InputSchema)
+		if def.Name != tc.tool {
+			t.Fatalf("no %s definition among %d", tc.tool, len(defs))
+		}
+		// The definition must carry what the adapter is meant to strip, or
+		// this test passes over a schema that never had it.
+		prop := def.InputSchema["properties"].(map[string]any)[tc.prop].(map[string]any)
+		if _, ok := prop[tc.key]; !ok || def.InputSchema["additionalProperties"] != false {
+			t.Fatalf("%s input_schema = %v, want %s on %s and additionalProperties false to strip", tc.tool, def.InputSchema, tc.key, tc.prop)
+		}
+		delete(prop, tc.key)
+		delete(def.InputSchema, "additionalProperties")
+
+		fn, ok := fns[tc.tool]
+		if !ok {
+			t.Fatalf("no %s function was sent", tc.tool)
+		}
+		if !reflect.DeepEqual(fn["parameters"], def.InputSchema) {
+			t.Errorf("%s parameters = %v, want the input_schema without %s and additionalProperties: %v",
+				tc.tool, fn["parameters"], tc.key, def.InputSchema)
 		}
 		if _, ok := fn["strict"]; ok {
-			t.Errorf("tools[%d].function carries strict = %v; strict mode would reject the schema", i, fn["strict"])
+			t.Errorf("%s carries strict = %v, want none", tc.tool, fn["strict"])
 		}
 	}
-	for i, tc := range []struct{ prop, key string }{{"url", "format"}, {"query", "minLength"}} {
-		params := sent[i].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
-		if params["additionalProperties"] != false {
-			t.Errorf("tools[%d].function.parameters.additionalProperties = %v, want false", i, params["additionalProperties"])
-		}
-		prop, _ := params["properties"].(map[string]any)[tc.prop].(map[string]any)
-		if _, ok := prop[tc.key]; !ok {
-			t.Errorf("tools[%d].function.parameters.properties.%s = %v, want it to carry %s", i, tc.prop, prop, tc.key)
-		}
+}
+
+// The strip is schema-aware, not a key search. It removes the three keywords
+// from every subschema — properties, items, the anyOf/oneOf/allOf branches,
+// $defs — and from every tool, a custom or MCP one as much as a built-in,
+// because any of them can make a backend refuse the list. It leaves a
+// property that is merely *named* format, and instance data — enum, default,
+// const, examples — whatever keys that data holds.
+func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
+	in := `{"type":"object","additionalProperties":false,"required":["format"],` +
+		`"properties":{` +
+		`"format":{"type":"string","enum":["json","text"],"minLength":1},` +
+		`"when":{"type":"string","format":"date-time","default":"now"},` +
+		`"tags":{"type":"array","items":{"type":"string","minLength":2}},` +
+		`"meta":{"type":"object","additionalProperties":{"type":"string","format":"email"}},` +
+		`"choice":{"anyOf":[{"type":"string","format":"uri"},{"type":"integer"}]},` +
+		`"opts":{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false,` +
+		`"default":{"format":"kept","minLength":3},"const":{"additionalProperties":false},"examples":[{"format":"kept"}]}},` +
+		`"$defs":{"link":{"type":"string","format":"uri"}}}`
+	want := `{"type":"object","required":["format"],` +
+		`"properties":{` +
+		`"format":{"type":"string","enum":["json","text"]},` +
+		`"when":{"type":"string","default":"now"},` +
+		`"tags":{"type":"array","items":{"type":"string"}},` +
+		`"meta":{"type":"object"},` +
+		`"choice":{"anyOf":[{"type":"string"},{"type":"integer"}]},` +
+		`"opts":{"type":"object","properties":{"n":{"type":"integer"}},` +
+		`"default":{"format":"kept","minLength":3},"const":{"additionalProperties":false},"examples":[{"format":"kept"}]}},` +
+		`"$defs":{"link":{"type":"string"}}}`
+
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:    []json.RawMessage{json.RawMessage(`{"name":"custom","description":"d","input_schema":` + in + `}`)},
+	})
+	fns := sentFunctions(t, body)
+
+	var wantSchema map[string]any
+	if err := json.Unmarshal([]byte(want), &wantSchema); err != nil {
+		t.Fatal(err)
+	}
+	if got := fns["custom"]["parameters"]; !reflect.DeepEqual(got, wantSchema) {
+		gotJSON, _ := json.Marshal(got)
+		t.Errorf("custom parameters =\n%s\nwant\n%s", gotJSON, want)
 	}
 }
 

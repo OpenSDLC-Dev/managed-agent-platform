@@ -18,9 +18,10 @@
 // rather than vanishing; a tool_result's is_error flag is dropped (OpenAI's
 // tool message has no error field) — the error text the platform embeds in the
 // result content is still forwarded, so the model sees the failure, only the
-// boolean is lost. Incoming, the deprecated single-function_call streaming
-// format is rejected loudly (the endpoint must emit tool_calls) rather than
-// silently losing the call.
+// boolean is lost; and every tool schema loses its format, minLength and
+// additionalProperties keywords (strippedKeywords says why). Incoming, the
+// deprecated single-function_call streaming format is rejected loudly (the
+// endpoint must emit tool_calls) rather than silently losing the call.
 package openai
 
 import (
@@ -403,9 +404,10 @@ func compactJSON(raw json.RawMessage) (string, error) {
 }
 
 // anthropic tool def -> OpenAI function tool. input_schema becomes parameters
-// verbatim, and strict is never set: strict mode accepts only a JSON Schema
-// subset, which excludes keywords the built-in web tools carry (the "uri"
-// format, minLength).
+// less the keywords stripSchemaKeywords removes. strict is never set: OpenAI's
+// strict mode requires every object closed with additionalProperties: false and
+// every field required (its structured-outputs guide), which these schemas —
+// optional fields, and additionalProperties stripped below — do not meet.
 func convertTools(tools []json.RawMessage) ([]chatTool, error) {
 	if len(tools) == 0 {
 		return nil, nil
@@ -423,14 +425,89 @@ func convertTools(tools []json.RawMessage) ([]chatTool, error) {
 		if def.Name == "" {
 			return nil, fmt.Errorf("tools[%d]: missing name", i)
 		}
+		params, err := stripSchemaKeywords(def.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("tools[%d].input_schema: %w", i, err)
+		}
 		out = append(out, chatTool{
 			Type: "function",
 			Function: chatToolFn{
-				Name: def.Name, Description: def.Description, Parameters: def.InputSchema,
+				Name: def.Name, Description: def.Description, Parameters: params,
 			},
 		})
 	}
 	return out, nil
+}
+
+// strippedKeywords leave every tool's parameters on this route (#682, an owner
+// decision). The built-in web tools carry all three, as the reference was
+// recorded handing them to the model, and the anthropic adapter sends them on;
+// but an OpenAI-compatible backend that accepts only part of JSON Schema —
+// Gemini's compatibility endpoint and vLLM's guided decoding were the cases
+// raised — can refuse the whole tool list over one of them, and both web tools
+// are on by default. The executor validates the web tools' input itself, so
+// what the model loses here is a hint, not the check.
+var strippedKeywords = []string{"format", "minLength", "additionalProperties"}
+
+// stripSchemaKeywords removes strippedKeywords from a schema and from every
+// subschema in it, at any depth. A schema with none of them is returned as it
+// came, bytes and key order included; one that loses any is re-encoded, its
+// numbers kept as written.
+func stripSchemaKeywords(raw json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return raw, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var schema any
+	if err := dec.Decode(&schema); err != nil {
+		return nil, err
+	}
+	if !stripSchema(schema) {
+		return raw, nil
+	}
+	return json.Marshal(schema)
+}
+
+// stripSchema strips one schema in place, reporting whether anything went. It
+// descends only through the keywords whose values are subschemas, so a
+// property merely named "format" survives, and so does instance data — enum,
+// const, default, examples — whatever keys that data happens to hold.
+func stripSchema(v any) bool {
+	schema, ok := v.(map[string]any)
+	if !ok {
+		return false // a boolean schema, or not a schema at all
+	}
+	stripped := false
+	for _, k := range strippedKeywords {
+		if _, ok := schema[k]; ok {
+			delete(schema, k)
+			stripped = true
+		}
+	}
+	for k, sub := range schema {
+		switch k {
+		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
+			// A map from names to subschemas: the names are data.
+			if m, ok := sub.(map[string]any); ok {
+				for _, s := range m {
+					stripped = stripSchema(s) || stripped
+				}
+			}
+		case "items", "prefixItems", "additionalItems", "contains", "unevaluatedItems",
+			"propertyNames", "unevaluatedProperties", "not", "if", "then", "else",
+			"anyOf", "oneOf", "allOf":
+			// One subschema, or a list of them (items' tuple form among them).
+			if list, ok := sub.([]any); ok {
+				for _, s := range list {
+					stripped = stripSchema(s) || stripped
+				}
+				continue
+			}
+			stripped = stripSchema(sub) || stripped
+		}
+	}
+	return stripped
 }
 
 // --- incoming stream translation (OpenAI SSE -> provider chunks) ---

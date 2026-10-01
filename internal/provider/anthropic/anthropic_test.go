@@ -320,30 +320,44 @@ func TestGenerateWebToolSchemaConstraintsReachTheWire(t *testing.T) {
 	}
 	collect(t, stream)
 
-	sent, _ := f.gotBody["tools"].([]any)
+	// Both sides are indexed by name, so no assertion leans on list order.
+	sent := map[string]map[string]any{}
+	tools, _ := f.gotBody["tools"].([]any)
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		name, _ := tool["name"].(string)
+		schema, _ := tool["input_schema"].(map[string]any)
+		sent[name] = schema
+	}
 	if len(sent) != len(defs) {
 		t.Fatalf("tools sent = %d, want %d", len(sent), len(defs))
 	}
 	for i, def := range defs {
 		var want struct {
+			Name        string         `json:"name"`
 			InputSchema map[string]any `json:"input_schema"`
 		}
 		if err := json.Unmarshal(def, &want); err != nil {
 			t.Fatalf("definition %d: %v", i, err)
 		}
-		got := sent[i].(map[string]any)["input_schema"]
-		if !reflect.DeepEqual(got, want.InputSchema) {
-			t.Errorf("tools[%d].input_schema = %v, want the definition's %v verbatim", i, got, want.InputSchema)
+		if got := sent[want.Name]; !reflect.DeepEqual(got, want.InputSchema) {
+			t.Errorf("%s input_schema = %v, want the definition's %v verbatim", want.Name, got, want.InputSchema)
 		}
 	}
-	for i, tc := range []struct{ prop, key string }{{"url", "format"}, {"query", "minLength"}} {
-		schema := sent[i].(map[string]any)["input_schema"].(map[string]any)
+	for _, tc := range []struct{ tool, prop, key string }{
+		{"web_fetch", "url", "format"},
+		{"web_search", "query", "minLength"},
+	} {
+		schema, ok := sent[tc.tool]
+		if !ok {
+			t.Fatalf("no %s tool was sent", tc.tool)
+		}
 		if schema["additionalProperties"] != false {
-			t.Errorf("tools[%d].input_schema.additionalProperties = %v, want false", i, schema["additionalProperties"])
+			t.Errorf("%s input_schema.additionalProperties = %v, want false", tc.tool, schema["additionalProperties"])
 		}
 		prop, _ := schema["properties"].(map[string]any)[tc.prop].(map[string]any)
 		if _, ok := prop[tc.key]; !ok {
-			t.Errorf("tools[%d].input_schema.properties.%s = %v, want it to carry %s", i, tc.prop, prop, tc.key)
+			t.Errorf("%s input_schema.properties.%s = %v, want it to carry %s", tc.tool, tc.prop, prop, tc.key)
 		}
 	}
 }
