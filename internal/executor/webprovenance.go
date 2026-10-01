@@ -47,9 +47,11 @@ import (
 // reading is read in, and no browser or reader takes a longer one.
 const maxFetchURL = 8 << 10
 
-// readingBudget is the most URL parses one lookup spends. A session past it —
-// in practice a page built to exhaust it — refuses the fetch.
-const readingBudget = 500_000
+// readingBudget is the most bytes of URL one lookup parses. A session past it
+// — in practice a page built to exhaust it — refuses the fetch. Counted in
+// bytes, not parses, because a parse costs its length and a request may be
+// long.
+const readingBudget = 64 << 20
 
 // errReadingBudget is a lookup that spent readingBudget before deciding.
 var errReadingBudget = errors.New("the session holds too many URLs naming this host to check this one")
@@ -126,20 +128,23 @@ func (e *Executor) webFetchSource(ctx context.Context, sid domain.ID, raw string
 // want: the given URL a request names. found is the first such reading, or one
 // spelled exactly as the request when there is one.
 type urlMatcher struct {
-	raw, want, host string // the request, its normalized form, and its canonical host[:port]
-	min, max        int    // the byte lengths a matching reading can have
-	budget          int    // URL parses left
-	found           string
-	exact           bool
+	raw, want, host  string // the request, its normalized form, and its canonical host[:port]
+	authMax          int    // the longest authority (userinfo, host, port) a match can be spelled with
+	tailMin, tailMax int    // the byte lengths of what follows that authority in a match
+	budget           int    // bytes of URL left to parse
+	found            string
+	exact            bool
 }
 
 // newURLMatcher returns the matcher for the request raw, or false when raw is
 // not an absolute http(s) URL with a host, or is longer than maxFetchURL. A
-// reading normalizes to at most three times its length (a path's "\" or "é"
+// spelling normalizes to at most three times its length (a path's "\" or "é"
 // becomes a three-byte escape, a Unicode label its longer A-label) and at least
-// a third of it (a full-width host letter is three bytes and folds to one), so
-// the window is three times the request's normalized length either way, with
-// room for the "/" an empty path gains.
+// a third of it (a full-width letter is three bytes and folds to one), so each
+// part of a match — the authority, and what follows it — is read in a window
+// three times that part of the request's normalized form, with room for the "/"
+// an empty path gains. A host spelled with characters IDNA deletes (soft
+// hyphens) past that window is not found: a refusal, never a wrong fetch.
 func newURLMatcher(raw string) (*urlMatcher, bool) {
 	raw = strings.TrimSpace(raw)
 	if len(raw) > maxFetchURL {
@@ -154,8 +159,15 @@ func newURLMatcher(raw string) (*urlMatcher, bool) {
 		return nil, false
 	}
 	host, _ := canonicalHostPort(u)
+	rest := want[strings.Index(want, "://")+len("://"):]
+	auth := len(rest)
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		auth = i
+	}
+	tail := len(rest) - auth
 	return &urlMatcher{raw: raw, want: want, host: host,
-		min: max(0, (len(want)-16)/3), max: 3*len(want) + 64, budget: readingBudget}, true
+		authMax: 3*auth + 64, tailMin: max(0, (tail-16)/3), tailMax: 3*tail + 64,
+		budget: readingBudget}, true
 }
 
 // walk reads every string in the decoded JSON value v. It reports true when the
@@ -200,57 +212,88 @@ func (m *urlMatcher) scan(s string) bool {
 // markdown link's closing parenthesis, CJK text with no space before it, or a
 // possessive's apostrophe can follow it inside that run — and each of those can
 // also be part of a URL, as a search hit's source ending in "?" or a Wikipedia
-// title's parentheses are. So the readings are the whole run, and the run cut
-// just before each character that can end a URL in text (endsURLInText), each
-// a substring of the text as written. Only the window can match, and only an
-// occurrence whose authority names the request's host has any reading worth a
-// parse beyond the authority's own.
+// title's parentheses are. Every reading is a substring of the text as written.
+//
+// The authority is read a fixed number of ways, each one parse: to the first
+// "/", "?" or "#"; to the first non-ASCII character; to the first ASCII
+// character no host carries; and each with its trailing dots and colons
+// trimmed. A reading that ends in its authority is tried as it is. Only one
+// whose authority, read to its "/", "?" or "#", names the request's host goes
+// on: the run cut just before each character that can end a URL in text
+// (endsURLInText), and the whole run, within the tail's window.
 func (m *urlMatcher) occurrence(s string) bool {
+	start := strings.Index(s, "://") + len("://")
 	run, whole := s, true
-	if len(run) > m.max {
-		run, whole = run[:m.max], false
+	if limit := start + m.authMax + m.tailMax; len(run) > limit {
+		run, whole = run[:limit], false
 	}
 	if end := strings.IndexFunc(run, func(r rune) bool {
 		return unicode.IsSpace(r) || r < ' ' || strings.ContainsRune("<>\"`", r)
 	}); end >= 0 {
 		run, whole = run[:end], true
 	}
-	start := strings.Index(run, "://") + len("://")
-	authEnd := len(run)
-	if i := strings.IndexAny(run[start:], "/?#"); i >= 0 {
+	area := run[start:min(len(run), start+m.authMax)]
+	authEnd := -1
+	if i := strings.IndexAny(area, "/?#"); i >= 0 {
 		authEnd = start + i
+	} else if len(run) <= start+m.authMax && whole {
+		authEnd = len(run)
 	}
-	// The authority, and each cut inside it ("example.com." in a sentence),
-	// is parsed once; only a host matching the request's goes further.
+	var ends []int
+	if authEnd >= 0 {
+		ends = append(ends, authEnd)
+	}
+	if i := strings.IndexFunc(area, func(r rune) bool { return r > unicode.MaxASCII }); i >= 0 {
+		ends = append(ends, start+i)
+	}
+	if i := strings.IndexFunc(area, func(r rune) bool {
+		return r <= unicode.MaxASCII && !isHostByte(byte(r))
+	}); i >= 0 {
+		ends = append(ends, start+i)
+	}
 	hostOK := false
-	for i, r := range run[start:authEnd] {
-		if k := start + i; k > start && endsURLInText(r) && m.sameHost(run[:k]) {
-			if m.try(run[:k]) {
+	for _, e := range ends {
+		for k, n := e, 0; k > start && n < 16; k, n = k-1, n+1 {
+			if !m.sameHost(run[:k]) {
+				if c := run[k-1]; c != '.' && c != ':' {
+					break
+				}
+				continue
+			}
+			if k == authEnd {
+				hostOK = true
+			} else if m.try(run[:k]) {
 				return true
 			}
+			break
 		}
-	}
-	if m.sameHost(run[:authEnd]) {
-		hostOK = true
-	}
-	if m.budget <= 0 {
-		return true
+		if m.budget <= 0 {
+			return true
+		}
 	}
 	if !hostOK {
 		return false
 	}
 	for i, r := range run[authEnd:] {
-		if k := authEnd + i; endsURLInText(r) && k >= m.min && m.try(run[:k]) {
+		if k := authEnd + i; endsURLInText(r) && i >= m.tailMin && m.try(run[:k]) {
 			return true
 		}
 	}
-	return whole && len(run) >= m.min && m.try(run)
+	return whole && len(run)-authEnd >= m.tailMin && m.try(run)
+}
+
+// isHostByte reports whether c can appear in an authority: userinfo, a host
+// name, an IPv6 literal, a port. Text punctuation that ends a bare host in a
+// sentence — a comma, an apostrophe, a parenthesis — cannot.
+func isHostByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+		strings.IndexByte("-._~%:@[]", c) >= 0
 }
 
 // sameHost reports whether the authority of the reading r names the request's
-// host, spending one parse.
+// host, spending r's length.
 func (m *urlMatcher) sameHost(r string) bool {
-	m.budget--
+	m.budget -= len(r)
 	u, err := url.Parse(r)
 	if err != nil {
 		return false
@@ -259,11 +302,11 @@ func (m *urlMatcher) sameHost(r string) bool {
 	return ok && h == m.host
 }
 
-// try compares one reading with the request. It reports true when the search
-// is over: this reading is spelled exactly as the request, or the budget is
-// spent.
+// try compares one reading with the request, spending its length. It reports
+// true when the search is over: this reading is spelled exactly as the
+// request, or the budget is spent.
 func (m *urlMatcher) try(r string) bool {
-	m.budget--
+	m.budget -= len(r)
 	if got, ok := normalizeFetchURL(r); ok && got == m.want {
 		if r == m.raw {
 			m.found, m.exact = r, true

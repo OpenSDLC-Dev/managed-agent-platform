@@ -84,6 +84,11 @@ func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
 		{"見てhttps://example.com/a。お願いします", []string{"https://example.com/a"}},
 		{"https://example.com/a—see", []string{"https://example.com/a"}},
 		{"https://example.com/a's", []string{"https://example.com/a"}},
+		// A bare host ends at text that no host carries, and a long given
+		// URL is read short where it can be cut.
+		{"See https://example.com's docs, (https://example.org), https://example.net.",
+			[]string{"https://example.com", "https://example.org", "https://example.net"}},
+		{"https://example.com/a?" + strings.Repeat("b", 2048), []string{"https://example.com/a"}},
 		// A URL's own punctuation followed by the sentence's, and a closing
 		// parenthesis that is the URL's own inside a link's.
 		{"see https://example.com/release!.", []string{"https://example.com/release!", "https://example.com/release"}},
@@ -127,8 +132,8 @@ func fetchOutcome(t *testing.T, h *harness, url string) (res struct {
 
 // A page built to make reading quadratic — 100 KiB of URLs on one host run
 // together, each cut at every punctuation mark to the end of the run — costs a
-// lookup a parse count linear in its length, not the tens of millions the
-// unbounded reading spent; a request long enough to widen the window past use
+// lookup parsing linear in its length, not the gigabytes the unbounded reading
+// spent; a request long enough to widen the window past use
 // spends the budget and stops.
 func TestURLMatcherStaysLinearOnAHostileRun(t *testing.T) {
 	run := strings.Repeat("https://docs.example.com/,", 4000)
@@ -137,8 +142,10 @@ func TestURLMatcherStaysLinearOnAHostileRun(t *testing.T) {
 		t.Fatal("matcher refused a plain URL")
 	}
 	m.scan(run)
-	if spent := readingBudget - m.budget; m.found != "" || spent > 200_000 {
-		t.Errorf("found %q after %d parses of a %d-byte run, want nothing found in a linear count", m.found, spent, len(run))
+	// The window bounds what each occurrence parses, so the total grows with
+	// the run's length; the unbounded reading parsed gigabytes of this run.
+	if spent := readingBudget - m.budget; m.found != "" || spent > 24<<20 {
+		t.Errorf("found %q after parsing %d bytes of a %d-byte run, want nothing found within 24 MiB", m.found, spent, len(run))
 	}
 
 	long, ok := newURLMatcher("https://docs.example.com/" + strings.Repeat("a", maxFetchURL-len("https://docs.example.com/")))
