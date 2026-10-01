@@ -1088,8 +1088,9 @@ func TestLifecycleEndpointsRejectCloudToolExec(t *testing.T) {
 }
 
 // TestHeartbeatMissingAndMalformed pins two error mappings: a heartbeat on an
-// absent item is not-found (404), distinct from a mismatch, and a malformed
-// expected value is a mismatch (412), never a 500 from a failed SQL cast.
+// absent item is not-found (404), distinct from a mismatch, whatever its
+// expected value, and a malformed expected value on a present item is a
+// mismatch (412), never a 500 from a failed SQL cast.
 func TestHeartbeatMissingAndMalformed(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -1106,9 +1107,14 @@ func TestHeartbeatMissingAndMalformed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// An absent item is not-found (so a worker can tell "stale, retry" from "gone").
+	// An absent item is not-found (so a worker can tell "stale, retry" from "gone"),
+	// a malformed expected value included: a 412 reports the item it refused
+	// (#664), and there is none to report.
 	if _, err := q.Heartbeat(ctx, env, domain.NewID("work"), "2026-01-01T00:00:00Z", 30); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("heartbeat on missing item = %v, want ErrWorkNotFound", err)
+	}
+	if _, err := q.Heartbeat(ctx, env, domain.NewID("work"), "not-a-timestamp", 30); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("heartbeat with malformed expected on missing item = %v, want ErrWorkNotFound", err)
 	}
 	// A malformed expected value is a mismatch, never a cast-error 500.
 	if _, err := q.Heartbeat(ctx, env, w.ID, "not-a-timestamp", 30); !errors.Is(err, queue.ErrHeartbeatMismatch) {

@@ -385,18 +385,61 @@ func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error)
 }
 
 // mapWorkErr maps a queue state-machine error onto its wire status: a missing
-// item is 404, a heartbeat precondition failure is 412. Anything else is an
-// internal fault.
+// item is 404, a heartbeat precondition failure is 412, carrying the details
+// the reference's 412 does (2026-09-02 batch2 `work.heartbeat.NO_HEARTBEAT`,
+// `work.heartbeat.wrong-expected`; #664). Anything else is an internal fault.
 func mapWorkErr(err error) error {
+	var mismatch *queue.HeartbeatMismatchError
 	switch {
 	case errors.Is(err, queue.ErrWorkNotFound):
 		return errNotFound("work item not found")
-	case errors.Is(err, queue.ErrHeartbeatMismatch):
-		return &apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
-			"expected_last_heartbeat does not match the current lease"}
+	case errors.As(err, &mismatch):
+		return withDetails(&apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
+			"expected_last_heartbeat does not match the current lease"},
+			errorDetails{
+				CurrentState:    refusedBeatState(mismatch),
+				ErrorVisibility: visibilityUserFacing,
+				ErrorCode:       "heartbeat_precondition_failed",
+			})
 	default:
 		return err
 	}
+}
+
+// refusedBeatStateWire is a 412's details.current_state: the heartbeat
+// response's members less its type, in the order the reference lists them,
+// plus lease_updated_at. Its last_heartbeat is the item's, rendered as
+// heartbeatWire renders one; its ttl_seconds the refused beat's own, as every
+// beat here that extends nothing reports it. lease_updated_at is the item's
+// started_at: the only recorded value equals it to the microsecond, and the
+// reference's started_at, like ours, stamps the item's entry to the queue.
+type refusedBeatStateWire struct {
+	LeaseExtended  bool       `json:"lease_extended"`
+	State          string     `json:"state"`
+	LastHeartbeat  string     `json:"last_heartbeat"`
+	TTLSeconds     int64      `json:"ttl_seconds"`
+	LeaseUpdatedAt *time.Time `json:"lease_updated_at"`
+}
+
+func refusedBeatState(m *queue.HeartbeatMismatchError) refusedBeatStateWire {
+	return refusedBeatStateWire{
+		LeaseExtended:  false,
+		State:          m.Item.State,
+		LastHeartbeat:  heartbeatString(m.Item.LastHeartbeat),
+		TTLSeconds:     m.TTLSeconds,
+		LeaseUpdatedAt: utcPtr(m.Item.StartedAt),
+	}
+}
+
+// heartbeatString renders a last heartbeat byte for byte as encoding/json
+// renders a UTC time.Time — the form the field had before it could be empty,
+// and the one the worker echoes back for Heartbeat to parse as its next
+// precondition — and an absent one as the empty string.
+func heartbeatString(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // getWork returns one work item (GET .../work/{work_id}).
@@ -489,15 +532,8 @@ func (s *server) heartbeatWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, mapWorkErr(err)
 	}
-	// Byte for byte what encoding/json renders a UTC time.Time as — the form
-	// this field had before it could be empty, and the one the worker echoes
-	// back for Heartbeat to parse as its next precondition.
-	last := ""
-	if res.LastHeartbeat != nil {
-		last = res.LastHeartbeat.UTC().Format(time.RFC3339Nano)
-	}
 	return heartbeatWire{
-		LastHeartbeat: last,
+		LastHeartbeat: heartbeatString(res.LastHeartbeat),
 		LeaseExtended: res.LeaseExtended,
 		State:         res.State,
 		TTLSeconds:    res.TTLSeconds,

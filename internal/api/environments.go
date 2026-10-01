@@ -603,7 +603,8 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 		// executor and a BYOC worker), so a config update that flips the kind is
 		// rejected rather than silently switching hands mid-flight.
 		if newKind != kind {
-			return nil, errInvalid("environment kind cannot be changed (from %s to %s)", kind, newKind)
+			return nil, withDetails(errInvalid("environment kind cannot be changed (from %s to %s)", kind, newKind),
+				errorDetails{ErrorCode: "invalid_config_type_change"})
 		}
 	}
 	// Environments alone treat an empty-string value as a delete (the SDK's

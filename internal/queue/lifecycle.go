@@ -19,6 +19,17 @@ var (
 	ErrHeartbeatMismatch = errors.New("queue: heartbeat precondition failed")
 )
 
+// HeartbeatMismatchError is the ErrHeartbeatMismatch every refused beat
+// returns, carrying the item as that beat found it — which the wire's 412
+// reports (#664). errors.Is(err, ErrHeartbeatMismatch) matches it.
+type HeartbeatMismatchError struct {
+	Item       *Work
+	TTLSeconds int64 // the refused beat's effective TTL
+}
+
+func (e *HeartbeatMismatchError) Error() string { return ErrHeartbeatMismatch.Error() }
+func (e *HeartbeatMismatchError) Unwrap() error { return ErrHeartbeatMismatch }
+
 // NoHeartbeat is the sentinel a worker's first heartbeat sends as
 // expected_last_heartbeat to claim an unclaimed lease (the wire's optimistic
 // concurrency: subsequent heartbeats echo the server's prior value).
@@ -179,7 +190,7 @@ func (q *Queue) Ack(ctx context.Context, envID, workID domain.ID) (*Work, error)
 // had not yet when a graceful stop parked it in stopping. An item not visible
 // to the work API is ErrWorkNotFound; a visible item whose precondition does
 // not hold (the expected value is not the row's current last_heartbeat, or the
-// first-heartbeat preconditions fail) is ErrHeartbeatMismatch (412).
+// first-heartbeat preconditions fail) is a *HeartbeatMismatchError (412).
 func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected string, ttlSeconds int64) (*HeartbeatResult, error) {
 	var row pgx.Row
 	if expected == NoHeartbeat {
@@ -194,16 +205,14 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 			   AND last_heartbeat IS NULL AND state = 'starting'
 			 RETURNING last_heartbeat, state, true`,
 			workID, envID, ttlSeconds)
-	} else {
+	} else if ts, perr := time.Parse(time.RFC3339Nano, expected); perr == nil {
 		// expected must be a timestamp the server itself emitted (RFC3339Nano,
 		// the JSON encoding of the returned last_heartbeat). Parse it here rather
 		// than casting the raw string in SQL: a non-timestamp precondition would
 		// make ($n)::timestamptz raise a DB error that surfaces as a 500, when it
-		// is simply a value that cannot be the current last_heartbeat — a 412.
-		ts, perr := time.Parse(time.RFC3339Nano, expected)
-		if perr != nil {
-			return nil, ErrHeartbeatMismatch
-		}
+		// is simply a value that cannot be the current last_heartbeat. It updates
+		// nothing, and so takes the lookup below like any beat that updated
+		// nothing: a 404 for an absent item, a 412 for a present one.
 		row = q.pool.QueryRow(ctx,
 			`UPDATE work_items
 			 SET last_heartbeat   = CASE WHEN state = 'active' THEN now() ELSE last_heartbeat END,
@@ -216,13 +225,15 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 			 RETURNING last_heartbeat, state, (state = 'active')`,
 			workID, envID, ttlSeconds, ts)
 	}
-	res := HeartbeatResult{TTLSeconds: ttlSeconds}
-	err := row.Scan(&res.LastHeartbeat, &res.State, &res.LeaseExtended)
-	if err == nil {
-		return &res, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("queue: heartbeat %s: %w", workID, err)
+	if row != nil {
+		res := HeartbeatResult{TTLSeconds: ttlSeconds}
+		err := row.Scan(&res.LastHeartbeat, &res.State, &res.LeaseExtended)
+		if err == nil {
+			return &res, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("queue: heartbeat %s: %w", workID, err)
+		}
 	}
 	// No row updated. A genuinely absent item is not-found, and a present one
 	// whose claim or extend precondition did not hold is a mismatch — save one
@@ -240,7 +251,7 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 	if expected == NoHeartbeat && w.State == "stopping" && w.LastHeartbeat == nil {
 		return &HeartbeatResult{State: w.State, TTLSeconds: ttlSeconds}, nil
 	}
-	return nil, ErrHeartbeatMismatch
+	return nil, &HeartbeatMismatchError{Item: w, TTLSeconds: ttlSeconds}
 }
 
 // Stop stops a work item and returns the item after the stop, which the wire

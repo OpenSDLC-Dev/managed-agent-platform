@@ -3,6 +3,8 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -11,6 +13,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	sdk "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
@@ -248,12 +253,12 @@ func TestFileDownloadGate(t *testing.T) {
 	created := s.uploadFile(t, "upload.bin", &oct, "secret upload")
 	id, _ := created["id"].(string)
 
-	// Uploaded → 400.
-	res := s.doRaw("GET", "/v1/files/"+id+"/content", nil, map[string]string{"x-api-key": testKey})
-	res.Body.Close()
-	if res.StatusCode != http.StatusBadRequest {
-		t.Fatalf("download of an upload: status %d, want 400", res.StatusCode)
-	}
+	// Uploaded → 400, carrying the details the reference attaches to this
+	// refusal (2026-09-02 batch2 `file.content.download`, 2026-09-03 batch2
+	// `cookie.files.content-original`; #664).
+	status, body := s.do("GET", "/v1/files/"+id+"/content", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantDetails(t, body, map[string]any{"error_code": "file_not_downloadable"})
 
 	// Seed a downloadable file (an object plus a row) as a tool would.
 	genID := "file_0000000000000000000000gk"
@@ -267,7 +272,7 @@ func TestFileDownloadGate(t *testing.T) {
 		t.Fatalf("seed row: %v", err)
 	}
 
-	res = s.doRaw("GET", "/v1/files/"+genID+"/content", nil, map[string]string{"x-api-key": testKey})
+	res := s.doRaw("GET", "/v1/files/"+genID+"/content", nil, map[string]string{"x-api-key": testKey})
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("download of a downloadable file: status %d, want 200", res.StatusCode)
@@ -284,6 +289,33 @@ func TestFileDownloadGate(t *testing.T) {
 	got, _ := io.ReadAll(res.Body)
 	if !bytes.Equal(got, content) {
 		t.Errorf("downloaded bytes = %q, want %q", got, content)
+	}
+}
+
+// TestFileNotDownloadableDetailsReachAnSDKClient: no schema declares
+// `details`, so a client reads it from what the pinned SDK keeps of a body
+// it did not type — the error object's extra fields (checked against
+// anthropic-sdk-go v1.70.1 — internal/apierror/apierror.go Error.RawJSON and
+// checked against anthropic-sdk-go v1.70.1 — shared/shared.go
+// InvalidRequestError).
+func TestFileNotDownloadableDetailsReachAnSDKClient(t *testing.T) {
+	s := newTestServer(t)
+	oct := "application/octet-stream"
+	id, _ := s.uploadFile(t, "upload.bin", &oct, "x")["id"].(string)
+	client := sdk.NewClient(option.WithoutEnvironmentDefaults(), option.WithBaseURL(s.url), option.WithAPIKey(testKey))
+
+	_, err := client.Beta.Files.Download(context.Background(), id, sdk.BetaFileDownloadParams{})
+	var apiErr *sdk.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("download of an upload through the SDK = %v, want a 400 *sdk.Error", err)
+	}
+	var envelope sdk.ErrorResponse
+	if err := json.Unmarshal([]byte(apiErr.RawJSON()), &envelope); err != nil {
+		t.Fatalf("decode the error body as the SDK's ErrorResponse: %v", err)
+	}
+	details := envelope.Error.AsInvalidRequestError().JSON.ExtraFields["details"]
+	if got := details.Raw(); got != `{"error_code":"file_not_downloadable"}` {
+		t.Errorf("details as the SDK keeps it = %q, want the recorded object", got)
 	}
 }
 
