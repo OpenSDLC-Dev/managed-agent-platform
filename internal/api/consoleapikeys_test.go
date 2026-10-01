@@ -659,6 +659,32 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 	}
 }
 
+// TestAPIKeyErrorsCarryTheRecordedDetails pins the details the reference
+// attaches to this surface's not-found answers (2026-09-05 batch5
+// `rec86.keys.update.wellformed-id.*`, batch8
+// `item6.after-archive.workspaceB.api_keys`; #664). An id without the apikey_
+// prefix is a 404 here and a 400 there (batch5 `rec86.keys.update.bogus-id.*`),
+// and both of the reference's answers carry these same details.
+func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
+	s := newTestServer(t)
+	otherWorkspace := "/api/console/organizations/default/workspaces/other/api_keys"
+	for name, tc := range map[string]struct {
+		method, path string
+		body         any
+	}{
+		"update, unknown id":       {http.MethodPost, consoleAPIKey("apikey_" + strings.Repeat("a", 24)), map[string]any{"status": "active"}},
+		"update, wrong prefix":     {http.MethodPost, consoleAPIKey("envkey_" + strings.Repeat("a", 24)), map[string]any{"status": "active"}},
+		"list, unknown workspace":  {http.MethodGet, otherWorkspace, nil},
+		"issue, unknown workspace": {http.MethodPost, otherWorkspace, map[string]any{"name": "x"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := s.do(tc.method, tc.path, tc.body)
+			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
+		})
+	}
+}
+
 // TestAPIKeyRoutesRejectWrongMethods proves the 405 fallbacks are registered
 // against the same patterns the handlers are: a drifted pattern would 404 where
 // the house envelope promises a 405, and nothing else would notice.

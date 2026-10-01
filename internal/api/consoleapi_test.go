@@ -612,6 +612,50 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 	}
 }
 
+// TestConsoleKeyErrorsCarryTheRecordedDetails pins the details the reference
+// attaches to this surface's not-found answers (2026-09-05 batch2
+// `rec83.edge3.issue.unknown-env`, `rec83.edge3.list.unknown-env`,
+// `rec83.edge4.revoke.unknown-uuid` and `.cross-environment`, batch8
+// `setup.envkeyA.mint.foreign-workspace-env`; #664). A malformed id shares its
+// unknown twin's one branch here, so it shares the details too: a difference
+// would be the oracle that branch exists to deny. The /v1 answer for the same
+// environment carries none, as recorded there (2026-09-02 batch2
+// `env.archive.with-deployment`).
+func TestConsoleKeyErrorsCarryTheRecordedDetails(t *testing.T) {
+	s := newTestServer(t)
+	mine := selfHostedEnv(t, s, "mine")
+	theirs := selfHostedEnv(t, s, "theirs")
+	issueViaConsole(t, s, theirs, "their-host")
+	theirID := onlyKeyID(t, s, theirs)
+	unknownEnv := "env_0123456789abcdefghjkmnp"
+	envGone := map[string]any{"error_visibility": "user_facing", "error_code": "environment_not_found"}
+	keyGone := map[string]any{"error_visibility": "user_facing"}
+
+	for name, tc := range map[string]struct {
+		method, path string
+		body         any
+		want         map[string]any
+	}{
+		"issue, unknown environment":   {http.MethodPost, consoleTokens(unknownEnv), map[string]any{"name": "x"}, envGone},
+		"issue, malformed environment": {http.MethodPost, consoleTokens("env_NOT!VALID"), map[string]any{"name": "x"}, envGone},
+		"list, unknown environment":    {http.MethodGet, consoleTokens(unknownEnv), nil, envGone},
+		"revoke, unknown environment":  {http.MethodPost, consoleRevoke(unknownEnv, theirID), nil, envGone},
+		"revoke, unknown key":          {http.MethodPost, consoleRevoke(mine, "envkey_0123456789abcdefghjkmnp"), nil, keyGone},
+		"revoke, malformed key":        {http.MethodPost, consoleRevoke(mine, "envkey_NOPE!"), nil, keyGone},
+		"revoke, another env's key":    {http.MethodPost, consoleRevoke(mine, theirID), nil, keyGone},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := s.do(tc.method, tc.path, tc.body)
+			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			wantDetails(t, body, tc.want)
+		})
+	}
+
+	status, body := s.do(http.MethodPost, "/v1/environments/"+unknownEnv+"/archive", nil)
+	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	wantDetails(t, body, nil)
+}
+
 // TestConsoleKeyRoutesRejectWrongMethods pins the house error envelope on the
 // methods these paths do not answer, and the 404 envelope on a neighbouring path
 // that does not exist. Go's ServeMux would otherwise write plain text, which the

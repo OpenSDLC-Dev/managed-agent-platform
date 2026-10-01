@@ -33,6 +33,12 @@ const (
 // names a workspace that does not exist.
 const reservedWorkspace = "default"
 
+// consoleNotFoundDetails is what the reference attaches to this surface's
+// not-found answers (2026-09-05 batch5 `rec86.keys.update.wellformed-id.*`,
+// batch8 `item6.after-archive.workspaceB.api_keys`; #664). Its answer to an id
+// without the apikey_ prefix is a 400, not our 404, and carries the same.
+var consoleNotFoundDetails = errorDetails{ErrorVisibility: visibilityUserFacing}
+
 // actorJSON renders the reference's `{id, type}` actor. Its own vocabulary for
 // type is `user`; ours is `principal` or `api_key`, because we have no `user_`
 // id to give — a divergence, registered in docs/DIVERGENCES.md.
@@ -129,7 +135,7 @@ func consoleWorkspace(r *http.Request) error {
 		return err
 	}
 	if ws := r.PathValue("workspace"); ws != reservedWorkspace {
-		return errNotFound("workspace %s not found", ws)
+		return withDetails(errNotFound("workspace %s not found", ws), consoleNotFoundDetails)
 	}
 	return nil
 }
@@ -200,7 +206,7 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	// This is its local equivalent, closing the unstorable-byte class before the
 	// id binds into a query.
 	if !domain.ValidWithPrefix(keyID, domain.PrefixAPIKey) {
-		return nil, errNotFound("api key not found")
+		return nil, withDetails(errNotFound("api key not found"), consoleNotFoundDetails)
 	}
 	obj, err := decodeObject(r)
 	if err != nil {
@@ -238,7 +244,7 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now())
 		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("api key %s not found", keyID)
+		return nil, withDetails(errNotFound("api key %s not found", keyID), consoleNotFoundDetails)
 	}
 	if err != nil {
 		return nil, err

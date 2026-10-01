@@ -124,10 +124,28 @@ func consoleEnvironmentID(r *http.Request) (string, error) {
 		return "", err
 	}
 	id := r.PathValue("id")
-	if err := checkID(id, "environment"); err != nil {
-		return "", err
+	if checkID(id, "environment") != nil {
+		return "", errConsoleEnvironmentNotFound(id)
 	}
 	return id, nil
+}
+
+// errConsoleEnvironmentNotFound is this namespace's 404 for an environment it
+// will not answer for, with the details the reference attaches to it here
+// (2026-09-05 batch2 `rec83.edge3.issue.unknown-env`; #664). It is not
+// checkID's 404 with details added: the reference's /v1 answer for the same
+// environment carries none (2026-09-02 batch2 `env.archive.with-deployment`).
+func errConsoleEnvironmentNotFound(id string) error {
+	return withDetails(errNotFound("environment %s not found", id),
+		errorDetails{ErrorVisibility: visibilityUserFacing, ErrorCode: "environment_not_found"})
+}
+
+// errEnvironmentKeyNotFound is revocation's one not-found branch, with the
+// details the reference attaches to its own (2026-09-05 batch2
+// `rec83.edge4.revoke.unknown-uuid`; #664).
+func errEnvironmentKeyNotFound() error {
+	return withDetails(errNotFound("environment key not found"),
+		errorDetails{ErrorVisibility: visibilityUserFacing})
 }
 
 // consoleEnvironment is consoleEnvironmentID plus the existence check the two
@@ -148,7 +166,7 @@ func (s *server) consoleEnvironment(r *http.Request) (string, error) {
 	err = s.pool.QueryRow(r.Context(),
 		`SELECT true FROM environments WHERE id = $1`+notInternal, id).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", errNotFound("environment %s not found", id)
+		return "", errConsoleEnvironmentNotFound(id)
 	}
 	if err != nil {
 		return "", err
@@ -211,7 +229,7 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	err = tx.QueryRow(ctx,
 		`SELECT kind, archived_at FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&kind, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("environment %s not found", envID)
+		return nil, errConsoleEnvironmentNotFound(envID)
 	}
 	if err != nil {
 		return nil, err
@@ -284,14 +302,14 @@ func (s *server) revokeEnvironmentKey(r *http.Request) error {
 	// shape every /v1 path accepts. This is its local equivalent — the same
 	// unstorable-byte class closed before the id binds into a query.
 	if !domain.ValidWithPrefix(keyID, domain.PrefixEnvironmentKey) {
-		return errNotFound("environment key not found")
+		return errEnvironmentKeyNotFound()
 	}
 	found, err := RevokeEnvironmentKey(r.Context(), s.pool, envID, keyID)
 	if err != nil {
 		return err
 	}
 	if !found {
-		return errNotFound("environment key not found")
+		return errEnvironmentKeyNotFound()
 	}
 	return nil
 }
