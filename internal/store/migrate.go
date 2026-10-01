@@ -39,13 +39,14 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 // migrateAttempts and migrateBackoff bound the retry of a migration
 // transaction that met a lock conflict: a deadlock (40P01), or a migration's
-// own lock_timeout running out (55P03). 0043 sets one to bound how long live
-// traffic queues behind its lock requests. The transaction has rolled back
-// whole, so a retry starts from the same schema. The wait before each retry
-// doubles from migrateBackoff, 1+2+4+8 = 15 seconds across five attempts, and
-// each attempt can itself wait up to 0043's 2s lock_timeout for each of the
-// two tables it locks, so a conflict that outlasts all five fails the start
-// after up to about 35 seconds, like any other migration error. Variables so
+// own lock_timeout running out (55P03). 0043 and 0045 each set one to bound
+// how long live traffic queues behind their lock requests. The transaction
+// has rolled back whole, so a retry starts from the same schema. The wait
+// before each retry doubles from migrateBackoff, 1+2+4+8 = 15 seconds across
+// five attempts, and each attempt can itself wait up to the 2s lock_timeout
+// for each table those two lock (0043's two, 0045's one), so a conflict that
+// outlasts all five fails the start after up to about 45 seconds, like any
+// other migration error. Variables so
 // a test can run the schedule to exhaustion quickly (export_test.go).
 var (
 	migrateAttempts = 5

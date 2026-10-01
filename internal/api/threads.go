@@ -21,22 +21,23 @@ import (
 // sessions.resolved_agent minus the roster, so a session update never leaves a
 // stale duplicate; child threads (slice 3) hold their spawn-time snapshot. The
 // primary's events are the session's: its list and stream serve the session
-// view; a child's serve that child's own rows. Thread stats render the empty
-// shape, the precedent session stats set (docs/DIVERGENCES.md).
+// view; a child's serve that child's own rows. Thread stats and usage render
+// null until the thread's first status transition (#674), then stats the
+// empty shape, the precedent session stats set (docs/DIVERGENCES.md).
 
 // threadJSON is BetaManagedAgentsSessionThread.
 type threadJSON struct {
-	ID             string          `json:"id"`
-	Type           string          `json:"type"` // "session_thread"
-	SessionID      string          `json:"session_id"`
-	ParentThreadID *string         `json:"parent_thread_id"`
-	Agent          threadAgentJSON `json:"agent"`
-	Status         string          `json:"status"`
-	Usage          usageJSON       `json:"usage"`
-	Stats          threadStatsJSON `json:"stats"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	ArchivedAt     *time.Time      `json:"archived_at"`
+	ID             string           `json:"id"`
+	Type           string           `json:"type"` // "session_thread"
+	SessionID      string           `json:"session_id"`
+	ParentThreadID *string          `json:"parent_thread_id"`
+	Agent          threadAgentJSON  `json:"agent"`
+	Status         string           `json:"status"`
+	Usage          *usageJSON       `json:"usage"`
+	Stats          *threadStatsJSON `json:"stats"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	ArchivedAt     *time.Time       `json:"archived_at"`
 }
 
 type threadStatsJSON struct {
@@ -55,16 +56,17 @@ type threadRow struct {
 	usageJSON            []byte
 	createdAt, updatedAt time.Time
 	archivedAt           *time.Time
+	transitioned         bool // set by the thread's first status transition (migration 0045)
 	resolvedAgent        []byte
 }
 
 const threadColumns = `t.id, t.session_id, t.parent_thread_id, t.agent, t.agent_name, t.status, t.usage,
-	t.created_at, t.updated_at, t.archived_at, s.resolved_agent`
+	t.created_at, t.updated_at, t.archived_at, t.transitioned, s.resolved_agent`
 
 func scanThread(row pgx.Row) (threadRow, error) {
 	var r threadRow
 	err := row.Scan(&r.id, &r.sessionID, &r.parent, &r.agentJSON, &r.agentName, &r.status, &r.usageJSON,
-		&r.createdAt, &r.updatedAt, &r.archivedAt, &r.resolvedAgent)
+		&r.createdAt, &r.updatedAt, &r.archivedAt, &r.transitioned, &r.resolvedAgent)
 	return r, err
 }
 
@@ -95,15 +97,35 @@ func renderThread(r threadRow) (threadJSON, error) {
 	if agent.Tools == nil {
 		agent.Tools = []json.RawMessage{}
 	}
+	out := threadJSON{
+		ID: r.id, Type: "session_thread", SessionID: r.sessionID, ParentThreadID: r.parent,
+		Agent: agent, Status: r.status,
+		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),
+	}
+	// Both null until the thread's first status transition. The spec holds
+	// usage back to the first idle; every recording shows the two null or
+	// present together, a running child's usage included, and this follows
+	// the recordings (docs/DIVERGENCES.md, the session threads entry).
 	var usage usageJSON
 	if err := json.Unmarshal(r.usageJSON, &usage); err != nil {
 		return threadJSON{}, fmt.Errorf("decode stored thread usage: %w", err)
 	}
-	return threadJSON{
-		ID: r.id, Type: "session_thread", SessionID: r.sessionID, ParentThreadID: r.parent,
-		Agent: agent, Status: r.status, Usage: usage, Stats: threadStatsJSON{},
-		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),
-	}, nil
+	if r.moved(usage) {
+		out.Usage, out.Stats = &usage, &threadStatsJSON{}
+	}
+	return out, nil
+}
+
+// moved reports whether the thread has made its first status transition. The
+// row shows it for every thread but an idle primary: a child is born running,
+// a status other than idle is itself a move, and nonzero usage means a model
+// request ran. Only an idle primary needs the transitioned flag (migration
+// 0045), and reading the row first keeps the threads a replica on an earlier
+// build wrote or moved, unflagged, from rendering null, but for the one kind
+// the migration's comment names.
+func (r threadRow) moved(usage usageJSON) bool {
+	return r.transitioned || r.parent != nil || r.status != string(domain.SessionIdle) ||
+		usage != (usageJSON{})
 }
 
 // threadMaxLimit is the threads list's cap and default: the list param
