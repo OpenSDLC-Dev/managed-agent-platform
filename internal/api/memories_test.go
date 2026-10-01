@@ -45,6 +45,7 @@ func createMemory(t *testing.T, s *tserver, storeID, path, content string) map[s
 // prefix rollups included (their path is the key too).
 func memoryPaths(t *testing.T, body map[string]any) []string {
 	t.Helper()
+	wantEmptyPrefixes(t, body)
 	var out []string
 	for _, row := range listData(t, body) {
 		path, _ := row["path"].(string)
@@ -54,6 +55,17 @@ func memoryPaths(t *testing.T, body map[string]any) []string {
 		out = append(out, path)
 	}
 	return out
+}
+
+// wantEmptyPrefixes holds a memories list page to the recorded `"prefixes": []`
+// — an empty array on every page and at every depth, never null or omitted
+// (#676). memoryPaths calls it, so every list read in this file is held to it.
+func wantEmptyPrefixes(t *testing.T, body map[string]any) {
+	t.Helper()
+	v, ok := body["prefixes"]
+	if arr, isArr := v.([]any); !ok || !isArr || len(arr) != 0 {
+		t.Errorf(`memories list "prefixes" = %v (present %v), want []`, v, ok)
+	}
 }
 
 func TestMemoryCRUD(t *testing.T) {
@@ -566,7 +578,7 @@ func TestMemoryList(t *testing.T) {
 	if got := memoryPaths(t, body); !slices.Equal(got, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
 		t.Errorf("list order = %v, want byte-wise path order", got)
 	}
-	wantNoFields(t, body, "next_page")
+	wantExactKeys(t, body, "data", "prefixes")
 	// The list defaults to basic.
 	for _, row := range listData(t, body) {
 		if row["content"] != nil {

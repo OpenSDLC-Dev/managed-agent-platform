@@ -347,6 +347,16 @@ type nullPageJSON struct {
 	NextPage *string `json:"next_page"`
 }
 
+// memoryPageJSON is pageJSON for the memories list, plus the `"prefixes": []`
+// every recorded memories page carries beside data — an empty array on every
+// page and at every depth, though the published schema has no such key (#676).
+// Rolled-up paths arrive as memory_prefix items in data, not here, so nothing
+// recorded says what would fill it.
+type memoryPageJSON struct {
+	pageJSON
+	Prefixes []string `json:"prefixes"`
+}
+
 // biPageJSON is the bidirectional list envelope (sessions). Like pageJSON it
 // omits a cursor it does not have: the reference's sessions list omits
 // next_page on a terminal page and was never recorded sending prev_page.

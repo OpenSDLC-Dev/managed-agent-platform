@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
@@ -119,9 +120,10 @@ func TestWorkListRejectsForeignCursors(t *testing.T) {
 type listEnvelope int
 
 const (
-	omitsNext listEnvelope = iota // nothing: next_page appears only when a page follows
-	nullNext                      // "next_page": null
-	filesNext                     // filePageJSON's four keys, next_page null among them
+	omitsNext    listEnvelope = iota // nothing: next_page appears only when a page follows
+	nullNext                         // "next_page": null
+	filesNext                        // filePageJSON's four keys, next_page null among them
+	memoriesNext                     // omitsNext plus the recorded "prefixes": []
 )
 
 // listRoutes classifies every list route server.go registers, keyed by the
@@ -145,7 +147,7 @@ var listRoutes = map[string]listEnvelope{
 	"/v1/skills/{id}/versions":               nullNext,
 	"/v1/files":                              filesNext,
 	"/v1/memory_stores":                      omitsNext,
-	"/v1/memory_stores/{id}/memories":        omitsNext,
+	"/v1/memory_stores/{id}/memories":        memoriesNext,
 	"/v1/memory_stores/{id}/memory_versions": omitsNext,
 	"/v1/dreams":                             omitsNext,
 }
@@ -269,12 +271,16 @@ func TestListTerminalPageEnvelope(t *testing.T) {
 			}
 			wantExactKeys(t, body, keys...)
 			nextPage(t, body)
+		case memoriesNext:
+			wantExactKeys(t, body, "data", "prefixes")
+			nextPage(t, body)
+			wantEmptyPrefixes(t, body)
 		case nullNext:
 			wantExactKeys(t, body, "data", "next_page")
 		case filesNext:
 			wantExactKeys(t, body, "data", "next_page", "has_more", "first_id", "last_id")
 		}
-		if env != omitsNext {
+		if env == nullNext || env == filesNext {
 			if c := nextPageOrNull(t, body); c != "" {
 				t.Errorf("last page next_page = %q, want null", c)
 			}
@@ -303,6 +309,10 @@ func TestListTerminalPageEnvelope(t *testing.T) {
 					lastPage(t, env, body, pattern == "/v1/sessions" && i > 0)
 					break
 				}
+				if env == memoriesNext {
+					wantExactKeys(t, body, "data", "next_page", "prefixes")
+					wantEmptyPrefixes(t, body)
+				}
 				query = path + "?limit=1&page=" + url.QueryEscape(wantCursor(t, body))
 			}
 		})
@@ -313,13 +323,17 @@ func TestListTerminalPageEnvelope(t *testing.T) {
 // the typed SDK's pagers read an omitted next_page and a null one alike, as the
 // end of the list. Each walk crosses a cursor page into a terminal one — the
 // agents list (PageCursor) and the sessions list (BidirectionalPageCursor)
-// omitting the key, the environments list sending null.
+// omitting the key, the environments list sending null, and the memories list
+// omitting it beside the recorded "prefixes": [], which the SDK does not model
+// and so files under JSON.ExtraFields.
 func TestSDKPagersEndOnEitherTerminalEnvelope(t *testing.T) {
 	s := newTestServer(t)
 	client := sdk.NewClient(option.WithoutEnvironmentDefaults(), option.WithBaseURL(s.url), option.WithAPIKey(testKey))
-	for range 3 {
+	storeID := createMemoryStore(t, s, "sdk-pager")
+	for i := range 3 {
 		agentID, envID := fixture(t, s)
 		createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+		createMemory(t, s, storeID, fmt.Sprintf("/m%d.md", i), "x")
 	}
 	walk := func(name string, pager interface {
 		Next() bool
@@ -343,4 +357,12 @@ func TestSDKPagersEndOnEitherTerminalEnvelope(t *testing.T) {
 	walk("agents", client.Beta.Agents.ListAutoPaging(ctx, sdk.BetaAgentListParams{Limit: sdk.Int(2)}))
 	walk("sessions", client.Beta.Sessions.ListAutoPaging(ctx, sdk.BetaSessionListParams{Limit: sdk.Int(2)}))
 	walk("environments", client.Beta.Environments.ListAutoPaging(ctx, sdk.BetaEnvironmentListParams{Limit: sdk.Int(2)}))
+	walk("memories", client.Beta.MemoryStores.Memories.ListAutoPaging(ctx, storeID, sdk.BetaMemoryStoreMemoryListParams{Limit: sdk.Int(2)}))
+	page, err := client.Beta.MemoryStores.Memories.List(ctx, storeID, sdk.BetaMemoryStoreMemoryListParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := page.JSON.ExtraFields["prefixes"]; !ok || f.Raw() != "[]" {
+		t.Errorf("typed memories page ExtraFields[prefixes] = %q (present %v), want the recorded []", f.Raw(), ok)
+	}
 }
