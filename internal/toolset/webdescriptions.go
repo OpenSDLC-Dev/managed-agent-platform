@@ -8,7 +8,10 @@ import "time"
 // (docs/DIVERGENCES.md weighs that echo as evidence). Adopting them, the daily
 // date line included, is an owner decision on #682.
 
-// webFetchDescription is web_fetch's, whole.
+// webFetchDescription is web_fetch's, whole. Its rule that the tool "can only
+// fetch EXACT URLs" the user gave or a search or fetch returned is the
+// reference's text, not a check this platform makes: the executor enforces
+// the scheme and the operator allowlist only (docs/DIVERGENCES.md, #823).
 const webFetchDescription = `Fetch the contents of a web page or a PDF at a given URL.
 Usage notes:
 - This tool can only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
