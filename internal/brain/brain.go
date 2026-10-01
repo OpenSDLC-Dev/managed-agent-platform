@@ -299,11 +299,13 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// fact of request assembly, independent of whether the turn later fails for
 	// an unrelated reason. The span attributes wait for the span (below).
 	recordResolveMisses(ctx, skillsMisses)
-	// Mounted-file injection: a "Mounted files" block after the skills block so
-	// the agent can find file mounts that live outside its workdir (plan slice
-	// 3). Best-effort, mirroring skills — a dangling mount is a logged, counted
-	// miss; the count is flushed now, before the early returns below, for the same
-	// reason as the skills misses.
+	// Mounted-file injection: the reference's uploads pointer after the skills
+	// block, naming /mnt/session/uploads and listing no file under it (#681), so
+	// the agent can find mounts that live outside its workdir; only a legacy
+	// mount stored outside that directory is named, by path. Best-effort, mirroring
+	// skills — a dangling mount is a logged, counted miss; the count is flushed
+	// now, before the early returns below, for the same reason as the skills
+	// misses.
 	filesBlock, filesInjected, filesMisses := b.resolveFilesBlock(ctx, resourcesJSON)
 	recordFileResolveMisses(ctx, filesMisses)
 	// Mounted-repository injection: a "Mounted repositories" block after the

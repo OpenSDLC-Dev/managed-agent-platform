@@ -203,7 +203,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 	}
 }
 
-// TestBuildRequestFilesBlockPlacement: the Mounted-files block sits after the
+// TestBuildRequestFilesBlockPlacement: the uploads pointer sits after the
 // skills block and before any runtime system.message text, all blank-joined.
 func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"}}
