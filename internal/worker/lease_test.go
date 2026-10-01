@@ -419,6 +419,11 @@ func TestSDKTypedStopDecodesTheWorkObject(t *testing.T) {
 		first.Data.ID != h.sid.String() {
 		t.Errorf("typed stop = %+v, want work %s stopped with stopped_at, for session %s", first, id, h.sid)
 	}
+	// The typed struct has no actor field, so the decoder files the recorded
+	// null with the keys it does not model (#680).
+	if f, ok := first.JSON.ExtraFields["actor"]; !ok || f.Raw() != "null" {
+		t.Errorf("typed stop ExtraFields[actor] = %q (present %v), want the recorded null", f.Raw(), ok)
+	}
 	again, err := h.client.Beta.Environments.Work.Stop(ctx, id, sdk.BetaEnvironmentWorkStopParams{EnvironmentID: h.envID.String()})
 	if err != nil {
 		t.Fatalf("typed repeat stop: %v", err)

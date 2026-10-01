@@ -64,6 +64,7 @@ func TestWorkListReturnsScopedItems(t *testing.T) {
 	}
 	gotSessions := map[string]bool{}
 	for _, item := range data {
+		wantWorkKeys(t, item)
 		if item["type"] != "work" {
 			t.Errorf("item type = %v, want work", item["type"])
 		}
