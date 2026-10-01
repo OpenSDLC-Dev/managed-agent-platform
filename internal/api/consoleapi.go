@@ -116,33 +116,43 @@ type paginationJSON struct {
 
 // consoleEnvironmentID resolves the {organization_id}/{environment_id} pair every
 // console-API environment route addresses, without touching the database. An
-// unrecognized organization and a malformed environment id answer with the same
-// 404 shape an absent environment gets, so the namespace is no better an
-// enumeration oracle than /v1 is.
+// unrecognized organization answers with the same 404 shape an absent
+// environment gets, so the namespace is no better an enumeration oracle than
+// /v1 is. An id that cannot be an environment's is the reference's 400 instead,
+// which says nothing about which environments exist.
 func consoleEnvironmentID(r *http.Request) (string, error) {
 	if err := consoleOrganization(r); err != nil {
 		return "", err
 	}
 	id := r.PathValue("id")
-	if checkID(id, "environment") != nil {
-		return "", errConsoleEnvironmentNotFound(id)
+	if !domain.ValidWithPrefix(id, domain.PrefixEnvironment) {
+		return "", errConsoleEnvironmentMalformed(id)
 	}
 	return id, nil
 }
 
+// errConsoleEnvironmentMalformed is the 400 the reference answers an id without
+// the env_ shape with, details included (2026-09-05 batch2
+// `rec83.edge3.issue.malformed-env`; #664). The message is ours.
+func errConsoleEnvironmentMalformed(id string) error {
+	return withDetails(errInvalid("%q is not an environment id", id),
+		errorDetails{ErrorVisibility: visibilityUserFacing, ErrorCode: "invalid_request"})
+}
+
 // errConsoleEnvironmentNotFound is this namespace's 404 for an environment it
 // will not answer for, with the details the reference attaches to it here
-// (2026-09-05 batch2 `rec83.edge3.issue.unknown-env`; #664). It is not
-// checkID's 404 with details added: the reference's /v1 answer for the same
-// environment carries none (2026-09-02 batch2 `env.archive.with-deployment`).
+// (2026-09-05 batch2 `rec83.edge3.issue.unknown-env`; #664). The /v1 routes'
+// 404 for the same environment stays without them, as the reference's does
+// (2026-09-02 batch2 `env.archive.with-deployment`).
 func errConsoleEnvironmentNotFound(id string) error {
 	return withDetails(errNotFound("environment %s not found", id),
 		errorDetails{ErrorVisibility: visibilityUserFacing, ErrorCode: "environment_not_found"})
 }
 
-// errEnvironmentKeyNotFound is revocation's one not-found branch, with the
-// details the reference attaches to its own (2026-09-05 batch2
-// `rec83.edge4.revoke.unknown-uuid`; #664).
+// errEnvironmentKeyNotFound is revocation's one not-found branch, an unknown key
+// and another environment's alike, with the details the reference attaches to
+// both (2026-09-05 batch2 `rec83.edge4.revoke.unknown-uuid` and
+// `.cross-environment`; #664).
 func errEnvironmentKeyNotFound() error {
 	return withDetails(errNotFound("environment key not found"),
 		errorDetails{ErrorVisibility: visibilityUserFacing})
@@ -300,9 +310,11 @@ func (s *server) revokeEnvironmentKey(r *http.Request) error {
 	// answer for it: checkID validates shape without asking which resource a
 	// prefix names, and admitting a private identifier there would widen the id
 	// shape every /v1 path accepts. This is its local equivalent — the same
-	// unstorable-byte class closed before the id binds into a query.
+	// unstorable-byte class closed before the id binds into a query — and it
+	// answers the reference's 400, which carries no details (2026-09-05 batch2
+	// `rec83.edge4.revoke.malformed-id`; #664).
 	if !domain.ValidWithPrefix(keyID, domain.PrefixEnvironmentKey) {
-		return errEnvironmentKeyNotFound()
+		return errInvalid("%q is not an environment key id", keyID)
 	}
 	found, err := RevokeEnvironmentKey(r.Context(), s.pool, envID, keyID)
 	if err != nil {

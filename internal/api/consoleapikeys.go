@@ -33,11 +33,12 @@ const (
 // names a workspace that does not exist.
 const reservedWorkspace = "default"
 
-// consoleNotFoundDetails is what the reference attaches to this surface's
-// not-found answers (2026-09-05 batch5 `rec86.keys.update.wellformed-id.*`,
-// batch8 `item6.after-archive.workspaceB.api_keys`; #664). Its answer to an id
-// without the apikey_ prefix is a 400, not our 404, and carries the same.
-var consoleNotFoundDetails = errorDetails{ErrorVisibility: visibilityUserFacing}
+// userFacingDetails is what the reference attaches to this surface's refusals
+// of an unknown workspace or key and of an id without the apikey_ prefix
+// (2026-09-05 batch5 `rec86.keys.update.wellformed-id.*` and
+// `rec86.keys.update.bogus-id.*`, batch8 `item6.after-archive.workspaceB.api_keys`;
+// #664).
+var userFacingDetails = errorDetails{ErrorVisibility: visibilityUserFacing}
 
 // actorJSON renders the reference's `{id, type}` actor. Its own vocabulary for
 // type is `user`; ours is `principal` or `api_key`, because we have no `user_`
@@ -135,7 +136,7 @@ func consoleWorkspace(r *http.Request) error {
 		return err
 	}
 	if ws := r.PathValue("workspace"); ws != reservedWorkspace {
-		return withDetails(errNotFound("workspace %s not found", ws), consoleNotFoundDetails)
+		return withDetails(errNotFound("workspace %s not found", ws), userFacingDetails)
 	}
 	return nil
 }
@@ -204,9 +205,10 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	// apikey_ is deliberately outside domain.knownPrefixes, so checkID cannot
 	// answer for it — the same reasoning revokeEnvironmentKey states for envkey_.
 	// This is its local equivalent, closing the unstorable-byte class before the
-	// id binds into a query.
+	// id binds into a query, and answering the reference's 400. It runs before
+	// the body is read, as the reference refuses the id whatever the body says.
 	if !domain.ValidWithPrefix(keyID, domain.PrefixAPIKey) {
-		return nil, withDetails(errNotFound("api key not found"), consoleNotFoundDetails)
+		return nil, withDetails(errInvalid("%q is not an api key id", keyID), userFacingDetails)
 	}
 	obj, err := decodeObject(r)
 	if err != nil {
@@ -244,7 +246,7 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now())
 		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, withDetails(errNotFound("api key %s not found", keyID), consoleNotFoundDetails)
+		return nil, withDetails(errNotFound("api key %s not found", keyID), userFacingDetails)
 	}
 	if err != nil {
 		return nil, err

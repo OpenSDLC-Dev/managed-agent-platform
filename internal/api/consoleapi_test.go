@@ -305,7 +305,7 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 		"archived environment": {consoleTokens(archived), map[string]any{"name": "x"}, http.StatusBadRequest, "invalid_request_error"},
 		"unknown environment":  {consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"name": "x"}, http.StatusNotFound, "not_found_error"},
 		"malformed environment": {consoleTokens("env_NOT!VALID"), map[string]any{"name": "x"},
-			http.StatusNotFound, "not_found_error"},
+			http.StatusBadRequest, "invalid_request_error"},
 		"name missing":     {consoleTokens(selfHosted), map[string]any{}, http.StatusBadRequest, "invalid_request_error"},
 		"name empty":       {consoleTokens(selfHosted), map[string]any{"name": ""}, http.StatusBadRequest, "invalid_request_error"},
 		"name whitespace":  {consoleTokens(selfHosted), map[string]any{"name": "   "}, http.StatusBadRequest, "invalid_request_error"},
@@ -563,11 +563,13 @@ func TestConsoleKeyListPagesAndRendersNullExpiry(t *testing.T) {
 
 // TestConsoleKeyRevokeRejectsIdsItDoesNotOwn pins that revocation can neither
 // reach another environment's credential nor confirm that an id exists
-// elsewhere: an unknown id, a malformed one and a foreign one all take the same
-// branch. The malformed case matters beyond tidiness — envkey_ is deliberately
-// outside domain.knownPrefixes, so checkID cannot answer for it, and without the
-// local check an unstorable byte would reach a bind parameter and surface as a
-// 500 instead of a 404.
+// elsewhere: an unknown id and a foreign one take the same 404 branch, as the
+// reference's do (2026-09-05 batch2 `rec83.edge4.revoke.unknown-uuid` and
+// `.cross-environment`). A malformed id is the 400 the reference answers one
+// with (`rec83.edge4.revoke.malformed-id`), which says only that the id cannot
+// be a key's. It matters beyond tidiness — envkey_ is deliberately outside
+// domain.knownPrefixes, so checkID cannot answer for it, and without the local
+// check an unstorable byte would reach a bind parameter and surface as a 500.
 func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 	s := newTestServer(t)
 	mine := selfHostedEnv(t, s, "mine")
@@ -575,13 +577,22 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 	theirKey := issueViaConsole(t, s, theirs, "their-host")
 	theirID := onlyKeyID(t, s, theirs)
 
+	for name, id := range map[string]string{
+		"recorded malformed id": "not-a-uuid",
+		"malformed alphabet":    "envkey_NOPE!",
+		"encoded NUL":           "envkey_%00",
+		"wrong prefix":          "env_0123456789abcdefghjkmnp",
+		"no prefix":             "envkey",
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := s.do(http.MethodPost, consoleRevoke(mine, id), nil)
+			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+		})
+	}
+
 	cases := map[string]string{
-		"unknown id":         "envkey_0123456789abcdefghjkmnp",
-		"malformed alphabet": "envkey_NOPE!",
-		"encoded NUL":        "envkey_%00",
-		"wrong prefix":       "env_0123456789abcdefghjkmnp",
-		"no prefix":          "envkey",
-		"another env's key":  theirID,
+		"unknown id":        "envkey_0123456789abcdefghjkmnp",
+		"another env's key": theirID,
 	}
 	messages := map[string]string{}
 	for name, id := range cases {
@@ -612,15 +623,15 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 	}
 }
 
-// TestConsoleKeyErrorsCarryTheRecordedDetails pins the details the reference
-// attaches to this surface's not-found answers (2026-09-05 batch2
-// `rec83.edge3.issue.unknown-env`, `rec83.edge3.list.unknown-env`,
-// `rec83.edge4.revoke.unknown-uuid` and `.cross-environment`, batch8
-// `setup.envkeyA.mint.foreign-workspace-env`; #664). A malformed id shares its
-// unknown twin's one branch here, so it shares the details too: a difference
-// would be the oracle that branch exists to deny. The /v1 answer for the same
-// environment carries none, as recorded there (2026-09-02 batch2
-// `env.archive.with-deployment`).
+// TestConsoleKeyErrorsCarryTheRecordedDetails pins each recorded answer on
+// this surface, details included (2026-09-05 batch2
+// `rec83.edge3.issue.unknown-env`, `.issue.malformed-env`,
+// `.list.unknown-env`, `rec83.edge4.revoke.unknown-uuid`, `.malformed-id`
+// and `.cross-environment`, batch8 `setup.envkeyA.mint.foreign-workspace-env`;
+// #664). A malformed environment id is the reference's detailed 400 on every
+// route that takes one, and a malformed key id its 400 with no details. The
+// /v1 answer for an unknown environment carries none, as recorded there
+// (2026-09-02 batch2 `env.archive.with-deployment`).
 func TestConsoleKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 	s := newTestServer(t)
 	mine := selfHostedEnv(t, s, "mine")
@@ -629,24 +640,31 @@ func TestConsoleKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 	theirID := onlyKeyID(t, s, theirs)
 	unknownEnv := "env_0123456789abcdefghjkmnp"
 	envGone := map[string]any{"error_visibility": "user_facing", "error_code": "environment_not_found"}
+	envMalformed := map[string]any{"error_visibility": "user_facing", "error_code": "invalid_request"}
 	keyGone := map[string]any{"error_visibility": "user_facing"}
 
 	for name, tc := range map[string]struct {
 		method, path string
 		body         any
+		status       int
+		errType      string
 		want         map[string]any
 	}{
-		"issue, unknown environment":   {http.MethodPost, consoleTokens(unknownEnv), map[string]any{"name": "x"}, envGone},
-		"issue, malformed environment": {http.MethodPost, consoleTokens("env_NOT!VALID"), map[string]any{"name": "x"}, envGone},
-		"list, unknown environment":    {http.MethodGet, consoleTokens(unknownEnv), nil, envGone},
-		"revoke, unknown environment":  {http.MethodPost, consoleRevoke(unknownEnv, theirID), nil, envGone},
-		"revoke, unknown key":          {http.MethodPost, consoleRevoke(mine, "envkey_0123456789abcdefghjkmnp"), nil, keyGone},
-		"revoke, malformed key":        {http.MethodPost, consoleRevoke(mine, "envkey_NOPE!"), nil, keyGone},
-		"revoke, another env's key":    {http.MethodPost, consoleRevoke(mine, theirID), nil, keyGone},
+		"issue, unknown environment":            {http.MethodPost, consoleTokens(unknownEnv), map[string]any{"name": "x"}, http.StatusNotFound, "not_found_error", envGone},
+		"issue, recorded malformed environment": {http.MethodPost, consoleTokens("not-an-env-id"), map[string]any{"name": "x"}, http.StatusBadRequest, "invalid_request_error", envMalformed},
+		"issue, malformed environment":          {http.MethodPost, consoleTokens("env_NOT!VALID"), map[string]any{"name": "x"}, http.StatusBadRequest, "invalid_request_error", envMalformed},
+		"list, unknown environment":             {http.MethodGet, consoleTokens(unknownEnv), nil, http.StatusNotFound, "not_found_error", envGone},
+		"list, malformed environment":           {http.MethodGet, consoleTokens("not-an-env-id"), nil, http.StatusBadRequest, "invalid_request_error", envMalformed},
+		"revoke, unknown environment":           {http.MethodPost, consoleRevoke(unknownEnv, theirID), nil, http.StatusNotFound, "not_found_error", envGone},
+		"revoke, malformed environment":         {http.MethodPost, consoleRevoke("not-an-env-id", theirID), nil, http.StatusBadRequest, "invalid_request_error", envMalformed},
+		"revoke, unknown key":                   {http.MethodPost, consoleRevoke(mine, "envkey_0123456789abcdefghjkmnp"), nil, http.StatusNotFound, "not_found_error", keyGone},
+		"revoke, another env's key":             {http.MethodPost, consoleRevoke(mine, theirID), nil, http.StatusNotFound, "not_found_error", keyGone},
+		"revoke, recorded malformed key":        {http.MethodPost, consoleRevoke(mine, "not-a-uuid"), nil, http.StatusBadRequest, "invalid_request_error", nil},
+		"revoke, malformed key":                 {http.MethodPost, consoleRevoke(mine, "envkey_NOPE!"), nil, http.StatusBadRequest, "invalid_request_error", nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(tc.method, tc.path, tc.body)
-			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			wantErr(t, status, body, tc.status, tc.errType)
 			wantDetails(t, body, tc.want)
 		})
 	}

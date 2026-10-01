@@ -592,8 +592,10 @@ func TestAPIKeyNamesNeedNotBeUnique(t *testing.T) {
 }
 
 // TestAPIKeyRoutesRejectUnknownScopesAndIDs keeps the namespace from becoming an
-// enumeration oracle: an unknown organization, an unknown workspace and a
-// malformed key id all answer with the same 404 shape.
+// enumeration oracle: an unknown organization, an unknown workspace and an
+// unknown key id all answer with the same 404 shape. A malformed key id is the
+// reference's 400 instead (2026-09-05 batch5 `rec86.keys.update.bogus-id.*`),
+// which says only that the id cannot be a key's.
 func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 	s := newTestServer(t)
 	id := issueAPIKey(t, s, map[string]any{"name": "scoped"})["id"].(string)
@@ -611,26 +613,26 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 
 	// Each case names the status it must produce, not merely "not 200". The whole
 	// point of validating an id at the edge is that an unstorable byte becomes a
-	// 404 instead of binding into a query as a 500 — an assertion that accepted any
+	// 400 instead of binding into a query as a 500 — an assertion that accepted any
 	// non-200 would pass on exactly the failure it exists to catch.
 	for name, tc := range map[string]struct {
 		keyID string
 		want  int
 	}{
-		// A well-formed id of the wrong family, and a well-formed id of the right
-		// family that names nothing, are the same answer: this route cannot confirm
-		// that an id exists somewhere else.
-		"wrong prefix": {"envkey_" + strings.Repeat("a", 24), http.StatusNotFound},
-		"unknown id":   {"apikey_" + strings.Repeat("a", 24), http.StatusNotFound},
-		"bad alphabet": {"apikey_" + strings.Repeat("!", 24), http.StatusNotFound},
+		"unknown id": {"apikey_" + strings.Repeat("a", 24), http.StatusNotFound},
+		// The id the reference was recorded refusing, and a well-formed id of the
+		// wrong family: neither can name a key, whatever exists elsewhere.
+		"recorded bogus id": {"00000000-0000-0000-0000-000000000000", http.StatusBadRequest},
+		"wrong prefix":      {"envkey_" + strings.Repeat("a", 24), http.StatusBadRequest},
+		"bad alphabet":      {"apikey_" + strings.Repeat("!", 24), http.StatusBadRequest},
 		// Bytes Postgres cannot store in a text column — the reason the shape check
 		// runs before the id reaches a query at all. They are written
 		// percent-encoded because net/url refuses to build a URL containing a raw
 		// control character, so a literal NUL never leaves the client; encoding is
 		// also how one would actually arrive, since ServeMux decodes each segment
 		// before PathValue sees it.
-		"NUL byte":      {"apikey_%00" + strings.Repeat("a", 23), http.StatusNotFound},
-		"invalid UTF-8": {"apikey_%ff" + strings.Repeat("a", 23), http.StatusNotFound},
+		"NUL byte":      {"apikey_%00" + strings.Repeat("a", 23), http.StatusBadRequest},
+		"invalid UTF-8": {"apikey_%ff" + strings.Repeat("a", 23), http.StatusBadRequest},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, obj := s.do(http.MethodPost, consoleAPIKey(tc.keyID), map[string]any{"status": "active"})
@@ -659,27 +661,35 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 	}
 }
 
-// TestAPIKeyErrorsCarryTheRecordedDetails pins the details the reference
-// attaches to this surface's not-found answers (2026-09-05 batch5
-// `rec86.keys.update.wellformed-id.*`, batch8
-// `item6.after-archive.workspaceB.api_keys`; #664). An id without the apikey_
-// prefix is a 404 here and a 400 there (batch5 `rec86.keys.update.bogus-id.*`),
-// and both of the reference's answers carry these same details.
+// TestAPIKeyErrorsCarryTheRecordedDetails pins each recorded answer on this
+// surface, details included (2026-09-05 batch5
+// `rec86.keys.update.wellformed-id.*` and `rec86.keys.update.bogus-id.*`,
+// batch8 `item6.after-archive.workspaceB.api_keys`; #664): an unknown key or
+// workspace is a 404, an id without the apikey_ prefix a 400, and each
+// carries the same details. The bogus id is refused before the body is read,
+// as the reference refuses it whatever the body says.
 func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 	s := newTestServer(t)
 	otherWorkspace := "/api/console/organizations/default/workspaces/other/api_keys"
+	bogus := consoleAPIKey("00000000-0000-0000-0000-000000000000")
 	for name, tc := range map[string]struct {
 		method, path string
 		body         any
+		status       int
+		errType      string
 	}{
-		"update, unknown id":       {http.MethodPost, consoleAPIKey("apikey_" + strings.Repeat("a", 24)), map[string]any{"status": "active"}},
-		"update, wrong prefix":     {http.MethodPost, consoleAPIKey("envkey_" + strings.Repeat("a", 24)), map[string]any{"status": "active"}},
-		"list, unknown workspace":  {http.MethodGet, otherWorkspace, nil},
-		"issue, unknown workspace": {http.MethodPost, otherWorkspace, map[string]any{"name": "x"}},
+		"update, unknown id":            {http.MethodPost, consoleAPIKey("apikey_" + strings.Repeat("a", 24)), map[string]any{"status": "active"}, http.StatusNotFound, "not_found_error"},
+		"list, unknown workspace":       {http.MethodGet, otherWorkspace, nil, http.StatusNotFound, "not_found_error"},
+		"issue, unknown workspace":      {http.MethodPost, otherWorkspace, map[string]any{"name": "x"}, http.StatusNotFound, "not_found_error"},
+		"update, bogus id, empty body":  {http.MethodPost, bogus, map[string]any{}, http.StatusBadRequest, "invalid_request_error"},
+		"update, bogus id, status":      {http.MethodPost, bogus, map[string]any{"status": "inactive"}, http.StatusBadRequest, "invalid_request_error"},
+		"update, bogus id, bad status":  {http.MethodPost, bogus, map[string]any{"status": "bogus"}, http.StatusBadRequest, "invalid_request_error"},
+		"update, wrong-prefix id":       {http.MethodPost, consoleAPIKey("envkey_" + strings.Repeat("a", 24)), map[string]any{"status": "active"}, http.StatusBadRequest, "invalid_request_error"},
+		"update, bogus id, no body key": {http.MethodPost, bogus, map[string]any{"scopes": "x"}, http.StatusBadRequest, "invalid_request_error"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(tc.method, tc.path, tc.body)
-			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			wantErr(t, status, body, tc.status, tc.errType)
 			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
 		})
 	}
