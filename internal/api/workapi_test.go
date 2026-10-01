@@ -672,7 +672,8 @@ func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 // `work.heartbeat.NO_HEARTBEAT`, `work.heartbeat.wrong-expected`; #664):
 // current_state is the item as the refused beat found it — the heartbeat
 // response's members less its type, never extended, plus lease_updated_at,
-// which the recording shows equal to the item's started_at.
+// which the recording shows equal to the item's started_at once a beat has
+// claimed it.
 func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 	s := newTestServer(t)
 	envID, sessionID, key := selfHostedWorker(t, s, "ek-hb-412")
@@ -698,12 +699,13 @@ func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 		}
 	}
 
-	// A claim before the ack, on work no beat has reached. The recordings hold
-	// no 412 on such an item, so its empty last_heartbeat is the heartbeat
-	// response's own form for one, not an observed current_state.
+	// A claim before the ack, on work no beat has reached. No recording holds a
+	// 412 on such an item; the pinned SDK's own fixture for one renders both
+	// last_heartbeat and lease_updated_at null (checked against anthropic-sdk-go
+	// v1.70.1 — lib/environments/worker_test.go leaseLostBody).
 	refused(t, "expected_last_heartbeat=NO_HEARTBEAT", map[string]any{
-		"lease_extended": false, "state": "queued", "last_heartbeat": "",
-		"ttl_seconds": float64(30), "lease_updated_at": startedAt,
+		"lease_extended": false, "state": "queued", "last_heartbeat": nil,
+		"ttl_seconds": float64(30), "lease_updated_at": nil,
 	})
 
 	if res, _, raw := s.workReq(t, http.MethodPost, item+"/ack", key, nil); res.StatusCode != http.StatusOK {

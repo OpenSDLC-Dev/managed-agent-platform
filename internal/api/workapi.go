@@ -408,38 +408,33 @@ func mapWorkErr(err error) error {
 
 // refusedBeatStateWire is a 412's details.current_state: the heartbeat
 // response's members less its type, in the order the reference lists them,
-// plus lease_updated_at. Its last_heartbeat is the item's, rendered as
-// heartbeatWire renders one; its ttl_seconds the refused beat's own, as every
-// beat here that extends nothing reports it. lease_updated_at is the item's
-// started_at: the only recorded value equals it to the microsecond, and the
-// reference's started_at, like ours, stamps the item's entry to the queue.
+// plus lease_updated_at. Its ttl_seconds is the refused beat's own, as every
+// beat here that extends nothing reports it. Once a beat has claimed the item,
+// lease_updated_at is its started_at: the only recorded value equals it to the
+// microsecond, and the reference's started_at, like ours, stamps the item's
+// entry to the queue. Until one has — never claimed, or re-queued, which
+// clears last_heartbeat — both timestamps are null, as in the pinned SDK's own
+// fixture for such a 412 (checked against anthropic-sdk-go v1.70.1 —
+// lib/environments/worker_test.go leaseLostBody).
 type refusedBeatStateWire struct {
 	LeaseExtended  bool       `json:"lease_extended"`
 	State          string     `json:"state"`
-	LastHeartbeat  string     `json:"last_heartbeat"`
+	LastHeartbeat  *time.Time `json:"last_heartbeat"`
 	TTLSeconds     int64      `json:"ttl_seconds"`
 	LeaseUpdatedAt *time.Time `json:"lease_updated_at"`
 }
 
 func refusedBeatState(m *queue.HeartbeatMismatchError) refusedBeatStateWire {
-	return refusedBeatStateWire{
-		LeaseExtended:  false,
-		State:          m.Item.State,
-		LastHeartbeat:  heartbeatString(m.Item.LastHeartbeat),
-		TTLSeconds:     m.TTLSeconds,
-		LeaseUpdatedAt: utcPtr(m.Item.StartedAt),
+	out := refusedBeatStateWire{
+		LeaseExtended: false,
+		State:         m.Item.State,
+		LastHeartbeat: utcPtr(m.Item.LastHeartbeat),
+		TTLSeconds:    m.TTLSeconds,
 	}
-}
-
-// heartbeatString renders a last heartbeat byte for byte as encoding/json
-// renders a UTC time.Time — the form the field had before it could be empty,
-// and the one the worker echoes back for Heartbeat to parse as its next
-// precondition — and an absent one as the empty string.
-func heartbeatString(t *time.Time) string {
-	if t == nil {
-		return ""
+	if out.LastHeartbeat != nil {
+		out.LeaseUpdatedAt = utcPtr(m.Item.StartedAt)
 	}
-	return t.UTC().Format(time.RFC3339Nano)
+	return out
 }
 
 // getWork returns one work item (GET .../work/{work_id}).
@@ -532,8 +527,15 @@ func (s *server) heartbeatWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, mapWorkErr(err)
 	}
+	// Byte for byte what encoding/json renders a UTC time.Time as — the form
+	// this field had before it could be empty, and the one the worker echoes
+	// back for Heartbeat to parse as its next precondition.
+	last := ""
+	if res.LastHeartbeat != nil {
+		last = res.LastHeartbeat.UTC().Format(time.RFC3339Nano)
+	}
 	return heartbeatWire{
-		LastHeartbeat: heartbeatString(res.LastHeartbeat),
+		LastHeartbeat: last,
 		LeaseExtended: res.LeaseExtended,
 		State:         res.State,
 		TTLSeconds:    res.TTLSeconds,
