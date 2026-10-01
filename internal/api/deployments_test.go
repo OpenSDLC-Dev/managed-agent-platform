@@ -957,10 +957,7 @@ func TestListDeploymentsRejectsACursorItCannotHonor(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("agent versions: %d %v", status, body)
 	}
-	versionCursor := nextPage(t, body)
-	if versionCursor == "" {
-		t.Fatal("the agent versions listing issued no cursor to borrow")
-	}
+	versionCursor := wantCursor(t, body)
 
 	for _, cur := range []string{versionCursor, "not-a-cursor"} {
 		status, body := s.do(http.MethodGet, "/v1/deployments?page="+url.QueryEscape(cur), nil)

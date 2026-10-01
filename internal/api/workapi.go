@@ -304,7 +304,7 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := pageJSON{Data: []any{}}
+	out := nullPageJSON{Data: []any{}}
 	for i, w := range items {
 		if i >= page.limit {
 			break

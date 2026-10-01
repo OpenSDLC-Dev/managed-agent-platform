@@ -548,7 +548,7 @@ func TestAgentVersionsSnapshotHistory(t *testing.T) {
 	if entries := listData(t, page1); len(entries) != 2 || entries[0]["version"] != float64(3) {
 		t.Fatalf("versions page 1 = %v", entries)
 	}
-	status, page2 := s.do(http.MethodGet, "/v1/agents/"+id+"/versions?limit=2&page="+nextPage(t, page1), nil)
+	status, page2 := s.do(http.MethodGet, "/v1/agents/"+id+"/versions?limit=2&page="+wantCursor(t, page1), nil)
 	if status != http.StatusOK {
 		t.Fatalf("versions page 2: %d", status)
 	}
@@ -556,7 +556,7 @@ func TestAgentVersionsSnapshotHistory(t *testing.T) {
 		t.Errorf("versions page 2 = %v, want just version 1", entries)
 	}
 	if got := nextPage(t, page2); got != "" {
-		t.Errorf("versions final page next_page = %q, want null", got)
+		t.Errorf("versions final page next_page = %q, want none", got)
 	}
 }
 
@@ -581,10 +581,7 @@ func TestAgentListPagination(t *testing.T) {
 	if d1[0]["id"] != ids[2] || d1[1]["id"] != ids[1] {
 		t.Errorf("order = %v,%v want %v,%v", d1[0]["id"], d1[1]["id"], ids[2], ids[1])
 	}
-	cursor := nextPage(t, page1)
-	if cursor == "" {
-		t.Fatal("next_page empty with more rows remaining")
-	}
+	cursor := wantCursor(t, page1)
 
 	status, page2 := s.do(http.MethodGet, "/v1/agents?limit=2&page="+cursor, nil)
 	if status != http.StatusOK {
@@ -595,7 +592,7 @@ func TestAgentListPagination(t *testing.T) {
 		t.Errorf("page 2 = %v", d2)
 	}
 	if got := nextPage(t, page2); got != "" {
-		t.Errorf("next_page on final page = %q, want null", got)
+		t.Errorf("next_page on final page = %q, want none", got)
 	}
 
 	// Limit bounds: 0 and 101 are invalid; a bogus cursor is invalid.
