@@ -1381,10 +1381,11 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
 		// The watchdog sleeps its whole deadline before it kills, so the run is
-		// the deadline — never under it by more than the clock's hundredth of a
-		// second, and never past the slop, or a punctual kill would read as an
-		// overrun.
-		wantRan(t, ran, time.Second-uptimeTick, time.Second+defaultOverrunSlop)
+		// the deadline: never past the slop, or a punctual kill would read as an
+		// overrun, and under it only by what the record can start late — a
+		// wrapper descheduled just after launching the watchdog (classifyTimeout)
+		// — which the slop also bounds here, since the mark covers that case.
+		wantRan(t, ran, time.Second-defaultOverrunSlop, time.Second+defaultOverrunSlop)
 		if !classifier.classifyTimeout(time.Second, code, killed, ran, verdict{}) {
 			t.Error("a command the watchdog killed on its deadline did not classify as a timeout")
 		}
@@ -1509,10 +1510,6 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	})
 }
 
-// uptimeTick is /proc/uptime's resolution: two readings of it can lose up to
-// this much of the time between them.
-const uptimeTick = 10 * time.Millisecond
-
 // wantRan checks a run time the wrapper recorded on the host's shell. Its clock
 // is /proc/uptime, which a pod always has and a macOS host does not; there the
 // check is the other half of the contract instead — no clock, no record, and
@@ -1561,11 +1558,84 @@ func TestExecWrapperRecordsHowLongTheCommandRan(t *testing.T) {
 	if err != nil || code != 7 || killed {
 		t.Fatalf("parseExit(%q) = %d, %v, %s, %v; want 7, false", out, code, killed, ran, err)
 	}
-	// At least the 300ms the command slept, less one tick. Under a second: what
-	// the record adds beyond the sleep is a fork and a reap, single-digit
-	// milliseconds on an idle host, so 700ms of headroom is load, not slack for a
-	// record that counts something it should not.
-	wantRan(t, ran, 300*time.Millisecond-uptimeTick, time.Second)
+	// At least half the 300ms the command slept: the record starts once the
+	// watchdog is launched, which can come a moment after the command has begun
+	// its sleep — half of it would take a host stalled that long right then.
+	// Under a second: what the record adds beyond the
+	// sleep is a reap, single-digit milliseconds on an idle host, so 700ms of
+	// headroom is load, not slack for a record that counts something it should
+	// not.
+	wantRan(t, ran, 150*time.Millisecond, time.Second)
+}
+
+// The record starts once the watchdog has been launched, never before: a SIGKILL
+// it reads as the deadline's has then lasted the deadline less probeLead from
+// the watchdog's launch, not from some earlier instant the watchdog's countdown
+// had not reached (classifyTimeout states the bound this buys).
+//
+// Behaviourally: everything the wrapper does between launching the command and
+// launching the watchdog stays out of the record. A FIFO planted at the pid file
+// holds the wrapper at its only blocking step there — writing the pid — for half
+// a second of the command's one-second run; a record that started before that
+// write counts the whole second, one that starts after the launch only the half
+// left. (The command outlives the hold on purpose: its exit would interrupt the
+// blocked write, which macOS's bash 3.2 then abandons rather than retries.) The
+// one step left between that write and the reading is the watchdog's fork,
+// which no host test can stretch, so the script's own order is asserted for it.
+func TestExecWrapperStartsTheRecordOnceTheWatchdogIsLaunched(t *testing.T) {
+	launch := strings.Index(execWrapper, ") >/dev/null 2>&1 3>&- &")
+	reading := strings.Index(execWrapper, "read -r t0 ")
+	if launch < 0 || reading < 0 || reading < launch {
+		t.Errorf("the first reading (at %d) does not follow the watchdog's launch (at %d) in execWrapper", reading, launch)
+	}
+
+	env := setsidEnv(t)
+	state := t.TempDir() + "/state"
+	if err := syscall.Mkfifo(state+".pid", 0o644); err != nil {
+		t.Fatalf("plant a fifo at the pid file: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	wrapper := exec.CommandContext(ctx, "/bin/bash", "-c", execWrapper, "map-exec", "sleep 1", "30", state)
+	if env != nil {
+		wrapper.Env = env
+	}
+	if err := wrapper.Start(); err != nil {
+		t.Fatalf("start execWrapper: %v", err)
+	}
+	const held = 500 * time.Millisecond
+	time.Sleep(held)
+	opened := make(chan error, 1)
+	go func() {
+		// Blocks until the wrapper's write opens the other end, which it is
+		// already waiting to do.
+		f, err := os.Open(state + ".pid")
+		if err == nil {
+			_, err = io.ReadAll(f)
+			_ = f.Close()
+		}
+		opened <- err
+	}()
+	select {
+	case err := <-opened:
+		if err != nil {
+			t.Fatalf("release the wrapper's pid write: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the wrapper never wrote its pid")
+	}
+	if err := wrapper.Wait(); err != nil {
+		t.Fatalf("run execWrapper: %v", err)
+	}
+	out, err := exec.Command("/bin/bash", "-c", exitScript, "map-exit", state).Output()
+	if err != nil {
+		t.Fatalf("run exitScript: %v", err)
+	}
+	code, killed, ran, err := parseExit(string(out))
+	if err != nil || code != 0 || killed {
+		t.Fatalf("parseExit(%q) = %d, %v, %s, %v; want 0, false", out, code, killed, ran, err)
+	}
+	wantRan(t, ran, 0, time.Second-held/2)
 }
 
 // The watchdog must not still be holding the exec's stderr when the command has

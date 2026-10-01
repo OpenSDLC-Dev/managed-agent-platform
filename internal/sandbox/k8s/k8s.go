@@ -1267,11 +1267,23 @@ func watchdogDeadline(timeout time.Duration) time.Duration {
 // it reaps the command, and reaping is the moment `kill -0` stops finding a
 // command too. So the record adds only a timeout an instantly answered probe
 // would also have given, with one bounded exception: a wrapper that stalls
-// between the reap and that reading for longer than the exec took to start
-// over-reports by no more than the stall, plus /proc/uptime's hundredth of a
-// second — a cost paid in the direction of the label. Asked at the same lead, the
-// record pays the lead's cost too: a command that SIGKILLs itself, or exits 137,
-// within probeLead of its deadline reads as a timeout.
+// between the reap and that reading for longer than its first reading came after
+// Exec's start over-reports by no more than the stall, plus /proc/uptime's
+// hundredth of a second — a cost paid in the direction of the label.
+//
+// Asked at the same lead, the record pays the lead's cost too: a command that
+// SIGKILLs itself, or exits 137, within probeLead of its deadline reads as a
+// timeout — that deadline counted from where the record starts, just after the
+// watchdog's launch, and so after the command's own launch: such a SIGKILL comes
+// no sooner than the command's own deadline less probeLead. That is as near the
+// watchdog's countdown as the wrapper can honestly get: the countdown itself
+// begins a moment after the launch, inside the watchdog's own process — its
+// first `kill -0`, then the fork and exec of its first `sleep` — and the wrapper
+// could learn when only by waiting on a process the command can kill. So against
+// the watchdog's own kill the window is probeLead plus that start-up. Reading
+// after the launch has a cost on the other side, and it only ever removes: a
+// wrapper descheduled just after the launch starts the record late, and it can
+// then fall short of a punctual kill, which the mark still witnesses.
 //
 // The mark is not quite proof of authorship: the watchdog marks after `kill -0`
 // says the command is there, and a command that exits in the moment between

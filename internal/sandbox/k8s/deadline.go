@@ -66,21 +66,20 @@ import "time"
 // command's return by up to a poll interval.
 //
 // How long the command ran rides on the exit line, after the code, as two
-// readings of /proc/uptime (classifyTimeout says why, #832): one taken as the
-// command is launched — just after, so nothing the wrapper sets can reach the
-// command's environment — and one once it is reaped. /proc/uptime because every
-// pod has it — it is the kernel's, not the image's — and its clock does not step
-// the way the wall clock can. `read` because it is a builtin, so a reading forks
-// nothing, and a regular one, so a missing file cannot abort the wrapper even
-// under a POSIX-mode bash. Each reading is cleared first: a read that fails then
-// leaves it empty, and the line carries no record, rather than whatever value
-// the environment happened to give the name.
+// readings of /proc/uptime (classifyTimeout says why, and what the order of the
+// first one bounds, #832): one taken once the watchdog has been launched —
+// never before, and after both launches, so nothing the wrapper sets can reach
+// either process's environment — and one once the command is reaped.
+// /proc/uptime because every pod has it — it is the kernel's, not the image's —
+// and its clock does not step the way the wall clock can. `read` because it is a
+// builtin, so a reading forks nothing, and a regular one, so a missing file
+// cannot abort the wrapper even under a POSIX-mode bash. Each reading is cleared
+// first: a read that fails then leaves it empty, and the line carries no record,
+// rather than whatever value the environment happened to give the name.
 const execWrapper = `
 exec 3>&2 2>/dev/null
 setsid /bin/bash -c "$1" 2>&3 3>&- &
 cmd=$!
-t0=
-read -r t0 _ </proc/uptime
 echo "$cmd" > "$3.pid"
 if [ "$2" != "0" ]; then
   (
@@ -96,6 +95,8 @@ if [ "$2" != "0" ]; then
     fi
   ) >/dev/null 2>&1 3>&- &
 fi
+t0=
+read -r t0 _ </proc/uptime
 wait "$cmd"
 c=$?
 t1=
@@ -176,6 +177,6 @@ const (
 	// already killed looks like one never there. The probe's answer lands a round
 	// trip late, which is why the probe is not what classifies a punctual timeout
 	// here; the wrapper's record asks the same question at the same lead, on the
-	// pod's own clock. See classifyTimeout.
+	// pod's own clock and timed from the watchdog's launch. See classifyTimeout.
 	defaultProbeLead = 50 * time.Millisecond
 )
