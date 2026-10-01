@@ -225,8 +225,10 @@ func TestSandboxToolSchemasCarryTheAdoptedRecordedKeywords(t *testing.T) {
 			continue
 		}
 		seen++
-		if ap := d.InputSchema.AdditionalProperties; ap == nil || *ap {
-			t.Errorf("%s: additionalProperties = %v, want false", d.Name, ap)
+		if ap := d.InputSchema.AdditionalProperties; ap == nil {
+			t.Errorf("%s: additionalProperties absent, want false", d.Name)
+		} else if *ap {
+			t.Errorf("%s: additionalProperties = true, want false", d.Name)
 		}
 		if fp, ok := d.InputSchema.Properties["file_path"]; ok {
 			if _, ok := fp["pattern"]; ok {
@@ -234,13 +236,13 @@ func TestSandboxToolSchemasCarryTheAdoptedRecordedKeywords(t *testing.T) {
 			}
 		}
 		for prop, schema := range d.InputSchema.Properties {
-			min, has := schema["minLength"]
+			minLen, has := schema["minLength"]
 			if d.Name == "edit" && prop == "old_string" {
-				if min != float64(1) {
-					t.Errorf("edit.old_string: minLength = %v, want 1", min)
+				if minLen != float64(1) {
+					t.Errorf("edit.old_string: minLength = %v, want 1", minLen)
 				}
 			} else if has {
-				t.Errorf("%s.%s: minLength = %v, want none", d.Name, prop, min)
+				t.Errorf("%s.%s: minLength = %v, want none", d.Name, prop, minLen)
 			}
 		}
 	}

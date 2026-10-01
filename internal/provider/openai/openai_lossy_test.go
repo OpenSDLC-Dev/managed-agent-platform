@@ -280,66 +280,69 @@ func sentFunctions(t *testing.T, body map[string]any) map[string]map[string]any 
 // wrote it, and no "strict" is set.
 //
 // The six sandbox tools carry two of them since #822 — additionalProperties on
-// all six, minLength on edit's old_string — and lose them the same way; edit
-// stands for the six.
+// all six, minLength on edit's old_string — and lose them the same way, so
+// every one of the eight is checked.
 func TestBuiltinToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.T) {
-	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
-		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true},{"name":"edit","enabled":true}]}`)
-	defs, err := toolset.Tools(entry, time.Now())
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
 	}
-	body := requestFor(t, provider.Request{
-		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
-		Tools:        defs,
-		BuiltinTools: map[string]bool{"web_fetch": true, "web_search": true, "edit": true},
-	})
-	fns := sentFunctions(t, body)
-
+	type definition struct {
+		Name        string         `json:"name"`
+		InputSchema map[string]any `json:"input_schema"`
+	}
+	byName := map[string]definition{}
+	builtins := map[string]bool{}
+	for _, raw := range defs {
+		// A fresh value per decode: decoding into a reused one merges the
+		// earlier tool's schema keys into this one's.
+		var d definition
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("definition: %v", err)
+		}
+		byName[d.Name], builtins[d.Name] = d, true
+	}
+	if len(byName) != 8 {
+		t.Fatalf("built-ins = %v, want all eight enabled", builtins)
+	}
+	// The definitions must carry what the adapter is meant to strip, or this
+	// test passes over schemas that never had it.
 	for _, tc := range []struct{ tool, prop, key string }{
 		{"web_fetch", "url", "format"},
 		{"web_search", "query", "minLength"},
 		{"edit", "old_string", "minLength"},
 	} {
-		type definition struct {
-			Name        string         `json:"name"`
-			InputSchema map[string]any `json:"input_schema"`
+		prop := byName[tc.tool].InputSchema["properties"].(map[string]any)[tc.prop].(map[string]any)
+		if _, ok := prop[tc.key]; !ok {
+			t.Fatalf("%s.%s = %v, want %s to strip", tc.tool, tc.prop, prop, tc.key)
 		}
-		var def definition
-		for _, raw := range defs {
-			// A fresh value per decode: decoding into a reused one merges
-			// the earlier tool's schema keys into this one's.
-			var d definition
-			if err := json.Unmarshal(raw, &d); err != nil {
-				t.Fatalf("definition: %v", err)
-			}
-			if d.Name == tc.tool {
-				def = d
-				break
-			}
-		}
-		if def.Name != tc.tool {
-			t.Fatalf("no %s definition among %d", tc.tool, len(defs))
-		}
-		// The definition must carry what the adapter is meant to strip, or
-		// this test passes over a schema that never had it.
-		prop := def.InputSchema["properties"].(map[string]any)[tc.prop].(map[string]any)
-		if _, ok := prop[tc.key]; !ok || def.InputSchema["additionalProperties"] != false {
-			t.Fatalf("%s input_schema = %v, want %s on %s and additionalProperties false to strip", tc.tool, def.InputSchema, tc.key, tc.prop)
-		}
-		delete(prop, tc.key)
-		delete(def.InputSchema, "additionalProperties")
+	}
 
-		fn, ok := fns[tc.tool]
-		if !ok {
-			t.Fatalf("no %s function was sent", tc.tool)
+	fns := sentFunctions(t, requestFor(t, provider.Request{
+		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:        defs,
+		BuiltinTools: builtins,
+	}))
+	for name, def := range byName {
+		if def.InputSchema["additionalProperties"] != false {
+			t.Fatalf("%s input_schema.additionalProperties = %v, want false to strip", name, def.InputSchema["additionalProperties"])
 		}
-		if !reflect.DeepEqual(fn["parameters"], def.InputSchema) {
-			t.Errorf("%s parameters = %v, want the input_schema without %s and additionalProperties: %v",
-				tc.tool, fn["parameters"], tc.key, def.InputSchema)
+		want := def.InputSchema
+		delete(want, "additionalProperties")
+		for _, p := range want["properties"].(map[string]any) {
+			delete(p.(map[string]any), "format")
+			delete(p.(map[string]any), "minLength")
+		}
+		fn, ok := fns[name]
+		if !ok {
+			t.Fatalf("no %s function was sent", name)
+		}
+		if !reflect.DeepEqual(fn["parameters"], want) {
+			t.Errorf("%s parameters = %v, want the input_schema without format, minLength and additionalProperties: %v",
+				name, fn["parameters"], want)
 		}
 		if _, ok := fn["strict"]; ok {
-			t.Errorf("%s carries strict = %v, want none", tc.tool, fn["strict"])
+			t.Errorf("%s carries strict = %v, want none", name, fn["strict"])
 		}
 	}
 }
@@ -350,8 +353,8 @@ func TestBuiltinToolParametersLoseFormatMinLengthAndAdditionalProperties(t *test
 // contentSchema — and unevaluatedProperties with additionalProperties; it
 // leaves a property that is merely *named* format, a dependencies entry that
 // is a list of names, and instance data — enum, default, const, examples —
-// whatever keys that data holds. No built-in nests a schema today (the web
-// tools' are flat); this pins the walk for one that does.
+// whatever keys that data holds. No built-in carries one of the keywords in a
+// nested subschema today; this pins the walk for one that does.
 func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
 	in := `{"type":"object","additionalProperties":false,"required":["format"],` +
 		`"properties":{` +

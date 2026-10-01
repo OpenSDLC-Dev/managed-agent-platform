@@ -452,11 +452,12 @@ func convertTools(tools []json.RawMessage, builtin map[string]bool) ([]chatTool,
 // part of JSON Schema — Gemini's compatibility endpoint and vLLM's guided
 // decoding were the cases raised — can refuse the whole tool list over one of
 // them, and the built-ins are on by default. What the model loses here is a
-// hint, not the check: the executor validates the web tools' input and edit's
-// old_string itself, and a property a closed schema would have refused is one
-// the tools ignore. A custom or MCP tool's
-// schema is never touched: it is a contract its author set, which no platform
-// check stands behind, and whatever it carries it carried before #682.
+// hint, not the check: the executor validates the web tools' input, the edit
+// tool refuses an empty old_string wherever it runs (executor or BYOC
+// worker), and a property a closed schema would have refused is one the tools
+// ignore. A custom or MCP tool's schema is never touched: it is a contract
+// its author set, which no platform check stands behind, and whatever it
+// carries it carried before #682.
 // unevaluatedProperties goes with additionalProperties: it is the 2019-09
 // keyword that closes an object the same way, and no built-in carries it yet.
 var strippedKeywords = []string{"format", "minLength", "additionalProperties", "unevaluatedProperties"}
