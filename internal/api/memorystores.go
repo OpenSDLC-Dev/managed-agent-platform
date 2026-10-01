@@ -253,9 +253,11 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 		}
 	}
 
-	// updated_at is "when the store's name, description, or metadata was last
-	// modified" (the spec), so a request that modifies none of them — an empty
-	// body, a null bag, the stored values sent back — leaves it alone.
+	// An update moves updated_at by the spec's definition of the field, "when
+	// the store's name, description, or metadata was last modified", so a
+	// request that modifies none of them — an empty body, a null bag, the
+	// stored values sent back — leaves it alone. The first archive moves it
+	// too, as the reference's recorded archives did (see archiveMemoryStore).
 	if row.name != oldName || row.description != oldDescription || !maps.Equal(metadata, oldMetadata) {
 		if err := tx.QueryRow(ctx,
 			`UPDATE memory_stores SET name = $2, description = $3, metadata = $4, updated_at = now()
