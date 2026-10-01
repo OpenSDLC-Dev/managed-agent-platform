@@ -3,7 +3,6 @@ package executor
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -33,13 +32,21 @@ func TestNormalizeFetchURL(t *testing.T) {
 	}
 }
 
-func TestURLsInReadsEachURLToItsEnd(t *testing.T) {
+// textHolds reports whether text provides url, as fetchProvenanced decides it
+// for one string.
+func textHolds(text, url string) bool {
+	want, ok := normalizeFetchURL(url)
+	return ok && mentionsURL(text, want)
+}
+
+func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
 	for _, tc := range []struct {
 		text string
-		want []string
+		urls []string // each one the text holds
 	}{
-		{"read https://example.com/page.", []string{"https://example.com/page"}},
-		{"(see https://example.com/a), or HTTP://Example.com/b!", []string{"https://example.com/a", "HTTP://Example.com/b"}},
+		{"read https://example.com/page.", []string{"https://example.com/page", "https://example.com/page."}},
+		{"(see https://example.com/a), or HTTP://Example.com/b!",
+			[]string{"https://example.com/a", "http://example.com/b", "http://example.com/b!"}},
 		{"[next](https://example.com/next)[prev](https://example.com/prev)",
 			[]string{"https://example.com/next", "https://example.com/prev"}},
 		{"https://en.wikipedia.org/wiki/Go_(programming_language) is it",
@@ -47,14 +54,32 @@ func TestURLsInReadsEachURLToItsEnd(t *testing.T) {
 		{"[w](https://en.wikipedia.org/wiki/Go_(programming_language))",
 			[]string{"https://en.wikipedia.org/wiki/Go_(programming_language)"}},
 		{`"https://example.com/q?a=1&b=2"`, []string{"https://example.com/q?a=1&b=2"}},
+		{"'https://example.com/quoted'", []string{"https://example.com/quoted"}},
 		{"<https://example.com/x>", []string{"https://example.com/x"}},
 		{"**https://example.com/bold**", []string{"https://example.com/bold"}},
 		{"https://r.jina.ai/https://example.com/", []string{"https://r.jina.ai/https://example.com/", "https://example.com/"}},
 		{"İstanbul https://example.com/after-a-wide-rune", []string{"https://example.com/after-a-wide-rune"}},
-		{"no url here, only httpx://nope and http:/nope", nil},
+		// A URL's own last character survives where text punctuation would be
+		// dropped: a search hit's source is returned exactly so.
+		{"https://example.com/search?", []string{"https://example.com/search?", "https://example.com/search"}},
+		{"https://example.com/release!", []string{"https://example.com/release!"}},
+		{"https://example.com/a)", []string{"https://example.com/a)", "https://example.com/a"}},
 	} {
-		if got := urlsIn(tc.text); !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("urlsIn(%q) = %q, want %q", tc.text, got, tc.want)
+		for _, u := range tc.urls {
+			if !textHolds(tc.text, u) {
+				t.Errorf("text %q does not hold %q, want it to", tc.text, u)
+			}
+		}
+	}
+	for _, tc := range []struct{ text, url string }{
+		{"https://example.com/a", "https://example.com/a?d=1"},
+		{"https://example.com/a", "https://example.com/ab"},
+		{"https://example.com/a", "https://example.com/"},
+		{"https://example.com/a.", "https://example.com/a.b"},
+		{"no url here, only httpx://nope and http:/nope", "http://nope/"},
+	} {
+		if textHolds(tc.text, tc.url) {
+			t.Errorf("text %q holds %q, want it not to", tc.text, tc.url)
 		}
 	}
 }

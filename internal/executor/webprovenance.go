@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -23,8 +24,9 @@ import (
 // a user.message, so a coordinator cannot launder a URL through a child. Every
 // string in those payloads counts — a text block, a document's URL source, a
 // search hit's source, title and snippet, a fetched page's text — and a URL in
-// one is found by scanning for "http://" or "https://" and reading to the end of
-// the URL (scanURL). Matching is exact after normalizeFetchURL on both sides.
+// one is found at each "http://" or "https://" and read every way running text
+// allows (urlReadings). Matching is exact after normalizeFetchURL on both
+// sides.
 
 // fetchProvenanced reports whether target, a URL web_fetch was asked for, was
 // provided in the session sid. It reads the committed log: only the payloads
@@ -116,17 +118,15 @@ func normalizeFetchURL(raw string) (string, bool) {
 	return u.String(), true
 }
 
-// urlsIn returns every URL that starts at an "http://" or "https://" in s,
-// matched without regard to case, each read by scanURL. One nested in another
-// (a reader's URL wrapping its target) is returned as well, since it appears
-// in the text as written.
+// urlsIn returns every reading of every URL that starts at an "http://" or
+// "https://" in s, matched without regard to case (urlReadings). One nested in
+// another (a reader's URL wrapping its target) is read as well, since it
+// appears in the text as written.
 func urlsIn(s string) []string {
 	var out []string
 	for i := 0; i < len(s); i++ {
 		if (s[i] == 'h' || s[i] == 'H') && (hasPrefixFold(s[i:], "http://") || hasPrefixFold(s[i:], "https://")) {
-			if u := scanURL(s[i:]); u != "" {
-				out = append(out, u)
-			}
+			out = append(out, urlReadings(s[i:])...)
 		}
 	}
 	return out
@@ -137,33 +137,48 @@ func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
 
-// scanURL reads the URL at the start of s: up to whitespace or a character no
-// URL in running text carries, or a closing parenthesis or bracket it did not
-// open (the one ending a markdown link), with trailing sentence punctuation
-// dropped. A balanced pair inside the URL, as in a Wikipedia title, stays.
-func scanURL(s string) string {
-	parens, brackets := 0, 0
-	end := 0
+// trailingPunct is what a sentence or markup can put after a URL; each is
+// also a character a URL may end with.
+const trailingPunct = ".,;:!?*'"
+
+// urlReadings returns the ways the URL at the start of s can be read. Running
+// text does not say where a URL ends: a full stop or a markdown link's closing
+// parenthesis follows one, yet either can also be its last character, as in a
+// search hit's source ending in "?". So every reading is kept — the run to
+// whitespace or a character no URL carries, the run to a closing parenthesis
+// or bracket it did not open (so a balanced pair, as in a Wikipedia title,
+// stays), and each without trailing punctuation — and a URL matching any of
+// them is one the text holds. Each is a prefix of the text as written.
+func urlReadings(s string) []string {
+	run := s[:strings.IndexFunc(s+" ", func(r rune) bool {
+		return r <= ' ' || strings.ContainsRune("<>\"`{}|\\^", r)
+	})]
+	parens, brackets, end := 0, 0, 0
 scan:
-	for ; end < len(s); end++ {
-		switch c := s[end]; {
-		case c <= ' ' || strings.IndexByte("<>\"'`{}|\\^", c) >= 0:
-			break scan
-		case c == '(':
+	for ; end < len(run); end++ {
+		switch run[end] {
+		case '(':
 			parens++
-		case c == '[':
+		case '[':
 			brackets++
-		case c == ')':
+		case ')':
 			if parens == 0 {
 				break scan
 			}
 			parens--
-		case c == ']':
+		case ']':
 			if brackets == 0 {
 				break scan
 			}
 			brackets--
 		}
 	}
-	return strings.TrimRight(s[:end], ".,;:!?*")
+	balanced := run[:end]
+	var out []string
+	for _, r := range []string{run, strings.TrimRight(run, trailingPunct), balanced, strings.TrimRight(balanced, trailingPunct)} {
+		if !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
