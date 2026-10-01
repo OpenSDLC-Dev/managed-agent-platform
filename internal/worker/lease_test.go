@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1019,8 +1020,10 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 // worker's does, so a tool may be entered before the answer; the held tool
 // makes a cancelled run unable to finish one. Exactly one re-arm follows, from
 // that force stop. The poll hands out one item only, so the re-armed one stays
-// queued to be counted rather than run.
+// queued to be counted rather than run. The stop is the control plane's, not
+// a refusal, so no backoff follows it.
 func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
+	warnings := captureWarnings(t)
 	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
 	var (
 		h         *harness // set before the worker sends its first request
@@ -1088,6 +1091,10 @@ func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
 	waitDone(t, done)
 	close(sb.gate)
 	waitExit(t, cancel, errc)
+	// Run has returned, so a backoff it began after the item is logged by now.
+	if out := warnings(); strings.Contains(out, "before its lease was extended") {
+		t.Errorf("the graceful stop before the claim was followed by a backoff:\n%s", out)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1572,38 +1579,84 @@ func (b *heldBody) Read(p []byte) (int, error) {
 
 func (b *heldBody) Close() error { return nil }
 
-// TestWorkerBacksOffAfterItemsRefusedFromTheirClaim: an item the heartbeat stops
-// before any beat extended its lease is followed by a backoff before the next
-// poll. The stop re-arms the session's unanswered call as a new item, so
-// without one a control plane that refuses every beat spins the worker at the
-// speed of a round trip (#813). Every beat is refused here, the claim included,
-// and the tool never answers, so each stop re-arms it; the second item ends at
-// least the first backoff's floor after the first.
+// TestWorkerBacksOffAfterItemsRefusedFromTheirClaim: an item whose heartbeat
+// the control plane refused before any beat extended its lease, with a 4xx
+// retrying will not fix or a lease declined beside a live state, is followed
+// by a backoff before the next poll. The stop after it re-arms the session's
+// unanswered call as a new item, so without one a control plane that refuses
+// every beat spins the worker at the speed of a round trip (#813). Every beat
+// is refused at first and the tool never answers, so each stop re-arms it: the
+// second item ends at least the first backoff's floor after the first. Then
+// one item's claim is let through before its beats are refused, which resets
+// the count, and the item after it backs off from the first attempt again.
 func TestWorkerBacksOffAfterItemsRefusedFromTheirClaim(t *testing.T) {
-	o := &beatOverride{beatStatus: http.StatusNotFound, repoll: true,
-		beatBody: `{"type":"error","error":{"type":"not_found_error","message":"refused"}}`}
-	o.armed.Store(true)
-	sb := &fakeSandbox{gate: make(chan struct{})} // never released: no run answers its tool
-	h := newHarnessWrapped(t, sb, o.wrap)
-	h.suspend(t, writeUse("out.txt", "hi"))
-	h.enqueueWork(t)
-	h.client = h.noRetryClient()
-	w, done := h.newWorker(Config{})
-	cancel, errc := runWorker(w)
-	defer cancel()
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"rejected", http.StatusNotFound, `{"type":"error","error":{"type":"not_found_error","message":"refused"}}`},
+		{"declined", http.StatusOK, `{"type":"work_heartbeat","lease_extended":false,"state":"active","last_heartbeat":"2026-10-01T00:00:00Z","ttl_seconds":30}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			warnings := captureWarnings(t)
+			o := &beatOverride{beatStatus: tc.status, beatBody: tc.body, repoll: true}
+			o.armed.Store(true)
+			sb := &fakeSandbox{gate: make(chan struct{})} // never released: no run answers its tool
+			h := newHarnessWrapped(t, sb, o.wrap)
+			h.suspend(t, writeUse("out.txt", "hi"))
+			h.enqueueWork(t)
+			h.client = h.noRetryClient()
+			w, done := h.newWorker(Config{})
+			cancel, errc := runWorker(w)
+			defer cancel()
 
-	waitDone(t, done)
-	first := time.Now()
-	waitDone(t, done)
-	// The floor is backoffBase/2, jitter's; the margin absorbs this goroutine
-	// reading the first item late.
-	if gap := time.Since(first); gap < backoffBase/2-100*time.Millisecond {
-		t.Errorf("the second refused item ended %v after the first, want a backoff of at least %v between them", gap, backoffBase/2)
+			waitDone(t, done)
+			first := time.Now()
+			waitDone(t, done)
+			// The floor is backoffBase/2, jitter's; the margin absorbs this goroutine
+			// reading the first item late.
+			if gap := time.Since(first); gap < backoffBase/2-100*time.Millisecond {
+				t.Errorf("the second refused item ended %v after the first, want a backoff of at least %v between them", gap, backoffBase/2)
+			}
+
+			// The third item is polled after the second backoff, at least a second
+			// from now: let its claim land, then refuse its beats again.
+			o.armed.Store(false)
+			for i := 0; ; i++ {
+				var state string
+				if err := h.pool.QueryRow(context.Background(),
+					`SELECT state FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'
+					  ORDER BY created_at DESC, id DESC LIMIT 1`, h.sid.String()).Scan(&state); err != nil {
+					t.Fatal(err)
+				}
+				if state == "active" {
+					break
+				}
+				if i == 1500 {
+					t.Fatalf("the third item's claim never landed (state %q)", state)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			o.armed.Store(true)
+			waitDone(t, done) // the third, refused after its claim landed
+			waitDone(t, done) // the fourth, refused from its claim
+
+			attempt := regexp.MustCompile(`before its lease was extended, backing off" work=\S+ attempt=(\d+)`)
+			var got []string
+			for i := 0; i < 500 && len(got) < 3; i++ {
+				got = got[:0]
+				for _, m := range attempt.FindAllStringSubmatch(warnings(), -1) {
+					got = append(got, m[1])
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if len(got) < 3 || strings.Join(got[:3], ",") != "1,2,1" {
+				t.Errorf("backoff attempts = %v, want 1 and 2, then 1 after the item whose claim landed", got)
+			}
+			waitExit(t, cancel, errc)
+		})
 	}
-	if got := o.stops.Load(); got != 2 {
-		t.Errorf("stops sent = %d, want one per item", got)
-	}
-	waitExit(t, cancel, errc)
 }
 
 // TestWorkerStaleLeaseDoesNotStopTheItem: transient beat failures that outlast
@@ -1767,22 +1820,27 @@ func TestErrorClassification(t *testing.T) {
 	}
 }
 
-// TestHbExitMustStop pins which heartbeat exits stop the item whatever the
-// run's outcome. The rule is written as the reference's is, by the exits that
-// must not stop it (checked against anthropic-sdk-go v1.70.1 — worker.go
+// TestHbExitClassification pins which heartbeat exits stop the item whatever
+// the run's outcome, and which of those are refusals Run backs off after. The
+// stop rule is written as the reference's is, by the exits that must not stop
+// it (checked against anthropic-sdk-go v1.70.1 — worker.go
 // leaseEndReason.lost), so an exit added later stops the item until it is
 // listed among them.
-func TestHbExitMustStop(t *testing.T) {
-	for exit, want := range map[hbExit]bool{
-		hbExitCancelled:     false,
-		hbExitStopRequested: true,
-		hbExitRejected:      true,
-		hbExitLeaseLost:     false,
-		hbExitStalled:       false,
-		hbExitStalled + 1:   true, // one added later
+func TestHbExitClassification(t *testing.T) {
+	for exit, want := range map[hbExit]struct{ mustStop, refused bool }{
+		hbExitCancelled:     {false, false},
+		hbExitStopRequested: {true, false},
+		hbExitLeaseDeclined: {true, true},
+		hbExitRejected:      {true, true},
+		hbExitLeaseLost:     {false, false},
+		hbExitStalled:       {false, false},
+		hbExitStalled + 1:   {true, false}, // one added later
 	} {
-		if got := exit.mustStop(); got != want {
-			t.Errorf("hbExit(%d).mustStop() = %v, want %v", exit, got, want)
+		if got := exit.mustStop(); got != want.mustStop {
+			t.Errorf("hbExit(%d).mustStop() = %v, want %v", exit, got, want.mustStop)
+		}
+		if got := exit.refused(); got != want.refused {
+			t.Errorf("hbExit(%d).refused() = %v, want %v", exit, got, want.refused)
 		}
 	}
 }
