@@ -413,9 +413,10 @@ func TestMemoryStoreList(t *testing.T) {
 		t.Fatalf("tie every created_at: %v", err)
 	}
 	status, body = s.do(http.MethodGet, "/v1/memory_stores?include_archived=true", nil)
-	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
-		t.Fatalf("default limit: status %d, %d rows, next_page %q — want 20 rows and a cursor", status, n, nextPage(t, body))
+	if n := len(listData(t, body)); status != http.StatusOK || n != 20 {
+		t.Fatalf("default limit: status %d, %d rows — want 20 rows and a cursor", status, n)
 	}
+	wantCursor(t, body)
 	status, body = s.do(http.MethodGet, "/v1/memory_stores?include_archived=true&limit=100", nil)
 	if n := len(listData(t, body)); status != http.StatusOK || n != 21 {
 		t.Fatalf("limit=100: status %d, %d rows, want all 21", status, n)

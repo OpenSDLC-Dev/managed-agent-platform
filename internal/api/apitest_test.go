@@ -255,7 +255,8 @@ func listData(t *testing.T, body map[string]any) []map[string]any {
 // only when a further page exists, and "" on a terminal page — where the key,
 // and a prev_page with nothing before it, must be absent rather than null.
 // That is most lists; the reference sends an explicit null on five, which read
-// it with nextPageOrNull (#676).
+// it with nextPageOrNull (#676). A page that must carry a cursor is read with
+// wantCursor, on either envelope.
 func nextPage(t *testing.T, body map[string]any) string {
 	t.Helper()
 	if v, ok := body["prev_page"]; ok && v == nil {
@@ -283,6 +284,19 @@ func nextPageOrNull(t *testing.T, body map[string]any) string {
 	}
 	if v == nil {
 		return ""
+	}
+	return cursorString(t, v)
+}
+
+// wantCursor returns the next_page cursor of a page with rows still to come,
+// on either envelope, failing when the key is absent or null. It is the guard
+// nextPage cannot be: on most lists an absent key is how the last page looks,
+// so only the caller knows that a page should have had one.
+func wantCursor(t *testing.T, body map[string]any) string {
+	t.Helper()
+	v, ok := body["next_page"]
+	if !ok || v == nil || v == "" {
+		t.Fatalf(`list response has no "next_page" cursor with rows still to come: %v`, body)
 	}
 	return cursorString(t, v)
 }

@@ -611,9 +611,10 @@ func TestMemoryList(t *testing.T) {
 		createMemory(t, s, bulk, fmt.Sprintf("/n%02d.md", i), "x")
 	}
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memories?view=full&limit=100", nil)
-	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
-		t.Fatalf("view=full limit: status %d, %d rows, cursor %q — want 20 and a cursor", status, n, nextPage(t, body))
+	if n := len(listData(t, body)); status != http.StatusOK || n != 20 {
+		t.Fatalf("view=full limit: status %d, %d rows — want 20 and a cursor", status, n)
 	}
+	wantCursor(t, body)
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memories?limit=100", nil)
 	if n := len(listData(t, body)); status != http.StatusOK || n != 25 {
 		t.Fatalf("view=basic limit=100: status %d, %d rows, want 25", status, n)
@@ -635,10 +636,8 @@ func TestMemoryList(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("store list: status %d (%v)", status, body)
 	}
-	if c := nextPage(t, body); c != "" {
-		status, resp := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?page="+c, nil)
-		wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
-	}
+	status, resp := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?page="+wantCursor(t, body), nil)
+	wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
 }
 
 // path_prefix is a literal prefix match, and depth=1 rolls everything below the

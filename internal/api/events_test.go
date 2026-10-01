@@ -1086,10 +1086,7 @@ func TestListEventsDescCursorKeepsDirection(t *testing.T) {
 		t.Fatalf("desc page 1: %d", status)
 	}
 	page1 := listData(t, res)
-	cur := nextPage(t, res)
-	if cur == "" {
-		t.Fatal("desc page 1 has no next_page")
-	}
+	cur := wantCursor(t, res)
 
 	// Following next_page WITHOUT re-passing order must keep walking desc.
 	status, res = s.do(http.MethodGet, path+"?limit=2&page="+cur, nil)

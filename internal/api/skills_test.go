@@ -663,10 +663,7 @@ func TestSkillVersionListLimits(t *testing.T) {
 	if status != http.StatusOK || len(listData(t, body)) != 1 {
 		t.Fatalf("first page: %d %v", status, body)
 	}
-	cursor := nextPageOrNull(t, body)
-	if cursor == "" {
-		t.Fatal("expected a next_page cursor")
-	}
+	cursor := wantCursor(t, body)
 	status, body = s.do("GET", "/v1/skills/"+id+"/versions?limit=1&page="+cursor, nil)
 	if status != http.StatusOK || len(listData(t, body)) != 1 {
 		t.Fatalf("second page: %d %v", status, body)

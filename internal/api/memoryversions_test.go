@@ -311,15 +311,17 @@ func TestMemoryVersionList(t *testing.T) {
 		}
 	}
 	status, body := s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memory_versions", nil)
-	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
-		t.Fatalf("default limit: status %d, %d rows, cursor %q", status, n, nextPage(t, body))
+	if n := len(listData(t, body)); status != http.StatusOK || n != 20 {
+		t.Fatalf("default limit: status %d, %d rows", status, n)
 	}
+	wantCursor(t, body)
 	// "Listing with view=full caps limit at 20" — silently, as it does on the
 	// memories list; view=basic keeps the caller's own limit.
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memory_versions?view=full&limit=100", nil)
-	if n := len(listData(t, body)); status != http.StatusOK || n != 20 || nextPage(t, body) == "" {
-		t.Fatalf("view=full limit: status %d, %d rows, cursor %q — want 20 and a cursor", status, n, nextPage(t, body))
+	if n := len(listData(t, body)); status != http.StatusOK || n != 20 {
+		t.Fatalf("view=full limit: status %d, %d rows — want 20 and a cursor", status, n)
 	}
+	wantCursor(t, body)
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+bulk+"/memory_versions?view=basic&limit=100", nil)
 	if n := len(listData(t, body)); status != http.StatusOK || n != 25 {
 		t.Fatalf("view=basic limit=100: status %d, %d rows, want 25", status, n)
