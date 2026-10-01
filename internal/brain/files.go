@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"path"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -30,15 +32,25 @@ type fileMount struct {
 // uploadsPointer is the whole of what the system prompt says about file mounts:
 // the reference's own sentence, as the model quoted it in the 2026-09-02
 // recording (probe sessF.events.after-ls-after-delete), which lists no file and
-// sends the agent to ls (#681). Every file mount created since #323 lands under
-// this directory, which api.resolveMountPath roots it in; one stored elsewhere
-// before that is materialized but no longer named.
+// sends the agent to ls (#681).
 const uploadsPointer = "User uploads (files uploaded to the session by the user) are available at " +
-	"`/mnt/session/uploads`. Use `ls` on that directory to see available files."
+	"`" + uploadsRoot + "`. Use `ls` on that directory to see available files."
+
+// uploadsRoot is the directory api.resolveMountPath has rooted every file mount
+// in since #323. A mount stored before that, by an unreleased build, can lie
+// elsewhere and still materializes there, so its path alone follows the
+// pointer — never a filename, MIME type or size.
+const uploadsRoot = "/mnt/session/uploads"
+
+// oneLine flattens caller-controlled text onto one line, so a newline in it
+// cannot start a line of its own in the prompt. renderMemoryBlock holds the
+// same guard as a closure.
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // resolveFilesBlock returns the uploads pointer when the session's resources[]
-// hold at least one live file mount, and "" otherwise — the gating is ours, the
-// recording having shown the sentence only in a session with uploads
+// hold at least one live file mount, followed by the paths of any mounted
+// outside uploadsRoot, and "" otherwise — the gating is ours, the recording
+// having shown the sentence only in a session with uploads
 // (docs/DIVERGENCES.md). It also returns the number of live mounts and the
 // number of misses. Best-effort, mirroring resolveSkillsBlock: a dangling mount
 // (its file row gone — the delete raced the reference, plan decision 2) or a
@@ -54,6 +66,7 @@ func (b *Brain) resolveFilesBlock(ctx context.Context, resourcesJSON []byte) (st
 		return "", 0, 0
 	}
 	live, misses := 0, 0
+	var outside []string
 	for _, m := range mounts {
 		if m.Type != "file" || m.FileID == "" || m.MountPath == "" {
 			continue
@@ -76,11 +89,17 @@ func (b *Brain) resolveFilesBlock(ctx context.Context, resourcesJSON []byte) (st
 			continue
 		}
 		live++
+		if p := path.Clean(m.MountPath); p != uploadsRoot && !strings.HasPrefix(p, uploadsRoot+"/") {
+			outside = append(outside, oneLine(p))
+		}
 	}
 	if live == 0 {
 		return "", 0, misses
 	}
-	return uploadsPointer, live, misses
+	if len(outside) == 0 {
+		return uploadsPointer, live, misses
+	}
+	return uploadsPointer + "\nFiles are also mounted at: " + strings.Join(outside, ", "), live, misses
 }
 
 // recordFileResolveMisses adds to the mounted-file resolve-miss counter, the twin
