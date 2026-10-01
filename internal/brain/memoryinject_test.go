@@ -68,7 +68,7 @@ func TestMemoryBlockInjected(t *testing.T) {
 		t.Fatalf("system prompt carries no memory block:\n%s", sys)
 	}
 	for _, want := range []string{
-		` - "Notes" → /mnt/memory/notes/ (read-write): the user's notes` + "\n   consult before answering",
+		` - "Notes" → /mnt/memory/notes/ (read-write): the user's notes` + "\n   Instructions: consult before answering",
 		` - "Archive" → /mnt/memory/archive/ (read-only)`,
 		` - "Frozen" → /mnt/memory/frozen/ (read-only, archived): archived since`,
 		` - "Gone" → /mnt/memory/gone/ (read-write)` + "\n   NOT AVAILABLE: the memory store no longer exists",
@@ -79,7 +79,7 @@ func TestMemoryBlockInjected(t *testing.T) {
 	}
 	// The block says what the directory cannot: the files persist through the
 	// store at the run boundary, and a read-only store takes no writes.
-	for _, want := range []string{"when your tool calls finish running", "A read-only store: nothing written there is saved."} {
+	for _, want := range []string{"normally when your tool calls finish", "A read-only store: what you write there is not saved"} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt missing %q:\n%s", want, sys)
 		}
@@ -130,8 +130,8 @@ func TestMemoryBlockUnresolvedWhenTheLookupFails(t *testing.T) {
 	}
 	sys := h.provider.calls[0].System
 	if !strings.Contains(sys, ` - "Notes" → /mnt/memory/notes/ (read-write): the user's notes`+
-		"\n   The store's state could not be checked this turn: it may have been archived, in which case it is read-only."+
-		"\n   consult before answering") {
+		"\n   Instructions: consult before answering"+
+		"\n   The store's state could not be checked this turn: it may have been archived, in which case it is read-only.") {
 		t.Errorf("the unresolved store is not rendered as attached and unresolved:\n%s", sys)
 	}
 	if strings.Contains(sys, "NOT AVAILABLE") || strings.Contains(sys, ", archived)") {
@@ -153,11 +153,11 @@ func TestMemoryBlockRenderedOnSelfHosted(t *testing.T) {
 	}
 }
 
-// memoryHeading and memoryLead are the block's list heading and the opening
-// of its persistence paragraph, the reference's own words.
+// memoryHeading and memoryLead are the block's list heading, the reference's
+// own words, and the opening of its persistence paragraph.
 const (
 	memoryHeading = "Available stores (write only inside the directories listed below):"
-	memoryLead    = "You have persistent memory stores mounted at /mnt/memory/"
+	memoryLead    = "You have persistent memory stores at /mnt/memory/"
 )
 
 // memoryLine returns the block's bullet for the mount.

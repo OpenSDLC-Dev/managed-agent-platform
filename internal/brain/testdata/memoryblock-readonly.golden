@@ -1,0 +1,12 @@
+You have persistent memory stores at /mnt/memory/: local copies, in your sandbox, of stores the platform keeps and shares across sessions. None of the stores below takes writes: read them, and leave their files as they are — what you write here is not saved, and deleting a file in a store marked archived may delete it from the store.
+
+Available stores (write only inside the directories listed below):
+ - "notes" → /mnt/memory/notes/ (read-only)
+   Instructions: Read-only reference notes. Consult before answering.
+ - "Frozen" → /mnt/memory/frozen/ (read-only, archived)
+ - "Gone" → /mnt/memory/gone/ (read-write)
+   NOT AVAILABLE: the memory store no longer exists, so nothing you save there persists; the path may still hold what was mounted before.
+
+These copies are on your sandbox's disk, not a live network mount. Changes made elsewhere arrive when the platform syncs them, normally when your tool calls finish and again before your next ones run.
+
+**Check memory first.** Before fresh research, `grep -ri --exclude-dir=.sync --exclude=.anthropic-memory-store '<keyword>'` /mnt/memory/ with two or three keywords and read matching sections in full. If nothing matches, `ls -R /mnt/memory/` to check whether the store is empty or your keywords missed; read any relevant-looking file directly. Prior sessions on this project may already have researched many of these topics and saved verified findings here — written after doing the same searches you'd do now. Then go to other sources for what memory doesn't cover. Re-check memory when you get stuck or change direction, not just at the start.
