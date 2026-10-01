@@ -21,7 +21,11 @@ import (
 // neither, but always render — "" and {} when unset, per "Empty string when
 // unset" (checked against anthropic-sdk-go v1.66.0 — betamemorystore.go
 // BetaManagedAgentsMemoryStore.Description) — so no client sees null where the
-// schema types a string or an object.
+// schema types a string or an object. archived_at, optional as well as
+// nullable, is left out until the store is archived: the reference's recorded
+// create, get, list and update carry no key on an unarchived store (2026-09-02
+// `store.create`, `store.get`, `store.list.include_archived`,
+// `store.update.name+description`; #817).
 type memoryStoreJSON struct {
 	ID          string            `json:"id"`
 	Type        string            `json:"type"`
@@ -30,7 +34,7 @@ type memoryStoreJSON struct {
 	Metadata    map[string]string `json:"metadata"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
-	ArchivedAt  *time.Time        `json:"archived_at"`
+	ArchivedAt  *time.Time        `json:"archived_at,omitempty"`
 }
 
 // The documented store-surface limits (checked against anthropic-sdk-go
@@ -181,6 +185,38 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "name", "description", "metadata"); err != nil {
 		return nil, err
 	}
+	// A body naming none of the three is the reference's recorded 400
+	// (2026-09-02 `store.update.empty`, #817). A key names its field whatever
+	// its value: a null description was answered 200 (2026-09-03
+	// `store.update.description-null`). That an empty metadata bag names
+	// metadata, and that the body is judged before the store is looked up, are
+	// ours (docs/DIVERGENCES.md). rejectUnknownKeys has left only the three.
+	if len(obj) == 0 {
+		return nil, errInvalid("at least one of name, description, or metadata must be provided")
+	}
+	// A null bag is the reference's parse refusal, worded as recorded
+	// (2026-09-03 `store.update.metadata-null`); a null inside the bag still
+	// deletes its key (patchMetadata).
+	if raw, ok := obj["metadata"]; ok && isNull(raw) {
+		return nil, errInvalid(`Failed to parse request: params: field "metadata": null is not a valid value for a map field; omit the field to preserve, or set individual keys to null to delete them`)
+	}
+	// Every other shape refusal is a parse error too, so it is judged here as
+	// well: a non-string name or description, a metadata bag that is not an
+	// object of strings and nulls. The value rules wait for the row.
+	name, nameSet, nameNull, err := stringField(obj, "name")
+	if err != nil {
+		return nil, err
+	}
+	description, descriptionSet, descriptionNull, err := stringField(obj, "description")
+	if err != nil {
+		return nil, err
+	}
+	metadataRaw, metadataSet := obj["metadata"]
+	if metadataSet {
+		if _, err := patchMetadata(map[string]string{}, metadataRaw, false); err != nil {
+			return nil, err
+		}
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -199,8 +235,8 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Archived is read-only (the vault rule — plan 36 decision 3; the reference
-	// says only "read-only", with no status, registered as INFERRED).
+	// Archived is read-only (the vault rule — plan 36 decision 3), the 400 the
+	// reference was recorded answering (docs/DIVERGENCES.md).
 	if row.archivedAt != nil {
 		return nil, errInvalid("memory store %s is archived", id)
 	}
@@ -211,28 +247,24 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	oldName, oldDescription, oldMetadata := row.name, row.description, metadata
 
 	// The spec admits JSON null on all three top-level fields and says nothing
-	// about what it means; the SDK's `omitzero` never sends one. Each field
-	// takes the rule its sibling resources already apply: `name` is required,
-	// so null or "" is "cannot be cleared" (updateAgent and updateEnvironment;
-	// updateVault says it of null and lets "" fall to "display_name is
-	// required" — registered as INFERRED in docs/DIVERGENCES.md); a null
-	// `description` clears, like its documented "" (updateAgent's description);
-	// a null metadata bag preserves (patchMetadata).
-	if name, set, null, err := stringField(obj, "name"); err != nil {
-		return nil, err
-	} else if set {
-		if null || name == "" {
-			return nil, errInvalid("name cannot be cleared")
+	// about what it means; the SDK's `omitzero` never sends one. The reference
+	// was recorded answering each (2026-09-03 `store.update.name-null`,
+	// `store.update.description-null`, `store.update.metadata-null`): a null
+	// name is a 400 worded as recorded, a null description clears like its
+	// documented "", and a null metadata bag is refused above. An empty name
+	// is unrecorded on update and takes the null's wording, the one this
+	// route was recorded using (docs/DIVERGENCES.md).
+	if nameSet {
+		if nameNull || name == "" {
+			return nil, errInvalid("name cannot be empty")
 		}
 		if err := validateMemoryStoreName(name); err != nil {
 			return nil, err
 		}
 		row.name = name
 	}
-	if description, set, null, err := stringField(obj, "description"); err != nil {
-		return nil, err
-	} else if set {
-		if null {
+	if descriptionSet {
+		if descriptionNull {
 			description = ""
 		}
 		if err := validateMemoryStoreDescription(description); err != nil {
@@ -240,11 +272,11 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 		}
 		row.description = description
 	}
-	if raw, ok := obj["metadata"]; ok {
+	if metadataSet {
 		// Patch semantics: string upserts, null deletes, omitted keys keep
 		// (emptyDeletes=false — the environments empty-string rule is
 		// documented for environments only).
-		metadata, err = patchMetadata(metadata, raw, false)
+		metadata, err = patchMetadata(metadata, metadataRaw, false)
 		if err != nil {
 			return nil, err
 		}
@@ -255,8 +287,8 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 
 	// An update moves updated_at by the spec's definition of the field, "when
 	// the store's name, description, or metadata was last modified", so a
-	// request that modifies none of them — an empty body, a null bag, the
-	// stored values sent back — leaves it alone. The first archive moves it
+	// request that modifies none of them — an empty bag, the stored values
+	// sent back — leaves it alone. The first archive moves it
 	// too, as the reference's recorded archives did (see archiveMemoryStore).
 	if row.name != oldName || row.description != oldDescription || !maps.Equal(metadata, oldMetadata) {
 		if err := tx.QueryRow(ctx,

@@ -3,6 +3,7 @@ package api_test
 import (
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -35,20 +36,22 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if !strings.HasPrefix(id, "memstore_") {
 		t.Fatalf("id %q lacks the memstore_ prefix", id)
 	}
-	wantFields(t, body, "type", "id", "name", "created_at", "updated_at", "archived_at", "description", "metadata")
+	wantFields(t, body, "type", "id", "name", "created_at", "updated_at", "description", "metadata")
 	if body["type"] != "memory_store" || body["name"] != "User preferences" {
 		t.Fatalf("unexpected create body: %v", body)
 	}
-	// description renders "" when unset (never null), metadata {}, archived_at null.
+	// description renders "" when unset (never null), metadata {}, and
+	// archived_at not at all until the store is archived, as the reference's
+	// recorded create, get, list and update do (2026-09-02 free_batch1
+	// `store.create`, `store.get`, `store.list.include_archived`,
+	// `store.update.name+description`; #817).
 	if body["description"] != "" {
 		t.Errorf("description = %v, want the empty string", body["description"])
 	}
 	if md, ok := body["metadata"].(map[string]any); !ok || len(md) != 0 {
 		t.Errorf("metadata = %v, want an empty object", body["metadata"])
 	}
-	if body["archived_at"] != nil {
-		t.Errorf("archived_at should render null, got %v", body["archived_at"])
-	}
+	wantNoFields(t, body, "archived_at")
 	if body["updated_at"] != body["created_at"] {
 		t.Errorf("updated_at = %v on create, want created_at %v", body["updated_at"], body["created_at"])
 	}
@@ -56,9 +59,11 @@ func TestMemoryStoreCRUD(t *testing.T) {
 
 	// Get returns the same shape; an unknown well-formed id 404s from the row
 	// lookup, a wrong-prefix or malformed one from checkID before it.
-	if status, got := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil); status != http.StatusOK || got["id"] != id {
+	status, got := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil)
+	if status != http.StatusOK || got["id"] != id {
 		t.Fatalf("get: status %d (%v)", status, got)
 	}
+	wantNoFields(t, got, "archived_at")
 	// The NUL case proves checkID runs: without it the byte reaches Postgres,
 	// which refuses it as a 500 rather than a miss.
 	token := strings.Repeat("a", len(strings.TrimPrefix(id, "memstore_")))
@@ -85,6 +90,7 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if md := body["metadata"].(map[string]any); md["team"] != "infra" {
 		t.Fatalf("metadata not round-tripped: %v", md)
 	}
+	wantNoFields(t, body, "archived_at")
 	// updated_at advances when name, description or metadata change ...
 	if got := stamp(t, body["updated_at"]); !got.After(updatedAt) {
 		t.Errorf("updated_at = %v after update, want later than %v", got, updatedAt)
@@ -273,14 +279,27 @@ func TestMemoryStoreUpdateSemantics(t *testing.T) {
 	}
 
 	// The spec admits a null on all three top-level fields and gives it no
-	// meaning; each takes its sibling resources' rule (updateAgent's): a name
-	// cannot be cleared — null or "" is a 400 — a null description clears like
-	// "", and a null metadata bag, like an empty body, preserves.
-	for _, name := range []any{nil, ""} {
-		status, got := s.do(http.MethodPost, "/v1/memory_stores/"+id, map[string]any{"name": name})
-		if status != http.StatusBadRequest {
-			t.Errorf("name %#v: status %d, want 400 (%v)", name, status, got)
-		}
+	// meaning; the reference was recorded answering each (2026-09-03 batch1
+	// `store.update.name-null`, `store.update.description-null`,
+	// `store.update.metadata-null`). A null name is the recorded 400; an empty
+	// one, unrecorded on update, takes the same words. A null
+	// description clears like "". A null metadata bag is the recorded parse
+	// refusal, while a null inside the bag still deletes its key (above).
+	_, before := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil)
+	for _, tc := range []struct {
+		patch map[string]any
+		msg   string
+	}{
+		{map[string]any{"name": nil}, "name cannot be empty"},
+		{map[string]any{"name": ""}, "name cannot be empty"},
+		{map[string]any{"metadata": nil}, nullMetadataRefusal},
+		{map[string]any{"name": "renamed", "metadata": nil}, nullMetadataRefusal},
+	} {
+		status, got := s.do(http.MethodPost, "/v1/memory_stores/"+id, tc.patch)
+		wantInvalidRequest(t, fmt.Sprintf("update with %v", tc.patch), status, got, tc.msg)
+	}
+	if _, after := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil); !reflect.DeepEqual(after, before) {
+		t.Errorf("a refused null update changed the store: %v, was %v", after, before)
 	}
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id, map[string]any{"description": "again"})
 	if status != http.StatusOK || body["description"] != "again" {
@@ -291,12 +310,12 @@ func TestMemoryStoreUpdateSemantics(t *testing.T) {
 		t.Fatalf("null description: status %d (%v), want it cleared", status, body)
 	}
 	// updated_at records when name, description or metadata last changed, so
-	// a request that changes none of them — an empty body, a null bag, the
-	// stored values sent back — leaves it where the last real change put it.
+	// a request that changes none of them — an empty bag, the stored values
+	// sent back — leaves it where the last real change put it. (An empty body
+	// is refused instead: TestMemoryStoreEmptyUpdate.)
 	updatedAt := stamp(t, body["updated_at"])
 	for _, patch := range []map[string]any{
-		{"metadata": nil},
-		{},
+		{"metadata": map[string]any{}},
 		{"name": "notes", "description": "", "metadata": map[string]any{"team": "infra"}},
 	} {
 		status, got := s.do(http.MethodPost, "/v1/memory_stores/"+id, patch)
@@ -312,6 +331,102 @@ func TestMemoryStoreUpdateSemantics(t *testing.T) {
 		if at := stamp(t, got["updated_at"]); !at.Equal(updatedAt) {
 			t.Errorf("update with %v moved updated_at to %v, want %v unchanged", patch, at, updatedAt)
 		}
+	}
+}
+
+// TestMemoryStoreEmptyUpdate pins the reference's answer to an update that
+// names none of the three fields (#817): the 2026-09-02 recording's
+// `store.update.empty` sent `{}` and got a 400 `invalid_request_error` with the
+// message below and no `details`. A key names its field whatever its value: the
+// 2026-09-03 recording's `store.update.description-null` answered 200. Two
+// readings are ours, registered in docs/DIVERGENCES.md: an empty metadata bag
+// names metadata (TestMemoryStoreUpdateSemantics), and the body is judged before
+// the store is looked up, so a missing or an archived store draws this 400, and
+// the null-bag refusal, too.
+func TestMemoryStoreEmptyUpdate(t *testing.T) {
+	s := newTestServer(t)
+	id := createMemoryStore(t, s, "notes")
+	_, before := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil)
+
+	wantEmptyRefused := func(storeID string) {
+		t.Helper()
+		status, body := s.do(http.MethodPost, "/v1/memory_stores/"+storeID, map[string]any{})
+		wantInvalidRequest(t, "empty update of "+storeID, status, body,
+			"at least one of name, description, or metadata must be provided")
+	}
+
+	wantEmptyRefused(id)
+	if _, after := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil); !reflect.DeepEqual(after, before) {
+		t.Errorf("a refused empty update changed the store: %v, was %v", after, before)
+	}
+
+	missing := "memstore_" + strings.Repeat("a", len(strings.TrimPrefix(id, "memstore_")))
+	wantEmptyRefused(missing)
+	archived := createMemoryStore(t, s, "archived")
+	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+archived+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: status %d (%v)", status, body)
+	}
+	wantEmptyRefused(archived)
+
+	// A null metadata bag, the reference's parse refusal, is judged there too.
+	for _, storeID := range []string{missing, archived} {
+		status, body := s.do(http.MethodPost, "/v1/memory_stores/"+storeID, map[string]any{"metadata": nil})
+		wantInvalidRequest(t, "null metadata on "+storeID, status, body, nullMetadataRefusal)
+	}
+
+	// A request with no body, or a JSON null for one, reads as {} and draws the
+	// same 400; neither was recorded.
+	for _, body := range []any{nil, "null"} {
+		status, res := s.do(http.MethodPost, "/v1/memory_stores/"+id, body)
+		wantInvalidRequest(t, fmt.Sprintf("update with body %v", body), status, res,
+			"at least one of name, description, or metadata must be provided")
+	}
+
+	// Every shape refusal is a parse error, judged before the lookup as the
+	// null bag is: a missing store answers it rather than its 404.
+	const badBag = "metadata must be an object of string-or-null values"
+	for _, tc := range []struct {
+		body map[string]any
+		msg  string
+	}{
+		{map[string]any{"name": 5}, "name must be a string"},
+		{map[string]any{"description": true}, "description must be a string"},
+		{map[string]any{"metadata": "x"}, badBag},
+		{map[string]any{"metadata": map[string]any{"k": 1}}, badBag},
+	} {
+		status, res := s.do(http.MethodPost, "/v1/memory_stores/"+missing, tc.body)
+		wantInvalidRequest(t, fmt.Sprintf("%v on a missing store", tc.body), status, res, tc.msg)
+	}
+
+	// A null name or description is a field's value, judged after the
+	// lookup: a missing store is the 404 and an archived one the archived
+	// refusal, never the null's own answer.
+	for _, body := range []map[string]any{{"name": nil}, {"name": ""}, {"description": nil}} {
+		if status, res := s.do(http.MethodPost, "/v1/memory_stores/"+missing, body); status != http.StatusNotFound {
+			t.Errorf("%v on a missing store: status %d (%v), want 404", body, status, res)
+		}
+		status, res := s.do(http.MethodPost, "/v1/memory_stores/"+archived, body)
+		if status != http.StatusBadRequest || !strings.Contains(errMessage(res), "is archived") {
+			t.Errorf("%v on an archived store: status %d (%v), want the archived refusal", body, status, res)
+		}
+	}
+}
+
+// nullMetadataRefusal is the reference's recorded answer to a null metadata
+// bag on a store update (2026-09-03 batch1 `store.update.metadata-null`).
+const nullMetadataRefusal = `Failed to parse request: params: field "metadata": null is not a valid value for a map field; omit the field to preserve, or set individual keys to null to delete them`
+
+// wantInvalidRequest asserts a recorded 400 envelope exactly: an
+// invalid_request_error carrying msg and no other member (no `details`), under
+// a request_id.
+func wantInvalidRequest(t *testing.T, label string, status int, body map[string]any, msg string) {
+	t.Helper()
+	want := map[string]any{"type": "invalid_request_error", "message": msg}
+	if status != http.StatusBadRequest || body["type"] != "error" || !reflect.DeepEqual(body["error"], want) {
+		t.Errorf("%s: status %d, body %v; want 400 with error %v and nothing else in it", label, status, body, want)
+	}
+	if _, ok := body["request_id"].(string); !ok {
+		t.Errorf("%s: request_id = %v, want a string", label, body["request_id"])
 	}
 }
 
@@ -343,6 +458,13 @@ func TestMemoryStoreList(t *testing.T) {
 	rows := listData(t, body)
 	if rows[0]["id"] != ids[2] || rows[2]["id"] != ids[0] {
 		t.Errorf("list order = %v %v %v, want newest first", rows[0]["id"], rows[1]["id"], rows[2]["id"])
+	}
+	// Only the archived item carries archived_at, as in the recorded
+	// `store.list.include_archived` (2026-09-02 free_batch1; #817).
+	wantNoFields(t, rows[0], "archived_at")
+	wantNoFields(t, rows[1], "archived_at")
+	if _, ok := rows[2]["archived_at"].(string); !ok {
+		t.Errorf("archived item's archived_at = %v, want a timestamp", rows[2]["archived_at"])
 	}
 
 	// Keyset paging walks every store exactly once, one page at a time.
@@ -509,5 +631,19 @@ func TestMemoryStoreMethodNotAllowed(t *testing.T) {
 	} {
 		status, body := s.do(call.method, call.path, nil)
 		wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
+	}
+}
+
+// A create's null metadata bag reads as {}, as every create here does; the
+// update's recorded refusal of one was never sent to the reference's create
+// (docs/DIVERGENCES.md, the memory-store update INFERRED entry, reading 4).
+func TestMemoryStoreCreateReadsANullBagAsEmpty(t *testing.T) {
+	s := newTestServer(t)
+	status, body := s.do(http.MethodPost, "/v1/memory_stores", map[string]any{"name": "nullbag", "metadata": nil})
+	if status != http.StatusOK {
+		t.Fatalf("create with a null bag: status %d (%v)", status, body)
+	}
+	if md, ok := body["metadata"].(map[string]any); !ok || len(md) != 0 {
+		t.Errorf("metadata = %v, want {}", body["metadata"])
 	}
 }
