@@ -203,7 +203,7 @@ const (
 // by default and ls -R skips too. And "may already have", without "on this
 // exact environment": a store belongs to a workspace, may be empty, and is
 // not bound to one environment.
-const memoryCheckFirst = "**Check memory first.** Before fresh research, `grep -ri --exclude-dir=.sync --exclude=.anthropic-memory-store '<keyword>'` /mnt/memory/ with two or three keywords and read matching sections in full. " +
+const memoryCheckFirst = "**Check memory first.** Before fresh research, `grep -ri --exclude-dir=.sync --exclude=.anthropic-memory-store '<keyword>' /mnt/memory/` with two or three keywords and read matching sections in full. " +
 	"If nothing matches, `ls -R /mnt/memory/` to check whether the store is empty or your keywords missed; read any relevant-looking file directly. " +
 	"Prior sessions on this project may already have researched many of these topics and saved verified findings here — written after doing the same searches you'd do now. " +
 	"Then go to other sources for what memory doesn't cover. Re-check memory when you get stuck or change direction, not just at the start."
