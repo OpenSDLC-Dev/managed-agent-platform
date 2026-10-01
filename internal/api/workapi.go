@@ -401,6 +401,11 @@ func mapWorkErr(err error) error {
 				ErrorVisibility: visibilityUserFacing,
 				ErrorCode:       "heartbeat_precondition_failed",
 			})
+	case errors.Is(err, queue.ErrHeartbeatMismatch):
+		// The sentinel without the item the queue's refusals carry: still the
+		// 412, with nothing to report as current_state.
+		return &apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
+			"expected_last_heartbeat does not match the current lease"}
 	default:
 		return err
 	}

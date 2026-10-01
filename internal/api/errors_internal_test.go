@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // TestAnErrorWithoutDetailsRendersAsBefore pins writeError's bytes for errors
@@ -53,5 +56,31 @@ func TestDetailsNestInsideTheError(t *testing.T) {
 	}
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+// TestDetailsKeepTheStatusVisible: a detailed error is still an *apiError to
+// errors.As, so the callers that classify an error by its status — a session
+// resource's outcome, a gone session, a skill read — see it through the
+// details as they did before #664.
+func TestDetailsKeepTheStatusVisible(t *testing.T) {
+	var ae *apiError
+	err := withDetails(errNotFound("environment %s not found", "env_1"), errorDetails{ErrorVisibility: visibilityUserFacing})
+	if !errors.As(err, &ae) || ae.status != http.StatusNotFound {
+		t.Fatalf("errors.As through withDetails = %v (%+v), want the 404 underneath", errors.As(err, &ae), ae)
+	}
+}
+
+// TestABareHeartbeatMismatchIsStillA412: the queue's refusals carry the item
+// now, but the sentinel alone keeps the 412 it always had, without details,
+// rather than falling through to an internal fault.
+func TestABareHeartbeatMismatchIsStillA412(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/x", nil)
+	r = r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID, "req_x"))
+	w := httptest.NewRecorder()
+	writeError(w, r, mapWorkErr(queue.ErrHeartbeatMismatch))
+	want := `{"error":{"message":"expected_last_heartbeat does not match the current lease","type":"invalid_request_error"},"request_id":"req_x","type":"error"}` + "\n"
+	if w.Code != http.StatusPreconditionFailed || w.Body.String() != want {
+		t.Errorf("bare sentinel = %d %s, want 412 %s", w.Code, w.Body.String(), want)
 	}
 }

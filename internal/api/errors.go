@@ -66,6 +66,10 @@ type apiErrorWithFields struct {
 	fields map[string]any
 }
 
+// Unwrap exposes the apiError underneath, so a caller that classifies an error
+// by its status with errors.As sees through the extra members.
+func (e *apiErrorWithFields) Unwrap() error { return &e.apiError }
+
 // errorDetails is the `details` object the reference nests inside `error` on
 // some errors (#664). No schema declares it, so its members are what the
 // recordings hold: these three, in the order every recorded body lists them,
