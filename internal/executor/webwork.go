@@ -208,9 +208,12 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 			Query string `json:"query"`
 		}
 		// The floor is the schema's minLength 2 (toolset's web_search
-		// definition), counted in characters as minLength counts them.
-		if err := json.Unmarshal(u.input, &in); err != nil || utf8.RuneCountInString(strings.TrimSpace(in.Query)) < 2 {
-			return fail(`web_search: input requires a "query" string of at least 2 characters`)
+		// definition), counted as minLength counts: code points of the string
+		// as sent, untrimmed. A blank query is refused as it was before the
+		// floor existed, though the schema alone would admit two spaces.
+		if err := json.Unmarshal(u.input, &in); err != nil ||
+			utf8.RuneCountInString(in.Query) < 2 || strings.TrimSpace(in.Query) == "" {
+			return fail(`web_search: input requires a non-blank "query" string of at least 2 characters`)
 		}
 		hits, err := e.searcher.Search(ctx, in.Query)
 		if err != nil {

@@ -453,19 +453,24 @@ func (s *countingSearcher) Search(context.Context, string) ([]webtool.SearchResu
 
 // The schema the model is handed puts minLength 2 on query — the reference's,
 // as recorded (#682) — so the executor's own input check holds the same floor
-// rather than searching for what that schema calls invalid. It counts
-// characters, as minLength does, not bytes; and it counts them after trimming,
-// as the check always has, so padding cannot lift a one-character query over.
+// rather than searching for what that schema calls invalid. It counts as
+// minLength does: code points, not bytes, and the string as sent, untrimmed —
+// "q " is two characters and the schema admits it. The one refusal the schema
+// does not make is a query of whitespace alone, which the check refused before
+// the floor existed and still does.
 func TestWebSearchHoldsTheSchemasMinimumQueryLength(t *testing.T) {
 	for _, tc := range []struct {
 		query string
 		ok    bool
 	}{
 		{"q", false},
-		{" q ", false},
-		{"天", false}, // one character, three bytes
+		{"", false},
+		{"q ", true},
+		{" q", true},
+		{"天", false}, // one code point, three bytes
 		{"天氣", true},
 		{"go", true},
+		{"  ", false}, // two characters, but blank
 	} {
 		s := &countingSearcher{}
 		e := &Executor{searcher: s}
