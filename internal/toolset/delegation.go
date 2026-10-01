@@ -2,6 +2,7 @@ package toolset
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"time"
 )
@@ -101,7 +102,12 @@ var (
 func renderDefs(defs []toolDef) []json.RawMessage {
 	out := make([]json.RawMessage, len(defs))
 	for i, d := range defs {
-		// No delegation definition sets describe, so the clock is unread.
+		// Rendered once with no clock, so a definition that renders per
+		// request (describe) would be frozen at the zero date: refuse it here,
+		// at load, rather than ship it.
+		if d.describe != nil {
+			panic(fmt.Sprintf("toolset: delegation definition %q sets describe, but delegation definitions render once at load with no clock", d.name))
+		}
 		raw, err := d.marshal(time.Time{})
 		if err != nil {
 			panic(err)

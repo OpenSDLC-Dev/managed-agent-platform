@@ -137,13 +137,18 @@ var definitions = []toolDef{
 		name:     "web_search",
 		describe: webSearchDescription,
 		props: map[string]any{
-			"query": map[string]any{"type": "string", "minLength": 2, "description": "The search query to use"},
+			"query": map[string]any{"type": "string", "minLength": WebSearchMinQueryLength, "description": "The search query to use"},
 		},
 		required: []string{"query"},
 		closed:   true,
 		web:      true,
 	},
 }
+
+// WebSearchMinQueryLength is web_search's minLength on query, as the reference
+// was recorded handing it to the model (#682). The executor's input check holds
+// the same floor, counted as minLength counts: code points, untrimmed.
+const WebSearchMinQueryLength = 2
 
 // IsWebTool reports whether name is a built-in tool that executes in the
 // executor's process rather than the sandbox. The executor's sandbox scan, the

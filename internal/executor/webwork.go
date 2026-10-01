@@ -207,13 +207,14 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 		var in struct {
 			Query string `json:"query"`
 		}
-		// The floor is the schema's minLength 2 (toolset's web_search
+		// The floor is the schema's minLength (toolset's web_search
 		// definition), counted as minLength counts: code points of the string
 		// as sent, untrimmed. A blank query is refused as it was before the
 		// floor existed, though the schema alone would admit two spaces.
 		if err := json.Unmarshal(u.input, &in); err != nil ||
-			utf8.RuneCountInString(in.Query) < 2 || strings.TrimSpace(in.Query) == "" {
-			return fail(`web_search: input requires a non-blank "query" string of at least 2 characters`)
+			utf8.RuneCountInString(in.Query) < toolset.WebSearchMinQueryLength || strings.TrimSpace(in.Query) == "" {
+			return fail(fmt.Sprintf(`web_search: input requires a non-blank "query" string of at least %d characters`,
+				toolset.WebSearchMinQueryLength))
 		}
 		hits, err := e.searcher.Search(ctx, in.Query)
 		if err != nil {
