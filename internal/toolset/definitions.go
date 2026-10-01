@@ -42,8 +42,10 @@ const (
 // BetaManagedAgentsAgentToolset20260401GlobInput and
 // BetaManagedAgentsAgentToolset20260401GrepInput) are what the model's tool
 // calls are validated against on the other side, so a property this platform
-// invents is a property no reference client would send. The two web tools have
-// no such Input types (see their own comment below).
+// invents is a property no reference client would send. What the reference
+// itself hands the model differs from these six in places, as a 2026-09-02
+// recording showed; docs/DIVERGENCES.md registers how, and #822 tracks it. The
+// two web tools have no such Input types (see their own comment below).
 var definitions = []toolDef{
 	{
 		name: "bash",
