@@ -680,7 +680,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := pageJSON{Data: data}
+	out := memoryPageJSON{pageJSON: pageJSON{Data: data}, Prefixes: []string{}}
 	if out.Data == nil {
 		out.Data = []any{}
 	}

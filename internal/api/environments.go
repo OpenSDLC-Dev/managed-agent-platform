@@ -691,7 +691,7 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := pageJSON{Data: data}
+	out := nullPageJSON{Data: data}
 	if out.Data == nil {
 		out.Data = []any{}
 	}
