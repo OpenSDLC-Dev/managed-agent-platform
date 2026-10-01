@@ -21,10 +21,22 @@ import (
 // same reason consoleTokensPath is one — the 405 fallbacks must register the
 // string the handlers do, and a drifted pattern is a 404 where the house
 // envelope promises a 405.
+//
+// A key is updated at two paths. consoleOrgAPIKeyPath is the reference's own,
+// with no workspace segment (2026-09-05 batch5 `rec86.keys.update.*`);
+// consoleAPIKeyPath, under the workspace, is the one this platform served
+// first and keeps as an alias, which the console still drives.
 const (
-	consoleAPIKeysPath = "/api/console/organizations/{org}/workspaces/{workspace}/api_keys"
-	consoleAPIKeyPath  = consoleAPIKeysPath + "/{key_id}"
+	consoleWorkspacePath = "/api/console/organizations/{org}/workspaces/{workspace}"
+	consoleAPIKeysPath   = consoleWorkspacePath + "/api_keys"
+	consoleAPIKeyPath    = consoleAPIKeysPath + "/{key_id}"
+	consoleOrgAPIKeyPath = "/api/console/organizations/{org}/api_keys/{key_id}"
 )
+
+// apiKeyNameMax bounds a management key's name, in characters: the bound the
+// reference was recorded enforcing (2026-09-05 batch5 `rec86.create.name.500`
+// passes, `.501` and `.1000` are refused).
+const apiKeyNameMax = 500
 
 // reservedWorkspace is the only workspace id this platform answers for, beside
 // reservedOrganization. The segment is carried because the reference carries it
@@ -120,22 +132,39 @@ func renderAPIKey(k ManagementKey) apiKeyJSON {
 	}
 }
 
-// consoleWorkspace resolves the {org}/{workspace} pair every route here
-// addresses, without touching the database. An unrecognized value on either
-// segment is a 404, so the namespace is no better an enumeration oracle than
-// /v1 is. Only the details differ, as recorded: the workspace's 404 carries
-// the reference's `{error_visibility}` (2026-09-05 batch8
-// `item6.after-archive.workspaceB.api_keys`), and the organization's carries
-// none, because the reference answers a foreign organization with a 401
-// instead (batch2 `rec83.edge6.foreign-org-uuid`; #820).
+// consoleWorkspace resolves the {org}/{workspace} pair the workspace-scoped
+// routes here address, without touching the database. The organization is
+// consoleOrganization's; an unrecognized workspace is a 404 carrying the
+// reference's `{error_visibility}` (2026-09-05 batch8
+// `item6.after-archive.workspaceB.api_keys`), so the namespace is no better an
+// enumeration oracle than /v1 is.
 func consoleWorkspace(r *http.Request) error {
 	if err := consoleOrganization(r); err != nil {
 		return err
 	}
 	if ws := r.PathValue("workspace"); ws != reservedWorkspace {
-		return withDetails(errNotFound("workspace %s not found", ws), userFacingDetails)
+		return errWorkspaceNotFound(ws)
 	}
 	return nil
+}
+
+func errWorkspaceNotFound(ws string) error {
+	return withDetails(errNotFound("workspace %s not found", ws), userFacingDetails)
+}
+
+// getWorkspace answers GET …/workspaces/{workspace} with the 404 the reference
+// was recorded answering an archived workspace with (2026-09-05 batch8
+// `item6.after-archive.workspaceB.get`), for every id, `default` included.
+// This platform holds no workspace to render: the recorded workspace object is
+// a `wrkspc_` row whose display color, data residency and compartment id have
+// no value here, and the reserved `default` is no such row — nor is the
+// reference's own Default workspace a row of its workspace listing (batch9
+// `item5.workspaces.list.include_archived`).
+func (s *server) getWorkspace(r *http.Request) (any, error) {
+	if err := consoleOrganization(r); err != nil {
+		return nil, err
+	}
+	return nil, errWorkspaceNotFound(r.PathValue("workspace"))
 }
 
 // createAPIKey issues a management credential and returns it once.
@@ -147,15 +176,18 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknownKeys(obj, "name", "expires_at"); err != nil {
+	if err := rejectUnknownKeys(obj, "name", "expires_at", "principal_id"); err != nil {
 		return nil, err
 	}
-	name, err := consoleKeyName(obj, true)
+	name, err := apiKeyName(obj, true)
 	if err != nil {
 		return nil, err
 	}
 	expiresAt, err := apiKeyExpiry(obj)
 	if err != nil {
+		return nil, err
+	}
+	if err := apiKeyPrincipal(obj); err != nil {
 		return nil, err
 	}
 	// The issuer, from whichever lane authenticated: a `principal_` id for a human
@@ -202,21 +234,36 @@ func apiKeyPatch(raw json.RawMessage) (status, name *string, err error) {
 	if status, err = apiKeyStatus(obj); err != nil {
 		return nil, nil, err
 	}
-	if name, err = consoleKeyName(obj, false); err != nil {
+	if name, err = apiKeyName(obj, false); err != nil {
 		return nil, nil, err
 	}
 	return status, name, nil
 }
 
-// updateAPIKey changes a key's status, its name, or both.
+// updateAPIKey is the update on the reference's own route, which names the
+// organization and no workspace.
+func (s *server) updateAPIKey(r *http.Request) (any, error) {
+	if err := consoleOrganization(r); err != nil {
+		return nil, err
+	}
+	return s.updateAPIKeyIn(r)
+}
+
+// updateWorkspaceAPIKey is the same update on the workspace-scoped alias.
+func (s *server) updateWorkspaceAPIKey(r *http.Request) (any, error) {
+	if err := consoleWorkspace(r); err != nil {
+		return nil, err
+	}
+	return s.updateAPIKeyIn(r)
+}
+
+// updateAPIKeyIn changes a key's status, its name, or both, once the caller
+// has resolved the route's scope.
 //
 // The transaction exists for the check below, not for the write: the row is read
 // FOR UPDATE so a concurrent update cannot change what is being decided on
 // between the decision and the write.
-func (s *server) updateAPIKey(r *http.Request) (any, error) {
-	if err := consoleWorkspace(r); err != nil {
-		return nil, err
-	}
+func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	keyID := r.PathValue("key_id")
 	// apikey_ is deliberately outside domain.knownPrefixes, so checkID cannot
 	// answer for it — the same reasoning revokeEnvironmentKey states for envkey_.
@@ -343,11 +390,52 @@ func (s *server) updateAPIKey(r *http.Request) (any, error) {
 	return renderAPIKey(row), nil
 }
 
-// consoleKeyName parses the operator's label. Bounds are environmentKeyNameMax's,
-// reused rather than re-chosen: both are a console label an operator reads back
-// in a list, and the dialect's own bound is unobserved on either surface. Reusing
-// the other surface's number is a local choice, not evidence about this one, so
-// it is registered in docs/DIVERGENCES.md as plan 30 registered its own.
+// apiKeyName parses a management key's name as the reference was recorded
+// judging it: 1 to apiKeyNameMax characters, as sent. Nothing is trimmed — a
+// whitespace-only name passes there and is stored and echoed as sent
+// (2026-09-05 batch5 `rec86.create.name.whitespace`, `.tab-nl`; 2026-09-24
+// `api-key`). The refusal's message is the recorded one. A rename is held to
+// the same rule, which no recording shows.
+//
+// Returns nil when the field is absent, which only the update path allows.
+func apiKeyName(obj map[string]json.RawMessage, required bool) (*string, error) {
+	name, err := consoleKeyName(obj, required)
+	if err != nil || name == nil {
+		return name, err
+	}
+	if utf8.RuneCountInString(*name) > apiKeyNameMax {
+		return nil, errInvalid("name: String should have at most %d characters", apiKeyNameMax)
+	}
+	return name, nil
+}
+
+// apiKeyPrincipal judges create's optional `principal_id`, the reference's way
+// to link a key to an identity, as far as the recordings reach. Its shape is
+// recorded: a `user_` or `svac_` id, anything else a 400 with
+// `{error_visibility}` (2026-09-05 batch5 `rec86.create.principal_id.bogus-string`).
+// What a well-formed one does is not, and needs an identity this platform
+// does not have — no users and no service accounts, its humans being
+// `principal_` rows that shape refuses — so a well-formed id names nothing
+// here and is the namespace's 404 for an id that names nothing. An absent or
+// null field is no principal, the only kind of key this platform issues.
+func apiKeyPrincipal(obj map[string]json.RawMessage) error {
+	raw, ok := obj["principal_id"]
+	if !ok || isNull(raw) {
+		return nil
+	}
+	var id string
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return errInvalid("principal_id must be a string")
+	}
+	if !consoleIDShape(id, "user") && !consoleIDShape(id, "svac") {
+		return withDetails(errInvalid("%q is not a user or service account id", id), userFacingDetails)
+	}
+	return withDetails(errNotFound("principal %s not found", id), userFacingDetails)
+}
+
+// consoleKeyName reads an operator's label on either console surface: present,
+// a string, and not empty. What else bounds it is each surface's own —
+// environmentKeyName's rule and apiKeyName's.
 //
 // Returns nil when the field is absent, which only the update path allows.
 func consoleKeyName(obj map[string]json.RawMessage, required bool) (*string, error) {
@@ -370,12 +458,6 @@ func consoleKeyName(obj map[string]json.RawMessage, required bool) (*string, err
 	name, err := requiredString(obj, "name")
 	if err != nil {
 		return nil, err
-	}
-	// Trim before measuring and before storing: a name is a label an operator
-	// reads back in a list, and one that is all whitespace names nothing.
-	name = strings.TrimSpace(name)
-	if name == "" || utf8.RuneCountInString(name) > environmentKeyNameMax {
-		return nil, errInvalid("name must be 1-%d characters", environmentKeyNameMax)
 	}
 	return &name, nil
 }

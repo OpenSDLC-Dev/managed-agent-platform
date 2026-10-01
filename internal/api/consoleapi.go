@@ -1,12 +1,14 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -49,28 +51,37 @@ const (
 // exists because the reference's does and because org/workspace/project are this
 // platform's reserved tenancy keys (principle 5); until they become real
 // scoping, any other value names an organization that does not exist.
+//
+// The reference refuses this very value: its segment is a UUID, and `default`
+// is its 400 (2026-09-05 batch2 `rec83.edge6.literal-default-org`). Keeping it
+// is a registered divergence — it is the reserved key every console path here
+// is built on, and the console sends nothing else.
 const reservedOrganization = "default"
 
 // consoleOrganization resolves the {org} segment every console-API route carries,
-// shared by both surfaces rather than spelled once each. The point of the 404 is
-// that the namespace is no better an enumeration oracle than /v1 is, and that
-// argument only holds if the two surfaces answer alike — which a second copy
-// cannot guarantee once #56 makes org a real tenancy key and someone updates one
-// of them.
+// shared by both surfaces rather than spelled once each, so the two answer alike
+// once #56 makes org a real tenancy key. Every value but `default` names an
+// organization this platform does not serve, and is answered as the reference
+// answers one it will not serve you: a UUID is its 401 with `{error_visibility}`
+// (`rec83.edge6.foreign-org-uuid`), anything else its 400 for a segment that is
+// not a UUID, without details (`.literal-default-org`). Both come before
+// anything is looked up, so the segment cannot probe environment or key ids.
 func consoleOrganization(r *http.Request) error {
-	if org := r.PathValue("org"); org != reservedOrganization {
-		return errNotFound("organization %s not found", org)
+	org := r.PathValue("org")
+	switch {
+	case org == reservedOrganization:
+		return nil
+	case isUUID(org):
+		return withDetails(errAuth("not authenticated for organization "+org), userFacingDetails)
+	default:
+		return errInvalid("%q is not an organization id", org)
 	}
-	return nil
 }
 
-// consoleKeyLimit is both the default and the maximum page size for the key
-// listing — the reference console's own listing reported limit 100, and a
-// deployment issuing more than a hundred keys to one environment can page. It is
-// a literal rather than an alias of the wire surface's maxLimit: the two happen
-// to agree today, but they are separate observations about separate contracts,
-// and page.go's own maxEventLimit is the precedent for a cap differing per
-// surface.
+// consoleKeyLimit is the default page size for the key listing, the reference
+// console's own (2026-09-05 batch2 `rec83.edge5.list.no-params`). It is no
+// maximum: the reference takes `limit=101` and `limit=1000` and echoes them
+// (`rec83.edge5.list.limit.101`, `.1000`), and so does parseOffsetPage.
 const consoleKeyLimit = 100
 
 // environmentKeyNameMax bounds the operator's label, counted in characters
@@ -80,6 +91,22 @@ const consoleKeyLimit = 100
 // choice: long enough for a hostname or a "staging-eu-west-1 runner" phrase,
 // short enough that a listing stays readable and a name is not bulk storage.
 const environmentKeyNameMax = 128
+
+// environmentKeyName parses an environment key's label: trimmed before it is
+// measured and stored, since a name is a label an operator reads back in a
+// list and one that is all whitespace names nothing. That rule, like the
+// bound, is ours; the management-key surface's recorded rule is apiKeyName's.
+func environmentKeyName(obj map[string]json.RawMessage) (string, error) {
+	raw, err := consoleKeyName(obj, true)
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimSpace(*raw)
+	if name == "" || utf8.RuneCountInString(name) > environmentKeyNameMax {
+		return "", errInvalid("name must be 1-%d characters", environmentKeyNameMax)
+	}
+	return name, nil
+}
 
 // environmentKeyIssuedJSON is the issuance response: an RFC 6749 token response,
 // the shape the reference console's private API returns. It carries no id, name
@@ -218,8 +245,8 @@ var userFacingDetails = errorDetails{ErrorVisibility: visibilityUserFacing}
 // consoleEnvironment is consoleEnvironmentID plus the existence check the two
 // read-mostly routes need. Neither consults kind nor archive state: an operator
 // must be able to see, and revoke, keys already issued to an environment whatever
-// has happened to it since. Issuance does consult both, and reads them under a
-// row lock instead — see createEnvironmentKey.
+// has happened to it since. Issuance reads the row under a lock instead — see
+// createEnvironmentKey.
 //
 // notInternal because off the wire is not off the rule (plan 41 §4.4): the dream
 // runner's own environment is hidden from every public surface, and a console
@@ -243,15 +270,17 @@ func (s *server) consoleEnvironment(r *http.Request) (string, error) {
 
 // createEnvironmentKey issues a worker credential and returns it once.
 //
-// Only a self_hosted environment gets one: a cloud environment's work is run by
-// this platform's own executor, which consumes the queue in-process and holds no
-// environment key, so issuing one there would hand an operator a credential
-// nothing can use. The reference offers no key UI for its cloud environments
-// either.
+// Any environment gets one, a `cloud` or an archived one included, as the
+// reference issues on both (2026-09-05 batch2 `rec83.edge1.issue.on-cloud-env`
+// and `rec83.edge2.issue.on-archived-env`). A cloud environment's key cannot
+// take that environment's work: the platform executor runs it in-process, and
+// the work API refuses such a key's poll and listing as the reference does
+// (pollWork, listWork) beneath a queue whose poll serves self_hosted items
+// alone (queue.Poll). An archived self_hosted environment's key polls on, so
+// a worker can drain what the archive left queued.
 //
-// The row read carries notInternal for the reason consoleEnvironment's does, and
-// with more to lose: without it the runner's hidden environment is refused as a
-// cloud environment, which says what kind of row is there.
+// The row read carries notInternal for the reason consoleEnvironment's does:
+// the dream runner's hidden environment is refused as absent.
 func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	envID, err := consoleEnvironmentID(r)
 	if err != nil {
@@ -266,22 +295,14 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "name"); err != nil {
 		return nil, err
 	}
-	// Shared with the management-key surface (consoleapikeys.go): both are an
-	// operator's label on a credential, read back in a console listing, and both
-	// bound on environmentKeyNameMax. Two copies of the trim-and-measure would let
-	// the two contracts drift the first time one of them gained a character-class
-	// rule or a different bound.
-	namePtr, err := consoleKeyName(obj, true)
+	name, err := environmentKeyName(obj)
 	if err != nil {
 		return nil, err
 	}
-	name := *namePtr
 
 	// One transaction around check → insert, the idiom session create already
 	// uses (internal/api/sessions.go): FOR SHARE on the environment row blocks a
-	// concurrent archive or delete from slipping in between the two. Without it
-	// an archive landing in that window mints a live key on an archived
-	// environment — the 400 below, silently not enforced — and a delete turns the
+	// concurrent delete from slipping in between the two, which would turn the
 	// insert's foreign key into a 500 where this route's own not-found branch is
 	// the right answer.
 	ctx := r.Context()
@@ -291,21 +312,14 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var kind string
-	var archivedAt *time.Time
+	var exists bool
 	err = tx.QueryRow(ctx,
-		`SELECT kind, archived_at FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&kind, &archivedAt)
+		`SELECT true FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errConsoleEnvironmentNotFound(envID)
 	}
 	if err != nil {
 		return nil, err
-	}
-	if kind != string(domain.EnvSelfHosted) {
-		return nil, errInvalid("environment %s is a %s environment; only a self_hosted environment runs a worker that authenticates with an environment key", envID, kind)
-	}
-	if archivedAt != nil {
-		return nil, errInvalid("environment %s is archived", envID)
 	}
 	key, err := issueEnvironmentKey(ctx, tx, envID, name)
 	if err != nil {
@@ -420,8 +434,8 @@ func parseOffsetPage(q url.Values) (limit, offset int, err error) {
 	limit, offset = consoleKeyLimit, 0
 	if s := q.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
-		if err != nil || n < 1 || n > consoleKeyLimit {
-			return 0, 0, errInvalid("limit must be an integer between 1 and %d", consoleKeyLimit)
+		if err != nil || n < 1 {
+			return 0, 0, errInvalid("limit must be a positive integer")
 		}
 		limit = n
 	}

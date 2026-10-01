@@ -391,13 +391,23 @@ func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
 		}
 	}
 
-	// The update route denies before it decides whether the key exists — a 404
+	// Both update routes deny before they decide whether the key exists — a 404
 	// here would be a probe for key ids, from a caller who may not read the list.
-	status, errType := laneStatus(t, s.bearer(http.MethodPost,
-		consoleAPIKey("apikey_"+strings.Repeat("a", 24)), s.token("platform-devs"),
-		map[string]any{"status": "archived"}))
+	for _, path := range []string{
+		consoleAPIKey("apikey_" + strings.Repeat("a", 24)),
+		consoleOrgAPIKey("apikey_" + strings.Repeat("a", 24)),
+	} {
+		status, errType := laneStatus(t, s.bearer(http.MethodPost, path, s.token("platform-devs"),
+			map[string]any{"status": "archived"}))
+		if status != http.StatusForbidden || errType != "permission_error" {
+			t.Errorf("update %s as a developer: status %d, error type %q, want 403 permission_error", path, status, errType)
+		}
+	}
+	// The workspace read sits in the same admin section.
+	status, errType := laneStatus(t, s.bearer(http.MethodGet,
+		"/api/console/organizations/default/workspaces/default", s.token("platform-devs"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
-		t.Errorf("update as a developer: status %d, error type %q, want 403 permission_error", status, errType)
+		t.Errorf("workspace read as a developer: status %d, error type %q, want 403 permission_error", status, errType)
 	}
 
 	// An admin who issues a key over the identity lane is recorded as its creator

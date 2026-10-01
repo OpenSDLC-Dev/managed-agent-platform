@@ -87,13 +87,12 @@ func TestInternalRowsAreUnlistedAndUnretrievable(t *testing.T) {
 	// Every id-addressed route answers the 404 an unknown id gets — the
 	// versions list among them, which would otherwise render the internal spec
 	// to anyone holding the id — and the console API's three environment-key
-	// routes with them. Off the wire is not off the rule: a listing that
-	// answered 200 confirms the row, and issuance refusing with "is a cloud
-	// environment" says what kind it is.
+	// routes with them. Off the wire is not off the rule: a listing or an
+	// issuance that answered 200 would confirm the row.
 	//
 	// The revoke arm only carries the rule with a key to aim at — a missing key
 	// answers 404 by itself — so one is minted straight through the store,
-	// which is the only way to give a cloud environment a key at all.
+	// since the console route refuses this environment.
 	internalKeyID := storeIssuedKeyID(t, s, envID)
 
 	for _, tc := range []struct {
