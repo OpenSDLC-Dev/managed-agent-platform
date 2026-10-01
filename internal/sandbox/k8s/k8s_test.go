@@ -380,7 +380,9 @@ func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 // cluster where the staging cannot work (no /proc/<pid>/task/<pid>/children)
 // fails this row by name rather than passing it vacuously or spinning. Exec gets a
 // kill grace no cluster's latency approaches, so the command exits before Exec
-// gives up on it and the row stays on the path it pins.
+// gives up on it and the row stays on the path it pins. The deadline is 3s, not
+// 1s, so the staging finishes well before the watchdog would fire on a loaded
+// node: at 1s it lost that race twice in 24 runs under heavy load.
 func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 	sb := liveSandbox(t)
 	k8s.SetKillGraceForTest(sb, 30*time.Second)
@@ -399,9 +401,9 @@ func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 	  true & gone=$!
 	  wait "$gone"
 	  [ -n "$state" ] && [ -f "$state.pid" ] && echo "$gone" > "$state.pid" && echo blinded
-	  sleep 2
+	  sleep 5
 	`
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: blindTheProbe, Timeout: time.Second})
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: blindTheProbe, Timeout: 3 * time.Second})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
@@ -417,6 +419,6 @@ func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 			res.ExitCode, res)
 	}
 	if !res.TimedOut {
-		t.Errorf("a command that ran 2s against a 1s deadline and exited while the probe was blind was not a timeout: %+v", res)
+		t.Errorf("a command that ran 5s against a 3s deadline and exited while the probe was blind was not a timeout: %+v", res)
 	}
 }
