@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -15,7 +13,7 @@ import (
 )
 
 // MetricFileResolveMisses counts mounted-file references the brain could not
-// resolve to filename/size at injection time — a dangling mount (its file row
+// resolve to a live file row at injection time — a dangling mount (its file row
 // gone, plan decision 2) or a transient store error. The mounted-files twin of
 // [MetricSkillResolveMisses]; exported so the telemetry test can assert the name.
 const MetricFileResolveMisses = "files.resolve.misses"
@@ -29,19 +27,22 @@ type fileMount struct {
 	Type      string `json:"type"`
 }
 
-// fileMeta is one resolved mount's rendered facts.
-type fileMeta struct {
-	Path, Filename, MimeType string
-	Size                     int64
-}
+// uploadsPointer is the whole of what the system prompt says about file mounts:
+// the reference's own sentence, as the model quoted it in the 2026-09-02
+// recording (probe sessF.events.after-ls-after-delete), which lists no file and
+// sends the agent to ls (#681). Every file mount created since #323 lands under
+// this directory, which api.resolveMountPath roots it in; one stored elsewhere
+// before that is materialized but no longer named.
+const uploadsPointer = "User uploads (files uploaded to the session by the user) are available at " +
+	"`/mnt/session/uploads`. Use `ls` on that directory to see available files."
 
-// resolveFilesBlock builds the "Mounted files" system-prompt block from the
-// session's resources[], joining each mount to its files-table row for the
-// filename, MIME type, and size the agent needs to recognize the mount. It
-// returns the block, the number of mounts injected, and the number of misses.
-// Best-effort, mirroring resolveSkillsBlock: a dangling mount (its file row gone
-// — the delete raced the reference, plan decision 2) or a store error is a logged,
-// counted miss, never a failed turn. The block is metadata only; the executor is
+// resolveFilesBlock returns the uploads pointer when the session's resources[]
+// hold at least one live file mount, and "" otherwise — the gating is ours, the
+// recording having shown the sentence only in a session with uploads
+// (docs/DIVERGENCES.md). It also returns the number of live mounts and the
+// number of misses. Best-effort, mirroring resolveSkillsBlock: a dangling mount
+// (its file row gone — the delete raced the reference, plan decision 2) or a
+// store error is a logged, counted miss, never a failed turn. The executor is
 // what actually writes the bytes into the sandbox.
 func (b *Brain) resolveFilesBlock(ctx context.Context, resourcesJSON []byte) (string, int, int) {
 	if len(resourcesJSON) == 0 {
@@ -52,20 +53,17 @@ func (b *Brain) resolveFilesBlock(ctx context.Context, resourcesJSON []byte) (st
 		slog.WarnContext(ctx, "session resources not injected", "err", err)
 		return "", 0, 0
 	}
-	var metas []fileMeta
-	misses := 0
+	live, misses := 0, 0
 	for _, m := range mounts {
 		if m.Type != "file" || m.FileID == "" || m.MountPath == "" {
 			continue
 		}
-		var filename, mimeType string
-		var size int64
 		// Expired counts as gone here too: the executor no longer materializes
-		// such a mount, so telling the model the file is there would describe a
-		// path with nothing at it (#655, plan 49).
+		// such a mount, so counting it would point the model at a file that is
+		// not there (#655, plan 49).
+		var one int
 		err := b.pool.QueryRow(ctx,
-			`SELECT filename, mime_type, size_bytes FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).
-			Scan(&filename, &mimeType, &size)
+			`SELECT 1 FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).Scan(&one)
 		if errors.Is(err, pgx.ErrNoRows) {
 			slog.WarnContext(ctx, "mounted file not injected (file gone)",
 				"file_id", m.FileID, "mount_path", m.MountPath)
@@ -77,9 +75,12 @@ func (b *Brain) resolveFilesBlock(ctx context.Context, resourcesJSON []byte) (st
 			misses++
 			continue
 		}
-		metas = append(metas, fileMeta{Path: m.MountPath, Filename: filename, MimeType: mimeType, Size: size})
+		live++
 	}
-	return renderFilesBlock(metas), len(metas), misses
+	if live == 0 {
+		return "", 0, misses
+	}
+	return uploadsPointer, live, misses
 }
 
 // recordFileResolveMisses adds to the mounted-file resolve-miss counter, the twin
@@ -96,26 +97,4 @@ func recordFileResolveMisses(ctx context.Context, n int) {
 		return
 	}
 	c.Add(ctx, int64(n))
-}
-
-// renderFilesBlock formats the mounts as a system-prompt block. The wording and
-// placement are inferences (docs/DIVERGENCES.md), mirroring the skills block.
-func renderFilesBlock(metas []fileMeta) string {
-	if len(metas) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("Mounted files. Each file below is available at the given path in your sandbox; read it with your file tools.\n")
-	for _, m := range metas {
-		b.WriteString("\n- ")
-		b.WriteString(m.Path)
-		b.WriteString(" (")
-		b.WriteString(m.Filename)
-		if m.MimeType != "" {
-			b.WriteString(", ")
-			b.WriteString(m.MimeType)
-		}
-		fmt.Fprintf(&b, ", %d bytes)", m.Size)
-	}
-	return b.String()
 }
