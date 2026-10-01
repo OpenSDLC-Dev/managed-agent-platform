@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,12 +51,19 @@ func waitForState(t *testing.T, h *harness, want string) {
 	t.Fatalf("work item never reached state %q (last %q)", want, h.workState(t))
 }
 
+// firstItem is the clause the item readers below share: the session's first
+// tool_exec item. A stop that lands re-arms the session's unanswered calls as a
+// newer row (the work API's stopWork), and a re-hand-out rotates the row's id
+// but keeps its created_at, so this reads the item a test staged whatever
+// followed it.
+const firstItem = `FROM work_items WHERE session_id = $1 AND kind = 'tool_exec' ORDER BY created_at, id LIMIT 1`
+
 // workState returns the tool_exec work item's current state.
 func (h *harness) workState(t *testing.T) string {
 	t.Helper()
 	var state string
 	if err := h.pool.QueryRow(context.Background(),
-		`SELECT state FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`,
+		`SELECT state `+firstItem,
 		h.sid.String()).Scan(&state); err != nil {
 		t.Fatalf("read work state: %v", err)
 	}
@@ -68,7 +76,7 @@ func (h *harness) lastHeartbeat(t *testing.T) time.Time {
 	t.Helper()
 	var ts *time.Time
 	if err := h.pool.QueryRow(context.Background(),
-		`SELECT last_heartbeat FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`,
+		`SELECT last_heartbeat `+firstItem,
 		h.sid.String()).Scan(&ts); err != nil {
 		t.Fatalf("read last_heartbeat: %v", err)
 	}
@@ -110,6 +118,18 @@ func (h *harness) newWorker(cfg Config) (*Worker, <-chan string) {
 	w := NewWorker(h.client, h.prov, cfg)
 	w.onItemDone = func(id string) { done <- id }
 	return w, done
+}
+
+// noRetryClient is the harness's worker client with the SDK's own retries off,
+// so each answer a test stages reaches the worker's loop as it is rather than
+// being absorbed by a retry. opts ride on top (a test's middleware, say).
+func (h *harness) noRetryClient(opts ...option.RequestOption) sdk.Client {
+	return sdk.NewClient(append([]option.RequestOption{
+		option.WithoutEnvironmentDefaults(),
+		option.WithBaseURL(h.serverURL),
+		option.WithAuthToken(h.key),
+		option.WithMaxRetries(0),
+	}, opts...)...)
 }
 
 // runWorker runs w.Run in the background, returning a cancel func and a channel
@@ -704,13 +724,7 @@ func TestWorkerAckFailureLeavesItemQueued(t *testing.T) {
 	h.enqueueWork(t)
 
 	// SDK retries disabled so the 503 surfaces to pollAck directly, not absorbed.
-	noRetry := sdk.NewClient(
-		option.WithoutEnvironmentDefaults(),
-		option.WithBaseURL(h.serverURL),
-		option.WithAuthToken(h.key),
-		option.WithMaxRetries(0),
-	)
-	w := NewWorker(noRetry, h.prov, Config{EnvironmentID: h.envID.String(), EmptyPollSleep: 5 * time.Millisecond})
+	w := NewWorker(h.noRetryClient(), h.prov, Config{EnvironmentID: h.envID.String(), EmptyPollSleep: 5 * time.Millisecond})
 	cancel, errc := runWorker(w)
 
 	// Wait until the worker has polled and attempted (and failed) the ack.
@@ -943,7 +957,7 @@ func (h *harness) workID(t *testing.T) string {
 	t.Helper()
 	var id string
 	if err := h.pool.QueryRow(context.Background(),
-		`SELECT id FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`,
+		`SELECT id `+firstItem,
 		h.sid.String()).Scan(&id); err != nil {
 		t.Fatalf("read work id: %v", err)
 	}
@@ -1011,8 +1025,10 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 // worker's does, so a tool may be entered before the answer; the held tool
 // makes a cancelled run unable to finish one. Exactly one re-arm follows, from
 // that force stop. The poll hands out one item only, so the re-armed one stays
-// queued to be counted rather than run.
+// queued to be counted rather than run. The stop is the control plane's, not
+// a refusal, so no backoff follows it.
 func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
+	warnings := captureWarnings(t)
 	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
 	var (
 		h         *harness // set before the worker sends its first request
@@ -1023,13 +1039,6 @@ func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
 		claims    []string       // each heartbeat's status and body
 		forced    []string       // each stop the worker sent: body, status, answered state
 	)
-	relay := func(w http.ResponseWriter, rec *httptest.ResponseRecorder) {
-		for k, v := range rec.Header() {
-			w.Header()[k] = v
-		}
-		w.WriteHeader(rec.Code)
-		_, _ = w.Write(rec.Body.Bytes())
-	}
 	wrap := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rec := httptest.NewRecorder()
@@ -1087,6 +1096,10 @@ func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
 	waitDone(t, done)
 	close(sb.gate)
 	waitExit(t, cancel, errc)
+	// Run has returned, so a backoff it began after the item is logged by now.
+	if out := warnings(); strings.Contains(out, "before its lease was extended") {
+		t.Errorf("the graceful stop before the claim was followed by a backoff:\n%s", out)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1141,7 +1154,7 @@ func TestWorkerStopBeforeTheClaimWindsDown(t *testing.T) {
 func (h *harness) stopFinality(t *testing.T) (stoppedAt, leaseExpiresAt *time.Time) {
 	t.Helper()
 	if err := h.pool.QueryRow(context.Background(),
-		`SELECT stopped_at, lease_expires_at FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`,
+		`SELECT stopped_at, lease_expires_at `+firstItem,
 		h.sid.String()).Scan(&stoppedAt, &leaseExpiresAt); err != nil {
 		t.Fatalf("read stop finality: %v", err)
 	}
@@ -1154,10 +1167,11 @@ func (h *harness) stopFinality(t *testing.T) (stoppedAt, leaseExpiresAt *time.Ti
 // the reclaim race — so another worker may now hold the item and stopping it
 // would terminate that worker's run. Only a stop the control plane actually
 // asked for is finished by the worker; a lease merely lost leaves the item live
-// for reclaim.
+// for reclaim, and no stop is sent for it at all.
 func TestWorkerLeaseLossDoesNotStopTheItem(t *testing.T) {
 	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
-	h := newHarness(t, sb)
+	o := &beatOverride{} // never armed: it only counts the stops
+	h := newHarnessWrapped(t, sb, o.wrap)
 	h.suspend(t, writeUse("out.txt", "hi"))
 	h.enqueueWork(t)
 
@@ -1179,10 +1193,504 @@ func TestWorkerLeaseLossDoesNotStopTheItem(t *testing.T) {
 	if got := h.workState(t); got != "active" {
 		t.Errorf("work item state = %q, want it left active for reclaim (a lost lease must not stop it)", got)
 	}
+	if got := o.stops.Load(); got != 0 {
+		t.Errorf("stops sent = %d, want none for a lost lease", got)
+	}
 	if got := len(h.results(t)); got != 0 {
 		t.Errorf("user.tool_result = %d, want 0 (the run was cancelled)", got)
 	}
 	close(sb.gate) // release, though the tool already returned via cancellation
+	waitExit(t, cancel, errc)
+}
+
+// relay writes a recorded answer through to the worker.
+func relay(w http.ResponseWriter, rec *httptest.ResponseRecorder) {
+	for k, v := range rec.Header() {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(rec.Code)
+	_, _ = w.Write(rec.Body.Bytes())
+}
+
+// beatOverride stands between the worker and the control plane for the tests of
+// how a heartbeat ends. It answers a heartbeat itself, with beatStatus and
+// beatBody, while armed and, when first is set, for the first that many beats.
+// Other beats reach the control plane, and when ttl is set their ttl_seconds is
+// rewritten to it, so the worker's staleness ceiling is short while the lease
+// the control plane holds is not. Every beat and stop the worker sends is
+// counted, and every poll once a stop has been sent. A stop that lands re-arms
+// the session's unanswered calls as a new item (the work API's stopWork), which
+// the worker would poll at once and run under the same override, so from then
+// on polls are answered empty, unless repoll is set, and a test sees one item's
+// stops alone.
+type beatOverride struct {
+	ttl        int
+	first      int32
+	beatStatus int
+	beatBody   string
+	repoll     bool
+
+	armed          atomic.Bool
+	beats          atomic.Int32
+	stops          atomic.Int32
+	landed         atomic.Bool
+	pollsAfterStop atomic.Int32
+}
+
+func (o *beatOverride) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch path := r.URL.Path; {
+		case strings.HasSuffix(path, "/heartbeat"):
+			if n := o.beats.Add(1); o.armed.Load() || n <= o.first {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(o.beatStatus)
+				_, _ = io.WriteString(w, o.beatBody)
+				return
+			}
+			if o.ttl == 0 {
+				next.ServeHTTP(w, r)
+				return
+			}
+			rec := httptest.NewRecorder()
+			next.ServeHTTP(rec, r)
+			body := rec.Body.Bytes()
+			var beat map[string]any
+			if rec.Code == http.StatusOK && json.Unmarshal(body, &beat) == nil {
+				beat["ttl_seconds"] = o.ttl
+				body, _ = json.Marshal(beat)
+			}
+			for k, v := range rec.Header() {
+				w.Header()[k] = v
+			}
+			w.Header().Del("Content-Length")
+			w.WriteHeader(rec.Code)
+			_, _ = w.Write(body)
+		case strings.HasSuffix(path, "/stop"):
+			o.stops.Add(1)
+			rec := httptest.NewRecorder()
+			next.ServeHTTP(rec, r)
+			if rec.Code == http.StatusOK {
+				o.landed.Store(true)
+			}
+			relay(w, rec)
+		case strings.HasSuffix(path, "/work/poll"):
+			if o.stops.Load() > 0 {
+				o.pollsAfterStop.Add(1)
+			}
+			if o.landed.Load() && !o.repoll {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, "null")
+				return
+			}
+			next.ServeHTTP(w, r)
+		default:
+			next.ServeHTTP(w, r)
+		}
+	})
+}
+
+// heldRun stages one tool on a harness behind wrap and starts a worker on it,
+// its client retrying nothing so each answer a test stages reaches the
+// heartbeat as it is. It returns once the claim has reached the control plane
+// and the tool is entered and held, so the run ends only as the caller then
+// provokes: by arming an override, say, or by releasing the tool. The caller
+// waits for the item with waitDone.
+func heldRun(t *testing.T, wrap func(http.Handler) http.Handler) (h *harness, sb *fakeSandbox, done <-chan string, cancel context.CancelFunc, errc <-chan error) {
+	t.Helper()
+	sb = &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h = newHarnessWrapped(t, sb, wrap)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+	h.client = h.noRetryClient()
+	var w *Worker
+	w, done = h.newWorker(Config{})
+	cancel, errc = runWorker(w)
+	t.Cleanup(cancel) // so a failure below still unblocks the held tool via ctx
+	select {
+	case <-sb.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the held tool was never entered")
+	}
+	waitForState(t, h, "active")
+	return h, sb, done, cancel, errc
+}
+
+// TestWorkerLeaseNotExtendedStopsTheItem: a beat answered 200 with the lease not
+// extended beside a live state cancels the run and force-stops the item. The
+// reference worker reads a declined lease as the control plane's stop, not a
+// lost lease, and force-stops the item on its way out (checked against
+// anthropic-sdk-go v1.70.1 — worker.go runHeartbeat) (#813). This control plane
+// declines a lease only beside stopping or stopped, so the answer is staged.
+func TestWorkerLeaseNotExtendedStopsTheItem(t *testing.T) {
+	o := &beatOverride{beatStatus: http.StatusOK,
+		beatBody: `{"type":"work_heartbeat","lease_extended":false,"state":"active","last_heartbeat":"2026-10-01T00:00:00Z","ttl_seconds":30}`}
+	h, sb, done, cancel, errc := heldRun(t, o.wrap)
+	o.armed.Store(true)
+
+	waitDone(t, done) // the held tool returns only through cancellation
+	if got := o.stops.Load(); got != 1 {
+		t.Errorf("stops sent = %d, want the one force stop", got)
+	}
+	if got := h.workState(t); got != "stopped" {
+		t.Errorf("work item state = %q, want stopped", got)
+	}
+	if got := len(h.results(t)); got != 0 {
+		t.Errorf("user.tool_result = %d, want 0 (the run was cancelled)", got)
+	}
+	close(sb.gate)
+	waitExit(t, cancel, errc)
+}
+
+// TestWorkerRejectedHeartbeatStopsTheItem: a beat refused with a 4xx that
+// retrying will not fix, other than 412, cancels the run and force-stops the
+// item. The reference worker ends its heartbeat on such a refusal with a reason
+// that is not a lost lease, so it force-stops the item on its way out (checked
+// against anthropic-sdk-go v1.70.1 — worker.go runHeartbeat) (#813). Only a 412
+// and a lapsed lease release the item unstopped. The refusal staged here comes
+// after a claim that landed, so the worker polls on without the backoff an item
+// refused from its claim earns (TestWorkerBacksOffAfterItemsRefusedFromTheirClaim).
+func TestWorkerRejectedHeartbeatStopsTheItem(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		errType string
+	}{
+		{http.StatusNotFound, "not_found_error"},
+		{http.StatusForbidden, "permission_error"},
+		{http.StatusUnauthorized, "authentication_error"},
+	} {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			warnings := captureWarnings(t)
+			o := &beatOverride{beatStatus: tc.status,
+				beatBody: `{"type":"error","error":{"type":"` + tc.errType + `","message":"refused"}}`}
+			h, sb, done, cancel, errc := heldRun(t, o.wrap)
+			o.armed.Store(true)
+
+			waitDone(t, done)
+			if got := o.stops.Load(); got != 1 {
+				t.Errorf("stops sent = %d, want the one force stop", got)
+			}
+			if got := h.workState(t); got != "stopped" {
+				t.Errorf("work item state = %q, want stopped", got)
+			}
+			if got := len(h.results(t)); got != 0 {
+				t.Errorf("user.tool_result = %d, want 0 (the run was cancelled)", got)
+			}
+			close(sb.gate)
+			waitExit(t, cancel, errc)
+			// Run has returned, so a backoff it began is logged by now.
+			if out := warnings(); strings.Contains(out, "before its lease was extended") {
+				t.Errorf("an item whose claim landed was followed by a backoff:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestWorkerRevokedKeyEndsTheRunThenTheWorker: a revoked environment key gets
+// the worker's beat, its stop and its next poll each refused 401. The refused
+// beat cancels the run and is followed by the force stop the reference sends
+// after one (checked against anthropic-sdk-go v1.70.1 — worker.go
+// EnvironmentWorker.handleItem). Refused in turn, that stop is only logged and
+// leaves the item active; the poll after it ends the worker with the auth
+// error, as any poll refused 401 or 403 does.
+func TestWorkerRevokedKeyEndsTheRunThenTheWorker(t *testing.T) {
+	warnings := captureWarnings(t)
+	o := &beatOverride{} // never armed: it only counts the stops
+	h, sb, done, _, errc := heldRun(t, o.wrap)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE environment_keys SET revoked_at = now() WHERE environment_id = $1`, h.envID.String()); err != nil {
+		t.Fatalf("revoke the key: %v", err)
+	}
+
+	waitDone(t, done)
+	select {
+	case err := <-errc:
+		if !isAuthError(err) {
+			t.Errorf("worker Run returned %v, want its poll's 401", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("worker Run did not return once its poll was refused")
+	}
+	if got := o.stops.Load(); got != 1 {
+		t.Errorf("stops sent = %d, want the one force stop", got)
+	}
+	if out := warnings(); !strings.Contains(out, "heartbeat rejected") ||
+		!strings.Contains(out, "force-stop failed") || !strings.Contains(out, "401") {
+		t.Errorf("want the refused beat and the refused stop logged:\n%s", out)
+	}
+	if got := h.workState(t); got != "active" {
+		t.Errorf("work item state = %q, want active (the stop never reached it)", got)
+	}
+	close(sb.gate)
+}
+
+// TestWorkerRejectedBeatOnAReissuedIDLeavesTheReplacementAlone drives the path
+// #813 opened beside #62's rotation. This worker's lease lapses while its run is
+// held, and a replacement re-polls the item, which mints it a fresh id, and
+// claims it; only then does this worker's next beat reach the control plane. It
+// 404s on the retired id, so the worker cancels its run and sends the force
+// stop the reference sends after a rejected beat (checked against
+// anthropic-sdk-go v1.70.1 — worker.go EnvironmentWorker.handleItem), under the
+// id it was handed. That stop 404s too and is only logged, the worker polls
+// on, and the replacement's item stays active, its next beat still extending
+// the lease.
+func TestWorkerRejectedBeatOnAReissuedIDLeavesTheReplacementAlone(t *testing.T) {
+	ctx := context.Background()
+	warnings := captureWarnings(t)
+	var holding atomic.Bool
+	parked := make(chan struct{}, 1)
+	release := make(chan struct{})
+	hold := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/heartbeat") && holding.Load() {
+				select {
+				case parked <- struct{}{}:
+				default:
+				}
+				select {
+				case <-release:
+				case <-r.Context().Done(): // the beat timed out; the worker retries it
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	o := &beatOverride{} // never armed: it counts the stops and the polls after them
+	h, sb, done, cancel, errc := heldRun(t, func(next http.Handler) http.Handler { return o.wrap(hold(next)) })
+	stale := h.workID(t)
+
+	// Park this worker's next beat, so nothing renews its lease while the lease
+	// lapses and the replacement takes the item.
+	holding.Store(true)
+	select {
+	case <-parked:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the worker's next beat never arrived")
+	}
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, stale); err != nil {
+		t.Fatal(err)
+	}
+	q := queue.New(h.pool)
+	repl, err := q.Poll(ctx, h.envID, time.Minute)
+	if err != nil || repl == nil {
+		t.Fatalf("replacement poll: %+v %v", repl, err)
+	}
+	if repl.ID.String() == stale {
+		t.Fatalf("the reclaim re-offered the retired work id %s", stale)
+	}
+	if _, err := q.Ack(ctx, h.envID, repl.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := q.Heartbeat(ctx, h.envID, repl.ID, queue.NoHeartbeat, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holding.Store(false)
+	close(release)
+
+	waitDone(t, done)
+	for i := 0; i < 300 && o.pollsAfterStop.Load() == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if o.pollsAfterStop.Load() == 0 {
+		t.Error("the worker sent no poll after its stop, want it to poll on")
+	}
+	if got := o.stops.Load(); got != 1 {
+		t.Errorf("stops sent = %d, want the one force stop", got)
+	}
+	if out := warnings(); !strings.Contains(out, "heartbeat rejected") ||
+		!strings.Contains(out, "force-stop failed") || !strings.Contains(out, "404") {
+		t.Errorf("want the beat and the stop on the retired id logged as 404s:\n%s", out)
+	}
+	var state string
+	if err := h.pool.QueryRow(ctx, `SELECT state FROM work_items WHERE id = $1`, repl.ID.String()).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "active" {
+		t.Errorf("the replacement's item is %q, want active", state)
+	}
+	beat, err := q.Heartbeat(ctx, h.envID, repl.ID, claim.LastHeartbeat.UTC().Format(time.RFC3339Nano), 30)
+	if err != nil || !beat.LeaseExtended {
+		t.Errorf("the replacement's next beat = %+v, %v; want its lease extended", beat, err)
+	}
+	close(sb.gate)
+	waitExit(t, cancel, errc)
+}
+
+// TestWorkerLeaseLostAsTheRunFinishesIsNotStopped: a 412 read as the run
+// finishes still counts as a lost lease, so the completed item is not stopped.
+// The reference checks a beat's 412 before its context for this race (checked
+// against anthropic-sdk-go v1.70.1 — worker.go runHeartbeat). It is made
+// certain at the one point it can happen: the SDK hands a status back only if
+// the caller's context was live when the response arrived, so the claim is
+// answered 412 at once, but its body is held until the run's finish cancels
+// the beat.
+func TestWorkerLeaseLostAsTheRunFinishesIsNotStopped(t *testing.T) {
+	o := &beatOverride{} // never armed: it only counts the stops
+	h := newHarnessWrapped(t, &fakeSandbox{}, o.wrap)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+	released := make(chan error, 1)
+	h.client = h.noRetryClient(option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		if !strings.HasSuffix(r.URL.Path, "/heartbeat") {
+			return next(r)
+		}
+		return &http.Response{
+			StatusCode: http.StatusPreconditionFailed,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body: &heldBody{ctx: r.Context(), released: released,
+				body: `{"type":"error","error":{"type":"invalid_request_error","message":"lease lost"}}`},
+			Request: r,
+		}, nil
+	}))
+	// A long interval, so the claim's request timeout cannot end the hold first.
+	w, done := h.newWorker(Config{HeartbeatInterval: time.Minute})
+	cancel, errc := runWorker(w)
+
+	waitDone(t, done)
+	if err := <-released; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the claim's body was released by %v, want the run's finish", err)
+	}
+	if got := len(h.results(t)); got != 1 {
+		t.Errorf("user.tool_result = %d, want 1 (the run finished)", got)
+	}
+	if got := o.stops.Load(); got != 0 {
+		t.Errorf("stops sent = %d, want none for a lost lease", got)
+	}
+	if got := h.workState(t); got != "starting" {
+		t.Errorf("work item state = %q, want it left starting", got)
+	}
+	waitExit(t, cancel, errc)
+}
+
+// heldBody yields nothing until ctx ends, then body, and reports on released
+// what ended ctx.
+type heldBody struct {
+	ctx      context.Context
+	released chan<- error
+	body     string
+	r        io.Reader
+}
+
+func (b *heldBody) Read(p []byte) (int, error) {
+	if b.r == nil {
+		<-b.ctx.Done()
+		b.released <- b.ctx.Err()
+		b.r = strings.NewReader(b.body)
+	}
+	return b.r.Read(p)
+}
+
+func (b *heldBody) Close() error { return nil }
+
+// TestWorkerBacksOffAfterItemsRefusedFromTheirClaim: an item whose heartbeat
+// the control plane refused before any beat extended its lease, with a 4xx
+// retrying will not fix or a lease declined beside a live state, is followed
+// by a backoff before the next poll. The stop after it re-arms the session's
+// unanswered call as a new item, so without one a control plane that refuses
+// every beat spins the worker at the speed of a round trip (#813). Every beat
+// is refused at first and the tool never answers, so each stop re-arms it: the
+// second item ends at least the first backoff's floor after the first. Then
+// one item's claim is let through before its beats are refused, which resets
+// the count, and the item after it backs off from the first attempt again.
+func TestWorkerBacksOffAfterItemsRefusedFromTheirClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"rejected", http.StatusNotFound, `{"type":"error","error":{"type":"not_found_error","message":"refused"}}`},
+		{"declined", http.StatusOK, `{"type":"work_heartbeat","lease_extended":false,"state":"active","last_heartbeat":"2026-10-01T00:00:00Z","ttl_seconds":30}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			warnings := captureWarnings(t)
+			o := &beatOverride{beatStatus: tc.status, beatBody: tc.body, repoll: true}
+			o.armed.Store(true)
+			sb := &fakeSandbox{gate: make(chan struct{})} // never released: no run answers its tool
+			h := newHarnessWrapped(t, sb, o.wrap)
+			h.suspend(t, writeUse("out.txt", "hi"))
+			h.enqueueWork(t)
+			h.client = h.noRetryClient()
+			w, done := h.newWorker(Config{})
+			cancel, errc := runWorker(w)
+			defer cancel()
+
+			waitDone(t, done)
+			first := time.Now()
+			waitDone(t, done)
+			// The floor is backoffBase/2, jitter's; the margin absorbs this goroutine
+			// reading the first item late.
+			if gap := time.Since(first); gap < backoffBase/2-100*time.Millisecond {
+				t.Errorf("the second refused item ended %v after the first, want a backoff of at least %v between them", gap, backoffBase/2)
+			}
+
+			// The third item is polled after the second backoff, at least a second
+			// from now: let its claim land, then refuse its beats again.
+			o.armed.Store(false)
+			for i := 0; ; i++ {
+				var state string
+				if err := h.pool.QueryRow(context.Background(),
+					`SELECT state FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'
+					  ORDER BY created_at DESC, id DESC LIMIT 1`, h.sid.String()).Scan(&state); err != nil {
+					t.Fatal(err)
+				}
+				if state == "active" {
+					break
+				}
+				if i == 1500 {
+					t.Fatalf("the third item's claim never landed (state %q)", state)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			o.armed.Store(true)
+			waitDone(t, done) // the third, refused after its claim landed
+			waitDone(t, done) // the fourth, refused from its claim
+
+			attempt := regexp.MustCompile(`before its lease was extended, backing off" work=\S+ attempt=(\d+)`)
+			var got []string
+			for i := 0; i < 500 && len(got) < 3; i++ {
+				got = got[:0]
+				for _, m := range attempt.FindAllStringSubmatch(warnings(), -1) {
+					got = append(got, m[1])
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if len(got) < 3 || strings.Join(got[:3], ",") != "1,2,1" {
+				t.Errorf("backoff attempts = %v, want 1 and 2, then 1 after the item whose claim landed", got)
+			}
+			waitExit(t, cancel, errc)
+		})
+	}
+}
+
+// TestWorkerStaleLeaseDoesNotStopTheItem: transient beat failures that outlast
+// the lease's TTL release the item without a stop. The lease has lapsed by then,
+// so another worker may hold the item, and the reference releases it unstopped
+// too (checked against anthropic-sdk-go v1.70.1 — worker.go runHeartbeat).
+// ttl_seconds is rewritten to 1 so the ceiling falls within the test, while the
+// control plane's own lease stays long enough that no poll reclaims the item.
+func TestWorkerStaleLeaseDoesNotStopTheItem(t *testing.T) {
+	warnings := captureWarnings(t)
+	o := &beatOverride{ttl: 1, beatStatus: http.StatusServiceUnavailable,
+		beatBody: `{"type":"error","error":{"type":"api_error","message":"unavailable"}}`}
+	h, sb, done, cancel, errc := heldRun(t, o.wrap)
+	o.armed.Store(true)
+
+	waitDone(t, done)
+	if out := warnings(); !strings.Contains(out, "heartbeat stale beyond lease TTL") {
+		t.Fatalf("the run did not end on the staleness ceiling:\n%s", out)
+	}
+	if got := o.stops.Load(); got != 0 {
+		t.Errorf("stops sent = %d, want none for a lapsed lease", got)
+	}
+	if got := h.workState(t); got != "active" {
+		t.Errorf("work item state = %q, want it left active for reclaim", got)
+	}
+	if got := len(h.results(t)); got != 0 {
+		t.Errorf("user.tool_result = %d, want 0 (the run was cancelled)", got)
+	}
+	close(sb.gate)
 	waitExit(t, cancel, errc)
 }
 
@@ -1289,10 +1797,7 @@ func TestWorkerBadKeyPollIsFatal(t *testing.T) {
 func TestErrorClassification(t *testing.T) {
 	auth := &sdk.Error{StatusCode: 401}
 	perm := &sdk.Error{StatusCode: 403}
-	precond := &sdk.Error{StatusCode: 412}
 	conflict := &sdk.Error{StatusCode: 409}
-	rateLimit := &sdk.Error{StatusCode: 429}
-	server := &sdk.Error{StatusCode: 503}
 
 	if !isAuthError(auth) || !isAuthError(perm) {
 		t.Error("401/403 should be auth errors (fatal poll)")
@@ -1300,14 +1805,48 @@ func TestErrorClassification(t *testing.T) {
 	if isAuthError(conflict) || isAuthError(errors.New("network")) {
 		t.Error("409 and non-API errors are not auth errors")
 	}
-	if !isFatalHeartbeat(precond) || !isFatalHeartbeat(conflict) {
-		t.Error("412/409 should be fatal heartbeat errors (lease lost)")
+	// The reference's fatal set (checked against anthropic-sdk-go v1.70.1 —
+	// poller.go isFatal4xx): every 4xx but 408, 409 and 429.
+	for _, code := range []int{400, 401, 403, 404, 412, 422} {
+		if !isFatalHeartbeat(&sdk.Error{StatusCode: code}) {
+			t.Errorf("%d should be a fatal heartbeat error", code)
+		}
 	}
-	if isFatalHeartbeat(rateLimit) || isFatalHeartbeat(server) || isFatalHeartbeat(errors.New("timeout")) {
-		t.Error("429/5xx/network errors are transient, not fatal heartbeat errors")
+	for _, code := range []int{408, 409, 429, 500, 503} {
+		if isFatalHeartbeat(&sdk.Error{StatusCode: code}) {
+			t.Errorf("%d is transient, not a fatal heartbeat error", code)
+		}
+	}
+	if isFatalHeartbeat(errors.New("timeout")) {
+		t.Error("a network error is transient, not a fatal heartbeat error")
 	}
 	if !isStatus(conflict, 409) || isStatus(conflict, 412) {
 		t.Error("isStatus must match the exact code")
+	}
+}
+
+// TestHbExitClassification pins which heartbeat exits stop the item whatever
+// the run's outcome, and which of those are refusals Run backs off after. The
+// stop rule is written as the reference's is, by the exits that must not stop
+// it (checked against anthropic-sdk-go v1.70.1 — worker.go
+// leaseEndReason.lost), so an exit added later stops the item until it is
+// listed among them.
+func TestHbExitClassification(t *testing.T) {
+	for exit, want := range map[hbExit]struct{ mustStop, refused bool }{
+		hbExitCancelled:     {false, false},
+		hbExitStopRequested: {true, false},
+		hbExitLeaseDeclined: {true, true},
+		hbExitRejected:      {true, true},
+		hbExitLeaseLost:     {false, false},
+		hbExitStalled:       {false, false},
+		hbExitStalled + 1:   {true, false}, // one added later
+	} {
+		if got := exit.mustStop(); got != want.mustStop {
+			t.Errorf("hbExit(%d).mustStop() = %v, want %v", exit, got, want.mustStop)
+		}
+		if got := exit.refused(); got != want.refused {
+			t.Errorf("hbExit(%d).refused() = %v, want %v", exit, got, want.refused)
+		}
 	}
 }
 
@@ -1380,48 +1919,20 @@ func TestLeaseLapsed(t *testing.T) {
 	}
 }
 
-// TestWorkerTransientHeartbeatRecovers: transient heartbeat failures (a 503 for
-// the first two beats) must not abandon the run — the worker retries, recovers,
-// claims the lease, and still finishes the item. This exercises the heartbeat
-// transient-retry path that unit tests of the pure helpers cannot reach. The
-// worker's client has SDK retries disabled so each 503 surfaces to the worker's
-// own retry loop deterministically (rather than being absorbed by the SDK), and
-// the tool is held open until the lease is claimed so completion is owned.
+// TestWorkerTransientHeartbeatRecovers: beats answered with a status retrying
+// can fix must not abandon the run — the worker retries, recovers, claims the
+// lease, and still finishes the item. The status is 409, the one #813 moved out
+// of the fatal set into the transient one, as the reference has it (checked
+// against anthropic-sdk-go v1.70.1 — poller.go isFatal4xx); TestErrorClassification
+// pins the rest of that set. heldRun's client retries nothing, so each failure
+// reaches the worker's own retry loop rather than being absorbed by the SDK,
+// and the tool is held open until the lease is claimed so completion is owned.
 func TestWorkerTransientHeartbeatRecovers(t *testing.T) {
-	var beats atomic.Int32
-	failFirst := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasSuffix(r.URL.Path, "/heartbeat") && beats.Add(1) <= 2 {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-
-	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
-	h := newHarnessWrapped(t, sb, failFirst)
-	h.suspend(t, writeUse("out.txt", "hi"))
-	h.enqueueWork(t)
-
-	noRetry := sdk.NewClient(
-		option.WithoutEnvironmentDefaults(),
-		option.WithBaseURL(h.serverURL),
-		option.WithAuthToken(h.key),
-		option.WithMaxRetries(0),
-	)
-	w := NewWorker(noRetry, h.prov, Config{
-		EnvironmentID:     h.envID.String(),
-		EmptyPollSleep:    5 * time.Millisecond,
-		HeartbeatInterval: 5 * time.Millisecond,
-	})
-	done := make(chan string, 4)
-	w.onItemDone = func(id string) { done <- id }
-	cancel, errc := runWorker(w)
-
-	<-sb.entered                 // the tool is running, held open by the gate
-	waitForState(t, h, "active") // two beats 503'd, then the third claimed the lease
-	close(sb.gate)               // release the tool
+	o := &beatOverride{first: 2, beatStatus: http.StatusConflict}
+	// A 409 read as fatal cancels the run before its tool or its claim, and
+	// heldRun fails waiting for them.
+	h, sb, done, cancel, errc := heldRun(t, o.wrap)
+	close(sb.gate) // two beats failed, then the third claimed the lease: release the tool
 
 	waitDone(t, done)
 	if got := len(h.results(t)); got != 1 {
@@ -1430,8 +1941,8 @@ func TestWorkerTransientHeartbeatRecovers(t *testing.T) {
 	if got := h.workState(t); got != "stopped" {
 		t.Errorf("work item state = %q, want stopped (owned and completed)", got)
 	}
-	if beats.Load() < 3 {
-		t.Errorf("heartbeat attempts = %d, want the two failures plus a recovery", beats.Load())
+	if got := o.beats.Load(); got < 3 {
+		t.Errorf("heartbeat attempts = %d, want the two failures plus a recovery", got)
 	}
 	waitExit(t, cancel, errc)
 }
