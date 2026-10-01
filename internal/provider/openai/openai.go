@@ -18,8 +18,8 @@
 // rather than vanishing; a tool_result's is_error flag is dropped (OpenAI's
 // tool message has no error field) — the error text the platform embeds in the
 // result content is still forwarded, so the model sees the failure, only the
-// boolean is lost; and every tool schema loses its format, minLength and
-// additionalProperties keywords (strippedKeywords says why). Incoming, the
+// boolean is lost; and a built-in tool's schema loses its format, minLength
+// and additionalProperties keywords (strippedKeywords says why). Incoming, the
 // deprecated single-function_call streaming format is rejected loudly (the
 // endpoint must emit tool_calls) rather than silently losing the call.
 package openai
@@ -90,7 +90,7 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 	if err != nil {
 		return nil, err
 	}
-	tools, err := convertTools(req.Tools)
+	tools, err := convertTools(req.Tools, req.BuiltinTools)
 	if err != nil {
 		return nil, err
 	}
@@ -404,11 +404,12 @@ func compactJSON(raw json.RawMessage) (string, error) {
 }
 
 // anthropic tool def -> OpenAI function tool. input_schema becomes parameters
-// less the keywords stripSchemaKeywords removes. strict is never set: OpenAI's
+// as it came, except that a built-in's (builtin, the request's BuiltinTools)
+// loses the keywords stripSchemaKeywords removes. strict is never set: OpenAI's
 // strict mode requires every object closed with additionalProperties: false and
-// every field required (its structured-outputs guide), which these schemas —
-// optional fields, and additionalProperties stripped below — do not meet.
-func convertTools(tools []json.RawMessage) ([]chatTool, error) {
+// every field required (its structured-outputs guide), which the built-ins'
+// schemas — optional fields, and additionalProperties stripped — do not meet.
+func convertTools(tools []json.RawMessage, builtin map[string]bool) ([]chatTool, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
@@ -425,9 +426,13 @@ func convertTools(tools []json.RawMessage) ([]chatTool, error) {
 		if def.Name == "" {
 			return nil, fmt.Errorf("tools[%d]: missing name", i)
 		}
-		params, err := stripSchemaKeywords(def.InputSchema)
-		if err != nil {
-			return nil, fmt.Errorf("tools[%d].input_schema: %w", i, err)
+		params := def.InputSchema
+		if builtin[def.Name] {
+			stripped, err := stripSchemaKeywords(def.InputSchema)
+			if err != nil {
+				return nil, fmt.Errorf("tools[%d].input_schema: %w", i, err)
+			}
+			params = stripped
 		}
 		out = append(out, chatTool{
 			Type: "function",
@@ -439,14 +444,16 @@ func convertTools(tools []json.RawMessage) ([]chatTool, error) {
 	return out, nil
 }
 
-// strippedKeywords leave every tool's parameters on this route (#682, an owner
-// decision). The built-in web tools carry all three, as the reference was
+// strippedKeywords leave the built-in tools' parameters on this route (#682, an
+// owner decision). The built-in web tools carry all three, as the reference was
 // recorded handing them to the model, and the anthropic adapter sends them on;
 // but an OpenAI-compatible backend that accepts only part of JSON Schema —
 // Gemini's compatibility endpoint and vLLM's guided decoding were the cases
 // raised — can refuse the whole tool list over one of them, and both web tools
 // are on by default. The executor validates the web tools' input itself, so
-// what the model loses here is a hint, not the check.
+// what the model loses here is a hint, not the check. A custom or MCP tool's
+// schema is never touched: it is a contract its author set, which no platform
+// check stands behind, and whatever it carries it carried before #682.
 var strippedKeywords = []string{"format", "minLength", "additionalProperties"}
 
 // stripSchemaKeywords removes strippedKeywords from a schema and from every

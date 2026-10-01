@@ -298,7 +298,9 @@ func TestGeneratePassthroughPreservesFields(t *testing.T) {
 // The web tools' JSON Schema constraints — format, minLength,
 // additionalProperties (#682) — reach the endpoint untouched: the adapter
 // hands each tool definition to the SDK as raw JSON, so input_schema arrives
-// value-for-value as the toolset rendered it.
+// value-for-value as the toolset rendered it. The request marks both as
+// built-ins, as the brain does: that marking licenses the openai adapter's
+// strip, and this adapter ignores it.
 func TestGenerateWebToolSchemaConstraintsReachTheWire(t *testing.T) {
 	f := &fakeServer{sse: []string{
 		`{"type":"message_start","message":{"id":"msg_8","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
@@ -314,8 +316,9 @@ func TestGenerateWebToolSchemaConstraintsReachTheWire(t *testing.T) {
 	}
 
 	stream, err := p.Generate(context.Background(), provider.Request{
-		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
-		Tools:    defs,
+		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:        defs,
+		BuiltinTools: map[string]bool{"web_fetch": true, "web_search": true},
 	})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,7 @@ type fakeServer struct {
 	sse     []string // each becomes one `data: <s>` SSE frame; a final `data: [DONE]` is appended
 	noDone  bool     // suppress the trailing `data: [DONE]` (simulates a cut-off stream)
 	gotBody map[string]any
+	gotRaw  []byte // the request body as sent, for byte-level assertions
 	gotHead http.Header
 	status  int
 	errBody string
@@ -40,7 +42,12 @@ func (f *fakeServer) handler(w http.ResponseWriter, r *http.Request) {
 		f.t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 	}
 	f.gotHead = r.Header.Clone()
-	if err := json.NewDecoder(r.Body).Decode(&f.gotBody); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		f.t.Errorf("read request body: %v", err)
+	}
+	f.gotRaw = raw
+	if err := json.Unmarshal(raw, &f.gotBody); err != nil {
 		f.t.Errorf("decode request body: %v", err)
 	}
 	if f.status != 0 {

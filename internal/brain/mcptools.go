@@ -37,12 +37,30 @@ type mcpCatalog map[string]json.RawMessage
 // rather than a test on the name, because a single-agent session's agent may
 // declare a custom tool called create_agent and that call is the agent's own:
 // only the class knows whether this thread's role is what put the name there.
+//
+// builtin marks a definition the agent_toolset expansion supplied, for the
+// same reason: a custom tool may take a disabled built-in's name, and only
+// the class knows which of the two the name is. builtinTools reads it.
 type toolClass struct {
 	kind       domain.EventType
 	policy     domain.PermissionPolicyType
 	server     string
 	tool       string
 	settlement bool
+	builtin    bool
+}
+
+// builtinTools names the built-ins a request offers, for the provider
+// (provider.Request.BuiltinTools): the only definitions a lossy adapter may
+// rewrite.
+func builtinTools(class map[string]toolClass) map[string]bool {
+	out := map[string]bool{}
+	for name, c := range class {
+		if c.builtin {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 // delegationRole is which of the delegation tools a thread is offered, decided
@@ -291,7 +309,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			}
 			defs = append(defs, builtins...)
 			for name, p := range policies {
-				class[name] = toolClass{kind: domain.EventAgentToolUse, policy: p}
+				class[name] = toolClass{kind: domain.EventAgentToolUse, policy: p, builtin: true}
 			}
 		}
 	}

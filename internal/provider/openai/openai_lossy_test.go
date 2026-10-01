@@ -270,14 +270,14 @@ func sentFunctions(t *testing.T, body map[string]any) map[string]map[string]any 
 	return out
 }
 
-// The web tools' input schemas carry three keywords as the reference was
-// recorded sending them — "format": "uri" on url, "minLength": 2 on query, and
-// "additionalProperties": false on both objects (#682) — and the anthropic
-// adapter sends them on. This one strips all three (owner decision, #682): an
-// OpenAI-compatible backend that accepts only part of JSON Schema can reject the
-// whole tool list over one of them, and both web tools are on by default.
-// Everything else in the schema arrives as the definition wrote it, and no
-// "strict" is set.
+// The built-in web tools' input schemas carry three keywords as the reference
+// was recorded sending them — "format": "uri" on url, "minLength": 2 on query,
+// and "additionalProperties": false on both objects (#682) — and the anthropic
+// adapter sends them on. This one strips all three from those built-ins (owner
+// decision, #682): an OpenAI-compatible backend that accepts only part of JSON
+// Schema can reject the whole tool list over one of them, and both web tools
+// are on by default. Everything else in the schema arrives as the definition
+// wrote it, and no "strict" is set.
 func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.T) {
 	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
 		`"configs":[{"name":"web_fetch","enabled":true},{"name":"web_search","enabled":true}]}`)
@@ -286,8 +286,9 @@ func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.
 		t.Fatalf("Tools: %v", err)
 	}
 	body := requestFor(t, provider.Request{
-		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
-		Tools:    defs,
+		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:        defs,
+		BuiltinTools: map[string]bool{"web_fetch": true, "web_search": true},
 	})
 	fns := sentFunctions(t, body)
 
@@ -334,11 +335,11 @@ func TestWebToolParametersLoseFormatMinLengthAndAdditionalProperties(t *testing.
 }
 
 // The strip is schema-aware, not a key search. It removes the three keywords
-// from every subschema — properties, items, the anyOf/oneOf/allOf branches,
-// $defs — and from every tool, a custom or MCP one as much as a built-in,
-// because any of them can make a backend refuse the list. It leaves a
-// property that is merely *named* format, and instance data — enum, default,
-// const, examples — whatever keys that data holds.
+// from every subschema of a built-in definition — properties, items, the
+// anyOf/oneOf/allOf branches, $defs — and leaves a property that is merely
+// *named* format, and instance data — enum, default, const, examples —
+// whatever keys that data holds. No built-in nests a schema today (the web
+// tools' are flat); this pins the walk for one that does.
 func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
 	in := `{"type":"object","additionalProperties":false,"required":["format"],` +
 		`"properties":{` +
@@ -362,8 +363,9 @@ func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
 		`"$defs":{"link":{"type":"string"}}}`
 
 	body := requestFor(t, provider.Request{
-		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
-		Tools:    []json.RawMessage{json.RawMessage(`{"name":"custom","description":"d","input_schema":` + in + `}`)},
+		Messages:     []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:        []json.RawMessage{json.RawMessage(`{"name":"nested","description":"d","input_schema":` + in + `}`)},
+		BuiltinTools: map[string]bool{"nested": true},
 	})
 	fns := sentFunctions(t, body)
 
@@ -371,9 +373,58 @@ func TestToolParametersStripTheKeywordsAtEveryDepth(t *testing.T) {
 	if err := json.Unmarshal([]byte(want), &wantSchema); err != nil {
 		t.Fatal(err)
 	}
-	if got := fns["custom"]["parameters"]; !reflect.DeepEqual(got, wantSchema) {
+	if got := fns["nested"]["parameters"]; !reflect.DeepEqual(got, wantSchema) {
 		gotJSON, _ := json.Marshal(got)
-		t.Errorf("custom parameters =\n%s\nwant\n%s", gotJSON, want)
+		t.Errorf("nested parameters =\n%s\nwant\n%s", gotJSON, want)
+	}
+}
+
+// Only the platform's built-ins are stripped, and which those are is the
+// request's BuiltinTools — provenance the brain records, never a name the
+// adapter recognizes. A custom tool may take a built-in's name once that
+// built-in is disabled, and an MCP tool's schema is its server's: both are
+// contracts their authors set, so both reach the endpoint byte for byte, the
+// keywords included, beside a built-in that loses them.
+func TestUserToolSchemasPassThroughUntouched(t *testing.T) {
+	custom := `{"type":"object","properties":{"query":{"type":"string","minLength":3,"format":"hostname"}},` +
+		`"required":["query"],"additionalProperties":false}`
+	mcp := `{"type":"object","properties":{"since":{"type":"string","format":"date-time"},` +
+		`"tags":{"type":"object","additionalProperties":{"type":"string","minLength":1}}},"additionalProperties":false}`
+	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"enabled":false},` +
+		`"configs":[{"name":"web_fetch","enabled":true}]}`)
+	builtins, err := toolset.Tools(entry, time.Now())
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	f := &fakeServer{sse: []string{
+		`{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools: append(builtins,
+			json.RawMessage(`{"name":"web_search","description":"ours","input_schema":`+custom+`}`),
+			json.RawMessage(`{"name":"mcp__docs__search","description":"theirs","input_schema":`+mcp+`}`)),
+		BuiltinTools: map[string]bool{"web_fetch": true},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	_ = collect(t, stream)
+
+	for name, schema := range map[string]string{"web_search": custom, "mcp__docs__search": mcp} {
+		if !strings.Contains(string(f.gotRaw), `"name":"`+name+`"`) ||
+			!strings.Contains(string(f.gotRaw), `"parameters":`+schema) {
+			t.Errorf("%s parameters were not sent byte for byte as %s:\n%s", name, schema, f.gotRaw)
+		}
+	}
+	// The built-in beside them still loses its keywords, so the request did
+	// carry provenance and the pass-through above is not the strip switched off.
+	fetch := sentFunctions(t, f.gotBody)["web_fetch"]["parameters"].(map[string]any)
+	if _, ok := fetch["additionalProperties"]; ok {
+		t.Errorf("built-in web_fetch parameters = %v, want additionalProperties stripped", fetch)
 	}
 }
 

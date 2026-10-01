@@ -60,6 +60,13 @@ type Request struct {
 	Messages  []Message
 	Tools     []json.RawMessage // Anthropic tool definitions, verbatim
 	MaxTokens int64
+	// BuiltinTools names the Tools entries that are the platform's own
+	// built-in definitions (agent_toolset_20260401), by provenance: the brain
+	// records which definitions the toolset expansion supplied, so a custom
+	// tool that takes a built-in's name, or an MCP tool, is never in it. It is
+	// the only licence a lossy adapter has to rewrite a definition's schema
+	// (provider/openai strips keywords from these alone, #682); nil names none.
+	BuiltinTools map[string]bool
 }
 
 // Message is one conversational turn.
