@@ -249,8 +249,10 @@ func (s *server) createMemory(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Worded as the reference answered a null content (2026-09-03
+	// `memory.create.content-null`); an absent one, unrecorded, shares it.
 	if !set || null {
-		return nil, errInvalid("content is required")
+		return nil, errInvalid("content: value is required")
 	}
 	if err := memsync.ValidateContent(content); err != nil {
 		return nil, errInvalid("%s", err)
@@ -364,13 +366,13 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Both fields are anyOf [T, null] with no stated meaning for the null, and
-	// the SDK's omitzero never sends one; a null reads as "leave it alone",
-	// which is what omitting it already means.
+	// A null content or path reads as omitted, and the reference answers a
+	// body of nulls, or an empty one, with the spec's "at least one of" rule
+	// in its own words (2026-09-03 `memory.update.content-null`,
+	// `memory.update.content-and-path-null`, `memory.update.empty-body`).
 	contentSet, pathSet = contentSet && !contentNull, pathSet && !pathNull
 	if !contentSet && !pathSet {
-		// Spec: "At least one of `content` or `path` must be provided".
-		return nil, errInvalid("update requires content or path")
+		return nil, errInvalid("v1_update_memory_params: at least one of content or path must be provided")
 	}
 	if contentSet {
 		if err := memsync.ValidateContent(content); err != nil {
@@ -496,7 +498,12 @@ func parsePrecondition(raw json.RawMessage) (*string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !set || null || sha == "" {
+	// A null is the reference's recorded refusal (2026-09-03
+	// `memory.update.precondition-sha-null`); an absent or empty hash is ours.
+	if null {
+		return nil, errInvalid("precondition.content_sha256: Value is not nullable")
+	}
+	if !set || sha == "" {
 		return nil, errInvalid("precondition.content_sha256 is required")
 	}
 	return &sha, nil

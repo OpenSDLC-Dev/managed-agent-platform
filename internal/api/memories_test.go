@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -908,5 +909,34 @@ func TestMemoryPathsSortUnderTheCCollation(t *testing.T) {
 	}
 	if got := memoryPaths(t, body); !slices.Equal(got, []string{"/B.md", "/a.md"}) {
 		t.Errorf("list order = %v, want /B.md before /a.md", got)
+	}
+}
+
+// A null content or path, an empty update body and a null precondition hash
+// take the reference's recorded words (2026-09-03 batch1
+// `memory.create.content-null`, `memory.update.content-null`,
+// `memory.update.content-and-path-null`, `memory.update.empty-body`,
+// `memory.update.precondition-sha-null`), each refusal leaving the memory as
+// it was (`memory.get.after-null-updates`).
+func TestMemoryNullsTakeTheRecordedWords(t *testing.T) {
+	s := newTestServer(t)
+	store := createMemoryStore(t, s, "nulls")
+	base := "/v1/memory_stores/" + store + "/memories"
+
+	status, body := s.do(http.MethodPost, base, map[string]any{"path": "/n.md", "content": nil})
+	wantInvalidRequest(t, "create with a null content", status, body, "content: value is required")
+
+	id := createMemory(t, s, store, "/n.md", "original")["id"].(string)
+	_, before := s.do(http.MethodGet, base+"/"+id, nil)
+	for _, patch := range []map[string]any{{"content": nil}, {"content": nil, "path": nil}, {}} {
+		status, body := s.do(http.MethodPost, base+"/"+id, patch)
+		wantInvalidRequest(t, fmt.Sprintf("update with %v", patch), status, body,
+			"v1_update_memory_params: at least one of content or path must be provided")
+	}
+	status, body = s.do(http.MethodPost, base+"/"+id, map[string]any{
+		"content": "changed", "precondition": map[string]any{"type": "content_sha256", "content_sha256": nil}})
+	wantInvalidRequest(t, "a null precondition hash", status, body, "precondition.content_sha256: Value is not nullable")
+	if _, after := s.do(http.MethodGet, base+"/"+id, nil); !reflect.DeepEqual(after, before) {
+		t.Errorf("a refused update changed the memory: %v, was %v", after, before)
 	}
 }
