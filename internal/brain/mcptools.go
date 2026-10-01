@@ -39,8 +39,10 @@ type mcpCatalog map[string]json.RawMessage
 // only the class knows whether this thread's role is what put the name there.
 //
 // builtin marks a definition the agent_toolset expansion supplied, for the
-// same reason: a custom tool may take a disabled built-in's name, and only
-// the class knows which of the two the name is. builtinTools reads it.
+// same reason: a custom tool may hold a built-in's name — a disabled one's,
+// or, in a snapshot stored before the API refused the pairing, an enabled
+// one's that it was listed after — and only the class knows which of the two
+// the name is. builtinTools reads it.
 type toolClass struct {
 	kind       domain.EventType
 	policy     domain.PermissionPolicyType
@@ -268,43 +270,51 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 		}
 	}
 
-	// The built-ins the agent's toolset enables, read before any custom tool
-	// is, so that a custom tool sharing a name with one is dropped whichever
-	// of the two tools[] lists first. The API refuses such a spec at every
-	// write (internal/api validateAgentSpec), so only a snapshot stored before
-	// that check reaches here with one; offering both would put two tools of
-	// one name in a request the Messages API refuses, and leave the name's
-	// class — the provenance builtinTools reads — to whichever came last.
-	enabledBuiltins := map[string]bool{}
-	for _, raw := range agent.Tools {
-		var probe struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(raw, &probe); err != nil {
-			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
-		}
-		if probe.Type != agentToolsetType {
-			continue
-		}
-		policies, err := toolset.Policies(raw)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
-		}
-		for name := range policies {
-			enabledBuiltins[name] = true
-		}
-	}
-
-	for _, raw := range agent.Tools {
-		var probe struct {
+	// A first pass resolves each toolset entry once, keeping the result for
+	// the second, and records where in tools[] every enabled built-in and
+	// every offerable custom tool sits. The positions settle a custom tool
+	// that shares an enabled built-in's name. The API refuses that pairing at
+	// every write (internal/api validateAgentSpec), so only a snapshot stored
+	// before that check carries one, and there the later entry owned the
+	// name's class, so the model's calls went to it. The later entry still
+	// wins, whichever kind it is; only it is offered now, because a request
+	// that names a tool twice is one the Messages API refuses, and the name is
+	// marked built-in (builtinTools) only when the built-in is what won.
+	type toolEntry struct {
+		probe struct {
 			Type        string          `json:"type"`
 			Name        string          `json:"name"`
 			Description string          `json:"description"`
 			InputSchema json.RawMessage `json:"input_schema"`
 		}
-		if err := json.Unmarshal(raw, &probe); err != nil {
+		builtins []toolset.Builtin // an agent_toolset entry's, resolved once
+	}
+	entries := make([]toolEntry, len(agent.Tools))
+	builtinAt, customAt := map[string]int{}, map[string]int{}
+	for i, raw := range agent.Tools {
+		e := &entries[i]
+		if err := json.Unmarshal(raw, &e.probe); err != nil {
 			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
 		}
+		switch e.probe.Type {
+		case "custom":
+			if !injected[e.probe.Name] {
+				customAt[e.probe.Name] = i
+			}
+		case agentToolsetType:
+			bs, err := toolset.Resolve(raw, now)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
+			}
+			e.builtins = bs
+			for _, b := range bs {
+				builtinAt[b.Name] = i
+			}
+		}
+	}
+
+	for i := range entries {
+		probe := entries[i].probe
 		switch probe.Type {
 		case "custom":
 			if injected[probe.Name] {
@@ -317,8 +327,8 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 					noteLabel(probe.Name))
 				continue
 			}
-			if enabledBuiltins[probe.Name] {
-				notes.add("the agent's custom tool %q was not offered: the built-in tool of that name shadows it",
+			if at, ok := builtinAt[probe.Name]; ok && at > i {
+				notes.add("the agent's custom tool %q was not offered: the built-in tool of that name, listed after it in tools[], takes the name",
 					noteLabel(probe.Name))
 				continue
 			}
@@ -331,17 +341,14 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			defs = append(defs, def)
 			class[probe.Name] = toolClass{kind: domain.EventAgentCustomToolUse}
 		case agentToolsetType:
-			builtins, err := toolset.Tools(raw, now)
-			if err != nil {
-				return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
-			}
-			policies, err := toolset.Policies(raw)
-			if err != nil {
-				return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
-			}
-			defs = append(defs, builtins...)
-			for name, p := range policies {
-				class[name] = toolClass{kind: domain.EventAgentToolUse, policy: p, builtin: true}
+			for _, b := range entries[i].builtins {
+				if at, ok := customAt[b.Name]; ok && at > i {
+					notes.add("the built-in tool %q was not offered: the agent's custom tool of that name, listed after it in tools[], takes the name",
+						noteLabel(b.Name))
+					continue
+				}
+				defs = append(defs, b.Definition)
+				class[b.Name] = toolClass{kind: domain.EventAgentToolUse, policy: b.Policy, builtin: true}
 			}
 		}
 	}

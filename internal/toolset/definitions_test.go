@@ -262,3 +262,44 @@ func TestIsWebTool(t *testing.T) {
 		}
 	}
 }
+
+// Resolve is Tools and Policies in one pass, for the brain, which needs both
+// for every toolset entry on every turn: the same tools, in the same order,
+// each definition byte-identical to Tools' and each policy Policies'.
+func TestResolveIsToolsAndPoliciesInOnePass(t *testing.T) {
+	entry := json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_ask"}},` +
+		`"configs":[{"name":"bash","permission_policy":{"type":"always_allow"}},{"name":"grep","enabled":false}]}`)
+	now := time.Date(2026, 9, 2, 0, 2, 58, 0, time.UTC)
+	defs, err := toolset.Tools(entry, now)
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	policies, err := toolset.Policies(entry)
+	if err != nil {
+		t.Fatalf("Policies: %v", err)
+	}
+	got, err := toolset.Resolve(entry, now)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(got) != len(defs) || len(got) != len(policies) {
+		t.Fatalf("Resolve = %d tools, Tools %d, Policies %d", len(got), len(defs), len(policies))
+	}
+	for i, b := range got {
+		if string(b.Definition) != string(defs[i]) {
+			t.Errorf("tool %d (%s) definition differs from Tools':\n%s\n%s", i, b.Name, b.Definition, defs[i])
+		}
+		if b.Policy != policies[b.Name] {
+			t.Errorf("%s policy = %q, want Policies' %q", b.Name, b.Policy, policies[b.Name])
+		}
+		var d struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(b.Definition, &d); err != nil || d.Name != b.Name {
+			t.Errorf("tool %d named %q, its definition %q (%v)", i, b.Name, d.Name, err)
+		}
+	}
+	if _, err := toolset.Resolve(json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"nope"}}}`), now); err == nil {
+		t.Error("Resolve accepted a policy Tools and Policies refuse")
+	}
+}

@@ -482,19 +482,42 @@ func Validate(raw json.RawMessage) error {
 // Tools returns the model-facing definitions of the built-in tools an
 // agent_toolset_20260401 entry enables, in the wire's order, for a request made
 // at now. now matters to one definition: web_search's description carries the
-// day's date, so the brain calls this per request rather than once.
+// day's date, so the brain builds them per request rather than once.
 func Tools(raw json.RawMessage, now time.Time) ([]json.RawMessage, error) {
-	rs, err := resolveToolset(raw)
+	bs, err := Resolve(raw, now)
 	if err != nil {
 		return nil, err
 	}
 	var out []json.RawMessage
+	for _, b := range bs {
+		out = append(out, b.Definition)
+	}
+	return out, nil
+}
+
+// Builtin is one built-in tool an agent_toolset_20260401 entry enables: its
+// name, its model-facing definition, and its resolved permission policy.
+type Builtin struct {
+	Name       string
+	Definition json.RawMessage
+	Policy     domain.PermissionPolicyType
+}
+
+// Resolve is Tools and Policies in one pass over the entry, for a caller that
+// needs both: the enabled built-ins in the wire's order, each rendered for a
+// request made at now.
+func Resolve(raw json.RawMessage, now time.Time) ([]Builtin, error) {
+	rs, err := resolveToolset(raw)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Builtin, 0, len(rs))
 	for _, r := range rs {
 		def, err := r.def.marshal(now)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, def)
+		out = append(out, Builtin{Name: r.def.name, Definition: def, Policy: r.policy})
 	}
 	return out, nil
 }
