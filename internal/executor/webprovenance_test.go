@@ -38,12 +38,11 @@ func TestNormalizeFetchURL(t *testing.T) {
 	}
 }
 
-// textHolds reports whether text provides url, as fetchProvenanced decides it
+// textHolds reports whether text provides url, as webFetchSource decides it
 // for one string.
 func textHolds(text, url string) bool {
-	want, ok := normalizeFetchURL(url)
 	m, ok := newURLMatcher(url)
-	if !ok || want == "" {
+	if !ok {
 		return false
 	}
 	m.scan(text)
@@ -81,6 +80,10 @@ func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
 		// No space before what follows: CJK text, an em dash, a possessive.
 		{"请看https://example.com/docs，然后总结", []string{"https://example.com/docs"}},
 		{"看https://example.com/docs然后总结", []string{"https://example.com/docs"}},
+		{"看https://example.com然后总结", []string{"https://example.com", "https://example.com/"}},
+		// A raw CJK path is the request's escaped one: the text is shorter
+		// than the normalized form it matches.
+		{"https://example.com/日本語", []string{"https://example.com/%E6%97%A5%E6%9C%AC%E8%AA%9E"}},
 		{"見てhttps://example.com/a。お願いします", []string{"https://example.com/a"}},
 		{"https://example.com/a—see", []string{"https://example.com/a"}},
 		{"https://example.com/a's", []string{"https://example.com/a"}},
@@ -160,6 +163,33 @@ func TestURLMatcherStaysLinearOnAHostileRun(t *testing.T) {
 	}
 }
 
+// A lookup that would read past its budget refuses the fetch with an error
+// saying why, rather than stalling the executor: here a long request, whose
+// window is wide, against a page of URLs on its host run together.
+func TestWebFetchRefusesWhenTheLookupWouldSpendItsBudget(t *testing.T) {
+	h := webHarness(t, "", "")
+	ctx := context.Background()
+	use, _ := json.Marshal(map[string]any{"name": "web_fetch", "input": map[string]string{"url": "https://docs.example.com/"}})
+	out, err := h.log.Append(ctx, h.sid, []events.NewEvent{{Type: domain.EventAgentToolUse, Payload: use}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ := json.Marshal(map[string]any{"tool_use_id": out[0].ID.String(), "is_error": false,
+		"content": []map[string]string{{"type": "text", "text": strings.Repeat("https://docs.example.com/,", 4000)}}})
+	if _, err := h.log.Append(ctx, h.sid, []events.NewEvent{{Type: domain.EventAgentToolResult, Payload: page}}); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &recordingFetcher{}
+	h.exec.fetcher = f
+	long := "https://docs.example.com/" + strings.Repeat("a", maxFetchURL-len("https://docs.example.com/"))
+	in, _ := json.Marshal(map[string]string{"url": long})
+	res := h.exec.runWebTool(ctx, h.sid, toolUse{name: "web_fetch", input: in})
+	if !res.IsError || !strings.Contains(res.Content, "too many URLs") || f.calls != 0 {
+		t.Errorf("result = %+v (fetches %d), want the budget refusal and nothing fetched", res, f.calls)
+	}
+}
+
 // fetchedAs runs one web_fetch of url against the harness's session and
 // returns the URL the fetcher was handed, or "" when nothing was fetched.
 func fetchedAs(t *testing.T, h *harness, url string) string {
@@ -184,6 +214,8 @@ func TestWebFetchFetchesTheGivenSpellingNotTheModels(t *testing.T) {
 	// A full-width letter folds to its ASCII form, so the payload never holds
 	// the request's ASCII host and the prefilter must not drop it.
 	h.userSays(t, "And https://ｅxample.org/path.")
+	// A sentence's colon after a bare host is not sent as an empty port.
+	h.userSays(t, "See https://colon.example: it is.")
 
 	for _, tc := range []struct{ request, fetched string }{
 		{"https://docs.example.com/guide#d=secret", "https://docs.example.com/guide"},
@@ -192,6 +224,7 @@ func TestWebFetchFetchesTheGivenSpellingNotTheModels(t *testing.T) {
 		{"https://xn--bcher-kva.de/x", "https://bücher.de/x"},
 		{"https://Ünicode.example/page", "https://Ünicode.example/page"},
 		{"https://example.org/path", "https://ｅxample.org/path"},
+		{"https://colon.example/", "https://colon.example"},
 	} {
 		if got := fetchedAs(t, h, tc.request); got != tc.fetched {
 			t.Errorf("request %s fetched %q, want the given %q", tc.request, got, tc.fetched)

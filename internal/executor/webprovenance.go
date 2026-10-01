@@ -38,10 +38,13 @@ import (
 //
 // The reading is bounded, because the text is not ours: a fetched page can hold
 // 100 KiB of URLs run together, and reading each occurrence to the end of such
-// a run, cut at every punctuation mark, is quadratic. A reading that can match
-// is no longer than urlMatcher's window, an occurrence naming another host is
-// skipped after one parse of its authority, and a lookup that would parse more
-// than readingBudget readings refuses the fetch rather than stall the executor.
+// a run, cut at every punctuation mark, is quadratic. urlMatcher reads an
+// occurrence's authority a fixed number of ways and what follows only within
+// the window a match can fit in, goes no further for another host, and charges
+// every byte it scans or parses to readingBudget: a lookup past it refuses the
+// fetch rather than stall the executor. What people wrote is read first, then
+// the newest results, so a page that spends the budget costs the URLs given
+// before it last.
 
 // maxFetchURL is the longest URL web_fetch accepts. It bounds the window every
 // reading is read in, and no browser or reader takes a longer one.
@@ -78,22 +81,24 @@ func (e *Executor) webFetchSource(ctx context.Context, sid domain.ID, raw string
 	const narrow = `($2 = '' OR strpos(lower(%[1]s::text), lower($2)) > 0
 		       OR octet_length(%[1]s::text) <> char_length(%[1]s::text))`
 	rows, err := e.pool.Query(ctx, `
-		SELECT m.payload FROM events m
+		SELECT payload FROM (
+		SELECT m.payload, 0 AS rank, m.seq FROM events m
 		 WHERE m.session_id = $1 AND m.type = ANY($3)
 		   AND `+fmt.Sprintf(narrow, "m.payload")+`
 		UNION ALL
-		SELECT r.payload FROM events r
+		SELECT u.payload->'input', 0, u.seq FROM events u
+		 WHERE u.session_id = $1 AND u.type = $5 AND u.payload->>'name' = 'web_fetch'
+		   AND EXISTS (SELECT 1 FROM events c
+		                WHERE c.session_id = u.session_id AND c.type = $6
+		                  AND c.payload->>'tool_use_id' = u.id AND c.payload->>'result' = 'allow')
+		UNION ALL
+		SELECT r.payload, 1, r.seq FROM events r
 		  JOIN events u ON u.session_id = r.session_id AND u.id = r.payload->>'tool_use_id'
 		 WHERE r.session_id = $1 AND r.type = $4
 		   AND u.type = $5 AND u.payload->>'name' IN ('web_search', 'web_fetch')
 		   AND NOT COALESCE((r.payload->>'is_error')::boolean, false)
 		   AND `+fmt.Sprintf(narrow, "r.payload")+`
-		UNION ALL
-		SELECT u.payload->'input' FROM events u
-		 WHERE u.session_id = $1 AND u.type = $5 AND u.payload->>'name' = 'web_fetch'
-		   AND EXISTS (SELECT 1 FROM events c
-		                WHERE c.session_id = u.session_id AND c.type = $6
-		                  AND c.payload->>'tool_use_id' = u.id AND c.payload->>'result' = 'allow')`,
+		) given ORDER BY rank, seq DESC`,
 		sid.String(), key,
 		[]string{string(domain.EventUserMessage), string(domain.EventUserDefineOutcome),
 			string(domain.EventUserToolConfirm), string(domain.EventSystemMessage)},
@@ -129,6 +134,7 @@ func (e *Executor) webFetchSource(ctx context.Context, sid domain.ID, raw string
 // spelled exactly as the request when there is one.
 type urlMatcher struct {
 	raw, want, host  string // the request, its normalized form, and its canonical host[:port]
+	head, tail       string // want split after its authority: "scheme://authority" and the rest
 	authMax          int    // the longest authority (userinfo, host, port) a match can be spelled with
 	tailMin, tailMax int    // the byte lengths of what follows that authority in a match
 	budget           int    // bytes of URL left to parse
@@ -164,8 +170,9 @@ func newURLMatcher(raw string) (*urlMatcher, bool) {
 	if i := strings.IndexByte(rest, '/'); i >= 0 {
 		auth = i
 	}
-	tail := len(rest) - auth
-	return &urlMatcher{raw: raw, want: want, host: host,
+	head := len(want) - len(rest) + auth
+	tail := len(want) - head
+	return &urlMatcher{raw: raw, want: want, host: host, head: want[:head], tail: want[head:],
 		authMax: 3*auth + 64, tailMin: max(0, (tail-16)/3), tailMax: 3*tail + 64,
 		budget: readingBudget}, true
 }
@@ -216,11 +223,11 @@ func (m *urlMatcher) scan(s string) bool {
 //
 // The authority is read a fixed number of ways, each one parse: to the first
 // "/", "?" or "#"; to the first non-ASCII character; to the first ASCII
-// character no host carries; and each with its trailing dots and colons
-// trimmed. A reading that ends in its authority is tried as it is. Only one
-// whose authority, read to its "/", "?" or "#", names the request's host goes
-// on: the run cut just before each character that can end a URL in text
-// (endsURLInText), and the whole run, within the tail's window.
+// character no host carries; and, for a reading that ends in its authority,
+// with its trailing dots and colons trimmed first. Only an occurrence whose
+// authority, read to its "/", "?" or "#", is the request's goes on: the run cut
+// just before each character that can end a URL in text (endsURLInText), and
+// the whole run, within the tail's window. The scan itself is charged too.
 func (m *urlMatcher) occurrence(s string) bool {
 	start := strings.Index(s, "://") + len("://")
 	run, whole := s, true
@@ -232,6 +239,7 @@ func (m *urlMatcher) occurrence(s string) bool {
 	}); end >= 0 {
 		run, whole = run[:end], true
 	}
+	m.budget -= len(run)/8 + 1
 	area := run[start:min(len(run), start+m.authMax)]
 	authEnd := -1
 	if i := strings.IndexAny(area, "/?#"); i >= 0 {
@@ -251,35 +259,42 @@ func (m *urlMatcher) occurrence(s string) bool {
 	}); i >= 0 {
 		ends = append(ends, start+i)
 	}
-	hostOK := false
+	headOK := false
 	for _, e := range ends {
-		for k, n := e, 0; k > start && n < 16; k, n = k-1, n+1 {
-			if !m.sameHost(run[:k]) {
-				if c := run[k-1]; c != '.' && c != ':' {
-					break
+		if e == authEnd {
+			headOK = m.sameHead(run[:e])
+		}
+		// A reading that ends in its authority: trailing dots and colons
+		// trimmed first (a sentence's "example.com." or "example.com:"),
+		// then as it stands.
+		k := e
+		for n := 0; k > start && n < 16 && (run[k-1] == '.' || run[k-1] == ':'); n++ {
+			k--
+		}
+		for _, c := range []int{k, e} {
+			if c != authEnd && c > start && m.sameHost(run[:c]) {
+				if m.try(run[:c]) {
+					return true
 				}
-				continue
+				break
 			}
-			if k == authEnd {
-				hostOK = true
-			} else if m.try(run[:k]) {
-				return true
+			if k == e {
+				break
 			}
-			break
 		}
 		if m.budget <= 0 {
 			return true
 		}
 	}
-	if !hostOK {
+	if !headOK {
 		return false
 	}
 	for i, r := range run[authEnd:] {
-		if k := authEnd + i; endsURLInText(r) && i >= m.tailMin && m.try(run[:k]) {
+		if k := authEnd + i; endsURLInText(r) && i >= m.tailMin && m.tryTail(run, authEnd, k) {
 			return true
 		}
 	}
-	return whole && len(run)-authEnd >= m.tailMin && m.try(run)
+	return whole && len(run)-authEnd >= m.tailMin && m.tryTail(run, authEnd, len(run))
 }
 
 // isHostByte reports whether c can appear in an authority: userinfo, a host
@@ -302,21 +317,74 @@ func (m *urlMatcher) sameHost(r string) bool {
 	return ok && h == m.host
 }
 
-// try compares one reading with the request, spending its length. It reports
-// true when the search is over: this reading is spelled exactly as the
-// request, or the budget is spent.
-func (m *urlMatcher) try(r string) bool {
+// sameHead reports whether r, a scheme and an authority, normalizes to the
+// request's: the same scheme, userinfo, host and port.
+func (m *urlMatcher) sameHead(r string) bool {
 	m.budget -= len(r)
-	if got, ok := normalizeFetchURL(r); ok && got == m.want {
-		if r == m.raw {
-			m.found, m.exact = r, true
-			return true
-		}
-		if m.found == "" {
-			m.found = r
-		}
+	got, ok := normalizeFetchURL(r)
+	return ok && strings.TrimSuffix(got, "/") == m.head
+}
+
+// tryTail compares the reading run[:k], whose head is the request's, with the
+// request. A tail of plain characters — ones Go's URL type spells back as
+// written — is compared as a string, for a sixteenth of the charge; any other
+// is parsed.
+func (m *urlMatcher) tryTail(run string, authEnd, k int) bool {
+	tail := run[authEnd:k]
+	if !isPlainTail(tail) {
+		return m.try(run[:k])
+	}
+	m.budget -= len(tail)/16 + 1
+	if tail == "" || tail[0] == '?' {
+		tail = "/" + tail
+	}
+	if tail == m.tail && m.record(run[:k]) {
+		return true
 	}
 	return m.budget <= 0
+}
+
+// isPlainTail reports whether t, the path and query after an authority,
+// normalizes to itself: a path of unreserved characters, sub-delimiters, ":",
+// "@" and "/", and a query of printable ASCII, with no escape and no fragment.
+func isPlainTail(t string) bool {
+	q := strings.IndexByte(t, '?')
+	for i := range len(t) {
+		c := t[i]
+		switch {
+		case c <= ' ' || c >= unicode.MaxASCII || c == '%' || c == '#':
+			return false
+		case q >= 0 && i > q:
+		case 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9':
+		case strings.IndexByte("-._~!$&'()*+,;=:@/?", c) < 0:
+			return false
+		}
+	}
+	return true
+}
+
+// try compares one reading with the request, parsing it and spending its
+// length. It reports true when the search is over: this reading is spelled
+// exactly as the request, or the budget is spent.
+func (m *urlMatcher) try(r string) bool {
+	m.budget -= len(r)
+	if got, ok := normalizeFetchURL(r); ok && got == m.want && m.record(r) {
+		return true
+	}
+	return m.budget <= 0
+}
+
+// record notes a matching reading, reporting true when it is spelled exactly as
+// the request, which ends the search.
+func (m *urlMatcher) record(r string) bool {
+	if r == m.raw {
+		m.found, m.exact = r, true
+		return true
+	}
+	if m.found == "" {
+		m.found = r
+	}
+	return false
 }
 
 // normalizeFetchURL is the form two URLs are compared in: the scheme lowercased,
