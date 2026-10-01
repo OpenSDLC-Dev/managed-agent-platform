@@ -185,6 +185,21 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "name", "description", "metadata"); err != nil {
 		return nil, err
 	}
+	// A body naming none of the three is the reference's recorded 400
+	// (2026-09-02 `store.update.empty`, #817). A key names its field whatever
+	// its value: a null description was answered 200 (2026-09-03
+	// `store.update.description-null`). That an empty metadata bag names
+	// metadata, and that the body is judged before the store is looked up, are
+	// ours (docs/DIVERGENCES.md). rejectUnknownKeys has left only the three.
+	if len(obj) == 0 {
+		return nil, errInvalid("at least one of name, description, or metadata must be provided")
+	}
+	// A null bag is the reference's parse refusal, worded as recorded
+	// (2026-09-03 `store.update.metadata-null`); a null inside the bag still
+	// deletes its key (patchMetadata).
+	if raw, ok := obj["metadata"]; ok && isNull(raw) {
+		return nil, errInvalid(`Failed to parse request: params: field "metadata": null is not a valid value for a map field; omit the field to preserve, or set individual keys to null to delete them`)
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -215,17 +230,20 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	oldName, oldDescription, oldMetadata := row.name, row.description, metadata
 
 	// The spec admits JSON null on all three top-level fields and says nothing
-	// about what it means; the SDK's `omitzero` never sends one. Each field
-	// takes the rule its sibling resources already apply: `name` is required,
-	// so null or "" is "cannot be cleared" (updateAgent and updateEnvironment;
-	// updateVault says it of null and lets "" fall to "display_name is
-	// required" — registered as INFERRED in docs/DIVERGENCES.md); a null
-	// `description` clears, like its documented "" (updateAgent's description);
-	// a null metadata bag preserves (patchMetadata).
+	// about what it means; the SDK's `omitzero` never sends one. The reference
+	// was recorded answering each (2026-09-03 `store.update.name-null`,
+	// `store.update.description-null`, `store.update.metadata-null`): a null
+	// name is a 400 worded as recorded, a null description clears like its
+	// documented "", and a null metadata bag is refused above. An empty name
+	// is unrecorded and keeps the sibling resources' wording (updateAgent and
+	// updateEnvironment) — registered as INFERRED in docs/DIVERGENCES.md.
 	if name, set, null, err := stringField(obj, "name"); err != nil {
 		return nil, err
 	} else if set {
-		if null || name == "" {
+		if null {
+			return nil, errInvalid("name cannot be empty")
+		}
+		if name == "" {
 			return nil, errInvalid("name cannot be cleared")
 		}
 		if err := validateMemoryStoreName(name); err != nil {
@@ -259,8 +277,8 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 
 	// An update moves updated_at by the spec's definition of the field, "when
 	// the store's name, description, or metadata was last modified", so a
-	// request that modifies none of them — an empty body, a null bag, the
-	// stored values sent back — leaves it alone. The first archive moves it
+	// request that modifies none of them — an empty bag, the stored values
+	// sent back — leaves it alone. The first archive moves it
 	// too, as the reference's recorded archives did (see archiveMemoryStore).
 	if row.name != oldName || row.description != oldDescription || !maps.Equal(metadata, oldMetadata) {
 		if err := tx.QueryRow(ctx,
