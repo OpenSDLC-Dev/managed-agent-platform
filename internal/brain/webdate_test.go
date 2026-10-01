@@ -75,6 +75,39 @@ func TestWebSearchDateIsRenderedPerRequest(t *testing.T) {
 	}
 }
 
+// The test above swaps the clock out, so it cannot see the one New wires in:
+// a brain built with a frozen clock would pass it. This turn runs on the
+// production clock and its date line must be the real UTC date — the date
+// before the turn or the date after it, so a run that straddles a UTC
+// midnight still passes.
+func TestWebSearchDateComesFromTheWallClock(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{agentReply("one")}, nil)
+	h.builtins(t)
+
+	before := time.Now().UTC().Format(time.DateOnly)
+	h.wake(t, "first")
+	h.runOnce(t)
+	after := time.Now().UTC().Format(time.DateOnly)
+
+	if len(h.provider.calls) != 1 {
+		t.Fatalf("%d model calls, want 1", len(h.provider.calls))
+	}
+	def, ok := toolsByName(t, h.provider.calls[0].Tools)["web_search"]
+	if !ok {
+		t.Fatal("no web_search was offered")
+	}
+	var d struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal([]byte(def), &d); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.Description, "\n- Today's date is "+before+"\n") &&
+		!strings.Contains(d.Description, "\n- Today's date is "+after+"\n") {
+		t.Errorf("web_search's date line is not today's UTC date (%s):\n%s", before, d.Description)
+	}
+}
+
 // toolsByName indexes one request's tool definitions by name, as raw text.
 func toolsByName(t *testing.T, tools []json.RawMessage) map[string]string {
 	t.Helper()
