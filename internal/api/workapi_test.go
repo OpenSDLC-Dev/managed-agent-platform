@@ -310,6 +310,8 @@ func TestWorkUpdateMetadata(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("update status = %d, want 200 (body %q)", res.StatusCode, raw)
 	}
+	// Ours, not recorded: the recordings hold this route only as 403s, so the
+	// recorded keys here follow from the renderer every work route shares.
 	wantWorkKeys(t, body)
 	if body["type"] != "work" || body["id"] != workID {
 		t.Errorf("update returned %v, want the work object", body)
