@@ -20,6 +20,9 @@ func TestNormalizeFetchURL(t *testing.T) {
 		{"https://example.com#top", "https://example.com/"},
 		{"https://example.com/a?q=1&r=2", "https://example.com/a?q=1&r=2"},
 		{"http://[::1]:8080/x", "http://[::1]:8080/x"},
+		// Only ASCII folds: "İ" lowercases to "i" in Unicode, which would make
+		// a look-alike host equal a given one.
+		{"https://WİKİPEDİA.org/x", "https://w%C4%B0k%C4%B0ped%C4%B0a.org/x"},
 	} {
 		if got, ok := normalizeFetchURL(tc.in); !ok || got != tc.want {
 			t.Errorf("normalizeFetchURL(%q) = %q, %v; want %q", tc.in, got, ok, tc.want)
@@ -64,6 +67,9 @@ func TestTextHoldsEveryReadingOfAURL(t *testing.T) {
 		{"https://example.com/search?", []string{"https://example.com/search?", "https://example.com/search"}},
 		{"https://example.com/release!", []string{"https://example.com/release!"}},
 		{"https://example.com/a)", []string{"https://example.com/a)", "https://example.com/a"}},
+		// CJK text ends a URL with its own punctuation and spaces.
+		{"看 https://example.com/cjk。", []string{"https://example.com/cjk"}},
+		{"https://example.com/wide\u3000次", []string{"https://example.com/wide"}},
 	} {
 		for _, u := range tc.urls {
 			if !textHolds(tc.text, u) {
@@ -104,13 +110,15 @@ func fetchOutcome(t *testing.T, h *harness, url string) (res struct {
 func TestWebFetchRefusesAURLNobodyProvided(t *testing.T) {
 	h := webHarness(t, "", "")
 	h.userSays(t, "Look at https://example.com/a for me.")
+	h.userSays(t, "And https://wikipedia.org/x.")
 
 	for _, url := range []string{
 		"https://attacker.example/?d=secret",
 		"https://example.com/a?d=secret", // anything appended is a different URL
 		"https://example.com/ab",
 		"https://example.com/",
-		"http://example.com/a", // the scheme is part of what was provided
+		"http://example.com/a",    // the scheme is part of what was provided
+		"https://wİkİpedİa.org/x", // a look-alike host Unicode case-folding would admit
 	} {
 		res, fetched := fetchOutcome(t, h, url)
 		if !res.IsError || !strings.Contains(res.Content, "was not provided by the user") {
@@ -197,6 +205,42 @@ func TestWebFetchCountsNoOtherSource(t *testing.T) {
 		"https://exfil.example/agent?d=1",
 		"https://exfil.example/error?d=1",
 		"https://exfil.example/bash?d=1",
+	} {
+		if res, fetched := fetchOutcome(t, h, url); !res.IsError || fetched {
+			t.Errorf("fetch %s = %+v (fetched %v), want it refused", url, res, fetched)
+		}
+	}
+}
+
+// Provenance is the session's own: another session's user message, another
+// session's web result, and a result here naming another session's call are
+// none of them given here. Each case pins one of the query's session filters.
+func TestWebFetchCountsOnlyThisSession(t *testing.T) {
+	h := webHarness(t, "", "")
+	ctx := context.Background()
+	other := pgtest.NewSessionInEnv(t, h.exec.pool, h.envID)
+	appendTo := func(sid domain.ID, typ domain.EventType, payload any) domain.ID {
+		t.Helper()
+		raw, _ := json.Marshal(payload)
+		out, err := h.log.Append(ctx, sid, []events.NewEvent{{Type: typ, Payload: raw}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out[0].ID
+	}
+	text := func(s string) []map[string]string { return []map[string]string{{"type": "text", "text": s}} }
+
+	appendTo(other, domain.EventUserMessage, map[string]any{"content": text("https://other.example/message")})
+	theirs := appendTo(other, domain.EventAgentToolUse, map[string]any{"name": "web_fetch", "input": map[string]string{"url": "https://a.example/"}})
+	appendTo(other, domain.EventAgentToolResult, map[string]any{
+		"tool_use_id": theirs.String(), "is_error": false, "content": text("https://other.example/their-result")})
+	appendTo(h.sid, domain.EventAgentToolResult, map[string]any{
+		"tool_use_id": theirs.String(), "is_error": false, "content": text("https://other.example/borrowed-call")})
+
+	for _, url := range []string{
+		"https://other.example/message",
+		"https://other.example/their-result",
+		"https://other.example/borrowed-call",
 	} {
 		if res, fetched := fetchOutcome(t, h, url); !res.IsError || fetched {
 			t.Errorf("fetch %s = %+v (fetched %v), want it refused", url, res, fetched)

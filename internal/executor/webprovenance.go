@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -48,7 +49,7 @@ func (e *Executor) fetchProvenanced(ctx context.Context, sid domain.ID, target *
 		   AND u.type = $5 AND u.payload->>'name' IN ('web_search', 'web_fetch')
 		   AND NOT COALESCE((r.payload->>'is_error')::boolean, false)
 		   AND strpos(lower(r.payload::text), $2) > 0`,
-		sid.String(), strings.ToLower(target.Hostname()),
+		sid.String(), asciiLower(target.Hostname()),
 		string(domain.EventUserMessage), string(domain.EventAgentToolResult), string(domain.EventAgentToolUse))
 	if err != nil {
 		return false, fmt.Errorf("read the session's provided URLs: %w", err)
@@ -97,7 +98,9 @@ func mentionsURL(v any, want string) bool {
 }
 
 // normalizeFetchURL is the form two URLs are compared in: the scheme and host
-// lowercased, as RFC 3986 makes them case-insensitive, the fragment dropped,
+// lowercased, as RFC 3986 makes them case-insensitive (ASCII only: Unicode
+// folding maps "İ" to "i", which would let a look-alike host IDNA reads as
+// another label match a given one), the fragment dropped,
 // since it never reaches the server, and an empty path read as "/". The path
 // and query stay exactly as given. It reports false for anything but an
 // absolute http(s) URL.
@@ -110,7 +113,7 @@ func normalizeFetchURL(raw string) (string, bool) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", false
 	}
-	u.Host = strings.ToLower(u.Host)
+	u.Host = asciiLower(u.Host)
 	u.Fragment, u.RawFragment = "", ""
 	if u.Path == "" && u.RawPath == "" {
 		u.Path = "/"
@@ -132,14 +135,31 @@ func urlsIn(s string) []string {
 	return out
 }
 
+// asciiLower lowercases the ASCII letters of s and nothing else.
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, s)
+}
+
 // hasPrefixFold is strings.HasPrefix ignoring ASCII case.
 func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
 
 // trailingPunct is what a sentence or markup can put after a URL; each is
-// also a character a URL may end with.
+// also a character a URL may end with. Non-ASCII punctuation, a CJK full
+// stop say, is trimmed as well (isTrailing).
 const trailingPunct = ".,;:!?*'"
+
+// isTrailing reports whether r is punctuation a reading may drop from a
+// URL's end.
+func isTrailing(r rune) bool {
+	return strings.ContainsRune(trailingPunct, r) || (r > unicode.MaxASCII && unicode.IsPunct(r))
+}
 
 // urlReadings returns the ways the URL at the start of s can be read. Running
 // text does not say where a URL ends: a full stop or a markdown link's closing
@@ -151,7 +171,7 @@ const trailingPunct = ".,;:!?*'"
 // them is one the text holds. Each is a prefix of the text as written.
 func urlReadings(s string) []string {
 	run := s[:strings.IndexFunc(s+" ", func(r rune) bool {
-		return r <= ' ' || strings.ContainsRune("<>\"`{}|\\^", r)
+		return r <= ' ' || unicode.IsSpace(r) || strings.ContainsRune("<>\"`{}|\\^", r)
 	})]
 	parens, brackets, end := 0, 0, 0
 scan:
@@ -175,7 +195,7 @@ scan:
 	}
 	balanced := run[:end]
 	var out []string
-	for _, r := range []string{run, strings.TrimRight(run, trailingPunct), balanced, strings.TrimRight(balanced, trailingPunct)} {
+	for _, r := range []string{run, strings.TrimRightFunc(run, isTrailing), balanced, strings.TrimRightFunc(balanced, isTrailing)} {
 		if !slices.Contains(out, r) {
 			out = append(out, r)
 		}
