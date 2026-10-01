@@ -269,7 +269,8 @@ func NewSessionInEnv(t *testing.T, pool *pgxpool.Pool, envID domain.ID) (session
 }
 
 // SetSessionStatus moves a fixture session to status the way the platform
-// does — the primary thread's row and the session's column together (plan 35
+// does — the primary thread's row (its status, and the transitioned flag a
+// real move sets) and the session's column together (plan 35
 // decision 4: the session's status is a fold over its threads', so a fixture
 // that moved the column alone would be read back as its idle primary).
 func SetSessionStatus(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID, status string) {
@@ -279,7 +280,8 @@ func SetSessionStatus(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID, sta
 		t.Fatalf("fixture status: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
-		`UPDATE session_threads SET status = $2 WHERE session_id = $1 AND parent_thread_id IS NULL`,
+		`UPDATE session_threads SET status = $2, transitioned = transitioned OR status <> $2
+		  WHERE session_id = $1 AND parent_thread_id IS NULL`,
 		sessionID, status); err != nil {
 		t.Fatalf("fixture thread status: %v", err)
 	}
