@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -204,6 +205,24 @@ func wantErr(t *testing.T, status int, body map[string]any, wantStatus int, want
 	}
 	if msg, _ := inner["message"].(string); msg == "" {
 		t.Errorf("error.message missing: %v", body)
+	}
+}
+
+// wantDetails asserts the error's `details` member: nested inside `error`,
+// where the reference places it (#664), and holding exactly want — the
+// recorded keys and values, nothing more. A nil want asserts it is absent.
+func wantDetails(t *testing.T, body map[string]any, want map[string]any) {
+	t.Helper()
+	if _, beside := body["details"]; beside {
+		t.Errorf("details sits beside error in %v, want it inside", body)
+	}
+	inner, _ := body["error"].(map[string]any)
+	got, ok := inner["details"]
+	switch {
+	case want == nil && ok:
+		t.Errorf("error.details = %v, want no details member", got)
+	case want != nil && !reflect.DeepEqual(got, want):
+		t.Errorf("error.details = %v, want %v", got, want)
 	}
 }
 
