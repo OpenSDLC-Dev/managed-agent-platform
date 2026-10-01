@@ -48,14 +48,15 @@
 // and the GET /v1/files/{id}/content download, which is the
 // worker's own SetupSkills and SetupFiles path. Skill content and file content
 // therefore do NOT need a management key. What keeps the lane narrow is the
-// key's environment and then per-resource scoping. On every one of these routes
-// the environment must be self_hosted: a cloud environment's key, which the
-// console issues as the reference does, has no worker to serve and gets one 404
-// (errNotSelfHostedKey, envauth.go). Past that, a session route's key must own
-// the session (requireEnvironmentKeyForSession), a file download's key must
-// belong to an environment in which some session mounts that file
-// (downloadFile), and skills, workspace-global resources every environment's
-// sandboxes consume, need no further scoping. Everything else on /v1 — the collections, the file
+// key's environment and then per-resource scoping. On the session routes and
+// the file download the environment must be self_hosted: a cloud environment's
+// key, which the console issues as the reference does, has no worker to serve
+// and gets one 404 there (errNotSelfHostedKey, envauth.go). Past that, a
+// session route's key must own the session (requireEnvironmentKeyForSession),
+// a file download's key must belong to an environment in which some session
+// mounts that file (downloadFile), and skills, workspace-global resources
+// every environment's sandboxes consume, need no scoping at all — a cloud key
+// reads them as the reference's does. Everything else on /v1 — the collections, the file
 // metadata read, every mutation — is management-only, the work API excepted:
 // it runs the other way, taking the environment key and nothing else, since
 // resolveEnvironmentKey demands a Bearer and a management x-api-key never

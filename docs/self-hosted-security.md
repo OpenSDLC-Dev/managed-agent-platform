@@ -859,11 +859,11 @@ What you own:
   the reference issues them. A `cloud` environment's key has nothing to do: the
   platform's own executor runs that environment's work in-process, so the work
   API refuses the key's poll (400) and work listing (404) and answers its stats
-  with zeros, and every other route an environment key reaches refuses it with
-  one 404 — that environment's sessions, their events and event stream, the
-  files they mount, the skills. So there is no reason to issue one, and the
-  console neither offers it nor shows a `cloud` environment's keys: revoking
-  one is API-only.
+  with zeros, and that environment's sessions, their events and event stream,
+  and the files they mount refuse it with one 404. It still reads the skills,
+  which are workspace-global, as the reference's does. So there is no reason
+  to issue one, and the console neither offers it nor shows a `cloud`
+  environment's keys: revoking one is API-only.
 
   ```sh
   curl -s "$CONTROLPLANE/api/oauth/organizations/default/environments/$CLOUD_ENV/tokens" \

@@ -76,16 +76,18 @@ func withEnvironmentKey(ctx context.Context, envID string, kind domain.Environme
 }
 
 // errNotSelfHostedKey is the one refusal a key on an environment that is not
-// self_hosted gets on every lane outside the work API. Since #820 the console
-// issues a key on a cloud environment, as the reference does, and that
-// environment's work is the platform executor's: the key has no worker to
-// serve, so it must not read the environment's sessions, post to them — a
-// tool confirmation the executor would act on included — stream their events,
-// download the files they mount, or read the skills. A 404, as the work
-// listing answers such a key, with a message of ours; it is answered before
-// any session or file is looked up, so it says nothing about either.
+// self_hosted gets on the session lane and the file content download. Since
+// #820 the console issues a key on a cloud environment, as the reference does,
+// and that environment's work is the platform executor's: the key has no
+// worker to serve, so it must not read the environment's sessions, post to
+// them — a tool confirmation the executor would act on included — stream
+// their events, or download the files they mount. A 404, as the work listing
+// answers such a key, with a message of ours; it is answered before any
+// session or file is looked up, so it says nothing about either. The skill
+// reads are not refused: they are workspace-global, and the reference was
+// recorded serving them to a cloud environment's key.
 func errNotSelfHostedKey(envID string) error {
-	return errNotFound("environment %s is not a self_hosted environment; only a self_hosted environment's key reaches its sessions, files and skills", envID)
+	return errNotFound("environment %s is not a self_hosted environment; only a self_hosted environment's key reaches its sessions and the files they mount", envID)
 }
 
 // requireEnvironmentKey is the worker-auth middleware guarding the work API:
@@ -95,6 +97,8 @@ func errNotSelfHostedKey(envID string) error {
 // another's queue. A key of any kind is admitted, because the work API answers
 // a cloud environment's key route by route, as the reference was recorded
 // answering it (pollWork, listWork, statsWork read the kind from the context).
+// It is the skill reads' environment-key lane too, where a cloud key is
+// served, as recorded (2026-09-05 batch2 idx 57, 59, 62).
 func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
@@ -105,9 +109,9 @@ func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	})
 }
 
-// requireSelfHostedEnvironmentKey is the environment-key lane of the skill and
-// file reads: requireEnvironmentKey, refusing a key whose environment is not
-// self_hosted (errNotSelfHostedKey).
+// requireSelfHostedEnvironmentKey is the environment-key lane of the file
+// content download: requireEnvironmentKey, refusing a key whose environment is
+// not self_hosted (errNotSelfHostedKey).
 func requireSelfHostedEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		envID, kind, ok := resolveEnvironmentKey(w, r, pool)

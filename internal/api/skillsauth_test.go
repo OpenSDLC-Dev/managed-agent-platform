@@ -13,7 +13,7 @@ import (
 // Everything mutating — and the collection list — stays management-only.
 func TestSkillReadsEnvironmentKeyLane(t *testing.T) {
 	s := newTestServer(t)
-	_, envID := selfHostedFixture(t, s)
+	_, envID := fixture(t, s)
 	wkey := issueKey(t, s.pool, envID, "skills-lane")
 	bearer := map[string]string{"Authorization": "Bearer " + wkey}
 
