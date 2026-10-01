@@ -44,7 +44,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 	req := provider.Request{System: system, Tools: tools}
 	// Startup metadata blocks sit after the agent's own system prompt and before
 	// any runtime system.message text (systemTail), which is appended at the end:
-	// the Level-1 skills block first, then the Mounted-files block, then the
+	// the Level-1 skills block first, then the uploads pointer, then the
 	// Mounted-repositories block, then the Memory-stores block. Placement is an
 	// inference (docs/DIVERGENCES.md).
 	for _, block := range []string{skillsBlock, filesBlock, reposBlock, memoryBlock} {
