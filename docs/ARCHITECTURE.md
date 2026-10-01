@@ -253,7 +253,8 @@ own mount and a log line, never the turn.
 the store's name and its `/mnt/memory/<slug>` mount. The sandbox lands the store's
 memories there before the tools run — `0666` files beside a marker naming the store and
 a baseline recording what the directory and the store agreed on — and the brain renders
-a "Memory stores" block after the repositories block. A `cloud` session's executor reads
+the Memory-stores block after the repositories block: the reference's recorded layout,
+its guidance rewritten for the run-boundary sync below. A `cloud` session's executor reads
 and writes the store's rows directly; a `self_hosted` session's BYOC worker does the
 same over the wire, through the five memory routes its per-item sessions token admits
 (decision 15), the store landed from a `view=full` listing and reconciled with per-memory
