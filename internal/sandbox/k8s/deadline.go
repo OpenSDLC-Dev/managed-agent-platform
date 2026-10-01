@@ -66,10 +66,11 @@ import "time"
 // command's return by up to a poll interval.
 //
 // How long the command ran rides on the exit line, after the code, as two
-// readings of /proc/uptime (classifyTimeout says why, and what the order of the
-// first one bounds, #832): one taken once the watchdog has been launched —
-// never before, and after both launches, so nothing the wrapper sets can reach
-// either process's environment — and one once the command is reaped.
+// readings of /proc/uptime (classifyTimeout says why, and what each reading's
+// place bounds, #832): one taken just after the command is launched — after, so
+// nothing the wrapper sets can reach the command's environment, and before
+// anything else the wrapper does, so the record misses only that launch gap of
+// the command's run — and one once the command is reaped.
 // /proc/uptime because every pod has it — it is the kernel's, not the image's —
 // and its clock does not step the way the wall clock can. `read` because it is a
 // builtin, so a reading forks nothing, and a regular one, so a missing file
@@ -80,6 +81,8 @@ const execWrapper = `
 exec 3>&2 2>/dev/null
 setsid /bin/bash -c "$1" 2>&3 3>&- &
 cmd=$!
+t0=
+read -r t0 _ </proc/uptime
 echo "$cmd" > "$3.pid"
 if [ "$2" != "0" ]; then
   (
@@ -95,8 +98,6 @@ if [ "$2" != "0" ]; then
     fi
   ) >/dev/null 2>&1 3>&- &
 fi
-t0=
-read -r t0 _ </proc/uptime
 wait "$cmd"
 c=$?
 t1=
@@ -174,9 +175,8 @@ const (
 	defaultOverrunSlop = 500 * time.Millisecond
 	// defaultProbeLead is how far before the deadline Exec asks whether the
 	// command is still alive — before, not at, since a command the watchdog has
-	// already killed looks like one never there. The probe's answer lands a round
-	// trip late, which is why the probe is not what classifies a punctual timeout
-	// here; the wrapper's record asks the same question at the same lead, on the
-	// pod's own clock and timed from the watchdog's launch. See classifyTimeout.
+	// already killed looks like one never there. It is a lead on Exec's own clock
+	// only, which is why it is not what classifies a punctual timeout here; see
+	// classifyTimeout.
 	defaultProbeLead = 50 * time.Millisecond
 )

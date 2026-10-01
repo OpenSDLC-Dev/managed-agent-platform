@@ -1242,48 +1242,35 @@ func watchdogDeadline(timeout time.Duration) time.Duration {
 // long the wrapper recorded it ran, and the probes' verdict — and reads no clock
 // of its own, so what it decides is testable without one.
 //
-// A finished command hit its deadline if it was still running once the
-// deadline and the slop had both passed and exited anyway — which on the honest
-// path the watchdog would have prevented, so that needs no exit code, since none
-// it chose can be believed — or if a SIGKILL ended it and the kill was the
-// deadline's. An exit code of 137 is evidence, not proof, of that SIGKILL: bash
+// Three ways a finished command can have hit its deadline, and an exit code of
+// 137 is what two of them are read against. It is evidence, not proof: bash
 // reports it for a job SIGKILLed out from under it, and a command is free to
 // choose it. What it rules out is a command that reports some other code and
-// calls itself killed. The kill was the deadline's if the watchdog reports
-// having fired, or if the command was still alive probeLead before the deadline,
-// which covers a SIGKILL the watchdog did not deliver — the tenant killed the
-// watchdog, or the node did the killing.
+// calls itself killed. The watchdog reports having fired, which is why the mark
+// exists: the pre-deadline probe is a second in-pod exec, so its answer
+// describes the pod an apiserver round trip after it was asked, and on a loaded
+// cluster that lands past the kill it was sent to see (#95, #110). Or the
+// command was still alive when that probe looked, which covers a SIGKILL the
+// watchdog did not deliver — the tenant killed the watchdog, or the node did the
+// killing — so the probe stays as extra reach, never as a veto; it has no
+// witness beside it yet (#838). Or it outlived the deadline and the slop and
+// exited anyway, which on the honest path the watchdog would have prevented;
+// that one needs no exit code, since none it chose can be believed.
 //
-// "Still alive at" each of those two instants has two witnesses, and this is the
-// one place the reason is argued. The liveness probes ask from outside, but each
-// is a second in-pod exec, so its answer describes the pod an apiserver round
-// trip after it was asked; on a loaded cluster that lands past what it was sent
-// to see — past the watchdog's punctual kill (#95, #110), which is what the mark
-// is for, and past the exit of a command that overran and then finished, which
+// That last instant has two witnesses, and this is the one place the reason is
+// argued. The overrun probe is an in-pod exec too, and on a loaded cluster its
+// answer lands past the exit of a command that overran and then finished, which
 // read as finishing on time (#832). The wrapper's record of how long the command
-// ran answers the same two questions with no round trip in it. Its clock starts
-// after Exec's — the exec request has to reach the pod first — which can only
-// shorten what it measures. It stops at the wrapper's second reading, just after
-// it reaps the command, and reaping is the moment `kill -0` stops finding a
-// command too. So the record adds only a timeout an instantly answered probe
-// would also have given, with one bounded exception: a wrapper that stalls
-// between the reap and that reading for longer than its first reading came after
-// Exec's start over-reports by no more than the stall, plus /proc/uptime's
-// hundredth of a second — a cost paid in the direction of the label.
-//
-// Asked at the same lead, the record pays the lead's cost too: a command that
-// SIGKILLs itself, or exits 137, within probeLead of its deadline reads as a
-// timeout — that deadline counted from where the record starts, just after the
-// watchdog's launch, and so after the command's own launch: such a SIGKILL comes
-// no sooner than the command's own deadline less probeLead. That is as near the
-// watchdog's countdown as the wrapper can honestly get: the countdown itself
-// begins a moment after the launch, inside the watchdog's own process — its
-// first `kill -0`, then the fork and exec of its first `sleep` — and the wrapper
-// could learn when only by waiting on a process the command can kill. So against
-// the watchdog's own kill the window is probeLead plus that start-up. Reading
-// after the launch has a cost on the other side, and it only ever removes: a
-// wrapper descheduled just after the launch starts the record late, and it can
-// then fall short of a punctual kill, which the mark still witnesses.
+// ran answers the same question with no round trip in it. Its first reading is
+// taken just after the command's launch, so it under-measures the command's run
+// by that gap, and Exec's clock by the exec's start latency besides — both of
+// which only shorten it. Its second is taken just after the wrapper reaps the
+// command, and reaping is the moment `kill -0` stops finding a command too. So
+// the record adds only an overrun an instantly answered probe would also have
+// seen, with one bounded exception: a wrapper that stalls between the reap and
+// that second reading, for longer than the exec took to start, over-reports by
+// no more than the stall, plus /proc/uptime's hundredth of a second — a cost
+// paid in the direction of the label.
 //
 // The mark is not quite proof of authorship: the watchdog marks after `kill -0`
 // says the command is there, and a command that exits in the moment between
@@ -1312,9 +1299,8 @@ func (pd *pod) classifyTimeout(timeout time.Duration, code int, watchdogFired bo
 	if deadline == 0 {
 		return false
 	}
-	aliveAtDeadline := v.aliveAtDeadline || ran > deadline-pd.probeLead
 	overran := v.overran || ran > deadline+pd.overrunSlop
-	return (code == sigkillExit && (watchdogFired || aliveAtDeadline)) || overran
+	return (code == sigkillExit && (watchdogFired || v.aliveAtDeadline)) || overran
 }
 
 // readExit reads the line the wrapper recorded once the command finished, and

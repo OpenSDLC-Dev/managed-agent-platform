@@ -12,9 +12,9 @@ import (
 // instants they look. It has the same shape as the docker backend's, but not the
 // same weight: docker's liveness primitive is a cheap out-of-band daemon call,
 // while this one is a whole in-pod exec whose answer lands a round trip late. So
-// it is one of two witnesses to each instant here — the wrapper's record of how
-// long the command ran is the other — and the watchdog's mark stands beside
-// both. See classifyTimeout.
+// the watchdog's own mark is what classifies a punctual kill, and the wrapper's
+// record of how long the command ran stands beside the overrun answer; these
+// two instants are the reach around them. See classifyTimeout.
 type verdict struct {
 	// aliveAtDeadline: still running as the deadline arrived, so a SIGKILL that
 	// follows is the watchdog's and not the command's own.
