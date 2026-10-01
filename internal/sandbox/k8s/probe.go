@@ -8,12 +8,13 @@ import (
 	"time"
 )
 
-// verdict is what the sandbox saw of a command's life from outside the pod, at
-// the two instants it looks. It has the same shape as the docker backend's, but
-// not the same weight: docker's liveness primitive is a cheap out-of-band daemon
-// call, while this one is a whole in-pod exec, so its pre-deadline answer is too
-// late to be relied on for a punctual kill. The watchdog's own mark decides
-// that; these two instants are the reach around it. See classifyTimeout.
+// verdict is what Exec's liveness probes saw of a command's life, at the two
+// instants they look. It has the same shape as the docker backend's, but not the
+// same weight: docker's liveness primitive is a cheap out-of-band daemon call,
+// while this one is a whole in-pod exec whose answer lands a round trip late. So
+// the watchdog's own mark is what classifies a punctual kill, and the wrapper's
+// record of how long the command ran stands beside the overrun answer; these
+// two instants are the reach around them. See classifyTimeout.
 type verdict struct {
 	// aliveAtDeadline: still running as the deadline arrived, so a SIGKILL that
 	// follows is the watchdog's and not the command's own.

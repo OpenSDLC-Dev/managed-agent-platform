@@ -367,3 +367,58 @@ func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 			pairs, median, costs)
 	}
 }
+
+// A command that disarms its watchdog, overruns its deadline and then exits clean
+// is a timeout even where the overrun probe cannot see it: the #832 flake, where
+// the probe answered too late, and classifyTimeout argues what still sees it.
+//
+// No cluster can be told to answer a probe late, so this row blinds the probe
+// instead, which is the same thing as far as the probe can tell: with its
+// watchdog gone, the command points the pid file — all the probe reads — at a
+// process that has already exited. It waits, briefly and boundedly, for the
+// watchdog to exist before killing it, and says on stdout what it managed, so a
+// cluster where the staging cannot work (no /proc/<pid>/task/<pid>/children)
+// fails this row by name rather than passing it vacuously or spinning. Exec gets a
+// kill grace no cluster's latency approaches, so the command exits before Exec
+// gives up on it and the row stays on the path it pins. The deadline is 3s, not
+// 1s, so the staging finishes well before the watchdog would fire on a loaded
+// node: at 1s it lost that race twice in 24 runs under heavy load.
+func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
+	sb := liveSandbox(t)
+	k8s.SetKillGraceForTest(sb, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const blindTheProbe = `
+	  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)
+	  w=
+	  for i in $(seq 100); do
+	    for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do [ "$p" != "$$" ] && w=$p; done
+	    [ -n "$w" ] && break
+	    sleep 0.01
+	  done
+	  [ -n "$w" ] && kill -9 "$w" 2>/dev/null && echo disarmed
+	  true & gone=$!
+	  wait "$gone"
+	  [ -n "$state" ] && [ -f "$state.pid" ] && echo "$gone" > "$state.pid" && echo blinded
+	  sleep 5
+	`
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: blindTheProbe, Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "disarmed") {
+		t.Fatalf("the command never found its watchdog to kill, so the watchdog was left to fire and this row proves nothing; "+
+			"it needs /proc/<pid>/task/<pid>/children, which this cluster's runtime may not provide: %+v", res)
+	}
+	if !strings.Contains(res.Stdout, "blinded") {
+		t.Fatalf("the command could not point its pid file at a dead process, so the probe could still see it and this row proves nothing: %+v", res)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit = %d, want the command's own 0: it disarmed its watchdog, yet something killed it or Exec gave up on it despite a 30s kill grace, so the row never reached the path it pins: %+v",
+			res.ExitCode, res)
+	}
+	if !res.TimedOut {
+		t.Errorf("a command that ran 5s against a 3s deadline and exited while the probe was blind was not a timeout: %+v", res)
+	}
+}
