@@ -32,7 +32,7 @@ func TestCredentialFromFailsClosed(t *testing.T) {
 func TestAFailedManagementLookupIsQuietWhenTheClientLeft(t *testing.T) {
 	for err, want := range map[error]slog.Level{
 		context.Canceled: slog.LevelDebug,
-		fmt.Errorf("acquire connection: %w", context.DeadlineExceeded): slog.LevelDebug,
+		fmt.Errorf("acquire connection: %w", context.DeadlineExceeded):  slog.LevelDebug,
 		errors.New("dial tcp 127.0.0.1:1: connect: connection refused"): slog.LevelWarn,
 	} {
 		if got := lookupFailureLevel(err); got != want {
