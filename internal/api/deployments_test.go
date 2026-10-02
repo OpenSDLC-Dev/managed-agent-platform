@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1301,6 +1302,177 @@ func TestDeploymentResourcesEchoWithoutTheToken(t *testing.T) {
 	}
 	if strings.Contains(string(stored), "ghp_secret") {
 		t.Error("the repository token is stored in plaintext")
+	}
+}
+
+// TestDeploymentEchoesMountPathsAsGiven pins the reference's resource echo
+// (#849): a file's mount_path as the request spelled it — "/uploads/
+// rec141-input.txt" (2026-09-12-console-141 api-fixtures idx 15), the same
+// spelling on every later answer for that deployment: the list (ui-network idx
+// 232 and 305), pause (250), unpause (254), an update that sent no resources
+// (255) and archive (api-fixtures idx 23) — and a repository's as given
+// (2026-09-05 batch3 idx 20) or, omitted, no key at all (idx 19). By idx 19's
+// analogy a file whose mount_path is omitted or null echoes no key either,
+// and by the config's "echoes the input" an unclean spelling echoes uncleaned.
+// The column holds what the echo shows. Only the fire resolves: its session
+// mounts each resource where a session create would (ui-network idx 266, the
+// session read at idx 268), and the deployment still echoes the given
+// spellings afterwards.
+func TestDeploymentEchoesMountPathsAsGiven(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileID := uploadOneFile(t, s, "rec141-input.txt")
+	other := uploadOneFile(t, s, "other.txt")
+	unclean := uploadOneFile(t, s, "notes.txt")
+	null := uploadOneFile(t, s, "null.txt")
+	storeID := createMemoryStore(t, s, "rec141-console-memory")
+	const sdk = "https://github.com/anthropics/anthropic-sdk-go"
+
+	body := deploymentBody(agentID, envID)
+	body["schedule"] = map[string]any{"type": "cron", "expression": "0 0 1 1 *", "timezone": "UTC"}
+	body["resources"] = []any{
+		map[string]any{"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"},
+		map[string]any{"type": "memory_store", "memory_store_id": storeID, "access": "read_only", "instructions": "Synthetic reference notes."},
+		map[string]any{"type": "github_repository", "url": sdk, "authorization_token": "ghp_x"},
+		map[string]any{"type": "github_repository", "url": sdk, "authorization_token": "ghp_x", "mount_path": "/workspace/sdk"},
+		map[string]any{"type": "file", "file_id": other},
+		map[string]any{"type": "file", "file_id": unclean, "mount_path": "uploads//notes.txt/"},
+		map[string]any{"type": "file", "file_id": null, "mount_path": nil},
+	}
+	want := []map[string]any{
+		{"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"},
+		{"type": "memory_store", "memory_store_id": storeID, "access": "read_only", "instructions": "Synthetic reference notes."},
+		{"type": "github_repository", "url": sdk},
+		{"type": "github_repository", "url": sdk, "mount_path": "/workspace/sdk"},
+		{"type": "file", "file_id": other},
+		{"type": "file", "file_id": unclean, "mount_path": "uploads//notes.txt/"},
+		{"type": "file", "file_id": null},
+	}
+	echoes := func(where string, d map[string]any) {
+		t.Helper()
+		var got []map[string]any
+		raw, _ := json.Marshal(d["resources"])
+		if err := json.Unmarshal(raw, &got); err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: resources = %s, want %v", where, raw, want)
+		}
+	}
+
+	d := createDeployment(t, s, body)
+	id := d["id"].(string)
+	echoes("create", d)
+	var raw []byte
+	if err := s.pool.QueryRow(t.Context(), `SELECT resources FROM deployments WHERE id = $1`, id).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var stored []map[string]any
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	for _, el := range stored {
+		delete(el, "token")
+	}
+	if !reflect.DeepEqual(stored, want) {
+		t.Errorf("stored resources = %s, want the echo's %v", raw, want)
+	}
+
+	for _, step := range []struct{ name, method, path string }{
+		{"get", http.MethodGet, "/v1/deployments/" + id},
+		{"pause", http.MethodPost, "/v1/deployments/" + id + "/pause"},
+		{"unpause", http.MethodPost, "/v1/deployments/" + id + "/unpause"},
+	} {
+		status, res := s.do(step.method, step.path, nil)
+		if status != http.StatusOK {
+			t.Fatalf("%s: %d %v", step.name, status, res)
+		}
+		echoes(step.name, res)
+	}
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"name": "rec141-console-deployment"})
+	if status != http.StatusOK {
+		t.Fatalf("update: %d %v", status, res)
+	}
+	echoes("update without resources", res)
+	status, res = s.do(http.MethodGet, "/v1/deployments", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list: %d %v", status, res)
+	}
+	for _, el := range listData(t, res) {
+		if el["id"] == id {
+			echoes("list", el)
+		}
+	}
+
+	run := runDeployment(t, s, id)
+	sid, _ := run["session_id"].(string)
+	if sid == "" {
+		t.Fatalf("run settled without a session: %v", run["error"])
+	}
+	status, sess := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get fired session: %d %v", status, sess)
+	}
+	var mounts []any
+	for _, el := range sess["resources"].([]any) {
+		mounts = append(mounts, el.(map[string]any)["mount_path"])
+	}
+	if wantMounts := []any{
+		"/mnt/session/uploads/rec141-input.txt", "/mnt/memory/rec141-console-memory",
+		"/workspace/anthropic-sdk-go", "/workspace/sdk", "/mnt/session/uploads/" + other,
+		"/mnt/session/uploads/notes.txt", "/mnt/session/uploads/" + null,
+	}; !reflect.DeepEqual(mounts, wantMounts) {
+		t.Errorf("fired session mounts = %v, want %v", mounts, wantMounts)
+	}
+	status, res = s.do(http.MethodGet, "/v1/deployments/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get after the run: %d %v", status, res)
+	}
+	echoes("get after the run", res)
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+id+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, res)
+	}
+	echoes("archive", res)
+}
+
+// TestDeploymentValidatesMountPathsUpFront: storing a mount_path as given does
+// not defer judging it (#849). A path session create would refuse on its own
+// — one resolveMountPath roots nowhere, or a repository path
+// validateRepoMountPath refuses — is refused by deployment create and update
+// too, in the words session create answers it with.
+func TestDeploymentValidatesMountPathsUpFront(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileID := uploadOneFile(t, s, "in.txt")
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	file := func(mount string) map[string]any {
+		return map[string]any{"type": "file", "file_id": fileID, "mount_path": mount}
+	}
+	repo := func(mount string) map[string]any { return repoBody("g", map[string]any{"mount_path": mount}) }
+
+	for name, res := range map[string]map[string]any{
+		"a file at the filesystem root":     file("/"),
+		"a file naming the uploads root":    file("/mnt/session/uploads"),
+		"a file climbing out":               file("../etc/passwd"),
+		"a file too long once resolved":     file("/" + strings.Repeat("a", 1010)),
+		"a repository at a relative path":   repo("workspace/r"),
+		"a repository at an unclean path":   repo("/workspace/./r"),
+		"a repository at a reserved path":   repo("/tmp"),
+		"a repository among memory mounts":  repo("/mnt/memory/r"),
+		"a repository whose default is bad": repoBody("g", map[string]any{"url": "https://github.com/acme/" + strings.Repeat("r", 1020)}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resources := []any{res}
+			status, refused := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+				"agent": agentID, "environment_id": envID, "resources": resources})
+			if status != http.StatusBadRequest {
+				t.Fatalf("session create: %d %v, want 400", status, refused)
+			}
+			body := deploymentBody(agentID, envID)
+			body["resources"] = resources
+			status, created := s.do(http.MethodPost, "/v1/deployments", body)
+			wantErrMsg(t, status, created, http.StatusBadRequest, "invalid_request_error", errMessage(refused))
+			status, updated := s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": resources})
+			wantErrMsg(t, status, updated, http.StatusBadRequest, "invalid_request_error", errMessage(refused))
+		})
 	}
 }
 

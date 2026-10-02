@@ -180,7 +180,10 @@ const (
 // a sesrsc_ id or timestamps. The token lives only here in memory on its way
 // to the cipher — it is never marshaled.
 type resourceInput struct {
-	kind      resourceKind
+	kind resourceKind
+	// mountPath is the resolved container path — except as the deployment
+	// routes parse it, where it is the request's own spelling, "" when it
+	// sent none, which a fire resolves (sessionInputsFrom, #849).
 	mountPath string
 	// file variant
 	fileID string
@@ -241,6 +244,14 @@ func parseSessionResourceInputs(obj map[string]json.RawMessage) ([]resourceInput
 // the same store at most once and at most maxMemoryStoresPerSession of them
 // (plan 36 decision 7). f picks the words a refusal takes; an element parser
 // whose sentences name the element is handed its index too.
+//
+// The deployment routes judge each element alone and keep its mount_path as
+// given (#849): the reference stores and echoes the spelling and resolves it
+// when the deployment fires, so the mount rules above, which compare resolved
+// paths, are the fire's (sessionInputsFrom). The reference was recorded
+// applying them in session creation, to defaults it had derived (2026-09-03
+// batch1 `session.create.repo-same-repo-twice`), and refusing a deployment
+// only for faults of one element (2026-09-05 batch3 `rec84.repo.*`).
 func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourceInput, error) {
 	raw, ok := obj["resources"]
 	if !ok || isNull(raw) {
@@ -274,14 +285,11 @@ func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourc
 			out = append(out, in)
 			continue
 		}
-		clean := path.Clean(in.mountPath)
-		if prev, taken := seen[clean]; taken {
-			if f == resourceForSession && in.kind == resourceKindRepo {
-				return nil, errRepoMountOverlap(prev, in.mountPath)
+		if f != resourceForDeployment {
+			if err := claimMount(seen, in, f); err != nil {
+				return nil, err
 			}
-			return nil, errInvalid("mount_path %q is used by more than one resource", in.mountPath)
 		}
-		seen[clean] = in.mountPath
 		if in.kind == resourceKindRepo {
 			repos++
 		}
@@ -290,25 +298,50 @@ func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourc
 	if repos > maxReposPerSession {
 		return nil, errInvalid("a session can mount at most %d github_repository resources", maxReposPerSession)
 	}
-	for ri, r := range out {
+	if f != resourceForDeployment {
+		if err := mountUnderRepo(out, f); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// claimMount records in's mount in seen (cleaned path → the mount_path that
+// took it), refusing one an earlier resource already took.
+func claimMount(seen map[string]string, in resourceInput, f resourceFlavor) error {
+	clean := path.Clean(in.mountPath)
+	if prev, taken := seen[clean]; taken {
+		if f == resourceForSession && in.kind == resourceKindRepo {
+			return errRepoMountOverlap(prev, in.mountPath)
+		}
+		return errInvalid("mount_path %q is used by more than one resource", in.mountPath)
+	}
+	seen[clean] = in.mountPath
+	return nil
+}
+
+// mountUnderRepo refuses a resource of rs, which holds every element at its
+// request index, mounted at a proper ancestor of a repository's mount.
+func mountUnderRepo(rs []resourceInput, f resourceFlavor) error {
+	for ri, r := range rs {
 		if r.kind != resourceKindRepo {
 			continue
 		}
-		for pi, p := range out {
+		for pi, p := range rs {
 			if p.kind == resourceKindMemory {
 				continue
 			}
 			if properPathAncestor(path.Clean(p.mountPath), path.Clean(r.mountPath)) {
-				// out holds every element at its request index, so the later
-				// of the pair is the one the reference's sentence is about.
-				if f == resourceForSession && out[max(pi, ri)].kind == resourceKindRepo {
-					return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
+				// The later of the pair is the one the reference's sentence
+				// is about.
+				if f == resourceForSession && rs[max(pi, ri)].kind == resourceKindRepo {
+					return errRepoMountOverlap(p.mountPath, r.mountPath)
 				}
-				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
+				return errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
 			}
 		}
 	}
-	return out, nil
+	return nil
 }
 
 // errRepoMountOverlap is session create's refusal of a repository whose mount
@@ -376,20 +409,28 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 		}
 		return resourceInput{}, errInvalid("file_id must be a valid file id")
 	}
-	mountPath, set, null, err := stringField(obj, "mount_path")
+	mountPath, _, _, err := stringField(obj, "mount_path")
 	if err != nil {
 		return resourceInput{}, err
 	}
-	if !set || null || mountPath == "" {
-		mountPath = defaultMountRoot + fileID
-	} else {
-		resolved, err := resolveMountPath(mountPath, fileID)
-		if err != nil {
-			return resourceInput{}, err
-		}
+	resolved, err := fileMountPath(mountPath, fileID)
+	if err != nil {
+		return resourceInput{}, err
+	}
+	if f != resourceForDeployment {
 		mountPath = resolved
 	}
 	return resourceInput{fileID: fileID, mountPath: mountPath}, nil
+}
+
+// fileMountPath is where a file resource mounts: an omitted mount_path ("", as
+// a null is) at defaultMountRoot + fileID, a supplied one where
+// resolveMountPath roots it.
+func fileMountPath(given, fileID string) (string, error) {
+	if given == "" {
+		return defaultMountRoot + fileID, nil
+	}
+	return resolveMountPath(given, fileID)
 }
 
 // parseMemoryResource validates the memory_store create variant
@@ -525,23 +566,37 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 	if err != nil {
 		return resourceInput{}, err
 	}
-	mountPath, set, null, err := stringField(obj, "mount_path")
+	mountPath, _, _, err := stringField(obj, "mount_path")
 	if err != nil {
 		return resourceInput{}, err
 	}
-	if !set || null || mountPath == "" {
-		mountPath = defaultRepoMountRoot + repoName
-	}
-	// The derived default is validated too, not just a supplied path: the
-	// grammar above keeps the repo name clean and storable, and this keeps
-	// that true by construction (and bounds a pathologically long name).
-	if err := validateRepoMountPath(mountPath); err != nil {
+	resolved, err := repoMountPath(mountPath, repoName)
+	if err != nil {
 		return resourceInput{}, err
+	}
+	if f != resourceForDeployment {
+		mountPath = resolved
 	}
 	return resourceInput{
 		kind: resourceKindRepo, mountPath: mountPath,
 		url: rawURL, token: token, checkout: checkout,
 	}, nil
+}
+
+// repoMountPath is where a repository mounts: an omitted mount_path ("", as a
+// null is) at defaultRepoMountRoot + repoName, a supplied one literally. The
+// derived default is validated too, not just a supplied path: the URL grammar
+// keeps the repo name clean and storable, and this keeps that true by
+// construction (and bounds a pathologically long name).
+func repoMountPath(given, repoName string) (string, error) {
+	p := given
+	if p == "" {
+		p = defaultRepoMountRoot + repoName
+	}
+	if err := validateRepoMountPath(p); err != nil {
+		return "", err
+	}
+	return p, nil
 }
 
 // parseGitHubRepoURL enforces the exact canonical repository URL

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -262,6 +263,165 @@ func TestDeploymentRunRecordsAClassifiedFailure(t *testing.T) {
 	if orphans != 0 {
 		t.Errorf("%d session rows survived a failed fire; the savepoint rollback must discard them", orphans)
 	}
+}
+
+// TestDeploymentMountOverlapIsTheFiresToRefuse: a deployment stores its
+// mount paths as given (#849), so where two resources meet is judged where
+// they are resolved — at the fire, not at create or update. Session create
+// still refuses each pair when the request arrives, the repository cases in
+// the reference's sentence (2026-09-03 batch1 `session.create.repo-same-repo-twice`
+// and `repo-nested-mounts`); a deployment holding one is stored, and every
+// fire settles session_creation_rejected_error ("rejected with a
+// non-retryable validation error") in this platform's words, no run sentence
+// for an overlap being recorded. That type is not in the paused-reason union,
+// so a scheduled fire records the run and leaves the schedule running.
+func TestDeploymentMountOverlapIsTheFiresToRefuse(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileA := uploadOneFile(t, s, "a.txt")
+	fileB := uploadOneFile(t, s, "b.txt")
+	file := func(id, mount string) map[string]any {
+		return map[string]any{"type": "file", "file_id": id, "mount_path": mount}
+	}
+	const taken = `mount_path "/mnt/session/uploads/x" is used by more than one resource`
+
+	for name, tc := range map[string]struct {
+		resources []any
+		want      string
+	}{
+		"the uploads alias beside a rooted spelling": {[]any{file(fileA, "/uploads/x"), file(fileB, "/x")}, taken},
+		"one spelling twice":                         {[]any{file(fileA, "/x"), file(fileB, "/x")}, taken},
+		"a relative spelling beside the full path":   {[]any{file(fileA, "x"), file(fileB, "/mnt/session/uploads/x")}, taken},
+		"one repository twice at its default": {[]any{repoBody("g", nil), repoBody("g", nil)},
+			`mount_path "/workspace/example-repo" is used by more than one resource`},
+		"a file above a repository": {
+			[]any{file(fileA, "repo"), repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
+			`mount_path "/mnt/session/uploads/repo" is an ancestor of repository mount_path "/mnt/session/uploads/repo/src"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+				"agent": agentID, "environment_id": envID, "resources": tc.resources})
+			if status != http.StatusBadRequest {
+				t.Fatalf("session create: %d %v, want the 400 it answers when the request arrives", status, res)
+			}
+
+			body := deploymentBody(agentID, envID)
+			body["resources"] = tc.resources
+			created := createDeployment(t, s, body)["id"].(string)
+			updated := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+			if status, res := s.do(http.MethodPost, "/v1/deployments/"+updated,
+				map[string]any{"resources": tc.resources}); status != http.StatusOK {
+				t.Fatalf("update: %d %v, want 200", status, res)
+			}
+			for _, id := range []string{created, updated} {
+				run := runDeployment(t, s, id)
+				re, _ := run["error"].(map[string]any)
+				if run["session_id"] != nil || re["type"] != "session_creation_rejected_error" || re["message"] != tc.want {
+					t.Errorf("run = session %v, error %v; want no session and session_creation_rejected_error %q",
+						run["session_id"], re, tc.want)
+				}
+				if status, d := s.do(http.MethodGet, "/v1/deployments/"+id, nil); status != http.StatusOK || d["status"] != "active" {
+					t.Errorf("after the run: %d status %v, want active", status, d["status"])
+				}
+			}
+		})
+	}
+
+	var sessions int
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM sessions WHERE deployment_id IS NOT NULL`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 {
+		t.Errorf("%d sessions survived a refused fire, want 0", sessions)
+	}
+
+	body := scheduledBody(agentID, envID, "0 9 * * *", "UTC")
+	body["resources"] = []any{file(fileA, "/uploads/x"), file(fileB, "/x")}
+	deplID := createDeployment(t, s, body)["id"].(string)
+	setResumedAt(t, s, deplID, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC))
+	if err := api.SchedulerTick(t.Context(), s.pool, time.Date(2026, 3, 12, 9, 0, 10, 0, time.UTC)); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	runs := scheduledRuns(t, s, deplID)
+	if len(runs) != 1 || runs[0].errType == nil || *runs[0].errType != "session_creation_rejected_error" {
+		t.Fatalf("scheduled runs = %+v, want one settled on session_creation_rejected_error", runs)
+	}
+	if status, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil); status != http.StatusOK || d["status"] != "active" {
+		t.Errorf("after the scheduled fire: %d status %v, want active — the type does not pause", status, d["status"])
+	}
+}
+
+// TestDeploymentRowsStoredResolvedFireWhereTheyDid: a deployment stored before
+// #849 holds its paths resolved — a file's rooted under /mnt/session/uploads,
+// doubled for an "/uploads/<name>" stored before #848, and a repository's
+// default derived. Nothing rewrites them, so they echo as stored; and the fire
+// resolves an already-rooted path by passing it through, so each keeps
+// mounting where it did, the doubled one included. Sending the echoed
+// resources back, as the console's deployment editor does, keeps them too.
+func TestDeploymentRowsStoredResolvedFireWhereTheyDid(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileA := uploadOneFile(t, s, "rec141-input.txt")
+	fileB := uploadOneFile(t, s, "notes.txt")
+	body := deploymentBody(agentID, envID)
+	body["resources"] = []any{
+		map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/rec141-input.txt"},
+		map[string]any{"type": "file", "file_id": fileB, "mount_path": "notes.txt"},
+		repoBody("g", nil),
+	}
+	id := createDeployment(t, s, body)["id"].(string)
+	legacy := []string{
+		"/mnt/session/uploads/uploads/rec141-input.txt",
+		"/mnt/session/uploads/notes.txt",
+		"/workspace/example-repo",
+	}
+	for i, p := range legacy {
+		if _, err := s.pool.Exec(t.Context(),
+			`UPDATE deployments SET resources = jsonb_set(resources, ARRAY[$1::text, 'mount_path'], to_jsonb($2::text))
+			  WHERE id = $3`, strconv.Itoa(i), p, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mounts := func(where string, rs any, want []string) {
+		t.Helper()
+		var got []string
+		for _, el := range rs.([]any) {
+			p, _ := el.(map[string]any)["mount_path"].(string)
+			got = append(got, p)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: mount paths = %v, want %v", where, got, want)
+		}
+	}
+	fire := func(want []string) {
+		t.Helper()
+		sid, _ := runDeployment(t, s, id)["session_id"].(string)
+		if sid == "" {
+			t.Fatal("the run settled without a session")
+		}
+		status, sess := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+		if status != http.StatusOK {
+			t.Fatalf("get fired session: %d %v", status, sess)
+		}
+		mounts("fired session", sess["resources"], want)
+	}
+
+	status, d := s.do(http.MethodGet, "/v1/deployments/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get: %d %v", status, d)
+	}
+	mounts("echo", d["resources"], legacy)
+	fire(legacy)
+
+	files := d["resources"].([]any)[:2]
+	status, d = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"resources": files})
+	if status != http.StatusOK {
+		t.Fatalf("re-send the echoed files: %d %v", status, d)
+	}
+	mounts("echo after the re-send", d["resources"], legacy[:2])
+	fire(legacy[:2])
 }
 
 // The sessions-list deployment_id filter is real from this slice (it

@@ -126,14 +126,14 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	in, err := deploymentSessionIn(id, name, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
-	if err != nil {
-		return nil, err
-	}
 	if _, err := tx.Exec(ctx, `SAVEPOINT fire`); err != nil {
 		return nil, err
 	}
-	created, fireErr := s.createSessionInTx(ctx, tx, in)
+	var created createdSession
+	in, fireErr := deploymentSessionIn(id, name, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
+	if fireErr == nil {
+		created, fireErr = s.createSessionInTx(ctx, tx, in)
+	}
 	if fireErr != nil {
 		var re *runError
 		if !errors.As(fireErr, &re) {
@@ -189,7 +189,9 @@ func settleRun(ctx context.Context, tx pgx.Tx, sql string, args ...any) error {
 
 // deploymentSessionIn hydrates a session create from the deployment's stored
 // columns: the fire validates exactly what POST /v1/sessions validates and no
-// more, the parse stage having run at deployment create/update. The metadata
+// more, the parse stage having run at deployment create/update — all of it
+// but what needs the resolved mount paths, which sessionInputsFrom resolves
+// and judges here, its refusal classified (#849). The metadata
 // bag is deliberately empty — session metadata is the application layer's
 // hook, not the deployment's (§8.1 entry 24) — and the reference sends it
 // empty too. The title is the deployment's name as it stands at the fire,

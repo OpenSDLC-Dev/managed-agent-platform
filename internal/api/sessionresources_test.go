@@ -179,15 +179,14 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 // TestDeploymentFireResolvesTheUploadsAlias pins the third recorded route for
 // a "/uploads/<name>" file mount (#848): the reference's deployment of
 // 2026-09-12-console-141 api-fixtures idx 15, fired as ui-network idx 266,
-// mounted its file at /mnt/session/uploads/rec141-input.txt (idx 268). A
-// deployment update resolves the spelling the same way. The stored and echoed
-// form is this platform's resolved path, where the reference stores and echoes
-// the path as given (#849, docs/DIVERGENCES.md).
+// mounted its file at /mnt/session/uploads/rec141-input.txt (idx 268). The
+// deployment itself stores and echoes the spelling as given, whether created
+// or updated to it, and the fire resolves it (#849).
 func TestDeploymentFireResolvesTheUploadsAlias(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	fileID := uploadOneFile(t, s, "rec141-input.txt")
-	const want = "/mnt/session/uploads/rec141-input.txt"
+	const given, want = "/uploads/rec141-input.txt", "/mnt/session/uploads/rec141-input.txt"
 
 	fire := func(deplID string) {
 		t.Helper()
@@ -207,19 +206,19 @@ func TestDeploymentFireResolvesTheUploadsAlias(t *testing.T) {
 		if len(rs) != 1 {
 			t.Fatalf("%s: resources = %v, want one element", where, d["resources"])
 		}
-		if got := rs[0].(map[string]any)["mount_path"]; got != want {
-			t.Errorf("%s: echoed mount_path = %v, want %s", where, got, want)
+		if got := rs[0].(map[string]any)["mount_path"]; got != given {
+			t.Errorf("%s: echoed mount_path = %v, want %s", where, got, given)
 		}
 		var stored string
 		if err := s.pool.QueryRow(t.Context(),
 			`SELECT resources->0->>'mount_path' FROM deployments WHERE id = $1`, d["id"]).Scan(&stored); err != nil {
 			t.Fatal(err)
 		}
-		if stored != want {
-			t.Errorf("%s: stored mount_path = %q, want %s", where, stored, want)
+		if stored != given {
+			t.Errorf("%s: stored mount_path = %q, want %s", where, stored, given)
 		}
 	}
-	resources := []any{map[string]any{"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"}}
+	resources := []any{map[string]any{"type": "file", "file_id": fileID, "mount_path": given}}
 
 	// Created with the spelling.
 	body := deploymentBody(agentID, envID)
