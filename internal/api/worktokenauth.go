@@ -17,9 +17,11 @@ import (
 // worker sends it (checked against anthropic-sdk-go v1.66.0 — worker.go
 // EnvironmentWorker.handleItem): the item's own heartbeat and stop, its own
 // session's read and events (list, stream, send), the skill reads
-// (workspace-global, as they are for the environment key), and the memories of
-// the stores its session attaches — list, create, get, update, delete, the five
-// calls the worker's memory sync makes. Every other route refuses it — the rest
+// (workspace-global, as they are for the environment key, and the skill's own
+// read besides, which the reference refuses an environment key but was never
+// recorded answering this token), and the memories of the stores its session
+// attaches — list, create, get, update, delete, the five calls the worker's
+// memory sync makes. Every other route refuses it — the rest
 // of the work API stays the environment key's; a store's own read, its
 // versions, its lifecycle and every management route stay the management key's.
 // The lane is chosen by path family and token shape (isWorkTokenBearer): a wtk_
@@ -41,8 +43,18 @@ func isWorkTokenBearer(r *http.Request) bool {
 // outside them a wtk_ Bearer falls to the management lane's 401.
 func isWorkTokenPath(r *http.Request, p string) bool {
 	return isWorkPath(p) || isSessionEventsPath(p) ||
-		(r.Method == http.MethodGet && (isBareSessionPath(p) || isSkillReadPath(p))) ||
+		(r.Method == http.MethodGet && (isBareSessionPath(p) || isWorkTokenSkillPath(p))) ||
 		isMemoryStorePath(p)
+}
+
+// isWorkTokenSkillPath reports whether p is a skill read the token reaches:
+// the environment key's (isSkillReadPath) and the skill's own read
+// (isSkillResourcePath), which this lane served before #840 narrowed the
+// environment key's to what the reference was recorded serving it. Neither
+// worker reads a skill itself; what the reference answers this token there is
+// unrecorded, so the lane keeps its own answer.
+func isWorkTokenSkillPath(p string) bool {
+	return isSkillReadPath(p) || isSkillResourcePath(p)
 }
 
 // isMemoryStorePath reports whether p is under one store: /v1/memory_stores/{id}
@@ -141,7 +153,7 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 				writeError(w, r, errNotFound("session %s not found", sid))
 				return
 			}
-		case isSkillReadPath(p):
+		case isWorkTokenSkillPath(p):
 			// Workspace-global, as for the environment key.
 		case isMemoryStorePath(p):
 			storeID, rest := splitMemoryStore(p)

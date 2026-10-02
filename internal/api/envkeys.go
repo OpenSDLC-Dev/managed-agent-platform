@@ -24,8 +24,16 @@ const EnvironmentKeyTTL = 365 * 24 * time.Hour
 // silhouette follows the reference's `sk-ant-oat01-…` (plan 01: "format modeled
 // on"), but the middle is deliberately ours: we are not Anthropic's OAuth
 // infrastructure, and a key that reads like an Anthropic credential invites
-// being pasted into ANTHROPIC_API_KEY. Nothing parses it — to every consumer,
-// including the real `ant beta:worker`, the key is an opaque Bearer token.
+// being pasted into ANTHROPIC_API_KEY. To every client, the real `ant
+// beta:worker` included, the key is an opaque Bearer token, and authentication
+// never needs it: a key is looked up by its hash. The control plane reads it in
+// two places (#840), both of them as the mark of a key minted here: the
+// management lane looks a Bearer up as an environment key only when it carries
+// the prefix, and a revoked key is answered in its own words only when it
+// does (lookupEnvironmentKey). So a new prefix must be added beside this one,
+// never swapped for it: every key minted under the old one would otherwise
+// draw the missing-key 401 on a management route, and the dead-key 401 where
+// it was revoked.
 const environmentKeySecretPrefix = "sk-map-env01-"
 
 // environmentKeySecretBytes is the CSPRNG width behind the prefix: 256 bits,
