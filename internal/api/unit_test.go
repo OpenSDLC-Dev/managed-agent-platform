@@ -88,14 +88,54 @@ func TestKeysetClause(t *testing.T) {
 // TestResolveMountPath pins the documented rooting rule: every supplied
 // mount_path resolves under /mnt/session/uploads, whether or not it starts with
 // "/" (managed-agents/files, "File paths"), a path already under that root is
-// left alone, and one that climbs above it — or names the root itself — is
-// rejected rather than mounted outside.
+// left alone, "uploads/<name>" names a file in that root and a bare "uploads"
+// the root itself, which places the file where an omitted mount_path does
+// (#848), and one that climbs above the root — or names it by its full path —
+// is rejected rather than mounted outside.
 func TestResolveMountPath(t *testing.T) {
 	const root = "/mnt/session/uploads"
+	const fileID = "file_x"
 	// The root's own name must be compared as a directory, not a string prefix:
 	// /mnt/session/uploadsX is a different directory and gets rooted like any
 	// other path. A weaker HasPrefix(resolved, root) would mount it outside.
 	for name, tc := range map[string]struct{ in, want string }{
+		// Every recorded file mount that supplied a mount_path, with the path
+		// the reference answered.
+		// 2026-09-02 batch2 idx 389 sessF.create.file-mount.rooted-path.
+		"recorded: rooted under uploads": {"/tmp/elsewhere.txt", root + "/tmp/elsewhere.txt"},
+		// 2026-09-02 batch2 idx 388 sessF.create.file-mount, read back at idx 397.
+		"recorded: already rooted": {root + "/custom/notes.txt", root + "/custom/notes.txt"},
+		// 2026-09-12-console-141 api-fixtures idx 13 (session create), and the
+		// deployment of api-fixtures idx 15 fired as ui-network idx 266 (its
+		// session read at idx 268).
+		"recorded: uploads alias, create": {"/uploads/rec141-input.txt", root + "/rec141-input.txt"},
+		// 2026-09-12-console-141 ui-network idx 288 (POST …/resources).
+		"recorded: uploads alias, add": {"/uploads/rec141-extra.txt", root + "/rec141-extra.txt"},
+		// The alias past the recordings: nested, dirty, reached through "..",
+		// and applied once, to the cleaned path — never a second time.
+		"uploads alias, nested":            {"/uploads/a/b.txt", root + "/a/b.txt"},
+		"uploads alias, dirty":             {"//uploads/./a//b.txt", root + "/a/b.txt"},
+		"uploads alias, reached by dotdot": {"/x/../uploads/y", root + "/y"},
+		"uploads alias, left by dotdot":    {"/uploads/../../etc/passwd", root + "/etc/passwd"},
+		"uploads alias to the full root":   {"/uploads/../mnt/session/uploads/x", root + "/x"},
+		"uploads alias, doubled":           {"/uploads/uploads/x", root + "/uploads/x"},
+		"uploads alias over the full root": {"/uploads/mnt/session/uploads/x", root + "/mnt/session/uploads/x"},
+		// A leading "/" is style, so the relative spelling is the same alias.
+		"uploads alias, relative":         {"uploads/x", root + "/x"},
+		"uploads alias, relative, dirty":  {"./uploads//x/", root + "/x"},
+		"uploads alias, relative doubled": {"uploads/uploads/x", root + "/uploads/x"},
+		// The alias alone is the uploads directory itself: the file lands where
+		// an omitted mount_path puts it, as the pre-#848 rooting accepted it.
+		"the uploads directory":                   {"/uploads", root + "/" + fileID},
+		"the uploads directory, trailing slash":   {"/uploads/", root + "/" + fileID},
+		"the uploads directory, dotted":           {"/uploads/.", root + "/" + fileID},
+		"the uploads directory, relative":         {"uploads", root + "/" + fileID},
+		"the uploads directory, relative, dotted": {"./uploads/", root + "/" + fileID},
+		// Compared as a directory too: /uploadsx is not /uploads.
+		"uploads-prefixed sibling": {"/uploadsx/y", root + "/uploadsx/y"},
+		"uploads alias at the byte bound": {"/uploads/" + strings.Repeat("a", maxMountPathBytes-len(root)-1),
+			root + "/" + strings.Repeat("a", maxMountPathBytes-len(root)-1)},
+
 		"bare filename":         {"app.log", root + "/app.log"},
 		"documented example":    {"/data.csv", root + "/data.csv"},
 		"absolute nested":       {"/src/main.py", root + "/src/main.py"},
@@ -122,7 +162,7 @@ func TestResolveMountPath(t *testing.T) {
 		// not a rejection. Bounding the caller's spelling instead would refuse it.
 		"unstorable byte cleaned away": {"\xff/../b.txt", root + "/b.txt"},
 	} {
-		got, err := resolveMountPath(tc.in)
+		got, err := resolveMountPath(tc.in, fileID)
 		if err != nil || got != tc.want {
 			t.Errorf("%s: resolveMountPath(%q) = %q, %v; want %q", name, tc.in, got, err, tc.want)
 		}
@@ -144,8 +184,13 @@ func TestResolveMountPath(t *testing.T) {
 		"NUL byte":            "/a\x00b",
 		"invalid utf-8":       "/a\xffb",
 		"empty (never valid)": "",
+		// The alias opens no way past the bounds or out of the root (#848).
+		"the alias, above itself":    "/uploads/..",
+		"the alias, one byte over":   "/uploads/" + strings.Repeat("a", maxMountPathBytes-len(root)),
+		"the alias, NUL byte":        "/uploads/a\x00b",
+		"relative uploads, escaping": "uploads/../../x",
 	} {
-		if got, err := resolveMountPath(in); err == nil {
+		if got, err := resolveMountPath(in, fileID); err == nil {
 			t.Errorf("%s: resolveMountPath(%q) = %q, want an error", name, in, got)
 		}
 	}
@@ -160,7 +205,7 @@ func TestMountPathTakenCleansStoredPaths(t *testing.T) {
 	if err := json.Unmarshal([]byte(stored), &resources); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	resolved, err := resolveMountPath("/report.csv")
+	resolved, err := resolveMountPath("/report.csv", "file_y")
 	if err != nil {
 		t.Fatalf("resolveMountPath: %v", err)
 	}
