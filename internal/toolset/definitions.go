@@ -391,8 +391,15 @@ func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, 
 		// A built-in entry whose name selects one of the eight variants is
 		// refused in the reference's words (2026-09-02 batch2
 		// `agent.create.config-unknown-key`, #540). One with no such name is
-		// a different refusal there, and unrecorded.
-		if name, named := builtinName(obj["name"]); builtinTool && named {
+		// a different refusal there, and unrecorded. So is a web tool's own
+		// field: the reference accepts it, so no recording holds a refusal
+		// of it, and refusing it is this platform's choice
+		// (docs/DIVERGENCES.md, the web tools entry) — said in its words.
+		name, named := builtinName(obj["name"])
+		if builtinTool && named && slices.Contains(webToolFields[name], k) {
+			return ours
+		}
+		if builtinTool && named {
 			return &ConfigError{Path: path + "." + k,
 				Reason: fmt.Sprintf("Extra inputs are not permitted for name %q", name), msg: ours.Error()}
 		}
@@ -476,14 +483,26 @@ func builtinName(raw json.RawMessage) (string, bool) {
 	return name, slices.ContainsFunc(definitions, func(d toolDef) bool { return d.name == name })
 }
 
-// unknownKey reports a key of obj not in allowed, if there is one.
-func unknownKey(obj map[string]json.RawMessage, allowed []string) (string, bool) {
+// webToolFields are the config fields the SDK gave each web tool (checked
+// against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsWebFetchToolConfigParams and
+// BetaManagedAgentsWebSearchToolConfigParams). The reference accepts them;
+// this platform refuses them until #481 honors them.
+var webToolFields = map[string][]string{
+	"web_fetch":  {"allowed_domains", "blocked_domains", "max_content_tokens"},
+	"web_search": {"allowed_domains", "blocked_domains", "user_location"},
+}
+
+// unknownKey reports a key of obj not in allowed, if there is one: the least
+// in byte order, so a body with several names the same one on every request,
+// as internal/api's rejectUnknownKeys does.
+func unknownKey(obj map[string]json.RawMessage, allowed []string) (unknown string, found bool) {
 	for k := range obj {
-		if !slices.Contains(allowed, k) {
-			return k, true
+		if !slices.Contains(allowed, k) && (!found || k < unknown) {
+			unknown, found = k, true
 		}
 	}
-	return "", false
+	return unknown, found
 }
 
 // rejectKeysOutside fails on the first key of obj not in allowed, naming its path

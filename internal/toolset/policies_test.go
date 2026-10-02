@@ -3,6 +3,7 @@ package toolset_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -280,6 +281,56 @@ func TestValidateConfigErrorsForTheRecordedCases(t *testing.T) {
 	var cfg *toolset.ConfigError
 	if err == nil || errors.As(err, &cfg) {
 		t.Errorf("ValidateMCPToolset with an unknown configs[] key = %v, want a plain error", err)
+	}
+
+	// A web tool's own fields are refused by this platform's choice; the
+	// reference accepts them, so no recorded sentence applies and the refusal
+	// stays a plain error in this package's words (#540, #481).
+	for tool, fields := range map[string][]string{
+		"web_fetch":  {"allowed_domains", "blocked_domains", "max_content_tokens"},
+		"web_search": {"allowed_domains", "blocked_domains", "user_location"},
+	} {
+		for _, f := range fields {
+			entry := fmt.Sprintf(`{"type":"agent_toolset_20260401","configs":[{"name":%q,%q:1}]}`, tool, f)
+			err := toolset.Validate(json.RawMessage(entry))
+			want := fmt.Sprintf(`agent_toolset_20260401: unknown field %q in configs[0]`, f)
+			var cfg *toolset.ConfigError
+			if err == nil || errors.As(err, &cfg) || err.Error() != want {
+				t.Errorf("Validate(%s) = %v, want the plain %q", entry, err, want)
+			}
+		}
+	}
+	// A field belonging to the other web tool is unknown on both sides, and
+	// takes the recorded sentence like any other unknown key.
+	err = toolset.Validate(json.RawMessage(`{"type":"agent_toolset_20260401","configs":[{"name":"web_fetch","user_location":1}]}`))
+	if !errors.As(err, &cfg) || cfg.Reason != `Extra inputs are not permitted for name "web_fetch"` {
+		t.Errorf("web_fetch with user_location = %v, want the recorded sentence", err)
+	}
+}
+
+// TestValidateNamesTheLeastUnknownKey pins that a configs[] entry, a
+// default_config or a toolset carrying several unknown keys names the same
+// one on every call — the byte-order-least, as internal/api's
+// rejectUnknownKeys does — where a map's iteration order would pick any.
+func TestValidateNamesTheLeastUnknownKey(t *testing.T) {
+	for entry, want := range map[string]string{
+		`{"type":"agent_toolset_20260401","configs":[{"name":"bash","zeta":1,"alpha":1,"mid":1}]}`: `agent_toolset_20260401: unknown field "alpha" in configs[0]`,
+		`{"type":"agent_toolset_20260401","default_config":{"zeta":1,"alpha":1}}`:                  `agent_toolset_20260401: unknown field "alpha" in default_config`,
+		`{"type":"agent_toolset_20260401","zeta":1,"alpha":1}`:                                     `agent_toolset_20260401: unknown field "alpha"`,
+		// A web field and a truly unknown one: the least is the web field, so
+		// the refusal is this platform's.
+		`{"type":"agent_toolset_20260401","configs":[{"name":"web_fetch","zzz":1,"allowed_domains":1}]}`: `agent_toolset_20260401: unknown field "allowed_domains" in configs[0]`,
+	} {
+		for range 20 {
+			if err := toolset.Validate(json.RawMessage(entry)); err == nil || err.Error() != want {
+				t.Fatalf("Validate(%s) = %v, want %q", entry, err, want)
+			}
+		}
+	}
+	var cfg *toolset.ConfigError
+	err := toolset.Validate(json.RawMessage(`{"type":"agent_toolset_20260401","configs":[{"name":"bash","zeta":1,"alpha":1}]}`))
+	if !errors.As(err, &cfg) || cfg.Path != "configs[0].alpha" {
+		t.Errorf("ConfigError = %v, want the path to name alpha", err)
 	}
 }
 

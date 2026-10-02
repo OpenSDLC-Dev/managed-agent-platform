@@ -155,6 +155,33 @@ func TestAgentToolConfigRefusalsAreTheReferences(t *testing.T) {
 			wantUpdateRejected(t, s, id, map[string]any{"tools": tools}, "Failed to parse request: agent."+tc.want)
 		})
 	}
+
+	// A web tool's own fields are refused by this platform's choice, not the
+	// reference's, which accepts them (docs/DIVERGENCES.md, the web tools
+	// entry; #481): no recording holds a refusal of them, so they keep this
+	// platform's words rather than borrowing the sentence above.
+	for _, tc := range []struct{ tool, field string }{
+		{"web_fetch", "allowed_domains"}, {"web_fetch", "blocked_domains"}, {"web_fetch", "max_content_tokens"},
+		{"web_search", "allowed_domains"}, {"web_search", "blocked_domains"}, {"web_search", "user_location"},
+	} {
+		t.Run(tc.tool+"."+tc.field, func(t *testing.T) {
+			config := map[string]any{"name": tc.tool, "type": tc.tool, tc.field: []any{"example.com"}}
+			tools := []any{map[string]any{"type": "agent_toolset_20260401", "configs": []any{config}}}
+			want := `agent_toolset_20260401: unknown field "` + tc.field + `" in configs[0]`
+			status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{"tools": tools}))
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+			wantUpdateRejected(t, s, id, map[string]any{"tools": tools}, want)
+		})
+	}
+	// Two unknown keys name the byte-order-least one, every time, as every
+	// other unknown-key refusal here does.
+	for range 20 {
+		tools := []any{map[string]any{"type": "agent_toolset_20260401",
+			"configs": []any{map[string]any{"name": "bash", "zeta": 1, "alpha": 1}}}}
+		status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{"tools": tools}))
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+			`Failed to parse request: tools[0].configs[0].alpha: Extra inputs are not permitted for name "bash"`)
+	}
 }
 
 func TestAgentCreateMinimal(t *testing.T) {
