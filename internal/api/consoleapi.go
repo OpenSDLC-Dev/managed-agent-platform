@@ -502,10 +502,20 @@ func parseOffsetPage(q url.Values) (limit, offset int, err error) {
 func pydanticInt(field, s string, min int) (int, error) {
 	n, err := strconv.Atoi(s)
 	if err != nil {
-		return 0, errInvalid("%s: Input should be a valid integer, unable to parse string as an integer", field)
+		return 0, errPydanticInt(field)
 	}
 	if n < min {
-		return 0, errInvalid("%s: Input should be greater than or equal to %d", field, min)
+		return 0, errPydanticMin(field, min)
 	}
 	return n, nil
+}
+
+// errPydanticInt and errPydanticMin are pydanticInt's two sentences, for a
+// parameter that bounds its value its own way above (reclaimWindow).
+func errPydanticInt(field string) error {
+	return errInvalid("%s: Input should be a valid integer, unable to parse string as an integer", field)
+}
+
+func errPydanticMin(field string, min int) error {
+	return errInvalid("%s: Input should be greater than or equal to %d", field, min)
 }

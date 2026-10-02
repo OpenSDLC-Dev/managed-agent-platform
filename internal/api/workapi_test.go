@@ -431,30 +431,33 @@ func TestWorkUpdateMetadata(t *testing.T) {
 // TestWorkPollClampsHugeReclaim pins that an over-large reclaim_older_than_ms is
 // clamped rather than overflowing time.Duration into a past reservation: after
 // a poll hands out the item, an immediate second poll must still see it reserved
-// (null), not re-hand it out.
+// (null), not re-hand it out. A value past any machine integer is clamped too,
+// not refused as unparseable: pydantic's integers have no such bound.
 func TestWorkPollClampsHugeReclaim(t *testing.T) {
-	s := newTestServer(t)
-	envID, sessionID, key := selfHostedWorker(t, s, "ek-clamp")
-	q := queue.New(s.pool)
-	if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
+	for _, huge := range []string{"9223372036854775807", "99999999999999999999999"} {
+		t.Run(huge, func(t *testing.T) {
+			s := newTestServer(t)
+			envID, sessionID, key := selfHostedWorker(t, s, "ek-clamp")
+			q := queue.New(s.pool)
+			if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
 
-	auth := map[string]string{"Authorization": "Bearer " + key}
-	path := "/v1/environments/" + envID + "/work/poll?reclaim_older_than_ms=9223372036854775807"
-	res := s.doRaw(http.MethodGet, path, nil, auth)
-	res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("first poll status = %d, want 200", res.StatusCode)
-	}
-	// If the huge value had overflowed into a negative lease, the reservation
-	// would already be in the past and this poll would re-hand-out the item.
-	res2, raw2 := s.poll(t, envID, auth)
-	if res2.StatusCode != http.StatusOK {
-		t.Fatalf("second poll status = %d, want 200", res2.StatusCode)
-	}
-	if strings.TrimSpace(raw2) != "null" {
-		t.Fatalf("second poll re-handed-out a reserved item (reclaim overflow not clamped): %q", raw2)
+			auth := map[string]string{"Authorization": "Bearer " + key}
+			res, raw := s.pollQuery(t, envID, "?reclaim_older_than_ms="+huge, auth)
+			if res.StatusCode != http.StatusOK || !strings.Contains(raw, `"id":"work_`) {
+				t.Fatalf("first poll = %d %s, want 200 and the item", res.StatusCode, raw)
+			}
+			// If the huge value had overflowed into a negative lease, the reservation
+			// would already be in the past and this poll would re-hand-out the item.
+			res2, raw2 := s.poll(t, envID, auth)
+			if res2.StatusCode != http.StatusOK {
+				t.Fatalf("second poll status = %d, want 200", res2.StatusCode)
+			}
+			if strings.TrimSpace(raw2) != "null" {
+				t.Fatalf("second poll re-handed-out a reserved item (reclaim overflow not clamped): %q", raw2)
+			}
+		})
 	}
 }
 
@@ -473,9 +476,10 @@ func TestWorkPollRefusesAReclaimWindowUnderOne(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	for q, want := range map[string]string{
-		"?block_ms=900&reclaim_older_than_ms=0": "reclaim_older_than_ms: Input should be greater than or equal to 1",
-		"?reclaim_older_than_ms=-5":             "reclaim_older_than_ms: Input should be greater than or equal to 1",
-		"?reclaim_older_than_ms=soon":           "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?block_ms=900&reclaim_older_than_ms=0":        "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=-5":                    "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=-99999999999999999999": "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=soon":                  "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
 	} {
 		res, raw := s.pollQuery(t, envID, q, auth)
 		var body map[string]any

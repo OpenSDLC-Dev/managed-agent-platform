@@ -220,17 +220,27 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 // the version's miss, whatever is missing (2026-09-04 batch1 #110, `latest` on
 // a deleted skill), and one that does not is the skill's. The skill is looked
 // up by id whatever its source, as the reference accepted an anthropic entry
-// naming a custom skill's id (2026-09-04 batch1 #104); its version resolves as
-// materialization resolves it (skillVersionExists). raw is the request's
+// naming a custom skill's id (2026-09-04 batch1 #104), and its version is
+// resolved as a stored pin is (skills.ClassifyPin). raw is the request's
 // `skills`, already shape-checked by parseSkills, so an absent version is
 // still told apart from an explicit "latest".
 //
-// A `type: "custom"` entry is not checked, though the reference refuses one
-// the same way: that permissiveness is registered in docs/DIVERGENCES.md and
-// is #78's to settle. Only agent create was recorded checking, so neither an
-// agent update nor a session's agent override runs this. On a platform whose
-// operator never ran -import-anthropic-skills the catalog holds no anthropic
-// skill, so every anthropic entry naming one of its short ids is refused.
+// One statement resolves every entry, and holds the skill rows it resolves
+// FOR SHARE until the create commits, so a concurrent delete of the skill or
+// of the version cannot slip between the check and the insert: both take the
+// skill row FOR UPDATE first. An entry that does not resolve locks nothing,
+// and the create it fails rolls back.
+//
+// The check needs a catalog to check against. The reference's is always
+// populated; this platform's anthropic catalog is the operator's import
+// (-import-anthropic-skills), and where no anthropic skill was ever imported
+// the check is skipped, the reference accepted as before and left to resolve
+// to nothing at materialization, with one Warn naming the import — refusing
+// `xlsx` because a self-hosted catalog is empty would refuse what the
+// reference accepts. A custom entry is not checked at all, though the
+// reference refuses one the same way: that permissiveness is registered in
+// docs/DIVERGENCES.md and is #78's to settle. Only agent create was recorded
+// checking, so neither an agent update nor a session override runs this.
 func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage) error {
 	if raw == nil || isNull(raw) {
 		return nil
@@ -243,59 +253,78 @@ func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage
 	if err := json.Unmarshal(raw, &refs); err != nil {
 		return nil // parseSkills refused it first
 	}
-	for _, ref := range refs {
-		if ref.Type != "anthropic" {
+	type ref struct{ skillID, version string }
+	var checked []ref
+	named := map[ref]bool{}
+	for _, r := range refs {
+		if r.Type != "anthropic" {
 			continue
 		}
-		version := skillLatestAlias
-		if ref.Version != nil && *ref.Version != "" {
-			version = *ref.Version
+		c := ref{r.SkillID, skills.LatestAlias}
+		if r.Version != nil && *r.Version != "" {
+			c.version = *r.Version
+			named[c] = true
 		}
-		ok, err := skillVersionExists(ctx, tx, ref.SkillID, version)
-		if err != nil {
+		checked = append(checked, c)
+	}
+	if len(checked) == 0 {
+		return nil
+	}
+	var catalog bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM skills WHERE source = 'anthropic')`).Scan(&catalog); err != nil {
+		return err
+	}
+	if !catalog {
+		slog.WarnContext(ctx, "agent create: anthropic skill references not checked, the catalog holding no anthropic skill; run the controlplane with -import-anthropic-skills to provision it",
+			"request_id", requestIDFrom(ctx), "references", len(checked))
+		return nil
+	}
+	// Each entry goes in with its pin's form, so the statement resolves it as
+	// every stored pin is resolved; only shapes a stored pin can resolve by
+	// reach a bind parameter.
+	var ids, versions []string
+	var forms []int32
+	for _, c := range checked {
+		form := skills.ClassifyPin(c.version)
+		if form != skills.PinNone && (domain.ID(c.skillID).Valid() || skillShortNameRe.MatchString(c.skillID)) {
+			ids, versions, forms = append(ids, c.skillID), append(versions, c.version), append(forms, int32(form))
+		}
+	}
+	resolved := map[ref]bool{}
+	rows, err := tx.Query(ctx,
+		`SELECT s.id, r.version
+		   FROM skills s
+		   JOIN unnest($1::text[], $2::text[], $3::int[]) AS r(skill_id, version, form) ON r.skill_id = s.id
+		  WHERE EXISTS (SELECT 1 FROM skill_versions v WHERE v.skill_id = s.id AND
+		          CASE r.form WHEN $4 THEN v.version = s.latest_version
+		                      WHEN $5 THEN v.id = r.version
+		                      ELSE v.version = r.version END)
+		  FOR SHARE OF s`, ids, versions, forms, int32(skills.PinLatest), int32(skills.PinID))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c ref
+		if err := rows.Scan(&c.skillID, &c.version); err != nil {
 			return err
 		}
+		resolved[c] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, c := range checked {
 		switch {
-		case ok:
-		case ref.Version != nil && *ref.Version != "":
-			return errInvalid("Agent has invalid configuration: `skill_id` `%s` version `%s` not found", ref.SkillID, version)
+		case resolved[c]:
+		case named[c]:
+			return errInvalid("Agent has invalid configuration: `skill_id` `%s` version `%s` not found", c.skillID, c.version)
 		default:
-			return errInvalid("Agent has invalid configuration: `skill_id` `%s` not found", ref.SkillID)
+			return errInvalid("Agent has invalid configuration: `skill_id` `%s` not found", c.skillID)
 		}
 	}
 	return nil
-}
-
-// skillVersionExists reports whether a skills entry's version resolves: the
-// alias "latest" through the skill's latest_version, a version id (either
-// spelling) through its row under that skill, and a digit string through the
-// row of that number — the three forms the brain and the executor resolve a
-// stored pin by. Anything else resolves to nothing. The id and the version
-// are checked for shape before they are bound, so no unstorable byte reaches
-// the query.
-func skillVersionExists(ctx context.Context, tx pgx.Tx, skillID, version string) (bool, error) {
-	if !domain.ID(skillID).Valid() && !skillShortNameRe.MatchString(skillID) {
-		return false, nil
-	}
-	var query string
-	switch {
-	case version == skillLatestAlias:
-		query = `SELECT EXISTS (SELECT 1 FROM skills s JOIN skill_versions v
-		         ON v.skill_id = s.id AND v.version = s.latest_version WHERE s.id = $1)`
-	case skillVersionIDRe.MatchString(version):
-		query = `SELECT EXISTS (SELECT 1 FROM skill_versions WHERE skill_id = $1 AND id = $2)`
-	case skillVersionNumberRe.MatchString(version):
-		query = `SELECT EXISTS (SELECT 1 FROM skill_versions WHERE skill_id = $1 AND version = $2)`
-	default:
-		return false, nil
-	}
-	args := []any{skillID}
-	if version != skillLatestAlias {
-		args = append(args, version)
-	}
-	var ok bool
-	err := tx.QueryRow(ctx, query, args...).Scan(&ok)
-	return ok, err
 }
 
 // skillLatestVersionIDExpr renders latest_version_id for a skills query: the id

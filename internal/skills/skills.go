@@ -254,12 +254,15 @@ func checkPath(p string) (top string, err error) {
 // directory names the skill: compared to SKILL.md's name case- and
 // underscore-insensitively.
 func checkDirectoryName(dir, name string) error {
-	norm := func(s string) string { return strings.ReplaceAll(strings.ToLower(s), "_", "-") }
-	if norm(dir) != norm(name) {
+	if normName(dir) != normName(name) {
 		return fmt.Errorf("top-level directory %q does not match the skill name %q", dir, name)
 	}
 	return nil
 }
+
+// normName is the reading under which a directory names a skill: lower case,
+// '_' read as '-'.
+func normName(s string) string { return strings.ReplaceAll(strings.ToLower(s), "_", "-") }
 
 // LengthError refuses a frontmatter name or description over its cap. It is a
 // type so the upload routes can answer the reference's one sentence for both
@@ -280,8 +283,12 @@ func (e *LengthError) Error() string {
 // both upload routes (2026-09-12-followups skills-api.json #7, #17, #25
 // `rec.skill-upload.*.missing-name`: `rec-followup-upload/SKILL.md` carrying
 // only a description became a version named `rec-followup-upload`). The
-// fallback is then held to every rule a frontmatter name is. A missing
-// description has no recorded fallback and stays a refusal.
+// fallback is the directory as checkDirectoryName reads it (normName), so a
+// directory that would name a SKILL.md carrying a name names one without it
+// — `My_Skill/` is `my-skill`, an inference, the recording's directory being
+// already lower-case. It is then held to every rule a frontmatter name is,
+// and a refusal of a name the client never wrote says where it came from. A
+// missing description has no recorded fallback and stays a refusal.
 func parseFrontmatter(md []byte, dir string) (name, description string, err error) {
 	body, ok := frontmatterBlock(md)
 	if !ok {
@@ -294,20 +301,21 @@ func parseFrontmatter(md []byte, dir string) (name, description string, err erro
 	if err := yaml.Unmarshal(body, &fm); err != nil {
 		return "", "", fmt.Errorf("%s frontmatter is not valid YAML", skillMDName)
 	}
+	from := ""
 	if fm.Name == "" {
-		fm.Name = dir
+		fm.Name, from = normName(dir), " (name taken from the directory, as "+skillMDName+" has none)"
 	}
 	// The pattern first: it admits ASCII alone, so the cap after it counts
 	// characters and bytes alike, as its refusal says.
 	if !nameRe.MatchString(fm.Name) {
-		return "", "", fmt.Errorf("name %q must contain only lowercase letters, digits, and hyphens", fm.Name)
+		return "", "", fmt.Errorf("name %q must contain only lowercase letters, digits, and hyphens%s", fm.Name, from)
 	}
 	if len(fm.Name) > maxNameLen {
 		return "", "", &LengthError{Field: "name", Limit: maxNameLen}
 	}
 	for _, reserved := range []string{"anthropic", "claude"} {
 		if strings.Contains(fm.Name, reserved) {
-			return "", "", fmt.Errorf("name must not contain the reserved word %q", reserved)
+			return "", "", fmt.Errorf("name must not contain the reserved word %q%s", reserved, from)
 		}
 	}
 	if fm.Description == "" {

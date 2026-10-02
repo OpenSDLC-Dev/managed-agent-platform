@@ -628,6 +628,19 @@ func TestAddingAFileNeedsAUsableReadTool(t *testing.T) {
 		t.Errorf("add after a session update enabled read = %d %v, want 200", status, body)
 	}
 
+	// A stored entry that no longer resolves — here the always_deny policy the
+	// sentence names, which no toolset of this platform accepts on the way
+	// in — offers no usable read, so the add is the refusal, not a 500.
+	stale := session([]any{readable, mcp}, nil)
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE sessions SET resolved_agent = jsonb_set(resolved_agent, '{tools}',
+		   '[{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_deny"}}}]')
+		 WHERE id = $1`, stale); err != nil {
+		t.Fatal(err)
+	}
+	status, body := add(stale)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", refusal)
+
 	created := session([]any{bashOnly, mcp}, []any{map[string]any{"type": "file", "file_id": fileID}})
 	if got := resourcesOf(t, createGetSession(t, s, created)); len(got) != 1 {
 		t.Errorf("session create attaching a file to an agent without read: resources %v, want the one", got)

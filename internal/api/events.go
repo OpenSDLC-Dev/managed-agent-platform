@@ -171,22 +171,6 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, sendCheckError(err)
 	}
-	// A message or an outcome posted while the primary waits on a response —
-	// a confirmation, a custom call's result, a worker's — is the reference's
-	// 400, not input queued behind the call (events.CheckWhileAwaiting). The
-	// send's own answers and an interrupt reaching the primary count first.
-	if slices.ContainsFunc(newEvents, func(ev events.NewEvent) bool {
-		return ev.Type == domain.EventUserMessage || ev.Type == domain.EventUserDefineOutcome
-	}) {
-		awaited, err := events.ThreadAwaitedResponses(ctx, tx, domain.ID(id), "", platformExecuted)
-		if err != nil {
-			return nil, err
-		}
-		reachesPrimary := func(i int) bool { return !scoped[i] || newEvents[i].ThreadID == "" }
-		if err := events.CheckWhileAwaiting(awaited, newEvents, reachesPrimary); err != nil {
-			return nil, errInvalid("%s", err)
-		}
-	}
 
 	// Route input per thread, then settle its ordered tool flow under the same
 	// session lock. Receipt prevents duplicates; processing controls blockers
@@ -244,6 +228,29 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		if th.id == "" {
 			primaryStatus = th.status
 		}
+	}
+	// A message or an outcome posted while the primary rests idle on a
+	// response — a confirmation, a custom call's result, a worker's — is the
+	// reference's 400, not input queued behind the call
+	// (events.CheckWhileAwaiting); the send's own answers and an interrupt
+	// reaching the primary count first. Only that state was recorded refusing:
+	// a primary still running, its turn or a platform call under way, queues
+	// the input as before. The flow read here is the one the primary's
+	// message arm below wakes it by: that arm runs only for a primary this
+	// send gives no answer to, whose calls nothing in the send has moved.
+	var primaryFlow events.ToolFlow
+	if primaryStatus == string(domain.SessionIdle) && slices.ContainsFunc(newEvents, func(ev events.NewEvent) bool {
+		return ev.Type == domain.EventUserMessage || ev.Type == domain.EventUserDefineOutcome
+	}) {
+		flow, awaited, err := events.ThreadWaits(ctx, tx, domain.ID(id), "", envKind, platformExecuted)
+		if err != nil {
+			return nil, err
+		}
+		reachesPrimary := func(i int) bool { return !scoped[i] || newEvents[i].ThreadID == "" }
+		if err := events.CheckWhileAwaiting(awaited, newEvents, reachesPrimary); err != nil {
+			return nil, errInvalid("%s", err)
+		}
+		primaryFlow = flow
 	}
 	// One active outcome at a time, and a file rubric must name a stored,
 	// rubric-sized file — DB-backed like the tool-result cross-checks. An
@@ -609,11 +616,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			// was refused above; one behind a call that awaits nothing more
 			// from outside — its answer in but not yet processed, or the
 			// platform's to run — stays queued behind it.
-			flow, err := events.ThreadToolFlow(ctx, tx, domain.ID(id), tid, platformExecuted)
-			if err != nil {
-				return nil, err
-			}
-			if flow.Unsettled {
+			if primaryFlow.Unsettled {
 				break
 			}
 

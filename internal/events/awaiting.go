@@ -18,30 +18,30 @@ type AwaitedResponse struct {
 	Result       bool
 }
 
-// ThreadAwaitedResponses lists, in log order, the responses a thread is
-// waiting on: ToolFlow.Pending, less what was received already. An answer
-// queued behind an earlier call is not awaited, nor is a call whose received
-// confirmation denies it, the denial being its answer.
-func ThreadAwaitedResponses(ctx context.Context, q Querier, sid, tid domain.ID, platformOwned func(string) bool) ([]AwaitedResponse, error) {
-	calls, kind, err := threadCalls(ctx, q, sid, tid)
+// ThreadWaits reads a thread's calls once for a caller that already holds the
+// session's environment kind, and returns both the flow ThreadToolFlow would
+// (the thread's resting place) and the responses it awaits: ToolFlow.Pending,
+// less what was received already. An answer queued behind an earlier call is
+// not awaited, nor is a call whose received confirmation denies it, the denial
+// being its answer — reachable while the denial waits behind an earlier call
+// for the walk that writes its result.
+func ThreadWaits(ctx context.Context, q Querier, sid, tid domain.ID, kind string, platformOwned func(string) bool) (ToolFlow, []AwaitedResponse, error) {
+	calls, err := threadCallsOf(ctx, q, sid, tid)
 	if err != nil {
-		return nil, err
+		return ToolFlow{}, nil, err
 	}
-	var out []AwaitedResponse
+	var awaited []AwaitedResponse
 	for _, c := range calls {
 		if c.confirmationID != "" && denies(c.confirmation) {
 			continue
 		}
-		a := AwaitedResponse{
-			ID:           c.id,
-			Confirmation: c.permission == string(domain.EvalPermAsk) && c.confirmationID == "",
-			Result:       (c.typ == domain.EventAgentCustomToolUse || workerCall(c, kind, platformOwned)) && c.resultID == "",
-		}
+		ask, external := c.needs(kind, platformOwned)
+		a := AwaitedResponse{ID: c.id, Confirmation: ask && c.confirmationID == "", Result: external && c.resultID == ""}
 		if a.Confirmation || a.Result {
-			out = append(out, a)
+			awaited = append(awaited, a)
 		}
 	}
-	return out, nil
+	return summarizeTools(calls, kind, platformOwned), awaited, nil
 }
 
 // WhileAwaitingError refuses a user.message or a user.define_outcome posted
@@ -64,10 +64,12 @@ func (e *WhileAwaitingError) Error() string {
 
 // CheckWhileAwaiting refuses a send whose user.message or user.define_outcome
 // the primary thread could not read because it would still await a response
-// once the send's own answers are in — the input this platform used to queue
-// behind the call. It returns a *WhileAwaitingError naming the first such
-// event and what the primary would still await (ThreadAwaitedResponses, less
-// the send's answers). The answers count wherever the send carries them, a
+// once the send's own answers are in. Its caller applies it to a primary
+// resting idle on those responses, the state the reference was recorded
+// refusing in, where this platform used to queue the input behind the call.
+// It returns a *WhileAwaitingError naming the first such event and what the
+// primary would still await (ThreadWaits, less the send's answers). The
+// answers count wherever the send carries them, a
 // message posted ahead of the answer that frees the primary included, since
 // the send is settled as one: a result or a denial answers its call, an allow
 // confirms it — a custom or a worker call then awaiting its result still —

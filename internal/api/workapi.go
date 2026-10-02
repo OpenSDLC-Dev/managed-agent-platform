@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -785,19 +786,25 @@ func parseStopForce(r *http.Request) (bool, error) {
 // that 400, and an unparseable one is pydanticInt's other sentence, which the
 // same validator was recorded giving the console's limit (2026-09-05 batch2
 // `rec83.edge5.list.limit.abc`) and this parameter never was. Absent or empty
-// is the default. An over-large value is clamped to maxReclaimMs, ours, so it
-// can never overflow time.Duration into a past (negative) reservation.
+// is the default. A value over maxReclaimMs is clamped to it, ours — one past
+// any machine integer included, as pydantic's integers have no such bound —
+// so it can never overflow time.Duration into a past (negative) reservation.
 func reclaimWindow(r *http.Request) (time.Duration, error) {
-	ms := defaultReclaimMs
-	if v := r.URL.Query().Get("reclaim_older_than_ms"); v != "" {
-		n, err := pydanticInt("reclaim_older_than_ms", v, 1)
-		if err != nil {
-			return 0, err
-		}
-		ms = n
+	const field = "reclaim_older_than_ms"
+	v := r.URL.Query().Get(field)
+	if v == "" {
+		return defaultReclaimMs * time.Millisecond, nil
 	}
-	if ms > maxReclaimMs {
-		ms = maxReclaimMs
+	n, err := strconv.ParseInt(v, 10, 64)
+	switch {
+	case errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(v, "-"):
+		n = maxReclaimMs
+	case errors.Is(err, strconv.ErrRange):
+		return 0, errPydanticMin(field, 1)
+	case err != nil:
+		return 0, errPydanticInt(field)
+	case n < 1:
+		return 0, errPydanticMin(field, 1)
 	}
-	return time.Duration(ms) * time.Millisecond, nil
+	return time.Duration(min(n, maxReclaimMs)) * time.Millisecond, nil
 }

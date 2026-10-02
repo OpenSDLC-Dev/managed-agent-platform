@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -1552,9 +1553,10 @@ func TestSkillListParams(t *testing.T) {
 // version was named, an explicit "latest" taking the version's (2026-09-04
 // batch1 #110); the skill is found by id whatever its source, so an anthropic
 // entry naming a custom skill is accepted (#104). The catalog here is the
-// operator import's, so on a platform that never ran it the prebuilt short
-// ids name nothing. A custom entry, an agent update and a session's override
-// are not checked, none of them recorded doing so for an anthropic entry.
+// operator import's, and where it holds no anthropic skill at all the check
+// is skipped with a Warn, as the reference's catalog is never empty. A custom
+// entry, an agent update and a session's override are not checked, none of
+// them recorded doing so for an anthropic entry.
 func TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing(t *testing.T) {
 	s := newTestServer(t)
 	create := func(skill map[string]any) (int, map[string]any) {
@@ -1568,19 +1570,35 @@ func TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing(t *testing.T) {
 		wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", want)
 	}
 
-	// An empty catalog: the import never ran.
-	refused(map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"},
-		"Agent has invalid configuration: `skill_id` `xlsx` version `1` not found")
-	refused(map[string]any{"type": "anthropic", "skill_id": "no-such-skill"},
-		"Agent has invalid configuration: `skill_id` `no-such-skill` not found")
-	refused(map[string]any{"type": "anthropic", "skill_id": "xlsx"},
-		"Agent has invalid configuration: `skill_id` `xlsx` not found")
+	// No anthropic skill imported: accepted as before, with one Warn a create.
+	logs := captureLogs(t, slog.LevelWarn)
+	if status, obj := create(map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"}); status != http.StatusOK {
+		t.Fatalf("an anthropic reference on an empty catalog: %d %v, want 200", status, obj)
+	}
+	if n := strings.Count(logs(), "anthropic skill references not checked"); n != 1 {
+		t.Errorf("Warn lines on an empty catalog = %d, want 1:\n%s", n, logs())
+	}
+	// A custom skill alone is not an anthropic catalog.
+	custom := s.createSkill(t)
+	customID, _ := custom["id"].(string)
+	if status, obj := create(map[string]any{"type": "anthropic", "skill_id": "no-such-skill"}); status != http.StatusOK {
+		t.Fatalf("an anthropic reference beside custom skills only: %d %v, want 200", status, obj)
+	}
 
 	if _, err := api.ImportAnthropicSkills(t.Context(), s.pool, s.blobs, importDirs("alpha-notes"), "20260101"); err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	custom := s.createSkill(t)
-	customID, _ := custom["id"].(string)
+	refused(map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"},
+		"Agent has invalid configuration: `skill_id` `xlsx` version `1` not found")
+	refused(map[string]any{"type": "anthropic", "skill_id": "no-such-skill"},
+		"Agent has invalid configuration: `skill_id` `no-such-skill` not found")
+	// Every entry is resolved in the one statement, the first miss answered.
+	status, obj := s.do(http.MethodPost, "/v1/agents", map[string]any{"name": "skill-refs", "model": "claude-haiku-4-5-20251001",
+		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "alpha-notes"},
+			map[string]any{"type": "anthropic", "skill_id": "alpha-notes", "version": "7"},
+			map[string]any{"type": "anthropic", "skill_id": "no-such-skill"}}})
+	wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error",
+		"Agent has invalid configuration: `skill_id` `alpha-notes` version `7` not found")
 	var versionID string
 	if err := s.pool.QueryRow(t.Context(),
 		`SELECT id FROM skill_versions WHERE skill_id = 'alpha-notes' AND version = '20260101'`).Scan(&versionID); err != nil {
@@ -1613,7 +1631,7 @@ func TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing(t *testing.T) {
 	// Unchecked where no recording reaches: an update and a session override.
 	agent := createAgent(t, s, map[string]any{"name": "plain", "model": "claude-haiku-4-5-20251001"})
 	agentID, _ := agent["id"].(string)
-	status, obj := s.do(http.MethodPost, "/v1/agents/"+agentID, map[string]any{
+	status, obj = s.do(http.MethodPost, "/v1/agents/"+agentID, map[string]any{
 		"version": 1, "skills": []any{map[string]any{"type": "anthropic", "skill_id": "no-such-skill"}},
 	})
 	if status != http.StatusOK {

@@ -228,7 +228,8 @@ func TestFrontmatterValidation(t *testing.T) {
 // name.` resolved to a version named `rec-followup-upload`, on both forms
 // here. The fallback is judged as a frontmatter name is, so a directory over
 // the cap is the *LengthError the routes answer the reference's sentence for,
-// and one outside the pattern, or carrying a reserved word, is refused.
+// and one outside the pattern, or carrying a reserved word, is refused, saying
+// the name came from the directory.
 func TestAMissingNameFallsBackToTheDirectory(t *testing.T) {
 	const md = "---\ndescription: Missing required name.\n---\nSynthetic fixture.\n"
 	for form, build := range map[string]func() (*Bundle, error){
@@ -254,9 +255,19 @@ func TestAMissingNameFallsBackToTheDirectory(t *testing.T) {
 	if !errors.As(err, &tooLong) || tooLong.Field != "name" {
 		t.Errorf("a 65-character directory as the name: err = %v, want the name's *LengthError", err)
 	}
-	for _, dir := range []string{"Financial", "claude-helper"} {
-		if _, err := FromFiles([]File{{Path: dir + "/SKILL.md", Data: []byte(md)}}); err == nil {
-			t.Errorf("directory %q accepted as a name a frontmatter could not carry", dir)
+	// The directory is read as checkDirectoryName reads it, so one that would
+	// name a SKILL.md carrying a name names one without it.
+	b, err := FromFiles([]File{{Path: "My_Skill/SKILL.md", Data: []byte(md)}})
+	if err != nil || b.Name != "my-skill" || b.Directory != "My_Skill" {
+		t.Errorf("My_Skill/: bundle %+v, err %v; want the name my-skill", b, err)
+	}
+	// A refusal of a name the client never wrote says where it came from.
+	for dir, want := range map[string]string{
+		"my skill":      `name "my skill" must contain only lowercase letters, digits, and hyphens (name taken from the directory, as SKILL.md has none)`,
+		"claude-helper": `name must not contain the reserved word "claude" (name taken from the directory, as SKILL.md has none)`,
+	} {
+		if _, err := FromFiles([]File{{Path: dir + "/SKILL.md", Data: []byte(md)}}); err == nil || err.Error() != want {
+			t.Errorf("directory %q: err = %v, want %q", dir, err, want)
 		}
 	}
 	if _, err := FromFiles([]File{{Path: "a/SKILL.md", Data: []byte("---\nname: a\n---\n")}}); err == nil ||

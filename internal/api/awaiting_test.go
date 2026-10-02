@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -115,9 +116,34 @@ func TestWhatTheSendWaitsOn(t *testing.T) {
 		sendEvents(t, s, sid, userMessage("hello"), customResult(first), customResult(second), confirm(third, "deny", nil))
 	})
 
+	// A denial answers its call even while it waits behind an earlier one,
+	// before the walk writes its result: a worker's gated call denied ahead of
+	// the custom call it follows is no longer awaited, neither named nor in
+	// the way of the custom call's answer.
+	t.Run("a denial queued behind an earlier call", func(t *testing.T) {
+		sid := selfHostedSession(t, s)
+		custom := appendGatedToolUse(t, s, sid, domain.EventAgentCustomToolUse, `{"name":"a","input":{},"session_thread_id":null}`)
+		gated := appendGatedToolUse(t, s, sid, domain.EventAgentToolUse,
+			`{"name":"bash","input":{},"evaluated_permission":"ask","session_thread_id":null}`)
+		sendEvents(t, s, sid, confirm(gated, "deny", nil))
+		sendRefusedWhileAwaiting(t, s, sid, whileAwaiting("user.message", 0, custom), userMessage("hello"))
+		sendEvents(t, s, sid, customResult(custom), userMessage("hello"))
+	})
+
 	t.Run("an interrupt reaching the primary", func(t *testing.T) {
 		sid, _ := ask(t)
 		sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"}, userMessage("redirect"))
+	})
+
+	// Only a primary resting idle on its calls was recorded refusing: one
+	// still running — its turn, or a platform call beside the custom one —
+	// queues the message as before, unprocessed until a turn reads it.
+	t.Run("a running primary", func(t *testing.T) {
+		sid := eventsFixture(t, s)
+		appendGatedToolUse(t, s, sid, domain.EventAgentCustomToolUse, `{"name":"a","input":{},"session_thread_id":null}`)
+		pgtest.SetSessionStatus(t, s.pool, domain.ID(sid), "running")
+		sendEvents(t, s, sid, userMessage("meanwhile"))
+		wantQueuedMessage(t, s, sid, "running")
 	})
 
 	t.Run("a system.message trailing a result", func(t *testing.T) {
@@ -127,4 +153,38 @@ func TestWhatTheSendWaitsOn(t *testing.T) {
 		sendEvents(t, s, sid, customResult(first),
 			map[string]any{"type": "system.message", "content": []any{map[string]any{"type": "text", "text": "note"}}})
 	})
+}
+
+// TestAMessageBehindACallAwaitingNothingExternalQueues pins the wake arm's
+// other half: an idle primary whose head call awaits nothing from outside —
+// here a platform call allowed to run and not yet run, as a log stranded
+// before #181 holds one — is no state the reference refuses in, and its
+// message is accepted and queued behind the call rather than waking a turn
+// that would replay a tool_use nothing answers.
+func TestAMessageBehindACallAwaitingNothingExternalQueues(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	appendToolUseWithPerm(t, s, sid, "bash", "allow")
+	sendEvents(t, s, sid, userMessage("are you still there?"))
+	wantQueuedMessage(t, s, sid, "idle")
+}
+
+// wantQueuedMessage asserts the session's one user.message is on the log
+// unprocessed, the status unmoved and no turn enqueued.
+func wantQueuedMessage(t *testing.T, s *tserver, sid, status string) {
+	t.Helper()
+	var n, processed int
+	if err := s.pool.QueryRow(t.Context(), `SELECT count(*), count(processed_at) FROM events
+		 WHERE session_id = $1 AND type = 'user.message'`, sid).Scan(&n, &processed); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || processed != 0 {
+		t.Errorf("user.message rows = %d, processed %d; want one, queued", n, processed)
+	}
+	if got := s.sessionStatus(sid); got != status {
+		t.Errorf("status = %q, want %q", got, status)
+	}
+	if n := s.liveWork(sid, queue.ModelTurn); n != 0 {
+		t.Errorf("model turns enqueued = %d, want 0", n)
+	}
 }

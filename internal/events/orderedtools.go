@@ -73,6 +73,13 @@ func threadCalls(ctx context.Context, q Querier, sid, tid domain.ID) ([]orderedC
 	if err := q.QueryRow(ctx, `SELECT e.kind FROM sessions s JOIN environments e ON e.id=s.environment_id WHERE s.id=$1`, sid.String()).Scan(&kind); err != nil {
 		return nil, "", err
 	}
+	calls, err := threadCallsOf(ctx, q, sid, tid)
+	return calls, kind, err
+}
+
+// threadCallsOf is threadCalls for a caller that already read the session's
+// environment kind: the thread's unprocessed calls in log order.
+func threadCallsOf(ctx context.Context, q Querier, sid, tid domain.ID) ([]orderedCall, error) {
 	rows, err := q.Query(ctx, `SELECT tu.id,tu.type,tu.payload,
  COALESCE(r.id,''),COALESCE(c.id,''),c.payload,COALESCE(c.processed_at IS NOT NULL,false)
  FROM events tu
@@ -83,30 +90,39 @@ func threadCalls(ctx context.Context, q Querier, sid, tid domain.ID) ([]orderedC
  WHERE tu.session_id=$1 AND tu.type=ANY($2) AND tu.thread_id IS NOT DISTINCT FROM $4
    AND r.processed_at IS NULL ORDER BY tu.seq`, sid.String(), toolUseTypes, toolResultTypes, nullableID(tid))
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer rows.Close()
 	var calls []orderedCall
 	for rows.Next() {
 		var c orderedCall
 		if err := rows.Scan(&c.id, &c.typ, &c.payload, &c.resultID, &c.confirmationID, &c.confirmation, &c.confirmed); err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		var p struct {
 			Name       string `json:"name"`
 			Permission string `json:"evaluated_permission"`
 		}
 		if err := json.Unmarshal(c.payload, &p); err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		c.name, c.permission = p.Name, p.Permission
 		calls = append(calls, c)
 	}
-	return calls, kind, rows.Err()
+	return calls, rows.Err()
 }
 
 func workerCall(c orderedCall, kind string, platformOwned func(string) bool) bool {
 	return kind == string(domain.EnvSelfHosted) && c.typ == domain.EventAgentToolUse && !platformOwned(c.name)
+}
+
+// needs is what a call needs from outside the platform before it settles: a
+// confirmation, for an ask-gated call, and a result, for a custom call or a
+// self_hosted worker's built-in — whether or not either has arrived. The one
+// classification ToolFlow.Pending and AwaitedResponse are both read from.
+func (c orderedCall) needs(kind string, platformOwned func(string) bool) (confirmation, result bool) {
+	return c.permission == string(domain.EvalPermAsk),
+		c.typ == domain.EventAgentCustomToolUse || workerCall(c, kind, platformOwned)
 }
 
 func summarizeTools(calls []orderedCall, kind string, platformOwned func(string) bool) ToolFlow {
@@ -115,8 +131,8 @@ func summarizeTools(calls []orderedCall, kind string, platformOwned func(string)
 		if c.resolved {
 			continue
 		}
-		external := c.typ == domain.EventAgentCustomToolUse || workerCall(c, kind, platformOwned)
-		gated := c.permission == string(domain.EvalPermAsk) && !c.confirmed
+		ask, external := c.needs(kind, platformOwned)
+		gated := ask && !c.confirmed
 		if external || gated {
 			out.Pending = append(out.Pending, c.id)
 		}

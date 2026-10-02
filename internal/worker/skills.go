@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
-	"regexp"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -25,12 +24,6 @@ type skillRef struct {
 	SkillID string `json:"skill_id"`
 	Version string `json:"version"`
 }
-
-// skillDigitsRe matches the pre-GA numeric pin this platform still accepts
-// (plan 39 decision 4). The other two forms a stored pin holds need no pattern:
-// a version id is domain.ID.HasPrefix, which recognizes both spellings, and the
-// alias "latest" is what is left.
-var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 
 // SetupSkills materializes the session's skills into the sandbox — its agent's
 // own, and on a coordinator session every roster member's beside them — the
@@ -196,8 +189,8 @@ func skipSkill(ctx context.Context, sessionID, skillID, version string, err erro
 		"session_id", sessionID, "skill_id", skillID, "version", version, "err", err)
 }
 
-// resolveSkillVersion is the three-way classification of one stored pin (plan
-// 39 decision 5): it returns the token the /content download is addressed by,
+// resolveSkillVersion is the classification of one stored pin (plan 39
+// decision 5): it returns the token the /content download is addressed by,
 // given the pin and the version the retrieve answered it with.
 //
 // It replaces a two-way "digits or else" test that read anything non-numeric as
@@ -206,28 +199,22 @@ func skipSkill(ctx context.Context, sessionID, skillID, version string, err erro
 // rather than a refusal, which is why it is a resolution rule and not a
 // validation one.
 func resolveSkillVersion(pinned string, retrieved *sdk.BetaSkillVersion) string {
-	switch {
-	case skillDigitsRe.MatchString(pinned):
-		// The pre-GA numeric pin this platform still accepts (decision 4). It
-		// is not an id, so the retrieve's answer cannot stand in for it; this
-		// platform's /content route takes the numeric verbatim, so it is
-		// carried through. The reference's GA route refuses it, and that
-		// route keeps taking it here for this download (docs/DIVERGENCES.md).
-		return pinned
-	case domain.ID(pinned).HasPrefix(domain.PrefixSkillVersion):
+	if domain.ID(pinned).HasPrefix(domain.PrefixSkillVersion) {
 		// Already concrete and already the addressing token, in either
 		// spelling. Taken from the pin rather than the retrieve's echo, so what
 		// lands is the version the agent named whatever answers for it.
 		return pinned
-	default:
-		// The alias "latest", which is all that is left: a pin naming no
-		// version at all never reaches here, the retrieve having refused it.
-		// Only the retrieve resolves the alias, so the download rides the
-		// concrete id it answered with — the reference worker's own rule
-		// (checked against anthropic-sdk-go v1.70.1 — skills.go
-		// AgentToolContext.downloadSkill).
-		return retrieved.ID
 	}
+	// The alias "latest", or the pre-GA numeric this platform still accepts
+	// as a pin (decision 4): a pin naming no version at all never reaches
+	// here, the retrieve having refused it. Neither is an id the download can
+	// be addressed by on the reference's GA route, so the download rides the
+	// concrete id the retrieve answered with — the reference worker's own rule
+	// (checked against anthropic-sdk-go v1.70.1 — skills.go
+	// AgentToolContext.downloadSkill). Workers released before #842 sent the
+	// numeric to /content instead, which this platform's route still takes
+	// for them (docs/DIVERGENCES.md).
+	return retrieved.ID
 }
 
 // resolveSkill resolves one reference to {addressing token, trusted directory}

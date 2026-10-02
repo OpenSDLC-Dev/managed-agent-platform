@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
-	"regexp"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
@@ -25,17 +24,12 @@ type skillRef struct {
 	Version string `json:"version"`
 }
 
-// errSkillNotFound classifies a dangling reference: existence is deliberately
-// not validated at agent create (docs/plan/06_skills.md design decision 7),
-// so a missing skill or version surfaces here as a logged skip.
+// errSkillNotFound classifies a dangling reference: existence is not validated
+// at agent create for a custom reference (docs/plan/06_skills.md design
+// decision 7), nor for any reference on an agent update or a session override
+// (docs/DIVERGENCES.md), so a missing skill or version surfaces here as a
+// logged skip.
 var errSkillNotFound = errors.New("skill not found")
-
-// skillVersionAlias is the one alias the wire admits for a skill version: the
-// newest one at use time. Everything else a stored pin can hold is concrete —
-// a version id, or the legacy numeric.
-const skillVersionAlias = "latest"
-
-var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 
 // materializeSkills lands the session agent's skills under {workdir}/skills/
 // in the provisioned sandbox — the reference worker's SetupSkills semantics
@@ -186,8 +180,8 @@ func (e *Executor) skipSkill(ctx context.Context, sid domain.ID, skillID, versio
 // The numeric stays the internal identity (decision 3), so the blob key, the
 // sentinel and skills.BlobKey are untouched by id addressing.
 func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (string, error) {
-	switch {
-	case ref.Version == skillVersionAlias:
+	switch skills.ClassifyPin(ref.Version) {
+	case skills.PinLatest:
 		var latest *string
 		err := e.pool.QueryRow(ctx,
 			`SELECT latest_version FROM skills WHERE id = $1`, ref.SkillID).Scan(&latest)
@@ -201,7 +195,7 @@ func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (strin
 			return "", fmt.Errorf("%w: no versions to resolve %q against", errSkillNotFound, ref.Version)
 		}
 		return *latest, nil
-	case domain.ID(ref.Version).HasPrefix(domain.PrefixSkillVersion) && domain.ID(ref.Version).Valid():
+	case skills.PinID:
 		var version string
 		err := e.pool.QueryRow(ctx,
 			`SELECT version FROM skill_versions WHERE skill_id = $1 AND id = $2`,
@@ -213,11 +207,11 @@ func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (strin
 			return "", err
 		}
 		return version, nil
-	case skillDigitsRe.MatchString(ref.Version):
+	case skills.PinNumber:
 		return ref.Version, nil
 	default:
 		return "", fmt.Errorf("%w: version %q is neither %q, a version id nor a version number",
-			errSkillNotFound, ref.Version, skillVersionAlias)
+			errSkillNotFound, ref.Version, skills.LatestAlias)
 	}
 }
 
