@@ -789,11 +789,19 @@ func parseStopForce(r *http.Request) (bool, error) {
 // included, which pydanticInt saturates — so it can never overflow
 // time.Duration into a past (negative) reservation.
 func reclaimWindow(r *http.Request) (time.Duration, error) {
-	v := r.URL.Query().Get("reclaim_older_than_ms")
-	if v == "" {
+	vs, ok := r.URL.Query()["reclaim_older_than_ms"]
+	if !ok {
 		return defaultReclaimMs * time.Millisecond, nil
 	}
-	n, err := pydanticInt("reclaim_older_than_ms", v, 1)
+	// Repeated, it is refused as block_ms is, rather than read by its first
+	// value with the rest silently ignored (unrecorded, so in our words).
+	if len(vs) != 1 {
+		return 0, errInvalid("reclaim_older_than_ms must be given at most once")
+	}
+	if vs[0] == "" {
+		return defaultReclaimMs * time.Millisecond, nil
+	}
+	n, err := pydanticInt("reclaim_older_than_ms", vs[0], 1)
 	if err != nil {
 		return 0, err
 	}

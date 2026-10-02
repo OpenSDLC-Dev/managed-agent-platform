@@ -483,6 +483,7 @@ func TestWorkPollRefusesAReclaimWindowUnderOne(t *testing.T) {
 		"?reclaim_older_than_ms=99999999999999999999999.5":  "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
 		"?reclaim_older_than_ms=-99999999999999999999x":     "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
 		"?reclaim_older_than_ms=soon":                       "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?reclaim_older_than_ms=&reclaim_older_than_ms=0":   "reclaim_older_than_ms must be given at most once",
 	} {
 		res, raw := s.pollQuery(t, envID, q, auth)
 		var body map[string]any
