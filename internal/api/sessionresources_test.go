@@ -62,7 +62,7 @@ func wantResourceFields(t *testing.T, res map[string]any) {
 // (list / get / add / delete).
 func TestSessionFileResourceRoundTrip(t *testing.T) {
 	s := newTestServer(t)
-	agentID, envID := fixture(t, s)
+	agentID, envID := readableFixture(t, s)
 	fileA := uploadOneFile(t, s, "a.txt")
 	fileB := uploadOneFile(t, s, "b.txt")
 
@@ -163,7 +163,7 @@ func createGetSession(t *testing.T, s *tserver, sid string) map[string]any {
 // TestSessionResourceValidation covers the create- and add-time rejections.
 func TestSessionResourceValidation(t *testing.T) {
 	s := newTestServer(t)
-	agentID, envID := fixture(t, s)
+	agentID, envID := readableFixture(t, s)
 	fileA := uploadOneFile(t, s, "a.txt")
 
 	create := func(resources any) (int, map[string]any) {
@@ -509,7 +509,7 @@ func resourceMutationCount(t *testing.T, rm metricdata.ResourceMetrics, outcome 
 func TestSessionResourceMetrics(t *testing.T) {
 	collect := collectMetrics(t)
 	s := newTestServer(t)
-	agentID, envID := fixture(t, s)
+	agentID, envID := readableFixture(t, s)
 	fileA := uploadOneFile(t, s, "a.txt")
 
 	// One create attaching two resources → ok += 2.
@@ -544,5 +544,92 @@ func TestSessionResourceMetrics(t *testing.T) {
 	}
 	if got := resourceMutationCount(t, rm, "not_found"); got != 1 {
 		t.Errorf("session.resources{outcome=not_found} = %d, want 1", got)
+	}
+}
+
+// TestAddingAFileNeedsAUsableReadTool pins the reference's refusal of a file
+// added to a session whose agent cannot read it (2026-09-12-console-141
+// ui-network.json #92 `session.file.attach-by-id`), against the recorded
+// toolset — default_config disabled, bash alone enabled — and read disabled
+// any other way: no toolset at all, read switched off by name, or only an MCP
+// toolset and a custom tool. The refusal leaves the session's resources as
+// they were. Read enabled, by default or by name over a disabled default (#288
+// `session.readable-agent.attach-file`), the add succeeds, as it does once a
+// session update enables read — where the recording's #112 still refused,
+// for a cause the recording leaves unresolved. A session create attaching a
+// file is not held to the rule: no recording shows one without read.
+func TestAddingAFileNeedsAUsableReadTool(t *testing.T) {
+	s := newTestServer(t)
+	_, envID := fixture(t, s)
+	fileID := uploadOneFile(t, s, "rec141-input.txt")
+	const refusal = "Missing required tool: file resources require the read tool to be usable (enabled and not always_deny) on the session's `agent_toolset`"
+	toolset := func(def bool, configs ...map[string]any) map[string]any {
+		cs := []any{}
+		for _, c := range configs {
+			cs = append(cs, c)
+		}
+		return map[string]any{"type": "agent_toolset_20260401", "configs": cs,
+			"default_config": map[string]any{"enabled": def, "permission_policy": map[string]any{"type": "always_ask"}}}
+	}
+	bashOnly := toolset(false, map[string]any{"name": "bash", "enabled": true, "permission_policy": map[string]any{"type": "always_ask"}})
+	session := func(tools []any, resources []any) string {
+		t.Helper()
+		agent := createAgent(t, s, map[string]any{"name": "rec141-console-approval", "model": "claude-haiku-4-5-20251001",
+			"tools": tools, "mcp_servers": []any{map[string]any{"type": "url", "name": "docs", "url": "https://mcp.example.com"}}})
+		body := map[string]any{"agent": agent["id"], "environment_id": envID}
+		if resources != nil {
+			body["resources"] = resources
+		}
+		return createSession(t, s, body)["id"].(string)
+	}
+	add := func(sid string) (int, map[string]any) {
+		return s.do(http.MethodPost, "/v1/sessions/"+sid+"/resources",
+			map[string]any{"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"})
+	}
+	mcp := map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"}
+	custom := map[string]any{"type": "custom", "name": "record_probe", "description": "d", "input_schema": map[string]any{"type": "object"}}
+
+	for name, tools := range map[string][]any{
+		"the recorded toolset":  {bashOnly, mcp},
+		"no toolset":            {mcp, custom},
+		"read disabled by name": {toolset(true, map[string]any{"name": "read", "enabled": false}), mcp},
+		"every tool disabled":   {toolset(false), mcp},
+	} {
+		sid := session(tools, nil)
+		status, body := add(sid)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: add = %d %v, want 400", name, status, body)
+			continue
+		}
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", refusal)
+		if got := resourcesOf(t, createGetSession(t, s, sid)); len(got) != 0 {
+			t.Errorf("%s: a refused add left resources %v", name, got)
+		}
+	}
+
+	readable := toolset(false,
+		map[string]any{"name": "bash", "enabled": true, "permission_policy": map[string]any{"type": "always_ask"}},
+		map[string]any{"name": "read", "enabled": true, "permission_policy": map[string]any{"type": "always_allow"}})
+	for name, tools := range map[string][]any{
+		"read enabled by name":    {readable, mcp},
+		"read enabled by default": {toolset(true), mcp},
+	} {
+		if status, body := add(session(tools, nil)); status != http.StatusOK {
+			t.Errorf("%s: add = %d %v, want 200", name, status, body)
+		}
+	}
+
+	sid := session([]any{bashOnly, mcp}, nil)
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"tools": []any{readable, mcp}}}); status != http.StatusOK {
+		t.Fatalf("enable read on the session: %d %v", status, body)
+	}
+	if status, body := add(sid); status != http.StatusOK {
+		t.Errorf("add after a session update enabled read = %d %v, want 200", status, body)
+	}
+
+	created := session([]any{bashOnly, mcp}, []any{map[string]any{"type": "file", "file_id": fileID}})
+	if got := resourcesOf(t, createGetSession(t, s, created)); len(got) != 1 {
+		t.Errorf("session create attaching a file to an agent without read: resources %v, want the one", got)
 	}
 }

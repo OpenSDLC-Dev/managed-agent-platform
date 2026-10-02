@@ -1543,3 +1543,80 @@ func TestSkillListParams(t *testing.T) {
 	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
 		"limit must be between 1 and 1000")
 }
+
+// TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing pins the reference's
+// create-time check on a `type: "anthropic"` skills entry (2026-09-02 batch2):
+// a version that does not resolve is #419's sentence, an unknown skill named
+// without a version #421's, both verbatim, and a known skill named without one
+// is accepted and echoed as "latest" [#418]. The sentence follows whether a
+// version was named, an explicit "latest" taking the version's (2026-09-04
+// batch1 #110); the skill is found by id whatever its source, so an anthropic
+// entry naming a custom skill is accepted (#104). The catalog here is the
+// operator import's, so on a platform that never ran it the prebuilt short
+// ids name nothing. A custom entry, an agent update and a session's override
+// are not checked, none of them recorded doing so for an anthropic entry.
+func TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing(t *testing.T) {
+	s := newTestServer(t)
+	create := func(skill map[string]any) (int, map[string]any) {
+		return s.do(http.MethodPost, "/v1/agents", map[string]any{
+			"name": "skill-ref", "model": "claude-haiku-4-5-20251001", "skills": []any{skill},
+		})
+	}
+	refused := func(skill map[string]any, want string) {
+		t.Helper()
+		status, obj := create(skill)
+		wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", want)
+	}
+
+	// An empty catalog: the import never ran.
+	refused(map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"},
+		"Agent has invalid configuration: `skill_id` `xlsx` version `1` not found")
+	refused(map[string]any{"type": "anthropic", "skill_id": "no-such-skill"},
+		"Agent has invalid configuration: `skill_id` `no-such-skill` not found")
+	refused(map[string]any{"type": "anthropic", "skill_id": "xlsx"},
+		"Agent has invalid configuration: `skill_id` `xlsx` not found")
+
+	if _, err := api.ImportAnthropicSkills(t.Context(), s.pool, s.blobs, importDirs("alpha-notes"), "20260101"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	custom := s.createSkill(t)
+	customID, _ := custom["id"].(string)
+	var versionID string
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT id FROM skill_versions WHERE skill_id = 'alpha-notes' AND version = '20260101'`).Scan(&versionID); err != nil {
+		t.Fatalf("read the imported version's id: %v", err)
+	}
+	for _, skill := range []map[string]any{
+		{"type": "anthropic", "skill_id": "alpha-notes"},
+		{"type": "anthropic", "skill_id": "alpha-notes", "version": "latest"},
+		{"type": "anthropic", "skill_id": "alpha-notes", "version": "20260101"},
+		{"type": "anthropic", "skill_id": "alpha-notes", "version": versionID},
+		{"type": "anthropic", "skill_id": customID},
+		{"type": "custom", "skill_id": "skill_01DoesNotExistXXXXXXXXXXX"},
+	} {
+		status, obj := create(skill)
+		if status != http.StatusOK {
+			t.Errorf("%v: %d %v, want 200", skill, status, obj)
+			continue
+		}
+		if got, _ := obj["skills"].([]any); len(got) != 1 || got[0].(map[string]any)["version"] == "" {
+			t.Errorf("%v: echoed skills %v", skill, obj["skills"])
+		}
+	}
+	refused(map[string]any{"type": "anthropic", "skill_id": "alpha-notes", "version": "1"},
+		"Agent has invalid configuration: `skill_id` `alpha-notes` version `1` not found")
+	refused(map[string]any{"type": "anthropic", "skill_id": "no-such-skill", "version": "latest"},
+		"Agent has invalid configuration: `skill_id` `no-such-skill` version `latest` not found")
+	refused(map[string]any{"type": "anthropic", "skill_id": customID, "version": "skver_01AsBoL6YhmcKN4PUSpPtmw3"},
+		"Agent has invalid configuration: `skill_id` `"+customID+"` version `skver_01AsBoL6YhmcKN4PUSpPtmw3` not found")
+
+	// Unchecked where no recording reaches: an update and a session override.
+	agent := createAgent(t, s, map[string]any{"name": "plain", "model": "claude-haiku-4-5-20251001"})
+	agentID, _ := agent["id"].(string)
+	status, obj := s.do(http.MethodPost, "/v1/agents/"+agentID, map[string]any{
+		"version": 1, "skills": []any{map[string]any{"type": "anthropic", "skill_id": "no-such-skill"}},
+	})
+	if status != http.StatusOK {
+		t.Errorf("update naming an unknown anthropic skill: %d %v, want 200 (unchecked)", status, obj)
+	}
+}

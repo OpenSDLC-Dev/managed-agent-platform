@@ -632,7 +632,10 @@ func TestIdentityLaneCannotPostAToolResult(t *testing.T) {
 	if msg := laneMessage(t, body); msg != toolResultRefusal(0) {
 		t.Errorf("message = %q, want %q", msg, toolResultRefusal(0))
 	}
-	if status, errType := laneStatus(t, s.bearer(http.MethodPost, path, admin, map[string]any{"events": []any{userMessage("hi")}})); status != http.StatusOK {
+	// Behind the interrupt that answers the call, as a message beside an
+	// unanswered one is refused whoever sends it.
+	if status, errType := laneStatus(t, s.bearer(http.MethodPost, path, admin, map[string]any{"events": []any{
+		map[string]any{"type": "user.interrupt"}, userMessage("hi")}})); status != http.StatusOK {
 		t.Errorf("a human's user.message: status %d, error %q, want 200", status, errType)
 	}
 }

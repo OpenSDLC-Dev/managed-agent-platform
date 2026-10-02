@@ -200,3 +200,41 @@ func TestSkillUploadRefusesInReferenceWords(t *testing.T) {
 		t.Errorf("refused uploads left %d objects in storage, want only the fixture skill's", n)
 	}
 }
+
+// TestSkillUploadResolvesAMissingNameFromTheDirectory pins the reference's
+// fallback on both upload routes (2026-09-12-followups skills-api.json #7
+// `rec.skill-upload.create.missing-name`, #17 `.version.missing-name`, #25
+// `.read-version.missing-name`): a manifest under `rec-followup-upload/`
+// whose frontmatter carries only a description is accepted, the skill keeps
+// the display_name sent, and the version is named after the directory.
+func TestSkillUploadResolvesAMissingNameFromTheDirectory(t *testing.T) {
+	s := newTestServer(t)
+	nameless := []upFile{{"rec-followup-upload/SKILL.md", "---\ndescription: Missing required name.\n---\nSynthetic fixture.\n"}}
+	display := "rec-followup-missing-name"
+
+	ct, body := skillForm(t, &display, nameless)
+	status, obj := s.doForm("POST", "/v1/skills", ct, body)
+	if status != http.StatusOK || obj["display_name"] != display {
+		t.Fatalf("create with a nameless SKILL.md: %d %v", status, obj)
+	}
+	id, _ := obj["id"].(string)
+	version, _ := obj["latest_version_id"].(string)
+	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/"+version, nil)
+	if status != http.StatusOK || obj["name"] != "rec-followup-upload" || obj["description"] != "Missing required name." {
+		t.Fatalf("the created version: %d %v, want name rec-followup-upload", status, obj)
+	}
+
+	// A new version of a skill already named after the directory.
+	ct, body = skillForm(t, nil, []upFile{{"rec-followup-upload/SKILL.md",
+		"---\nname: rec-followup-upload\ndescription: Synthetic recording fixture for upload protocol tests.\n---\n"}})
+	status, obj = s.doForm("POST", "/v1/skills", ct, body)
+	if status != http.StatusOK {
+		t.Fatalf("create the named skill: %d %v", status, obj)
+	}
+	id, _ = obj["id"].(string)
+	ct, body = skillForm(t, nil, nameless)
+	status, obj = s.doForm("POST", "/v1/skills/"+id+"/versions", ct, body)
+	if status != http.StatusOK || obj["name"] != "rec-followup-upload" || obj["description"] != "Missing required name." {
+		t.Fatalf("version with a nameless SKILL.md: %d %v", status, obj)
+	}
+}

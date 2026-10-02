@@ -209,9 +209,10 @@ func resolveSkillVersion(pinned string, retrieved *sdk.BetaSkillVersion) string 
 	switch {
 	case skillDigitsRe.MatchString(pinned):
 		// The pre-GA numeric pin this platform still accepts (decision 4). It
-		// is not an id, so the retrieve's answer cannot stand in for it; both
-		// this platform's /content route and the reference's take the numeric
-		// verbatim, so it is carried through.
+		// is not an id, so the retrieve's answer cannot stand in for it; this
+		// platform's /content route takes the numeric verbatim, so it is
+		// carried through. The reference's GA route refuses it, and that
+		// route keeps taking it here for this download (docs/DIVERGENCES.md).
 		return pinned
 	case domain.ID(pinned).HasPrefix(domain.PrefixSkillVersion):
 		// Already concrete and already the addressing token, in either

@@ -485,13 +485,15 @@ func TestConfirmationMixedAllowDenyInOneBatch(t *testing.T) {
 // A user.message posted while the session is gated on confirmation must not
 // wake the turn: replaying past the unresolved tool_use is a request the model
 // rejects, and requires_action resolves only by confirmation. The message is
-// appended and rides the next replay once the gate clears.
+// refused, as the reference refuses one beside an unanswered call
+// (TestAMessageWhileACustomCallAwaitsItsResultIsRefused), and the gate stays.
 func TestConfirmationUserMessageDoesNotBypassGate(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := eventsFixture(t, s)
 	askID := appendAskToolUse(t, s, sessionID, "bash")
 
-	sendEvents(t, s, sessionID, userMessage("actually, do something else"))
+	sendRefusedWhileAwaiting(t, s, sessionID, whileAwaiting("user.message", 0, askID),
+		userMessage("actually, do something else"))
 
 	if got := s.sessionStatus(sessionID); got != "idle" {
 		t.Errorf("status after user.message while gated = %q, want idle", got)
@@ -503,17 +505,13 @@ func TestConfirmationUserMessageDoesNotBypassGate(t *testing.T) {
 		t.Errorf("session.status_running while gated = %d, want 0", n)
 	}
 
-	// The confirmation still resolves the gate, and the message is on the log
-	// to be replayed.
+	// The confirmation still resolves the gate.
 	sendEvents(t, s, sessionID, confirm(askID, "allow", nil))
 	if got := s.sessionStatus(sessionID); got != "running" {
 		t.Errorf("status after confirmation = %q, want running", got)
 	}
 	if n := s.liveWork(sessionID, queue.ToolExec); n != 1 {
 		t.Errorf("tool_exec after confirmation = %d, want 1", n)
-	}
-	if countEventType(t, s, sessionID, "user.message") != 1 {
-		t.Errorf("user.message was not retained on the log")
 	}
 }
 

@@ -352,10 +352,10 @@ func sameStrings(got, want []string) bool {
 func TestInterruptFreesASessionStrandedIdleOnAPlainToolUse(t *testing.T) {
 	// The second dead end, and the only one with no gate to point at: a log
 	// stranded by a pre-#181 binary — a tool intent committed with nothing ever
-	// scheduled to run it, on a session that then went idle. The resume gate
-	// refuses a user.message there rather than replay a tool_use no result
-	// answers, and no later result revives it, so before the interrupt this
-	// session could never run again.
+	// scheduled to run it, on a session that then went idle. A user.message
+	// there is refused rather than replay a tool_use no result answers, and no
+	// later result revives it, so before the interrupt this session could never
+	// run again.
 	s := newTestServer(t)
 	sessionID := selfHostedSession(t, s)
 	ctx := context.Background()
@@ -372,8 +372,9 @@ func TestInterruptFreesASessionStrandedIdleOnAPlainToolUse(t *testing.T) {
 	}
 	pgtest.SetSessionStatus(t, s.pool, domain.ID(sessionID), "idle")
 
-	// Stranded: the message is accepted, appended, and changes nothing.
-	sendEvents(t, s, sessionID, userMessage("are you still there?"))
+	// Stranded: the message is refused and changes nothing.
+	sendRefusedWhileAwaiting(t, s, sessionID, whileAwaiting("user.message", 0, toolUseID),
+		userMessage("are you still there?"))
 	if got := s.sessionStatus(sessionID); got != "idle" {
 		t.Fatalf("status before the interrupt = %q, want idle (stranded)", got)
 	}

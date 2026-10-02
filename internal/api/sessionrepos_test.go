@@ -593,10 +593,11 @@ func TestSessionRepoDeleteRejected(t *testing.T) {
 // not land a resource above a repository's mount.
 func TestSessionRepoAddPostCreateRejected(t *testing.T) {
 	s := newTestServer(t)
-	sess := createRepoSession(t, s,
+	agentID, envID := readableFixture(t, s)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "resources": []any{
 		repoBody("ghp_seed", nil),
 		repoBody("ghp_up", map[string]any{
-			"url": "https://github.com/example-org/other", "mount_path": "/mnt/session/uploads/repo/src"}))
+			"url": "https://github.com/example-org/other", "mount_path": "/mnt/session/uploads/repo/src"})}})
 	sid := sess["id"].(string)
 
 	// Refused on its type before the variant is read, in the words the

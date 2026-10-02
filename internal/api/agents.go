@@ -233,6 +233,9 @@ func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMe
 			return false, err
 		}
 	}
+	if err := checkAnthropicSkillRefs(ctx, tx, obj["skills"]); err != nil {
+		return false, err
+	}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		return false, err

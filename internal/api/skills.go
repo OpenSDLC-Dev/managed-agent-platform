@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -88,10 +89,11 @@ var skillShortNameRe = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 
 // errSkillNotFound is the skill's 404 in the reference's words, recorded on
 // its get and delete, its versions list, a version's get and its /content
-// (2026-09-04 batch1 #80-#83, batch2 #148; 2026-09-05 batch1 #15-#17; #540).
-// Every skills route that finds no skill answers it.
-func errSkillNotFound(id string) *apiError {
-	return errNotFound("Skill not found: %s", id)
+// (2026-09-04 batch1 #80-#83, batch2 #148; 2026-09-05 batch1 #15-#17; #540),
+// each with `x-should-retry: false` (#842). Every skills route that finds no
+// skill answers it.
+func errSkillNotFound(id string) error {
+	return noRetry(errNotFound("Skill not found: %s", id))
 }
 
 // checkSkillID rejects a path id that is neither a valid skill_ id nor a
@@ -137,14 +139,14 @@ func checkSkillVersion(v, aliasVerb string) error {
 		if aliasVerb == "" {
 			return nil
 		}
-		return errInvalid("'latest' is not accepted when %s a skill version. "+
+		return noRetry(errInvalid("'latest' is not accepted when %s a skill version. "+
 			"Address a specific version id: read the skill's latest_version_id, or "+
-			"GET /v1/skills/{skill_id}/versions/latest, and use that id.", aliasVerb)
+			"GET /v1/skills/{skill_id}/versions/latest, and use that id.", aliasVerb))
 	}
 	if skillVersionIDRe.MatchString(v) || skillVersionNumberRe.MatchString(v) {
 		return nil
 	}
-	return errInvalid("Invalid version id: '%s'", v)
+	return noRetry(errInvalid("Invalid version id: '%s'", v))
 }
 
 // errSkillVersionMiss is resolveSkillVersion's miss: the slot names no version
@@ -170,7 +172,7 @@ func (s *server) skillVersionNotFound(ctx context.Context, skillID, slot string)
 	if !exists {
 		return errSkillNotFound(skillID)
 	}
-	return errNotFound("Skill version not found: %s version %s", skillID, slot)
+	return noRetry(errNotFound("Skill version not found: %s version %s", skillID, slot))
 }
 
 // resolveSkillVersion maps a validated {version} slot onto the numeric version
@@ -207,6 +209,93 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 	default:
 		return slot, nil
 	}
+}
+
+// checkAnthropicSkillRefs refuses, at agent create, a `type: "anthropic"`
+// skills entry that names nothing, as the reference was recorded refusing one
+// (2026-09-02 batch2 #419 `agent.create.skill-ref.anthropic-version-1`, "Agent
+// has invalid configuration: `skill_id` `xlsx` version `1` not found"; #421
+// `.anthropic-unknown-id`, "… `skill_id` `no-such-skill` not found"). The
+// two sentences part on whether the entry names a version: one that does is
+// the version's miss, whatever is missing (2026-09-04 batch1 #110, `latest` on
+// a deleted skill), and one that does not is the skill's. The skill is looked
+// up by id whatever its source, as the reference accepted an anthropic entry
+// naming a custom skill's id (2026-09-04 batch1 #104); its version resolves as
+// materialization resolves it (skillVersionExists). raw is the request's
+// `skills`, already shape-checked by parseSkills, so an absent version is
+// still told apart from an explicit "latest".
+//
+// A `type: "custom"` entry is not checked, though the reference refuses one
+// the same way: that permissiveness is registered in docs/DIVERGENCES.md and
+// is #78's to settle. Only agent create was recorded checking, so neither an
+// agent update nor a session's agent override runs this. On a platform whose
+// operator never ran -import-anthropic-skills the catalog holds no anthropic
+// skill, so every anthropic entry naming one of its short ids is refused.
+func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage) error {
+	if raw == nil || isNull(raw) {
+		return nil
+	}
+	var refs []struct {
+		Type    string  `json:"type"`
+		SkillID string  `json:"skill_id"`
+		Version *string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &refs); err != nil {
+		return nil // parseSkills refused it first
+	}
+	for _, ref := range refs {
+		if ref.Type != "anthropic" {
+			continue
+		}
+		version := skillLatestAlias
+		if ref.Version != nil && *ref.Version != "" {
+			version = *ref.Version
+		}
+		ok, err := skillVersionExists(ctx, tx, ref.SkillID, version)
+		if err != nil {
+			return err
+		}
+		switch {
+		case ok:
+		case ref.Version != nil && *ref.Version != "":
+			return errInvalid("Agent has invalid configuration: `skill_id` `%s` version `%s` not found", ref.SkillID, version)
+		default:
+			return errInvalid("Agent has invalid configuration: `skill_id` `%s` not found", ref.SkillID)
+		}
+	}
+	return nil
+}
+
+// skillVersionExists reports whether a skills entry's version resolves: the
+// alias "latest" through the skill's latest_version, a version id (either
+// spelling) through its row under that skill, and a digit string through the
+// row of that number — the three forms the brain and the executor resolve a
+// stored pin by. Anything else resolves to nothing. The id and the version
+// are checked for shape before they are bound, so no unstorable byte reaches
+// the query.
+func skillVersionExists(ctx context.Context, tx pgx.Tx, skillID, version string) (bool, error) {
+	if !domain.ID(skillID).Valid() && !skillShortNameRe.MatchString(skillID) {
+		return false, nil
+	}
+	var query string
+	switch {
+	case version == skillLatestAlias:
+		query = `SELECT EXISTS (SELECT 1 FROM skills s JOIN skill_versions v
+		         ON v.skill_id = s.id AND v.version = s.latest_version WHERE s.id = $1)`
+	case skillVersionIDRe.MatchString(version):
+		query = `SELECT EXISTS (SELECT 1 FROM skill_versions WHERE skill_id = $1 AND id = $2)`
+	case skillVersionNumberRe.MatchString(version):
+		query = `SELECT EXISTS (SELECT 1 FROM skill_versions WHERE skill_id = $1 AND version = $2)`
+	default:
+		return false, nil
+	}
+	args := []any{skillID}
+	if version != skillLatestAlias {
+		args = append(args, version)
+	}
+	var ok bool
+	err := tx.QueryRow(ctx, query, args...).Scan(&ok)
+	return ok, err
 }
 
 // skillLatestVersionIDExpr renders latest_version_id for a skills query: the id
@@ -246,14 +335,14 @@ func parseSkillsPage(q url.Values) (pageParams, error) {
 }
 
 // errSkillsLimit is parseSkillsPage's one refusal of its own; every other one
-// is the page token's.
-var errSkillsLimit = errInvalid("limit must be between 1 and %d", maxSkillLimit)
+// is the page token's. Both carry `x-should-retry: false` as recorded (#842).
+var errSkillsLimit = noRetry(errInvalid("limit must be between 1 and %d", maxSkillLimit))
 
 // errSkillsPageToken is the skills collection list's refusal of a page token
 // it cannot use, in the reference's words (2026-09-04 batch1 #28
 // `rec81.skills.list.bad-cursor`; #540). Recorded on this list alone, so the
 // shared cursor helpers and the versions list keep ours.
-var errSkillsPageToken = errInvalid("page is not a valid page token.")
+var errSkillsPageToken = noRetry(errInvalid("page is not a valid page token."))
 
 // errSkillsUnavailable answers the storage-backed skill routes on a
 // deployment configured without object storage.
@@ -404,7 +493,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 	// these two here, with this message.
 	source := q.Get("source")
 	if source != "" && source != "custom" && source != "anthropic" {
-		return nil, errInvalid("source must be one of custom, anthropic")
+		return nil, noRetry(errInvalid("source must be one of custom, anthropic"))
 	}
 
 	query := `SELECT s.id, s.display_title, ` + skillLatestVersionIDExpr +
@@ -566,7 +655,7 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 		// converged: a short name the catalog lacks still 404s at the lookup
 		// above, which a shape check like the one that wording implies would
 		// refuse with this 400 instead — unrecorded either way.
-		return nil, errInvalid("Invalid skill_id format: %s", id)
+		return nil, noRetry(errInvalid("Invalid skill_id format: %s", id))
 	}
 	up, err := parseSkillUpload(r, false)
 	if err != nil {
@@ -644,9 +733,9 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string
 	case err != nil:
 		return time.Time{}, err
 	case named != bundle.Name:
-		return time.Time{}, errInvalid(
+		return time.Time{}, noRetry(errInvalid(
 			"Skill name '%s' in SKILL.md must be consistent across all versions "+
-				"for a given `skill_id`. Expected '%s'.", bundle.Name, named)
+				"for a given `skill_id`. Expected '%s'.", bundle.Name, named))
 	}
 	var createdAt time.Time
 	if err := tx.QueryRow(ctx,
@@ -837,13 +926,13 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 	if target == 0 {
 		// The skill row is held, so this is skillVersionNotFound's second arm
 		// without the probe.
-		return nil, errNotFound("Skill version not found: %s version %s", id, slot)
+		return nil, noRetry(errNotFound("Skill version not found: %s version %s", id, slot))
 	}
 	// A skill can never reach zero versions through the API (decision 6): the
 	// way to remove the last one is to delete the skill, which cascades.
 	if total == 1 {
-		return nil, errInvalid("cannot delete a Skill's only version. " +
-			"Delete the Skill, or create another version first")
+		return nil, noRetry(errInvalid("cannot delete a Skill's only version. " +
+			"Delete the Skill, or create another version first"))
 	}
 	var vid string
 	if err := tx.QueryRow(ctx,

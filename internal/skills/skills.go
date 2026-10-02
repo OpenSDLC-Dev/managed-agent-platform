@@ -111,7 +111,7 @@ func FromFiles(files []File) (*Bundle, error) {
 	if skillMD == nil {
 		return nil, fmt.Errorf("missing %s at the root of directory %q", skillMDName, dir)
 	}
-	name, description, err := parseFrontmatter(skillMD)
+	name, description, err := parseFrontmatter(skillMD, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +218,7 @@ func FromZip(data []byte) (*Bundle, error) {
 	if err != nil || len(md) > MaxTotalBytes {
 		return nil, fmt.Errorf("read %s: content does not match the archive's declared size", skillMDName)
 	}
-	name, description, err := parseFrontmatter(md)
+	name, description, err := parseFrontmatter(md, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -275,8 +275,14 @@ func (e *LengthError) Error() string {
 }
 
 // parseFrontmatter extracts and validates name/description from SKILL.md's
-// YAML frontmatter. Unknown keys are tolerated.
-func parseFrontmatter(md []byte) (name, description string, err error) {
+// YAML frontmatter. Unknown keys are tolerated. A frontmatter without a name
+// takes the skill directory's, as the reference was recorded resolving one on
+// both upload routes (2026-09-12-followups skills-api.json #7, #17, #25
+// `rec.skill-upload.*.missing-name`: `rec-followup-upload/SKILL.md` carrying
+// only a description became a version named `rec-followup-upload`). The
+// fallback is then held to every rule a frontmatter name is. A missing
+// description has no recorded fallback and stays a refusal.
+func parseFrontmatter(md []byte, dir string) (name, description string, err error) {
 	body, ok := frontmatterBlock(md)
 	if !ok {
 		return "", "", fmt.Errorf("%s must open with a --- YAML frontmatter block", skillMDName)
@@ -289,7 +295,7 @@ func parseFrontmatter(md []byte) (name, description string, err error) {
 		return "", "", fmt.Errorf("%s frontmatter is not valid YAML", skillMDName)
 	}
 	if fm.Name == "" {
-		return "", "", fmt.Errorf("%s frontmatter is missing name", skillMDName)
+		fm.Name = dir
 	}
 	// The pattern first: it admits ASCII alone, so the cap after it counts
 	// characters and bytes alike, as its refusal says.

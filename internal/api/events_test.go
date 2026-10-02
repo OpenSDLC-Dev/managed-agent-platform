@@ -472,14 +472,15 @@ func TestToolResultAdmissionIsByCredential(t *testing.T) {
 	wantErr(t, st, body, http.StatusNotFound, "not_found_error")
 	untouched("another environment's key")
 
-	// The management key keeps every other event type: the gate is the event
-	// type's, not a lane-wide refusal.
-	sendEvents(t, s, sid, userMessage("still here"))
-
 	echo := sendEventsAs(t, s, workerAuth(t, s, sid), sid, result)
 	if echo[0]["type"] != "user.tool_result" || echo[0]["tool_use_id"] != useID {
 		t.Errorf("the worker's result echoed as %v", echo[0])
 	}
+
+	// The management key keeps every other event type: the gate is the event
+	// type's, not a lane-wide refusal. Posted once the call is answered, as a
+	// message beside an unanswered one is refused whoever sends it.
+	sendEvents(t, s, sid, userMessage("still here"))
 }
 
 // TestToolResultRefusalOrder pins where the credential rule sits: in the

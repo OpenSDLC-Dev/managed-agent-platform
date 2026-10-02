@@ -171,6 +171,22 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, sendCheckError(err)
 	}
+	// A message or an outcome posted while the primary waits on a response —
+	// a confirmation, a custom call's result, a worker's — is the reference's
+	// 400, not input queued behind the call (events.CheckWhileAwaiting). The
+	// send's own answers and an interrupt reaching the primary count first.
+	if slices.ContainsFunc(newEvents, func(ev events.NewEvent) bool {
+		return ev.Type == domain.EventUserMessage || ev.Type == domain.EventUserDefineOutcome
+	}) {
+		awaited, err := events.ThreadAwaitedResponses(ctx, tx, domain.ID(id), "", platformExecuted)
+		if err != nil {
+			return nil, err
+		}
+		reachesPrimary := func(i int) bool { return !scoped[i] || newEvents[i].ThreadID == "" }
+		if err := events.CheckWhileAwaiting(awaited, newEvents, reachesPrimary); err != nil {
+			return nil, errInvalid("%s", err)
+		}
+	}
 
 	// Route input per thread, then settle its ordered tool flow under the same
 	// session lock. Receipt prevents duplicates; processing controls blockers
@@ -589,7 +605,10 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				return nil
 			})
 		case isPrimary && (hasUserMessage || hasDefineOutcome) && status == string(domain.SessionIdle):
-			// Messages remain queued behind any unprocessed tool call.
+			// A message reaching an idle primary that still awaits a response
+			// was refused above; one behind a call that awaits nothing more
+			// from outside — its answer in but not yet processed, or the
+			// platform's to run — stays queued behind it.
 			flow, err := events.ThreadToolFlow(ctx, tx, domain.ID(id), tid, platformExecuted)
 			if err != nil {
 				return nil, err

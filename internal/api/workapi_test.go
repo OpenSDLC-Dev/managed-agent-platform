@@ -458,6 +458,44 @@ func TestWorkPollClampsHugeReclaim(t *testing.T) {
 	}
 }
 
+// TestWorkPollRefusesAReclaimWindowUnderOne pins reclaim_older_than_ms to the
+// reference's validation: a 0 was recorded refused, block_ms beside it valid
+// (2026-09-02 batch2 #352 `work.poll.requeued-item`), and a negative fails the
+// same bound; an unparseable value takes the validator's other sentence, which
+// that recording does not reach. Each refusal comes before the poll is
+// recorded or anything is handed out, and an absent or empty value is still
+// the default window, which hands the item out.
+func TestWorkPollRefusesAReclaimWindowUnderOne(t *testing.T) {
+	s := newTestServer(t)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-reclaim")
+	auth := map[string]string{"Authorization": "Bearer " + key, "Anthropic-Worker-ID": "rec-worker"}
+	if _, err := queue.New(s.pool).Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	for q, want := range map[string]string{
+		"?block_ms=900&reclaim_older_than_ms=0": "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=-5":             "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=soon":           "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+	} {
+		res, raw := s.pollQuery(t, envID, q, auth)
+		var body map[string]any
+		_ = json.Unmarshal([]byte(raw), &body)
+		wantErrMsg(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error", want)
+	}
+	var polled int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM worker_polls WHERE environment_id = $1`, envID).Scan(&polled); err != nil {
+		t.Fatalf("count pollers: %v", err)
+	}
+	if polled != 0 {
+		t.Errorf("a refused poll was recorded as a worker's: %d poller rows", polled)
+	}
+	res, raw := s.pollQuery(t, envID, "?reclaim_older_than_ms=", auth)
+	if res.StatusCode != http.StatusOK || !strings.Contains(raw, `"id":"work_`) {
+		t.Errorf("an empty reclaim_older_than_ms = %d %s, want the item under the default window", res.StatusCode, raw)
+	}
+}
+
 // TestWorkPollBlockMsWakesOnMidWaitEnqueue pins the long poll (#74): a poll
 // carrying block_ms holds an empty queue's request open and returns the item
 // as soon as a mid-wait enqueue commits — well before the window lapses, which
@@ -557,8 +595,8 @@ func TestWorkPollBlockMsExpiresToNull(t *testing.T) {
 // records: non-blocking is expressed by omitting block_ms, and the reference
 // server rejects an explicit 0 (checked against anthropic-sdk-go v1.70.1 —
 // poller.go WorkPollerOptions.BlockMs). Zero, negative, present-but-empty,
-// unparseable, and repeated values are all 400 here — unlike the non-validating
-// reclaim knob.
+// unparseable, and repeated values are all 400 here, in this platform's words:
+// no recording holds the reference's for block_ms.
 func TestWorkPollBlockMsRejectsNonPositive(t *testing.T) {
 	s := newTestServer(t)
 	envID, _, key := selfHostedWorker(t, s, "ek-block-bad")
