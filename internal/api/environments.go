@@ -84,10 +84,11 @@ func checkEnvironmentID(id string) error {
 
 // rejectExtraEnvironmentKeys is rejectUnknownKeys for an environment body,
 // whose reference validator is pydantic's and words an unknown key its own way
-// (2026-09-03 batch1 `env.create.cloud`, #540).
+// (2026-09-03 batch1 `env.create.cloud`, #540), with `x-should-retry: false`
+// (#842).
 func rejectExtraEnvironmentKeys(obj map[string]json.RawMessage) error {
 	if key, ok := unknownkey.Least(obj, "name", "description", "config", "scope", "metadata"); ok {
-		return errInvalid("%s: Extra inputs are not permitted", key)
+		return noRetry(errInvalid("%s: Extra inputs are not permitted", key))
 	}
 	return nil
 }
@@ -165,10 +166,10 @@ func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, norm
 	default:
 		if tagged {
 			// The reference's words for a tag it does not know (2026-09-05
-			// batch8 `probe.env.kind-enum`, #540). An absent or non-string
-			// type is a different refusal there, never recorded, so it keeps
-			// ours below.
-			return "", nil, errInvalid("config: Input tag '%s' found using 'type' does not match any of the expected tags: 'cloud', 'self_hosted'", typ)
+			// batch8 `probe.env.kind-enum`, #540), and its header (#842).
+			// An absent or non-string type is a different refusal there,
+			// never recorded, so it keeps ours below.
+			return "", nil, noRetry(errInvalid("config: Input tag '%s' found using 'type' does not match any of the expected tags: 'cloud', 'self_hosted'", typ))
 		}
 		return "", nil, errInvalid(`config.type must be "cloud" or "self_hosted"`)
 	}
@@ -511,10 +512,10 @@ func (s *server) insertEnvironmentInTx(ctx context.Context, tx pgx.Tx, body json
 		return false, err
 	}
 	// The reference's validator words an absent key its own way (2026-09-03
-	// batch1 `env.create.bogus-probe`, #540); a null or empty name, never
-	// recorded, keeps ours below.
+	// batch1 `env.create.bogus-probe`, #540), with `x-should-retry: false`
+	// (#842); a null or empty name, never recorded, keeps ours below.
 	if err := fieldRequired(obj, "name", "name"); err != nil {
-		return false, err
+		return false, noRetry(err)
 	}
 	name, err := requiredString(obj, "name")
 	if err != nil {
@@ -757,8 +758,11 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	// Its 404 carries `x-should-retry: false`, as the reference's was recorded
+	// carrying it (2026-09-02 batch2 `env.archive.with-deployment`; #842) — a
+	// malformed id's too, which must not tell itself apart from an absent one.
 	if err := checkEnvironmentID(id); err != nil {
-		return nil, err
+		return nil, noRetry(err)
 	}
 	var row environmentRow
 	err := s.pool.QueryRow(ctx,
@@ -770,7 +774,7 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errEnvironmentNotFound(id)
+		return nil, noRetry(errEnvironmentNotFound(id))
 	}
 	if err != nil {
 		return nil, err
@@ -938,8 +942,10 @@ func (s *server) selfHostedQueueRefusal(ctx context.Context, envID string) error
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	// Its 404 carries `x-should-retry: false`, archiveEnvironment's reason
+	// (2026-09-05 batch1 `rec82.env.delete.environments-beta`; #842).
 	if err := checkEnvironmentID(id); err != nil {
-		return nil, err
+		return nil, noRetry(err)
 	}
 	force, err := parseBoolParam(r.URL.Query(), "force")
 	if err != nil {
@@ -964,7 +970,7 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
-		return nil, errEnvironmentNotFound(id)
+		return nil, noRetry(errEnvironmentNotFound(id))
 	}
 	return map[string]string{"id": id, "type": "environment_deleted"}, nil
 }

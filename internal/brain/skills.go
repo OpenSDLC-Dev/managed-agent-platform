@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -21,13 +20,6 @@ import (
 // (surfaced late-bound, plan design decision 7) or a transient store error.
 // Exported so the telemetry contract test can assert the exact name.
 const MetricSkillResolveMisses = "skills.resolve.misses"
-
-// skillVersionAlias is the one alias the wire admits for a skill version: the
-// newest one at use time. Everything else a stored pin can hold is concrete —
-// a version id, or the legacy numeric.
-const skillVersionAlias = "latest"
-
-var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 
 // skillRef is the minimal shape of one resolved-agent skills[] entry — the
 // normalized {type, skill_id, version} the API stores, of which injection needs
@@ -111,8 +103,8 @@ func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAge
 // (SQLSTATE 22021) where the miss below was intended.
 func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (string, string, error) {
 	var row pgx.Row
-	switch {
-	case version == skillVersionAlias:
+	switch skills.ClassifyPin(version) {
+	case skills.PinLatest:
 		var latest *string
 		err := b.pool.QueryRow(ctx, `SELECT latest_version FROM skills WHERE id = $1`, skillID).Scan(&latest)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -127,17 +119,17 @@ func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (
 		row = b.pool.QueryRow(ctx,
 			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2`,
 			skillID, *latest)
-	case domain.ID(version).HasPrefix(domain.PrefixSkillVersion) && domain.ID(version).Valid():
+	case skills.PinID:
 		row = b.pool.QueryRow(ctx,
 			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND id = $2`,
 			skillID, version)
-	case skillDigitsRe.MatchString(version):
+	case skills.PinNumber:
 		row = b.pool.QueryRow(ctx,
 			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2`,
 			skillID, version)
 	default:
 		return "", "", fmt.Errorf("skill %s version %q is neither %q, a version id nor a version number",
-			skillID, version, skillVersionAlias)
+			skillID, version, skills.LatestAlias)
 	}
 	var name, description string
 	err := row.Scan(&name, &description)

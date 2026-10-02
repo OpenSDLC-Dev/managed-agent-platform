@@ -431,30 +431,81 @@ func TestWorkUpdateMetadata(t *testing.T) {
 // TestWorkPollClampsHugeReclaim pins that an over-large reclaim_older_than_ms is
 // clamped rather than overflowing time.Duration into a past reservation: after
 // a poll hands out the item, an immediate second poll must still see it reserved
-// (null), not re-hand it out.
+// (null), not re-hand it out. A value past any machine integer is clamped too,
+// not refused as unparseable: pydantic's integers have no such bound.
 func TestWorkPollClampsHugeReclaim(t *testing.T) {
+	for _, huge := range []string{"9223372036854775807", "99999999999999999999999"} {
+		t.Run(huge, func(t *testing.T) {
+			s := newTestServer(t)
+			envID, sessionID, key := selfHostedWorker(t, s, "ek-clamp")
+			q := queue.New(s.pool)
+			if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+
+			auth := map[string]string{"Authorization": "Bearer " + key}
+			res, raw := s.pollQuery(t, envID, "?reclaim_older_than_ms="+huge, auth)
+			if res.StatusCode != http.StatusOK || !strings.Contains(raw, `"id":"work_`) {
+				t.Fatalf("first poll = %d %s, want 200 and the item", res.StatusCode, raw)
+			}
+			// If the huge value had overflowed into a negative lease, the reservation
+			// would already be in the past and this poll would re-hand-out the item.
+			res2, raw2 := s.poll(t, envID, auth)
+			if res2.StatusCode != http.StatusOK {
+				t.Fatalf("second poll status = %d, want 200", res2.StatusCode)
+			}
+			if strings.TrimSpace(raw2) != "null" {
+				t.Fatalf("second poll re-handed-out a reserved item (reclaim overflow not clamped): %q", raw2)
+			}
+		})
+	}
+}
+
+// TestWorkPollRefusesAReclaimWindowUnderOne pins reclaim_older_than_ms to the
+// reference's validation: a 0 was recorded refused, block_ms beside it valid
+// (2026-09-02 batch2 #352 `work.poll.requeued-item`), and a negative fails the
+// same bound; an unparseable value takes the validator's other sentence, which
+// that recording does not reach. Each refusal comes before the poll is
+// recorded or anything is handed out, and an absent or empty value is still
+// the default window, which hands the item out.
+func TestWorkPollRefusesAReclaimWindowUnderOne(t *testing.T) {
 	s := newTestServer(t)
-	envID, sessionID, key := selfHostedWorker(t, s, "ek-clamp")
-	q := queue.New(s.pool)
-	if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-reclaim")
+	auth := map[string]string{"Authorization": "Bearer " + key, "Anthropic-Worker-ID": "rec-worker"}
+	if _, err := queue.New(s.pool).Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-
-	auth := map[string]string{"Authorization": "Bearer " + key}
-	path := "/v1/environments/" + envID + "/work/poll?reclaim_older_than_ms=9223372036854775807"
-	res := s.doRaw(http.MethodGet, path, nil, auth)
-	res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("first poll status = %d, want 200", res.StatusCode)
+	for q, want := range map[string]string{
+		"?block_ms=900&reclaim_older_than_ms=0":             "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=-5":                         "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=-99999999999999999999":      "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=99999999999999999999999abc": "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?reclaim_older_than_ms=99999999999999999999999.5":  "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?reclaim_older_than_ms=-99999999999999999999x":     "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?reclaim_older_than_ms=soon":                       "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?reclaim_older_than_ms=&reclaim_older_than_ms=0":   "reclaim_older_than_ms must be given at most once",
+	} {
+		res, raw := s.pollQuery(t, envID, q, auth)
+		var body map[string]any
+		_ = json.Unmarshal([]byte(raw), &body)
+		wantErrMsg(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error", want)
 	}
-	// If the huge value had overflowed into a negative lease, the reservation
-	// would already be in the past and this poll would re-hand-out the item.
-	res2, raw2 := s.poll(t, envID, auth)
-	if res2.StatusCode != http.StatusOK {
-		t.Fatalf("second poll status = %d, want 200", res2.StatusCode)
+	var polled int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM worker_polls WHERE environment_id = $1`, envID).Scan(&polled); err != nil {
+		t.Fatalf("count pollers: %v", err)
 	}
-	if strings.TrimSpace(raw2) != "null" {
-		t.Fatalf("second poll re-handed-out a reserved item (reclaim overflow not clamped): %q", raw2)
+	if polled != 0 {
+		t.Errorf("a refused poll was recorded as a worker's: %d poller rows", polled)
+	}
+	res, raw := s.pollQuery(t, envID, "?reclaim_older_than_ms=", auth)
+	if res.StatusCode != http.StatusOK || !strings.Contains(raw, `"id":"work_`) {
+		t.Errorf("an empty reclaim_older_than_ms = %d %s, want the item under the default window", res.StatusCode, raw)
+	}
+	// Surrounding whitespace is stripped, as pydantic's lax integers strip it
+	// (inferred) — so a `+5`, which a query decodes to " 5", is the window 5.
+	if res, raw := s.pollQuery(t, envID, "?reclaim_older_than_ms=+5", auth); res.StatusCode != http.StatusOK {
+		t.Errorf("reclaim_older_than_ms=+5 = %d %s, want 200", res.StatusCode, raw)
 	}
 }
 
@@ -557,8 +608,8 @@ func TestWorkPollBlockMsExpiresToNull(t *testing.T) {
 // records: non-blocking is expressed by omitting block_ms, and the reference
 // server rejects an explicit 0 (checked against anthropic-sdk-go v1.70.1 —
 // poller.go WorkPollerOptions.BlockMs). Zero, negative, present-but-empty,
-// unparseable, and repeated values are all 400 here — unlike the non-validating
-// reclaim knob.
+// unparseable, and repeated values are all 400 here, in this platform's words:
+// no recording holds the reference's for block_ms.
 func TestWorkPollBlockMsRejectsNonPositive(t *testing.T) {
 	s := newTestServer(t)
 	envID, _, key := selfHostedWorker(t, s, "ek-block-bad")

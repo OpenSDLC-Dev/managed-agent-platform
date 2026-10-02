@@ -117,7 +117,11 @@ func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool
 		writeError(w, r, err)
 		return "", "", false
 	case envID == "":
-		writeError(w, r, errAuth("invalid environment key"))
+		// `x-should-retry: false`, as the reference marks the Bearer it does
+		// not take on its work and skill routes (2026-09-02 batch2
+		// `work.list.via-console-org-auth`, `work.poll.via-console-org-auth`;
+		// 2026-09-03 batch2 `envkey.dead-key-verify`; #842).
+		writeError(w, r, noRetry(errAuth("invalid environment key")))
 		return "", "", false
 	}
 	markVerified(r.Context())
@@ -232,11 +236,14 @@ const skillsScopeRefusal = "OAuth token does not meet scope requirement any_of(o
 // An unrecorded route keeps this platform's answer: the reference's refusals
 // differ route by route — a 401 on the agents list, a 403 naming the route's
 // scopes on the skills — so nothing says which a third route takes.
-var environmentKeyRefusals = map[string]*apiError{
+//
+// The skills' 403s carry `x-should-retry: false`, as every recording of them
+// does; the agents list's 401 was recorded without it (#842).
+var environmentKeyRefusals = map[string]error{
 	// 2026-09-03 batch2 idx 5 `envkey.agents.list-should-refuse`.
 	"GET /v1/agents":      errAuth("Authentication failed"),
-	"GET /v1/skills":      errForbidden(skillsScopeRefusal),
-	"GET /v1/skills/{id}": errForbidden(skillsScopeRefusal),
+	"GET /v1/skills":      noRetry(errForbidden(skillsScopeRefusal)),
+	"GET /v1/skills/{id}": noRetry(errForbidden(skillsScopeRefusal)),
 }
 
 // withEnvironmentKey records what an environment key resolved to: its
@@ -284,9 +291,10 @@ func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 // content download: requireEnvironmentKey, refusing a key whose environment is
 // not self_hosted before any file is looked up. The refusal is the reference's
 // bare "Not found" (2026-09-03 batch2 `envkey.files.content-original`,
-// `envkey.files.content-session-copy`; #540), the words every other 404 on
-// this lane takes (downloadFile), so it says nothing about the file either.
-// Which reason fired is the operator's, in the log.
+// `envkey.files.content-session-copy`; #540), the words and the
+// `x-should-retry: false` every other 404 on this lane takes (downloadFile;
+// #842), so it says nothing about the file either. Which reason fired is the
+// operator's, in the log.
 func requireSelfHostedEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
@@ -296,7 +304,7 @@ func requireSelfHostedEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http
 		if kind != domain.EnvSelfHosted {
 			slog.InfoContext(r.Context(), "file download refused: environment key is not self_hosted",
 				"request_id", requestIDFrom(r.Context()), "environment_id", envID, "environment_kind", kind)
-			writeError(w, r, errNotFound("Not found"))
+			writeError(w, r, noRetry(errNotFound("Not found")))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(withEnvironmentKey(r.Context(), envID, kind)))

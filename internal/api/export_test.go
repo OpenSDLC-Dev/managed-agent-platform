@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"time"
 
@@ -468,7 +470,11 @@ type EnvironmentKeyRefusal struct {
 // pattern. Test binary only.
 func EnvironmentKeyRefusalsForTest() map[string]EnvironmentKeyRefusal {
 	out := make(map[string]EnvironmentKeyRefusal, len(environmentKeyRefusals))
-	for pattern, e := range environmentKeyRefusals {
+	for pattern, err := range environmentKeyRefusals {
+		var e *apiError
+		if !errors.As(err, &e) {
+			panic(fmt.Sprintf("environmentKeyRefusals[%q] is no apiError: %v", pattern, err))
+		}
 		out[pattern] = EnvironmentKeyRefusal{e.status, e.errType, e.message}
 	}
 	return out
