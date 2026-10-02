@@ -266,12 +266,15 @@ func TestDeploymentRunRecordsAClassifiedFailure(t *testing.T) {
 }
 
 // TestDeploymentRowsStoredResolvedFireWhereTheyDid: a deployment stored before
-// #849 holds its paths resolved — a file's rooted under /mnt/session/uploads,
-// doubled for an "/uploads/<name>" stored before #848, and a repository's
-// default derived. Nothing rewrites them, so they echo as stored; and the fire
-// resolves an already-rooted path by passing it through, so each keeps
-// mounting where it did, the doubled one included. Sending the echoed
-// resources back, as the console's deployment editor does, keeps them too.
+// #849 holds only its resolved paths — a file's rooted under
+// /mnt/session/uploads, doubled for an "/uploads/<name>" stored before #848,
+// and a repository's default derived — with no given_mount_path beside them.
+// Nothing rewrites them: they echo as stored, since what the caller sent is
+// recorded nowhere, and the fire mounts each where it did, the doubled one
+// included. Sending the echoed resources back, as the console's deployment
+// editor does, keeps them too — the files as echoed, a repository only once
+// its write-only authorization_token is restored, which the echo never
+// carries.
 func TestDeploymentRowsStoredResolvedFireWhereTheyDid(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -284,6 +287,11 @@ func TestDeploymentRowsStoredResolvedFireWhereTheyDid(t *testing.T) {
 		repoBody("g", nil),
 	}
 	id := createDeployment(t, s, body)["id"].(string)
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE deployments SET resources = (SELECT jsonb_agg(el - 'given_mount_path' ORDER BY i)
+		   FROM jsonb_array_elements(resources) WITH ORDINALITY AS e(el, i)) WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
 	legacy := []string{
 		"/mnt/session/uploads/uploads/rec141-input.txt",
 		"/mnt/session/uploads/notes.txt",
@@ -328,13 +336,16 @@ func TestDeploymentRowsStoredResolvedFireWhereTheyDid(t *testing.T) {
 	mounts("echo", d["resources"], legacy)
 	fire(legacy)
 
-	files := d["resources"].([]any)[:2]
-	status, d = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"resources": files})
+	echoed := d["resources"].([]any)
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"resources": echoed})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "resources.2.authorization_token: Field required")
+	echoed[2].(map[string]any)["authorization_token"] = "g"
+	status, d = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"resources": echoed})
 	if status != http.StatusOK {
-		t.Fatalf("re-send the echoed files: %d %v", status, d)
+		t.Fatalf("re-send the echoed resources, the token restored: %d %v", status, d)
 	}
-	mounts("echo after the re-send", d["resources"], legacy[:2])
-	fire(legacy[:2])
+	mounts("echo after the re-send", d["resources"], legacy)
+	fire(legacy)
 }
 
 // The sessions-list deployment_id filter is real from this slice (it

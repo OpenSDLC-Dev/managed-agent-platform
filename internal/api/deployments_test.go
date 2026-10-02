@@ -1314,10 +1314,10 @@ func TestDeploymentResourcesEchoWithoutTheToken(t *testing.T) {
 // (2026-09-05 batch3 idx 20) or, omitted, no key at all (idx 19). By idx 19's
 // analogy a file whose mount_path is omitted or null echoes no key either,
 // and by the config's "echoes the input" an unclean spelling echoes uncleaned.
-// The column holds what the echo shows. Only the fire resolves: its session
-// mounts each resource where a session create would (ui-network idx 266, the
-// session read at idx 268), and the deployment still echoes the given
-// spellings afterwards.
+// The fired session mounts each resource where a session create would
+// (ui-network idx 266, the session read at idx 268), and the deployment still
+// echoes the given spellings afterwards. What the column holds is
+// TestDeploymentStoresTheResolvedPathBesideTheSpelling's.
 func TestDeploymentEchoesMountPathsAsGiven(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -1360,20 +1360,6 @@ func TestDeploymentEchoesMountPathsAsGiven(t *testing.T) {
 	d := createDeployment(t, s, body)
 	id := d["id"].(string)
 	echoes("create", d)
-	var raw []byte
-	if err := s.pool.QueryRow(t.Context(), `SELECT resources FROM deployments WHERE id = $1`, id).Scan(&raw); err != nil {
-		t.Fatal(err)
-	}
-	var stored []map[string]any
-	if err := json.Unmarshal(raw, &stored); err != nil {
-		t.Fatal(err)
-	}
-	for _, el := range stored {
-		delete(el, "token")
-	}
-	if !reflect.DeepEqual(stored, want) {
-		t.Errorf("stored resources = %s, want the echo's %v", raw, want)
-	}
 
 	for _, step := range []struct{ name, method, path string }{
 		{"get", http.MethodGet, "/v1/deployments/" + id},
@@ -1395,10 +1381,15 @@ func TestDeploymentEchoesMountPathsAsGiven(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("list: %d %v", status, res)
 	}
+	listed := false
 	for _, el := range listData(t, res) {
 		if el["id"] == id {
+			listed = true
 			echoes("list", el)
 		}
+	}
+	if !listed {
+		t.Errorf("the list does not carry deployment %s", id)
 	}
 
 	run := runDeployment(t, s, id)
@@ -1476,17 +1467,108 @@ func TestDeploymentValidatesMountPathsUpFront(t *testing.T) {
 	}
 }
 
-// TestDeploymentRefusesResolvedMountOverlapsUpFront: storing a mount_path as
+// TestDeploymentStoresTheResolvedPathBesideTheSpelling: the stored element's
+// mount_path is the resolved path, as before #849, and the caller's spelling
+// rides beside it in given_mount_path, which only the echo reads. So any
+// reader of the column that predates #849 — the fire as it was, or an older
+// binary during a rolling update or after a rollback — decodes a mount_path
+// create already resolved and judged, never a spelling it would root a second
+// time ("/uploads/x" at /mnt/session/uploads/uploads/x). An omitted
+// mount_path stores its default and an empty spelling.
+func TestDeploymentStoresTheResolvedPathBesideTheSpelling(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileA := uploadOneFile(t, s, "rec141-input.txt")
+	fileB := uploadOneFile(t, s, "b.txt")
+	body := deploymentBody(agentID, envID)
+	body["resources"] = []any{
+		map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/rec141-input.txt"},
+		map[string]any{"type": "file", "file_id": fileB},
+		repoBody("g", nil),
+		repoBody("g", map[string]any{"mount_path": "/workspace/sdk"}),
+	}
+	id := createDeployment(t, s, body)["id"].(string)
+
+	var raw []byte
+	if err := s.pool.QueryRow(t.Context(), `SELECT resources FROM deployments WHERE id = $1`, id).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	// The element as a binary from before #849 decodes it.
+	var older []struct {
+		Type      string `json:"type"`
+		MountPath string `json:"mount_path"`
+	}
+	var given []struct {
+		GivenMountPath *string `json:"given_mount_path"`
+	}
+	if err := json.Unmarshal(raw, &older); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &given); err != nil {
+		t.Fatal(err)
+	}
+	wantResolved := []string{"/mnt/session/uploads/rec141-input.txt", "/mnt/session/uploads/" + fileB,
+		"/workspace/example-repo", "/workspace/sdk"}
+	wantGiven := []string{"/uploads/rec141-input.txt", "", "", "/workspace/sdk"}
+	for i, el := range older {
+		if el.MountPath != wantResolved[i] {
+			t.Errorf("element %d (%s): stored mount_path = %q, want the resolved %q", i, el.Type, el.MountPath, wantResolved[i])
+		}
+		if g := given[i].GivenMountPath; g == nil || *g != wantGiven[i] {
+			t.Errorf("element %d (%s): stored given_mount_path = %v, want %q", i, el.Type, g, wantGiven[i])
+		}
+	}
+	if len(older) != len(wantResolved) {
+		t.Errorf("stored %d elements, want %d: %s", len(older), len(wantResolved), raw)
+	}
+}
+
+// TestDeploymentBoundsTheStoredSpelling: a deployment stores and echoes the
+// caller's mount_path (#849), and resolution bounds only what a spelling
+// resolves to, so the spelling is held to maxMountPathBytes itself — in this
+// platform's words, on create and update alike. Session create, which stores
+// only the resolved path, still takes the long spelling.
+func TestDeploymentBoundsTheStoredSpelling(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileID := uploadOneFile(t, s, "xyz")
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	climb := "/" + strings.Repeat("a/../", 204) // 1021 bytes, cleaned away
+	file := func(mount string) []any {
+		return []any{map[string]any{"type": "file", "file_id": fileID, "mount_path": mount}}
+	}
+
+	longest := climb + "xyz" // 1024 bytes
+	body := deploymentBody(agentID, envID)
+	body["resources"] = file(longest)
+	rs := createDeployment(t, s, body)["resources"].([]any)
+	if got := rs[0].(map[string]any)["mount_path"]; got != longest {
+		t.Errorf("a %d-byte spelling echoed as %v", len(longest), got)
+	}
+
+	tooLong := climb + "wxyz" // 1025 bytes, resolving to /mnt/session/uploads/wxyz
+	if status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "resources": file(tooLong)}); status != http.StatusOK {
+		t.Errorf("session create: %d %v, want 200 — it stores only the resolved path", status, res)
+	}
+	body["resources"] = file(tooLong)
+	status, res := s.do(http.MethodPost, "/v1/deployments", body)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes")
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": file(tooLong)})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes")
+}
+
+// TestDeploymentRefusesResolvedMountOverlapsUpFront: echoing a mount_path as
 // given (#849) does not defer judging where two meet. Deployment create and
 // update resolve each spelling, with session create's rules, and refuse two
 // that land on one mount, or a resource at a proper ancestor of a
 // repository's — "/uploads/x" beside "/x" included — before anything is
 // stored. No recording shows a deployment holding such a pair. The words are
-// the deployment routes' own: session create answers an overlapping
-// repository in the reference's recorded sentence (2026-09-03 batch1
-// `session.create.repo-same-repo-twice` and `repo-nested-mounts`), which no
-// deployment recording holds, so ours stands there (#540); a pair of files
-// takes the same words on both routes.
+// the deployment routes' own, naming the spelling the caller sent and what it
+// resolves to, or the default it took; session create keeps its own, an
+// overlapping repository's being the reference's recorded sentence (2026-09-03
+// batch1 `session.create.repo-same-repo-twice` and `repo-nested-mounts`),
+// which no deployment recording holds (#540).
 func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -1497,6 +1579,7 @@ func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 		return map[string]any{"type": "file", "file_id": id, "mount_path": mount}
 	}
 	const taken = `mount_path "/mnt/session/uploads/x" is used by more than one resource`
+	const takenAsX = `mount_path "/x" (resolves to "/mnt/session/uploads/x") is used by more than one resource`
 	overlap := func(a, b string) string {
 		return "Invalid `github_repository` resource: `mount_path` overlaps another resource: " + a + " and " + b + "; set distinct `mount_path` values"
 	}
@@ -1505,16 +1588,16 @@ func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 		resources         []any
 		session, deployed string
 	}{
-		"the uploads alias beside a rooted spelling": {[]any{file(fileA, "/uploads/x"), file(fileB, "/x")}, taken, taken},
-		"one spelling twice":                         {[]any{file(fileA, "/x"), file(fileB, "/x")}, taken, taken},
+		"the uploads alias beside a rooted spelling": {[]any{file(fileA, "/uploads/x"), file(fileB, "/x")}, taken, takenAsX},
+		"one spelling twice":                         {[]any{file(fileA, "/x"), file(fileB, "/x")}, taken, takenAsX},
 		"a relative spelling beside the full path":   {[]any{file(fileA, "x"), file(fileB, "/mnt/session/uploads/x")}, taken, taken},
 		"one repository twice at its default": {[]any{repoBody("g", nil), repoBody("g", nil)},
 			overlap("/workspace/example-repo", "/workspace/example-repo"),
-			`mount_path "/workspace/example-repo" is used by more than one resource`},
+			`the default mount_path "/workspace/example-repo" is used by more than one resource`},
 		"a file above a repository": {
 			[]any{file(fileA, "repo"), repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
 			overlap("/mnt/session/uploads/repo", "/mnt/session/uploads/repo/src"),
-			`mount_path "/mnt/session/uploads/repo" is an ancestor of repository mount_path "/mnt/session/uploads/repo/src"`},
+			`mount_path "repo" (resolves to "/mnt/session/uploads/repo") is an ancestor of repository mount_path "/mnt/session/uploads/repo/src"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{

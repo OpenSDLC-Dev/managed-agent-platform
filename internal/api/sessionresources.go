@@ -41,7 +41,9 @@ const maxResourceListLimit = 1000
 const defaultMountRoot = "/mnt/session/uploads/"
 
 // maxMountPathBytes bounds a resolved mount_path so a pathological value never
-// reaches the sandbox layer or the jsonb column.
+// reaches the sandbox layer or the jsonb column — and, on the deployment
+// routes, the caller's own spelling, which is stored beside the resolved path
+// and echoed on every read (#849).
 const maxMountPathBytes = 1024
 
 // defaultRepoMountRoot prefixes the default mount for a github_repository
@@ -183,9 +185,9 @@ const (
 type resourceInput struct {
 	kind      resourceKind
 	mountPath string
-	// givenMountPath is the request's own mount_path, "" when it sent none:
-	// what a deployment stores and echoes, mountPath being where the
-	// resource would mount (#849).
+	// givenMountPath is the request's own mount_path, "" when it sent none,
+	// beside the resolved mountPath: a deployment stores both, mounts the
+	// one and echoes the other (#849).
 	givenMountPath string
 	// file variant
 	fileID string
@@ -246,8 +248,8 @@ func parseSessionResourceInputs(obj map[string]json.RawMessage) ([]resourceInput
 // the same store at most once and at most maxMemoryStoresPerSession of them
 // (plan 36 decision 7). f picks the words a refusal takes; an element parser
 // whose sentences name the element is handed its index too. The deployment
-// routes are judged on the resolved paths like the rest, though they store
-// each spelling as given (givenMountPath, #849).
+// routes are judged on the resolved paths like the rest; since they echo the
+// caller's spelling, their refusals name it too (mountWords, #849).
 func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourceInput, error) {
 	raw, ok := obj["resources"]
 	if !ok || isNull(raw) {
@@ -286,7 +288,7 @@ func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourc
 			if f == resourceForSession && in.kind == resourceKindRepo {
 				return nil, errRepoMountOverlap(prev, in.mountPath)
 			}
-			return nil, errInvalid("mount_path %q is used by more than one resource", in.mountPath)
+			return nil, errInvalid("%s is used by more than one resource", in.mountWords(f))
 		}
 		seen[clean] = in.mountPath
 		if in.kind == resourceKindRepo {
@@ -311,11 +313,26 @@ func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourc
 				if f == resourceForSession && out[max(pi, ri)].kind == resourceKindRepo {
 					return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
 				}
-				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
+				return nil, errInvalid("%s is an ancestor of repository %s", p.mountWords(f), r.mountWords(f))
 			}
 		}
 	}
 	return out, nil
+}
+
+// mountWords names in's mount in a refusal of where two resources meet: by its
+// resolved path, and on the deployment routes, which echo the caller's
+// spelling rather than that path, by the spelling too — or as the default, for
+// a resource that sent none (#849). Those words are ours; no deployment
+// recording holds an overlap.
+func (in resourceInput) mountWords(f resourceFlavor) string {
+	switch {
+	case f != resourceForDeployment || in.givenMountPath == in.mountPath:
+		return "mount_path " + strconv.Quote(in.mountPath)
+	case in.givenMountPath == "":
+		return "the default mount_path " + strconv.Quote(in.mountPath)
+	}
+	return "mount_path " + strconv.Quote(in.givenMountPath) + " (resolves to " + strconv.Quote(in.mountPath) + ")"
 }
 
 // errRepoMountOverlap is session create's refusal of a repository whose mount
@@ -390,6 +407,13 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 	mountPath, err := fileMountPath(given, fileID)
 	if err != nil {
 		return resourceInput{}, err
+	}
+	if f == resourceForDeployment && len(given) > maxMountPathBytes {
+		// The spelling is stored and echoed there (#849), and resolution
+		// bounds only what it resolves to: "/" + "a/../"×800000 + "x" is
+		// /mnt/session/uploads/x. A repository's spelling, when it sends one,
+		// is its resolved path, bounded already.
+		return resourceInput{}, errInvalid("mount_path must be at most %d bytes", maxMountPathBytes)
 	}
 	return resourceInput{fileID: fileID, mountPath: mountPath, givenMountPath: given}, nil
 }
@@ -771,15 +795,19 @@ func validateRepoMountPath(p string) error {
 // ".." on the absolute form too — would mean declining to clean a path POSIX
 // already defines, so the asymmetry is accepted.
 //
-// The resolved path is what gets stored and mounted, so it — not the caller's
-// spelling — carries the bounds: it must stay under the root, be at most
-// maxMountPathBytes, and be storable text, since an unstorable byte (U+0000,
-// invalid UTF-8) would otherwise fail as a 500 when the resources array binds
-// into the jsonb column (see #135). Containment is lexical, over the stored
-// string: the uploads directory is agent-writable, so an intermediate symlink
-// the agent plants there can still point a mount's bytes elsewhere — the same
-// accepted single-tenant tampering residual the mount sentinel carries
-// (docs/DIVERGENCES.md), not something this resolver can answer.
+// The resolved path is what gets mounted, so it carries the bounds: it must
+// stay under the root, be at most maxMountPathBytes, and be storable text,
+// since an unstorable byte (U+0000, invalid UTF-8) would otherwise fail as a
+// 500 when the resources array binds into the jsonb column (see #135). A
+// session stores only this path. A deployment also stores the caller's
+// spelling, to echo it (#849); parseFileResource holds that spelling to
+// maxMountPathBytes there, the one bound it needs — the body decoder has
+// already refused invalid UTF-8 and U+0000 anywhere in the request.
+// Containment is lexical, over the resolved string: the uploads directory is
+// agent-writable, so an intermediate symlink the agent plants there can still
+// point a mount's bytes elsewhere — the same accepted single-tenant tampering
+// residual the mount sentinel carries (docs/DIVERGENCES.md), not something
+// this resolver can answer.
 func resolveMountPath(p, fileID string) (string, error) {
 	const uploadsAlias = "uploads"
 	root := strings.TrimSuffix(defaultMountRoot, "/")

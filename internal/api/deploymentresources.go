@@ -9,7 +9,8 @@ import (
 
 // deploymentResource is one element of deployments.resources as stored: the
 // wire's SessionResourceConfig, plus — for a repository — the sealed token that
-// config deliberately omits.
+// config deliberately omits, with the resolved mount path in mount_path and
+// the caller's spelling, which config echoes there instead, beside it.
 //
 // A deployment's resources are *configuration*, not materialized session
 // resources: no sesrsc_ id, no timestamps, and a memory store keeps only its
@@ -17,8 +18,6 @@ import (
 // and mount path happens when a fire creates a session, so a store renamed
 // between two nightly runs reaches the second run under its new name — which
 // is the behavior a stored snapshot on the deployment would have frozen.
-// Mount paths are configuration the same way: each is kept as the request
-// spelled it, and resolved by the fire (sessionInputsFrom).
 type deploymentResource struct {
 	Type string `json:"type"`
 
@@ -34,14 +33,23 @@ type deploymentResource struct {
 	Access        string  `json:"access,omitempty"`
 	Instructions  *string `json:"instructions,omitempty"`
 
-	// MountPath is the request's mount_path as given, absent when it sent
-	// none — the reference echoes "/uploads/rec141-input.txt" as sent
-	// (2026-09-12-console-141 api-fixtures idx 15) and a repository's omitted
-	// one as no key (2026-09-05 batch3 idx 19) — and always absent on a memory
-	// store, whose path is derived from the store's name when a session mounts
-	// it. A deployment stored before #849 holds the path resolved, and echoes
-	// it so: nothing rewrites it.
+	// MountPath is the resolved container path, what a fire mounts; absent on
+	// a memory store, whose path is derived from the store's name when a
+	// session mounts it. It stays resolved, as before #849, so every reader of
+	// the column — a fire, and a binary from before #849 during a rolling
+	// update or after a rollback — mounts a path create or update resolved and
+	// judged, and never re-resolves a spelling.
 	MountPath string `json:"mount_path,omitempty"`
+
+	// GivenMountPath is storage only: the caller's own mount_path, which
+	// config() echoes in MountPath's place, as the reference does
+	// ("/uploads/rec141-input.txt" sent and echoed, 2026-09-12-console-141
+	// api-fixtures idx 15; a repository's omitted one echoed as no key,
+	// 2026-09-05 batch3 idx 19). "" records that the caller sent none, so the
+	// echo carries no key. nil is an element written before #849, which keeps
+	// echoing its resolved path: what it was sent is recorded nowhere. Held to
+	// maxMountPathBytes at parse (#849).
+	GivenMountPath *string `json:"given_mount_path,omitempty"`
 
 	// Token is storage only and never echoed: config() drops it, and every
 	// render path goes through config(). The plaintext never lands here —
@@ -59,10 +67,14 @@ type sealedTokenJSON struct {
 }
 
 // config strips what the wire calls write-only — "the authorization token is
-// write-only and never returned" — leaving the SessionResourceConfig the
-// reference echoes.
+// write-only and never returned" — and puts the caller's mount_path where the
+// resolved one was stored, leaving the SessionResourceConfig the reference
+// echoes: "Echoes the input minus write-only credentials".
 func (r deploymentResource) config() deploymentResource {
 	r.Token = nil
+	if r.GivenMountPath != nil {
+		r.MountPath, r.GivenMountPath = *r.GivenMountPath, nil
+	}
 	return r
 }
 
@@ -80,7 +92,8 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 		case resourceKindRepo:
 			el := deploymentResource{
 				Type: "github_repository", URL: in.url,
-				Checkout: in.checkout, MountPath: in.givenMountPath,
+				Checkout: in.checkout, MountPath: in.mountPath,
+				GivenMountPath: &in.givenMountPath,
 				Token: &sealedTokenJSON{
 					Ciphertext: sealed[repo].ciphertext,
 					KeyID:      sealed[repo].keyID,
@@ -95,7 +108,8 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 			})
 		default:
 			out = append(out, deploymentResource{
-				Type: "file", FileID: in.fileID, MountPath: in.givenMountPath,
+				Type: "file", FileID: in.fileID, MountPath: in.mountPath,
+				GivenMountPath: &in.givenMountPath,
 			})
 		}
 	}
@@ -109,35 +123,15 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 // own, walked back the other way; the type switch is total over what that
 // function writes, and anything else is corrupt storage, refused rather than
 // misread as a file.
-//
-// Each stored mount path is resolved here, as a session create resolves it
-// when the request arrives (#849): the reference stores the spelling and its
-// fired session mounts the resolved path (2026-09-12-console-141 ui-network
-// idx 266, the session read at idx 268). Create and update resolved the same
-// spellings with the same functions to judge each one and where two meet
-// (parseResources), so while those rules stand nothing here is refused and no
-// overlap arrives; a refusal means a rule tightened under a stored path, and
-// is unclassified, like corrupt storage, so the fire rolls back. A path stored resolved, by a deployment written before
-// #849, is already rooted and passes through unchanged — the doubled
-// /mnt/session/uploads/uploads/<name> of one written before #848 included — so
-// it mounts where it always did.
 func sessionInputsFrom(stored []deploymentResource) ([]resourceInput, []sealedToken, error) {
 	var inputs []resourceInput
 	var sealed []sealedToken
 	for _, r := range stored {
 		switch r.Type {
 		case "github_repository":
-			name, err := parseGitHubRepoURL(r.URL)
-			if err != nil {
-				return nil, nil, err
-			}
-			mount, err := repoMountPath(r.MountPath, name)
-			if err != nil {
-				return nil, nil, err
-			}
 			inputs = append(inputs, resourceInput{
 				kind: resourceKindRepo, url: r.URL,
-				checkout: r.Checkout, mountPath: mount,
+				checkout: r.Checkout, mountPath: r.MountPath,
 			})
 			sealed = append(sealed, sealedToken{ciphertext: r.Token.Ciphertext, keyID: r.Token.KeyID})
 		case "memory_store":
@@ -146,12 +140,8 @@ func sessionInputsFrom(stored []deploymentResource) ([]resourceInput, []sealedTo
 				access: r.Access, instructions: r.Instructions,
 			})
 		case "file":
-			mount, err := fileMountPath(r.MountPath, r.FileID)
-			if err != nil {
-				return nil, nil, err
-			}
 			inputs = append(inputs, resourceInput{
-				kind: resourceKindFile, fileID: r.FileID, mountPath: mount,
+				kind: resourceKindFile, fileID: r.FileID, mountPath: r.MountPath,
 			})
 		default:
 			return nil, nil, fmt.Errorf("stored deployment resource has unknown type %q", r.Type)
