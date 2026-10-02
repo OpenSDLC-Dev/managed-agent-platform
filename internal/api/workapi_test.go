@@ -501,6 +501,11 @@ func TestWorkPollRefusesAReclaimWindowUnderOne(t *testing.T) {
 	if res.StatusCode != http.StatusOK || !strings.Contains(raw, `"id":"work_`) {
 		t.Errorf("an empty reclaim_older_than_ms = %d %s, want the item under the default window", res.StatusCode, raw)
 	}
+	// Surrounding whitespace is stripped, as pydantic's lax integers strip it
+	// (inferred) — so a `+5`, which a query decodes to " 5", is the window 5.
+	if res, raw := s.pollQuery(t, envID, "?reclaim_older_than_ms=+5", auth); res.StatusCode != http.StatusOK {
+		t.Errorf("reclaim_older_than_ms=+5 = %d %s, want 200", res.StatusCode, raw)
+	}
 }
 
 // TestWorkPollBlockMsWakesOnMidWaitEnqueue pins the long poll (#74): a poll

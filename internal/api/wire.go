@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -265,6 +266,28 @@ func fieldRequired(obj map[string]json.RawMessage, key, path string) error {
 		return errInvalid("%s: Field required", path)
 	}
 	return nil
+}
+
+// parseDecimalInt reads s as an integer spelled in decimal — an optional sign,
+// then digits, and nothing else — so ok is false for anything else. A
+// well-formed integer outside int64 is overflow, n then saturated at the
+// bound its sign points to. The shape is judged before the value because
+// strconv.ParseInt reports the overflow of a run of digits before it reads
+// what follows it, which would call "99999999999999999999x" out of range
+// rather than not an integer at all.
+func parseDecimalInt(s string) (n int64, ok, overflow bool) {
+	digits := s
+	if digits != "" && (digits[0] == '+' || digits[0] == '-') {
+		digits = digits[1:]
+	}
+	if digits == "" || strings.Trim(digits, "0123456789") != "" {
+		return 0, false, false
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if errors.Is(err, strconv.ErrRange) {
+		return n, true, true
+	}
+	return n, err == nil, false
 }
 
 func isNull(raw json.RawMessage) bool {

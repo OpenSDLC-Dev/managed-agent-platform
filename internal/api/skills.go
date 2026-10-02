@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -215,24 +216,28 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 // `.anthropic-unknown-id`, "… `skill_id` `no-such-skill` not found"). The
 // two sentences part on whether the entry names a version: one that does is
 // the version's miss, whatever is missing (2026-09-04 batch1 #110, `latest` on
-// a deleted skill), and one that does not is the skill's. The skill is looked
-// up by id whatever its source, as the reference accepted an anthropic entry
-// naming a custom skill's id (2026-09-04 batch1 #104), and its version is
-// resolved as a stored pin is (skills.ClassifyPin). raw is the request's
-// `skills`, already shape-checked by parseSkills, so an absent version is
-// still told apart from an explicit "latest", entry by entry.
+// a deleted skill), and one that does not is the skill's. raw is the
+// request's `skills`, already shape-checked by parseSkills, so an absent
+// version is still told apart from an explicit "latest", entry by entry.
 //
-// The reference's prebuilt catalog is always there; this platform's is the
-// operator's import, which may have provisioned some of it or none. So an
-// entry naming one of the reference's prebuilt ids (skills.PrebuiltIDs) that
-// this catalog does not hold is not refused — the reference would accept it,
-// and an operator who never imported it would otherwise see automation that
-// ran without the skill before #842 break — but accepted as before, left to
-// resolve to nothing at materialization, with one Warn per create naming the
-// import. An id in neither is refused as recorded, as is an imported skill's
-// version that does not resolve. A custom entry is not checked at all,
-// though the reference refuses one the same way: that permissiveness is
-// registered in docs/DIVERGENCES.md and is #78's to settle. Only agent create
+// An entry naming one of the reference's own prebuilt skills
+// (skills.IsReferencePrebuilt) is checked for its version's form alone, a
+// version of none (skills.PinNone) taking the version's sentence. This
+// platform cannot know the reference's versions of those skills: its catalog
+// holds what the operator imported, if anything, under versions the import
+// mints, so a version the reference minted, or a skill never imported, would
+// be refused although the reference accepts it. Such an entry is accepted,
+// with one Warn per create for the ones this catalog does not resolve, and
+// left to resolve or not at materialization. That accepts #419's own `xlsx`
+// at version `1`, a deliberate divergence (docs/DIVERGENCES.md). Every other
+// anthropic entry is checked against this catalog as recorded: the skill
+// looked up by id whatever its source, as the reference accepted an anthropic
+// entry naming a custom skill's id (2026-09-04 batch1 #104), its version
+// resolved as a stored pin is (skills.ClassifyPin), so an unknown id and an
+// unresolvable version of a skill this catalog holds — a custom one an
+// anthropic entry names included — are both refused. A custom entry is not
+// checked at all, though the reference refuses one the same way: that
+// permissiveness is registered too and is #78's to settle. Only agent create
 // was recorded checking, so neither an agent update nor a session override
 // runs this.
 //
@@ -256,8 +261,9 @@ func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage
 	}
 	type entry struct {
 		skillID, version string
+		form             skills.PinForm
 		named            bool // the request supplied the version
-		exists, resolves bool
+		resolves         bool
 	}
 	var checked []entry
 	for _, r := range refs {
@@ -268,67 +274,61 @@ func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage
 		if r.Version != nil && *r.Version != "" {
 			e.version, e.named = *r.Version, true
 		}
+		e.form = skills.ClassifyPin(e.version)
 		checked = append(checked, e)
 	}
-	if len(checked) == 0 {
-		return nil
-	}
-	// One statement for every entry, each with its pin's form so it is
-	// resolved as every stored pin is. Only an id of a shape a skill can carry
-	// reaches a bind parameter, and a version of no form is sent as nothing.
+	// One statement for every entry that can resolve: an id of a shape a
+	// skill carries and a version of a form a pin takes, each resolved by its
+	// form as every stored pin is. Nothing else reaches a bind parameter.
 	var ords []int32
 	var ids, versions []string
 	var forms []int32
 	for i, e := range checked {
-		if !domain.ID(e.skillID).Valid() && !skillShortNameRe.MatchString(e.skillID) {
-			continue
+		if e.form != skills.PinNone && (domain.ID(e.skillID).Valid() || skillShortNameRe.MatchString(e.skillID)) {
+			ords, ids, versions, forms = append(ords, int32(i)), append(ids, e.skillID), append(versions, e.version), append(forms, int32(e.form))
 		}
-		form, version := skills.ClassifyPin(e.version), e.version
-		if form == skills.PinNone {
-			version = ""
-		}
-		ords, ids, versions, forms = append(ords, int32(i)), append(ids, e.skillID), append(versions, version), append(forms, int32(form))
 	}
-	rows, err := tx.Query(ctx,
-		`SELECT r.ord, s.id IS NOT NULL,
-		        COALESCE(EXISTS (SELECT 1 FROM skill_versions v WHERE v.skill_id = s.id AND
-		          CASE r.form WHEN $5 THEN v.version = s.latest_version
-		                      WHEN $6 THEN v.id = r.version
-		                      WHEN $7 THEN v.version = r.version
-		                      ELSE false END), false)
-		   FROM unnest($1::int[], $2::text[], $3::text[], $4::int[]) AS r(ord, skill_id, version, form)
-		   LEFT JOIN skills s ON s.id = r.skill_id`,
-		ords, ids, versions, forms, int32(skills.PinLatest), int32(skills.PinID), int32(skills.PinNumber))
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var ord int32
-		var exists, resolves bool
-		if err := rows.Scan(&ord, &exists, &resolves); err != nil {
+	if len(ords) > 0 {
+		rows, err := tx.Query(ctx,
+			`SELECT r.ord FROM unnest($1::int[], $2::text[], $3::text[], $4::int[]) AS r(ord, skill_id, version, form)
+			   JOIN skills s ON s.id = r.skill_id
+			  WHERE EXISTS (SELECT 1 FROM skill_versions v WHERE v.skill_id = s.id AND
+			          CASE r.form WHEN $5 THEN v.version = s.latest_version
+			                      WHEN $6 THEN v.id = r.version
+			                      ELSE v.version = r.version END)`,
+			ords, ids, versions, forms, int32(skills.PinLatest), int32(skills.PinID))
+		if err != nil {
 			return err
 		}
-		checked[ord].exists, checked[ord].resolves = exists, resolves
+		defer rows.Close()
+		for rows.Next() {
+			var ord int32
+			if err := rows.Scan(&ord); err != nil {
+				return err
+			}
+			checked[ord].resolves = true
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	var unimported []string
+	var unresolved []string
 	for _, e := range checked {
 		switch {
 		case e.resolves:
-		case !e.exists && skills.IsPrebuilt(e.skillID):
-			unimported = append(unimported, e.skillID)
+		case skills.IsReferencePrebuilt(e.skillID) && e.form != skills.PinNone:
+			if !slices.Contains(unresolved, e.skillID) {
+				unresolved = append(unresolved, e.skillID)
+			}
 		case e.named:
 			return errInvalid("Agent has invalid configuration: `skill_id` `%s` version `%s` not found", e.skillID, e.version)
 		default:
 			return errInvalid("Agent has invalid configuration: `skill_id` `%s` not found", e.skillID)
 		}
 	}
-	if len(unimported) > 0 {
-		slog.WarnContext(ctx, "agent create: prebuilt anthropic skills not in this catalog, accepted unchecked; run the controlplane with -import-anthropic-skills to provision them",
-			"request_id", requestIDFrom(ctx), "skill_ids", unimported)
+	if len(unresolved) > 0 {
+		slog.WarnContext(ctx, "agent create: references to Anthropic's prebuilt skills this catalog does not resolve, accepted unchecked; add them to -import-skills, or run the controlplane with -import-anthropic-skills if it never ran",
+			"request_id", requestIDFrom(ctx), "skill_ids", unresolved)
 	}
 	return nil
 }

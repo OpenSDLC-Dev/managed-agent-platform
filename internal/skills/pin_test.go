@@ -10,6 +10,8 @@ func TestClassifyPin(t *testing.T) {
 		"latest":                         PinLatest,
 		"skver_0000000000000000000000gk": PinID,
 		"skillver_0000000000000000000gk": PinID,
+		"skver_018iw3a1acR7fWuwaNj1TqN6": PinID, // the reference's xlsx version (2026-09-02 batch2 #415)
+		"skver_01IllegalO":               PinNone,
 		"1759178010641129":               PinNumber,
 		"1":                              PinNumber,
 		"":                               PinNone,

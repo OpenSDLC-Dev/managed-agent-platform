@@ -8,9 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -31,9 +29,6 @@ const defaultReclaimMs = 5000
 // int large enough to overflow time.Duration would wrap negative — a past
 // reservation that defeats the soft handout. Clamping closes both.
 const maxReclaimMs = 600_000 // 10 minutes
-
-// decimalIntRe is the shape of an integer a query parameter may carry.
-var decimalIntRe = regexp.MustCompile(`^[+-]?[0-9]+$`)
 
 // maxBlockMs caps block_ms at the reference server's ceiling: the SDK's own
 // work poller documents that "the server caps this at 999" and sends exactly
@@ -786,33 +781,21 @@ func parseStopForce(r *http.Request) (bool, error) {
 // reclaimWindow reads reclaim_older_than_ms (default 5000). The reference
 // validates it as pydantic does a bounded integer: a 0 was recorded refused
 // with `reclaim_older_than_ms: Input should be greater than or equal to 1`
-// (2026-09-02 batch2 #352 `work.poll.requeued-item`), so a value under 1 is
-// that 400, and an unparseable one is pydanticInt's other sentence, which the
-// same validator was recorded giving the console's limit (2026-09-05 batch2
-// `rec83.edge5.list.limit.abc`) and this parameter never was. Absent or empty
-// is the default. A value over maxReclaimMs is clamped to it, ours — one past
-// any machine integer included, as pydantic's integers have no such bound —
-// so it can never overflow time.Duration into a past (negative) reservation.
-// Only an integer is out of range: ParseInt reports the overflow of a digit
-// run before it reads what follows, so the shape is checked first.
+// (2026-09-02 batch2 #352 `work.poll.requeued-item`), so it is read by
+// pydanticInt, whose other sentence the same validator was recorded giving
+// the console's limit (2026-09-05 batch2 `rec83.edge5.list.limit.abc`) and
+// this parameter never was. Absent or empty is the default. A value over
+// maxReclaimMs is clamped to it, ours — one past any machine integer
+// included, which pydanticInt saturates — so it can never overflow
+// time.Duration into a past (negative) reservation.
 func reclaimWindow(r *http.Request) (time.Duration, error) {
-	const field = "reclaim_older_than_ms"
-	v := r.URL.Query().Get(field)
+	v := r.URL.Query().Get("reclaim_older_than_ms")
 	if v == "" {
 		return defaultReclaimMs * time.Millisecond, nil
 	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	switch {
-	case !decimalIntRe.MatchString(v):
-		return 0, errPydanticInt(field)
-	case errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(v, "-"):
-		n = maxReclaimMs
-	case errors.Is(err, strconv.ErrRange):
-		return 0, errPydanticMin(field, 1)
-	case err != nil:
-		return 0, errPydanticInt(field)
-	case n < 1:
-		return 0, errPydanticMin(field, 1)
+	n, err := pydanticInt("reclaim_older_than_ms", v, 1)
+	if err != nil {
+		return 0, err
 	}
 	return time.Duration(min(n, maxReclaimMs)) * time.Millisecond, nil
 }

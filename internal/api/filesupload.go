@@ -7,7 +7,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -157,7 +156,9 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 // visible in the wire error and a later drift either way would be silent.
 //
 // A number too large for an int64 is reported as out of range rather than as
-// malformed: it parsed fine, it is just not a lifetime.
+// malformed: it parsed fine, it is just not a lifetime. Only an integer is
+// read so: digits followed by anything else are not one, however many there
+// are (parseDecimalInt).
 func parseExpiresIn(part *multipart.Part) (int64, error) {
 	raw, err := io.ReadAll(io.LimitReader(part, maxExpiresInBytes+1))
 	if err != nil {
@@ -169,12 +170,12 @@ func parseExpiresIn(part *multipart.Part) (int64, error) {
 	if len(raw) > maxExpiresInBytes {
 		return 0, notAnInteger
 	}
-	secs, err := strconv.ParseInt(string(raw), 10, 64)
+	secs, ok, overflow := parseDecimalInt(string(raw))
 	switch {
-	case errors.Is(err, strconv.ErrRange):
-		return 0, outOfRange
-	case err != nil:
+	case !ok:
 		return 0, notAnInteger
+	case overflow:
+		return 0, outOfRange
 	}
 	if secs < minExpiresInSeconds || secs > maxExpiresInSeconds {
 		return 0, outOfRange

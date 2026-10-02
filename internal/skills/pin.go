@@ -16,7 +16,8 @@ const (
 	// PinLatest is the alias LatestAlias, the newest version at use time.
 	PinLatest
 	// PinID is a version id, in the GA skver_ spelling or the legacy
-	// skillver_ one, naming its row under the skill it pins.
+	// skillver_ one, naming its row under the skill it pins — one the
+	// reference minted included, which no row here carries.
 	PinID
 	// PinNumber is the legacy numeric version, already concrete.
 	PinNumber
@@ -33,7 +34,9 @@ var pinDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 // so that "is it digits?" can never again resolve a pinned id to the newest
 // version. The id form asks for a well-formed id, not merely a prefixed one:
 // nothing validates a stored pin's shape on the way in, and an unstorable
-// byte must reach no bind parameter.
+// byte must reach no bind parameter. Well-formed is this platform's alphabet
+// or the reference's (domain.WellFormedID), so a version id the reference
+// minted reads as the id it is, resolving to nothing here.
 //
 // It is not the API's {version} path slot, whose grammar is the wire's and
 // is validated per route (checkSkillVersion), nor the BYOC worker's, which
@@ -42,7 +45,8 @@ func ClassifyPin(version string) PinForm {
 	switch {
 	case version == LatestAlias:
 		return PinLatest
-	case domain.ID(version).HasPrefix(domain.PrefixSkillVersion) && domain.ID(version).Valid():
+	case domain.ID(version).HasPrefix(domain.PrefixSkillVersion) && domain.ID(version).Valid(),
+		domain.WellFormedID(version, domain.PrefixSkillVersion):
 		return PinID
 	case pinDigitsRe.MatchString(version):
 		return PinNumber

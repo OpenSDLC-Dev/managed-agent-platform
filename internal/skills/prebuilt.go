@@ -1,13 +1,13 @@
 package skills
 
-import "slices"
+// referencePrebuilt is the reference's own prebuilt skill catalog as recorded:
+// its skills list served xlsx, pptx, pdf and docx, each `source.type:
+// "anthropic"` (2026-09-02 batch2 #415 `skills.list`). It is the recording's
+// set, not the operator import's default list (cmd/controlplane
+// -import-skills), so widening what an import provisions cannot widen what an
+// agent create leaves unchecked.
+var referencePrebuilt = map[string]bool{"docx": true, "pdf": true, "pptx": true, "xlsx": true}
 
-// PrebuiltIDs are the short ids of the reference's own prebuilt skills: the
-// catalog its skills list was recorded serving (2026-09-02 batch2 #415
-// `skills.list` — xlsx, pptx, pdf and docx, each `source.type: "anthropic"`),
-// and the directories the operator import provisions by default
-// (cmd/controlplane -import-skills).
-var PrebuiltIDs = []string{"docx", "pdf", "pptx", "xlsx"}
-
-// IsPrebuilt reports whether id is one of PrebuiltIDs.
-func IsPrebuilt(id string) bool { return slices.Contains(PrebuiltIDs, id) }
+// IsReferencePrebuilt reports whether id names one of the reference's own
+// prebuilt skills.
+func IsReferencePrebuilt(id string) bool { return referencePrebuilt[id] }

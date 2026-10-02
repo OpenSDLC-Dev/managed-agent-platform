@@ -84,7 +84,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
@@ -95,7 +94,7 @@ var (
 		"run-once mode: path to a local checkout of github.com/anthropics/skills; import the -import-skills directories, then exit")
 	importVersion = flag.String("import-version", "",
 		"date version for the import (digits, YYYYMMDD; default: the checkout's last commit date via git)")
-	importSkills = flag.String("import-skills", strings.Join(skills.PrebuiltIDs, ","),
+	importSkills = flag.String("import-skills", "docx,pdf,pptx,xlsx",
 		"comma-separated skill directory names under <checkout>/skills to import")
 )
 

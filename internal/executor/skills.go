@@ -25,11 +25,11 @@ type skillRef struct {
 }
 
 // errSkillNotFound classifies a dangling reference. Agent create checks an
-// anthropic reference alone, and not one naming a prebuilt skill this catalog
-// lacks; it checks no custom reference (docs/plan/06_skills.md design decision
-// 7) and nothing on an agent update or a session override; and its check is a
-// read a concurrent delete can outrun (docs/DIVERGENCES.md). So a missing
-// skill or version surfaces here as a logged skip.
+// anthropic reference alone, and one naming a reference's prebuilt skill only
+// for its version's form; it checks no custom reference (docs/plan/06_skills.md
+// design decision 7) and nothing on an agent update or a session override; and
+// its check is a read a concurrent delete can outrun (docs/DIVERGENCES.md). So
+// a missing skill or version surfaces here as a logged skip.
 var errSkillNotFound = errors.New("skill not found")
 
 // materializeSkills lands the session agent's skills under {workdir}/skills/
