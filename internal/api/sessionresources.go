@@ -698,29 +698,51 @@ func validateRepoMountPath(p string) error {
 // file is mounted at. Every supplied path is rooted under the session's uploads
 // directory — "a mount_path of /data.csv places the file at
 // /mnt/session/uploads/data.csv in the sandbox" (docs, managed-agents/files
-// § "File paths") — so a leading "/" is that page's documented style ("paths
-// should be absolute"), not a filesystem root: "/data.csv" and "data.csv"
-// resolve alike. An **absolute** path already under the root passes through
-// cleaned but not re-rooted, which the reference's own data-analyst cookbook
-// requires: it mounts at the full /mnt/session/uploads/<name> and then prompts
-// the agent with that same path, which a second rooting would break. That is the
-// only form the cookbook evidence covers, so a relative "mnt/session/uploads/x"
-// is rooted like any other relative path.
+// § "File paths"), and the reference mounted "/tmp/elsewhere.txt" at
+// /mnt/session/uploads/tmp/elsewhere.txt (2026-09-02 batch2
+// sessF.create.file-mount.rooted-path) — so a leading "/" is that page's
+// documented style ("paths should be absolute"), not a filesystem root:
+// "/data.csv" and "data.csv" resolve alike. Two **absolute** spellings name
+// the uploads directory itself rather than a directory inside it, so neither
+// is rooted a second time:
+//
+//   - The full root. A path already under /mnt/session/uploads passes through
+//     cleaned: the reference echoed "/mnt/session/uploads/custom/notes.txt"
+//     unchanged (2026-09-02 batch2 sessF.create.file-mount), and its
+//     data-analyst cookbook mounts there and prompts the agent with that path.
+//   - "/uploads", the directory's short name (#848). "/uploads/<name>" lands at
+//     /mnt/session/uploads/<name> on every route that takes a file mount:
+//     session create, resources add and a deployment fire
+//     (2026-09-12-console-141 api-fixtures idx 13, ui-network idx 288, and
+//     the deployment of api-fixtures idx 15 fired as ui-network idx 266). It is
+//     the spelling the reference's own Console attach dialog and the SDK's
+//     request fixtures send.
+//
+// Each spelling is matched as a directory, not as a string prefix, so
+// "/uploadsx/y" roots like any other path. Each applies once, to the cleaned
+// path: "/uploads/mnt/session/uploads/x" is not unwrapped a second time. The
+// evidence covers only the absolute forms, so a relative "mnt/session/uploads/x"
+// or "uploads/x" roots like any other relative path. That a bare "/uploads"
+// names the root, and is refused below as "/mnt/session/uploads" is, is our
+// inference (docs/DIVERGENCES.md): the alias read the way the full root
+// already is.
 //
 // The caller's path is cleaned **before** it is rooted, so two spellings of one
-// path resolve alike: "/mnt/session/uploads/a/../../../../etc/passwd" and
-// "/../../etc/passwd" both clean to "/etc/passwd" and both land at
-// "/mnt/session/uploads/etc/passwd". Rooting the raw spelling instead would let
-// a ".." eat the duplicated root and land the file at a nested path no client
-// would look at — the very failure this rooting exists to prevent. Cleaning an
-// absolute path resolves its ".." entirely (POSIX makes "/.." the root), so only
-// a relative path whose cleaned form still leads with ".." can climb out, and
-// that is rejected. That leaves one asymmetry worth naming rather than hiding:
-// "/../etc/passwd" is accepted (it *is* "/etc/passwd") while "../etc/passwd" is
-// a 400, so under the "a leading slash is style, not a root" reading above these
-// two spell one intent and get opposite answers. Both are contained; the
-// alternative — rejecting a leading ".." on the absolute form too — would mean
-// declining to clean a path POSIX already defines, so the asymmetry is accepted.
+// path resolve alike: "/mnt/session/uploads/a/../../../../etc/passwd",
+// "/uploads/../../etc/passwd" and "/../../etc/passwd" all clean to
+// "/etc/passwd" and all land at "/mnt/session/uploads/etc/passwd". Rooting the
+// raw spelling instead would let a ".." eat the duplicated root and land the
+// file at a nested path no client would look at — the very failure this
+// rooting exists to prevent. Cleaning an absolute path resolves its ".."
+// entirely (POSIX makes "/.." the root), so only a relative path whose cleaned
+// form still leads with ".." can climb out, and that is rejected; the alias,
+// matched on the cleaned path, opens no other way. That leaves one asymmetry
+// worth naming rather than hiding: "/../etc/passwd" is accepted (it *is*
+// "/etc/passwd") while "../etc/passwd" is a 400, so under the "a leading slash
+// is style, not a root" reading above these two spell one intent and get
+// opposite answers. Both are contained; the alternative — rejecting a leading
+// ".." on the absolute form too — would mean declining to clean a path POSIX
+// already defines, so the asymmetry is accepted.
 //
 // The resolved path is what gets stored and mounted, so it — not the caller's
 // spelling — carries the bounds: it must stay under the root, be at most
@@ -732,9 +754,16 @@ func validateRepoMountPath(p string) error {
 // accepted single-tenant tampering residual the mount sentinel carries
 // (docs/DIVERGENCES.md), not something this resolver can answer.
 func resolveMountPath(p string) (string, error) {
+	const uploadsAlias = "/uploads"
 	root := strings.TrimSuffix(defaultMountRoot, "/")
 	resolved := path.Clean(p)
-	if resolved != root && !strings.HasPrefix(resolved, root+"/") {
+	switch {
+	case pathAtOrUnder(resolved, root):
+		// Already rooted: passes through cleaned.
+	case pathAtOrUnder(resolved, uploadsAlias):
+		// Cleaned and absolute, so the suffix is "" or "/…" free of "." and "..".
+		resolved = root + strings.TrimPrefix(resolved, uploadsAlias)
+	default:
 		resolved = path.Join(root, resolved)
 	}
 	// Also catches the root itself, which names a directory, not a mount target.
@@ -748,6 +777,12 @@ func resolveMountPath(p string) (string, error) {
 		return "", errInvalid("mount_path must be storable text")
 	}
 	return resolved, nil
+}
+
+// pathAtOrUnder reports whether clean path p is dir or lies below it, compared
+// by path segment: "/uploadsx" is not under "/uploads".
+func pathAtOrUnder(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, dir+"/")
 }
 
 // sealedToken is a repository's write-only token after the cipher: the

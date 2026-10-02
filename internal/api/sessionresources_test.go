@@ -93,8 +93,10 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 
 	// An explicit mount path is honored, rooted under the uploads directory —
 	// the same resolved path whether the caller spells it absolute or relative
-	// (managed-agents/files, "File paths"), and left alone when already rooted.
-	for _, given := range []string{"/data/in.txt", "data/in.txt", "/mnt/session/uploads/data/in.txt"} {
+	// (managed-agents/files, "File paths"), left alone when already rooted, and
+	// the uploads directory itself when it leads with "/uploads/" (#848, the
+	// recorded create of 2026-09-12-console-141 api-fixtures idx 13).
+	for _, given := range []string{"/data/in.txt", "data/in.txt", "/mnt/session/uploads/data/in.txt", "/uploads/data/in.txt"} {
 		sess2 := createSession(t, s, map[string]any{
 			"agent": agentID, "environment_id": envID,
 			"resources": []any{map[string]any{"type": "file", "file_id": fileA, "mount_path": given}},
@@ -148,6 +150,39 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 	if len(gr) != 1 || gr[0]["id"] != ridB {
 		t.Errorf("after delete: resources = %v, want only %s", gr, ridB)
 	}
+
+	// The add route resolves the "/uploads/" spelling alike: the recorded add of
+	// 2026-09-12-console-141 ui-network idx 288, answered with the same path.
+	status, aliased := s.do("POST", "/v1/sessions/"+sid+"/resources",
+		map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/rec141-extra.txt"})
+	if status != http.StatusOK {
+		t.Fatalf("add resource at /uploads/: %d %v", status, aliased)
+	}
+	if want := "/mnt/session/uploads/rec141-extra.txt"; aliased["mount_path"] != want {
+		t.Errorf("add mount_path = %v, want %s", aliased["mount_path"], want)
+	}
+}
+
+// TestDeploymentFireResolvesTheUploadsAlias pins the third recorded route for
+// a "/uploads/<name>" file mount (#848): the reference's deployment of
+// 2026-09-12-console-141 api-fixtures idx 15, fired as ui-network idx 266,
+// mounted its file at /mnt/session/uploads/rec141-input.txt (idx 268). The
+// deployment's own echo is not asserted: the reference echoed the given path
+// there, this platform the resolved one (docs/DIVERGENCES.md).
+func TestDeploymentFireResolvesTheUploadsAlias(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileID := uploadOneFile(t, s, "rec141-input.txt")
+
+	body := deploymentBody(agentID, envID)
+	body["resources"] = []any{map[string]any{
+		"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"}}
+	run := runDeployment(t, s, createDeployment(t, s, body)["id"].(string))
+	sid, _ := run["session_id"].(string)
+	res := resourcesOf(t, createGetSession(t, s, sid))
+	if len(res) != 1 || res[0]["mount_path"] != "/mnt/session/uploads/rec141-input.txt" {
+		t.Errorf("fired session resources = %v, want one file at /mnt/session/uploads/rec141-input.txt", res)
+	}
 }
 
 // createGetSession GETs a session and asserts 200.
@@ -185,6 +220,8 @@ func TestSessionResourceValidation(t *testing.T) {
 		// ".." resolves away and roots normally (resolveMountPath).
 		"mount path escaping the root": {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "../etc/passwd"}}, 400},
 		"mount path naming the root":   {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "/"}}, 400},
+		// "/uploads" is the uploads directory's short name, so it too names the root (#848).
+		"mount path naming the root by its alias": {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads"}}, 400},
 		"duplicate mount path": {[]any{
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
@@ -193,6 +230,10 @@ func TestSessionResourceValidation(t *testing.T) {
 		"duplicate after resolution": {[]any{
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "same"},
+		}, 400},
+		"duplicate after the uploads alias": {[]any{
+			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
+			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/same"},
 		}, 400},
 	} {
 		status, body := create(tc.resources)
@@ -239,6 +280,8 @@ func TestSessionResourceValidation(t *testing.T) {
 		"add nonexistent file":     {map[string]any{"type": "file", "file_id": "file_0000000000000000000000gk"}, 404},
 		"add github":               {map[string]any{"type": "github_repository"}, 400},
 		"add missing type":         {map[string]any{"file_id": fileA}, 400},
+		// The "/uploads/" spelling of the taken path collides as well (#848).
+		"add duplicate via the uploads alias": {map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/taken"}, 400},
 	}
 	for name, tc := range addCases {
 		status, body := s.do("POST", "/v1/sessions/"+sid+"/resources", tc.body)
