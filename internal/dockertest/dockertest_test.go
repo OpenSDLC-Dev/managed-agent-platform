@@ -155,7 +155,7 @@ func TestARemovalThatLosesARaceWaitsForTheWinnerRatherThanAnnouncingIt(t *testin
 		listedFor int
 		within    time.Duration
 		announced bool
-		prompt    bool // answered without waiting out within
+		prompt    bool // answered after one look, without waiting out within
 	}{
 		"the winner's removal finishes": {refusal: inProgress, listedFor: 2, within: 10 * time.Second},
 		"nobody's removal finishes": {refusal: inProgress, listedFor: 1_000_000, within: time.Second,
@@ -167,23 +167,23 @@ func TestARemovalThatLosesARaceWaitsForTheWinnerRatherThanAnnouncingIt(t *testin
 			listedFor: 0, within: 10 * time.Second, prompt: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fakeDocker(t, tc.refusal, tc.listedFor)
+			looks := fakeDocker(t, tc.refusal, tc.listedFor)
 			ctx, cancel := context.WithTimeout(context.Background(), tc.within)
 			defer cancel()
 
 			var removed bool
-			start := time.Now()
 			said := stderrOf(t, func() { removed = removeContainer(ctx, "dockertest", "c0ffee") })
-			took := time.Since(start)
 			if removed {
 				t.Errorf("a refused removal was reported as this call's own")
 			}
 			if announced := said != ""; announced != tc.announced {
 				t.Errorf("announced = %v (%q), want %v", announced, said, tc.announced)
 			}
-			if tc.prompt && took > tc.within/4 {
-				t.Errorf("answered after %s of a %s deadline; a refusal with no winner to wait for "+
-					"must not wait", took, tc.within)
+			// Counted, not timed: a wall-clock bound flakes on a loaded machine,
+			// and the claim is that nothing is waited for — one look, no poll.
+			if n := looks(); tc.prompt && n != 1 {
+				t.Errorf("looked %d times; a refusal with no winner to wait for must be "+
+					"answered after one look", n)
 			}
 		})
 	}
@@ -191,8 +191,9 @@ func TestARemovalThatLosesARaceWaitsForTheWinnerRatherThanAnnouncingIt(t *testin
 
 // fakeDocker puts a `docker` on PATH whose `rm` always fails with refusal, and
 // whose `ps` lists the container for its first listedFor calls and then reports
-// it gone. Builtins only, because PATH holds nothing else.
-func fakeDocker(t *testing.T, refusal string, listedFor int) {
+// it gone. Builtins only, because PATH holds nothing else. It returns a count of
+// the `ps` calls made so far.
+func fakeDocker(t *testing.T, refusal string, listedFor int) (looks func() int) {
 	t.Helper()
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "ps-calls")
@@ -215,6 +216,20 @@ exit 2
 		t.Fatalf("write the fake docker: %v", err)
 	}
 	t.Setenv("PATH", dir)
+	return func() int {
+		b, err := os.ReadFile(calls)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatalf("read the fake docker's ps count: %v", err)
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil {
+			t.Fatalf("parse the fake docker's ps count %q: %v", b, err)
+		}
+		return n
+	}
 }
 
 // stderrOf runs f and returns what it wrote to os.Stderr, which is where
