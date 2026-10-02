@@ -345,17 +345,24 @@ func TestAnIssuerThatNamesNoLifetimeLeavesTheExpiryUnknown(t *testing.T) {
 // comparison: a token that outlives the dial is sent as it is. The two rows
 // either side of the leeway sit close enough to it — half a minute in, half a
 // minute out — that moving the leeway in either direction fails one of them.
+//
+// Each expiry is read off the wall clock as its row is written, because that is
+// the clock the decision compares against and half a minute is all the room
+// there is. Taken once for the whole table, "outside it" also had to absorb
+// every subtest that ran before it — and a laptop that slept for 62 s between
+// two of them spent the margin while the test reported 3.7 s, since Go's
+// monotonic clock stops through a suspend and the wall clock does not (#843).
 func TestWhenTheExpiryDecidesToRefresh(t *testing.T) {
 	for name, row := range map[string]struct {
-		expiresAt *time.Time
+		expiresAt func() *time.Time
 		want      string
 		exchanges int
 	}{
-		"long expired":      {ago(time.Hour), "access-1", 1},
-		"just expired":      {ago(time.Second), "access-1", 1},
-		"inside the leeway": {ahead(30 * time.Second), "access-1", 1},
-		"outside it":        {ahead(90 * time.Second), "still-good", 0},
-		"no expiry named":   {nil, "still-good", 0},
+		"long expired":      {func() *time.Time { return ago(time.Hour) }, "access-1", 1},
+		"just expired":      {func() *time.Time { return ago(time.Second) }, "access-1", 1},
+		"inside the leeway": {func() *time.Time { return ahead(30 * time.Second) }, "access-1", 1},
+		"outside it":        {func() *time.Time { return ahead(90 * time.Second) }, "still-good", 0},
+		"no expiry named":   {func() *time.Time { return nil }, "still-good", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool := pgtest.NewPool(t)
@@ -363,8 +370,9 @@ func TestWhenTheExpiryDecidesToRefresh(t *testing.T) {
 			issuer := newTokenEndpoint(t, grants(`,"expires_in":3600`))
 
 			v := newVault(t, pool, false)
+			written := time.Now()
 			newRefreshableCred(t, pool, cipher, v, refreshable{
-				expiresAt: row.expiresAt, endpoint: issuer.URL,
+				expiresAt: row.expiresAt(), endpoint: issuer.URL,
 				sealed: map[string]string{"access_token": "still-good", "refresh_token": "refresh-1"},
 			})
 
@@ -374,7 +382,10 @@ func TestWhenTheExpiryDecidesToRefresh(t *testing.T) {
 				t.Fatal(err)
 			}
 			if got != row.want {
-				t.Errorf("resolved %q, want %q", got, row.want)
+				// Round(0) drops the monotonic reading, so this is the wall-clock
+				// time the decision saw pass — a suspend included.
+				t.Errorf("resolved %q, want %q; the wall clock moved %s between writing the row and resolving it",
+					got, row.want, time.Now().Round(0).Sub(written.Round(0)))
 			}
 			if n := issuer.calls(); n != row.exchanges {
 				t.Errorf("the issuer was called %d times, want %d", n, row.exchanges)

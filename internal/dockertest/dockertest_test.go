@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -100,6 +103,156 @@ func TestSweepStraysRemovesAnAgedContainerAndSparesAFreshOne(t *testing.T) {
 	if gone(context.Background(), fresh) {
 		t.Errorf("fresh container %s was reaped; a concurrent suite's live fixture would have been too", fresh)
 	}
+}
+
+// A sweep that loses to a sibling binary's is refused with "removal of
+// container … is already in progress", and the container stays listed until the
+// winner's removal finishes (#843). goneBefore is what waits that out, so it is
+// checked against a container another process removes a moment later — and
+// against one nobody removes, which must still come back as not gone once the
+// deadline passes, or a removal that really failed would never be announced.
+func TestGoneBeforeWaitsOutARemovalAnotherProcessHasUnderWay(t *testing.T) {
+	removed := plant(t, time.Now())
+	kept := plant(t, time.Now())
+	if gone(context.Background(), removed) {
+		t.Fatalf("container %s is gone before anything removed it", removed)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(time.Second)
+		done <- exec.Command("docker", "rm", "-f", "-v", removed).Run()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if !goneBefore(ctx, removed) {
+		t.Errorf("container %s, removed a second into the wait, was not seen to go", removed)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the concurrent removal failed: %v", err)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if goneBefore(ctx, kept) {
+		t.Errorf("container %s, which nothing removed, was reported gone", kept)
+	}
+}
+
+// removeContainer is where the wait is wired in: a removal refused because
+// another is already under way must wait for the winner rather than announce a
+// failure on its first look, and one that nobody completes must still be
+// announced (#843). Every other refusal has no winner to wait for, so it gets
+// one look and, unless that shows the container gone, is announced at once —
+// waiting it out instead would spend the sweep's budget on containers nobody is
+// removing. A real daemon cannot be made to have a removal in flight at the
+// moment this one runs, so a fake `docker` stands in: `rm` is refused with the
+// given text, and `ps` lists the container for its first listedFor calls only.
+func TestARemovalThatLosesARaceWaitsForTheWinnerRatherThanAnnouncingIt(t *testing.T) {
+	const inProgress = "Error response from daemon: removal of container c0ffee is already in progress"
+	for name, tc := range map[string]struct {
+		refusal   string
+		listedFor int
+		within    time.Duration
+		announced bool
+		prompt    bool // answered after one look, without waiting out within
+	}{
+		"the winner's removal finishes": {refusal: inProgress, listedFor: 2, within: 10 * time.Second},
+		"nobody's removal finishes": {refusal: inProgress, listedFor: 1_000_000, within: time.Second,
+			announced: true},
+		"any other refusal is announced at once": {refusal: "Error response from daemon: permission denied",
+			listedFor: 1_000_000, within: 10 * time.Second, announced: true, prompt: true},
+		"any other refusal of a container already gone is silent": {
+			refusal:   "Error response from daemon: No such container: c0ffee",
+			listedFor: 0, within: 10 * time.Second, prompt: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			looks := fakeDocker(t, tc.refusal, tc.listedFor)
+			ctx, cancel := context.WithTimeout(context.Background(), tc.within)
+			defer cancel()
+
+			var removed bool
+			said := stderrOf(t, func() { removed = removeContainer(ctx, "dockertest", "c0ffee") })
+			if removed {
+				t.Errorf("a refused removal was reported as this call's own")
+			}
+			if announced := said != ""; announced != tc.announced {
+				t.Errorf("announced = %v (%q), want %v", announced, said, tc.announced)
+			}
+			// Counted, not timed: a wall-clock bound flakes on a loaded machine,
+			// and the claim is that nothing is waited for — one look, no poll.
+			if n := looks(); tc.prompt && n != 1 {
+				t.Errorf("looked %d times; a refusal with no winner to wait for must be "+
+					"answered after one look", n)
+			}
+		})
+	}
+}
+
+// fakeDocker puts a `docker` on PATH whose `rm` always fails with refusal, and
+// whose `ps` lists the container for its first listedFor calls and then reports
+// it gone. Builtins only, because PATH holds nothing else. It returns a count of
+// the `ps` calls made so far.
+func fakeDocker(t *testing.T, refusal string, listedFor int) (looks func() int) {
+	t.Helper()
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "ps-calls")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+rm)
+	echo %[3]q >&2
+	exit 1 ;;
+ps)
+	n=0
+	[ -f %[1]q ] && read n < %[1]q
+	n=$((n + 1))
+	echo "$n" > %[1]q
+	[ "$n" -le %[2]d ] && echo c0ffee
+	exit 0 ;;
+esac
+exit 2
+`, calls, listedFor, refusal)
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write the fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	return func() int {
+		b, err := os.ReadFile(calls)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatalf("read the fake docker's ps count: %v", err)
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil {
+			t.Fatalf("parse the fake docker's ps count %q: %v", b, err)
+		}
+		return n
+	}
+}
+
+// stderrOf runs f and returns what it wrote to os.Stderr, which is where
+// removeContainer announces a container it could not clear.
+func stderrOf(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	old := os.Stderr
+	os.Stderr = w
+	func() {
+		defer func() { os.Stderr = old }()
+		f()
+	}()
+	w.Close()
+	said, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(said)
 }
 
 // plant creates a stopped container labelled as a fixture started at the given
