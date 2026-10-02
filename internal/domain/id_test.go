@@ -152,49 +152,6 @@ func TestIDValid(t *testing.T) {
 	}
 }
 
-// TestValidWithPrefix pins the prefix-narrowed spelling directly, on envkey_
-// because that prefix is deliberately absent from knownPrefixes: it shows the
-// function answers for a prefix Valid never can, and that admitting one here
-// widens nothing on the wire.
-func TestValidWithPrefix(t *testing.T) {
-	if id := NewID(PrefixEnvironmentKey).String(); !ValidWithPrefix(id, PrefixEnvironmentKey) {
-		t.Errorf("NewID(%q) = %q must satisfy ValidWithPrefix", PrefixEnvironmentKey, id)
-	}
-	// The whole point of keeping envkey_ out of knownPrefixes: the wire's own
-	// validator must keep rejecting it, so admitting it here widens nothing.
-	if ID(NewID(PrefixEnvironmentKey)).Valid() {
-		t.Error("an envkey_ id must not be Valid on the wire's prefix set")
-	}
-
-	good := "envkey_0123456789abcdefghjkmnp"
-	invalid := map[string]string{
-		"empty":            "",
-		"prefix only":      "envkey",
-		"empty token":      "envkey_",
-		"just underscore":  "_",
-		"wrong prefix":     "env_0123456789abcdefghjkmnp",
-		"prefix is a pre":  "envkeys_0123456789",
-		"out-of-alphabet":  "envkey_illo",
-		"uppercase":        "envkey_ABCDE",
-		"underscore token": "envkey_ab_cd",
-		"nul byte":         "envkey_\x00",
-		"nul mid-token":    "envkey_ab\x00cd",
-		"invalid utf-8":    "envkey_\x80",
-		"leading space":    " envkey_abcde",
-		"trailing space":   "envkey_abcde ",
-	}
-	for name, id := range invalid {
-		if ValidWithPrefix(id, PrefixEnvironmentKey) {
-			t.Errorf("%s: %q should be invalid under %q", name, id, PrefixEnvironmentKey)
-		}
-	}
-	// The prefix is the caller's to name, and naming a different one rejects an
-	// otherwise well-formed id — which is what makes this safe to reuse.
-	if ValidWithPrefix(good, PrefixAgent) {
-		t.Errorf("%q must not validate under the agent prefix", good)
-	}
-}
-
 // TestWellFormedID pins the shape the surfaces that tell a malformed id from
 // an absent one read ids by (#841). Well-formed: every id NewID mints, the
 // fixed ids this platform writes, and the reference's own — each recorded one

@@ -410,9 +410,10 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 // domain.WellFormedID refuses in an agent or a thread id — the reference parses
 // those and evidently not this one. So such an id goes on to the store lookup,
 // which answers it that way. That shape also holds the token to storable text,
-// which a string decoded from a JSON body already is: decoding replaces invalid
-// UTF-8, and decodeObject's body-wide check has refused U+0000. The deployment
-// routes keep the full shape: they look no store up until a fire.
+// which a string decoded from the body already is: the body decoder has
+// refused invalid UTF-8 and U+0000 outright, and a lone-surrogate escape
+// decodes to U+FFFD, which Postgres stores. The deployment routes keep the
+// full shape: they look no store up until a fire.
 func parseMemoryResource(obj map[string]json.RawMessage, f resourceFlavor, i int) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "memory_store_id", "access", "instructions"); err != nil {
 		return resourceInput{}, err

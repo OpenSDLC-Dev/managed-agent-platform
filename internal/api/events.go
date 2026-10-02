@@ -145,7 +145,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// the calls no client may answer, which closes the scan-to-commit
 	// double-answer window on self_hosted (#222).
 	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, platformExecuted); err != nil {
-		return nil, errInvalid("%s", err)
+		return nil, sendCheckError(err)
 	}
 	// A confirmation must name a tool use still awaiting one; like a tool
 	// result, a bad reference on the append-only log would wedge the resume.
@@ -158,7 +158,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				"request_id", requestIDFrom(ctx), "session_id", id,
 				"tool_use_id", np.ToolUseID, "reason", np.Reason)
 		}
-		return nil, errInvalid("%s", err)
+		return nil, sendCheckError(err)
 	}
 
 	// Every inbound event addresses one thread (plan 35 decision 9): a
@@ -169,7 +169,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// primary. Routed here, validated, before the triggers decide per thread.
 	scoped, err := events.RouteInbound(ctx, tx, domain.ID(id), newEvents)
 	if err != nil {
-		return nil, routeInboundError(err)
+		return nil, sendCheckError(err)
 	}
 
 	// Route input per thread, then settle its ordered tool flow under the same
@@ -241,7 +241,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	interruptCanSettle := hasInterrupt && at("").interrupt &&
 		(primaryStatus == string(domain.SessionIdle) || primaryStatus == string(domain.SessionRunning))
 	if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), newEvents, interruptCanSettle); err != nil {
-		return nil, errInvalid("%s", err)
+		return nil, sendCheckError(err)
 	}
 	defs, err := events.DefineOutcomes(newEvents)
 	if err != nil {
@@ -766,18 +766,21 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	return map[string]any{"data": data}, nil
 }
 
-// routeInboundError answers RouteInbound's refusals: an interrupt naming no
-// thread of the session is the reference's 404, the client's other mistakes
-// are 400s, and anything else — a database error, a cancelled context — is
-// returned as it came, to take writeError's 500 without its text.
-func routeInboundError(err error) error {
+// sendCheckError answers the refusals of the checks a send runs against the
+// log (RouteInbound, ValidateToolResults, ValidateToolConfirmations,
+// ValidateDefineOutcomes): an interrupt naming no thread of the session is the
+// reference's 404, the client's other mistakes are 400s, and anything else — a
+// database error, a cancelled context — is returned as it came, to take
+// writeError's 500 without its text.
+func sendCheckError(err error) error {
 	var noThread *events.ThreadNotFoundError
-	var refusal *events.RouteRefusal
+	var refusal *events.Refusal
+	var noPending *events.NoPendingConfirmationError
 	switch {
 	case errors.As(err, &noThread):
 		return errNotFound("%s", noThread)
-	case errors.As(err, &refusal):
-		return errInvalid("%s", refusal)
+	case errors.As(err, &refusal), errors.As(err, &noPending):
+		return errInvalid("%s", err)
 	}
 	return err
 }

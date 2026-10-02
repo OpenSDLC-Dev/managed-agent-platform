@@ -102,6 +102,11 @@ type apiErrorWithHeaders struct {
 	headers map[string]string
 }
 
+// Unwrap exposes the apiError underneath, as apiErrorWithFields' does, so a
+// caller that classifies an error by its status with errors.As sees through
+// the headers.
+func (e *apiErrorWithHeaders) Unwrap() error { return &e.apiError }
+
 func (e *apiError) Error() string { return e.message }
 
 func errInvalid(format string, args ...any) *apiError {

@@ -515,10 +515,22 @@ func isNullRaw(raw json.RawMessage) bool {
 	return string(raw) == "null"
 }
 
-// threadClaim reads an interrupt's explicit session_thread_id (plan 35
-// decision 9): null or absent is no claim, anything but a string is refused,
-// and a string must be a well-formed thread id by domain.WellFormedID — a
-// malformed one in the reference's words (2026-09-02 batch2
+// readClaim reads an inbound event's explicit session_thread_id: set is false
+// for null or absent, and anything but a string is refused.
+func readClaim(obj map[string]json.RawMessage) (claim string, set bool, err error) {
+	raw, ok := obj["session_thread_id"]
+	if !ok || isNullRaw(raw) {
+		return "", false, nil
+	}
+	if err := json.Unmarshal(raw, &claim); err != nil {
+		return "", false, errors.New("session_thread_id must be a string or null")
+	}
+	return claim, true, nil
+}
+
+// threadClaim reads an interrupt's session_thread_id (plan 35 decision 9): a
+// string must be a well-formed thread id by domain.WellFormedID — a malformed
+// one is refused in the reference's words (2026-09-02 batch2
 // `sessK.send.interrupt.sth_-prefix` and `.unknown-thread`, #540), while a
 // reference-format one goes on to the lookup (#841). The claim rides
 // NewEvent.ThreadID out of normalization for RouteInbound to resolve against
@@ -526,13 +538,9 @@ func isNullRaw(raw json.RawMessage) bool {
 // session_thread_id null, rendered per surface like every thread-addressable
 // event.
 func threadClaim(obj map[string]json.RawMessage) (domain.ID, error) {
-	raw, set := obj["session_thread_id"]
-	if !set || isNullRaw(raw) {
-		return "", nil
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", errClaimType
+	s, set, err := readClaim(obj)
+	if err != nil || !set {
+		return "", err
 	}
 	if !domain.WellFormedID(s, domain.PrefixSessionThread) {
 		return "", verbatim{ref: "Invalid session_thread_id: " + s,
@@ -542,28 +550,18 @@ func threadClaim(obj map[string]json.RawMessage) (domain.ID, error) {
 }
 
 // answerClaim checks a tool confirmation's or a tool result's
-// session_thread_id for its type alone: null, absent or a string. Whatever the
-// string says is dropped. The reference was recorded accepting a tool
-// confirmation that named another thread of the session, an unknown thread or
-// an `sth_` value, and storing it on the call's own thread (#334–#336
-// `sessK2.send.tool_confirmation.*`; #841): it routes an answer by the call it
-// answers, as RouteInbound does, so the claim decides nothing. A tool result's
-// and a custom tool result's claim go the same way (INFERRED,
-// docs/DIVERGENCES.md; neither is recorded): RouteInbound routes all three by
-// the one lookup.
+// session_thread_id for its type alone, and drops whatever the string says.
+// The reference was recorded accepting a tool confirmation that named another
+// thread of the session, an unknown thread or an `sth_` value, and storing it
+// on the call's own thread (#334–#336 `sessK2.send.tool_confirmation.*`;
+// #841): it routes an answer by the call it answers, as RouteInbound does, so
+// the claim decides nothing. A tool result's and a custom tool result's claim
+// go the same way (INFERRED, docs/DIVERGENCES.md; neither is recorded):
+// RouteInbound routes all three by the one lookup.
 func answerClaim(obj map[string]json.RawMessage) error {
-	raw, set := obj["session_thread_id"]
-	if !set || isNullRaw(raw) {
-		return nil
-	}
-	var s string
-	if json.Unmarshal(raw, &s) != nil {
-		return errClaimType
-	}
-	return nil
+	_, _, err := readClaim(obj)
+	return err
 }
-
-var errClaimType = errors.New("session_thread_id must be a string or null")
 
 // Content-block vocabularies per carrier event.
 var (

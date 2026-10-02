@@ -20,16 +20,18 @@ type ThreadNotFoundError struct{ ID domain.ID }
 
 func (e *ThreadNotFoundError) Error() string { return "Thread not found: " + e.ID.String() }
 
-// RouteRefusal is the client's error in a batch RouteInbound refuses: the API
-// answers it 400. Every other error RouteInbound returns but a
-// *ThreadNotFoundError is a fault reading the log — a database error, a
-// cancelled context — and none of it is the client's to read.
-type RouteRefusal struct{ msg string }
+// Refusal is the client's error in a send batch the log-reading checks refuse
+// — RouteInbound, ValidateToolResults, ValidateToolConfirmations and
+// ValidateDefineOutcomes: the API answers it 400. Every other error they
+// return, a *ThreadNotFoundError and a *NoPendingConfirmationError aside, is a
+// fault reading the log — a database error, a cancelled context — and none of
+// it is the client's to read.
+type Refusal struct{ msg string }
 
-func (e *RouteRefusal) Error() string { return e.msg }
+func (e *Refusal) Error() string { return e.msg }
 
-func refuseRoute(format string, args ...any) error {
-	return &RouteRefusal{fmt.Sprintf(format, args...)}
+func refuse(format string, args ...any) error {
+	return &Refusal{fmt.Sprintf(format, args...)}
 }
 
 // RouteInbound resolves the thread each inbound event addresses (plan 35
@@ -61,11 +63,9 @@ func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []New
 			if refKey == "" {
 				refKey = "tool_use_id"
 			}
-			// The payload is normalization's own, so a reference it cannot
-			// read is a fault, not the client's.
 			ref, err := payloadString(ev.Payload, refKey)
 			if err != nil {
-				return nil, fmt.Errorf("route inbound event: %w", err)
+				return nil, refuse("events[%d]: %v", i, err)
 			}
 			var thread string
 			var crossPosted bool
@@ -73,7 +73,7 @@ func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []New
 				`SELECT COALESCE(thread_id, ''), cross_posted FROM events WHERE session_id = $1 AND id = $2`,
 				sessionID.String(), ref).Scan(&thread, &crossPosted)
 			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, refuseRoute("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
+				return nil, refuse("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("route inbound event: %w", err)
@@ -101,12 +101,12 @@ func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []New
 				return nil, fmt.Errorf("route inbound event: %w", err)
 			}
 			if archivedAt != nil {
-				return nil, refuseRoute("events[%d]: thread %s is archived", i, claim)
+				return nil, refuse("events[%d]: thread %s is archived", i, claim)
 			}
 			// Not live even before archived_at lands: termination and archiving
 			// travel together today, but the claim's rule is the fold's.
 			if status == string(domain.SessionTerminated) {
-				return nil, refuseRoute("events[%d]: thread %s is terminated", i, claim)
+				return nil, refuse("events[%d]: thread %s is terminated", i, claim)
 			}
 			ev.CrossPosted = true
 		}

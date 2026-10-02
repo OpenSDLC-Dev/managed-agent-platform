@@ -463,6 +463,30 @@ func TestAgentPathRefusesAMalformedID(t *testing.T) {
 	}
 }
 
+// The two agent_id list filters read an id as the agent routes do
+// (domain.WellFormedID, #841): the reference's own format and the runner's
+// fixed agent_dreamrunner filter to a page, empty here, rather than the 400 a
+// malformed id gets.
+func TestAgentIDFiltersReadIDsAsTheAgentRoutesDo(t *testing.T) {
+	s := newTestServer(t)
+	for _, list := range []string{"/v1/sessions", "/v1/deployments"} {
+		for _, id := range []string{"agent_dreamrunner", "agent_01UreT9PZKHtpNLgeSGzPCQh", absentAgentID} {
+			status, body := s.do(http.MethodGet, list+"?agent_id="+id, nil)
+			if status != http.StatusOK || len(listData(t, body)) != 0 {
+				t.Errorf("%s?agent_id=%s: %d %v, want an empty page", list, id, status, body)
+			}
+		}
+		for _, id := range []string{"undefined", "sesn_" + strings.Repeat("0", 24), "agent_01UnknownAgentIdXXXXXXXX", "agent_%00"} {
+			status, body := s.do(http.MethodGet, list+"?agent_id="+id, nil)
+			if status != http.StatusBadRequest {
+				t.Errorf("%s?agent_id=%s: status %d, want 400 (%v)", list, id, status, body)
+				continue
+			}
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "agent_id must be a valid agent id")
+		}
+	}
+}
+
 func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 	s := newTestServer(t)
 	created := createAgent(t, s, map[string]any{"name": "v", "model": "m1", "system": "keep me"})

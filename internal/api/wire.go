@@ -175,11 +175,13 @@ func fieldPath(path string) string {
 // checkID rejects a malformed path id with the 404 an unknown id already gets.
 // Path IDs and id-shaped query parameters are the separate surface rejectNULBody
 // flags: http.ServeMux decodes %00 into a real NUL in PathValue / URL.Query, and
-// — like any non-alphabet or invalid-UTF-8 byte — it binds straight into
-// Postgres and fails as a 500 (SQLSTATE 22021). A server-minted id never carries
-// such a byte, so validating the id's shape before it reaches a bind parameter
-// closes the whole class. resource names the resource in the wire message, so a
-// malformed id is indistinguishable from a merely-absent one (see #135).
+// — like an invalid-UTF-8 byte — it binds straight into Postgres and fails as a
+// 500 (SQLSTATE 22021). domain.Valid admits only this platform's minting
+// alphabet, which holds neither, so validating the id's shape before it reaches
+// a bind parameter closes the whole class. resource names the resource in the
+// wire message, so a malformed id is indistinguishable from a merely-absent one
+// (see #135). Where the reference tells the two apart, the id is read by
+// domain.WellFormedID instead (checkAgentPathID, threadIDs).
 func checkID(id, resource string) error {
 	if !domain.ID(id).Valid() {
 		return errNotFound("%s %s not found", resource, id)

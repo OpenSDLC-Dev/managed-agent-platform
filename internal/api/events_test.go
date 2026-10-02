@@ -369,7 +369,7 @@ func TestSendValidationSweep(t *testing.T) {
 			"content": []any{map[string]any{"type": "text", "text": ""}}}}}, "events.0.user_message.content.0.text: value is required"},
 		// 2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
 		// `sessK.send.interrupt.unknown-thread`: the wrong prefix, and the
-		// recorded malformed id — its token outside the id alphabet.
+		// recorded malformed id — the I in its token (domain.WellFormedID).
 		{"thread id with the sth_ prefix", map[string]any{"events": []any{map[string]any{
 			"type": "user.interrupt", "session_thread_id": "sth_01HbamSkv49mRn4JHt9ryS6T"}}},
 			"Invalid session_thread_id: sth_01HbamSkv49mRn4JHt9ryS6T"},

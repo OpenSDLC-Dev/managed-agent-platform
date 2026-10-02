@@ -580,10 +580,10 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		}
 		ref, err := payloadString(ev.Payload, refKey)
 		if err != nil {
-			return fmt.Errorf("events[%d]: %w", i, err)
+			return refuse("events[%d]: %v", i, err)
 		}
 		if seen[ref] {
-			return fmt.Errorf("events[%d]: duplicate result for %s %q in one request", i, refKey, ref)
+			return refuse("events[%d]: duplicate result for %s %q in one request", i, refKey, ref)
 		}
 		seen[ref] = true
 
@@ -603,16 +603,16 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 			 FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
 			sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &name, &perm, &answered, &confirmed)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
+			return refuse("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
 		}
 		if err != nil {
 			return fmt.Errorf("validate tool result: %w", err)
 		}
 		if domain.EventType(useType) != wantUse {
-			return fmt.Errorf("events[%d]: %s %q references a %s event, not %s", i, refKey, ref, useType, wantUse)
+			return refuse("events[%d]: %s %q references a %s event, not %s", i, refKey, ref, useType, wantUse)
 		}
 		if answered {
-			return fmt.Errorf("events[%d]: tool use %q already has a result", i, ref)
+			return refuse("events[%d]: tool use %q already has a result", i, ref)
 		}
 		// A platform-owned call is never the client's to answer, answered or
 		// not: while the executor's web pass runs between its scan and its
@@ -620,7 +620,7 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		// wave the client's result through — the second answer then commits
 		// with the executor's settlement (#222).
 		if platformOwned != nil && wantUse == domain.EventAgentToolUse && platformOwned(name) {
-			return fmt.Errorf("events[%d]: tool use %q (%s) is platform-executed and cannot be answered by a client result", i, ref, name)
+			return refuse("events[%d]: tool use %q (%s) is platform-executed and cannot be answered by a client result", i, ref, name)
 		}
 		// An ask-gated tool must be allowed before any result answers it: a
 		// premature result would bypass the human approval and, on a later
@@ -628,7 +628,7 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		// A queued denial is already authoritative even while an earlier call
 		// prevents its result from being synthesized.
 		if perm == string(domain.EvalPermAsk) && !confirmed {
-			return fmt.Errorf("events[%d]: tool use %q is awaiting confirmation and cannot be answered yet", i, ref)
+			return refuse("events[%d]: tool use %q is awaiting confirmation and cannot be answered yet", i, ref)
 		}
 	}
 	return nil
@@ -680,10 +680,10 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 		}
 		ref, err := payloadString(ev.Payload, "tool_use_id")
 		if err != nil {
-			return fmt.Errorf("events[%d]: %w", i, err)
+			return refuse("events[%d]: %v", i, err)
 		}
 		if seen[ref] {
-			return fmt.Errorf("events[%d]: duplicate confirmation for tool_use_id %q in one request", i, ref)
+			return refuse("events[%d]: duplicate confirmation for tool_use_id %q in one request", i, ref)
 		}
 		seen[ref] = true
 
@@ -713,7 +713,7 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 				Reason: "tool use was not gated for confirmation"}
 		}
 		if confirmed {
-			return fmt.Errorf("events[%d]: tool use %q is already confirmed", i, ref)
+			return refuse("events[%d]: tool use %q is already confirmed", i, ref)
 		}
 		// A gated call that already has a result was abandoned by a
 		// user.interrupt, which answers everything outstanding without asking
@@ -721,7 +721,7 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 		// result for the same call onto the append-only log — the double-answer
 		// ValidateToolResults refuses from the other direction.
 		if answered {
-			return fmt.Errorf("events[%d]: tool use %q was already answered and can no longer be confirmed", i, ref)
+			return refuse("events[%d]: tool use %q was already answered and can no longer be confirmed", i, ref)
 		}
 	}
 	return nil

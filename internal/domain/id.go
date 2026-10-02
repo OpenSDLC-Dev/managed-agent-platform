@@ -168,18 +168,6 @@ func (id ID) Valid() bool {
 	return ok && knownPrefixes[prefix] && validToken(token)
 }
 
-// ValidWithPrefix is Valid narrowed to one prefix the caller names, whether or
-// not knownPrefixes holds it: the exact shape NewID emits for that prefix. No
-// route reads ids by it now. The surfaces where the reference tells a
-// malformed id from an absent one read the wider WellFormedID, which admits the
-// reference's own ids (#841), and the console's envkey_ and apikey_ ids are
-// checked for their prefix and storable bytes (#664); plan 42 names it for a
-// workspace id, which this platform alone mints.
-func ValidWithPrefix(id, prefix string) bool {
-	p, token, ok := strings.Cut(id, "_")
-	return ok && p == prefix && validToken(token)
-}
-
 // WellFormedID reports whether id is shaped like an id of the resource prefix
 // names, on the surfaces where the reference was recorded telling a malformed
 // id from an absent one: prefix_, then a non-empty token of ASCII letters and
@@ -212,9 +200,8 @@ func WellFormedID(id, prefix string) bool {
 	return true
 }
 
-// validToken holds the rule Valid and ValidWithPrefix share: a non-empty token
-// drawn only from idAlphabet. One copy, so the two entry points cannot drift on
-// what an acceptable id body is.
+// validToken is Valid's rule for the token: non-empty and drawn only from
+// idAlphabet.
 func validToken(token string) bool {
 	if token == "" {
 		return false

@@ -144,17 +144,17 @@ func TestCapForLogCutsAtARuneBoundary(t *testing.T) {
 	}
 }
 
-// RouteInbound's faults are not the client's (#841): a database error or a
-// cancelled context it returns takes writeError's 500 without its text, while
+// A send check's faults are not the client's (#841): a database error or a
+// cancelled context one returns takes writeError's 500 without its text, while
 // the interrupt naming no thread is the reference's 404 in its words. The
 // events package pins which of its errors are which
-// (TestRouteInboundTellsRefusalsFromFaults); this pins what each answers.
-func TestRouteInboundFaultsAnswerAsFaults(t *testing.T) {
+// (TestSendChecksTellRefusalsFromFaults); this pins what each answers.
+func TestSendCheckFaultsAnswerAsFaults(t *testing.T) {
 	render := func(err error) (int, string) {
 		r := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_x/events", nil)
 		r = r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID, "req_x"))
 		w := httptest.NewRecorder()
-		writeError(w, r, routeInboundError(err))
+		writeError(w, r, sendCheckError(err))
 		return w.Code, w.Body.String()
 	}
 	status, body := render(fmt.Errorf("route inbound event: %w", context.Canceled))
@@ -165,5 +165,20 @@ func TestRouteInboundFaultsAnswerAsFaults(t *testing.T) {
 	status, body = render(&events.ThreadNotFoundError{ID: "sthr_01DdMGc4KudV1Z22t2L7Y9QH"})
 	if want := `{"error":{"message":"Thread not found: sthr_01DdMGc4KudV1Z22t2L7Y9QH","type":"not_found_error"},"request_id":"req_x","type":"error"}`; status != http.StatusNotFound || body != want+"\n" {
 		t.Errorf("an absent thread rendered %d %s, want 404 %s", status, body, want)
+	}
+}
+
+// Both decorated errors unwrap to the apiError beneath, so errors.As reads the
+// status and type through the extra members or the pinned headers alike — a
+// noRetry'd 409 among them (#841).
+func TestDecoratedErrorsUnwrapToTheirAPIError(t *testing.T) {
+	for name, err := range map[string]error{
+		"headers": noRetry(errConflict("blocked")),
+		"fields":  withDetails(errConflict("blocked"), errorDetails{ErrorCode: "x"}),
+	} {
+		var ae *apiError
+		if !errors.As(err, &ae) || ae.status != http.StatusConflict || ae.errType != errTypeInvalidRequest || ae.message != "blocked" {
+			t.Errorf("%s: errors.As found %+v, want the 409 underneath", name, ae)
+		}
 	}
 }
