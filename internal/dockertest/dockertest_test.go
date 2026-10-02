@@ -142,48 +142,64 @@ func TestGoneBeforeWaitsOutARemovalAnotherProcessHasUnderWay(t *testing.T) {
 // removeContainer is where the wait is wired in: a removal refused because
 // another is already under way must wait for the winner rather than announce a
 // failure on its first look, and one that nobody completes must still be
-// announced (#843). A real daemon cannot be made to have a removal in flight at
-// the moment this one runs, so a fake `docker` stands in: `rm` is refused the
-// way the daemon refuses a duplicate, and `ps` lists the container for its first
-// listedFor calls only.
+// announced (#843). Every other refusal has no winner to wait for, so it gets
+// one look and, unless that shows the container gone, is announced at once —
+// waiting it out instead would spend the sweep's budget on containers nobody is
+// removing. A real daemon cannot be made to have a removal in flight at the
+// moment this one runs, so a fake `docker` stands in: `rm` is refused with the
+// given text, and `ps` lists the container for its first listedFor calls only.
 func TestARemovalThatLosesARaceWaitsForTheWinnerRatherThanAnnouncingIt(t *testing.T) {
+	const inProgress = "Error response from daemon: removal of container c0ffee is already in progress"
 	for name, tc := range map[string]struct {
+		refusal   string
 		listedFor int
 		within    time.Duration
 		announced bool
+		prompt    bool // answered without waiting out within
 	}{
-		"the winner's removal finishes": {listedFor: 2, within: 10 * time.Second},
-		"nobody's removal finishes":     {listedFor: 1_000_000, within: time.Second, announced: true},
+		"the winner's removal finishes": {refusal: inProgress, listedFor: 2, within: 10 * time.Second},
+		"nobody's removal finishes": {refusal: inProgress, listedFor: 1_000_000, within: time.Second,
+			announced: true},
+		"any other refusal is announced at once": {refusal: "Error response from daemon: permission denied",
+			listedFor: 1_000_000, within: 10 * time.Second, announced: true, prompt: true},
+		"any other refusal of a container already gone is silent": {
+			refusal:   "Error response from daemon: No such container: c0ffee",
+			listedFor: 0, within: 10 * time.Second, prompt: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fakeDocker(t, tc.listedFor)
+			fakeDocker(t, tc.refusal, tc.listedFor)
 			ctx, cancel := context.WithTimeout(context.Background(), tc.within)
 			defer cancel()
 
 			var removed bool
+			start := time.Now()
 			said := stderrOf(t, func() { removed = removeContainer(ctx, "dockertest", "c0ffee") })
+			took := time.Since(start)
 			if removed {
 				t.Errorf("a refused removal was reported as this call's own")
 			}
 			if announced := said != ""; announced != tc.announced {
 				t.Errorf("announced = %v (%q), want %v", announced, said, tc.announced)
 			}
+			if tc.prompt && took > tc.within/4 {
+				t.Errorf("answered after %s of a %s deadline; a refusal with no winner to wait for "+
+					"must not wait", took, tc.within)
+			}
 		})
 	}
 }
 
-// fakeDocker puts a `docker` on PATH that refuses every `rm` as a duplicate of
-// a removal already in progress, and whose `ps` lists the container for its
-// first listedFor calls and then reports it gone. Builtins only, because PATH
-// holds nothing else.
-func fakeDocker(t *testing.T, listedFor int) {
+// fakeDocker puts a `docker` on PATH whose `rm` always fails with refusal, and
+// whose `ps` lists the container for its first listedFor calls and then reports
+// it gone. Builtins only, because PATH holds nothing else.
+func fakeDocker(t *testing.T, refusal string, listedFor int) {
 	t.Helper()
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "ps-calls")
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1" in
 rm)
-	echo "Error response from daemon: removal of container $4 is already in progress" >&2
+	echo %[3]q >&2
 	exit 1 ;;
 ps)
 	n=0
@@ -194,7 +210,7 @@ ps)
 	exit 0 ;;
 esac
 exit 2
-`, calls, listedFor)
+`, calls, listedFor, refusal)
 	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write the fake docker: %v", err)
 	}

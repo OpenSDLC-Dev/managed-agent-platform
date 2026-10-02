@@ -144,11 +144,17 @@ func SweepStrays(harness string) {
 // answers "removal of container … is already in progress", and lists the
 // container until the winner's removal finishes — which on a crowded daemon is
 // long enough for a single look to see it and announce a loss that was only a
-// race (#843). So a failed removal keeps looking, for whatever is left of its
-// own bound, before counting the container as one this run could not clear. A
-// lost race ordinarily resolves within a second, but a saturated daemon has been
-// seen to hold a removal in progress past ten seconds, and the bound that caps
-// one wedged removal is the natural ceiling for waiting on someone else's.
+// race (#843). So that refusal, and only that one, keeps looking, for whatever
+// is left of the call's own bound, before counting the container as one this
+// run could not clear. A lost race ordinarily resolves within a second, but a
+// saturated daemon has been seen to hold a removal in progress past ten
+// seconds, and the bound that caps one wedged removal is the natural ceiling for
+// waiting on someone else's. Any other failure — a permissions error, a
+// different conflict, a daemon that answers nothing — has no winner to wait
+// for, so it gets the single look and is announced at once: waiting it out
+// would let two such containers spend the sweep's whole budget, and hold every
+// fixture binary's TestMain for it. internal/sandbox/docker's removeWaitingGone
+// draws the same line, on the 409 the CLI prints as this text.
 //
 // That announcement reaches a terminal only when the package fails or the suite
 // runs under -v, since `go test ./...` buffers a passing package's output and
@@ -163,7 +169,11 @@ func removeContainer(ctx context.Context, harness, id string) bool {
 	if err == nil {
 		return true
 	}
-	if !goneBefore(ctx, id) {
+	settled := gone
+	if strings.Contains(string(out), "already in progress") {
+		settled = goneBefore
+	}
+	if !settled(ctx, id) {
 		fmt.Fprintf(os.Stderr, "%s: reaping stray container %s: %v: %s\n",
 			harness, id, err, strings.TrimSpace(string(out)))
 	}
