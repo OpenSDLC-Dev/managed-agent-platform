@@ -476,10 +476,13 @@ func TestWorkPollRefusesAReclaimWindowUnderOne(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	for q, want := range map[string]string{
-		"?block_ms=900&reclaim_older_than_ms=0":        "reclaim_older_than_ms: Input should be greater than or equal to 1",
-		"?reclaim_older_than_ms=-5":                    "reclaim_older_than_ms: Input should be greater than or equal to 1",
-		"?reclaim_older_than_ms=-99999999999999999999": "reclaim_older_than_ms: Input should be greater than or equal to 1",
-		"?reclaim_older_than_ms=soon":                  "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?block_ms=900&reclaim_older_than_ms=0":             "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=-5":                         "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=-99999999999999999999":      "reclaim_older_than_ms: Input should be greater than or equal to 1",
+		"?reclaim_older_than_ms=99999999999999999999999abc": "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?reclaim_older_than_ms=99999999999999999999999.5":  "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?reclaim_older_than_ms=-99999999999999999999x":     "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
+		"?reclaim_older_than_ms=soon":                       "reclaim_older_than_ms: Input should be a valid integer, unable to parse string as an integer",
 	} {
 		res, raw := s.pollQuery(t, envID, q, auth)
 		var body map[string]any

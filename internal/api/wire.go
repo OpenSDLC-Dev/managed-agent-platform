@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 )
@@ -753,7 +754,7 @@ func parseSkills(raw json.RawMessage) ([]json.RawMessage, error) {
 			return nil, errInvalid(`skills entries require type "anthropic" or "custom" and skill_id`)
 		}
 		if probe.Version == "" {
-			probe.Version = "latest"
+			probe.Version = skills.LatestAlias
 		}
 		normalized, err := json.Marshal(map[string]string{
 			"type": probe.Type, "skill_id": probe.SkillID, "version": probe.Version,

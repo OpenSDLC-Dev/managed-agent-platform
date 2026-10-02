@@ -3,20 +3,19 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
-// TestTheAnthropicSkillCheckHoldsWhatItResolved pins the lock the check takes:
-// the skill rows it resolved stay FOR SHARE until the create's transaction
-// ends, so the FOR UPDATE a skill or version delete takes first waits rather
-// than slipping between the check and the agent's insert.
-func TestTheAnthropicSkillCheckHoldsWhatItResolved(t *testing.T) {
+// TestTheAnthropicSkillCheckTakesNoLock pins the check as the read it is: the
+// skill rows it resolved are not held while the create's transaction runs, so
+// the FOR UPDATE a version upload, an import or a delete takes on the skill
+// row proceeds — an agent create never waits on another transaction's
+// archive upload, and a delete committing meanwhile leaves the agent a
+// dangling reference that materialization skips (best-effort, registered).
+func TestTheAnthropicSkillCheckTakesNoLock(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx,
@@ -37,9 +36,7 @@ func TestTheAnthropicSkillCheckHoldsWhatItResolved(t *testing.T) {
 	if err := checkAnthropicSkillRefs(ctx, tx, json.RawMessage(`[{"type":"anthropic","skill_id":"alpha-notes"}]`)); err != nil {
 		t.Fatalf("check: %v", err)
 	}
-	_, err = pool.Exec(ctx, `SELECT 1 FROM skills WHERE id = 'alpha-notes' FOR UPDATE NOWAIT`)
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
-		t.Errorf("a delete's FOR UPDATE beside the check = %v, want lock_not_available", err)
+	if _, err := pool.Exec(ctx, `SELECT 1 FROM skills WHERE id = 'alpha-notes' FOR UPDATE NOWAIT`); err != nil {
+		t.Errorf("a version upload's FOR UPDATE beside the check = %v, want it taken", err)
 	}
 }

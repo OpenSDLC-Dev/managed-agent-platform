@@ -50,8 +50,8 @@ func ToolWaitIDs(batch []NewEvent, kind string, platformOwned func(string) bool)
 		if p.Permission == string(domain.EvalPermDeny) {
 			continue
 		}
-		c := orderedCall{typ: ev.Type, name: p.Name}
-		if ev.Type == domain.EventAgentCustomToolUse || p.Permission == string(domain.EvalPermAsk) || workerCall(c, kind, platformOwned) {
+		c := orderedCall{typ: ev.Type, name: p.Name, permission: p.Permission}
+		if c.asks() || c.external(kind, platformOwned) {
 			ids = append(ids, ev.ID)
 		}
 	}
@@ -116,13 +116,16 @@ func workerCall(c orderedCall, kind string, platformOwned func(string) bool) boo
 	return kind == string(domain.EnvSelfHosted) && c.typ == domain.EventAgentToolUse && !platformOwned(c.name)
 }
 
-// needs is what a call needs from outside the platform before it settles: a
-// confirmation, for an ask-gated call, and a result, for a custom call or a
-// self_hosted worker's built-in — whether or not either has arrived. The one
-// classification ToolFlow.Pending and AwaitedResponse are both read from.
-func (c orderedCall) needs(kind string, platformOwned func(string) bool) (confirmation, result bool) {
-	return c.permission == string(domain.EvalPermAsk),
-		c.typ == domain.EventAgentCustomToolUse || workerCall(c, kind, platformOwned)
+// asks and external are what a call needs from outside the platform before it
+// settles, whether or not either has arrived: a confirmation, for an
+// ask-gated call, and a result, for a custom call or a self_hosted worker's
+// built-in. They are the one classification every reading of a thread's
+// waits takes — ToolWaitIDs, ToolFlow.Pending, the approvals still pending,
+// the processing walk and AwaitedResponse.
+func (c orderedCall) asks() bool { return c.permission == string(domain.EvalPermAsk) }
+
+func (c orderedCall) external(kind string, platformOwned func(string) bool) bool {
+	return c.typ == domain.EventAgentCustomToolUse || workerCall(c, kind, platformOwned)
 }
 
 func summarizeTools(calls []orderedCall, kind string, platformOwned func(string) bool) ToolFlow {
@@ -131,8 +134,8 @@ func summarizeTools(calls []orderedCall, kind string, platformOwned func(string)
 		if c.resolved {
 			continue
 		}
-		ask, external := c.needs(kind, platformOwned)
-		gated := ask && !c.confirmed
+		external := c.external(kind, platformOwned)
+		gated := c.asks() && !c.confirmed
 		if external || gated {
 			out.Pending = append(out.Pending, c.id)
 		}
@@ -161,7 +164,7 @@ func PendingThreadApprovals(ctx context.Context, q Querier, sid, tid domain.ID) 
 		return false, err
 	}
 	for _, c := range calls {
-		if c.permission == string(domain.EvalPermAsk) && !c.confirmed {
+		if c.asks() && !c.confirmed {
 			return true, nil
 		}
 	}
@@ -223,7 +226,7 @@ func (l *Log) AdvanceThreadTools(ctx context.Context, tx pgx.Tx, sid, tid domain
 func walkReady(calls []orderedCall, consume func(c *orderedCall) (bool, error)) error {
 	for i := range calls {
 		c := &calls[i]
-		if c.resultID == "" && (c.permission != string(domain.EvalPermAsk) || c.confirmationID == "") {
+		if c.resultID == "" && (!c.asks() || c.confirmationID == "") {
 			return nil
 		}
 		resolved, err := consume(c)

@@ -35,8 +35,9 @@ func ThreadWaits(ctx context.Context, q Querier, sid, tid domain.ID, kind string
 		if c.confirmationID != "" && denies(c.confirmation) {
 			continue
 		}
-		ask, external := c.needs(kind, platformOwned)
-		a := AwaitedResponse{ID: c.id, Confirmation: ask && c.confirmationID == "", Result: external && c.resultID == ""}
+		a := AwaitedResponse{ID: c.id,
+			Confirmation: c.asks() && c.confirmationID == "",
+			Result:       c.external(kind, platformOwned) && c.resultID == ""}
 		if a.Confirmation || a.Result {
 			awaited = append(awaited, a)
 		}

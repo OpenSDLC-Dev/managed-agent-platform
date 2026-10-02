@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,9 @@ const defaultReclaimMs = 5000
 // int large enough to overflow time.Duration would wrap negative — a past
 // reservation that defeats the soft handout. Clamping closes both.
 const maxReclaimMs = 600_000 // 10 minutes
+
+// decimalIntRe is the shape of an integer a query parameter may carry.
+var decimalIntRe = regexp.MustCompile(`^[+-]?[0-9]+$`)
 
 // maxBlockMs caps block_ms at the reference server's ceiling: the SDK's own
 // work poller documents that "the server caps this at 999" and sends exactly
@@ -789,6 +793,8 @@ func parseStopForce(r *http.Request) (bool, error) {
 // is the default. A value over maxReclaimMs is clamped to it, ours — one past
 // any machine integer included, as pydantic's integers have no such bound —
 // so it can never overflow time.Duration into a past (negative) reservation.
+// Only an integer is out of range: ParseInt reports the overflow of a digit
+// run before it reads what follows, so the shape is checked first.
 func reclaimWindow(r *http.Request) (time.Duration, error) {
 	const field = "reclaim_older_than_ms"
 	v := r.URL.Query().Get(field)
@@ -797,6 +803,8 @@ func reclaimWindow(r *http.Request) (time.Duration, error) {
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
 	switch {
+	case !decimalIntRe.MatchString(v):
+		return 0, errPydanticInt(field)
 	case errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(v, "-"):
 		n = maxReclaimMs
 	case errors.Is(err, strconv.ErrRange):
