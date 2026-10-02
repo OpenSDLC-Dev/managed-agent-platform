@@ -172,6 +172,35 @@ func TestDeploymentRunArchivedRefusesAndPausedAllows(t *testing.T) {
 	}
 }
 
+// A deployment whose environment is gone settles its run as the reference was
+// recorded settling one: environment_not_found_error, in the run's own
+// sentence (2026-09-02 batch2 idx 465 `deployment.run.after-env-archived`,
+// after idx 462 deleted the environment under its deployment; #540). Here the
+// deployments foreign key refuses that delete, so the test drops it to reach
+// the arm; on the wire the environment's own 404 stays the session create's.
+func TestDeploymentRunWithItsEnvironmentGoneIsTheRecordedError(t *testing.T) {
+	s := newTestServer(t)
+	agentID, _ := fixture(t, s)
+	envID := createEnvironment(t, s, map[string]any{"name": "rec78-env-del"})["id"].(string)
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	ctx := context.Background()
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE deployments DROP CONSTRAINT deployments_environment_id_fkey`); err != nil {
+		t.Fatalf("drop the deployments FK: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, envID); err != nil {
+		t.Fatalf("delete the environment: %v", err)
+	}
+
+	run := runDeployment(t, s, deplID)
+	re, _ := run["error"].(map[string]any)
+	if run["session_id"] != nil || re["type"] != "environment_not_found_error" {
+		t.Fatalf("run = session %v, error %v; want no session and environment_not_found_error", run["session_id"], re)
+	}
+	if want := "session creation rejected: environment `" + envID + "` not found"; re["message"] != want {
+		t.Errorf("error.message = %v, want %q", re["message"], want)
+	}
+}
+
 // A classified failure is a 200 carrying an error-bearing run — the endpoint's
 // only success shape is the run object, and its error member is where failure
 // lives (§5.2). The half-made session is rolled back, and a manual run never
@@ -219,12 +248,16 @@ func TestDeploymentRunRecordsAClassifiedFailure(t *testing.T) {
 		}
 	}
 
+	// The archived store's run is recorded, and settles in the reference's
+	// run sentence (2026-09-03 batch1 idx 119 `deployment.run.store-archived`,
+	// #540); the other two are not, and keep ours.
 	for _, tc := range []struct {
 		deployment, wantType, wantIn string
 	}{
-		{dEnv, "environment_archived_error", "is archived"},
-		{dVault, "vault_archived_error", "is archived"},
-		{dStore, "memory_store_archived_error", "is archived"},
+		{dEnv, "environment_archived_error", "environment " + envID + " is archived"},
+		{dVault, "vault_archived_error", "vault " + vaultID + " is archived"},
+		{dStore, "memory_store_archived_error",
+			"session creation rejected: a referenced memory store is archived; check deployment resources"},
 	} {
 		run := runDeployment(t, s, tc.deployment)
 		if run["session_id"] != nil {
@@ -234,8 +267,8 @@ func TestDeploymentRunRecordsAClassifiedFailure(t *testing.T) {
 		if re["type"] != tc.wantType {
 			t.Errorf("error.type = %v, want %s (message %v)", re["type"], tc.wantType, re["message"])
 		}
-		if msg, _ := re["message"].(string); !strings.Contains(msg, tc.wantIn) {
-			t.Errorf("error.message = %q, want it to say %q", msg, tc.wantIn)
+		if msg, _ := re["message"].(string); msg != tc.wantIn {
+			t.Errorf("error.message = %q, want %q", msg, tc.wantIn)
 		}
 
 		status, after := s.do(http.MethodGet, "/v1/deployments/"+tc.deployment, nil)

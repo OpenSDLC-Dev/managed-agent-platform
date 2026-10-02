@@ -85,19 +85,31 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec, prefi
 		}
 		spec.Model = m
 	}
-	limits := map[string]int{"system": maxAgentSystemRunes, "description": maxAgentDescriptionRunes}
-	for key, dst := range map[string]*string{"system": &spec.System, "description": &spec.Description} {
-		val, set, null, err := stringField(obj, key)
+	// A fixed order, so a body with both fields over their bounds names the
+	// same one on every request: the SDK params' own field order, description
+	// before system on create and update alike (checked against
+	// anthropic-sdk-go v1.70.1 — betaagent.go BetaAgentNewParams.Description
+	// and BetaAgentUpdateParams.Description). Which one the reference names
+	// first is unrecorded.
+	for _, f := range []struct {
+		key   string
+		dst   *string
+		limit int
+	}{
+		{"description", &spec.Description, maxAgentDescriptionRunes},
+		{"system", &spec.System, maxAgentSystemRunes},
+	} {
+		val, set, null, err := stringField(obj, f.key)
 		if err != nil {
 			return err
 		}
 		if set {
 			if null {
 				val = ""
-			} else if err := capRunes(prefix+key, val, limits[key]); err != nil {
+			} else if err := capRunes(prefix+f.key, val, f.limit); err != nil {
 				return err
 			}
-			*dst = val
+			*f.dst = val
 		}
 	}
 	if raw, ok := obj["tools"]; ok {

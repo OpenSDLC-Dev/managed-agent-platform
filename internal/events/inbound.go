@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -488,8 +490,10 @@ func asObject(raw json.RawMessage, what string) (map[string]json.RawMessage, err
 	return obj, nil
 }
 
+// allowKeys refuses the first key of obj outside allowed, in byte order, so a
+// payload with several names the same one on every request.
 func allowKeys(obj map[string]json.RawMessage, allowed ...string) error {
-	for key := range obj {
+	for _, key := range slices.Sorted(maps.Keys(obj)) {
 		found := false
 		for _, a := range allowed {
 			if key == a {

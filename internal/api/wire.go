@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -372,7 +373,10 @@ func validateMetadataCaps(md map[string]string) error {
 	if len(md) > metadataMaxPairs {
 		return errInvalid("metadata cannot exceed %d pairs", metadataMaxPairs)
 	}
-	for k, v := range md {
+	// In byte order, so a bag over both bounds draws the same refusal on
+	// every request.
+	for _, k := range slices.Sorted(maps.Keys(md)) {
+		v := md[k]
 		if utf8.RuneCountInString(k) > metadataKeyMax {
 			return errInvalid("metadata keys cannot exceed %d characters", metadataKeyMax)
 		}

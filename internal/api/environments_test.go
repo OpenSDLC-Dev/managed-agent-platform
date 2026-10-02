@@ -741,6 +741,20 @@ func TestEnvironmentCreateValidation(t *testing.T) {
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	}
 
+	// Several unknown keys name the same one, the least in byte order, on
+	// every request.
+	for range 20 {
+		status, body := s.do(http.MethodPost, "/v1/environments",
+			map[string]any{"name": "x", "zeta": 1, "kind": "cloud"})
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "kind: Extra inputs are not permitted")
+		status, body = s.do(http.MethodPost, "/v1/environments",
+			map[string]any{"name": "x", "config": map[string]any{"type": "cloud", "zeta": 1, "alpha": 1}})
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", `unknown cloud config field "alpha"`)
+		status, body = s.do(http.MethodPost, "/v1/environments", map[string]any{"name": "x", "config": map[string]any{
+			"type": "cloud", "networking": map[string]any{"type": "limited", "zeta": 1, "alpha": 1}}})
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", `unknown limited networking field "alpha"`)
+	}
+
 	// Three of those refusals in the reference's words, its environment
 	// validator being pydantic's (#540): 2026-09-03 batch1 idx 3
 	// `env.create.bogus-probe` ({}), idx 0 `env.create.cloud` (a `kind` key) and

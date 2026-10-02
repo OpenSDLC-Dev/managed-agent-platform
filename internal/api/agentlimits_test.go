@@ -137,6 +137,21 @@ func TestAgentSystemCap(t *testing.T) {
 // Name and description: the spec's bounds, unprobed on the reference. The
 // refusal is the reference's generic maxLength sentence, recorded for system
 // above and for a vault credential's auth.secret_name (#540).
+// TestAgentFieldCapsNameOneFieldEveryTime: a body with description and
+// system both over their bounds names the same one on every request — the
+// first in the SDK params' field order, description — on create and update.
+// It used to range over a map and name either.
+func TestAgentFieldCapsNameOneFieldEveryTime(t *testing.T) {
+	s := newTestServer(t)
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	both := map[string]any{"description": strings.Repeat("d", 2049), "system": strings.Repeat("s", 100_001)}
+	for range 20 {
+		status, res := s.do(http.MethodPost, "/v1/agents", agentBody(both))
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "description: maximum string length is 2048")
+		wantUpdateRejected(t, s, id, both, "agent.description: maximum string length is 2048")
+	}
+}
+
 func TestAgentNameAndDescriptionCaps(t *testing.T) {
 	s := newTestServer(t)
 	status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{"name": strings.Repeat("n", 257)}))

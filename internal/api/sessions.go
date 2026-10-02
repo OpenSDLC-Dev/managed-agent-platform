@@ -247,7 +247,7 @@ const overrideSystemMaxRunes = maxAgentSystemRunes
 // snapshot the session will carry. internal admits the dream runner's own
 // hidden agent, which every other caller resolves as not found (§4.4); it is
 // createSessionIn.internal, and no request can set it.
-func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessage, internal bool) (sessionAgentJSON, error) {
+func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessage, internal bool, c sessionCaller) (sessionAgentJSON, error) {
 	var snap sessionAgentJSON
 
 	var agentID string
@@ -301,10 +301,18 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 			if present(obj.Multiagent) {
 				return snap, errInvalid("Failed to parse request body: unknown field %q", "multiagent")
 			}
-			for key, val := range map[string]json.RawMessage{
-				"model": obj.Model, "system": obj.System, "tools": obj.Tools,
-				"mcp_servers": obj.MCP, "skills": obj.Skills,
+			// The override params' field order (checked against
+			// anthropic-sdk-go v1.70.1 — betasession.go
+			// BetaManagedAgentsAgentWithOverridesParams), so a body with two
+			// null overrides names the same one on every request.
+			for _, o := range []struct {
+				key string
+				val json.RawMessage
+			}{
+				{"system", obj.System}, {"mcp_servers", obj.MCP}, {"model", obj.Model},
+				{"skills", obj.Skills}, {"tools", obj.Tools},
 			} {
+				key, val := o.key, o.val
 				if len(val) > 0 {
 					// Only system documents null semantics ("set to null to
 					// clear the agent's system prompt").
@@ -358,11 +366,14 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		}
 	}
 	if archivedAt != nil {
-		// The reference's sentence (2026-09-02 batch2
-		// `session.create.archived-agent`, #540); it holds for every caller,
-		// since each one resolves the agent to create a session.
-		return snap, classified("agent_archived_error",
-			errInvalid("agent %s is archived and cannot be used to create a session", agentID))
+		// The reference's sentence on a session create (2026-09-02 batch2
+		// `session.create.archived-agent`, #540); a deployment's run and a
+		// dream's start were never recorded refusing one, and keep ours.
+		if c == callerRequest {
+			return snap, classified("agent_archived_error",
+				errInvalid("agent %s is archived and cannot be used to create a session", agentID))
+		}
+		return snap, classified("agent_archived_error", errInvalid("agent %s is archived", agentID))
 	}
 
 	var spec agentSpec
@@ -687,6 +698,51 @@ func (s *server) createSession(r *http.Request) (any, error) {
 // so a caller with no authenticated principal creates the session
 // unattributed. deploymentID is set only by a deployment fire — the create
 // surface has no deployment field on the wire and rejects the key.
+// sessionCaller is who creates a session through createSessionInTx. The
+// reference was recorded refusing a POST /v1/sessions and a deployment's run,
+// each in words of its own, and never a dream's start, so a refusal the three
+// share is worded per caller (#540).
+type sessionCaller int
+
+const (
+	callerRequest    sessionCaller = iota // POST /v1/sessions
+	callerDeployment                      // a deployment's manual run or scheduled fire
+	callerDream                           // the dream runner's pipeline session
+)
+
+// caller reports who in is: a deployment's create names its deployment, and
+// only the dream runner's is internal.
+func (in createSessionIn) caller() sessionCaller {
+	switch {
+	case in.deploymentID != nil:
+		return callerDeployment
+	case in.internal:
+		return callerDream
+	}
+	return callerRequest
+}
+
+// errSessionEnvironmentNotFound is createSessionInTx's refusal of an
+// environment it cannot find, per caller: the request's recorded 404
+// (2026-09-05 batch8 `item1.create.session-absent-env` and
+// `item1.create.session-foreign-env`); a deployment's run settled on the
+// recorded environment_not_found_error, its message the run's own
+// (2026-09-02 batch2 `deployment.run.after-env-archived`, an environment the
+// reference let be deleted under its deployment) — unreachable here while the
+// deployments foreign key refuses that delete, and classified so it would
+// settle as recorded; a dream's, ours (#540).
+func errSessionEnvironmentNotFound(c sessionCaller, envID string) error {
+	switch c {
+	case callerRequest:
+		return errEnvironmentNotFound(envID)
+	case callerDeployment:
+		return classifiedRun("environment_not_found_error",
+			fmt.Sprintf("session creation rejected: environment `%s` not found", envID),
+			errNotFound("environment %s not found", envID))
+	}
+	return errNotFound("environment %s not found", envID)
+}
+
 type createSessionIn struct {
 	// id is the session's, for a caller that must know it before the row
 	// exists: the dream runner mints it so the memory clone's `created`
@@ -754,9 +810,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		`SELECT archived_at, kind, config FROM environments WHERE id = $1`+hidden+` FOR SHARE`, in.envID).
 		Scan(&envArchivedAt, &envKind, &envConfig)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// 2026-09-05 batch8 `item1.create.session-absent-env` and
-		// `item1.create.session-foreign-env` (#540).
-		return createdSession{}, errEnvironmentNotFound(in.envID)
+		return createdSession{}, errSessionEnvironmentNotFound(in.caller(), in.envID)
 	}
 	if err != nil {
 		return createdSession{}, err
@@ -777,7 +831,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, err
 	}
 
-	agent, err := s.resolveAgent(ctx, tx, in.agentRaw, in.internal)
+	agent, err := s.resolveAgent(ctx, tx, in.agentRaw, in.internal, in.caller())
 	if err != nil {
 		return createdSession{}, err
 	}
@@ -790,7 +844,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	}
 
 	now := time.Now().UTC()
-	resources, repoIDs, err := materializeResourceInputs(ctx, tx, in.resourceInputs, now)
+	resources, repoIDs, err := materializeResourceInputs(ctx, tx, in.resourceInputs, now, in.caller())
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return createdSession{}, err
@@ -840,7 +894,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
 		if strings.Contains(pgErr.ConstraintName, "environment") {
-			return createdSession{}, errEnvironmentNotFound(in.envID)
+			return createdSession{}, errSessionEnvironmentNotFound(in.caller(), in.envID)
 		}
 		return createdSession{}, errNotFound("agent %s version %d not found", agent.ID, agent.Version)
 	}
@@ -1316,10 +1370,12 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 		args = append(args, statuses)
 		query += fmt.Sprintf(` AND %s = ANY($%d)`, sessionStatusExpr, len(args))
 	}
-	for key, op := range map[string]string{
-		"created_at[gt]": ">", "created_at[gte]": ">=",
-		"created_at[lt]": "<", "created_at[lte]": "<=",
+	// A fixed order, so two malformed bounds name the same one every time.
+	for _, b := range [...]struct{ key, op string }{
+		{"created_at[gt]", ">"}, {"created_at[gte]", ">="},
+		{"created_at[lt]", "<"}, {"created_at[lte]", "<="},
 	} {
+		key, op := b.key, b.op
 		ts, err := parseTimeParam(q, key)
 		if err != nil {
 			return nil, err

@@ -541,7 +541,7 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 		}
 		if err := settleRun(ctx, tx,
 			`UPDATE deployment_runs SET error_type = $1, error_message = $2 WHERE id = $3`,
-			re.typ, re.err.Error(), runID); err != nil {
+			re.typ, re.runMessage(), runID); err != nil {
 			return "", "", err
 		}
 		// Only a scheduled fire auto-pauses, and only the fourteen types the

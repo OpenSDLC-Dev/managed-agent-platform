@@ -239,6 +239,15 @@ func TestNormalizeInboundReferenceWording(t *testing.T) {
 		t.Errorf("management tool_result: err = %v, want %q", err, want)
 	}
 
+	// Several unknown keys on an event name the least in byte order, on every
+	// call.
+	for range 20 {
+		_, err := norm(t, "cloud", `{"type":"user.interrupt","zeta":1,"alpha":1}`)
+		if want := `events[0]: unknown field "alpha"`; err == nil || err.Error() != want {
+			t.Fatalf("two unknown keys: err = %v, want %q", err, want)
+		}
+	}
+
 	// A create's initial_events keeps this platform's words: no recording
 	// reaches that surface, and the reference's sentences name a send batch.
 	_, err = events.NormalizeInitialEvents("cloud", events.ManagementCredential,

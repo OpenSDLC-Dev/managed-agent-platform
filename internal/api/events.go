@@ -1499,15 +1499,19 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		}
 	}
 	query.Types = types
-	for key, dst := range map[string]**time.Time{
-		"created_at[gt]": &query.CreatedGT, "created_at[gte]": &query.CreatedGTE,
-		"created_at[lt]": &query.CreatedLT, "created_at[lte]": &query.CreatedLTE,
+	// A fixed order, so two malformed bounds name the same one every time.
+	for _, b := range [...]struct {
+		key string
+		dst **time.Time
+	}{
+		{"created_at[gt]", &query.CreatedGT}, {"created_at[gte]", &query.CreatedGTE},
+		{"created_at[lt]", &query.CreatedLT}, {"created_at[lte]", &query.CreatedLTE},
 	} {
-		t, err := parseTimeParam(q, key)
+		t, err := parseTimeParam(q, b.key)
 		if err != nil {
 			return nil, err
 		}
-		*dst = t
+		*b.dst = t
 	}
 
 	view, err := resolve(ctx)

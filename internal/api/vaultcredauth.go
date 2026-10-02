@@ -315,7 +315,12 @@ func parseInjectionLocationFields(obj map[string]json.RawMessage, loc *injection
 	if err := rejectUnknownKeys(obj, "body", "header"); err != nil {
 		return err
 	}
-	for key, dst := range map[string]*bool{"body": &loc.Body, "header": &loc.Header} {
+	// A fixed order, so a body wrong in both names the same one every time.
+	for _, f := range [...]struct {
+		key string
+		dst *bool
+	}{{"body", &loc.Body}, {"header", &loc.Header}} {
+		key, dst := f.key, f.dst
 		raw, ok := obj[key]
 		if !ok {
 			continue

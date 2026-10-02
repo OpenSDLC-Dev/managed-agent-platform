@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -120,17 +121,13 @@ func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, norm
 	}
 	switch typ {
 	case string(domain.EnvSelfHosted):
-		for key := range obj {
-			if key != "type" {
-				return "", nil, errInvalid("unknown self_hosted config field %q", key)
-			}
+		if key, ok := firstUnknownKey(obj, "type"); ok {
+			return "", nil, errInvalid("unknown self_hosted config field %q", key)
 		}
 		return typ, []byte(`{"type":"self_hosted"}`), nil
 	case string(domain.EnvCloud):
-		for key := range obj {
-			if key != "type" && key != "networking" && key != "packages" {
-				return "", nil, errInvalid("unknown cloud config field %q", key)
-			}
+		if key, ok := firstUnknownKey(obj, "type", "networking", "packages"); ok {
+			return "", nil, errInvalid("unknown cloud config field %q", key)
 		}
 		// Base: the existing cloud config when updating, defaults otherwise.
 		base := cloudConfigJSON{
@@ -236,10 +233,8 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	}
 	switch typ {
 	case string(domain.NetUnrestricted):
-		for key := range obj {
-			if key != "type" {
-				return nil, errInvalid("unknown unrestricted networking field %q", key)
-			}
+		if key, ok := firstUnknownKey(obj, "type"); ok {
+			return nil, errInvalid("unknown unrestricted networking field %q", key)
 		}
 		return json.RawMessage(`{"type":"unrestricted"}`), nil
 	case string(domain.NetLimited):
@@ -248,7 +243,10 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 		if json.Unmarshal(prior, &prev) == nil && prev.Type == typ {
 			out = prev
 		}
-		for key, val := range obj {
+		// In byte order, so a patch wrong in two fields names the same one on
+		// every request.
+		for _, key := range slices.Sorted(maps.Keys(obj)) {
+			val := obj[key]
 			switch key {
 			case "type":
 			case "allowed_hosts":
