@@ -17,10 +17,11 @@ import (
 )
 
 // envKeyRoute is what a cloud environment's key gets on one route an
-// environment key reaches. A route outside the work API answers its lane's
-// refusal (cloudKeyRefusal, or the file download's recorded "Not found"); the
-// work API keeps the answers recorded on the reference's cloud environments
-// (workkind_test.go).
+// environment key reaches, or one the management lane answers it on in the
+// reference's words. A route outside the work API answers its lane's refusal
+// (cloudKeyRefusal, the file download's recorded "Not found", or the skill
+// routes' recorded 403); the work API keeps the answers recorded on the
+// reference's cloud environments (workkind_test.go).
 type envKeyRoute struct {
 	query  string // appended to the path
 	body   any
@@ -57,10 +58,12 @@ func cloudKeyRefusal(envID string) string {
 // The routes are not listed from memory. Every registration in server.go is
 // requested twice, with a self_hosted environment's key and with a cloud
 // environment's: the routes the self_hosted key is not refused on with a 401
-// are the ones an environment key reaches, and that set must be exactly the
-// table below — so a route that joins an environment-key lane later fails here
-// until someone decides what a cloud key gets on it. On each, the self_hosted
-// key still works.
+// are the ones an environment key reaches — or, for the skill collection and a
+// skill's own read, the ones the management lane refuses it on with the
+// reference's 403 (#840) — and that set must be exactly the table below, so a
+// route that joins an environment-key lane later fails here until someone
+// decides what a cloud key gets on it. On each lane route, the self_hosted key
+// still works.
 func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -98,6 +101,7 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 	refused := envKeyRoute{status: http.StatusNotFound, errType: "not_found_error", refused: true, selfHostedServed: true}
 	served := envKeyRoute{status: http.StatusOK, selfHostedServed: true}
 	workItem404 := envKeyRoute{status: http.StatusNotFound, errType: "not_found_error"}
+	scopeRefused := envKeyRoute{status: http.StatusForbidden, errType: "permission_error", refused: true, refusal: skillsScopeMessage}
 	want := map[string]envKeyRoute{
 		// The work API: the reference's recorded answers on a cloud
 		// environment, and the work-item 404 on the item routes.
@@ -120,8 +124,11 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 		"GET /v1/sessions/{id}/events/stream": refused,
 		"GET /v1/files/{id}/content": {status: http.StatusNotFound, errType: "not_found_error",
 			refused: true, refusal: "Not found", selfHostedServed: true},
-		// The skill reads: served, as recorded.
-		"GET /v1/skills/{id}":                            served,
+		// The skill collection and a skill's own read: the management lane's
+		// recorded 403, whatever the key's environment.
+		"GET /v1/skills":      scopeRefused,
+		"GET /v1/skills/{id}": scopeRefused,
+		// The skill version reads: served, as recorded.
 		"GET /v1/skills/{id}/versions":                   served,
 		"GET /v1/skills/{id}/versions/{version}":         served,
 		"GET /v1/skills/{id}/versions/{version}/content": served,

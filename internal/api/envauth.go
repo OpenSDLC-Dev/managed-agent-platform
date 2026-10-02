@@ -16,28 +16,58 @@ import (
 
 // authenticateEnvironmentKey resolves a Bearer token to the environment it is
 // scoped to and that environment's kind, or "" if the key is unknown, revoked,
-// or expired. Those three take the same branch on purpose: the caller turns ""
-// into one 401 with one message, so a probing client learns nothing about which
-// of them it hit. A key minted before keys carried expiries has a NULL
-// expires_at and never expires.
+// or expired. revoked reports the one of those three a caller answers in its
+// own words: the reference answers a key known to be revoked "OAuth access
+// token has been revoked." (errRevokedEnvironmentKey), and only the holder of
+// the key — 256 random bits when this platform minted it — can learn it.
+// Expired and unknown take the same branch on purpose: the caller turns them
+// into one 401 with one message, so a probing client learns nothing about
+// which of them it hit. A key that is both revoked and expired is revoked: a
+// revocation is permanent and the operator's own act, so a revoked key
+// answers one sentence for the rest of its life rather than changing its
+// answer on the day its expiry passes. A key minted before keys carried
+// expiries has a NULL expires_at and never expires.
 //
 // The kind rides the same lookup because every lane gates on it, and a second
 // query on every poll would be its price. A key dies with its environment (ON
 // DELETE CASCADE) and a kind never changes (updateEnvironment), so the join
 // drops no live key and the kind cannot go stale within a request.
-func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (envID string, kind domain.EnvironmentKind, err error) {
+func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (envID string, kind domain.EnvironmentKind, revoked bool, err error) {
 	var k string
+	var expired bool
 	err = pool.QueryRow(ctx,
-		`SELECT k.environment_id, e.kind FROM environment_keys k
+		`SELECT k.environment_id, e.kind, k.revoked_at IS NOT NULL,
+		        k.expires_at IS NOT NULL AND k.expires_at <= now()
+		   FROM environment_keys k
 		   JOIN environments e ON e.id = k.environment_id
-		  WHERE k.key_hash = $1 AND k.revoked_at IS NULL
-		    AND (k.expires_at IS NULL OR k.expires_at > now())`,
-		hashKey(key)).Scan(&envID, &k)
-	if err == pgx.ErrNoRows {
-		return "", "", nil
+		  WHERE k.key_hash = $1`,
+		hashKey(key)).Scan(&envID, &k, &revoked, &expired)
+	switch {
+	case err == pgx.ErrNoRows:
+		return "", "", false, nil
+	case err != nil:
+		return "", "", false, err
+	case revoked:
+		return "", "", true, nil
+	case expired:
+		return "", "", false, nil
 	}
-	return envID, domain.EnvironmentKind(k), err
+	return envID, domain.EnvironmentKind(k), false, nil
 }
+
+// errRevokedEnvironmentKey is the 401 a revoked environment key gets, in the
+// reference's words: recorded on the work poll (2026-09-19 custom-mixed-tools,
+// custom-order-followup and self-hosted-docker `worker-network.json` idx 169,
+// 51 and 63), on a skill version's content (2026-09-05 batch1 idx 84
+// `rec82.envkey.dead-key-verify.t4-builtin`, batch2 idx 64
+// `rec83.control.revoked-key-A.content`) and on GET /v1/models, a route
+// outside every environment-key lane (2026-09-19 custom-mixed-tools,
+// custom-order-followup and self-hosted-latest-cli `worker-network.json` idx
+// 170, 52 and 61). Every lane that recognises an environment key answers it,
+// the management lane included (answerEnvironmentKey). The reference's bodies
+// carry a null request_id and no request-id header; this one carries the
+// request id every response does.
+var errRevokedEnvironmentKey = errAuth("OAuth access token has been revoked.")
 
 // bearerToken extracts a non-empty Authorization: Bearer token. ok reports
 // whether the header used the Bearer scheme at all — the dual-auth dispatcher
@@ -49,8 +79,9 @@ func bearerToken(r *http.Request) (token string, ok bool) {
 
 // resolveEnvironmentKey authenticates a request's Authorization: Bearer
 // environment key, returning the environment it is scoped to and its kind. On a
-// missing/empty header or an unknown/revoked key it writes the wire auth error
-// and returns ok=false. Every environment-key middleware shares it so the
+// missing/empty header or a key that is not live it writes the wire auth error
+// — a revoked key's own, or the one expired and unknown keys share — and
+// returns ok=false. Every environment-key middleware shares it so the
 // Bearer-resolution rules live in one place.
 func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, kind domain.EnvironmentKind, ok bool) {
 	token, hasBearer := bearerToken(r)
@@ -58,9 +89,13 @@ func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool
 		writeError(w, r, errAuth("missing Authorization: Bearer environment key"))
 		return "", "", false
 	}
-	envID, kind, err := authenticateEnvironmentKey(r.Context(), pool, token)
+	envID, kind, revoked, err := authenticateEnvironmentKey(r.Context(), pool, token)
 	if err != nil {
 		writeError(w, r, err)
+		return "", "", false
+	}
+	if revoked {
+		writeError(w, r, errRevokedEnvironmentKey)
 		return "", "", false
 	}
 	if envID == "" {
@@ -69,6 +104,76 @@ func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool
 	}
 	markVerified(r.Context())
 	return envID, kind, true
+}
+
+// answerEnvironmentKey is the management lane's answer to an environment key
+// presented there as a Bearer, with no management key beside it, and reports
+// whether it wrote one. The lane looks such a key up only when the Bearer
+// carries the prefix every key this platform mints does
+// (environmentKeySecretPrefix), so a request offering an x-api-key — which the
+// dispatcher serves before asking — or any other Bearer costs no query. A
+// grandfathered pre-0021 key, whose value the operator chose, is therefore not
+// recognised here and keeps the missing-key 401.
+//
+// A revoked key gets its own 401 on every route, as on the key lanes
+// (errRevokedEnvironmentKey). A live key gets the reference's recorded refusal
+// on the routes it was recorded on (environmentKeyRefusal). Everywhere else,
+// and for an expired or unknown key, the lane answers as it always has, so an
+// unauthenticated caller learns nothing about SSO or about which dead state a
+// key is in.
+func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) bool {
+	token, ok := bearerToken(r)
+	if !ok || !strings.HasPrefix(token, environmentKeySecretPrefix) {
+		return false
+	}
+	envID, _, revoked, err := authenticateEnvironmentKey(r.Context(), pool, token)
+	switch {
+	case err != nil:
+		writeError(w, r, err)
+		return true
+	case revoked:
+		writeError(w, r, errRevokedEnvironmentKey)
+		return true
+	case envID == "":
+		return false
+	}
+	refusal := environmentKeyRefusal(r)
+	if refusal == nil {
+		return false
+	}
+	markVerified(r.Context())
+	slog.InfoContext(r.Context(), "management route refused: environment key",
+		"request_id", requestIDFrom(r.Context()), "environment_id", envID)
+	writeError(w, r, refusal)
+	return true
+}
+
+// skillsScopeRefusal is the reference's 403 for a live environment key on the
+// skill collection and a skill's own read, the routes whose OAuth scope its key
+// does not carry (2026-09-03 batch2 idx 4 `envkey.skills.collection-list` and
+// idx 2 `envkey.skills.get-anthropic`, 2026-09-04 batch2 idx 146
+// `rec81.envkey.skills.get.custom`, 2026-09-05 batch1 idx 51
+// `rec82.skills.list.envkey`). The scopes are the reference's; this platform
+// has no scope vocabulary of its own (#550).
+const skillsScopeRefusal = "OAuth token does not meet scope requirement any_of(org:skills, user:developer, user:managed_agents, user:skills, workspace:developer, workspace:skills)"
+
+// environmentKeyRefusal is the reference's answer to a live environment key on
+// a management route, for each route it was recorded on, and nil for every
+// other. An unrecorded route keeps this platform's answer: the reference's
+// refusals differ route by route — a 401 on the agents list, a 403 naming the
+// route's scopes on the skills — so nothing says which a third route takes.
+func environmentKeyRefusal(r *http.Request) error {
+	if r.Method != http.MethodGet {
+		return nil
+	}
+	switch p := r.URL.EscapedPath(); {
+	case p == "/v1/agents":
+		// 2026-09-03 batch2 idx 5 `envkey.agents.list-should-refuse`.
+		return errAuth("Authentication failed")
+	case p == "/v1/skills", isSkillResourcePath(p):
+		return errForbidden(skillsScopeRefusal)
+	}
+	return nil
 }
 
 // withEnvironmentKey records what an environment key resolved to: its

@@ -808,8 +808,13 @@ id cannot be revoked, or even confirmed to exist, through another environment.
 A key value is bound to one environment for life: `key_hash` is UNIQUE, so the
 same secret can never authenticate two queues.
 
-An **expired** key fails exactly as a revoked or unknown one does — the same 401
-with the same message — so the auth lane leaks nothing about which it was. Keys
+An **expired** key fails exactly as an unknown one does — the same 401 with the
+same message — so the auth lane leaks nothing about which it was. A **revoked**
+key gets a 401 of its own, the reference's "OAuth access token has been
+revoked.", on the worker routes and the management routes alike (a
+grandfathered key, below, on the worker routes only); only the holder of the
+key can draw it, and a key both revoked and expired answers as revoked.
+Deleting an environment deletes its keys with it. Keys
 minted before expiries existed (before migration 0021) carry no expiry and stay
 live until revoked; the migration deliberately does not backfill one, which
 would have retro-expired credentials already in use. Treat those as a migration

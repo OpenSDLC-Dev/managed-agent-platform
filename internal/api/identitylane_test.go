@@ -510,6 +510,8 @@ func TestIdentityLaneRejectionsAreUniform401(t *testing.T) {
 // TestIdentityDisabledIsUnchanged is the contract IDENTITY_MODE=disabled
 // carries: a Bearer on a management path 401s exactly as it did before this
 // slice existed, and nothing in the response says a human lane was considered.
+// The one Bearer answered otherwise is an environment key, whose answer is the
+// reference's in every mode (#840).
 func TestIdentityDisabledIsUnchanged(t *testing.T) {
 	s := newTestServer(t) // built with a nil verifier
 
@@ -529,6 +531,20 @@ func TestIdentityDisabledIsUnchanged(t *testing.T) {
 	}
 	if msg := laneMessage(t, raw); !strings.Contains(msg, "x-api-key") {
 		t.Errorf("message = %q; the missing-key 401 must stay the one this platform always sent", msg)
+	}
+
+	// A live environment key is the Bearer whose answer #840 changed: the
+	// reference refuses it on this route in words of its own (2026-09-03
+	// batch2 idx 5 `envkey.agents.list-should-refuse`). Only the holder of a
+	// real key draws them, so they say nothing about whether SSO is enabled.
+	res = s.doRaw(http.MethodGet, "/v1/agents", nil,
+		asBearer(issueKey(t, s.pool, selfHostedEnv(t, s, "disabled-lane"), "host")))
+	status, errType, raw = laneRead(t, res)
+	if status != http.StatusUnauthorized || errType != "authentication_error" {
+		t.Errorf("environment key with identity disabled: status %d, error type %q, want 401 authentication_error", status, errType)
+	}
+	if msg := laneMessage(t, raw); msg != "Authentication failed" {
+		t.Errorf("environment key with identity disabled: message %q, want the reference's %q", msg, "Authentication failed")
 	}
 
 	// The one request shape that is NOT what it was, and the only behaviour this

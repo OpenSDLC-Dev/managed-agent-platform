@@ -43,9 +43,9 @@
 // its session is dual-auth (dualAuth) — reached by a worker's Bearer
 // environment key, or by a management or human caller, whichever the request
 // carries. That is the session events subtree; the bare GET /v1/sessions/{id};
-// the GET skill reads at and under /v1/skills/{id} — the skill itself, its
-// versions, a version, and a version's /content (isSkillReadPath, server.go);
-// and the GET /v1/files/{id}/content download, which is the
+// the GET skill version reads under /v1/skills/{id} — its versions, a version,
+// and a version's /content (isSkillReadPath, server.go); and the GET
+// /v1/files/{id}/content download, which is the
 // worker's own SetupSkills and SetupFiles path. Skill content and file content
 // therefore do NOT need a management key. What keeps the lane narrow is the
 // key's environment and then per-resource scoping. On the session routes and
@@ -57,11 +57,14 @@
 // a file download's key must belong to an environment in which some session
 // mounts that file (downloadFile), and skills, workspace-global resources
 // every environment's sandboxes consume, need no scoping at all — a cloud key
-// reads them as the reference's does. Everything else on /v1 — the collections, the file
-// metadata read, every mutation — is management-only, the work API excepted:
-// it runs the other way, taking the environment key and nothing else, since
-// resolveEnvironmentKey demands a Bearer and a management x-api-key never
-// satisfies it (envauth.go). Outside the events subtree the dual-auth routes
+// reads them as the reference's does. Everything else on /v1 — the collections, a
+// skill's own read, the file metadata read, every mutation — is management-only,
+// the work API excepted: it runs the other way, taking the environment key and
+// nothing else, since resolveEnvironmentKey demands a Bearer and a management
+// x-api-key never satisfies it (envauth.go). The management lane refuses an
+// environment key rather than ignoring it: a revoked key gets its own 401, and
+// a live one the reference's recorded refusal where one was recorded
+// (answerEnvironmentKey, envauth.go). Outside the events subtree the dual-auth routes
 // are GET-only. Inside it, one event type runs the work API's way: a
 // user.tool_result is the environment credential's alone, and a management or
 // human caller posting one is refused 403 (#662) — by events.NormalizeInbound,

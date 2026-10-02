@@ -538,8 +538,10 @@ and holds the two OS-touching adapters `gaterun/` declares.
   event's alone: management still posts `user.custom_tool_result` and
   `user.tool_confirmation`, and a `user.interrupt` still has the platform answer the
   calls it ends. Environment keys are hashed at rest too, issued one per host so a
-  compromised host is revoked alone, and expire a year after issue; revoked,
-  expired and unknown are one indistinguishable 401. Issuing and revoking them is
+  compromised host is revoked alone, and expire a year after issue; expired and
+  unknown are one indistinguishable 401, and a revoked key gets the reference's own
+  401 on the worker and management routes alike, which only its holder can draw
+  (#840). Issuing and revoking them is
   a **management** operation on the off-wire console API, so an environment key
   can never mint or retire another — but equally, that surface delegates no
   authority the management key did not already hold, and is not a separate
@@ -553,7 +555,8 @@ and holds the two OS-touching adapters `gaterun/` declares.
   sync makes; the store's own read, its versions and its lifecycle are not among
   them) — a sibling session or an unattached store is the same 404 another
   environment's session gets, everything else a 401 — narrower than the key that
-  polled it everywhere but the memories, which are what it exists for. It dies with
+  polled it everywhere but the memories, which are what it exists for, and a skill's
+  own read, which the key lost to the reference's recorded refusal (#840). It dies with
   the item, by join condition, for every request after — a stream already open runs
   to its end, as one opened with any credential here does: a re-hand-out, a lapsed
   lease or an archive ends it. A stop leaves it whole for a minute from the request
