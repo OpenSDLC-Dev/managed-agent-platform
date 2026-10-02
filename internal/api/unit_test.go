@@ -88,11 +88,13 @@ func TestKeysetClause(t *testing.T) {
 // TestResolveMountPath pins the documented rooting rule: every supplied
 // mount_path resolves under /mnt/session/uploads, whether or not it starts with
 // "/" (managed-agents/files, "File paths"), a path already under that root is
-// left alone, "/uploads/<name>" names a file in that root (#848), and one that
-// climbs above it — or names the root itself, by either name — is rejected
-// rather than mounted outside.
+// left alone, "uploads/<name>" names a file in that root and a bare "uploads"
+// the root itself, which places the file where an omitted mount_path does
+// (#848), and one that climbs above the root — or names it by its full path —
+// is rejected rather than mounted outside.
 func TestResolveMountPath(t *testing.T) {
 	const root = "/mnt/session/uploads"
+	const fileID = "file_x"
 	// The root's own name must be compared as a directory, not a string prefix:
 	// /mnt/session/uploadsX is a different directory and gets rooted like any
 	// other path. A weaker HasPrefix(resolved, root) would mount it outside.
@@ -118,9 +120,17 @@ func TestResolveMountPath(t *testing.T) {
 		"uploads alias to the full root":   {"/uploads/../mnt/session/uploads/x", root + "/x"},
 		"uploads alias, doubled":           {"/uploads/uploads/x", root + "/uploads/x"},
 		"uploads alias over the full root": {"/uploads/mnt/session/uploads/x", root + "/mnt/session/uploads/x"},
-		// Only the absolute spelling is evidenced, as for the full root's.
-		"uploads, relative":       {"uploads/x", root + "/uploads/x"},
-		"uploads, relative, bare": {"uploads", root + "/uploads"},
+		// A leading "/" is style, so the relative spelling is the same alias.
+		"uploads alias, relative":         {"uploads/x", root + "/x"},
+		"uploads alias, relative, dirty":  {"./uploads//x/", root + "/x"},
+		"uploads alias, relative doubled": {"uploads/uploads/x", root + "/uploads/x"},
+		// The alias alone is the uploads directory itself: the file lands where
+		// an omitted mount_path puts it, as the pre-#848 rooting accepted it.
+		"the uploads directory":                   {"/uploads", root + "/" + fileID},
+		"the uploads directory, trailing slash":   {"/uploads/", root + "/" + fileID},
+		"the uploads directory, dotted":           {"/uploads/.", root + "/" + fileID},
+		"the uploads directory, relative":         {"uploads", root + "/" + fileID},
+		"the uploads directory, relative, dotted": {"./uploads/", root + "/" + fileID},
 		// Compared as a directory too: /uploadsx is not /uploads.
 		"uploads-prefixed sibling": {"/uploadsx/y", root + "/uploadsx/y"},
 		"uploads alias at the byte bound": {"/uploads/" + strings.Repeat("a", maxMountPathBytes-len(root)-1),
@@ -152,7 +162,7 @@ func TestResolveMountPath(t *testing.T) {
 		// not a rejection. Bounding the caller's spelling instead would refuse it.
 		"unstorable byte cleaned away": {"\xff/../b.txt", root + "/b.txt"},
 	} {
-		got, err := resolveMountPath(tc.in)
+		got, err := resolveMountPath(tc.in, fileID)
 		if err != nil || got != tc.want {
 			t.Errorf("%s: resolveMountPath(%q) = %q, %v; want %q", name, tc.in, got, err, tc.want)
 		}
@@ -174,17 +184,13 @@ func TestResolveMountPath(t *testing.T) {
 		"NUL byte":            "/a\x00b",
 		"invalid utf-8":       "/a\xffb",
 		"empty (never valid)": "",
-		// The alias names the root as the full spelling does (#848), and opens
-		// no way past the bounds or out of the root.
-		"the root, by its alias":     "/uploads",
-		"the alias, trailing slash":  "/uploads/",
-		"the alias, dotted":          "/uploads/.",
+		// The alias opens no way past the bounds or out of the root (#848).
 		"the alias, above itself":    "/uploads/..",
 		"the alias, one byte over":   "/uploads/" + strings.Repeat("a", maxMountPathBytes-len(root)),
 		"the alias, NUL byte":        "/uploads/a\x00b",
 		"relative uploads, escaping": "uploads/../../x",
 	} {
-		if got, err := resolveMountPath(in); err == nil {
+		if got, err := resolveMountPath(in, fileID); err == nil {
 			t.Errorf("%s: resolveMountPath(%q) = %q, want an error", name, in, got)
 		}
 	}
@@ -199,7 +205,7 @@ func TestMountPathTakenCleansStoredPaths(t *testing.T) {
 	if err := json.Unmarshal([]byte(stored), &resources); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	resolved, err := resolveMountPath("/report.csv")
+	resolved, err := resolveMountPath("/report.csv", "file_y")
 	if err != nil {
 		t.Fatalf("resolveMountPath: %v", err)
 	}

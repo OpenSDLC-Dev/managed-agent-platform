@@ -94,9 +94,11 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 	// An explicit mount path is honored, rooted under the uploads directory —
 	// the same resolved path whether the caller spells it absolute or relative
 	// (managed-agents/files, "File paths"), left alone when already rooted, and
-	// the uploads directory itself when it leads with "/uploads/" (#848, the
-	// recorded create of 2026-09-12-console-141 api-fixtures idx 13).
-	for _, given := range []string{"/data/in.txt", "data/in.txt", "/mnt/session/uploads/data/in.txt", "/uploads/data/in.txt"} {
+	// the uploads directory itself when it leads with "uploads/", with or
+	// without its "/" (#848, the recorded create of 2026-09-12-console-141
+	// api-fixtures idx 13).
+	for _, given := range []string{"/data/in.txt", "data/in.txt", "/mnt/session/uploads/data/in.txt",
+		"/uploads/data/in.txt", "uploads/data/in.txt"} {
 		sess2 := createSession(t, s, map[string]any{
 			"agent": agentID, "environment_id": envID,
 			"resources": []any{map[string]any{"type": "file", "file_id": fileA, "mount_path": given}},
@@ -104,6 +106,17 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 		if r := resourcesOf(t, sess2); r[0]["mount_path"] != "/mnt/session/uploads/data/in.txt" {
 			t.Errorf("mount_path %q resolved to %v, want /mnt/session/uploads/data/in.txt",
 				given, r[0]["mount_path"])
+		}
+	}
+	// The uploads directory alone places the file where an omitted mount_path
+	// does — an input the pre-#848 rooting accepted stays accepted.
+	for _, given := range []string{"/uploads", "/uploads/", "uploads"} {
+		sess2 := createSession(t, s, map[string]any{
+			"agent": agentID, "environment_id": envID,
+			"resources": []any{map[string]any{"type": "file", "file_id": fileA, "mount_path": given}},
+		})
+		if want := "/mnt/session/uploads/" + fileA; resourcesOf(t, sess2)[0]["mount_path"] != want {
+			t.Errorf("mount_path %q resolved to %v, want the default %s", given, resourcesOf(t, sess2)[0]["mount_path"], want)
 		}
 	}
 
@@ -166,23 +179,63 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 // TestDeploymentFireResolvesTheUploadsAlias pins the third recorded route for
 // a "/uploads/<name>" file mount (#848): the reference's deployment of
 // 2026-09-12-console-141 api-fixtures idx 15, fired as ui-network idx 266,
-// mounted its file at /mnt/session/uploads/rec141-input.txt (idx 268). The
-// deployment's own echo is not asserted: the reference echoed the given path
-// there, this platform the resolved one (docs/DIVERGENCES.md).
+// mounted its file at /mnt/session/uploads/rec141-input.txt (idx 268). A
+// deployment update resolves the spelling the same way. The stored and echoed
+// form is this platform's resolved path, where the reference stores and echoes
+// the path as given (#849, docs/DIVERGENCES.md).
 func TestDeploymentFireResolvesTheUploadsAlias(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	fileID := uploadOneFile(t, s, "rec141-input.txt")
+	const want = "/mnt/session/uploads/rec141-input.txt"
 
-	body := deploymentBody(agentID, envID)
-	body["resources"] = []any{map[string]any{
-		"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"}}
-	run := runDeployment(t, s, createDeployment(t, s, body)["id"].(string))
-	sid, _ := run["session_id"].(string)
-	res := resourcesOf(t, createGetSession(t, s, sid))
-	if len(res) != 1 || res[0]["mount_path"] != "/mnt/session/uploads/rec141-input.txt" {
-		t.Errorf("fired session resources = %v, want one file at /mnt/session/uploads/rec141-input.txt", res)
+	fire := func(deplID string) {
+		t.Helper()
+		run := runDeployment(t, s, deplID)
+		sid, ok := run["session_id"].(string)
+		if !ok || sid == "" {
+			t.Fatalf("run settled without a session (session_id %v, error %v)", run["session_id"], run["error"])
+		}
+		res := resourcesOf(t, createGetSession(t, s, sid))
+		if len(res) != 1 || res[0]["mount_path"] != want {
+			t.Errorf("fired session resources = %v, want one file at %s", res, want)
+		}
 	}
+	echoed := func(where string, d map[string]any) {
+		t.Helper()
+		rs, _ := d["resources"].([]any)
+		if len(rs) != 1 {
+			t.Fatalf("%s: resources = %v, want one element", where, d["resources"])
+		}
+		if got := rs[0].(map[string]any)["mount_path"]; got != want {
+			t.Errorf("%s: echoed mount_path = %v, want %s", where, got, want)
+		}
+		var stored string
+		if err := s.pool.QueryRow(t.Context(),
+			`SELECT resources->0->>'mount_path' FROM deployments WHERE id = $1`, d["id"]).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored != want {
+			t.Errorf("%s: stored mount_path = %q, want %s", where, stored, want)
+		}
+	}
+	resources := []any{map[string]any{"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"}}
+
+	// Created with the spelling.
+	body := deploymentBody(agentID, envID)
+	body["resources"] = resources
+	d := createDeployment(t, s, body)
+	echoed("create", d)
+	fire(d["id"].(string))
+
+	// Updated to it, from a deployment created without resources.
+	d = createDeployment(t, s, deploymentBody(agentID, envID))
+	status, up := s.do(http.MethodPost, "/v1/deployments/"+d["id"].(string), map[string]any{"resources": resources})
+	if status != http.StatusOK {
+		t.Fatalf("update deployment: status %d, body %v", status, up)
+	}
+	echoed("update", up)
+	fire(d["id"].(string))
 }
 
 // createGetSession GETs a session and asserts 200.
@@ -220,8 +273,9 @@ func TestSessionResourceValidation(t *testing.T) {
 		// ".." resolves away and roots normally (resolveMountPath).
 		"mount path escaping the root": {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "../etc/passwd"}}, 400},
 		"mount path naming the root":   {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "/"}}, 400},
-		// "/uploads" is the uploads directory's short name, so it too names the root (#848).
-		"mount path naming the root by its alias": {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads"}}, 400},
+		// By its full path too; its short name "/uploads" is the default
+		// placement instead (#848), below.
+		"mount path naming the root by its full path": {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "/mnt/session/uploads"}}, 400},
 		"duplicate mount path": {[]any{
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
@@ -234,6 +288,10 @@ func TestSessionResourceValidation(t *testing.T) {
 		"duplicate after the uploads alias": {[]any{
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/same"},
+		}, 400},
+		"duplicate across the alias's two spellings": {[]any{
+			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/x"},
+			map[string]any{"type": "file", "file_id": fileA, "mount_path": "uploads/x"},
 		}, 400},
 	} {
 		status, body := create(tc.resources)
@@ -260,6 +318,13 @@ func TestSessionResourceValidation(t *testing.T) {
 		map[string]any{"type": "file", "file_id": ghostFile}})
 	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error",
 		"One or more files not found. Check that each `file_id` exists and is accessible: "+ghostFile)
+
+	// The root's short name is the default placement rather than a refusal, so
+	// it collides with an omitted mount_path (#848).
+	status, body = create([]any{map[string]any{"type": "file", "file_id": fileA},
+		map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads"}})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		`mount_path "/mnt/session/uploads/`+fileA+`" is used by more than one resource`)
 
 	// A session with one resource, for the add/get/delete rejections.
 	sess := createSession(t, s, map[string]any{

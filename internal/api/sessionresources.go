@@ -383,7 +383,7 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 	if !set || null || mountPath == "" {
 		mountPath = defaultMountRoot + fileID
 	} else {
-		resolved, err := resolveMountPath(mountPath)
+		resolved, err := resolveMountPath(mountPath, fileID)
 		if err != nil {
 			return resourceInput{}, err
 		}
@@ -695,37 +695,41 @@ func validateRepoMountPath(p string) error {
 }
 
 // resolveMountPath maps a caller-supplied mount_path to the container path the
-// file is mounted at. Every supplied path is rooted under the session's uploads
-// directory — "a mount_path of /data.csv places the file at
+// file fileID is mounted at. Every supplied path is rooted under the session's
+// uploads directory — "a mount_path of /data.csv places the file at
 // /mnt/session/uploads/data.csv in the sandbox" (docs, managed-agents/files
 // § "File paths"), and the reference mounted "/tmp/elsewhere.txt" at
 // /mnt/session/uploads/tmp/elsewhere.txt (2026-09-02 batch2
 // sessF.create.file-mount.rooted-path) — so a leading "/" is that page's
 // documented style ("paths should be absolute"), not a filesystem root:
-// "/data.csv" and "data.csv" resolve alike. Two **absolute** spellings name
-// the uploads directory itself rather than a directory inside it, so neither
-// is rooted a second time:
+// "/data.csv" and "data.csv" resolve alike. Two spellings name the uploads
+// directory itself rather than a directory inside it, so neither is rooted a
+// second time:
 //
-//   - The full root. A path already under /mnt/session/uploads passes through
+//   - Its full path, /mnt/session/uploads. A path under it passes through
 //     cleaned: the reference echoed "/mnt/session/uploads/custom/notes.txt"
 //     unchanged (2026-09-02 batch2 sessF.create.file-mount), and its
 //     data-analyst cookbook mounts there and prompts the agent with that path.
-//   - "/uploads", the directory's short name (#848). "/uploads/<name>" lands at
-//     /mnt/session/uploads/<name> on every route that takes a file mount:
-//     session create, resources add and a deployment fire
-//     (2026-09-12-console-141 api-fixtures idx 13, ui-network idx 288, and
-//     the deployment of api-fixtures idx 15 fired as ui-network idx 266). It is
-//     the spelling the reference's own Console attach dialog and the SDK's
-//     request fixtures send.
+//     A container path is absolute by nature, and the evidence covers only
+//     that form, so a relative "mnt/session/uploads/x" is rooted like any
+//     other relative path. The full path alone names a directory, not a mount
+//     target, and is refused below.
+//   - Its short name, "uploads" (#848). "/uploads/<name>" lands at
+//     /mnt/session/uploads/<name>: recorded on session create, resources add
+//     and a deployment fire (2026-09-12-console-141 api-fixtures idx 13,
+//     ui-network idx 288, and the deployment of api-fixtures idx 15 fired as
+//     ui-network idx 266), and the spelling the reference's own Console attach
+//     dialog and the SDK's request fixtures send. The short name lives where a
+//     leading "/" is style, so "uploads/<name>" is the same alias. Alone
+//     ("/uploads", "uploads/") it names the directory and places the file
+//     where an omitted mount_path does, /mnt/session/uploads/<file_id>: the
+//     rooting before #848 accepted those spellings, so they stay accepted,
+//     where the full path never was. Both readings past the recordings are
+//     ours (docs/DIVERGENCES.md).
 //
-// Each spelling is matched as a directory, not as a string prefix, so
-// "/uploadsx/y" roots like any other path. Each applies once, to the cleaned
-// path: "/uploads/mnt/session/uploads/x" is not unwrapped a second time. The
-// evidence covers only the absolute forms, so a relative "mnt/session/uploads/x"
-// or "uploads/x" roots like any other relative path. That a bare "/uploads"
-// names the root, and is refused below as "/mnt/session/uploads" is, is our
-// inference (docs/DIVERGENCES.md): the alias read the way the full root
-// already is.
+// Each spelling is matched on the cleaned path, as a directory rather than a
+// string prefix ("/uploadsx/y" roots like any other path), and once:
+// "/uploads/mnt/session/uploads/x" is not unwrapped a second time.
 //
 // The caller's path is cleaned **before** it is rooted, so two spellings of one
 // path resolve alike: "/mnt/session/uploads/a/../../../../etc/passwd",
@@ -753,16 +757,19 @@ func validateRepoMountPath(p string) error {
 // the agent plants there can still point a mount's bytes elsewhere — the same
 // accepted single-tenant tampering residual the mount sentinel carries
 // (docs/DIVERGENCES.md), not something this resolver can answer.
-func resolveMountPath(p string) (string, error) {
-	const uploadsAlias = "/uploads"
+func resolveMountPath(p, fileID string) (string, error) {
+	const uploadsAlias = "uploads"
 	root := strings.TrimSuffix(defaultMountRoot, "/")
 	resolved := path.Clean(p)
+	short := strings.TrimPrefix(resolved, "/")
 	switch {
-	case pathAtOrUnder(resolved, root):
+	case resolved == root || properPathAncestor(root, resolved):
 		// Already rooted: passes through cleaned.
-	case pathAtOrUnder(resolved, uploadsAlias):
-		// Cleaned and absolute, so the suffix is "" or "/…" free of "." and "..".
-		resolved = root + strings.TrimPrefix(resolved, uploadsAlias)
+	case short == uploadsAlias:
+		resolved = defaultMountRoot + fileID
+	case strings.HasPrefix(short, uploadsAlias+"/"):
+		// Cleaned and led by a name, so the rest holds no "." or ".." segment.
+		resolved = root + strings.TrimPrefix(short, uploadsAlias)
 	default:
 		resolved = path.Join(root, resolved)
 	}
@@ -777,12 +784,6 @@ func resolveMountPath(p string) (string, error) {
 		return "", errInvalid("mount_path must be storable text")
 	}
 	return resolved, nil
-}
-
-// pathAtOrUnder reports whether clean path p is dir or lies below it, compared
-// by path segment: "/uploadsx" is not under "/uploads".
-func pathAtOrUnder(p, dir string) bool {
-	return p == dir || strings.HasPrefix(p, dir+"/")
 }
 
 // sealedToken is a repository's write-only token after the cipher: the

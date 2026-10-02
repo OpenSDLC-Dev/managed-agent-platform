@@ -560,7 +560,7 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 	}
 	inputs := []resourceInput{store}
 	for _, f := range files {
-		mount, err := resolveMountPath(f.mount)
+		mount, err := resolveMountPath(f.mount, f.id)
 		if err != nil {
 			return createdSession{}, err
 		}
