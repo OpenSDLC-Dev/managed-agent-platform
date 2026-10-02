@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -134,6 +137,91 @@ func TestGoneBeforeWaitsOutARemovalAnotherProcessHasUnderWay(t *testing.T) {
 	if goneBefore(ctx, kept) {
 		t.Errorf("container %s, which nothing removed, was reported gone", kept)
 	}
+}
+
+// removeContainer is where the wait is wired in: a removal refused because
+// another is already under way must wait for the winner rather than announce a
+// failure on its first look, and one that nobody completes must still be
+// announced (#843). A real daemon cannot be made to have a removal in flight at
+// the moment this one runs, so a fake `docker` stands in: `rm` is refused the
+// way the daemon refuses a duplicate, and `ps` lists the container for its first
+// listedFor calls only.
+func TestARemovalThatLosesARaceWaitsForTheWinnerRatherThanAnnouncingIt(t *testing.T) {
+	for name, tc := range map[string]struct {
+		listedFor int
+		within    time.Duration
+		announced bool
+	}{
+		"the winner's removal finishes": {listedFor: 2, within: 10 * time.Second},
+		"nobody's removal finishes":     {listedFor: 1_000_000, within: time.Second, announced: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeDocker(t, tc.listedFor)
+			ctx, cancel := context.WithTimeout(context.Background(), tc.within)
+			defer cancel()
+
+			var removed bool
+			said := stderrOf(t, func() { removed = removeContainer(ctx, "dockertest", "c0ffee") })
+			if removed {
+				t.Errorf("a refused removal was reported as this call's own")
+			}
+			if announced := said != ""; announced != tc.announced {
+				t.Errorf("announced = %v (%q), want %v", announced, said, tc.announced)
+			}
+		})
+	}
+}
+
+// fakeDocker puts a `docker` on PATH that refuses every `rm` as a duplicate of
+// a removal already in progress, and whose `ps` lists the container for its
+// first listedFor calls and then reports it gone. Builtins only, because PATH
+// holds nothing else.
+func fakeDocker(t *testing.T, listedFor int) {
+	t.Helper()
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "ps-calls")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+rm)
+	echo "Error response from daemon: removal of container $4 is already in progress" >&2
+	exit 1 ;;
+ps)
+	n=0
+	[ -f %[1]q ] && read n < %[1]q
+	n=$((n + 1))
+	echo "$n" > %[1]q
+	[ "$n" -le %[2]d ] && echo c0ffee
+	exit 0 ;;
+esac
+exit 2
+`, calls, listedFor)
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write the fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+// stderrOf runs f and returns what it wrote to os.Stderr, which is where
+// removeContainer announces a container it could not clear.
+func stderrOf(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	old := os.Stderr
+	os.Stderr = w
+	func() {
+		defer func() { os.Stderr = old }()
+		f()
+	}()
+	w.Close()
+	said, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(said)
 }
 
 // plant creates a stopped container labelled as a fixture started at the given
