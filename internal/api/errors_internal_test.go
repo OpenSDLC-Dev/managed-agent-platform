@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
@@ -111,5 +113,25 @@ func TestAHeartbeatMismatchRendersTheLastBeatAsTheReferenceDoes(t *testing.T) {
 		if want := "Heartbeat precondition failed: expected NO_HEARTBEAT, actual was " + tc.want; ae.message != want {
 			t.Errorf("%v: %q, want %q", tc.beat, ae.message, want)
 		}
+	}
+}
+
+// TestCapForLogCutsAtARuneBoundary pins the refusal line's cap: a short string
+// passes whole, a long one is cut to at most logFieldMax bytes without
+// splitting a rune, and the cut is marked.
+func TestCapForLogCutsAtARuneBoundary(t *testing.T) {
+	if got := capForLog("short"); got != "short" {
+		t.Errorf("short: %q", got)
+	}
+	exact := strings.Repeat("a", logFieldMax)
+	if got := capForLog(exact); got != exact {
+		t.Errorf("exactly the cap was cut: %d bytes", len(got))
+	}
+	// 'a' then two-byte runes: byte logFieldMax falls inside a rune.
+	got := capForLog("a" + strings.Repeat("é", logFieldMax))
+	body, ok := strings.CutSuffix(got, "…[truncated]")
+	if !ok || !utf8.ValidString(body) || len(body) != logFieldMax-1 {
+		t.Errorf("cut = %d bytes, valid %v, marked %v; want %d valid bytes, marked",
+			len(body), utf8.ValidString(body), ok, logFieldMax-1)
 	}
 }

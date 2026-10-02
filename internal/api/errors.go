@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"unicode/utf8"
 )
 
 // Wire error types (shared.ErrorType in the reference SDK). The shared union
@@ -224,16 +225,25 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		ae = &apiError{http.StatusInternalServerError, errTypeAPI, "internal server error"}
 	}
-	if ae.status >= 400 && ae.status < 500 {
-		// Every refusal is logged once, here, because the wire's words are
-		// the reference's where it was recorded (#540) and several of those
-		// name nothing — "Not found", "Cannot modify archived agent",
-		// "Method Not Allowed". The path carries the ids such a message drops,
-		// and no route puts a secret in its path; the query string is left
-		// out, as a filter or a cursor is no refusal's subject. Detail only a
-		// handler knows is that handler's own line.
-		slog.InfoContext(r.Context(), "request refused", "method", r.Method, "path", r.URL.Path,
-			"status", ae.status, "error_type", ae.errType, "request_id", requestIDFrom(r.Context()))
+	if ae.status >= 400 && ae.status < 500 && authenticated(r.Context()) {
+		// A refusal of an authenticated request gets one summary line here,
+		// because the wire's words are the reference's where it was recorded
+		// (#540) and several of those name nothing — "Not found", "Cannot
+		// modify archived agent", "Method Not Allowed". The path carries the
+		// ids such a message drops. A handler that knows more than the path
+		// and the message say writes a detail line of its own beside this
+		// one, under the same request id. A request no credential
+		// authenticated writes nothing, so an unauthenticated caller cannot
+		// drive the log's volume.
+		//
+		// Paths are not treated as secret — every proxy in front of this
+		// server logs them too — and a client that pastes a credential into
+		// one is out of scope. The query string is left out, as a filter or
+		// a cursor is no refusal's subject. Both the path and the message are
+		// capped, since either can echo what the client sent.
+		slog.InfoContext(r.Context(), "request refused", "method", r.Method, "path", capForLog(r.URL.Path),
+			"status", ae.status, "error_type", ae.errType, "message", capForLog(ae.message),
+			"request_id", requestIDFrom(r.Context()))
 	}
 	// Last, so no schema's extra member can shadow the two every error carries.
 	inner["type"] = ae.errType
@@ -243,6 +253,28 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		"request_id": requestIDFrom(r.Context()),
 		"error":      inner,
 	})
+}
+
+// authenticated reports whether a credential on any lane authenticated the
+// request: a management key or a human (principalFrom), an environment key or
+// a sessions token (environmentFrom), or a gate token (sessionFrom).
+func authenticated(ctx context.Context) bool {
+	return principalFrom(ctx) != "" || environmentFrom(ctx) != "" || sessionFrom(ctx) != ""
+}
+
+// logFieldMax caps a client-shaped string written to the refusal line.
+const logFieldMax = 512
+
+// capForLog cuts s to logFieldMax bytes at a rune boundary and marks the cut.
+func capForLog(s string) string {
+	if len(s) <= logFieldMax {
+		return s
+	}
+	cut := logFieldMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…[truncated]"
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

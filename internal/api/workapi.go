@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worktoken"
 	"github.com/jackc/pgx/v5"
 )
@@ -520,7 +521,7 @@ func (s *server) updateWork(r *http.Request) (any, error) {
 	// The work API is a pydantic surface on the reference, so its unknown-key
 	// sentence is not the strict decoder's rejectUnknownKeys reproduces; none
 	// was recorded, so ours stands.
-	if key, ok := domain.LeastUnknownKey(obj, "metadata"); ok {
+	if key, ok := unknownkey.Least(obj, "metadata"); ok {
 		return nil, errInvalid("unknown field %q", key)
 	}
 	// 2026-09-12 batch1 `rec91.work.poll.post-empty-retry` (#540); an

@@ -243,6 +243,17 @@ func TestFrontmatterLengthRefusal(t *testing.T) {
 			t.Errorf("LengthError = %+v, want field %q, limit %d", *tooLong, tc.field, tc.limit)
 		}
 	}
+
+	// 33 'é' are 33 characters in 66 bytes: under the name's cap in
+	// characters, over it in bytes. The pattern refuses them first, so the
+	// cap never speaks of characters it did not count.
+	name := strings.Repeat("é", 33)
+	_, err := FromFiles([]File{{Path: "a/SKILL.md", Data: []byte(skillMD(name, "d"))}})
+	var tooLong *LengthError
+	if want := fmt.Sprintf("name %q must contain only lowercase letters, digits, and hyphens", name); errors.As(err, &tooLong) ||
+		err == nil || err.Error() != want {
+		t.Errorf("33 'é' name: err = %v, want %q", err, want)
+	}
 }
 
 func buildZip(t *testing.T, entries map[string]string, dirs ...string) []byte {

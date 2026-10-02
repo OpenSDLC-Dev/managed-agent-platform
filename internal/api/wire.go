@@ -15,6 +15,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 )
 
 // maxBodyBytes bounds request bodies; agent specs are small configuration
@@ -216,7 +217,7 @@ func storableText(s string) bool {
 // environments, recorded with pydantic's sentence, and the console and work
 // routes, pydantic surfaces whose unknown-key sentence no recording holds.
 func rejectUnknownKeys(obj map[string]json.RawMessage, allowed ...string) error {
-	if key, ok := domain.LeastUnknownKey(obj, allowed...); ok {
+	if key, ok := unknownkey.Least(obj, allowed...); ok {
 		return errInvalid("Failed to parse request body: unknown field %q", key)
 	}
 	return nil

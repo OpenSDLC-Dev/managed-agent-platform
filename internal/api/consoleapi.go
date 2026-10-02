@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -335,7 +336,7 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	}
 	// A pydantic surface on the reference, whose unknown-key sentence no
 	// recording holds, so it is not rejectUnknownKeys' strict-decoder one.
-	if key, ok := domain.LeastUnknownKey(obj, "name"); ok {
+	if key, ok := unknownkey.Least(obj, "name"); ok {
 		return nil, errInvalid("unknown field %q", key)
 	}
 	name, err := environmentKeyName(obj)

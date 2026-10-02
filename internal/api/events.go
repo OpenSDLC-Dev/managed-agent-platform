@@ -1306,7 +1306,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 // postDreamStageInTx appends one stage's user.message on the primary thread of
 // an idle session and enqueues the model turn it starts, inside the caller's
 // transaction. It is the narrow recipe createSessionInTx runs for a create's
-// initial events (sessions.go: NormalizeInbound → TransitionThread →
+// initial events (sessions.go: NormalizeInitialEvents → TransitionThread →
 // AppendInTx with an Enqueue in Then), lifted for the dream runner's arm 9
 // (plan 41 §4.1) — deliberately not a factoring of sendSessionEvents, which
 // the runner cannot call at all: requireNotDreamOwned refuses every send to

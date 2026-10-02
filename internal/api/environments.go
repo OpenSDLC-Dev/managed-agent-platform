@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -85,7 +86,7 @@ func checkEnvironmentID(id string) error {
 // whose reference validator is pydantic's and words an unknown key its own way
 // (2026-09-03 batch1 `env.create.cloud`, #540).
 func rejectExtraEnvironmentKeys(obj map[string]json.RawMessage) error {
-	if key, ok := domain.LeastUnknownKey(obj, "name", "description", "config", "scope", "metadata"); ok {
+	if key, ok := unknownkey.Least(obj, "name", "description", "config", "scope", "metadata"); ok {
 		return errInvalid("%s: Extra inputs are not permitted", key)
 	}
 	return nil
@@ -121,12 +122,12 @@ func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, norm
 	}
 	switch typ {
 	case string(domain.EnvSelfHosted):
-		if key, ok := domain.LeastUnknownKey(obj, "type"); ok {
+		if key, ok := unknownkey.Least(obj, "type"); ok {
 			return "", nil, errInvalid("unknown self_hosted config field %q", key)
 		}
 		return typ, []byte(`{"type":"self_hosted"}`), nil
 	case string(domain.EnvCloud):
-		if key, ok := domain.LeastUnknownKey(obj, "type", "networking", "packages"); ok {
+		if key, ok := unknownkey.Least(obj, "type", "networking", "packages"); ok {
 			return "", nil, errInvalid("unknown cloud config field %q", key)
 		}
 		// Base: the existing cloud config when updating, defaults otherwise.
@@ -233,7 +234,7 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	}
 	switch typ {
 	case string(domain.NetUnrestricted):
-		if key, ok := domain.LeastUnknownKey(obj, "type"); ok {
+		if key, ok := unknownkey.Least(obj, "type"); ok {
 			return nil, errInvalid("unknown unrestricted networking field %q", key)
 		}
 		return json.RawMessage(`{"type":"unrestricted"}`), nil

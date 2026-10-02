@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 )
 
 // The permission policy each toolset kind resolves to when an entry sets none.
@@ -386,7 +387,7 @@ func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, 
 	if builtinTool {
 		allowed = append(allowed, "type")
 	}
-	if k, ok := domain.LeastUnknownKey(obj, allowed...); ok {
+	if k, ok := unknownkey.Least(obj, allowed...); ok {
 		ours := fmt.Errorf("%s: unknown field %q in %s", kind, k, path)
 		// A built-in entry whose name selects one of the eight variants is
 		// refused in the reference's words (2026-09-02 batch2
@@ -496,7 +497,7 @@ var webToolFields = map[string][]string{
 // rejectKeysOutside fails on the first key of obj not in allowed, naming its path
 // (the toolset object itself for the empty path).
 func rejectKeysOutside(kind string, obj map[string]json.RawMessage, path string, allowed ...string) error {
-	k, ok := domain.LeastUnknownKey(obj, allowed...)
+	k, ok := unknownkey.Least(obj, allowed...)
 	switch {
 	case !ok:
 		return nil

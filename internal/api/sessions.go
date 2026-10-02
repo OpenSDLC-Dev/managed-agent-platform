@@ -514,8 +514,9 @@ const (
 
 // parseInitialEvents structurally validates the create-time initial_events
 // list (presence, size, the two-type allowlist, the define_outcome and
-// file-document bounds); the per-type field validation runs later through the
-// same NormalizeInbound a posted batch gets.
+// file-document bounds); the per-type field validation runs later through
+// NormalizeInitialEvents, the normalizer a posted batch gets in this
+// platform's words.
 // allowSystemMessage widens the type allowlist by one arm. A deployment's
 // initial_events admits system.message where a session's does not — the
 // reference's two schemas differ by exactly that arm — and a fired session has
@@ -552,7 +553,7 @@ func parseInitialEvents(obj map[string]json.RawMessage, allowSystemMessage bool)
 			} `json:"content"`
 		}
 		// Best-effort: the count only matters for a well-formed block array;
-		// a string or malformed content is NormalizeInbound's to judge.
+		// a string or malformed content is NormalizeInitialEvents' to judge.
 		_ = json.Unmarshal(item, &probe)
 		probe.Type = head.Type
 		switch probe.Type {
@@ -737,8 +738,10 @@ func requestWording(err error) error {
 		return errNotFound("Memory store `%s` not found.", r.id)
 	case refusedStoreArchived:
 		return errInvalid("Memory store %s is archived.", r.id)
+	case refusedFileGone:
+		return errNotFound("One or more files not found. Check that each `file_id` exists and is accessible: %s", r.id)
 	}
-	return errNotFound("One or more files not found. Check that each `file_id` exists and is accessible: %s", r.id)
+	return err
 }
 
 // createSessionIn is what a session create needs once its caller's
@@ -1459,23 +1462,22 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 }
 
 // requireNotRunning locks the session row and refuses the mutation while the
-// session is running, with refusal — the reference documents that a running
-// session cannot be archived or deleted (an interrupt must settle it idle
-// first); the reject status and each route's sentence are the ones recorded
-// from the reference (2026-09-02 batch2 `sessT.archive.while-running` and
-// `sessT.delete.while-running`, #540; docs/DIVERGENCES.md, whose session
+// session is running, with what refusal returns — the reference documents that
+// a running session cannot be archived or deleted (an interrupt must settle it
+// idle first); the reject status and each route's sentence are the ones
+// recorded from the reference (2026-09-02 batch2 `sessT.archive.while-running`
+// and `sessT.delete.while-running`, #540; docs/DIVERGENCES.md, whose session
 // threads entry covers rescheduling). The archive sentence says only pending or
-// idle sessions may be archived, but only running is refused here. The row
-// lock holds the status still until the caller's tx commits, so an approval
-// flipping the session to running cannot slip between the check and the
-// mutation.
+// idle sessions may be archived, but only running is refused here. The row lock
+// holds the status still until the caller's tx commits, so an approval flipping
+// the session to running cannot slip between the check and the mutation.
 //
 // It is also the first half of a lock order the mutation depends on: the session
 // row before anything that cascades from it. internal/gatetoken.Ensure takes the
 // same order on purpose, and taking the two the other way round here would
 // reopen the deadlock #313 closed. The work API's claim takes a session's item
 // and never its row, so it has no order to keep (claimWork, #643).
-func requireNotRunning(ctx context.Context, tx pgx.Tx, id string, refusal *apiError) error {
+func requireNotRunning(ctx context.Context, tx pgx.Tx, id string, refusal func() error) error {
 	var status string
 	err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, id).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1485,7 +1487,7 @@ func requireNotRunning(ctx context.Context, tx pgx.Tx, id string, refusal *apiEr
 		return err
 	}
 	if status == string(domain.SessionRunning) {
-		return refusal
+		return refusal()
 	}
 	return nil
 }
@@ -1504,9 +1506,10 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
 	}
-	if err := requireNotRunning(ctx, tx, id, errInvalid(
-		"Session %s cannot be archived while its status is %q. Only pending or idle sessions may be archived.",
-		id, domain.SessionRunning)); err != nil {
+	if err := requireNotRunning(ctx, tx, id, func() error {
+		return errInvalid("Session %s cannot be archived while its status is %q. Only pending or idle sessions may be archived.",
+			id, domain.SessionRunning)
+	}); err != nil {
 		return nil, err
 	}
 	row, moves, err := s.archiveSessionInTx(ctx, tx, id)
@@ -1663,8 +1666,9 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
 	}
-	if err := requireNotRunning(ctx, tx, id, errInvalid(
-		"Cannot delete session while it is running. Send an interrupt event or wait for the session to complete.")); err != nil {
+	if err := requireNotRunning(ctx, tx, id, func() error {
+		return errInvalid("Cannot delete session while it is running. Send an interrupt event or wait for the session to complete.")
+	}); err != nil {
 		return nil, err
 	}
 	// The tombstone rides the deleting transaction, written while the row can

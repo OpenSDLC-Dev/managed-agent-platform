@@ -482,7 +482,7 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 		}
 		return resourceInput{}, err
 	}
-	if tok, set, null, err := stringField(obj, "authorization_token"); err == nil && !null && tok == "" {
+	if tok, _, null, err := stringField(obj, "authorization_token"); err == nil && !null && tok == "" {
 		// An absent token on either recorded route (2026-09-03 batch1
 		// `session.create.repo-token-absent`, 2026-09-05 batch3
 		// `rec84.repo.with-url`), and an empty one on session create
@@ -492,8 +492,10 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 		switch {
 		case f == resourceForSession:
 			return resourceInput{}, errInvalid("resources.%d.github_repository.authorization_token: value is required", i)
-		case f == resourceForDeployment && !set:
-			return resourceInput{}, errInvalid("resources.%d.authorization_token: Field required", i)
+		case f == resourceForDeployment:
+			if err := fieldRequired(obj, "authorization_token", "resources."+strconv.Itoa(i)+".authorization_token"); err != nil {
+				return resourceInput{}, err
+			}
 		}
 	}
 	token, err := requiredString(obj, "authorization_token")

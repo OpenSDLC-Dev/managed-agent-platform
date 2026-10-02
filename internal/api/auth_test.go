@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -116,9 +117,11 @@ func TestUnknownRouteAndMethodReturnErrorEnvelope(t *testing.T) {
 }
 
 // TestEveryRefusalIsLogged pins the one Info line writeError writes for a
-// 4xx: method, path without its query, status, error type and request id —
-// what an operator needs once a refusal's wire message names nothing (#540).
-// A success writes none.
+// 4xx answered to an authenticated request: method, path without its query
+// and capped, status, error type, the wire message and request id — what an
+// operator needs once a refusal's wire message names nothing (#540). A
+// success writes none, and neither does a request no credential
+// authenticated.
 func TestEveryRefusalIsLogged(t *testing.T) {
 	s := newTestServer(t)
 	logs := captureLogs(t, slog.LevelInfo)
@@ -127,8 +130,16 @@ func TestEveryRefusalIsLogged(t *testing.T) {
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 	status, put := s.do(http.MethodPut, "/v1/agents", nil)
 	wantErr(t, status, put, http.StatusMethodNotAllowed, "invalid_request_error")
+	longPath := "/v1/agents/" + strings.Repeat("a", 600)
+	status, long := s.do(http.MethodGet, longPath, nil)
+	wantErr(t, status, long, http.StatusNotFound, "not_found_error")
 	if status, _ := s.do(http.MethodGet, "/v1/agents", nil); status != http.StatusOK {
 		t.Fatalf("list agents: %d", status)
+	}
+	res := s.doRaw(http.MethodGet, "/v1/agents/unauthenticated-probe", nil, map[string]string{})
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no key: %d, want 401", res.StatusCode)
 	}
 
 	var refused []string
@@ -137,23 +148,28 @@ func TestEveryRefusalIsLogged(t *testing.T) {
 			refused = append(refused, l)
 		}
 	}
-	if len(refused) != 2 {
-		t.Fatalf("refusal lines = %d, want 2 (one per 4xx, none for the 200):\n%s", len(refused), strings.Join(refused, "\n"))
+	if len(refused) != 3 {
+		t.Fatalf("refusal lines = %d, want 3 (one per authenticated 4xx, none for the 200 or the 401):\n%s",
+			len(refused), strings.Join(refused, "\n"))
+	}
+	message := func(res map[string]any) string {
+		return "message=" + strconv.Quote(res["error"].(map[string]any)["message"].(string))
 	}
 	for i, want := range [][]string{
-		{"method=GET", "path=/v1/agents/agent_0000000000000000000000000", "status=404", "error_type=not_found_error",
-			"request_id=" + body["request_id"].(string)},
+		{"method=GET", "path=/v1/agents/agent_0000000000000000000000000 ", "status=404", "error_type=not_found_error",
+			message(body), "request_id=" + body["request_id"].(string)},
 		{"method=PUT", "path=/v1/agents ", "status=405", "error_type=invalid_request_error",
-			"request_id=" + put["request_id"].(string)},
+			`message="Method Not Allowed"`, "request_id=" + put["request_id"].(string)},
+		{"path=" + longPath[:512] + "…[truncated] ", "status=404", "request_id=" + long["request_id"].(string)},
 	} {
 		for _, w := range want {
-			if !strings.Contains(refused[i]+" ", w) {
+			if !strings.Contains(refused[i], w) {
 				t.Errorf("refusal line %q lacks %q", refused[i], w)
 			}
 		}
 	}
-	if strings.Contains(logs(), "secret-looking") {
-		t.Error("a refusal line carries the query string")
+	if l := logs(); strings.Contains(l, "secret-looking") || strings.Contains(l, "unauthenticated-probe") {
+		t.Error("a refusal line carries the query string, or an unauthenticated request was logged")
 	}
 }
 

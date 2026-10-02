@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 )
 
 // Inbound validation for POST /v1/sessions/{id}/events. Only the wire's seven
@@ -492,9 +493,9 @@ func asObject(raw json.RawMessage, what string) (map[string]json.RawMessage, err
 }
 
 // allowKeys refuses a key of obj outside allowed, naming the one
-// domain.LeastUnknownKey picks.
+// unknownkey.Least picks.
 func allowKeys(obj map[string]json.RawMessage, allowed ...string) error {
-	if key, ok := domain.LeastUnknownKey(obj, allowed...); ok {
+	if key, ok := unknownkey.Least(obj, allowed...); ok {
 		return fmt.Errorf("unknown field %q", key)
 	}
 	return nil
@@ -530,11 +531,12 @@ func isNullRaw(raw json.RawMessage) bool {
 //
 // A malformed claim on an interrupt is refused in the reference's words
 // (2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
-// `.unknown-thread`, #540). On a confirmation or a result the reference
-// refuses nothing — it was recorded accepting an `sth_` id and an unknown one
-// and rewriting the claim to the call's own thread (idx 335–336
-// `sessK2.send.tool_confirmation.*`) — so this platform's refusal there is
-// its own, and keeps its own words (docs/DIVERGENCES.md, #841).
+// `.unknown-thread`, #540). A tool confirmation's the reference does not
+// refuse: it was recorded accepting another thread's id, an unknown one and an
+// `sth_` one, rewriting the claim to the call's own thread (#334–#336
+// `sessK2.send.tool_confirmation.*`). Its answer on a tool result or a custom
+// tool result is unrecorded. So this platform's refusal on all three is its
+// own, and keeps its own words (docs/DIVERGENCES.md, #841, #78).
 func threadClaim(obj map[string]json.RawMessage, interrupt bool) (domain.ID, error) {
 	raw, set := obj["session_thread_id"]
 	if !set || isNullRaw(raw) {

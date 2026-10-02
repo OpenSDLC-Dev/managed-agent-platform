@@ -291,11 +291,13 @@ func parseFrontmatter(md []byte) (name, description string, err error) {
 	if fm.Name == "" {
 		return "", "", fmt.Errorf("%s frontmatter is missing name", skillMDName)
 	}
-	if len(fm.Name) > maxNameLen {
-		return "", "", &LengthError{Field: "name", Limit: maxNameLen}
-	}
+	// The pattern first: it admits ASCII alone, so the cap after it counts
+	// characters and bytes alike, as its refusal says.
 	if !nameRe.MatchString(fm.Name) {
 		return "", "", fmt.Errorf("name %q must contain only lowercase letters, digits, and hyphens", fm.Name)
+	}
+	if len(fm.Name) > maxNameLen {
+		return "", "", &LengthError{Field: "name", Limit: maxNameLen}
 	}
 	for _, reserved := range []string{"anthropic", "claude"} {
 		if strings.Contains(fm.Name, reserved) {

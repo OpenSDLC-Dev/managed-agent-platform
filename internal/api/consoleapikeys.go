@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -179,7 +180,7 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	}
 	// A pydantic surface on the reference, whose unknown-key sentence no
 	// recording holds, so it is not rejectUnknownKeys' strict-decoder one.
-	if key, ok := domain.LeastUnknownKey(obj, "name", "expires_at", "principal_id"); ok {
+	if key, ok := unknownkey.Least(obj, "name", "expires_at", "principal_id"); ok {
 		return nil, errInvalid("unknown field %q", key)
 	}
 	name, err := apiKeyCreateName(obj)
@@ -231,7 +232,7 @@ func apiKeyPatch(raw json.RawMessage) (status, name *string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if key, ok := domain.LeastUnknownKey(obj, "status", "name"); ok {
+	if key, ok := unknownkey.Least(obj, "status", "name"); ok {
 		return nil, nil, errInvalid("unknown field %q", key)
 	}
 	if status, err = apiKeyStatus(obj); err != nil {

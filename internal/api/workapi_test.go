@@ -687,37 +687,21 @@ func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 	if startedAt == "" {
 		t.Fatalf("polled item has no started_at: %v", polled)
 	}
-	refused := func(t *testing.T, query string, want map[string]any) {
+	// The sentence (#540) names the precondition as the beat sent it, then the
+	// item's last heartbeat — recorded as "Heartbeat precondition failed:
+	// expected NO_HEARTBEAT, actual was 2026-09-02T00:08:33.477978Z" (batch2
+	// idx 259) and "… expected 2020-01-01T00:00:00Z, actual was …" (idx 260) —
+	// or "NULL" when it holds none, as the SDK's leaseLostBody fixture renders
+	// that case.
+	refused := func(t *testing.T, query string, want map[string]any, msg string) {
 		t.Helper()
 		res, body, _ := s.workReq(t, http.MethodPost, item+"/heartbeat?"+query, key, nil)
-		wantErr(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error")
+		wantErrMsg(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error", msg)
 		wantDetails(t, body, map[string]any{
 			"current_state":    want,
 			"error_visibility": "user_facing",
 			"error_code":       "heartbeat_precondition_failed",
 		})
-		// The reference's sentence (#540): the precondition as the beat sent it,
-		// then the item's last heartbeat with six fractional digits — recorded
-		// as "Heartbeat precondition failed: expected NO_HEARTBEAT, actual was
-		// 2026-09-02T00:08:33.477978Z" (batch2 idx 259) and "… expected
-		// 2020-01-01T00:00:00Z, actual was …" (idx 260) — or "NULL" when it
-		// holds none, as the SDK's leaseLostBody fixture renders that case. A
-		// whole second's shape is TestAHeartbeatMismatchRendersTheLastBeatAsTheReferenceDoes's.
-		q, _ := url.ParseQuery(query)
-		actual := "NULL"
-		if lh, ok := want["last_heartbeat"].(string); ok {
-			ts, err := time.Parse(time.RFC3339Nano, lh)
-			if err != nil {
-				t.Fatalf("last_heartbeat %q: %v", lh, err)
-			}
-			layout := "2006-01-02T15:04:05.000000Z07:00"
-			if ts.Nanosecond() == 0 { // a whole second drops the fraction
-				layout = "2006-01-02T15:04:05Z07:00"
-			}
-			actual = ts.UTC().Format(layout)
-		}
-		wantErrMsg(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error",
-			"Heartbeat precondition failed: expected "+q.Get("expected_last_heartbeat")+", actual was "+actual)
 	}
 
 	// A claim before the ack, on work no beat has reached. No recording holds a
@@ -727,35 +711,52 @@ func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 	refused(t, "expected_last_heartbeat=NO_HEARTBEAT", map[string]any{
 		"lease_extended": false, "state": "queued", "last_heartbeat": nil,
 		"ttl_seconds": float64(30), "lease_updated_at": nil,
-	})
+	}, "Heartbeat precondition failed: expected NO_HEARTBEAT, actual was NULL")
 
 	if res, _, raw := s.workReq(t, http.MethodPost, item+"/ack", key, nil); res.StatusCode != http.StatusOK {
 		t.Fatalf("ack status = %d (body %q)", res.StatusCode, raw)
 	}
 	res, claim, raw := s.workReq(t, http.MethodPost, item+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", key, nil)
-	last, _ := claim["last_heartbeat"].(string)
-	if res.StatusCode != http.StatusOK || last == "" {
+	if res.StatusCode != http.StatusOK || claim["last_heartbeat"] == nil {
 		t.Fatalf("claim = %d (body %q), want 200 with a last_heartbeat", res.StatusCode, raw)
 	}
-	active := func(ttl float64) map[string]any {
+	// The claim stamped now(); the stored beat is set to a fixed one so each
+	// sentence below is a literal — the recorded beat first, six fractional
+	// digits, then a whole second, which drops them.
+	setBeat := func(t *testing.T, beat string) {
+		t.Helper()
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE work_items SET last_heartbeat = $2::timestamptz WHERE id = $1`, workID, beat); err != nil {
+			t.Fatalf("set last_heartbeat: %v", err)
+		}
+	}
+	active := func(last string, ttl float64) map[string]any {
 		return map[string]any{
 			"lease_extended": false, "state": "active", "last_heartbeat": last,
 			"ttl_seconds": ttl, "lease_updated_at": startedAt,
 		}
 	}
+	setBeat(t, "2026-09-02T00:08:33.477978Z")
 	for name, tc := range map[string]struct {
-		query string
-		ttl   float64
+		query, msg string
+		ttl        float64
 	}{
-		"a second claim":   {"expected_last_heartbeat=NO_HEARTBEAT", 30},
-		"a wrong echo":     {"expected_last_heartbeat=2020-01-01T00:00:00Z", 30},
-		"a malformed echo": {"expected_last_heartbeat=not-a-timestamp", 30},
+		"a second claim": {"expected_last_heartbeat=NO_HEARTBEAT",
+			"Heartbeat precondition failed: expected NO_HEARTBEAT, actual was 2026-09-02T00:08:33.477978Z", 30},
+		"a wrong echo": {"expected_last_heartbeat=2020-01-01T00:00:00Z",
+			"Heartbeat precondition failed: expected 2020-01-01T00:00:00Z, actual was 2026-09-02T00:08:33.477978Z", 30},
+		"a malformed echo": {"expected_last_heartbeat=not-a-timestamp",
+			"Heartbeat precondition failed: expected not-a-timestamp, actual was 2026-09-02T00:08:33.477978Z", 30},
 		// ttl_seconds is the refused beat's effective TTL, as every beat here
 		// that extends nothing reports it (docs/DIVERGENCES.md).
-		"a TTL of its own": {"expected_last_heartbeat=NO_HEARTBEAT&desired_ttl_seconds=120", 120},
+		"a TTL of its own": {"expected_last_heartbeat=NO_HEARTBEAT&desired_ttl_seconds=120",
+			"Heartbeat precondition failed: expected NO_HEARTBEAT, actual was 2026-09-02T00:08:33.477978Z", 120},
 	} {
-		t.Run(name, func(t *testing.T) { refused(t, tc.query, active(tc.ttl)) })
+		t.Run(name, func(t *testing.T) { refused(t, tc.query, active("2026-09-02T00:08:33.477978Z", tc.ttl), tc.msg) })
 	}
+	setBeat(t, "2026-09-02T00:08:33Z")
+	refused(t, "expected_last_heartbeat=NO_HEARTBEAT", active("2026-09-02T00:08:33Z", 30),
+		"Heartbeat precondition failed: expected NO_HEARTBEAT, actual was 2026-09-02T00:08:33Z")
 }
 
 // TestWorkStopAnswersTheWorkObject pins POST .../work/{work_id}/stop: success

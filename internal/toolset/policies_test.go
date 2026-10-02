@@ -310,7 +310,7 @@ func TestValidateConfigErrorsForTheRecordedCases(t *testing.T) {
 
 // TestValidateNamesTheLeastUnknownKey pins that a configs[] entry, a
 // default_config or a toolset carrying several unknown keys names the same
-// one on every call — the byte-order-least, domain.LeastUnknownKey's pick —
+// one on every call — the byte-order-least, unknownkey.Least's pick —
 // where a map's iteration order would pick any.
 func TestValidateNamesTheLeastUnknownKey(t *testing.T) {
 	for entry, want := range map[string]string{

@@ -1,8 +1,8 @@
-package domain
+package unknownkey
 
 import "testing"
 
-func TestLeastUnknownKey(t *testing.T) {
+func TestLeast(t *testing.T) {
 	for _, tc := range []struct {
 		obj     map[string]int
 		allowed []string
@@ -15,8 +15,8 @@ func TestLeastUnknownKey(t *testing.T) {
 		{map[string]int{"type": 1, "zeta": 1}, []string{"type"}, "zeta", true},
 	} {
 		for range 20 { // map order varies run to run; the answer must not
-			if got, found := LeastUnknownKey(tc.obj, tc.allowed...); got != tc.want || found != tc.found {
-				t.Fatalf("LeastUnknownKey(%v, %v) = %q, %v; want %q, %v", tc.obj, tc.allowed, got, found, tc.want, tc.found)
+			if got, found := Least(tc.obj, tc.allowed...); got != tc.want || found != tc.found {
+				t.Fatalf("Least(%v, %v) = %q, %v; want %q, %v", tc.obj, tc.allowed, got, found, tc.want, tc.found)
 			}
 		}
 	}

@@ -207,9 +207,10 @@ func TestNormalizeInboundReferenceWording(t *testing.T) {
 			"Invalid session_thread_id: sth_x"},
 		{"malformed thread id", `{"type":"user.interrupt","session_thread_id":"sthr_01UnknownThreadIdXXXXXXXXX"}`,
 			"Invalid session_thread_id: sthr_01UnknownThreadIdXXXXXXXXX"},
-		// Not on a confirmation or a result: the reference accepts the claim
-		// there (idx 335–336 `sessK2.send.tool_confirmation.*`, 200), so the
-		// refusal is ours, in ours.
+		// Not on a confirmation or a result: the reference was recorded
+		// accepting the claim on a tool confirmation (#334–#336
+		// `sessK2.send.tool_confirmation.*`, 200), and never recorded on a
+		// result, so the refusal is ours, in ours.
 		{"malformed thread id on a confirmation", `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","session_thread_id":"sesn_x"}`,
 			`events[1]: session_thread_id "sesn_x" is not a session thread id`},
 		{"malformed thread id on a result", `{"type":"user.custom_tool_result","custom_tool_use_id":"c","session_thread_id":"sesn_x"}`,

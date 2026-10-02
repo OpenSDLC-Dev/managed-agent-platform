@@ -420,6 +420,7 @@ Layout order is by layer, as the repo is.
 | `domain/` | The Anthropic-native types every other package speaks — ids and their wire prefixes, the event taxonomy, session, agent, environment, outcome. Stdlib only: no adk-go, no genai, no provider SDK, because the wire schema is authoritative here. |
 | `api/` | The control plane's whole HTTP surface, and the dispatcher deciding which of four credentials reaches which route. Five surfaces share one `ServeMux`; auth runs before the router, never inside it. |
 | `events/` | The append-only session event log — the single source of truth — plus per-session `seq` allocation, list queries, the Postgres LISTEN/NOTIFY broker behind SSE, the ephemeral preview frames, and the `span.*` events emitted from the same instrumentation point as the OTel spans. |
+| `unknownkey/` | Which key a refusal of unknown keys names — the least in byte order, so a body carrying several names the same one every time — for the three packages that refuse them, `api`, `toolset` and `events`, which cannot import one another for it. Stdlib only, and not `domain/`, which holds the Anthropic-native types alone. |
 
 ### Execution chain
 
