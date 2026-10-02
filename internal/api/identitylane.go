@@ -80,6 +80,7 @@ func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler
 			writeError(w, r, errAuth(err.Error()))
 			return
 		}
+		markVerified(r.Context())
 		principalID, err := upsertPrincipal(r.Context(), pool, id)
 		if err != nil {
 			writeError(w, r, err)

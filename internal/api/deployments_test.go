@@ -1462,12 +1462,13 @@ func TestUpdateDeploymentReplacesTheCollections(t *testing.T) {
 		t.Errorf("initial_events = %v, want the two-event replacement", ev)
 	}
 
-	// And an update cannot empty it: the floor applies to the stored result.
-	// The refusal is this platform's sentence, not the one a send batch's
-	// empty `events` gets since #540: no recording reaches initial_events.
+	// And an update cannot empty it: the floor applies to the stored result,
+	// in the sentence create answers (TestDeploymentInitialEventsFloorAndCeiling)
+	// — this platform's, not the one a send batch's empty `events` gets since
+	// #540: no recording reaches initial_events.
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"initial_events": []any{}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
-		"initial_events: events must contain at least one event")
+		"initial_events must contain at least 1 event")
 }
 
 // The update params draw a line that the two spellings of "empty" have to

@@ -206,6 +206,7 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, errAuth("invalid x-api-key"))
 			return
 		}
+		markVerified(r.Context())
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyPrincipal, principal)))
 	})
 }

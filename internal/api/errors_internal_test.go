@@ -116,9 +116,10 @@ func TestAHeartbeatMismatchRendersTheLastBeatAsTheReferenceDoes(t *testing.T) {
 	}
 }
 
-// TestCapForLogCutsAtARuneBoundary pins the refusal line's cap: a short string
-// passes whole, a long one is cut to at most logFieldMax bytes without
-// splitting a rune, and the cut is marked.
+// TestCapForLogCutsAtARuneBoundary pins the refusal line's cap: a string of
+// logFieldMax bytes passes whole; a longer one comes out at most logFieldMax
+// bytes, the marker included — exactly that for ASCII — cut without splitting
+// a rune, and marked.
 func TestCapForLogCutsAtARuneBoundary(t *testing.T) {
 	if got := capForLog("short"); got != "short" {
 		t.Errorf("short: %q", got)
@@ -127,11 +128,16 @@ func TestCapForLogCutsAtARuneBoundary(t *testing.T) {
 	if got := capForLog(exact); got != exact {
 		t.Errorf("exactly the cap was cut: %d bytes", len(got))
 	}
-	// 'a' then two-byte runes: byte logFieldMax falls inside a rune.
+	over := capForLog(exact + "a")
+	if len(over) != logFieldMax || !strings.HasSuffix(over, truncatedMark) {
+		t.Errorf("one byte over = %d bytes %q…, want exactly %d ending in the marker", len(over), over[:8], logFieldMax)
+	}
+	// 'a' then two-byte runes: the cut point falls inside a rune and backs
+	// off to the rune before it.
 	got := capForLog("a" + strings.Repeat("é", logFieldMax))
-	body, ok := strings.CutSuffix(got, "…[truncated]")
-	if !ok || !utf8.ValidString(body) || len(body) != logFieldMax-1 {
-		t.Errorf("cut = %d bytes, valid %v, marked %v; want %d valid bytes, marked",
-			len(body), utf8.ValidString(body), ok, logFieldMax-1)
+	body, ok := strings.CutSuffix(got, truncatedMark)
+	if want := logFieldMax - len(truncatedMark) - 1; !ok || !utf8.ValidString(body) || len(body) != want || len(got) > logFieldMax {
+		t.Errorf("cut = %d bytes (%d with the marker), valid %v, marked %v; want %d valid bytes, marked",
+			len(body), len(got), utf8.ValidString(body), ok, want)
 	}
 }

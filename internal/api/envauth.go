@@ -67,6 +67,7 @@ func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool
 		writeError(w, r, errAuth("invalid environment key"))
 		return "", "", false
 	}
+	markVerified(r.Context())
 	return envID, kind, true
 }
 

@@ -34,6 +34,7 @@ func requireGateToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, errAuth("invalid gate token"))
 			return
 		}
+		markVerified(r.Context())
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeySession, sessionID)))
 	})
 }

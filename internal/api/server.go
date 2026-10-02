@@ -762,12 +762,14 @@ func (s *server) handleNoContent(min identity.Role, fn func(*http.Request) error
 }
 
 // withRequestID stamps every response (success and error) with a request-id
-// header and threads the ID into the context for error envelopes.
+// header and threads the ID into the context for error envelopes, beside the
+// mark a lane sets once a credential verifies (withVerifiedMark).
 func withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rid := domain.NewID("req").String()
 		w.Header().Set("request-id", rid)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID, rid)))
+		ctx := withVerifiedMark(context.WithValue(r.Context(), ctxKeyRequestID, rid))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

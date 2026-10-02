@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
@@ -141,6 +142,13 @@ func TestEveryRefusalIsLogged(t *testing.T) {
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("no key: %d, want 401", res.StatusCode)
 	}
+	// A 5xx answered to an authenticated request is no refusal: a server with
+	// no secrets cipher answers a repository-bearing create 500.
+	cipherless := newTestServerWithCipher(t, nil)
+	agentID, envID := fixture(t, cipherless)
+	status, fault := cipherless.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "resources": []any{repoBody("ghp_x", nil)}})
+	wantErr(t, status, fault, http.StatusInternalServerError, "api_error")
 
 	var refused []string
 	for _, l := range strings.Split(logs(), "\n") {
@@ -149,7 +157,7 @@ func TestEveryRefusalIsLogged(t *testing.T) {
 		}
 	}
 	if len(refused) != 3 {
-		t.Fatalf("refusal lines = %d, want 3 (one per authenticated 4xx, none for the 200 or the 401):\n%s",
+		t.Fatalf("refusal lines = %d, want 3 (one per authenticated 4xx, none for the 200, the 401 or the 500):\n%s",
 			len(refused), strings.Join(refused, "\n"))
 	}
 	message := func(res map[string]any) string {
@@ -160,7 +168,7 @@ func TestEveryRefusalIsLogged(t *testing.T) {
 			message(body), "request_id=" + body["request_id"].(string)},
 		{"method=PUT", "path=/v1/agents ", "status=405", "error_type=invalid_request_error",
 			`message="Method Not Allowed"`, "request_id=" + put["request_id"].(string)},
-		{"path=" + longPath[:512] + "…[truncated] ", "status=404", "request_id=" + long["request_id"].(string)},
+		{"path=" + longPath[:512-len("…[truncated]")] + "…[truncated] ", "status=404", "request_id=" + long["request_id"].(string)},
 	} {
 		for _, w := range want {
 			if !strings.Contains(refused[i], w) {
@@ -170,6 +178,79 @@ func TestEveryRefusalIsLogged(t *testing.T) {
 	}
 	if l := logs(); strings.Contains(l, "secret-looking") || strings.Contains(l, "unauthenticated-probe") {
 		t.Error("a refusal line carries the query string, or an unauthenticated request was logged")
+	}
+	for _, l := range refused {
+		if strings.Contains(l, "request_id="+fault["request_id"].(string)) {
+			t.Errorf("a 5xx was logged as a refusal: %s", l)
+		}
+	}
+}
+
+// TestARefusalAfterAuthenticationIsLoggedOnEveryLane pins the refusal line on
+// the requests a lane refuses after their credential verified but before the
+// lane puts anything of it on the context — the environment key's session and
+// file-download lanes and the sessions token's route checks — and its absence
+// on every lane for a credential that never verified. The management key, a
+// human's credential and the gate token refuse nothing between the two.
+func TestARefusalAfterAuthenticationIsLoggedOnEveryLane(t *testing.T) {
+	s := newTestServer(t)
+	logs := captureLogs(t, slog.LevelInfo)
+
+	selfEnv, _, selfKey := selfHostedWorker(t, s, "lanes-self")
+	cloudEnv := createEnvironment(t, s, map[string]any{"name": "lanes-cloud"})["id"].(string)
+	cloudKey := issueKey(t, s.pool, cloudEnv, "lanes-cloud")
+	_, storeEnv, _, _, storeKey := storeWorker(t, s, "lanes-token")
+	_, _, wtk := pollItem(t, s, storeEnv, storeKey)
+	if wtk == "" {
+		t.Fatal("the poll minted no sessions token")
+	}
+	ghostSession := "/v1/sessions/sesn_" + strings.Repeat("0", 25)
+
+	requestID := func(t *testing.T, method, path string, headers map[string]string, wantStatus int) string {
+		t.Helper()
+		res := s.doRaw(method, path, nil, headers)
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		if res.StatusCode != wantStatus {
+			t.Fatalf("%s %s = %d, want %d", method, path, res.StatusCode, wantStatus)
+		}
+		return res.Header.Get("request-id")
+	}
+	logged := map[string]string{
+		"self_hosted key, a session not its own": requestID(t, http.MethodGet, ghostSession, asBearer(selfKey), http.StatusNotFound),
+		"cloud key, a session route":             requestID(t, http.MethodGet, ghostSession+"/events", asBearer(cloudKey), http.StatusNotFound),
+		"cloud key, a file download": requestID(t, http.MethodGet, "/v1/files/file_"+strings.Repeat("0", 25)+"/content",
+			asBearer(cloudKey), http.StatusNotFound),
+		"sessions token, outside its routes": requestID(t, http.MethodGet, "/v1/environments/"+storeEnv+"/work",
+			asBearer(wtk), http.StatusUnauthorized),
+		"sessions token, another session": requestID(t, http.MethodGet, ghostSession+"/events", asBearer(wtk), http.StatusNotFound),
+	}
+	silent := map[string]string{
+		"no credential":           requestID(t, http.MethodGet, "/v1/agents", map[string]string{}, http.StatusUnauthorized),
+		"unknown management key":  requestID(t, http.MethodGet, "/v1/agents", map[string]string{"x-api-key": "not-a-key"}, http.StatusUnauthorized),
+		"unknown environment key": requestID(t, http.MethodGet, "/v1/environments/"+selfEnv+"/work/poll", asBearer("sk-map-env01-bogus"), http.StatusUnauthorized),
+		"unknown sessions token":  requestID(t, http.MethodGet, "/v1/environments/"+storeEnv+"/work", asBearer("wtk_bogus"), http.StatusUnauthorized),
+		"unknown gate token":      requestID(t, http.MethodGet, gateconfig.Path, asBearer("gtk_bogus"), http.StatusUnauthorized),
+	}
+
+	lines := strings.Split(logs(), "\n")
+	lineFor := func(rid string) string {
+		for _, l := range lines {
+			if strings.Contains(l, `msg="request refused"`) && strings.Contains(l, "request_id="+rid) {
+				return l
+			}
+		}
+		return ""
+	}
+	for name, rid := range logged {
+		if lineFor(rid) == "" {
+			t.Errorf("%s: no refusal line for request %s", name, rid)
+		}
+	}
+	for name, rid := range silent {
+		if l := lineFor(rid); l != "" {
+			t.Errorf("%s: an unauthenticated request was logged: %s", name, l)
+		}
 	}
 }
 
