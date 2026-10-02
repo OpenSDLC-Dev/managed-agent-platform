@@ -102,6 +102,40 @@ func TestSweepStraysRemovesAnAgedContainerAndSparesAFreshOne(t *testing.T) {
 	}
 }
 
+// A sweep that loses to a sibling binary's is refused with "removal of
+// container … is already in progress", and the container stays listed until the
+// winner's removal finishes (#843). goneBefore is what waits that out, so it is
+// checked against a container another process removes a moment later — and
+// against one nobody removes, which must still come back as not gone once the
+// deadline passes, or a removal that really failed would never be announced.
+func TestGoneBeforeWaitsOutARemovalAnotherProcessHasUnderWay(t *testing.T) {
+	removed := plant(t, time.Now())
+	kept := plant(t, time.Now())
+	if gone(context.Background(), removed) {
+		t.Fatalf("container %s is gone before anything removed it", removed)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(time.Second)
+		done <- exec.Command("docker", "rm", "-f", "-v", removed).Run()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if !goneBefore(ctx, removed) {
+		t.Errorf("container %s, removed a second into the wait, was not seen to go", removed)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the concurrent removal failed: %v", err)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if goneBefore(ctx, kept) {
+		t.Errorf("container %s, which nothing removed, was reported gone", kept)
+	}
+}
+
 // plant creates a stopped container labelled as a fixture started at the given
 // time, and removes it at test end. Being labelled, it is also reaped by a
 // later run's sweep if this run is the one that gets killed.

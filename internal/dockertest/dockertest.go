@@ -140,6 +140,16 @@ func SweepStrays(harness string) {
 // corpse, and only one of them can win. Everything else — a daemon that refuses,
 // a volume that will not delete — is a container this run could not clear.
 //
+// Losing while the winner is still at work looks different, though: the daemon
+// answers "removal of container … is already in progress", and lists the
+// container until the winner's removal finishes — which on a crowded daemon is
+// long enough for a single look to see it and announce a loss that was only a
+// race (#843). So a failed removal keeps looking, for whatever is left of its
+// own bound, before counting the container as one this run could not clear. A
+// lost race ordinarily resolves within a second, but a saturated daemon has been
+// seen to hold a removal in progress past ten seconds, and the bound that caps
+// one wedged removal is the natural ceiling for waiting on someone else's.
+//
 // That announcement reaches a terminal only when the package fails or the suite
 // runs under -v, since `go test ./...` buffers a passing package's output and
 // prints just its ok line. So it is a breadcrumb for whoever is already looking
@@ -153,11 +163,27 @@ func removeContainer(ctx context.Context, harness, id string) bool {
 	if err == nil {
 		return true
 	}
-	if !gone(ctx, id) {
+	if !goneBefore(ctx, id) {
 		fmt.Fprintf(os.Stderr, "%s: reaping stray container %s: %v: %s\n",
 			harness, id, err, strings.TrimSpace(string(out)))
 	}
 	return false
+}
+
+// goneBefore polls gone until the container has disappeared or ctx is done,
+// whichever is first. The poll is coarse, like pgtest's readiness poll, so the
+// wait adds next to no load to the daemon it is waiting on.
+func goneBefore(ctx context.Context, id string) bool {
+	for {
+		if gone(ctx, id) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // gone reports whether the daemon no longer knows the container. A daemon that
