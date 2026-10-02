@@ -17,8 +17,7 @@ import (
 // const, so export_test.go can lower it to exercise the 413 path without
 // streaming half a gigabyte through a test. Self-hosted operators own their
 // disk, so the reference's per-org storage quota (1 TB in the docs as of
-// 2026-10-02) is deliberately not enforced
-// (docs/DIVERGENCES.md).
+// 2026-10-02) is deliberately not enforced (docs/DIVERGENCES.md).
 var maxFileBytes int64 = 500 << 20
 
 // fileUploadHeadroom is the multipart-framing slop added to the total-body
