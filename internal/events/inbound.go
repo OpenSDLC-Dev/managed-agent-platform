@@ -18,8 +18,9 @@ import (
 // kept as the client's raw bytes after validation, so they round-trip
 // byte-for-byte.
 //
-// An explicit session_thread_id is validated for shape here and resolved
-// against the log by RouteInbound (route.go). Tool-result references are
+// An interrupt's explicit session_thread_id is validated for shape here and
+// resolved against the log by RouteInbound (route.go); an answer's is dropped
+// (threadClaim). Tool-result references are
 // cross-checked against the log by ValidateToolResults (toolflow.go) — that
 // needs a database, so it runs in the API's send transaction, not here; so
 // do user.define_outcome's single-active check and file-rubric validation
@@ -521,22 +522,22 @@ func isNullRaw(raw json.RawMessage) bool {
 }
 
 // threadClaim reads an inbound event's explicit session_thread_id (plan 35
-// decision 9): null or absent is no claim; a string must be a well-formed
-// thread id. The claim rides NewEvent.ThreadID out of normalization for
-// RouteInbound to resolve against the log — a confirmation or result routes
-// by the tool use it answers and the claim must match; an interrupt's claim
-// names the one thread it ends — while the stored payload keeps
-// session_thread_id null, rendered per surface like every thread-addressable
-// event.
+// decision 9): null or absent is no claim, and anything but a string is
+// refused. An interrupt's claim must be a well-formed thread id, and rides
+// NewEvent.ThreadID out of normalization for RouteInbound to resolve against
+// the log as the one thread it ends; a malformed one is refused in the
+// reference's words (2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
+// `.unknown-thread`, #540).
 //
-// A malformed claim on an interrupt is refused in the reference's words
-// (2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
-// `.unknown-thread`, #540). A tool confirmation's the reference does not
-// refuse: it was recorded accepting another thread's id, an unknown one and an
-// `sth_` one, rewriting the claim to the call's own thread (#334–#336
-// `sessK2.send.tool_confirmation.*`). Its answer on a tool result or a custom
-// tool result is unrecorded. So this platform's refusal on all three is its
-// own, and keeps its own words (docs/DIVERGENCES.md, #841, #78).
+// An answer's claim is dropped. The reference was recorded accepting a tool
+// confirmation that named another thread of the session, an unknown thread or
+// an `sth_` value, and storing it on the call's own thread (#334–#336
+// `sessK2.send.tool_confirmation.*`; #841): it routes an answer by the call it
+// answers, as RouteInbound does, so the claim decides nothing. A tool result's
+// and a custom tool result's claim go the same way (INFERRED,
+// docs/DIVERGENCES.md; neither is recorded): RouteInbound routes all three by
+// the one lookup. The stored payload keeps session_thread_id null either way,
+// rendered per surface like every thread-addressable event.
 func threadClaim(obj map[string]json.RawMessage, interrupt bool) (domain.ID, error) {
 	raw, set := obj["session_thread_id"]
 	if !set || isNullRaw(raw) {
@@ -546,12 +547,12 @@ func threadClaim(obj map[string]json.RawMessage, interrupt bool) (domain.ID, err
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return "", fmt.Errorf("session_thread_id must be a string or null")
 	}
+	if !interrupt {
+		return "", nil
+	}
 	if !domain.ValidWithPrefix(s, domain.PrefixSessionThread) {
-		ours := fmt.Sprintf("session_thread_id %q is not a session thread id", s)
-		if !interrupt {
-			return "", errors.New(ours)
-		}
-		return "", verbatim{ref: "Invalid session_thread_id: " + s, ours: ours}
+		return "", verbatim{ref: "Invalid session_thread_id: " + s,
+			ours: fmt.Sprintf("session_thread_id %q is not a session thread id", s)}
 	}
 	return domain.ID(s), nil
 }

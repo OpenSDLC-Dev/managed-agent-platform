@@ -921,28 +921,52 @@ func TestEnvironmentDeleteBlockedBySessions(t *testing.T) {
 	s := newTestServer(t)
 	agent := createAgent(t, s, map[string]any{"name": "a", "model": "m"})
 	env := createEnvironment(t, s, map[string]any{"name": "busy"})
-	status, sess := s.do(http.MethodPost, "/v1/sessions", map[string]any{
-		"agent": agent["id"], "environment_id": env["id"],
-	})
-	if status != http.StatusOK {
-		t.Fatalf("create session: %d %v", status, sess)
+	envID := env["id"].(string)
+	var sessions []string
+	for range 2 {
+		status, sess := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+			"agent": agent["id"], "environment_id": envID,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("create session: %d %v", status, sess)
+		}
+		sessions = append(sessions, sess["id"].(string))
+	}
+	// An archived session still holds the environment, and is counted.
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+sessions[1]+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive session: %d %v", status, body)
 	}
 
-	status, body := s.do(http.MethodDelete, "/v1/environments/"+env["id"].(string), nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	// The reference's refusal, words and count included (2026-09-03 batch2
+	// #250 `sweep2.del.environments.pWX3jb`, #841). It counted four sessions
+	// already deleted through its API on a self_hosted environment; here a
+	// deleted session is gone, and every session that is not — archived ones
+	// included, on either kind of environment — is counted.
+	status, body := s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error",
+		"Environment has 2 active sessions. Use force=true to delete anyway.")
+
+	// The count is the recorded template's: one session reads "1 active
+	// sessions" (INFERRED).
+	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+sessions[1], nil); status != http.StatusOK {
+		t.Fatalf("delete session: %d %v", status, body)
+	}
+	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error",
+		"Environment has 1 active sessions. Use force=true to delete anyway.")
+
+	// force=true deletes no session here (#546), so the forced delete is
+	// refused by the same sessions: the same 409, in this platform's words,
+	// since the reference grants that request and its sentence's advice is the
+	// force just sent.
+	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID+"?force=true", nil)
+	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error",
+		"environment "+envID+" still has sessions; delete them first")
 
 	// Still there.
-	status, _ = s.do(http.MethodGet, "/v1/environments/"+env["id"].(string), nil)
+	status, _ = s.do(http.MethodGet, "/v1/environments/"+envID, nil)
 	if status != http.StatusOK {
 		t.Fatalf("environment vanished after failed delete: %d", status)
-	}
-
-	// The message names the referent it actually found. It had blamed sessions
-	// for every foreign key on the table, which was harmless while sessions
-	// were the only one that could block. The whole sentence, not the word:
-	// "sessions" appears in messages that say the opposite too.
-	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "still has sessions; delete them first") {
-		t.Errorf("a session blocking the delete said %q", msg)
 	}
 }
 
@@ -1111,8 +1135,8 @@ func TestEnvironmentDeleteBlockedByBothNamesEachOfThem(t *testing.T) {
 		map[string]any{"environment_id": other}); status != http.StatusOK {
 		t.Fatalf("repoint: %d %v", status, res)
 	}
-	if status, _ := s.do(http.MethodDelete, "/v1/environments/"+envID, nil); status != http.StatusBadRequest {
-		t.Errorf("delete after the repoint alone: %d, want it still refused by the session", status)
+	if status, _ := s.do(http.MethodDelete, "/v1/environments/"+envID, nil); status != http.StatusConflict {
+		t.Errorf("delete after the repoint alone: %d, want it still refused by the session (409, #841)", status)
 	}
 }
 
@@ -1173,10 +1197,8 @@ func TestEnvironmentDeleteRefusesASelfHostedQueueUnlessForced(t *testing.T) {
 	}
 
 	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID+"?force=true", nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "still has sessions; delete them first") {
-		t.Errorf("the forced delete was refused with %q, want the sessions' refusal", msg)
-	}
+	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error",
+		"environment "+envID+" still has sessions; delete them first")
 
 	var queued int
 	if err := s.pool.QueryRow(context.Background(),
@@ -1203,19 +1225,18 @@ func TestEnvironmentDeleteRefusesASelfHostedQueueUnlessForced(t *testing.T) {
 //     and an active one — mid-flight, and the costliest to lose — does.
 //
 // The three that must not refuse fall through to the delete, which the
-// sessions then refuse in their own words.
+// sessions then refuse in the reference's sessions sentence (#841) — the
+// drained self_hosted one is the very case recorded (2026-09-03 batch2 #250).
 func TestEnvironmentDeleteQueueRefusalIsSelfHostedAndUndrainedOnly(t *testing.T) {
 	s := newTestServer(t)
 	const queueSentence = "work in the queue"
+	const sessionsSentence = "Environment has 1 active sessions. Use force=true to delete anyway."
 
 	// A cloud environment's queued tool_exec.
 	agentID, cloudEnv := fixture(t, s)
 	enqueueToolExec(t, s, agentID, cloudEnv)
 	status, body := s.do(http.MethodDelete, "/v1/environments/"+cloudEnv, nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, queueSentence) {
-		t.Errorf("a cloud environment's queued tool_exec drew the self-hosted refusal: %q", msg)
-	}
+	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error", sessionsSentence)
 
 	// A self_hosted environment whose only item is the brain's own model_turn.
 	turnEnv, turnSession, _ := selfHostedWorker(t, s, "ek-modelturn")
@@ -1224,20 +1245,14 @@ func TestEnvironmentDeleteQueueRefusalIsSelfHostedAndUndrainedOnly(t *testing.T)
 		t.Fatal(err)
 	}
 	status, body = s.do(http.MethodDelete, "/v1/environments/"+turnEnv, nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, queueSentence) {
-		t.Errorf("a model_turn, which no worker polls, drew the refusal: %q", msg)
-	}
+	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error", sessionsSentence)
 
 	// A self_hosted tool_exec that has drained.
 	envID, sessionID, _ := selfHostedWorker(t, s, "ek-drained")
 	enqueueOn(t, s, envID, sessionID)
 	setWorkState(t, s, envID, "stopped")
 	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, queueSentence) {
-		t.Errorf("a drained queue drew the refusal: %q", msg)
-	}
+	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error", sessionsSentence)
 
 	// A self_hosted tool_exec a worker is running right now. Nothing is queued
 	// here, so a refusal that only counted 'queued' rows would let this delete

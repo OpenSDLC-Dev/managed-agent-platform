@@ -313,6 +313,22 @@ func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 	})
 	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Memory store `"+ghostStore+"` not found.")
 
+	// The recorded id itself — the right prefix, a token outside this
+	// platform's id alphabet — is read as the reference reads it, well-formed
+	// and absent: the same 404 (2026-09-02 batch2 #160
+	// `session.create.unknown-store`, #841). A deployment, which looks no
+	// store up until a fire, still refuses it on shape.
+	const recordedStore = "memstore_01UnknownStoreIdXXXXXXXXX"
+	status, body = s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{memoryElement(recordedStore, nil)},
+	})
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Memory store `"+recordedStore+"` not found.")
+	deployment := deploymentBody(agentID, envID)
+	deployment["resources"] = []any{memoryElement(recordedStore, nil)}
+	status, body = s.do(http.MethodPost, "/v1/deployments", deployment)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "memory_store_id must be a valid memory store id")
+
 	// Eight stores, instructions of exactly 4,096 characters, and explicit
 	// nulls for access and instructions are all accepted — the null
 	// instructions omitted from the element, as an omitted one is.

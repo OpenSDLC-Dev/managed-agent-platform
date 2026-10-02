@@ -402,6 +402,15 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 // default, "read_write" — and for instructions the omitted key. The SDK never
 // transmits an empty access (omitzero), so "" is refused with every other value
 // outside the enum rather than read as the default.
+//
+// On session create the shape is the prefix alone: the reference read
+// `memstore_01UnknownStoreIdXXXXXXXXX`, a token outside this platform's id
+// alphabet, as a well-formed id naming nothing — 404, "Memory store `…` not
+// found." (2026-09-02 batch2 #160 `session.create.unknown-store`; #841) — so
+// such an id goes on to the store lookup, which answers it that way. That
+// lookup compares text through a bind parameter, so the token need only be
+// storable (storableText); a value that is not still takes the 400. The
+// deployment routes keep the full shape: they look no store up until a fire.
 func parseMemoryResource(obj map[string]json.RawMessage, f resourceFlavor, i int) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "memory_store_id", "access", "instructions"); err != nil {
 		return resourceInput{}, err
@@ -410,7 +419,12 @@ func parseMemoryResource(obj map[string]json.RawMessage, f resourceFlavor, i int
 	if err != nil {
 		return resourceInput{}, err
 	}
-	if !domain.ID(id).HasPrefix(domain.PrefixMemoryStore) || !domain.ID(id).Valid() {
+	wellFormed := domain.ID(id).HasPrefix(domain.PrefixMemoryStore) && domain.ID(id).Valid()
+	if f == resourceForSession {
+		_, token, _ := strings.Cut(id, "_")
+		wellFormed = domain.ID(id).HasPrefix(domain.PrefixMemoryStore) && token != "" && storableText(id)
+	}
+	if !wellFormed {
 		return resourceInput{}, errInvalid("memory_store_id must be a valid memory store id")
 	}
 	access, set, null, err := stringField(obj, "access")

@@ -257,7 +257,7 @@ func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMe
 func (s *server) getAgent(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if err := checkID(id, "agent"); err != nil {
+	if err := checkAgentPathID(id); err != nil {
 		return nil, err
 	}
 	q, err := queryValues(r)
@@ -364,7 +364,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		}
 		expected = &v
 	}
-	if err := checkID(id, "agent"); err != nil {
+	if err := checkAgentPathID(id); err != nil {
 		return nil, err
 	}
 
@@ -600,7 +600,7 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 func (s *server) listAgentVersions(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if err := checkID(id, "agent"); err != nil {
+	if err := checkAgentPathID(id); err != nil {
 		return nil, err
 	}
 	page, err := parsePage(r.URL.Query())
@@ -745,7 +745,7 @@ func refuseDeploymentsPinningAgent(ctx context.Context, db querier, agentID stri
 func (s *server) archiveAgent(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if err := checkID(id, "agent"); err != nil {
+	if err := checkAgentPathID(id); err != nil {
 		return nil, err
 	}
 	tx, err := s.pool.Begin(ctx)

@@ -264,83 +264,107 @@ func TestThreadScopedInterruptLeavesTheSharedExecItem(t *testing.T) {
 	}
 }
 
-// Inbound session_thread_id is accepted and validated (decision 9): a
-// confirmation's claim must be the thread of the call it answers (the
-// primary's own id names the primary), an interrupt's claim a live thread of
-// this session, and the value a thread id at all.
+// Inbound session_thread_id (decision 9), as the recordings settled it (#841).
+// An interrupt's claim must name a live thread of this session: another
+// session's thread is the reference's 404 in its words (2026-09-02 batch2 #333
+// `sessK.send.interrupt.thread-of-other-session`), and so is an id naming no
+// thread at all, which misses the same lookup (INFERRED); an archived thread
+// is this platform's 400. An answer's claim decides nothing: a tool
+// confirmation naming another thread of the session, an unknown thread, an
+// `sth_` value or no thread id at all is accepted and stored on the call's own
+// thread, as the reference stores it (#334 `.wrong-thread`, #335
+// `.unknown-thread`, #336 `.sth_-prefix` of `sessK2.send.tool_confirmation`,
+// each a 200 echoing the call's thread), and a custom tool result's claim goes
+// the same way (INFERRED; unrecorded).
 func TestInboundThreadClaimValidation(t *testing.T) {
 	s := newTestServer(t)
 	sid, a, b, askID := coordinatorFixture(t, s)
 	primary := domain.PrimaryThreadID(domain.ID(sid)).String()
 	primaryAsk := appendOn(t, s, sid, "", false, domain.EventAgentToolUse, askBashCall)
+	asks := []string{askID}
+	for range 5 {
+		asks = append(asks, appendOn(t, s, sid, domain.ID(a), true, domain.EventAgentToolUse, askBashCall))
+	}
+	setThread(t, s, a, "idle", `{"type":"requires_action","event_ids":["`+strings.Join(asks, `","`)+`"]}`)
 	archived := insertChild(t, s, sid, "terminated")
 	if _, err := s.pool.Exec(context.Background(),
 		`UPDATE session_threads SET archived_at = now() WHERE id = $1`, archived); err != nil {
 		t.Fatal(err)
 	}
-	post := func(ev map[string]any) (int, map[string]any) {
-		return s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": []any{ev}})
+	other := eventsFixture(t, s)
+	otherChild := insertChild(t, s, other, "idle")
+	post := func(evs ...any) (int, map[string]any) {
+		return s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": evs})
 	}
-	for _, tc := range []struct {
-		name string
-		ev   map[string]any
-		want string
-	}{
-		{"confirmation naming the sibling", confirm(askID, "allow", map[string]any{"session_thread_id": b}),
-			"does not match the thread of tool use"},
-		{"confirmation naming the primary for a child's call", confirm(askID, "allow", map[string]any{"session_thread_id": primary}),
-			"does not match the thread of tool use"},
-		{"confirmation naming a child for the primary's call", confirm(primaryAsk, "allow", map[string]any{"session_thread_id": a}),
-			"does not match the thread of tool use"},
-		// Ours: the reference accepts a malformed claim on a confirmation
-		// (2026-09-02 batch2 idx 336 `sessK2.send.tool_confirmation.sth_-prefix`
-		// answered 200), so its interrupt sentence is not borrowed (#841).
-		{"not a thread id", confirm(askID, "allow", map[string]any{"session_thread_id": "sesn_" + strings.Repeat("0", 25)}),
-			`events[0]: session_thread_id "sesn_` + strings.Repeat("0", 25) + `" is not a session thread id`},
-		{"interrupt naming an unknown thread", map[string]any{"type": "user.interrupt", "session_thread_id": "sthr_" + strings.Repeat("0", 25)},
-			"does not name a thread in this session"},
-		{"interrupt naming an archived thread", map[string]any{"type": "user.interrupt", "session_thread_id": archived},
-			"is archived"},
+	interrupt := func(claim string) map[string]any {
+		return map[string]any{"type": "user.interrupt", "session_thread_id": claim}
+	}
+
+	for name, claim := range map[string]string{
+		"another session's child":   otherChild,
+		"another session's primary": domain.PrimaryThreadID(domain.ID(other)).String(),
+		"no thread at all":          "sthr_" + strings.Repeat("0", 25),
 	} {
-		status, body := post(tc.ev)
-		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-		if msg := errMessage(body); !strings.Contains(msg, tc.want) {
-			t.Errorf("%s: message %q does not mention %q", tc.name, msg, tc.want)
+		status, body := post(interrupt(claim))
+		if status != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404 (%v)", name, status, body)
+			continue
 		}
+		wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Thread not found: "+claim)
+	}
+	status, body := post(interrupt(archived))
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	if msg := errMessage(body); !strings.Contains(msg, "is archived") {
+		t.Errorf("an archived thread's interrupt: message %q does not mention %q", msg, "is archived")
 	}
 	// Nothing above moved anything.
 	if got := s.threadStatus(t, a); got != "idle" {
 		t.Errorf("thread A = %q after the refused batches, want idle", got)
 	}
-	// The primary's own id on the primary's call, and a child's on its own,
-	// are accepted; the stored payload keeps session_thread_id null and the
-	// event lands on the call's thread.
-	if status, body := post(confirm(primaryAsk, "deny", map[string]any{"session_thread_id": primary})); status != http.StatusOK {
-		t.Fatalf("primary claim: %d %v", status, body)
+
+	// One batch of answers, each claiming a thread other than its call's: all
+	// accepted, each stored and echoed on its call's thread — A's, which the
+	// session view names, and the primary's, which it omits.
+	claims := []string{b, primary, "sthr_" + strings.Repeat("0", 25), "sth_" + strings.TrimPrefix(a, "sthr_"),
+		"sesn_" + strings.Repeat("0", 25), a}
+	var batch []any
+	for i, ask := range asks {
+		batch = append(batch, confirm(ask, "deny", map[string]any{"session_thread_id": claims[i]}))
 	}
-	if status, body := post(confirm(askID, "deny", map[string]any{"session_thread_id": a})); status != http.StatusOK {
-		t.Fatalf("child claim: %d %v", status, body)
+	batch = append(batch, confirm(primaryAsk, "deny", map[string]any{"session_thread_id": a}))
+	status, body = post(batch...)
+	if status != http.StatusOK {
+		t.Fatalf("answers with mismatched claims: %d %v", status, body)
 	}
-	var owners []string
-	rows, err := s.pool.Query(context.Background(),
-		`SELECT COALESCE(thread_id, '') FROM events WHERE session_id = $1 AND type = 'user.tool_confirmation' ORDER BY seq`, sid)
-	if err != nil {
-		t.Fatal(err)
+	echo := listData(t, body)
+	if len(echo) != len(batch) {
+		t.Fatalf("echo carries %d events, want %d", len(echo), len(batch))
 	}
-	for rows.Next() {
-		var tid string
-		if err := rows.Scan(&tid); err != nil {
-			t.Fatal(err)
+	for _, ev := range echo {
+		want, onA := a, ev["tool_use_id"] != primaryAsk
+		if !onA {
+			want = ""
 		}
-		owners = append(owners, tid)
+		if got := s.threadOf(t, ev["id"].(string)); got != want {
+			t.Errorf("confirmation of %v stored on %q, want %q", ev["tool_use_id"], got, want)
+		}
+		if got, named := ev["session_thread_id"]; onA && got != a || !onA && named {
+			t.Errorf("confirmation of %v echoes session_thread_id %v, want the call's thread", ev["tool_use_id"], got)
+		}
 	}
-	rows.Close()
-	if !sameStrings(owners, []string{"", a}) {
-		t.Errorf("confirmation thread columns = %v, want [primary A]", owners)
+
+	// A custom tool result's claim goes the same way.
+	c := insertChild(t, s, sid, "idle")
+	use := appendOn(t, s, sid, domain.ID(c), true, domain.EventAgentCustomToolUse, `{"name":"decide","input":{}}`)
+	setThread(t, s, c, "idle", `{"type":"requires_action","event_ids":["`+use+`"]}`)
+	result := customResult(use)
+	result["session_thread_id"] = "sth_" + strings.TrimPrefix(c, "sthr_")
+	replied := sendEvents(t, s, sid, result)
+	if got := s.threadOf(t, replied[0]["id"].(string)); got != c {
+		t.Errorf("custom result stored on %q, want the call's thread %q", got, c)
 	}
-	ev := lastEventOfType(t, s, sid, "user.tool_confirmation")
-	if ev["session_thread_id"] != a {
-		t.Errorf("a child's confirmation renders its thread: %v", ev)
+	if replied[0]["session_thread_id"] != c {
+		t.Errorf("custom result echoes %v, want the call's thread", replied[0]["session_thread_id"])
 	}
 }
 

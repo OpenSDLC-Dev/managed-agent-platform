@@ -10,14 +10,24 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ThreadNotFoundError refuses an interrupt whose well-formed session_thread_id
+// names no thread of this session. The API answers it 404 not_found_error in
+// the reference's words, which carry no "events[i]: " prefix (2026-09-02
+// batch2 #333 `sessK.send.interrupt.thread-of-other-session`; #841). The
+// recording named another session's thread; an id naming no thread anywhere
+// misses the same lookup and is answered alike (INFERRED, docs/DIVERGENCES.md).
+type ThreadNotFoundError struct{ ID domain.ID }
+
+func (e *ThreadNotFoundError) Error() string { return "Thread not found: " + e.ID.String() }
+
 // RouteInbound resolves the thread each inbound event addresses (plan 35
-// decision 9) and checks the client's explicit session_thread_id against it,
-// after the batch has passed ValidateToolResults and ValidateToolConfirmations
-// (so every reference names a tool use in this session). A confirmation or a
-// result is written on the thread of the tool use it answers — cross-posted
-// when the call was, so the answer shows on the same surfaces — and a claim
-// that names another thread is the client's 400. An interrupt's claim names
-// the one thread it ends: it must be a live thread of this session; the
+// decision 9), after the batch has passed ValidateToolResults and
+// ValidateToolConfirmations (so every reference names a tool use in this
+// session). A confirmation or a result is written on the thread of the tool
+// use it answers — cross-posted when the call was, so the answer shows on the
+// same surfaces — whatever thread the client named (threadClaim drops that
+// claim). An interrupt's claim names the one thread it ends: it must be a live
+// thread of this session (a *ThreadNotFoundError when it names none); the
 // primary's own id means the primary. user.message, user.define_outcome and
 // system.message carry no thread and address the primary (ThreadID stays
 // empty). A child-scoped interrupt is cross-posted: the client sent it through
@@ -25,7 +35,7 @@ import (
 // child's own view with null — as the answers to a cross-posted call are
 // (INFERRED, docs/DIVERGENCES.md). On return each event's ThreadID and
 // CrossPosted are what the append stores; the returned slice marks, per
-// event, whether the client named a thread at all — what tells a
+// event, whether an interrupt named a thread at all — what tells a
 // thread-scoped interrupt (the primary's own id included) from a session-wide
 // one once both carry an empty ThreadID.
 func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent) ([]bool, error) {
@@ -56,17 +66,7 @@ func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []New
 			if err != nil {
 				return nil, fmt.Errorf("route inbound event: %w", err)
 			}
-			owner := domain.ID(thread)
-			if claim != "" {
-				want := owner
-				if want == "" {
-					want = primary
-				}
-				if claim != want {
-					return nil, fmt.Errorf("events[%d]: session_thread_id %q does not match the thread of tool use %q (%s)", i, claim, ref, want)
-				}
-			}
-			ev.ThreadID, ev.CrossPosted = owner, crossPosted
+			ev.ThreadID, ev.CrossPosted = domain.ID(thread), crossPosted
 		case domain.EventUserInterrupt:
 			if claim == "" {
 				continue
@@ -81,7 +81,7 @@ func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []New
 				`SELECT archived_at, status FROM session_threads WHERE id = $1 AND session_id = $2`,
 				claim.String(), sessionID.String()).Scan(&archivedAt, &status)
 			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, fmt.Errorf("events[%d]: session_thread_id %q does not name a thread in this session", i, claim)
+				return nil, &ThreadNotFoundError{ID: claim}
 			}
 			if err != nil {
 				return nil, fmt.Errorf("route inbound event: %w", err)

@@ -94,9 +94,24 @@ func TestThreadsPrimaryOnEverySession(t *testing.T) {
 		t.Errorf("get thread via session_ spelling: %d %v", status, one)
 	}
 	status, body := s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/sthr_0000000000000000000000000", nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
-	status, body = s.do(http.MethodGet, "/v1/sessions/"+sid+"/threads/bogus", nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "thread sthr_0000000000000000000000000 not found")
+	// A {tid} that is not a thread id at all is the reference's 400, in its
+	// words (2026-09-02 batch2 #337 `sessK2.threads.get.sth_-prefix`, #841),
+	// recorded on the get with an `sth_` prefix; the other three thread routes,
+	// another prefix and a token outside the id alphabet share it (INFERRED).
+	for _, tid := range []string{"sth_" + strings.TrimPrefix(primary, "sthr_"), "bogus", "sthr_01DdMGc4KudV1Z22t2L7Y9QH", "sthr_%00"} {
+		for _, r := range []struct{ method, suffix string }{
+			{http.MethodGet, ""}, {http.MethodPost, "/archive"}, {http.MethodGet, "/events"}, {http.MethodGet, "/stream"},
+		} {
+			status, body := s.do(r.method, "/v1/sessions/"+sid+"/threads/"+tid+r.suffix, nil)
+			if status != http.StatusBadRequest {
+				t.Errorf("%s …/threads/%s%s: status %d, want 400 (%v)", r.method, tid, r.suffix, status, body)
+				continue
+			}
+			want := "Invalid thread ID: " + strings.ReplaceAll(tid, "%00", "\x00")
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", want)
+		}
+	}
 	// Another session's primary is not this session's — and the schema
 	// refuses a child hung off another session's thread.
 	other := eventsFixture(t, s)

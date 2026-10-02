@@ -5,11 +5,14 @@ issue: "#53"
 
 # Multi-agent session threads — the coordinator topology (plan 35)
 
-> **Superseded on one point since archival (#674).** Decision 4 orders every transition
+> **Superseded on two points since archival (#674, #841).** Decision 4 orders every transition
 > "thread event first, session event second". That now holds for idle and rescheduled
 > only: `session.status_running` is appended ahead of the thread's event, the order every
 > recorded running pair shows for the primary thread. docs/DIVERGENCES.md's session-thread
 > entries carry the evidence, and the child resume the reference shapes differently.
+> Decision 9 refuses an answer whose `session_thread_id` names another thread; the
+> reference accepts it and stores the answer on its call's thread, and so does this
+> platform now (docs/DIVERGENCES.md, the inbound `session_thread_id` entry).
 
 This plan addresses #53 (its last slice closes it): a session's primary thread orchestrates work by spawning **session
 threads**, each running an agent from the coordinator's roster. At drafting the seam was

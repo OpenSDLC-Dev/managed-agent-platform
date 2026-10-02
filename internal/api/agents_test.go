@@ -22,6 +22,11 @@ var agentRequiredFields = []string{
 	"created_at", "updated_at", "archived_at",
 }
 
+// absentAgentID is well-formed and names no agent: a malformed one is the
+// reference's 400 (TestAgentPathRefusesAMalformedID), not the 404 an absent
+// agent gets.
+var absentAgentID = "agent_" + strings.Repeat("0", 23) + "1"
+
 func createAgent(t *testing.T, s *tserver, body map[string]any) map[string]any {
 	t.Helper()
 	status, res := s.do(http.MethodPost, "/v1/agents", body)
@@ -400,8 +405,43 @@ func TestAgentGet(t *testing.T) {
 	}
 	wantFields(t, got, agentRequiredFields...)
 
-	status, body := s.do(http.MethodGet, "/v1/agents/agent_doesnotexist", nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	status, body := s.do(http.MethodGet, "/v1/agents/"+absentAgentID, nil)
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "agent "+absentAgentID+" not found")
+}
+
+// An agent path id this platform could never have minted is the reference's
+// 400, not the 404 an absent agent gets (2026-09-02 batch2 #115
+// `agent.get.coordinator.after-member-update`: GET /v1/agents/undefined, #841).
+// Recorded on the get, with a prefix-less id; the other three agent routes, an
+// id with another resource's prefix and a token outside the id alphabet — the
+// reference's own ids among them — share the check (INFERRED,
+// docs/DIVERGENCES.md). None reaches the database.
+func TestAgentPathRefusesAMalformedID(t *testing.T) {
+	s := newTestServer(t)
+	for _, id := range []string{
+		"undefined",
+		"sesn_" + strings.Repeat("0", 24),
+		"agent_01UreT9PZKHtpNLgeSGzPCQh",
+		"agent_",
+		"agent_%00",
+	} {
+		for name, tc := range map[string]struct {
+			method, path string
+			body         any
+		}{
+			"get":      {http.MethodGet, "/v1/agents/" + id, nil},
+			"update":   {http.MethodPost, "/v1/agents/" + id, map[string]any{"name": "x"}},
+			"versions": {http.MethodGet, "/v1/agents/" + id + "/versions", nil},
+			"archive":  {http.MethodPost, "/v1/agents/" + id + "/archive", nil},
+		} {
+			status, body := s.do(tc.method, tc.path, tc.body)
+			if status != http.StatusBadRequest {
+				t.Errorf("%s %s: status %d, want 400 (%v)", name, id, status, body)
+				continue
+			}
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Invalid agent ID.")
+		}
+	}
 }
 
 func TestAgentUpdateOptimisticVersioning(t *testing.T) {
@@ -525,7 +565,7 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 	}
 
 	// Unknown agent → 404.
-	status, body = s.do(http.MethodPost, "/v1/agents/agent_missing", map[string]any{"version": 1})
+	status, body = s.do(http.MethodPost, "/v1/agents/"+absentAgentID, map[string]any{"version": 1})
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
 
@@ -611,7 +651,7 @@ func TestAgentVersionsSnapshotHistory(t *testing.T) {
 	}
 
 	// Versions of an unknown agent → 404.
-	status, body = s.do(http.MethodGet, "/v1/agents/agent_missing/versions", nil)
+	status, body = s.do(http.MethodGet, "/v1/agents/"+absentAgentID+"/versions", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 
 	// Version lists paginate on the version number.
@@ -741,7 +781,7 @@ func TestAgentArchive(t *testing.T) {
 	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Cannot modify archived agent")
 
 	// Archive of an unknown agent → 404.
-	status, body = s.do(http.MethodPost, "/v1/agents/agent_missing/archive", nil)
+	status, body = s.do(http.MethodPost, "/v1/agents/"+absentAgentID+"/archive", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
 

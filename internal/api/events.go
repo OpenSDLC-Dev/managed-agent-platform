@@ -162,11 +162,16 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 
 	// Every inbound event addresses one thread (plan 35 decision 9): a
-	// confirmation or result the thread of the call it answers (an explicit
-	// session_thread_id must agree), an interrupt the thread it names or every
-	// live thread, a message / define_outcome / system.message the primary.
-	// Routed here, validated, before the triggers decide per thread.
+	// confirmation or result the thread of the call it answers (whatever
+	// session_thread_id it carries, as the reference stores one), an interrupt
+	// the thread it names — a 404 when that is no thread of this session — or
+	// every live thread, a message / define_outcome / system.message the
+	// primary. Routed here, validated, before the triggers decide per thread.
 	scoped, err := events.RouteInbound(ctx, tx, domain.ID(id), newEvents)
+	var noThread *events.ThreadNotFoundError
+	if errors.As(err, &noThread) {
+		return nil, errNotFound("%s", noThread)
+	}
 	if err != nil {
 		return nil, errInvalid("%s", err)
 	}

@@ -187,10 +187,37 @@ func checkID(id, resource string) error {
 	return nil
 }
 
-// checkWorkID is checkID for the work API, whose not-found message omits the id
-// (matching mapWorkErr's ErrWorkNotFound) so a worker cannot tell a malformed
-// work_id from an item it is not allowed to see.
+// checkAgentPathID is checkID for an agent path id, which the reference
+// answers apart from an absent one: 400, "Invalid agent ID." (2026-09-02
+// batch2 #115 `agent.get.coordinator.after-member-update`, a prefix-less
+// `undefined`; #841). Malformed is what this platform could never have minted
+// for an agent — no agent_ prefix, as recorded, or a token outside the id
+// alphabet, which the reference's agent-id check reads too (roster.go
+// checkAgentID's recording) — so nothing malformed reaches a bind parameter.
+// Every agent path route shares it, though only the get was recorded
+// (INFERRED, docs/DIVERGENCES.md).
+func checkAgentPathID(id string) error {
+	if !domain.ValidWithPrefix(id, domain.PrefixAgent) {
+		return errInvalid("Invalid agent ID.")
+	}
+	return nil
+}
+
+// checkWorkID is checkID for the work API. An id carrying none of the prefixes
+// the reference accepts is its recorded 400 (2026-09-12 batch1 #59
+// `rec91.work.poll.post-metadata`, a POST to …/work/poll read as work_id
+// "poll"; #841), on every {work_id} route, though only the update was recorded
+// (INFERRED, docs/DIVERGENCES.md). The accepted set is the sentence's three
+// plus sesn_, which the reference's own work ids carry and its routes were
+// recorded taking. Past that, the not-found message omits the id (matching
+// mapWorkErr's ErrWorkNotFound) so a worker cannot tell a malformed token from
+// an item it is not allowed to see.
 func checkWorkID(id domain.ID) error {
+	switch {
+	case id.HasPrefix(domain.PrefixWork), id.HasPrefix(domain.PrefixSession), id.Prefix() == "cse":
+	default:
+		return errInvalid(`Invalid work ID format: expected session_*, cse_*, or work_* prefix, got "%s".`, id)
+	}
 	if !id.Valid() {
 		return errNotFound("work item not found")
 	}
