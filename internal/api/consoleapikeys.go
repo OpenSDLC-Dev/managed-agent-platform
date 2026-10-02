@@ -143,7 +143,7 @@ func consoleWorkspace(r *http.Request) error {
 		return err
 	}
 	if ws := r.PathValue("workspace"); ws != reservedWorkspace {
-		return errWorkspaceNotFound(ws)
+		return errWorkspaceNotFound
 	}
 	return nil
 }
@@ -151,9 +151,7 @@ func consoleWorkspace(r *http.Request) error {
 // errWorkspaceNotFound is the reference's recorded 404 for a workspace, words
 // included (2026-09-05 batch8 `item6.after-archive.workspaceB.get` and
 // `.api_keys`; #540): it does not name the workspace.
-func errWorkspaceNotFound(string) error {
-	return withDetails(errNotFound("Not found"), userFacingDetails)
-}
+var errWorkspaceNotFound = withDetails(errNotFound("Not found"), userFacingDetails)
 
 // getWorkspace answers GET …/workspaces/{workspace} with the 404 the reference
 // was recorded answering an archived workspace with (2026-09-05 batch8
@@ -167,7 +165,7 @@ func (s *server) getWorkspace(r *http.Request) (any, error) {
 	if err := consoleOrganization(r); err != nil {
 		return nil, err
 	}
-	return nil, errWorkspaceNotFound(r.PathValue("workspace"))
+	return nil, errWorkspaceNotFound
 }
 
 // createAPIKey issues a management credential and returns it once.
@@ -181,7 +179,7 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	}
 	// A pydantic surface on the reference, whose unknown-key sentence no
 	// recording holds, so it is not rejectUnknownKeys' strict-decoder one.
-	if key, ok := firstUnknownKey(obj, "name", "expires_at", "principal_id"); ok {
+	if key, ok := domain.LeastUnknownKey(obj, "name", "expires_at", "principal_id"); ok {
 		return nil, errInvalid("unknown field %q", key)
 	}
 	name, err := apiKeyCreateName(obj)
@@ -233,7 +231,7 @@ func apiKeyPatch(raw json.RawMessage) (status, name *string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if key, ok := firstUnknownKey(obj, "status", "name"); ok {
+	if key, ok := domain.LeastUnknownKey(obj, "status", "name"); ok {
 		return nil, nil, errInvalid("unknown field %q", key)
 	}
 	if status, err = apiKeyStatus(obj); err != nil {
@@ -424,11 +422,11 @@ func apiKeyName(obj map[string]json.RawMessage, required bool) (*string, error) 
 // `.empty`; #540). A null name keeps ours, and so does a rename's refusal:
 // neither was recorded.
 func apiKeyCreateName(obj map[string]json.RawMessage) (*string, error) {
-	raw, ok := obj["name"]
-	switch {
-	case !ok:
-		return nil, errInvalid("name: Field required")
-	case isNull(raw):
+	if err := fieldRequired(obj, "name", "name"); err != nil {
+		return nil, err
+	}
+	raw := obj["name"]
+	if isNull(raw) {
 		return apiKeyName(obj, true)
 	}
 	var name string

@@ -59,16 +59,18 @@ func (u *skillUpload) bundle() (*skills.Bundle, error) {
 }
 
 // refuse logs a refusal from bundle and returns the 400 it answers. A
-// frontmatter length refusal answers the reference's sentence, which names
-// neither the field nor its cap (#540), so the line carries both.
+// frontmatter length refusal answers the reference's sentence, recorded for
+// both fields on both routes (2026-09-12-followups skills-api.json #8, #9,
+// #18, #19; #540); it names neither the field nor its cap, which the line's
+// reason does.
 func (u *skillUpload) refuse(ctx context.Context, err error, attrs ...any) error {
 	attrs = append(attrs, "request_id", requestIDFrom(ctx),
 		"files", len(u.files), "bytes", u.totalBytes(), "reason", err)
+	slog.InfoContext(ctx, "skill upload rejected", attrs...)
 	var tooLong *skills.LengthError
 	if errors.As(err, &tooLong) {
-		attrs = append(attrs, "field", tooLong.Field, "limit", tooLong.Limit)
+		return errInvalid("`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits")
 	}
-	slog.InfoContext(ctx, "skill upload rejected", attrs...)
 	return errInvalid("%s", err)
 }
 

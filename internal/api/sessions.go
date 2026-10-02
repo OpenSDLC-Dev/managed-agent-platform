@@ -247,7 +247,7 @@ const overrideSystemMaxRunes = maxAgentSystemRunes
 // snapshot the session will carry. internal admits the dream runner's own
 // hidden agent, which every other caller resolves as not found (§4.4); it is
 // createSessionIn.internal, and no request can set it.
-func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessage, internal bool, c sessionCaller) (sessionAgentJSON, error) {
+func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessage, internal bool) (sessionAgentJSON, error) {
 	var snap sessionAgentJSON
 
 	var agentID string
@@ -366,14 +366,8 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		}
 	}
 	if archivedAt != nil {
-		// The reference's sentence on a session create (2026-09-02 batch2
-		// `session.create.archived-agent`, #540); a deployment's run and a
-		// dream's start were never recorded refusing one, and keep ours.
-		if c == callerRequest {
-			return snap, classified("agent_archived_error",
-				errInvalid("agent %s is archived and cannot be used to create a session", agentID))
-		}
-		return snap, classified("agent_archived_error", errInvalid("agent %s is archived", agentID))
+		return snap, classified("agent_archived_error",
+			&createRefusal{refusedAgentArchived, agentID, errInvalid("agent %s is archived", agentID)})
 	}
 
 	var spec agentSpec
@@ -678,13 +672,73 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		vaultIDs: vaultIDs, rawInitial: rawInitial,
 	})
 	if err != nil {
-		return nil, err
+		return nil, requestWording(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	created.recordCreated(ctx)
 	return renderSession(created.row)
+}
+
+// createRefusal is a refusal createSessionInTx's three callers share but the
+// reference words apart (#540). It carries this platform's words — what a
+// dream's start, never recorded, keeps — classified where a deployment's run
+// settles on it; requestWording gives a session create the reference's HTTP
+// sentence, and runWording a deployment's run its run sentence, where each was
+// recorded.
+type createRefusal struct {
+	what refused
+	id   string
+	err  error
+}
+
+func (e *createRefusal) Error() string { return e.err.Error() }
+func (e *createRefusal) Unwrap() error { return e.err }
+
+// refused is what a createRefusal refuses, by the id it carries.
+type refused int
+
+const (
+	refusedEnvironmentGone refused = iota
+	refusedAgentArchived
+	refusedStoreGone
+	refusedStoreArchived
+	refusedFileGone
+)
+
+// errSessionEnvironmentNotFound is createSessionInTx's refusal of an
+// environment it cannot find. It is unclassified, so a deployment's fire rolls
+// back rather than settling a run (§5.2's last row); the reference's run
+// sentence for a deleted environment is unreachable here while the deployments
+// foreign key refuses that delete (docs/DIVERGENCES.md).
+func errSessionEnvironmentNotFound(envID string) error {
+	return &createRefusal{refusedEnvironmentGone, envID, errNotFound("environment %s not found", envID)}
+}
+
+// requestWording is POST /v1/sessions' answer to a createRefusal: the
+// reference's recorded sentence (2026-09-05 batch8
+// `item1.create.session-absent-env` and `.session-foreign-env`; 2026-09-02 batch2
+// `session.create.archived-agent`, `session.create.unknown-store`,
+// `session.create.archived-store`, `sessF2.create.deleted-file-mount`). The
+// file sentence's list is always of one id, since files are checked one at a
+// time. Any other error passes through.
+func requestWording(err error) error {
+	var r *createRefusal
+	if !errors.As(err, &r) {
+		return err
+	}
+	switch r.what {
+	case refusedEnvironmentGone:
+		return errEnvironmentNotFound(r.id)
+	case refusedAgentArchived:
+		return errInvalid("agent %s is archived and cannot be used to create a session", r.id)
+	case refusedStoreGone:
+		return errNotFound("Memory store `%s` not found.", r.id)
+	case refusedStoreArchived:
+		return errInvalid("Memory store %s is archived.", r.id)
+	}
+	return errNotFound("One or more files not found. Check that each `file_id` exists and is accessible: %s", r.id)
 }
 
 // createSessionIn is what a session create needs once its caller's
@@ -698,51 +752,6 @@ func (s *server) createSession(r *http.Request) (any, error) {
 // so a caller with no authenticated principal creates the session
 // unattributed. deploymentID is set only by a deployment fire — the create
 // surface has no deployment field on the wire and rejects the key.
-// sessionCaller is who creates a session through createSessionInTx. The
-// reference was recorded refusing a POST /v1/sessions and a deployment's run,
-// each in words of its own, and never a dream's start, so a refusal the three
-// share is worded per caller (#540).
-type sessionCaller int
-
-const (
-	callerRequest    sessionCaller = iota // POST /v1/sessions
-	callerDeployment                      // a deployment's manual run or scheduled fire
-	callerDream                           // the dream runner's pipeline session
-)
-
-// caller reports who in is: a deployment's create names its deployment, and
-// only the dream runner's is internal.
-func (in createSessionIn) caller() sessionCaller {
-	switch {
-	case in.deploymentID != nil:
-		return callerDeployment
-	case in.internal:
-		return callerDream
-	}
-	return callerRequest
-}
-
-// errSessionEnvironmentNotFound is createSessionInTx's refusal of an
-// environment it cannot find, per caller: the request's recorded 404
-// (2026-09-05 batch8 `item1.create.session-absent-env` and
-// `item1.create.session-foreign-env`); a deployment's run settled on the
-// recorded environment_not_found_error, its message the run's own
-// (2026-09-02 batch2 `deployment.run.after-env-archived`, an environment the
-// reference let be deleted under its deployment) — unreachable here while the
-// deployments foreign key refuses that delete, and classified so it would
-// settle as recorded; a dream's, ours (#540).
-func errSessionEnvironmentNotFound(c sessionCaller, envID string) error {
-	switch c {
-	case callerRequest:
-		return errEnvironmentNotFound(envID)
-	case callerDeployment:
-		return classifiedRun("environment_not_found_error",
-			fmt.Sprintf("session creation rejected: environment `%s` not found", envID),
-			errNotFound("environment %s not found", envID))
-	}
-	return errNotFound("environment %s not found", envID)
-}
-
 type createSessionIn struct {
 	// id is the session's, for a caller that must know it before the row
 	// exists: the dream runner mints it so the memory clone's `created`
@@ -810,7 +819,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		`SELECT archived_at, kind, config FROM environments WHERE id = $1`+hidden+` FOR SHARE`, in.envID).
 		Scan(&envArchivedAt, &envKind, &envConfig)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return createdSession{}, errSessionEnvironmentNotFound(in.caller(), in.envID)
+		return createdSession{}, errSessionEnvironmentNotFound(in.envID)
 	}
 	if err != nil {
 		return createdSession{}, err
@@ -831,7 +840,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, err
 	}
 
-	agent, err := s.resolveAgent(ctx, tx, in.agentRaw, in.internal, in.caller())
+	agent, err := s.resolveAgent(ctx, tx, in.agentRaw, in.internal)
 	if err != nil {
 		return createdSession{}, err
 	}
@@ -844,7 +853,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	}
 
 	now := time.Now().UTC()
-	resources, repoIDs, err := materializeResourceInputs(ctx, tx, in.resourceInputs, now, in.caller())
+	resources, repoIDs, err := materializeResourceInputs(ctx, tx, in.resourceInputs, now)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return createdSession{}, err
@@ -894,7 +903,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
 		if strings.Contains(pgErr.ConstraintName, "environment") {
-			return createdSession{}, errSessionEnvironmentNotFound(in.caller(), in.envID)
+			return createdSession{}, errSessionEnvironmentNotFound(in.envID)
 		}
 		return createdSession{}, errNotFound("agent %s version %d not found", agent.ID, agent.Version)
 	}
@@ -1450,10 +1459,10 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 }
 
 // requireNotRunning locks the session row and refuses the mutation while the
-// session is running — the reference documents that a running session cannot be
-// archived or deleted (an interrupt must settle it idle first); the reject
-// status and each verb's sentence are the ones recorded from the reference
-// (2026-09-02 batch2 `sessT.archive.while-running` and
+// session is running, with refusal — the reference documents that a running
+// session cannot be archived or deleted (an interrupt must settle it idle
+// first); the reject status and each route's sentence are the ones recorded
+// from the reference (2026-09-02 batch2 `sessT.archive.while-running` and
 // `sessT.delete.while-running`, #540; docs/DIVERGENCES.md, whose session
 // threads entry covers rescheduling). The archive sentence says only pending or
 // idle sessions may be archived, but only running is refused here. The row
@@ -1466,7 +1475,7 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 // same order on purpose, and taking the two the other way round here would
 // reopen the deadlock #313 closed. The work API's claim takes a session's item
 // and never its row, so it has no order to keep (claimWork, #643).
-func requireNotRunning(ctx context.Context, tx pgx.Tx, id, verb string) error {
+func requireNotRunning(ctx context.Context, tx pgx.Tx, id string, refusal *apiError) error {
 	var status string
 	err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, id).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1476,10 +1485,7 @@ func requireNotRunning(ctx context.Context, tx pgx.Tx, id, verb string) error {
 		return err
 	}
 	if status == string(domain.SessionRunning) {
-		if verb == "archiving" {
-			return errInvalid("Session %s cannot be archived while its status is %q. Only pending or idle sessions may be archived.", id, status)
-		}
-		return errInvalid("Cannot delete session while it is running. Send an interrupt event or wait for the session to complete.")
+		return refusal
 	}
 	return nil
 }
@@ -1498,7 +1504,9 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
 	}
-	if err := requireNotRunning(ctx, tx, id, "archiving"); err != nil {
+	if err := requireNotRunning(ctx, tx, id, errInvalid(
+		"Session %s cannot be archived while its status is %q. Only pending or idle sessions may be archived.",
+		id, domain.SessionRunning)); err != nil {
 		return nil, err
 	}
 	row, moves, err := s.archiveSessionInTx(ctx, tx, id)
@@ -1655,7 +1663,8 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
 	}
-	if err := requireNotRunning(ctx, tx, id, "deleting"); err != nil {
+	if err := requireNotRunning(ctx, tx, id, errInvalid(
+		"Cannot delete session while it is running. Send an interrupt event or wait for the session to complete.")); err != nil {
 		return nil, err
 	}
 	// The tombstone rides the deleting transaction, written while the row can

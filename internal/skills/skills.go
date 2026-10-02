@@ -261,18 +261,17 @@ func checkDirectoryName(dir, name string) error {
 	return nil
 }
 
-// LengthError refuses a frontmatter name or description over its cap. Its
-// message is the reference's own sentence, recorded for both fields on both
-// upload routes (2026-09-12-followups skills-api.json #8, #9, #18, #19; #540),
-// and it names neither; Field and Limit keep what it drops, for the API's
-// rejection log.
+// LengthError refuses a frontmatter name or description over its cap. It is a
+// type so the upload routes can answer the reference's one sentence for both
+// fields, which names neither (#540); its own message names both, for every
+// caller that logs it — the operator importer among them.
 type LengthError struct {
 	Field string // "name" or "description"
 	Limit int
 }
 
 func (e *LengthError) Error() string {
-	return "`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits"
+	return fmt.Sprintf("%s must be at most %d characters", e.Field, e.Limit)
 }
 
 // parseFrontmatter extracts and validates name/description from SKILL.md's

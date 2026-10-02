@@ -221,24 +221,22 @@ func TestFrontmatterValidation(t *testing.T) {
 	}
 }
 
-// TestFrontmatterLengthRefusal pins the over-cap refusal: the reference's one
-// sentence for both fields (2026-09-12-followups skills-api.json #8
-// `rec.skill-upload.create.long-name`, #9 `rec.skill-upload.create.long-description`,
-// #18 and #19 the version twins), and the field and cap it does not name,
-// which the API logs instead.
+// TestFrontmatterLengthRefusal pins the over-cap refusal: a *LengthError, so
+// the upload routes can answer the reference's sentence for it, whose own
+// message names the field and cap that sentence does not.
 func TestFrontmatterLengthRefusal(t *testing.T) {
-	const want = "`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits"
 	for _, tc := range []struct {
 		md, field string
 		limit     int
+		want      string
 	}{
-		{skillMD(strings.Repeat("a", 65), "d"), "name", 64},
-		{skillMD("a", strings.Repeat("d", 1025)), "description", 1024},
+		{skillMD(strings.Repeat("a", 65), "d"), "name", 64, "name must be at most 64 characters"},
+		{skillMD("a", strings.Repeat("d", 1025)), "description", 1024, "description must be at most 1024 characters"},
 	} {
 		_, err := FromFiles([]File{{Path: "a/SKILL.md", Data: []byte(tc.md)}})
 		var tooLong *LengthError
-		if !errors.As(err, &tooLong) || err.Error() != want {
-			t.Errorf("%s over its cap: err = %v, want a *LengthError reading %q", tc.field, err, want)
+		if !errors.As(err, &tooLong) || err.Error() != tc.want {
+			t.Errorf("%s over its cap: err = %v, want a *LengthError reading %q", tc.field, err, tc.want)
 			continue
 		}
 		if tooLong.Field != tc.field || tooLong.Limit != tc.limit {

@@ -87,8 +87,8 @@ func parseDeploymentSchedule(ctx context.Context, obj map[string]json.RawMessage
 		// recorded, keeps ours.
 		var keys map[string]json.RawMessage
 		if json.Unmarshal(raw, &keys) == nil {
-			if _, sent := keys["timezone"]; !sent {
-				return "", "", true, false, errInvalid("schedule.timezone: Field required")
+			if err := fieldRequired(keys, "timezone", "schedule.timezone"); err != nil {
+				return "", "", true, false, err
 			}
 		}
 		return "", "", true, false, errInvalid("schedule.timezone is required")

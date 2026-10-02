@@ -386,7 +386,7 @@ func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, 
 	if builtinTool {
 		allowed = append(allowed, "type")
 	}
-	if k, ok := unknownKey(obj, allowed); ok {
+	if k, ok := domain.LeastUnknownKey(obj, allowed...); ok {
 		ours := fmt.Errorf("%s: unknown field %q in %s", kind, k, path)
 		// A built-in entry whose name selects one of the eight variants is
 		// refused in the reference's words (2026-09-02 batch2
@@ -493,22 +493,10 @@ var webToolFields = map[string][]string{
 	"web_search": {"allowed_domains", "blocked_domains", "user_location"},
 }
 
-// unknownKey reports a key of obj not in allowed, if there is one: the least
-// in byte order, so a body with several names the same one on every request,
-// as internal/api's rejectUnknownKeys does.
-func unknownKey(obj map[string]json.RawMessage, allowed []string) (unknown string, found bool) {
-	for k := range obj {
-		if !slices.Contains(allowed, k) && (!found || k < unknown) {
-			unknown, found = k, true
-		}
-	}
-	return unknown, found
-}
-
 // rejectKeysOutside fails on the first key of obj not in allowed, naming its path
 // (the toolset object itself for the empty path).
 func rejectKeysOutside(kind string, obj map[string]json.RawMessage, path string, allowed ...string) error {
-	k, ok := unknownKey(obj, allowed)
+	k, ok := domain.LeastUnknownKey(obj, allowed...)
 	switch {
 	case !ok:
 		return nil

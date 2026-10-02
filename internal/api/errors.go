@@ -224,6 +224,17 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		ae = &apiError{http.StatusInternalServerError, errTypeAPI, "internal server error"}
 	}
+	if ae.status >= 400 && ae.status < 500 {
+		// Every refusal is logged once, here, because the wire's words are
+		// the reference's where it was recorded (#540) and several of those
+		// name nothing — "Not found", "Cannot modify archived agent",
+		// "Method Not Allowed". The path carries the ids such a message drops,
+		// and no route puts a secret in its path; the query string is left
+		// out, as a filter or a cursor is no refusal's subject. Detail only a
+		// handler knows is that handler's own line.
+		slog.InfoContext(r.Context(), "request refused", "method", r.Method, "path", r.URL.Path,
+			"status", ae.status, "error_type", ae.errType, "request_id", requestIDFrom(r.Context()))
+	}
 	// Last, so no schema's extra member can shadow the two every error carries.
 	inner["type"] = ae.errType
 	inner["message"] = ae.message

@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -75,6 +73,9 @@ func NormalizeInitialEvents(envKind string, cred Credential, raws []json.RawMess
 
 func normalizeBatch(envKind string, cred Credential, raws []json.RawMessage, reference bool) ([]NewEvent, error) {
 	if len(raws) == 0 {
+		if !reference {
+			return nil, errors.New("events must contain at least one event")
+		}
 		// 2026-09-02 batch2 `sessT.send.empty-events` (#540).
 		return nil, errors.New("events: must contain at least 1 item")
 	}
@@ -262,7 +263,7 @@ func normalizeUserInterrupt(obj map[string]json.RawMessage) (NewEvent, error) {
 	if err := allowKeys(obj, "type", "session_thread_id"); err != nil {
 		return NewEvent{}, err
 	}
-	claim, err := threadClaim(obj)
+	claim, err := threadClaim(obj, true)
 	if err != nil {
 		return NewEvent{}, err
 	}
@@ -304,7 +305,7 @@ func normalizeToolConfirmation(obj map[string]json.RawMessage, i int) (NewEvent,
 		}
 		denyMessage = raw
 	}
-	claim, err := threadClaim(obj)
+	claim, err := threadClaim(obj, false)
 	if err != nil {
 		return NewEvent{}, err
 	}
@@ -343,7 +344,7 @@ func normalizeToolResult(obj map[string]json.RawMessage, typ domain.EventType, r
 		}
 		isError = raw
 	}
-	claim, err := threadClaim(obj)
+	claim, err := threadClaim(obj, false)
 	if err != nil {
 		return NewEvent{}, err
 	}
@@ -490,20 +491,11 @@ func asObject(raw json.RawMessage, what string) (map[string]json.RawMessage, err
 	return obj, nil
 }
 
-// allowKeys refuses the first key of obj outside allowed, in byte order, so a
-// payload with several names the same one on every request.
+// allowKeys refuses a key of obj outside allowed, naming the one
+// domain.LeastUnknownKey picks.
 func allowKeys(obj map[string]json.RawMessage, allowed ...string) error {
-	for _, key := range slices.Sorted(maps.Keys(obj)) {
-		found := false
-		for _, a := range allowed {
-			if key == a {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("unknown field %q", key)
-		}
+	if key, ok := domain.LeastUnknownKey(obj, allowed...); ok {
+		return fmt.Errorf("unknown field %q", key)
 	}
 	return nil
 }
@@ -535,7 +527,15 @@ func isNullRaw(raw json.RawMessage) bool {
 // names the one thread it ends — while the stored payload keeps
 // session_thread_id null, rendered per surface like every thread-addressable
 // event.
-func threadClaim(obj map[string]json.RawMessage) (domain.ID, error) {
+//
+// A malformed claim on an interrupt is refused in the reference's words
+// (2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
+// `.unknown-thread`, #540). On a confirmation or a result the reference
+// refuses nothing — it was recorded accepting an `sth_` id and an unknown one
+// and rewriting the claim to the call's own thread (idx 335–336
+// `sessK2.send.tool_confirmation.*`) — so this platform's refusal there is
+// its own, and keeps its own words (docs/DIVERGENCES.md, #841).
+func threadClaim(obj map[string]json.RawMessage, interrupt bool) (domain.ID, error) {
 	raw, set := obj["session_thread_id"]
 	if !set || isNullRaw(raw) {
 		return "", nil
@@ -545,13 +545,11 @@ func threadClaim(obj map[string]json.RawMessage) (domain.ID, error) {
 		return "", fmt.Errorf("session_thread_id must be a string or null")
 	}
 	if !domain.ValidWithPrefix(s, domain.PrefixSessionThread) {
-		// The reference's words, recorded on an interrupt (2026-09-02 batch2
-		// `sessK.send.interrupt.sth_-prefix` and `interrupt.unknown-thread`,
-		// #540); every type that carries the field shares this check.
-		return "", verbatim{
-			ref:  "Invalid session_thread_id: " + s,
-			ours: fmt.Sprintf("session_thread_id %q is not a session thread id", s),
+		ours := fmt.Sprintf("session_thread_id %q is not a session thread id", s)
+		if !interrupt {
+			return "", errors.New(ours)
 		}
+		return "", verbatim{ref: "Invalid session_thread_id: " + s, ours: ours}
 	}
 	return domain.ID(s), nil
 }

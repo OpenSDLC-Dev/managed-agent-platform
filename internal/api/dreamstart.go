@@ -554,7 +554,7 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 	// fire here: the store is the clone this transaction inserted, or the input
 	// dreamStartChecks found live and holds FOR SHARE. Were one to, it would be
 	// a start failure for the runner to log and retry, never an HTTP answer.
-	mounted, err := snapshotMemoryStore(ctx, tx, store, callerDream)
+	mounted, err := snapshotMemoryStore(ctx, tx, store)
 	if err != nil {
 		return createdSession{}, err
 	}

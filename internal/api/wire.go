@@ -209,29 +209,29 @@ func storableText(s string) bool {
 // unrecognized body fields are an error, not a silent no-op — a typo'd field
 // name must not vanish into accepted-but-ignored input. The sentence is the
 // reference's strict decoder's, recorded on agents, sessions, deployments,
-// vaults and vault credentials (#540), and like that decoder it names the bare
+// vaults and vault credentials (#540) and answered by every caller, recorded
+// or not (INFERRED, docs/DIVERGENCES.md), and like that decoder it names the bare
 // key even inside a nested object (`resources[0].mount_path` is reported as
 // "mount_path"). Two surfaces speak another dialect and do not call this:
 // environments, recorded with pydantic's sentence, and the console and work
 // routes, pydantic surfaces whose unknown-key sentence no recording holds.
 func rejectUnknownKeys(obj map[string]json.RawMessage, allowed ...string) error {
-	if key, ok := firstUnknownKey(obj, allowed...); ok {
+	if key, ok := domain.LeastUnknownKey(obj, allowed...); ok {
 		return errInvalid("Failed to parse request body: unknown field %q", key)
 	}
 	return nil
 }
 
-// firstUnknownKey reports the unknown key a refusal names: the least in byte
-// order, so a body with several names the same one on every request. The
-// reference's choice agrees on the one recorded body with several (2026-09-03
-// batch2 `cred.create.oauth-te-400` named access_token among five).
-func firstUnknownKey(obj map[string]json.RawMessage, allowed ...string) (unknown string, found bool) {
-	for key := range obj {
-		if !slices.Contains(allowed, key) && (!found || key < unknown) {
-			unknown, found = key, true
-		}
+// fieldRequired refuses obj when key is absent from it, in the words pydantic
+// gives a missing field — path, the field as the sentence names it, then
+// ": Field required" — which the reference was recorded answering on the
+// routes that call this (#540). Absence only: a null or empty value is each
+// caller's own refusal.
+func fieldRequired(obj map[string]json.RawMessage, key, path string) error {
+	if _, ok := obj[key]; !ok {
+		return errInvalid("%s: Field required", path)
 	}
-	return unknown, found
+	return nil
 }
 
 func isNull(raw json.RawMessage) bool {

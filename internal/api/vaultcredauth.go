@@ -242,8 +242,8 @@ func parseStaticBearerCreate(obj map[string]json.RawMessage) (*credAuth, error) 
 	// An absent key is the reference's recorded sentence (2026-09-03 batch1
 	// `cred.create.throwaway`, #540); null, "" and the other required fields,
 	// never recorded, keep requiredString's.
-	if _, sent := obj["mcp_server_url"]; !sent {
-		return nil, errInvalid("auth.mcp_server_url: Field required")
+	if err := fieldRequired(obj, "mcp_server_url", "auth.mcp_server_url"); err != nil {
+		return nil, err
 	}
 	serverURL, err := requiredString(obj, "mcp_server_url")
 	if err != nil {

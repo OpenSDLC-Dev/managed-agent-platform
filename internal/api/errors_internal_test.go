@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
@@ -82,5 +83,33 @@ func TestABareHeartbeatMismatchIsStillA412(t *testing.T) {
 	want := `{"error":{"message":"expected_last_heartbeat does not match the current lease","type":"invalid_request_error"},"request_id":"req_x","type":"error"}` + "\n"
 	if w.Code != http.StatusPreconditionFailed || w.Body.String() != want {
 		t.Errorf("bare sentinel = %d %s, want 412 %s", w.Code, w.Body.String(), want)
+	}
+}
+
+// TestAHeartbeatMismatchRendersTheLastBeatAsTheReferenceDoes pins the 412
+// sentence's two timestamp shapes: six fractional digits, as recorded
+// (2026-09-02 batch2 idx 259 `work.heartbeat.NO_HEARTBEAT`), and none on a
+// whole second, where Python's isoformat, which the reference renders with,
+// drops an all-zero fraction (INFERRED, unrecorded).
+func TestAHeartbeatMismatchRendersTheLastBeatAsTheReferenceDoes(t *testing.T) {
+	for _, tc := range []struct {
+		beat time.Time
+		want string
+	}{
+		{time.Date(2026, 9, 2, 0, 8, 33, 477978000, time.UTC), "2026-09-02T00:08:33.477978Z"},
+		{time.Date(2026, 9, 2, 0, 8, 33, 120000000, time.UTC), "2026-09-02T00:08:33.120000Z"},
+		{time.Date(2026, 9, 2, 0, 8, 33, 0, time.UTC), "2026-09-02T00:08:33Z"},
+		{time.Date(2026, 9, 2, 2, 8, 33, 0, time.FixedZone("x", 2*3600)), "2026-09-02T00:08:33Z"},
+	} {
+		beat := tc.beat
+		err := mapWorkErr(&queue.HeartbeatMismatchError{
+			Item: &queue.Work{State: "active", LastHeartbeat: &beat}, TTLSeconds: 30, Expected: "NO_HEARTBEAT"})
+		var ae *apiError
+		if !errors.As(err, &ae) {
+			t.Fatalf("%v: %v, want an API error", tc.beat, err)
+		}
+		if want := "Heartbeat precondition failed: expected NO_HEARTBEAT, actual was " + tc.want; ae.message != want {
+			t.Errorf("%v: %q, want %q", tc.beat, ae.message, want)
+		}
 	}
 }

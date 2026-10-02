@@ -310,8 +310,8 @@ func TestValidateConfigErrorsForTheRecordedCases(t *testing.T) {
 
 // TestValidateNamesTheLeastUnknownKey pins that a configs[] entry, a
 // default_config or a toolset carrying several unknown keys names the same
-// one on every call — the byte-order-least, as internal/api's
-// rejectUnknownKeys does — where a map's iteration order would pick any.
+// one on every call — the byte-order-least, domain.LeastUnknownKey's pick —
+// where a map's iteration order would pick any.
 func TestValidateNamesTheLeastUnknownKey(t *testing.T) {
 	for entry, want := range map[string]string{
 		`{"type":"agent_toolset_20260401","configs":[{"name":"bash","zeta":1,"alpha":1,"mid":1}]}`: `agent_toolset_20260401: unknown field "alpha" in configs[0]`,

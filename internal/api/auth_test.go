@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
@@ -111,6 +113,48 @@ func TestUnknownRouteAndMethodReturnErrorEnvelope(t *testing.T) {
 	wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
 	status, body = s.do(http.MethodDelete, "/v1/dreams/drm_x", nil)
 	wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
+}
+
+// TestEveryRefusalIsLogged pins the one Info line writeError writes for a
+// 4xx: method, path without its query, status, error type and request id —
+// what an operator needs once a refusal's wire message names nothing (#540).
+// A success writes none.
+func TestEveryRefusalIsLogged(t *testing.T) {
+	s := newTestServer(t)
+	logs := captureLogs(t, slog.LevelInfo)
+
+	status, body := s.do(http.MethodGet, "/v1/agents/agent_0000000000000000000000000?cursor=secret-looking", nil)
+	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	status, put := s.do(http.MethodPut, "/v1/agents", nil)
+	wantErr(t, status, put, http.StatusMethodNotAllowed, "invalid_request_error")
+	if status, _ := s.do(http.MethodGet, "/v1/agents", nil); status != http.StatusOK {
+		t.Fatalf("list agents: %d", status)
+	}
+
+	var refused []string
+	for _, l := range strings.Split(logs(), "\n") {
+		if strings.Contains(l, `msg="request refused"`) {
+			refused = append(refused, l)
+		}
+	}
+	if len(refused) != 2 {
+		t.Fatalf("refusal lines = %d, want 2 (one per 4xx, none for the 200):\n%s", len(refused), strings.Join(refused, "\n"))
+	}
+	for i, want := range [][]string{
+		{"method=GET", "path=/v1/agents/agent_0000000000000000000000000", "status=404", "error_type=not_found_error",
+			"request_id=" + body["request_id"].(string)},
+		{"method=PUT", "path=/v1/agents ", "status=405", "error_type=invalid_request_error",
+			"request_id=" + put["request_id"].(string)},
+	} {
+		for _, w := range want {
+			if !strings.Contains(refused[i]+" ", w) {
+				t.Errorf("refusal line %q lacks %q", refused[i], w)
+			}
+		}
+	}
+	if strings.Contains(logs(), "secret-looking") {
+		t.Error("a refusal line carries the query string")
+	}
 }
 
 func TestEnsureAPIKeyIsIdempotentAndStoresOnlyHashes(t *testing.T) {

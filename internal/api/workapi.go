@@ -421,8 +421,10 @@ func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error)
 // precondition the beat sent and the last heartbeat the item holds, "NULL" for
 // none, as in the pinned SDK's fixture for such a 412 (checked against
 // anthropic-sdk-go v1.70.1 — lib/environments/worker_test.go leaseLostBody),
-// with the six fractional digits the recorded timestamp carries. Anything
-// else is an internal fault.
+// with the six fractional digits the recorded timestamp carries — and, on a
+// whole second, none: the reference renders it as Python's isoformat does,
+// which drops an all-zero fraction (INFERRED, docs/DIVERGENCES.md; no
+// recording holds one). Anything else is an internal fault.
 func mapWorkErr(err error) error {
 	var mismatch *queue.HeartbeatMismatchError
 	switch {
@@ -430,8 +432,12 @@ func mapWorkErr(err error) error {
 		return errNotFound("work item not found")
 	case errors.As(err, &mismatch):
 		actual := "NULL"
-		if mismatch.Item.LastHeartbeat != nil {
-			actual = mismatch.Item.LastHeartbeat.UTC().Format("2006-01-02T15:04:05.000000Z07:00")
+		if lh := mismatch.Item.LastHeartbeat; lh != nil {
+			layout := "2006-01-02T15:04:05.000000Z07:00"
+			if lh.Nanosecond()/int(time.Microsecond) == 0 {
+				layout = "2006-01-02T15:04:05Z07:00"
+			}
+			actual = lh.UTC().Format(layout)
 		}
 		return withDetails(&apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
 			fmt.Sprintf("Heartbeat precondition failed: expected %s, actual was %s", mismatch.Expected, actual)},
@@ -514,15 +520,15 @@ func (s *server) updateWork(r *http.Request) (any, error) {
 	// The work API is a pydantic surface on the reference, so its unknown-key
 	// sentence is not the strict decoder's rejectUnknownKeys reproduces; none
 	// was recorded, so ours stands.
-	if key, ok := firstUnknownKey(obj, "metadata"); ok {
+	if key, ok := domain.LeastUnknownKey(obj, "metadata"); ok {
 		return nil, errInvalid("unknown field %q", key)
 	}
-	raw, ok := obj["metadata"]
-	if !ok {
-		// 2026-09-12 batch1 `rec91.work.poll.post-empty-retry` (#540); an
-		// explicit null, never recorded, keeps ours.
-		return nil, errInvalid("metadata: Field required")
+	// 2026-09-12 batch1 `rec91.work.poll.post-empty-retry` (#540); an
+	// explicit null, never recorded, keeps ours.
+	if err := fieldRequired(obj, "metadata", "metadata"); err != nil {
+		return nil, err
 	}
+	raw := obj["metadata"]
 	if isNull(raw) {
 		return nil, errInvalid("metadata is required")
 	}

@@ -416,6 +416,16 @@ func TestMemoryPathOccupancy(t *testing.T) {
 	} {
 		conflict(t, store, "/memories/"+mover, map[string]any{"path": path}, deep, "/a/b", msg)
 	}
+	// Two descendants occupy one ancestor: the conflict names the least path
+	// in byte order, whichever was written first, on every call.
+	twice := createMemoryStore(t, s, "two-conflicts")
+	createMemory(t, s, twice, "/p/z", "written first")
+	least := createMemory(t, s, twice, "/p/b", "the least path")["id"].(string)
+	for range 3 {
+		conflict(t, twice, "/memories", map[string]any{"path": "/p", "content": "x"}, least, "/p/b",
+			"path `/p` conflicts with existing memory at `/p/b`: a memory and a path prefix of it cannot coexist. Delete or rename the other memory first.")
+	}
+
 	// Renaming a memory onto its own path is the no-op, not a self-conflict.
 	status, same := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+mover,
 		map[string]any{"path": "/mover.md"})

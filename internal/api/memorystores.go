@@ -95,16 +95,17 @@ func (s *server) createMemoryStore(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "name", "description", "metadata"); err != nil {
 		return nil, err
 	}
-	name, nameSet, nameNull, err := stringField(obj, "name")
+	name, _, nameNull, err := stringField(obj, "name")
 	if err != nil {
 		return nil, err
 	}
 	// An absent name and an empty one take the reference's validator's words
 	// (2026-09-02 free_batch1 `store.create.no-name`, `store.create.empty-name`;
 	// #540); a null one, never recorded, keeps requiredString's.
+	if err := fieldRequired(obj, "name", "name"); err != nil {
+		return nil, err
+	}
 	switch {
-	case !nameSet:
-		return nil, errInvalid("name: Field required")
 	case nameNull:
 		return nil, errInvalid("name is required")
 	case name == "":

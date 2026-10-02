@@ -248,8 +248,8 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 	// An absent list is the reference's recorded sentence (2026-09-03 batch1
 	// `deployment.create.with-memory-store`, #540); null and [], never
 	// recorded, keep validateDeploymentBounds' floor below.
-	if _, sent := obj["initial_events"]; !sent {
-		return nil, errInvalid("initial_events: Field required")
+	if err := fieldRequired(obj, "initial_events", "initial_events"); err != nil {
+		return nil, err
 	}
 	initial, err := parseInitialEvents(obj, true)
 	if err != nil {

@@ -216,7 +216,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("POST "+consoleRevokePath, s.handleNoContent(identity.RoleAdmin, s.revokeEnvironmentKey))
 	for _, pattern := range []string{consoleTokensPath, consoleRevokePath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, methodNotAllowed(r))
+			writeError(w, r, errMethodNotAllowed)
 		})
 	}
 
@@ -244,7 +244,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("GET "+consoleWorkspacePath, s.handle(identity.RoleAdmin, s.getWorkspace))
 	for _, pattern := range []string{consoleAPIKeysPath, consoleAPIKeyPath, consoleOrgAPIKeyPath, consoleWorkspacePath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, methodNotAllowed(r))
+			writeError(w, r, errMethodNotAllowed)
 		})
 	}
 
@@ -255,7 +255,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// non-GET.
 	mux.HandleFunc("GET "+gateconfig.Path, s.handle(identity.RoleNone, s.getGateConfig))
 	mux.HandleFunc(gateconfig.Path, func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, methodNotAllowed(r))
+		writeError(w, r, errMethodNotAllowed)
 	})
 
 	// The mux's built-in 404/405 write plain text; clients expect the wire
@@ -297,7 +297,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/deployment_runs", "/v1/deployment_runs/{id}",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, methodNotAllowed(r))
+			writeError(w, r, errMethodNotAllowed)
 		})
 	}
 
@@ -331,7 +331,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/environments/{id}/work/{work_id}/stop",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, methodNotAllowed(r))
+			writeError(w, r, errMethodNotAllowed)
 		})
 	}
 	mux.HandleFunc("/v1/environments/{id}/work/", func(w http.ResponseWriter, r *http.Request) {
@@ -678,14 +678,12 @@ func isBareSessionPath(p string) bool {
 	return ok && sub == ""
 }
 
-// methodNotAllowed is the wire 405 for a known path reached with an
+// errMethodNotAllowed is the wire 405 for a known path reached with an
 // unsupported method, in the reference's words: recorded on a dream, the work
 // poll, an environment key's token path and a console API key (#540). Neither
 // the method nor the path is named, as the reference names neither; both are
 // the client's own request.
-func methodNotAllowed(*http.Request) *apiError {
-	return &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest, "Method Not Allowed"}
-}
+var errMethodNotAllowed = &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest, "Method Not Allowed"}
 
 // errUnknownPath is the wire 404 for a path no route matches — see the "/"
 // fallback for the two spellings and where each was recorded.

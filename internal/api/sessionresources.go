@@ -455,10 +455,12 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 	if err := rejectUnknownKeys(obj, "type", "url", "authorization_token", "mount_path", "checkout"); err != nil {
 		return resourceInput{}, err
 	}
-	if _, ok := obj["url"]; !ok && f == resourceForDeployment {
+	if f == resourceForDeployment {
 		// 2026-09-05 batch3 `rec84.repo.bare-type` (#540): an absent key only;
 		// a null or empty url there is never recorded.
-		return resourceInput{}, errInvalid("resources.%d.url: Field required", i)
+		if err := fieldRequired(obj, "url", "resources."+strconv.Itoa(i)+".url"); err != nil {
+			return resourceInput{}, err
+		}
 	}
 	rawURL, err := requiredString(obj, "url")
 	if err != nil {
@@ -774,7 +776,7 @@ func sealRepoTokens(ctx context.Context, cipher secrets.Cipher, inputs []resourc
 // the session row exists — the credential rows FK the session. Memory stores
 // whose slugs collide all attach (#671, suffixCollidingMemoryMounts), so their
 // elements are marshaled only once every store's mount is settled.
-func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time, c sessionCaller) ([]json.RawMessage, []string, error) {
+func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time) ([]json.RawMessage, []string, error) {
 	out := make([]json.RawMessage, 0, len(inputs))
 	var repoIDs []string
 	var stores []memoryResourceJSON
@@ -782,7 +784,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 	for _, in := range inputs {
 		switch in.kind {
 		case resourceKindMemory:
-			el, err := snapshotMemoryStore(ctx, db, in, c)
+			el, err := snapshotMemoryStore(ctx, db, in)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -798,7 +800,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			}))
 			repoIDs = append(repoIDs, id)
 		default:
-			if err := fileMustExist(ctx, db, in.fileID, c == callerRequest); err != nil {
+			if err := fileMustExist(ctx, db, in.fileID); err != nil {
 				return nil, nil, err
 			}
 			id := domain.NewID(domain.PrefixResource).String()
@@ -863,15 +865,9 @@ func suffixCollidingMemoryMounts(stores []memoryResourceJSON) {
 // (decision 8), falling back to the slug of the whole store id —
 // memstore-<token>, lowercased, as recorded (#671) — for a name with no
 // alphanumerics. It is the store's own slug: suffixCollidingMemoryMounts
-// suffixes it when another store in the same create keeps it.
-//
-// Its two refusals are worded per caller (#540): a session create answers the
-// reference's HTTP sentences (2026-09-02 batch2 `session.create.unknown-store`
-// and `session.create.archived-store`), a deployment's run settles with the
-// reference's run sentences (2026-09-03 batch1 `deployment.run.store-deleted`
-// and `deployment.run.store-archived`), and a dream's start, never recorded,
-// keeps ours.
-func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput, c sessionCaller) (memoryResourceJSON, error) {
+// suffixes it when another store in the same create keeps it. Its two
+// refusals are createRefusals, which each caller words (#540).
+func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (memoryResourceJSON, error) {
 	var name, description string
 	var archivedAt *time.Time
 	err := db.QueryRow(ctx,
@@ -880,31 +876,15 @@ func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput, c se
 	if errors.Is(err, pgx.ErrNoRows) {
 		// A missing store is §5.2's "other resource gone" arm; only an
 		// archived one has a type of its own.
-		const typ = "session_resource_not_found_error"
-		switch c {
-		case callerRequest:
-			return memoryResourceJSON{}, classified(typ, errNotFound("Memory store `%s` not found.", in.memoryStoreID))
-		case callerDeployment:
-			return memoryResourceJSON{}, classifiedRun(typ,
-				"session creation rejected: a referenced resource was not found; check deployment configuration",
-				errNotFound("memory store %s not found", in.memoryStoreID))
-		}
-		return memoryResourceJSON{}, classified(typ, errNotFound("memory store %s not found", in.memoryStoreID))
+		return memoryResourceJSON{}, classified("session_resource_not_found_error", &createRefusal{refusedStoreGone,
+			in.memoryStoreID, errNotFound("memory store %s not found", in.memoryStoreID)})
 	}
 	if err != nil {
 		return memoryResourceJSON{}, err
 	}
 	if archivedAt != nil {
-		const typ = "memory_store_archived_error"
-		switch c {
-		case callerRequest:
-			return memoryResourceJSON{}, classified(typ, errInvalid("Memory store %s is archived.", in.memoryStoreID))
-		case callerDeployment:
-			return memoryResourceJSON{}, classifiedRun(typ,
-				"session creation rejected: a referenced memory store is archived; check deployment resources",
-				errInvalid("memory store %s is archived", in.memoryStoreID))
-		}
-		return memoryResourceJSON{}, classified(typ, errInvalid("memory store %s is archived", in.memoryStoreID))
+		return memoryResourceJSON{}, classified("memory_store_archived_error", &createRefusal{refusedStoreArchived,
+			in.memoryStoreID, errInvalid("memory store %s is archived", in.memoryStoreID)})
 	}
 	slug := memsync.Slug(name, memsync.Slug(in.memoryStoreID, ""))
 	return memoryResourceJSON{
@@ -967,21 +947,15 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 // needs no clause: the worker reads the content lane's 404 as not_found, skips
 // that mount and materializes the rest (internal/worker/files.go).
 //
-// recorded is the session create's refusal, in the reference's words
-// (2026-09-02 batch2 `sessF2.create.deleted-file-mount`, #540), its list
-// always of one id, since files are checked one at a time. Every other caller
-// — the add endpoint, a deployment's run, a dream's start — was never recorded
-// and keeps ours.
-func fileMustExist(ctx context.Context, db querier, fileID string, recorded bool) error {
+// The refusal is a createRefusal, which a session create answers in the
+// reference's words (#540); the add endpoint, never recorded, keeps ours.
+func fileMustExist(ctx context.Context, db querier, fileID string) error {
 	var exists bool
 	err := db.QueryRow(ctx,
 		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, fileID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if recorded {
-			return classified("file_not_found_error",
-				errNotFound("One or more files not found. Check that each `file_id` exists and is accessible: %s", fileID))
-		}
-		return classified("file_not_found_error", errNotFound("file %s not found", fileID))
+		return classified("file_not_found_error",
+			&createRefusal{refusedFileGone, fileID, errNotFound("file %s not found", fileID)})
 	}
 	return err
 }
@@ -1159,7 +1133,7 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 		// supported overlay — stays legal.
 		return fileResourceJSON{}, errInvalid("mount_path %q is an ancestor of repository mount_path %q", in.mountPath, rm)
 	}
-	if err := fileMustExist(ctx, tx, in.fileID, false); err != nil {
+	if err := fileMustExist(ctx, tx, in.fileID); err != nil {
 		return fileResourceJSON{}, err
 	}
 	now := time.Now().UTC()

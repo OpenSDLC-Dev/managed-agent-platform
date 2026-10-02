@@ -701,7 +701,8 @@ func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 		// as "Heartbeat precondition failed: expected NO_HEARTBEAT, actual was
 		// 2026-09-02T00:08:33.477978Z" (batch2 idx 259) and "… expected
 		// 2020-01-01T00:00:00Z, actual was …" (idx 260) — or "NULL" when it
-		// holds none, as the SDK's leaseLostBody fixture renders that case.
+		// holds none, as the SDK's leaseLostBody fixture renders that case. A
+		// whole second's shape is TestAHeartbeatMismatchRendersTheLastBeatAsTheReferenceDoes's.
 		q, _ := url.ParseQuery(query)
 		actual := "NULL"
 		if lh, ok := want["last_heartbeat"].(string); ok {
@@ -709,7 +710,11 @@ func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 			if err != nil {
 				t.Fatalf("last_heartbeat %q: %v", lh, err)
 			}
-			actual = ts.UTC().Format("2006-01-02T15:04:05.000000Z07:00")
+			layout := "2006-01-02T15:04:05.000000Z07:00"
+			if ts.Nanosecond() == 0 { // a whole second drops the fraction
+				layout = "2006-01-02T15:04:05Z07:00"
+			}
+			actual = ts.UTC().Format(layout)
 		}
 		wantErrMsg(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error",
 			"Heartbeat precondition failed: expected "+q.Get("expected_last_heartbeat")+", actual was "+actual)

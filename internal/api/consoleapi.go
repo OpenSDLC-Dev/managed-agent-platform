@@ -160,7 +160,7 @@ func consoleEnvironmentID(r *http.Request) (string, error) {
 	}
 	id := r.PathValue("id")
 	if !consoleIDShape(id, domain.PrefixEnvironment) {
-		return "", errConsoleEnvironmentMalformed(id)
+		return "", errConsoleEnvironmentMalformed
 	}
 	return id, nil
 }
@@ -247,10 +247,8 @@ func isHex(s string) bool {
 // the env_ shape with, details and words included (2026-09-05 batch2
 // `rec83.edge3.issue.malformed-env`; #664, #540). The id it names is not
 // echoed, as the reference's is not.
-func errConsoleEnvironmentMalformed(string) error {
-	return withDetails(errInvalid("Invalid request: Environment id must have `env_` prefix."),
-		errorDetails{ErrorVisibility: visibilityUserFacing, ErrorCode: "invalid_request"})
-}
+var errConsoleEnvironmentMalformed = withDetails(errInvalid("Invalid request: Environment id must have `env_` prefix."),
+	errorDetails{ErrorVisibility: visibilityUserFacing, ErrorCode: "invalid_request"})
 
 // errConsoleEnvironmentNotFound is this namespace's 404 for an environment it
 // will not answer for, with the details the reference attaches to it here
@@ -337,7 +335,7 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	}
 	// A pydantic surface on the reference, whose unknown-key sentence no
 	// recording holds, so it is not rejectUnknownKeys' strict-decoder one.
-	if key, ok := firstUnknownKey(obj, "name"); ok {
+	if key, ok := domain.LeastUnknownKey(obj, "name"); ok {
 		return nil, errInvalid("unknown field %q", key)
 	}
 	name, err := environmentKeyName(obj)

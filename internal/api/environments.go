@@ -85,7 +85,7 @@ func checkEnvironmentID(id string) error {
 // whose reference validator is pydantic's and words an unknown key its own way
 // (2026-09-03 batch1 `env.create.cloud`, #540).
 func rejectExtraEnvironmentKeys(obj map[string]json.RawMessage) error {
-	if key, ok := firstUnknownKey(obj, "name", "description", "config", "scope", "metadata"); ok {
+	if key, ok := domain.LeastUnknownKey(obj, "name", "description", "config", "scope", "metadata"); ok {
 		return errInvalid("%s: Extra inputs are not permitted", key)
 	}
 	return nil
@@ -121,12 +121,12 @@ func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, norm
 	}
 	switch typ {
 	case string(domain.EnvSelfHosted):
-		if key, ok := firstUnknownKey(obj, "type"); ok {
+		if key, ok := domain.LeastUnknownKey(obj, "type"); ok {
 			return "", nil, errInvalid("unknown self_hosted config field %q", key)
 		}
 		return typ, []byte(`{"type":"self_hosted"}`), nil
 	case string(domain.EnvCloud):
-		if key, ok := firstUnknownKey(obj, "type", "networking", "packages"); ok {
+		if key, ok := domain.LeastUnknownKey(obj, "type", "networking", "packages"); ok {
 			return "", nil, errInvalid("unknown cloud config field %q", key)
 		}
 		// Base: the existing cloud config when updating, defaults otherwise.
@@ -233,7 +233,7 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	}
 	switch typ {
 	case string(domain.NetUnrestricted):
-		if key, ok := firstUnknownKey(obj, "type"); ok {
+		if key, ok := domain.LeastUnknownKey(obj, "type"); ok {
 			return nil, errInvalid("unknown unrestricted networking field %q", key)
 		}
 		return json.RawMessage(`{"type":"unrestricted"}`), nil
@@ -509,11 +509,11 @@ func (s *server) insertEnvironmentInTx(ctx context.Context, tx pgx.Tx, body json
 	if err := rejectExtraEnvironmentKeys(obj); err != nil {
 		return false, err
 	}
-	if _, ok := obj["name"]; !ok {
-		// The reference's validator words an absent key its own way
-		// (2026-09-03 batch1 `env.create.bogus-probe`, #540); a null or empty
-		// name, never recorded, keeps ours below.
-		return false, errInvalid("name: Field required")
+	// The reference's validator words an absent key its own way (2026-09-03
+	// batch1 `env.create.bogus-probe`, #540); a null or empty name, never
+	// recorded, keeps ours below.
+	if err := fieldRequired(obj, "name", "name"); err != nil {
+		return false, err
 	}
 	name, err := requiredString(obj, "name")
 	if err != nil {

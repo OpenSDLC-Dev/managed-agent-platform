@@ -250,6 +250,9 @@ func (s *server) checkMemoryStore(ctx context.Context, storeID string) error {
 // LIKE is deliberately not used: `_` and `%` are legal path bytes, so a
 // pattern would make /acb/x occupy /a_b. except is the memory the write is
 // updating, so a rename does not conflict with itself; "" for a create.
+// Several descendants can occupy one path, and the 409 names one of them: the
+// least in byte order (the column's collation is "C"), so it is the same one
+// on every call.
 func occupiedBy(ctx context.Context, tx pgx.Tx, storeID, path, except string) (id, conflicting string, err error) {
 	err = tx.QueryRow(ctx,
 		`SELECT id, path FROM memories
@@ -257,7 +260,7 @@ func occupiedBy(ctx context.Context, tx pgx.Tx, storeID, path, except string) (i
 		    AND (path = $3
 		      OR left(path, length($3) + 1) = $3 || '/'
 		      OR left($3, length(path) + 1) = path || '/')
-		  LIMIT 1`, storeID, except, path).Scan(&id, &conflicting)
+		  ORDER BY path LIMIT 1`, storeID, except, path).Scan(&id, &conflicting)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", nil
 	}

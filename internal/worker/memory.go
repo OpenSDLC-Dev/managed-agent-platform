@@ -832,7 +832,10 @@ const refusalArchived = pushArchived
 // since #540, and "holds N memories") — and "is archived" too, the archive's
 // wording before #540, so an older control plane is still read right; a
 // server that words a refusal otherwise gets the reference's own rule, and
-// the file is retried once it changes.
+// the file is retried once it changes. That rule is also what a worker built
+// before #540 applies to a newer control plane's archive, whose wording it
+// does not know: each file is remembered until its bytes change, past an
+// unarchive — so workers upgrade before or with the control plane.
 func refusalKind(err error) string {
 	var apierr *sdk.Error
 	if !errors.As(err, &apierr) {

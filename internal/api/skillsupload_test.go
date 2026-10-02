@@ -161,7 +161,8 @@ func TestSkillUploadRefusesInReferenceWords(t *testing.T) {
 						line = l
 					}
 				}
-				for _, want := range []string{"field=" + tc.field, "limit=" + strconv.Itoa(tc.limit),
+				for _, want := range []string{
+					`reason="` + tc.field + " must be at most " + strconv.Itoa(tc.limit) + ` characters"`,
 					"request_id=" + obj["request_id"].(string)} {
 					if !strings.Contains(line, want) {
 						t.Errorf("rejection log line %q lacks %q", line, want)

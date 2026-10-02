@@ -22,30 +22,26 @@ import (
 type runError struct {
 	typ string
 	err error
-	// message is the run's own error message where the reference was
-	// recorded wording the run apart from the HTTP refusal beneath it (#540):
-	// "session creation rejected: …" (classifiedRun). Empty records err's.
-	message string
 }
 
 func (e *runError) Error() string { return e.err.Error() }
 func (e *runError) Unwrap() error { return e.err }
 
-// runMessage is what a settled run's error.message carries.
-func (e *runError) runMessage() string {
-	if e.message != "" {
-		return e.message
+// runWording is the message a settled run's error carries: the reference's run
+// sentence for a memory store gone or archived, which names no store
+// (2026-09-03 batch1 `deployment.run.store-deleted` and
+// `deployment.run.store-archived`; #540), and err's own otherwise.
+func runWording(re *runError) string {
+	var r *createRefusal
+	if errors.As(re.err, &r) {
+		switch r.what {
+		case refusedStoreGone:
+			return "session creation rejected: a referenced resource was not found; check deployment configuration"
+		case refusedStoreArchived:
+			return "session creation rejected: a referenced memory store is archived; check deployment resources"
+		}
 	}
-	return e.err.Error()
-}
-
-// classifiedRun is classified for a deployment's own refusal, which the
-// reference was recorded settling a run with in words of its own. Three are
-// recorded, each opening "session creation rejected: " (2026-09-02 batch2
-// `deployment.run.after-env-archived`, 2026-09-03 batch1
-// `deployment.run.store-deleted` and `deployment.run.store-archived`; #540).
-func classifiedRun(typ, message string, err error) error {
-	return &runError{typ: typ, err: err, message: message}
+	return re.err.Error()
 }
 
 // classified wraps err with the run-error type a deployment fire records for
@@ -148,10 +144,10 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 		}
 		// The run row survives the savepoint rollback — it was inserted
 		// before the savepoint.
-		run.Error = &domain.RunError{Type: re.typ, Message: re.runMessage()}
+		run.Error = &domain.RunError{Type: re.typ, Message: runWording(re)}
 		if err := settleRun(ctx, tx,
 			`UPDATE deployment_runs SET error_type = $1, error_message = $2 WHERE id = $3`,
-			re.typ, re.runMessage(), run.ID); err != nil {
+			re.typ, runWording(re), run.ID); err != nil {
 			return nil, err
 		}
 	} else {

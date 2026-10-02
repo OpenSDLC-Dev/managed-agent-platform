@@ -292,10 +292,11 @@ func TestInboundThreadClaimValidation(t *testing.T) {
 			"does not match the thread of tool use"},
 		{"confirmation naming a child for the primary's call", confirm(primaryAsk, "allow", map[string]any{"session_thread_id": a}),
 			"does not match the thread of tool use"},
-		// The reference's sentence, recorded on an interrupt (2026-09-02
-		// batch2 `sessK.send.interrupt.sth_-prefix`, #540), on a confirmation.
+		// Ours: the reference accepts a malformed claim on a confirmation
+		// (2026-09-02 batch2 idx 336 `sessK2.send.tool_confirmation.sth_-prefix`
+		// answered 200), so its interrupt sentence is not borrowed (#841).
 		{"not a thread id", confirm(askID, "allow", map[string]any{"session_thread_id": "sesn_" + strings.Repeat("0", 25)}),
-			"Invalid session_thread_id: sesn_" + strings.Repeat("0", 25)},
+			`events[0]: session_thread_id "sesn_` + strings.Repeat("0", 25) + `" is not a session thread id`},
 		{"interrupt naming an unknown thread", map[string]any{"type": "user.interrupt", "session_thread_id": "sthr_" + strings.Repeat("0", 25)},
 			"does not name a thread in this session"},
 		{"interrupt naming an archived thread", map[string]any{"type": "user.interrupt", "session_thread_id": archived},

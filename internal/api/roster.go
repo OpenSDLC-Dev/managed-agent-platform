@@ -380,15 +380,15 @@ func asObjectRaw(raw json.RawMessage) (map[string]json.RawMessage, error) {
 // resolveRoster answers in the reference's words.
 var errNullRosterEntry = errors.New("null roster entry")
 
-// parseRosterEntry reads one roster entry: a bare agent-id string, a
-// {type:"agent", id, version?} reference, or {type:"self"}. version 0 means
-// "pin the current version" (an explicit null reads as omitted, as session
-// create's agent.version does).
 // rosterUnknownKeyError carries an entry's unknown-key refusal past the
 // entry-index prefix resolveRoster puts on the rest: rejectUnknownKeys'
 // sentence names the bare key, as the reference's strict decoder does.
 type rosterUnknownKeyError struct{ error }
 
+// parseRosterEntry reads one roster entry: a bare agent-id string, a
+// {type:"agent", id, version?} reference, or {type:"self"}. version 0 means
+// "pin the current version" (an explicit null reads as omitted, as session
+// create's agent.version does).
 func parseRosterEntry(raw json.RawMessage) (id string, version int64, isSelf bool, err error) {
 	shapeErr := errors.New(`entry must be an agent id string, {"type":"agent","id",…} or {"type":"self"}`)
 	if isNull(raw) {

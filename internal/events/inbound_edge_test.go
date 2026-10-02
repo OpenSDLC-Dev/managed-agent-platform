@@ -202,16 +202,18 @@ func TestNormalizeInboundReferenceWording(t *testing.T) {
 		{"stream-only type", `{"type":"event_delta"}`,
 			`Failed to parse request: events[1].type: "event_delta" is not a valid value`},
 		// 2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
-		// `sessK.send.interrupt.unknown-thread`, on an interrupt; every
-		// type carrying the field shares the check.
+		// `sessK.send.interrupt.unknown-thread`, on an interrupt.
 		{"thread id with the wrong prefix", `{"type":"user.interrupt","session_thread_id":"sth_x"}`,
 			"Invalid session_thread_id: sth_x"},
 		{"malformed thread id", `{"type":"user.interrupt","session_thread_id":"sthr_01UnknownThreadIdXXXXXXXXX"}`,
 			"Invalid session_thread_id: sthr_01UnknownThreadIdXXXXXXXXX"},
+		// Not on a confirmation or a result: the reference accepts the claim
+		// there (idx 335–336 `sessK2.send.tool_confirmation.*`, 200), so the
+		// refusal is ours, in ours.
 		{"malformed thread id on a confirmation", `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","session_thread_id":"sesn_x"}`,
-			"Invalid session_thread_id: sesn_x"},
+			`events[1]: session_thread_id "sesn_x" is not a session thread id`},
 		{"malformed thread id on a result", `{"type":"user.custom_tool_result","custom_tool_use_id":"c","session_thread_id":"sesn_x"}`,
-			"Invalid session_thread_id: sesn_x"},
+			`events[1]: session_thread_id "sesn_x" is not a session thread id`},
 		// 2026-09-02 batch2 `sessT.send.tool_confirmation.deny_message-on-allow`.
 		{"deny_message on allow", `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","deny_message":"x"}`,
 			"Invalid tool_confirmation event at index 1: deny_message is only allowed when result is 'deny'"},
@@ -254,6 +256,10 @@ func TestNormalizeInboundReferenceWording(t *testing.T) {
 		[]json.RawMessage{json.RawMessage(`{"type":"user.message","content":[{"type":"text","text":""}]}`)})
 	if want := "events[0]: content[0]: text block text must not be empty"; err == nil || err.Error() != want {
 		t.Errorf("initial_events empty text block: err = %v, want %q", err, want)
+	}
+	if _, err := events.NormalizeInitialEvents("cloud", events.ManagementCredential, nil); err == nil ||
+		err.Error() != "events must contain at least one event" {
+		t.Errorf("initial_events empty list: err = %v, want this platform's sentence", err)
 	}
 }
 
