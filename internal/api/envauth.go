@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -61,11 +62,11 @@ func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key str
 // `rec83.control.revoked-key-A.content`) and on GET /v1/models, a route
 // outside every environment-key lane (2026-09-19 custom-mixed-tools,
 // custom-order-followup and self-hosted-latest-cli `worker-network.json` idx
-// 170, 52 and 61). lookupEnvironmentKey writes it, for every lane that reads
-// an environment key, the management lane included (answerEnvironmentKey) —
-// every public route; the internal gate-config endpoint takes a gate token and
-// nothing else. The reference's bodies carry a null request_id and no
-// request-id header; this one carries the request id every response does.
+// 170, 52 and 61). lookupEnvironmentKey returns it to every lane that reads an
+// environment key, the management lane included (answerEnvironmentKey); where
+// it is answered and where it is not is docs/DIVERGENCES.md's *Environment key
+// revocation and expiry*. The reference's bodies carry a null request_id and
+// no request-id header; this one carries the request id every response does.
 var errRevokedEnvironmentKey = errAuth("OAuth access token has been revoked.")
 
 // bearerToken extracts a non-empty Authorization: Bearer token. ok reports
@@ -77,28 +78,21 @@ func bearerToken(r *http.Request) (token string, ok bool) {
 }
 
 // lookupEnvironmentKey resolves token as an environment key for every lane
-// that reads one, and answers a revoked key itself, so the revoked 401
-// (errRevokedEnvironmentKey) is written here and nowhere else; answered
-// reports that it was. Only a key carrying the prefix this platform mints
-// (environmentKeySecretPrefix) is answered so: 256 random bits that only their
-// holder can present, so the sentence tells nobody else anything. The prefix
-// and migration 0021 landed together (#360), so every key carrying it was
-// minted here. A grandfathered pre-0021 key is a value its operator chose and
-// may be guessable, and a revoked one gets the lane's dead-key answer instead,
-// so a dictionary of guesses cannot learn which value once worked. Otherwise
-// it returns the live key's environment and kind, or "" for a key that is
-// expired, unknown, or revoked and grandfathered; err, a failed lookup, is the
-// lane's to answer.
-func lookupEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, token string) (envID string, kind domain.EnvironmentKind, answered bool, err error) {
-	envID, kind, revoked, err := authenticateEnvironmentKey(r.Context(), pool, token)
-	if err != nil || !revoked {
-		return envID, kind, false, err
+// that reads one: the live key's environment and kind, or "" for a key that is
+// expired, unknown, or revoked without being one this platform minted. A
+// revoked key that carries the mint prefix (environmentKeySecretPrefix) is
+// errRevokedEnvironmentKey, the one place that answer is chosen; why the
+// prefix decides it is docs/DIVERGENCES.md's *Environment key revocation and
+// expiry*. Any other error is a failed lookup, the lane's to answer.
+func lookupEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, token string) (envID string, kind domain.EnvironmentKind, err error) {
+	envID, kind, revoked, err := authenticateEnvironmentKey(ctx, pool, token)
+	switch {
+	case err != nil:
+		return "", "", err
+	case revoked && strings.HasPrefix(token, environmentKeySecretPrefix):
+		return "", "", errRevokedEnvironmentKey
 	}
-	if !strings.HasPrefix(token, environmentKeySecretPrefix) {
-		return "", "", false, nil
-	}
-	writeError(w, r, errRevokedEnvironmentKey)
-	return "", "", true, nil
+	return envID, kind, nil
 }
 
 // resolveEnvironmentKey authenticates a request's Authorization: Bearer
@@ -107,20 +101,19 @@ func lookupEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.
 // — a revoked key's own (lookupEnvironmentKey), or the one every other dead
 // key shares — and returns ok=false. Every environment-key middleware shares
 // it so the Bearer-resolution rules live in one place. Unlike the management
-// lane it looks up any Bearer, prefixed or not: a grandfathered key is still a
-// worker's credential here, and a failed lookup is the 500 an outage is on
-// every authenticating lane.
+// lane it looks up any Bearer, prefixed or not, since a grandfathered key is
+// still a worker's credential here; and a failed lookup is the 500 an outage
+// is on every authenticating lane.
 func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, kind domain.EnvironmentKind, ok bool) {
 	token, hasBearer := bearerToken(r)
 	if !hasBearer || token == "" {
 		writeError(w, r, errAuth("missing Authorization: Bearer environment key"))
 		return "", "", false
 	}
-	envID, kind, answered, err := lookupEnvironmentKey(w, r, pool, token)
+	envID, kind, err := lookupEnvironmentKey(r.Context(), pool, token)
 	switch {
-	case answered:
-		return "", "", false
 	case err != nil:
+		// The revoked 401, or an outage's 500.
 		writeError(w, r, err)
 		return "", "", false
 	case envID == "":
@@ -139,32 +132,40 @@ func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool
 //   - The lane looks a key up only when the Bearer carries the prefix every key
 //     this platform mints does (environmentKeySecretPrefix), so a management
 //     key's request — served before this is asked — and any other Bearer cost
-//     no query. A grandfathered pre-0021 key, whose value the operator chose, is
-//     not recognised here and keeps the missing-key 401.
+//     no query. A grandfathered pre-0021 key is therefore not recognised here
+//     and keeps the missing-key 401.
 //   - A failed lookup is not this request's 500. Nothing authenticated it, so
 //     the lane fails closed with the missing-key 401 it would give anyway, and
-//     the operator's log gets the failure at Warn.
+//     the operator's log gets the failure (lookupFailureLevel).
 //
 // A revoked key gets its own 401 on every route the lane serves
 // (lookupEnvironmentKey). A live key gets the reference's recorded refusal on
-// the routes it was recorded on (environmentKeyRefusals). Everywhere else, and
-// for an expired or unknown key, the lane answers as it always has, so an
-// unauthenticated caller learns nothing about SSO or about which dead state a
-// key is in.
+// the routes it was recorded on (environmentKeyRefusals), read as the router
+// reads the request: by the pattern it would serve, and only for a path it
+// would serve rather than redirect. Everywhere else, and for an expired or
+// unknown key, the lane answers as it always has, so an unauthenticated caller
+// learns nothing about SSO or about which dead state a key is in.
 func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, router *http.ServeMux) bool {
 	token, ok := bearerToken(r)
 	if !ok || !strings.HasPrefix(token, environmentKeySecretPrefix) {
 		return false
 	}
-	envID, _, answered, err := lookupEnvironmentKey(w, r, pool, token)
+	envID, _, err := lookupEnvironmentKey(r.Context(), pool, token)
 	switch {
-	case answered:
+	case errors.Is(err, errRevokedEnvironmentKey):
+		writeError(w, r, err)
 		return true
 	case err != nil:
-		slog.WarnContext(r.Context(), "management lane: environment key lookup failed; answering as for no key",
+		slog.Log(r.Context(), lookupFailureLevel(err), "management lane: environment key lookup failed; answering as for no key",
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		return false
 	case envID == "":
+		return false
+	}
+	// ServeMux.Handler names the pattern a non-canonical path (/v1//agents,
+	// /v1/./agents) cleans to, beside the redirect it would answer instead of
+	// serving it; the route was recorded refusing a request, not a redirect.
+	if p := r.URL.EscapedPath(); p != canonicalPath(p) {
 		return false
 	}
 	_, pattern := router.Handler(r)
@@ -177,6 +178,35 @@ func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.
 		"request_id", requestIDFrom(r.Context()), "environment_id", envID, "route", pattern)
 	writeError(w, r, refusal)
 	return true
+}
+
+// lookupFailureLevel is how loudly a failed management-lane lookup is logged.
+// The request it served was not authenticated, so a context ended by the
+// client going away is Debug: anyone could otherwise drive the Warn volume by
+// hanging up. Anything else — the database unreachable, say — is the
+// operator's to see, at Warn.
+func lookupFailureLevel(err error) slog.Level {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return slog.LevelDebug
+	}
+	return slog.LevelWarn
+}
+
+// canonicalPath is p as ServeMux cleans it before routing (net/http's
+// cleanPath): dot segments resolved, repeated slashes collapsed, a trailing
+// slash kept. A path that differs from it is one the router redirects.
+func canonicalPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if p[0] != '/' {
+		p = "/" + p
+	}
+	np := path.Clean(p)
+	if p[len(p)-1] == '/' && np != "/" {
+		np += "/"
+	}
+	return np
 }
 
 // skillsScopeRefusal is the reference's 403 for a live environment key on the

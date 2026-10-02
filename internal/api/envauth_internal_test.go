@@ -1,16 +1,11 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
@@ -29,43 +24,19 @@ func TestCredentialFromFailsClosed(t *testing.T) {
 	}
 }
 
-// TestTheManagementLaneFailsClosedWhenTheKeyLookupFails: the management lane's
+// TestAFailedManagementLookupIsQuietWhenTheClientLeft: the management lane's
 // environment-key lookup runs for a request nothing has authenticated, so a
-// failed lookup — a database down, a context gone — must not turn that request
-// into a 500 and an ERROR line. It answers the missing-key 401 the lane gives
-// without the lookup, and the failure goes to the operator's log at Warn.
-func TestTheManagementLaneFailsClosedWhenTheKeyLookupFails(t *testing.T) {
-	// Nothing listens on port 1, so every query fails at connect.
-	pool, err := pgxpool.New(context.Background(), "postgres://nobody@127.0.0.1:1/none?connect_timeout=2")
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	mux := http.NewServeMux()
-	reached := false
-	mux.HandleFunc("GET /v1/agents", func(http.ResponseWriter, *http.Request) { reached = true })
-	req := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
-	req.Header.Set("Authorization", "Bearer "+environmentKeySecretPrefix+"looked-up-against-nothing")
-	rec := httptest.NewRecorder()
-	dispatchManagementAuth(pool, nil, mux).ServeHTTP(rec, req)
-
-	if reached {
-		t.Fatal("the handler was reached")
-	}
-	var body struct {
-		Error struct{ Type, Message string } `json:"error"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if rec.Code != http.StatusUnauthorized || body.Error.Message != "x-api-key header is required" {
-		t.Errorf("status %d, body %s; want the missing-key 401", rec.Code, rec.Body.String())
-	}
-	if out := logs.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "environment key lookup failed") ||
-		strings.Contains(out, "level=ERROR") {
-		t.Errorf("want the failed lookup logged at Warn and nothing at Error:\n%s", out)
+// lookup ended by the client going away is Debug — otherwise anyone could
+// drive the Warn volume by hanging up — while any other failure, the database
+// unreachable say, is the operator's at Warn.
+func TestAFailedManagementLookupIsQuietWhenTheClientLeft(t *testing.T) {
+	for err, want := range map[error]slog.Level{
+		context.Canceled: slog.LevelDebug,
+		fmt.Errorf("acquire connection: %w", context.DeadlineExceeded): slog.LevelDebug,
+		errors.New("dial tcp 127.0.0.1:1: connect: connection refused"): slog.LevelWarn,
+	} {
+		if got := lookupFailureLevel(err); got != want {
+			t.Errorf("lookupFailureLevel(%v) = %v, want %v", err, got, want)
+		}
 	}
 }

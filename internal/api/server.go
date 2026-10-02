@@ -79,10 +79,11 @@ func WithObjectDeletes(q *ObjectDeleteQueue) Option {
 // validate probe) answer with a configuration error (fails closed, plan 12 D1).
 // verifier authenticates humans; nil is IDENTITY_MODE=disabled, and the surface
 // is then what it was before plan 31 — no lane, no role check — on every
-// request shape but two, each answered the same in every mode, deliberately
-// (see dispatchManagementAuth): requireAPIKey refuses a repeated x-api-key
-// field, and an environment key offered as a Bearer on a management route is
-// answered as the reference answers one (answerEnvironmentKey).
+// request shape but two, deliberately (see dispatchManagementAuth):
+// requireAPIKey refuses a repeated x-api-key field in every mode, and an
+// environment key offered as a Bearer on a management route is answered as the
+// reference answers one (answerEnvironmentKey), in every mode for a request
+// that offers no human credential beside it.
 func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier, opts ...Option) http.Handler {
 	s := newServer(pool, blobs, cipher)
 	for _, opt := range opts {
@@ -458,8 +459,8 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux)
 // the change only ever denies. And an environment key offered as a Bearer is
 // answered as the reference answers one, a revoked key and a live key on a
 // recorded route each in its recorded words: a machine credential's answer,
-// which has nothing to do with whether humans can sign in, so it is the same in
-// every mode.
+// which has nothing to do with whether humans can sign in, so a request that
+// offers no human credential beside the key draws it in every mode.
 func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	var human http.Handler
@@ -508,8 +509,12 @@ func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http
 //
 // In trusted_proxy mode Bearer is never a human credential (identityCredential
 // reads only the assertion header), so this branch stays exactly what it was and
-// the assertion is consulted afterwards, inside the management arm — machine
-// lanes first, always.
+// the assertion is consulted afterwards, inside the management arm: on these
+// routes a worker's Bearer, the machine credential that admits here, resolves
+// before a human's assertion. The management arm orders the other way for an
+// environment key, which on its routes is only ever refused
+// (dispatchManagementAuth); that human-first rule is the management lane's
+// alone.
 func dualAuth(v *identity.Verifier, env, human, mgmt http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if token, ok := bearerToken(r); ok && !apiKeyOffered(r) {

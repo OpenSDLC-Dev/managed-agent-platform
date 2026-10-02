@@ -812,13 +812,10 @@ An **expired** key fails exactly as an unknown one does — the same 401 with th
 same message — so the auth lane leaks nothing about which it was. A **revoked**
 key the platform minted gets a 401 of its own, the reference's "OAuth access
 token has been revoked.", on the worker routes and the management routes alike,
-and a key both revoked and expired answers as revoked. That tells a caller the
-key was once valid, which is safe only because nobody but its holder can
-present it: a minted key is 256 random bits, and the `sk-map-env01-` prefix is
-how the platform knows it minted one. A revoked grandfathered key (below) is a
-value you chose and may be guessable, so it keeps the 401 every dead key shares,
-and guessing cannot reveal which values once worked. Deleting an environment
-deletes its keys with it. Keys
+and a key both revoked and expired answers as revoked; a revoked grandfathered
+key (below) keeps the 401 every dead key shares. Why the two differ is
+docs/DIVERGENCES.md's *Environment key revocation and expiry*. Deleting an
+environment deletes its keys with it. Keys
 minted before expiries existed (before migration 0021) carry no expiry and stay
 live until revoked; the migration deliberately does not backfill one, which
 would have retro-expired credentials already in use. Treat those as a migration

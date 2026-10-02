@@ -3,9 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"maps"
 	"net"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -459,9 +457,19 @@ func DreamArmForTest(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, 
 	return newServer(pool, blobs, nil).runDreamArm(ctx, id, now, cfg)
 }
 
-// EnvironmentKeyRefusalPatternsForTest lists the route patterns the
-// management lane answers a live environment key on in the reference's words
-// (environmentKeyRefusals). Test binary only.
-func EnvironmentKeyRefusalPatternsForTest() []string {
-	return slices.Sorted(maps.Keys(environmentKeyRefusals))
+// EnvironmentKeyRefusal is one entry of environmentKeyRefusals: the answer a
+// live environment key gets on a route the reference was recorded refusing it.
+type EnvironmentKeyRefusal struct {
+	Status        int
+	Type, Message string
+}
+
+// EnvironmentKeyRefusalsForTest returns environmentKeyRefusals by route
+// pattern. Test binary only.
+func EnvironmentKeyRefusalsForTest() map[string]EnvironmentKeyRefusal {
+	out := make(map[string]EnvironmentKeyRefusal, len(environmentKeyRefusals))
+	for pattern, e := range environmentKeyRefusals {
+		out[pattern] = EnvironmentKeyRefusal{e.status, e.errType, e.message}
+	}
+	return out
 }

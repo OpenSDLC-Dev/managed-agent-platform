@@ -540,10 +540,11 @@ and holds the two OS-touching adapters `gaterun/` declares.
   calls it ends. Environment keys are hashed at rest too, issued one per host so a
   compromised host is revoked alone, and expire a year after issue; expired and
   unknown are one indistinguishable 401, and a revoked key this platform minted gets
-  the reference's own 401 on every public route, which only its holder can draw: it
-  is 256 random bits behind the `sk-map-env01-` prefix. A revoked pre-0021 key, a
-  value its operator chose and so perhaps a guessable one, stays one of the
-  indistinguishable dead (#840). Issuing and revoking them is
+  the reference's own 401 on every public route (a management key beside it is
+  served wherever the route takes one, and on a management route so is a human
+  credential); a revoked pre-0021 key stays one of the
+  indistinguishable dead, for the reason docs/DIVERGENCES.md's *Environment key
+  revocation and expiry* gives (#840). Issuing and revoking them is
   a **management** operation on the off-wire console API, so an environment key
   can never mint or retire another — but equally, that surface delegates no
   authority the management key did not already hold, and is not a separate

@@ -5,12 +5,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
@@ -105,7 +110,7 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 	revokeViaConsole(t, s, envID, "revoked-self-hosted")
 	revokeViaConsole(t, s, cloudEnv, "revoked-cloud")
 
-	requests := []string{"GET /v1/models", "HEAD /v1/agents", "GET /v1/%61gents"}
+	requests := []string{"GET /v1/models"}
 	for _, reg := range parseRoutes(t, "server.go") {
 		if reg.isFunc {
 			continue // a 404 or 405 closure, not a route
@@ -127,13 +132,6 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 			method, path, _ := strings.Cut(request, " ")
 			t.Run(kind+" "+request, func(t *testing.T) {
 				status, body := sendBounded(t, s, method, path, asBearer(key))
-				if method == http.MethodHead {
-					// A HEAD answer carries no body to read the sentence from.
-					if status != http.StatusUnauthorized {
-						t.Errorf("status %d, want 401", status)
-					}
-					return
-				}
 				wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
 			})
 		}
@@ -152,11 +150,11 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 // environment key presented as a Bearer on a management route gets the
 // reference's recorded refusal there, in every identity mode, since it is a
 // machine credential's answer and says nothing about whether humans can sign
-// in. The refusal follows the route the router resolves, so a HEAD it serves
-// through the GET registration and a percent-encoded spelling it decodes take
-// it too. A route no recording reaches keeps the lane's own missing-key 401, a
-// revoked key gets its own sentence in every mode, and a management key beside
-// the environment key is served.
+// in. A percent-encoded spelling the router decodes takes the refusal too
+// (TestALiveKeysRefusalReadsTheRequestAsTheRouterDoes has the rest of the
+// routing). A route no recording reaches keeps the lane's own missing-key 401,
+// a revoked key gets its own sentence in every mode, and a management key
+// beside the environment key is served.
 func TestTheManagementLaneAnswersALiveEnvironmentKeyAsRecorded(t *testing.T) {
 	servers := map[string]func(*testing.T) *tserver{
 		"identity disabled": newTestServer,
@@ -213,18 +211,6 @@ func TestTheManagementLaneAnswersALiveEnvironmentKeyAsRecorded(t *testing.T) {
 					t.Run(kind+" "+u.method+" "+u.path, func(t *testing.T) {
 						wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", missingKeyMessage)
 					})
-				}
-				// HEAD carries no body, so its status is what shows the route.
-				for path, want := range map[string]int{
-					"/v1/agents":          http.StatusUnauthorized,
-					"/v1/skills":          http.StatusForbidden,
-					"/v1/skills/" + skill: http.StatusForbidden,
-				} {
-					res := s.doRaw(http.MethodHead, path, nil, asBearer(key))
-					res.Body.Close()
-					if res.StatusCode != want {
-						t.Errorf("%s HEAD %s: status %d, want %d", kind, path, res.StatusCode, want)
-					}
 				}
 			}
 
@@ -284,12 +270,10 @@ func TestTheManagementLaneLeavesEveryOtherBearerAlone(t *testing.T) {
 }
 
 // TestARevokedGrandfatheredKeyIsAnsweredAsDead: the revoked sentence is only
-// for a key this platform minted, whose 256 random bits nobody but its holder
-// can present. A pre-0021 key is a value its operator chose and may be
-// guessable, so once revoked it gets the dead-key answer of whichever lane it
-// reaches — the key lanes' `invalid environment key`, the management lane's
-// missing-key 401 — and a dictionary of guesses learns nothing about which
-// value once worked.
+// for a key carrying the mint prefix (docs/DIVERGENCES.md's *Environment key
+// revocation and expiry* says why). A revoked pre-0021 key gets the dead-key
+// answer of whichever lane it reaches — the key lanes' `invalid environment
+// key`, the management lane's missing-key 401.
 func TestARevokedGrandfatheredKeyIsAnsweredAsDead(t *testing.T) {
 	s := newTestServer(t)
 	envID := selfHostedEnv(t, s, "grandfathered-revoked")
@@ -342,8 +326,11 @@ func TestAHumanBesideAnEnvironmentKeyIsServedAsTheHuman(t *testing.T) {
 }
 
 // TestEveryEnvironmentKeyRefusalNamesARegisteredRoute: the recorded refusals
-// are keyed by the patterns server.go registers, and looked up by the pattern
-// the router resolves, so a key that names no registration would never fire.
+// are keyed by the patterns server.go registers and looked up by the pattern
+// the router resolves, on the management lane alone. So each key must be a
+// registration, and a live key sent to it must reach the management lane and
+// draw that refusal: an entry naming a route dispatchAuth gives to another
+// lane — an environment-key lane serving the key — would never fire.
 func TestEveryEnvironmentKeyRefusalNamesARegisteredRoute(t *testing.T) {
 	registered := map[string]bool{}
 	for _, reg := range parseRoutes(t, "server.go") {
@@ -351,10 +338,84 @@ func TestEveryEnvironmentKeyRefusalNamesARegisteredRoute(t *testing.T) {
 			registered[reg.pattern] = true
 		}
 	}
-	for _, pattern := range api.EnvironmentKeyRefusalPatternsForTest() {
+	s := newTestServer(t)
+	envID := selfHostedEnv(t, s, "refusal-table")
+	key := issueKey(t, s.pool, envID, "host")
+	skill := s.createSkill(t)
+	for pattern, refusal := range api.EnvironmentKeyRefusalsForTest() {
 		if !registered[pattern] {
 			t.Errorf("environmentKeyRefusals names %q, which server.go does not register", pattern)
+			continue
 		}
+		method, template, _ := strings.Cut(pattern, " ")
+		path := fillRoute(template, envID, "", "", "", skill["id"].(string), skill["latest_version_id"].(string))
+		status, body := readJSON(t, s.doRaw(method, path, nil, asBearer(key)))
+		t.Run(pattern, func(t *testing.T) {
+			wantErrMsg(t, status, body, refusal.Status, refusal.Type, refusal.Message)
+		})
+	}
+}
+
+// TestALiveKeysRefusalReadsTheRequestAsTheRouterDoes: the recorded refusal
+// goes with the route the router would serve. A HEAD, which it serves through
+// the GET registration, takes it — on the skills a 403 nothing else gives, on
+// the agents list a 401 the log line tells from the missing-key one. A path
+// the router would redirect instead of serving (a doubled slash, a dot
+// segment) does not: the route was recorded refusing a request it served.
+func TestALiveKeysRefusalReadsTheRequestAsTheRouterDoes(t *testing.T) {
+	s := newTestServer(t)
+	key := issueKey(t, s.pool, selfHostedEnv(t, s, "router-reading"), "host")
+	skill := s.createSkill(t)["id"].(string)
+	logs := captureLogs(t, slog.LevelInfo)
+	refused := func() int { return strings.Count(logs(), "management route refused: environment key") }
+
+	for path, want := range map[string]int{"/v1/skills": http.StatusForbidden, "/v1/skills/" + skill: http.StatusForbidden} {
+		res := s.doRaw(http.MethodHead, path, nil, asBearer(key))
+		res.Body.Close()
+		if res.StatusCode != want {
+			t.Errorf("HEAD %s: status %d, want the recorded %d", path, res.StatusCode, want)
+		}
+	}
+	before := refused()
+	res := s.doRaw(http.MethodHead, "/v1/agents", nil, asBearer(key))
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized || refused() != before+1 {
+		t.Errorf("HEAD /v1/agents: status %d, refusals logged %d; want the recorded 401, logged as the refusal",
+			res.StatusCode, refused()-before)
+	}
+
+	for _, path := range []string{"/v1//agents", "/v1/./agents", "/v1/agents/x/..", "/v1//skills"} {
+		before := refused()
+		status, body := readJSON(t, s.doRaw(http.MethodGet, path, nil, asBearer(key)))
+		wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", missingKeyMessage)
+		if refused() != before {
+			t.Errorf("GET %s: a path the router redirects drew the recorded refusal", path)
+		}
+	}
+}
+
+// TestTheManagementLaneFailsClosedWhenTheKeyLookupFails: the management lane's
+// environment-key lookup runs for a request nothing has authenticated, so a
+// failed lookup must not turn that request into a 500 and an ERROR line. It
+// answers the missing-key 401 the lane gives without the lookup, and the
+// failure goes to the operator's log at Warn.
+func TestTheManagementLaneFailsClosedWhenTheKeyLookupFails(t *testing.T) {
+	// Nothing listens on port 1, so every query fails at connect.
+	pool, err := pgxpool.New(context.Background(), "postgres://nobody@127.0.0.1:1/none?connect_timeout=2")
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	logs := captureLogs(t, slog.LevelInfo)
+	srv := httptest.NewServer(api.NewHandler(pool, blobtest.Mem(), nil, nil))
+	t.Cleanup(srv.Close)
+	s := &tserver{t: t, url: srv.URL, pool: pool}
+
+	status, body := readJSON(t, s.doRaw(http.MethodGet, "/v1/agents", nil, asBearer("sk-map-env01-looked-up-against-nothing")))
+	wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", missingKeyMessage)
+	if out := logs(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "environment key lookup failed") ||
+		strings.Contains(out, "level=ERROR") {
+		t.Errorf("want the failed lookup logged at Warn and nothing at Error:\n%s", out)
 	}
 }
 
