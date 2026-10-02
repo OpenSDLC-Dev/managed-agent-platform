@@ -1476,6 +1476,65 @@ func TestDeploymentValidatesMountPathsUpFront(t *testing.T) {
 	}
 }
 
+// TestDeploymentRefusesResolvedMountOverlapsUpFront: storing a mount_path as
+// given (#849) does not defer judging where two meet. Deployment create and
+// update resolve each spelling, with session create's rules, and refuse two
+// that land on one mount, or a resource at a proper ancestor of a
+// repository's — "/uploads/x" beside "/x" included — before anything is
+// stored. No recording shows a deployment holding such a pair. The words are
+// the deployment routes' own: session create answers an overlapping
+// repository in the reference's recorded sentence (2026-09-03 batch1
+// `session.create.repo-same-repo-twice` and `repo-nested-mounts`), which no
+// deployment recording holds, so ours stands there (#540); a pair of files
+// takes the same words on both routes.
+func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileA := uploadOneFile(t, s, "a.txt")
+	fileB := uploadOneFile(t, s, "b.txt")
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	file := func(id, mount string) map[string]any {
+		return map[string]any{"type": "file", "file_id": id, "mount_path": mount}
+	}
+	const taken = `mount_path "/mnt/session/uploads/x" is used by more than one resource`
+	overlap := func(a, b string) string {
+		return "Invalid `github_repository` resource: `mount_path` overlaps another resource: " + a + " and " + b + "; set distinct `mount_path` values"
+	}
+
+	for name, tc := range map[string]struct {
+		resources         []any
+		session, deployed string
+	}{
+		"the uploads alias beside a rooted spelling": {[]any{file(fileA, "/uploads/x"), file(fileB, "/x")}, taken, taken},
+		"one spelling twice":                         {[]any{file(fileA, "/x"), file(fileB, "/x")}, taken, taken},
+		"a relative spelling beside the full path":   {[]any{file(fileA, "x"), file(fileB, "/mnt/session/uploads/x")}, taken, taken},
+		"one repository twice at its default": {[]any{repoBody("g", nil), repoBody("g", nil)},
+			overlap("/workspace/example-repo", "/workspace/example-repo"),
+			`mount_path "/workspace/example-repo" is used by more than one resource`},
+		"a file above a repository": {
+			[]any{file(fileA, "repo"), repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
+			overlap("/mnt/session/uploads/repo", "/mnt/session/uploads/repo/src"),
+			`mount_path "/mnt/session/uploads/repo" is an ancestor of repository mount_path "/mnt/session/uploads/repo/src"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+				"agent": agentID, "environment_id": envID, "resources": tc.resources})
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.session)
+			body := deploymentBody(agentID, envID)
+			body["resources"] = tc.resources
+			status, res = s.do(http.MethodPost, "/v1/deployments", body)
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.deployed)
+			status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": tc.resources})
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.deployed)
+		})
+	}
+
+	status, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil)
+	if rs, _ := d["resources"].([]any); status != http.StatusOK || len(rs) != 0 {
+		t.Errorf("after the refused updates: %d resources %v, want none stored", status, d["resources"])
+	}
+}
+
 // A file rubric needs object storage to snapshot into. Refusing it at create
 // beats recording a failed run every night on a deployment that can never
 // grade, so the check runs here rather than at the fire — and this is the only

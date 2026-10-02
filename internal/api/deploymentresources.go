@@ -80,7 +80,7 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 		case resourceKindRepo:
 			el := deploymentResource{
 				Type: "github_repository", URL: in.url,
-				Checkout: in.checkout, MountPath: in.mountPath,
+				Checkout: in.checkout, MountPath: in.givenMountPath,
 				Token: &sealedTokenJSON{
 					Ciphertext: sealed[repo].ciphertext,
 					KeyID:      sealed[repo].keyID,
@@ -95,7 +95,7 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 			})
 		default:
 			out = append(out, deploymentResource{
-				Type: "file", FileID: in.fileID, MountPath: in.mountPath,
+				Type: "file", FileID: in.fileID, MountPath: in.givenMountPath,
 			})
 		}
 	}
@@ -110,60 +110,52 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 // function writes, and anything else is corrupt storage, refused rather than
 // misread as a file.
 //
-// Each mount path is resolved here, as a session create resolves it when the
-// request arrives (#849): the reference stores the spelling and its fired
-// session mounts the resolved path (2026-09-12-console-141 ui-network idx 266,
-// the session read at idx 268). A path stored resolved, by a deployment
-// written before #849, is already rooted and passes through unchanged — the
-// doubled /mnt/session/uploads/uploads/<name> of one written before #848
-// included — so it mounts where it always did. Where two resolved mounts
-// meet is judged here too, with the rules session create applies
-// (parseResources) and, as on POST /v1/sessions, before its other checks; it
-// settles the run as session_creation_rejected_error, "rejected with a
-// non-retryable validation error", in this platform's words, since no run
-// sentence for an overlap is recorded. A path that fails to resolve settles
-// the same way — possible only if a rule tightens under a stored path, since
-// the create or update that stored it resolved it once.
+// Each stored mount path is resolved here, as a session create resolves it
+// when the request arrives (#849): the reference stores the spelling and its
+// fired session mounts the resolved path (2026-09-12-console-141 ui-network
+// idx 266, the session read at idx 268). Create and update resolved the same
+// spellings with the same functions to judge each one and where two meet
+// (parseResources), so while those rules stand nothing here is refused and no
+// overlap arrives; a refusal means a rule tightened under a stored path, and
+// is unclassified, like corrupt storage, so the fire rolls back. A path stored resolved, by a deployment written before
+// #849, is already rooted and passes through unchanged — the doubled
+// /mnt/session/uploads/uploads/<name> of one written before #848 included — so
+// it mounts where it always did.
 func sessionInputsFrom(stored []deploymentResource) ([]resourceInput, []sealedToken, error) {
-	rejected := func(err error) ([]resourceInput, []sealedToken, error) {
-		return nil, nil, classified("session_creation_rejected_error", err)
-	}
 	var inputs []resourceInput
 	var sealed []sealedToken
-	seen := make(map[string]string, len(stored))
 	for _, r := range stored {
-		var in resourceInput
-		var err error
 		switch r.Type {
 		case "github_repository":
-			in = resourceInput{kind: resourceKindRepo, url: r.URL, checkout: r.Checkout}
-			var name string
-			if name, err = parseGitHubRepoURL(r.URL); err == nil {
-				in.mountPath, err = repoMountPath(r.MountPath, name)
+			name, err := parseGitHubRepoURL(r.URL)
+			if err != nil {
+				return nil, nil, err
 			}
+			mount, err := repoMountPath(r.MountPath, name)
+			if err != nil {
+				return nil, nil, err
+			}
+			inputs = append(inputs, resourceInput{
+				kind: resourceKindRepo, url: r.URL,
+				checkout: r.Checkout, mountPath: mount,
+			})
 			sealed = append(sealed, sealedToken{ciphertext: r.Token.Ciphertext, keyID: r.Token.KeyID})
 		case "memory_store":
 			inputs = append(inputs, resourceInput{
 				kind: resourceKindMemory, memoryStoreID: r.MemoryStoreID,
 				access: r.Access, instructions: r.Instructions,
 			})
-			continue
 		case "file":
-			in = resourceInput{kind: resourceKindFile, fileID: r.FileID}
-			in.mountPath, err = fileMountPath(r.MountPath, r.FileID)
+			mount, err := fileMountPath(r.MountPath, r.FileID)
+			if err != nil {
+				return nil, nil, err
+			}
+			inputs = append(inputs, resourceInput{
+				kind: resourceKindFile, fileID: r.FileID, mountPath: mount,
+			})
 		default:
 			return nil, nil, fmt.Errorf("stored deployment resource has unknown type %q", r.Type)
 		}
-		if err == nil {
-			err = claimMount(seen, in, resourceForDeployment)
-		}
-		if err != nil {
-			return rejected(err)
-		}
-		inputs = append(inputs, in)
-	}
-	if err := mountUnderRepo(inputs, resourceForDeployment); err != nil {
-		return rejected(err)
 	}
 	return inputs, sealed, nil
 }

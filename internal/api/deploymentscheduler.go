@@ -507,6 +507,10 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 		return "", "", err
 	}
 
+	in, err := deploymentSessionIn(f.deploymentID, name, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
+	if err != nil {
+		return "", "", err
+	}
 	if _, err := tx.Exec(ctx, `SAVEPOINT fire`); err != nil {
 		return "", "", err
 	}
@@ -514,10 +518,6 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 	fireErr := error(nil)
 	if h := deploymentFireHookInFire; h != nil {
 		fireErr = h()
-	}
-	var in createSessionIn
-	if fireErr == nil {
-		in, fireErr = deploymentSessionIn(f.deploymentID, name, envID, agentID, agentVersion, vaultIDs, initial, rawResources)
 	}
 	if fireErr == nil {
 		// The ticker's ctx carries no principal, so the session is created
