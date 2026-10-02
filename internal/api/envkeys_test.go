@@ -167,40 +167,51 @@ func TestIssueEnvironmentKeyStoresOnlyItsHash(t *testing.T) {
 }
 
 // TestEnvironmentKeyExpiryStopsAuthentication: an expiry that nothing enforces is
-// decoration. An expired key must fail exactly as a revoked or unknown one does —
-// same status, same message — so a client cannot use the auth lane to learn which
-// of the three it hit.
+// decoration. An expired key must fail exactly as an unknown one does — same
+// status, same message — so a client cannot use the auth lane to learn which of
+// the two it hit. A revoked key is the one dead key answered in its own words,
+// the reference's "OAuth access token has been revoked." (revokedKeyMessage
+// cites the recordings; #840), which only the holder of the key can draw; and
+// a key both revoked and expired is revoked, so its answer does not change on
+// the day its expiry passes.
 func TestEnvironmentKeyExpiryStopsAuthentication(t *testing.T) {
 	s := newTestServer(t)
 	envID := selfHostedEnv(t, s, "expiring")
 	key := issueKey(t, s.pool, envID, "host")
+	revoked := issueKey(t, s.pool, envID, "revoked")
+	revokedExpired := issueKey(t, s.pool, envID, "revoked-expired")
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
 	if res, raw := s.poll(t, envID, auth); res.StatusCode != http.StatusOK {
 		t.Fatalf("freshly issued key does not poll: status %d, body %q", res.StatusCode, raw)
 	}
 	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE environment_keys SET expires_at = now() - interval '1 second' WHERE environment_id = $1`,
+		`UPDATE environment_keys SET expires_at = now() - interval '1 second'
+		  WHERE environment_id = $1 AND name IN ('host', 'revoked-expired')`,
 		envID); err != nil {
-		t.Fatalf("age the key past its expiry: %v", err)
+		t.Fatalf("age the keys past their expiry: %v", err)
+	}
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE environment_keys SET revoked_at = now()
+		  WHERE environment_id = $1 AND name IN ('revoked', 'revoked-expired')`,
+		envID); err != nil {
+		t.Fatalf("revoke the keys: %v", err)
 	}
 
-	expired := s.doRaw(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil, auth)
-	expiredStatus, expiredBody := expired.StatusCode, decodeBody(t, expired)
-	unknown := s.doRaw(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil,
-		map[string]string{"Authorization": "Bearer sk-map-env01-not-a-real-key"})
-	unknownStatus, unknownBody := unknown.StatusCode, decodeBody(t, unknown)
+	poll := func(key string) (int, map[string]any) {
+		res := s.doRaw(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil,
+			map[string]string{"Authorization": "Bearer " + key})
+		return res.StatusCode, decodeBody(t, res)
+	}
+	expiredStatus, expiredBody := poll(key)
+	unknownStatus, unknownBody := poll("sk-map-env01-not-a-real-key")
+	wantErrMsg(t, expiredStatus, expiredBody, http.StatusUnauthorized, "authentication_error", deadKeyMessage)
+	wantErrMsg(t, unknownStatus, unknownBody, http.StatusUnauthorized, "authentication_error", deadKeyMessage)
 
-	wantErr(t, expiredStatus, expiredBody, http.StatusUnauthorized, "authentication_error")
-	wantErr(t, unknownStatus, unknownBody, http.StatusUnauthorized, "authentication_error")
-	message := func(body map[string]any) string {
-		inner, _ := body["error"].(map[string]any)
-		msg, _ := inner["message"].(string)
-		return msg
-	}
-	if got, want := message(expiredBody), message(unknownBody); got != want {
-		t.Errorf("expired key's message = %q, unknown key's = %q; they must not be distinguishable", got, want)
-	}
+	status, body := poll(revoked)
+	wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
+	status, body = poll(revokedExpired)
+	wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
 }
 
 // TestEnvironmentKeyWithoutExpiryStillAuthenticates covers the rows migration

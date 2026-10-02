@@ -456,3 +456,20 @@ func DreamArmForTest(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, 
 	now time.Time, cfg DreamRunnerConfig) error {
 	return newServer(pool, blobs, nil).runDreamArm(ctx, id, now, cfg)
 }
+
+// EnvironmentKeyRefusal is one entry of environmentKeyRefusals: the answer a
+// live environment key gets on a route the reference was recorded refusing it.
+type EnvironmentKeyRefusal struct {
+	Status        int
+	Type, Message string
+}
+
+// EnvironmentKeyRefusalsForTest returns environmentKeyRefusals by route
+// pattern. Test binary only.
+func EnvironmentKeyRefusalsForTest() map[string]EnvironmentKeyRefusal {
+	out := make(map[string]EnvironmentKeyRefusal, len(environmentKeyRefusals))
+	for pattern, e := range environmentKeyRefusals {
+		out[pattern] = EnvironmentKeyRefusal{e.status, e.errType, e.message}
+	}
+	return out
+}

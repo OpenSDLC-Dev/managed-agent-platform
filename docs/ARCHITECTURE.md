@@ -538,8 +538,13 @@ and holds the two OS-touching adapters `gaterun/` declares.
   event's alone: management still posts `user.custom_tool_result` and
   `user.tool_confirmation`, and a `user.interrupt` still has the platform answer the
   calls it ends. Environment keys are hashed at rest too, issued one per host so a
-  compromised host is revoked alone, and expire a year after issue; revoked,
-  expired and unknown are one indistinguishable 401. Issuing and revoking them is
+  compromised host is revoked alone, and expire a year after issue; expired and
+  unknown are one indistinguishable 401, and a revoked key this platform minted gets
+  the reference's own 401 on every public route (a management key beside it is
+  served wherever the route takes one, and on a management route so is a human
+  credential); a revoked pre-0021 key stays one of the
+  indistinguishable dead, for the reason docs/DIVERGENCES.md's *Environment key
+  revocation and expiry* gives (#840). Issuing and revoking them is
   a **management** operation on the off-wire console API, so an environment key
   can never mint or retire another — but equally, that surface delegates no
   authority the management key did not already hold, and is not a separate
@@ -553,7 +558,8 @@ and holds the two OS-touching adapters `gaterun/` declares.
   sync makes; the store's own read, its versions and its lifecycle are not among
   them) — a sibling session or an unattached store is the same 404 another
   environment's session gets, everything else a 401 — narrower than the key that
-  polled it everywhere but the memories, which are what it exists for. It dies with
+  polled it everywhere but the memories, which are what it exists for, and a skill's
+  own read, which the key lost to the reference's recorded refusal (#840). It dies with
   the item, by join condition, for every request after — a stream already open runs
   to its end, as one opened with any credential here does: a re-hand-out, a lapsed
   lease or an archive ends it. A stop leaves it whole for a minute from the request
@@ -575,17 +581,20 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **Humans authenticate through the deployment's own IdP, and the platform stores no
   authority** (plan 31, #56). Off by default: with `IDENTITY_MODE` unset or `disabled`
   no JWT is accepted anywhere and the surface is the machine-credential platform
-  above — byte-for-byte on every request shape but one, a repeated `x-api-key`
-  field, which is refused as ambiguous in every mode rather than resolved by header
-  order (`server.go`). Configured, a human's token is verified against its issuer's JWKS —
+  above — byte-for-byte on every request shape but two, each answered the same in
+  every mode: a repeated `x-api-key` field, which is refused as ambiguous rather than
+  resolved by header order, and an environment key offered as a Bearer on a
+  management route, which draws the reference's own refusal (#840; `server.go`). Configured, a human's token is verified against its issuer's JWKS —
   algorithm allowlist, exact `iss`, `aud` containment plus `azp`, required `sub`/`exp`,
   keys only from the key set and only while its bounded lifetime holds — and never
   minted here; every **credential** rejection is one indistinguishable 401, which is
   what makes the 500 from a failed principal provisioning meaningful rather than
   noise: it says the credential was good and the database was not, so an operator is
-  not sent hunting the IdP for an outage. The machine lanes always
-  resolve first, so a second credential can never change which lane, and so which role
-  check, a request takes. The request's role is computed from the IdP's claim on **that
+  not sent hunting the IdP for an outage. The management key always resolves first,
+  and a worker's environment key resolves before a human's credential on the routes
+  where it admits; on a management route, where it is only ever refused, it is
+  answered only when no human credential is offered. So a second credential can
+  never change which lane, and so which role check, a request takes. The request's role is computed from the IdP's claim on **that
   request** through the operator's map: `principals` records who signed in, never what
   they may do, so revoking a group at the IdP takes effect on the next request rather
   than after someone remembers to mirror it. Enforcement is one check at the control
