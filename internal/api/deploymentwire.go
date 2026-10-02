@@ -74,7 +74,7 @@ func principalPtr(ctx context.Context) *string {
 // one the normalizer cannot see, so it is checked here with the message the
 // event path already uses.
 func (s *server) validateDeploymentInitialEvents(initial []json.RawMessage) error {
-	if _, err := events.NormalizeInbound("", events.ManagementCredential, initial); err != nil {
+	if _, err := events.NormalizeInitialEvents("", events.ManagementCredential, initial); err != nil {
 		return errInvalid("initial_events: %s", err)
 	}
 	if s.blobs != nil {

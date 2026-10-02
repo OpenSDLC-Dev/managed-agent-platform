@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -220,6 +221,32 @@ func TestFrontmatterValidation(t *testing.T) {
 	}
 }
 
+// TestFrontmatterLengthRefusal pins the over-cap refusal: the reference's one
+// sentence for both fields (2026-09-12-followups skills-api.json #8
+// `rec.skill-upload.create.long-name`, #9 `rec.skill-upload.create.long-description`,
+// #18 and #19 the version twins), and the field and cap it does not name,
+// which the API logs instead.
+func TestFrontmatterLengthRefusal(t *testing.T) {
+	const want = "`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits"
+	for _, tc := range []struct {
+		md, field string
+		limit     int
+	}{
+		{skillMD(strings.Repeat("a", 65), "d"), "name", 64},
+		{skillMD("a", strings.Repeat("d", 1025)), "description", 1024},
+	} {
+		_, err := FromFiles([]File{{Path: "a/SKILL.md", Data: []byte(tc.md)}})
+		var tooLong *LengthError
+		if !errors.As(err, &tooLong) || err.Error() != want {
+			t.Errorf("%s over its cap: err = %v, want a *LengthError reading %q", tc.field, err, want)
+			continue
+		}
+		if tooLong.Field != tc.field || tooLong.Limit != tc.limit {
+			t.Errorf("LengthError = %+v, want field %q, limit %d", *tooLong, tc.field, tc.limit)
+		}
+	}
+}
+
 func buildZip(t *testing.T, entries map[string]string, dirs ...string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -296,25 +323,39 @@ func TestFromZipRejects(t *testing.T) {
 // bits say symlink or FIFO (the reference's zipEntryIsPlain rule, mirrored by
 // Extract), so an archive whose only SKILL.md is such an entry would validate
 // here and then materialize without a manifest. Validation shares the
-// predicate for the one member it requires.
+// predicate for the one member it requires, and words its two arms apart: the
+// symlink in the reference's sentence (2026-09-12-followups skills-api.json #5
+// `rec.skill-upload.create.symlink-manifest`, #15 the version twin), the FIFO,
+// which the reference accepts (#6, #16), in ours.
 func TestFromZipRejectsNonPlainSkillMD(t *testing.T) {
-	var buf bytes.Buffer
-	w := zip.NewWriter(&buf)
-	h := &zip.FileHeader{Name: "financial-skill/SKILL.md", Method: zip.Deflate}
-	h.SetMode(0o777 | fs.ModeSymlink)
-	h.CreatorVersion = 3 << 8 // Unix host
-	f, err := w.CreateHeader(h)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write([]byte(goodSkillMD)); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := FromZip(buf.Bytes()); err == nil || !strings.Contains(err.Error(), "regular file") {
-		t.Errorf("FromZip = %v, want a rejection naming the non-regular SKILL.md", err)
+	for _, tc := range []struct {
+		name string
+		mode fs.FileMode
+		want string
+	}{
+		{"Symlink", 0o777 | fs.ModeSymlink, "archives must not contain symbolic links"},
+		{"FIFO", 0o644 | fs.ModeNamedPipe, "SKILL.md must be a regular file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := zip.NewWriter(&buf)
+			h := &zip.FileHeader{Name: "financial-skill/SKILL.md", Method: zip.Deflate}
+			h.SetMode(tc.mode)
+			h.CreatorVersion = 3 << 8 // Unix host
+			f, err := w.CreateHeader(h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Write([]byte(goodSkillMD)); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := FromZip(buf.Bytes()); err == nil || err.Error() != tc.want {
+				t.Errorf("FromZip = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

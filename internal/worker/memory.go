@@ -828,9 +828,11 @@ const refusalArchived = pushArchived
 // either, and an archive, which makes the whole store pull-only whatever the
 // attachment asked (decision 3). The token reaches no store read, so an
 // archive is learned here, from the wording internal/api's own routes use
-// (memories.go: "is archived", "holds N memories"); a server that words a
-// refusal otherwise gets the reference's own rule, and the file is retried
-// once it changes.
+// (memories.go: "cannot modify archived resource", the reference's own words
+// since #540, and "holds N memories") — and "is archived" too, the archive's
+// wording before #540, so an older control plane is still read right; a
+// server that words a refusal otherwise gets the reference's own rule, and
+// the file is retried once it changes.
 func refusalKind(err error) string {
 	var apierr *sdk.Error
 	if !errors.As(err, &apierr) {
@@ -843,7 +845,8 @@ func refusalKind(err error) string {
 	}
 	_ = json.Unmarshal([]byte(apierr.RawJSON()), &body)
 	switch {
-	case strings.Contains(body.Error.Message, "is archived"):
+	case strings.Contains(body.Error.Message, "cannot modify archived resource"),
+		strings.Contains(body.Error.Message, "is archived"):
 		return pushArchived
 	case strings.Contains(body.Error.Message, fmt.Sprintf("holds %d memories", memsync.MaxMemoriesPerStore)):
 		return pushOverCap

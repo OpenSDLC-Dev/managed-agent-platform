@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -149,6 +150,14 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// A confirmation must name a tool use still awaiting one; like a tool
 	// result, a bad reference on the append-only log would wedge the resume.
 	if err := events.ValidateToolConfirmations(ctx, tx, domain.ID(id), newEvents); err != nil {
+		// The reference's sentence covers two of our reasons alike (#540);
+		// the operator's log keeps which one fired.
+		var np *events.NoPendingConfirmationError
+		if errors.As(err, &np) {
+			slog.InfoContext(ctx, "session events send refused: no pending tool permission request",
+				"request_id", requestIDFrom(ctx), "session_id", id,
+				"tool_use_id", np.ToolUseID, "reason", np.Reason)
+		}
 		return nil, errInvalid("%s", err)
 	}
 

@@ -413,9 +413,16 @@ func TestCreateSessionInitialEventsRejections(t *testing.T) {
 		return s.do(http.MethodPost, "/v1/sessions", body)
 	}
 
-	// Only the two documented types are accepted.
+	// Only the two documented types are accepted; another is refused in the
+	// reference's words (2026-09-02 batch2
+	// `sessI.create.initial_events.interrupt-rejected`, #540), at its index.
 	status, res := create([]any{map[string]any{"type": "user.interrupt"}})
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request: initial_events[0].type: "user.interrupt" is not a valid value`)
+	status, res = create([]any{userMessage("m"), map[string]any{"type": "system.message",
+		"content": []any{map[string]any{"type": "text", "text": "s"}}}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request: initial_events[1].type: "system.message" is not a valid value`)
 
 	// More than one define_outcome.
 	status, res = create([]any{defineOutcome("a", nil), defineOutcome("b", nil)})

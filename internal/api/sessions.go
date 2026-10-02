@@ -256,7 +256,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 
 	if err := json.Unmarshal(raw, &agentID); err != nil {
 		var obj struct {
-			Type       string          `json:"type"`
+			Type       *string         `json:"type"`
 			ID         string          `json:"id"`
 			Version    *int64          `json:"version"`
 			Model      json.RawMessage `json:"model"`
@@ -269,22 +269,37 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return snap, errInvalid("agent must be an agent id string or an agent reference object")
 		}
+		// The discriminator is judged before the id, in the reference's words
+		// (#540): a missing one as 2026-09-05 batch8
+		// `probe.session.selector-enum` answered, an unknown one as 2026-09-03
+		// batch2 `sess.create.mcp-initial-events` did — that body carried
+		// agent_id, no id, so the type has to be read first to answer it. An
+		// explicit null reads as missing. The reference parses this union
+		// before it looks anything up; here it is still judged after the
+		// environment lookup, since resolveAgent runs inside the create
+		// transaction.
+		if obj.Type == nil {
+			return snap, errInvalid("Failed to parse request: agent.selector.type: Field required")
+		}
+		if typ := *obj.Type; typ != "agent" && typ != "agent_with_overrides" {
+			return snap, errInvalid("Failed to parse request: agent.selector.type: %q is not a valid value", typ)
+		}
 		if obj.ID == "" {
 			return snap, errInvalid("agent.id is required")
 		}
-		switch obj.Type {
-		case "agent":
-		case "agent_with_overrides":
+		if *obj.Type == "agent_with_overrides" {
 			// The override params carry no roster (absent at anthropic-sdk-go
 			// v1.70.1 — betasession.go
 			// BetaManagedAgentsAgentWithOverridesParams.Multiagent); the
 			// coordinator's stored roster is the only one a session gets — an
 			// explicit 400, not a silent drop (plan 35 decision 10, INFERRED in
-			// docs/DIVERGENCES.md). An explicit null is the value every session
-			// response renders for a single agent, so a read-modify-write echo
-			// passes.
+			// docs/DIVERGENCES.md), worded as the reference's strict decoder
+			// words a key it does not know (2026-09-02 batch2
+			// `session.create.agent_with_overrides.multiagent`, #540). An
+			// explicit null is the value every session response renders for a
+			// single agent, so a read-modify-write echo passes.
 			if present(obj.Multiagent) {
-				return snap, errInvalid("agent override multiagent is not supported; the roster is the coordinator agent's")
+				return snap, errInvalid("Failed to parse request body: unknown field %q", "multiagent")
 			}
 			for key, val := range map[string]json.RawMessage{
 				"model": obj.Model, "system": obj.System, "tools": obj.Tools,
@@ -299,8 +314,6 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 					overrides[key] = val
 				}
 			}
-		default:
-			return snap, errInvalid(`agent.type must be "agent" or "agent_with_overrides"`)
 		}
 		agentID = obj.ID
 		if obj.Version != nil {
@@ -345,8 +358,11 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		}
 	}
 	if archivedAt != nil {
+		// The reference's sentence (2026-09-02 batch2
+		// `session.create.archived-agent`, #540); it holds for every caller,
+		// since each one resolves the agent to create a session.
 		return snap, classified("agent_archived_error",
-			errInvalid("agent %s is archived", agentID))
+			errInvalid("agent %s is archived and cannot be used to create a session", agentID))
 	}
 
 	var spec agentSpec
@@ -372,8 +388,9 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 			// — so the check binds what the override supplies, never the
 			// preserved value. The agent params' own bound (#665) binds
 			// requests alike, so a stored system written over it before then
-			// still resolves.
-			return snap, errInvalid("agent override system cannot exceed %d characters", overrideSystemMaxRunes)
+			// still resolves. Worded as the reference words it (2026-09-02
+			// batch2 `session.create.overrides.system-100001-ascii`, #540).
+			return snap, errInvalid("agent.agent_with_overrides.config.system: must be at most %d characters", overrideSystemMaxRunes)
 		}
 	}
 	if raw, ok := overrides["tools"]; ok {
@@ -544,14 +561,16 @@ func parseInitialEvents(obj map[string]json.RawMessage, allowSystemMessage bool)
 			defineOutcomes++
 		case string(domain.EventSystemMessage):
 			if !allowSystemMessage {
-				return nil, errInvalid("initial_events[%d]: %s", i, initialEventsAllowedNote)
+				return nil, errInitialEventType(i, probe.Type)
 			}
 		default:
-			note := initialEventsAllowedNote
 			if allowSystemMessage {
-				note = deploymentInitialEventsNote
+				return nil, errInvalid("initial_events[%d]: %s", i, deploymentInitialEventsNote)
 			}
-			return nil, errInvalid("initial_events[%d]: %s", i, note)
+			if probe.Type != "" {
+				return nil, errInitialEventType(i, probe.Type)
+			}
+			return nil, errInvalid("initial_events[%d]: %s", i, initialEventsAllowedNote)
 		}
 	}
 	if defineOutcomes > 1 {
@@ -561,6 +580,14 @@ func parseInitialEvents(obj map[string]json.RawMessage, allowSystemMessage bool)
 		return nil, errInvalid("initial_events supports at most %d file-sourced document blocks (got %d)", initialFileDocBlocksMax, fileDocs)
 	}
 	return items, nil
+}
+
+// errInitialEventType refuses a session's initial event of a type the list
+// does not take, in the reference's words (2026-09-02 batch2
+// `sessI.create.initial_events.interrupt-rejected`, #540). A missing type, and
+// a deployment's list, are never recorded and keep ours.
+func errInitialEventType(i int, typ string) error {
+	return errInvalid("Failed to parse request: initial_events[%d].type: %q is not a valid value", i, typ)
 }
 
 func (s *server) createSession(r *http.Request) (any, error) {
@@ -583,9 +610,11 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	agentRaw, ok := obj["agent"]
 	if !ok || isNull(agentRaw) {
-		return nil, errInvalid("agent is required")
+		// 2026-09-05 batch8 `item1.create.session-foreign-env.no-agent-field`
+		// (#540); an explicit null is never recorded and answers alike.
+		return nil, errInvalid("agent: value is required")
 	}
-	resourceInputs, err := parseResourceInputs(obj)
+	resourceInputs, err := parseSessionResourceInputs(obj)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
@@ -725,7 +754,9 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		`SELECT archived_at, kind, config FROM environments WHERE id = $1`+hidden+` FOR SHARE`, in.envID).
 		Scan(&envArchivedAt, &envKind, &envConfig)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return createdSession{}, errNotFound("environment %s not found", in.envID)
+		// 2026-09-05 batch8 `item1.create.session-absent-env` and
+		// `item1.create.session-foreign-env` (#540).
+		return createdSession{}, errEnvironmentNotFound(in.envID)
 	}
 	if err != nil {
 		return createdSession{}, err
@@ -771,7 +802,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	// outcome checks run after the insert, against the fresh row.
 	var initialEvents []events.NewEvent
 	if len(in.rawInitial) > 0 {
-		initialEvents, err = events.NormalizeInbound(envKind, events.ManagementCredential, in.rawInitial)
+		initialEvents, err = events.NormalizeInitialEvents(envKind, events.ManagementCredential, in.rawInitial)
 		if err != nil {
 			return createdSession{}, errInvalid("initial_events: %s", err)
 		}
@@ -809,7 +840,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
 		if strings.Contains(pgErr.ConstraintName, "environment") {
-			return createdSession{}, errNotFound("environment %s not found", in.envID)
+			return createdSession{}, errEnvironmentNotFound(in.envID)
 		}
 		return createdSession{}, errNotFound("agent %s version %d not found", agent.ID, agent.Version)
 	}
@@ -967,16 +998,20 @@ func numberEqual(a, b json.Number) bool {
 	return xok && yok && x.Cmp(y) == 0
 }
 
+// getSession answers a missing session — and, as checkID does everywhere, a
+// malformed id — in the reference's words for this route (2026-09-05 batch3
+// `rec84.session.get.after-delete`, #540). The other session routes keep ours:
+// only this one is recorded.
 func (s *server) getSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
-	if err := checkID(id, "session"); err != nil {
-		return nil, err
+	if !domain.ID(id).Valid() {
+		return nil, errNotFound("Session not found: %s", id)
 	}
 	row, err := scanSession(s.pool.QueryRow(ctx,
 		`SELECT `+sessionColumns+` FROM sessions WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("session %s not found", id)
+		return nil, errNotFound("Session not found: %s", id)
 	}
 	if err != nil {
 		return nil, err
@@ -1361,9 +1396,12 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 // requireNotRunning locks the session row and refuses the mutation while the
 // session is running — the reference documents that a running session cannot be
 // archived or deleted (an interrupt must settle it idle first); the reject
-// status is the one recorded from the reference and the message is ours
-// (docs/DIVERGENCES.md, whose session threads entry covers rescheduling). The
-// row lock holds the status still until the caller's tx commits, so an approval
+// status and each verb's sentence are the ones recorded from the reference
+// (2026-09-02 batch2 `sessT.archive.while-running` and
+// `sessT.delete.while-running`, #540; docs/DIVERGENCES.md, whose session
+// threads entry covers rescheduling). The archive sentence says only pending or
+// idle sessions may be archived, but only running is refused here. The row
+// lock holds the status still until the caller's tx commits, so an approval
 // flipping the session to running cannot slip between the check and the
 // mutation.
 //
@@ -1382,7 +1420,10 @@ func requireNotRunning(ctx context.Context, tx pgx.Tx, id, verb string) error {
 		return err
 	}
 	if status == string(domain.SessionRunning) {
-		return errInvalid("session %s is running; send a user.interrupt event before %s", id, verb)
+		if verb == "archiving" {
+			return errInvalid("Session %s cannot be archived while its status is %q. Only pending or idle sessions may be archived.", id, status)
+		}
+		return errInvalid("Cannot delete session while it is running. Send an interrupt event or wait for the session to complete.")
 	}
 	return nil
 }

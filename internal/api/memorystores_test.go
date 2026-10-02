@@ -64,16 +64,19 @@ func TestMemoryStoreCRUD(t *testing.T) {
 		t.Fatalf("get: status %d (%v)", status, got)
 	}
 	wantNoFields(t, got, "archived_at")
-	// The NUL case proves checkID runs: without it the byte reaches Postgres,
-	// which refuses it as a 500 rather than a miss.
+	// The NUL case proves the shape check runs: without it the byte reaches
+	// Postgres, which refuses it as a 500 rather than a miss. Every spelling
+	// takes the reference's words for this route (2026-09-05 batch8 idx 7
+	// `item1.read.absent-store-control`; #540).
 	token := strings.Repeat("a", len(strings.TrimPrefix(id, "memstore_")))
-	for _, bad := range []string{
-		"memstore_" + token, "vlt_" + token, "memstore_missing00000000000",
-		"memstore_" + token[1:] + "%00",
+	for _, bad := range []struct{ path, id string }{
+		{"memstore_" + token, "memstore_" + token},
+		{"vlt_" + token, "vlt_" + token},
+		{"memstore_missing00000000000", "memstore_missing00000000000"},
+		{"memstore_" + token[1:] + "%00", "memstore_" + token[1:] + "\x00"},
 	} {
-		if status, _ := s.do(http.MethodGet, "/v1/memory_stores/"+bad, nil); status != http.StatusNotFound {
-			t.Fatalf("get %s: status %d, want 404", bad, status)
-		}
+		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+bad.path, nil)
+		wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "memory store not found: "+bad.id)
 	}
 
 	// Update: name and description replace, metadata patches.
@@ -115,13 +118,11 @@ func TestMemoryStoreCRUD(t *testing.T) {
 		t.Fatalf("archive not idempotent: status %d, archived_at %v vs %v, updated_at %v vs %v",
 			status, body["archived_at"], first, body["updated_at"], firstUpdated)
 	}
+	// The reference's words (2026-09-02 free_batch1 idx 82
+	// `store.update.archived.rename`; #540).
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+id, map[string]any{"name": "X"})
-	if status != http.StatusBadRequest {
-		t.Fatalf("update archived: status %d (%v)", status, body)
-	}
-	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "is archived") {
-		t.Errorf("update-archived message = %q, want it to say the store is archived", msg)
-	}
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"cannot modify archived resource: memory store "+id)
 	if status, got := s.do(http.MethodGet, "/v1/memory_stores/"+id, nil); status != http.StatusOK || got["archived_at"] == nil {
 		t.Fatalf("get after archive: status %d (%v) — retrieve includes archived stores", status, got)
 	}
@@ -131,14 +132,16 @@ func TestMemoryStoreCRUD(t *testing.T) {
 	if status != http.StatusOK || body["type"] != "memory_store_deleted" || body["id"] != id {
 		t.Fatalf("delete: status %d (%v)", status, body)
 	}
-	for _, call := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/memory_stores/" + id},
-		{http.MethodDelete, "/v1/memory_stores/" + id},
-		{http.MethodPost, "/v1/memory_stores/" + id + "/archive"},
+	// The read takes the reference's words (2026-09-05 batch4 idx 14
+	// `rec85.teardown.store.get.after-delete`; #540); the delete and the
+	// archive, never recorded missing a store, keep ours.
+	for _, call := range []struct{ method, path, msg string }{
+		{http.MethodGet, "/v1/memory_stores/" + id, "memory store not found: " + id},
+		{http.MethodDelete, "/v1/memory_stores/" + id, "memory store " + id + " not found"},
+		{http.MethodPost, "/v1/memory_stores/" + id + "/archive", "memory store " + id + " not found"},
 	} {
-		if status, got := s.do(call.method, call.path, nil); status != http.StatusNotFound {
-			t.Errorf("%s %s after delete: status %d (%v)", call.method, call.path, status, got)
-		}
+		status, got := s.do(call.method, call.path, nil)
+		wantErrMsg(t, status, got, http.StatusNotFound, "not_found_error", call.msg)
 	}
 }
 
@@ -157,9 +160,21 @@ func stamp(t *testing.T, v any) time.Time {
 func TestMemoryStoreValidation(t *testing.T) {
 	s := newTestServer(t)
 
+	// An absent name and an empty one take the reference's words (2026-09-02
+	// free_batch1 idx 73 `store.create.no-name`, idx 72
+	// `store.create.empty-name`; #540); a null one, never recorded, keeps ours.
+	for _, tc := range []struct {
+		body map[string]any
+		msg  string
+	}{
+		{map[string]any{}, "name: Field required"},
+		{map[string]any{"name": ""}, "name: minimum string length is 1"},
+		{map[string]any{"name": nil}, "name is required"},
+	} {
+		status, resp := s.do(http.MethodPost, "/v1/memory_stores", tc.body)
+		wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", tc.msg)
+	}
 	for name, body := range map[string]map[string]any{
-		"missing name":         {},
-		"empty name":           {"name": ""},
 		"name of 256 runes":    {"name": strings.Repeat("é", 256)},
 		"control char in name": {"name": "bad\u0007name"},
 		"long description":     {"name": "n", "description": strings.Repeat("d", 1025)},
@@ -406,9 +421,8 @@ func TestMemoryStoreEmptyUpdate(t *testing.T) {
 			t.Errorf("%v on a missing store: status %d (%v), want 404", body, status, res)
 		}
 		status, res := s.do(http.MethodPost, "/v1/memory_stores/"+archived, body)
-		if status != http.StatusBadRequest || !strings.Contains(errMessage(res), "is archived") {
-			t.Errorf("%v on an archived store: status %d (%v), want the archived refusal", body, status, res)
-		}
+		wantInvalidRequest(t, fmt.Sprintf("%v on an archived store", body), status, res,
+			"cannot modify archived resource: memory store "+archived)
 	}
 }
 

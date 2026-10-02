@@ -142,11 +142,10 @@ func TestDeploymentRunArchivedRefusesAndPausedAllows(t *testing.T) {
 	if status, res := s.do(http.MethodPost, "/v1/deployments/"+archived+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: status %d, body %v", status, res)
 	}
+	// The reference's sentence (2026-09-02 batch2 `deployment.run.on-archived`
+	// #450, #540).
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+archived+"/run", nil)
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := res["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "is archived") {
-		t.Errorf("message %q does not say the deployment is archived", msg)
-	}
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "Cannot modify archived deployment")
 	var runs int
 	if err := s.pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM deployment_runs WHERE deployment_id = $1`, archived).Scan(&runs); err != nil {
@@ -608,8 +607,10 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	if got := runIDs(t, listRuns(t, s, "deployment_id=depl_absent123")); len(got) != 0 {
 		t.Errorf("a non-existent deployment_id returned %v, want empty data", got)
 	}
+	// The malformed one answers the reference's sentence (2026-09-02 batch2
+	// `deployment_runs.list.unknown-deployment` #444, #540).
 	status, res := s.do(http.MethodGet, "/v1/deployment_runs?deployment_id=not-an-id", nil)
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "Invalid deployment ID.")
 
 	// trigger_type: the enum filters, anything else is a 400.
 	if got := runIDs(t, listRuns(t, s, "trigger_type=schedule")); !slices.Equal(got, []string{scheduledRunID}) {
@@ -628,8 +629,11 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	if got := runIDs(t, listRuns(t, s, "has_error=false")); len(got) != 5 || slices.Contains(got, failedRunID) {
 		t.Errorf("has_error=false = %v, want the 5 successes", got)
 	}
-	status, res = s.do(http.MethodGet, "/v1/deployment_runs?has_error=maybe", nil)
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	// Anything else answers the reference's sentence, the value quoted
+	// (2026-09-05 batch3 `rec84.runs.list.has_error.bogus` #10, #540).
+	status, res = s.do(http.MethodGet, "/v1/deployment_runs?has_error=bogus", nil)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request body: invalid value for bool field has_error: "bogus"`)
 
 	// The four created_at comparators, split at a middle run's own rendered
 	// timestamp: gte keeps it, gt drops it, lte/lt mirror.

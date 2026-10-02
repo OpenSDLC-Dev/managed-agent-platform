@@ -264,9 +264,11 @@ func TestDreamCreateRejections(t *testing.T) {
 			fmt.Sprintf("session_ids must not repeat %q", alias)},
 		// The arm's key set is checked before its target rules (§5.2): with that
 		// check removed this body would 400 on the missing memory_store_id instead.
+		// Its sentence is the strict decoder's every /v1 body shares
+		// (rejectUnknownKeys, #540); no dream refusal was ever recorded.
 		{"update_existing carrying an unknown key", dreamWith(storeID, sessionIDs, "output_behavior",
 			map[string]any{"type": "update_existing", "extra": 1}),
-			`unknown field "extra"`},
+			`Failed to parse request body: unknown field "extra"`},
 		// The target's own rules (§5.3). memory_store_id is required with a
 		// minLength of 1 (BetaOutputBehaviorUpdateExisting), and the one value
 		// it may take is the dream's own memory_store input — the EAP rule the

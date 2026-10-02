@@ -195,7 +195,32 @@ type resourceInput struct {
 	instructions  *string
 }
 
-// parseResourceInputs validates the create-time resources[] union without
+// resourceFlavor is the route a resource is parsed for. The parsers below are
+// shared, but the reference words their refusals per route (#540): session
+// create, the deployment routes and the add endpoint each carry recorded
+// sentences of their own, and a sentence recorded on one is never assumed for
+// another — a refusal no recording holds keeps ours on every route.
+type resourceFlavor int
+
+const (
+	resourceForSession    resourceFlavor = iota // POST /v1/sessions
+	resourceForDeployment                       // POST /v1/deployments and POST /v1/deployments/{id}
+	resourceForAdd                              // POST /v1/sessions/{id}/resources
+)
+
+// parseResourceInputs is the deployment routes' resources[], on create and
+// update; parseSessionResourceInputs is session create's. Both are
+// parseResources, differing only in the words a refusal takes.
+func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error) {
+	return parseResources(obj, resourceForDeployment)
+}
+
+// parseSessionResourceInputs is session create's resources[] (parseResources).
+func parseSessionResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error) {
+	return parseResources(obj, resourceForSession)
+}
+
+// parseResources validates the create-time resources[] union without
 // touching the database: each element must be a supported resource (file,
 // github_repository or memory_store) with a valid file_id, canonical GitHub
 // URL + token, or memory_store_id. A file's mount_path resolves
@@ -214,8 +239,9 @@ type resourceInput struct {
 // the store's name in the transaction, under memoryMountParent, which no file
 // or repository mount can reach — so it takes only its own two rules here:
 // the same store at most once and at most maxMemoryStoresPerSession of them
-// (plan 36 decision 7).
-func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error) {
+// (plan 36 decision 7). f picks the words a refusal takes; an element parser
+// whose sentences name the element is handed its index too.
+func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourceInput, error) {
 	raw, ok := obj["resources"]
 	if !ok || isNull(raw) {
 		return nil, nil
@@ -225,16 +251,20 @@ func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error
 		return nil, errInvalid("resources must be an array")
 	}
 	out := make([]resourceInput, 0, len(items))
-	seen := make(map[string]bool, len(items))
+	seen := make(map[string]string, len(items)) // cleaned mount path → the mount_path that took it
 	stores := make(map[string]bool, len(items))
 	repos := 0
-	for _, item := range items {
-		in, err := parseResourceItem(item)
+	for i, item := range items {
+		in, err := parseResourceItem(item, f, i)
 		if err != nil {
 			return nil, err
 		}
 		if in.kind == resourceKindMemory {
 			if stores[in.memoryStoreID] {
+				if f == resourceForSession {
+					// 2026-09-02 batch2 `session.create.same-store-twice` (#540).
+					return nil, errInvalid("resources contains duplicate memory_store_id: %s", in.memoryStoreID)
+				}
 				return nil, errInvalid("memory store %s is attached more than once", in.memoryStoreID)
 			}
 			stores[in.memoryStoreID] = true
@@ -245,10 +275,13 @@ func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error
 			continue
 		}
 		clean := path.Clean(in.mountPath)
-		if seen[clean] {
+		if prev, taken := seen[clean]; taken {
+			if f == resourceForSession && in.kind == resourceKindRepo {
+				return nil, errRepoMountOverlap(prev, in.mountPath)
+			}
 			return nil, errInvalid("mount_path %q is used by more than one resource", in.mountPath)
 		}
-		seen[clean] = true
+		seen[clean] = in.mountPath
 		if in.kind == resourceKindRepo {
 			repos++
 		}
@@ -257,20 +290,35 @@ func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error
 	if repos > maxReposPerSession {
 		return nil, errInvalid("a session can mount at most %d github_repository resources", maxReposPerSession)
 	}
-	for _, r := range out {
+	for ri, r := range out {
 		if r.kind != resourceKindRepo {
 			continue
 		}
-		for _, p := range out {
+		for pi, p := range out {
 			if p.kind == resourceKindMemory {
 				continue
 			}
 			if properPathAncestor(path.Clean(p.mountPath), path.Clean(r.mountPath)) {
+				// out holds every element at its request index, so the later
+				// of the pair is the one the reference's sentence is about.
+				if f == resourceForSession && out[max(pi, ri)].kind == resourceKindRepo {
+					return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
+				}
 				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
 			}
 		}
 	}
 	return out, nil
+}
+
+// errRepoMountOverlap is session create's refusal of a repository whose mount
+// takes an earlier resource's path or sits below another resource's, in the
+// reference's words (2026-09-03 batch1 `session.create.repo-same-mount-twice`,
+// `repo-same-repo-twice` and `repo-nested-mounts`, #540): the earlier, or the
+// ancestor, path first. The sentence names a github_repository, so a collision
+// whose later element is a file — never recorded — keeps ours.
+func errRepoMountOverlap(first, second string) error {
+	return errInvalid("Invalid `github_repository` resource: `mount_path` overlaps another resource: %s and %s; set distinct `mount_path` values", first, second)
 }
 
 // properPathAncestor reports whether clean path a is a proper ancestor
@@ -285,34 +333,35 @@ func properPathAncestor(a, b string) bool {
 	return strings.HasPrefix(b, a+"/")
 }
 
-func parseResourceItem(raw json.RawMessage) (resourceInput, error) {
+func parseResourceItem(raw json.RawMessage, f resourceFlavor, i int) (resourceInput, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return resourceInput{}, errInvalid("each resource must be an object")
 	}
-	return parseResourceObject(obj)
+	return parseResourceObject(obj, f, i)
 }
 
-// parseResourceObject dispatches on the resource union's type discriminator. It
-// backs both the create-time array elements and the add endpoint's single body.
-func parseResourceObject(obj map[string]json.RawMessage) (resourceInput, error) {
+// parseResourceObject dispatches on the resource union's type discriminator
+// for element i of a create-time resources[] array. The add endpoint judges
+// the type itself and parses only the file variant (addSessionResourceTx).
+func parseResourceObject(obj map[string]json.RawMessage, f resourceFlavor, i int) (resourceInput, error) {
 	typ, err := requiredString(obj, "type")
 	if err != nil {
 		return resourceInput{}, err
 	}
 	switch typ {
 	case "file":
-		return parseFileResource(obj)
+		return parseFileResource(obj, f)
 	case "github_repository":
-		return parseRepoResource(obj)
+		return parseRepoResource(obj, f, i)
 	case "memory_store":
-		return parseMemoryResource(obj)
+		return parseMemoryResource(obj, f, i)
 	default:
 		return resourceInput{}, errInvalid("resource type %q is not supported", typ)
 	}
 }
 
-func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
+func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "file_id", "mount_path"); err != nil {
 		return resourceInput{}, err
 	}
@@ -321,6 +370,10 @@ func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
 		return resourceInput{}, err
 	}
 	if !domain.ID(fileID).HasPrefix(domain.PrefixFile) || !domain.ID(fileID).Valid() {
+		if f == resourceForSession {
+			// 2026-09-02 batch2 `sessF.create.file-mount.unknown-file` (#540).
+			return resourceInput{}, errInvalid("Invalid file resource: invalid file_id: %q", fileID)
+		}
 		return resourceInput{}, errInvalid("file_id must be a valid file id")
 	}
 	mountPath, set, null, err := stringField(obj, "mount_path")
@@ -349,7 +402,7 @@ func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
 // default, "read_write" — and for instructions the omitted key. The SDK never
 // transmits an empty access (omitzero), so "" is refused with every other value
 // outside the enum rather than read as the default.
-func parseMemoryResource(obj map[string]json.RawMessage) (resourceInput, error) {
+func parseMemoryResource(obj map[string]json.RawMessage, f resourceFlavor, i int) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "memory_store_id", "access", "instructions"); err != nil {
 		return resourceInput{}, err
 	}
@@ -368,6 +421,10 @@ func parseMemoryResource(obj map[string]json.RawMessage) (resourceInput, error) 
 		access = "read_write"
 	}
 	if access != "read_write" && access != "read_only" {
+		if f == resourceForSession {
+			// 2026-09-02 batch2 `session.create.store-access-bogus` (#540).
+			return resourceInput{}, errInvalid("Failed to parse request: resources[%d].access: %q is not a valid value; expected one of read_only, read_write", i, access)
+		}
 		return resourceInput{}, errInvalid(`access must be "read_write" or "read_only"`)
 	}
 	in := resourceInput{kind: resourceKindMemory, memoryStoreID: id, access: access}
@@ -377,6 +434,10 @@ func parseMemoryResource(obj map[string]json.RawMessage) (resourceInput, error) 
 	}
 	if set && !null {
 		if utf8.RuneCountInString(instructions) > maxMemoryInstructionsChars {
+			if f == resourceForSession {
+				// 2026-09-02 batch2 `session.create.store-instructions-4097` (#540).
+				return resourceInput{}, errInvalid("resources.%d.memory_store.instructions: must be at most %d characters", i, maxMemoryInstructionsChars)
+			}
 			return resourceInput{}, errInvalid("instructions must be at most %d characters", maxMemoryInstructionsChars)
 		}
 		in.instructions = &instructions
@@ -390,9 +451,14 @@ func parseMemoryResource(obj map[string]json.RawMessage) (resourceInput, error) 
 // BetaManagedAgentsGitHubRepositoryResourceParams). Validation is
 // create-time-local — no network call proves the repo or the token; the first
 // materialization is the probe (plan 25 decision 3).
-func parseRepoResource(obj map[string]json.RawMessage) (resourceInput, error) {
+func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "url", "authorization_token", "mount_path", "checkout"); err != nil {
 		return resourceInput{}, err
+	}
+	if _, ok := obj["url"]; !ok && f == resourceForDeployment {
+		// 2026-09-05 batch3 `rec84.repo.bare-type` (#540): an absent key only;
+		// a null or empty url there is never recorded.
+		return resourceInput{}, errInvalid("resources.%d.url: Field required", i)
 	}
 	rawURL, err := requiredString(obj, "url")
 	if err != nil {
@@ -400,7 +466,33 @@ func parseRepoResource(obj map[string]json.RawMessage) (resourceInput, error) {
 	}
 	repoName, err := parseGitHubRepoURL(rawURL)
 	if err != nil {
+		// Each route's own sentence: 2026-09-03 batch1
+		// `session.create.repo-userinfo` (and the port, query and tree-path
+		// probes beside it) and 2026-09-05 batch3 `rec84.repo.bad-url` (#540).
+		// The session sentence forbids a .git suffix this grammar still
+		// accepts (docs/DIVERGENCES.md), so it is only ever said of a URL
+		// refused for another reason.
+		switch f {
+		case resourceForSession:
+			return resourceInput{}, errInvalid("Invalid `github_repository` resource: invalid github_repository url: must be https://github.com/{owner}/{repo} with no .git suffix")
+		case resourceForDeployment:
+			return resourceInput{}, errInvalid("validate deployment resources: invalid GitHub repository URL: repo URL must be https://github.com/{owner}/{repo}")
+		}
 		return resourceInput{}, err
+	}
+	if tok, set, null, err := stringField(obj, "authorization_token"); err == nil && !null && tok == "" {
+		// An absent token on either recorded route (2026-09-03 batch1
+		// `session.create.repo-token-absent`, 2026-09-05 batch3
+		// `rec84.repo.with-url`), and an empty one on session create
+		// (`session.create.repo-token-empty`), in the reference's words
+		// (#540). A null one, and the cases no recording holds, keep
+		// requiredString's below.
+		switch {
+		case f == resourceForSession:
+			return resourceInput{}, errInvalid("resources.%d.github_repository.authorization_token: value is required", i)
+		case f == resourceForDeployment && !set:
+			return resourceInput{}, errInvalid("resources.%d.authorization_token: Field required", i)
+		}
 	}
 	token, err := requiredString(obj, "authorization_token")
 	if err != nil {
@@ -706,7 +798,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			}))
 			repoIDs = append(repoIDs, id)
 		default:
-			if err := fileMustExist(ctx, db, in.fileID); err != nil {
+			if err := fileMustExist(ctx, db, in.fileID, resourceForSession); err != nil {
 				return nil, nil, err
 			}
 			id := domain.NewID(domain.PrefixResource).String()
@@ -771,7 +863,10 @@ func suffixCollidingMemoryMounts(stores []memoryResourceJSON) {
 // (decision 8), falling back to the slug of the whole store id —
 // memstore-<token>, lowercased, as recorded (#671) — for a name with no
 // alphanumerics. It is the store's own slug: suffixCollidingMemoryMounts
-// suffixes it when another store in the same create keeps it.
+// suffixes it when another store in the same create keeps it. Both refusals
+// are the reference's sentences (2026-09-02 batch2 `session.create.unknown-store`
+// and `session.create.archived-store`, #540), and every caller — a session
+// create, a deployment's fire or run, a dream's start — says them alike.
 func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (memoryResourceJSON, error) {
 	var name, description string
 	var archivedAt *time.Time
@@ -782,14 +877,14 @@ func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (mem
 		// A missing store is §5.2's "other resource gone" arm; only an
 		// archived one has a type of its own.
 		return memoryResourceJSON{}, classified("session_resource_not_found_error",
-			errNotFound("memory store %s not found", in.memoryStoreID))
+			errNotFound("Memory store `%s` not found.", in.memoryStoreID))
 	}
 	if err != nil {
 		return memoryResourceJSON{}, err
 	}
 	if archivedAt != nil {
 		return memoryResourceJSON{}, classified("memory_store_archived_error",
-			errInvalid("memory store %s is archived", in.memoryStoreID))
+			errInvalid("Memory store %s is archived.", in.memoryStoreID))
 	}
 	slug := memsync.Slug(name, memsync.Slug(in.memoryStoreID, ""))
 	return memoryResourceJSON{
@@ -851,11 +946,21 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 // A session that outlives a file it already mounted is a different case and
 // needs no clause: the worker reads the content lane's 404 as not_found, skips
 // that mount and materializes the rest (internal/worker/files.go).
-func fileMustExist(ctx context.Context, db querier, fileID string) error {
+//
+// A session create — and so a deployment's fire or run, and a dream's start —
+// answers in the reference's words (2026-09-02 batch2
+// `sessF2.create.deleted-file-mount`, #540), its list always of one id, since
+// files are checked one at a time; the add endpoint's 404 is never recorded
+// and keeps ours.
+func fileMustExist(ctx context.Context, db querier, fileID string, f resourceFlavor) error {
 	var exists bool
 	err := db.QueryRow(ctx,
 		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, fileID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if f == resourceForSession {
+			return classified("file_not_found_error",
+				errNotFound("One or more files not found. Check that each `file_id` exists and is accessible: %s", fileID))
+		}
 		return classified("file_not_found_error", errNotFound("file %s not found", fileID))
 	}
 	return err
@@ -913,7 +1018,7 @@ func (s *server) getSessionResource(r *http.Request) (any, error) {
 	if raw := findResource(resources, rid); raw != nil {
 		return raw, nil
 	}
-	return nil, errNotFound("session resource %s not found", rid)
+	return nil, errResourceNotFound(rid)
 }
 
 func (s *server) listSessionResources(r *http.Request) (any, error) {
@@ -983,17 +1088,23 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 	if err != nil {
 		return fileResourceJSON{}, err
 	}
-	in, err := parseResourceObject(obj)
+	typ, err := requiredString(obj, "type")
 	if err != nil {
 		return fileResourceJSON{}, err
 	}
-	if in.kind != resourceKindFile {
+	if typ != "file" {
 		// The add endpoint is typed file-only in the SDK (Add returns the file
 		// resource, checked against anthropic-sdk-go v1.70.1 —
 		// betasessionresource.go BetaSessionResourceService.Add) and the docs
-		// pin repos to the session's lifetime — wire-faithful, message INFERRED
-		// (plan 25 decision 3).
-		return fileResourceJSON{}, errInvalid("only file resources can be added to an existing session")
+		// pin repos to the session's lifetime (plan 25 decision 3). Judged
+		// before the variant is read, and worded, as the reference judges and
+		// words it (2026-09-02 batch2 `session.resources.post.memory_store`,
+		// #540).
+		return fileResourceJSON{}, errInvalid("Failed to parse request: type: %q is not a valid value", typ)
+	}
+	in, err := parseFileResource(obj, resourceForAdd)
+	if err != nil {
+		return fileResourceJSON{}, err
 	}
 	if err := checkID(id, "session"); err != nil {
 		return fileResourceJSON{}, err
@@ -1028,7 +1139,7 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 		// supported overlay — stays legal.
 		return fileResourceJSON{}, errInvalid("mount_path %q is an ancestor of repository mount_path %q", in.mountPath, rm)
 	}
-	if err := fileMustExist(ctx, tx, in.fileID); err != nil {
+	if err := fileMustExist(ctx, tx, in.fileID, resourceForAdd); err != nil {
 		return fileResourceJSON{}, err
 	}
 	now := time.Now().UTC()
@@ -1089,7 +1200,7 @@ func (s *server) deleteSessionResourceTx(ctx context.Context, id, rid string) er
 	}
 	idx := indexOfResource(resources, rid)
 	if idx < 0 {
-		return errNotFound("session resource %s not found", rid)
+		return errResourceNotFound(rid)
 	}
 	if resourceType(resources[idx]) == "github_repository" {
 		// "Repositories are attached for the lifetime of the session" (the
@@ -1187,7 +1298,7 @@ func (s *server) rotateResourceTokenTx(ctx context.Context, id, rid string, r *h
 	}
 	idx := indexOfResource(resources, rid)
 	if idx < 0 {
-		return nil, errNotFound("session resource %s not found", rid)
+		return nil, errResourceNotFound(rid)
 	}
 	if resourceType(resources[idx]) != "github_repository" {
 		return nil, errInvalid("only github_repository resources support token rotation")
@@ -1241,9 +1352,18 @@ func resourceWithUpdatedAt(raw json.RawMessage, now time.Time) (json.RawMessage,
 // 404 an unknown resource already gets (checkID's shape-reject rationale).
 func checkResourceID(id string) error {
 	if !domain.ID(id).HasPrefix(domain.PrefixResource) || !domain.ID(id).Valid() {
-		return errNotFound("session resource %s not found", id)
+		return errResourceNotFound(id)
 	}
 	return nil
+}
+
+// errResourceNotFound is the get, delete and update routes' 404 for a resource
+// id, in the reference's words (2026-09-02 batch2
+// `session.resources.get.by-memory_store_id`, `get.bogus-sesrsc` and
+// `delete.by-memory_store_id`, #540). The update route's is never recorded;
+// it is the same family on the same path.
+func errResourceNotFound(id string) error {
+	return errNotFound("Resource not found: %s", id)
 }
 
 // findResource returns the stored resource object whose id equals rid, or nil.

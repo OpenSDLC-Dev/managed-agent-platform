@@ -337,8 +337,8 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 	status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"status": api.KeyStatusActive})
 	if status != http.StatusBadRequest {
 		t.Errorf("re-activating a lapsed key: %d %v, want 400", status, obj)
-	} else if !strings.Contains(errMessage(obj), "expired") {
-		t.Errorf("the refusal %q does not name the expiry", errMessage(obj))
+	} else if want := "Expired API keys can only be deleted, not renamed or reactivated."; errMessage(obj) != want {
+		t.Errorf("the refusal %q, want the measured %q (#389, #540)", errMessage(obj), want)
 	}
 	// The same refusal must hold by the route a review found around it: disable a
 	// key, let it lapse while disabled, then re-enable.
@@ -380,10 +380,12 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 		{},
 	} {
 		code, body := s.do(http.MethodPost, consoleAPIKey(id), patch)
+		// In the reference's words, as the #389 probe measured them (#540).
+		const want = "Expired API keys can only be deleted, not renamed or reactivated."
 		if code != http.StatusBadRequest {
 			t.Errorf("patch %v on a lapsed key: %d %v, want 400", patch, code, body)
-		} else if !strings.Contains(errMessage(body), "expired") {
-			t.Errorf("the refusal %q does not name the expiry", errMessage(body))
+		} else if errMessage(body) != want {
+			t.Errorf("the refusal %q, want %q", errMessage(body), want)
 		}
 	}
 
@@ -405,9 +407,14 @@ func TestAPIKeyIssuanceRejectsBadRequests(t *testing.T) {
 		body any
 		want string
 	}{
-		{"no name", map[string]any{}, "name is required"},
+		// The name's three refusals in the reference's pydantic words (#540):
+		// 2026-09-05 batch5 idx 13 `rec86.create.name.missing`, idx 18
+		// `.wrong-type`, idx 14 `.empty`. A null name keeps ours.
+		{"no name", map[string]any{}, "name: Field required"},
+		{"empty name", map[string]any{"name": ""}, "name: String should have at least 1 character"},
+		{"null name", map[string]any{"name": nil}, "name is required"},
 		{"name too long", map[string]any{"name": strings.Repeat("x", 501)}, "at most 500 characters"},
-		{"name not a string", map[string]any{"name": 7}, "name must be a string"},
+		{"name not a string", map[string]any{"name": 7}, "name: Input should be a valid string"},
 		{"unknown field", map[string]any{"name": "n", "nope": 1}, `unknown field "nope"`},
 		{"expiry not a timestamp", map[string]any{"name": "n", "expires_at": "tomorrow"}, "RFC 3339"},
 		// A past expires_at is NOT here: the reference accepts it and mints a key
@@ -540,10 +547,12 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 		{},
 	} {
 		status, obj := s.do(http.MethodPost, consoleAPIKey(id), patch)
+		// In the reference's words, as the #389 probe measured them (#540).
+		const want = "Archived API keys cannot be updated."
 		if status != http.StatusBadRequest {
 			t.Errorf("patch %v on an archived key: %d %v, want 400", patch, status, obj)
-		} else if !strings.Contains(errMessage(obj), api.KeyStatusArchived) {
-			t.Errorf("the refusal %q does not name the archived state", errMessage(obj))
+		} else if errMessage(obj) != want {
+			t.Errorf("the refusal %q, want %q", errMessage(obj), want)
 		}
 	}
 
@@ -716,6 +725,15 @@ func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 				status, body := s.do(tc.method, tc.path, tc.body)
 				wantErr(t, status, body, tc.status, tc.errType)
 				wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
+				// And the reference's words for each (#540): batch5 idx 7–9
+				// for a bogus id, idx 10–12 for an unknown one.
+				want := "API Key id must have `apikey_` prefix."
+				if tc.status == http.StatusNotFound {
+					want = "API Key `apikey_01ABCDEFGHJKMNPQRSTVWXYZ` not found."
+				}
+				if got := errMessage(body); got != want {
+					t.Errorf("message = %q, want %q", got, want)
+				}
 			})
 		}
 	}
@@ -729,7 +747,8 @@ func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(tc.method, tc.path, tc.body)
-			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			// batch8 idx 33 and 34, words included (#540).
+			wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Not found")
 			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
 		})
 	}
@@ -918,6 +937,11 @@ func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
 			wantDetails(t, body, tc.details)
 		})
 	}
+	// The recorded refusal, in the reference's words (batch5 idx 26; #540).
+	status, body := s.do(http.MethodPost, consoleAPIKeysPath,
+		map[string]any{"name": "rec86 probe", "principal_id": "zzz-not-a-principal"})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"principal_id must be a user_... (user) or svac_... (service account) ID.")
 	if after := len(listAPIKeys(t, s)); after != before {
 		t.Errorf("refused creates changed the listing from %d keys to %d", before, after)
 	}
@@ -926,7 +950,7 @@ func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
 	// name with a bad principal_id. Its refusal reads as the reference's schema
 	// validation (pydantic's message, no details), and the principal_id one
 	// (idx 26, with details) as its handler's, which would run after.
-	status, body := s.do(http.MethodPost, consoleAPIKeysPath,
+	status, body = s.do(http.MethodPost, consoleAPIKeysPath,
 		map[string]any{"name": strings.Repeat("x", 501), "principal_id": "zzz-not-a-principal"})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	wantDetails(t, body, nil)
@@ -966,7 +990,7 @@ func TestAPIKeyUpdatesOnTheRecordedRoute(t *testing.T) {
 
 	for _, method := range []string{http.MethodDelete, http.MethodPatch, http.MethodPut, http.MethodGet} {
 		status, body := s.do(method, consoleOrgAPIKey(zeroUUID), map[string]any{"status": "inactive"})
-		wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
+		wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
 	}
 }
 

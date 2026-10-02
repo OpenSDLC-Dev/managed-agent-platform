@@ -97,15 +97,21 @@ func TestSessionMemoryStoreAttachment(t *testing.T) {
 	if status != http.StatusOK || len(listData(t, list)) != 2 {
 		t.Errorf("resources list: %d %v", status, list)
 	}
+	// Both in the reference's words (2026-09-02 batch2
+	// `session.resources.get.by-memory_store_id` and
+	// `session.resources.delete.by-memory_store_id`, #540).
 	for _, rid := range []string{store, "sesrsc_" + strings.Repeat("0", 23) + "1"} {
 		for _, method := range []string{http.MethodGet, http.MethodDelete} {
 			status, body := s.do(method, "/v1/sessions/"+sid+"/resources/"+rid, nil)
-			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Resource not found: "+rid)
 		}
 	}
-	// Attach is create-time only: the add endpoint keeps its files-only rule.
+	// Attach is create-time only: the add endpoint keeps its files-only rule,
+	// judging the type before the variant, as the reference does (2026-09-02
+	// batch2 `session.resources.post.memory_store`, #540).
 	status, body := s.do(http.MethodPost, "/v1/sessions/"+sid+"/resources", memoryElement(bare, nil))
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request: type: "memory_store" is not a valid value`)
 
 	// A deleted store's attachment is tolerated: the element stays as
 	// snapshotted (the files precedent; the prompt-side hedge is slice 4's).
@@ -253,13 +259,9 @@ func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 		resources []any
 		want      string
 	}{
-		"archived store":  {envID, []any{memoryElement(archived, nil)}, "is archived"},
 		"nine stores":     {envID, nine, "at most 8"},
-		"the same twice":  {envID, []any{memoryElement(store, nil), memoryElement(store, map[string]any{"access": "read_only"})}, "more than once"},
-		"instructions":    {envID, []any{memoryElement(store, map[string]any{"instructions": strings.Repeat("x", 4097)})}, "4096"},
 		"malformed id":    {envID, []any{memoryElement("mem_x", nil)}, "memory_store_id"},
 		"missing id":      {envID, []any{map[string]any{"type": "memory_store"}}, "memory_store_id"},
-		"bad access":      {envID, []any{memoryElement(store, map[string]any{"access": "append"})}, "access"},
 		"output-only key": {envID, []any{memoryElement(store, map[string]any{"mount_path": "/mnt/memory/x"})}, "unknown field"},
 	} {
 		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
@@ -271,17 +273,45 @@ func TestSessionMemoryStoreAttachmentRejections(t *testing.T) {
 		}
 	}
 
+	// The refusals the reference was recorded wording, in its words whole
+	// (#540), at the index the element sits at.
+	for name, tc := range map[string]struct {
+		resources []any
+		want      string
+	}{
+		// 2026-09-02 batch2 `session.create.archived-store`.
+		"archived store": {[]any{memoryElement(archived, nil)}, "Memory store " + archived + " is archived."},
+		// 2026-09-02 batch2 `session.create.same-store-twice`.
+		"the same twice": {[]any{memoryElement(store, nil), memoryElement(store, map[string]any{"access": "read_only"})},
+			"resources contains duplicate memory_store_id: " + store},
+		// 2026-09-02 batch2 `session.create.store-instructions-4097`.
+		"instructions": {[]any{memoryElement(store, nil), memoryElement(createMemoryStore(t, s, "Other"),
+			map[string]any{"instructions": strings.Repeat("x", 4097)})},
+			"resources.1.memory_store.instructions: must be at most 4096 characters"},
+		// 2026-09-02 batch2 `session.create.store-access-bogus`.
+		"bad access": {[]any{memoryElement(store, map[string]any{"access": "write_only"})},
+			`Failed to parse request: resources[0].access: "write_only" is not a valid value; expected one of read_only, read_write`},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+			"agent": agentID, "environment_id": envID, "resources": tc.resources,
+		})
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (%v)", name, status, body)
+			continue
+		}
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
+	}
+
 	// A well-formed id naming no store is a 404, as on the reference and as
 	// GET /v1/memory_stores/{id} answers it here — where an archived one, a
-	// row that exists, stays the 400 above (#668).
+	// row that exists, stays the 400 above (#668) — in the reference's words
+	// (2026-09-02 batch2 `session.create.unknown-store`, #540).
+	ghostStore := "memstore_" + strings.Repeat("0", 23) + "1"
 	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
 		"agent": agentID, "environment_id": envID,
-		"resources": []any{memoryElement("memstore_"+strings.Repeat("0", 23)+"1", nil)},
+		"resources": []any{memoryElement(ghostStore, nil)},
 	})
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "not found") {
-		t.Errorf("unknown store: message %q does not mention %q", msg, "not found")
-	}
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Memory store `"+ghostStore+"` not found.")
 
 	// Eight stores, instructions of exactly 4,096 characters, and explicit
 	// nulls for access and instructions are all accepted — the null

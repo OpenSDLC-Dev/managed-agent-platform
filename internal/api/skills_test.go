@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -410,16 +411,45 @@ func TestSkillUploadFormErrors(t *testing.T) {
 		status, obj := s.doForm("POST", "/v1/skills", w.FormDataContentType(), buf.String())
 		wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", "files[]: Field required")
 	})
+	// A files[] part with no filename is a string where a file was due, in the
+	// reference validator's words and indexed among the files[] parts
+	// (2026-09-12-followups skills-api.json #2
+	// `rec.skill-upload.create.unnamed-part`, behind a display_name part, and
+	// #12 `rec.skill-upload.version.unnamed-part`). Only index 0 was recorded;
+	// index 1 for a second part is the counting inferred from it.
 	t.Run("FilePartWithoutFilename", func(t *testing.T) {
-		var buf bytes.Buffer
-		w := multipart.NewWriter(&buf)
-		h := textproto.MIMEHeader{}
-		h.Set("Content-Disposition", `form-data; name="files[]"`)
-		pw, _ := w.CreatePart(h)
-		_, _ = pw.Write([]byte("content"))
-		_ = w.Close()
-		status, obj := s.doForm("POST", "/v1/skills", w.FormDataContentType(), buf.String())
-		wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+		form := func(displayName string, named ...string) (string, string) {
+			var buf bytes.Buffer
+			w := multipart.NewWriter(&buf)
+			if displayName != "" {
+				_ = w.WriteField("display_name", displayName)
+			}
+			for _, name := range append(named, "") {
+				h := textproto.MIMEHeader{}
+				if name == "" {
+					h.Set("Content-Disposition", `form-data; name="files[]"`)
+				} else {
+					h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="files[]"; filename="%s"`, name))
+				}
+				pw, _ := w.CreatePart(h)
+				_, _ = pw.Write([]byte(testSkillMD))
+			}
+			_ = w.Close()
+			return w.FormDataContentType(), buf.String()
+		}
+		const unnamed = "files[].%d: Expected UploadFile, received: <class 'str'>"
+		ct, body := form("unnamed part")
+		status, obj := s.doForm("POST", "/v1/skills", ct, body)
+		wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf(unnamed, 0))
+
+		skillID, _ := s.createSkill(t)["id"].(string)
+		ct, body = form("")
+		status, obj = s.doForm("POST", "/v1/skills/"+skillID+"/versions", ct, body)
+		wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf(unnamed, 0))
+
+		ct, body = form("", "financial-skill/SKILL.md")
+		status, obj = s.doForm("POST", "/v1/skills", ct, body)
+		wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf(unnamed, 1))
 	})
 	t.Run("OversizedBody", func(t *testing.T) {
 		big := strings.Repeat("x", 33<<20)
@@ -453,15 +483,17 @@ func TestSkillGet(t *testing.T) {
 		t.Errorf("get source = %v, want the create's object", obj["source"])
 	}
 
-	status, obj = s.do("GET", "/v1/skills/skill_0000000000000000000000ok", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
-	// Malformed and short-name-shaped ids are 404s, never 500s.
-	status, obj = s.do("GET", "/v1/skills/no-such-short-name", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
-	status, obj = s.do("GET", "/v1/skills/agent_0000000000000000000000ok", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+	// The unknown skill's 404 is the reference's sentence (2026-09-04
+	// batch1.json #80 `rec81.skills.get.after-cascade`, 2026-09-05 batch1.json
+	// #17 `rec82.skill.get.after-delete`). Malformed and short-name-shaped ids
+	// are 404s too, never 500s, in the same words (checkSkillID).
+	for _, path := range []string{"skill_0000000000000000000000ok", "no-such-short-name",
+		"agent_0000000000000000000000ok"} {
+		status, obj = s.do("GET", "/v1/skills/"+path, nil)
+		wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Skill not found: "+path)
+	}
 	status, obj = s.do("GET", "/v1/skills/%00bad", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Skill not found: \x00bad")
 }
 
 // insertAnthropicSkill plants an imported catalog row the way slice 3's
@@ -566,11 +598,13 @@ func TestSkillVersionCreateAndLatestTracking(t *testing.T) {
 		t.Errorf("skill after version create = %v, want latest_version_id %q", skill, v2)
 	}
 
-	// Versions of anthropic skills are not API-managed.
+	// Versions of anthropic skills are not API-managed. The reference words the
+	// refusal as a malformed custom id (2026-09-04 batch1.json #55
+	// `rec81.versions.create.anthropic-skill`).
 	s.insertAnthropicSkill(t, "xlsx", "Excel", "20250929")
 	ct, body = skillForm(t, nil, []upFile{{name: "financial-skill/SKILL.md", content: testSkillMD}})
 	status, obj = s.doForm("POST", "/v1/skills/xlsx/versions", ct, body)
-	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", "Invalid skill_id format: xlsx")
 
 	// Neither are deletes: the imported catalog cannot be removed through the
 	// management API (rerunning the importer is the operator's path back, so an
@@ -587,10 +621,12 @@ func TestSkillVersionCreateAndLatestTracking(t *testing.T) {
 		t.Errorf("anthropic latest_version_id names version %q, want the planted 20250929", got)
 	}
 
-	// Unknown skill 404s before any upload processing.
+	// Unknown skill 404s before any upload processing, in the words every
+	// recorded skills route uses for one (errSkillNotFound).
 	ct, body = skillForm(t, nil, []upFile{{name: "financial-skill/SKILL.md", content: testSkillMD}})
 	status, obj = s.doForm("POST", "/v1/skills/skill_0000000000000000000000ok/versions", ct, body)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error",
+		"Skill not found: skill_0000000000000000000000ok")
 }
 
 // TestSkillVersionRefusesRenamedFrontmatter pins the reference's
@@ -652,7 +688,13 @@ func TestSkillVersionListLimits(t *testing.T) {
 		"limit must be between 1 and 1000")
 
 	status, body = s.do("GET", "/v1/skills/skill_0000000000000000000000ok/versions", nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error",
+		"Skill not found: skill_0000000000000000000000ok")
+
+	// The collection list's page-token sentence was recorded on that list
+	// alone (TestSkillListParams), so this one keeps ours.
+	status, body = s.do("GET", "/v1/skills/"+id+"/versions?page=bogus", nil)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "invalid page cursor")
 
 	// Cursor pagination over versions.
 	ct, form := skillForm(t, nil, []upFile{{name: "financial-skill/SKILL.md", content: testSkillMD}})
@@ -687,7 +729,15 @@ func TestSkillVersionGet(t *testing.T) {
 	// The slot's accepted forms and its refusals are pinned by
 	// TestSkillVersionAddressing; here, that an id naming nothing is a 404.
 	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/999", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error",
+		"Skill version not found: "+id+" version 999")
+
+	// Another skill's version is a miss under this one, naming both as
+	// addressed (2026-09-04 batch1.json #39 `rec81.versions.get.wrong-skill`).
+	other, _ := s.createSkill(t)["latest_version_id"].(string)
+	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/"+other, nil)
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error",
+		"Skill version not found: "+id+" version "+other)
 }
 
 func TestSkillVersionDeleteRecomputesLatest(t *testing.T) {
@@ -729,8 +779,15 @@ func TestSkillVersionDeleteRecomputesLatest(t *testing.T) {
 		t.Errorf("the version delete owes %v, want exactly the deleted version's archive %v", got, want)
 	}
 
+	// Deleting it again is the reference's version miss (2026-09-04
+	// batch1.json #64 `rec81.versions.delete.twice`), by id and, through the
+	// count under the skill's lock, by number alike.
 	status, del = s.do("DELETE", "/v1/skills/"+id+"/versions/"+v3, nil)
-	wantErr(t, status, del, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, del, http.StatusNotFound, "not_found_error",
+		"Skill version not found: "+id+" version "+v3)
+	status, del = s.do("DELETE", "/v1/skills/"+id+"/versions/"+v3number, nil)
+	wantErrMsg(t, status, del, http.StatusNotFound, "not_found_error",
+		"Skill version not found: "+id+" version "+v3number)
 
 	// Deleting the newest again rolls back again. The last one standing cannot
 	// be deleted at all — that refusal is TestSkillVersionDeleteRefusesOnlyVersion's.
@@ -824,8 +881,15 @@ func TestSkillDownloadErrors(t *testing.T) {
 	id, _ := created["id"].(string)
 	version, _ := created["latest_version_id"].(string)
 
+	// The download answers every version miss as the skill's 404, even under
+	// a skill that exists — another skill's version included (2026-09-04
+	// batch2.json #148 `rec81.envkey.versions.content.wrong-skill`), where the
+	// metadata route names the version (TestSkillVersionGet).
 	status, obj := s.do("GET", "/v1/skills/"+id+"/versions/999/content", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Skill not found: "+id)
+	other, _ := s.createSkill(t)["latest_version_id"].(string)
+	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/"+other+"/content", nil)
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Skill not found: "+id)
 
 	// A version row whose archive vanished from object storage is an operator
 	// incident, not a 404: the resource exists. The blob key is still keyed on
@@ -1152,10 +1216,13 @@ func TestSkillVersionAddressing(t *testing.T) {
 		status, obj := s.do("GET", "/v1/skills/"+id+"/versions/"+slot, nil)
 		wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
 	}
-	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/skver_nosuchversionid", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
-	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/999", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+	// The 404 names the slot as addressed, whichever form it took (2026-09-04
+	// batch1.json #39 `rec81.versions.get.wrong-skill` for the id form).
+	for _, slot := range []string{"skver_nosuchversionid", "999"} {
+		status, obj = s.do("GET", "/v1/skills/"+id+"/versions/"+slot, nil)
+		wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error",
+			"Skill version not found: "+id+" version "+slot)
+	}
 
 	// "latest" on a skill that has none is a 404, not a 500.
 	if _, err := s.pool.Exec(t.Context(),
@@ -1163,7 +1230,8 @@ func TestSkillVersionAddressing(t *testing.T) {
 		t.Fatalf("clear latest_version: %v", err)
 	}
 	status, obj = s.do("GET", "/v1/skills/"+id+"/versions/latest", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error",
+		"Skill version not found: "+id+" version latest")
 }
 
 // TestSkillLatestAliasRoundTripsToDownload pins the two-call flow the SDK's
@@ -1350,9 +1418,12 @@ func TestSkillDeleteCascadesOverVersions(t *testing.T) {
 		{name: "financial-skill/SKILL.md", content: testSkillMD},
 		{name: "financial-skill/v2.txt", content: "second"},
 	})
-	if st, obj := s.doForm("POST", "/v1/skills/"+id+"/versions", ct, form); st != http.StatusOK {
-		t.Fatalf("second version: %d %v", st, obj)
+	st, v2obj := s.doForm("POST", "/v1/skills/"+id+"/versions", ct, form)
+	if st != http.StatusOK {
+		t.Fatalf("second version: %d %v", st, v2obj)
 	}
+	v2, _ := v2obj["id"].(string)
+	v2number := s.versionNumber(t, id, v2)
 	if n := s.blobs.Len(); n != 2 {
 		t.Fatalf("stored objects = %d, want one per version", n)
 	}
@@ -1361,12 +1432,26 @@ func TestSkillDeleteCascadesOverVersions(t *testing.T) {
 	if status != http.StatusOK || obj["id"] != id || obj["type"] != "skill_deleted" {
 		t.Fatalf("delete skill: %d %v", status, obj)
 	}
-	status, obj = s.do("GET", "/v1/skills/"+id, nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
-	status, obj = s.do("GET", "/v1/skills/"+id+"/versions", nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
-	status, obj = s.do("DELETE", "/v1/skills/"+id, nil)
-	wantErr(t, status, obj, http.StatusNotFound, "not_found_error")
+	// Every route then answers the skill's 404 in the reference's words: the
+	// skill's get [80], its versions list [81], a version's get by id [82] —
+	// the one route that would otherwise name the version — and the delete
+	// again [83] (2026-09-04 batch1.json `rec81.*.after-cascade`,
+	// `rec81.skills.delete.twice`). The download, the alias and a version
+	// delete were not recorded after a cascade; they answer the same 404.
+	notFound := "Skill not found: " + id
+	for _, req := range [][2]string{
+		{"GET", "/v1/skills/" + id},
+		{"GET", "/v1/skills/" + id + "/versions"},
+		{"GET", "/v1/skills/" + id + "/versions/" + v2},
+		{"GET", "/v1/skills/" + id + "/versions/latest"},
+		{"GET", "/v1/skills/" + id + "/versions/" + v2 + "/content"},
+		{"DELETE", "/v1/skills/" + id + "/versions/" + v2},
+		{"DELETE", "/v1/skills/" + id + "/versions/" + v2number},
+		{"DELETE", "/v1/skills/" + id},
+	} {
+		status, obj = s.do(req[0], req[1], nil)
+		wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", notFound)
+	}
 
 	var rows int
 	if err := s.pool.QueryRow(t.Context(),
@@ -1439,4 +1524,22 @@ func TestSkillListParams(t *testing.T) {
 		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
 			"source must be one of custom, anthropic")
 	}
+	// A page token the list cannot use gets the reference's sentence
+	// (2026-09-04 batch1.json #28 `rec81.skills.list.bad-cursor`, page=bogus),
+	// and so does one that decodes but belongs to another list's ordering —
+	// a token is opaque, so the client cannot tell the two apart.
+	status, body := s.do("GET", "/v1/skills?limit=2&page=bogus", nil)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"page is not a valid page token.")
+	for name, cur := range foreignCursors {
+		t.Run(name, func(t *testing.T) {
+			status, body := s.do("GET", "/v1/skills?page="+url.QueryEscape(cur), nil)
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+				"page is not a valid page token.")
+		})
+	}
+	// A bad limit beside a bad token is still the limit's refusal.
+	status, body = s.do("GET", "/v1/skills?limit=0&page=bogus", nil)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"limit must be between 1 and 1000")
 }

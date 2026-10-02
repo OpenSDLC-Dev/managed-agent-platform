@@ -41,6 +41,17 @@ func TestInferenceGeoInvalidAtEveryAPIBoundary(t *testing.T) {
 			wantErr(t, status, got, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
+
+	// A bad value string is refused on the agent routes in the reference's
+	// words, which name no path and so read alike on create and update
+	// (#540). Recording: managed-agents-wire-recordings 2026-09-12/batch1.json
+	// idx 9 rec91.model.update.geo-bogus.
+	const want = "`inference_geo`: must be one of [\"global\" \"us\"]: invalid inference_geo value"
+	model := map[string]any{"id": "custom", "inference_geo": "bogus"}
+	status, got := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"model": model})
+	wantErrMsg(t, status, got, http.StatusBadRequest, "invalid_request_error", want)
+	status, got = s.do(http.MethodPost, "/v1/agents", map[string]any{"name": "invalid", "model": model})
+	wantErrMsg(t, status, got, http.StatusBadRequest, "invalid_request_error", want)
 }
 
 func TestAgentInferenceGeoSDKNullCreatesUnset(t *testing.T) {

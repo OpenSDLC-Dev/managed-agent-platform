@@ -95,9 +95,20 @@ func (s *server) createMemoryStore(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "name", "description", "metadata"); err != nil {
 		return nil, err
 	}
-	name, err := requiredString(obj, "name")
+	name, nameSet, nameNull, err := stringField(obj, "name")
 	if err != nil {
 		return nil, err
+	}
+	// An absent name and an empty one take the reference's validator's words
+	// (2026-09-02 free_batch1 `store.create.no-name`, `store.create.empty-name`;
+	// #540); a null one, never recorded, keeps requiredString's.
+	switch {
+	case !nameSet:
+		return nil, errInvalid("name: Field required")
+	case nameNull:
+		return nil, errInvalid("name is required")
+	case name == "":
+		return nil, errInvalid("name: minimum string length is 1")
 	}
 	if err := validateMemoryStoreName(name); err != nil {
 		return nil, err
@@ -148,8 +159,15 @@ type memoryStoreRow struct {
 func (s *server) getMemoryStore(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if err := checkID(id, "memory store"); err != nil {
-		return nil, err
+	// The reference's words for a missing store on this route (2026-09-05
+	// batch8 `item1.read.absent-store-control`, batch4
+	// `rec85.teardown.store.get.after-delete`; #540), for a malformed id as for
+	// an absent one (checkID's #135). Only this route was recorded with them:
+	// the store's update, archive and delete keep checkID's, and the memories
+	// beneath a store answer the "memory store %s not found" recorded there.
+	notFound := errNotFound("memory store not found: %s", id)
+	if !domain.ID(id).Valid() {
+		return nil, notFound
 	}
 	// No archived filter: retrieve returns the store "including archived
 	// stores" (the spec's BetaManagedAgentsGetMemoryStoreResponse).
@@ -159,7 +177,7 @@ func (s *server) getMemoryStore(r *http.Request) (any, error) {
 		 FROM memory_stores WHERE id = $1`, id).
 		Scan(&row.name, &row.description, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("memory store %s not found", id)
+		return nil, notFound
 	}
 	if err != nil {
 		return nil, err
@@ -236,9 +254,10 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// Archived is read-only (the vault rule — plan 36 decision 3), the 400 the
-	// reference was recorded answering (docs/DIVERGENCES.md).
+	// reference was recorded answering, in its words (2026-09-02 free_batch1
+	// `store.update.archived.rename`; #540).
 	if row.archivedAt != nil {
-		return nil, errInvalid("memory store %s is archived", id)
+		return nil, errMemoryStoreArchived(id)
 	}
 	metadata := map[string]string{}
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {

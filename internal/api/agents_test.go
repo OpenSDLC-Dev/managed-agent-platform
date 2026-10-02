@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
@@ -124,6 +125,36 @@ func TestAgentToolConfigTypeDiscriminator(t *testing.T) {
 		"tools": []any{map[string]any{"type": "agent_toolset_20260401",
 			"configs": []any{map[string]any{"name": "bash", "type": "read"}}}},
 	}), "configs[0].type")
+}
+
+// The configs[] refusals the reference was recorded answering on agent create
+// carry its words, the path bare on create and opened by "agent." on update,
+// the reference's update prefix for this layer (2026-09-12/batch1.json idx 67
+// rec91.web.config.fetch-empty) (#540). Recording: managed-agents-wire-recordings
+// 2026-09-02/batch2.json, the idx and probe each case names. The tools[] index
+// is the entry's own, so each request puts a custom tool first.
+func TestAgentToolConfigRefusalsAreTheReferences(t *testing.T) {
+	s := newTestServer(t)
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	for _, tc := range []struct {
+		name   string
+		config map[string]any
+		want   string
+	}{
+		{"idx 131 agent.create.config-unknown-key", map[string]any{"name": "bash", "bogus": 1},
+			`tools[1].configs[0].bogus: Extra inputs are not permitted for name "bash"`},
+		{"idx 129 agent.create.config-type-only", map[string]any{"type": "bash"},
+			`tools[1].configs[0].name: must be "bash" on a config of type "bash"`},
+		{"idx 130 agent.create.config-name-type-mismatch", map[string]any{"name": "bash", "type": "grep"},
+			`tools[1].configs[0].type: "grep" does not match name "bash"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tools := []any{customTool("mine"), map[string]any{"type": "agent_toolset_20260401", "configs": []any{tc.config}}}
+			status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{"tools": tools}))
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "Failed to parse request: "+tc.want)
+			wantUpdateRejected(t, s, id, map[string]any{"tools": tools}, "Failed to parse request: agent."+tc.want)
+		})
+	}
 }
 
 func TestAgentCreateMinimal(t *testing.T) {
@@ -380,10 +411,26 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 		t.Errorf("omitted system was not preserved: %v", updated["system"])
 	}
 
-	// Stale version → 409 with the error envelope. The reference's recorded 409
-	// carried a mutating field too, so this stays our shape for a stale check.
+	// Stale version → 409 with the error envelope, in the reference's words
+	// (2026-09-02 recording, batch2.json idx 126 `agent.update.stale-version`,
+	// whose request carried a mutating field too). The sentence names neither
+	// version, so the operator's log line carries both (#540).
+	logs := captureLogs(t, slog.LevelInfo)
 	status, body = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 1, "name": "loser"})
-	wantErr(t, status, body, http.StatusConflict, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error",
+		"Concurrent modification detected. Please fetch the latest version and retry.")
+	line := ""
+	for _, l := range strings.Split(logs(), "\n") {
+		if strings.Contains(l, "agent update refused: stale version") {
+			line = l
+		}
+	}
+	for _, want := range []string{"agent_id=" + id, "expected_version=1", "current_version=3",
+		"request_id=" + body["request_id"].(string)} {
+		if !strings.Contains(line, want) {
+			t.Errorf("stale-version log line %q lacks %q", line, want)
+		}
+	}
 
 	// The conflicting update changed nothing.
 	_, got := s.do(http.MethodGet, "/v1/agents/"+id, nil)
@@ -660,8 +707,14 @@ func TestAgentArchive(t *testing.T) {
 		t.Errorf("get archived: %d %v", status, got["archived_at"])
 	}
 
+	// An archived agent refuses an update, in the reference's words (#540).
+	// Recording: managed-agents-wire-recordings 2026-09-02/batch2.json idx 147
+	// agent.update.archived.
+	status, body := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"description": "x"})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Cannot modify archived agent")
+
 	// Archive of an unknown agent → 404.
-	status, body := s.do(http.MethodPost, "/v1/agents/agent_missing/archive", nil)
+	status, body = s.do(http.MethodPost, "/v1/agents/agent_missing/archive", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
 

@@ -62,6 +62,43 @@ type limitedNetworkJSON struct {
 	AllowPackageManagers bool     `json:"allow_package_managers"`
 }
 
+// errEnvironmentNotFound is the environment's 404 in the reference's words,
+// recorded on its delete and archive, on a session create naming it and on the
+// console's key issuance and listing (#540). Every route that looks an
+// environment up answers it, so a missing environment reads one way wherever
+// it is named.
+func errEnvironmentNotFound(id string) *apiError {
+	return errNotFound("Environment %s not found.", id)
+}
+
+// checkEnvironmentID is checkID for an environment: a malformed id takes the
+// same 404 an absent one does (#135), in the same words.
+func checkEnvironmentID(id string) error {
+	if !domain.ID(id).Valid() {
+		return errEnvironmentNotFound(id)
+	}
+	return nil
+}
+
+// rejectExtraEnvironmentKeys is rejectUnknownKeys for an environment body,
+// whose reference validator is pydantic's and words an unknown key its own way
+// (2026-09-03 batch1 `env.create.cloud`, #540).
+func rejectExtraEnvironmentKeys(obj map[string]json.RawMessage) error {
+	if key, ok := firstUnknownKey(obj, "name", "description", "config", "scope", "metadata"); ok {
+		return errInvalid("%s: Extra inputs are not permitted", key)
+	}
+	return nil
+}
+
+// environmentTypeName is a kind as the reference's kind-change refusal names
+// it (2026-09-12 batch1 `rec91.kind.*`): "Cloud" and "BYOC".
+func environmentTypeName(kind string) string {
+	if kind == string(domain.EnvSelfHosted) {
+		return "BYOC"
+	}
+	return "Cloud"
+}
+
 // normalizeEnvConfig validates the config union and produces the stored,
 // fully-populated form. existing is the currently stored config when merging
 // an update (nil on create): per the reference's update semantics, omitted
@@ -77,8 +114,9 @@ func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, norm
 		return "", nil, errInvalid("config must be an object")
 	}
 	var typ string
+	tagged := false
 	if rawType, ok := obj["type"]; ok {
-		_ = json.Unmarshal(rawType, &typ)
+		tagged = !isNull(rawType) && json.Unmarshal(rawType, &typ) == nil
 	}
 	switch typ {
 	case string(domain.EnvSelfHosted):
@@ -127,6 +165,13 @@ func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, norm
 		normalized, err = json.Marshal(base)
 		return typ, normalized, err
 	default:
+		if tagged {
+			// The reference's words for a tag it does not know (2026-09-05
+			// batch8 `probe.env.kind-enum`, #540). An absent or non-string
+			// type is a different refusal there, never recorded, so it keeps
+			// ours below.
+			return "", nil, errInvalid("config: Input tag '%s' found using 'type' does not match any of the expected tags: 'cloud', 'self_hosted'", typ)
+		}
 		return "", nil, errInvalid(`config.type must be "cloud" or "self_hosted"`)
 	}
 }
@@ -142,7 +187,8 @@ func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, norm
 // "Specifies" is read as a non-empty list, not a present key: every stored
 // cloud config carries all six lists (normalizeEnvConfig's own base fills
 // them), so key presence would refuse every limited environment ever created
-// here. The message is ours, and names both remedies the caller has.
+// here. The message is ours — no recording holds the reference's (#540) — and
+// names both remedies the caller has.
 //
 // It runs on the merged config, after both blocks are parsed, so the two halves
 // of the offending shape cannot arrive separately: an update that adds packages
@@ -462,8 +508,14 @@ func (s *server) insertEnvironmentInTx(ctx context.Context, tx pgx.Tx, body json
 	if err != nil {
 		return false, err
 	}
-	if err := rejectUnknownKeys(obj, "name", "description", "config", "scope", "metadata"); err != nil {
+	if err := rejectExtraEnvironmentKeys(obj); err != nil {
 		return false, err
+	}
+	if _, ok := obj["name"]; !ok {
+		// The reference's validator words an absent key its own way
+		// (2026-09-03 batch1 `env.create.bogus-probe`, #540); a null or empty
+		// name, never recorded, keeps ours below.
+		return false, errInvalid("name: Field required")
 	}
 	name, err := requiredString(obj, "name")
 	if err != nil {
@@ -508,7 +560,7 @@ type environmentRow struct {
 func (s *server) getEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if err := checkID(id, "environment"); err != nil {
+	if err := checkEnvironmentID(id); err != nil {
 		return nil, err
 	}
 	var row environmentRow
@@ -518,7 +570,7 @@ func (s *server) getEnvironment(r *http.Request) (any, error) {
 		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("environment %s not found", id)
+		return nil, errEnvironmentNotFound(id)
 	}
 	if err != nil {
 		return nil, err
@@ -538,13 +590,13 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknownKeys(obj, "name", "description", "config", "scope", "metadata"); err != nil {
+	if err := rejectExtraEnvironmentKeys(obj); err != nil {
 		return nil, err
 	}
 	if err := parseScope(obj); err != nil {
 		return nil, err
 	}
-	if err := checkID(id, "environment"); err != nil {
+	if err := checkEnvironmentID(id); err != nil {
 		return nil, err
 	}
 
@@ -562,7 +614,7 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 		Scan(&row.name, &kind, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("environment %s not found", id)
+		return nil, errEnvironmentNotFound(id)
 	}
 	if err != nil {
 		return nil, err
@@ -603,7 +655,8 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 		// executor and a BYOC worker), so a config update that flips the kind is
 		// rejected rather than silently switching hands mid-flight.
 		if newKind != kind {
-			return nil, withDetails(errInvalid("environment kind cannot be changed (from %s to %s)", kind, newKind),
+			return nil, withDetails(errInvalid("Cannot change environment type from %s to %s",
+				environmentTypeName(kind), environmentTypeName(newKind)),
 				errorDetails{ErrorCode: "invalid_config_type_change"})
 		}
 	}
@@ -705,7 +758,7 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if err := checkID(id, "environment"); err != nil {
+	if err := checkEnvironmentID(id); err != nil {
 		return nil, err
 	}
 	var row environmentRow
@@ -718,7 +771,7 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("environment %s not found", id)
+		return nil, errEnvironmentNotFound(id)
 	}
 	if err != nil {
 		return nil, err
@@ -873,7 +926,7 @@ func (s *server) selfHostedQueueRefusal(ctx context.Context, envID string) error
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if err := checkID(id, "environment"); err != nil {
+	if err := checkEnvironmentID(id); err != nil {
 		return nil, err
 	}
 	force, err := parseBoolParam(r.URL.Query(), "force")
@@ -899,7 +952,7 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
-		return nil, errNotFound("environment %s not found", id)
+		return nil, errEnvironmentNotFound(id)
 	}
 	return map[string]string{"id": id, "type": "environment_deleted"}, nil
 }

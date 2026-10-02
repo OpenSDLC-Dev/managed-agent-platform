@@ -481,8 +481,10 @@ func TestDeletedMemoryStoreFailsAFireAsClassified(t *testing.T) {
 	if run["session_id"] != nil || re["type"] != "session_resource_not_found_error" {
 		t.Errorf("manual run = session %v, error %v; want no session and session_resource_not_found_error", run["session_id"], re)
 	}
-	if msg, _ := re["message"].(string); !strings.Contains(msg, storeID+" not found") {
-		t.Errorf("error.message = %q, want it to name the missing store", msg)
+	// The session create's 404 in the reference's words (2026-09-02 batch2
+	// `session.create.unknown-store`, #540), carried into the run's error.
+	if msg, _ := re["message"].(string); msg != "Memory store `"+storeID+"` not found." {
+		t.Errorf("error.message = %q, want the reference's sentence naming the missing store", msg)
 	}
 	if code, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil); code != http.StatusOK || d["status"] != "active" {
 		t.Fatalf("after the manual run: %d %v, want active — only a scheduled fire pauses", code, d["status"])

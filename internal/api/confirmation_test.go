@@ -2,7 +2,10 @@ package api_test
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -595,11 +598,34 @@ func TestConfirmationValidation(t *testing.T) {
 		status, _ := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events", map[string]any{"events": evs})
 		return status
 	}
+	// An unknown reference and an ungated tool are one refusal in the
+	// reference's words (2026-09-02 batch2
+	// `sessT.send.tool_confirmation.unknown-id` and
+	// `tool_confirmation.not-pending`, #540); the operator's log line keeps
+	// which reason fired.
+	logs := captureLogs(t, slog.LevelInfo)
+	wantNoPending := func(ref, reason string) {
+		t.Helper()
+		status, body := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events",
+			map[string]any{"events": []any{confirm(ref, "allow", nil)}})
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("No pending tool permission request found for tool_use_id %q at event index 0", ref))
+		line := ""
+		for _, l := range strings.Split(logs(), "\n") {
+			if strings.Contains(l, "session events send refused: no pending tool permission request") &&
+				strings.Contains(l, "request_id="+body["request_id"].(string)) {
+				line = l
+			}
+		}
+		for _, want := range []string{"session_id=" + sessionID, "tool_use_id=" + ref, fmt.Sprintf("reason=%q", reason)} {
+			if !strings.Contains(line, want) {
+				t.Errorf("no-pending log line %q lacks %q", line, want)
+			}
+		}
+	}
 
 	// Unknown reference.
-	if got := post(confirm("sevt_00000000000000000000000000", "allow", nil)); got != http.StatusBadRequest {
-		t.Errorf("unknown ref: status %d, want 400", got)
-	}
+	wantNoPending("sevt_00000000000000000000000000", "names no confirmable tool use in this session")
 	// deny_message is only valid with a deny (inbound validation).
 	if got := post(confirm(askID, "allow", map[string]any{"deny_message": "x"})); got != http.StatusBadRequest {
 		t.Errorf("deny_message on allow: status %d, want 400", got)
@@ -610,9 +636,7 @@ func TestConfirmationValidation(t *testing.T) {
 	}
 	// A tool that was not gated for confirmation cannot be confirmed.
 	allowID := appendToolUseWithPerm(t, s, sessionID, "grep", "allow")
-	if got := post(confirm(allowID, "allow", nil)); got != http.StatusBadRequest {
-		t.Errorf("non-ask tool: status %d, want 400", got)
-	}
+	wantNoPending(allowID, "tool use was not gated for confirmation")
 	// The valid confirmation lands…
 	if got := post(confirm(askID, "allow", nil)); got != http.StatusOK {
 		t.Errorf("valid confirm: status %d, want 200", got)

@@ -28,6 +28,11 @@ func TestAuthRejectsMissingAndWrongKeys(t *testing.T) {
 		if name == "missing key" && res.Header.Get("request-id") == "" {
 			t.Error("error responses must carry a request-id header")
 		}
+		// No key at all is refused in the reference's words (2026-09-19
+		// self-hosted-docker worker-network idx 0, a credential-less GET; #540).
+		if name == "missing key" {
+			wantErrMsg(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error", "x-api-key header is required")
+		}
 	}
 }
 
@@ -78,14 +83,34 @@ func TestAuthAcceptsValidKeyAndIgnoresAnthropicHeaders(t *testing.T) {
 	}
 }
 
+// TestUnknownRouteAndMethodReturnErrorEnvelope pins the fallbacks' envelopes
+// and, since #540, the reference's own words: "Not found" for an unknown path
+// (2026-09-05-dreams batch1 idx 9 `rec91.control.nonsense-path`, idx 20
+// `/v1/dreamz`; 2026-09-03 batch2 idx 270 `/v1/outcomes`), "Not Found" for one
+// under the deployment and dream routes (2026-09-12-console-141 api-fixtures
+// idx 22 `deployment.final-runs`; 2026-09-05-dreams batch1 idx 21
+// `rec91.control.dreams.extra-segment`), and "Method Not Allowed" for a known
+// path's unsupported method (2026-09-05-dreams batch1 idx 23
+// `rec91.control.dreams.delete`).
 func TestUnknownRouteAndMethodReturnErrorEnvelope(t *testing.T) {
 	s := newTestServer(t)
 
-	status, body := s.do(http.MethodGet, "/v1/nope", nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	for path, want := range map[string]string{
+		"/v1/nope":                          "Not found",
+		"/v1/nonsense_route_does_not_exist": "Not found",
+		"/v1/dreamz":                        "Not found",
+		"/v1/outcomes":                      "Not found",
+		"/v1/deployments/depl_x/runs":       "Not Found",
+		"/v1/dreams/drm_x/bogus":            "Not Found",
+	} {
+		status, body := s.do(http.MethodGet, path, nil)
+		wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", want)
+	}
 
-	status, body = s.do(http.MethodPut, "/v1/agents", nil)
-	wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
+	status, body := s.do(http.MethodPut, "/v1/agents", nil)
+	wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
+	status, body = s.do(http.MethodDelete, "/v1/dreams/drm_x", nil)
+	wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
 }
 
 func TestEnsureAPIKeyIsIdempotentAndStoresOnlyHashes(t *testing.T) {

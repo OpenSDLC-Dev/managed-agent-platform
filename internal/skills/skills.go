@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	"regexp"
 	"sort"
 	"strings"
@@ -196,7 +197,14 @@ func FromZip(data []byte) (*Bundle, error) {
 	}
 	// Extraction (ours and the reference worker's alike) skips a member whose
 	// type bits are not a regular file's, so a manifest stored as a symlink or
-	// FIFO entry would validate here and never materialize.
+	// FIFO entry would validate here and never materialize. The reference
+	// refuses the symlink in its own words, which name the archive rather than
+	// the manifest (2026-09-12-followups skills-api.json #5, #15; #540); it
+	// accepts the FIFO (#6, #16), so that arm is a refusal of ours alone and
+	// keeps our wording (#630). Only the manifest is checked, not every entry.
+	if skillMD.Mode()&fs.ModeSymlink != 0 {
+		return nil, fmt.Errorf("archives must not contain symbolic links")
+	}
 	if !skillMD.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s must be a regular file", skillMDName)
 	}
@@ -253,6 +261,20 @@ func checkDirectoryName(dir, name string) error {
 	return nil
 }
 
+// LengthError refuses a frontmatter name or description over its cap. Its
+// message is the reference's own sentence, recorded for both fields on both
+// upload routes (2026-09-12-followups skills-api.json #8, #9, #18, #19; #540),
+// and it names neither; Field and Limit keep what it drops, for the API's
+// rejection log.
+type LengthError struct {
+	Field string // "name" or "description"
+	Limit int
+}
+
+func (e *LengthError) Error() string {
+	return "`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits"
+}
+
 // parseFrontmatter extracts and validates name/description from SKILL.md's
 // YAML frontmatter. Unknown keys are tolerated.
 func parseFrontmatter(md []byte) (name, description string, err error) {
@@ -271,7 +293,7 @@ func parseFrontmatter(md []byte) (name, description string, err error) {
 		return "", "", fmt.Errorf("%s frontmatter is missing name", skillMDName)
 	}
 	if len(fm.Name) > maxNameLen {
-		return "", "", fmt.Errorf("name must be at most %d characters", maxNameLen)
+		return "", "", &LengthError{Field: "name", Limit: maxNameLen}
 	}
 	if !nameRe.MatchString(fm.Name) {
 		return "", "", fmt.Errorf("name %q must contain only lowercase letters, digits, and hyphens", fm.Name)
@@ -288,7 +310,7 @@ func parseFrontmatter(md []byte) (name, description string, err error) {
 		return "", "", fmt.Errorf("description is not valid UTF-8 text")
 	}
 	if utf8.RuneCountInString(fm.Description) > maxDescriptionLen {
-		return "", "", fmt.Errorf("description must be at most %d characters", maxDescriptionLen)
+		return "", "", &LengthError{Field: "description", Limit: maxDescriptionLen}
 	}
 	if xmlTagRe.MatchString(fm.Description) {
 		return "", "", fmt.Errorf("description must not contain XML tags")

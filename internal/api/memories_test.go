@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -153,20 +154,20 @@ func TestMemoryCRUD(t *testing.T) {
 		t.Fatalf("rename: status %d (%v)", status, renamed)
 	}
 
-	// Delete is a tombstone; the memory then 404s on every route.
+	// Delete is a tombstone; the memory then 404s on every route — the read in
+	// the reference's words (2026-09-02 free_batch1 idx 110 `mem.get.deleted`;
+	// #540), the update and the delete, never recorded missing one, in ours.
 	status, tomb := s.do(http.MethodDelete, "/v1/memory_stores/"+store+"/memories/"+id, nil)
 	if status != http.StatusOK || tomb["type"] != "memory_deleted" || tomb["id"] != id {
 		t.Fatalf("delete: status %d (%v)", status, tomb)
 	}
-	for _, call := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/memory_stores/" + store + "/memories/" + id},
-		{http.MethodPost, "/v1/memory_stores/" + store + "/memories/" + id},
-		{http.MethodDelete, "/v1/memory_stores/" + store + "/memories/" + id},
+	for _, call := range []struct{ method, path, msg string }{
+		{http.MethodGet, "/v1/memory_stores/" + store + "/memories/" + id, "memory `" + id + "` not found"},
+		{http.MethodPost, "/v1/memory_stores/" + store + "/memories/" + id, "memory " + id + " not found"},
+		{http.MethodDelete, "/v1/memory_stores/" + store + "/memories/" + id, "memory " + id + " not found"},
 	} {
 		status, resp := s.do(call.method, call.path, map[string]any{"content": "x"})
-		if status != http.StatusNotFound {
-			t.Errorf("%s %s after delete: status %d (%v)", call.method, call.path, status, resp)
-		}
+		wantErrMsg(t, status, resp, http.StatusNotFound, "not_found_error", call.msg)
 	}
 	// A memory addressed under the wrong store is not found either, and an
 	// unknown store 404s before any collection under it answers.
@@ -310,13 +311,18 @@ func TestMemoryContentRules(t *testing.T) {
 		"null":         {"path": "/a.md", "content": nil},
 		"not a string": {"path": "/a.md", "content": 7},
 		"unknown key":  {"path": "/a.md", "content": "x", "surprise": true},
-		"over 100 kB":  {"path": "/a.md", "content": strings.Repeat("x", 102401)},
 	} {
 		status, resp := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories", body)
 		if status != http.StatusBadRequest {
 			t.Errorf("create with %s: status %d (%v)", name, status, resp)
 		}
 	}
+	// Over 100 kB, in the reference's words (2026-09-02 free_batch1 idx 30
+	// `mem.create.102401-bytes`; #540).
+	const tooBig = "content must be at most 102400 bytes"
+	status, resp := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories",
+		map[string]any{"path": "/a.md", "content": strings.Repeat("x", 102401)})
+	wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", tooBig)
 	empty := createMemory(t, s, store, "/empty.md", "")
 	if empty["content_size_bytes"] != float64(0) || empty["content_sha256"] != digest("") {
 		t.Errorf("an empty memory: %v", empty)
@@ -325,12 +331,10 @@ func TestMemoryContentRules(t *testing.T) {
 	if big["content_size_bytes"] != float64(102400) {
 		t.Errorf("100 kB exactly: %v", big["content_size_bytes"])
 	}
-	// And on update.
-	status, resp := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+big["id"].(string),
+	// And on update, which shares the rule and its words.
+	status, resp = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+big["id"].(string),
 		map[string]any{"content": strings.Repeat("x", 102401)})
-	if status != http.StatusBadRequest {
-		t.Errorf("update over 100 kB: status %d (%v)", status, resp)
-	}
+	wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", tooBig)
 }
 
 // A body carrying a byte that is not valid UTF-8 is refused whole, on create
@@ -374,29 +378,43 @@ func TestMemoryRejectsInvalidUTF8(t *testing.T) {
 func TestMemoryPathOccupancy(t *testing.T) {
 	s := newTestServer(t)
 
-	conflict := func(t *testing.T, store, path string, body map[string]any, wantID, wantPath string) {
+	conflict := func(t *testing.T, store, path string, body map[string]any, wantID, wantPath, wantMsg string) {
 		t.Helper()
 		status, resp := s.do(http.MethodPost, "/v1/memory_stores/"+store+path, body)
-		wantErr(t, status, resp, http.StatusConflict, "memory_path_conflict_error")
+		wantErrMsg(t, status, resp, http.StatusConflict, "memory_path_conflict_error", wantMsg)
 		inner, _ := resp["error"].(map[string]any)
 		if inner["conflicting_memory_id"] != wantID || inner["conflicting_path"] != wantPath {
 			t.Errorf("conflict names %v at %v, want %s at %s",
 				inner["conflicting_memory_id"], inner["conflicting_path"], wantID, wantPath)
 		}
 	}
+	// The reference's words tell an occupied path from a prefix relation, and
+	// end the first with the next step for a create or a rename (2026-09-02
+	// free_batch1 idx 24 `mem.create.at-occupied`, idx 25
+	// `mem.create.under-existing-file`, idx 23 `mem.rename.onto-occupied`,
+	// idx 21 `mem.rename.onto-ancestor`, idx 22
+	// `mem.rename.onto-descendant-of-other`; #540).
+	prefixed := func(path string) string {
+		return "path `" + path + "` conflicts with existing memory at `/a/b`: a memory and a path prefix of it cannot coexist. Delete or rename the other memory first."
+	}
 
 	// A descendant blocks a create at its ancestor, and the reverse.
 	store := createMemoryStore(t, s, "occupancy")
 	deep := createMemory(t, s, store, "/a/b", "deep")["id"].(string)
-	conflict(t, store, "/memories", map[string]any{"path": "/a", "content": "x"}, deep, "/a/b")
-	conflict(t, store, "/memories", map[string]any{"path": "/a/b", "content": "x"}, deep, "/a/b")
-	conflict(t, store, "/memories", map[string]any{"path": "/a/b/c", "content": "x"}, deep, "/a/b")
+	conflict(t, store, "/memories", map[string]any{"path": "/a", "content": "x"}, deep, "/a/b", prefixed("/a"))
+	conflict(t, store, "/memories", map[string]any{"path": "/a/b", "content": "x"}, deep, "/a/b",
+		"path `/a/b` is already used by `"+deep+"`; use update to modify it")
+	conflict(t, store, "/memories", map[string]any{"path": "/a/b/c", "content": "x"}, deep, "/a/b", prefixed("/a/b/c"))
 
-	// Rename onto each — spec-stated for an occupied path, inferred for an
+	// Rename onto each — spec-stated for an occupied path, and recorded for an
 	// ancestor or a descendant of one.
 	mover := createMemory(t, s, store, "/mover.md", "m")["id"].(string)
-	for _, path := range []string{"/a", "/a/b", "/a/b/c"} {
-		conflict(t, store, "/memories/"+mover, map[string]any{"path": path}, deep, "/a/b")
+	for path, msg := range map[string]string{
+		"/a":     prefixed("/a"),
+		"/a/b":   "path `/a/b` is already used by `" + deep + "`; delete it first to rename-and-replace",
+		"/a/b/c": prefixed("/a/b/c"),
+	} {
+		conflict(t, store, "/memories/"+mover, map[string]any{"path": path}, deep, "/a/b", msg)
 	}
 	// Renaming a memory onto its own path is the no-op, not a self-conflict.
 	status, same := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+mover,
@@ -428,10 +446,6 @@ func TestMemoryUpdateSemantics(t *testing.T) {
 		"an unknown key":        {"surprise": true},
 		"a bad precondition":    {"content": "x", "precondition": map[string]any{"type": "etag"}},
 		"a string precondition": {"content": "x", "precondition": "sha"},
-		"a typeless precondition": {"content": "x",
-			"precondition": map[string]any{"content_sha256": digest("x")}},
-		"a bodyless precondition": {"content": "x",
-			"precondition": map[string]any{"type": "content_sha256"}},
 		"an over-full precondition": {"content": "x", "precondition": map[string]any{
 			"type": "content_sha256", "content_sha256": digest("x"), "surprise": 1}},
 	} {
@@ -440,12 +454,37 @@ func TestMemoryUpdateSemantics(t *testing.T) {
 			t.Errorf("update with %s: status %d (%v)", name, status, resp)
 		}
 	}
+	// A precondition without its type, or without its hash, takes the
+	// reference's words (2026-09-03 batch1 idx 23
+	// `memory.update.precondition-no-type`, idx 21
+	// `memory.update.precondition-type-only`; #540). An empty hash fails the
+	// same two rules an absent one does, and shares its words.
+	const shaShape = "precondition.content_sha256: must be 64 characters (and 1 more validation errors)"
+	for _, tc := range []struct {
+		precondition map[string]any
+		msg          string
+	}{
+		{map[string]any{"content_sha256": digest("x")}, "Failed to parse request: precondition.type: Field required"},
+		{map[string]any{"type": "content_sha256"}, shaShape},
+		{map[string]any{"type": "content_sha256", "content_sha256": ""}, shaShape},
+	} {
+		status, resp := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
+			map[string]any{"content": "x", "precondition": tc.precondition})
+		wantInvalidRequest(t, fmt.Sprintf("update with precondition %v", tc.precondition), status, resp, tc.msg)
+	}
 
-	// A stale precondition is a 409 of the memory surface's own type.
+	// A stale precondition is a 409 of the memory surface's own type, in the
+	// reference's words (2026-09-03 batch1 idx 24
+	// `memory.update.precondition-wrong-sha`; #540), which name neither digest:
+	// the log keeps both.
+	logs := captureLogs(t, slog.LevelInfo)
 	status, resp := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id, map[string]any{
 		"content": "changed", "precondition": map[string]any{"type": "content_sha256", "content_sha256": digest("stale")},
 	})
-	wantErr(t, status, resp, http.StatusConflict, "memory_precondition_failed_error")
+	wantErrMsg(t, status, resp, http.StatusConflict, "memory_precondition_failed_error",
+		"precondition content_sha256 failed: content has changed")
+	wantStaleContentLog(t, logs(), "memory update refused: stale content_sha256", resp,
+		id, digest("stale"), digest("original"))
 
 	// "If the precondition fails but the stored state already exactly matches
 	// the requested content and path, the server returns 200 instead of 409."
@@ -499,6 +538,25 @@ func TestMemoryUpdateSemantics(t *testing.T) {
 	}
 }
 
+// wantStaleContentLog finds the log line a stale content_sha256 refusal
+// writes and holds it to the memory, both digests and the request id.
+func wantStaleContentLog(t *testing.T, logs, event string, resp map[string]any, memoryID, supplied, stored string) {
+	t.Helper()
+	line := ""
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, event) {
+			line = l
+		}
+	}
+	requestID, _ := resp["request_id"].(string)
+	for _, want := range []string{"memory_id=" + memoryID, "supplied_content_sha256=" + supplied,
+		"stored_content_sha256=" + stored, "request_id=" + requestID} {
+		if !strings.Contains(line, want) {
+			t.Errorf("%q log line %q lacks %q", event, line, want)
+		}
+	}
+}
+
 func countVersions(t *testing.T, s *tserver, storeID string) int {
 	t.Helper()
 	var n int
@@ -521,12 +579,20 @@ func TestMemoryDeletePrecondition(t *testing.T) {
 	if status, resp := s.do(http.MethodDelete, path+"?expected_content_sha256=%00", nil); status != http.StatusBadRequest {
 		t.Errorf("a NUL in expected_content_sha256: status %d (%v)", status, resp)
 	}
-	for _, bad := range []string{"not-an-id", "mem_%00", "vlt_" + strings.Repeat("a", 24)} {
-		bad := "/v1/memory_stores/" + store + "/memories/" + bad
-		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
-			if status, resp := s.do(method, bad, map[string]any{"content": "x"}); status != http.StatusNotFound {
-				t.Errorf("%s %s: status %d (%v)", method, bad, status, resp)
-			}
+	// The read words a malformed id as it words an absent one, in the
+	// reference's words (2026-09-02 free_batch1 idx 110 `mem.get.deleted`;
+	// #540); the update and the delete keep checkID's.
+	for _, bad := range []struct{ path, id string }{
+		{"not-an-id", "not-an-id"}, {"mem_%00", "mem_\x00"}, {"vlt_" + strings.Repeat("a", 24), "vlt_" + strings.Repeat("a", 24)},
+	} {
+		badPath := "/v1/memory_stores/" + store + "/memories/" + bad.path
+		for method, msg := range map[string]string{
+			http.MethodGet:    "memory `" + bad.id + "` not found",
+			http.MethodPost:   "memory " + bad.id + " not found",
+			http.MethodDelete: "memory " + bad.id + " not found",
+		} {
+			status, resp := s.do(method, badPath, map[string]any{"content": "x"})
+			wantErrMsg(t, status, resp, http.StatusNotFound, "not_found_error", msg)
 		}
 	}
 
@@ -536,11 +602,20 @@ func TestMemoryDeletePrecondition(t *testing.T) {
 	// the 409 below (the 2026-09-02 recording, #684). The uppercase spelling of
 	// the stored digest is refused too, since what is stored is lowercase, and
 	// so is a parameter supplied empty — the SDK sends one for param.NewOpt("")
-	// — since only an absent parameter means no precondition.
-	for _, bad := range []string{"nothex", strings.Repeat("a", 63), strings.Repeat("a", 65),
-		strings.Repeat("g", 64), strings.ToUpper(digest("bytes")), ""} {
+	// — since only an absent parameter means no precondition. A value failing
+	// both of the reference's rules, length and hex, takes its words
+	// (2026-09-02 free_batch1 idx 27 `mem.delete.malformed-sha`; #540), an
+	// empty one among them; one failing a single rule was never recorded and
+	// keeps ours.
+	const both = "expected_content_sha256: must be 64 characters (and 1 more validation errors)"
+	const ours = "expected_content_sha256: must be 64 lowercase hex characters"
+	for bad, msg := range map[string]string{
+		"nothex": both, "": both, "zz": both,
+		strings.Repeat("a", 63): ours, strings.Repeat("a", 65): ours, "ABC": ours,
+		strings.Repeat("g", 64): ours, strings.ToUpper(digest("bytes")): ours,
+	} {
 		status, resp := s.do(http.MethodDelete, path+"?expected_content_sha256="+bad, nil)
-		wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
+		wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", msg)
 	}
 	// A query string that does not parse is refused whole: url.Values drops a
 	// malformed pair, so a corrupted precondition would otherwise read as
@@ -555,10 +630,15 @@ func TestMemoryDeletePrecondition(t *testing.T) {
 	}
 
 	// The precondition rides the query string on delete, and a mismatch is the
-	// same 409 an update's is — the status and type the reference answers a
-	// well-formed wrong digest with (the 2026-09-02 recording).
+	// same 409 an update's is — the status, type and words the reference
+	// answers a well-formed wrong digest with (2026-09-02 free_batch1 idx 26
+	// `mem.delete.wrong-sha`; #540), the digests in the log.
+	logs := captureLogs(t, slog.LevelInfo)
 	status, resp := s.do(http.MethodDelete, path+"?expected_content_sha256="+digest("other"), nil)
-	wantErr(t, status, resp, http.StatusConflict, "memory_precondition_failed_error")
+	wantErrMsg(t, status, resp, http.StatusConflict, "memory_precondition_failed_error",
+		"precondition content_sha256 failed: content has changed")
+	wantStaleContentLog(t, logs(), "memory delete refused: stale content_sha256", resp,
+		id, digest("other"), digest("bytes"))
 	if status, got := s.do(http.MethodGet, path, nil); status != http.StatusOK || got["content"] != "bytes" {
 		t.Fatalf("the refused delete changed the memory: status %d (%v)", status, got)
 	}
@@ -645,11 +725,25 @@ func TestMemoryList(t *testing.T) {
 	}
 
 	for _, q := range []string{
-		"limit=0", "limit=101", "limit=abc", "page=@@@", "view=deep",
-		"depth=2", "depth=-1", "depth=all", "path_prefix=%00",
+		"limit=0", "limit=abc", "page=@@@", "view=deep", "path_prefix=%00",
 	} {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	}
+	// The reference's words for a limit past either of its two bounds
+	// (2026-09-05 batch4 idx 8 `rec85.memories.list.limit-101`, which also
+	// recorded 200 and 1000, and idx 11 `rec85.memories.list.limit-1001`), and
+	// for a depth other than 0 or 1 (2026-09-02 free_batch1 idx 13
+	// `mem.list.depth2`), which the other refused depths share; #540.
+	const inner = "limit: value must be greater than or equal to 1 and less than or equal to 100"
+	for q, msg := range map[string]string{
+		"limit=101": inner, "limit=1000": inner,
+		"limit=1001": "limit: must be greater than or equal to 1 and less than or equal to 1000",
+		"depth=2":    "depth must be 0 or 1 when provided", "depth=-1": "depth must be 0 or 1 when provided",
+		"depth=all": "depth must be 0 or 1 when provided",
+	} {
+		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
+		wantInvalidRequest(t, q, status, body, msg)
 	}
 	// A cursor from another list's grammar is not a memory cursor.
 	status, body = s.do(http.MethodGet, "/v1/memory_stores?limit=1", nil)
@@ -790,13 +884,12 @@ func TestMemoryArchivedStoreRefusesNewContentAdmitsDelete(t *testing.T) {
 		{http.MethodPost, "/v1/memory_stores/" + store + "/memories", map[string]any{"path": "/new.md", "content": "x"}},
 		{http.MethodPost, "/v1/memory_stores/" + store + "/memories/" + id, map[string]any{"content": "x"}},
 	} {
+		// The reference's words on both routes (2026-09-02 free_batch1 idx 83
+		// `mem.create.on-archived-store`, idx 106 `mem.update.archived-store`;
+		// #540).
 		status, body := s.do(call.method, call.path, call.body)
-		if status != http.StatusBadRequest {
-			t.Errorf("%s %s on an archived store: status %d (%v)", call.method, call.path, status, body)
-		}
-		if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "is archived") {
-			t.Errorf("%s %s message = %q", call.method, call.path, msg)
-		}
+		wantInvalidRequest(t, call.method+" "+call.path+" on an archived store", status, body,
+			"cannot modify archived resource: memory store "+store)
 	}
 	if status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories/"+id, nil); status != http.StatusOK || body["content"] != "bytes" {
 		t.Fatalf("read on an archived store: status %d (%v)", status, body)

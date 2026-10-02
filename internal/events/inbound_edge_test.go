@@ -113,8 +113,10 @@ func TestNormalizeInboundRejections(t *testing.T) {
 		// is replayed to a Messages endpoint that rejects it too (INFERRED,
 		// docs/DIVERGENCES.md). user.tool_result shares the same block
 		// validator (self_hosted-only, so it cannot sit in this cloud table).
+		// A user.message's refusal is the reference's sentence
+		// (TestNormalizeInboundReferenceWording); the other carriers' is ours.
 		{"text empty in custom tool result", `{"type":"user.custom_tool_result","custom_tool_use_id":"x","content":[{"type":"text","text":""}]}`, "must not be empty"},
-		{"text empty in message", `{"type":"user.message","content":[{"type":"text","text":""}]}`, "must not be empty"},
+		{"text empty in message", `{"type":"user.message","content":[{"type":"text","text":""}]}`, "events.0.user_message.content.0.text: value is required"},
 		{"string content empty in message", `{"type":"user.message","content":""}`, "must not be empty"},
 		{"text empty in system message", `{"type":"system.message","content":[{"type":"text","text":""}]}`, "must not be empty"},
 		{"text empty in search_result", `{"type":"user.custom_tool_result","custom_tool_use_id":"x","content":[{"type":"search_result","source":"https://x","title":"t","citations":{"enabled":true},"content":[{"type":"text","text":""}]}]}`, "must not be empty"},
@@ -171,14 +173,78 @@ func TestNormalizeInboundNullHandling(t *testing.T) {
 }
 
 // The agent-to-agent message pair is platform-emitted like every other agent.*
-// event (plan 35 decision 6), so a client posting one is told that rather than
-// "unknown event type" — the difference between a wrong endpoint and a typo.
+// event (plan 35 decision 6), so a client cannot post one: refused as every
+// type outside the client set is, in the reference's words (#540).
 func TestNormalizeInboundRefusesThreadMessages(t *testing.T) {
 	for _, typ := range []string{"agent.thread_message_sent", "agent.thread_message_received"} {
 		_, err := norm(t, "self_hosted", `{"type":"`+typ+`"}`)
-		if err == nil || !strings.Contains(err.Error(), "emitted by the platform") {
-			t.Errorf("%s: err = %v, want it refused as platform-emitted", typ, err)
+		if want := `Failed to parse request: events[0].type: "` + typ + `" is not a valid value`; err == nil || err.Error() != want {
+			t.Errorf("%s: err = %v, want %q", typ, err, want)
 		}
+	}
+}
+
+// TestNormalizeInboundReferenceWording pins the refusals NormalizeInbound words
+// as the reference was recorded wording them (#540), each exactly: the ones
+// whose sentence carries the index its own way pass through without the
+// "events[i]: " prefix every other refusal takes, and the credential refusal
+// keeps it, as recorded. The cases put the refused event at index 1, so an
+// index taken from the wrong place shows.
+func TestNormalizeInboundReferenceWording(t *testing.T) {
+	const msg = `{"type":"user.message","content":[{"type":"text","text":"x"}]}`
+	for _, tc := range []struct{ name, ev, want string }{
+		// 2026-09-02 batch2 `sessT.send.unknown-type` (an agent.message); the
+		// unknown and stream-only types share the sentence.
+		{"platform-emitted type", `{"type":"agent.message"}`,
+			`Failed to parse request: events[1].type: "agent.message" is not a valid value`},
+		{"unknown type", `{"type":"user.bogus"}`,
+			`Failed to parse request: events[1].type: "user.bogus" is not a valid value`},
+		{"stream-only type", `{"type":"event_delta"}`,
+			`Failed to parse request: events[1].type: "event_delta" is not a valid value`},
+		// 2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
+		// `sessK.send.interrupt.unknown-thread`, on an interrupt; every
+		// type carrying the field shares the check.
+		{"thread id with the wrong prefix", `{"type":"user.interrupt","session_thread_id":"sth_x"}`,
+			"Invalid session_thread_id: sth_x"},
+		{"malformed thread id", `{"type":"user.interrupt","session_thread_id":"sthr_01UnknownThreadIdXXXXXXXXX"}`,
+			"Invalid session_thread_id: sthr_01UnknownThreadIdXXXXXXXXX"},
+		{"malformed thread id on a confirmation", `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","session_thread_id":"sesn_x"}`,
+			"Invalid session_thread_id: sesn_x"},
+		{"malformed thread id on a result", `{"type":"user.custom_tool_result","custom_tool_use_id":"c","session_thread_id":"sesn_x"}`,
+			"Invalid session_thread_id: sesn_x"},
+		// 2026-09-02 batch2 `sessT.send.tool_confirmation.deny_message-on-allow`.
+		{"deny_message on allow", `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","deny_message":"x"}`,
+			"Invalid tool_confirmation event at index 1: deny_message is only allowed when result is 'deny'"},
+		// 2026-09-02 batch2 `sessT.send.user.message.empty-text-block`, here at
+		// the message's second block.
+		{"empty text block in a message", `{"type":"user.message","content":[{"type":"text","text":"x"},{"type":"text","text":""}]}`,
+			"events.1.user_message.content.1.text: value is required"},
+	} {
+		_, err := norm(t, "cloud", msg, tc.ev)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+
+	// 2026-09-02 batch2 `sessT.send.empty-events`.
+	if _, err := norm(t, "cloud"); err == nil || err.Error() != "events: must contain at least 1 item" {
+		t.Errorf("empty batch: err = %v, want the reference's sentence", err)
+	}
+	// 2026-09-02 batch2 `sessW.send.user.tool_result.console-auth`: the
+	// credential refusal keeps the index prefix, as recorded.
+	_, err := normAs(t, "self_hosted", events.ManagementCredential, `{"type":"user.tool_result","tool_use_id":"tu"}`)
+	if want := "events[0]: `user.tool_result` may only be sent with environment credentials " +
+		"(the self-hosted runner's Session-Instance JWT); " +
+		"an API key or Console session cannot post this event type"; err == nil || err.Error() != want {
+		t.Errorf("management tool_result: err = %v, want %q", err, want)
+	}
+
+	// A create's initial_events keeps this platform's words: no recording
+	// reaches that surface, and the reference's sentences name a send batch.
+	_, err = events.NormalizeInitialEvents("cloud", events.ManagementCredential,
+		[]json.RawMessage{json.RawMessage(`{"type":"user.message","content":[{"type":"text","text":""}]}`)})
+	if want := "events[0]: content[0]: text block text must not be empty"; err == nil || err.Error() != want {
+		t.Errorf("initial_events empty text block: err = %v, want %q", err, want)
 	}
 }
 

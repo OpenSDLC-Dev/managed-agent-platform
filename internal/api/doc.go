@@ -51,7 +51,8 @@
 // key's environment and then per-resource scoping. On the session routes and
 // the file download the environment must be self_hosted: a cloud environment's
 // key, which the console issues as the reference does, has no worker to serve
-// and gets one 404 there (errNotSelfHostedKey, envauth.go). Past that, a
+// and gets one 404 there (errNotSelfHostedKey on the session routes, the
+// reference's "Not found" on the download; envauth.go). Past that, a
 // session route's key must own the session (requireEnvironmentKeyForSession),
 // a file download's key must belong to an environment in which some session
 // mounts that file (downloadFile), and skills, workspace-global resources

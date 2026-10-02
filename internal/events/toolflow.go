@@ -649,12 +649,29 @@ func ToolConfirmationRefs(evs []NewEvent) []string {
 	return refs
 }
 
+// NoPendingConfirmationError is ValidateToolConfirmations' refusal of a
+// confirmation whose tool_use_id names no confirmable tool use in the session,
+// or one that was never gated, in the reference's one sentence for both
+// (2026-09-02 batch2 `sessT.send.tool_confirmation.unknown-id` and
+// `tool_confirmation.not-pending`, #540). The sentence cannot tell the two
+// apart, so Reason carries which fired for the caller's log.
+type NoPendingConfirmationError struct {
+	Index     int
+	ToolUseID string
+	Reason    string
+}
+
+func (e *NoPendingConfirmationError) Error() string {
+	return fmt.Sprintf("No pending tool permission request found for tool_use_id %q at event index %d", e.ToolUseID, e.Index)
+}
+
 // ValidateToolConfirmations rejects an inbound user.tool_confirmation that does
 // not name a tool use still awaiting confirmation: the id must reference an
 // ask-gated tool-use event (evaluated_permission "ask") in this session that no
 // prior confirmation has resolved, and not appear twice in one request. Like a
 // tool result, an accepted bad confirmation cannot be taken back from the
-// append-only log, so a wrong reference is the client's 400.
+// append-only log, so a wrong reference is the client's 400. An already
+// confirmed or already answered call keeps ours: neither is recorded.
 func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent) error {
 	seen := map[string]bool{}
 	for i, ev := range evs {
@@ -685,13 +702,15 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 			sessionID.String(), ref, confirmableToolUseTypes, string(domain.EventUserToolConfirm),
 			toolResultTypes).Scan(&perm, &confirmed, &answered)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("events[%d]: tool_use_id %q does not name a tool use in this session", i, ref)
+			return &NoPendingConfirmationError{Index: i, ToolUseID: ref,
+				Reason: "names no confirmable tool use in this session"}
 		}
 		if err != nil {
 			return fmt.Errorf("validate tool confirmation: %w", err)
 		}
 		if perm != string(domain.EvalPermAsk) {
-			return fmt.Errorf("events[%d]: tool use %q was not gated for confirmation", i, ref)
+			return &NoPendingConfirmationError{Index: i, ToolUseID: ref,
+				Reason: "tool use was not gated for confirmation"}
 		}
 		if confirmed {
 			return fmt.Errorf("events[%d]: tool use %q is already confirmed", i, ref)

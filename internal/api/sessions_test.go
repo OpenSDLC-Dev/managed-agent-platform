@@ -250,14 +250,13 @@ func TestSessionOverrideSystemCap(t *testing.T) {
 			"environment_id": envID,
 		}
 	}
+	// In the reference's words (2026-09-02 batch2
+	// `session.create.overrides.system-100001-ascii`, #540).
 	wantRejected := func(sys string) {
 		t.Helper()
 		status, res := s.do(http.MethodPost, "/v1/sessions", withSystem(sys))
-		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
-		inner, _ := res["error"].(map[string]any)
-		if msg, _ := inner["message"].(string); !strings.Contains(msg, "100000") {
-			t.Errorf("error message %q does not name the limit", msg)
-		}
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+			"agent.agent_with_overrides.config.system: must be at most 100000 characters")
 	}
 
 	// The documented boundary is accepted; one rune past it rejects.
@@ -510,14 +509,12 @@ func TestSessionCreateValidation(t *testing.T) {
 		wantStatus int
 		wantType   string
 	}{
-		"missing agent":        {map[string]any{"environment_id": envID}, 400, "invalid_request_error"},
 		"missing environment":  {map[string]any{"agent": agentID}, 400, "invalid_request_error"},
 		"unknown agent":        {map[string]any{"agent": "agent_missing", "environment_id": envID}, 404, "not_found_error"},
 		"unknown agent object": {map[string]any{"agent": map[string]any{"type": "agent", "id": "agent_missing"}, "environment_id": envID}, 404, "not_found_error"},
 		"unknown version":      {map[string]any{"agent": map[string]any{"type": "agent", "id": agentID, "version": 99}, "environment_id": envID}, 404, "not_found_error"},
 		"bad agent union type": {map[string]any{"agent": map[string]any{"type": "wizard", "id": agentID}, "environment_id": envID}, 400, "invalid_request_error"},
 		"unknown environment":  {map[string]any{"agent": agentID, "environment_id": "env_missing"}, 404, "not_found_error"},
-		"archived agent":       {map[string]any{"agent": archAgent["id"], "environment_id": envID}, 400, "invalid_request_error"},
 		"archived environment": {map[string]any{"agent": agentID, "environment_id": archEnv["id"]}, 400, "invalid_request_error"},
 		"github resource missing token": {map[string]any{"agent": agentID, "environment_id": envID,
 			"resources": []any{map[string]any{"type": "github_repository", "url": "https://github.com/x/y"}}}, 400, "invalid_request_error"},
@@ -536,6 +533,45 @@ func TestSessionCreateValidation(t *testing.T) {
 		}
 		wantErr(t, status, body, tc.wantStatus, tc.wantType)
 	}
+
+	// The refusals the reference was recorded wording, in its words whole
+	// (#540), on ids this server minted.
+	ghostEnv := domain.NewID(domain.PrefixEnvironment).String()
+	archAgentID := archAgent["id"].(string)
+	for name, tc := range map[string]struct {
+		body       any
+		wantStatus int
+		wantType   string
+		wantMsg    string
+	}{
+		// 2026-09-05 batch8 `item1.create.session-foreign-env.no-agent-field`.
+		"missing agent": {map[string]any{"environment_id": envID}, 400, "invalid_request_error",
+			"agent: value is required"},
+		// 2026-09-05 batch8 `probe.session.selector-enum`, and the
+		// agent-object probes beside it.
+		"agent object without a type": {map[string]any{"agent": map[string]any{"id": agentID}, "environment_id": envID},
+			400, "invalid_request_error", "Failed to parse request: agent.selector.type: Field required"},
+		// 2026-09-03 batch2 `sess.create.mcp-initial-events`: its agent object
+		// carried agent_id and no id, so the type is judged first.
+		"agent object of an unknown type": {map[string]any{"agent": map[string]any{"agent_id": agentID, "type": "agent_id"}, "environment_id": envID},
+			400, "invalid_request_error", `Failed to parse request: agent.selector.type: "agent_id" is not a valid value`},
+		"bad agent union type": {map[string]any{"agent": map[string]any{"type": "wizard", "id": agentID}, "environment_id": envID},
+			400, "invalid_request_error", `Failed to parse request: agent.selector.type: "wizard" is not a valid value`},
+		// 2026-09-05 batch8 `item1.create.session-absent-env` and
+		// `item1.create.session-foreign-env` (single-tenant here: absent).
+		"absent environment": {map[string]any{"agent": agentID, "environment_id": ghostEnv},
+			404, "not_found_error", "Environment " + ghostEnv + " not found."},
+		// 2026-09-02 batch2 `session.create.archived-agent`.
+		"archived agent": {map[string]any{"agent": archAgentID, "environment_id": envID},
+			400, "invalid_request_error", "agent " + archAgentID + " is archived and cannot be used to create a session"},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/sessions", tc.body)
+		if status != tc.wantStatus {
+			t.Errorf("%s: status %d, want %d (%v)", name, status, tc.wantStatus, body)
+			continue
+		}
+		wantErrMsg(t, status, body, tc.wantStatus, tc.wantType, tc.wantMsg)
+	}
 }
 
 func TestSessionGetAcceptsAltSessionPrefix(t *testing.T) {
@@ -551,8 +587,10 @@ func TestSessionGetAcceptsAltSessionPrefix(t *testing.T) {
 		t.Fatalf("get with session_ prefix: %d %v", status, got)
 	}
 
+	// A malformed id is the 404 an absent one gets, in the same words
+	// (2026-09-05 batch3 `rec84.session.get.after-delete`, #540).
 	status, body := s.do(http.MethodGet, "/v1/sessions/sesn_missing", nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Session not found: sesn_missing")
 }
 
 func TestSessionUpdate(t *testing.T) {
@@ -744,15 +782,14 @@ func TestSessionArchiveAndDelete(t *testing.T) {
 	if deleted["id"] != id || deleted["type"] != "session_deleted" {
 		t.Errorf("delete response = %v", deleted)
 	}
+	// The reference's words for a deleted session's GET (2026-09-05 batch3
+	// `rec84.session.get.after-delete`, #540).
 	status, body := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Session not found: "+id)
 	status, body = s.do(http.MethodDelete, "/v1/sessions/sesn_missing", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
 
-// Plan 24 slice 1: the reference documents that a running session cannot be
-// archived or deleted (an interrupt must land first). The reject status and
-// message are ours — INFERRED in docs/DIVERGENCES.md.
 // A deleted session's workspace checkpoint goes with the record, by the same
 // route as its deliverables: enqueued in the deleting transaction and removed
 // by the sweeper (plan 50). It used to be a best-effort delete on the request
@@ -1270,6 +1307,10 @@ func TestTerminatedIsHiddenFromTheDefaultListing(t *testing.T) {
 	}
 }
 
+// Plan 24 slice 1: the reference documents that a running session cannot be
+// archived or deleted (an interrupt must land first). Both refusals are the
+// reference's, status and words (2026-09-02 batch2 `sessT.archive.while-running`
+// and `sessT.delete.while-running`, #540).
 func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -1282,9 +1323,11 @@ func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	}
 
 	status, body := s.do(http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"Session "+id+` cannot be archived while its status is "running". Only pending or idle sessions may be archived.`)
 	status, body = s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"Cannot delete session while it is running. Send an interrupt event or wait for the session to complete.")
 
 	// Neither refusal mutated the session: still listed, still unarchived.
 	status, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)

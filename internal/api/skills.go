@@ -86,6 +86,14 @@ func renderSkillVersion(vid, skillID, name, description string, createdAt time.T
 // both spellings.
 var skillShortNameRe = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 
+// errSkillNotFound is the skill's 404 in the reference's words, recorded on
+// its get and delete, its versions list, a version's get and its /content
+// (2026-09-04 batch1 #80-#83, batch2 #148; 2026-09-05 batch1 #15-#17; #540).
+// Every skills route that finds no skill answers it.
+func errSkillNotFound(id string) *apiError {
+	return errNotFound("Skill not found: %s", id)
+}
+
 // checkSkillID rejects a path id that is neither a valid skill_ id nor a
 // catalog short name, with the 404 an unknown id already gets (checkID's
 // rationale: shape-reject before an unstorable byte reaches a bind parameter).
@@ -96,7 +104,7 @@ func checkSkillID(id string) error {
 	if skillShortNameRe.MatchString(id) {
 		return nil
 	}
-	return errNotFound("skill %s not found", id)
+	return errSkillNotFound(id)
 }
 
 // skillLatestAlias is the read-only version alias.
@@ -139,12 +147,38 @@ func checkSkillVersion(v, aliasVerb string) error {
 	return errInvalid("Invalid version id: '%s'", v)
 }
 
+// errSkillVersionMiss is resolveSkillVersion's miss: the slot names no version
+// of the skill, or the skill itself is gone. It is never answered as is,
+// because the reference words a miss differently per route (#540): the
+// metadata routes through skillVersionNotFound, /content as the skill's 404.
+var errSkillVersionMiss = errors.New("skill version slot resolves to no version")
+
+// skillVersionNotFound is a version miss on the metadata routes (GET and
+// DELETE …/versions/{version}) in the reference's words, which turn on whether
+// the skill still exists: its 404 when it does not (2026-09-04 batch1 #82
+// `rec81.versions.get.after-cascade`, 2026-09-05 batch1 #16), else one naming
+// the skill and the slot as addressed (2026-09-04 batch1 #39
+// `rec81.versions.get.wrong-skill`, #64 `rec81.versions.delete.twice`). The
+// probe runs on the miss only. On DELETE a missing skill was never recorded;
+// it answers the skill's 404 every recorded route gives one.
+func (s *server) skillVersionNotFound(ctx context.Context, skillID, slot string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM skills WHERE id = $1)`, skillID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return errSkillNotFound(skillID)
+	}
+	return errNotFound("Skill version not found: %s version %s", skillID, slot)
+}
+
 // resolveSkillVersion maps a validated {version} slot onto the numeric version
 // the storage layer keys on: "latest" through the skill's latest_version, an id
 // through its row, a numeric taken verbatim. A version row's id and its number
 // are both immutable, so resolving outside a caller's transaction cannot go
 // stale — the row can only vanish, and every caller's next statement reports
-// that as the 404 it is.
+// that as the 404 it is. A slot naming nothing is errSkillVersionMiss.
 func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) (string, error) {
 	switch {
 	case slot == skillLatestAlias:
@@ -152,7 +186,7 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 		err := s.pool.QueryRow(ctx,
 			`SELECT latest_version FROM skills WHERE id = $1`, skillID).Scan(&latest)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && latest == nil) {
-			return "", errNotFound("skill %s version %s not found", skillID, slot)
+			return "", errSkillVersionMiss
 		}
 		if err != nil {
 			return "", err
@@ -164,7 +198,7 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 			`SELECT version FROM skill_versions WHERE skill_id = $1 AND id = $2`,
 			skillID, slot).Scan(&version)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", errNotFound("skill %s version %s not found", skillID, slot)
+			return "", errSkillVersionMiss
 		}
 		if err != nil {
 			return "", err
@@ -205,11 +239,21 @@ func parseSkillsPage(q url.Values) (pageParams, error) {
 	if s := q.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 1 || n > maxSkillLimit {
-			return pageParams{}, errInvalid("limit must be between 1 and %d", maxSkillLimit)
+			return pageParams{}, errSkillsLimit
 		}
 	}
 	return parsePageMax(q, maxSkillLimit)
 }
+
+// errSkillsLimit is parseSkillsPage's one refusal of its own; every other one
+// is the page token's.
+var errSkillsLimit = errInvalid("limit must be between 1 and %d", maxSkillLimit)
+
+// errSkillsPageToken is the skills collection list's refusal of a page token
+// it cannot use, in the reference's words (2026-09-04 batch1 #28
+// `rec81.skills.list.bad-cursor`; #540). Recorded on this list alone, so the
+// shared cursor helpers and the versions list keep ours.
+var errSkillsPageToken = errInvalid("page is not a valid page token.")
 
 // errSkillsUnavailable answers the storage-backed skill routes on a
 // deployment configured without object storage.
@@ -253,9 +297,7 @@ func (s *server) createSkill(r *http.Request) (any, error) {
 	bundle, err := up.bundle()
 	if err != nil {
 		recordSkillUpload(ctx, skillOutcomeInvalid, 0)
-		slog.InfoContext(ctx, "skill upload rejected", "files", len(up.files),
-			"bytes", up.totalBytes(), "reason", err)
-		return nil, err
+		return nil, up.refuse(ctx, err)
 	}
 	// display_name is optional and derives from the SKILL.md frontmatter name
 	// when omitted; it is capped at 255 characters by the form parser and,
@@ -336,7 +378,7 @@ func (s *server) getSkill(r *http.Request) (any, error) {
 		 FROM skills s WHERE s.id = $1`, id).
 		Scan(&displayName, &latestVersionID, &source, &createdAt, &updatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("skill %s not found", id)
+		return nil, errSkillNotFound(id)
 	}
 	if err != nil {
 		return nil, err
@@ -351,8 +393,11 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 		return nil, err
 	}
 	page, err := parseSkillsPage(q)
-	if err != nil {
+	if errors.Is(err, errSkillsLimit) {
 		return nil, err
+	}
+	if err != nil {
+		return nil, errSkillsPageToken
 	}
 	// The filter's pair did not widen when the source OBJECT's type set gained
 	// anthropic_example and plugin: the reference still refuses anything but
@@ -371,7 +416,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 	}
 	if page.cur != nil {
 		if page.cur.foreignToTime() || page.cur.dir != dirNext {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errSkillsPageToken
 		}
 		args = append(args, page.cur.t, page.cur.id)
 		query += fmt.Sprintf(` AND (s.created_at, s.id) < ($%d, $%d)`, len(args)-1, len(args))
@@ -445,7 +490,7 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	var source string
 	if err := tx.QueryRow(ctx, `SELECT source FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&source); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errNotFound("skill %s not found", id)
+			return nil, errSkillNotFound(id)
 		}
 		return nil, err
 	}
@@ -509,13 +554,19 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 	var source string
 	err := s.pool.QueryRow(ctx, `SELECT source FROM skills WHERE id = $1`, id).Scan(&source)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("skill %s not found", id)
+		return nil, errSkillNotFound(id)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if source != "custom" {
-		return nil, errInvalid("versions of anthropic skills are managed by the platform, not this API")
+		// The reference refuses an imported skill's id here as the wrong shape
+		// for a custom one, naming it as sent (2026-09-04 batch1 #55
+		// `rec81.versions.create.anthropic-skill`; #540). Only the message
+		// converged: a short name the catalog lacks still 404s at the lookup
+		// above, which a shape check like the one that wording implies would
+		// refuse with this 400 instead — unrecorded either way.
+		return nil, errInvalid("Invalid skill_id format: %s", id)
 	}
 	up, err := parseSkillUpload(r, false)
 	if err != nil {
@@ -525,9 +576,7 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 	bundle, err := up.bundle()
 	if err != nil {
 		recordSkillUpload(ctx, skillOutcomeInvalid, 0)
-		slog.InfoContext(ctx, "skill upload rejected", "skill_id", id,
-			"files", len(up.files), "bytes", up.totalBytes(), "reason", err)
-		return nil, err
+		return nil, up.refuse(ctx, err, "skill_id", id)
 	}
 
 	version := mintSkillVersion()
@@ -535,7 +584,7 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 	createdAt, err := s.insertSkillVersion(ctx, id, vid, version, bundle)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errNotFound("skill %s not found", id)
+			return nil, errSkillNotFound(id)
 		}
 		if isUniqueViolation(err, "skill_versions_skill_id_version_key") {
 			// The row was claimed before any storage traffic, so a
@@ -650,7 +699,7 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if !exists {
-		return nil, errNotFound("skill %s not found", id)
+		return nil, errSkillNotFound(id)
 	}
 
 	query := `SELECT id, name, description, created_at FROM skill_versions WHERE skill_id = $1`
@@ -715,6 +764,9 @@ func (s *server) getSkillVersion(r *http.Request) (any, error) {
 		return nil, err
 	}
 	version, err := s.resolveSkillVersion(ctx, id, slot)
+	if errors.Is(err, errSkillVersionMiss) {
+		return nil, s.skillVersionNotFound(ctx, id, slot)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -727,7 +779,7 @@ func (s *server) getSkillVersion(r *http.Request) (any, error) {
 		 WHERE skill_id = $1 AND version = $2`, id, version).
 		Scan(&vid, &name, &description, &createdAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("skill %s version %s not found", id, slot)
+		return nil, s.skillVersionNotFound(ctx, id, slot)
 	}
 	if err != nil {
 		return nil, err
@@ -748,6 +800,9 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 		return nil, errSkillsUnavailable
 	}
 	version, err := s.resolveSkillVersion(ctx, id, slot)
+	if errors.Is(err, errSkillVersionMiss) {
+		return nil, s.skillVersionNotFound(ctx, id, slot)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -764,7 +819,7 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 	var source string
 	if err := tx.QueryRow(ctx, `SELECT source FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&source); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errNotFound("skill %s version %s not found", id, slot)
+			return nil, errSkillNotFound(id)
 		}
 		return nil, err
 	}
@@ -780,7 +835,9 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if target == 0 {
-		return nil, errNotFound("skill %s version %s not found", id, slot)
+		// The skill row is held, so this is skillVersionNotFound's second arm
+		// without the probe.
+		return nil, errNotFound("Skill version not found: %s version %s", id, slot)
 	}
 	// A skill can never reach zero versions through the API (decision 6): the
 	// way to remove the last one is to delete the skill, which cascades.
@@ -870,7 +927,14 @@ func (s *server) downloadSkillVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errSkillsUnavailable)
 		return
 	}
+	// The reference answers every version miss here as the skill's 404, even
+	// one under a skill that exists (2026-09-04 batch2 #148
+	// `rec81.envkey.versions.content.wrong-skill`; #540), where the metadata
+	// route names the version.
 	version, err := s.resolveSkillVersion(ctx, id, slot)
+	if errors.Is(err, errSkillVersionMiss) {
+		err = errSkillNotFound(id)
+	}
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -886,7 +950,7 @@ func (s *server) downloadSkillVersion(w http.ResponseWriter, r *http.Request) {
 		`SELECT name, sha256 FROM skill_versions WHERE skill_id = $1 AND version = $2`,
 		id, version).Scan(&name, &sha)
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, r, errNotFound("skill %s version %s not found", id, slot))
+		writeError(w, r, errSkillNotFound(id))
 		return
 	}
 	if err != nil {

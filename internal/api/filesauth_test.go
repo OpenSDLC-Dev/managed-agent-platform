@@ -3,7 +3,9 @@ package api_test
 import (
 	"bytes"
 	"io"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -42,14 +44,14 @@ func TestFileContentEnvironmentKeyLane(t *testing.T) {
 
 	// A file no session in this environment mounts: 404, indistinguishable from
 	// absent, so a leaked env key can neither read arbitrary files nor probe their
-	// existence.
+	// existence. Every 404 on this lane is the reference's bare "Not found"
+	// (2026-09-03 batch2 idx 20 `envkey.files.content-wrong-environment`,
+	// #540), the message included: an absent id, a malformed one and an
+	// expired mounted file answer it too, below.
 	unmounted := s.uploadFile(t, "unmounted.bin", &oct, "private")
 	unmountedID := unmounted["id"].(string)
-	res = s.doRaw("GET", "/v1/files/"+unmountedID+"/content", nil, bearer)
-	res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
-		t.Errorf("env-key download of an unmounted file = %d, want 404", res.StatusCode)
-	}
+	status, obj := readJSON(t, s.doRaw("GET", "/v1/files/"+unmountedID+"/content", nil, bearer))
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Not found")
 
 	// A file mounted only by a session in a DIFFERENT environment: still 404 for
 	// this key — the scope is per-environment, not workspace-global.
@@ -61,11 +63,26 @@ func TestFileContentEnvironmentKeyLane(t *testing.T) {
 		"agent": agentID, "environment_id": otherID,
 		"resources": []any{map[string]any{"type": "file", "file_id": crossedID}},
 	})
-	res = s.doRaw("GET", "/v1/files/"+crossedID+"/content", nil, bearer)
-	res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
-		t.Errorf("env-key download of a file mounted in another environment = %d, want 404 (cross-env denied)", res.StatusCode)
+	status, obj = readJSON(t, s.doRaw("GET", "/v1/files/"+crossedID+"/content", nil, bearer))
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Not found")
+
+	// An absent id, a malformed one and a mounted file past its expiry take the
+	// same words on this lane; the management lane, never recorded missing a
+	// file, keeps ours.
+	expiring := s.uploadFile(t, "expiring.bin", &oct, "soon gone")
+	expiringID := expiring["id"].(string)
+	createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{map[string]any{"type": "file", "file_id": expiringID}},
+	})
+	expire(t, s, expiringID)
+	absentID := "file_0000000000000000000000ab"
+	for _, id := range []string{absentID, "file_0000000000000000000000ok", expiringID} {
+		status, obj = readJSON(t, s.doRaw("GET", "/v1/files/"+id+"/content", nil, bearer))
+		wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Not found")
 	}
+	status, obj = s.do("GET", "/v1/files/"+absentID+"/content", nil)
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "file "+absentID+" not found")
 
 	// The metadata GET, the list, and mutations stay management-only: an
 	// environment key gets the management lane's 401, never the file lane.
@@ -94,5 +111,39 @@ func TestFileContentEnvironmentKeyLane(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusBadRequest {
 		t.Errorf("x-api-key alongside a Bearer = %d, want the management lane's downloadable-gate 400", res.StatusCode)
+	}
+}
+
+// TestFileContentCloudKeyRefusalIsLogged: a cloud environment's key is refused
+// the file lane before any file is looked up, in the reference's bare words
+// (2026-09-03 batch2 idx 18 `envkey.files.content-original`, idx 19
+// `envkey.files.content-session-copy`; #540) — the same words as an absent
+// file, so the wire no longer says which of the lane's refusals fired. The
+// operator's log does, naming the key's environment.
+func TestFileContentCloudKeyRefusalIsLogged(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	oct := "application/octet-stream"
+	fileID := s.uploadFile(t, "mounted.bin", &oct, "cloud mounted")["id"].(string)
+	createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{map[string]any{"type": "file", "file_id": fileID}},
+	})
+	bearer := asBearer(issueViaConsole(t, s, envID, "cloud-files"))
+
+	logs := captureLogs(t, slog.LevelInfo)
+	status, body := readJSON(t, s.doRaw("GET", "/v1/files/"+fileID+"/content", nil, bearer))
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Not found")
+	line := ""
+	for _, l := range strings.Split(logs(), "\n") {
+		if strings.Contains(l, "file download refused: environment key is not self_hosted") {
+			line = l
+		}
+	}
+	for _, want := range []string{"environment_id=" + envID, "environment_kind=cloud",
+		"request_id=" + body["request_id"].(string)} {
+		if !strings.Contains(line, want) {
+			t.Errorf("cloud-key refusal log line %q lacks %q", line, want)
+		}
 	}
 }

@@ -57,8 +57,9 @@ var (
 // schedule as unsatisfiable (plan 37 §3.3).
 //
 // Exported because the API refuses an expression with no occurrence inside it
-// and has to say how far it looked: "no occurrence in the next N years" is a
-// message an operator can act on, and "never fires" alone is not.
+// and logs how far it looked: the refusal is the reference's sentence, which
+// says "the next year" (#540), and an operator reading why a sparse schedule
+// was refused needs the bound actually searched.
 const SearchYears = 12
 
 // ambiguityMargin is how far outside each bound the walk reaches: it starts
@@ -175,7 +176,10 @@ var fields = [5]fieldSpec{
 func parse(expr string) (*schedule, error) {
 	parts := strings.Fields(expr)
 	if len(parts) != 5 {
-		return nil, fmt.Errorf("%w: want 5 fields, got %d in %q", ErrExpression, len(parts), expr)
+		// The reference's detail for this one refusal, which the API renders
+		// after its own prefix (2026-09-02 batch2 `deployment.create.6-field-cron`,
+		// #540). The other details here are ours: no recording holds theirs.
+		return nil, fmt.Errorf("%w: expected 5 fields, got %d", ErrExpression, len(parts))
 	}
 	var s schedule
 	masks := [5]*[64]bool{&s.minute, &s.hour, &s.dom, &s.month, &s.dow}

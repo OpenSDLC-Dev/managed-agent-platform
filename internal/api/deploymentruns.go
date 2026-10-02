@@ -90,7 +90,9 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if archivedAt != nil {
-		return nil, errInvalid("deployment %s is archived", id)
+		// loadDeployment's refusal, in the reference's sentence (2026-09-02
+		// batch2 `deployment.run.on-archived`, #540).
+		return nil, errInvalid("Cannot modify archived deployment")
 	}
 
 	run := domain.DeploymentRun{
@@ -287,9 +289,11 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		// name a stored deployment, and rejecting it keeps an unstorable byte
 		// from reaching the bind parameter as a 500 (#135). A well-formed but
 		// absent one is the published rule: "Filtering by a non-existent
-		// deployment_id returns 200 with empty data."
+		// deployment_id returns 200 with empty data." The refusal is the
+		// reference's sentence (2026-09-02 batch2
+		// `deployment_runs.list.unknown-deployment`, #540).
 		if !domain.ID(deplID).Valid() {
-			return nil, errInvalid("deployment_id must be a valid deployment id")
+			return nil, errInvalid("Invalid deployment ID.")
 		}
 		args = append(args, deplID)
 		query += fmt.Sprintf(` AND deployment_id = $%d`, len(args))
@@ -302,11 +306,14 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND trigger_type = $%d`, len(args))
 	}
 	// Hand-parsed rather than parseBoolParam, which cannot tell an absent
-	// key from false — and absent means no filter at all.
+	// key from false — and absent means no filter at all. The refusal is the
+	// reference's sentence for this parameter (2026-09-05 batch3
+	// `rec84.runs.list.has_error.bogus`, #540); parseBoolParam's own, for
+	// parameters no recording covers, stays ours.
 	if he := q.Get("has_error"); he != "" {
 		v, err := strconv.ParseBool(he)
 		if err != nil {
-			return nil, errInvalid("has_error must be true or false")
+			return nil, errInvalid("Failed to parse request body: invalid value for bool field has_error: %q", he)
 		}
 		// Published as "true for runs with non-null error, false for runs
 		// with non-null session_id" — but the false arm keys off succeeded_at,

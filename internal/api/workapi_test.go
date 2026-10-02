@@ -259,12 +259,14 @@ func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	envID, _, key := selfHostedWorker(t, s, "ek-route")
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
+	// The 405 in the reference's words (#540): 2026-09-12 batch1 idx 60
+	// `rec91.work.poll.put`.
 	res := s.doRaw(http.MethodPut, "/v1/environments/"+envID+"/work/poll", nil, auth)
 	raw, _ := io.ReadAll(res.Body)
 	res.Body.Close()
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
-	wantErr(t, res.StatusCode, body, http.StatusMethodNotAllowed, "invalid_request_error")
+	wantErrMsg(t, res.StatusCode, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
 
 	res = s.doRaw(http.MethodGet, "/v1/environments/"+envID+"/work/bogus", nil, auth)
 	raw, _ = io.ReadAll(res.Body)
@@ -284,13 +286,14 @@ func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
 
 	// POST .../work/poll with an empty body is a 400 (metadata required), not a
-	// 404: validation runs before the item lookup.
+	// 404: validation runs before the item lookup. Worded as the reference
+	// words it (2026-09-12 batch1 idx 58 `rec91.work.poll.post-empty-retry`).
 	res = s.doRaw(http.MethodPost, "/v1/environments/"+envID+"/work/poll", nil, auth)
 	raw, _ = io.ReadAll(res.Body)
 	res.Body.Close()
 	body = nil
 	_ = json.Unmarshal(raw, &body)
-	wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error", "metadata: Field required")
 }
 
 // TestWorkUpdateMetadata pins the metadata patch endpoint (POST .../work/{work_id}):
@@ -686,17 +689,30 @@ func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 	}
 	refused := func(t *testing.T, query string, want map[string]any) {
 		t.Helper()
-		res, body, raw := s.workReq(t, http.MethodPost, item+"/heartbeat?"+query, key, nil)
+		res, body, _ := s.workReq(t, http.MethodPost, item+"/heartbeat?"+query, key, nil)
 		wantErr(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error")
 		wantDetails(t, body, map[string]any{
 			"current_state":    want,
 			"error_visibility": "user_facing",
 			"error_code":       "heartbeat_precondition_failed",
 		})
-		// The message is ours and stays so until #540 settles message parity.
-		if !strings.Contains(raw, `"message":"expected_last_heartbeat does not match the current lease"`) {
-			t.Errorf("412 body %s, want the message unchanged", raw)
+		// The reference's sentence (#540): the precondition as the beat sent it,
+		// then the item's last heartbeat with six fractional digits — recorded
+		// as "Heartbeat precondition failed: expected NO_HEARTBEAT, actual was
+		// 2026-09-02T00:08:33.477978Z" (batch2 idx 259) and "… expected
+		// 2020-01-01T00:00:00Z, actual was …" (idx 260) — or "NULL" when it
+		// holds none, as the SDK's leaseLostBody fixture renders that case.
+		q, _ := url.ParseQuery(query)
+		actual := "NULL"
+		if lh, ok := want["last_heartbeat"].(string); ok {
+			ts, err := time.Parse(time.RFC3339Nano, lh)
+			if err != nil {
+				t.Fatalf("last_heartbeat %q: %v", lh, err)
+			}
+			actual = ts.UTC().Format("2006-01-02T15:04:05.000000Z07:00")
 		}
+		wantErrMsg(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error",
+			"Heartbeat precondition failed: expected "+q.Get("expected_last_heartbeat")+", actual was "+actual)
 	}
 
 	// A claim before the ack, on work no beat has reached. No recording holds a

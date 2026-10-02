@@ -40,22 +40,53 @@ const (
 
 // ErrEnvironmentCredentialRequired refuses a user.tool_result sent under any
 // credential but a worker's; NormalizeInbound wraps it with the event's index,
-// and the API answers it 403 permission_error, as the reference does.
+// and the API answers it 403 permission_error, as the reference does — in its
+// words, the index prefix included (2026-09-02 batch2
+// `sessW.send.user.tool_result.console-auth`, #540). The credential it names is
+// the reference's: here a worker's environment key or its sessions token is
+// what posts one.
 var ErrEnvironmentCredentialRequired = errors.New("`user.tool_result` may only be sent with environment credentials " +
-	"(the self-hosted worker's environment key or its sessions token); " +
+	"(the self-hosted runner's Session-Instance JWT); " +
 	"an API key or Console session cannot post this event type")
+
+// verbatim is an inbound refusal already in the reference's recorded words,
+// index and all, so NormalizeInbound passes it through rather than prefixing
+// "events[i]: " (#540). ours is the refusal in this platform's words, which a
+// create's initial_events keeps (NormalizeInitialEvents): no recording reaches
+// that surface, and the reference's sentences name a send batch's `events`.
+type verbatim struct{ ref, ours string }
+
+func (e verbatim) Error() string { return e.ref }
 
 // NormalizeInbound validates one send batch. envKind is the session's
 // environment kind ("cloud" | "self_hosted") and cred the class of credential
 // the batch arrived under; both gate user.tool_result, the credential first.
 func NormalizeInbound(envKind string, cred Credential, raws []json.RawMessage) ([]NewEvent, error) {
+	return normalizeBatch(envKind, cred, raws, true)
+}
+
+// NormalizeInitialEvents is NormalizeInbound for a session's or deployment's
+// initial_events, refusing in this platform's words throughout (see verbatim).
+func NormalizeInitialEvents(envKind string, cred Credential, raws []json.RawMessage) ([]NewEvent, error) {
+	return normalizeBatch(envKind, cred, raws, false)
+}
+
+func normalizeBatch(envKind string, cred Credential, raws []json.RawMessage, reference bool) ([]NewEvent, error) {
 	if len(raws) == 0 {
-		return nil, fmt.Errorf("events must contain at least one event")
+		// 2026-09-02 batch2 `sessT.send.empty-events` (#540).
+		return nil, errors.New("events: must contain at least 1 item")
 	}
 	out := make([]NewEvent, 0, len(raws))
 	var prev domain.EventType
 	for i, raw := range raws {
-		ev, err := normalizeOne(envKind, cred, raw)
+		ev, err := normalizeOne(envKind, cred, i, raw)
+		var v verbatim
+		if errors.As(err, &v) {
+			if reference {
+				return nil, err
+			}
+			err = errors.New(v.ours)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("events[%d]: %w", i, err)
 		}
@@ -117,7 +148,8 @@ func walkStrings(v any) error {
 	return nil
 }
 
-func normalizeOne(envKind string, cred Credential, raw json.RawMessage) (NewEvent, error) {
+// normalizeOne validates the batch's event i.
+func normalizeOne(envKind string, cred Credential, i int, raw json.RawMessage) (NewEvent, error) {
 	obj, err := asObject(raw, "event")
 	if err != nil {
 		return NewEvent{}, err
@@ -134,11 +166,11 @@ func normalizeOne(envKind string, cred Credential, raw json.RawMessage) (NewEven
 	et := domain.EventType(typ)
 	switch et {
 	case domain.EventUserMessage:
-		return normalizeUserMessage(obj)
+		return normalizeUserMessage(obj, i)
 	case domain.EventUserInterrupt:
 		return normalizeUserInterrupt(obj)
 	case domain.EventUserToolConfirm:
-		return normalizeToolConfirmation(obj)
+		return normalizeToolConfirmation(obj, i)
 	case domain.EventUserCustomToolRes:
 		return normalizeToolResult(obj, et, "custom_tool_use_id")
 	case domain.EventUserToolResult:
@@ -158,36 +190,19 @@ func normalizeOne(envKind string, cred Credential, raw json.RawMessage) (NewEven
 		return normalizeSystemMessage(obj)
 	case domain.EventUserDefineOutcome:
 		return normalizeDefineOutcome(obj)
-	case domain.EventStart, domain.EventDelta:
-		return NewEvent{}, fmt.Errorf("%q is a stream-only preview frame and cannot be sent", typ)
 	}
-	if platformEmitted[et] {
-		return NewEvent{}, fmt.Errorf("event type %q is emitted by the platform and cannot be sent by clients", typ)
+	// Any other type — platform-emitted, a stream-only preview frame, or
+	// unknown — is refused in the reference's words (2026-09-02 batch2
+	// `sessT.send.unknown-type`, #540). Only the platform-emitted case is
+	// recorded (an agent.message); the other two share its sentence.
+	return NewEvent{}, verbatim{
+		ref:  fmt.Sprintf("Failed to parse request: events[%d].type: %q is not a valid value", i, typ),
+		ours: fmt.Sprintf("event type %q cannot be sent", typ),
 	}
-	return NewEvent{}, fmt.Errorf("unknown event type %q", typ)
 }
 
-// platformEmitted enumerates the outbound taxonomy, so a client posting one
-// gets a clearer error than "unknown".
-var platformEmitted = map[domain.EventType]bool{
-	domain.EventAgentMessage: true, domain.EventAgentThinking: true,
-	domain.EventAgentToolUse: true, domain.EventAgentToolResult: true,
-	domain.EventAgentMCPToolUse: true, domain.EventAgentMCPToolResult: true,
-	domain.EventAgentCustomToolUse:         true,
-	domain.EventAgentThreadMessageSent:     true,
-	domain.EventAgentThreadMessageReceived: true,
-	domain.EventSessionStatusRunning:       true, domain.EventSessionStatusIdle: true,
-	domain.EventSessionStatusRescheduled: true, domain.EventSessionStatusTerminated: true,
-	domain.EventSessionError: true, domain.EventSessionUpdated: true, domain.EventSessionDeleted: true,
-	domain.EventSessionThreadCreated: true, domain.EventSessionThreadStatusRunning: true,
-	domain.EventSessionThreadStatusIdle: true, domain.EventSessionThreadStatusRescheduled: true,
-	domain.EventSessionThreadStatusTerminated: true,
-	domain.EventSpanModelRequestStart:         true, domain.EventSpanModelRequestEnd: true,
-	domain.EventSpanOutcomeEvalStart: true, domain.EventSpanOutcomeEvalOngoing: true,
-	domain.EventSpanOutcomeEvalEnd: true,
-}
-
-func normalizeUserMessage(obj map[string]json.RawMessage) (NewEvent, error) {
+// normalizeUserMessage validates the batch's event i, a user.message.
+func normalizeUserMessage(obj map[string]json.RawMessage, i int) (NewEvent, error) {
 	if err := allowKeys(obj, "type", "content"); err != nil {
 		return NewEvent{}, err
 	}
@@ -210,6 +225,16 @@ func normalizeUserMessage(obj map[string]json.RawMessage) (NewEvent, error) {
 		}
 	}
 	content, err := requireBlocks(obj, "content", blocksUserMessage)
+	var be *blockError
+	if errors.As(err, &be) && errors.Is(be.err, errEmptyText) {
+		// The reference's words for an empty text block in a user.message
+		// (2026-09-02 batch2 `sessT.send.user.message.empty-text-block`,
+		// #540). The other carriers' are never recorded and keep ours.
+		return NewEvent{}, verbatim{
+			ref:  fmt.Sprintf("events.%d.user_message.content.%d.text: value is required", i, be.index),
+			ours: be.Error(),
+		}
+	}
 	if err != nil {
 		return NewEvent{}, err
 	}
@@ -244,7 +269,9 @@ func normalizeUserInterrupt(obj map[string]json.RawMessage) (NewEvent, error) {
 	return ev, err
 }
 
-func normalizeToolConfirmation(obj map[string]json.RawMessage) (NewEvent, error) {
+// normalizeToolConfirmation validates the batch's event i, a
+// user.tool_confirmation.
+func normalizeToolConfirmation(obj map[string]json.RawMessage, i int) (NewEvent, error) {
 	if err := allowKeys(obj, "type", "result", "tool_use_id", "deny_message", "session_thread_id"); err != nil {
 		return NewEvent{}, err
 	}
@@ -266,7 +293,12 @@ func normalizeToolConfirmation(obj map[string]json.RawMessage) (NewEvent, error)
 			return NewEvent{}, fmt.Errorf("deny_message must be a string")
 		}
 		if result != "deny" {
-			return NewEvent{}, fmt.Errorf(`deny_message is only allowed when result is "deny"`)
+			// 2026-09-02 batch2
+			// `sessT.send.tool_confirmation.deny_message-on-allow` (#540).
+			return NewEvent{}, verbatim{
+				ref:  fmt.Sprintf("Invalid tool_confirmation event at index %d: deny_message is only allowed when result is 'deny'", i),
+				ours: `deny_message is only allowed when result is "deny"`,
+			}
 		}
 		denyMessage = raw
 	}
@@ -509,7 +541,13 @@ func threadClaim(obj map[string]json.RawMessage) (domain.ID, error) {
 		return "", fmt.Errorf("session_thread_id must be a string or null")
 	}
 	if !domain.ValidWithPrefix(s, domain.PrefixSessionThread) {
-		return "", fmt.Errorf("session_thread_id %q is not a session thread id", s)
+		// The reference's words, recorded on an interrupt (2026-09-02 batch2
+		// `sessK.send.interrupt.sth_-prefix` and `interrupt.unknown-thread`,
+		// #540); every type that carries the field shares this check.
+		return "", verbatim{
+			ref:  "Invalid session_thread_id: " + s,
+			ours: fmt.Sprintf("session_thread_id %q is not a session thread id", s),
+		}
 	}
 	return domain.ID(s), nil
 }
@@ -529,6 +567,20 @@ func requireBlocks(obj map[string]json.RawMessage, key string, allowed map[strin
 	return validateBlocks(raw, key, allowed)
 }
 
+// blockError is validateBlocks' refusal of one block, its index kept for a
+// carrier that words the refusal its own way (normalizeUserMessage).
+type blockError struct {
+	what  string
+	index int
+	err   error
+}
+
+func (e *blockError) Error() string { return fmt.Sprintf("%s[%d]: %v", e.what, e.index, e.err) }
+func (e *blockError) Unwrap() error { return e.err }
+
+// errEmptyText is validateBlock's refusal of a text block whose text is "".
+var errEmptyText = errors.New("text block text must not be empty")
+
 // validateBlocks checks each content block against the wire schema and
 // reassembles the array from the original raw block bytes.
 func validateBlocks(raw json.RawMessage, what string, allowed map[string]bool) (json.RawMessage, error) {
@@ -538,7 +590,7 @@ func validateBlocks(raw json.RawMessage, what string, allowed map[string]bool) (
 	}
 	for i, item := range items {
 		if err := validateBlock(item, allowed); err != nil {
-			return nil, fmt.Errorf("%s[%d]: %w", what, i, err)
+			return nil, &blockError{what: what, index: i, err: err}
 		}
 	}
 	out, err := json.Marshal(items)
@@ -580,7 +632,7 @@ func validateBlock(raw json.RawMessage, allowed map[string]bool) error {
 		// folds into the system string, where empty is harmless) (INFERRED,
 		// docs/DIVERGENCES.md).
 		if s == "" {
-			return fmt.Errorf("text block text must not be empty")
+			return errEmptyText
 		}
 		return nil
 	case "image":

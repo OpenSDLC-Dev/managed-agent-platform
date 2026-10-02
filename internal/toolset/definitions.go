@@ -386,8 +386,17 @@ func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, 
 	if builtinTool {
 		allowed = append(allowed, "type")
 	}
-	if err := rejectKeysOutside(kind, obj, path, allowed...); err != nil {
-		return err
+	if k, ok := unknownKey(obj, allowed); ok {
+		ours := fmt.Errorf("%s: unknown field %q in %s", kind, k, path)
+		// A built-in entry whose name selects one of the eight variants is
+		// refused in the reference's words (2026-09-02 batch2
+		// `agent.create.config-unknown-key`, #540). One with no such name is
+		// a different refusal there, and unrecorded.
+		if name, named := builtinName(obj["name"]); builtinTool && named {
+			return &ConfigError{Path: path + "." + k,
+				Reason: fmt.Sprintf("Extra inputs are not permitted for name %q", name), msg: ours.Error()}
+		}
+		return ours
 	}
 	if builtinTool {
 		if err := checkToolType(kind, obj, path); err != nil {
@@ -404,11 +413,16 @@ func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, 
 // tool the entry configures. The union tags each variant with one constant for
 // both name and type, so an entry whose two disagree names two variants at once
 // and there is no way to tell which the client meant: rejecting it beats
-// silently configuring whichever key this platform happens to read (INFERRED —
-// the reference's own answer is unrecorded; docs/DIVERGENCES.md). An absent type
-// is fine, the request marking it omitzero. Both are read as *string because
-// encoding/json accepts a JSON null into a plain string as its zero value, and
-// {"name":null,"type":""} would otherwise pass as two equal empty strings.
+// silently configuring whichever key this platform happens to read. The
+// reference refuses both recorded cases — a type with no name, and a type
+// disagreeing with a built-in name — and those two are answered in its words
+// (2026-09-02 batch2 `agent.create.config-type-only` and
+// `agent.create.config-name-type-mismatch`, #540); a null or non-string name,
+// and a type beside a name that selects no variant, keep this platform's. An
+// absent type is fine, the request marking it omitzero. Both are read as
+// *string because encoding/json accepts a JSON null into a plain string as its
+// zero value, and {"name":null,"type":""} would otherwise pass as two equal
+// empty strings.
 func checkToolType(kind string, obj map[string]json.RawMessage, path string) error {
 	raw, ok := obj["type"]
 	if !ok {
@@ -418,29 +432,72 @@ func checkToolType(kind string, obj map[string]json.RawMessage, path string) err
 	if err := json.Unmarshal(raw, &typ); err != nil || typ == nil {
 		return fmt.Errorf("%s: %s.type must be a string", kind, path)
 	}
+	rawName, hasName := obj["name"]
 	var name *string
-	if err := json.Unmarshal(obj["name"], &name); err != nil || name == nil {
-		return fmt.Errorf("%s: %s.type needs a string name to equal", kind, path)
+	if err := json.Unmarshal(rawName, &name); err != nil || name == nil {
+		ours := fmt.Errorf("%s: %s.type needs a string name to equal", kind, path)
+		if _, builtin := builtinName(raw); !hasName && builtin {
+			return &ConfigError{Path: path + ".name",
+				Reason: fmt.Sprintf("must be %q on a config of type %q", *typ, *typ), msg: ours.Error()}
+		}
+		return ours
 	}
 	if *typ != *name {
-		return fmt.Errorf("%s: %s.type is %q but must equal name %q", kind, path, *typ, *name)
+		ours := fmt.Errorf("%s: %s.type is %q but must equal name %q", kind, path, *typ, *name)
+		if _, builtin := builtinName(rawName); builtin {
+			return &ConfigError{Path: path + ".type",
+				Reason: fmt.Sprintf("%q does not match name %q", *typ, *name), msg: ours.Error()}
+		}
+		return ours
 	}
 	return nil
+}
+
+// ConfigError is a refusal of one agent_toolset_20260401 configs[] entry that
+// the reference was recorded answering (#540). Error() is this package's own
+// sentence, which every caller keeps but the agent create and update routes:
+// those answer in the reference's words, built from Path — the refused field
+// inside the toolset entry, such as configs[0].bogus — and Reason, the
+// sentence the reference puts after it (internal/api parseAgentTools).
+type ConfigError struct {
+	Path, Reason string
+	msg          string
+}
+
+func (e *ConfigError) Error() string { return e.msg }
+
+// builtinName reports the tool a raw name or type value selects: a string
+// naming one of the eight built-ins.
+func builtinName(raw json.RawMessage) (string, bool) {
+	var name string
+	if json.Unmarshal(raw, &name) != nil {
+		return "", false
+	}
+	return name, slices.ContainsFunc(definitions, func(d toolDef) bool { return d.name == name })
+}
+
+// unknownKey reports a key of obj not in allowed, if there is one.
+func unknownKey(obj map[string]json.RawMessage, allowed []string) (string, bool) {
+	for k := range obj {
+		if !slices.Contains(allowed, k) {
+			return k, true
+		}
+	}
+	return "", false
 }
 
 // rejectKeysOutside fails on the first key of obj not in allowed, naming its path
 // (the toolset object itself for the empty path).
 func rejectKeysOutside(kind string, obj map[string]json.RawMessage, path string, allowed ...string) error {
-	for k := range obj {
-		if slices.Contains(allowed, k) {
-			continue
-		}
-		if path == "" {
-			return fmt.Errorf("%s: unknown field %q", kind, k)
-		}
+	k, ok := unknownKey(obj, allowed)
+	switch {
+	case !ok:
+		return nil
+	case path == "":
+		return fmt.Errorf("%s: unknown field %q", kind, k)
+	default:
 		return fmt.Errorf("%s: unknown field %q in %s", kind, k, path)
 	}
-	return nil
 }
 
 // jsonObject decodes raw as a JSON object, reporting false for null, a non-object,

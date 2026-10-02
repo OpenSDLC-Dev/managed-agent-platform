@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -66,14 +67,19 @@ const reservedOrganization = "default"
 // (`rec83.edge6.foreign-org-uuid`), anything else its 400 for a segment that is
 // not a UUID, without details (`.literal-default-org`). Both come before
 // anything is looked up, so the segment cannot probe environment or key ids.
+// Both are worded as recorded (#540); a non-UUID the uuid crate would refuse
+// for something other than a stray character never was, and keeps ours.
 func consoleOrganization(r *http.Request) error {
 	org := r.PathValue("org")
 	switch {
 	case org == reservedOrganization:
 		return nil
 	case isUUID(org):
-		return withDetails(errAuth("not authenticated for organization "+org), userFacingDetails)
+		return withDetails(errAuth("Unable to authenticate session."), userFacingDetails)
 	default:
+		if why, ok := uuidInvalidCharacter(org); ok {
+			return errInvalid("path.organization_uuid: Input should be a valid UUID, %s", why)
+		}
 		return errInvalid("%q is not an organization id", org)
 	}
 }
@@ -198,6 +204,35 @@ func isUUID(s string) bool {
 		isHex(s[:8]+s[9:13]+s[14:18]+s[19:23]+s[24:])
 }
 
+// uuidInvalidCharacter is the Rust uuid crate's refusal of a value holding a
+// character no UUID can, which the reference's pydantic layer quotes after
+// "Input should be a valid UUID, " (2026-09-05 batch2
+// `rec83.edge4.revoke.malformed-id`, `rec83.edge6.literal-default-org`): the
+// first character that is neither a hyphen nor a hex digit, and its 1-based
+// position in the value as sent, counting a stripped `{` or `urn:uuid:`
+// (uuid 1.10.0, src/error.rs InvalidUuid::into_err). ok is false for a value
+// the crate refuses on another ground — invalid UTF-8, a wrong length or
+// grouping — whose wording no recording holds.
+func uuidInvalidCharacter(s string) (why string, ok bool) {
+	if !utf8.ValidString(s) {
+		return "", false
+	}
+	body, offset := s, 0
+	switch {
+	case len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}':
+		body, offset = s[1:len(s)-1], 1
+	case strings.HasPrefix(s, "urn:uuid:"):
+		body, offset = s[len("urn:uuid:"):], len("urn:uuid:")
+	}
+	for i, c := range body {
+		if c != '-' && (c >= utf8.RuneSelf || !isHex(string(c))) {
+			return fmt.Sprintf("invalid character: expected an optional prefix of `urn:uuid:` "+
+				"followed by [0-9a-fA-F-], found `%c` at %d", c, i+offset+1), true
+		}
+	}
+	return "", false
+}
+
 func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -209,29 +244,31 @@ func isHex(s string) bool {
 }
 
 // errConsoleEnvironmentMalformed is the 400 the reference answers an id without
-// the env_ shape with, details included (2026-09-05 batch2
-// `rec83.edge3.issue.malformed-env`; #664). The message is ours.
-func errConsoleEnvironmentMalformed(id string) error {
-	return withDetails(errInvalid("%q is not an environment id", id),
+// the env_ shape with, details and words included (2026-09-05 batch2
+// `rec83.edge3.issue.malformed-env`; #664, #540). The id it names is not
+// echoed, as the reference's is not.
+func errConsoleEnvironmentMalformed(string) error {
+	return withDetails(errInvalid("Invalid request: Environment id must have `env_` prefix."),
 		errorDetails{ErrorVisibility: visibilityUserFacing, ErrorCode: "invalid_request"})
 }
 
 // errConsoleEnvironmentNotFound is this namespace's 404 for an environment it
 // will not answer for, with the details the reference attaches to it here
-// (2026-09-05 batch2 `rec83.edge3.issue.unknown-env`; #664). The /v1 routes'
-// 404 for the same environment stays without them, as the reference's does
-// (2026-09-02 batch2 `env.archive.with-deployment`).
+// (2026-09-05 batch2 `rec83.edge3.issue.unknown-env`; #664) and the words every
+// environment 404 has (errEnvironmentNotFound). The /v1 routes' 404 for the
+// same environment stays without details, as the reference's does (2026-09-02
+// batch2 `env.archive.with-deployment`).
 func errConsoleEnvironmentNotFound(id string) error {
-	return withDetails(errNotFound("environment %s not found", id),
+	return withDetails(errEnvironmentNotFound(id),
 		errorDetails{ErrorVisibility: visibilityUserFacing, ErrorCode: "environment_not_found"})
 }
 
 // errEnvironmentKeyNotFound is revocation's one not-found branch, an unknown key
-// and another environment's alike, with the details the reference attaches to
-// both (2026-09-05 batch2 `rec83.edge4.revoke.unknown-uuid` and
-// `.cross-environment`; #664).
+// and another environment's alike, with the details and the words the
+// reference answers both with (2026-09-05 batch2
+// `rec83.edge4.revoke.unknown-uuid` and `.cross-environment`; #664, #540).
 func errEnvironmentKeyNotFound() error {
-	return withDetails(errNotFound("environment key not found"), userFacingDetails)
+	return withDetails(errNotFound("Token not found"), userFacingDetails)
 }
 
 // userFacingDetails is what the reference attaches to most of this namespace's
@@ -298,8 +335,10 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknownKeys(obj, "name"); err != nil {
-		return nil, err
+	// A pydantic surface on the reference, whose unknown-key sentence no
+	// recording holds, so it is not rejectUnknownKeys' strict-decoder one.
+	if key, ok := firstUnknownKey(obj, "name"); ok {
+		return nil, errInvalid("unknown field %q", key)
 	}
 	name, err := environmentKeyName(obj)
 	if err != nil {
@@ -398,6 +437,9 @@ func (s *server) revokeEnvironmentKey(r *http.Request) error {
 	// (`rec83.edge3.issue.malformed-env`), so the key id's shape is judged first,
 	// and a malformed one costs no query.
 	if !consoleIDShape(keyID, domain.PrefixEnvironmentKey) && !isUUID(keyID) {
+		if why, ok := uuidInvalidCharacter(keyID); ok {
+			return errInvalid("path.token_uuid: Input should be a valid UUID, %s", why)
+		}
 		return errInvalid("%q is not an environment key id", keyID)
 	}
 	envID, err := s.consoleEnvironment(r)
@@ -436,21 +478,34 @@ func noStore(next http.HandlerFunc) http.HandlerFunc {
 // across concurrent writes, which a keyset cursor cannot; it is what the
 // reference console's listing does, and an operator's per-host key list is small
 // enough that the difference never surfaces.
+//
+// Its refusals are pydantic's, as recorded (2026-09-05 batch2
+// `rec83.edge5.list.limit.abc`, `.limit.0`, `.offset.-1`; #540); a non-integer
+// offset, never recorded, takes the non-integer limit's sentence by analogy.
 func parseOffsetPage(q url.Values) (limit, offset int, err error) {
 	limit, offset = consoleKeyLimit, 0
 	if s := q.Get("limit"); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 1 {
-			return 0, 0, errInvalid("limit must be a positive integer")
+		if limit, err = pydanticInt("limit", s, 1); err != nil {
+			return 0, 0, err
 		}
-		limit = n
 	}
 	if s := q.Get("offset"); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 0 {
-			return 0, 0, errInvalid("offset must be a non-negative integer")
+		if offset, err = pydanticInt("offset", s, 0); err != nil {
+			return 0, 0, err
 		}
-		offset = n
 	}
 	return limit, offset, nil
+}
+
+// pydanticInt parses one integer query parameter with a lower bound, refusing
+// it in pydantic's words.
+func pydanticInt(field, s string, min int) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, errInvalid("%s: Input should be a valid integer, unable to parse string as an integer", field)
+	}
+	if n < min {
+		return 0, errInvalid("%s: Input should be greater than or equal to %d", field, min)
+	}
+	return n, nil
 }

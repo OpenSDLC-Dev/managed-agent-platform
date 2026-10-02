@@ -115,14 +115,20 @@ func selfMember(self sessionAgentJSON) threadAgentJSON {
 // (depth limit 1). `self` is exempt from the depth check — read literally the
 // rule would forbid the documented feature — and the depth check reads the spec
 // that gets pinned, since that is the definition a thread would run. Every
-// rejection is a 400 naming the entry.
-func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID string, selfVersion int64) (json.RawMessage, error) {
+// rejection is a 400. Those the reference was recorded answering on create
+// carry its sentences (2026-09-02 batch2, the `agent.create.roster.*` probes,
+// #540): a member's refusal names the member and not the entry, as the
+// reference's does, and a path is opened by prefix — "" on create,
+// agentUpdatePath on update. The rest name the entry, in our words.
+func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID string, selfVersion int64, prefix string) (json.RawMessage, error) {
 	obj, err := asObjectRaw(raw)
 	if err != nil {
 		return nil, errInvalid("multiagent must be an object")
 	}
+	// The strict decoder's sentence names the bare key, nested or not
+	// (rejectUnknownKeys), so it carries no path here either.
 	if err := rejectUnknownKeys(obj, "type", "agents"); err != nil {
-		return nil, errInvalid("multiagent: %s", err.Error())
+		return nil, err
 	}
 	var typ string
 	if raw, ok := obj["type"]; !ok || json.Unmarshal(raw, &typ) != nil || typ != "coordinator" {
@@ -132,24 +138,45 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 	if err != nil {
 		return nil, err
 	}
-	if len(entries) == 0 || len(entries) > rosterMaxEntries {
+	switch {
+	case len(entries) == 0 && !isNull(obj["agents"]):
+		// `agent.create.roster.empty`. An explicit null, which rawList also
+		// reads as empty, and the upper bound are unrecorded.
+		return nil, errInvalid("%smultiagent.coordinator.agents: must contain at least 1 item", prefix)
+	case len(entries) == 0 || len(entries) > rosterMaxEntries:
 		return nil, errInvalid("multiagent.agents must have between 1 and %d entries", rosterMaxEntries)
 	}
 
 	refs := make([]rosterRef, len(entries))
 	seen := map[string]bool{}
-	selfSeen := false
+	selfSeen, typedSelfSeen := false, false
 	var ids []string // the members to look up, in request order
 	for i, entry := range entries {
 		id, version, isSelf, err := parseRosterEntry(entry)
-		if err != nil {
+		var badID badAgentIDError
+		var unknown rosterUnknownKeyError
+		switch {
+		case errors.As(err, &unknown):
+			return nil, unknown.error
+		case errors.Is(err, errNullRosterEntry):
+			// `agent.create.roster.member-has-multiagent` (idx 117).
+			return nil, errInvalid("Failed to parse request: %smultiagent.agents[%d]: must be a string or an object (got null)", prefix, i)
+		case errors.As(err, &badID):
+			return nil, errInvalid("%s", err.Error())
+		case err != nil:
 			return nil, errInvalid("multiagent.agents[%d]: %s", i, err.Error())
 		}
 		if isSelf || id == selfID {
 			if selfSeen {
+				// `agent.create.roster.two-self`, where both are
+				// {"type":"self"}; an own-id entry beside one, which only
+				// update can send, is unrecorded.
+				if isSelf && typedSelfSeen {
+					return nil, errInvalid(`%smultiagent.agents.%d: at most one {"type":"self"} entry is allowed`, prefix, i)
+				}
 				return nil, errInvalid("multiagent.agents[%d]: at most one self entry", i)
 			}
-			selfSeen = true
+			selfSeen, typedSelfSeen = true, isSelf
 			// An explicit own-id reference may carry the version a GET
 			// renders for self (the one being superseded) or the one this
 			// write produces; any other is not this coordinator's self.
@@ -161,7 +188,8 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 			ids = append(ids, id)
 		}
 		if seen[id] {
-			return nil, errInvalid("multiagent.agents[%d]: agent %s is referenced more than once", i, id)
+			// `agent.create.roster.duplicate-member` and `.same-agent-two-versions`.
+			return nil, errInvalid("Agent has invalid configuration: subagent %s referenced multiple times", id)
 		}
 		seen[id] = true
 		refs[i] = rosterRef{ID: id, Type: "agent", Version: version}
@@ -217,7 +245,8 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 			return nil, errNotFound("agent %s not found", refs[i].ID)
 		}
 		if m.archived {
-			return nil, errInvalid("multiagent.agents[%d]: agent %s is archived", i, refs[i].ID)
+			// `agent.create.roster.archived-member`.
+			return nil, errInvalid("Agent has invalid configuration: subagent %s is archived", refs[i].ID)
 		}
 		if refs[i].Version == 0 {
 			refs[i].Version = m.current
@@ -257,10 +286,12 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 			continue
 		}
 		if !found[refs[i].ID] {
-			return nil, errInvalid("multiagent.agents[%d]: agent %s version %d not found", i, refs[i].ID, refs[i].Version)
+			// `agent.create.roster.version-999`.
+			return nil, errInvalid("Agent has invalid configuration: subagent %s version %d not found", refs[i].ID, refs[i].Version)
 		}
 		if nested[refs[i].ID] {
-			return nil, errInvalid("multiagent.agents[%d]: agent %s is itself a coordinator (depth limit 1)", i, refs[i].ID)
+			// `agent.create.roster.member-has-multiagent` (idx 137).
+			return nil, errInvalid("Agent has invalid configuration: subagent %s has its own subagents; maximum depth is 1", refs[i].ID)
 		}
 	}
 	return json.Marshal(storedRoster{Type: "coordinator", Agents: refs})
@@ -345,14 +376,23 @@ func asObjectRaw(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	return obj, nil
 }
 
+// errNullRosterEntry is parseRosterEntry's refusal of a null entry, which
+// resolveRoster answers in the reference's words.
+var errNullRosterEntry = errors.New("null roster entry")
+
 // parseRosterEntry reads one roster entry: a bare agent-id string, a
 // {type:"agent", id, version?} reference, or {type:"self"}. version 0 means
 // "pin the current version" (an explicit null reads as omitted, as session
 // create's agent.version does).
+// rosterUnknownKeyError carries an entry's unknown-key refusal past the
+// entry-index prefix resolveRoster puts on the rest: rejectUnknownKeys'
+// sentence names the bare key, as the reference's strict decoder does.
+type rosterUnknownKeyError struct{ error }
+
 func parseRosterEntry(raw json.RawMessage) (id string, version int64, isSelf bool, err error) {
 	shapeErr := errors.New(`entry must be an agent id string, {"type":"agent","id",…} or {"type":"self"}`)
 	if isNull(raw) {
-		return "", 0, false, shapeErr
+		return "", 0, false, errNullRosterEntry
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
@@ -369,12 +409,12 @@ func parseRosterEntry(raw json.RawMessage) (id string, version int64, isSelf boo
 	switch typ {
 	case "self":
 		if err := rejectUnknownKeys(obj, "type"); err != nil {
-			return "", 0, false, err
+			return "", 0, false, rosterUnknownKeyError{err}
 		}
 		return "", 0, true, nil
 	case "agent":
 		if err := rejectUnknownKeys(obj, "type", "id", "version"); err != nil {
-			return "", 0, false, err
+			return "", 0, false, rosterUnknownKeyError{err}
 		}
 		id, err := requiredString(obj, "id")
 		if err != nil {
@@ -402,9 +442,20 @@ func checkAgentID(id string) error {
 		return errors.New("agent id must not be empty")
 	}
 	if !domain.ID(id).HasPrefix(domain.PrefixAgent) || !domain.ID(id).Valid() {
-		return fmt.Errorf("%q is not an agent id", id)
+		return badAgentIDError(id)
 	}
 	return nil
+}
+
+// badAgentIDError is checkAgentID's refusal of a malformed id, in the
+// reference's words (2026-09-02 batch2 `agent.create.roster.unknown-agent`,
+// #540), which resolveRoster answers whole. The recorded id was malformed at
+// the reference as well (base58 has no "I"), so a well-formed id that names no
+// agent is a different, unrecorded case and keeps resolveRoster's own sentence.
+type badAgentIDError string
+
+func (id badAgentIDError) Error() string {
+	return fmt.Sprintf("Agent has invalid configuration: subagent %s is not a valid agent ID", string(id))
 }
 
 // snapshotRoster builds the session-side roster from a stored one: every
