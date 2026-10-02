@@ -937,7 +937,12 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 
 	if len(initialEvents) > 0 {
 		if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), initialEvents, false); err != nil {
-			return createdSession{}, errInvalid("initial_events: %s", err)
+			// The client's mistake is the 400; a fault reading the log is not.
+			var refusal *events.Refusal
+			if errors.As(err, &refusal) {
+				return createdSession{}, errInvalid("initial_events: %s", err)
+			}
+			return createdSession{}, err
 		}
 		defs, err := events.DefineOutcomes(initialEvents)
 		if err != nil {
@@ -1359,8 +1364,11 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	if agentID := q.Get("agent_id"); agentID != "" {
 		// A malformed agent_id can never name a stored agent; reject it on shape
 		// (a valid but absent one still filters to an empty page) so an unstorable
-		// byte does not reach the bind parameter as a 500. See #135.
-		if !domain.ID(agentID).Valid() {
+		// byte does not reach the bind parameter as a 500. See #135. The shape is
+		// the one an agent path id is read by (domain.WellFormedID, #841), so the
+		// reference's ids and the runner's fixed agent filter as the agent routes
+		// read them.
+		if !domain.WellFormedID(agentID, domain.PrefixAgent) {
 			return nil, errInvalid("agent_id must be a valid agent id")
 		}
 		args = append(args, agentID)

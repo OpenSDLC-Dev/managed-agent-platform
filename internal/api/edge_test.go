@@ -215,10 +215,13 @@ func TestMetadataRejectsNUL(t *testing.T) {
 // left open: path IDs and id-shaped query parameters. Go's http.ServeMux
 // percent-decodes %00 into a real NUL in PathValue / URL.Query, so without a
 // shape guard the byte binds straight into Postgres and fails with SQLSTATE
-// 22021 — a 500. Every affected surface must instead return the wire error an
-// unknown or absent id already gets: a 404 on a path id (or work item), a 400 on
-// an id-shaped query filter, the page cursor, or the free-form types[] filter.
-// See #135.
+// 22021 — a 500. Every affected surface must instead answer a 4xx: on most,
+// the wire error an unknown or absent id already gets — a 404 on a path id (or
+// work item), a 400 on an id-shaped query filter, the page cursor, or the
+// free-form types[] filter (#135). Where the reference answers a malformed id
+// apart from an absent one, it is that 400 in its words instead (#841): an
+// agent path id here, and a thread path id, which
+// TestThreadsPrimaryOnEverySession sweeps.
 func TestPathAndQueryRejectNUL(t *testing.T) {
 	s := newTestServer(t)
 	agent := createAgent(t, s, map[string]any{"name": "nul-id", "model": "m"})
@@ -232,15 +235,33 @@ func TestPathAndQueryRejectNUL(t *testing.T) {
 	// PathValue / query value the handler reads.
 	const nul = "%00"
 
-	// Path ids → 404 not_found_error (the shape an unknown id already returns).
+	// Agent path ids → the reference's 400 for a malformed one (#841).
 	for name, tc := range map[string]struct {
 		method, path string
 		body         any
 	}{
-		"agent get":       {http.MethodGet, "/v1/agents/agent_" + nul, nil},
-		"agent update":    {http.MethodPost, "/v1/agents/agent_" + nul, map[string]any{"version": 1}},
-		"agent versions":  {http.MethodGet, "/v1/agents/agent_" + nul + "/versions", nil},
-		"agent archive":   {http.MethodPost, "/v1/agents/agent_" + nul + "/archive", nil},
+		"agent get":      {http.MethodGet, "/v1/agents/agent_" + nul, nil},
+		"agent update":   {http.MethodPost, "/v1/agents/agent_" + nul, map[string]any{"version": 1}},
+		"agent versions": {http.MethodGet, "/v1/agents/agent_" + nul + "/versions", nil},
+		"agent archive":  {http.MethodPost, "/v1/agents/agent_" + nul + "/archive", nil},
+		// Invalid UTF-8 (a percent-decoded %80) is unstorable the same way, and
+		// domain.WellFormedID rejects it on shape too.
+		"agent get invalid utf-8": {http.MethodGet, "/v1/agents/agent_%80", nil},
+	} {
+		status, res := s.do(tc.method, tc.path, tc.body)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (%v)", name, status, res)
+			continue
+		}
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "Invalid agent ID.")
+	}
+
+	// Every other path id → 404 not_found_error (the shape an unknown id
+	// already returns).
+	for name, tc := range map[string]struct {
+		method, path string
+		body         any
+	}{
 		"env get":         {http.MethodGet, "/v1/environments/env_" + nul, nil},
 		"env update":      {http.MethodPost, "/v1/environments/env_" + nul, map[string]any{"name": "x"}},
 		"env delete":      {http.MethodDelete, "/v1/environments/env_" + nul, nil},
@@ -252,9 +273,6 @@ func TestPathAndQueryRejectNUL(t *testing.T) {
 		"events send":     {http.MethodPost, "/v1/sessions/sesn_" + nul + "/events", map[string]any{"events": []any{}}},
 		"events list":     {http.MethodGet, "/v1/sessions/sesn_" + nul + "/events", nil},
 		"events stream":   {http.MethodGet, "/v1/sessions/sesn_" + nul + "/events/stream", nil},
-		// Invalid UTF-8 (a percent-decoded %80) is unstorable the same way, and the
-		// alphabet check rejects it on shape too.
-		"agent get invalid utf-8": {http.MethodGet, "/v1/agents/agent_%80", nil},
 	} {
 		status, res := s.do(tc.method, tc.path, tc.body)
 		if status != http.StatusNotFound {

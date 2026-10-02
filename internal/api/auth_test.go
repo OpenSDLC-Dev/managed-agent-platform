@@ -133,7 +133,7 @@ func TestEveryRefusalIsLogged(t *testing.T) {
 	wantErr(t, status, put, http.StatusMethodNotAllowed, "invalid_request_error")
 	longPath := "/v1/agents/" + strings.Repeat("a", 600)
 	status, long := s.do(http.MethodGet, longPath, nil)
-	wantErr(t, status, long, http.StatusNotFound, "not_found_error")
+	wantErr(t, status, long, http.StatusBadRequest, "invalid_request_error") // a malformed agent id (#841)
 	if status, _ := s.do(http.MethodGet, "/v1/agents", nil); status != http.StatusOK {
 		t.Fatalf("list agents: %d", status)
 	}
@@ -168,7 +168,7 @@ func TestEveryRefusalIsLogged(t *testing.T) {
 			message(body), "request_id=" + body["request_id"].(string)},
 		{"method=PUT", "path=/v1/agents ", "status=405", "error_type=invalid_request_error",
 			`message="Method Not Allowed"`, "request_id=" + put["request_id"].(string)},
-		{"path=" + longPath[:512-len("…[truncated]")] + "…[truncated] ", "status=404", "request_id=" + long["request_id"].(string)},
+		{"path=" + longPath[:512-len("…[truncated]")] + "…[truncated] ", "status=400", "request_id=" + long["request_id"].(string)},
 	} {
 		for _, w := range want {
 			if !strings.Contains(refused[i], w) {

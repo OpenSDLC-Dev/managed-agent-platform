@@ -616,9 +616,10 @@ item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 
   `:42-48`: that set is what every `/v1` path accepts as an id shape, and widening it for a
   private identifier "would widen all of them". `internal/domain/docs_test.go:53-55` states the
   same exclusion, and `:56`'s test pins documents to `knownPrefixes` only, so a private prefix
-  costs no documentation edit. The validator is `domain.ValidWithPrefix`, which holds an id to
+  costs no documentation edit. The validator was `domain.ValidWithPrefix`, which held an id to
   this platform's own minting alphabet; the console paths stopped using it in #664, since they
-  must accept reference-shaped ids too.
+  must accept reference-shaped ids too, and #841 removed it once its last caller had moved to
+  `domain.WellFormedID`.
 - **No non-test Go composes a table name.** Fragment concatenation, by contrast, is pervasive:
   **77** lines in the target packages' non-test files place a backtick-quoted string
   adjacent to a `+`, including `internal/events/toolflow.go:72` (`func answeredBy` — a
@@ -884,7 +885,8 @@ the credential already covers.
   recorded there as a session note, so this reading rests on the note rather than on retained
   bytes. Tracked #78.
 - malformed → 400 `invalid_request_error`, the reference's message verbatim (§4.2). "Malformed"
-  is a real check: `domain.ValidWithPrefix(v, domain.PrefixWorkspace)` or the literal
+  is a real check: the `workspace_` prefix over this platform's minting alphabet (what the
+  since-removed `domain.ValidWithPrefix` checked) or the literal
   `default`. **CONFIRMED** — the docs state this arm unconditionally, and 2026-09-05 records it
   (`batch9.curl.txt:63`). **Accepting the literal `default` is ours**: the reference answers
   that exact 400 for it (`:95`), as it does for a bare UUID (`:134`). We accept it because

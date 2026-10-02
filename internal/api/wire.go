@@ -175,11 +175,13 @@ func fieldPath(path string) string {
 // checkID rejects a malformed path id with the 404 an unknown id already gets.
 // Path IDs and id-shaped query parameters are the separate surface rejectNULBody
 // flags: http.ServeMux decodes %00 into a real NUL in PathValue / URL.Query, and
-// — like any non-alphabet or invalid-UTF-8 byte — it binds straight into
-// Postgres and fails as a 500 (SQLSTATE 22021). A server-minted id never carries
-// such a byte, so validating the id's shape before it reaches a bind parameter
-// closes the whole class. resource names the resource in the wire message, so a
-// malformed id is indistinguishable from a merely-absent one (see #135).
+// — like an invalid-UTF-8 byte — it binds straight into Postgres and fails as a
+// 500 (SQLSTATE 22021). domain.Valid admits only this platform's minting
+// alphabet, which holds neither, so validating the id's shape before it reaches
+// a bind parameter closes the whole class. resource names the resource in the
+// wire message, so a malformed id is indistinguishable from a merely-absent one
+// (see #135). Where the reference tells the two apart, the id is read by
+// domain.WellFormedID instead (checkAgentPathID, threadIDs).
 func checkID(id, resource string) error {
 	if !domain.ID(id).Valid() {
 		return errNotFound("%s %s not found", resource, id)
@@ -187,10 +189,39 @@ func checkID(id, resource string) error {
 	return nil
 }
 
-// checkWorkID is checkID for the work API, whose not-found message omits the id
+// checkAgentPathID is checkID for an agent path id, which the reference
+// answers apart from an absent one: 400, "Invalid agent ID." (2026-09-02
+// batch2 #115 `agent.get.coordinator.after-member-update`, a prefix-less
+// `undefined`; #841). Malformed is domain.WellFormedID's: a reference-format
+// id (batch2 #136 read `agent_01UreT9PZKHtpNLgeSGzPCQh`) and the fixed
+// agent_dreamrunner go on to the lookup and its 404, the hidden row's
+// included. Every agent path route shares it, though only the get was
+// recorded (INFERRED, docs/DIVERGENCES.md).
+func checkAgentPathID(id string) error {
+	if !domain.WellFormedID(id, domain.PrefixAgent) {
+		return errInvalid("Invalid agent ID.")
+	}
+	return nil
+}
+
+// checkWorkID is checkID for the work API. An id carrying none of the prefixes
+// the reference accepts is its recorded 400 (2026-09-12 batch1 #59
+// `rec91.work.poll.post-metadata`, a POST to …/work/poll read as work_id
+// "poll"; #841), on every {work_id} route, though only the update was recorded
+// (INFERRED, docs/DIVERGENCES.md). The accepted set is the sentence's three
+// plus sesn_, which the reference's own work ids carry and its routes were
+// recorded taking. An accepted id that domain.Valid refuses is then the 404
+// without a lookup — every cse_ id, cse being no prefix this platform knows,
+// and a sesn_ or session_ token outside its alphabet: this platform mints none
+// of them, so none can name an item. The not-found message omits the id
 // (matching mapWorkErr's ErrWorkNotFound) so a worker cannot tell a malformed
-// work_id from an item it is not allowed to see.
+// token from an item it is not allowed to see.
 func checkWorkID(id domain.ID) error {
+	switch {
+	case id.HasPrefix(domain.PrefixWork), id.HasPrefix(domain.PrefixSession), id.Prefix() == "cse":
+	default:
+		return errInvalid(`Invalid work ID format: expected session_*, cse_*, or work_* prefix, got "%s".`, id)
+	}
 	if !id.Valid() {
 		return errNotFound("work item not found")
 	}

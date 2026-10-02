@@ -231,8 +231,8 @@ func TestRosterConstraints(t *testing.T) {
 	// roster() with no entries sends agents:null; the recorded request sent [].
 	empty := map[string]any{"type": "coordinator", "agents": []any{}}
 	// The reference's sentences, each request shaped like the recorded one with
-	// this server's ids standing in for the reference's, which fail its id
-	// alphabet. Recording: managed-agents-wire-recordings
+	// this server's ids standing in for the reference's, which name no agent
+	// here. Recording: managed-agents-wire-recordings
 	// 2026-09-02/batch2.json, the idx and probe each case names.
 	recorded := []struct {
 		name string
@@ -257,7 +257,8 @@ func TestRosterConstraints(t *testing.T) {
 			"Agent has invalid configuration: subagent " + archived + " is archived"},
 		{"C-6 nested coordinator (idx 137 agent.create.roster.member-has-multiagent)", roster(nested),
 			"Agent has invalid configuration: subagent " + nested + " has its own subagents; maximum depth is 1"},
-		// The recorded id itself, which this server's alphabet refuses too.
+		// The recorded id itself, malformed here too for the I in its token
+		// (domain.WellFormedID).
 		{"entry not an agent id (idx 123 agent.create.roster.unknown-agent)", roster("agent_01UnknownAgentIdXXXXXXXX"),
 			"Agent has invalid configuration: subagent agent_01UnknownAgentIdXXXXXXXX is not a valid agent ID"},
 		{"entry not an agent id, object form", roster(map[string]any{"type": "agent", "id": "bogus"}),

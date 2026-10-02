@@ -539,8 +539,9 @@ func (s *server) updateWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// After the body is validated, so an empty/bad patch is still the 400 the
-	// reference returns before an item lookup (a malformed work_id is a 404).
+	// After the body is validated, the order the reference was recorded taking:
+	// on …/work/poll an empty body is refused for the body, a valid one for the
+	// work id (2026-09-12 batch1 #58 and #59).
 	if err := checkWorkID(workID); err != nil {
 		return nil, err
 	}

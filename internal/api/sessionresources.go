@@ -402,6 +402,18 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 // default, "read_write" — and for instructions the omitted key. The SDK never
 // transmits an empty access (omitzero), so "" is refused with every other value
 // outside the enum rather than read as the default.
+//
+// On session create the shape is the lookup's, consoleIDShape's prefix and
+// non-empty token: the reference looked up `memstore_01UnknownStoreIdXXXXXXXXX`
+// and answered 404, "Memory store `…` not found." (2026-09-02 batch2 #160
+// `session.create.unknown-store`; #841), though its token carries the I that
+// domain.WellFormedID refuses in an agent or a thread id — the reference parses
+// those and evidently not this one. So such an id goes on to the store lookup,
+// which answers it that way. That shape also holds the token to storable text,
+// which a string decoded from the body already is: the body decoder has
+// refused invalid UTF-8 and U+0000 outright, and a lone-surrogate escape
+// decodes to U+FFFD, which Postgres stores. The deployment routes keep the
+// full shape: they look no store up until a fire.
 func parseMemoryResource(obj map[string]json.RawMessage, f resourceFlavor, i int) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "memory_store_id", "access", "instructions"); err != nil {
 		return resourceInput{}, err
@@ -410,7 +422,11 @@ func parseMemoryResource(obj map[string]json.RawMessage, f resourceFlavor, i int
 	if err != nil {
 		return resourceInput{}, err
 	}
-	if !domain.ID(id).HasPrefix(domain.PrefixMemoryStore) || !domain.ID(id).Valid() {
+	wellFormed := domain.ID(id).HasPrefix(domain.PrefixMemoryStore) && domain.ID(id).Valid()
+	if f == resourceForSession {
+		wellFormed = consoleIDShape(id, domain.PrefixMemoryStore)
+	}
+	if !wellFormed {
 		return resourceInput{}, errInvalid("memory_store_id must be a valid memory store id")
 	}
 	access, set, null, err := stringField(obj, "access")

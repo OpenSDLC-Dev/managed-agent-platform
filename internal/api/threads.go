@@ -218,15 +218,22 @@ func loadThread(ctx context.Context, db querier, sessionID, threadID string, for
 	return row, err
 }
 
-// threadIDs reads and validates the {id}/{tid} path pair.
+// threadIDs reads and validates the {id}/{tid} path pair. A {tid} that is not
+// a thread id at all is the reference's 400, in its words (2026-09-02 batch2
+// #337 `sessK2.threads.get.sth_-prefix`; #841), on all four thread routes
+// though only the get was recorded. Malformed is domain.WellFormedID's, the
+// shape an interrupt's session_thread_id is held to (internal/events
+// threadClaim) — a reference-format id included, which goes on to the lookup
+// (INFERRED, docs/DIVERGENCES.md). A well-formed id that names no thread of
+// the session stays loadThread's 404.
 func threadIDs(r *http.Request) (sessionID, threadID string, err error) {
 	sessionID = normalizeSessionID(r.PathValue("id"))
 	if err := checkID(sessionID, "session"); err != nil {
 		return "", "", err
 	}
 	threadID = r.PathValue("tid")
-	if !domain.ID(threadID).HasPrefix(domain.PrefixSessionThread) || !domain.ID(threadID).Valid() {
-		return "", "", errNotFound("thread %s not found", threadID)
+	if !domain.WellFormedID(threadID, domain.PrefixSessionThread) {
+		return "", "", errInvalid("Invalid thread ID: %s", threadID)
 	}
 	return sessionID, threadID, nil
 }

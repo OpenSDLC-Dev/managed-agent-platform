@@ -783,7 +783,7 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 		row.createdAt, row.updatedAt, row.archivedAt), nil
 }
 
-// environmentStillReferenced renders the 400 for a delete a foreign key
+// environmentStillReferenced renders the refusal of a delete a foreign key
 // refused. It reads what actually references the environment rather than
 // trusting the constraint the error names: Postgres reports one violated
 // constraint, and when both a session and a deployment are in the way it
@@ -812,7 +812,17 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 // which deployments can still fire, and a foreign key cannot ask that. Archived
 // rows sort first, so the one that makes the delete permanent is named rather
 // than truncated away behind five live ones.
-func environmentStillReferenced(ctx context.Context, db querier, envID string) error {
+//
+// Sessions alone are the reference's 409, in its sentence (2026-09-03 batch2
+// #250 `sweep2.del.environments.pWX3jb`; #841), the count rendered into it as
+// the recorded template has it — "1 active sessions" too. A deployment refuses
+// nothing there, so with one in the way the refusal stays this platform's 400.
+// force is whether the delete was forced: the reference grants that request, so
+// its sentence, whose one piece of advice is the force the caller just sent, is
+// not borrowed for refusing it — the same 409 answers in this platform's words.
+// Both carry the recorded `x-should-retry: false` (noRetry): only deleting the
+// sessions clears them.
+func environmentStillReferenced(ctx context.Context, db querier, envID string, force bool) error {
 	var sessions, deployments, stuck int
 	var envArchived bool
 	var named []string
@@ -838,8 +848,10 @@ func environmentStillReferenced(ctx context.Context, db querier, envID string) e
 		// deleted, a deployment repointed. A retry then succeeds, or answers
 		// 404 if the environment went with it.
 		return errInvalid("environment %s was still referenced when the delete ran; try again", envID)
+	case deployments == 0 && force:
+		return noRetry(errConflict("environment %s still has sessions; delete them first", envID))
 	case deployments == 0:
-		return errInvalid("environment %s still has sessions; delete them first", envID)
+		return noRetry(errConflict("Environment has %d active sessions. Use force=true to delete anyway.", sessions))
 	}
 
 	list := strings.Join(named, ", ")
@@ -919,8 +931,9 @@ func (s *server) selfHostedQueueRefusal(ctx context.Context, envID string) error
 // lock order against every enqueue path, which takes the session row first.
 //
 // ?force=true lifts the queue refusal and only that. On the reference the
-// forced delete answers 200; here the sessions refuse it in their own words,
-// so force exchanges one refusal for another rather than deleting — the
+// forced delete answers 200; here the sessions refuse it — the 409 they answer
+// an unforced delete with, in this platform's words (environmentStillReferenced)
+// — so force exchanges one refusal for another rather than deleting, the
 // divergence docs/DIVERGENCES.md registers.
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
@@ -945,7 +958,7 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 				return nil, err
 			}
 		}
-		return nil, environmentStillReferenced(ctx, s.pool, id)
+		return nil, environmentStillReferenced(ctx, s.pool, id, force)
 	}
 	if err != nil {
 		return nil, err

@@ -168,12 +168,13 @@ func consoleEnvironmentID(r *http.Request) (string, error) {
 
 // consoleIDShape is how this namespace tells a malformed id from an unknown
 // one: the prefix, then a non-empty token of bytes Postgres can store. It is
-// not domain.ValidWithPrefix, which holds an id to the alphabet this platform
+// not domain.Valid, which holds an id to the alphabet this platform
 // mints. The reference's ids are not in that alphabet — env_01MQbDnwtRB9MBhtuxWAHq1M
 // and apikey_01ABCDEFGHJKMNPQRSTVWXYZ were answered 404, not 400 (2026-09-05
 // batch8 idx 22, batch5 idx 10–12; #664) — so the alphabet cannot be what
 // makes an id malformed here. The storable-bytes rule is what keeps the id out
-// of a query that would fail on it.
+// of a query that would fail on it. Session create reads a memory store id by
+// it too, for the same recorded reason (parseMemoryResource).
 func consoleIDShape(id, prefix string) bool {
 	token, ok := strings.CutPrefix(id, prefix+"_")
 	return ok && token != "" && storableText(token)

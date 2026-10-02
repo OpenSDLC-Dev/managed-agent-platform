@@ -323,9 +323,10 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// in path, less in method — neither dominates, so the mux panics). The
 	// ".../work/{work_id}" fallback answers other non-GET methods on those literal
 	// paths (PUT/DELETE) with a 405 (work_id="poll"/"stats"); a POST there routes
-	// to the metadata update, which — given a valid patch body — 404s on the
-	// nonexistent item, as the reference's own POST route does (an empty or
-	// malformed body is a 400, since body validation precedes the item lookup).
+	// to the metadata update, which — given a valid patch body — refuses "poll"
+	// as a work id with the reference's 400 (checkWorkID), as the reference's own
+	// POST route was recorded doing (an empty or malformed body is a 400 first,
+	// since body validation precedes the id check).
 	for _, pattern := range []string{
 		"/v1/environments/{id}/work",
 		"/v1/environments/{id}/work/{work_id}",

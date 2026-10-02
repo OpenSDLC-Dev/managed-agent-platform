@@ -247,53 +247,102 @@ func TestWorkPollEmitsTraceContextHeader(t *testing.T) {
 }
 
 // TestWorkPollRejectsWrongMethodAndPath pins the wire error envelope on the
-// work subtree: a known route with a truly unhandled method is 405, an unknown
-// work path is 404 — both authenticated first. A POST to .../work/poll is NOT a
-// 405: it routes to the metadata update as work_id="poll". With a valid patch
-// body it 404s on the nonexistent "poll" item (as the reference's own POST
-// .../work/{work_id} does); with an empty body it is a 400, because body
-// validation (metadata is required) precedes the item lookup — so the not-found
-// contract holds only for a valid patch.
+// work subtree: a known route with a truly unhandled method is 405, a work path
+// no route serves is 404 — both authenticated first. A POST to .../work/poll is
+// NOT a 405: it routes to the metadata update as work_id="poll". With a valid
+// patch body it is the reference's 400 for a work id carrying no prefix it
+// accepts; with an empty body it is a 400 for the body, because body
+// validation (metadata is required) precedes the id check — the order the
+// reference was recorded taking (#63, #841).
 func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	s := newTestServer(t)
 	envID, _, key := selfHostedWorker(t, s, "ek-route")
 	auth := map[string]string{"Authorization": "Bearer " + key}
+	call := func(method, path string, body any) (int, map[string]any) {
+		t.Helper()
+		res := s.doRaw(method, path, body, auth)
+		raw, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		var obj map[string]any
+		_ = json.Unmarshal(raw, &obj)
+		return res.StatusCode, obj
+	}
+	work := "/v1/environments/" + envID + "/work/"
 
 	// The 405 in the reference's words (#540): 2026-09-12 batch1 idx 60
 	// `rec91.work.poll.put`.
-	res := s.doRaw(http.MethodPut, "/v1/environments/"+envID+"/work/poll", nil, auth)
-	raw, _ := io.ReadAll(res.Body)
-	res.Body.Close()
-	var body map[string]any
-	_ = json.Unmarshal(raw, &body)
-	wantErrMsg(t, res.StatusCode, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
+	status, body := call(http.MethodPut, work+"poll", nil)
+	wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
 
-	res = s.doRaw(http.MethodGet, "/v1/environments/"+envID+"/work/bogus", nil, auth)
-	raw, _ = io.ReadAll(res.Body)
-	res.Body.Close()
-	body = nil
-	_ = json.Unmarshal(raw, &body)
-	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
+	status, body = call(http.MethodGet, work+"work_"+strings.Repeat("0", 24)+"/bogus", nil)
+	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 
-	// POST .../work/poll with a valid metadata body 404s on the nonexistent
-	// "poll" item — the documented routing-collision outcome.
-	res = s.doRaw(http.MethodPost, "/v1/environments/"+envID+"/work/poll",
-		map[string]any{"metadata": map[string]any{"a": "1"}}, auth)
-	raw, _ = io.ReadAll(res.Body)
-	res.Body.Close()
-	body = nil
-	_ = json.Unmarshal(raw, &body)
-	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
+	// POST .../work/poll with a valid metadata body refuses "poll" as a work
+	// id, as the reference does (2026-09-12 batch1 idx 59
+	// `rec91.work.poll.post-metadata`, #841).
+	status, body = call(http.MethodPost, work+"poll", map[string]any{"metadata": map[string]any{"probe": "rec91"}})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		`Invalid work ID format: expected session_*, cse_*, or work_* prefix, got "poll".`)
 
-	// POST .../work/poll with an empty body is a 400 (metadata required), not a
-	// 404: validation runs before the item lookup. Worded as the reference
-	// words it (2026-09-12 batch1 idx 58 `rec91.work.poll.post-empty-retry`).
-	res = s.doRaw(http.MethodPost, "/v1/environments/"+envID+"/work/poll", nil, auth)
-	raw, _ = io.ReadAll(res.Body)
-	res.Body.Close()
-	body = nil
-	_ = json.Unmarshal(raw, &body)
-	wantErrMsg(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error", "metadata: Field required")
+	// POST .../work/poll with an empty body is a 400 for the body, not the id:
+	// validation runs first. Worded as the reference words it (2026-09-12
+	// batch1 idx 58 `rec91.work.poll.post-empty-retry`).
+	status, body = call(http.MethodPost, work+"poll", nil)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "metadata: Field required")
+}
+
+// Every {work_id} route refuses an id carrying none of the prefixes the
+// reference accepts with its recorded sentence, recorded on the update alone
+// (INFERRED for the other four, docs/DIVERGENCES.md; #841). The accepted
+// prefixes are the sentence's three and sesn_, the reference's own work ids,
+// and an id carrying one answers the 404 an unknown item gets — reached two
+// ways, since this platform mints only work_ ids: a work_, sesn_ or session_
+// id in its alphabet is looked up and missed, while a cse_ id and a
+// reference-format sesn_ one fail domain.Valid and are refused without a
+// lookup.
+func TestWorkIDFormatIsAnsweredAsTheReferenceAnswersIt(t *testing.T) {
+	s := newTestServer(t)
+	envID, _, key := selfHostedWorker(t, s, "ek-workid")
+	work := "/v1/environments/" + envID + "/work/"
+	routes := func(id string) map[string]struct {
+		method, path string
+		body         any
+	} {
+		return map[string]struct {
+			method, path string
+			body         any
+		}{
+			"get":       {http.MethodGet, work + id, nil},
+			"update":    {http.MethodPost, work + id, map[string]any{"metadata": map[string]any{"a": "1"}}},
+			"ack":       {http.MethodPost, work + id + "/ack", nil},
+			"heartbeat": {http.MethodPost, work + id + "/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", nil},
+			"stop":      {http.MethodPost, work + id + "/stop", nil},
+		}
+	}
+	for _, id := range []string{"bogus", "vlt_" + strings.Repeat("0", 24), "Work_" + strings.Repeat("0", 24)} {
+		for name, tc := range routes(id) {
+			res, body, raw := s.workReq(t, tc.method, tc.path, key, tc.body)
+			if res.StatusCode != http.StatusBadRequest {
+				t.Errorf("%s %s: status %d, want 400 (%s)", name, id, res.StatusCode, raw)
+				continue
+			}
+			wantErrMsg(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error",
+				`Invalid work ID format: expected session_*, cse_*, or work_* prefix, got "`+id+`".`)
+		}
+	}
+	for _, id := range []string{
+		"work_" + strings.Repeat("0", 24), "sesn_01TGr5xKiwgZXyte66gofce6",
+		"session_" + strings.Repeat("0", 24), "cse_" + strings.Repeat("0", 24),
+	} {
+		for name, tc := range routes(id) {
+			res, body, raw := s.workReq(t, tc.method, tc.path, key, tc.body)
+			if res.StatusCode != http.StatusNotFound {
+				t.Errorf("%s %s: status %d, want 404 (%s)", name, id, res.StatusCode, raw)
+				continue
+			}
+			wantErrMsg(t, res.StatusCode, body, http.StatusNotFound, "not_found_error", "work item not found")
+		}
+	}
 }
 
 // TestWorkUpdateMetadata pins the metadata patch endpoint (POST .../work/{work_id}):
@@ -364,7 +413,7 @@ func TestWorkUpdateMetadata(t *testing.T) {
 	res, body, _ = s.workReq(t, http.MethodPost, path, key, map[string]any{"metadata": map[string]any{"a": 5}})
 	wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
 
-	// Scoping: an unknown work id is 404 (as POST .../work/poll also is).
+	// Scoping: an unknown work id is 404.
 	res, body, _ = s.workReq(t, http.MethodPost, "/v1/environments/"+envID+"/work/work_nope", key, map[string]any{
 		"metadata": map[string]any{"a": "1"},
 	})

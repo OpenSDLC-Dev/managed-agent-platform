@@ -307,8 +307,6 @@ func TestSendValidationSweep(t *testing.T) {
 		{"is_error not bool", map[string]any{"events": []any{map[string]any{
 			"type": "user.custom_tool_result", "custom_tool_use_id": "sevt_1",
 			"is_error": "yes"}}}, "boolean"},
-		{"thread id rejected", map[string]any{"events": []any{map[string]any{
-			"type": "user.interrupt", "session_thread_id": "sthr_1"}}}, "does not name a thread in this session"},
 		{"NUL in text", map[string]any{"events": []any{userMessage("a\x00b")}}, "U+0000"},
 		{"system.message alone", map[string]any{"events": []any{map[string]any{
 			"type": "system.message", "content": txt}}}, "immediately follow"},
@@ -371,7 +369,7 @@ func TestSendValidationSweep(t *testing.T) {
 			"content": []any{map[string]any{"type": "text", "text": ""}}}}}, "events.0.user_message.content.0.text: value is required"},
 		// 2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
 		// `sessK.send.interrupt.unknown-thread`: the wrong prefix, and the
-		// recorded malformed id — its token outside the id alphabet.
+		// recorded malformed id — the I in its token (domain.WellFormedID).
 		{"thread id with the sth_ prefix", map[string]any{"events": []any{map[string]any{
 			"type": "user.interrupt", "session_thread_id": "sth_01HbamSkv49mRn4JHt9ryS6T"}}},
 			"Invalid session_thread_id: sth_01HbamSkv49mRn4JHt9ryS6T"},
@@ -383,9 +381,15 @@ func TestSendValidationSweep(t *testing.T) {
 		status, res := s.do(http.MethodPost, path, tc.body)
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.want)
 	}
+	// A well-formed thread id naming no thread of the session is the 404 the
+	// reference answers for another session's thread (2026-09-02 batch2 #333
+	// `sessK.send.interrupt.thread-of-other-session`, #841).
+	status, res := s.do(http.MethodPost, path, map[string]any{"events": []any{map[string]any{
+		"type": "user.interrupt", "session_thread_id": "sthr_1"}}})
+	wantErrMsg(t, status, res, http.StatusNotFound, "not_found_error", "Thread not found: sthr_1")
 
 	// An invalid batch is atomic: nothing from it may land in the log.
-	status, res := s.do(http.MethodGet, path, nil)
+	status, res = s.do(http.MethodGet, path, nil)
 	if status != http.StatusOK || len(listData(t, res)) != 0 {
 		t.Errorf("failed batches must append nothing; log has %v", res)
 	}

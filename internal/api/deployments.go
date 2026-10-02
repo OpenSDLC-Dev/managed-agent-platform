@@ -387,11 +387,12 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		query += ` AND paused_at IS NULL`
 	}
 	if agentID := q.Get("agent_id"); agentID != "" {
-		// "Filter by agent ID." Shape first, as the sessions list does: a
-		// malformed agent_id can never name a stored agent, and rejecting it
-		// here keeps an unstorable byte from reaching the bind parameter as a
-		// 500 (#135). A well-formed but absent one filters to an empty page.
-		if !domain.ID(agentID).Valid() {
+		// "Filter by agent ID." Shape first, as the sessions list does and by
+		// the same domain.WellFormedID (#841): a malformed agent_id can never
+		// name a stored agent, and rejecting it here keeps an unstorable byte
+		// from reaching the bind parameter as a 500 (#135). A well-formed but
+		// absent one filters to an empty page.
+		if !domain.WellFormedID(agentID, domain.PrefixAgent) {
 			return nil, errInvalid("agent_id must be a valid agent id")
 		}
 		args = append(args, agentID)

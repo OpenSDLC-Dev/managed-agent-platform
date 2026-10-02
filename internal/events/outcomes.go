@@ -88,13 +88,13 @@ func DefineOutcomes(evs []NewEvent) ([]DefineOutcome, error) {
 func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID, evs []NewEvent, batchInterrupts bool) error {
 	defs, err := DefineOutcomes(evs)
 	if err != nil {
-		return err
+		return refuse("%v", err)
 	}
 	if len(defs) == 0 {
 		return nil
 	}
 	if len(defs) > 1 {
-		return fmt.Errorf("only one outcome is supported at a time: send the next user.define_outcome after the previous outcome's terminal span.outcome_evaluation_end")
+		return refuse("only one outcome is supported at a time: send the next user.define_outcome after the previous outcome's terminal span.outcome_evaluation_end")
 	}
 	if !batchInterrupts {
 		var raw []byte
@@ -108,7 +108,7 @@ func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID,
 		}
 		for _, e := range evals {
 			if !domain.OutcomeResultTerminal(e.Result) {
-				return fmt.Errorf("only one outcome is supported at a time: outcome %s is still %s", e.OutcomeID, e.Result)
+				return refuse("only one outcome is supported at a time: outcome %s is still %s", e.OutcomeID, e.Result)
 			}
 		}
 	}
@@ -122,13 +122,13 @@ func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID,
 			`SELECT size_bytes FROM files WHERE id = $1 AND `+store.FileLiveSQL+` FOR SHARE`,
 			d.RubricFileID).Scan(&sizeBytes)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("rubric file %s not found", d.RubricFileID)
+			return refuse("rubric file %s not found", d.RubricFileID)
 		}
 		if err != nil {
 			return err
 		}
 		if sizeBytes > maxRubricFileBytes {
-			return fmt.Errorf("rubric file %s is %d bytes; the rubric cap is %d bytes", d.RubricFileID, sizeBytes, maxRubricFileBytes)
+			return refuse("rubric file %s is %d bytes; the rubric cap is %d bytes", d.RubricFileID, sizeBytes, maxRubricFileBytes)
 		}
 	}
 	return nil

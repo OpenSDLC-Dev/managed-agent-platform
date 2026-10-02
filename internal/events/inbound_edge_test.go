@@ -143,6 +143,47 @@ func TestNormalizeInboundRejections(t *testing.T) {
 	}
 }
 
+// An answer's session_thread_id is dropped, whatever it says: the reference
+// was recorded accepting a tool confirmation's naming another thread, an
+// unknown thread and an `sth_` value, and storing the confirmation on its
+// call's thread (2026-09-02 batch2 #334–#336
+// `sessK2.send.tool_confirmation.*`; #841), and the two tool results follow it
+// (INFERRED). The call's thread is RouteInbound's to find, so none carries a
+// claim out of normalization. A claim that is not a string at all is still
+// refused.
+func TestNormalizeInboundDropsAnAnswersThreadClaim(t *testing.T) {
+	for _, claim := range []string{`"sth_x"`, `"sesn_x"`, `"sthr_` + strings.Repeat("0", 25) + `"`, `"sthr_01UnknownThreadIdXXXXXXXXX"`} {
+		evs, err := norm(t, "self_hosted",
+			`{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","session_thread_id":`+claim+`}`,
+			`{"type":"user.tool_result","tool_use_id":"tu","session_thread_id":`+claim+`}`,
+			`{"type":"user.custom_tool_result","custom_tool_use_id":"c","session_thread_id":`+claim+`}`,
+		)
+		if err != nil {
+			t.Fatalf("claim %s: %v", claim, err)
+		}
+		for _, ev := range evs {
+			if ev.ThreadID != "" {
+				t.Errorf("claim %s: %s carries ThreadID %q out of normalization", claim, ev.Type, ev.ThreadID)
+			}
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if string(payload["session_thread_id"]) != "null" {
+				t.Errorf("claim %s: %s stores session_thread_id %s, want null", claim, ev.Type, payload["session_thread_id"])
+			}
+		}
+	}
+	for _, ev := range []string{
+		`{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","session_thread_id":7}`,
+		`{"type":"user.custom_tool_result","custom_tool_use_id":"c","session_thread_id":{}}`,
+	} {
+		if _, err := norm(t, "self_hosted", ev); err == nil || err.Error() != "events[0]: session_thread_id must be a string or null" {
+			t.Errorf("%s: err = %v, want the type refusal", ev, err)
+		}
+	}
+}
+
 func TestNormalizeInboundNullHandling(t *testing.T) {
 	// Explicit nulls behave like absence for every nullable field.
 	evs, err := norm(t, "self_hosted",
@@ -207,14 +248,6 @@ func TestNormalizeInboundReferenceWording(t *testing.T) {
 			"Invalid session_thread_id: sth_x"},
 		{"malformed thread id", `{"type":"user.interrupt","session_thread_id":"sthr_01UnknownThreadIdXXXXXXXXX"}`,
 			"Invalid session_thread_id: sthr_01UnknownThreadIdXXXXXXXXX"},
-		// Not on a confirmation or a result: the reference was recorded
-		// accepting the claim on a tool confirmation (#334–#336
-		// `sessK2.send.tool_confirmation.*`, 200), and never recorded on a
-		// result, so the refusal is ours, in ours.
-		{"malformed thread id on a confirmation", `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","session_thread_id":"sesn_x"}`,
-			`events[1]: session_thread_id "sesn_x" is not a session thread id`},
-		{"malformed thread id on a result", `{"type":"user.custom_tool_result","custom_tool_use_id":"c","session_thread_id":"sesn_x"}`,
-			`events[1]: session_thread_id "sesn_x" is not a session thread id`},
 		// 2026-09-02 batch2 `sessT.send.tool_confirmation.deny_message-on-allow`.
 		{"deny_message on allow", `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","deny_message":"x"}`,
 			"Invalid tool_confirmation event at index 1: deny_message is only allowed when result is 'deny'"},

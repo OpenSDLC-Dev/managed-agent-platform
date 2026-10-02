@@ -39,12 +39,22 @@ const internalEnvBody = `{
 }`
 
 // insertInternalPair writes the runner's two hidden rows through the shared
-// insert bodies and returns their ids.
+// insert bodies, under the fixed ids the runner itself uses (agent_dreamrunner
+// and env_dreamrunner), and returns them.
 func insertInternalPair(t *testing.T, s *tserver) (agentID, envID string) {
 	t.Helper()
+	agentID, envID = api.DreamInternalIDsForTest()
+	insertHiddenPair(t, s, agentID, envID)
+	return agentID, envID
+}
+
+// insertHiddenPair writes a hidden agent and environment under the given ids.
+// A pair under minted ids is what proves the hidden-row filters themselves:
+// the fixed ids' tokens are outside the minted alphabet, so a route that
+// reads ids by domain.Valid answers them 404 on shape before any filter runs.
+func insertHiddenPair(t *testing.T, s *tserver, agentID, envID string) {
+	t.Helper()
 	ctx := context.Background()
-	agentID = domain.NewID(domain.PrefixAgent).String()
-	envID = domain.NewID(domain.PrefixEnvironment).String()
 	inserted, err := api.InsertAgentForTest(ctx, s.pool, internalAgentBody, agentID, true)
 	if err != nil || !inserted {
 		t.Fatalf("insert internal agent: inserted=%v err=%v", inserted, err)
@@ -53,34 +63,44 @@ func insertInternalPair(t *testing.T, s *tserver) (agentID, envID string) {
 	if err != nil || !inserted {
 		t.Fatalf("insert internal environment: inserted=%v err=%v", inserted, err)
 	}
+}
+
+// mintedHiddenPair is insertHiddenPair under fresh ids.
+func mintedHiddenPair(t *testing.T, s *tserver) (agentID, envID string) {
+	t.Helper()
+	agentID = domain.NewID(domain.PrefixAgent).String()
+	envID = domain.NewID(domain.PrefixEnvironment).String()
+	insertHiddenPair(t, s, agentID, envID)
 	return agentID, envID
 }
 
 func TestInternalRowsAreUnlistedAndUnretrievable(t *testing.T) {
 	s := newTestServer(t)
-	agentID, envID := insertInternalPair(t, s)
+	fixedAgent, fixedEnv := insertInternalPair(t, s)
+	mintedAgent, mintedEnv := mintedHiddenPair(t, s)
 	visibleAgent, visibleEnv := fixture(t, s)
 
-	for _, tc := range []struct{ path, hidden, shown string }{
-		{"/v1/agents", agentID, visibleAgent},
-		{"/v1/agents?include_archived=true", agentID, visibleAgent},
-		{"/v1/environments", envID, visibleEnv},
-		{"/v1/environments?include_archived=true", envID, visibleEnv},
+	for _, tc := range []struct{ path, shown string }{
+		{"/v1/agents", visibleAgent},
+		{"/v1/agents?include_archived=true", visibleAgent},
+		{"/v1/environments", visibleEnv},
+		{"/v1/environments?include_archived=true", visibleEnv},
 	} {
 		status, body := s.do(http.MethodGet, tc.path, nil)
 		if status != http.StatusOK {
 			t.Fatalf("GET %s: status %d (%v)", tc.path, status, body)
 		}
-		var sawHidden, sawShown bool
+		var sawShown bool
 		for _, row := range listData(t, body) {
-			sawHidden = sawHidden || row["id"] == tc.hidden
-			sawShown = sawShown || row["id"] == tc.shown
-		}
-		if sawHidden {
-			t.Errorf("GET %s lists the internal row %s", tc.path, tc.hidden)
+			switch row["id"] {
+			case fixedAgent, fixedEnv, mintedAgent, mintedEnv:
+				t.Errorf("GET %s lists the internal row %s", tc.path, row["id"])
+			case tc.shown:
+				sawShown = true
+			}
 		}
 		if !sawShown {
-			t.Errorf("GET %s does not list %s, so the query lost more than the internal row", tc.path, tc.shown)
+			t.Errorf("GET %s does not list %s, so the query lost more than the internal rows", tc.path, tc.shown)
 		}
 	}
 
@@ -88,32 +108,40 @@ func TestInternalRowsAreUnlistedAndUnretrievable(t *testing.T) {
 	// versions list among them, which would otherwise render the internal spec
 	// to anyone holding the id — and the console API's three environment-key
 	// routes with them. Off the wire is not off the rule: a listing or an
-	// issuance that answered 200 would confirm the row.
+	// issuance that answered 200 would confirm the row. The runner's own fixed
+	// ids are the ones a viewer of a dream's pipeline session reads, so they
+	// must reach that 404 too, not a malformed-id 400 (#841).
 	//
 	// The revoke arm only carries the rule with a key to aim at — a missing key
 	// answers 404 by itself — so one is minted straight through the store,
 	// since the console route refuses this environment.
-	internalKeyID := storeIssuedKeyID(t, s, envID)
-
-	for _, tc := range []struct {
-		method, path string
-		body         any
-	}{
-		{http.MethodGet, "/v1/agents/" + agentID, nil},
-		{http.MethodGet, "/v1/agents/" + agentID + "?version=1", nil},
-		{http.MethodPost, "/v1/agents/" + agentID, nil},
-		{http.MethodGet, "/v1/agents/" + agentID + "/versions", nil},
-		{http.MethodPost, "/v1/agents/" + agentID + "/archive", nil},
-		{http.MethodGet, "/v1/environments/" + envID, nil},
-		{http.MethodPost, "/v1/environments/" + envID, nil},
-		{http.MethodDelete, "/v1/environments/" + envID, nil},
-		{http.MethodPost, "/v1/environments/" + envID + "/archive", nil},
-		{http.MethodPost, consoleTokens(envID), map[string]any{"name": "issued to a hidden row"}},
-		{http.MethodGet, consoleTokens(envID), nil},
-		{http.MethodPost, consoleRevoke(envID, internalKeyID), nil},
-	} {
-		status, body := s.do(tc.method, tc.path, tc.body)
-		wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	for _, pair := range [][2]string{{fixedAgent, fixedEnv}, {mintedAgent, mintedEnv}} {
+		agentID, envID := pair[0], pair[1]
+		internalKeyID := storeIssuedKeyID(t, s, envID)
+		for _, tc := range []struct {
+			method, path string
+			body         any
+		}{
+			{http.MethodGet, "/v1/agents/" + agentID, nil},
+			{http.MethodGet, "/v1/agents/" + agentID + "?version=1", nil},
+			{http.MethodPost, "/v1/agents/" + agentID, nil},
+			{http.MethodGet, "/v1/agents/" + agentID + "/versions", nil},
+			{http.MethodPost, "/v1/agents/" + agentID + "/archive", nil},
+			{http.MethodGet, "/v1/environments/" + envID, nil},
+			{http.MethodPost, "/v1/environments/" + envID, nil},
+			{http.MethodDelete, "/v1/environments/" + envID, nil},
+			{http.MethodPost, "/v1/environments/" + envID + "/archive", nil},
+			{http.MethodPost, consoleTokens(envID), map[string]any{"name": "issued to a hidden row"}},
+			{http.MethodGet, consoleTokens(envID), nil},
+			{http.MethodPost, consoleRevoke(envID, internalKeyID), nil},
+		} {
+			status, body := s.do(tc.method, tc.path, tc.body)
+			if status != http.StatusNotFound {
+				t.Errorf("%s %s: status %d, want 404 (%v)", tc.method, tc.path, status, body)
+				continue
+			}
+			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+		}
 	}
 }
 
@@ -132,33 +160,39 @@ func storeIssuedKeyID(t *testing.T, s *tserver, envID string) string {
 func TestInternalRowsRefusedByEveryResolver(t *testing.T) {
 	s := newTestServer(t)
 	internalAgent, internalEnv := insertInternalPair(t, s)
+	mintedAgent, mintedEnv := mintedHiddenPair(t, s)
 	agentID, envID := fixture(t, s)
 
-	cases := map[string]struct {
-		path string
-		body map[string]any
-	}{
-		"session create, internal agent": {"/v1/sessions",
-			map[string]any{"agent": internalAgent, "environment_id": envID}},
-		"session create, internal environment": {"/v1/sessions",
-			map[string]any{"agent": agentID, "environment_id": internalEnv}},
-		"deployment create, internal agent": {"/v1/deployments",
-			deploymentBody(internalAgent, envID)},
-		"deployment create, internal environment": {"/v1/deployments",
-			deploymentBody(agentID, internalEnv)},
-		// A roster member is the fourth resolver, and it answers the same 404
-		// rather than the 400 its own "not found" carries for an unknown id.
-		"roster member": {"/v1/agents", map[string]any{
-			"name": "coordinator", "model": "claude-opus-4-8",
-			"multiagent": map[string]any{"type": "coordinator",
-				"agents": []any{map[string]any{"type": "self"}, internalAgent}},
-		}},
-	}
-	for name, tc := range cases {
-		status, body := s.do(http.MethodPost, tc.path, tc.body)
-		t.Run(name, func(t *testing.T) {
-			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
-		})
+	for pair, ids := range map[string][2]string{"fixed": {internalAgent, internalEnv}, "minted": {mintedAgent, mintedEnv}} {
+		hiddenAgent, hiddenEnv := ids[0], ids[1]
+		cases := map[string]struct {
+			path string
+			body map[string]any
+		}{
+			"session create, internal agent": {"/v1/sessions",
+				map[string]any{"agent": hiddenAgent, "environment_id": envID}},
+			"session create, internal environment": {"/v1/sessions",
+				map[string]any{"agent": agentID, "environment_id": hiddenEnv}},
+			"deployment create, internal agent": {"/v1/deployments",
+				deploymentBody(hiddenAgent, envID)},
+			"deployment create, internal environment": {"/v1/deployments",
+				deploymentBody(agentID, hiddenEnv)},
+			// A roster member is the fourth resolver, and it answers the same
+			// 404 rather than the 400 its own "not found" carries for an
+			// unknown id — the fixed id too, which the roster reads by
+			// domain.WellFormedID (#841).
+			"roster member": {"/v1/agents", map[string]any{
+				"name": "coordinator", "model": "claude-opus-4-8",
+				"multiagent": map[string]any{"type": "coordinator",
+					"agents": []any{map[string]any{"type": "self"}, hiddenAgent}},
+			}},
+		}
+		for name, tc := range cases {
+			status, body := s.do(http.MethodPost, tc.path, tc.body)
+			t.Run(pair+" "+name, func(t *testing.T) {
+				wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			})
+		}
 	}
 
 	// The runner's own create is the one path that resolves them, and it does
