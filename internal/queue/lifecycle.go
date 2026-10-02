@@ -24,7 +24,8 @@ var (
 // reports (#664). errors.Is(err, ErrHeartbeatMismatch) matches it.
 type HeartbeatMismatchError struct {
 	Item       *Work
-	TTLSeconds int64 // the refused beat's effective TTL
+	TTLSeconds int64  // the refused beat's effective TTL
+	Expected   string // the expected_last_heartbeat the refused beat sent, as sent
 }
 
 func (e *HeartbeatMismatchError) Error() string { return ErrHeartbeatMismatch.Error() }
@@ -251,7 +252,7 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 	if expected == NoHeartbeat && w.State == "stopping" && w.LastHeartbeat == nil {
 		return &HeartbeatResult{State: w.State, TTLSeconds: ttlSeconds}, nil
 	}
-	return nil, &HeartbeatMismatchError{Item: w, TTLSeconds: ttlSeconds}
+	return nil, &HeartbeatMismatchError{Item: w, TTLSeconds: ttlSeconds, Expected: expected}
 }
 
 // Stop stops a work item and returns the item after the stop, which the wire

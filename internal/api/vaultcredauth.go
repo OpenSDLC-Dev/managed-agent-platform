@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/url"
 	"time"
 
@@ -237,6 +239,12 @@ func parseStaticBearerCreate(obj map[string]json.RawMessage) (*credAuth, error) 
 	if err := rejectUnknownKeys(obj, "type", "mcp_server_url", "token"); err != nil {
 		return nil, err
 	}
+	// An absent key is the reference's recorded sentence (2026-09-03 batch1
+	// `cred.create.throwaway`, #540); null, "" and the other required fields,
+	// never recorded, keep requiredString's.
+	if err := fieldRequired(obj, "mcp_server_url", "auth.mcp_server_url"); err != nil {
+		return nil, err
+	}
 	serverURL, err := requiredString(obj, "mcp_server_url")
 	if err != nil {
 		return nil, err
@@ -259,6 +267,12 @@ func parseStaticBearerCreate(obj map[string]json.RawMessage) (*credAuth, error) 
 func parseEnvVarCreate(obj map[string]json.RawMessage) (*credAuth, error) {
 	if err := rejectUnknownKeys(obj, "type", "secret_name", "secret_value", "networking", "injection_location"); err != nil {
 		return nil, err
+	}
+	// An empty name is the reference's recorded sentence (2026-09-03 batch1
+	// `cred.create.secret-name-empty`, #540); absent and null, never recorded,
+	// keep requiredString's.
+	if name, set, null, err := stringField(obj, "secret_name"); err == nil && set && !null && name == "" {
+		return nil, errInvalid("auth.secret_name: minimum string length is 1")
 	}
 	secretName, err := requiredString(obj, "secret_name")
 	if err != nil {
@@ -301,7 +315,12 @@ func parseInjectionLocationFields(obj map[string]json.RawMessage, loc *injection
 	if err := rejectUnknownKeys(obj, "body", "header"); err != nil {
 		return err
 	}
-	for key, dst := range map[string]*bool{"body": &loc.Body, "header": &loc.Header} {
+	// A fixed order, so a body wrong in both names the same one every time.
+	for _, f := range [...]struct {
+		key string
+		dst *bool
+	}{{"body", &loc.Body}, {"header", &loc.Header}} {
+		key, dst := f.key, f.dst
 		raw, ok := obj[key]
 		if !ok {
 			continue
@@ -445,7 +464,7 @@ func optionalStringPtr(obj map[string]json.RawMessage, key string) (*string, err
 // mcp_server_url, secret_name, and refresh's client_id/token_endpoint/resource
 // all reject as unknown keys. existingSecrets is the decrypted secret object;
 // the returned map is the full post-merge secret set.
-func applyCredAuthUpdate(raw json.RawMessage, authType string, existingDoc []byte,
+func applyCredAuthUpdate(ctx context.Context, raw json.RawMessage, authType string, existingDoc []byte,
 	existingSecrets map[string]string) (newDoc []byte, newSecrets map[string]string, err error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
@@ -459,7 +478,13 @@ func applyCredAuthUpdate(raw json.RawMessage, authType string, existingDoc []byt
 		return nil, nil, errInvalid("auth.type is required")
 	}
 	if typ != authType {
-		return nil, nil, errInvalid("auth.type cannot be changed (from %s to %s)", authType, typ)
+		// The reference's sentence (2026-09-03 batch1
+		// `cred.update.switch-variant-to-static-bearer`, #540) names neither
+		// type, and the stored one is state the request does not carry, so the
+		// log keeps both.
+		slog.InfoContext(ctx, "vault credential update refused: auth type mismatch",
+			"request_id", requestIDFrom(ctx), "stored_type", authType, "requested_type", typ)
+		return nil, nil, errInvalid("auth.type: does not match this credential's stored type")
 	}
 	newSecrets = map[string]string{}
 	for k, v := range existingSecrets {
@@ -518,18 +543,23 @@ func applyMCPOAuthUpdate(obj map[string]json.RawMessage, existingDoc []byte, sec
 		}
 	}
 	if raw, ok := obj["refresh"]; ok && !isNull(raw) {
-		// The update refresh union carries no client_id/token_endpoint (frozen
-		// after create), so a refresh block cannot be introduced here — there
-		// would be no anchors to build it from.
-		if doc.Refresh == nil {
-			return nil, errInvalid("refresh cannot be added after create")
-		}
+		// The block's own shape is judged first: the reference names an unknown
+		// key in it before refusing the block (2026-09-03 batch1
+		// `cred.update.add-refresh-post-create`, #540).
 		var refreshObj map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &refreshObj); err != nil || refreshObj == nil {
 			return nil, errInvalid("auth.refresh must be an object")
 		}
 		if err := rejectUnknownKeys(refreshObj, "refresh_token", "scope", "token_endpoint_auth"); err != nil {
 			return nil, err
+		}
+		// The update refresh union carries no client_id/token_endpoint (frozen
+		// after create), so a refresh block cannot be introduced here — there
+		// would be no anchors to build it from. The refusal is the reference's
+		// sentence (2026-09-03 batch1
+		// `cred.update.refresh-fields-on-no-refresh-cred`).
+		if doc.Refresh == nil {
+			return nil, errInvalid("auth.refresh: this credential was created without refresh capability")
 		}
 		if token, set, null, err := stringField(refreshObj, "refresh_token"); err != nil {
 			return nil, err

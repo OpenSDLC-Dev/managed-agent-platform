@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"sync/atomic"
+	"unicode/utf8"
 )
 
 // Wire error types (shared.ErrorType in the reference SDK). The shared union
@@ -182,6 +184,7 @@ const (
 	ctxKeyIdentity        // the verified human a request authenticated as (plan 31)
 	ctxKeyWorkSession     // the session a worker's sessions token is scoped to (plan 36)
 	ctxKeyCredential      // the class of credential that signed the request (#662); see credentialFrom
+	ctxKeyVerified        // the request's *atomic.Bool, set once any lane verifies a credential; see markVerified
 )
 
 func requestIDFrom(ctx context.Context) string {
@@ -224,6 +227,27 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		ae = &apiError{http.StatusInternalServerError, errTypeAPI, "internal server error"}
 	}
+	if ae.status >= 400 && ae.status < 500 && authenticated(r.Context()) {
+		// A refusal of an authenticated request gets one summary line here,
+		// because the wire's words are the reference's where it was recorded
+		// (#540) and several of those name nothing — "Not found", "Cannot
+		// modify archived agent", "Method Not Allowed". The path carries the
+		// ids such a message drops. A handler that knows more than the path
+		// and the message say writes a detail line of its own beside this
+		// one, under the same request id. A request no credential
+		// authenticated writes nothing, so an unauthenticated caller cannot
+		// drive the log's volume; one whose credential verified and was then
+		// refused by its own lane's authorization writes the line too.
+		//
+		// Paths are not treated as secret — every proxy in front of this
+		// server logs them too — and a client that pastes a credential into
+		// one is out of scope. The query string is left out, as a filter or
+		// a cursor is no refusal's subject. Both the path and the message are
+		// capped, since either can echo what the client sent.
+		slog.InfoContext(r.Context(), "request refused", "method", r.Method, "path", capForLog(r.URL.Path),
+			"status", ae.status, "error_type", ae.errType, "message", capForLog(ae.message),
+			"request_id", requestIDFrom(r.Context()))
+	}
 	// Last, so no schema's extra member can shadow the two every error carries.
 	inner["type"] = ae.errType
 	inner["message"] = ae.message
@@ -232,6 +256,52 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		"request_id": requestIDFrom(r.Context()),
 		"error":      inner,
 	})
+}
+
+// withVerifiedMark gives the request the mark markVerified sets. It goes on
+// at the outermost middleware, beside the request id, because the lanes that
+// verify a credential refuse some requests — a cloud environment's key on a
+// session route, a sessions token outside its route family — before they put
+// anything of the credential on the context, so a value a lane adds cannot
+// answer "was this request authenticated?" for those refusals. The mark is a
+// pointer, so a lane deeper in the chain sets the one the outer context holds.
+func withVerifiedMark(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKeyVerified, new(atomic.Bool))
+}
+
+// markVerified records that a credential verified: called by every lane — the
+// management key, a human's credential, an environment key, a sessions token,
+// a gate token — the moment its credential checks out, before any of its
+// authorization checks can refuse.
+func markVerified(ctx context.Context) {
+	if v, ok := ctx.Value(ctxKeyVerified).(*atomic.Bool); ok {
+		v.Store(true)
+	}
+}
+
+// authenticated reports whether markVerified ran for the request.
+func authenticated(ctx context.Context) bool {
+	v, ok := ctx.Value(ctxKeyVerified).(*atomic.Bool)
+	return ok && v.Load()
+}
+
+// logFieldMax caps a client-shaped string written to the refusal line, the
+// truncation marker included.
+const logFieldMax = 512
+
+const truncatedMark = "…[truncated]"
+
+// capForLog cuts s to at most logFieldMax bytes, marker included, at a rune
+// boundary.
+func capForLog(s string) string {
+	if len(s) <= logFieldMax {
+		return s
+	}
+	cut := logFieldMax - len(truncatedMark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + truncatedMark
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

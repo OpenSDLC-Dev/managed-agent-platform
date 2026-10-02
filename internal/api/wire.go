@@ -3,8 +3,10 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 )
 
 // maxBodyBytes bounds request bodies; agent specs are small configuration
@@ -205,12 +208,29 @@ func storableText(s string) bool {
 
 // rejectUnknownKeys mirrors the reference API's strict parameter validation:
 // unrecognized body fields are an error, not a silent no-op — a typo'd field
-// name must not vanish into accepted-but-ignored input.
+// name must not vanish into accepted-but-ignored input. The sentence is the
+// reference's strict decoder's, recorded on agents, sessions, deployments,
+// vaults and vault credentials (#540) and answered by every caller, recorded
+// or not (INFERRED, docs/DIVERGENCES.md), and like that decoder it names the bare
+// key even inside a nested object (`resources[0].mount_path` is reported as
+// "mount_path"). Two surfaces speak another dialect and do not call this:
+// environments, recorded with pydantic's sentence, and the console and work
+// routes, pydantic surfaces whose unknown-key sentence no recording holds.
 func rejectUnknownKeys(obj map[string]json.RawMessage, allowed ...string) error {
-	for key := range obj {
-		if !slices.Contains(allowed, key) {
-			return errInvalid("unknown field %q", key)
-		}
+	if key, ok := unknownkey.Least(obj, allowed...); ok {
+		return errInvalid("Failed to parse request body: unknown field %q", key)
+	}
+	return nil
+}
+
+// fieldRequired refuses obj when key is absent from it, in the words pydantic
+// gives a missing field — path, the field as the sentence names it, then
+// ": Field required" — which the reference was recorded answering on the
+// routes that call this (#540). Absence only: a null or empty value is each
+// caller's own refusal.
+func fieldRequired(obj map[string]json.RawMessage, key, path string) error {
+	if _, ok := obj[key]; !ok {
+		return errInvalid("%s: Field required", path)
 	}
 	return nil
 }
@@ -347,12 +367,17 @@ const (
 // called on create and after every patch, so an update cannot grow past them.
 // Lengths count runes, not bytes (the filesupload.go precedent for
 // character-documented limits); which unit the reference counts is
-// unobserved — recorded in docs/DIVERGENCES.md (#66).
+// unobserved — recorded in docs/DIVERGENCES.md (#66). The pair-count refusal
+// is the reference's sentence on agents (validateAgentMetadataCaps) and ours
+// on every other resource, where it is unrecorded.
 func validateMetadataCaps(md map[string]string) error {
 	if len(md) > metadataMaxPairs {
 		return errInvalid("metadata cannot exceed %d pairs", metadataMaxPairs)
 	}
-	for k, v := range md {
+	// In byte order, so a bag over both bounds draws the same refusal on
+	// every request.
+	for _, k := range slices.Sorted(maps.Keys(md)) {
+		v := md[k]
 		if utf8.RuneCountInString(k) > metadataKeyMax {
 			return errInvalid("metadata keys cannot exceed %d characters", metadataKeyMax)
 		}
@@ -361,6 +386,19 @@ func validateMetadataCaps(md map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// validateAgentMetadataCaps is validateMetadataCaps on agent create and
+// update, whose pair-count refusal is the reference's recorded sentence
+// (2026-09-02 batch2 `agent.create.metadata-17-keys`, #540). It counts the
+// bag the write would store — on update the post-patch one, which "would
+// have" fits too.
+func validateAgentMetadataCaps(md map[string]string) error {
+	if len(md) > metadataMaxPairs {
+		return errInvalid("invalid metadata: metadata map would have %d entries, exceeding the maximum of %d",
+			len(md), metadataMaxPairs)
+	}
+	return validateMetadataCaps(md)
 }
 
 // parseModel parses the wire's string-or-object model form and validates it.
@@ -376,6 +414,28 @@ func parseModel(raw json.RawMessage) (domain.Model, error) {
 		return m, errInvalid(`model.speed must be "standard" or "fast"`)
 	}
 	return m, nil
+}
+
+// parseAgentModel is parseModel on agent create and update, which answer a bad
+// effort level string and a bad inference_geo string in the reference's
+// recorded words (2026-09-12 batch1 `rec91.model.update.effort-bogus` and
+// `rec91.model.update.geo-bogus`, #540). prefix opens the effort path, as
+// agentUpdatePath does on update; the inference_geo sentence names no path on
+// either route. Session overrides and dreams keep parseModel's sentences, the
+// reference's being unrecorded there.
+func parseAgentModel(raw json.RawMessage, prefix string) (domain.Model, error) {
+	var m domain.Model
+	err := json.Unmarshal(raw, &m)
+	var effort *domain.EffortLevelError
+	switch {
+	case errors.As(err, &effort):
+		return m, errInvalid("Failed to parse request: %smodel.effort: %q is not a valid value; "+
+			"expected one of high, low, max, medium, xhigh", prefix, effort.Level)
+	case errors.Is(err, domain.ErrInferenceGeoValue):
+		return m, errInvalid("`inference_geo`: must be one of %q: invalid inference_geo value",
+			[]string{"global", "us"})
+	}
+	return parseModel(raw)
 }
 
 // rawList parses a JSON array field into its raw elements. Explicit null is
@@ -400,11 +460,26 @@ func rawList(raw json.RawMessage, key string) ([]json.RawMessage, error) {
 // client sent; the response is rendered from them rather than being them, since
 // renderAgent resolves the toolset configuration first (toolset.Materialize).
 func parseTools(raw json.RawMessage) ([]json.RawMessage, error) {
+	return parseToolsWith(raw, false, "")
+}
+
+// parseAgentTools is parseTools on agent create and update, which answer a
+// refused agent_toolset_20260401 configs[] entry the reference was recorded
+// refusing (toolset.ConfigError) in its words, the path opened by prefix — as
+// agentUpdatePath does on update — and the entry's tools[] index (2026-09-02
+// batch2 `agent.create.config-unknown-key`, `.config-type-only`,
+// `.config-name-type-mismatch`, #540). A session override's tools keep
+// parseTools' sentences, the reference's being unrecorded there.
+func parseAgentTools(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
+	return parseToolsWith(raw, true, prefix)
+}
+
+func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json.RawMessage, error) {
 	items, err := rawList(raw, "tools")
 	if err != nil {
 		return nil, err
 	}
-	for _, item := range items {
+	for i, item := range items {
 		var probe struct {
 			Type          string          `json:"type"`
 			Name          string          `json:"name"`
@@ -421,6 +496,10 @@ func parseTools(raw json.RawMessage) ([]json.RawMessage, error) {
 			// or permission_policy must be a 400 here rather than a toolset that
 			// wedges every turn when the brain resolves it.
 			if err := toolset.Validate(item); err != nil {
+				var cfg *toolset.ConfigError
+				if agentRoute && errors.As(err, &cfg) {
+					return nil, errInvalid("Failed to parse request: %stools[%d].%s: %s", prefix, i, cfg.Path, cfg.Reason)
+				}
 				return nil, errInvalid("%s", err)
 			}
 		case "custom":
@@ -494,17 +573,22 @@ const (
 // ASCII characters refused with 400 invalid_request_error, 100,000 "é" (200,000
 // bytes) accepted, which rules out bytes. Code points rather than UTF-16 units
 // is the session override's recorded unit, assumed here; update, name and
-// description were never probed. The messages are ours (#665).
+// description were never probed (#665). capRunes answers in the reference's
+// generic maxLength sentence, recorded for system on agent create and for a
+// vault credential's auth.secret_name (#540).
 const (
 	maxAgentNameRunes        = 256
 	maxAgentDescriptionRunes = 2048
 	maxAgentSystemRunes      = 100_000
 )
 
-// capRunes refuses a request-supplied string of more than limit code points.
-func capRunes(key, val string, limit int) error {
+// capRunes refuses a request-supplied string of more than limit code points,
+// in the reference's words (2026-09-02 batch2 `agent.create.system-100001-ascii`,
+// #540). path is the field's path as the route names it: the bare key on
+// create, opened by agentUpdatePath on update.
+func capRunes(path, val string, limit int) error {
 	if utf8.RuneCountInString(val) > limit {
-		return errInvalid("%s cannot exceed %d characters", key, limit)
+		return errInvalid("%s: maximum string length is %d", path, limit)
 	}
 	return nil
 }

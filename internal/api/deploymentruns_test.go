@@ -142,11 +142,10 @@ func TestDeploymentRunArchivedRefusesAndPausedAllows(t *testing.T) {
 	if status, res := s.do(http.MethodPost, "/v1/deployments/"+archived+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: status %d, body %v", status, res)
 	}
+	// The reference's sentence (2026-09-02 batch2 `deployment.run.on-archived`
+	// #450, #540).
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+archived+"/run", nil)
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := res["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "is archived") {
-		t.Errorf("message %q does not say the deployment is archived", msg)
-	}
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "Cannot modify archived deployment")
 	var runs int
 	if err := s.pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM deployment_runs WHERE deployment_id = $1`, archived).Scan(&runs); err != nil {
@@ -220,12 +219,16 @@ func TestDeploymentRunRecordsAClassifiedFailure(t *testing.T) {
 		}
 	}
 
+	// The archived store's run is recorded, and settles in the reference's
+	// run sentence (2026-09-03 batch1 idx 119 `deployment.run.store-archived`,
+	// #540); the other two are not, and keep ours.
 	for _, tc := range []struct {
 		deployment, wantType, wantIn string
 	}{
-		{dEnv, "environment_archived_error", "is archived"},
-		{dVault, "vault_archived_error", "is archived"},
-		{dStore, "memory_store_archived_error", "is archived"},
+		{dEnv, "environment_archived_error", "environment " + envID + " is archived"},
+		{dVault, "vault_archived_error", "vault " + vaultID + " is archived"},
+		{dStore, "memory_store_archived_error",
+			"session creation rejected: a referenced memory store is archived; check deployment resources"},
 	} {
 		run := runDeployment(t, s, tc.deployment)
 		if run["session_id"] != nil {
@@ -235,8 +238,8 @@ func TestDeploymentRunRecordsAClassifiedFailure(t *testing.T) {
 		if re["type"] != tc.wantType {
 			t.Errorf("error.type = %v, want %s (message %v)", re["type"], tc.wantType, re["message"])
 		}
-		if msg, _ := re["message"].(string); !strings.Contains(msg, tc.wantIn) {
-			t.Errorf("error.message = %q, want it to say %q", msg, tc.wantIn)
+		if msg, _ := re["message"].(string); msg != tc.wantIn {
+			t.Errorf("error.message = %q, want %q", msg, tc.wantIn)
 		}
 
 		status, after := s.do(http.MethodGet, "/v1/deployments/"+tc.deployment, nil)
@@ -608,8 +611,10 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	if got := runIDs(t, listRuns(t, s, "deployment_id=depl_absent123")); len(got) != 0 {
 		t.Errorf("a non-existent deployment_id returned %v, want empty data", got)
 	}
+	// The malformed one answers the reference's sentence (2026-09-02 batch2
+	// `deployment_runs.list.unknown-deployment` #444, #540).
 	status, res := s.do(http.MethodGet, "/v1/deployment_runs?deployment_id=not-an-id", nil)
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "Invalid deployment ID.")
 
 	// trigger_type: the enum filters, anything else is a 400.
 	if got := runIDs(t, listRuns(t, s, "trigger_type=schedule")); !slices.Equal(got, []string{scheduledRunID}) {
@@ -628,8 +633,11 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	if got := runIDs(t, listRuns(t, s, "has_error=false")); len(got) != 5 || slices.Contains(got, failedRunID) {
 		t.Errorf("has_error=false = %v, want the 5 successes", got)
 	}
-	status, res = s.do(http.MethodGet, "/v1/deployment_runs?has_error=maybe", nil)
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	// Anything else answers the reference's sentence, the value quoted
+	// (2026-09-05 batch3 `rec84.runs.list.has_error.bogus` #10, #540).
+	status, res = s.do(http.MethodGet, "/v1/deployment_runs?has_error=bogus", nil)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request body: invalid value for bool field has_error: "bogus"`)
 
 	// The four created_at comparators, split at a middle run's own rendered
 	// timestamp: gte keeps it, gt drops it, lte/lt mirror.

@@ -1,7 +1,12 @@
 package api_test
 
 import (
+	"archive/zip"
+	"bytes"
+	"io/fs"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -112,5 +117,86 @@ func TestSkillCreateRequiresFilesPart(t *testing.T) {
 
 	if n := s.blobs.Len(); n != 0 {
 		t.Errorf("refused uploads left %d objects in storage", n)
+	}
+}
+
+// TestSkillUploadRefusesInReferenceWords pins the bundle refusals the
+// reference was recorded wording on both upload routes (2026-09-12-followups
+// skills-api.json). A frontmatter name or description over its cap gets one
+// sentence for both [8 `rec.skill-upload.create.long-name`, 9
+// `rec.skill-upload.create.long-description`, 18 and 19 the version twins],
+// naming neither the field nor the cap, so the rejection log line carries
+// both. A manifest stored as a symbolic link gets the archive-wide sentence
+// [5 `rec.skill-upload.create.symlink-manifest`, 15 the version twin]; the
+// recorded archive's entries were flat, which ours refuses earlier for want
+// of a top-level directory (#630), so the fixture here is path-qualified.
+func TestSkillUploadRefusesInReferenceWords(t *testing.T) {
+	s := newTestServer(t)
+	skillID, _ := s.createSkill(t)["id"].(string)
+	routes := map[string]string{"create": "/v1/skills", "version": "/v1/skills/" + skillID + "/versions"}
+
+	longName := strings.Repeat("x", 65)
+	for _, tc := range []struct {
+		name  string
+		file  upFile
+		field string
+		limit int
+	}{
+		// The recorded long-name manifest used CRLF line endings; so does this.
+		{"long-name", upFile{longName + "/SKILL.md",
+			"---\r\nname: " + longName + "\r\ndescription: d\r\n---\r\n"}, "name", 64},
+		{"long-description", upFile{"financial-skill/SKILL.md",
+			"---\nname: financial-skill\ndescription: " + strings.Repeat("d", 1025) + "\n---\n"}, "description", 1024},
+	} {
+		for route, path := range routes {
+			t.Run(route+"_"+tc.name, func(t *testing.T) {
+				logs := captureLogs(t, slog.LevelInfo)
+				ct, body := skillForm(t, nil, []upFile{tc.file})
+				status, obj := s.doForm("POST", path, ct, body)
+				wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error",
+					"`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits")
+				line := ""
+				for _, l := range strings.Split(logs(), "\n") {
+					if strings.Contains(l, "skill upload rejected") {
+						line = l
+					}
+				}
+				for _, want := range []string{
+					`reason="` + tc.field + " must be at most " + strconv.Itoa(tc.limit) + ` characters"`,
+					"request_id=" + obj["request_id"].(string)} {
+					if !strings.Contains(line, want) {
+						t.Errorf("rejection log line %q lacks %q", line, want)
+					}
+				}
+			})
+		}
+	}
+
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	h := &zip.FileHeader{Name: "financial-skill/SKILL.md", Method: zip.Deflate}
+	h.SetMode(0o777 | fs.ModeSymlink)
+	h.CreatorVersion = 3 << 8 // Unix host, so the type bits are read
+	f, err := w.CreateHeader(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(testSkillMD)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for route, path := range routes {
+		t.Run(route+"_symlink-manifest", func(t *testing.T) {
+			ct, body := skillForm(t, nil, []upFile{{"symlink-manifest.zip", buf.String()}})
+			status, obj := s.doForm("POST", path, ct, body)
+			wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error",
+				"archives must not contain symbolic links")
+		})
+	}
+
+	if n := s.blobs.Len(); n != 1 {
+		t.Errorf("refused uploads left %d objects in storage, want only the fixture skill's", n)
 	}
 }

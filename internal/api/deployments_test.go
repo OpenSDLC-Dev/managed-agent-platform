@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -167,8 +168,10 @@ func TestDeploymentInitialEventsMustSurviveTheNormalizer(t *testing.T) {
 
 // Both sub-objects are additionalProperties: false with a required type, and
 // enforcing that one level down is the difference between a typo answering 400
-// and a schedule firing in the wrong zone for months. The dotted name in the
-// message says which object refused the key.
+// and a schedule firing in the wrong zone for months. The message names the
+// bare key, as the reference's strict decoder does inside a nested object
+// (recorded for resources[0].repository: 2026-09-05 batch3
+// `rec84.repo.with-repo`, #540).
 func TestDeploymentSubObjectsRefuseUnknownKeysAndRequireTheirType(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -186,6 +189,10 @@ func TestDeploymentSubObjectsRefuseUnknownKeysAndRequireTheirType(t *testing.T) 
 		"agent object without a type": {"agent": map[string]any{"id": agentID}},
 		"agent version below one":     {"agent": map[string]any{"type": "agent", "id": agentID, "version": 0}},
 	}
+	unknownKey := map[string]string{
+		"schedule typo":                  `Failed to parse request body: unknown field "timezome"`,
+		"agent object with an extra key": `Failed to parse request body: unknown field "system"`,
+	}
 	for name, patch := range cases {
 		t.Run(name, func(t *testing.T) {
 			body := deploymentBody(agentID, envID)
@@ -193,6 +200,10 @@ func TestDeploymentSubObjectsRefuseUnknownKeysAndRequireTheirType(t *testing.T) 
 				body[k] = v
 			}
 			status, res := s.do(http.MethodPost, "/v1/deployments", body)
+			if msg, ok := unknownKey[name]; ok {
+				wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
+				return
+			}
 			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
@@ -202,7 +213,8 @@ func TestDeploymentSubObjectsRefuseUnknownKeysAndRequireTheirType(t *testing.T) 
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
 		"schedule": map[string]any{"type": "cron", "expression": "0 9 * * *",
 			"timezone": "UTC", "enabled": true}})
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request body: unknown field "enabled"`)
 }
 
 // An unsupported method on a deployment path answers 405 like every other /v1
@@ -222,7 +234,10 @@ func TestDeploymentPathsAnswer405NotTheCatchAll(t *testing.T) {
 }
 
 // "At least 1, maximum 50", and the field is required — the floor is the half
-// a session's own initial_events does not have.
+// a session's own initial_events does not have. An absent list answers the
+// reference's recorded sentence (2026-09-03 batch1
+// `deployment.create.with-memory-store`, #540); an empty one, never recorded,
+// keeps ours.
 func TestDeploymentInitialEventsFloorAndCeiling(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -230,9 +245,10 @@ func TestDeploymentInitialEventsFloorAndCeiling(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		events []any
+		msg    string
 	}{
-		{"absent", nil},
-		{"empty", []any{}},
+		{"absent", nil, "initial_events: Field required"},
+		{"empty", []any{}, "initial_events must contain at least 1 event"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			body := deploymentBody(agentID, envID)
@@ -242,7 +258,7 @@ func TestDeploymentInitialEventsFloorAndCeiling(t *testing.T) {
 				body["initial_events"] = c.events
 			}
 			status, res := s.do(http.MethodPost, "/v1/deployments", body)
-			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", c.msg)
 		})
 	}
 
@@ -363,9 +379,12 @@ func TestDeploymentRefusesArchivedAgentAndEnvironment(t *testing.T) {
 	status, res = s.do(http.MethodPost, "/v1/deployments", body)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 
+	// A missing environment answers in the reference's words for one, which
+	// every environment lookup shares (#540).
 	body = deploymentBody(agentID, "env_0000000000000000000000")
 	status, res = s.do(http.MethodPost, "/v1/deployments", body)
-	wantErr(t, status, res, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, res, http.StatusNotFound, "not_found_error",
+		"Environment env_0000000000000000000000 not found.")
 }
 
 // The schedule enables scheduled execution, and its two computed members are
@@ -425,27 +444,96 @@ func TestDeploymentScheduleComputesItsTimestamps(t *testing.T) {
 // An expression that parses but can never fire is refused rather than stored:
 // upcoming_runs_at would be [] on an active deployment, the shape the wire
 // reserves for an archived one.
+//
+// The recorded refusals answer the reference's sentences verbatim (2026-09-02
+// batch2: `deployment.create.unsatisfiable-cron` #425, `bad-timezone` #427,
+// `no-timezone` #428, `6-field-cron` #429 — the expressions and zones are the
+// recorded ones, #540). The rest are ours; "L" and the "Local" zone keep our
+// detail after the recorded prefix.
 func TestDeploymentScheduleRejections(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 
-	for name, sched := range map[string]any{
-		"unsatisfiable":    map[string]any{"type": "cron", "expression": "0 0 31 2 *", "timezone": "UTC"},
-		"six fields":       map[string]any{"type": "cron", "expression": "* * * * * *", "timezone": "UTC"},
-		"predefined":       map[string]any{"type": "cron", "expression": "@daily", "timezone": "UTC"},
-		"L is unsupported": map[string]any{"type": "cron", "expression": "0 0 L * *", "timezone": "UTC"},
-		"unknown zone":     map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "Mars/Olympus"},
-		"host-local zone":  map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "Local"},
-		"no timezone":      map[string]any{"type": "cron", "expression": "0 9 * * *"},
-		"no expression":    map[string]any{"type": "cron", "timezone": "UTC"},
-		"unsupported type": map[string]any{"type": "interval", "expression": "0 9 * * *", "timezone": "UTC"},
-		"not an object":    "0 9 * * *",
+	for name, c := range map[string]struct {
+		sched any
+		msg   string
+	}{
+		"unsatisfiable": {map[string]any{"type": "cron", "expression": "0 0 31 2 *", "timezone": "UTC"},
+			"`schedule.expression` does not produce any occurrences in the next year"},
+		"six fields": {map[string]any{"type": "cron", "expression": "0 0 9 * * *", "timezone": "UTC"},
+			"`schedule.expression` is not a valid 5-field cron expression: expected 5 fields, got 6"},
+		"predefined": {map[string]any{"type": "cron", "expression": "@daily", "timezone": "UTC"},
+			"`schedule.expression` is not a valid 5-field cron expression: expected 5 fields, got 1"},
+		"L is unsupported": {map[string]any{"type": "cron", "expression": "0 0 L * *", "timezone": "UTC"},
+			"`schedule.expression` is not a valid 5-field cron expression: \"L\" in day-of-month field is not a number"},
+		"unknown zone": {map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "Mars/Olympus"},
+			"`schedule.timezone` \"Mars/Olympus\" is not a valid IANA timezone"},
+		"host-local zone": {map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "Local"},
+			"`schedule.timezone` \"Local\" is not a valid IANA timezone"},
+		"no timezone": {map[string]any{"type": "cron", "expression": "0 9 * * *"},
+			"schedule.timezone: Field required"},
+		"null timezone": {map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": nil},
+			"schedule.timezone is required"},
+		"empty timezone": {map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": ""},
+			"schedule.timezone is required"},
+		"no expression": {map[string]any{"type": "cron", "timezone": "UTC"},
+			"schedule.expression is required"},
+		"unsupported type": {map[string]any{"type": "interval", "expression": "0 9 * * *", "timezone": "UTC"},
+			`schedule.type "interval" is not supported; the only schedule type is "cron"`},
+		"not an object": {"0 9 * * *", "schedule must be an object"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			body := deploymentBody(agentID, envID)
-			body["schedule"] = sched
+			body["schedule"] = c.sched
+			status, res := s.do(http.MethodPost, "/v1/deployments", body)
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", c.msg)
+		})
+	}
+
+	// An absent timezone answers the same on update, where the same parser
+	// runs.
+	id := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
+		"schedule": map[string]any{"type": "cron", "expression": "0 9 * * *"}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "schedule.timezone: Field required")
+}
+
+// The two recorded schedule refusals that drop server-side detail keep it in
+// the operator's log: how far the occurrence search looked (the sentence says
+// a year, the search covers cron.SearchYears), and which of cron's two
+// timezone refusals fired (#540).
+func TestDeploymentScheduleRefusalsLogWhatTheSentenceDrops(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+
+	for _, c := range []struct {
+		name, expr, tz, line string
+		want                 []string
+	}{
+		{"unsatisfiable", "0 0 31 2 *", "UTC", "deployment schedule refused: no occurrence",
+			[]string{"search_years=12"}},
+		{"host-local zone", "0 9 * * *", "Local", "deployment schedule refused: invalid timezone",
+			[]string{"resolves to the host's zone"}},
+		{"unknown zone", "0 9 * * *", "Mars/Olympus", "deployment schedule refused: invalid timezone",
+			[]string{"is not in the IANA timezone database"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			logs := captureLogs(t, slog.LevelInfo)
+			body := deploymentBody(agentID, envID)
+			body["schedule"] = map[string]any{"type": "cron", "expression": c.expr, "timezone": c.tz}
 			status, res := s.do(http.MethodPost, "/v1/deployments", body)
 			wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+			line := ""
+			for _, l := range strings.Split(logs(), "\n") {
+				if strings.Contains(l, c.line) {
+					line = l
+				}
+			}
+			for _, want := range append(c.want, "request_id="+res["request_id"].(string)) {
+				if !strings.Contains(line, want) {
+					t.Errorf("log line %q lacks %q", line, want)
+				}
+			}
 		})
 	}
 }
@@ -627,10 +715,13 @@ func TestArchiveDeploymentIsTerminalForMutation(t *testing.T) {
 		t.Fatalf("second archive moved archived_at: %d %v", status, again)
 	}
 
-	// Terminal for update, pause and unpause; GET still answers.
+	// Terminal for update, pause and unpause, in the reference's sentence
+	// (2026-09-02 batch2 `deployment.update.on-archived` #452 and
+	// `deployment.pause.on-archived` #451; unpause, unrecorded, shares the
+	// helper, #540); GET still answers.
 	for _, path := range []string{"", "/pause", "/unpause"} {
 		status, res := s.do(http.MethodPost, "/v1/deployments/"+id+path, map[string]any{"name": "renamed"})
-		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "Cannot modify archived deployment")
 	}
 	if status, res := s.do(http.MethodGet, "/v1/deployments/"+id, nil); status != http.StatusOK {
 		t.Fatalf("get after archive: %d %v", status, res)
@@ -789,14 +880,19 @@ func TestListDeployments(t *testing.T) {
 		t.Errorf("status=paused returned %v, want just %s", rows, paused)
 	}
 
-	status, body = s.do(http.MethodGet, "/v1/deployments?status=active&include_archived=true", nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	// The reference's sentence (2026-09-02 batch2
+	// `deployment.list.status+include_archived` #436, #540).
+	const combined = "include_archived: cannot be set together with status"
+	for _, q := range []string{"status=active&include_archived=true", "status=paused&include_archived=true"} {
+		status, body = s.do(http.MethodGet, "/v1/deployments?"+q, nil)
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", combined)
+	}
 
 	// "The two cannot be combined" forbids sending both, whatever the value —
 	// so the refusal is keyed on the parameter being present, not on how the
 	// boolean parses. false and true have to answer alike.
 	status, body = s.do(http.MethodGet, "/v1/deployments?status=active&include_archived=false", nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", combined)
 
 	status, body = s.do(http.MethodGet, "/v1/deployments?status=nonsense", nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
@@ -1366,9 +1462,13 @@ func TestUpdateDeploymentReplacesTheCollections(t *testing.T) {
 		t.Errorf("initial_events = %v, want the two-event replacement", ev)
 	}
 
-	// And an update cannot empty it: the floor applies to the stored result.
+	// And an update cannot empty it: the floor applies to the stored result,
+	// in the sentence create answers (TestDeploymentInitialEventsFloorAndCeiling)
+	// — this platform's, not the one a send batch's empty `events` gets since
+	// #540: no recording reaches initial_events.
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"initial_events": []any{}})
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"initial_events must contain at least 1 event")
 }
 
 // The update params draw a line that the two spellings of "empty" have to
@@ -1443,7 +1543,8 @@ func TestUpdateDeploymentChangesEnvironment(t *testing.T) {
 
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+id,
 		map[string]any{"environment_id": "env_0000000000000000000000"})
-	wantErr(t, status, res, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, res, http.StatusNotFound, "not_found_error",
+		"Environment env_0000000000000000000000 not found.")
 
 	if status, res := s.do(http.MethodPost, "/v1/environments/"+envID+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: %d %v", status, res)

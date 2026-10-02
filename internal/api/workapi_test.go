@@ -259,12 +259,14 @@ func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	envID, _, key := selfHostedWorker(t, s, "ek-route")
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
+	// The 405 in the reference's words (#540): 2026-09-12 batch1 idx 60
+	// `rec91.work.poll.put`.
 	res := s.doRaw(http.MethodPut, "/v1/environments/"+envID+"/work/poll", nil, auth)
 	raw, _ := io.ReadAll(res.Body)
 	res.Body.Close()
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
-	wantErr(t, res.StatusCode, body, http.StatusMethodNotAllowed, "invalid_request_error")
+	wantErrMsg(t, res.StatusCode, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
 
 	res = s.doRaw(http.MethodGet, "/v1/environments/"+envID+"/work/bogus", nil, auth)
 	raw, _ = io.ReadAll(res.Body)
@@ -284,13 +286,14 @@ func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
 
 	// POST .../work/poll with an empty body is a 400 (metadata required), not a
-	// 404: validation runs before the item lookup.
+	// 404: validation runs before the item lookup. Worded as the reference
+	// words it (2026-09-12 batch1 idx 58 `rec91.work.poll.post-empty-retry`).
 	res = s.doRaw(http.MethodPost, "/v1/environments/"+envID+"/work/poll", nil, auth)
 	raw, _ = io.ReadAll(res.Body)
 	res.Body.Close()
 	body = nil
 	_ = json.Unmarshal(raw, &body)
-	wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error", "metadata: Field required")
 }
 
 // TestWorkUpdateMetadata pins the metadata patch endpoint (POST .../work/{work_id}):
@@ -684,19 +687,21 @@ func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 	if startedAt == "" {
 		t.Fatalf("polled item has no started_at: %v", polled)
 	}
-	refused := func(t *testing.T, query string, want map[string]any) {
+	// The sentence (#540) names the precondition as the beat sent it, then the
+	// item's last heartbeat — recorded as "Heartbeat precondition failed:
+	// expected NO_HEARTBEAT, actual was 2026-09-02T00:08:33.477978Z" (batch2
+	// idx 259) and "… expected 2020-01-01T00:00:00Z, actual was …" (idx 260) —
+	// or "NULL" when it holds none, as the SDK's leaseLostBody fixture renders
+	// that case.
+	refused := func(t *testing.T, query string, want map[string]any, msg string) {
 		t.Helper()
-		res, body, raw := s.workReq(t, http.MethodPost, item+"/heartbeat?"+query, key, nil)
-		wantErr(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error")
+		res, body, _ := s.workReq(t, http.MethodPost, item+"/heartbeat?"+query, key, nil)
+		wantErrMsg(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error", msg)
 		wantDetails(t, body, map[string]any{
 			"current_state":    want,
 			"error_visibility": "user_facing",
 			"error_code":       "heartbeat_precondition_failed",
 		})
-		// The message is ours and stays so until #540 settles message parity.
-		if !strings.Contains(raw, `"message":"expected_last_heartbeat does not match the current lease"`) {
-			t.Errorf("412 body %s, want the message unchanged", raw)
-		}
 	}
 
 	// A claim before the ack, on work no beat has reached. No recording holds a
@@ -706,35 +711,52 @@ func TestWorkHeartbeatRefusalReportsTheItem(t *testing.T) {
 	refused(t, "expected_last_heartbeat=NO_HEARTBEAT", map[string]any{
 		"lease_extended": false, "state": "queued", "last_heartbeat": nil,
 		"ttl_seconds": float64(30), "lease_updated_at": nil,
-	})
+	}, "Heartbeat precondition failed: expected NO_HEARTBEAT, actual was NULL")
 
 	if res, _, raw := s.workReq(t, http.MethodPost, item+"/ack", key, nil); res.StatusCode != http.StatusOK {
 		t.Fatalf("ack status = %d (body %q)", res.StatusCode, raw)
 	}
 	res, claim, raw := s.workReq(t, http.MethodPost, item+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", key, nil)
-	last, _ := claim["last_heartbeat"].(string)
-	if res.StatusCode != http.StatusOK || last == "" {
+	if res.StatusCode != http.StatusOK || claim["last_heartbeat"] == nil {
 		t.Fatalf("claim = %d (body %q), want 200 with a last_heartbeat", res.StatusCode, raw)
 	}
-	active := func(ttl float64) map[string]any {
+	// The claim stamped now(); the stored beat is set to a fixed one so each
+	// sentence below is a literal — the recorded beat first, six fractional
+	// digits, then a whole second, which drops them.
+	setBeat := func(t *testing.T, beat string) {
+		t.Helper()
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE work_items SET last_heartbeat = $2::timestamptz WHERE id = $1`, workID, beat); err != nil {
+			t.Fatalf("set last_heartbeat: %v", err)
+		}
+	}
+	active := func(last string, ttl float64) map[string]any {
 		return map[string]any{
 			"lease_extended": false, "state": "active", "last_heartbeat": last,
 			"ttl_seconds": ttl, "lease_updated_at": startedAt,
 		}
 	}
+	setBeat(t, "2026-09-02T00:08:33.477978Z")
 	for name, tc := range map[string]struct {
-		query string
-		ttl   float64
+		query, msg string
+		ttl        float64
 	}{
-		"a second claim":   {"expected_last_heartbeat=NO_HEARTBEAT", 30},
-		"a wrong echo":     {"expected_last_heartbeat=2020-01-01T00:00:00Z", 30},
-		"a malformed echo": {"expected_last_heartbeat=not-a-timestamp", 30},
+		"a second claim": {"expected_last_heartbeat=NO_HEARTBEAT",
+			"Heartbeat precondition failed: expected NO_HEARTBEAT, actual was 2026-09-02T00:08:33.477978Z", 30},
+		"a wrong echo": {"expected_last_heartbeat=2020-01-01T00:00:00Z",
+			"Heartbeat precondition failed: expected 2020-01-01T00:00:00Z, actual was 2026-09-02T00:08:33.477978Z", 30},
+		"a malformed echo": {"expected_last_heartbeat=not-a-timestamp",
+			"Heartbeat precondition failed: expected not-a-timestamp, actual was 2026-09-02T00:08:33.477978Z", 30},
 		// ttl_seconds is the refused beat's effective TTL, as every beat here
 		// that extends nothing reports it (docs/DIVERGENCES.md).
-		"a TTL of its own": {"expected_last_heartbeat=NO_HEARTBEAT&desired_ttl_seconds=120", 120},
+		"a TTL of its own": {"expected_last_heartbeat=NO_HEARTBEAT&desired_ttl_seconds=120",
+			"Heartbeat precondition failed: expected NO_HEARTBEAT, actual was 2026-09-02T00:08:33.477978Z", 120},
 	} {
-		t.Run(name, func(t *testing.T) { refused(t, tc.query, active(tc.ttl)) })
+		t.Run(name, func(t *testing.T) { refused(t, tc.query, active("2026-09-02T00:08:33.477978Z", tc.ttl), tc.msg) })
 	}
+	setBeat(t, "2026-09-02T00:08:33Z")
+	refused(t, "expected_last_heartbeat=NO_HEARTBEAT", active("2026-09-02T00:08:33Z", 30),
+		"Heartbeat precondition failed: expected NO_HEARTBEAT, actual was 2026-09-02T00:08:33Z")
 }
 
 // TestWorkStopAnswersTheWorkObject pins POST .../work/{work_id}/stop: success

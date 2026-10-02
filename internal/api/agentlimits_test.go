@@ -90,16 +90,13 @@ func TestAgentMCPServerCap(t *testing.T) {
 // components.schemas.BetaManagedAgentsUpdateAgentParams.properties). Each binds
 // the value a request supplies, never a stored one (#665).
 
-// wantUpdateRejected asserts an agent update 400s with a message carrying frag,
-// and that the refused update changed nothing: same version, same agent.
-func wantUpdateRejected(t *testing.T, s *tserver, id string, body map[string]any, frag string) {
+// wantUpdateRejected asserts an agent update 400s with exactly the message
+// msg, and that the refused update changed nothing: same version, same agent.
+func wantUpdateRejected(t *testing.T, s *tserver, id string, body map[string]any, msg string) {
 	t.Helper()
 	_, before := s.do(http.MethodGet, "/v1/agents/"+id, nil)
 	status, res := s.do(http.MethodPost, "/v1/agents/"+id, body)
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
-	if msg := errMessage(res); !strings.Contains(msg, frag) {
-		t.Errorf("error message %q does not mention %q", msg, frag)
-	}
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
 	if _, after := s.do(http.MethodGet, "/v1/agents/"+id, nil); !reflect.DeepEqual(after, before) {
 		t.Errorf("refused update changed the agent (version %v, now %v)", before["version"], after["version"])
 	}
@@ -108,8 +105,11 @@ func wantUpdateRejected(t *testing.T, s *tserver, id string, body map[string]any
 func TestAgentSystemCap(t *testing.T) {
 	s := newTestServer(t)
 	// Recorded 2026-09-02: agent create refused 100,001 ASCII characters with
-	// 400 invalid_request_error.
-	wantAgentRejected(t, s, agentBody(map[string]any{"system": strings.Repeat("a", 100_001)}), "100000")
+	// 400 invalid_request_error, in these words (#540). Recording:
+	// managed-agents-wire-recordings 2026-09-02/batch2.json idx 372
+	// agent.create.system-100001-ascii.
+	status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{"system": strings.Repeat("a", 100_001)}))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "system: maximum string length is 100000")
 	id := createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("a", 100_000)}))["id"].(string)
 
 	// Recorded: agent create took 100,000 "é", 200,000 UTF-8 bytes, so the unit
@@ -123,25 +123,49 @@ func TestAgentSystemCap(t *testing.T) {
 	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("😀", 50_001)}))
 
 	// Update is bound on the system it supplies — the spec's maxLength; the
-	// reference's update was not probed.
-	wantUpdateRejected(t, s, id, map[string]any{"system": strings.Repeat("a", 100_001)}, "100000")
+	// reference's update was not probed, so its sentence is create's, the path
+	// opened by the "agent." its update paths were recorded carrying
+	// (2026-09-12/batch1.json idx 7 rec91.model.update.effort-bogus).
+	wantUpdateRejected(t, s, id, map[string]any{"system": strings.Repeat("a", 100_001)},
+		"agent.system: maximum string length is 100000")
 	if status, body := s.do(http.MethodPost, "/v1/agents/"+id,
 		map[string]any{"system": strings.Repeat("b", 100_000)}); status != http.StatusOK {
 		t.Fatalf("update at the cap: status %d (body %v)", status, body)
 	}
 }
 
-// Name and description: the spec's bounds, unprobed on the reference.
+// Name and description: the spec's bounds, unprobed on the reference. The
+// refusal is the reference's generic maxLength sentence, recorded for system
+// above and for a vault credential's auth.secret_name (#540).
+// TestAgentFieldCapsNameOneFieldEveryTime: a body with description and
+// system both over their bounds names the same one on every request — the
+// first in the SDK params' field order, description — on create and update.
+// It used to range over a map and name either.
+func TestAgentFieldCapsNameOneFieldEveryTime(t *testing.T) {
+	s := newTestServer(t)
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	both := map[string]any{"description": strings.Repeat("d", 2049), "system": strings.Repeat("s", 100_001)}
+	for range 20 {
+		status, res := s.do(http.MethodPost, "/v1/agents", agentBody(both))
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "description: maximum string length is 2048")
+		wantUpdateRejected(t, s, id, both, "agent.description: maximum string length is 2048")
+	}
+}
+
 func TestAgentNameAndDescriptionCaps(t *testing.T) {
 	s := newTestServer(t)
-	wantAgentRejected(t, s, agentBody(map[string]any{"name": strings.Repeat("n", 257)}), "256")
-	wantAgentRejected(t, s, agentBody(map[string]any{"description": strings.Repeat("d", 2049)}), "2048")
+	status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{"name": strings.Repeat("n", 257)}))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "name: maximum string length is 256")
+	status, res = s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{"description": strings.Repeat("d", 2049)}))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "description: maximum string length is 2048")
 	// At both bounds in code points, three times as many UTF-8 bytes.
 	id := createAgent(t, s, agentBody(map[string]any{
 		"name": strings.Repeat("界", 256), "description": strings.Repeat("界", 2048)}))["id"].(string)
 
-	wantUpdateRejected(t, s, id, map[string]any{"name": strings.Repeat("n", 257)}, "256")
-	wantUpdateRejected(t, s, id, map[string]any{"description": strings.Repeat("d", 2049)}, "2048")
+	wantUpdateRejected(t, s, id, map[string]any{"name": strings.Repeat("n", 257)},
+		"agent.name: maximum string length is 256")
+	wantUpdateRejected(t, s, id, map[string]any{"description": strings.Repeat("d", 2049)},
+		"agent.description: maximum string length is 2048")
 }
 
 // An agent stored over all three string bounds — written before #665 enforced
@@ -238,8 +262,12 @@ func TestStoredOverCapAgentGrandfathered(t *testing.T) {
 	wantPlanted("after a metadata-only update", getAgent(), all...)
 	// ...while one that supplies an over-bound value is refused, even the very
 	// value stored — and leaves the planted values, asserted just above, whole.
-	for field, frag := range map[string]string{"name": "256", "description": "2048", "system": "100000"} {
-		wantUpdateRejected(t, s, legacy, map[string]any{field: planted[field]}, frag)
+	for field, msg := range map[string]string{
+		"name":        "agent.name: maximum string length is 256",
+		"description": "agent.description: maximum string length is 2048",
+		"system":      "agent.system: maximum string length is 100000",
+	} {
+		wantUpdateRejected(t, s, legacy, map[string]any{field: planted[field]}, msg)
 	}
 	wantPlanted("after the refused updates", getAgent(), all...)
 	update("name-only update", map[string]any{"name": "renamed"})
@@ -319,7 +347,11 @@ func TestAgentMetadataCaps(t *testing.T) {
 	for i := 0; i < 17; i++ {
 		over[fmt.Sprintf("k%02d", i)] = "v"
 	}
-	wantAgentRejected(t, s, agentBody(map[string]any{"metadata": over}), "16")
+	// The reference's words (#540). Recording: managed-agents-wire-recordings
+	// 2026-09-02/batch2.json idx 132 agent.create.metadata-17-keys.
+	status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{"metadata": over}))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"invalid metadata: metadata map would have 17 entries, exceeding the maximum of 16")
 	wantAgentRejected(t, s, agentBody(map[string]any{
 		"metadata": map[string]any{strings.Repeat("k", 65): "v"}}), "64")
 	wantAgentRejected(t, s, agentBody(map[string]any{
@@ -357,9 +389,12 @@ func TestAgentUpdateMetadataCapOnStoredBag(t *testing.T) {
 	res := createAgent(t, s, agentBody(map[string]any{"metadata": full}))
 	id, _ := res["id"].(string)
 
+	// Create's recorded sentence (2026-09-02/batch2.json idx 132
+	// agent.create.metadata-17-keys), counting the bag the patch would leave.
 	status, body := s.do(http.MethodPost, "/v1/agents/"+id,
 		map[string]any{"metadata": map[string]any{"k16": "v"}})
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"invalid metadata: metadata map would have 17 entries, exceeding the maximum of 16")
 
 	// Upserting an existing key does not grow the bag.
 	if status, body := s.do(http.MethodPost, "/v1/agents/"+id,

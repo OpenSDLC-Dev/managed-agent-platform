@@ -740,6 +740,37 @@ func TestEnvironmentCreateValidation(t *testing.T) {
 		}
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	}
+
+	// Several unknown keys name the same one, the least in byte order, on
+	// every request.
+	for range 20 {
+		status, body := s.do(http.MethodPost, "/v1/environments",
+			map[string]any{"name": "x", "zeta": 1, "kind": "cloud"})
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "kind: Extra inputs are not permitted")
+		status, body = s.do(http.MethodPost, "/v1/environments",
+			map[string]any{"name": "x", "config": map[string]any{"type": "cloud", "zeta": 1, "alpha": 1}})
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", `unknown cloud config field "alpha"`)
+		status, body = s.do(http.MethodPost, "/v1/environments", map[string]any{"name": "x", "config": map[string]any{
+			"type": "cloud", "networking": map[string]any{"type": "limited", "zeta": 1, "alpha": 1}}})
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", `unknown limited networking field "alpha"`)
+	}
+
+	// Three of those refusals in the reference's words, its environment
+	// validator being pydantic's (#540): 2026-09-03 batch1 idx 3
+	// `env.create.bogus-probe` ({}), idx 0 `env.create.cloud` (a `kind` key) and
+	// 2026-09-05 batch8 idx 25 `probe.env.kind-enum` (config.type "bogus").
+	for _, tc := range []struct {
+		body any
+		want string
+	}{
+		{map[string]any{}, "name: Field required"},
+		{map[string]any{"name": "rec79-cloud", "kind": "cloud"}, "kind: Extra inputs are not permitted"},
+		{map[string]any{"name": "x", "config": map[string]any{"type": "bogus"}},
+			"config: Input tag 'bogus' found using 'type' does not match any of the expected tags: 'cloud', 'self_hosted'"},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/environments", tc.body)
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
+	}
 }
 
 func TestEnvironmentGetUpdate(t *testing.T) {
@@ -855,8 +886,13 @@ func TestEnvironmentListPaginationAndArchive(t *testing.T) {
 	if entries := listData(t, list); len(entries) != 3 {
 		t.Errorf("include_archived = %d entries, want 3", len(entries))
 	}
+	// The reference's 404 for an environment it does not hold (2026-09-02
+	// batch2 idx 463 `env.archive.with-deployment`; #540), for a malformed id
+	// too.
 	status, body := s.do(http.MethodPost, "/v1/environments/env_missing/archive", nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Environment env_missing not found.")
+	status, body = s.do(http.MethodPost, "/v1/environments/env_UPPER/archive", nil)
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Environment env_UPPER not found.")
 }
 
 func TestEnvironmentDelete(t *testing.T) {
@@ -871,8 +907,12 @@ func TestEnvironmentDelete(t *testing.T) {
 	if res["id"] != id || res["type"] != "environment_deleted" {
 		t.Errorf("delete response = %v", res)
 	}
+	// The reference's words for a deleted environment (2026-09-05 batch1
+	// idx 56 `rec82.env.delete.environments-beta`; #540).
 	status, body := s.do(http.MethodGet, "/v1/environments/"+id, nil)
-	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Environment "+id+" not found.")
+	status, body = s.do(http.MethodDelete, "/v1/environments/"+id, nil)
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Environment "+id+" not found.")
 	status, body = s.do(http.MethodDelete, "/v1/environments/env_missing", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
@@ -1087,16 +1127,18 @@ func TestEnvironmentKindIsImmutable(t *testing.T) {
 	s := newTestServer(t)
 	recorded := map[string]any{"error_code": "invalid_config_type_change"}
 
+	// Both refusals in the reference's words too (#540), which name the kinds
+	// as its own console does: "Cloud" and "BYOC".
 	cloud := createEnvironment(t, s, map[string]any{"name": "c", "config": map[string]any{"type": "cloud"}})
 	status, body := s.do(http.MethodPost, "/v1/environments/"+cloud["id"].(string),
 		map[string]any{"config": map[string]any{"type": "self_hosted"}})
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Cannot change environment type from Cloud to BYOC")
 	wantDetails(t, body, recorded)
 
 	self := createEnvironment(t, s, map[string]any{"name": "s", "config": map[string]any{"type": "self_hosted"}})
 	status, body = s.do(http.MethodPost, "/v1/environments/"+self["id"].(string),
 		map[string]any{"config": map[string]any{"type": "cloud"}})
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Cannot change environment type from BYOC to Cloud")
 	wantDetails(t, body, recorded)
 
 	// A same-kind config update still works (kind unchanged).

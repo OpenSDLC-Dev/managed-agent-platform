@@ -122,6 +122,13 @@ func TestValidateContent(t *testing.T) {
 			t.Errorf("%s: accepted, want a rejection", name)
 		}
 	}
+	// The size refusal is worded as the reference words it, since the API
+	// lane answers it verbatim (2026-09-02 free_batch1 idx 30
+	// `mem.create.102401-bytes`; #540).
+	if err := memsync.ValidateContent(strings.Repeat("x", 102401)); err == nil ||
+		err.Error() != "content must be at most 102400 bytes" {
+		t.Errorf("one byte over: %v, want the reference's words", err)
+	}
 }
 
 // The mount slug (decision 8): the documented rule — lowercase, every

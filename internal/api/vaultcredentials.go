@@ -157,7 +157,9 @@ func (s *server) createVaultCredential(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if vaultArchived != nil {
-		return nil, errInvalid("vault %s is archived", vaultID)
+		// The reference's sentence (2026-09-03 batch1
+		// `cred.create.in-archived-vault`, #540).
+		return nil, errInvalid("Vault is archived.")
 	}
 	var active int
 	if err := tx.QueryRow(ctx,
@@ -179,8 +181,13 @@ func (s *server) createVaultCredential(r *http.Request) (any, error) {
 		Scan(&createdAt, &updatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation: the active-key index
-		return nil, errConflict("an active credential with this %s already exists in vault %s",
-			credKeyField(auth.authType), vaultID)
+		// The MCP variants' duplicate is the reference's sentence (2026-09-03
+		// batch1 `cred.create.mcp-oauth-with-refresh-basic`, #540); an
+		// environment variable's, never recorded, keeps ours.
+		if auth.authType != authEnvVar {
+			return nil, errConflict("A credential already exists for this MCP server URL.")
+		}
+		return nil, errConflict("an active credential with this secret_name already exists in vault %s", vaultID)
 	}
 	if err != nil {
 		return nil, err
@@ -191,11 +198,34 @@ func (s *server) createVaultCredential(r *http.Request) (any, error) {
 	return renderCredential(id, vaultID, displayName, auth.doc, metadata, createdAt, updatedAt, nil), nil
 }
 
-func credKeyField(authType string) string {
-	if authType == authEnvVar {
-		return "secret_name"
+// errCredentialNotFound is every credential row miss, a wrong vault segment
+// included, in the reference's words (2026-09-03 batch1 `cred.get.wrong-vault`,
+// `cred.update.wrong-vault`, `cred.delete.wrong-vault`, #540). A malformed id
+// is checkID's, never recorded.
+var errCredentialNotFound = errNotFound("Credential not found.")
+
+// archivedCredentialRefusal answers an update to an archived credential. The
+// reference checks the vault first and names it (2026-09-03 batch1
+// `cred.update.in-archived-vault-C`, #540). Archiving a vault archives every
+// credential in it, so an archived vault is only ever found behind an
+// archived credential, and asking here — after the credential's own read, in
+// a statement of its own — orders the two conditions as the reference does and
+// sees a vault archive that committed while the caller waited on the row. A
+// credential archived on its own, never recorded, keeps ours.
+func archivedCredentialRefusal(ctx context.Context, db querier, vaultID, credID string) error {
+	var vaultArchived *time.Time
+	err := db.QueryRow(ctx, `SELECT archived_at FROM vaults WHERE id = $1`, vaultID).Scan(&vaultArchived)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The vault, and its credentials with it, was deleted since the read.
+		return errCredentialNotFound
 	}
-	return "mcp_server_url"
+	if err != nil {
+		return err
+	}
+	if vaultArchived != nil {
+		return errInvalid("Vault is archived.")
+	}
+	return errInvalid("credential %s is archived", credID)
 }
 
 type credentialRow struct {
@@ -239,7 +269,7 @@ func (s *server) getVaultCredential(r *http.Request) (any, error) {
 		Scan(&row.vaultID, &row.displayName, &row.authType, &row.authDoc, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && row.vaultID != vaultID) {
-		return nil, errNotFound("credential %s not found in vault %s", credID, vaultID)
+		return nil, errCredentialNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -285,13 +315,13 @@ func (s *server) updateVaultCredential(r *http.Request) (any, error) {
 			 FROM vault_credentials WHERE id = $1`, credID).
 			Scan(&base.vaultID, &base.authType, &base.authDoc, &base.ciphertext, &base.keyID, &base.archivedAt)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && base.vaultID != vaultID) {
-			return nil, errNotFound("credential %s not found in vault %s", credID, vaultID)
+			return nil, errCredentialNotFound
 		}
 		if err != nil {
 			return nil, err
 		}
 		if base.archivedAt != nil {
-			return nil, errInvalid("credential %s is archived", credID)
+			return nil, archivedCredentialRefusal(ctx, s.pool, vaultID, credID)
 		}
 		reseal, err = s.resealCredAuth(ctx, raw, base)
 		if err != nil {
@@ -318,7 +348,7 @@ func (s *server) updateVaultCredential(r *http.Request) (any, error) {
 		Scan(&row.vaultID, &row.displayName, &row.authType, &row.authDoc, &row.ciphertext, &row.keyID,
 			&row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && row.vaultID != vaultID) {
-		return nil, errNotFound("credential %s not found in vault %s", credID, vaultID)
+		return nil, errCredentialNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -326,7 +356,7 @@ func (s *server) updateVaultCredential(r *http.Request) (any, error) {
 	// Like archived sibling resources: reject rather than resurrect (INFERRED,
 	// docs/DIVERGENCES.md — the archive purged the secrets).
 	if row.archivedAt != nil {
-		return nil, errInvalid("credential %s is archived", credID)
+		return nil, archivedCredentialRefusal(ctx, tx, vaultID, credID)
 	}
 	if reseal != nil {
 		// The unlocked read fed the re-seal; if the secret rotated between then
@@ -390,7 +420,7 @@ func (s *server) resealCredAuth(ctx context.Context, raw json.RawMessage, base *
 	if err := json.Unmarshal(plain, &existingSecrets); err != nil {
 		return nil, err
 	}
-	newDoc, newSecrets, err := applyCredAuthUpdate(raw, base.authType, base.authDoc, existingSecrets)
+	newDoc, newSecrets, err := applyCredAuthUpdate(ctx, raw, base.authType, base.authDoc, existingSecrets)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +547,7 @@ func (s *server) archiveVaultCredential(r *http.Request) (any, error) {
 		Scan(&row.vaultID, &row.displayName, &row.authDoc, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("credential %s not found in vault %s", credID, vaultID)
+		return nil, errCredentialNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -542,7 +572,7 @@ func (s *server) deleteVaultCredential(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
-		return nil, errNotFound("credential %s not found in vault %s", credID, vaultID)
+		return nil, errCredentialNotFound
 	}
 	return map[string]string{"id": credID, "type": "vault_credential_deleted"}, nil
 }

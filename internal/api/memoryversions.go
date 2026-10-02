@@ -305,8 +305,10 @@ func (s *server) redactMemoryVersion(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if head != "" {
-		return nil, errInvalid(
-			"memory version %s is the current head of memory %s and cannot be redacted", versionID, head)
+		// The reference's words, on a live store and an archived one alike
+		// (2026-09-02 free_batch1 `memver.redact.head`,
+		// `memver.redact.archived.head`; #540).
+		return nil, errInvalid("version is the current content of %s; write a new version first", head)
 	}
 
 	var redactedBy any

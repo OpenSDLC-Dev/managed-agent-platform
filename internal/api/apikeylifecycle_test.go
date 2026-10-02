@@ -29,10 +29,17 @@ import (
 // with them.
 func captureWarnings(t *testing.T) func() string {
 	t.Helper()
+	return captureLogs(t, slog.LevelWarn)
+}
+
+// captureLogs is captureWarnings at any level, for a test whose line is logged
+// below WARN — a refusal the client caused, whose detail the operator keeps.
+func captureLogs(t *testing.T, level slog.Level) func() string {
+	t.Helper()
 	buf := &lockedBuffer{}
 	prev := slog.Default()
 	prevOut, prevFlags := log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level})))
 	t.Cleanup(func() {
 		slog.SetDefault(prev)
 		log.SetOutput(prevOut)

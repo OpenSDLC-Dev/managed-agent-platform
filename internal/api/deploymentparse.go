@@ -4,7 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"slices"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,24 +18,21 @@ import (
 const scheduleExpressionMax = 256
 
 // rejectUnknownNested applies to a sub-object the additionalProperties: false
-// the reference declares on it, which rejectUnknownKeys only enforces at the
-// top level. The dotted name says which object refused the key, so a typo
-// reads as `unknown field "schedule.timezome"` rather than being dropped and
-// firing a schedule in the wrong zone for months.
+// the reference declares on it, which a top-level rejectUnknownKeys does not
+// reach, so a typo is refused rather than dropped and firing a schedule in the
+// wrong zone for months. It answers in rejectUnknownKeys' sentence, naming the
+// bare key as the reference's strict decoder does one level down (recorded for
+// `resources[0].repository` and `model.effort.extra`, #540) — so
+// `schedule.timezome` reads as unknown field "timezome".
 //
 // A raw that is not an object is left alone: the caller's own unmarshal has
 // already reported that shape error in its own words.
-func rejectUnknownNested(raw json.RawMessage, prefix string, allowed ...string) error {
+func rejectUnknownNested(raw json.RawMessage, allowed ...string) error {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(raw, &obj) != nil {
 		return nil
 	}
-	for key := range obj {
-		if !slices.Contains(allowed, key) {
-			return errInvalid("unknown field %q", prefix+"."+key)
-		}
-	}
-	return nil
+	return rejectUnknownKeys(obj, allowed...)
 }
 
 // parseDeploymentSchedule reads the create/update schedule union. It reports
@@ -47,7 +45,11 @@ func rejectUnknownNested(raw json.RawMessage, prefix string, allowed ...string) 
 // "0 0 31 2 *" parses, every field is in range, and February never has 31
 // days — so upcoming_runs_at would be [] on an active deployment, which is the
 // shape the wire reserves for an archived one (plan 37 §8.1 entry 27).
-func parseDeploymentSchedule(obj map[string]json.RawMessage) (expr, tz string, set, null bool, err error) {
+//
+// The refusals for an absent timezone, a bad expression or zone and an
+// unsatisfiable expression are the reference's recorded sentences (2026-09-02
+// batch2 `deployment.create.*`, #540); the others are ours.
+func parseDeploymentSchedule(ctx context.Context, obj map[string]json.RawMessage) (expr, tz string, set, null bool, err error) {
 	raw, ok := obj["schedule"]
 	if !ok {
 		return "", "", false, false, nil
@@ -63,7 +65,7 @@ func parseDeploymentSchedule(obj map[string]json.RawMessage) (expr, tz string, s
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return "", "", true, false, errInvalid("schedule must be an object")
 	}
-	if err := rejectUnknownNested(raw, "schedule", "type", "expression", "timezone"); err != nil {
+	if err := rejectUnknownNested(raw, "type", "expression", "timezone"); err != nil {
 		return "", "", true, false, err
 	}
 	// All three are required, and type is the union's discriminator rather
@@ -80,6 +82,15 @@ func parseDeploymentSchedule(obj map[string]json.RawMessage) (expr, tz string, s
 		return "", "", true, false, errInvalid("schedule.expression is required")
 	}
 	if body.Timezone == nil || *body.Timezone == "" {
+		// An absent key is the reference's recorded sentence (2026-09-02
+		// batch2 `deployment.create.no-timezone`); a null or empty one, never
+		// recorded, keeps ours.
+		var keys map[string]json.RawMessage
+		if json.Unmarshal(raw, &keys) == nil {
+			if err := fieldRequired(keys, "timezone", "schedule.timezone"); err != nil {
+				return "", "", true, false, err
+			}
+		}
 		return "", "", true, false, errInvalid("schedule.timezone is required")
 	}
 	// The published ceiling. A 5-field expression can exceed it through long
@@ -93,18 +104,32 @@ func parseDeploymentSchedule(obj map[string]json.RawMessage) (expr, tz string, s
 	next, err := cron.Upcoming(expr, tz, time.Now().UTC(), 1)
 	switch {
 	case errors.Is(err, cron.ErrExpression):
+		// The recorded prefix, then cron's own detail without its sentinel's
+		// words. Only the field-count detail is the reference's (2026-09-02
+		// batch2 `deployment.create.6-field-cron`).
 		return "", "", true, false, errInvalid(
-			"schedule.expression is not a valid 5-field POSIX cron expression: %s", err)
+			"`schedule.expression` is not a valid 5-field cron expression: %s",
+			strings.TrimPrefix(err.Error(), cron.ErrExpression.Error()+": "))
 	case errors.Is(err, cron.ErrTimezone):
-		return "", "", true, false, errInvalid(
-			"schedule.timezone is not an IANA timezone identifier: %s", err)
+		// The recorded sentence (2026-09-02 batch2
+		// `deployment.create.bad-timezone`) does not say which of cron's two
+		// refusals fired — a name outside the database, or "Local", which is
+		// in it but means the host's zone — so the log does.
+		slog.InfoContext(ctx, "deployment schedule refused: invalid timezone",
+			"request_id", requestIDFrom(ctx), "reason", err.Error())
+		return "", "", true, false, errInvalid("`schedule.timezone` %q is not a valid IANA timezone", tz)
 	case err != nil:
 		return "", "", true, false, err
 	}
 	if len(next) == 0 {
+		// The recorded sentence (2026-09-02 batch2
+		// `deployment.create.unsatisfiable-cron`) says a year where this
+		// platform searched cron.SearchYears, so the log says how far it
+		// looked. No occurrence in twelve years implies none in one.
+		slog.InfoContext(ctx, "deployment schedule refused: no occurrence",
+			"request_id", requestIDFrom(ctx), "search_years", cron.SearchYears)
 		return "", "", true, false, errInvalid(
-			"schedule.expression %q has no occurrence in the next %d years, so it would never fire",
-			expr, cron.SearchYears)
+			"`schedule.expression` does not produce any occurrences in the next year")
 	}
 	return expr, tz, true, false, nil
 }
@@ -135,7 +160,7 @@ func resolveDeploymentAgent(ctx context.Context, db querier, raw json.RawMessage
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return ref, errInvalid("agent must be an agent id string or an agent reference object")
 		}
-		if err := rejectUnknownNested(raw, "agent", "type", "id", "version"); err != nil {
+		if err := rejectUnknownNested(raw, "type", "id", "version"); err != nil {
 			return ref, err
 		}
 		// type is required and is what tells the two object arms apart, so its

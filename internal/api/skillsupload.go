@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -47,20 +49,29 @@ func (u *skillUpload) totalBytes() int64 {
 // One files[] part that is a zip archive (by magic bytes — where the reference
 // goes by the filename's extension, a recorded mismatch in
 // docs/DIVERGENCES.md) is the zip form; anything else is the
-// loose path-qualified form.
+// loose path-qualified form. A refusal is the skills package's own error, for
+// the caller to answer through refuse.
 func (u *skillUpload) bundle() (*skills.Bundle, error) {
 	if len(u.files) == 1 && skills.IsZip(u.files[0].Data) {
-		b, err := skills.FromZip(u.files[0].Data)
-		if err != nil {
-			return nil, errInvalid("%s", err)
-		}
-		return b, nil
+		return skills.FromZip(u.files[0].Data)
 	}
-	b, err := skills.FromFiles(u.files)
-	if err != nil {
-		return nil, errInvalid("%s", err)
+	return skills.FromFiles(u.files)
+}
+
+// refuse logs a refusal from bundle and returns the 400 it answers. A
+// frontmatter length refusal answers the reference's sentence, recorded for
+// both fields on both routes (2026-09-12-followups skills-api.json #8, #9,
+// #18, #19; #540); it names neither the field nor its cap, which the line's
+// reason does.
+func (u *skillUpload) refuse(ctx context.Context, err error, attrs ...any) error {
+	attrs = append(attrs, "request_id", requestIDFrom(ctx),
+		"files", len(u.files), "bytes", u.totalBytes(), "reason", err)
+	slog.InfoContext(ctx, "skill upload rejected", attrs...)
+	var tooLong *skills.LengthError
+	if errors.As(err, &tooLong) {
+		return errInvalid("`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits")
 	}
-	return b, nil
+	return errInvalid("%s", err)
 }
 
 // parseSkillUpload reads a multipart/form-data body of files[] parts (plus
@@ -75,7 +86,8 @@ func (u *skillUpload) bundle() (*skills.Bundle, error) {
 // from display_title alone, and the registry says so.
 //
 // files[] stays required. A files[] part without a filename is still rejected,
-// as it is on the reference — a 400 there too, recorded in docs/DIVERGENCES.md.
+// as it is on the reference — a 400 there too, in its words, recorded in
+// docs/DIVERGENCES.md.
 func parseSkillUpload(r *http.Request, allowDisplayName bool) (*skillUpload, error) {
 	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "multipart/form-data" || params["boundary"] == "" {
@@ -98,7 +110,12 @@ func parseSkillUpload(r *http.Request, allowDisplayName bool) (*skillUpload, err
 		case name == "files[]":
 			filename := rawPartFilename(part)
 			if filename == "" {
-				return nil, errInvalid("files[] part is missing a filename")
+				// The reference's validator words a part with no filename as
+				// a string where a file was due (2026-09-12-followups
+				// skills-api.json #2, #12; #540). Its index is the part's
+				// 0-based position among the files[] parts; only index 0 was
+				// recorded, so that counting is an inference.
+				return nil, errInvalid("files[].%d: Expected UploadFile, received: <class 'str'>", len(up.files))
 			}
 			data, err := io.ReadAll(part)
 			if err != nil {

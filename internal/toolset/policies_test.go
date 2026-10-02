@@ -2,6 +2,8 @@ package toolset_test
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -221,6 +223,114 @@ func TestValidateRejectsUnknownFields(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestValidateConfigErrorsForTheRecordedCases pins the three configs[] refusals
+// the reference was recorded answering: each is a *toolset.ConfigError carrying
+// the reference's path and sentence, which the agent routes render (#540),
+// while its Error() stays this package's own. Recording:
+// managed-agents-wire-recordings 2026-09-02/batch2.json idx 131
+// `agent.create.config-unknown-key`, idx 129 `agent.create.config-type-only`,
+// idx 130 `agent.create.config-name-type-mismatch`. The unrecorded siblings —
+// a name selecting no built-in, a null name, default_config, a
+// permission_policy, the toolset object, the mcp_toolset kind — stay plain
+// errors.
+func TestValidateConfigErrorsForTheRecordedCases(t *testing.T) {
+	for _, tc := range []struct {
+		entry, path, reason, ours string
+	}{
+		{`{"type":"agent_toolset_20260401","configs":[{"name":"read"},{"name":"bash","bogus":1}]}`,
+			"configs[1].bogus", `Extra inputs are not permitted for name "bash"`,
+			`agent_toolset_20260401: unknown field "bogus" in configs[1]`},
+		{`{"type":"agent_toolset_20260401","configs":[{"type":"bash"}]}`,
+			"configs[0].name", `must be "bash" on a config of type "bash"`,
+			`agent_toolset_20260401: configs[0].type needs a string name to equal`},
+		{`{"type":"agent_toolset_20260401","configs":[{"name":"bash","type":"grep"}]}`,
+			"configs[0].type", `"grep" does not match name "bash"`,
+			`agent_toolset_20260401: configs[0].type is "grep" but must equal name "bash"`},
+	} {
+		err := toolset.Validate(json.RawMessage(tc.entry))
+		var cfg *toolset.ConfigError
+		if !errors.As(err, &cfg) {
+			t.Errorf("Validate(%s) = %v, want a *toolset.ConfigError", tc.entry, err)
+			continue
+		}
+		if cfg.Path != tc.path || cfg.Reason != tc.reason || cfg.Error() != tc.ours {
+			t.Errorf("Validate(%s) = {Path %q, Reason %q, Error %q}, want {%q, %q, %q}",
+				tc.entry, cfg.Path, cfg.Reason, cfg.Error(), tc.path, tc.reason, tc.ours)
+		}
+	}
+	for _, entry := range []string{
+		`{"type":"agent_toolset_20260401","configs":[{"name":"nope","bogus":1}]}`,
+		`{"type":"agent_toolset_20260401","configs":[{"bogus":1}]}`,
+		`{"type":"agent_toolset_20260401","configs":[{"type":"nope"}]}`,
+		`{"type":"agent_toolset_20260401","configs":[{"name":null,"type":"bash"}]}`,
+		`{"type":"agent_toolset_20260401","configs":[{"name":"nope","type":"bash"}]}`,
+		`{"type":"agent_toolset_20260401","default_config":{"bogus":1}}`,
+		`{"type":"agent_toolset_20260401","configs":[{"name":"bash","permission_policy":{"type":"always_ask","bogus":1}}]}`,
+		`{"type":"agent_toolset_20260401","bogus":1}`,
+	} {
+		err := toolset.Validate(json.RawMessage(entry))
+		var cfg *toolset.ConfigError
+		if err == nil || errors.As(err, &cfg) {
+			t.Errorf("Validate(%s) = %v, want a plain error", entry, err)
+		}
+	}
+	err := toolset.ValidateMCPToolset(json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"s","configs":[{"name":"bash","bogus":1}]}`))
+	var cfg *toolset.ConfigError
+	if err == nil || errors.As(err, &cfg) {
+		t.Errorf("ValidateMCPToolset with an unknown configs[] key = %v, want a plain error", err)
+	}
+
+	// A web tool's own fields are refused by this platform's choice; the
+	// reference accepts them, so no recorded sentence applies and the refusal
+	// stays a plain error in this package's words (#540, #481).
+	for tool, fields := range map[string][]string{
+		"web_fetch":  {"allowed_domains", "blocked_domains", "max_content_tokens"},
+		"web_search": {"allowed_domains", "blocked_domains", "user_location"},
+	} {
+		for _, f := range fields {
+			entry := fmt.Sprintf(`{"type":"agent_toolset_20260401","configs":[{"name":%q,%q:1}]}`, tool, f)
+			err := toolset.Validate(json.RawMessage(entry))
+			want := fmt.Sprintf(`agent_toolset_20260401: unknown field %q in configs[0]`, f)
+			var cfg *toolset.ConfigError
+			if err == nil || errors.As(err, &cfg) || err.Error() != want {
+				t.Errorf("Validate(%s) = %v, want the plain %q", entry, err, want)
+			}
+		}
+	}
+	// A field belonging to the other web tool is unknown on both sides, and
+	// takes the recorded sentence like any other unknown key.
+	err = toolset.Validate(json.RawMessage(`{"type":"agent_toolset_20260401","configs":[{"name":"web_fetch","user_location":1}]}`))
+	if !errors.As(err, &cfg) || cfg.Reason != `Extra inputs are not permitted for name "web_fetch"` {
+		t.Errorf("web_fetch with user_location = %v, want the recorded sentence", err)
+	}
+}
+
+// TestValidateNamesTheLeastUnknownKey pins that a configs[] entry, a
+// default_config or a toolset carrying several unknown keys names the same
+// one on every call — the byte-order-least, unknownkey.Least's pick —
+// where a map's iteration order would pick any.
+func TestValidateNamesTheLeastUnknownKey(t *testing.T) {
+	for entry, want := range map[string]string{
+		`{"type":"agent_toolset_20260401","configs":[{"name":"bash","zeta":1,"alpha":1,"mid":1}]}`: `agent_toolset_20260401: unknown field "alpha" in configs[0]`,
+		`{"type":"agent_toolset_20260401","default_config":{"zeta":1,"alpha":1}}`:                  `agent_toolset_20260401: unknown field "alpha" in default_config`,
+		`{"type":"agent_toolset_20260401","zeta":1,"alpha":1}`:                                     `agent_toolset_20260401: unknown field "alpha"`,
+		// A web field and a truly unknown one: the least is the web field, so
+		// the refusal is this platform's.
+		`{"type":"agent_toolset_20260401","configs":[{"name":"web_fetch","zzz":1,"allowed_domains":1}]}`: `agent_toolset_20260401: unknown field "allowed_domains" in configs[0]`,
+	} {
+		for range 20 {
+			if err := toolset.Validate(json.RawMessage(entry)); err == nil || err.Error() != want {
+				t.Fatalf("Validate(%s) = %v, want %q", entry, err, want)
+			}
+		}
+	}
+	var cfg *toolset.ConfigError
+	err := toolset.Validate(json.RawMessage(`{"type":"agent_toolset_20260401","configs":[{"name":"bash","zeta":1,"alpha":1}]}`))
+	if !errors.As(err, &cfg) || cfg.Path != "configs[0].alpha" {
+		t.Errorf("ConfigError = %v, want the path to name alpha", err)
 	}
 }
 

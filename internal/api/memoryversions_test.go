@@ -372,11 +372,12 @@ func TestMemoryVersionRedact(t *testing.T) {
 		older = rows[1]["id"].(string)
 	}
 
-	// "A version that is the current head of a live memory cannot be redacted."
+	// "A version that is the current head of a live memory cannot be
+	// redacted", in the reference's words (2026-09-02 free_batch1 idx 93
+	// `memver.redact.head`; #540).
 	status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memory_versions/"+head+"/redact", nil)
-	if status != http.StatusBadRequest {
-		t.Fatalf("redacting the head: status %d (%v)", status, body)
-	}
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"version is the current content of "+id+"; write a new version first")
 
 	// The superseded one nulls all four fields, keeps its attribution, and
 	// records who redacted it.
@@ -447,8 +448,11 @@ func TestMemoryVersionRedactOnAnArchivedStore(t *testing.T) {
 		t.Fatalf("redacting a superseded version on an archived store: status %d (%v)", status, body)
 	}
 
+	// The same words as on a live store (2026-09-02 free_batch1 idx 103
+	// `memver.redact.archived.head`; #540).
 	status, body = s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memory_versions/"+head+"/redact", nil)
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"version is the current content of "+id+"; write a new version first")
 	status, got := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memory_versions/"+head, nil)
 	if status != http.StatusOK || got["redacted_at"] != nil || got["content"] != "rewritten" {
 		t.Errorf("the refused head redaction changed the version: status %d (%v)", status, got)

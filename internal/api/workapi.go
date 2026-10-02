@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worktoken"
 	"github.com/jackc/pgx/v5"
 )
@@ -187,7 +189,9 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 	// worker drains what is left in its queue. The kind is the one the key's
 	// own lookup read (authenticateEnvironmentKey), not a second query.
 	if !selfHostedKeyFrom(r.Context()) {
-		writeError(w, r, errInvalid("environment %s is not a self_hosted environment; only a self_hosted environment's work is polled by a worker", envID))
+		// The reference's sentence, which names the kind as its own
+		// environment model spells it (#540).
+		writeError(w, r, errInvalid("Only BYOC and bridge environments support work polling. Environment %s is anthropic_cloud.", envID))
 		return
 	}
 	block, err := blockWindow(r)
@@ -302,7 +306,7 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	// archived or not (2026-09-05 batch2 `rec83.active-key.work.list.beta`,
 	// `rec83.archived-key.work.list.beta`).
 	if !selfHostedKeyFrom(r.Context()) {
-		return nil, errNotFound("environment %s has no work list; the work API serves self_hosted environments only", envID)
+		return nil, errNotFound("Environment `%s` not found, or does not support work listing. The work API is only available for self-hosted environments.", envID)
 	}
 	page, err := parsePage(r.URL.Query())
 	if err != nil {
@@ -414,15 +418,30 @@ func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error)
 // mapWorkErr maps a queue state-machine error onto its wire status: a missing
 // item is 404, a heartbeat precondition failure is 412, carrying the details
 // the reference's 412 does (2026-09-02 batch2 `work.heartbeat.NO_HEARTBEAT`,
-// `work.heartbeat.wrong-expected`; #664). Anything else is an internal fault.
+// `work.heartbeat.wrong-expected`; #664) and its sentence (#540): the
+// precondition the beat sent and the last heartbeat the item holds, "NULL" for
+// none, as in the pinned SDK's fixture for such a 412 (checked against
+// anthropic-sdk-go v1.70.1 — lib/environments/worker_test.go leaseLostBody),
+// with the six fractional digits the recorded timestamp carries — and, on a
+// whole second, none: the reference renders it as Python's isoformat does,
+// which drops an all-zero fraction (INFERRED, docs/DIVERGENCES.md; no
+// recording holds one). Anything else is an internal fault.
 func mapWorkErr(err error) error {
 	var mismatch *queue.HeartbeatMismatchError
 	switch {
 	case errors.Is(err, queue.ErrWorkNotFound):
 		return errNotFound("work item not found")
 	case errors.As(err, &mismatch):
+		actual := "NULL"
+		if lh := mismatch.Item.LastHeartbeat; lh != nil {
+			layout := "2006-01-02T15:04:05.000000Z07:00"
+			if lh.Nanosecond()/int(time.Microsecond) == 0 {
+				layout = "2006-01-02T15:04:05Z07:00"
+			}
+			actual = lh.UTC().Format(layout)
+		}
 		return withDetails(&apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
-			"expected_last_heartbeat does not match the current lease"},
+			fmt.Sprintf("Heartbeat precondition failed: expected %s, actual was %s", mismatch.Expected, actual)},
 			errorDetails{
 				CurrentState:    refusedBeatState(mismatch),
 				ErrorVisibility: visibilityUserFacing,
@@ -499,11 +518,19 @@ func (s *server) updateWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknownKeys(obj, "metadata"); err != nil {
+	// The work API is a pydantic surface on the reference, so its unknown-key
+	// sentence is not the strict decoder's rejectUnknownKeys reproduces; none
+	// was recorded, so ours stands.
+	if key, ok := unknownkey.Least(obj, "metadata"); ok {
+		return nil, errInvalid("unknown field %q", key)
+	}
+	// 2026-09-12 batch1 `rec91.work.poll.post-empty-retry` (#540); an
+	// explicit null, never recorded, keeps ours.
+	if err := fieldRequired(obj, "metadata", "metadata"); err != nil {
 		return nil, err
 	}
-	raw, ok := obj["metadata"]
-	if !ok || isNull(raw) {
+	raw := obj["metadata"]
+	if isNull(raw) {
 		return nil, errInvalid("metadata is required")
 	}
 	// The work wire deletes only on an explicit null; an empty string is a

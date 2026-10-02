@@ -27,6 +27,23 @@ type runError struct {
 func (e *runError) Error() string { return e.err.Error() }
 func (e *runError) Unwrap() error { return e.err }
 
+// runWording is the message a settled run's error carries: the reference's run
+// sentence for a memory store gone or archived, which names no store
+// (2026-09-03 batch1 `deployment.run.store-deleted` and
+// `deployment.run.store-archived`; #540), and err's own otherwise.
+func runWording(re *runError) string {
+	var r *createRefusal
+	if errors.As(re.err, &r) {
+		switch r.what {
+		case refusedStoreGone:
+			return "session creation rejected: a referenced resource was not found; check deployment configuration"
+		case refusedStoreArchived:
+			return "session creation rejected: a referenced memory store is archived; check deployment resources"
+		}
+	}
+	return re.err.Error()
+}
+
 // classified wraps err with the run-error type a deployment fire records for
 // it. An error nothing wraps is unclassified: the fire rolls the whole
 // transaction back instead of settling a run (§5.2's last row).
@@ -90,7 +107,9 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if archivedAt != nil {
-		return nil, errInvalid("deployment %s is archived", id)
+		// loadDeployment's refusal, in the reference's sentence (2026-09-02
+		// batch2 `deployment.run.on-archived`, #540).
+		return nil, errInvalid("Cannot modify archived deployment")
 	}
 
 	run := domain.DeploymentRun{
@@ -125,10 +144,10 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 		}
 		// The run row survives the savepoint rollback — it was inserted
 		// before the savepoint.
-		run.Error = &domain.RunError{Type: re.typ, Message: re.err.Error()}
+		run.Error = &domain.RunError{Type: re.typ, Message: runWording(re)}
 		if err := settleRun(ctx, tx,
 			`UPDATE deployment_runs SET error_type = $1, error_message = $2 WHERE id = $3`,
-			re.typ, re.err.Error(), run.ID); err != nil {
+			re.typ, runWording(re), run.ID); err != nil {
 			return nil, err
 		}
 	} else {
@@ -287,9 +306,11 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		// name a stored deployment, and rejecting it keeps an unstorable byte
 		// from reaching the bind parameter as a 500 (#135). A well-formed but
 		// absent one is the published rule: "Filtering by a non-existent
-		// deployment_id returns 200 with empty data."
+		// deployment_id returns 200 with empty data." The refusal is the
+		// reference's sentence (2026-09-02 batch2
+		// `deployment_runs.list.unknown-deployment`, #540).
 		if !domain.ID(deplID).Valid() {
-			return nil, errInvalid("deployment_id must be a valid deployment id")
+			return nil, errInvalid("Invalid deployment ID.")
 		}
 		args = append(args, deplID)
 		query += fmt.Sprintf(` AND deployment_id = $%d`, len(args))
@@ -302,11 +323,14 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND trigger_type = $%d`, len(args))
 	}
 	// Hand-parsed rather than parseBoolParam, which cannot tell an absent
-	// key from false — and absent means no filter at all.
+	// key from false — and absent means no filter at all. The refusal is the
+	// reference's sentence for this parameter (2026-09-05 batch3
+	// `rec84.runs.list.has_error.bogus`, #540); parseBoolParam's own, for
+	// parameters no recording covers, stays ours.
 	if he := q.Get("has_error"); he != "" {
 		v, err := strconv.ParseBool(he)
 		if err != nil {
-			return nil, errInvalid("has_error must be true or false")
+			return nil, errInvalid("Failed to parse request body: invalid value for bool field has_error: %q", he)
 		}
 		// Published as "true for runs with non-null error, false for runs
 		// with non-null session_id" — but the false arm keys off succeeded_at,

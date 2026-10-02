@@ -83,6 +83,18 @@ func TestEffortInvalidAtEveryAPIBoundary(t *testing.T) {
 			wantErr(t, status, got, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
+
+	// A bad level string is refused on the agent routes in the reference's
+	// words, its path bare on create and opened by "agent." on update (#540).
+	// Recording: managed-agents-wire-recordings 2026-09-12/batch1.json idx 7
+	// rec91.model.update.effort-bogus.
+	model := map[string]any{"effort": "bogus", "id": "custom"}
+	status, got := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"model": model})
+	wantErrMsg(t, status, got, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request: agent.model.effort: "bogus" is not a valid value; expected one of high, low, max, medium, xhigh`)
+	status, got = s.do(http.MethodPost, "/v1/agents", map[string]any{"name": "invalid", "model": model})
+	wantErrMsg(t, status, got, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request: model.effort: "bogus" is not a valid value; expected one of high, low, max, medium, xhigh`)
 }
 
 func TestSessionEffortOverrides(t *testing.T) {

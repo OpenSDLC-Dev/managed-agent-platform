@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,6 +103,48 @@ func TestVaultCRUD(t *testing.T) {
 	}
 	if status, _ = s.do("DELETE", "/v1/vaults/"+id, nil); status != http.StatusNotFound {
 		t.Fatalf("second delete: status %d", status)
+	}
+}
+
+// A credential in an archived vault refuses create and update in the
+// reference's sentence (2026-09-03 batch1 `cred.create.in-archived-vault` #53
+// and `cred.update.in-archived-vault-C` #58, the recorded bodies, #540) — on
+// both of update's reads, the locked one a display_name reaches and the
+// pre-read an auth body takes. A credential archived on its own in a live
+// vault, never recorded, keeps ours.
+func TestCredentialWritesInAnArchivedVault(t *testing.T) {
+	s := newTestServer(t)
+
+	vaultID := createVault(t, s, "archived")
+	credID := createCredential(t, s, vaultID, envVarAuth("K"))["id"].(string)
+	if status, body := s.do("POST", "/v1/vaults/"+vaultID+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive vault: %d (%v)", status, body)
+	}
+	status, body := s.do("POST", "/v1/vaults/"+vaultID+"/credentials", map[string]any{
+		"display_name": "rec79-in-archived",
+		"auth": map[string]any{"type": "mcp_oauth", "access_token": "rec79-a6",
+			"mcp_server_url": "https://httpstat.us/202"}})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Vault is archived.")
+	for _, payload := range []map[string]any{
+		{"display_name": "renamed-after-archive"},
+		{"auth": map[string]any{"type": "environment_variable", "secret_value": "v2"}},
+	} {
+		status, body = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+credID, payload)
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Vault is archived.")
+	}
+
+	live := createVault(t, s, "live")
+	alone := createCredential(t, s, live, envVarAuth("K"))["id"].(string)
+	if status, body := s.do("POST", "/v1/vaults/"+live+"/credentials/"+alone+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive credential: %d (%v)", status, body)
+	}
+	for _, payload := range []map[string]any{
+		{"display_name": "x"},
+		{"auth": map[string]any{"type": "environment_variable", "secret_value": "v2"}},
+	} {
+		status, body = s.do("POST", "/v1/vaults/"+live+"/credentials/"+alone, payload)
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+			"credential "+alone+" is archived")
 	}
 }
 
@@ -456,6 +499,34 @@ func TestCredentialValidationRules(t *testing.T) {
 		}
 	}
 
+	// The recorded refusals answer the reference's sentences verbatim (#540),
+	// on the recorded bodies: a static_bearer without its server URL
+	// (2026-09-03 batch1 `cred.create.throwaway` #39) and an empty secret_name
+	// (`cred.create.secret-name-empty` #62). The neighbouring conditions,
+	// never recorded, keep ours.
+	for _, c := range []struct {
+		name string
+		auth map[string]any
+		msg  string
+	}{
+		{"bearer no url", map[string]any{"type": "static_bearer", "token": "rec79-tw"},
+			"auth.mcp_server_url: Field required"},
+		{"bearer null url", map[string]any{"type": "static_bearer", "mcp_server_url": nil, "token": "t"},
+			"mcp_server_url is required"},
+		{"mcp missing server_url", map[string]any{"type": "mcp_oauth", "access_token": "at"},
+			"mcp_server_url is required"},
+		{"empty secret_name", map[string]any{"type": "environment_variable", "secret_name": "",
+			"secret_value": "x", "networking": map[string]any{"type": "unrestricted"}},
+			"auth.secret_name: minimum string length is 1"},
+		{"absent secret_name", map[string]any{"type": "environment_variable",
+			"secret_value": "x", "networking": map[string]any{"type": "unrestricted"}},
+			"secret_name is required"},
+	} {
+		status, resp := s.do("POST", "/v1/vaults/"+vaultID+"/credentials",
+			map[string]any{"display_name": "rec79", "auth": c.auth})
+		wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", c.msg)
+	}
+
 	// 16 allowed hosts pass; 17 fail. Wildcards and IPv4 literals pass.
 	hosts := []string{"10.0.0.1", "*.example.com"}
 	for i := len(hosts); i < 16; i++ {
@@ -478,16 +549,19 @@ func TestCredentialUniquenessAndCap(t *testing.T) {
 	vaultID := createVault(t, s, "unique")
 
 	createCredential(t, s, vaultID, envVarAuth("DUP"))
-	if status, _ := s.do("POST", "/v1/vaults/"+vaultID+"/credentials", map[string]any{"auth": envVarAuth("DUP")}); status != http.StatusConflict {
-		t.Fatalf("duplicate active secret_name: status %d, want 409", status)
-	}
-	// The mcp_server_url namespace is shared by the two MCP variants.
+	// An environment variable's duplicate, never recorded, keeps ours.
+	status, resp := s.do("POST", "/v1/vaults/"+vaultID+"/credentials", map[string]any{"auth": envVarAuth("DUP")})
+	wantErrMsg(t, status, resp, http.StatusConflict, "invalid_request_error",
+		"an active credential with this secret_name already exists in vault "+vaultID)
+	// The mcp_server_url namespace is shared by the two MCP variants, and its
+	// duplicate answers the reference's sentence (2026-09-03 batch1
+	// `cred.create.mcp-oauth-with-refresh-basic` #41, #540).
 	createCredential(t, s, vaultID, map[string]any{
 		"type": "static_bearer", "mcp_server_url": "https://mcp.example.com", "token": "t"})
-	if status, _ := s.do("POST", "/v1/vaults/"+vaultID+"/credentials", map[string]any{"auth": map[string]any{
-		"type": "mcp_oauth", "mcp_server_url": "https://mcp.example.com", "access_token": "a"}}); status != http.StatusConflict {
-		t.Fatalf("duplicate active mcp_server_url across variants: status %d, want 409", status)
-	}
+	status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials", map[string]any{"auth": map[string]any{
+		"type": "mcp_oauth", "mcp_server_url": "https://mcp.example.com", "access_token": "a"}})
+	wantErrMsg(t, status, resp, http.StatusConflict, "invalid_request_error",
+		"A credential already exists for this MCP server URL.")
 	// Archiving frees the key.
 	var id string
 	if err := s.pool.QueryRow(t.Context(),
@@ -517,20 +591,25 @@ func TestCredentialPathScoping(t *testing.T) {
 	vaultB := createVault(t, s, "b")
 	id := createCredential(t, s, vaultA, envVarAuth("K"))["id"].(string)
 
-	// The wrong vault segment 404s on every nested verb.
-	for _, probe := range []struct{ method, path string }{
-		{"GET", "/v1/vaults/" + vaultB + "/credentials/" + id},
-		{"POST", "/v1/vaults/" + vaultB + "/credentials/" + id},
-		{"DELETE", "/v1/vaults/" + vaultB + "/credentials/" + id},
-		{"POST", "/v1/vaults/" + vaultB + "/credentials/" + id + "/archive"},
+	// The wrong vault segment 404s on every nested verb, in the reference's
+	// sentence (2026-09-03 batch1 `cred.get.wrong-vault` #32,
+	// `cred.update.wrong-vault` #33, `cred.delete.wrong-vault` #34; archive,
+	// unrecorded, shares it, #540). The update probes both of its reads: the
+	// locked one a display_name reaches, and the pre-read an auth body takes.
+	for _, probe := range []struct {
+		method, path string
+		payload      any
+	}{
+		{"GET", "/v1/vaults/" + vaultB + "/credentials/" + id, nil},
+		{"POST", "/v1/vaults/" + vaultB + "/credentials/" + id, map[string]any{}},
+		{"POST", "/v1/vaults/" + vaultB + "/credentials/" + id, map[string]any{"display_name": "x"}},
+		{"POST", "/v1/vaults/" + vaultB + "/credentials/" + id, map[string]any{
+			"auth": map[string]any{"type": "environment_variable", "secret_value": "v2"}}},
+		{"DELETE", "/v1/vaults/" + vaultB + "/credentials/" + id, nil},
+		{"POST", "/v1/vaults/" + vaultB + "/credentials/" + id + "/archive", nil},
 	} {
-		var payload any
-		if probe.method == "POST" && !strings.HasSuffix(probe.path, "/archive") {
-			payload = map[string]any{"display_name": "x"}
-		}
-		if status, _ := s.do(probe.method, probe.path, payload); status != http.StatusNotFound {
-			t.Fatalf("%s %s: status %d, want 404", probe.method, probe.path, status)
-		}
+		status, resp := s.do(probe.method, probe.path, probe.payload)
+		wantErrMsg(t, status, resp, http.StatusNotFound, "not_found_error", "Credential not found.")
 	}
 	// A wrong-vault archive must 404 WITHOUT destroying the credential — the
 	// mutation is scoped to the path's vault, not checked after the fact.
@@ -590,14 +669,48 @@ func TestCredentialUpdateImmutability(t *testing.T) {
 		}
 	}
 
+	// A variant switch answers the reference's sentence, which names neither
+	// type (2026-09-03 batch1 `cred.update.switch-variant-to-static-bearer`
+	// #37, the recorded body, #540); the operator's log keeps both.
+	logs := captureLogs(t, slog.LevelInfo)
+	status, resp := s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, map[string]any{
+		"auth": map[string]any{"type": "static_bearer", "token": "rec79-bearer"}})
+	wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error",
+		"auth.type: does not match this credential's stored type")
+	line := ""
+	for _, l := range strings.Split(logs(), "\n") {
+		if strings.Contains(l, "vault credential update refused: auth type mismatch") {
+			line = l
+		}
+	}
+	for _, want := range []string{"stored_type=mcp_oauth", "requested_type=static_bearer",
+		"request_id=" + resp["request_id"].(string)} {
+		if !strings.Contains(line, want) {
+			t.Errorf("auth-type log line %q lacks %q", line, want)
+		}
+	}
+	if strings.Contains(line, "rec79-bearer") {
+		t.Errorf("auth-type log line %q carries the token", line)
+	}
+
 	// A refresh block cannot be introduced after create (its anchors are
-	// create-only fields).
+	// create-only fields), in the reference's sentence (2026-09-03 batch1
+	// `cred.update.refresh-fields-on-no-refresh-cred` #40). A block that also
+	// carries the create-only anchors names the least of them first, as the
+	// reference does (`cred.update.add-refresh-post-create` #38, the recorded
+	// body).
 	noRefreshID := createCredential(t, s, vaultID, map[string]any{
 		"type": "mcp_oauth", "mcp_server_url": "https://plain.example.com", "access_token": "at"})["id"].(string)
-	if status, _ := s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+noRefreshID, map[string]any{
-		"auth": map[string]any{"type": "mcp_oauth", "refresh": map[string]any{"refresh_token": "rt"}}}); status != http.StatusBadRequest {
-		t.Fatal("adding a refresh block after create must be rejected")
-	}
+	status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+noRefreshID, map[string]any{
+		"auth": map[string]any{"type": "mcp_oauth", "refresh": map[string]any{"refresh_token": "newtok"}}})
+	wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error",
+		"auth.refresh: this credential was created without refresh capability")
+	status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+noRefreshID, map[string]any{
+		"auth": map[string]any{"type": "mcp_oauth", "refresh": map[string]any{
+			"client_id": "cid", "refresh_token": "rtok", "token_endpoint": "https://httpstat.us/200",
+			"token_endpoint_auth": map[string]any{"type": "client_secret_basic", "client_secret": "sec"}}}})
+	wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request body: unknown field "client_id"`)
 
 	// Switching token_endpoint_auth arms requires a client_secret; restating
 	// the same arm with one succeeds.
@@ -735,7 +848,11 @@ func TestCredentialUpdateErrors(t *testing.T) {
 			"token_endpoint_auth": map[string]any{"type": "none"}},
 	})["id"].(string)
 
-	// get a missing credential, and one under the wrong vault segment.
+	// get a missing credential (a row miss answers the reference's sentence,
+	// #540), and malformed ids, whose checkID refusal is never recorded and
+	// keeps ours.
+	status, resp := s.do("GET", "/v1/vaults/"+vaultID+"/credentials/vcrd_0000000000000000000000", nil)
+	wantErrMsg(t, status, resp, http.StatusNotFound, "not_found_error", "Credential not found.")
 	if status, _ := s.do("GET", "/v1/vaults/"+vaultID+"/credentials/vcrd_missing0000000000000000", nil); status != http.StatusNotFound {
 		t.Fatalf("get missing credential: %d", status)
 	}

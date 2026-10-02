@@ -264,20 +264,15 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 	}
 
 	for name, resources := range map[string][]any{
-		// w-no-token
-		"missing token":    {map[string]any{"type": "github_repository", "url": repoTestURL}},
-		"empty token":      {repoBody("", nil)},
+		// w-no-token (the absent and empty token are below, in the
+		// reference's words)
 		"token above 8KiB": {repoBody(strings.Repeat("t", 8193), nil)},
 		// w-bad-url
 		"http scheme":     {repoBody("g", map[string]any{"url": "http://github.com/o/r"})},
 		"non-github host": {repoBody("g", map[string]any{"url": "https://gitlab.com/o/r"})},
 		"owner only":      {repoBody("g", map[string]any{"url": "https://github.com/onlyowner"})},
-		"extra segments":  {repoBody("g", map[string]any{"url": repoTestURL + "/tree/main"})},
 		"garbage url":     {repoBody("g", map[string]any{"url": "not a url"})},
-		"userinfo url":    {repoBody("g", map[string]any{"url": "https://TOKEN@github.com/o/r"})},
-		"query url":       {repoBody("g", map[string]any{"url": repoTestURL + "?token=x"})},
 		"fragment url":    {repoBody("g", map[string]any{"url": repoTestURL + "#frag"})},
-		"explicit port":   {repoBody("g", map[string]any{"url": "https://github.com:443/o/r"})},
 		"trailing slash":  {repoBody("g", map[string]any{"url": repoTestURL + "/"})},
 		// The derived default mount is /workspace/<repo-name>; a repo segment
 		// that would make it unclean, unstorable, or oversized must be
@@ -320,22 +315,7 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		// marshaller substitutes U+FFFD before the request leaves the client.
 		"oversized mount":  {repoBody("g", map[string]any{"mount_path": "/workspace/" + strings.Repeat("x", 1024)})},
 		"unstorable mount": {repoBody("g", map[string]any{"mount_path": "/workspace/\x00r"})},
-		// w-mount-collision (aliases of one directory; the file arm compares
-		// by its uploads-resolved path since #323, so a relative file
-		// spelling collides with a repo's literal path at the same place)
-		"repo/repo collision": {
-			repoBody("g", map[string]any{"mount_path": "/workspace/same"}),
-			repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/same"})},
-		"alias collision": {
-			map[string]any{"type": "file", "file_id": fileID, "mount_path": "same"},
-			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/same"})},
-		// w-nesting
-		"file ancestor of repo": {
-			map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo"},
-			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
-		"nested repos": {
-			repoBody("g", map[string]any{"mount_path": "/workspace/outer"}),
-			repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/outer/inner"})},
+		// w-mount-collision and w-nesting are below, with their messages.
 		"root mount":    {repoBody("g", map[string]any{"mount_path": "/"})},
 		"staging mount": {repoBody("g", map[string]any{"mount_path": "/tmp"})},
 		// w-repo-cap
@@ -348,6 +328,78 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 			continue
 		}
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	}
+
+	// The refusals the reference was recorded wording, in its words whole
+	// (#540); where the later of two colliding elements is a file, which no
+	// recording holds, the message stays ours.
+	other := "https://github.com/example-org/other"
+	badURL := "Invalid `github_repository` resource: invalid github_repository url: must be https://github.com/{owner}/{repo} with no .git suffix"
+	overlap := func(a, b string) string {
+		return "Invalid `github_repository` resource: `mount_path` overlaps another resource: " + a + " and " + b + "; set distinct `mount_path` values"
+	}
+	for name, tc := range map[string]struct {
+		resources []any
+		want      string
+	}{
+		// 2026-09-03 batch1 `session.create.repo-token-absent` and
+		// `session.create.repo-token-empty`.
+		"missing token": {[]any{map[string]any{"type": "github_repository", "url": repoTestURL}},
+			"resources.0.github_repository.authorization_token: value is required"},
+		"empty token": {[]any{repoBody("g", map[string]any{"url": other}), repoBody("", nil)},
+			"resources.1.github_repository.authorization_token: value is required"},
+		// 2026-09-03 batch1 `session.create.repo-userinfo`, `repo-explicit-port`,
+		// `repo-query-string` and `repo-tree-path`. The same session's
+		// `repo-dot-git` is refused there too, and accepted here.
+		"userinfo url":   {[]any{repoBody("g", map[string]any{"url": "https://TOKEN@github.com/o/r"})}, badURL},
+		"explicit port":  {[]any{repoBody("g", map[string]any{"url": "https://github.com:443/o/r"})}, badURL},
+		"query url":      {[]any{repoBody("g", map[string]any{"url": repoTestURL + "?token=x"})}, badURL},
+		"extra segments": {[]any{repoBody("g", map[string]any{"url": repoTestURL + "/tree/main"})}, badURL},
+		// w-mount-collision (aliases of one directory; the file arm compares
+		// by its uploads-resolved path since #323, so a relative file
+		// spelling collides with a repo's literal path at the same place).
+		// 2026-09-03 batch1 `session.create.repo-same-mount-twice` and
+		// `session.create.repo-same-repo-twice`.
+		"repo/repo collision": {[]any{
+			repoBody("g", map[string]any{"mount_path": "/workspace/same"}),
+			repoBody("g", map[string]any{"url": other, "mount_path": "/workspace/same"})},
+			overlap("/workspace/same", "/workspace/same")},
+		"same repo twice": {[]any{repoBody("g", nil), repoBody("g", nil)},
+			overlap("/workspace/example-repo", "/workspace/example-repo")},
+		"alias collision": {[]any{
+			map[string]any{"type": "file", "file_id": fileID, "mount_path": "same"},
+			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/same"})},
+			overlap("/mnt/session/uploads/same", "/mnt/session/uploads/same")},
+		"alias collision, the file later": {[]any{
+			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/same"}),
+			map[string]any{"type": "file", "file_id": fileID, "mount_path": "same"}},
+			`mount_path "/mnt/session/uploads/same" is used by more than one resource`},
+		// w-nesting: 2026-09-03 batch1 `session.create.repo-nested-mounts`,
+		// the ancestor named first.
+		"nested repos": {[]any{
+			repoBody("g", map[string]any{"mount_path": "/workspace/outer"}),
+			repoBody("g", map[string]any{"url": other, "mount_path": "/workspace/outer/inner"})},
+			overlap("/workspace/outer", "/workspace/outer/inner")},
+		"nested repos, the ancestor later": {[]any{
+			repoBody("g", map[string]any{"url": other, "mount_path": "/workspace/outer/inner"}),
+			repoBody("g", map[string]any{"mount_path": "/workspace/outer"})},
+			overlap("/workspace/outer", "/workspace/outer/inner")},
+		"file ancestor of repo": {[]any{
+			map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo"},
+			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
+			overlap("/mnt/session/uploads/repo", "/mnt/session/uploads/repo/src")},
+		"file ancestor of repo, the file later": {[]any{
+			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"}),
+			map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo"}},
+			`mount_path "/mnt/session/uploads/repo" is an ancestor of repository mount_path "/mnt/session/uploads/repo/src"`},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+			"agent": agentID, "environment_id": envID, "resources": tc.resources})
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (%v)", name, status, body)
+			continue
+		}
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
 	}
 
 	// The caps are inclusive at the limit: a token of exactly 8 KiB and
@@ -547,12 +599,13 @@ func TestSessionRepoAddPostCreateRejected(t *testing.T) {
 			"url": "https://github.com/example-org/other", "mount_path": "/mnt/session/uploads/repo/src"}))
 	sid := sess["id"].(string)
 
+	// Refused on its type before the variant is read, in the words the
+	// reference refuses a memory_store with there (2026-09-02 batch2
+	// `session.resources.post.memory_store`, #540).
 	status, body := s.do(http.MethodPost, "/v1/sessions/"+sid+"/resources",
 		repoBody("ghp_new", map[string]any{"mount_path": "/workspace/added"}))
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg := errMessage(body); !strings.Contains(msg, "only file resources") {
-		t.Errorf("add rejection message = %q, want the file-only wording", msg)
-	}
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request: type: "github_repository" is not a valid value`)
 
 	// A file added at /mnt/session/uploads/repo (the resolved form of "repo")
 	// would sit above the repo mounted at .../repo/src — the direction create
@@ -566,6 +619,45 @@ func TestSessionRepoAddPostCreateRejected(t *testing.T) {
 		map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo/src/inside.txt"})
 	if status != http.StatusOK {
 		t.Errorf("overlay add: status %d, want 200 (%v)", status, body)
+	}
+}
+
+// TestDeploymentRepoResourceWording: a deployment's resources run through the
+// same parser as a session create's, but the reference words its refusals
+// there differently (#540), on create and on update alike. Each recorded one
+// is pinned whole; a refusal no recording holds keeps ours, however session
+// create words it — a null or empty field among them.
+func TestDeploymentRepoResourceWording(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+
+	for name, tc := range map[string]struct {
+		resource map[string]any
+		want     string
+	}{
+		// 2026-09-05 batch3 `rec84.repo.bare-type`: url and token both
+		// absent, the url named first.
+		"bare type": {map[string]any{"type": "github_repository"}, "resources.1.url: Field required"},
+		// 2026-09-05 batch3 `rec84.repo.with-url`.
+		"absent token": {map[string]any{"type": "github_repository", "url": repoTestURL},
+			"resources.1.authorization_token: Field required"},
+		// 2026-09-05 batch3 `rec84.repo.bad-url`.
+		"bad url": {repoBody("g", map[string]any{"url": "not-a-url"}),
+			"validate deployment resources: invalid GitHub repository URL: repo URL must be https://github.com/{owner}/{repo}"},
+		"empty token": {repoBody("", nil), "authorization_token is required"},
+		"null url":    {map[string]any{"type": "github_repository", "url": nil, "authorization_token": "g"}, "url is required"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The refused element sits at index 1, behind a valid one.
+			resources := []any{repoBody("g", map[string]any{"url": "https://github.com/example-org/other"}), tc.resource}
+			body := deploymentBody(agentID, envID)
+			body["resources"] = resources
+			status, res := s.do(http.MethodPost, "/v1/deployments", body)
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.want)
+			status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": resources})
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.want)
+		})
 	}
 }
 

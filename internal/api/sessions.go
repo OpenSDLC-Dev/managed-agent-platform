@@ -256,7 +256,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 
 	if err := json.Unmarshal(raw, &agentID); err != nil {
 		var obj struct {
-			Type       string          `json:"type"`
+			Type       *string         `json:"type"`
 			ID         string          `json:"id"`
 			Version    *int64          `json:"version"`
 			Model      json.RawMessage `json:"model"`
@@ -269,27 +269,50 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return snap, errInvalid("agent must be an agent id string or an agent reference object")
 		}
+		// The discriminator is judged before the id, in the reference's words
+		// (#540): a missing one as 2026-09-05 batch8
+		// `probe.session.selector-enum` answered, an unknown one as 2026-09-03
+		// batch2 `sess.create.mcp-initial-events` did — that body carried
+		// agent_id, no id, so the type has to be read first to answer it. An
+		// explicit null reads as missing. The reference parses this union
+		// before it looks anything up; here it is still judged after the
+		// environment lookup, since resolveAgent runs inside the create
+		// transaction.
+		if obj.Type == nil {
+			return snap, errInvalid("Failed to parse request: agent.selector.type: Field required")
+		}
+		if typ := *obj.Type; typ != "agent" && typ != "agent_with_overrides" {
+			return snap, errInvalid("Failed to parse request: agent.selector.type: %q is not a valid value", typ)
+		}
 		if obj.ID == "" {
 			return snap, errInvalid("agent.id is required")
 		}
-		switch obj.Type {
-		case "agent":
-		case "agent_with_overrides":
+		if *obj.Type == "agent_with_overrides" {
 			// The override params carry no roster (absent at anthropic-sdk-go
 			// v1.70.1 — betasession.go
 			// BetaManagedAgentsAgentWithOverridesParams.Multiagent); the
 			// coordinator's stored roster is the only one a session gets — an
 			// explicit 400, not a silent drop (plan 35 decision 10, INFERRED in
-			// docs/DIVERGENCES.md). An explicit null is the value every session
-			// response renders for a single agent, so a read-modify-write echo
-			// passes.
+			// docs/DIVERGENCES.md), worded as the reference's strict decoder
+			// words a key it does not know (2026-09-02 batch2
+			// `session.create.agent_with_overrides.multiagent`, #540). An
+			// explicit null is the value every session response renders for a
+			// single agent, so a read-modify-write echo passes.
 			if present(obj.Multiagent) {
-				return snap, errInvalid("agent override multiagent is not supported; the roster is the coordinator agent's")
+				return snap, errInvalid("Failed to parse request body: unknown field %q", "multiagent")
 			}
-			for key, val := range map[string]json.RawMessage{
-				"model": obj.Model, "system": obj.System, "tools": obj.Tools,
-				"mcp_servers": obj.MCP, "skills": obj.Skills,
+			// The override params' field order (checked against
+			// anthropic-sdk-go v1.70.1 — betasession.go
+			// BetaManagedAgentsAgentWithOverridesParams), so a body with two
+			// null overrides names the same one on every request.
+			for _, o := range []struct {
+				key string
+				val json.RawMessage
+			}{
+				{"system", obj.System}, {"mcp_servers", obj.MCP}, {"model", obj.Model},
+				{"skills", obj.Skills}, {"tools", obj.Tools},
 			} {
+				key, val := o.key, o.val
 				if len(val) > 0 {
 					// Only system documents null semantics ("set to null to
 					// clear the agent's system prompt").
@@ -299,8 +322,6 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 					overrides[key] = val
 				}
 			}
-		default:
-			return snap, errInvalid(`agent.type must be "agent" or "agent_with_overrides"`)
 		}
 		agentID = obj.ID
 		if obj.Version != nil {
@@ -346,7 +367,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 	}
 	if archivedAt != nil {
 		return snap, classified("agent_archived_error",
-			errInvalid("agent %s is archived", agentID))
+			&createRefusal{refusedAgentArchived, agentID, errInvalid("agent %s is archived", agentID)})
 	}
 
 	var spec agentSpec
@@ -372,8 +393,9 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 			// — so the check binds what the override supplies, never the
 			// preserved value. The agent params' own bound (#665) binds
 			// requests alike, so a stored system written over it before then
-			// still resolves.
-			return snap, errInvalid("agent override system cannot exceed %d characters", overrideSystemMaxRunes)
+			// still resolves. Worded as the reference words it (2026-09-02
+			// batch2 `session.create.overrides.system-100001-ascii`, #540).
+			return snap, errInvalid("agent.agent_with_overrides.config.system: must be at most %d characters", overrideSystemMaxRunes)
 		}
 	}
 	if raw, ok := overrides["tools"]; ok {
@@ -492,8 +514,9 @@ const (
 
 // parseInitialEvents structurally validates the create-time initial_events
 // list (presence, size, the two-type allowlist, the define_outcome and
-// file-document bounds); the per-type field validation runs later through the
-// same NormalizeInbound a posted batch gets.
+// file-document bounds); the per-type field validation runs later through
+// NormalizeInitialEvents, the normalizer a posted batch gets in this
+// platform's words.
 // allowSystemMessage widens the type allowlist by one arm. A deployment's
 // initial_events admits system.message where a session's does not — the
 // reference's two schemas differ by exactly that arm — and a fired session has
@@ -530,7 +553,7 @@ func parseInitialEvents(obj map[string]json.RawMessage, allowSystemMessage bool)
 			} `json:"content"`
 		}
 		// Best-effort: the count only matters for a well-formed block array;
-		// a string or malformed content is NormalizeInbound's to judge.
+		// a string or malformed content is NormalizeInitialEvents' to judge.
 		_ = json.Unmarshal(item, &probe)
 		probe.Type = head.Type
 		switch probe.Type {
@@ -544,14 +567,16 @@ func parseInitialEvents(obj map[string]json.RawMessage, allowSystemMessage bool)
 			defineOutcomes++
 		case string(domain.EventSystemMessage):
 			if !allowSystemMessage {
-				return nil, errInvalid("initial_events[%d]: %s", i, initialEventsAllowedNote)
+				return nil, errInitialEventType(i, probe.Type)
 			}
 		default:
-			note := initialEventsAllowedNote
 			if allowSystemMessage {
-				note = deploymentInitialEventsNote
+				return nil, errInvalid("initial_events[%d]: %s", i, deploymentInitialEventsNote)
 			}
-			return nil, errInvalid("initial_events[%d]: %s", i, note)
+			if probe.Type != "" {
+				return nil, errInitialEventType(i, probe.Type)
+			}
+			return nil, errInvalid("initial_events[%d]: %s", i, initialEventsAllowedNote)
 		}
 	}
 	if defineOutcomes > 1 {
@@ -561,6 +586,14 @@ func parseInitialEvents(obj map[string]json.RawMessage, allowSystemMessage bool)
 		return nil, errInvalid("initial_events supports at most %d file-sourced document blocks (got %d)", initialFileDocBlocksMax, fileDocs)
 	}
 	return items, nil
+}
+
+// errInitialEventType refuses a session's initial event of a type the list
+// does not take, in the reference's words (2026-09-02 batch2
+// `sessI.create.initial_events.interrupt-rejected`, #540). A missing type, and
+// a deployment's list, are never recorded and keep ours.
+func errInitialEventType(i int, typ string) error {
+	return errInvalid("Failed to parse request: initial_events[%d].type: %q is not a valid value", i, typ)
 }
 
 func (s *server) createSession(r *http.Request) (any, error) {
@@ -583,9 +616,11 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	agentRaw, ok := obj["agent"]
 	if !ok || isNull(agentRaw) {
-		return nil, errInvalid("agent is required")
+		// 2026-09-05 batch8 `item1.create.session-foreign-env.no-agent-field`
+		// (#540); an explicit null is never recorded and answers alike.
+		return nil, errInvalid("agent: value is required")
 	}
-	resourceInputs, err := parseResourceInputs(obj)
+	resourceInputs, err := parseSessionResourceInputs(obj)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
@@ -638,13 +673,75 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		vaultIDs: vaultIDs, rawInitial: rawInitial,
 	})
 	if err != nil {
-		return nil, err
+		return nil, requestWording(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	created.recordCreated(ctx)
 	return renderSession(created.row)
+}
+
+// createRefusal is a refusal createSessionInTx's three callers share but the
+// reference words apart (#540). It carries this platform's words — what a
+// dream's start, never recorded, keeps — classified where a deployment's run
+// settles on it; requestWording gives a session create the reference's HTTP
+// sentence, and runWording a deployment's run its run sentence, where each was
+// recorded.
+type createRefusal struct {
+	what refused
+	id   string
+	err  error
+}
+
+func (e *createRefusal) Error() string { return e.err.Error() }
+func (e *createRefusal) Unwrap() error { return e.err }
+
+// refused is what a createRefusal refuses, by the id it carries.
+type refused int
+
+const (
+	refusedEnvironmentGone refused = iota
+	refusedAgentArchived
+	refusedStoreGone
+	refusedStoreArchived
+	refusedFileGone
+)
+
+// errSessionEnvironmentNotFound is createSessionInTx's refusal of an
+// environment it cannot find. It is unclassified, so a deployment's fire rolls
+// back rather than settling a run (§5.2's last row); the reference's run
+// sentence for a deleted environment is unreachable here while the deployments
+// foreign key refuses that delete (docs/DIVERGENCES.md).
+func errSessionEnvironmentNotFound(envID string) error {
+	return &createRefusal{refusedEnvironmentGone, envID, errNotFound("environment %s not found", envID)}
+}
+
+// requestWording is POST /v1/sessions' answer to a createRefusal: the
+// reference's recorded sentence (2026-09-05 batch8
+// `item1.create.session-absent-env` and `.session-foreign-env`; 2026-09-02 batch2
+// `session.create.archived-agent`, `session.create.unknown-store`,
+// `session.create.archived-store`, `sessF2.create.deleted-file-mount`). The
+// file sentence's list is always of one id, since files are checked one at a
+// time. Any other error passes through.
+func requestWording(err error) error {
+	var r *createRefusal
+	if !errors.As(err, &r) {
+		return err
+	}
+	switch r.what {
+	case refusedEnvironmentGone:
+		return errEnvironmentNotFound(r.id)
+	case refusedAgentArchived:
+		return errInvalid("agent %s is archived and cannot be used to create a session", r.id)
+	case refusedStoreGone:
+		return errNotFound("Memory store `%s` not found.", r.id)
+	case refusedStoreArchived:
+		return errInvalid("Memory store %s is archived.", r.id)
+	case refusedFileGone:
+		return errNotFound("One or more files not found. Check that each `file_id` exists and is accessible: %s", r.id)
+	}
+	return err
 }
 
 // createSessionIn is what a session create needs once its caller's
@@ -725,7 +822,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		`SELECT archived_at, kind, config FROM environments WHERE id = $1`+hidden+` FOR SHARE`, in.envID).
 		Scan(&envArchivedAt, &envKind, &envConfig)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return createdSession{}, errNotFound("environment %s not found", in.envID)
+		return createdSession{}, errSessionEnvironmentNotFound(in.envID)
 	}
 	if err != nil {
 		return createdSession{}, err
@@ -771,7 +868,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	// outcome checks run after the insert, against the fresh row.
 	var initialEvents []events.NewEvent
 	if len(in.rawInitial) > 0 {
-		initialEvents, err = events.NormalizeInbound(envKind, events.ManagementCredential, in.rawInitial)
+		initialEvents, err = events.NormalizeInitialEvents(envKind, events.ManagementCredential, in.rawInitial)
 		if err != nil {
 			return createdSession{}, errInvalid("initial_events: %s", err)
 		}
@@ -809,7 +906,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
 		if strings.Contains(pgErr.ConstraintName, "environment") {
-			return createdSession{}, errNotFound("environment %s not found", in.envID)
+			return createdSession{}, errSessionEnvironmentNotFound(in.envID)
 		}
 		return createdSession{}, errNotFound("agent %s version %d not found", agent.ID, agent.Version)
 	}
@@ -967,16 +1064,20 @@ func numberEqual(a, b json.Number) bool {
 	return xok && yok && x.Cmp(y) == 0
 }
 
+// getSession answers a missing session — and, as checkID does everywhere, a
+// malformed id — in the reference's words for this route (2026-09-05 batch3
+// `rec84.session.get.after-delete`, #540). The other session routes keep ours:
+// only this one is recorded.
 func (s *server) getSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
-	if err := checkID(id, "session"); err != nil {
-		return nil, err
+	if !domain.ID(id).Valid() {
+		return nil, errNotFound("Session not found: %s", id)
 	}
 	row, err := scanSession(s.pool.QueryRow(ctx,
 		`SELECT `+sessionColumns+` FROM sessions WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("session %s not found", id)
+		return nil, errNotFound("Session not found: %s", id)
 	}
 	if err != nil {
 		return nil, err
@@ -1281,10 +1382,12 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 		args = append(args, statuses)
 		query += fmt.Sprintf(` AND %s = ANY($%d)`, sessionStatusExpr, len(args))
 	}
-	for key, op := range map[string]string{
-		"created_at[gt]": ">", "created_at[gte]": ">=",
-		"created_at[lt]": "<", "created_at[lte]": "<=",
+	// A fixed order, so two malformed bounds name the same one every time.
+	for _, b := range [...]struct{ key, op string }{
+		{"created_at[gt]", ">"}, {"created_at[gte]", ">="},
+		{"created_at[lt]", "<"}, {"created_at[lte]", "<="},
 	} {
+		key, op := b.key, b.op
 		ts, err := parseTimeParam(q, key)
 		if err != nil {
 			return nil, err
@@ -1359,20 +1462,22 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 }
 
 // requireNotRunning locks the session row and refuses the mutation while the
-// session is running — the reference documents that a running session cannot be
-// archived or deleted (an interrupt must settle it idle first); the reject
-// status is the one recorded from the reference and the message is ours
-// (docs/DIVERGENCES.md, whose session threads entry covers rescheduling). The
-// row lock holds the status still until the caller's tx commits, so an approval
-// flipping the session to running cannot slip between the check and the
-// mutation.
+// session is running, with what refusal returns — the reference documents that
+// a running session cannot be archived or deleted (an interrupt must settle it
+// idle first); the reject status and each route's sentence are the ones
+// recorded from the reference (2026-09-02 batch2 `sessT.archive.while-running`
+// and `sessT.delete.while-running`, #540; docs/DIVERGENCES.md, whose session
+// threads entry covers rescheduling). The archive sentence says only pending or
+// idle sessions may be archived, but only running is refused here. The row lock
+// holds the status still until the caller's tx commits, so an approval flipping
+// the session to running cannot slip between the check and the mutation.
 //
 // It is also the first half of a lock order the mutation depends on: the session
 // row before anything that cascades from it. internal/gatetoken.Ensure takes the
 // same order on purpose, and taking the two the other way round here would
 // reopen the deadlock #313 closed. The work API's claim takes a session's item
 // and never its row, so it has no order to keep (claimWork, #643).
-func requireNotRunning(ctx context.Context, tx pgx.Tx, id, verb string) error {
+func requireNotRunning(ctx context.Context, tx pgx.Tx, id string, refusal func() error) error {
 	var status string
 	err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, id).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1382,7 +1487,7 @@ func requireNotRunning(ctx context.Context, tx pgx.Tx, id, verb string) error {
 		return err
 	}
 	if status == string(domain.SessionRunning) {
-		return errInvalid("session %s is running; send a user.interrupt event before %s", id, verb)
+		return refusal()
 	}
 	return nil
 }
@@ -1401,7 +1506,10 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
 	}
-	if err := requireNotRunning(ctx, tx, id, "archiving"); err != nil {
+	if err := requireNotRunning(ctx, tx, id, func() error {
+		return errInvalid("Session %s cannot be archived while its status is %q. Only pending or idle sessions may be archived.",
+			id, domain.SessionRunning)
+	}); err != nil {
 		return nil, err
 	}
 	row, moves, err := s.archiveSessionInTx(ctx, tx, id)
@@ -1558,7 +1666,9 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
 	}
-	if err := requireNotRunning(ctx, tx, id, "deleting"); err != nil {
+	if err := requireNotRunning(ctx, tx, id, func() error {
+		return errInvalid("Cannot delete session while it is running. Send an interrupt event or wait for the session to complete.")
+	}); err != nil {
 		return nil, err
 	}
 	// The tombstone rides the deleting transaction, written while the row can

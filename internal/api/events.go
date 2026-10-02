@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -149,6 +150,14 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// A confirmation must name a tool use still awaiting one; like a tool
 	// result, a bad reference on the append-only log would wedge the resume.
 	if err := events.ValidateToolConfirmations(ctx, tx, domain.ID(id), newEvents); err != nil {
+		// The reference's sentence covers two of our reasons alike (#540);
+		// the operator's log keeps which one fired.
+		var np *events.NoPendingConfirmationError
+		if errors.As(err, &np) {
+			slog.InfoContext(ctx, "session events send refused: no pending tool permission request",
+				"request_id", requestIDFrom(ctx), "session_id", id,
+				"tool_use_id", np.ToolUseID, "reason", np.Reason)
+		}
 		return nil, errInvalid("%s", err)
 	}
 
@@ -1297,7 +1306,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 // postDreamStageInTx appends one stage's user.message on the primary thread of
 // an idle session and enqueues the model turn it starts, inside the caller's
 // transaction. It is the narrow recipe createSessionInTx runs for a create's
-// initial events (sessions.go: NormalizeInbound → TransitionThread →
+// initial events (sessions.go: NormalizeInitialEvents → TransitionThread →
 // AppendInTx with an Enqueue in Then), lifted for the dream runner's arm 9
 // (plan 41 §4.1) — deliberately not a factoring of sendSessionEvents, which
 // the runner cannot call at all: requireNotDreamOwned refuses every send to
@@ -1490,15 +1499,19 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		}
 	}
 	query.Types = types
-	for key, dst := range map[string]**time.Time{
-		"created_at[gt]": &query.CreatedGT, "created_at[gte]": &query.CreatedGTE,
-		"created_at[lt]": &query.CreatedLT, "created_at[lte]": &query.CreatedLTE,
+	// A fixed order, so two malformed bounds name the same one every time.
+	for _, b := range [...]struct {
+		key string
+		dst **time.Time
+	}{
+		{"created_at[gt]", &query.CreatedGT}, {"created_at[gte]", &query.CreatedGTE},
+		{"created_at[lt]", &query.CreatedLT}, {"created_at[lte]", &query.CreatedLTE},
 	} {
-		t, err := parseTimeParam(q, key)
+		t, err := parseTimeParam(q, b.key)
 		if err != nil {
 			return nil, err
 		}
-		*dst = t
+		*b.dst = t
 	}
 
 	view, err := resolve(ctx)

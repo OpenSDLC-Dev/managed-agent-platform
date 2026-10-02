@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -89,5 +90,34 @@ func TestModelInferenceGeoNullClearsPreviousValue(t *testing.T) {
 	}
 	if geo != "" {
 		t.Fatalf("null retained geo = %q", geo)
+	}
+}
+
+// The agent routes answer a bad effort level string and a bad inference_geo
+// string in the reference's recorded words (internal/api parseAgentModel,
+// #540), and find them by these errors. Every other malformed value — the
+// {type: level} form's bad level, a null, a non-string — stays a plain error,
+// the reference's answer to it being unrecorded.
+func TestModelRefusalsTheAgentRoutesRecognize(t *testing.T) {
+	decode := func(model string) error {
+		var m Model
+		return json.Unmarshal([]byte(model), &m)
+	}
+	var effort *EffortLevelError
+	if err := decode(`{"id":"custom","effort":"bogus"}`); !errors.As(err, &effort) || effort.Level != "bogus" {
+		t.Errorf("bad effort string: error %v, want an *EffortLevelError carrying \"bogus\"", err)
+	}
+	for _, raw := range []string{`{"type":"bogus"}`, `null`, `1`, `{}`} {
+		if err := decode(`{"id":"custom","effort":` + raw + `}`); err == nil || errors.As(err, &effort) {
+			t.Errorf("effort %s: error %v, want a plain refusal", raw, err)
+		}
+	}
+	for _, raw := range []string{`"bogus"`, `""`} {
+		if err := decode(`{"id":"custom","inference_geo":` + raw + `}`); !errors.Is(err, ErrInferenceGeoValue) {
+			t.Errorf("inference_geo %s: error %v, want ErrInferenceGeoValue", raw, err)
+		}
+	}
+	if err := decode(`{"id":"custom","inference_geo":1}`); err == nil || errors.Is(err, ErrInferenceGeoValue) {
+		t.Errorf("inference_geo 1: error %v, want a plain refusal", err)
 	}
 }

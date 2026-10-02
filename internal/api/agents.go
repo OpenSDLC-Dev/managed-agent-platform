@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -50,16 +51,28 @@ func renderAgent(id, name string, version int64, spec agentSpec, metadata map[st
 	}
 }
 
+// agentUpdatePath opens the path of a field the update route refuses. The
+// reference names a refused field by its path, bare on create and under
+// "agent." on update — recorded on update for its parse layer
+// ("Failed to parse request: agent.model.effort: …", 2026-09-12 batch1
+// `rec91.model.update.effort-bogus`; "… agent.tools[0].configs[0]…",
+// `rec91.web.config.fetch-empty`) and its schema layer ("agent.tools.0.…",
+// `rec91.web.config.fetch-65`). Its semantic layer ("Agent has invalid
+// configuration: …", "invalid metadata: …", "`inference_geo`: …") names no path
+// on either route (#540).
+const agentUpdatePath = "agent."
+
 // parseAgentSpecFields reads the spec-shaped fields shared by create and
 // update bodies into spec, tracking which keys were present. `multiagent` is
 // not read here: its resolution needs the write transaction (resolveRoster),
-// so create/update handle it beside their INSERT/UPDATE.
-func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error {
+// so create/update handle it beside their INSERT/UPDATE. prefix opens every
+// field path a refusal names: "" on create, agentUpdatePath on update.
+func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec, prefix string) error {
 	if raw, ok := obj["model"]; ok {
 		if isNull(raw) {
 			return errInvalid("model cannot be cleared")
 		}
-		m, err := parseModel(raw)
+		m, err := parseAgentModel(raw, prefix)
 		if err != nil {
 			return err
 		}
@@ -72,23 +85,35 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec) error
 		}
 		spec.Model = m
 	}
-	limits := map[string]int{"system": maxAgentSystemRunes, "description": maxAgentDescriptionRunes}
-	for key, dst := range map[string]*string{"system": &spec.System, "description": &spec.Description} {
-		val, set, null, err := stringField(obj, key)
+	// A fixed order, so a body with both fields over their bounds names the
+	// same one on every request: the SDK params' own field order, description
+	// before system on create and update alike (checked against
+	// anthropic-sdk-go v1.70.1 — betaagent.go BetaAgentNewParams.Description
+	// and BetaAgentUpdateParams.Description). Which one the reference names
+	// first is unrecorded.
+	for _, f := range []struct {
+		key   string
+		dst   *string
+		limit int
+	}{
+		{"description", &spec.Description, maxAgentDescriptionRunes},
+		{"system", &spec.System, maxAgentSystemRunes},
+	} {
+		val, set, null, err := stringField(obj, f.key)
 		if err != nil {
 			return err
 		}
 		if set {
 			if null {
 				val = ""
-			} else if err := capRunes(key, val, limits[key]); err != nil {
+			} else if err := capRunes(prefix+f.key, val, f.limit); err != nil {
 				return err
 			}
-			*dst = val
+			*f.dst = val
 		}
 	}
 	if raw, ok := obj["tools"]; ok {
-		items, err := parseTools(raw)
+		items, err := parseAgentTools(raw, prefix)
 		if err != nil {
 			return err
 		}
@@ -186,7 +211,7 @@ func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMe
 		return false, errInvalid("model is required")
 	}
 	var spec agentSpec
-	if err := parseAgentSpecFields(obj, &spec); err != nil {
+	if err := parseAgentSpecFields(obj, &spec, ""); err != nil {
 		return false, err
 	}
 	spec.Normalize()
@@ -197,14 +222,14 @@ func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMe
 	if err != nil {
 		return false, err
 	}
-	if err := validateMetadataCaps(metadata); err != nil {
+	if err := validateAgentMetadataCaps(metadata); err != nil {
 		return false, err
 	}
 
 	// The roster resolves inside the transaction (FOR SHARE on its members),
 	// with `self` pinned to the version this create produces.
 	if raw, ok := obj["multiagent"]; ok && !isNull(raw) {
-		if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, 1); err != nil {
+		if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, 1, ""); err != nil {
 			return false, err
 		}
 	}
@@ -367,10 +392,18 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if archivedAt != nil {
-		return nil, errInvalid("agent %s is archived", id)
+		// The reference's sentence (2026-09-02 batch2 `agent.update.archived`,
+		// #540); the id it drops is the request's own path.
+		return nil, errInvalid("Cannot modify archived agent")
 	}
 	if expected != nil && *expected != current {
-		return nil, errConflict("agent version mismatch: expected %d, currently %d", *expected, current)
+		// The wire carries the reference's recorded sentence, which names
+		// neither version (#540); the operator's log keeps both, so a stale
+		// caller one revision behind is still told apart from one twenty behind.
+		slog.InfoContext(ctx, "agent update refused: stale version",
+			"request_id", requestIDFrom(ctx), "agent_id", id,
+			"expected_version", *expected, "current_version", current)
+		return nil, errConflict("Concurrent modification detected. Please fetch the latest version and retry.")
 	}
 
 	spec, metadata, err := decodeSpecAndMetadata(specJSON, metaJSON)
@@ -410,12 +443,12 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		if null || newName == "" {
 			return nil, errInvalid("name cannot be cleared")
 		}
-		if err := capRunes("name", newName, maxAgentNameRunes); err != nil {
+		if err := capRunes(agentUpdatePath+"name", newName, maxAgentNameRunes); err != nil {
 			return nil, err
 		}
 		name = newName
 	}
-	if err := parseAgentSpecFields(obj, &spec); err != nil {
+	if err := parseAgentSpecFields(obj, &spec, agentUpdatePath); err != nil {
 		return nil, err
 	}
 	spec.Normalize()
@@ -430,7 +463,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := validateMetadataCaps(metadata); err != nil {
+		if err := validateAgentMetadataCaps(metadata); err != nil {
 			return nil, err
 		}
 	}
@@ -444,7 +477,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	if raw, ok := obj["multiagent"]; ok {
 		if isNull(raw) {
 			spec.Multiagent = nil
-		} else if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, newVersion); err != nil {
+		} else if spec.Multiagent, err = resolveRoster(ctx, tx, raw, id, newVersion, agentUpdatePath); err != nil {
 			return nil, err
 		}
 	} else if spec.Multiagent, err = repinSelf(spec.Multiagent, id, current, newVersion); err != nil {

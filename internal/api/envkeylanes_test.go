@@ -17,24 +17,30 @@ import (
 )
 
 // envKeyRoute is what a cloud environment's key gets on one route an
-// environment key reaches. A route outside the work API answers the one
-// refusal every such lane gives (cloudKeyRefusal); the work API keeps the
-// answers recorded on the reference's cloud environments (workkind_test.go).
+// environment key reaches. A route outside the work API answers its lane's
+// refusal (cloudKeyRefusal, or the file download's recorded "Not found"); the
+// work API keeps the answers recorded on the reference's cloud environments
+// (workkind_test.go).
 type envKeyRoute struct {
 	query  string // appended to the path
 	body   any
 	status int
 	// errType is the error envelope's type; "" for a success.
 	errType string
-	// refused marks the lane refusal, whose message is asserted too.
+	// refused marks the lane refusal, whose message is asserted too:
+	// cloudKeyRefusal, or refusal where that is set.
 	refused bool
+	refusal string
 	// selfHostedServed marks a route a self_hosted key is served on (200)
 	// in this fixture, so the test also shows that key still works there.
 	selfHostedServed bool
 }
 
 // cloudKeyRefusal is the message of the one refusal a key on a non-self_hosted
-// environment gets on the session lane and the file content download.
+// environment gets on the session lane. The file content download refuses it
+// with the reference's bare "Not found" instead (2026-09-03 batch2 idx 18
+// `envkey.files.content-original`, idx 19 `envkey.files.content-session-copy`;
+// #540).
 func cloudKeyRefusal(envID string) string {
 	return fmt.Sprintf("environment %s is not a self_hosted environment; only a self_hosted environment's key reaches its sessions and the files they mount", envID)
 }
@@ -112,7 +118,8 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 		"POST /v1/sessions/{id}/events": {body: map[string]any{"events": []any{userMessage("from a cloud key")}},
 			status: http.StatusNotFound, errType: "not_found_error", refused: true, selfHostedServed: true},
 		"GET /v1/sessions/{id}/events/stream": refused,
-		"GET /v1/files/{id}/content":          refused,
+		"GET /v1/files/{id}/content": {status: http.StatusNotFound, errType: "not_found_error",
+			refused: true, refusal: "Not found", selfHostedServed: true},
 		// The skill reads: served, as recorded.
 		"GET /v1/skills/{id}":                            served,
 		"GET /v1/skills/{id}/versions":                   served,
@@ -174,8 +181,12 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 				wantErr(t, cloudStatus, cloudBody, route.status, route.errType)
 			}
 			if route.refused {
-				if msg := envelopeMessage(cloudBody); msg != cloudKeyRefusal(cloud.env) {
-					t.Errorf("cloud key: message %q; want the lane refusal %q", msg, cloudKeyRefusal(cloud.env))
+				want := cloudKeyRefusal(cloud.env)
+				if route.refusal != "" {
+					want = route.refusal
+				}
+				if msg := envelopeMessage(cloudBody); msg != want {
+					t.Errorf("cloud key: message %q; want the lane refusal %q", msg, want)
 				}
 			}
 			// The self_hosted key still works on every lane the refusal

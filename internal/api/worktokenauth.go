@@ -114,6 +114,7 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, errAuth("invalid sessions token"))
 			return
 		}
+		markVerified(r.Context())
 		refused := errAuth("the sessions token does not authorize this route")
 		p := r.URL.EscapedPath()
 		switch {

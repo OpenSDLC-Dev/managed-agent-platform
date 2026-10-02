@@ -48,7 +48,7 @@ func TestResolveRosterDeadlockIs409(t *testing.T) {
 	for i := range ids {
 		go func(i int) {
 			roster := json.RawMessage(`{"type":"coordinator","agents":["` + ids[1-i] + `"]}`)
-			_, err := resolveRoster(ctx, txs[i], roster, ids[i], 2)
+			_, err := resolveRoster(ctx, txs[i], roster, ids[i], 2, "")
 			errs <- err
 		}(i)
 	}

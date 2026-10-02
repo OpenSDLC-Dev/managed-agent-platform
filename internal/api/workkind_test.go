@@ -54,7 +54,9 @@ func TestACloudEnvironmentKeyCannotTakeItsWork(t *testing.T) {
 				res, raw := s.pollQuery(t, envID, query, bearer)
 				var body map[string]any
 				_ = json.Unmarshal([]byte(raw), &body)
-				wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
+				// In the reference's words (#540): batch2 idx 34 and 38, batch8 idx 24.
+				wantErrMsg(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error",
+					"Only BYOC and bridge environments support work polling. Environment "+envID+" is anthropic_cloud.")
 				wantDetails(t, body, nil)
 			}
 			// Refused before anything is recorded: the polls carried a worker id,
@@ -67,8 +69,12 @@ func TestACloudEnvironmentKeyCannotTakeItsWork(t *testing.T) {
 				t.Errorf("worker_polls holds %d rows for the cloud environment after its refused polls; want none", polls)
 			}
 
+			// batch2 idx 37 `rec83.active-key.work.list.beta`, verbatim (#540).
+			// The archived environment's listing answered "Environment … is
+			// archived" there (idx 33): an archival check this route does not make.
 			status, body := readJSON(t, s.doRaw(http.MethodGet, base, nil, bearer))
-			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error",
+				"Environment `"+envID+"` not found, or does not support work listing. The work API is only available for self-hosted environments.")
 			wantDetails(t, body, nil)
 
 			status, body = readJSON(t, s.doRaw(http.MethodGet, base+"/stats", nil, bearer))

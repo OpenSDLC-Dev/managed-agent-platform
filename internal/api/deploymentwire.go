@@ -59,22 +59,28 @@ func principalPtr(ctx context.Context) *string {
 // at every fire — twice over, because there are two ways a stored list can be
 // unfirable.
 //
-// The first is the list itself. A fire runs events.NormalizeInbound, the same
-// normalizer a posted batch gets, so a list that cannot normalize records a
+// The first is the list itself. A fire runs events.NormalizeInitialEvents — the
+// normalizer a posted batch gets, refusing in this platform's words rather than
+// the send route's recorded ones — so a list that cannot normalize records a
 // failed run every night forever. That normalizer is called here rather than
 // reimplemented: its rules stay in one place, and its adjacency rule — a
 // system.message last, and immediately after a user.message — makes this
 // platform narrower than the union the reference publishes, which is plan 37
 // §8.1 entry 23. The environment kind and credential it takes are not threaded
 // through: user.tool_result is the only type either gates, and
-// parseInitialEvents has already refused every type but the three a
-// deployment admits.
+// parseInitialEvents has already refused every type but the three a deployment
+// admits.
 //
 // The second is a file rubric with no object storage to snapshot into. That
 // one the normalizer cannot see, so it is checked here with the message the
 // event path already uses.
 func (s *server) validateDeploymentInitialEvents(initial []json.RawMessage) error {
-	if _, err := events.NormalizeInbound("", events.ManagementCredential, initial); err != nil {
+	if len(initial) == 0 {
+		// validateDeploymentBounds' floor, which create and update both run on
+		// the list they would store, refuses it in the one sentence they share.
+		return nil
+	}
+	if _, err := events.NormalizeInitialEvents("", events.ManagementCredential, initial); err != nil {
 		return errInvalid("initial_events: %s", err)
 	}
 	if s.blobs != nil {
@@ -88,7 +94,7 @@ func (s *server) validateDeploymentInitialEvents(initial []json.RawMessage) erro
 			} `json:"rubric"`
 		}
 		if err := json.Unmarshal(raw, &ev); err != nil {
-			continue // NormalizeInbound's to judge, at the fire.
+			continue // NormalizeInitialEvents' to judge, at the fire.
 		}
 		if ev.Type == string(domain.EventUserDefineOutcome) && ev.Rubric.Type == "file" {
 			return errInvalid("file rubrics require the files surface, which this deployment does not configure")

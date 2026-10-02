@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -143,14 +144,15 @@ func consoleWorkspace(r *http.Request) error {
 		return err
 	}
 	if ws := r.PathValue("workspace"); ws != reservedWorkspace {
-		return errWorkspaceNotFound(ws)
+		return errWorkspaceNotFound
 	}
 	return nil
 }
 
-func errWorkspaceNotFound(ws string) error {
-	return withDetails(errNotFound("workspace %s not found", ws), userFacingDetails)
-}
+// errWorkspaceNotFound is the reference's recorded 404 for a workspace, words
+// included (2026-09-05 batch8 `item6.after-archive.workspaceB.get` and
+// `.api_keys`; #540): it does not name the workspace.
+var errWorkspaceNotFound = withDetails(errNotFound("Not found"), userFacingDetails)
 
 // getWorkspace answers GET …/workspaces/{workspace} with the 404 the reference
 // was recorded answering an archived workspace with (2026-09-05 batch8
@@ -164,7 +166,7 @@ func (s *server) getWorkspace(r *http.Request) (any, error) {
 	if err := consoleOrganization(r); err != nil {
 		return nil, err
 	}
-	return nil, errWorkspaceNotFound(r.PathValue("workspace"))
+	return nil, errWorkspaceNotFound
 }
 
 // createAPIKey issues a management credential and returns it once.
@@ -176,10 +178,12 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnknownKeys(obj, "name", "expires_at", "principal_id"); err != nil {
-		return nil, err
+	// A pydantic surface on the reference, whose unknown-key sentence no
+	// recording holds, so it is not rejectUnknownKeys' strict-decoder one.
+	if key, ok := unknownkey.Least(obj, "name", "expires_at", "principal_id"); ok {
+		return nil, errInvalid("unknown field %q", key)
 	}
-	name, err := apiKeyName(obj, true)
+	name, err := apiKeyCreateName(obj)
 	if err != nil {
 		return nil, err
 	}
@@ -228,8 +232,8 @@ func apiKeyPatch(raw json.RawMessage) (status, name *string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := rejectUnknownKeys(obj, "status", "name"); err != nil {
-		return nil, nil, err
+	if key, ok := unknownkey.Least(obj, "status", "name"); ok {
+		return nil, nil, errInvalid("unknown field %q", key)
 	}
 	if status, err = apiKeyStatus(obj); err != nil {
 		return nil, nil, err
@@ -271,7 +275,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// id binds into a query, and answering the reference's 400. It runs before
 	// the body is read, as the reference refuses the id whatever the body says.
 	if !consoleIDShape(keyID, domain.PrefixAPIKey) {
-		return nil, withDetails(errInvalid("%q is not an api key id", keyID), userFacingDetails)
+		return nil, withDetails(errInvalid("API Key id must have `apikey_` prefix."), userFacingDetails)
 	}
 	// The body is read and judged before any row is locked, so neither a slow
 	// upload nor an invalid body holds the lock. Its refusal is reported only
@@ -283,7 +287,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	notFound := withDetails(errNotFound("api key %s not found", keyID), userFacingDetails)
+	notFound := withDetails(errNotFound("API Key `%s` not found.", keyID), userFacingDetails)
 	ctx := r.Context()
 	status, name, bodyErr := apiKeyPatch(raw)
 	if bodyErr != nil {
@@ -361,8 +365,12 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// logged — see the warning it emits. That is the environment variable claiming
 	// a value, not the console undoing an archive, and it needs the deployment
 	// access that could equally configure a fresh key.
+	//
+	// Both refusals are worded as the #389 probe measured them (docs/HISTORY.md),
+	// since #540 — they used to name the key and say "archived" for the
+	// reference's "deleted", on the argument that an operator could act on it.
 	if current == KeyStatusArchived {
-		return nil, errInvalid("api key %s is archived, and an archived key cannot be updated", keyID)
+		return nil, errInvalid("Archived API keys cannot be updated.")
 	}
 	// A lapsed key admits exactly one operation: archiving it. The reference states
 	// the rule in the refusal itself — "Expired API keys can only be deleted, not
@@ -378,7 +386,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// the moment it was read. The row is what expired; which state it sits in while
 	// that happened does not change the answer here.
 	if lapsed && !(name == nil && status != nil && *status == KeyStatusArchived) {
-		return nil, errInvalid("api key %s has expired; an expired key can only be archived, not renamed or re-activated", keyID)
+		return nil, errInvalid("Expired API keys can only be deleted, not renamed or reactivated.")
 	}
 	row, err := updateManagementKey(ctx, tx, keyID, status, name)
 	if err != nil {
@@ -409,6 +417,29 @@ func apiKeyName(obj map[string]json.RawMessage, required bool) (*string, error) 
 	return name, nil
 }
 
+// apiKeyCreateName is apiKeyName for a create, refusing a missing, non-string
+// or empty name in pydantic's words, as the reference was recorded refusing
+// each (2026-09-05 batch5 `rec86.create.name.missing`, `.wrong-type`,
+// `.empty`; #540). A null name keeps ours, and so does a rename's refusal:
+// neither was recorded.
+func apiKeyCreateName(obj map[string]json.RawMessage) (*string, error) {
+	if err := fieldRequired(obj, "name", "name"); err != nil {
+		return nil, err
+	}
+	raw := obj["name"]
+	if isNull(raw) {
+		return apiKeyName(obj, true)
+	}
+	var name string
+	if json.Unmarshal(raw, &name) != nil {
+		return nil, errInvalid("name: Input should be a valid string")
+	}
+	if name == "" {
+		return nil, errInvalid("name: String should have at least 1 character")
+	}
+	return apiKeyName(obj, true)
+}
+
 // apiKeyPrincipal judges create's optional `principal_id`, the reference's way
 // to link a key to an identity, as far as the recordings reach. Its shape is
 // recorded: a `user_` or `svac_` id, anything else a 400 with
@@ -428,7 +459,7 @@ func apiKeyPrincipal(obj map[string]json.RawMessage) error {
 		return errInvalid("principal_id must be a string")
 	}
 	if !consoleIDShape(id, "user") && !consoleIDShape(id, "svac") {
-		return withDetails(errInvalid("%q is not a user or service account id", id), userFacingDetails)
+		return withDetails(errInvalid("principal_id must be a user_... (user) or svac_... (service account) ID."), userFacingDetails)
 	}
 	return withDetails(errNotFound("principal %s not found", id), userFacingDetails)
 }

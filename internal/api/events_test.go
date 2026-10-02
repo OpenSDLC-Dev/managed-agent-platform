@@ -269,21 +269,8 @@ func TestSendValidationSweep(t *testing.T) {
 	}{
 		{"missing events", map[string]any{}, "events"},
 		{"events not array", map[string]any{"events": "nope"}, "array"},
-		{"empty events", map[string]any{"events": []any{}}, "at least one"},
 		{"unknown top-level key", map[string]any{"events": []any{userMessage("x")}, "stream": true}, "stream"},
 		{"event missing type", map[string]any{"events": []any{map[string]any{"content": txt}}}, "type is required"},
-		{"unknown type", map[string]any{"events": []any{map[string]any{"type": "user.bogus"}}}, "unknown event type"},
-		{"platform type", map[string]any{"events": []any{map[string]any{"type": "agent.message"}}}, "emitted by the platform"},
-		// The two MCP shapes by name. Both were already refused — platformEmitted
-		// has listed them since the types existed — so these rows pin standing
-		// behavior rather than anything this change introduced. They are named
-		// now because the gate acts on one of them: a client able to post an
-		// agent.mcp_tool_use carrying evaluated_permission "ask" could park its
-		// own session on a call nothing runs, and one able to post an
-		// agent.mcp_tool_result could answer a call only the platform may answer.
-		{"platform MCP tool use", map[string]any{"events": []any{map[string]any{"type": "agent.mcp_tool_use"}}}, "emitted by the platform"},
-		{"platform MCP tool result", map[string]any{"events": []any{map[string]any{"type": "agent.mcp_tool_result"}}}, "emitted by the platform"},
-		{"stream-only type", map[string]any{"events": []any{map[string]any{"type": "event_delta"}}}, "stream-only"},
 		{"define_outcome empty rubric", map[string]any{"events": []any{map[string]any{"type": "user.define_outcome",
 			"description": "d", "rubric": map[string]any{}}}}, "rubric type is required"},
 		{"define_outcome no rubric", map[string]any{"events": []any{map[string]any{"type": "user.define_outcome",
@@ -315,9 +302,6 @@ func TestSendValidationSweep(t *testing.T) {
 			"type": "user.tool_confirmation", "tool_use_id": "sevt_1", "result": "maybe"}}}, `"allow" or "deny"`},
 		{"confirmation without tool_use_id", map[string]any{"events": []any{map[string]any{
 			"type": "user.tool_confirmation", "result": "allow"}}}, "tool_use_id is required"},
-		{"deny_message with allow", map[string]any{"events": []any{map[string]any{
-			"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "sevt_1",
-			"deny_message": "no"}}}, `only allowed when result is "deny"`},
 		{"custom result without id", map[string]any{"events": []any{map[string]any{
 			"type": "user.custom_tool_result"}}}, "custom_tool_use_id is required"},
 		{"is_error not bool", map[string]any{"events": []any{map[string]any{
@@ -350,6 +334,56 @@ func TestSendValidationSweep(t *testing.T) {
 		}
 	}
 
+	// The refusals the reference was recorded wording, in its words whole
+	// (#540).
+	typeRefusal := func(typ string) string {
+		return fmt.Sprintf("Failed to parse request: events[0].type: %q is not a valid value", typ)
+	}
+	recorded := []struct {
+		name string
+		body any
+		want string
+	}{
+		// 2026-09-02 batch2 `sessT.send.empty-events`.
+		{"empty events", map[string]any{"events": []any{}}, "events: must contain at least 1 item"},
+		// 2026-09-02 batch2 `sessT.send.unknown-type` posted the agent.message;
+		// an unknown or stream-only type shares its sentence.
+		{"platform type", map[string]any{"events": []any{map[string]any{"type": "agent.message",
+			"content": txt}}}, typeRefusal("agent.message")},
+		{"unknown type", map[string]any{"events": []any{map[string]any{"type": "user.bogus"}}}, typeRefusal("user.bogus")},
+		// The two MCP shapes by name. Both were already refused — the
+		// platform-emitted list named them since the types existed — so these
+		// rows pin standing behavior rather than anything this change
+		// introduced. They are named because the gate acts on one of them: a
+		// client able to post an agent.mcp_tool_use carrying
+		// evaluated_permission "ask" could park its own session on a call
+		// nothing runs, and one able to post an agent.mcp_tool_result could
+		// answer a call only the platform may answer.
+		{"platform MCP tool use", map[string]any{"events": []any{map[string]any{"type": "agent.mcp_tool_use"}}}, typeRefusal("agent.mcp_tool_use")},
+		{"platform MCP tool result", map[string]any{"events": []any{map[string]any{"type": "agent.mcp_tool_result"}}}, typeRefusal("agent.mcp_tool_result")},
+		{"stream-only type", map[string]any{"events": []any{map[string]any{"type": "event_delta"}}}, typeRefusal("event_delta")},
+		// 2026-09-02 batch2 `sessT.send.tool_confirmation.deny_message-on-allow`.
+		{"deny_message with allow", map[string]any{"events": []any{map[string]any{
+			"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "sevt_1",
+			"deny_message": "x"}}}, "Invalid tool_confirmation event at index 0: deny_message is only allowed when result is 'deny'"},
+		// 2026-09-02 batch2 `sessT.send.user.message.empty-text-block`.
+		{"empty text block", map[string]any{"events": []any{map[string]any{"type": "user.message",
+			"content": []any{map[string]any{"type": "text", "text": ""}}}}}, "events.0.user_message.content.0.text: value is required"},
+		// 2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
+		// `sessK.send.interrupt.unknown-thread`: the wrong prefix, and the
+		// recorded malformed id — its token outside the id alphabet.
+		{"thread id with the sth_ prefix", map[string]any{"events": []any{map[string]any{
+			"type": "user.interrupt", "session_thread_id": "sth_01HbamSkv49mRn4JHt9ryS6T"}}},
+			"Invalid session_thread_id: sth_01HbamSkv49mRn4JHt9ryS6T"},
+		{"malformed thread id", map[string]any{"events": []any{map[string]any{
+			"type": "user.interrupt", "session_thread_id": "sthr_01UnknownThreadIdXXXXXXXXX"}}},
+			"Invalid session_thread_id: sthr_01UnknownThreadIdXXXXXXXXX"},
+	}
+	for _, tc := range recorded {
+		status, res := s.do(http.MethodPost, path, tc.body)
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.want)
+	}
+
 	// An invalid batch is atomic: nothing from it may land in the log.
 	status, res := s.do(http.MethodGet, path, nil)
 	if status != http.StatusOK || len(listData(t, res)) != 0 {
@@ -373,9 +407,14 @@ func TestSendToolResultOnSelfHosted(t *testing.T) {
 
 // toolResultRefusal is the 403 a management credential's user.tool_result
 // draws, at the batch index of the first one.
+//
+// The sentence is the reference's, its index prefix and its parenthetical
+// included (2026-09-02 batch2 `sessW.send.user.tool_result.console-auth`,
+// #540), though the credential it names is the reference runner's: here a
+// worker's environment key or its sessions token is what posts one.
 func toolResultRefusal(index int) string {
 	return fmt.Sprintf("events[%d]: `user.tool_result` may only be sent with environment credentials "+
-		"(the self-hosted worker's environment key or its sessions token); "+
+		"(the self-hosted runner's Session-Instance JWT); "+
 		"an API key or Console session cannot post this event type", index)
 }
 
@@ -467,10 +506,10 @@ func TestToolResultRefusalOrder(t *testing.T) {
 	live := selfHostedSession(t, s)
 	st, body = readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+live+"/events",
 		map[string]any{"events": []any{map[string]any{"type": "user.bogus"}, result}}, mgmt))
-	wantErr(t, st, body, http.StatusBadRequest, "invalid_request_error")
-	if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.HasPrefix(msg, "events[0]: unknown event type") {
-		t.Errorf("message %q, want events[0]'s own refusal", msg)
-	}
+	// events[0]'s own refusal, in the reference's words (2026-09-02 batch2
+	// `sessT.send.unknown-type`, #540).
+	wantErrMsg(t, st, body, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request: events[0].type: "user.bogus" is not a valid value`)
 	if got := s.eventTypes(live); len(got) != 0 {
 		t.Errorf("the refused batch left %v on the log", got)
 	}

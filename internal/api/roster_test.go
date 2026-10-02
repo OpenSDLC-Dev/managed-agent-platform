@@ -208,8 +208,9 @@ func TestRosterUpdateSelfAndReplacement(t *testing.T) {
 	}
 }
 
-// Every documented constraint rejects with a 400 naming the entry, and the
-// coordinator is not stored.
+// Every documented constraint rejects with a 400, and the coordinator is not
+// stored. A constraint the reference was recorded refusing on create answers in
+// its words, verbatim (#540); the rest name the entry, in ours.
 func TestRosterConstraints(t *testing.T) {
 	s := newTestServer(t)
 	a := member(t, s, "worker-a")
@@ -226,31 +227,73 @@ func TestRosterConstraints(t *testing.T) {
 	roster := func(entries ...any) map[string]any {
 		return map[string]any{"type": "coordinator", "agents": entries}
 	}
+	self := map[string]any{"type": "self"}
+	// roster() with no entries sends agents:null; the recorded request sent [].
+	empty := map[string]any{"type": "coordinator", "agents": []any{}}
+	// The reference's sentences, each request shaped like the recorded one with
+	// this server's ids standing in for the reference's, which fail its id
+	// alphabet. Recording: managed-agents-wire-recordings
+	// 2026-09-02/batch2.json, the idx and probe each case names.
+	recorded := []struct {
+		name string
+		body any
+		want string
+	}{
+		{"C-1 empty (idx 122 agent.create.roster.empty)", empty,
+			"multiagent.coordinator.agents: must contain at least 1 item"},
+		{"C-2 duplicate ids (idx 118 agent.create.roster.duplicate-member)", roster(a, a),
+			"Agent has invalid configuration: subagent " + a + " referenced multiple times"},
+		{"C-2 one agent at two versions (idx 119 agent.create.roster.same-agent-two-versions)",
+			roster(map[string]any{"type": "agent", "id": a, "version": 1}, map[string]any{"type": "agent", "id": a, "version": 2}),
+			"Agent has invalid configuration: subagent " + a + " referenced multiple times"},
+		{"C-3 two selfs (idx 120 agent.create.roster.two-self)", roster(a, self, self),
+			`multiagent.agents.2: at most one {"type":"self"} entry is allowed`},
+		{"C-4 missing version (idx 121 agent.create.roster.version-999)",
+			roster(map[string]any{"type": "agent", "id": a, "version": 999}),
+			"Agent has invalid configuration: subagent " + a + " version 999 not found"},
+		{"C-4 version past int32", roster(map[string]any{"type": "agent", "id": a, "version": 2147483648}),
+			"Agent has invalid configuration: subagent " + a + " version 2147483648 not found"},
+		{"C-5 archived member (idx 149 agent.create.roster.archived-member)", roster(archived),
+			"Agent has invalid configuration: subagent " + archived + " is archived"},
+		{"C-6 nested coordinator (idx 137 agent.create.roster.member-has-multiagent)", roster(nested),
+			"Agent has invalid configuration: subagent " + nested + " has its own subagents; maximum depth is 1"},
+		// The recorded id itself, which this server's alphabet refuses too.
+		{"entry not an agent id (idx 123 agent.create.roster.unknown-agent)", roster("agent_01UnknownAgentIdXXXXXXXX"),
+			"Agent has invalid configuration: subagent agent_01UnknownAgentIdXXXXXXXX is not a valid agent ID"},
+		{"entry not an agent id, object form", roster(map[string]any{"type": "agent", "id": "bogus"}),
+			"Agent has invalid configuration: subagent bogus is not a valid agent ID"},
+		{"entry null (idx 117 agent.create.roster.member-has-multiagent)", roster(nil),
+			"Failed to parse request: multiagent.agents[0]: must be a string or an object (got null)"},
+	}
+	for _, tc := range recorded {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := s.do(http.MethodPost, "/v1/agents", map[string]any{
+				"name": "coordinator", "model": "claude-opus-4-8", "multiagent": tc.body})
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
+		})
+	}
+	// Ours, the reference's answer being unrecorded.
 	cases := []struct {
 		name string
 		body any
 		want string
 	}{
-		{"C-1 empty", roster(), "between 1 and 20"},
-		{"C-1 over 20", roster(many...), "between 1 and 20"},
-		{"C-2 duplicate ids", roster(a, map[string]any{"type": "agent", "id": a}), "referenced more than once"},
-		{"C-3 two selfs", roster(map[string]any{"type": "self"}, map[string]any{"type": "self"}), "at most one self"},
-		{"C-4 missing agent", roster("agent_0000000000000000000000000"), "not found"},
-		{"C-4 missing version", roster(map[string]any{"type": "agent", "id": a, "version": 9}), "version 9 not found"},
-		{"C-4 version past int32", roster(map[string]any{"type": "agent", "id": a, "version": 2147483648}), "version 2147483648 not found"},
-		{"C-5 archived member", roster(archived), "is archived"},
-		{"C-6 nested coordinator", roster(nested), "depth limit 1"},
+		{"C-1 over 20", roster(many...), "multiagent.agents must have between 1 and 20 entries"},
+		{"C-1 agents null", roster(), "multiagent.agents must have between 1 and 20 entries"},
+		{"C-4 missing agent", roster("agent_0000000000000000000000000"), "multiagent.agents[0]: agent agent_0000000000000000000000000 not found"},
 		{"C-7 type not coordinator", map[string]any{"type": "advisor", "agents": []any{a}}, `type must be "coordinator"`},
 		{"entry unknown type", roster(map[string]any{"type": "advisor", "model": "m"}), `entry type must be "agent" or "self"`},
-		{"entry unknown key", roster(map[string]any{"type": "self", "name": "x"}), "unknown field"},
+		// The strict decoder's sentence every /v1 body shares names the bare
+		// key, nested or not (rejectUnknownKeys, #540), so neither carries a
+		// roster path. Neither was recorded on a roster.
+		{"entry unknown key", roster(map[string]any{"type": "self", "name": "x"}), `Failed to parse request body: unknown field "name"`},
 		{"entry bad version", roster(map[string]any{"type": "agent", "id": a, "version": 0}), "positive integer"},
 		{"entry empty string", roster(""), "must not be empty"},
-		{"entry not an agent id", roster("bogus"), `"bogus" is not an agent id`},
-		{"entry null", roster(nil), "entry must be an agent id string"},
+		{"entry a number", roster(7), "multiagent.agents[0]: entry must be an agent id string"},
 		{"entry id not a string", roster(map[string]any{"type": "agent", "id": 7}), "id must be a string"},
 		{"entry id missing", roster(map[string]any{"type": "agent"}), "id is required"},
 		{"agents not an array", map[string]any{"type": "coordinator", "agents": "x"}, "agents must be an array"},
-		{"unknown roster key", map[string]any{"type": "coordinator", "agents": []any{a}, "max": 3}, "unknown field"},
+		{"unknown roster key", map[string]any{"type": "coordinator", "agents": []any{a}, "max": 3}, `Failed to parse request body: unknown field "max"`},
 		{"not an object", []any{a}, "must be an object"},
 	}
 	for _, tc := range cases {
@@ -260,6 +303,8 @@ func TestRosterConstraints(t *testing.T) {
 			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 			if msg := errMessage(body); !strings.Contains(msg, tc.want) {
 				t.Errorf("message = %q, want it to mention %q", msg, tc.want)
+			} else if strings.HasPrefix(tc.want, "Failed to parse") && msg != tc.want {
+				t.Errorf("message = %q, want exactly %q", msg, tc.want)
 			}
 		})
 	}
@@ -270,10 +315,26 @@ func TestRosterConstraints(t *testing.T) {
 			t.Errorf("a rejected coordinator was stored: %v", e)
 		}
 	}
-	// The same constraints bind update.
+	// The same constraints bind update, in the same words: a path opens with
+	// "agent." there, as the reference's update paths were recorded doing
+	// (2026-09-12/batch1.json idx 7 rec91.model.update.effort-bogus, idx 74
+	// rec91.web.config.fetch-65), and a member's sentence names no path on
+	// either route. An entry naming the coordinator's own id beside
+	// {"type":"self"}, which only update can send, is unrecorded and ours.
 	c := createAgent(t, s, map[string]any{"name": "c", "model": "claude-opus-4-8"})["id"].(string)
-	status, body := s.do(http.MethodPost, "/v1/agents/"+c, map[string]any{"multiagent": roster(nested)})
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	for _, tc := range []struct {
+		body any
+		want string
+	}{
+		{roster(nested), "Agent has invalid configuration: subagent " + nested + " has its own subagents; maximum depth is 1"},
+		{empty, "agent.multiagent.coordinator.agents: must contain at least 1 item"},
+		{roster(nil), "Failed to parse request: agent.multiagent.agents[0]: must be a string or an object (got null)"},
+		{roster(a, self, self), `agent.multiagent.agents.2: at most one {"type":"self"} entry is allowed`},
+		{roster(self, c), "multiagent.agents[1]: at most one self entry"},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/agents/"+c, map[string]any{"multiagent": tc.body})
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
+	}
 	if _, res := s.do(http.MethodGet, "/v1/agents/"+c, nil); res["version"] != float64(1) || res["multiagent"] != nil {
 		t.Errorf("rejected update changed the agent: %v", res)
 	}
@@ -400,10 +461,11 @@ func TestRosterOverrideRejected(t *testing.T) {
 		"agent":          map[string]any{"type": "agent_with_overrides", "id": a, "multiagent": map[string]any{"type": "coordinator", "agents": []any{a}}},
 		"environment_id": envID,
 	})
-	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-	if msg := errMessage(body); !strings.Contains(msg, "override multiagent") {
-		t.Errorf("message = %q", msg)
-	}
+	// The reference's strict decoder's sentence (#540). Recording:
+	// managed-agents-wire-recordings 2026-09-02/batch2.json idx 139
+	// session.create.agent_with_overrides.multiagent.
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request body: unknown field "multiagent"`)
 	status, body = s.do(http.MethodPost, "/v1/sessions", map[string]any{
 		"agent":          map[string]any{"type": "agent_with_overrides", "id": a, "system": "x", "multiagent": nil},
 		"environment_id": envID,

@@ -155,8 +155,10 @@ func ValidatePath(path string) error {
 // bytes come from a file in a sandbox: unrefused, a NUL in one file would
 // fail its store's whole settlement on every run until the sandbox died.
 func ValidateContent(content string) error {
+	// The reference's words, which the API lane answers verbatim (2026-09-02
+	// free_batch1 `mem.create.102401-bytes`, #540); the sync lanes only log it.
 	if len(content) > MaxContentBytes {
-		return fmt.Errorf("content cannot exceed %d bytes", MaxContentBytes)
+		return fmt.Errorf("content must be at most %d bytes", MaxContentBytes)
 	}
 	if !utf8.ValidString(content) {
 		return errors.New("content must be valid UTF-8")

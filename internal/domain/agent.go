@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -50,11 +51,17 @@ func (g *ModelInferenceGeo) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	if *geo != "us" && *geo != "global" {
-		return fmt.Errorf(`model.inference_geo must be "us" or "global"`)
+		return ErrInferenceGeoValue
 	}
 	*g = ModelInferenceGeo(*geo)
 	return nil
 }
+
+// ErrInferenceGeoValue is ModelInferenceGeo's refusal of a string outside the
+// supported values. Its text is this platform's own; the agent create and
+// update routes recognize it and answer in the reference's recorded words
+// instead (internal/api parseAgentModel, #540).
+var ErrInferenceGeoValue = errors.New(`model.inference_geo must be "us" or "global"`)
 
 // ModelEffort accepts the input union and renders the response's object form.
 // Checked against anthropic-sdk-go v1.70.1 — betaagent.go
@@ -63,8 +70,14 @@ func (g *ModelInferenceGeo) UnmarshalJSON(b []byte) error {
 type ModelEffort string
 
 func (e *ModelEffort) UnmarshalJSON(b []byte) error {
+	// Decoded through a pointer so that a JSON null is not a string: it falls
+	// to the object arm and is refused as a missing level, not as a bad one.
+	var str *string
+	isString := json.Unmarshal(b, &str) == nil && str != nil
 	var level string
-	if err := json.Unmarshal(b, &level); err != nil {
+	if isString {
+		level = *str
+	} else {
 		var obj struct {
 			Type string `json:"type"`
 		}
@@ -77,9 +90,22 @@ func (e *ModelEffort) UnmarshalJSON(b []byte) error {
 	case "low", "medium", "high", "xhigh", "max":
 		*e = ModelEffort(level)
 		return nil
-	default:
-		return fmt.Errorf("model.effort must be low, medium, high, xhigh, or max")
 	}
+	if isString {
+		return &EffortLevelError{Level: level}
+	}
+	return fmt.Errorf("model.effort must be low, medium, high, xhigh, or max")
+}
+
+// EffortLevelError is ModelEffort's refusal of a level string outside the
+// five. Its text is this platform's own; Level is the value sent, which the
+// agent create and update routes quote in the reference's recorded sentence
+// instead (internal/api parseAgentModel, #540). The {type: level} form's bad
+// level is a plain error: the reference's answer to it is unrecorded.
+type EffortLevelError struct{ Level string }
+
+func (e *EffortLevelError) Error() string {
+	return "model.effort must be low, medium, high, xhigh, or max"
 }
 
 func (e ModelEffort) MarshalJSON() ([]byte, error) {

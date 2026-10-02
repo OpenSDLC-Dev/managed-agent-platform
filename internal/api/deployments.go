@@ -194,7 +194,9 @@ func finishDeployment(ctx context.Context, db querier, d domain.Deployment) (dom
 // loadDeployment reads one row for a mutating action, locking it FOR UPDATE so
 // two concurrent pauses cannot interleave, and refuses an archived one.
 // Archive is terminal for every mutating action — update, pause, unpause and
-// run all answer 400 — while GET and the list still return the row.
+// run all answer 400, in the reference's sentence (recorded for update, pause
+// and run: 2026-09-02 batch2 `deployment.*.on-archived`, #540) — while GET and
+// the list still return the row.
 func loadDeployment(ctx context.Context, tx pgx.Tx, id string) (domain.Deployment, error) {
 	d, err := scanDeployment(tx.QueryRow(ctx,
 		`SELECT `+deploymentColumns+` FROM deployments WHERE id = $1 FOR UPDATE`, id))
@@ -205,7 +207,7 @@ func loadDeployment(ctx context.Context, tx pgx.Tx, id string) (domain.Deploymen
 		return d, err
 	}
 	if d.ArchivedAt != nil {
-		return d, errInvalid("deployment %s is archived", id)
+		return d, errInvalid("Cannot modify archived deployment")
 	}
 	return d, nil
 }
@@ -243,6 +245,12 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 	if !ok || isNull(agentRaw) {
 		return nil, errInvalid("agent is required")
 	}
+	// An absent list is the reference's recorded sentence (2026-09-03 batch1
+	// `deployment.create.with-memory-store`, #540); null and [], never
+	// recorded, keep validateDeploymentBounds' floor below.
+	if err := fieldRequired(obj, "initial_events", "initial_events"); err != nil {
+		return nil, err
+	}
 	initial, err := parseInitialEvents(obj, true)
 	if err != nil {
 		return nil, err
@@ -265,7 +273,7 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 	if err := validateDeploymentBounds(name, description, envID, vaultIDs, len(initial), len(resourceInputs)); err != nil {
 		return nil, err
 	}
-	expr, tz, _, _, err := parseDeploymentSchedule(obj)
+	expr, tz, _, _, err := parseDeploymentSchedule(ctx, obj)
 	if err != nil {
 		return nil, err
 	}
@@ -350,9 +358,10 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 	// cannot be combined." Presence, not value: the sentence forbids sending
 	// both, and an archived deployment reports status "active", so the pair
 	// asks for a set whose membership rule contradicts itself however the
-	// boolean reads.
+	// boolean reads. The refusal is the reference's sentence (2026-09-02
+	// batch2 `deployment.list.status+include_archived`, #540).
 	if _, sent := q["include_archived"]; status != "" && sent {
-		return nil, errInvalid("status cannot be combined with include_archived")
+		return nil, errInvalid("include_archived: cannot be set together with status")
 	}
 	if status != "" && status != string(domain.DeploymentActive) && status != string(domain.DeploymentPaused) {
 		return nil, errInvalid("status must be %q or %q", domain.DeploymentActive, domain.DeploymentPaused)
@@ -487,7 +496,7 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 			return nil, err
 		}
 	}
-	expr, tz, scheduleSet, scheduleNull, err := parseDeploymentSchedule(obj)
+	expr, tz, scheduleSet, scheduleNull, err := parseDeploymentSchedule(ctx, obj)
 	if err != nil {
 		return nil, err
 	}
@@ -772,12 +781,13 @@ func (s *server) sealDeploymentRepoTokens(ctx context.Context, inputs []resource
 
 // requireLiveEnvironment holds the environment row FOR SHARE so a concurrent
 // delete or archive cannot slip between the check and the write, the discipline
-// createSessionInTx applies to the same row.
+// createSessionInTx applies to the same row. A missing one answers in the
+// reference's words, as every environment lookup does (#540).
 func requireLiveEnvironment(ctx context.Context, tx pgx.Tx, envID string) error {
 	var archivedAt *time.Time
 	err := tx.QueryRow(ctx, `SELECT archived_at FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errNotFound("environment %s not found", envID)
+		return errEnvironmentNotFound(envID)
 	}
 	if err != nil {
 		return err

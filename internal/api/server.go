@@ -216,7 +216,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("POST "+consoleRevokePath, s.handleNoContent(identity.RoleAdmin, s.revokeEnvironmentKey))
 	for _, pattern := range []string{consoleTokensPath, consoleRevokePath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, methodNotAllowed(r))
+			writeError(w, r, errMethodNotAllowed)
 		})
 	}
 
@@ -244,7 +244,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("GET "+consoleWorkspacePath, s.handle(identity.RoleAdmin, s.getWorkspace))
 	for _, pattern := range []string{consoleAPIKeysPath, consoleAPIKeyPath, consoleOrgAPIKeyPath, consoleWorkspacePath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, methodNotAllowed(r))
+			writeError(w, r, errMethodNotAllowed)
 		})
 	}
 
@@ -255,14 +255,20 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// non-GET.
 	mux.HandleFunc("GET "+gateconfig.Path, s.handle(identity.RoleNone, s.getGateConfig))
 	mux.HandleFunc(gateconfig.Path, func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, methodNotAllowed(r))
+		writeError(w, r, errMethodNotAllowed)
 	})
 
 	// The mux's built-in 404/405 write plain text; clients expect the wire
 	// error envelope, so register explicit fallbacks: "/" for unknown paths
-	// and a method-less pattern per route for unsupported methods.
+	// and a method-less pattern per route for unsupported methods. An unknown
+	// path takes the reference's own words, which differ in one letter by
+	// where the path falls (#540): "Not Found" under the deployment and dream
+	// routes (2026-09-12-console-141 `deployment.final-runs`, 2026-09-05-dreams
+	// `rec91.control.dreams.extra-segment`), "Not found" everywhere else that
+	// was recorded (`/v1/dreamz`, `/v1/outcomes`, `/v1/work`, an unknown
+	// memory-store subpath among them).
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, errNotFound("no such endpoint: %s", r.URL.Path))
+		writeError(w, r, errUnknownPath(r))
 	})
 	for _, pattern := range []string{
 		"/v1/agents", "/v1/agents/{id}", "/v1/agents/{id}/versions", "/v1/agents/{id}/archive",
@@ -291,7 +297,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/deployment_runs", "/v1/deployment_runs/{id}",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, methodNotAllowed(r))
+			writeError(w, r, errMethodNotAllowed)
 		})
 	}
 
@@ -325,11 +331,11 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/environments/{id}/work/{work_id}/stop",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, methodNotAllowed(r))
+			writeError(w, r, errMethodNotAllowed)
 		})
 	}
 	mux.HandleFunc("/v1/environments/{id}/work/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, errNotFound("no such endpoint: %s", r.URL.Path))
+		writeError(w, r, errUnknownPath(r))
 	})
 
 	return withRequestID(withTracing(dispatchAuth(pool, verifier, mux)))
@@ -451,8 +457,8 @@ func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.
 			human.ServeHTTP(w, r)
 			return
 		}
-		// Neither credential: requireAPIKey produces the same "missing
-		// x-api-key" 401 it always has. Deliberately not a new message — an
+		// Neither credential: requireAPIKey produces the same missing-key
+		// 401 it always has. Deliberately not a new message — an
 		// unauthenticated caller learns nothing about whether SSO is enabled.
 		mgmt.ServeHTTP(w, r)
 	})
@@ -672,11 +678,20 @@ func isBareSessionPath(p string) bool {
 	return ok && sub == ""
 }
 
-// methodNotAllowed is the wire 405 for a known path reached with an
-// unsupported method.
-func methodNotAllowed(r *http.Request) *apiError {
-	return &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest,
-		"method " + r.Method + " is not allowed on " + r.URL.Path}
+// errMethodNotAllowed is the wire 405 for a known path reached with an
+// unsupported method, in the reference's words: recorded on a dream, the work
+// poll, an environment key's token path and a console API key (#540). Neither
+// the method nor the path is named, as the reference names neither; both are
+// the client's own request.
+var errMethodNotAllowed = &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest, "Method Not Allowed"}
+
+// errUnknownPath is the wire 404 for a path no route matches — see the "/"
+// fallback for the two spellings and where each was recorded.
+func errUnknownPath(r *http.Request) *apiError {
+	if p := r.URL.Path; strings.HasPrefix(p, "/v1/deployments/") || strings.HasPrefix(p, "/v1/dreams/") {
+		return errNotFound("Not Found")
+	}
+	return errNotFound("Not found")
 }
 
 // roleGate is the adapters' min parameter for the handful of routes that cannot
@@ -747,12 +762,14 @@ func (s *server) handleNoContent(min identity.Role, fn func(*http.Request) error
 }
 
 // withRequestID stamps every response (success and error) with a request-id
-// header and threads the ID into the context for error envelopes.
+// header and threads the ID into the context for error envelopes, beside the
+// mark a lane sets once a credential verifies (withVerifiedMark).
 func withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rid := domain.NewID("req").String()
 		w.Header().Set("request-id", rid)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID, rid)))
+		ctx := withVerifiedMark(context.WithValue(r.Context(), ctxKeyRequestID, rid))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

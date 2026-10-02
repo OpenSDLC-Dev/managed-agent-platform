@@ -175,8 +175,6 @@ func TestSessionResourceValidation(t *testing.T) {
 		resources  any
 		wantStatus int
 	}{
-		"nonexistent file":     {[]any{map[string]any{"type": "file", "file_id": "file_0000000000000000000000gk"}}, 404},
-		"malformed file id":    {[]any{map[string]any{"type": "file", "file_id": "not-an-id"}}, 400},
 		"missing file id":      {[]any{map[string]any{"type": "file"}}, 400},
 		"github missing url":   {[]any{map[string]any{"type": "github_repository"}}, 400},
 		"memory unsupported":   {[]any{map[string]any{"type": "memory_store"}}, 400},
@@ -209,6 +207,19 @@ func TestSessionResourceValidation(t *testing.T) {
 		wantErr(t, status, body, tc.wantStatus, wantType)
 	}
 
+	// The two create refusals the reference was recorded wording, in its
+	// words whole (#540): a malformed file_id (2026-09-02 batch2
+	// `sessF.create.file-mount.unknown-file`) and a well-formed one naming no
+	// live file (`sessF2.create.deleted-file-mount`).
+	status, body := create([]any{map[string]any{"type": "file", "file_id": "not-an-id"}})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		`Invalid file resource: invalid file_id: "not-an-id"`)
+	ghostFile := "file_0000000000000000000000gk"
+	status, body = create([]any{map[string]any{"type": "file", "file_id": fileA},
+		map[string]any{"type": "file", "file_id": ghostFile}})
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error",
+		"One or more files not found. Check that each `file_id` exists and is accessible: "+ghostFile)
+
 	// A session with one resource, for the add/get/delete rejections.
 	sess := createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": envID,
@@ -227,6 +238,7 @@ func TestSessionResourceValidation(t *testing.T) {
 		"add escaping mount path":  {map[string]any{"type": "file", "file_id": fileA, "mount_path": "../escaped"}, 400},
 		"add nonexistent file":     {map[string]any{"type": "file", "file_id": "file_0000000000000000000000gk"}, 404},
 		"add github":               {map[string]any{"type": "github_repository"}, 400},
+		"add missing type":         {map[string]any{"file_id": fileA}, 400},
 	}
 	for name, tc := range addCases {
 		status, body := s.do("POST", "/v1/sessions/"+sid+"/resources", tc.body)
@@ -240,17 +252,31 @@ func TestSessionResourceValidation(t *testing.T) {
 		}
 		wantErr(t, status, body, tc.wantStatus, wantType)
 	}
+	// The add route's type refusal is the reference's (2026-09-02 batch2
+	// `session.resources.post.memory_store`, #540), said of any type but
+	// file; its absent-file 404 is never recorded and keeps ours.
+	status, body = s.do("POST", "/v1/sessions/"+sid+"/resources", map[string]any{"type": "wizard"})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		`Failed to parse request: type: "wizard" is not a valid value`)
+	status, body = s.do("POST", "/v1/sessions/"+sid+"/resources", map[string]any{"type": "file", "file_id": ghostFile})
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "file "+ghostFile+" not found")
 
 	// Update (token rotation) is rejected for a file resource.
-	status, body := s.do("POST", "/v1/sessions/"+sid+"/resources/"+rid,
+	status, body = s.do("POST", "/v1/sessions/"+sid+"/resources/"+rid,
 		map[string]any{"authorization_token": "tok"})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
-	// Unknown resource id → 404 on get and delete.
+	// Unknown resource id → 404 on get, delete and update, in the
+	// reference's words (2026-09-02 batch2
+	// `session.resources.get.bogus-sesrsc`, #540; update is unrecorded, the
+	// same family on the same path).
+	ghostRID := "sesrsc_0000000000000000000000gk"
 	for _, method := range []string{"GET", "DELETE"} {
-		status, body := s.do(method, "/v1/sessions/"+sid+"/resources/sesrsc_0000000000000000000000gk", nil)
-		wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+		status, body := s.do(method, "/v1/sessions/"+sid+"/resources/"+ghostRID, nil)
+		wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Resource not found: "+ghostRID)
 	}
+	status, body = s.do("POST", "/v1/sessions/"+sid+"/resources/"+ghostRID, map[string]any{"authorization_token": "t"})
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Resource not found: "+ghostRID)
 
 	// Unknown session → 404 on the sub-resource routes.
 	status, body = s.do("GET", "/v1/sessions/sesn_0000000000000000000000gk/resources", nil)

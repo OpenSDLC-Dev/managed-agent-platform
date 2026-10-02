@@ -276,24 +276,30 @@ func TestConsoleKeyRoutesRejectOtherOrganizations(t *testing.T) {
 		"revoke": {http.MethodPost, consoleRevoke(envID, keyID), nil},
 	}
 	for name, tc := range routes {
+		// Both refusals in the reference's words (#540): batch2 idx 5
+		// `rec83.edge6.foreign-org-uuid`, and idx 6 `.literal-default-org`'s
+		// pydantic path refusal, whose uuid-crate tail names the first
+		// character no UUID holds and its 1-based position.
 		t.Run(name+"/a foreign UUID", func(t *testing.T) {
 			status, body := s.do(tc.method, under(zeroUUID, tc.path), tc.body)
-			wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
+			wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "Unable to authenticate session.")
 			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
 		})
 		t.Run(name+"/not a UUID", func(t *testing.T) {
 			status, body := s.do(tc.method, under("org_other", tc.path), tc.body)
-			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+				"path.organization_uuid: Input should be a valid UUID, invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found `o` at 1")
 			wantDetails(t, body, nil)
-			inner, _ := body["error"].(map[string]any)
-			if msg, _ := inner["message"].(string); !strings.Contains(msg, "organization") {
-				t.Errorf("message = %q, want it to name the organization, not the environment", msg)
-			}
 		})
 	}
+	// The recorded refusal of `default` itself ("found `u` at 5": d, e, f and
+	// a are hex digits), on a segment that is not ours to serve.
+	status, body := s.do(http.MethodGet, under("defaulx", consoleTokens(envID)), nil)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"path.organization_uuid: Input should be a valid UUID, invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found `u` at 5")
 	// The segment takes the UUID spellings a key id does (isUUID): the recorded
 	// refusal of `default` is the same parser's message.
-	status, body := s.do(http.MethodGet, under(strings.Repeat("0", 32), consoleTokens(envID)), nil)
+	status, body = s.do(http.MethodGet, under(strings.Repeat("0", 32), consoleTokens(envID)), nil)
 	wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
 
 	// The organization is judged before the environment: a foreign UUID over an
@@ -357,6 +363,12 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 			wantErr(t, status, body, tc.wantStatus, tc.wantType)
 		})
 	}
+	// The environment refusals in the reference's words (#540): batch2 idx 2
+	// `rec83.edge3.issue.unknown-env` and idx 3 `.malformed-env`.
+	status, body := s.do(http.MethodPost, consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"name": "x"})
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Environment env_0123456789abcdefghjkmnp not found.")
+	status, body = s.do(http.MethodPost, consoleTokens("not-an-env-id"), map[string]any{"name": "x"})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Invalid request: Environment id must have `env_` prefix.")
 
 	// Precedence, pinned so it cannot flip back silently: the body is validated
 	// before the environment is looked up, because the lookup holds a row lock
@@ -592,16 +604,19 @@ func TestConsoleKeyListPagesAndRendersNullExpiry(t *testing.T) {
 		t.Errorf("?offset=99 = %v, %v; want an empty page reporting total 3", past, page)
 	}
 
-	for name, query := range map[string]string{
-		"limit zero":          "?limit=0",
-		"limit negative":      "?limit=-1",
-		"limit not a number":  "?limit=many",
-		"offset negative":     "?offset=-1",
-		"offset not a number": "?offset=soon",
+	// Each refusal in the reference's pydantic words (#540): batch2 idx 8
+	// `rec83.edge5.list.limit.0`, idx 15 `.limit.abc`, idx 13 `.offset.-1`. A
+	// non-integer offset was never sent; it takes the limit's sentence.
+	for name, tc := range map[string]struct{ query, want string }{
+		"limit zero":          {"?limit=0", "limit: Input should be greater than or equal to 1"},
+		"limit negative":      {"?limit=-1", "limit: Input should be greater than or equal to 1"},
+		"limit not a number":  {"?limit=many", "limit: Input should be a valid integer, unable to parse string as an integer"},
+		"offset negative":     {"?offset=-1", "offset: Input should be greater than or equal to 0"},
+		"offset not a number": {"?offset=soon", "offset: Input should be a valid integer, unable to parse string as an integer"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(http.MethodGet, consoleTokens(envID)+query, nil)
-			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+			status, body := s.do(http.MethodGet, consoleTokens(envID)+tc.query, nil)
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
 		})
 	}
 
@@ -698,6 +713,14 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
+	// The recorded malformed ids, in the reference's words (#540): batch2
+	// idx 19 `rec83.edge4.revoke.malformed-id`, and 2026-09-04 batch2 idx 151
+	// `rec81.envkey.revoke` (a literal "undefined").
+	for id, at := range map[string]string{"not-a-uuid": "`n` at 1", "undefined": "`u` at 1"} {
+		status, body := s.do(http.MethodPost, consoleRevoke(mine, id), nil)
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+			"path.token_uuid: Input should be a valid UUID, invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found "+at)
+	}
 
 	cases := map[string]string{
 		"unknown id":          "envkey_0123456789abcdefghjkmnp",
@@ -729,8 +752,10 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 				name, msg, messages["unknown id"])
 		}
 	}
-	if !strings.Contains(messages["unknown id"], "environment key not found") {
-		t.Errorf("message = %q, want the id-free not-found wording", messages["unknown id"])
+	// The reference's own id-free sentence (batch2 idx 18
+	// `rec83.edge4.revoke.unknown-uuid`, idx 20 `.cross-environment`; #540).
+	if messages["unknown id"] != "Token not found" {
+		t.Errorf("message = %q, want the recorded %q", messages["unknown id"], "Token not found")
 	}
 	// The foreign key is untouched by the attempt to revoke it from elsewhere.
 	if res, raw := s.poll(t, theirs, map[string]string{"Authorization": "Bearer " + theirKey}); res.StatusCode != http.StatusOK {

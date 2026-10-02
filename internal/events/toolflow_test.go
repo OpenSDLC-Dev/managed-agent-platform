@@ -3,6 +3,7 @@ package events_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -85,6 +86,24 @@ func wantErrIs(t *testing.T, err error, want string) {
 	}
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// The reference's sentence for a confirmation naming no pending request
+// (2026-09-02 batch2 `sessT.send.tool_confirmation.unknown-id` and
+// `tool_confirmation.not-pending`, #540), and the two reasons it stands for,
+// which only the error's Reason tells apart.
+const (
+	noToolUse = "names no confirmable tool use in this session"
+	notGated  = "tool use was not gated for confirmation"
+)
+
+func wantNoPending(t *testing.T, err error, ref, reason string) {
+	t.Helper()
+	wantErrIs(t, err, fmt.Sprintf("No pending tool permission request found for tool_use_id %q at event index 0", ref))
+	var np *events.NoPendingConfirmationError
+	if !errors.As(err, &np) || np.Reason != reason || np.ToolUseID != ref || np.Index != 0 {
+		t.Errorf("error = %#v, want a NoPendingConfirmationError for %q at index 0, reason %q", err, ref, reason)
 	}
 }
 
@@ -654,8 +673,8 @@ func TestValidateToolResults(t *testing.T) {
 			id := toolUse(t, log, sid, domain.EventAgentCustomToolUse, `"ask"`)
 			wantErrHas(t, validate(sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", id.String())),
 				"is awaiting confirmation")
-			wantErrHas(t, events.ValidateToolConfirmations(ctx, pool, sid, []events.NewEvent{inConfirm(id.String())}),
-				"does not name a tool use in this session")
+			wantNoPending(t, events.ValidateToolConfirmations(ctx, pool, sid, []events.NewEvent{inConfirm(id.String())}),
+				id.String(), noToolUse)
 		})
 
 		// Only the literal "ask" gates. The absent and null legs reach the
@@ -756,26 +775,23 @@ func TestValidateToolConfirmations(t *testing.T) {
 
 	t.Run("unknown reference", func(t *testing.T) {
 		sid := newSession(t, pool)
-		wantErrIs(t, validate(sid, inConfirm("sevt_nope")),
-			`events[0]: tool_use_id "sevt_nope" does not name a tool use in this session`)
+		wantNoPending(t, validate(sid, inConfirm("sevt_nope")), "sevt_nope", noToolUse)
 	})
 
 	t.Run("reference in another session", func(t *testing.T) {
 		a, b := newSession(t, pool), newSession(t, pool)
 		id := ask(t, log, b)
-		wantErrIs(t, validate(a, inConfirm(id.String())),
-			fmt.Sprintf(`events[0]: tool_use_id %q does not name a tool use in this session`, id))
+		wantNoPending(t, validate(a, inConfirm(id.String())), id.String(), noToolUse)
 	})
 
 	// A custom tool is not confirmable, and the restriction lives in the WHERE
 	// clause — so an ask-gated custom tool use falls out as ErrNoRows and is
 	// reported as missing, not as ungated. Counter-intuitive but correct; a
-	// refactor moving the predicate would change the message.
+	// refactor moving the predicate would change the reason.
 	t.Run("non-confirmable kinds report missing, not ungated", func(t *testing.T) {
 		sid := newSession(t, pool)
 		id := toolUse(t, log, sid, domain.EventAgentCustomToolUse, `"ask"`)
-		wantErrIs(t, validate(sid, inConfirm(id.String())),
-			fmt.Sprintf(`events[0]: tool_use_id %q does not name a tool use in this session`, id))
+		wantNoPending(t, validate(sid, inConfirm(id.String())), id.String(), noToolUse)
 	})
 
 	// An MCP tool use is confirmable: the reference keys the confirmation on
@@ -798,8 +814,7 @@ func TestValidateToolConfirmations(t *testing.T) {
 			for _, perm := range []string{`"allow"`, "", "null"} {
 				sid := newSession(t, pool)
 				id := toolUse(t, log, sid, typ, perm)
-				wantErrIs(t, validate(sid, inConfirm(id.String())),
-					fmt.Sprintf(`events[0]: tool use %q was not gated for confirmation`, id))
+				wantNoPending(t, validate(sid, inConfirm(id.String())), id.String(), notGated)
 			}
 		}
 	})
@@ -843,8 +858,7 @@ func TestValidateToolConfirmations(t *testing.T) {
 		sid := newSession(t, pool)
 		id := toolUse(t, log, sid, domain.EventAgentToolUse, `"allow"`)
 		confirmOnLog(t, log, sid, id)
-		wantErrIs(t, validate(sid, inConfirm(id.String())),
-			fmt.Sprintf(`events[0]: tool use %q was not gated for confirmation`, id))
+		wantNoPending(t, validate(sid, inConfirm(id.String())), id.String(), notGated)
 	})
 
 	// The whole-payload null leg is the interesting one: the first decode
@@ -1069,8 +1083,8 @@ func TestToolflowChecksSeeCallerTransaction(t *testing.T) {
 	if got, err := events.UnconfirmedAskEvents(ctx, pool, sid, nil); err != nil || got != nil {
 		t.Errorf("outside tx: asks = %#v, %v; want nil", got, err)
 	}
-	wantErrHas(t, events.ValidateToolConfirmations(ctx, pool, sid, []events.NewEvent{inConfirm(id.String())}),
-		"does not name a tool use in this session")
+	wantNoPending(t, events.ValidateToolConfirmations(ctx, pool, sid, []events.NewEvent{inConfirm(id.String())}),
+		id.String(), noToolUse)
 }
 
 // A driver failure on the query itself must surface as a wrapped query error,

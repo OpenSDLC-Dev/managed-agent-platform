@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -66,6 +67,7 @@ func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool
 		writeError(w, r, errAuth("invalid environment key"))
 		return "", "", false
 	}
+	markVerified(r.Context())
 	return envID, kind, true
 }
 
@@ -76,16 +78,17 @@ func withEnvironmentKey(ctx context.Context, envID string, kind domain.Environme
 }
 
 // errNotSelfHostedKey is the one refusal a key on an environment that is not
-// self_hosted gets on the session lane and the file content download. Since
-// #820 the console issues a key on a cloud environment, as the reference does,
-// and that environment's work is the platform executor's: the key has no
-// worker to serve, so it must not read the environment's sessions, post to
-// them — a tool confirmation the executor would act on included — stream
-// their events, or download the files they mount. A 404, as the work listing
-// answers such a key, with a message of ours; it is answered before any
-// session or file is looked up, so it says nothing about either. The skill
-// reads are not refused: they are workspace-global, and the reference was
-// recorded serving them to a cloud environment's key.
+// self_hosted gets on the session lane. Since #820 the console issues a key on
+// a cloud environment, as the reference does, and that environment's work is
+// the platform executor's: the key has no worker to serve, so it must not read
+// the environment's sessions, post to them — a tool confirmation the executor
+// would act on included — stream their events, or download the files they
+// mount. A 404, as the work listing answers such a key, with a message of ours;
+// it is answered before any session is looked up, so it says nothing about
+// one. The file content download refuses the same key with the same status in
+// the reference's recorded words instead (requireSelfHostedEnvironmentKey).
+// The skill reads are not refused: they are workspace-global, and the
+// reference was recorded serving them to a cloud environment's key.
 func errNotSelfHostedKey(envID string) error {
 	return errNotFound("environment %s is not a self_hosted environment; only a self_hosted environment's key reaches its sessions and the files they mount", envID)
 }
@@ -111,7 +114,11 @@ func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 
 // requireSelfHostedEnvironmentKey is the environment-key lane of the file
 // content download: requireEnvironmentKey, refusing a key whose environment is
-// not self_hosted (errNotSelfHostedKey).
+// not self_hosted before any file is looked up. The refusal is the reference's
+// bare "Not found" (2026-09-03 batch2 `envkey.files.content-original`,
+// `envkey.files.content-session-copy`; #540), the words every other 404 on
+// this lane takes (downloadFile), so it says nothing about the file either.
+// Which reason fired is the operator's, in the log.
 func requireSelfHostedEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
@@ -119,7 +126,9 @@ func requireSelfHostedEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http
 			return
 		}
 		if kind != domain.EnvSelfHosted {
-			writeError(w, r, errNotSelfHostedKey(envID))
+			slog.InfoContext(r.Context(), "file download refused: environment key is not self_hosted",
+				"request_id", requestIDFrom(r.Context()), "environment_id", envID, "environment_kind", kind)
+			writeError(w, r, errNotFound("Not found"))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(withEnvironmentKey(r.Context(), envID, kind)))

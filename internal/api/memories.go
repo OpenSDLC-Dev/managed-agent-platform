@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
@@ -58,6 +61,10 @@ const (
 // memoryFullViewLimit is the documented silent clamp: a list with view=full
 // is "Capped at 20" however large a limit the caller asked for.
 const memoryFullViewLimit = 20
+
+// memoryListSchemaLimit is the outer of the two limit bounds the reference's
+// memories list was recorded answering (listMemories); the inner is maxLimit.
+const memoryListSchemaLimit = 1000
 
 const memoryColumns = `id, path, content, content_sha256, content_size_bytes,
 	memory_version_id, created_at, updated_at`
@@ -157,9 +164,71 @@ func lockMemoryStoreForWrite(ctx context.Context, tx pgx.Tx, storeID string) err
 		return err
 	}
 	if archived {
-		return errInvalid("memory store %s is archived", storeID)
+		return errMemoryStoreArchived(storeID)
 	}
 	return nil
+}
+
+// errMemoryStoreArchived is an archived store's refusal of new content, in the
+// reference's words on all three routes recorded refusing it: the store's
+// update, and a memory's create and update (2026-09-02 free_batch1
+// `store.update.archived.rename`, `mem.create.on-archived-store`,
+// `mem.update.archived-store`; #540). The BYOC worker reads it
+// (internal/worker refusalKind). A session attach and a dream input refuse an
+// archived store in words of their own.
+func errMemoryStoreArchived(storeID string) error {
+	return errInvalid("cannot modify archived resource: memory store %s", storeID)
+}
+
+// errMemoryPathOccupied is the occupancy 409 (decision 4) in the reference's
+// words, which tell an occupied path from a prefix relation and end an exact
+// conflict with the next step for the write that met it — exactTail, which
+// differs between a create and a rename (2026-09-02 free_batch1
+// `mem.create.at-occupied`, `mem.create.under-existing-file`,
+// `mem.rename.onto-occupied`, `mem.rename.onto-ancestor`,
+// `mem.rename.onto-descendant-of-other`; #540). The blocking memory rides
+// conflicting_memory_id and conflicting_path whichever is worded.
+func errMemoryPathOccupied(path, conflictID, conflictPath, exactTail string) error {
+	if conflictPath == path {
+		return errMemoryPathConflict(conflictID, conflictPath,
+			"path `%s` is already used by `%s`; %s", path, conflictID, exactTail)
+	}
+	return errMemoryPathConflict(conflictID, conflictPath,
+		"path `%s` conflicts with existing memory at `%s`: a memory and a path prefix of it cannot coexist. Delete or rename the other memory first.",
+		path, conflictPath)
+}
+
+// errStaleContent is the 409 a stale content_sha256 takes, an update's
+// precondition and a delete's expected_content_sha256 alike, in the
+// reference's words (2026-09-03 batch1 `memory.update.precondition-wrong-sha`,
+// 2026-09-02 free_batch1 `mem.delete.wrong-sha`; #540). They name neither
+// digest, so the log keeps both for the operator.
+func errStaleContent(ctx context.Context, verb, memoryID, supplied, stored string) error {
+	slog.InfoContext(ctx, "memory "+verb+" refused: stale content_sha256",
+		"request_id", requestIDFrom(ctx), "memory_id", memoryID,
+		"supplied_content_sha256", supplied, "stored_content_sha256", stored)
+	return errMemoryPrecondition("precondition content_sha256 failed: content has changed")
+}
+
+// errDigestShape is the reference validator's refusal of a digest that fails
+// both of its rules, the 64-character length and the hex alphabet — the two
+// it counts in "and 1 more" (2026-09-02 free_batch1 `mem.delete.malformed-sha`
+// for `nothex`, 2026-09-03 batch1 `memory.update.precondition-type-only` for an
+// absent one; #540).
+func errDigestShape(field string) error {
+	return errInvalid("%s: must be 64 characters (and 1 more validation errors)", field)
+}
+
+// failsBothDigestRules reports whether a value breaks both of those rules: it
+// is not 64 characters (runes, the repo's reading of a documented character)
+// long, and it is empty or carries a character no hex spelling has. Hex is
+// read case-blind here because whether the reference's pattern admits
+// uppercase is unrecorded: a short uppercase value may fail only the length
+// rule there, so it keeps our words.
+func failsBothDigestRules(v string) bool {
+	return utf8.RuneCountInString(v) != 64 && (v == "" || strings.ContainsFunc(v, func(r rune) bool {
+		return !strings.ContainsRune("0123456789abcdefABCDEF", r)
+	}))
 }
 
 // checkMemoryStore is the read half: the store must exist for its collections
@@ -181,6 +250,9 @@ func (s *server) checkMemoryStore(ctx context.Context, storeID string) error {
 // LIKE is deliberately not used: `_` and `%` are legal path bytes, so a
 // pattern would make /acb/x occupy /a_b. except is the memory the write is
 // updating, so a rename does not conflict with itself; "" for a create.
+// Several descendants can occupy one path, and the 409 names one of them: the
+// least in byte order (the column's collation is "C"), so it is the same one
+// on every call.
 func occupiedBy(ctx context.Context, tx pgx.Tx, storeID, path, except string) (id, conflicting string, err error) {
 	err = tx.QueryRow(ctx,
 		`SELECT id, path FROM memories
@@ -188,7 +260,7 @@ func occupiedBy(ctx context.Context, tx pgx.Tx, storeID, path, except string) (i
 		    AND (path = $3
 		      OR left(path, length($3) + 1) = $3 || '/'
 		      OR left($3, length(path) + 1) = path || '/')
-		  LIMIT 1`, storeID, except, path).Scan(&id, &conflicting)
+		  ORDER BY path LIMIT 1`, storeID, except, path).Scan(&id, &conflicting)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", nil
 	}
@@ -272,8 +344,7 @@ func (s *server) createMemory(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if conflictID != "" {
-		return nil, errMemoryPathConflict(conflictID, conflictPath,
-			"path %s is occupied by memory %s at %s", path, conflictID, conflictPath)
+		return nil, errMemoryPathOccupied(path, conflictID, conflictPath, "use update to modify it")
 	}
 	var held int
 	if err := tx.QueryRow(ctx,
@@ -312,8 +383,13 @@ func (s *server) getMemory(r *http.Request) (any, error) {
 	if err := checkID(storeID, "memory store"); err != nil {
 		return nil, err
 	}
-	if err := checkID(memoryID, "memory"); err != nil {
-		return nil, err
+	// The reference's words for a missing memory on this route (2026-09-02
+	// free_batch1 `mem.get.deleted`; #540), for a malformed id as for an absent
+	// one (checkID's #135). The update and the delete, never recorded missing
+	// one, keep checkID's.
+	memoryNotFound := errNotFound("memory `%s` not found", memoryID)
+	if !domain.ID(memoryID).Valid() {
+		return nil, memoryNotFound
 	}
 	// Retrieve is the one memory endpoint that defaults to full.
 	view, err := parseMemoryView(r.URL.Query(), viewFull)
@@ -330,7 +406,7 @@ func (s *server) getMemory(r *http.Request) (any, error) {
 		if err := s.checkMemoryStore(ctx, storeID); err != nil {
 			return nil, err
 		}
-		return nil, errNotFound("memory %s not found", memoryID)
+		return nil, memoryNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -430,8 +506,7 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 	// writes no new version". Same answer, so one branch serves both.
 	unchanged := next.content == row.content && next.path == row.path
 	if precondition != nil && *precondition != row.sha && !unchanged {
-		return nil, errMemoryPrecondition(
-			"memory %s has content_sha256 %s, not %s", memoryID, row.sha, *precondition)
+		return nil, errStaleContent(ctx, "update", memoryID, *precondition, row.sha)
 	}
 	if unchanged {
 		return renderMemory(storeID, row, view == viewFull), nil
@@ -446,8 +521,8 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 			return nil, err
 		}
 		if conflictID != "" {
-			return nil, errMemoryPathConflict(conflictID, conflictPath,
-				"path %s is occupied by memory %s at %s", next.path, conflictID, conflictPath)
+			return nil, errMemoryPathOccupied(next.path, conflictID, conflictPath,
+				"delete it first to rename-and-replace")
 		}
 	}
 	next.versionID, err = insertMemoryVersion(ctx, tx, storeID, memoryID, "modified",
@@ -487,9 +562,15 @@ func parsePrecondition(raw json.RawMessage) (*string, error) {
 	if err := rejectUnknownKeys(obj, "type", "content_sha256"); err != nil {
 		return nil, err
 	}
-	kind, _, _, err := stringField(obj, "type")
+	kind, kindSet, _, err := stringField(obj, "type")
 	if err != nil {
 		return nil, err
+	}
+	// An absent type is the reference's recorded parse refusal (2026-09-03
+	// batch1 `memory.update.precondition-no-type`; #540); a null or a wrong
+	// one, never recorded, keeps ours.
+	if !kindSet {
+		return nil, errInvalid("Failed to parse request: precondition.type: Field required")
 	}
 	if kind != "content_sha256" {
 		return nil, errInvalid(`precondition.type must be "content_sha256"`)
@@ -499,12 +580,14 @@ func parsePrecondition(raw json.RawMessage) (*string, error) {
 		return nil, err
 	}
 	// A null is the reference's recorded refusal (2026-09-03
-	// `memory.update.precondition-sha-null`); an absent or empty hash is ours.
+	// `memory.update.precondition-sha-null`), and so is an absent hash, which
+	// fails both of its digest rules (`memory.update.precondition-type-only`;
+	// #540). An empty one fails both as well and shares it.
 	if null {
 		return nil, errInvalid("precondition.content_sha256: Value is not nullable")
 	}
 	if !set || sha == "" {
-		return nil, errInvalid("precondition.content_sha256 is required")
+		return nil, errDigestShape("precondition.content_sha256")
 	}
 	return &sha, nil
 }
@@ -537,6 +620,12 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	}
 	expected := q.Get("expected_content_sha256")
 	if q.Has("expected_content_sha256") && !memsync.IsDigest([]byte(expected)) {
+		// A value failing both of the reference's digest rules takes its
+		// words (`nothex`, #540); one failing a single rule was never
+		// recorded, and keeps ours.
+		if failsBothDigestRules(expected) {
+			return nil, errDigestShape("expected_content_sha256")
+		}
 		return nil, errInvalid("expected_content_sha256: must be 64 lowercase hex characters")
 	}
 
@@ -560,8 +649,7 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if expected != "" && expected != row.sha {
-		return nil, errMemoryPrecondition(
-			"memory %s has content_sha256 %s, not %s", memoryID, row.sha, expected)
+		return nil, errStaleContent(ctx, "delete", memoryID, expected, row.sha)
 	}
 	// The tombstone's own promise — "The memory's version history persists and
 	// remains listable … until the store itself is deleted" — is why the
@@ -593,6 +681,19 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The reference bounds this limit twice, a schema bound of 1000 and the
+	// handler's 100, and words each its own way (2026-09-05 batch4
+	// `rec85.memories.list.limit-1001`, `rec85.memories.list.limit-101`;
+	// #540). A limit under 1 or not an integer was never recorded here and
+	// keeps parsePage's words.
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil {
+		switch {
+		case n > memoryListSchemaLimit:
+			return nil, errInvalid("limit: must be greater than or equal to 1 and less than or equal to %d", memoryListSchemaLimit)
+		case n > maxLimit:
+			return nil, errInvalid("limit: value must be greater than or equal to 1 and less than or equal to %d", maxLimit)
+		}
+	}
 	page, err := parsePage(q)
 	if err != nil {
 		return nil, err
@@ -613,7 +714,9 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if v := q.Get("depth"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || (n != 0 && n != 1) {
-			return nil, errInvalid("depth must be 0 or 1")
+			// The reference's words for depth=2 (2026-09-02 free_batch1
+			// `mem.list.depth2`; #540), shared by the other refused values.
+			return nil, errInvalid("depth must be 0 or 1 when provided")
 		}
 		depth = n
 	}
