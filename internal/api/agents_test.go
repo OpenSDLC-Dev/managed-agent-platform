@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -297,8 +298,13 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 		"description": "a fully configured agent",
 		"tools":       tools,
 		"mcp_servers": []any{map[string]any{"type": "url", "name": "docs", "url": "https://mcp.example.com"}},
-		"skills":      []any{map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "latest"}},
+		"skills":      []any{map[string]any{"type": "anthropic", "skill_id": "alpha-notes", "version": "latest"}},
 		"metadata":    map[string]any{"team": "sre"},
+	}
+	// An anthropic skills entry must name a skill the catalog holds
+	// (checkAnthropicSkillRefs), so the operator import provisions two.
+	if _, err := api.ImportAnthropicSkills(t.Context(), s.pool, s.blobs, importDirs("alpha-notes", "beta-notes"), "20260101"); err != nil {
+		t.Fatalf("import the anthropic fixtures: %v", err)
 	}
 	res := createAgent(t, s, body)
 
@@ -326,7 +332,7 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 	// skill carries a required version on the wire.
 	bare := createAgent(t, s, map[string]any{
 		"name": "bare-skill", "model": "m",
-		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "pdf"}},
+		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "beta-notes"}},
 	})
 	if sk, _ := bare["skills"].([]any); len(sk) != 1 {
 		t.Fatalf("skills = %v", bare["skills"])

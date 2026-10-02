@@ -93,19 +93,22 @@ func withDetails(e *apiError, d errorDetails) error {
 	return &apiErrorWithFields{apiError: *e, fields: map[string]any{"details": d}}
 }
 
-// apiErrorWithHeaders is an apiError the reference pins response headers to.
-// Few are — the refusals noRetry marks, whose `x-should-retry: false` is
+// apiErrorWithHeaders is an error the reference pins response headers to: an
+// *apiError, or an *apiErrorWithFields when the error carries members too.
+// Only the refusals noRetry marks are, whose `x-should-retry: false` is
 // contract rather than decoration — so, for the reason above, the map sits in
 // its own type instead of a nil field on every other error.
 type apiErrorWithHeaders struct {
-	apiError
+	err     error
 	headers map[string]string
 }
 
-// Unwrap exposes the apiError underneath, as apiErrorWithFields' does, so a
-// caller that classifies an error by its status with errors.As sees through
-// the headers.
-func (e *apiErrorWithHeaders) Unwrap() error { return &e.apiError }
+func (e *apiErrorWithHeaders) Error() string { return e.err.Error() }
+
+// Unwrap exposes the error underneath, so a caller that classifies an error
+// by its status with errors.As sees through the headers, and writeError finds
+// any members it carries.
+func (e *apiErrorWithHeaders) Unwrap() error { return e.err }
 
 func (e *apiError) Error() string { return e.message }
 
@@ -124,34 +127,46 @@ func errConflict(format string, args ...any) *apiError {
 // errMemoryPathConflict is errConflict under the memory surface's own type: a
 // create at an occupied path, or a rename onto one. "Occupied" is wider than
 // equal — an ancestor or a descendant of an existing memory's path occupies it
-// too — so the blocking memory is named rather than left to be guessed at.
+// too — so the blocking memory is named rather than left to be guessed at. It
+// is noRetry's on every recorded spelling, create and rename alike (2026-09-02
+// free_batch1 `mem.create.at-occupied`, `mem.rename.onto-ancestor`, 2026-09-05
+// batch4 `rec85.memory.update.at-cap`).
 func errMemoryPathConflict(conflictingID, conflictingPath, format string, args ...any) error {
-	return &apiErrorWithFields{
+	return noRetry(&apiErrorWithFields{
 		apiError: apiError{http.StatusConflict, errTypeMemoryPathConflict, fmt.Sprintf(format, args...)},
 		fields: map[string]any{
 			"conflicting_memory_id": conflictingID,
 			"conflicting_path":      conflictingPath,
 		},
-	}
+	})
 }
 
 // errMemoryPrecondition is the 409 an optimistic-concurrency mismatch takes:
 // an update whose `precondition.content_sha256` is stale, or a delete whose
-// `expected_content_sha256` is. The schema carries no extra members.
-func errMemoryPrecondition(format string, args ...any) *apiError {
-	return &apiError{http.StatusConflict, errTypeMemoryPreconditionFailed, fmt.Sprintf(format, args...)}
+// `expected_content_sha256` is. The schema carries no extra members. It is
+// noRetry's on both (2026-09-03 batch1 `memory.update.precondition-wrong-sha`,
+// 2026-09-02 free_batch1 `mem.delete.wrong-sha`).
+func errMemoryPrecondition(format string, args ...any) error {
+	return noRetry(&apiError{http.StatusConflict, errTypeMemoryPreconditionFailed, fmt.Sprintf(format, args...)})
 }
 
-// noRetry marks e with `x-should-retry: false`, as the reference marks a
-// refusal that only a change elsewhere can clear. The header is load-bearing:
-// without it the SDK spends two retries on a 409 (checked against
-// anthropic-sdk-go v1.70.1 — requestconfig.go NewRequestConfig and
-// shouldRetry, which reads x-should-retry ahead of the status code). Two
-// refusals carry it: the dream target-store hold and the environment delete
-// the sessions refuse.
-func noRetry(e *apiError) error {
-	return &apiErrorWithHeaders{apiError: *e, headers: map[string]string{"x-should-retry": "false"}}
+// noRetry marks err — an *apiError, or one decorated with members — with
+// `x-should-retry: false`, as the reference marks the refusals it was recorded
+// marking. The header is load-bearing: without it the SDK spends two retries
+// on a 409 (checked against anthropic-sdk-go v1.70.1 — requestconfig.go
+// NewRequestConfig and shouldRetry, which reads x-should-retry ahead of the
+// status code). Which refusals carry it is the recordings' call, not a rule
+// of ours (#842): a condition recorded with the header takes it where this
+// platform answers the same status, one recorded without it does not, and an
+// unrecorded one only through a helper every recorded use of which carries
+// it — docs/DIVERGENCES.md lists them. The console namespace takes it on
+// every refusal instead (writeError).
+func noRetry(err error) error {
+	return &apiErrorWithHeaders{err: err, headers: noRetryHeader}
 }
+
+// noRetryHeader is the one header noRetry pins.
+var noRetryHeader = map[string]string{"x-should-retry": "false"}
 
 // errTargetStoreHeld is the dream create's 409 (BetaTargetStoreHeldError, plan
 // 41 §5.3): the update_existing target is still held by a live in-place dream,
@@ -207,34 +222,35 @@ func requestIDFrom(ctx context.Context) string {
 // without leaking internals.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	inner := map[string]any{}
-	// Both decorations are matched against the error as it arrived, because
-	// either match narrows err to the plain apiError underneath: taking one
-	// first would hide the other from an error that ever carried both.
+	// Each decoration is matched against the error as it arrived, the headers
+	// wrapping the members where an error carries both: the extra members
+	// come off into the body, the headers onto the response before writeJSON
+	// writes the status line, and the plain apiError underneath renders the
+	// status and the two shared fields through the one code path whatever
+	// the schema added.
 	var withFields *apiErrorWithFields
-	hasFields := errors.As(err, &withFields)
-	var withHeaders *apiErrorWithHeaders
-	hasHeaders := errors.As(err, &withHeaders)
-	if hasFields {
-		// Take the extra members off, then carry on with the plain apiError
-		// underneath, so the status and the two shared fields have exactly one
-		// code path whatever the schema added.
+	if errors.As(err, &withFields) {
 		maps.Copy(inner, withFields.fields)
-		err = &withFields.apiError
 	}
-	if hasHeaders {
-		// Same shape as the fields above, and set before writeJSON writes the
-		// status line: the headers come off, the plain apiError underneath
-		// renders through the one code path.
+	var withHeaders *apiErrorWithHeaders
+	if errors.As(err, &withHeaders) {
 		for k, v := range withHeaders.headers {
 			w.Header().Set(k, v)
 		}
-		err = &withHeaders.apiError
 	}
 	var ae *apiError
 	if !errors.As(err, &ae) {
 		slog.ErrorContext(r.Context(), "internal error", "method", r.Method, "path", r.URL.Path,
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		ae = &apiError{http.StatusInternalServerError, errTypeAPI, "internal server error"}
+	}
+	if ae.status >= 400 && ae.status < 500 && isConsolePath(r.URL.EscapedPath()) {
+		// The console namespace's refusals carry the header wherever the
+		// reference was recorded refusing there, every one of them, so here
+		// it marks the namespace rather than a list of its conditions.
+		for k, v := range noRetryHeader {
+			w.Header().Set(k, v)
+		}
 	}
 	if ae.status >= 400 && ae.status < 500 && authenticated(r.Context()) {
 		// A refusal of an authenticated request gets one summary line here,

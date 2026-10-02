@@ -191,10 +191,15 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 	if !selfHostedKeyFrom(r.Context()) {
 		// The reference's sentence, which names the kind as its own
 		// environment model spells it (#540).
-		writeError(w, r, errInvalid("Only BYOC and bridge environments support work polling. Environment %s is anthropic_cloud.", envID))
+		writeError(w, r, noRetry(errInvalid("Only BYOC and bridge environments support work polling. Environment %s is anthropic_cloud.", envID)))
 		return
 	}
 	block, err := blockWindow(r)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	reclaim, err := reclaimWindow(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -208,7 +213,6 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 			slog.WarnContext(r.Context(), "record worker poll", "environment", envID, "error", err)
 		}
 	}
-	reclaim := reclaimWindow(r)
 	deadline := time.Now().Add(block)
 	var sub *events.Subscription
 	if block > 0 {
@@ -268,13 +272,15 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 }
 
 // blockWindow reads block_ms — how long an empty poll is held open before
-// answering null. Absent means non-blocking (the wire default). Unlike the
-// reclaim knob this one is validated: the SDK records that the reference
-// rejects an explicit 0 (non-blocking is expressed by omission, checked against
-// anthropic-sdk-go v1.70.1 — poller.go WorkPollerOptions.BlockMs), so zero,
-// negative, empty (present-but-valueless, which is not omission), unparseable,
-// and repeated values are 400; an over-cap value is clamped to the server
-// ceiling the same source documents.
+// answering null. Absent means non-blocking (the wire default). The SDK
+// records that the reference rejects an explicit 0 (non-blocking is expressed
+// by omission, checked against anthropic-sdk-go v1.70.1 — poller.go
+// WorkPollerOptions.BlockMs), so zero, negative, empty (present-but-valueless,
+// which is not omission), unparseable, and repeated values are 400; an
+// over-cap value is clamped to the server ceiling the same source documents.
+// The refusal keeps this platform's words: no recording holds the reference's
+// for block_ms, whose sibling reclaim_older_than_ms answers in pydantic's
+// (reclaimWindow).
 func blockWindow(r *http.Request) (time.Duration, error) {
 	vs, ok := r.URL.Query()["block_ms"]
 	if !ok {
@@ -304,9 +310,9 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	}
 	// A cloud environment has no worker's queue to list: the reference's 404,
 	// archived or not (2026-09-05 batch2 `rec83.active-key.work.list.beta`,
-	// `rec83.archived-key.work.list.beta`).
+	// `rec83.archived-key.work.list.beta`), with its `x-should-retry: false`.
 	if !selfHostedKeyFrom(r.Context()) {
-		return nil, errNotFound("Environment `%s` not found, or does not support work listing. The work API is only available for self-hosted environments.", envID)
+		return nil, noRetry(errNotFound("Environment `%s` not found, or does not support work listing. The work API is only available for self-hosted environments.", envID))
 	}
 	page, err := parsePage(r.URL.Query())
 	if err != nil {
@@ -409,8 +415,10 @@ func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error)
 		// A key that authenticated but names another environment is a scope
 		// failure, not an authentication one. The reference answers 403
 		// permission_error with this message, and answers an unknown environment
-		// id the same way rather than 404 (recorded 2026-09-02, #78).
-		return "", "", errForbidden("Token not authorized for this environment")
+		// id the same way rather than 404 (recorded 2026-09-02, #78), with
+		// `x-should-retry: false` (2026-09-05 batch2
+		// `rec83.archived-key.work.poll.other-env`; #842).
+		return "", "", noRetry(errForbidden("Token not authorized for this environment"))
 	}
 	return domain.ID(e), domain.ID(r.PathValue("work_id")), nil
 }
@@ -770,20 +778,32 @@ func parseStopForce(r *http.Request) (bool, error) {
 	return req.Force, nil
 }
 
-// reclaimWindow reads reclaim_older_than_ms (default 5000, clamped to
-// maxReclaimMs). A non-positive or unparseable value falls back to the default
-// rather than erroring — the wire treats it as an optional tuning knob, not a
-// validated field — and an over-large value is clamped so it can never overflow
+// reclaimWindow reads reclaim_older_than_ms (default 5000). The reference
+// validates it as pydantic does a bounded integer: a 0 was recorded refused
+// with `reclaim_older_than_ms: Input should be greater than or equal to 1`
+// (2026-09-02 batch2 #352 `work.poll.requeued-item`), so it is read by
+// pydanticInt, whose other sentence the same validator was recorded giving
+// the console's limit (2026-09-05 batch2 `rec83.edge5.list.limit.abc`) and
+// this parameter never was. Absent or empty is the default. A value over
+// maxReclaimMs is clamped to it, ours — one past any machine integer
+// included, which pydanticInt saturates — so it can never overflow
 // time.Duration into a past (negative) reservation.
-func reclaimWindow(r *http.Request) time.Duration {
-	ms := defaultReclaimMs
-	if v := r.URL.Query().Get("reclaim_older_than_ms"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			ms = n
-		}
+func reclaimWindow(r *http.Request) (time.Duration, error) {
+	vs, ok := r.URL.Query()["reclaim_older_than_ms"]
+	if !ok {
+		return defaultReclaimMs * time.Millisecond, nil
 	}
-	if ms > maxReclaimMs {
-		ms = maxReclaimMs
+	// Repeated, it is refused as block_ms is, rather than read by its first
+	// value with the rest silently ignored (unrecorded, so in our words).
+	if len(vs) != 1 {
+		return 0, errInvalid("reclaim_older_than_ms must be given at most once")
 	}
-	return time.Duration(ms) * time.Millisecond
+	if vs[0] == "" {
+		return defaultReclaimMs * time.Millisecond, nil
+	}
+	n, err := pydanticInt("reclaim_older_than_ms", vs[0], 1)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(min(n, maxReclaimMs)) * time.Millisecond, nil
 }

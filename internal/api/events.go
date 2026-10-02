@@ -229,6 +229,31 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			primaryStatus = th.status
 		}
 	}
+	// A message or an outcome posted while the primary rests idle on a
+	// response — a confirmation, a custom call's result, a worker's — is the
+	// reference's 400, not input queued behind the call
+	// (events.CheckWhileAwaiting); the send's own answers and an interrupt
+	// reaching the primary count first. Only that state was recorded refusing:
+	// a primary still running, its turn or a platform call under way, queues
+	// the input as before. The flow read here is the primary's message arm's
+	// below: that arm runs only for an idle primary and a send carrying a
+	// message or an outcome — exactly when this read runs — and only for a
+	// primary the send gives no answer to, whose calls nothing in the send
+	// moves before the arm runs.
+	var primaryFlow events.ToolFlow
+	if primaryStatus == string(domain.SessionIdle) && slices.ContainsFunc(newEvents, func(ev events.NewEvent) bool {
+		return ev.Type == domain.EventUserMessage || ev.Type == domain.EventUserDefineOutcome
+	}) {
+		flow, awaited, err := events.ThreadWaits(ctx, tx, domain.ID(id), "", envKind, platformExecuted)
+		if err != nil {
+			return nil, err
+		}
+		reachesPrimary := func(i int) bool { return !scoped[i] || newEvents[i].ThreadID == "" }
+		if err := events.CheckWhileAwaiting(awaited, newEvents, reachesPrimary); err != nil {
+			return nil, errInvalid("%s", err)
+		}
+		primaryFlow = flow
+	}
 	// One active outcome at a time, and a file rubric must name a stored,
 	// rubric-sized file — DB-backed like the tool-result cross-checks. An
 	// interrupt in the same batch settles the active outcome first (its case
@@ -589,12 +614,13 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				return nil
 			})
 		case isPrimary && (hasUserMessage || hasDefineOutcome) && status == string(domain.SessionIdle):
-			// Messages remain queued behind any unprocessed tool call.
-			flow, err := events.ThreadToolFlow(ctx, tx, domain.ID(id), tid, platformExecuted)
-			if err != nil {
-				return nil, err
-			}
-			if flow.Unsettled {
+			// A message reaching an idle primary that still awaits a response
+			// was refused above; one behind a call that awaits nothing more
+			// from outside — its answer in but not yet processed, or the
+			// platform's to run — stays queued behind it. primaryFlow is the
+			// gate's read, which ran for this send under this arm's own
+			// conditions (status idle, a message or an outcome posted).
+			if primaryFlow.Unsettled {
 				break
 			}
 

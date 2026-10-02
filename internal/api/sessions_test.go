@@ -306,6 +306,17 @@ func fixture(t *testing.T, s *tserver) (agentID, envID string) {
 	return a["id"].(string), e["id"].(string)
 }
 
+// readableFixture is fixture with an agent whose toolset leaves read enabled,
+// the one a session needs before a file resource can be added to it
+// (requireReadTool).
+func readableFixture(t *testing.T, s *tserver) (agentID, envID string) {
+	t.Helper()
+	a := createAgent(t, s, map[string]any{"name": "task-agent", "model": "claude-opus-4-8", "system": "base system",
+		"tools": []any{map[string]any{"type": "agent_toolset_20260401"}}})
+	e := createEnvironment(t, s, map[string]any{"name": "task-env"})
+	return a["id"].(string), e["id"].(string)
+}
+
 // selfHostedFixture is fixture with a self_hosted environment: the kind whose
 // key a worker holds, and so the one whose key reaches a session, a mounted
 // file or a skill (#820).

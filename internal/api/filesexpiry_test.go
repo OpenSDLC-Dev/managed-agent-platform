@@ -150,6 +150,10 @@ func TestFileUploadExpiresInSeconds(t *testing.T) {
 		// Too large for an int64 — it parses, it is simply not a lifetime, so
 		// it is reported as out of range rather than as malformed.
 		{"beyond int64", strings.Repeat("9", 25), false, rangeMsg},
+		// ...but only an integer is: digits past int64 followed by anything
+		// else are malformed, though ParseInt would report the overflow first.
+		{"beyond int64, then not a digit", strings.Repeat("9", 20) + "x", false, integerMsg},
+		{"beyond int64, negative, then not a digit", "-" + strings.Repeat("9", 20) + "x", false, integerMsg},
 		// One byte past the cap, and the 32-byte prefix is a VALID in-range
 		// value (3600). A parser that truncated instead of rejecting would
 		// accept this as an hour; only a length reject fails it, so this is the

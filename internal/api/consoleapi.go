@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -498,14 +498,31 @@ func parseOffsetPage(q url.Values) (limit, offset int, err error) {
 }
 
 // pydanticInt parses one integer query parameter with a lower bound, refusing
-// it in pydantic's words.
+// it in pydantic's words. Its lax reading of a string is inferred, not
+// recorded: surrounding whitespace is stripped, as Python's int() strips it —
+// which also reads a query's `+5`, decoded to " 5", as 5 — and an integer
+// past any machine integer is still an integer, its bound checked like any
+// other: one over the minimum saturates at math.MaxInt, for the caller to cap,
+// and one under it is the minimum's sentence. A float or underscore spelling
+// ("5.0", "1_000") is not taken, with no evidence that pydantic takes it here.
 func pydanticInt(field, s string, min int) (int, error) {
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, errInvalid("%s: Input should be a valid integer, unable to parse string as an integer", field)
+	n, ok, overflow := parseDecimalInt(strings.TrimSpace(s))
+	switch {
+	case !ok:
+		return 0, errPydanticInt(field)
+	case overflow && n > 0, n > math.MaxInt:
+		return math.MaxInt, nil
+	case overflow, n < int64(min):
+		return 0, errPydanticMin(field, min)
 	}
-	if n < min {
-		return 0, errInvalid("%s: Input should be greater than or equal to %d", field, min)
-	}
-	return n, nil
+	return int(n), nil
+}
+
+// errPydanticInt and errPydanticMin are pydanticInt's two sentences.
+func errPydanticInt(field string) error {
+	return errInvalid("%s: Input should be a valid integer, unable to parse string as an integer", field)
+}
+
+func errPydanticMin(field string, min int) error {
+	return errInvalid("%s: Input should be greater than or equal to %d", field, min)
 }

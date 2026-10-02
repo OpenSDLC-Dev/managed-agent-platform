@@ -186,7 +186,12 @@ A self-hosted worker accepts both running and idle sessions and may execute late
 already-authorized sandbox calls; its result is still processed in thread order.
 Cloud drivers cannot cross an earlier unresolved call. A completed ready prefix
 can therefore move a thread running → idle while another custom reply is pending.
-Messages cannot bypass this wait. Session status remains the fold over threads,
+Messages cannot bypass this wait: to a primary resting idle on these responses, a
+`user.message` or `user.define_outcome` it could not read because it would still await
+one once the send's own answers are in — an interrupt reaching it answers them all —
+is refused with the reference's 400 (`events.CheckWhileAwaiting`); to a primary still
+running, or behind a call that awaits nothing from outside, it is queued behind the call.
+Session status remains the fold over threads,
 and only the answered thread receives model work after all its calls settle.
 Processing timestamps are independent of the model's replay watermark, so input
 accepted during a model call still schedules its continuation. Legacy running

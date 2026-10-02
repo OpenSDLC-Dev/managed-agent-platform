@@ -62,16 +62,18 @@ func (u *skillUpload) bundle() (*skills.Bundle, error) {
 // frontmatter length refusal answers the reference's sentence, recorded for
 // both fields on both routes (2026-09-12-followups skills-api.json #8, #9,
 // #18, #19; #540); it names neither the field nor its cap, which the line's
-// reason does.
+// reason does. Every refusal carries `x-should-retry: false`, as the bundle
+// refusals recorded where the header was captured do (2026-09-05 batch1
+// `SKILL.md not found in uploaded files` and the unreadable archive; #842).
 func (u *skillUpload) refuse(ctx context.Context, err error, attrs ...any) error {
 	attrs = append(attrs, "request_id", requestIDFrom(ctx),
 		"files", len(u.files), "bytes", u.totalBytes(), "reason", err)
 	slog.InfoContext(ctx, "skill upload rejected", attrs...)
 	var tooLong *skills.LengthError
 	if errors.As(err, &tooLong) {
-		return errInvalid("`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits")
+		return noRetry(errInvalid("`name` and `description` must resolve from `SKILL.md` frontmatter or its fallbacks, within their length limits"))
 	}
-	return errInvalid("%s", err)
+	return noRetry(errInvalid("%s", err))
 }
 
 // parseSkillUpload reads a multipart/form-data body of files[] parts (plus
@@ -135,7 +137,7 @@ func parseSkillUpload(r *http.Request, allowDisplayName bool) (*skillUpload, err
 				return nil, mapSkillBodyErr(err)
 			}
 			if utf8.RuneCount(data) > maxDisplayNameChars {
-				return nil, errInvalid("display_name must be at most %d characters long", maxDisplayNameChars)
+				return nil, noRetry(errInvalid("display_name must be at most %d characters long", maxDisplayNameChars))
 			}
 			up.displayName = string(data)
 			up.displayNameSet = true
@@ -147,7 +149,7 @@ func parseSkillUpload(r *http.Request, allowDisplayName bool) (*skillUpload, err
 		// The reference's own wording, and also what a part named bare "files"
 		// gets: it is not files[], so it is ignored, and the form then carries
 		// no file part at all.
-		return nil, errInvalid("files[]: Field required")
+		return nil, noRetry(errInvalid("files[]: Field required"))
 	}
 	return &up, nil
 }

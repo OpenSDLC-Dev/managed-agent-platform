@@ -275,16 +275,16 @@ func TestAChildsDenialIsListedAheadOfItsResume(t *testing.T) {
 // (2026-09-19-custom-order-followup setup.json,
 // ask-first-deny.final-audit.events idx 11 to 14: the denial, then the
 // thread's idle on the gate left open, session.usage and the session's idle),
-// so what the send leaves pending stays at the tail behind it (#793): a
-// message the parked primary reads once it resumes, and an allow queued behind
-// the gate still open, in either posted order.
+// so what the send leaves pending stays at the tail behind it (#793): an
+// allow queued behind the gate still open, in either posted order. A message
+// the parked primary could not read yet is no longer pending input but the
+// reference's refusal (TestWhatTheSendWaitsOn).
 func TestAReIdleIsListedBesideTheAnswerAheadOfPendingInput(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		pending func(ids []string) map[string]any
 		want    string
 	}{
-		{"a message", func([]string) map[string]any { return userMessage("once you can") }, "user.message"},
 		{"a queued allow", func(ids []string) map[string]any { return confirm(ids[2], "allow", nil) }, "user.tool_confirmation"},
 	} {
 		for _, pendingFirst := range []bool{false, true} {

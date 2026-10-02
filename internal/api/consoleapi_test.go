@@ -613,11 +613,25 @@ func TestConsoleKeyListPagesAndRendersNullExpiry(t *testing.T) {
 		"limit not a number":  {"?limit=many", "limit: Input should be a valid integer, unable to parse string as an integer"},
 		"offset negative":     {"?offset=-1", "offset: Input should be greater than or equal to 0"},
 		"offset not a number": {"?offset=soon", "offset: Input should be a valid integer, unable to parse string as an integer"},
+		// An integer past int64 is still an integer, bounded like any other;
+		// digits followed by anything else are not one, however many.
+		"limit past int64, negative":      {"?limit=-99999999999999999999", "limit: Input should be greater than or equal to 1"},
+		"limit past int64, then a letter": {"?limit=99999999999999999999x", "limit: Input should be a valid integer, unable to parse string as an integer"},
+		"limit as a float":                {"?limit=5.0", "limit: Input should be a valid integer, unable to parse string as an integer"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(http.MethodGet, consoleTokens(envID)+tc.query, nil)
 			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
 		})
+	}
+	// Taken, as pydantic's lax integers are (inferred): one past int64, which
+	// lists everything, and one with surrounding whitespace — a query's `+2`
+	// decodes to " 2".
+	if ids, _ := consoleKeyIDs(t, s, envID, "?limit=99999999999999999999"); len(ids) != 3 {
+		t.Errorf("?limit past int64 listed %d rows, want all 3", len(ids))
+	}
+	if ids, _ := consoleKeyIDs(t, s, envID, "?limit=+2"); len(ids) != 2 {
+		t.Errorf("?limit=+2 listed %d rows, want 2", len(ids))
 	}
 
 	// A row from before migration 0021 has no expiry and was promised it would

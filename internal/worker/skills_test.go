@@ -277,9 +277,9 @@ func (g *gaRegistry) materialize(t *testing.T, pin string) *fakeSandbox {
 // skills[] pin (plan 39 decision 5). The alias goes to the retrieve, which is
 // the only thing that resolves it, and the download rides the concrete id it
 // answers with — the reference worker's own rule (checked against
-// anthropic-sdk-go v1.70.1 — skills.go AgentToolContext.downloadSkill). An id
-// and the pre-GA numeric are already the addressing token and are carried
-// through verbatim.
+// anthropic-sdk-go v1.70.1 — skills.go AgentToolContext.downloadSkill) — and so
+// does the pre-GA numeric, which the reference's GA /content refuses. An id is
+// already the addressing token and is carried through verbatim.
 //
 // The two id rows are the regression the plan is built on: the two-way "digits
 // or else" test this replaces read a pinned version id as the alias "latest"
@@ -294,8 +294,8 @@ func TestSkillPinResolvesByForm(t *testing.T) {
 		pin  func(*gaRegistry) string
 		want int // index of the version whose archive must land
 		// downloadsBy is the token /content must be addressed by, which is the
-		// pin itself for every already-concrete form and the resolved id for
-		// the alias.
+		// pin itself for an id and the resolved id for the alias and the
+		// numeric.
 		downloadsBy func(*gaRegistry) string
 	}{
 		{"the alias latest", func(*gaRegistry) string { return "latest" }, 2,
@@ -305,7 +305,7 @@ func TestSkillPinResolvesByForm(t *testing.T) {
 		{"a legacy skillver_ id", func(g *gaRegistry) string { return g.versions[0].id }, 0,
 			func(g *gaRegistry) string { return g.versions[0].id }},
 		{"a legacy numeric pin", func(g *gaRegistry) string { return g.versions[1].numeric }, 1,
-			func(g *gaRegistry) string { return g.versions[1].numeric }},
+			func(g *gaRegistry) string { return g.versions[1].id }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -381,10 +381,16 @@ func TestSetupSkillsOverTheWire(t *testing.T) {
 		t.Errorf("materializing a two-file skill made WriteFiles calls of sizes %v, want exactly one of size 2",
 			sb.bulkSizes)
 	}
-	// The sentinel records the token the download was addressed by.
+	// The sentinel records the token the download was addressed by: for a
+	// numeric pin, the id the retrieve answered with.
+	var versionID string
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT id FROM skill_versions WHERE skill_id = 'wire-one' AND version = '100'`).Scan(&versionID); err != nil {
+		t.Fatal(err)
+	}
 	sentinel := sb.files["/workspace/skills/"+skills.SentinelName]
-	if !strings.Contains(sentinel, `"100"`) {
-		t.Errorf("sentinel = %q", sentinel)
+	if !strings.Contains(sentinel, `"`+versionID+`"`) {
+		t.Errorf("sentinel = %q, want the version id %s", sentinel, versionID)
 	}
 
 	// An unchanged resolved set skips rewrites on a reclaiming pass.

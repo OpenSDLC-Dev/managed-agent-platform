@@ -734,12 +734,16 @@ func isBareSessionPath(p string) bool {
 var errMethodNotAllowed = &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest, "Method Not Allowed"}
 
 // errUnknownPath is the wire 404 for a path no route matches — see the "/"
-// fallback for the two spellings and where each was recorded.
-func errUnknownPath(r *http.Request) *apiError {
+// fallback for the two spellings and where each was recorded. The lower-case
+// spelling is noRetry's, as every recorded one carries `x-should-retry: false`
+// (2026-09-05-dreams batch1 `rec91.control.nonsense-path`, `.dreamz`,
+// `.memory_storez`; 2026-09-02 free_batch1 `store.unarchive`); the capital one
+// was recorded without it (`rec91.control.dreams.extra-segment`).
+func errUnknownPath(r *http.Request) error {
 	if p := r.URL.Path; strings.HasPrefix(p, "/v1/deployments/") || strings.HasPrefix(p, "/v1/dreams/") {
 		return errNotFound("Not Found")
 	}
-	return errNotFound("Not found")
+	return noRetry(errNotFound("Not found"))
 }
 
 // roleGate is the adapters' min parameter for the handful of routes that cannot

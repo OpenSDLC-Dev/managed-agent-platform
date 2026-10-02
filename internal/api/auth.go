@@ -193,8 +193,9 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 		key := r.Header.Get("x-api-key")
 		if key == "" {
 			// The reference's words for a request offering no key (2026-09-19
-			// self-hosted-docker worker-network idx 0; #540).
-			writeError(w, r, errAuth("x-api-key header is required"))
+			// self-hosted-docker worker-network idx 0; #540), and its
+			// `x-should-retry: false` (#842).
+			writeError(w, r, noRetry(errAuth("x-api-key header is required")))
 			return
 		}
 		principal, err := authenticate(r.Context(), pool, key)

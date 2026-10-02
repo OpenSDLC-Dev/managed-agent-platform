@@ -121,7 +121,9 @@ lane, so that divergence is two-sided and always was.
 path and `?beta=true` [134, 135], so the route is not beta-only server-side. `latest` is
 refused there with the download-worded twin of the delete message [136]. The numeric version
 **is** accepted by `/content` even on the GA lane [150] while version metadata rejects it
-[34] — an asymmetry in the reference, recorded and not designed around. The console cookie is
+[34] — an asymmetry in the reference, recorded and not designed around. (Corrected for
+#842: [150] is a browser-cache replay of [140], a dated-header request, and GA `/content`
+refuses the numeric on both lanes — 2026-09-05 batch1 [46, 47]; docs/DIVERGENCES.md has it.) The console cookie is
 refused with `Downloading skill content is not supported with this credential type. Use a
 workspace API key, an environment credential, or a Session credential.` [44], and an
 environment key is refused on the skill object GET with an `any_of(org:skills, …)` scope

@@ -18,6 +18,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -1088,6 +1089,51 @@ func sessionResourceRows(ctx context.Context, db querier, id string, forUpdate b
 	return resources, archivedAt, nil
 }
 
+// requireReadTool refuses a file resource added to a session whose agent has
+// no usable read tool, in the reference's words (2026-09-12-console-141
+// ui-network.json #92 `session.file.attach-by-id`, against an agent whose
+// toolset enabled bash alone). Usable is what the sentence says: an
+// agent_toolset_20260401 entry on the session's own agent that leaves read
+// enabled — always_deny, the sentence's other half, is a policy this
+// platform's toolsets cannot carry. A session whose agent has no such entry
+// has no read tool at all. The agent is the session's snapshot, the primary's
+// on a coordinator session; MCP and custom tools do not count.
+//
+// The snapshot is read as it stands, so a session update that enables read
+// lets the add through. The reference refused it again after such an update
+// echoed read enabled (#112), for a cause its recording leaves unresolved;
+// that divergence is registered rather than reproduced. Session create is
+// not held to the rule: no recording shows a create attaching a file to an
+// agent without read.
+func requireReadTool(ctx context.Context, tx pgx.Tx, id string) error {
+	var tools []json.RawMessage
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(resolved_agent->'tools', '[]') FROM sessions WHERE id = $1`, id).Scan(&tools); err != nil {
+		return err
+	}
+	for _, t := range tools {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(t, &head) != nil || head.Type != "agent_toolset_20260401" {
+			continue
+		}
+		// An entry stored before a policy it carries stopped resolving offers
+		// no tool this platform can run, read included: it is skipped, so
+		// the add gets the refusal rather than a 500.
+		policies, err := toolset.Policies(t)
+		if err != nil {
+			slog.WarnContext(ctx, "session agent toolset does not resolve; read not usable",
+				"request_id", requestIDFrom(ctx), "session_id", id, "err", err)
+			continue
+		}
+		if _, ok := policies["read"]; ok {
+			return nil
+		}
+	}
+	return errInvalid("Missing required tool: file resources require the read tool to be usable (enabled and not always_deny) on the session's `agent_toolset`")
+}
+
 // updateSessionResources rewrites the resources array and bumps updated_at. No
 // session.updated event is emitted: the taxonomy has no session_resource.* event
 // and the documented session.updated payload carries only title/metadata/agent.
@@ -1230,6 +1276,9 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 		return fileResourceJSON{}, errInvalid("session %s is archived", id)
 	}
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
+		return fileResourceJSON{}, err
+	}
+	if err := requireReadTool(ctx, tx, id); err != nil {
 		return fileResourceJSON{}, err
 	}
 	if mountPathTaken(resources, in.mountPath) {

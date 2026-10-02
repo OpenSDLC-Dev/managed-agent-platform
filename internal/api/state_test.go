@@ -177,10 +177,9 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	// that reached idle with a tool_use still unanswered must not be woken on
 	// a user.message. The resumed turn would replay an assistant tool_use that
 	// no tool_result answers — a request the model protocol rejects. The
-	// message is accepted and appended, and the session stays idle; a later
-	// result alone does not revive it (that trigger needs a running session),
-	// but a batch carrying the result *and* the message does, which is why the
-	// check counts the batch's own results as answered.
+	// message is refused (the reference's 400, since #842) and the session
+	// stays idle; a batch carrying the result *and* the message resumes it,
+	// which is why the check counts the batch's own results as answered.
 	s := newTestServer(t)
 	sessionID := selfHostedSession(t, s)
 	ctx := context.Background()
@@ -198,17 +197,11 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	// The stranded state: idle, with the intent unanswered.
 	pgtest.SetSessionStatus(t, s.pool, domain.ID(sessionID), "idle")
 
-	sendEvents(t, s, sessionID, userMessage("are you still there?"))
-
-	if got := s.sessionStatus(sessionID); got != "idle" {
-		t.Errorf("status after user.message = %q, want idle (a tool_use is unanswered)", got)
-	}
-	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
-		t.Errorf("live model_turn items = %d, want 0", n)
-	}
+	sendRefusedWhileAwaiting(t, s, sessionID, whileAwaiting("user.message", 0, toolUseID),
+		userMessage("are you still there?"))
 	// The first message woke the session, so it follows its pair; the second
-	// woke nothing and sits where it was received.
-	want := []string{"session.status_running", "session.thread_status_running", "user.message", "agent.tool_use", "user.message"}
+	// was never appended.
+	want := []string{"session.status_running", "session.thread_status_running", "user.message", "agent.tool_use"}
 	got := s.eventTypes(sessionID)
 	if len(got) != len(want) {
 		t.Fatalf("event log = %v, want %v", got, want)

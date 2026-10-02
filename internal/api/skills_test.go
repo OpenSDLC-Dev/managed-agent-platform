@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -1542,4 +1543,132 @@ func TestSkillListParams(t *testing.T) {
 	status, body = s.do("GET", "/v1/skills?limit=0&page=bogus", nil)
 	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
 		"limit must be between 1 and 1000")
+}
+
+// TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing pins the reference's
+// create-time check on a `type: "anthropic"` skills entry (2026-09-02 batch2):
+// a version that does not resolve takes #419's sentence, an unknown skill
+// named without a version #421's, and a known skill named without one is
+// accepted and echoed as "latest" [#418]. The sentence follows whether a
+// version was named, an explicit "latest" taking the version's (2026-09-04
+// batch1 #110); the skill is found by id whatever its source, so an anthropic
+// entry naming a custom skill is accepted (#104) and one naming that skill at
+// a version it lacks refused. One of the reference's own prebuilt skills is
+// checked for its version's form alone, this platform having no way to know
+// the reference's versions of it: so #419's own `xlsx` at version `1` is
+// accepted here, a deliberate divergence, with a Warn naming what this
+// catalog does not resolve, and only a version of no form is refused. A
+// custom entry, an agent update and a session's override are not checked,
+// none of them recorded doing so for an anthropic entry.
+func TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing(t *testing.T) {
+	s := newTestServer(t)
+	create := func(skill map[string]any) (int, map[string]any) {
+		return s.do(http.MethodPost, "/v1/agents", map[string]any{
+			"name": "skill-ref", "model": "claude-haiku-4-5-20251001", "skills": []any{skill},
+		})
+	}
+	refused := func(skill map[string]any, want string) {
+		t.Helper()
+		status, obj := create(skill)
+		wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", want)
+	}
+
+	// Nothing imported: a prebuilt id at any version of a pin's form is
+	// accepted — #419's own `xlsx` at `1` among them, deliberately — with one
+	// Warn a create naming each unresolved id once; a version of no form is
+	// refused in #419's words; an id in neither is #421's refusal.
+	logs := captureLogs(t, slog.LevelWarn)
+	status, obj := s.do(http.MethodPost, "/v1/agents", map[string]any{"name": "prebuilt", "model": "claude-haiku-4-5-20251001",
+		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"},
+			map[string]any{"type": "anthropic", "skill_id": "pdf"},
+			map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "skver_018iw3a1acR7fWuwaNj1TqN6"}}})
+	if status != http.StatusOK {
+		t.Fatalf("prebuilt references on an empty catalog: %d %v, want 200", status, obj)
+	}
+	if n := strings.Count(logs(), "Anthropic's prebuilt skills this catalog does not resolve"); n != 1 || !strings.Contains(logs(), "skill_ids=\"[xlsx pdf]\"") {
+		t.Errorf("Warn on an empty catalog: %d lines, want 1 naming xlsx and pdf once each:\n%s", n, logs())
+	}
+	refused(map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "not a version"},
+		"Agent has invalid configuration: `skill_id` `xlsx` version `not a version` not found")
+	refused(map[string]any{"type": "anthropic", "skill_id": "no-such-skill"},
+		"Agent has invalid configuration: `skill_id` `no-such-skill` not found")
+	// Each entry keeps whether it named a version: an omitted one and an
+	// explicit "latest" on the same missing skill take different sentences.
+	status, obj = s.do(http.MethodPost, "/v1/agents", map[string]any{"name": "dup", "model": "claude-haiku-4-5-20251001",
+		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "gone"},
+			map[string]any{"type": "anthropic", "skill_id": "gone", "version": "latest"}}})
+	wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error",
+		"Agent has invalid configuration: `skill_id` `gone` not found")
+
+	// A partial import changes nothing for a prebuilt id: xlsx held, the
+	// reference's own versions of it (a date it minted, `1`) still accepted,
+	// and latest resolving here; pptx not held, accepted as before.
+	if _, err := s.pool.Exec(t.Context(),
+		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ('xlsx', 'anthropic', 'xlsx', '20260101')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(t.Context(),
+		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory)
+		 VALUES ('skver_0000000000000000000xlsx', 'xlsx', '20260101', 'xlsx', 'd', 'xlsx')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"latest", "1", "20251013"} {
+		if status, obj := create(map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": version}); status != http.StatusOK {
+			t.Errorf("an imported prebuilt skill at %q: %d %v, want 200", version, status, obj)
+		}
+	}
+	if status, obj := create(map[string]any{"type": "anthropic", "skill_id": "pptx", "version": "1"}); status != http.StatusOK {
+		t.Errorf("a prebuilt skill this partial catalog lacks: %d %v, want 200", status, obj)
+	}
+
+	custom := s.createSkill(t)
+	customID, _ := custom["id"].(string)
+	if _, err := api.ImportAnthropicSkills(t.Context(), s.pool, s.blobs, importDirs("alpha-notes"), "20260101"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	// Every entry is resolved in the one statement, the first miss answered.
+	status, obj = s.do(http.MethodPost, "/v1/agents", map[string]any{"name": "skill-refs", "model": "claude-haiku-4-5-20251001",
+		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "alpha-notes"},
+			map[string]any{"type": "anthropic", "skill_id": "alpha-notes", "version": "7"},
+			map[string]any{"type": "anthropic", "skill_id": "no-such-skill"}}})
+	wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error",
+		"Agent has invalid configuration: `skill_id` `alpha-notes` version `7` not found")
+	var versionID string
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT id FROM skill_versions WHERE skill_id = 'alpha-notes' AND version = '20260101'`).Scan(&versionID); err != nil {
+		t.Fatalf("read the imported version's id: %v", err)
+	}
+	for _, skill := range []map[string]any{
+		{"type": "anthropic", "skill_id": "alpha-notes"},
+		{"type": "anthropic", "skill_id": "alpha-notes", "version": "latest"},
+		{"type": "anthropic", "skill_id": "alpha-notes", "version": "20260101"},
+		{"type": "anthropic", "skill_id": "alpha-notes", "version": versionID},
+		{"type": "anthropic", "skill_id": customID},
+		{"type": "custom", "skill_id": "skill_01DoesNotExistXXXXXXXXXXX"},
+	} {
+		status, obj := create(skill)
+		if status != http.StatusOK {
+			t.Errorf("%v: %d %v, want 200", skill, status, obj)
+			continue
+		}
+		if got, _ := obj["skills"].([]any); len(got) != 1 || got[0].(map[string]any)["version"] == "" {
+			t.Errorf("%v: echoed skills %v", skill, obj["skills"])
+		}
+	}
+	refused(map[string]any{"type": "anthropic", "skill_id": "alpha-notes", "version": "1"},
+		"Agent has invalid configuration: `skill_id` `alpha-notes` version `1` not found")
+	refused(map[string]any{"type": "anthropic", "skill_id": "no-such-skill", "version": "latest"},
+		"Agent has invalid configuration: `skill_id` `no-such-skill` version `latest` not found")
+	refused(map[string]any{"type": "anthropic", "skill_id": customID, "version": "skver_01AsBoL6YhmcKN4PUSpPtmw3"},
+		"Agent has invalid configuration: `skill_id` `"+customID+"` version `skver_01AsBoL6YhmcKN4PUSpPtmw3` not found")
+
+	// Unchecked where no recording reaches: an update and a session override.
+	agent := createAgent(t, s, map[string]any{"name": "plain", "model": "claude-haiku-4-5-20251001"})
+	agentID, _ := agent["id"].(string)
+	status, obj = s.do(http.MethodPost, "/v1/agents/"+agentID, map[string]any{
+		"version": 1, "skills": []any{map[string]any{"type": "anthropic", "skill_id": "no-such-skill"}},
+	})
+	if status != http.StatusOK {
+		t.Errorf("update naming an unknown anthropic skill: %d %v, want 200 (unchecked)", status, obj)
+	}
 }

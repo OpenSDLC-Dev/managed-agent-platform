@@ -171,10 +171,10 @@ func TestCustomWaitMessagesAndCancellation(t *testing.T) {
 			sid, ids := customWaitPair(t, s)
 			sendEvents(t, s, sid, customReply(ids[1]))
 			saved := lastEventOfType(t, s, sid, "user.custom_tool_result")["id"]
-			sendEvents(t, s, sid, userMessage("do not skip the outstanding tool"))
-			if s.sessionStatus(sid) != "idle" || s.liveWork(sid, queue.ModelTurn) != 0 {
-				t.Fatal("ordinary message bypassed tool wait")
-			}
+			// Refused, naming the call still unanswered and not the one whose
+			// reply waits behind it.
+			sendRefusedWhileAwaiting(t, s, sid, whileAwaiting("user.message", 0, ids[0]),
+				userMessage("do not skip the outstanding tool"))
 			if archive {
 				code, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil)
 				if code != http.StatusOK {
