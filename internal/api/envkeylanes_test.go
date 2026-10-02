@@ -52,8 +52,10 @@ func cloudKeyRefusal(envID string) string {
 // has no worker to serve and must not act on that environment's sessions:
 // approve an always_ask call, answer a custom tool, define an outcome, read
 // the event stream, or download a mounted file a management key is refused.
-// The skill reads stay served, as the reference was recorded serving them to a
-// cloud environment's key (2026-09-05 batch2 idx 57, 59, 62).
+// The skill version reads stay served, as the reference was recorded serving a
+// version's content to a cloud environment's key (2026-09-05 batch2 idx 57, 59,
+// 62); the skill collection and a skill's own read answer it the reference's
+// 403, whatever its environment (#840).
 //
 // The routes are not listed from memory. Every registration in server.go is
 // requested twice, with a self_hosted environment's key and with a cloud

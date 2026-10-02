@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -455,4 +457,11 @@ func DreamCandidatesForTest(ctx context.Context, pool *pgxpool.Pool, now time.Ti
 func DreamArmForTest(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, id string,
 	now time.Time, cfg DreamRunnerConfig) error {
 	return newServer(pool, blobs, nil).runDreamArm(ctx, id, now, cfg)
+}
+
+// EnvironmentKeyRefusalPatternsForTest lists the route patterns the
+// management lane answers a live environment key on in the reference's words
+// (environmentKeyRefusals). Test binary only.
+func EnvironmentKeyRefusalPatternsForTest() []string {
+	return slices.Sorted(maps.Keys(environmentKeyRefusals))
 }

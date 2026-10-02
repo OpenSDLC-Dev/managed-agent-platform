@@ -16,17 +16,15 @@ import (
 
 // authenticateEnvironmentKey resolves a Bearer token to the environment it is
 // scoped to and that environment's kind, or "" if the key is unknown, revoked,
-// or expired. revoked reports the one of those three a caller answers in its
-// own words: the reference answers a key known to be revoked "OAuth access
-// token has been revoked." (errRevokedEnvironmentKey), and only the holder of
-// the key — 256 random bits when this platform minted it — can learn it.
-// Expired and unknown take the same branch on purpose: the caller turns them
-// into one 401 with one message, so a probing client learns nothing about
-// which of them it hit. A key that is both revoked and expired is revoked: a
-// revocation is permanent and the operator's own act, so a revoked key
-// answers one sentence for the rest of its life rather than changing its
-// answer on the day its expiry passes. A key minted before keys carried
-// expiries has a NULL expires_at and never expires.
+// or expired. revoked reports the one of those three the lanes may answer in
+// its own words, which lookupEnvironmentKey decides. Expired and unknown take
+// the same branch on purpose: the caller turns them into one 401 with one
+// message, so a probing client learns nothing about which of them it hit. A
+// key that is both revoked and expired is revoked: a revocation is permanent
+// and the operator's own act, so a revoked key answers one sentence for the
+// rest of its life rather than changing its answer on the day its expiry
+// passes. A key minted before keys carried expiries has a NULL expires_at and
+// never expires.
 //
 // The kind rides the same lookup because every lane gates on it, and a second
 // query on every poll would be its price. A key dies with its environment (ON
@@ -63,10 +61,11 @@ func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key str
 // `rec83.control.revoked-key-A.content`) and on GET /v1/models, a route
 // outside every environment-key lane (2026-09-19 custom-mixed-tools,
 // custom-order-followup and self-hosted-latest-cli `worker-network.json` idx
-// 170, 52 and 61). Every lane that recognises an environment key answers it,
-// the management lane included (answerEnvironmentKey). The reference's bodies
-// carry a null request_id and no request-id header; this one carries the
-// request id every response does.
+// 170, 52 and 61). lookupEnvironmentKey writes it, for every lane that reads
+// an environment key, the management lane included (answerEnvironmentKey) —
+// every public route; the internal gate-config endpoint takes a gate token and
+// nothing else. The reference's bodies carry a null request_id and no
+// request-id header; this one carries the request id every response does.
 var errRevokedEnvironmentKey = errAuth("OAuth access token has been revoked.")
 
 // bearerToken extracts a non-empty Authorization: Bearer token. ok reports
@@ -77,28 +76,54 @@ func bearerToken(r *http.Request) (token string, ok bool) {
 	return strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 }
 
+// lookupEnvironmentKey resolves token as an environment key for every lane
+// that reads one, and answers a revoked key itself, so the revoked 401
+// (errRevokedEnvironmentKey) is written here and nowhere else; answered
+// reports that it was. Only a key carrying the prefix this platform mints
+// (environmentKeySecretPrefix) is answered so: 256 random bits that only their
+// holder can present, so the sentence tells nobody else anything. The prefix
+// and migration 0021 landed together (#360), so every key carrying it was
+// minted here. A grandfathered pre-0021 key is a value its operator chose and
+// may be guessable, and a revoked one gets the lane's dead-key answer instead,
+// so a dictionary of guesses cannot learn which value once worked. Otherwise
+// it returns the live key's environment and kind, or "" for a key that is
+// expired, unknown, or revoked and grandfathered; err, a failed lookup, is the
+// lane's to answer.
+func lookupEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, token string) (envID string, kind domain.EnvironmentKind, answered bool, err error) {
+	envID, kind, revoked, err := authenticateEnvironmentKey(r.Context(), pool, token)
+	if err != nil || !revoked {
+		return envID, kind, false, err
+	}
+	if !strings.HasPrefix(token, environmentKeySecretPrefix) {
+		return "", "", false, nil
+	}
+	writeError(w, r, errRevokedEnvironmentKey)
+	return "", "", true, nil
+}
+
 // resolveEnvironmentKey authenticates a request's Authorization: Bearer
 // environment key, returning the environment it is scoped to and its kind. On a
 // missing/empty header or a key that is not live it writes the wire auth error
-// — a revoked key's own, or the one expired and unknown keys share — and
-// returns ok=false. Every environment-key middleware shares it so the
-// Bearer-resolution rules live in one place.
+// — a revoked key's own (lookupEnvironmentKey), or the one every other dead
+// key shares — and returns ok=false. Every environment-key middleware shares
+// it so the Bearer-resolution rules live in one place. Unlike the management
+// lane it looks up any Bearer, prefixed or not: a grandfathered key is still a
+// worker's credential here, and a failed lookup is the 500 an outage is on
+// every authenticating lane.
 func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, kind domain.EnvironmentKind, ok bool) {
 	token, hasBearer := bearerToken(r)
 	if !hasBearer || token == "" {
 		writeError(w, r, errAuth("missing Authorization: Bearer environment key"))
 		return "", "", false
 	}
-	envID, kind, revoked, err := authenticateEnvironmentKey(r.Context(), pool, token)
-	if err != nil {
+	envID, kind, answered, err := lookupEnvironmentKey(w, r, pool, token)
+	switch {
+	case answered:
+		return "", "", false
+	case err != nil:
 		writeError(w, r, err)
 		return "", "", false
-	}
-	if revoked {
-		writeError(w, r, errRevokedEnvironmentKey)
-		return "", "", false
-	}
-	if envID == "" {
+	case envID == "":
 		writeError(w, r, errAuth("invalid environment key"))
 		return "", "", false
 	}
@@ -107,43 +132,49 @@ func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool
 }
 
 // answerEnvironmentKey is the management lane's answer to an environment key
-// presented there as a Bearer, with no management key beside it, and reports
-// whether it wrote one. The lane looks such a key up only when the Bearer
-// carries the prefix every key this platform mints does
-// (environmentKeySecretPrefix), so a request offering an x-api-key — which the
-// dispatcher serves before asking — or any other Bearer costs no query. A
-// grandfathered pre-0021 key, whose value the operator chose, is therefore not
-// recognised here and keeps the missing-key 401.
+// presented there as a Bearer, with neither a management key nor a human
+// credential beside it (dispatchManagementAuth), and reports whether it wrote
+// one. Two things differ from the key lanes, deliberately:
 //
-// A revoked key gets its own 401 on every route, as on the key lanes
-// (errRevokedEnvironmentKey). A live key gets the reference's recorded refusal
-// on the routes it was recorded on (environmentKeyRefusal). Everywhere else,
-// and for an expired or unknown key, the lane answers as it always has, so an
+//   - The lane looks a key up only when the Bearer carries the prefix every key
+//     this platform mints does (environmentKeySecretPrefix), so a management
+//     key's request — served before this is asked — and any other Bearer cost
+//     no query. A grandfathered pre-0021 key, whose value the operator chose, is
+//     not recognised here and keeps the missing-key 401.
+//   - A failed lookup is not this request's 500. Nothing authenticated it, so
+//     the lane fails closed with the missing-key 401 it would give anyway, and
+//     the operator's log gets the failure at Warn.
+//
+// A revoked key gets its own 401 on every route the lane serves
+// (lookupEnvironmentKey). A live key gets the reference's recorded refusal on
+// the routes it was recorded on (environmentKeyRefusals). Everywhere else, and
+// for an expired or unknown key, the lane answers as it always has, so an
 // unauthenticated caller learns nothing about SSO or about which dead state a
 // key is in.
-func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) bool {
+func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, router *http.ServeMux) bool {
 	token, ok := bearerToken(r)
 	if !ok || !strings.HasPrefix(token, environmentKeySecretPrefix) {
 		return false
 	}
-	envID, _, revoked, err := authenticateEnvironmentKey(r.Context(), pool, token)
+	envID, _, answered, err := lookupEnvironmentKey(w, r, pool, token)
 	switch {
+	case answered:
+		return true
 	case err != nil:
-		writeError(w, r, err)
-		return true
-	case revoked:
-		writeError(w, r, errRevokedEnvironmentKey)
-		return true
+		slog.WarnContext(r.Context(), "management lane: environment key lookup failed; answering as for no key",
+			"request_id", requestIDFrom(r.Context()), "err", err)
+		return false
 	case envID == "":
 		return false
 	}
-	refusal := environmentKeyRefusal(r)
+	_, pattern := router.Handler(r)
+	refusal := environmentKeyRefusals[pattern]
 	if refusal == nil {
 		return false
 	}
 	markVerified(r.Context())
 	slog.InfoContext(r.Context(), "management route refused: environment key",
-		"request_id", requestIDFrom(r.Context()), "environment_id", envID)
+		"request_id", requestIDFrom(r.Context()), "environment_id", envID, "route", pattern)
 	writeError(w, r, refusal)
 	return true
 }
@@ -157,23 +188,25 @@ func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.
 // has no scope vocabulary of its own (#550).
 const skillsScopeRefusal = "OAuth token does not meet scope requirement any_of(org:skills, user:developer, user:managed_agents, user:skills, workspace:developer, workspace:skills)"
 
-// environmentKeyRefusal is the reference's answer to a live environment key on
-// a management route, for each route it was recorded on, and nil for every
-// other. An unrecorded route keeps this platform's answer: the reference's
-// refusals differ route by route — a 401 on the agents list, a 403 naming the
-// route's scopes on the skills — so nothing says which a third route takes.
-func environmentKeyRefusal(r *http.Request) error {
-	if r.Method != http.MethodGet {
-		return nil
-	}
-	switch p := r.URL.EscapedPath(); {
-	case p == "/v1/agents":
-		// 2026-09-03 batch2 idx 5 `envkey.agents.list-should-refuse`.
-		return errAuth("Authentication failed")
-	case p == "/v1/skills", isSkillResourcePath(p):
-		return errForbidden(skillsScopeRefusal)
-	}
-	return nil
+// environmentKeyRefusals is the reference's answer to a live environment key
+// on a management route, for each route it was recorded on, keyed by the
+// pattern server.go registers that route under. answerEnvironmentKey asks the
+// router which pattern a request reaches (ServeMux.Handler) rather than
+// matching paths of its own, so the table reads the request exactly as the
+// router does: a HEAD, which the router serves through a GET registration,
+// and a percent-encoded spelling it decodes (/v1/%61gents) take the route's
+// refusal as they would take its handler. The refusal cannot sit on the
+// registration itself, since every lane answers before the router runs
+// (dispatchAuth), and a handler would run only after the lane had answered.
+//
+// An unrecorded route keeps this platform's answer: the reference's refusals
+// differ route by route — a 401 on the agents list, a 403 naming the route's
+// scopes on the skills — so nothing says which a third route takes.
+var environmentKeyRefusals = map[string]*apiError{
+	// 2026-09-03 batch2 idx 5 `envkey.agents.list-should-refuse`.
+	"GET /v1/agents":      errAuth("Authentication failed"),
+	"GET /v1/skills":      errForbidden(skillsScopeRefusal),
+	"GET /v1/skills/{id}": errForbidden(skillsScopeRefusal),
 }
 
 // withEnvironmentKey records what an environment key resolved to: its

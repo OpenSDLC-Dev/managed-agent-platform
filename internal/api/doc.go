@@ -62,8 +62,9 @@
 // the work API excepted: it runs the other way, taking the environment key and
 // nothing else, since resolveEnvironmentKey demands a Bearer and a management
 // x-api-key never satisfies it (envauth.go). The management lane refuses an
-// environment key rather than ignoring it: a revoked key gets its own 401, and
-// a live one the reference's recorded refusal where one was recorded
+// environment key rather than ignoring it, when no human credential rides
+// beside it: a revoked key this platform minted gets its own 401, and a live
+// one the reference's recorded refusal where one was recorded
 // (answerEnvironmentKey, envauth.go). Outside the events subtree the dual-auth routes
 // are GET-only. Inside it, one event type runs the work API's way: a
 // user.tool_result is the environment credential's alone, and a management or

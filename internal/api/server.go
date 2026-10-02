@@ -347,8 +347,10 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 // no request reaches a handler — or a ServeMux redirect — unauthenticated. Work
 // API paths take the Authorization: Bearer environment key; the session events
 // subtree and the skill read routes are dual-auth (a worker's Bearer key or the
-// management x-api-key); everything else takes the management x-api-key.
-func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
+// management x-api-key); everything else takes the management x-api-key. next
+// is the router itself, typed as one because the management lane asks it which
+// route a request reaches (answerEnvironmentKey).
+func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux) http.Handler {
 	work := requireEnvironmentKey(pool, next)
 	workToken := requireWorkToken(pool, next)
 	mgmt := dispatchManagementAuth(pool, v, next)
@@ -424,7 +426,7 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 }
 
 // dispatchManagementAuth is the management arm's credential dispatch: the
-// machine key first, an environment key second, the human lane third, and
+// machine key first, the human lane second, an environment key third, and
 // today's 401 when none of them is offered (#56, plan 31, #840).
 //
 // Order is the security property. A non-empty x-api-key wins outright and keeps
@@ -433,10 +435,17 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 // automation depend on. Only when no key is offered does anything else get to
 // look, so an assertion header or a Bearer riding alongside a management key can
 // never vouch for it, and a caller cannot downgrade a route's role requirement
-// by attaching a second credential. An environment key, the other machine
-// credential, is looked at before the human lane — machine lanes first, as
-// dualAuth orders them — and on this lane it is only ever refused
-// (answerEnvironmentKey), never admitted.
+// by attaching a second credential.
+//
+// An environment key is looked at last, and only when no human credential is
+// offered either. On this lane it is only ever refused (answerEnvironmentKey),
+// never admitted, so it has nothing to win by going first, and going first
+// would let a stale worker Bearer beside a proxy's assertion refuse a human the
+// proxy vouched for. In oidc mode the two cannot meet in one header: a human's
+// credential is a JWT-shaped Bearer, and an environment key, which has no dots,
+// never is (identityCredential), so it reaches the answer below. That is the
+// reverse of dualAuth's order, where the environment lane admits, and a
+// worker's key is that route's machine credential.
 //
 // With identity disabled there is no human lane and no role check, which is the
 // contract IDENTITY_MODE=disabled carries. That contract is byte-for-byte on
@@ -451,7 +460,7 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 // recorded route each in its recorded words: a machine credential's answer,
 // which has nothing to do with whether humans can sign in, so it is the same in
 // every mode.
-func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
+func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	var human http.Handler
 	if v != nil {
@@ -462,14 +471,14 @@ func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.
 			mgmt.ServeHTTP(w, r)
 			return
 		}
-		if answerEnvironmentKey(w, r, pool) {
-			return
-		}
 		if human != nil {
 			if _, ok := identityCredential(r, v); ok {
 				human.ServeHTTP(w, r)
 				return
 			}
+		}
+		if answerEnvironmentKey(w, r, pool, next) {
+			return
 		}
 		// No credential this lane admits: requireAPIKey produces the same
 		// missing-key 401 it always has. Deliberately not a new message — an
@@ -529,7 +538,7 @@ func dualAuth(v *identity.Verifier, env, human, mgmt http.Handler) http.Handler 
 // on the environment lane, which still validates the key and scopes it to its own
 // environment. Mutating session CRUD (create/update/delete/archive/list) is not
 // routed here, so the environment key never reaches it.
-func dispatchSessionEventsAuth(pool *pgxpool.Pool, v *identity.Verifier, human, next http.Handler) http.Handler {
+func dispatchSessionEventsAuth(pool *pgxpool.Pool, v *identity.Verifier, human http.Handler, next *http.ServeMux) http.Handler {
 	return dualAuth(v, requireEnvironmentKeyForSession(pool, next), human,
 		dispatchManagementAuth(pool, v, next))
 }
@@ -640,7 +649,7 @@ func isSessionEventsPath(p string) bool {
 // so GET /v1/skills/{id} (isSkillResourcePath), the collection list
 // /v1/skills and every mutation stay management-only, and the management lane
 // answers an environment key on the two reads as recorded
-// (environmentKeyRefusal). Like the other predicates this sees the escaped
+// (environmentKeyRefusals). Like the other predicates this sees the escaped
 // path, so a %2F can never smuggle a skills segment past the router's view.
 func isSkillReadPath(p string) bool {
 	segs, ok := skillSegments(p)
