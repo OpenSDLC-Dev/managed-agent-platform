@@ -94,9 +94,9 @@ func withDetails(e *apiError, d errorDetails) error {
 }
 
 // apiErrorWithHeaders is an apiError the reference pins response headers to.
-// Exactly one is — the dream target-store hold, whose `x-should-retry: false`
-// is contract rather than decoration — so, for the reason above, the map sits
-// in its own type instead of a nil field on every other error.
+// Few are — the refusals noRetry marks, whose `x-should-retry: false` is
+// contract rather than decoration — so, for the reason above, the map sits in
+// its own type instead of a nil field on every other error.
 type apiErrorWithHeaders struct {
 	apiError
 	headers map[string]string
@@ -137,18 +137,22 @@ func errMemoryPrecondition(format string, args ...any) *apiError {
 	return &apiError{http.StatusConflict, errTypeMemoryPreconditionFailed, fmt.Sprintf(format, args...)}
 }
 
+// noRetry marks e with `x-should-retry: false`, as the reference marks a
+// refusal that only a change elsewhere can clear. The header is load-bearing:
+// without it the SDK spends two retries on a 409 (checked against
+// anthropic-sdk-go v1.70.1 — requestconfig.go NewRequestConfig and
+// shouldRetry, which reads x-should-retry ahead of the status code). Two
+// refusals carry it: the dream target-store hold and the environment delete
+// the sessions refuse.
+func noRetry(e *apiError) error {
+	return &apiErrorWithHeaders{apiError: *e, headers: map[string]string{"x-should-retry": "false"}}
+}
+
 // errTargetStoreHeld is the dream create's 409 (BetaTargetStoreHeldError, plan
-// 41 §5.3): the update_existing target is still held by a live in-place dream.
-// The header is load-bearing — without it the SDK spends two retries on a
-// conflict that nothing but the holding dream's close can clear (checked
-// against anthropic-sdk-go v1.70.1 — requestconfig.go NewRequestConfig and
-// shouldRetry, which reads x-should-retry ahead of the status code) — and
-// this is the only response on the platform that carries one.
+// 41 §5.3): the update_existing target is still held by a live in-place dream,
+// which nothing but the holding dream's close can clear, so it is noRetry's.
 func errTargetStoreHeld(format string, args ...any) error {
-	return &apiErrorWithHeaders{
-		apiError: apiError{http.StatusConflict, errTypeConflict, fmt.Sprintf(format, args...)},
-		headers:  map[string]string{"x-should-retry": "false"},
-	}
+	return noRetry(&apiError{http.StatusConflict, errTypeConflict, fmt.Sprintf(format, args...)})
 }
 
 func errAuth(message string) *apiError {

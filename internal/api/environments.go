@@ -820,6 +820,8 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 // force is whether the delete was forced: the reference grants that request, so
 // its sentence, whose one piece of advice is the force the caller just sent, is
 // not borrowed for refusing it — the same 409 answers in this platform's words.
+// Both carry the recorded `x-should-retry: false` (noRetry): only deleting the
+// sessions clears them.
 func environmentStillReferenced(ctx context.Context, db querier, envID string, force bool) error {
 	var sessions, deployments, stuck int
 	var envArchived bool
@@ -847,9 +849,9 @@ func environmentStillReferenced(ctx context.Context, db querier, envID string, f
 		// 404 if the environment went with it.
 		return errInvalid("environment %s was still referenced when the delete ran; try again", envID)
 	case deployments == 0 && force:
-		return errConflict("environment %s still has sessions; delete them first", envID)
+		return noRetry(errConflict("environment %s still has sessions; delete them first", envID))
 	case deployments == 0:
-		return errConflict("Environment has %d active sessions. Use force=true to delete anyway.", sessions)
+		return noRetry(errConflict("Environment has %d active sessions. Use force=true to delete anyway.", sessions))
 	}
 
 	list := strings.Join(named, ", ")

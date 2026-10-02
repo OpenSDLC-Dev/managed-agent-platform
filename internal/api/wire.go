@@ -190,14 +190,13 @@ func checkID(id, resource string) error {
 // checkAgentPathID is checkID for an agent path id, which the reference
 // answers apart from an absent one: 400, "Invalid agent ID." (2026-09-02
 // batch2 #115 `agent.get.coordinator.after-member-update`, a prefix-less
-// `undefined`; #841). Malformed is what this platform could never have minted
-// for an agent — no agent_ prefix, as recorded, or a token outside the id
-// alphabet, which the reference's agent-id check reads too (roster.go
-// checkAgentID's recording) — so nothing malformed reaches a bind parameter.
-// Every agent path route shares it, though only the get was recorded
-// (INFERRED, docs/DIVERGENCES.md).
+// `undefined`; #841). Malformed is domain.WellFormedID's: a reference-format
+// id (batch2 #136 read `agent_01UreT9PZKHtpNLgeSGzPCQh`) and the fixed
+// agent_dreamrunner go on to the lookup and its 404, the hidden row's
+// included. Every agent path route shares it, though only the get was
+// recorded (INFERRED, docs/DIVERGENCES.md).
 func checkAgentPathID(id string) error {
-	if !domain.ValidWithPrefix(id, domain.PrefixAgent) {
+	if !domain.WellFormedID(id, domain.PrefixAgent) {
 		return errInvalid("Invalid agent ID.")
 	}
 	return nil
@@ -209,9 +208,12 @@ func checkAgentPathID(id string) error {
 // "poll"; #841), on every {work_id} route, though only the update was recorded
 // (INFERRED, docs/DIVERGENCES.md). The accepted set is the sentence's three
 // plus sesn_, which the reference's own work ids carry and its routes were
-// recorded taking. Past that, the not-found message omits the id (matching
-// mapWorkErr's ErrWorkNotFound) so a worker cannot tell a malformed token from
-// an item it is not allowed to see.
+// recorded taking. An accepted id that domain.Valid refuses is then the 404
+// without a lookup — every cse_ id, cse being no prefix this platform knows,
+// and a sesn_ or session_ token outside its alphabet: this platform mints none
+// of them, so none can name an item. The not-found message omits the id
+// (matching mapWorkErr's ErrWorkNotFound) so a worker cannot tell a malformed
+// token from an item it is not allowed to see.
 func checkWorkID(id domain.ID) error {
 	switch {
 	case id.HasPrefix(domain.PrefixWork), id.HasPrefix(domain.PrefixSession), id.Prefix() == "cse":

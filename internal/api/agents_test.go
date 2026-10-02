@@ -409,23 +409,23 @@ func TestAgentGet(t *testing.T) {
 	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "agent "+absentAgentID+" not found")
 }
 
-// An agent path id this platform could never have minted is the reference's
-// 400, not the 404 an absent agent gets (2026-09-02 batch2 #115
-// `agent.get.coordinator.after-member-update`: GET /v1/agents/undefined, #841).
-// Recorded on the get, with a prefix-less id; the other three agent routes, an
-// id with another resource's prefix and a token outside the id alphabet — the
-// reference's own ids among them — share the check (INFERRED,
-// docs/DIVERGENCES.md). None reaches the database.
+// A malformed agent path id is the reference's 400, not the 404 an absent
+// agent gets (2026-09-02 batch2 #115 `agent.get.coordinator.after-member-update`:
+// GET /v1/agents/undefined, #841). Malformed is domain.WellFormedID's: no
+// prefix, as recorded, another resource's, or a token carrying what neither
+// this platform's ids nor the reference's do — the I the reference refused in
+// an agent id (#123 `agent.create.roster.unknown-agent`), a NUL. Recorded on
+// the get; the other three agent routes share the check (INFERRED,
+// docs/DIVERGENCES.md). A reference-format id — batch2 #136 read
+// `agent_01UreT9PZKHtpNLgeSGzPCQh` — and the runner's fixed agent_dreamrunner
+// are well-formed, so absent they are the 404.
 func TestAgentPathRefusesAMalformedID(t *testing.T) {
 	s := newTestServer(t)
-	for _, id := range []string{
-		"undefined",
-		"sesn_" + strings.Repeat("0", 24),
-		"agent_01UreT9PZKHtpNLgeSGzPCQh",
-		"agent_",
-		"agent_%00",
+	routes := func(id string) map[string]struct {
+		method, path string
+		body         any
 	} {
-		for name, tc := range map[string]struct {
+		return map[string]struct {
 			method, path string
 			body         any
 		}{
@@ -433,13 +433,32 @@ func TestAgentPathRefusesAMalformedID(t *testing.T) {
 			"update":   {http.MethodPost, "/v1/agents/" + id, map[string]any{"name": "x"}},
 			"versions": {http.MethodGet, "/v1/agents/" + id + "/versions", nil},
 			"archive":  {http.MethodPost, "/v1/agents/" + id + "/archive", nil},
-		} {
+		}
+	}
+	for _, id := range []string{
+		"undefined",
+		"sesn_" + strings.Repeat("0", 24),
+		"agent_01UnknownAgentIdXXXXXXXX",
+		"agent_",
+		"agent_%00",
+	} {
+		for name, tc := range routes(id) {
 			status, body := s.do(tc.method, tc.path, tc.body)
 			if status != http.StatusBadRequest {
 				t.Errorf("%s %s: status %d, want 400 (%v)", name, id, status, body)
 				continue
 			}
 			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Invalid agent ID.")
+		}
+	}
+	for _, id := range []string{"agent_01UreT9PZKHtpNLgeSGzPCQh", "agent_dreamrunner", absentAgentID} {
+		for name, tc := range routes(id) {
+			status, body := s.do(tc.method, tc.path, tc.body)
+			if status != http.StatusNotFound {
+				t.Errorf("%s %s: status %d, want 404 (%v)", name, id, status, body)
+				continue
+			}
+			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 		}
 	}
 }

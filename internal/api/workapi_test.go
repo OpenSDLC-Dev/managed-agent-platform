@@ -294,10 +294,13 @@ func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 // Every {work_id} route refuses an id carrying none of the prefixes the
 // reference accepts with its recorded sentence, recorded on the update alone
 // (INFERRED for the other four, docs/DIVERGENCES.md; #841). The accepted
-// prefixes are the sentence's three and sesn_, the reference's own work ids;
-// an id carrying one that names no item here — ours are all work_ — is the 404
-// an unknown item gets, whatever its token.
-func TestWorkIDFormatIsTheReferencesRefusal(t *testing.T) {
+// prefixes are the sentence's three and sesn_, the reference's own work ids,
+// and an id carrying one answers the 404 an unknown item gets — reached two
+// ways, since this platform mints only work_ ids: a work_, sesn_ or session_
+// id in its alphabet is looked up and missed, while a cse_ id and a
+// reference-format sesn_ one fail domain.Valid and are refused without a
+// lookup.
+func TestWorkIDFormatIsAnsweredAsTheReferenceAnswersIt(t *testing.T) {
 	s := newTestServer(t)
 	envID, _, key := selfHostedWorker(t, s, "ek-workid")
 	work := "/v1/environments/" + envID + "/work/"

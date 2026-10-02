@@ -435,13 +435,15 @@ func parseRosterEntry(raw json.RawMessage) (id string, version int64, isSelf boo
 }
 
 // checkAgentID rejects a member id on shape before it reaches a bind
-// parameter (the vault_ids precedent): a value that is not an agent_ id can
-// never name a stored agent.
+// parameter (the vault_ids precedent), by domain.WellFormedID, the shape an
+// agent path id is read by (#841): a reference-format id, or the fixed
+// agent_dreamrunner, goes on to the lookup, which answers it as absent or
+// hidden.
 func checkAgentID(id string) error {
 	if id == "" {
 		return errors.New("agent id must not be empty")
 	}
-	if !domain.ID(id).HasPrefix(domain.PrefixAgent) || !domain.ID(id).Valid() {
+	if !domain.WellFormedID(id, domain.PrefixAgent) {
 		return badAgentIDError(id)
 	}
 	return nil

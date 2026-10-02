@@ -155,31 +155,66 @@ func (id ID) HasPrefix(prefix string) bool {
 
 // Valid reports whether id is a well-formed resource identifier: a known
 // prefix, an underscore, and a non-empty token drawn only from idAlphabet — the
-// exact shape NewID emits, plus the session_ wire spelling. Clients only ever
-// hold ids the server minted, so a value failing this cannot name a stored row.
-// The API rejects such an id on shape (a 404 on a path, a 400 on a query
-// filter) before it reaches a bind parameter, where an unstorable byte (U+0000,
-// invalid UTF-8) — or any non-alphabet byte — would otherwise fail as a 500
-// (Postgres SQLSTATE 22021) rather than the status the wire expects.
+// exact shape NewID emits, plus the session_ wire spelling. A value failing
+// this cannot name a row NewID wrote. The API rejects such an id on shape
+// before it reaches a bind parameter, where an unstorable byte (U+0000,
+// invalid UTF-8) would otherwise fail as a 500 (Postgres SQLSTATE 22021): with
+// the 404 an absent id gets on most paths, and a 400 on a query filter. The
+// surfaces where the reference tells a malformed id from an absent one read
+// ids by WellFormedID instead, which admits the reference's own ids, and the
+// fixed ones this platform writes, to the lookup.
 func (id ID) Valid() bool {
 	prefix, token, ok := strings.Cut(string(id), "_")
 	return ok && knownPrefixes[prefix] && validToken(token)
 }
 
 // ValidWithPrefix is Valid narrowed to one prefix the caller names, whether or
-// not knownPrefixes holds it: the exact shape NewID emits for that prefix. Its
-// one caller holds an inbound session_thread_id to a thread's sthr_ shape
-// (internal/events/inbound.go threadClaim). The console's envkey_ and apikey_
-// ids no longer use it: the reference's own ids are not in this alphabet, so
-// the console checks their prefix and storable bytes instead (#664).
+// not knownPrefixes holds it: the exact shape NewID emits for that prefix. No
+// route reads ids by it now. The surfaces where the reference tells a
+// malformed id from an absent one read the wider WellFormedID, which admits the
+// reference's own ids (#841), and the console's envkey_ and apikey_ ids are
+// checked for their prefix and storable bytes (#664); plan 42 names it for a
+// workspace id, which this platform alone mints.
 func ValidWithPrefix(id, prefix string) bool {
 	p, token, ok := strings.Cut(id, "_")
 	return ok && p == prefix && validToken(token)
 }
 
-// validToken holds the rule both spellings share: a non-empty token drawn only
-// from idAlphabet. One copy, so the two entry points cannot drift on what an
-// acceptable id body is.
+// WellFormedID reports whether id is shaped like an id of the resource prefix
+// names, on the surfaces where the reference was recorded telling a malformed
+// id from an absent one: prefix_, then a non-empty token of ASCII letters and
+// digits other than I, O and l. That set is the union of the alphabet NewID
+// mints and the base58 the reference's own ids carry after their "01" (base58
+// has no 0, I, O or l; idAlphabet needs the 0), so every id either side mints
+// is well-formed — the fixed ones too, agent_dreamrunner among them — and the
+// reference's recorded refusals still read as malformed: a missing or wrong
+// prefix (`undefined`, `sth_…`) and an I in the token, which it refused as
+// malformed in a thread id (`sthr_01UnknownThreadIdXXXXXXXXX`) and an agent id
+// (`agent_01UnknownAgentIdXXXXXXXX`, 24 characters like every real one, so the
+// character is what decides and not the length). Only ASCII letters and digits
+// pass, so nothing unstorable reaches a bind parameter. The rule is inferred
+// from those recordings (docs/DIVERGENCES.md); the I is the only excluded
+// character any of them carries.
+func WellFormedID(id, prefix string) bool {
+	token, ok := strings.CutPrefix(id, prefix+"_")
+	if !ok || token == "" {
+		return false
+	}
+	for i := 0; i < len(token); i++ {
+		switch c := token[i]; {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'z' && c != 'l':
+		case c >= 'A' && c <= 'Z' && c != 'I' && c != 'O':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validToken holds the rule Valid and ValidWithPrefix share: a non-empty token
+// drawn only from idAlphabet. One copy, so the two entry points cannot drift on
+// what an acceptable id body is.
 func validToken(token string) bool {
 	if token == "" {
 		return false

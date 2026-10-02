@@ -168,12 +168,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// every live thread, a message / define_outcome / system.message the
 	// primary. Routed here, validated, before the triggers decide per thread.
 	scoped, err := events.RouteInbound(ctx, tx, domain.ID(id), newEvents)
-	var noThread *events.ThreadNotFoundError
-	if errors.As(err, &noThread) {
-		return nil, errNotFound("%s", noThread)
-	}
 	if err != nil {
-		return nil, errInvalid("%s", err)
+		return nil, routeInboundError(err)
 	}
 
 	// Route input per thread, then settle its ordered tool flow under the same
@@ -768,6 +764,22 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		data = append(data, wire)
 	}
 	return map[string]any{"data": data}, nil
+}
+
+// routeInboundError answers RouteInbound's refusals: an interrupt naming no
+// thread of the session is the reference's 404, the client's other mistakes
+// are 400s, and anything else — a database error, a cancelled context — is
+// returned as it came, to take writeError's 500 without its text.
+func routeInboundError(err error) error {
+	var noThread *events.ThreadNotFoundError
+	var refusal *events.RouteRefusal
+	switch {
+	case errors.As(err, &noThread):
+		return errNotFound("%s", noThread)
+	case errors.As(err, &refusal):
+		return errInvalid("%s", refusal)
+	}
+	return err
 }
 
 // interruptThreadIn is one thread's slice of an interrupt: the thread itself

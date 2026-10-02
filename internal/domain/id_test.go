@@ -194,3 +194,48 @@ func TestValidWithPrefix(t *testing.T) {
 		t.Errorf("%q must not validate under the agent prefix", good)
 	}
 }
+
+// TestWellFormedID pins the shape the surfaces that tell a malformed id from
+// an absent one read ids by (#841). Well-formed: every id NewID mints, the
+// fixed ids this platform writes, and the reference's own — each recorded one
+// answered as present or absent (2026-09-02 batch2 #136, #333). Malformed: the
+// reference's recorded refusals (#115, #123, #331, #337) and anything that is
+// not ASCII letters and digits.
+func TestWellFormedID(t *testing.T) {
+	for prefix, ids := range map[string][]string{
+		PrefixAgent: {NewID(PrefixAgent).String(), "agent_dreamrunner",
+			"agent_01UreT9PZKHtpNLgeSGzPCQh", "agent_016ieodQ5yinxXz3EowqtbPJ", "agent_0123456789abcdefghjkmnpqrstvwxyz"},
+		PrefixSessionThread: {NewID(PrefixSessionThread).String(),
+			PrimaryThreadID(NewID(PrefixSession)).String(), "sthr_01DdMGc4KudV1Z22t2L7Y9QH", "sthr_1"},
+	} {
+		for _, id := range ids {
+			if !WellFormedID(id, prefix) {
+				t.Errorf("%q should be well-formed under %q", id, prefix)
+			}
+		}
+	}
+	for name, id := range map[string]string{
+		"no prefix (#115)":            "undefined",
+		"another prefix (#337)":       "sth_01DdMGc4KudV1Z22t2L7Y9QH",
+		"an I in the token (#123)":    "agent_01UnknownAgentIdXXXXXXXX",
+		"an I, as on a thread (#331)": "agent_01UnknownThreadIdXXXXXXXXX",
+		"an O":                        "agent_01OOOOOOOOOOOOOOOOOOOOOO",
+		"an l":                        "agent_01lllllllllllllllllllllll",
+		"empty":                       "",
+		"prefix only":                 "agent",
+		"empty token":                 "agent_",
+		"another resource's id":       NewID(PrefixSession).String(),
+		"a longer prefix":             "agents_0123456789",
+		"hyphen":                      "agent_ab-cd",
+		"underscore in the token":     "agent_ab_cd",
+		"nul byte":                    "agent_\x00",
+		"invalid utf-8":               "agent_\x80",
+		"non-ascii letter":            "agent_é",
+		"leading space":               " agent_abcde",
+		"trailing space":              "agent_abcde ",
+	} {
+		if WellFormedID(id, PrefixAgent) {
+			t.Errorf("%s: %q should be malformed", name, id)
+		}
+	}
+}

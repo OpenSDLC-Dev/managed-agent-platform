@@ -304,6 +304,8 @@ func TestInboundThreadClaimValidation(t *testing.T) {
 		"another session's child":   otherChild,
 		"another session's primary": domain.PrimaryThreadID(domain.ID(other)).String(),
 		"no thread at all":          "sthr_" + strings.Repeat("0", 25),
+		// #333's own id, reference-format: well-formed, so the lookup's 404.
+		"the recorded id": "sthr_01DdMGc4KudV1Z22t2L7Y9QH",
 	} {
 		status, body := post(interrupt(claim))
 		if status != http.StatusNotFound {

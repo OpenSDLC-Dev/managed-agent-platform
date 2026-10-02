@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -139,5 +141,29 @@ func TestCapForLogCutsAtARuneBoundary(t *testing.T) {
 	if want := logFieldMax - len(truncatedMark) - 1; !ok || !utf8.ValidString(body) || len(body) != want || len(got) > logFieldMax {
 		t.Errorf("cut = %d bytes (%d with the marker), valid %v, marked %v; want %d valid bytes, marked",
 			len(body), len(got), utf8.ValidString(body), ok, want)
+	}
+}
+
+// RouteInbound's faults are not the client's (#841): a database error or a
+// cancelled context it returns takes writeError's 500 without its text, while
+// the interrupt naming no thread is the reference's 404 in its words. The
+// events package pins which of its errors are which
+// (TestRouteInboundTellsRefusalsFromFaults); this pins what each answers.
+func TestRouteInboundFaultsAnswerAsFaults(t *testing.T) {
+	render := func(err error) (int, string) {
+		r := httptest.NewRequest(http.MethodPost, "/v1/sessions/sesn_x/events", nil)
+		r = r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID, "req_x"))
+		w := httptest.NewRecorder()
+		writeError(w, r, routeInboundError(err))
+		return w.Code, w.Body.String()
+	}
+	status, body := render(fmt.Errorf("route inbound event: %w", context.Canceled))
+	if status != http.StatusInternalServerError || !strings.Contains(body, `"type":"api_error"`) ||
+		strings.Contains(body, "route inbound") || strings.Contains(body, "canceled") {
+		t.Errorf("a fault rendered %d %s, want a 500 api_error carrying none of its text", status, body)
+	}
+	status, body = render(&events.ThreadNotFoundError{ID: "sthr_01DdMGc4KudV1Z22t2L7Y9QH"})
+	if want := `{"error":{"message":"Thread not found: sthr_01DdMGc4KudV1Z22t2L7Y9QH","type":"not_found_error"},"request_id":"req_x","type":"error"}`; status != http.StatusNotFound || body != want+"\n" {
+		t.Errorf("an absent thread rendered %d %s, want 404 %s", status, body, want)
 	}
 }

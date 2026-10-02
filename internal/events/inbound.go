@@ -19,8 +19,8 @@ import (
 // byte-for-byte.
 //
 // An interrupt's explicit session_thread_id is validated for shape here and
-// resolved against the log by RouteInbound (route.go); an answer's is dropped
-// (threadClaim). Tool-result references are
+// resolved against the log by RouteInbound (route.go); an answer's is checked
+// for its type and dropped (answerClaim). Tool-result references are
 // cross-checked against the log by ValidateToolResults (toolflow.go) — that
 // needs a database, so it runs in the API's send transaction, not here; so
 // do user.define_outcome's single-active check and file-rubric validation
@@ -265,7 +265,7 @@ func normalizeUserInterrupt(obj map[string]json.RawMessage) (NewEvent, error) {
 	if err := allowKeys(obj, "type", "session_thread_id"); err != nil {
 		return NewEvent{}, err
 	}
-	claim, err := threadClaim(obj, true)
+	claim, err := threadClaim(obj)
 	if err != nil {
 		return NewEvent{}, err
 	}
@@ -307,18 +307,15 @@ func normalizeToolConfirmation(obj map[string]json.RawMessage, i int) (NewEvent,
 		}
 		denyMessage = raw
 	}
-	claim, err := threadClaim(obj, false)
-	if err != nil {
+	if err := answerClaim(obj); err != nil {
 		return NewEvent{}, err
 	}
-	ev, err := newEvent(domain.EventUserToolConfirm, fields{
+	return newEvent(domain.EventUserToolConfirm, fields{
 		"result":            mustJSON(result),
 		"tool_use_id":       mustJSON(toolUseID),
 		"deny_message":      denyMessage,
 		"session_thread_id": nullRaw,
 	})
-	ev.ThreadID = claim
-	return ev, err
 }
 
 // normalizeToolResult covers user.tool_result and user.custom_tool_result,
@@ -346,18 +343,15 @@ func normalizeToolResult(obj map[string]json.RawMessage, typ domain.EventType, r
 		}
 		isError = raw
 	}
-	claim, err := threadClaim(obj, false)
-	if err != nil {
+	if err := answerClaim(obj); err != nil {
 		return NewEvent{}, err
 	}
-	ev, err := newEvent(typ, fields{
+	return newEvent(typ, fields{
 		refKey:              mustJSON(ref),
 		"content":           content,
 		"is_error":          isError,
 		"session_thread_id": nullRaw,
 	})
-	ev.ThreadID = claim
-	return ev, err
 }
 
 // Rubric bounds, from the SDK's typed schema and the plan's own choices:
@@ -521,41 +515,55 @@ func isNullRaw(raw json.RawMessage) bool {
 	return string(raw) == "null"
 }
 
-// threadClaim reads an inbound event's explicit session_thread_id (plan 35
-// decision 9): null or absent is no claim, and anything but a string is
-// refused. An interrupt's claim must be a well-formed thread id, and rides
+// threadClaim reads an interrupt's explicit session_thread_id (plan 35
+// decision 9): null or absent is no claim, anything but a string is refused,
+// and a string must be a well-formed thread id by domain.WellFormedID — a
+// malformed one in the reference's words (2026-09-02 batch2
+// `sessK.send.interrupt.sth_-prefix` and `.unknown-thread`, #540), while a
+// reference-format one goes on to the lookup (#841). The claim rides
 // NewEvent.ThreadID out of normalization for RouteInbound to resolve against
-// the log as the one thread it ends; a malformed one is refused in the
-// reference's words (2026-09-02 batch2 `sessK.send.interrupt.sth_-prefix` and
-// `.unknown-thread`, #540).
-//
-// An answer's claim is dropped. The reference was recorded accepting a tool
-// confirmation that named another thread of the session, an unknown thread or
-// an `sth_` value, and storing it on the call's own thread (#334–#336
-// `sessK2.send.tool_confirmation.*`; #841): it routes an answer by the call it
-// answers, as RouteInbound does, so the claim decides nothing. A tool result's
-// and a custom tool result's claim go the same way (INFERRED,
-// docs/DIVERGENCES.md; neither is recorded): RouteInbound routes all three by
-// the one lookup. The stored payload keeps session_thread_id null either way,
-// rendered per surface like every thread-addressable event.
-func threadClaim(obj map[string]json.RawMessage, interrupt bool) (domain.ID, error) {
+// the log as the one thread the interrupt ends; the stored payload keeps
+// session_thread_id null, rendered per surface like every thread-addressable
+// event.
+func threadClaim(obj map[string]json.RawMessage) (domain.ID, error) {
 	raw, set := obj["session_thread_id"]
 	if !set || isNullRaw(raw) {
 		return "", nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", fmt.Errorf("session_thread_id must be a string or null")
+		return "", errClaimType
 	}
-	if !interrupt {
-		return "", nil
-	}
-	if !domain.ValidWithPrefix(s, domain.PrefixSessionThread) {
+	if !domain.WellFormedID(s, domain.PrefixSessionThread) {
 		return "", verbatim{ref: "Invalid session_thread_id: " + s,
 			ours: fmt.Sprintf("session_thread_id %q is not a session thread id", s)}
 	}
 	return domain.ID(s), nil
 }
+
+// answerClaim checks a tool confirmation's or a tool result's
+// session_thread_id for its type alone: null, absent or a string. Whatever the
+// string says is dropped. The reference was recorded accepting a tool
+// confirmation that named another thread of the session, an unknown thread or
+// an `sth_` value, and storing it on the call's own thread (#334–#336
+// `sessK2.send.tool_confirmation.*`; #841): it routes an answer by the call it
+// answers, as RouteInbound does, so the claim decides nothing. A tool result's
+// and a custom tool result's claim go the same way (INFERRED,
+// docs/DIVERGENCES.md; neither is recorded): RouteInbound routes all three by
+// the one lookup.
+func answerClaim(obj map[string]json.RawMessage) error {
+	raw, set := obj["session_thread_id"]
+	if !set || isNullRaw(raw) {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return errClaimType
+	}
+	return nil
+}
+
+var errClaimType = errors.New("session_thread_id must be a string or null")
 
 // Content-block vocabularies per carrier event.
 var (

@@ -215,11 +215,13 @@ func TestMetadataRejectsNUL(t *testing.T) {
 // left open: path IDs and id-shaped query parameters. Go's http.ServeMux
 // percent-decodes %00 into a real NUL in PathValue / URL.Query, so without a
 // shape guard the byte binds straight into Postgres and fails with SQLSTATE
-// 22021 — a 500. Every affected surface must instead return the wire error an
-// unknown or absent id already gets: a 404 on a path id (or work item), a 400 on
-// an id-shaped query filter, the page cursor, or the free-form types[] filter.
-// See #135. An agent path id is the exception: the reference answers a
-// malformed one apart from an absent one, 400 (#841).
+// 22021 — a 500. Every affected surface must instead answer a 4xx: on most,
+// the wire error an unknown or absent id already gets — a 404 on a path id (or
+// work item), a 400 on an id-shaped query filter, the page cursor, or the
+// free-form types[] filter (#135). Where the reference answers a malformed id
+// apart from an absent one, it is that 400 in its words instead (#841): an
+// agent path id here, and a thread path id, which
+// TestThreadsPrimaryOnEverySession sweeps.
 func TestPathAndQueryRejectNUL(t *testing.T) {
 	s := newTestServer(t)
 	agent := createAgent(t, s, map[string]any{"name": "nul-id", "model": "m"})
@@ -243,7 +245,7 @@ func TestPathAndQueryRejectNUL(t *testing.T) {
 		"agent versions": {http.MethodGet, "/v1/agents/agent_" + nul + "/versions", nil},
 		"agent archive":  {http.MethodPost, "/v1/agents/agent_" + nul + "/archive", nil},
 		// Invalid UTF-8 (a percent-decoded %80) is unstorable the same way, and
-		// the alphabet check rejects it on shape too.
+		// domain.WellFormedID rejects it on shape too.
 		"agent get invalid utf-8": {http.MethodGet, "/v1/agents/agent_%80", nil},
 	} {
 		status, res := s.do(tc.method, tc.path, tc.body)

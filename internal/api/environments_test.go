@@ -937,12 +937,21 @@ func TestEnvironmentDeleteBlockedBySessions(t *testing.T) {
 		t.Fatalf("archive session: %d %v", status, body)
 	}
 
-	// The reference's refusal, words and count included (2026-09-03 batch2
-	// #250 `sweep2.del.environments.pWX3jb`, #841). It counted four sessions
-	// already deleted through its API on a self_hosted environment; here a
-	// deleted session is gone, and every session that is not — archived ones
-	// included, on either kind of environment — is counted.
-	status, body := s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	// The reference's refusal, words, count and header included (2026-09-03
+	// batch2 #250 `sweep2.del.environments.pWX3jb`, #841). It counted four
+	// sessions already deleted through its API on a self_hosted environment;
+	// here a deleted session is gone, and every session that is not — archived
+	// ones included, on either kind of environment — is counted. Its
+	// `x-should-retry: false` keeps the SDK from retrying the 409 twice.
+	del := func(path string) (int, map[string]any) {
+		t.Helper()
+		res := s.doRaw(http.MethodDelete, path, nil, map[string]string{"x-api-key": testKey})
+		if got := res.Header.Get("x-should-retry"); got != "false" {
+			t.Errorf("DELETE %s: x-should-retry = %q, want %q", path, got, "false")
+		}
+		return readJSON(t, res)
+	}
+	status, body := del("/v1/environments/" + envID)
 	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error",
 		"Environment has 2 active sessions. Use force=true to delete anyway.")
 
@@ -951,15 +960,15 @@ func TestEnvironmentDeleteBlockedBySessions(t *testing.T) {
 	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+sessions[1], nil); status != http.StatusOK {
 		t.Fatalf("delete session: %d %v", status, body)
 	}
-	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID, nil)
+	status, body = del("/v1/environments/" + envID)
 	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error",
 		"Environment has 1 active sessions. Use force=true to delete anyway.")
 
 	// force=true deletes no session here (#546), so the forced delete is
-	// refused by the same sessions: the same 409, in this platform's words,
-	// since the reference grants that request and its sentence's advice is the
-	// force just sent.
-	status, body = s.do(http.MethodDelete, "/v1/environments/"+envID+"?force=true", nil)
+	// refused by the same sessions: the same 409 and header, in this platform's
+	// words, since the reference grants that request and its sentence's advice
+	// is the force just sent.
+	status, body = del("/v1/environments/" + envID + "?force=true")
 	wantErrMsg(t, status, body, http.StatusConflict, "invalid_request_error",
 		"environment "+envID+" still has sessions; delete them first")
 

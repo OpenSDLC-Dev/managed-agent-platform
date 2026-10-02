@@ -403,14 +403,16 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 // transmits an empty access (omitzero), so "" is refused with every other value
 // outside the enum rather than read as the default.
 //
-// On session create the shape is the prefix alone: the reference read
-// `memstore_01UnknownStoreIdXXXXXXXXX`, a token outside this platform's id
-// alphabet, as a well-formed id naming nothing — 404, "Memory store `…` not
-// found." (2026-09-02 batch2 #160 `session.create.unknown-store`; #841) — so
-// such an id goes on to the store lookup, which answers it that way. That
-// lookup compares text through a bind parameter, so the token need only be
-// storable (storableText); a value that is not still takes the 400. The
-// deployment routes keep the full shape: they look no store up until a fire.
+// On session create the shape is the lookup's, consoleIDShape's prefix and
+// non-empty token: the reference looked up `memstore_01UnknownStoreIdXXXXXXXXX`
+// and answered 404, "Memory store `…` not found." (2026-09-02 batch2 #160
+// `session.create.unknown-store`; #841), though its token carries the I that
+// domain.WellFormedID refuses in an agent or a thread id — the reference parses
+// those and evidently not this one. So such an id goes on to the store lookup,
+// which answers it that way. That shape also holds the token to storable text,
+// which a string decoded from a JSON body already is: decoding replaces invalid
+// UTF-8, and decodeObject's body-wide check has refused U+0000. The deployment
+// routes keep the full shape: they look no store up until a fire.
 func parseMemoryResource(obj map[string]json.RawMessage, f resourceFlavor, i int) (resourceInput, error) {
 	if err := rejectUnknownKeys(obj, "type", "memory_store_id", "access", "instructions"); err != nil {
 		return resourceInput{}, err
@@ -421,8 +423,7 @@ func parseMemoryResource(obj map[string]json.RawMessage, f resourceFlavor, i int
 	}
 	wellFormed := domain.ID(id).HasPrefix(domain.PrefixMemoryStore) && domain.ID(id).Valid()
 	if f == resourceForSession {
-		_, token, _ := strings.Cut(id, "_")
-		wellFormed = domain.ID(id).HasPrefix(domain.PrefixMemoryStore) && token != "" && storableText(id)
+		wellFormed = consoleIDShape(id, domain.PrefixMemoryStore)
 	}
 	if !wellFormed {
 		return resourceInput{}, errInvalid("memory_store_id must be a valid memory store id")
