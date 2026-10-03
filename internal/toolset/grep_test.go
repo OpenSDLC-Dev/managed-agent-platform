@@ -805,6 +805,42 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 	}
 }
 
+// floodHook is an image's BASH_ENV file whose EXIT trap prints past the
+// sandbox's output cap on both streams, after whatever the shell ran.
+const floodHook = `trap "head -c 1100000 /dev/zero | tr '\0' x; head -c 1100000 /dev/zero | tr '\0' y >&2" EXIT` + "\n"
+
+// On an image whose EXIT trap floods both streams past the cap, every
+// search's script has printed its end line before the flood begins: the cap
+// cut nothing the search said, and no answer or failure says it did.
+func TestASearchCutOnlyPastItsEndLineSaysNothingOfTheCap(t *testing.T) {
+	image := dockertest.ImageFrom(t, "search-flood", "FROM debian:stable-slim\n"+
+		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(floodHook))+" | base64 -d > /etc/map-flood.sh\n"+
+		"ENV BASH_ENV=/etc/map-flood.sh\n", "--host", docker.DaemonHost())
+	r := runner(t, fromImage(image))
+	ok(t, r, "write", `{"file_path":"fl/a.txt","content":"needle\n"}`)
+	ok(t, r, "write", `{"file_path":"fl/b.txt","content":"needle\n"}`)
+	for in, want := range map[string]string{
+		`{"pattern":"needle","path":"fl"}`:                         "/workspace/fl/a.txt\n/workspace/fl/b.txt",
+		`{"pattern":"needle","path":"fl","output_mode":"content"}`: "/workspace/fl/a.txt:1:needle\n/workspace/fl/b.txt:1:needle",
+	} {
+		if got := ok(t, r, "grep", in); got != want {
+			t.Errorf("grep(%s) = %q, want %q", in, got, want)
+		}
+	}
+	if got := ok(t, r, "glob", `{"pattern":"*.txt","path":"fl"}`); !slices.Contains(strings.Split(got, "\n"), "/workspace/fl/a.txt") ||
+		strings.Contains(got, "truncated") {
+		t.Errorf("glob = %q, want the two files and nothing of the cap", got)
+	}
+	for _, tc := range []struct{ tool, in, want string }{
+		{"grep", `{"pattern":"[unclosed","path":"fl"}`, "regex parse error"},
+		{"glob", `{"pattern":"*","path":"fl/absent"}`, "no such directory"},
+	} {
+		if msg := fails(t, r, tc.tool, tc.in, tc.want); strings.Contains(msg, "truncated") || strings.Contains(msg, "xxx") {
+			t.Errorf("%s(%s) = %q; want the failure alone, nothing of the cap", tc.tool, tc.in, msg)
+		}
+	}
+}
+
 // glob expands `**` with bash's globstar, which bash 3.2 does not have: on a
 // 3.2 image every glob is a tool error naming the bash it needs, never a
 // search in which `**` quietly means `*`. grep, whose scripts stay within 3.2,
@@ -1206,8 +1242,9 @@ func TestACommandTooLongIsTheModelsOnlyWhereItsInputMadeIt(t *testing.T) {
 // stderr the cap cut before its begin line has lost rg's messages, which the
 // answer says rather than dropping them silently. Each stream is read by its
 // own cut: a stderr flood marks no whole answer as cut and lets no answer
-// without its end line through, and a stream cut inside its end line keeps
-// none of it.
+// without its end line through, a stream cut inside its end line keeps none
+// of it, and one cut only after its end line — an EXIT trap's flood — is
+// whole, with no notice.
 func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 	const denied = "rg: /workspace/b.txt: Permission denied (os error 13)"
 	const unframed = "grep: no answer reached the output whole"
@@ -1275,6 +1312,15 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 			StdoutTruncated: true, StderrTruncated: true}, false, "[output truncated]\n/workspace/a.txt\n[output truncated]"},
 		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "flood flood", StderrTruncated: true},
 			true, "[output truncated]\ngrep: failed with exit code 2"},
+		// A cap that cut a stream only after its end line — an EXIT trap's
+		// flood — cut nothing rg said: the answer and its messages stand
+		// whole, with no notice.
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptEnded + "trap flood", StdoutTruncated: true},
+			false, "/workspace/a.txt"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "rg: a\n" + scriptEnded + "trap flood",
+			StderrTruncated: true}, false, "/workspace/a.txt\nrg: a"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptEnded + "trap flood",
+			Stderr: scriptBegan + scriptEnded + "trap flood", StdoutTruncated: true, StderrTruncated: true}, false, "/workspace/a.txt"},
 	} {
 		res, err := run(t, &fakeSandbox{exec: tc.exec}, "grep", `{"pattern":"x"}`)
 		if err != nil || res.IsError != tc.isError || res.Content != tc.want && !(tc.isError && strings.HasPrefix(res.Content, tc.want)) {

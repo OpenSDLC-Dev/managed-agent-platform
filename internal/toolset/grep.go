@@ -383,7 +383,7 @@ func missingRipgrep(res sandbox.ExecResult, f searchFrame) (string, bool) {
 	if res.ExitCode != exitNoRipgrep {
 		return "", false
 	}
-	out, ok := f.cut(res.Stdout, res.StdoutTruncated)
+	out, ok, _ := f.cut(res.Stdout, res.StdoutTruncated)
 	if !ok {
 		return "", false
 	}
@@ -669,12 +669,14 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 // neither marks a whole answer as cut nor lets one without its end line
 // through. A stderr without its frame is none of rg's and is left out: only
 // the cap takes a begin line that the script printed first, and with it
-// whatever came after. What the cap cut says so — in front of the answer when
-// it cut the answer, after rg's messages when it cut them, after the answer
-// when it took them whole, its begin line included, and in front of a failure
-// when it cut either (searchFrame.messages, searchFailure).
+// whatever came after. What the cap cut of the script's says so — in front of
+// the answer when it cut the answer, after rg's messages when it cut them,
+// after the answer when it took them whole, its begin line included, and in
+// front of a failure when it cut either (searchFrame.messages,
+// searchFailure); a stream it cut only after the end line — an EXIT trap's
+// flood — lost nothing of the script's, and says nothing.
 func grepAnswer(res sandbox.ExecResult, f searchFrame) (Result, error) {
-	out, framed := f.cut(res.Stdout, res.StdoutTruncated)
+	out, framed, short := f.cut(res.Stdout, res.StdoutTruncated)
 	if !framed {
 		return unframed("grep", res)
 	}
@@ -687,11 +689,12 @@ func grepAnswer(res sandbox.ExecResult, f searchFrame) (Result, error) {
 	case res.ExitCode == 1, res.ExitCode == exitErrorBesideEmptyPage:
 		out = "no matches"
 	default:
-		return searchFailure("grep", out, msg, res.ExitCode, res.StdoutTruncated || lost)
+		return searchFailure("grep", out, msg, res.ExitCode, short || lost)
 	}
-	// The sandbox's own per-stream cap may already have cut this stream; the
+	// The sandbox's own per-stream cap may already have cut the answer; the
 	// marker must ride along, or a spill of it would read as the full result.
-	if res.StdoutTruncated {
+	// A cap that cut the stream only after its end line cut no answer.
+	if short {
 		out = truncationNotice + "\n" + out
 	}
 	// Messages the cap took whole, begin line and all, are said where they

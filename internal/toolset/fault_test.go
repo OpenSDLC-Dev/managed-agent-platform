@@ -382,7 +382,7 @@ func TestSearchTimeoutIsAnErrorResult(t *testing.T) {
 // reading as an empty result. Each stream's cut is said where it cut, by both
 // tools alike (sandbox.ExecResult's per-stream flags): after the messages the
 // cap cut, and in front where it cut the output, or took the messages whole,
-// begin line and all.
+// begin line and all — and nowhere where it cut only past the end lines.
 func TestSearchFailure(t *testing.T) {
 	for _, tool := range []string{"glob", "grep"} {
 		sb := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "banner" + scriptBegan + "unmatched [\n"}}
@@ -407,6 +407,11 @@ func TestSearchFailure(t *testing.T) {
 				"[output truncated]\n" + tool + ": failed with exit code 9"},
 			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan + "partial" + scriptNoEnd, Stderr: scriptBegan + "err: a\n", StdoutTruncated: true},
 				"[output truncated]\npartial\nerr: a"},
+			// A cap that cut both streams only after their end lines — an
+			// EXIT trap's flood — took nothing the command said.
+			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan + "partial" + scriptEnded + "trap flood",
+				Stderr: scriptBegan + "err: a\n" + scriptEnded + "trap flood", StdoutTruncated: true, StderrTruncated: true},
+				"partial\nerr: a"},
 		} {
 			res, _ := run(t, &fakeSandbox{exec: tc.exec}, tool, `{"pattern":"*"}`)
 			if !res.IsError || res.Content != tc.want {

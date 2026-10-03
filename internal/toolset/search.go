@@ -64,58 +64,65 @@ printf '\n%%s\n' %[1]s; printf '\n%%s\n' %[1]s >&2
 }
 
 // cut returns what the script printed on one stream — what lies between the
-// last begin line and the end line after it — and true. Each line is printed
-// after a newline of its own, so it is a line however what came before it
-// ended, and the newline before the end line is the frame's, not the
-// script's. The last begin line, because whatever printed before the script —
-// an image's banner — can print a line that looks like one, nonce and all,
-// having read the script from the exec's argv; the script's own comes after
-// it. That choice opens the other side as far as it closes this one: what
-// prints after the script's end line — an EXIT trap an image's startup file
-// set, which runs in the script's own shell and reads the nonce there — can
-// print a begin line, an answer and an end line of its own, and that is what
-// is read. Neither is a boundary the frame keeps: it keeps out what an
-// image's startup prints by accident, not what a process in the sandbox
-// forges on purpose (searchBeginPrefix, #860). A stream the sandbox's cap cut (truncated: that stream's own flag,
-// never the other's) has lost its end line, so all that follows the begin line
-// is what there is, less any start of the end line the cap left at its tail. A
-// stream with no begin line, or a whole one with no end line after it, is not
-// one the script printed to its end: "", false.
-func (f searchFrame) cut(s string, truncated bool) (string, bool) {
+// last begin line and the end line after it — with framed true, and short
+// true where the sandbox's cap cut the stream before its end line. Each line
+// is printed after a newline of its own, so it is a line however what came
+// before it ended, and the newline before the end line is the frame's, not
+// the script's. The last begin line, because whatever printed before the
+// script — an image's banner — can print a line that looks like one, nonce
+// and all, having read the script from the exec's argv; the script's own
+// comes after it. That choice opens the other side as far as it closes this
+// one: what prints after the script's end line — an EXIT trap an image's
+// startup file set, which runs in the script's own shell and reads the nonce
+// there — can print a begin line, an answer and an end line of its own, and
+// that is what is read. Neither is a boundary the frame keeps: it keeps out
+// what an image's startup prints by accident, not what a process in the
+// sandbox forges on purpose (searchBeginPrefix, #860).
+//
+// A stream the sandbox's cap cut (truncated: that stream's own flag, never
+// the other's) before its end line is short: all that follows the begin
+// line is what there is, less any start of the end line the cap left at its
+// tail. One the cap cut only after its end line — an EXIT trap's flood — is
+// whole, and not short. A stream with no begin line, or a whole one with no
+// end line after it, is not one the script printed to its end: "", false,
+// false.
+func (f searchFrame) cut(s string, truncated bool) (text string, framed, short bool) {
 	t := "\n" + s
 	begin := "\n" + f.begin + "\n"
 	i := strings.LastIndex(t, begin)
 	if i < 0 {
-		return "", false
+		return "", false, false
 	}
 	rest := t[i+len(begin):]
 	end := "\n" + f.end + "\n"
 	if j := strings.Index(rest, end); j >= 0 {
-		return rest[:j], true
+		return rest[:j], true, false
 	}
 	if !truncated {
-		return "", false
+		return "", false, false
 	}
 	for k := min(len(end)-1, len(rest)); k > 0; k-- {
 		if strings.HasSuffix(rest, end[:k]) {
-			return rest[:len(rest)-k], true
+			return rest[:len(rest)-k], true, true
 		}
 	}
-	return rest, true
+	return rest, true, true
 }
 
 // messages is what a search's script printed on stderr (cut), trimmed, and
-// what the sandbox's cap took of it there. A stderr the cap cut after the
-// begin line keeps what came before the cut, with the truncation notice after
-// it. One the cap cut before the begin line — what an image's startup printed
-// filled the cap first — has lost all the script printed there: its messages
-// are "", and lost tells the caller to say the cap cut them (searchFailure,
-// grepAnswer). A stderr the cap did not cut and with no frame is none of the
-// script's: "".
+// what the sandbox's cap took of it there. A stderr the cap cut between the
+// begin and end lines keeps what came before the cut, with the truncation
+// notice after it; one it cut only after the end line — an EXIT trap's flood
+// — took none of the script's, and says nothing of the cap. One the cap cut
+// before the begin line — what an image's startup printed filled the cap
+// first — has lost all the script printed there: its messages are "", and
+// lost tells the caller to say the cap cut them (searchFailure, grepAnswer).
+// A stderr the cap did not cut and with no frame is none of the script's:
+// "".
 func (f searchFrame) messages(res sandbox.ExecResult) (msg string, lost bool) {
-	msg, framed := f.cut(res.Stderr, res.StderrTruncated)
+	msg, framed, short := f.cut(res.Stderr, res.StderrTruncated)
 	msg = strings.TrimSpace(msg)
-	if res.StderrTruncated && framed {
+	if short {
 		msg = strings.TrimSpace(msg + "\n" + truncationNotice)
 	}
 	return msg, res.StderrTruncated && !framed
@@ -249,13 +256,13 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if res.TimedOut {
 		return failf("glob: timed out after %s", DefaultTimeout)
 	}
-	out, framed := frame.cut(res.Stdout, res.StdoutTruncated)
+	out, framed, short := frame.cut(res.Stdout, res.StdoutTruncated)
 	if !framed {
 		return unframed("glob", res)
 	}
 	if res.ExitCode != 0 {
 		msg, lost := frame.messages(res)
-		return searchFailure("glob", out, msg, res.ExitCode, res.StdoutTruncated || lost)
+		return searchFailure("glob", out, msg, res.ExitCode, short || lost)
 	}
 
 	// stat printed "<mtime> <path>\0" per match, newest first. Records split on
