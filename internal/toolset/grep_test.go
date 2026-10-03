@@ -664,11 +664,15 @@ func (s swapping) WriteFileStream(ctx context.Context, path string, src io.Reade
 }
 
 // The install runs from inside /tmp/.map-ripgrep, on names relative to it, so
-// a link the model swaps in while the binary is carried in — at
-// /tmp/.map-ripgrep itself or at the install's own directory, pointing at a
-// directory it filled to look like the install's — redirects nothing: the
-// install refuses, and what the link points at is left as it was, its planted
-// upload unread and no rg landed beside it.
+// a link the model swaps in once the upload has landed — at /tmp/.map-ripgrep
+// itself or at the install's own directory, pointing at a directory it filled
+// to look like the install's — takes the install nowhere: it refuses, and
+// what the link points at is left as it was, its planted upload unread and no
+// rg landed beside it. (A link swapped in before the upload lands would take
+// the platform's write of the binary itself wherever it points inside the
+// sandbox, the upload naming its target by absolute path — no boundary, since
+// the model writes anywhere in its own sandbox — and the install would refuse
+// the same way.)
 func TestGrepInstallFollowsNoLinkSwappedInMidInstall(t *testing.T) {
 	const plant = `n=$(cd /tmp/.map-ripgrep && ls -d .install-*) && mkdir -p /workspace/victim/"$n" && ` +
 		`printf '#!/bin/sh\necho ripgrep ` + "%[1]s" + ` planted\n' > /workspace/victim/"$n"/upload && `

@@ -165,12 +165,22 @@ to `debian:stable-slim` for local development (`cmd/executor/main.go`,
 `/bin/bash`, and that bash **4.0 or newer** for two tools, which use what 4.0
 added: the `bash` tool's shell carries its state from one call to the next
 with an associative array (`declare -A`), so on bash 3.2 every call after the
-first fails, and `glob` expands its pattern with `globstar`, which 3.2 refuses
-outright. `grep`'s scripts need only 3.2 (below). What the image's environment
-sets for a shell — an `ENV BASH_ENV` startup file, exported functions,
-`SHELLOPTS` — applies to every script that runs in the sandbox, the model's
-commands and the platform's own alike; whether the platform's own should run
-without it is [#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860).
+first fails, and `glob` expands its pattern with `globstar`, which 3.2 does
+not have — there every `glob` is a tool error naming the bash it needs.
+`grep`'s scripts need only 3.2 (below). Two of the platform's scripts want GNU
+coreutils, which a BusyBox userland does not provide, and neither want is new:
+`glob` stamps each match with GNU `stat --printf`, so on BusyBox it is a tool
+error, and the memory sync hashes a store with GNU `sha256sum -z`, so on
+BusyBox its listing of a store that holds files fails. What the image's
+environment sets for a shell — an `ENV BASH_ENV` startup file, exported
+functions, `SHELLOPTS` — applies to every script that runs in the sandbox,
+the model's commands and the platform's own alike. `glob` and `grep` read
+their answers from between a begin and an end line their own scripts print,
+so what a startup file prints around them is not taken for one. Whether the
+platform's own scripts should run without the startup file at all — the
+others, whose output it can still corrupt, and these two, whose behaviour it
+can still change — is
+[#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860).
 The **Kubernetes** backend needs more,
 and needs it hard: `setsid` for its exec wrapper, `tee`/`wc` for the write
 path's delivered-byte count, a `stat` accepting `-c` (GNU or BusyBox), on which

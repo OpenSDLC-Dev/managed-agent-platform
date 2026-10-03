@@ -423,10 +423,15 @@ const (
 // ripgrepDir and is not a directory is removed (rm on a link removes the link,
 // never what it names), the directory is made afresh, and the script enters
 // it (enterRipgrepDir) and works from inside it, on names relative to it. A
-// link swapped in after that cannot redirect it: a relative name resolves from
-// the directory the script stands in, not from the path. The install's own
-// directory is made fresh — mkdir refuses a name already there — so the
-// upload lands in one this install made.
+// link swapped in after that cannot redirect the script: a relative name
+// resolves from the directory the script stands in, not from the path. The
+// install's own directory is made fresh — mkdir refuses a name already there
+// — so the upload is aimed at one this install made; but the upload is the
+// platform's write by absolute path, so a link a sandbox process swaps in at
+// ripgrepDir or at that directory before it lands takes the binary wherever
+// the link points inside the sandbox. That is no boundary: the model writes
+// anywhere in its own sandbox itself. The install after it refuses all the
+// same (installScript).
 const prepareScript = `d=%[1]s
 s=%[2]s
 if [ -h "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then rm -f -- "$d" || exit 1; fi

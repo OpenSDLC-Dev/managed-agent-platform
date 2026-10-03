@@ -85,7 +85,8 @@ Deferred past v1 — **seams reserved, not implemented**, each tracked as an iss
 Requires **Go 1.26+** and Docker: the storage and API contract tests start
 their own disposable Postgres containers, and the sandbox, shell, toolset, and
 executor tests start a disposable `debian:stable-slim` container (the toolset's
-grep tests start a `postgres:16-alpine` one too). The fixtures
+search tests start a `postgres:16-alpine` one too, and one built from
+`bash:3.2`). The fixtures
 that drive the daemon through the `docker` CLI rather than its HTTP API — the
 storage, API, sandbox and toolset ones — need that binary on PATH as well. The Kubernetes
 sandbox provider's contract test additionally needs a cluster — a local
