@@ -18,12 +18,13 @@ const BannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2;
 
 // Banners are the words BannerHook prints, which a check reading the output of
 // a command the image's startup reaches — the bash tool's — takes out first.
-var Banners = []string{"welcome to the image ", "stderr banner ", "exit banner ", "exit stderr "}
+var Banners = []string{"welcome to the image", "stderr banner", "exit banner", "exit stderr"}
 
-// Unbanner is s with BannerHook's words taken out.
+// Unbanner is s with BannerHook's words taken out, with the space each prints
+// after it where that is still there — a tool's answer trims it off its end.
 func Unbanner(s string) string {
 	for _, b := range Banners {
-		s = strings.ReplaceAll(s, b, "")
+		s = strings.ReplaceAll(strings.ReplaceAll(s, b+" ", ""), b, "")
 	}
 	return s
 }
