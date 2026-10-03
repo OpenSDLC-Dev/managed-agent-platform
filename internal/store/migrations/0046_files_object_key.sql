@@ -40,7 +40,7 @@
 -- writes the deleted_sessions row too, in the same transaction, under the
 -- session's row lock and before it touches files, so the trigger on it
 -- deletes every session-scoped row: the copies the guard would keep from that
--- build's DELETE and the outputs it would take. One statement takes them in id
+-- build's DELETE and the outputs it would take. One statement locks them in id
 -- order, the order a create holds the rows it mounts FOR SHARE in
 -- (internal/api's lockFileRows), and their keys are enqueued once each, in
 -- the count's lock order below. That build's own DELETE then finds nothing
