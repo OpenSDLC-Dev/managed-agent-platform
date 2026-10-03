@@ -63,17 +63,30 @@ func whole(name string, v *float64) (int, string) {
 	return int(*v), ""
 }
 
+// vcsDirs are the version-control directories a search never enters, which
+// is Claude Code's GrepTool's list: the recorded property descriptions are
+// that tool's word for word, and it runs rg with --hidden and a `!dir` glob
+// for each of these (docs/DIVERGENCES.md, the INFERRED grep entry).
+var vcsDirs = []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
+
 // query maps the input onto rg, flag for the flag each recorded description
 // names, searching root. The rest is ours and fixed: --no-config, so an
 // image's RIPGREP_CONFIG_PATH cannot change what a call means; --no-heading,
-// so every line carries its file; and --sort=path, so an answer is the same
-// on every call and offset pages through one list rather than rg's thread
-// order, which differs run to run — the price is that rg searches with one
-// thread. Every value the model chose is one argv word: the pattern after -e
-// and the type and glob joined to their flag, so none of them can be read as
-// an option whatever it begins with, and the path after "--".
+// so every line carries its file; --hidden with the version-control
+// directories globbed out, as the reference's GrepTool searches (vcsDirs) —
+// .gitignore and the other ignore files rg reads still apply; and, only when
+// the call pages, --sort=path, so that offset pages through one list rather
+// than rg's thread order, which differs run to run. Sorting costs rg its
+// parallel search, so a call that does not page keeps it and lists in the
+// order rg found things. Every value the model chose is one argv word: the
+// pattern after -e and the type and glob joined to their flag, so none of
+// them can be read as an option whatever it begins with, and the path after
+// "--".
 func (in grepInput) query(root string) (grepQuery, string) {
-	q := grepQuery{args: []string{"--no-config", "--no-heading", "--sort=path"}}
+	q := grepQuery{args: []string{"--no-config", "--no-heading", "--hidden"}}
+	for _, d := range vcsDirs {
+		q.args = append(q.args, "--glob=!"+d)
+	}
 	var why string
 	if q.limit, why = whole("head_limit", in.HeadLimit); why != "" {
 		return q, why
@@ -82,6 +95,9 @@ func (in grepInput) query(root string) (grepQuery, string) {
 		return q, why
 	}
 	q.limit, q.skip = max(q.limit, 0), max(q.skip, 0)
+	if q.limit > 0 || q.skip > 0 {
+		q.args = append(q.args, "--sort=path")
+	}
 
 	switch in.OutputMode {
 	case "", grepFiles:
@@ -158,13 +174,21 @@ func ripgrepPath() string { return ripgrepDir + "/rg-" + ripgrep.Pinned.Version 
 // below the 126 a shell takes for a command it could not run.
 const (
 	// exitNoRipgrep: rg is not installed — or not runnable, or not this
-	// build's — and stdout carries the machine after ripgrepMissing.
+	// build's — and stdout's last line is ripgrepMissing and the machine.
 	exitNoRipgrep = 97
 	// exitPager: paging the output failed; stderr says why.
 	exitPager = 98
 )
 
 const ripgrepMissing = "map-ripgrep-missing "
+
+// maxGrepCommandBytes bounds the script one grep hands to Exec. The script
+// is one execve argument, which Linux caps near 128 KiB (MAX_ARG_STRLEN); past
+// it the exec fails before anything runs ("argument list too long") — and the
+// pattern, path, type and glob are all in it, the pattern again in rg's own
+// argv. The bound is internal/executor's maxInstallCommandBytes, for the same
+// reason: below the ceiling, with room for the wrapper Exec runs it under.
+const maxGrepCommandBytes = 120 << 10
 
 // openRipgrep is ripgrep.Open, a variable so a test can play a build that
 // fetched no binaries.
@@ -182,14 +206,18 @@ var openRipgrep = ripgrep.Open
 // tampering with its own sandbox, where bash already runs whatever it likes.
 // A failed check reports the machine, so the caller can install rg and call
 // again; `uname -m` reports it, and bash's own $HOSTTYPE stands in where an
-// image ships no uname.
+// image ships no uname. The report is the script's last line, printed after a
+// newline of its own: an image's `ENV BASH_ENV` hook prints first, possibly
+// without ending its line, and only the last line is read (missingRipgrep) —
+// the framing sandbox.bulkLeftBeginMarker argues.
 //
 // head_limit and offset page rg's output lines as the descriptions' "| tail
 // -n +N | head -N" does: through head and tail in the sandbox, so a large
 // answer is cut where it is made rather than carried out of the sandbox and
 // thrown away, and head stops rg once it has its lines (rg exits 0 when the
 // pipe closes under it). rg's stderr does not pass through either, so its
-// errors survive the paging.
+// errors survive the paging. The line counts are summed in int64: each is
+// up to 2³¹−1, and a 32-bit int (the worker's linux/arm build) would wrap.
 func (q grepQuery) script() string {
 	words := make([]string, len(q.args))
 	for i, a := range q.args {
@@ -201,15 +229,15 @@ v=
 if [ -f "$rg" ] && [ -x "$rg" ]; then v=$("$rg" --version 2>/dev/null); fi
 case $v in
 %s*) ;;
-*) printf '%s%%s\n' "$(uname -m 2>/dev/null || printf '%%s' "$HOSTTYPE")"; exit %d ;;
+*) printf '\n%s%%s\n' "$(uname -m 2>/dev/null || printf '%%s' "$HOSTTYPE")"; exit %d ;;
 esac
 `, singleQuote(ripgrepPath()), singleQuote("ripgrep "+ripgrep.Pinned.Version+" "), ripgrepMissing, exitNoRipgrep)
 	var pager []string
 	if q.limit > 0 {
-		pager = append(pager, fmt.Sprintf("head -n %d", q.skip+q.limit))
+		pager = append(pager, fmt.Sprintf("head -n %d", int64(q.skip)+int64(q.limit)))
 	}
 	if q.skip > 0 {
-		pager = append(pager, fmt.Sprintf("tail -n +%d", q.skip+1))
+		pager = append(pager, fmt.Sprintf("tail -n +%d", int64(q.skip)+1))
 	}
 	if len(pager) == 0 {
 		fmt.Fprintf(&b, "exec \"$rg\" %s\n", strings.Join(words, " "))
@@ -228,22 +256,84 @@ exit "${s[0]}"
 	return b.String()
 }
 
+// missingRipgrep reads a search's exit as the check's report that rg is not
+// there: the machine, and true, when the script exited exitNoRipgrep and the
+// last line of its stdout is the report. Anything before that line — an
+// image's banner — is not read, and an exit 97 without the report is not the
+// check's.
+func missingRipgrep(res sandbox.ExecResult) (string, bool) {
+	if res.ExitCode != exitNoRipgrep {
+		return "", false
+	}
+	out := strings.TrimRight(res.Stdout, "\n")
+	return strings.CutPrefix(out[strings.LastIndexByte(out, '\n')+1:], ripgrepMissing)
+}
+
+// An install works in a directory of its own under ripgrepDir,
+// installPrefix<unix seconds>-<nonce>: the probe, the upload, the backend's
+// own temporary under it and the copy that becomes rg all land there, and the
+// install removes it as it exits. One that never got to — a sandbox exec
+// killed at its deadline, an executor that died mid-upload — leaves it
+// behind, so every install first removes the ones older than staleInstall.
+// The seconds are the platform's clock both times, never the sandbox's, so a
+// sandbox clock that is wrong cannot sweep a live install away; staleInstall
+// is far past any install's own deadline and covers the clock skew between
+// executors. Nothing else in ripgrepDir is touched.
+const (
+	installPrefix = ".install-"
+	staleInstall  = 10 * time.Minute
+	// installTimeout bounds each of the install's two execs.
+	installTimeout = time.Minute
+)
+
+// prepareScript makes the install's directory, after sweeping the stale ones,
+// and proves the sandbox can execute a file there before a 5 MB binary is
+// carried in: an empty file, which the kernel refuses with EACCES on a
+// noexec mount and bash otherwise runs as an empty script, whatever
+// interpreters the image has. Exit 1 is a step that failed and said why;
+// exit 2 is a sandbox that will not execute a file under ripgrepDir. Either
+// way the directory goes again.
+const prepareScript = `d=%[1]s
+s=%[2]s
+for o in "$d"/` + installPrefix + `*; do
+  [ -d "$o" ] && [ ! -h "$o" ] || continue
+  n=${o##*/` + installPrefix + `}
+  n=${n%%%%-*}
+  case $n in ''|*[!0-9]*) continue ;; esac
+  [ "$n" -lt %[3]d ] && rm -rf -- "$o"
+done
+mkdir -p -- "$s" || exit 1
+: > "$s/probe" && chmod 755 -- "$s/probe" || { rm -rf -- "$s"; exit 1; }
+m=$("$s/probe" 2>&1)
+if [ $? != 0 ]; then rm -rf -- "$s"; printf '%%s\n' "$m" >&2; exit 2; fi
+rm -f -- "$s/probe"
+`
+
 // installScript lands the uploaded binary as rg and proves it runs. It copies
 // rather than renames: Docker writes the upload as root, so on an image that
 // does not run as root only a copy the sandbox user makes is one it can mark
-// executable. Exit 1 is a step that failed and said why; exit 2 is a binary
-// in place that did not answer as this build's rg — `noexec` on /tmp, or a
-// machine the kernel cannot run it on.
-const installScript = `u=%[1]s
+// executable. What sits at rg's path and is not a regular file — a directory
+// or a link the model made there — is removed first, because mv would move
+// the binary into it rather than over it; one that reappears before the move
+// lands is reported, its stray copy removed. Exit 1 is a step that failed and
+// said why; exit 2 is a binary in place that did not answer as this build's
+// rg — a machine the kernel cannot run it on.
+const installScript = `s=%[1]s
 rg=%[2]s
-t="$rg.$$"
-trap 'rm -f -- "$u" "$t"' EXIT
-cat -- "$u" > "$t" && chmod 755 -- "$t" && mv -f -- "$t" "$rg" || exit 1
+trap 'rm -rf -- "$s"' EXIT
+cat -- "$s/upload" > "$s/rg" && chmod 755 -- "$s/rg" || exit 1
+if [ -h "$rg" ] || { [ -e "$rg" ] && [ ! -f "$rg" ]; }; then rm -rf -- "$rg" || exit 1; fi
+mv -f -- "$s/rg" "$rg" || exit 1
+if [ -d "$rg" ]; then
+  rm -f -- "$rg/rg"
+  printf '%%s became a directory while ripgrep was being installed\n' "$rg" >&2
+  exit 1
+fi
 v=$("$rg" --version 2>&1)
-s=$?
-case $s/$v in
+st=$?
+case $st/$v in
 0/%[3]s*) ;;
-*) printf 'exit %%s: %%s\n' "$s" "$v" >&2; exit 2 ;;
+*) printf 'exit %%s: %%s\n' "$st" "$v" >&2; exit 2 ;;
 esac
 `
 
@@ -277,10 +367,28 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 	if err != nil {
 		return fail("%v", err)
 	}
+	now := time.Now()
 	var nonce [8]byte
 	_, _ = rand.Read(nonce[:])
-	upload := ripgrepDir + "/.upload-" + hex.EncodeToString(nonce[:])
-	if err := r.Sandbox.WriteFileStream(ctx, upload, rg, size); err != nil {
+	dir := fmt.Sprintf("%s/%s%d-%s", ripgrepDir, installPrefix, now.Unix(), hex.EncodeToString(nonce[:]))
+
+	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{
+		Command: fmt.Sprintf(prepareScript, singleQuote(ripgrepDir), singleQuote(dir), now.Add(-staleInstall).Unix()),
+		Timeout: installTimeout,
+	})
+	switch {
+	case err != nil:
+		return nil, err
+	case res.TimedOut:
+		return fail("installing ripgrep timed out")
+	case res.ExitCode == 2:
+		return fail("ripgrep cannot run in this sandbox: it refused to execute a file under %s (%s); grep needs /tmp to be writable and to allow executing files",
+			ripgrepDir, strings.TrimSpace(res.Stderr))
+	case res.ExitCode != 0:
+		return fail("cannot install ripgrep under %s: %s", ripgrepDir, strings.TrimSpace(combine(res)))
+	}
+
+	if err := r.Sandbox.WriteFileStream(ctx, dir+"/upload", rg, size); err != nil {
 		switch {
 		case errors.Is(err, sandbox.ErrNotWritable):
 			return fail("cannot install ripgrep under %s: %s", ripgrepDir, notWritableReason(err))
@@ -289,10 +397,10 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 		}
 		return nil, err
 	}
-	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{
-		Command: fmt.Sprintf(installScript, singleQuote(upload), singleQuote(ripgrepPath()),
+	res, err = r.Sandbox.Exec(ctx, sandbox.ExecRequest{
+		Command: fmt.Sprintf(installScript, singleQuote(dir), singleQuote(ripgrepPath()),
 			singleQuote("ripgrep "+ripgrep.Pinned.Version+" ")),
-		Timeout: time.Minute,
+		Timeout: installTimeout,
 	})
 	switch {
 	case err != nil:
@@ -300,7 +408,7 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 	case res.TimedOut:
 		return fail("installing ripgrep timed out")
 	case res.ExitCode == 2:
-		return fail("ripgrep %s for %s was written to %s but does not run there (%s); grep needs /tmp to be writable and to allow executing files",
+		return fail("ripgrep %s for %s was written to %s but does not run there (%s)",
 			ripgrep.Pinned.Version, machine, ripgrepPath(), strings.TrimSpace(res.Stderr))
 	case res.ExitCode != 0:
 		return fail("cannot install ripgrep at %s: %s", ripgrepPath(), strings.TrimSpace(combine(res)))
@@ -334,6 +442,10 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 		return failf("grep: %s", why)
 	}
 	script := q.script()
+	if len(script) > maxGrepCommandBytes {
+		return failf("grep: the pattern, path, type and glob make a %d-byte command, over the %d bytes one exec argument can carry; shorten them",
+			len(script), maxGrepCommandBytes)
+	}
 	for installed := false; ; installed = true {
 		res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: DefaultTimeout})
 		if err != nil {
@@ -342,8 +454,8 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 		if res.TimedOut {
 			return failf("grep: timed out after %s", DefaultTimeout)
 		}
-		machine, missing := strings.CutPrefix(strings.TrimSpace(res.Stdout), ripgrepMissing)
-		if res.ExitCode != exitNoRipgrep || !missing {
+		machine, missing := missingRipgrep(res)
+		if !missing {
 			return grepAnswer(res)
 		}
 		if installed {
@@ -359,14 +471,21 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 }
 
 // grepAnswer reads rg's exit: 0 for matches, 1 for none — or for a search
-// head cut short, which rg may also report as 1 — and anything else a failure,
-// whose message is rg's own. A message rg printed beside an answer, such as an
-// ignore file it could not parse, follows the answer rather than being lost.
+// head cut short, which rg may also report as 1 — and 2 for an error. An
+// error beside an answer — one unreadable file among the matches, say — is
+// still the answer, with rg's messages after it, as the reference's GrepTool
+// keeps what rg found when it exits 2 (docs/DIVERGENCES.md); an error with
+// nothing found, and any other exit, is a failure whose message is rg's own. A
+// message rg printed beside a successful answer, such as an ignore file it
+// could not parse, follows it the same way rather than being lost.
 func grepAnswer(res sandbox.ExecResult) (Result, error) {
-	if res.ExitCode != 0 && res.ExitCode != 1 {
+	out := strings.TrimRight(res.Stdout, "\n")
+	switch {
+	case res.ExitCode == 0, res.ExitCode == 1:
+	case res.ExitCode == 2 && strings.TrimSpace(out) != "":
+	default:
 		return searchFailure("grep", res)
 	}
-	out := strings.TrimRight(res.Stdout, "\n")
 	if out == "" {
 		out = "no matches"
 	}

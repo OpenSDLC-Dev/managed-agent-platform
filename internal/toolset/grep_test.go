@@ -2,11 +2,15 @@ package toolset_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +44,9 @@ func grepFixture(t *testing.T, r toolset.Runner) {
 		`for i in 1 2 3 4 5; do echo needle > many/f$i.txt; done && `+
 		`echo needle > 'sp/foo bar.txt' && echo needle > sp/foo && echo needle > 'sp/a.ts,b.js' && echo needle > sp/a.ts && `+
 		`for f in a.txt .h.go .hd/x.txt; do echo needle > hid/$f; done && `+
+		`for d in .git .svn .hg .bzr .jj .sl .other; do mkdir -p vcs/$d && echo needle > vcs/$d/x.txt; done && echo needle > vcs/keep.txt && `+
 		`printf 'vendor/\\n*.log\\n' > repo/.gitignore && echo needle > repo/vendor/dep.go && echo needle > repo/run.log && echo needle > repo/main.go && `+
+		`echo needle > repo/.git/HEAD && `+
 		`i=0; while [ $i -lt 20000 ]; do i=$((i+1)); echo $i; done > seq.txt)"}`)
 }
 
@@ -60,18 +66,59 @@ func under(dir string, names ...string) string {
 	return strings.Join(names, "\n")
 }
 
+// unordered asserts a grep whose answer is want in some order. A call that
+// does not page keeps rg's parallel search, so what it lists, and the files a
+// content answer walks through, come in its threads' order, run to run.
+func unordered(t *testing.T, r toolset.Runner, input, want string) {
+	t.Helper()
+	got := ok(t, r, "grep", input)
+	if sortedLines(got) != sortedLines(want) {
+		t.Fatalf("grep(%s) =\n%s\nwant, in any order,\n%s", input, got, want)
+	}
+}
+
+func sortedLines(s string) string {
+	lines := strings.Split(s, "\n")
+	slices.Sort(lines)
+	return strings.Join(lines, "\n")
+}
+
+// testImageFrom builds an image from a Dockerfile for one test and removes it
+// when the test is done. The tag is the test's own, so a parallel run building
+// the same Dockerfile shares its layers and not its name, and removing it
+// takes only this run's tag.
+func testImageFrom(t *testing.T, name, dockerfile string) string {
+	t.Helper()
+	var nonce [6]byte
+	_, _ = rand.Read(nonce[:])
+	image := "map-grep-" + name + "-test:" + hex.EncodeToString(nonce[:])
+	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build.Stdin = strings.NewReader(dockerfile)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build %s: %v\n%s", image, err, out)
+	}
+	t.Cleanup(func() {
+		if out, err := exec.Command("docker", "rmi", image).CombinedOutput(); err != nil {
+			t.Errorf("remove %s: %v\n%s", image, err, out)
+		}
+	})
+	return image
+}
+
 // TestGrepParameters pins how each of the twelve properties the recorded
 // reference adds to grep (#827) reaches ripgrep, by the flag its description
 // names, and the shape of what comes back. The answers are rg's own; what is
-// ours is the mapping, the paging and the text around them.
+// ours is the mapping, the paging and the text around them. A call that does
+// not page lists in rg's own order, so its many-line answers are compared as
+// sets (unordered).
 func TestGrepParameters(t *testing.T) {
 	r := runner(t)
 	grepFixture(t, r)
 	const code = "/workspace/gp/code/"
 
 	t.Run("output_mode", func(t *testing.T) {
-		// files_with_matches is the default: rg -l, sorted by path.
-		exactly(t, r, `{"pattern":"needle","path":"gp/code"}`,
+		// files_with_matches is the default: rg -l.
+		unordered(t, r, `{"pattern":"needle","path":"gp/code"}`,
 			under(code, "main.go", "main_test.go", "readme.md", "util/util.go", "web/app.js", "web/app.ts", "web/app.tsx"))
 		exactly(t, r, `{"pattern":"needle","path":"gp/code/util","output_mode":"files_with_matches"}`, code+"util/util.go")
 		exactly(t, r, `{"pattern":"needle","path":"gp/code/util","output_mode":"content"}`, code+"util/util.go:1:x needle")
@@ -111,10 +158,15 @@ func TestGrepParameters(t *testing.T) {
 		// context and -C are one option; given both, context wins.
 		exactly(t, r, base+`"-C":0,"context":2}`, "2-2\n3-3\n4:X\n5-5\n6-6\n7-7\n8:X\n9-9")
 		exactly(t, r, base+`"-C":0}`, "4:X\n8:X")
-		// Groups in different files are separated as groups in one are.
-		exactly(t, r, `{"pattern":"X|foo start","path":"gp","glob":"{ctx,ml}.txt","output_mode":"content","-A":1}`,
-			"/workspace/gp/ctx.txt:4:X\n/workspace/gp/ctx.txt-5-5\n--\n/workspace/gp/ctx.txt:8:X\n/workspace/gp/ctx.txt-9-9\n--\n"+
-				"/workspace/gp/ml.txt:2:foo start\n/workspace/gp/ml.txt-3-middle")
+		// Groups in different files are separated as groups in one are,
+		// whichever file rg reaches first.
+		in := `{"pattern":"X|foo start","path":"gp","glob":"{ctx,ml}.txt","output_mode":"content","-A":1}`
+		groups := strings.Split(ok(t, r, "grep", in), "\n--\n")
+		slices.Sort(groups)
+		if want := []string{"/workspace/gp/ctx.txt:4:X\n/workspace/gp/ctx.txt-5-5", "/workspace/gp/ctx.txt:8:X\n/workspace/gp/ctx.txt-9-9",
+			"/workspace/gp/ml.txt:2:foo start\n/workspace/gp/ml.txt-3-middle"}; !slices.Equal(groups, want) {
+			t.Fatalf("grep(%s) groups = %q, want %q", in, groups, want)
+		}
 		// Ignored outside content mode — not even validated, as the recorded
 		// descriptions say ("Requires output_mode: content, ignored otherwise").
 		exactly(t, r, `{"pattern":"X","path":"gp/ctx.txt","-C":2}`, "/workspace/gp/ctx.txt")
@@ -136,7 +188,7 @@ func TestGrepParameters(t *testing.T) {
 		exactly(t, r, `{"pattern":"X","path":"gp/ctx.txt","output_mode":"content","-A":1,"head_limit":3}`, "4:X\n5-5\n--")
 		exactly(t, r, `{"pattern":"X","path":"gp/ctx.txt","output_mode":"content","-A":1,"head_limit":2,"offset":2}`, "--\n8:X")
 
-		// Paging a file list: the order is the path's, so the pages are
+		// Paging a file list: a paged call sorts by path, so the pages are
 		// disjoint and together are the list, call after call.
 		var all []string
 		for _, page := range []string{`"head_limit":2`, `"head_limit":2,"offset":2`, `"offset":4`} {
@@ -153,20 +205,25 @@ func TestGrepParameters(t *testing.T) {
 			"19998:19998\n19999:19999")
 		fails(t, r, "grep", base+`,"head_limit":-2}`, "head_limit must be a whole number")
 		fails(t, r, "grep", base+`,"offset":1e12}`, "offset must be a whole number")
+		// Unlike the context counts, both are read in every mode.
+		fails(t, r, "grep", `{"pattern":"x","head_limit":0.5}`, "head_limit must be a whole number")
+		fails(t, r, "grep", `{"pattern":"x","output_mode":"count","offset":-1}`, "offset must be a whole number")
+		// The largest counts the schema admits, whose sums pass 2³¹−1.
+		exactly(t, r, base+fmt.Sprintf(`,"head_limit":%d,"offset":%d}`, math.MaxInt32, math.MaxInt32), "no matches")
 	})
 
 	t.Run("type", func(t *testing.T) {
-		exactly(t, r, `{"pattern":"needle","path":"gp/code","type":"go"}`, under(code, "main.go", "main_test.go", "util/util.go"))
-		exactly(t, r, `{"pattern":"needle","path":"gp/code","type":"ts"}`, under(code, "web/app.ts", "web/app.tsx"))
+		unordered(t, r, `{"pattern":"needle","path":"gp/code","type":"go"}`, under(code, "main.go", "main_test.go", "util/util.go"))
+		unordered(t, r, `{"pattern":"needle","path":"gp/code","type":"ts"}`, under(code, "web/app.ts", "web/app.tsx"))
 		fails(t, r, "grep", `{"pattern":"needle","path":"gp/code","type":"golang"}`, "unrecognized file type: golang")
 		// A file named outright is searched whatever its type, as rg does.
 		exactly(t, r, `{"pattern":"needle","path":"gp/code/readme.md","type":"go"}`, code+"readme.md")
 	})
 
 	t.Run("glob", func(t *testing.T) {
-		exactly(t, r, `{"pattern":"needle","path":"gp/code","glob":"*.go"}`, under(code, "main.go", "main_test.go", "util/util.go"))
-		exactly(t, r, `{"pattern":"needle","path":"gp/code","glob":"*.{ts,tsx}"}`, under(code, "web/app.ts", "web/app.tsx"))
-		exactly(t, r, `{"pattern":"needle","path":"gp/code","glob":"!*_test.go","type":"go"}`, under(code, "main.go", "util/util.go"))
+		unordered(t, r, `{"pattern":"needle","path":"gp/code","glob":"*.go"}`, under(code, "main.go", "main_test.go", "util/util.go"))
+		unordered(t, r, `{"pattern":"needle","path":"gp/code","glob":"*.{ts,tsx}"}`, under(code, "web/app.ts", "web/app.tsx"))
+		unordered(t, r, `{"pattern":"needle","path":"gp/code","glob":"!*_test.go","type":"go"}`, under(code, "main.go", "util/util.go"))
 		// The value is one glob, whole: a space or a comma outside braces is
 		// part of it, as it is to rg --glob.
 		exactly(t, r, `{"pattern":"needle","path":"gp/sp","glob":"foo bar.txt"}`, "/workspace/gp/sp/foo bar.txt")
@@ -175,14 +232,19 @@ func TestGrepParameters(t *testing.T) {
 		fails(t, r, "grep", `{"pattern":"needle","glob":"[abc"}`, "unclosed character class")
 	})
 
-	// rg's own walk: hidden files and directories below the root are skipped,
-	// and inside a git repository so is what its .gitignore names. A glob
-	// does not bring a hidden file back; a path that names one does.
-	t.Run("hidden and ignored files", func(t *testing.T) {
-		exactly(t, r, `{"pattern":"needle","path":"gp/hid"}`, "/workspace/gp/hid/a.txt")
+	// The reference's walk (rg --hidden, the version-control directories
+	// globbed out): hidden files and directories are searched, the six VCS
+	// directories are not, and inside a git repository neither is what its
+	// .gitignore names. A path that names an ignored file, or one inside
+	// .git, is searched all the same, as rg searches what it is given.
+	t.Run("hidden, version-control and ignored files", func(t *testing.T) {
+		unordered(t, r, `{"pattern":"needle","path":"gp/hid"}`, under("/workspace/gp/hid/", ".h.go", ".hd/x.txt", "a.txt"))
 		exactly(t, r, `{"pattern":"needle","path":"gp/hid/.hd"}`, "/workspace/gp/hid/.hd/x.txt")
+		unordered(t, r, `{"pattern":"needle","path":"gp/vcs"}`, under("/workspace/gp/vcs/", ".other/x.txt", "keep.txt"))
+		exactly(t, r, `{"pattern":"needle","path":"gp/vcs","glob":"*.txt","head_limit":9}`, under("/workspace/gp/vcs/", ".other/x.txt", "keep.txt"))
 		exactly(t, r, `{"pattern":"needle","path":"gp/repo"}`, "/workspace/gp/repo/main.go")
 		exactly(t, r, `{"pattern":"needle","path":"gp/repo/run.log"}`, "/workspace/gp/repo/run.log")
+		exactly(t, r, `{"pattern":"needle","path":"gp/repo/.git/HEAD"}`, "/workspace/gp/repo/.git/HEAD")
 	})
 
 	t.Run("binary files", func(t *testing.T) {
@@ -210,14 +272,17 @@ func TestGrepParameters(t *testing.T) {
 
 	// Every value the model chose reaches rg as one argv word: nothing it
 	// carries is run by the shell, and nothing it begins with makes it an
-	// option.
+	// option — on the paging path too, where rg's words go into a pipeline.
 	t.Run("the model's values are data, not code or options", func(t *testing.T) {
-		for _, v := range []string{"$(touch /tmp/pwned-a)", "`touch /tmp/pwned-b`", "';touch /tmp/pwned-c;'", "x\ntouch /tmp/pwned-d"} {
-			q := strings.ReplaceAll(strings.ReplaceAll(v, "\n", `\n`), "`", "\\u0060")
-			call(t, r, "grep", `{"pattern":"`+q+`","path":"gp"}`)
-			call(t, r, "grep", `{"pattern":"needle","path":"gp","glob":"`+q+`"}`)
-			call(t, r, "grep", `{"pattern":"needle","path":"gp","type":"`+q+`"}`)
-			call(t, r, "grep", `{"pattern":"needle","path":"`+q+`"}`)
+		for _, v := range []string{"$(touch /tmp/pwned-a)", "`touch /tmp/pwned-b`", "';touch /tmp/pwned-c;'", "x\ntouch /tmp/pwned-d",
+			"' | touch /tmp/pwned-e; '", "x'\"; touch /tmp/pwned-f; \"'"} {
+			q := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(v, "\n", `\n`), "`", "\\u0060"), `"`, `\"`)
+			for _, paging := range []string{"", `,"head_limit":5,"offset":1`} {
+				call(t, r, "grep", `{"pattern":"`+q+`","path":"gp"`+paging+`}`)
+				call(t, r, "grep", `{"pattern":"needle","path":"gp","glob":"`+q+`"`+paging+`}`)
+				call(t, r, "grep", `{"pattern":"needle","path":"gp","type":"`+q+`"`+paging+`}`)
+				call(t, r, "grep", `{"pattern":"needle","path":"`+q+`"`+paging+`}`)
+			}
 		}
 		if out := ok(t, r, "bash", `{"command":"ls /tmp/pwned-* 2>/dev/null; echo checked"}`); strings.TrimSpace(out) != "checked" {
 			t.Fatalf("a grep value was executed: %q", out)
@@ -227,6 +292,17 @@ func TestGrepParameters(t *testing.T) {
 		exactly(t, r, `{"pattern":"-x","path":"gp/dash/-f.txt","output_mode":"content"}`, "2:-x")
 		exactly(t, r, `{"pattern":"x","path":"gp/dash","glob":"--files"}`, "no matches")
 		fails(t, r, "grep", `{"pattern":"x","path":"gp/dash","type":"--help"}`, "unrecognized file type: --help")
+	})
+
+	// The search is one exec argument, which Linux caps near 128 KiB: a value
+	// that would push it past is refused before anything runs, where it would
+	// otherwise fail as "argument list too long"; one inside the bound
+	// searches.
+	t.Run("a value too long for one exec argument", func(t *testing.T) {
+		exactly(t, r, `{"pattern":"`+strings.Repeat("z", 100<<10)+`","path":"gp/case.txt"}`, "no matches")
+		fails(t, r, "grep", `{"pattern":"`+strings.Repeat("z", 130<<10)+`","path":"gp/case.txt"}`,
+			"over the 122880 bytes one exec argument can carry")
+		fails(t, r, "grep", `{"pattern":"z","glob":"`+strings.Repeat("g", 125<<10)+`"}`, "shorten them")
 	})
 }
 
@@ -281,10 +357,16 @@ func TestGrepInstallsRipgrepInTheSandbox(t *testing.T) {
 		t.Errorf("/tmp/.map-ripgrep holds %q; an upload or a temporary was left behind", out)
 	}
 
+	// What stands at rg's path and is not rg is replaced: a directory there
+	// would otherwise take the binary inside it, and a link to one would take
+	// it to wherever the link points.
+	rg := toolset.RipgrepPath()
 	for _, tamper := range []string{
-		"rm -f " + toolset.RipgrepPath(),
-		"printf '#!/bin/sh\\necho tampered\\n' > " + toolset.RipgrepPath(),
-		"chmod 644 " + toolset.RipgrepPath(),
+		"rm -f " + rg,
+		"printf '#!/bin/sh\\necho tampered\\n' > " + rg,
+		"chmod 644 " + rg,
+		"rm -f " + rg + " && mkdir -p " + rg + "/sub && echo x > " + rg + "/sub/f",
+		"rm -rf " + rg + " && mkdir -p /tmp/elsewhere && ln -s /tmp/elsewhere " + rg,
 	} {
 		ok(t, r, "bash", `{"command":"`+tamper+`"}`)
 		if got := ok(t, r, "grep", in); got != want {
@@ -292,6 +374,9 @@ func TestGrepInstallsRipgrepInTheSandbox(t *testing.T) {
 		}
 		if got, want := installedRipgrep(t, r), fmt.Sprintf("755 %d", ripgrepSize(t, r)); got != want {
 			t.Fatalf("after %q rg = %q, want it written again (%s)", tamper, got, want)
+		}
+		if out := ok(t, r, "bash", `{"command":"test -f `+rg+` && ! test -h `+rg+` && ls -A /tmp/.map-ripgrep; ls -A /tmp/elsewhere 2>/dev/null; true"}`); strings.TrimSpace(out) != "rg-"+ripgrep.Pinned.Version {
+			t.Fatalf("after %q the install left %q, want rg alone, a regular file, and nothing where a link pointed", tamper, out)
 		}
 	}
 
@@ -360,13 +445,20 @@ func sameAnswers(t *testing.T, a, b toolset.Runner, an, bn string) {
 		`{"pattern":"needle","path":"gp/many","output_mode":"count","head_limit":2}`:                             false,
 		`{"pattern":"1","path":"gp/seq.txt","output_mode":"content","head_limit":2}`:                             false,
 		`{"pattern":"needle","path":"gp/repo"}`:                                                                  false,
+		`{"pattern":"needle","path":"gp/vcs"}`:                                                                   false,
 		`{"pattern":"[unclosed","path":"gp"}`:                                                                    true,
 	} {
 		x, y := call(t, a, "grep", in), call(t, b, "grep", in)
 		if y.IsError != wantErr || y.Content == "no matches" {
 			t.Fatalf("grep(%s) on %s = %+v, a fixture that no longer exercises the search", in, bn, y)
 		}
-		if x.IsError != y.IsError || x.Content != y.Content {
+		// A call that does not page lists in rg's thread order, which is
+		// not the same twice.
+		xc, yc := x.Content, y.Content
+		if !strings.Contains(in, "head_limit") && !strings.Contains(in, "offset") {
+			xc, yc = sortedLines(xc), sortedLines(yc)
+		}
+		if x.IsError != y.IsError || xc != yc {
 			t.Errorf("grep(%s) differs:\n%s (is_error=%v): %q\n%s (is_error=%v): %q", in, an, x.IsError, x.Content, bn, y.IsError, y.Content)
 		}
 	}
@@ -400,16 +492,14 @@ func runnerFor(t *testing.T, image string, h sandbox.Hardening) toolset.Runner {
 // root; the install copies it, as the sandbox user, into a file that user can
 // make executable. A read-only root moves /tmp onto a volume, which rg runs
 // from all the same, and a root that has dropped every capability still owns
-// what it makes. The fixture goes in with the write tool, because bash's
-// state directory is a root-owned volume to a non-root user under a
-// read-only root on Docker (docs/self-hosted-security.md §2).
+// what it makes. The fixture goes in with the write tool rather than bash:
+// the persistent shell keeps its state under /var/lib/map-shell
+// (sandbox.ShellStateRoot), which this image's user cannot create — /var/lib
+// is root's 0755 — and under a read-only root Docker mounts an anonymous
+// volume there that is root's 0755 too, so the first bash call fails either
+// way.
 func TestGrepInstallsRipgrepWhereTheSandboxIsNotRoot(t *testing.T) {
-	const image = "map-grep-nonroot-test:latest"
-	build := exec.Command("docker", "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader("FROM debian:stable-slim\nRUN useradd -m app && mkdir -p /workspace && chown app:app /workspace\nUSER app\n")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the non-root image: %v\n%s", err, out)
-	}
+	image := testImageFrom(t, "nonroot", "FROM debian:stable-slim\nRUN useradd -m app && mkdir -p /workspace && chown app:app /workspace\nUSER app\n")
 	for _, tc := range []struct {
 		name, image string
 		h           sandbox.Hardening
@@ -473,19 +563,90 @@ func tmpVolume(opts string) []string {
 }
 
 // Where rg cannot be installed or cannot run, grep is a tool error that says
-// which: a /tmp mounted noexec, and a /tmp the sandbox user cannot write.
+// which: a /tmp mounted noexec, and a /tmp the sandbox user cannot write. A
+// noexec /tmp is found by a probe before the binary is carried in, so a
+// sandbox that can never run rg costs each grep two small execs rather than a
+// 5 MB upload, and keeps nothing.
 func TestGrepSaysWhyRipgrepCannotRun(t *testing.T) {
 	t.Run("noexec", func(t *testing.T) {
 		r := attached(t, tmpVolume("noexec,mode=1777")...)
-		msg := fails(t, r, "grep", `{"pattern":"x"}`, "was written to "+toolset.RipgrepPath()+" but does not run there")
-		if !strings.Contains(msg, "Permission denied") || !strings.Contains(msg, "allow executing files") {
-			t.Errorf("error = %q, want the shell's refusal and what grep needs", msg)
+		for range 2 {
+			msg := fails(t, r, "grep", `{"pattern":"x"}`, "grep: ripgrep cannot run in this sandbox: it refused to execute a file under /tmp/.map-ripgrep")
+			if !strings.Contains(msg, "Permission denied") || !strings.Contains(msg, "allow executing files") {
+				t.Errorf("error = %q, want the shell's refusal and what grep needs", msg)
+			}
+			if out := ok(t, r, "bash", `{"command":"ls -A /tmp/.map-ripgrep"}`); strings.TrimSpace(out) != "" {
+				t.Errorf("/tmp/.map-ripgrep holds %q after a refused install, want nothing", out)
+			}
 		}
 	})
 	t.Run("unwritable", func(t *testing.T) {
 		r := attached(t, append(tmpVolume("mode=0755"), "--user", "65534")...)
-		fails(t, r, "grep", `{"pattern":"x"}`, "grep: cannot install ripgrep under /tmp/.map-ripgrep: permission denied")
+		msg := fails(t, r, "grep", `{"pattern":"x"}`, "grep: cannot install ripgrep under /tmp/.map-ripgrep: mkdir:")
+		if !strings.Contains(msg, "Permission denied") {
+			t.Errorf("error = %q, want mkdir's refusal", msg)
+		}
 	})
+}
+
+// An install that never finished — its exec killed at the deadline, or the
+// executor gone mid-upload — leaves its directory behind; the next install
+// sweeps the ones past staleness, and touches nothing it did not name: not a
+// recent install's, which may still be running, and not a file of anyone
+// else's.
+func TestGrepInstallSweepsWhatAnEarlierInstallLeft(t *testing.T) {
+	r := runner(t)
+	fresh := fmt.Sprintf(".install-%d-feed", time.Now().Unix())
+	ok(t, r, "bash", `{"command":"mkdir -p /tmp/.map-ripgrep/.install-1000-dead /tmp/.map-ripgrep/.install-2000-beef/x /tmp/.map-ripgrep/`+fresh+
+		` && echo partial > /tmp/.map-ripgrep/.install-1000-dead/upload && echo keep > /tmp/.map-ripgrep/notes.txt`+
+		` && mkdir -p /tmp/.map-ripgrep/.install-oops && echo needle > sw.txt"}`)
+	if got := ok(t, r, "grep", `{"pattern":"needle","path":"sw.txt"}`); got != "/workspace/sw.txt" {
+		t.Fatalf("grep = %q", got)
+	}
+	want := strings.Join([]string{".install-oops", fresh, "notes.txt", "rg-" + ripgrep.Pinned.Version}, "\n")
+	if out := ok(t, r, "bash", `{"command":"ls -A /tmp/.map-ripgrep | LC_ALL=C sort"}`); strings.TrimSpace(out) != sortedLines(want) {
+		t.Errorf("/tmp/.map-ripgrep holds\n%s\nwant\n%s", out, sortedLines(want))
+	}
+}
+
+// What rg prints beside an answer stays with it — here the file it could
+// not read among the ones it matched, which is rg's exit 2 with matches
+// found, answered as the matches rather than as a failure. A search that
+// found nothing but that error is still one. A root without capabilities
+// cannot read a mode-000 file, so no second user is needed.
+func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
+	r := runnerFor(t, testImage, sandbox.Hardening{CapDrop: []string{"ALL"}})
+	ok(t, r, "bash", `{"command":"mkdir -p ex2 && echo needle > ex2/a.txt && echo needle > ex2/b.txt && chmod 000 ex2/b.txt"}`)
+	const denied = "rg: /workspace/ex2/b.txt: Permission denied (os error 13)"
+	exactly(t, r, `{"pattern":"needle","path":"ex2"}`, "/workspace/ex2/a.txt\n"+denied)
+	exactly(t, r, `{"pattern":"needle","path":"ex2","output_mode":"content","head_limit":5}`, "/workspace/ex2/a.txt:1:needle\n"+denied)
+	fails(t, r, "grep", `{"pattern":"needle","path":"ex2/b.txt"}`, denied)
+}
+
+// An image whose bash prints a banner — an `ENV BASH_ENV` hook, sourced by
+// every `bash -c` before the script, here without even ending its line —
+// still gets rg installed and searched with: the check's report is read off
+// the last line only. The banner itself reaches the answer, as it reaches
+// every tool's output on that image.
+func TestGrepThroughAnImageBanner(t *testing.T) {
+	image := testImageFrom(t, "banner", "FROM debian:stable-slim\n"+
+		"RUN printf 'printf welcome-banner\\n' > /etc/map-banner.sh\n"+
+		"ENV BASH_ENV=/etc/map-banner.sh\n")
+	r := runnerFor(t, image, sandbox.Hardening{})
+	ok(t, r, "write", `{"file_path":"be/a.txt","content":"needle\n"}`)
+	got := ok(t, r, "grep", `{"pattern":"needle","path":"be"}`)
+	if !strings.HasPrefix(got, "welcome-banner") || !strings.HasSuffix(got, "/workspace/be/a.txt") {
+		t.Fatalf("grep = %q, want the image's banner and then the answer", got)
+	}
+	// bash prints the banner too, so it is cut from what the checks read.
+	unbanner := func(s string) string { return strings.TrimSpace(strings.ReplaceAll(s, "welcome-banner", "")) }
+	_, size, err := ripgrep.Open(toolset.LinuxArch(unbanner(ok(t, r, "bash", `{"command":"uname -m"}`))))
+	if err != nil {
+		t.Fatalf("ripgrep.Open: %v", err)
+	}
+	if got, want := unbanner(installedRipgrep(t, r)), fmt.Sprintf("755 %d", size); got != want {
+		t.Errorf("installed rg = %q, want %q", got, want)
+	}
 }
 
 // TestGrepRunsTheSameInAKubernetesPod installs and runs rg in a pod — over
@@ -576,7 +737,7 @@ func (s *scripted) WriteFileStream(_ context.Context, path string, src io.Reader
 
 func TestGrepInstallFaults(t *testing.T) {
 	missing := func(machine string) sandbox.ExecResult {
-		return sandbox.ExecResult{ExitCode: 97, Stdout: "map-ripgrep-missing " + machine + "\n"}
+		return sandbox.ExecResult{ExitCode: 97, Stdout: "\nmap-ripgrep-missing " + machine + "\n"}
 	}
 	found := sandbox.ExecResult{Stdout: "/workspace/a.txt\n"}
 	for _, tc := range []struct {
@@ -585,22 +746,42 @@ func TestGrepInstallFaults(t *testing.T) {
 		streamErr error
 		want      string // a tool error mentioning this, or "" for found's answer
 		fault     error  // or a backend fault
+		noUpload  bool   // and nothing may have been carried in
 	}{
-		{name: "an x86_64 sandbox gets the amd64 binary", results: []sandbox.ExecResult{missing("x86_64"), {}, found}},
-		{name: "an upload the path refuses", results: []sandbox.ExecResult{missing("aarch64")},
+		// The search's check, the install's prepare and its install, the
+		// search again.
+		{name: "an x86_64 sandbox gets the amd64 binary", results: []sandbox.ExecResult{missing("x86_64"), {}, {}, found}},
+		// Only the report's own line, the last, is read: what an image's
+		// hook printed first, a forged report included, is not.
+		{name: "a banner before the report", results: []sandbox.ExecResult{
+			{ExitCode: 97, Stdout: "welcome\nmap-ripgrep-missing riscv64\nhi" + missing("x86_64").Stdout}, {}, {}, found}},
+		{name: "an exit 97 whose last line is not the report", results: []sandbox.ExecResult{
+			{ExitCode: 97, Stdout: "map-ripgrep-missing x86_64\nmore\n"}}, want: "more", noUpload: true},
+		{name: "a sandbox that will not execute a file under /tmp", results: []sandbox.ExecResult{missing("x86_64"),
+			{ExitCode: 2, Stderr: "bash: line 12: /tmp/.map-ripgrep/.install-1-ab/probe: Permission denied\n"}},
+			want: "it refused to execute a file under /tmp/.map-ripgrep (bash: line 12: /tmp/.map-ripgrep/.install-1-ab/probe: Permission denied)", noUpload: true},
+		{name: "a prepare step that failed", results: []sandbox.ExecResult{missing("x86_64"),
+			{ExitCode: 1, Stderr: "mkdir: cannot create directory '/tmp/.map-ripgrep': Read-only file system\n"}},
+			want: "cannot install ripgrep under /tmp/.map-ripgrep: mkdir: cannot create directory '/tmp/.map-ripgrep': Read-only file system", noUpload: true},
+		{name: "a prepare that timed out", results: []sandbox.ExecResult{missing("x86_64"), {TimedOut: true}},
+			want: "installing ripgrep timed out", noUpload: true},
+		{name: "a prepare whose exec failed", results: []sandbox.ExecResult{missing("aarch64")}, fault: sandbox.ErrNotFound, noUpload: true},
+		{name: "an upload the path refuses", results: []sandbox.ExecResult{missing("aarch64"), {}},
 			streamErr: fmt.Errorf("x: %w", sandbox.ErrNotDirectory), want: "cannot install ripgrep under /tmp/.map-ripgrep: x: sandbox: path is not a directory"},
-		{name: "an upload the sandbox fails", results: []sandbox.ExecResult{missing("aarch64")},
+		{name: "an upload the sandbox fails", results: []sandbox.ExecResult{missing("aarch64"), {}},
 			streamErr: sandbox.ErrNotFound, fault: sandbox.ErrNotFound},
-		{name: "an install that timed out", results: []sandbox.ExecResult{missing("aarch64"), {TimedOut: true}},
+		{name: "an install that timed out", results: []sandbox.ExecResult{missing("aarch64"), {}, {TimedOut: true}},
 			want: "installing ripgrep timed out"},
-		{name: "an install step that failed", results: []sandbox.ExecResult{missing("aarch64"), {ExitCode: 1, Stderr: "cat: write error: No space left on device\n"}},
+		{name: "an install step that failed", results: []sandbox.ExecResult{missing("aarch64"), {}, {ExitCode: 1, Stderr: "cat: write error: No space left on device\n"}},
 			want: "cannot install ripgrep at /tmp/.map-ripgrep/rg-" + ripgrep.Pinned.Version + ": cat: write error: No space left on device"},
-		{name: "an install whose exec failed", results: []sandbox.ExecResult{missing("aarch64")}, fault: sandbox.ErrNotFound},
-		{name: "a binary gone again before the search", results: []sandbox.ExecResult{missing("aarch64"), {}, missing("aarch64")},
+		{name: "a binary that does not run", results: []sandbox.ExecResult{missing("aarch64"), {}, {ExitCode: 2, Stderr: "exit 126: cannot execute binary file\n"}},
+			want: "ripgrep " + ripgrep.Pinned.Version + " for aarch64 was written to /tmp/.map-ripgrep/rg-" + ripgrep.Pinned.Version + " but does not run there (exit 126: cannot execute binary file)"},
+		{name: "an install whose exec failed", results: []sandbox.ExecResult{missing("aarch64"), {}}, fault: sandbox.ErrNotFound},
+		{name: "a binary gone again before the search", results: []sandbox.ExecResult{missing("aarch64"), {}, {}, missing("aarch64")},
 			want: "was gone again before the search ran"},
 		// Exit 97 without the marker is not the check's: it is answered as
 		// any other failure.
-		{name: "an exit 97 that is not the check's", results: []sandbox.ExecResult{{ExitCode: 97, Stderr: "boom\n"}}, want: "boom"},
+		{name: "an exit 97 that is not the check's", results: []sandbox.ExecResult{{ExitCode: 97, Stderr: "boom\n"}}, want: "boom", noUpload: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sb := &scripted{fakeSandbox: &fakeSandbox{}, results: tc.results, streamErr: tc.streamErr}
@@ -620,26 +801,128 @@ func TestGrepInstallFaults(t *testing.T) {
 				}
 				_, size, _ := ripgrep.Open("amd64")
 				for path, n := range sb.uploaded {
-					if !strings.HasPrefix(path, "/tmp/.map-ripgrep/.upload-") || n != size {
-						t.Errorf("uploaded %d bytes to %s, want the amd64 binary's %d", n, path, size)
+					if !strings.HasPrefix(path, "/tmp/.map-ripgrep/.install-") || !strings.HasSuffix(path, "/upload") || n != size {
+						t.Errorf("uploaded %d bytes to %s, want the amd64 binary's %d in an install directory", n, path, size)
 					}
 				}
 				if len(sb.uploaded) != 1 {
 					t.Errorf("uploads = %v, want one", sb.uploaded)
 				}
 			}
+			if tc.noUpload && len(sb.uploaded) != 0 {
+				t.Errorf("uploads = %v, want none: the install stopped before the binary was carried in", sb.uploaded)
+			}
 		})
 	}
 }
 
-// What rg prints beside an answer — a warning about an ignore file it could
-// not read — follows the answer rather than being dropped, and an answer the
-// sandbox's own cap cut says so.
-func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: "/workspace/a.txt\n", Stderr: "rg: ./.gitignore: line 1: error parsing glob\n", Truncated: true}}
-	res, err := run(t, sb, "grep", `{"pattern":"x"}`)
-	if err != nil || res.IsError || res.Content != "[output truncated]\n/workspace/a.txt\nrg: ./.gitignore: line 1: error parsing glob" {
+// The prepare exec sweeps only install directories past staleness, by the
+// platform's clock, and makes this one's; the install exec removes it as it
+// exits. Both name it the same.
+func TestGrepInstallScripts(t *testing.T) {
+	sb := &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{{ExitCode: 97, Stdout: "\nmap-ripgrep-missing x86_64\n"}, {}, {}, {}}}
+	before := time.Now()
+	if res, err := run(t, sb, "grep", `{"pattern":"x"}`); err != nil || res.IsError {
 		t.Fatalf("grep = %+v, %v", res, err)
+	}
+	if len(sb.commands) != 4 {
+		t.Fatalf("execs = %d, want the check, the prepare, the install and the search", len(sb.commands))
+	}
+	var dir string
+	for path := range sb.uploaded {
+		dir = strings.TrimSuffix(path, "/upload")
+	}
+	after := time.Now()
+	prepare, install := sb.commands[1], sb.commands[2]
+	var cutoff int64
+	if _, rest, ok := strings.Cut(prepare, `[ "$n" -lt `); !ok {
+		t.Errorf("prepare sweeps nothing:\n%s", prepare)
+	} else if _, err := fmt.Sscanf(rest, "%d", &cutoff); err != nil ||
+		cutoff < before.Add(-10*time.Minute).Unix() || cutoff > after.Add(-10*time.Minute).Unix() {
+		t.Errorf("prepare's cutoff = %d (%v), want ten minutes before the call by the platform's clock", cutoff, err)
+	}
+	for _, c := range []string{prepare, install} {
+		if !strings.Contains(c, "s='"+dir+"'") {
+			t.Errorf("a script does not work in the upload's directory %s:\n%s", dir, c)
+		}
+	}
+	if !strings.Contains(install, `trap 'rm -rf -- "$s"' EXIT`) {
+		t.Errorf("install does not remove its directory:\n%s", install)
+	}
+}
+
+// head_limit and offset each run to 2³¹−1, so the lines head keeps and the
+// line tail starts at pass it: summed as int, a 32-bit build — the worker's
+// linux/arm — would hand head a negative count.
+func TestGrepPagesPastTwoToTheThirtyOne(t *testing.T) {
+	sb := &fakeSandbox{}
+	if res, err := run(t, sb, "grep", fmt.Sprintf(`{"pattern":"x","head_limit":%d,"offset":%d}`, math.MaxInt32, math.MaxInt32)); err != nil || res.IsError {
+		t.Fatalf("grep = %+v, %v", res, err)
+	}
+	if len(sb.commands) != 1 || !strings.Contains(sb.commands[0], "| head -n 4294967294 | tail -n +2147483648\n") {
+		t.Fatalf("grep script =\n%s\nwant head -n 4294967294 and tail -n +2147483648", strings.Join(sb.commands, "\n---\n"))
+	}
+}
+
+// A call that pages sorts by path, so that offset walks one list; one that
+// does not keeps rg's parallel search and its order.
+func TestGrepSortsOnlyWhenItPages(t *testing.T) {
+	for in, sorted := range map[string]bool{
+		`{"pattern":"x"}`:                                                 false,
+		`{"pattern":"x","head_limit":0}`:                                  false,
+		`{"pattern":"x","offset":0}`:                                      false,
+		`{"pattern":"x","head_limit":1}`:                                  true,
+		`{"pattern":"x","offset":1}`:                                      true,
+		`{"pattern":"x","output_mode":"count","head_limit":2,"offset":3}`: true,
+	} {
+		sb := &fakeSandbox{}
+		if _, err := run(t, sb, "grep", in); err != nil || len(sb.commands) != 1 {
+			t.Fatalf("grep(%s): %v, %d execs", in, err, len(sb.commands))
+		}
+		if got := strings.Contains(sb.commands[0], "'--sort=path'"); got != sorted {
+			t.Errorf("grep(%s) sorts = %v, want %v", in, got, sorted)
+		}
+		for _, d := range []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"} {
+			if !strings.Contains(sb.commands[0], "'--hidden'") || !strings.Contains(sb.commands[0], "'--glob=!"+d+"'") {
+				t.Errorf("grep(%s) does not search hidden files with %s globbed out", in, d)
+			}
+		}
+	}
+}
+
+// A search whose values make a command too long for one exec argument is
+// refused before anything runs.
+func TestGrepRefusesACommandPastOneExecArgument(t *testing.T) {
+	sb := &fakeSandbox{}
+	res, err := run(t, sb, "grep", `{"pattern":"`+strings.Repeat("z", 130<<10)+`"}`)
+	if err != nil || !res.IsError || !strings.HasPrefix(res.Content, "grep: the pattern, path, type and glob make a ") || len(sb.commands) != 0 {
+		t.Fatalf("grep = %+v, %v after %d execs; want a refusal before any", res, err, len(sb.commands))
+	}
+}
+
+// What rg prints beside an answer — a warning about an ignore file it could
+// not read, or the error of exit 2 with matches found — follows the answer
+// rather than being dropped, and an answer the sandbox's own cap cut says
+// so. Exit 2 with nothing found is a failure.
+func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		exec    sandbox.ExecResult
+		isError bool
+		want    string
+	}{
+		{sandbox.ExecResult{Stdout: "/workspace/a.txt\n", Stderr: "rg: ./.gitignore: line 1: error parsing glob\n", Truncated: true},
+			false, "[output truncated]\n/workspace/a.txt\nrg: ./.gitignore: line 1: error parsing glob"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: "/workspace/a.txt\n", Stderr: "rg: /workspace/b.txt: Permission denied (os error 13)\n"},
+			false, "/workspace/a.txt\nrg: /workspace/b.txt: Permission denied (os error 13)"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: "\n", Stderr: "rg: /workspace/b.txt: Permission denied (os error 13)\n"},
+			true, "rg: /workspace/b.txt: Permission denied (os error 13)"},
+		{sandbox.ExecResult{ExitCode: 98, Stdout: "/workspace/a.txt\n", Stderr: "head: write error\n"},
+			true, "/workspace/a.txt\nhead: write error"},
+	} {
+		res, err := run(t, &fakeSandbox{exec: tc.exec}, "grep", `{"pattern":"x"}`)
+		if err != nil || res.IsError != tc.isError || res.Content != tc.want {
+			t.Errorf("grep over %+v = %+v, %v; want is_error=%v %q", tc.exec, res, err, tc.isError, tc.want)
+		}
 	}
 }
 
