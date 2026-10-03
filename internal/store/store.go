@@ -47,6 +47,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -79,10 +80,11 @@ import (
 // one microsecond earlier would have been admitted anyway.
 //
 // One reader deliberately omits it, and only one: the grader's deliverables
-// listing (internal/brain/grader.go) selects `scope_type = 'session'` rows,
-// which only the outputs harvest writes, and the harvest sets no expiry — the
-// upload route is the one writer that can. Composing it there would guard a
-// state no writer can reach.
+// listing (internal/brain/grader.go) selects the session-scoped rows that own
+// their object (`source_file_id IS NULL`), which only the outputs harvest
+// writes, and the harvest sets no expiry. The upload route sets one, and a
+// session's copy of an upload inherits it (#578), but the listing leaves copies
+// out. Composing it there would guard a state no writer can reach.
 const FileLiveSQL = `(expires_at IS NULL OR expires_at > now())`
 
 // SessionTombstoneInsertSQL writes a session's deleted_sessions tombstone —
@@ -122,11 +124,18 @@ const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object
 //
 // The transaction is the point, so the parameter is one: a caller with only a
 // pool has nothing to ride and is writing a debt no commit stands behind.
+//
+// A key some files row still names is dropped by the database, not owed:
+// migration 0046's trigger counts the references, because a session's file
+// copy shares its upload's object (#578). The keys go in sorted, on a copy of
+// the caller's slice, because that count can take an advisory lock per key, and
+// two removers taking a shared pair in opposite orders would deadlock.
 func EnqueueObjectDeletes(ctx context.Context, tx pgx.Tx, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	_, err := tx.Exec(ctx, PendingObjectDeleteInsertSQL, keys)
+	sorted := slices.Sorted(slices.Values(keys))
+	_, err := tx.Exec(ctx, PendingObjectDeleteInsertSQL, sorted)
 	return err
 }
 

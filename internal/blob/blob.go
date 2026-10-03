@@ -17,12 +17,17 @@ import (
 // it so callers can errors.Is across backends.
 var ErrNotFound = errors.New("blob: object not found")
 
-// FilesKey is the object-storage key for a Files-API file's bytes — the
-// `files/{file_id}` namespace this package's doc reserves. It lives here, not
-// in a feature package (unlike skills' own BlobKey), because it has no home
-// package: the api registry that writes the object and the executor/worker that
-// stream it into sandboxes all import blob, so one definition keeps the layout
-// from drifting between the writer and its readers.
+// FilesKey is the object-storage key a new Files-API file's bytes are written
+// at — the `files/{file_id}` namespace this package's doc reserves. It lives
+// here, not in a feature package (unlike skills' own BlobKey), because it has
+// no home package: the api registry, the executor's outputs harvest and the
+// dream runner all write files objects.
+//
+// It names where a writer puts bytes, never where a reader finds them. Since
+// #578 a files row records its key in object_key, and a session's copy of an
+// upload records the upload's, so every reader reads the column; migration 0046
+// backfills it, and fills it for a previous build's INSERT, with this same
+// layout.
 func FilesKey(id string) string { return "files/" + id }
 
 // SessionCheckpointKey is the object-storage key for a session's workspace
