@@ -381,7 +381,8 @@ just told it had not touched. Keeping a payload the container will take away is
 the lesser harm than destroying data the write promised to leave alone, so that
 branch unlinks with your sandbox user's own `rm` and stops there.
 
-One limit predates all of this and is tracked separately. On a **writable** root
+One limit predates all of this and is tracked in
+[#863](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/863). On a **writable** root
 the daemon lands a temporary wherever the directory it is handed resolves, so a
 non-root sandbox user can aim a write at a directory it cannot write through a
 symlink it made itself — `ln -s /etc /workspace/x`, then a write to
