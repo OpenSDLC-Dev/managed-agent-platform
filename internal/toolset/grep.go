@@ -642,13 +642,10 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 		return failf("grep: %s", why)
 	}
 	// The script is one exec argument, and the pattern, path, type and glob
-	// are all in it, the pattern again in rg's own argv.
+	// are all in it, the pattern again in rg's own argv: Exec refuses one
+	// past sandbox.MaxCommandBytes before it runs, which Run answers.
 	q.frame = newGrepFrame()
 	script := q.script()
-	if len(script) > sandbox.MaxCommandBytes {
-		return failf("grep: the pattern, path, type and glob make a %d-byte command, over the %d bytes one exec argument can carry; shorten them",
-			len(script), sandbox.MaxCommandBytes)
-	}
 	for installed := false; ; installed = true {
 		res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: DefaultTimeout})
 		if err != nil {

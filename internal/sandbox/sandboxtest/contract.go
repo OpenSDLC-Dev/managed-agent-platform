@@ -179,6 +179,27 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A command past MaxCommandBytes is refused before anything runs, with a
+	// *CommandTooLongError the toolset can answer as the model's; one at the
+	// bound runs.
+	t.Run("ExecRefusesACommandPastMaxCommandBytes", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		pad := func(cmd string, size int) string { return cmd + "\n#" + strings.Repeat("x", size-len(cmd)-2) }
+		_, err := sb.Exec(ctx, sandbox.ExecRequest{Command: pad("touch /tmp/map-too-long", sandbox.MaxCommandBytes+1)})
+		var tooLong *sandbox.CommandTooLongError
+		if !errors.As(err, &tooLong) || tooLong.Bytes != sandbox.MaxCommandBytes+1 {
+			t.Fatalf("exec of a %d-byte command: %v; want a *CommandTooLongError", sandbox.MaxCommandBytes+1, err)
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: pad("ls /tmp/map-too-long 2>&1; echo at-the-bound", sandbox.MaxCommandBytes)})
+		if err != nil {
+			t.Fatalf("exec of a %d-byte command: %v", sandbox.MaxCommandBytes, err)
+		}
+		if !strings.Contains(res.Stdout, "No such file") || !strings.Contains(res.Stdout, "at-the-bound") {
+			t.Errorf("stdout = %q; want the refused command never to have run, and one at the bound to run", res.Stdout)
+		}
+	})
+
 	t.Run("ExecReportsExitCode", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
 		res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: `exit 7`})

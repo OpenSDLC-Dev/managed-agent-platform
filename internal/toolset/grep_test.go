@@ -1045,12 +1045,22 @@ func TestGrepSortsEveryCallByPath(t *testing.T) {
 }
 
 // A search whose values make a command too long for one exec argument is
-// refused before anything runs.
-func TestGrepRefusesACommandPastOneExecArgument(t *testing.T) {
-	sb := &fakeSandbox{}
-	res, err := run(t, sb, "grep", `{"pattern":"`+strings.Repeat("z", 130<<10)+`"}`)
-	if err != nil || !res.IsError || !strings.HasPrefix(res.Content, "grep: the pattern, path, type and glob make a ") || len(sb.commands) != 0 {
-		t.Fatalf("grep = %+v, %v after %d execs; want a refusal before any", res, err, len(sb.commands))
+// refused before anything runs: the sandbox's Exec refuses it
+// (sandbox.CheckCommand, which the fake applies as every backend does), and
+// the tool answers with what the model can shorten, as a tool error, not a
+// fault.
+func TestSearchesRefuseACommandPastOneExecArgument(t *testing.T) {
+	long := strings.Repeat("z", 130<<10)
+	for tool, want := range map[string]string{
+		"grep": "grep: the pattern, path, type and glob make a ",
+		"glob": "glob: the pattern and path make a ",
+	} {
+		sb := &fakeSandbox{}
+		res, err := run(t, sb, tool, `{"pattern":"`+long+`"}`)
+		if err != nil || !res.IsError || !strings.HasPrefix(res.Content, want) ||
+			!strings.HasSuffix(res.Content, "-byte command, over the 122880 bytes one exec argument can carry; shorten them") || len(sb.commands) != 0 {
+			t.Errorf("%s = %+v, %v after %d execs; want a refusal before any", tool, res, err, len(sb.commands))
+		}
 	}
 }
 

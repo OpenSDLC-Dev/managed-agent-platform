@@ -694,8 +694,8 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			continue
 		}
 		// The assembled command is one execve argument, which Linux caps near
-		// 128 KiB (sandbox.MaxCommandBytes); past it the install faults at exec
-		// startup, and a fault reclaim-loops the item. The API's per-manager
+		// 128 KiB; past sandbox.MaxCommandBytes Exec refuses it before it runs,
+		// an error that would fault the pass, and a fault reclaim-loops the item. The API's per-manager
 		// byte cap does not bound this: it counts entry bytes, while `go` emits
 		// one `go install` per entry (far more than the entry's own bytes), and
 		// a row stored before that cap existed never passed it. This is the

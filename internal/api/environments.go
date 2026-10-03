@@ -353,7 +353,7 @@ func parsePackages(raw json.RawMessage, base packagesJSON) (packagesJSON, error)
 		}
 		// A fast bound on entry bytes: the executor hands one manager's whole
 		// list to a single `bash -c` argument, which Linux caps near 128 KiB, and
-		// a list past that faults at exec startup and reclaim-loops the item. This
+		// a list past that would fault the install and reclaim-loop the item. This
 		// is not the whole guard — `go` expands to one invocation per entry, so
 		// the assembled command can exceed the ceiling while the entry bytes stay
 		// small; the executor bounds the assembled command itself

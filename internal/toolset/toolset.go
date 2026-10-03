@@ -51,6 +51,7 @@ package toolset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"path"
@@ -166,6 +167,14 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 		// not recognise at all. Telling the model so lets it try something else.
 		return failf("unknown tool %q", name)
 	}
+	// Nor is a command too long for one exec argument, which the sandbox
+	// refused before anything ran: it grew with what the model sent, and the
+	// model can send less.
+	var tooLong *sandbox.CommandTooLongError
+	if errors.As(err, &tooLong) {
+		return failf("%s: %s a %d-byte command, over the %d bytes one exec argument can carry; shorten them",
+			name, commandInputs(name), tooLong.Bytes, sandbox.MaxCommandBytes)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -185,6 +194,18 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	}
 	res.Content = CapOutput(res.Content)
 	return res, nil
+}
+
+// commandInputs names the inputs a tool's command grows with, for the
+// refusal of one too long to run.
+func commandInputs(tool string) string {
+	switch tool {
+	case "glob":
+		return "the pattern and path make"
+	case "grep":
+		return "the pattern, path, type and glob make"
+	}
+	return "its input makes"
 }
 
 // spillDir is where an oversized output's full bytes land in the sandbox —

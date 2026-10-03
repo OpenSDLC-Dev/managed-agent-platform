@@ -1140,6 +1140,9 @@ func (pd *pod) execErr(ctx context.Context, err error) error {
 // instead — the Kubernetes analogue of docker's exec-inspect — which the stream
 // close cannot delay.
 func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if err := sandbox.CheckCommand(req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
 	deadline := watchdogDeadline(req.Timeout)
 	seconds := int(deadline / time.Second)
 

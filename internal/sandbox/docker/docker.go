@@ -975,6 +975,9 @@ func (c *container) aliveOrTimedOut(ctx context.Context, pid int) bool {
 // exit code it chose. The one thing a command buys by killing its watchdog is
 // overrunSlop of unnoticed overrun.
 func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if err := sandbox.CheckCommand(req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
 	seconds := 0
 	if req.Timeout > 0 {
 		seconds = int(math.Ceil(req.Timeout.Seconds()))

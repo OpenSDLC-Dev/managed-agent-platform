@@ -394,15 +394,35 @@ func (req ExecRequest) BashMode() string {
 	return "-p"
 }
 
-// MaxCommandBytes bounds a Command the platform assembles itself. Each backend
-// hands the command to its exec wrapper as one execve argument, which Linux
-// caps near 128 KiB (MAX_ARG_STRLEN, 32 pages); past that the exec fails
-// before anything runs ("argument list too long"), which a backend reports as
-// a fault. The bound sits below the ceiling with room for the wrapper. The
-// package-install pass (internal/executor) and grep (internal/toolset), the
-// two places a command grows with what a client or a model chose, refuse one
-// past it before they exec.
+// MaxCommandBytes bounds an ExecRequest's Command. Each backend hands the
+// command to its exec wrapper as one execve argument, which Linux caps near
+// 128 KiB (MAX_ARG_STRLEN, 32 pages); past that the exec would fail before
+// anything ran ("argument list too long"), which a backend could only report
+// as a fault. The bound sits below the ceiling with room for the wrapper, and
+// every backend's Exec refuses a Command past it before anything runs, with a
+// *CommandTooLongError (CheckCommand). The toolset answers that refusal with a
+// tool error naming what the model can shorten — glob's and grep's commands
+// grow with its pattern and path — and the package-install pass, whose command
+// grows with a client's list, refuses one past the bound itself, terminally
+// and before its probe, as it refuses an invalid entry.
 const MaxCommandBytes = 120 << 10
+
+// CommandTooLongError is Exec's refusal of a Command past MaxCommandBytes:
+// nothing ran.
+type CommandTooLongError struct{ Bytes int }
+
+func (e *CommandTooLongError) Error() string {
+	return fmt.Sprintf("sandbox: a %d-byte command is over the %d bytes one exec argument can carry", e.Bytes, MaxCommandBytes)
+}
+
+// CheckCommand is the bound every backend's Exec applies before it runs
+// anything (MaxCommandBytes).
+func CheckCommand(command string) error {
+	if len(command) > MaxCommandBytes {
+		return &CommandTooLongError{Bytes: len(command)}
+	}
+	return nil
+}
 
 // ExecResult is a finished command. TimedOut means the command itself outlived
 // its deadline: the sandbox stopped it, or stopped waiting for it, or caught it
@@ -437,7 +457,9 @@ type Sandbox interface {
 	// ExecResult, because each is something the model reads and answers. The
 	// error return is the sandbox failing the caller instead — gone
 	// (ErrNotFound), unreachable, the context cancelled — which the toolset
-	// carries up as a backend fault rather than folding into a tool result.
+	// carries up as a backend fault rather than folding into a tool result;
+	// and a Command past MaxCommandBytes, refused before anything runs with a
+	// *CommandTooLongError, which the toolset answers as the model's.
 	Exec(ctx context.Context, req ExecRequest) (ExecResult, error)
 	// ReadFile returns a file's bytes verbatim, binary included.
 	ReadFile(ctx context.Context, path string) ([]byte, error)

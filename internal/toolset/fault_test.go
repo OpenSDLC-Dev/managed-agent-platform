@@ -34,6 +34,10 @@ type fakeSandbox struct {
 func (f *fakeSandbox) ID() string { return "fake" }
 
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// A backend refuses a command too long to run before anything runs.
+	if err := sandbox.CheckCommand(req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
 	f.commands = append(f.commands, req.Command)
 	f.timeouts = append(f.timeouts, req.Timeout)
 	if f.execErr != nil {

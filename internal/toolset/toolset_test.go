@@ -409,6 +409,23 @@ func TestGlob(t *testing.T) {
 		fails(t, r, "glob", `{"pattern":"*","path":"g/absent"}`, "no such")
 	})
 
+	// The search is one exec argument, which Linux caps near 128 KiB: a
+	// pattern that would push it past is refused before anything runs, where
+	// the exec would otherwise fail before it started.
+	t.Run("a pattern too long for one exec argument", func(t *testing.T) {
+		exactly := func(in, want string) {
+			t.Helper()
+			if got := ok(t, r, "glob", in); got != want {
+				t.Fatalf("glob(%.40s…) = %q, want %q", in, got, want)
+			}
+		}
+		exactly(`{"pattern":"`+strings.Repeat("z", 100<<10)+`","path":"g"}`, "no matches")
+		fails(t, r, "glob", `{"pattern":"`+strings.Repeat("z", 130<<10)+`","path":"g"}`,
+			"glob: the pattern and path make a ")
+		fails(t, r, "glob", `{"pattern":"*","path":"`+strings.Repeat("p", 125<<10)+`"}`,
+			"over the 122880 bytes one exec argument can carry; shorten them")
+	})
+
 	t.Run("pattern is required", func(t *testing.T) {
 		fails(t, r, "glob", `{}`, "pattern is required")
 	})
