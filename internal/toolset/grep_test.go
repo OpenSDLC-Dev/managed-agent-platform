@@ -634,6 +634,57 @@ func TestGrepThroughAnImageBanner(t *testing.T) {
 	}
 }
 
+// The memory sync's baselines and each store's marker are not memories, and a
+// search that reaches them from above leaves them out — whatever directory rg
+// runs in, which decides how rg matches the glob naming the baselines
+// (memoryGlobs): from the default workdir, which does not lead
+// /mnt/memory/.sync, and from /mnt and from /, which do. A memory directory
+// that happens to be named .sync is a memory, and a search rooted at the
+// baselines searches them, as rg searches a hidden directory it is handed.
+func TestGrepLeavesOutTheMemorySyncState(t *testing.T) {
+	for _, workdir := range []string{"", "/mnt", "/"} {
+		t.Run("workdir "+workdir, func(t *testing.T) {
+			r := runnerIn(t, workdir)
+			ok(t, r, "bash", `{"command":"mkdir -p /mnt/memory/.sync /mnt/memory/s1/.sync /mnt/memory/s1/sub`+
+				` && echo needle > /mnt/memory/.sync/memstore_1 && echo needle > /mnt/memory/s1/.anthropic-memory-store`+
+				` && echo needle > /mnt/memory/s1/notes.md && echo needle > /mnt/memory/s1/.sync/kept.md && echo needle > /mnt/memory/s1/sub/deep.md"}`)
+			memories := under("/mnt/memory/s1/", ".sync/kept.md", "notes.md", "sub/deep.md")
+			for _, root := range []string{"/mnt", "/mnt/memory", "/mnt/memory/"} {
+				exactly(t, r, `{"pattern":"needle","path":"`+root+`"}`, memories)
+				// The model's own glob cannot bring them back.
+				exactly(t, r, `{"pattern":"needle","path":"`+root+`","glob":"*"}`, memories)
+			}
+			exactly(t, r, `{"pattern":"needle","path":"/mnt/memory/s1"}`, memories)
+			exactly(t, r, `{"pattern":"needle","path":"/mnt/memory/.sync"}`, "/mnt/memory/.sync/memstore_1")
+		})
+	}
+}
+
+// runnerIn is runner for a sandbox whose workdir — where rg runs, and where
+// relative paths resolve — is workdir, or the default when it is "".
+func runnerIn(t *testing.T, workdir string) toolset.Runner {
+	t.Helper()
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("toolset tests require Docker: %v", err)
+	}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+		SessionID:  domain.NewID("sesn"),
+		Image:      testImage,
+		Workdir:    workdir,
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+	return toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn"), Workdir: workdir}
+}
+
 // TestGrepRunsTheSameInAKubernetesPod installs and runs rg in a pod — over
 // the k8s backend's exec, whose stdin carries the binary, into the emptyDir a
 // read-only root mounts at /tmp — on the Debian and the musl image, installs

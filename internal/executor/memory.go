@@ -45,9 +45,8 @@ type memoryRef struct {
 }
 
 const (
-	// memorySyncDir holds one baseline file per store, beside the mounts
-	// rather than inside them so it is never a memory and never hashed.
-	memorySyncDir = "/mnt/memory/.sync"
+	// memorySyncDir holds one baseline file per store (toolset.MemorySyncDir).
+	memorySyncDir = toolset.MemorySyncDir
 	// memoryFileMode is what a memory file lands with (decision 10): the docker
 	// daemon lands a batch's members root-owned, and a root-owned 0644 file
 	// refuses a non-root agent's in-place `>>` even though the file tools'

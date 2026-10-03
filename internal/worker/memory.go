@@ -60,10 +60,9 @@ type memoryRef struct {
 }
 
 const (
-	// memorySyncDir holds one baseline file per store, beside the mounts
-	// rather than inside them so it is never a memory and never hashed —
-	// the executor's path, byte for byte; the two never share a sandbox.
-	memorySyncDir = "/mnt/memory/.sync"
+	// memorySyncDir holds one baseline file per store (toolset.MemorySyncDir)
+	// — the executor's path; the two never share a sandbox.
+	memorySyncDir = toolset.MemorySyncDir
 	// memoryFileMode is what a memory file lands with (decision 10): a
 	// batch's members land root-owned, and a root-owned 0644 file refuses a
 	// non-root agent's in-place `>>`.

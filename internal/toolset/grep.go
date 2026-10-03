@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/ripgrep"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
@@ -81,18 +82,20 @@ func number(v float64) string {
 var vcsDirs = []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
 
 // query maps the input onto rg, flag for the flag each recorded description
-// names, searching root. The rest is ours and fixed: --no-config, so an
-// image's RIPGREP_CONFIG_PATH cannot change what a call means; --no-heading,
-// so every line carries its file; --hidden with the version-control
-// directories globbed out, as the reference's GrepTool searches (vcsDirs) —
-// .gitignore and the other ignore files rg reads still apply; and
-// --sort=path, so an answer lists in one order run after run, and offset
-// pages through that order whether or not the call that came before paged —
-// which costs rg its parallel search, as sorting does (docs/DIVERGENCES.md).
-// Every value the model chose is one argv word: the pattern after -e and the
-// type and glob joined to their flag, so none of them can be read as an
-// option whatever it begins with, and the path after "--".
-func (in grepInput) query(root string) (grepQuery, string) {
+// names, searching root from cwd, the directory rg runs in. The rest is ours
+// and fixed: --no-config, so an image's RIPGREP_CONFIG_PATH cannot change what
+// a call means; --no-heading, so every line carries its file; --hidden with
+// the version-control directories globbed out, as the reference's GrepTool
+// searches (vcsDirs) — .gitignore and the other ignore files rg reads still
+// apply; --sort=path, so an answer lists in one order run after run, and
+// offset pages through that order whether or not the call that came before
+// paged — which costs rg its parallel search, as sorting does (docs/
+// DIVERGENCES.md); and, after the model's own glob so that one cannot bring
+// them back, the memory sync's files (memoryGlobs). Every value the model
+// chose is one argv word: the pattern after -e and the type and glob joined to
+// their flag, so none of them can be read as an option whatever it begins
+// with, and the path after "--".
+func (in grepInput) query(root, cwd string) (grepQuery, string) {
 	q := grepQuery{args: []string{"--no-config", "--no-heading", "--hidden", "--sort=path"}}
 	for _, d := range vcsDirs {
 		q.args = append(q.args, "--glob=!"+d)
@@ -159,8 +162,40 @@ func (in grepInput) query(root string) (grepQuery, string) {
 	if in.Glob != "" {
 		q.args = append(q.args, "--glob="+in.Glob)
 	}
+	q.args = append(q.args, memoryGlobs(root, cwd)...)
 	q.args = append(q.args, "-e", in.Pattern, "--", root)
 	return q, ""
+}
+
+// memoryGlobs keeps the memory sync's own files out of a search. The
+// baselines in MemorySyncDir and the marker at each store's root
+// (memsync.MarkerName) are the platform's bookkeeping beside the memories, not
+// memories, and --hidden would otherwise list them; the memory guidance's own
+// grep line leaves them out for the same reason (internal/brain). The marker
+// is left out by name, wherever it lies, as that line leaves it out. The
+// baselines are one directory, left out where the walk reaches it from a root
+// above it; a search rooted at it or inside it searches it, as rg searches a
+// hidden directory it is handed.
+//
+// rg 15.2.0 matches a glob against each path as its walk yields it — the root
+// as given, joined with what lies under it — less rg's working directory: the
+// override matcher is rooted there, not at the search root, and strips the
+// working directory's bytes from the front of a path that begins with them,
+// and then one slash (the ignore crate's Gitignore::strip). A glob that begins
+// with "/" must match all of what is left. So the glob naming the baselines is
+// "/" and their path below cwd where cwd leads it — "/memory/.sync" from /mnt
+// — and "/" and their absolute path where it does not: "//mnt/memory/.sync"
+// from /workspace. TestGrepLeavesOutTheMemorySyncState holds rg to both.
+func memoryGlobs(root, cwd string) []string {
+	globs := []string{"--glob=!" + memsync.MarkerName}
+	if root == MemorySyncDir || (root != "/" && !under(MemorySyncDir, root)) {
+		return globs
+	}
+	rel := MemorySyncDir
+	if rest, ok := strings.CutPrefix(MemorySyncDir, cwd); ok {
+		rel = strings.TrimPrefix(rest, "/")
+	}
+	return append(globs, "--glob=!/"+rel)
 }
 
 // ripgrepDir is where grep installs rg in a sandbox: under /tmp, which is
@@ -455,7 +490,7 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if in.Path != "" {
 		root = r.resolve(in.Path)
 	}
-	q, why := in.query(root)
+	q, why := in.query(root, r.workdir())
 	if why != "" {
 		return failf("grep: %s", why)
 	}

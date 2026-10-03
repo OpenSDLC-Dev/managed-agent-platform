@@ -271,6 +271,12 @@ func (r Runner) resolve(p string) string {
 // repository mounts out of it.
 const MemoryMountRoot = "/mnt/memory"
 
+// MemorySyncDir holds the memory sync's baselines, one file per store (plan 36
+// decision 11): beside the mounts rather than inside them, so it is never a
+// memory and never hashed. The executor and the worker keep them there; grep
+// leaves it out of a search (memoryGlobs).
+const MemorySyncDir = MemoryMountRoot + "/.sync"
+
 // unwritable says why a resolved path may not be written by the file tools —
 // the read-only store it is inside, or the reserved tree it is loose in — or
 // "" when it may. display is the path the model used, for the message; the
