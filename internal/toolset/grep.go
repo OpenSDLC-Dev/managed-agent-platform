@@ -160,9 +160,15 @@ func (in grepInput) query(root string) (grepQuery, string) {
 // writable in every hardening shape on both backends (sandbox.WritablePaths —
 // an emptyDir or a volume under a read-only root, neither mounted noexec) and
 // outside the workdir, so the model's own searches and the checkpoint never
-// meet it. A platform directory rather than /tmp itself, so the sandbox user
-// owns it: Docker lands a written file as root, and only the owner of a
-// directory without /tmp's sticky bit can move that file and remove it.
+// meet it. A directory of the platform's own rather than /tmp itself: Docker
+// lands the upload as root, and /tmp's sticky bit lets only a file's owner,
+// the directory's, or root unlink or rename it, so a non-root sandbox user
+// could never clear a root-owned upload out of /tmp. Each install instead
+// works in a directory of its own under this one, which the sandbox user
+// makes, and from a directory it may write that carries no sticky bit,
+// removing the upload takes nothing more. The path is the platform's: what an
+// install finds there that is not a directory — a link to somewhere else
+// included — it removes, and it makes the directory afresh (prepareScript).
 const ripgrepDir = "/tmp/.map-ripgrep"
 
 // ripgrepPath is where this build's rg lives in a sandbox. The version is in
@@ -285,16 +291,29 @@ const (
 // interpreters the image has. Exit 1 is a step that failed and said why;
 // exit 2 is a sandbox that will not execute a file under ripgrepDir. Either
 // way the directory goes again.
+//
+// The sweep removes directories, so it must never reach past ripgrepDir. A
+// link there — the model's, or an image's — would take it to wherever the
+// link points, and a stale-looking name there would go; so what stands at
+// ripgrepDir and is not a directory is removed (rm on a link removes the link,
+// never what it names), the directory is made afresh, and the sweep runs from
+// inside it, on names relative to it, once the directory the script stands in
+// is shown to be the one at ripgrepDir and that to be no link. A link swapped
+// in after that cannot redirect it: a relative name resolves from the
+// directory the script stands in, not from the path.
 const prepareScript = `d=%[1]s
 s=%[2]s
-for o in "$d"/` + installPrefix + `*; do
+if [ -h "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then rm -f -- "$d" || exit 1; fi
+mkdir -p -- "$d" && cd -- "$d" || exit 1
+if [ -h "$d" ] || [ ! . -ef "$d" ]; then printf '%%s was replaced while ripgrep was being installed\n' "$d" >&2; exit 1; fi
+for o in ` + installPrefix + `*; do
   [ -d "$o" ] && [ ! -h "$o" ] || continue
-  n=${o##*/` + installPrefix + `}
+  n=${o#` + installPrefix + `}
   n=${n%%%%-*}
   case $n in ''|*[!0-9]*) continue ;; esac
   [ "$n" -lt %[3]d ] && rm -rf -- "$o"
 done
-mkdir -p -- "$s" || exit 1
+mkdir -- "$s" || exit 1
 : > "$s/probe" && chmod 755 -- "$s/probe" || { rm -rf -- "$s"; exit 1; }
 m=$("$s/probe" 2>&1)
 if [ $? != 0 ]; then rm -rf -- "$s"; printf '%%s\n' "$m" >&2; exit 2; fi

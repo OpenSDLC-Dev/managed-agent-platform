@@ -569,20 +569,50 @@ func TestGrepSaysWhyRipgrepCannotRun(t *testing.T) {
 // An install that never finished — its exec killed at the deadline, or the
 // executor gone mid-upload — leaves its directory behind; the next install
 // sweeps the ones past staleness, and touches nothing it did not name: not a
-// recent install's, which may still be running, and not a file of anyone
-// else's.
+// recent install's, which may still be running; not a name whose seconds are
+// not all digits, though a shell's test would read "+1000" as a number; not a
+// link, though it names a stale install and points at a directory; and not a
+// file of anyone else's.
 func TestGrepInstallSweepsWhatAnEarlierInstallLeft(t *testing.T) {
 	r := runner(t)
+	const d = "/tmp/.map-ripgrep/"
 	fresh := fmt.Sprintf(".install-%d-feed", time.Now().Unix())
-	ok(t, r, "bash", `{"command":"mkdir -p /tmp/.map-ripgrep/.install-1000-dead /tmp/.map-ripgrep/.install-2000-beef/x /tmp/.map-ripgrep/`+fresh+
-		` && echo partial > /tmp/.map-ripgrep/.install-1000-dead/upload && echo keep > /tmp/.map-ripgrep/notes.txt`+
-		` && mkdir -p /tmp/.map-ripgrep/.install-oops && echo needle > sw.txt"}`)
+	ok(t, r, "bash", `{"command":"mkdir -p `+d+`.install-1000-dead `+d+`.install-2000-beef/x `+d+fresh+` `+d+`.install-+1000-plus /tmp/sweep-target`+
+		` && echo partial > `+d+`.install-1000-dead/upload && echo keep > `+d+`notes.txt && echo keep > /tmp/sweep-target/f`+
+		` && ln -s /tmp/sweep-target `+d+`.install-1000-link && mkdir -p `+d+`.install-oops && echo needle > sw.txt"}`)
 	if got := ok(t, r, "grep", `{"pattern":"needle","path":"sw.txt"}`); got != "/workspace/sw.txt" {
 		t.Fatalf("grep = %q", got)
 	}
-	want := strings.Join([]string{".install-oops", fresh, "notes.txt", "rg-" + ripgrep.Pinned.Version}, "\n")
-	if out := ok(t, r, "bash", `{"command":"ls -A /tmp/.map-ripgrep | LC_ALL=C sort"}`); strings.TrimSpace(out) != sortedLines(want) {
-		t.Errorf("/tmp/.map-ripgrep holds\n%s\nwant\n%s", out, sortedLines(want))
+	want := []string{".install-+1000-plus", ".install-1000-link", ".install-oops", fresh, "notes.txt", "rg-" + ripgrep.Pinned.Version}
+	slices.Sort(want)
+	if out := ok(t, r, "bash", `{"command":"ls -A `+d+` | LC_ALL=C sort"}`); strings.TrimSpace(out) != strings.Join(want, "\n") {
+		t.Errorf("%s holds\n%s\nwant\n%s", d, out, strings.Join(want, "\n"))
+	}
+	if out := ok(t, r, "bash", `{"command":"test -h `+d+`.install-1000-link && cat /tmp/sweep-target/f"}`); strings.TrimSpace(out) != "keep" {
+		t.Errorf("the link or what it points at was touched: %q", out)
+	}
+}
+
+// What stands at /tmp/.map-ripgrep and is not a directory is not the
+// platform's to follow: a link there — Codex's case, pointing into the
+// workspace at a directory holding a stale-looking install name — is removed,
+// never what it points at, and the directory is made afresh; so is a file.
+func TestGrepInstallNeverSweepsThroughALink(t *testing.T) {
+	r := runner(t)
+	ok(t, r, "bash", `{"command":"mkdir -p victim/.install-1000-x && echo keep > victim/.install-1000-x/f && echo needle > lk.txt`+
+		` && ln -s /workspace/victim /tmp/.map-ripgrep"}`)
+	exactly(t, r, `{"pattern":"needle","path":"lk.txt"}`, "/workspace/lk.txt")
+	if out := ok(t, r, "bash", `{"command":"cat victim/.install-1000-x/f; ls -A victim"}`); out != "keep\n.install-1000-x\n" {
+		t.Errorf("the link's target holds %q, want its own file alone", out)
+	}
+	check := `{"command":"test -d /tmp/.map-ripgrep && ! test -h /tmp/.map-ripgrep && ls -A /tmp/.map-ripgrep"}`
+	if out := ok(t, r, "bash", check); strings.TrimSpace(out) != "rg-"+ripgrep.Pinned.Version {
+		t.Errorf("/tmp/.map-ripgrep = %q, want a directory of its own holding rg", out)
+	}
+	ok(t, r, "bash", `{"command":"rm -rf /tmp/.map-ripgrep && echo not-a-directory > /tmp/.map-ripgrep"}`)
+	exactly(t, r, `{"pattern":"needle","path":"lk.txt"}`, "/workspace/lk.txt")
+	if out := ok(t, r, "bash", check); strings.TrimSpace(out) != "rg-"+ripgrep.Pinned.Version {
+		t.Errorf("/tmp/.map-ripgrep = %q, want a directory of its own holding rg", out)
 	}
 }
 
