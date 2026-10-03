@@ -142,9 +142,9 @@ func TestPathFaultShellIgnoresAShadowedDirname(t *testing.T) {
 	}
 }
 
-// The name a write lands under: hidden, unique per call, and a single path
+// The name a write lands under: hidden, unique per call, a single path
 // component so it stays in the target's own directory — the property that makes
-// the rename atomic.
+// the rename atomic — and TempNameBytes long, every time.
 func TestTempName(t *testing.T) {
 	seen := make(map[string]bool, 64)
 	for range 64 {
@@ -154,6 +154,9 @@ func TestTempName(t *testing.T) {
 			t.Fatalf("%q does not carry the prefix the contract suite looks for", n)
 		case strings.ContainsAny(n, "/ "):
 			t.Fatalf("%q is not a single plain path component", n)
+		case len(n) != sandbox.TempNameBytes || sandbox.TempNameBytes != 27:
+			t.Fatalf("%q is %d bytes; TempNameBytes says %d, and the toolset's bound on a write's directory says 27",
+				n, len(n), sandbox.TempNameBytes)
 		case seen[n]:
 			t.Fatalf("%q was minted twice", n)
 		}

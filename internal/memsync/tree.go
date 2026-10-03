@@ -90,9 +90,10 @@ func mountPrelude(mount string, status int) string {
 	return "[ -d " + m + " ] || exit 0; cd -P " + m + ` && [ "$PWD" = ` + m + " ] || exit " + strconv.Itoa(status) + "; "
 }
 
-// removeCommandBytes bounds one removal command: the sandbox hands a command
-// to its shell as a single argument, which Linux caps at 128 KiB, and 2,000
-// memory paths of up to 1,024 bytes are well past that.
+// removeCommandBytes bounds one removal command, since 2,000 memory paths of
+// up to 1,024 bytes are well past what one command may carry: a sandbox's Exec
+// refuses one past sandbox.MaxCommandBytes (120 KiB, under the single argument
+// Linux caps near 128 KiB) before it runs, and this sits well inside that.
 const removeCommandBytes = 32 << 10
 
 // RemoveCommands is the apply phase's deletions, as one exec or several: the

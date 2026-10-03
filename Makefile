@@ -17,7 +17,7 @@ SHELL := /usr/bin/env bash
 # internally), so refuse it rather than gate on a stale profile.
 .NOTPARALLEL:
 
-.PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
+.PHONY: build crossbuild vet fmt-check test cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
@@ -55,6 +55,34 @@ fmt-check:
 		exit 1; \
 	fi
 
+# The static ripgrep the grep tool installs in a sandbox (internal/ripgrep):
+# upstream's release archives, pinned by URL and sha256 in
+# internal/ripgrep/assets/manifest.json, downloaded into that gitignored
+# directory and checked against the pin before anything embeds them. Every
+# target below that builds or runs something that greps depends on it — test
+# (so the gate searches with the real rg), eval, release-binaries — and the
+# Dockerfile's build stage runs the same command. A plain `go build` without it
+# still compiles, into a binary whose grep answers that it carries no ripgrep.
+# Idempotent: an archive already present with the pinned digest is not fetched
+# again, so this costs nothing after the first run.
+ripgrep:
+	go run ./tools/ripgrepfetch
+
+# THIRD_PARTY_LICENSES, the license texts of what that ripgrep was built from,
+# which the worker tarballs and the server image ship beside NOTICE and
+# LICENSE. Generated from tools/thirdpartylicenses/sources.json, whose every
+# input — the lock files, each crate, each upstream license file — is checked
+# against a sha256 before it is used. It needs the network, so it is run when
+# the ripgrep pin moves, not by the gate. tools/thirdpartylicenses' own test,
+# which is in the gate, holds the committed file to the sha256s its header
+# records — of sources.json and of the file's own body — and to the pinned
+# ripgrep: it fails when sources.json changed without a regeneration, when
+# the body was edited since, or when the file describes another ripgrep. It
+# cannot regenerate offline, so a generator change not followed by a run, or
+# a body edited together with its recorded digest, gets past it.
+third-party-licenses:
+	go run ./tools/thirdpartylicenses
+
 # Coverage denominator: logic packages only. internal/pgtest, internal/dockertest,
 # internal/sandbox/sandboxtest, internal/modeltest, internal/blob/blobtest,
 # internal/blob/gcs/gcstest, internal/provider/providertest, internal/secrets/secretstest,
@@ -80,7 +108,7 @@ fmt-check:
 # its pgtest fixture, so the ceiling also fed the next run's contention. This
 # buys room rather than fixing the cause: the per-test database creation behind
 # the growth, and reaping a fixture whose owner died, are #499.
-test:
+test: ripgrep
 	@set -euo pipefail; \
 	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest)$$' | paste -sd, -)"; \
 	set -x; \
@@ -125,7 +153,7 @@ verify: build crossbuild vet fmt-check test cover-gate
 #
 # Artifacts land in evals/artifacts/ (gitignored): report.json, summary.md, and
 # one transcript per failed attempt (a retried-then-failed task leaves two).
-eval:
+eval: ripgrep
 	RUN_EVALS=1 go test -count=1 -v -timeout 120m ./evals/...
 
 # Release-time changelog tooling (docs/RELEASING.md; the fragment format is
@@ -152,12 +180,18 @@ changelog-archive:
 # `verify` — they are offline, and `go test ./...` runs tools/registrycheck's
 # own test, which calls Check on the real docs/DIVERGENCES.md. This target is
 # the other half: whether each live `Tracked: #N` still names an OPEN issue,
-# which only GitHub can answer. NOT part of `verify`, for the one reason the
-# gcp-* and eval groups are not either — the gate is offline and
-# credential-free by design, and a check that reaches the network cannot be
-# made to fail honestly inside it. .github/workflows/registry.yml runs this
-# daily and on every PR that touches the registry; GITHUB_TOKEN is optional
-# (the repository is public) and only raises the API rate limit.
+# which only GitHub can answer. NOT part of `verify`: the gate is
+# credential-free by design and downloads only build and test input — the
+# modules go.sum pins and the ripgrep `make ripgrep` checks against its
+# sha256, both fixed by digest, and the container images its suites run, some
+# by a tag that moves (debian:stable-slim, postgres:16-alpine, bash:3.2 for
+# glob's refusal of a bash without globstar, busybox for the Kubernetes
+# backend's net-setup init container, and golang:1.26-bookworm for the gate
+# image it builds, whose build also runs apt-get), so those can change
+# between runs — while this check's answer is live state elsewhere, which a
+# gate cannot be made to fail on honestly. .github/workflows/registry.yml
+# runs this daily and on every PR that touches the registry; GITHUB_TOKEN is
+# optional (the repository is public) and only raises the API rate limit.
 registry-check:
 	go run ./tools/registrycheck -issues
 
@@ -250,7 +284,11 @@ release-chart: release-chart-check
 
 # Worker binaries for the platforms BYOC users run. No Windows: the worker
 # drives Docker sandboxes and has no Windows user story (plan 27 decision 4).
-release-binaries:
+# Every one embeds both Linux ripgrep binaries, the darwin builds included: a
+# worker on a Mac drives Linux sandboxes, of either architecture. NOTICE and
+# THIRD_PARTY_LICENSES ride in each tarball because of them, and LICENSE, which
+# NOTICE refers to.
+release-binaries: ripgrep
 	@set -euo pipefail; \
 	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
 	mkdir -p dist; \
@@ -258,7 +296,8 @@ release-binaries:
 		os="$${target%/*}"; arch="$${target#*/}"; \
 		dir="dist/worker_$(VERSION)_$${os}_$${arch}"; \
 		CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" go build -trimpath $(RELEASE_LDFLAGS) -o "$$dir/worker" ./cmd/worker; \
-		tar -czf "$$dir.tar.gz" -C "$$dir" worker; \
+		cp LICENSE NOTICE THIRD_PARTY_LICENSES "$$dir/"; \
+		tar -czf "$$dir.tar.gz" -C "$$dir" worker LICENSE NOTICE THIRD_PARTY_LICENSES; \
 		rm -r "$$dir"; \
 	done; \
 	(cd dist && shasum -a 256 worker_$(VERSION)_*.tar.gz > "worker_$(VERSION)_sha256sums.txt"); \

@@ -60,10 +60,9 @@ type memoryRef struct {
 }
 
 const (
-	// memorySyncDir holds one baseline file per store, beside the mounts
-	// rather than inside them so it is never a memory and never hashed —
-	// the executor's path, byte for byte; the two never share a sandbox.
-	memorySyncDir = "/mnt/memory/.sync"
+	// memorySyncDir holds one baseline file per store (toolset.MemorySyncDir)
+	// — the executor's path; the two never share a sandbox.
+	memorySyncDir = toolset.MemorySyncDir
 	// memoryFileMode is what a memory file lands with (decision 10): a
 	// batch's members land root-owned, and a root-owned 0644 file refuses a
 	// non-root agent's in-place `>>`.
@@ -251,7 +250,7 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	// A listing with anything in it — or one too long to capture, or one
 	// that failed — is a directory nothing vouches for. An absent directory
 	// lists nothing and exits 0, which is the fresh case.
-	if len(res.Stdout) > 0 || res.Truncated || res.ExitCode != 0 {
+	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
 	// One batch for the whole store, bounded by the store's own caps (2,000
@@ -498,7 +497,7 @@ func (m *memoryStores) readStore(ctx context.Context, st *storeSync, progress fu
 	if err != nil {
 		return err
 	}
-	if res.Truncated {
+	if res.Truncated() {
 		return errors.New("the listing overflows the exec output cap")
 	}
 	// A non-zero exit is a listing not to act on — under the command's

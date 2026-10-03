@@ -15,10 +15,10 @@
 //     Check on the real file the way internal/modeltest/docs_test.go holds
 //     README's tier table to the tree.
 //   - The state rungs ask GitHub whether each referenced issue is open or
-//     closed. `make verify` is offline and credential-free by design, so they
-//     cannot join it; `make registry-check` runs them, and
-//     .github/workflows/registry.yml runs that on a schedule, where a red run
-//     is the whole notification mechanism.
+//     closed. `make verify` is credential-free by design and asks GitHub
+//     about no issue, so they cannot join it; `make registry-check` runs
+//     them, and .github/workflows/registry.yml runs that on a schedule, where
+//     a red run is the whole notification mechanism.
 //
 // The parser exists because the two jobs a pointer does are not separable by
 // eye. A clause reads

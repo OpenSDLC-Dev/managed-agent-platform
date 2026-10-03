@@ -47,8 +47,11 @@ const (
 // itself hands the model differs from these six in places, as a 2026-09-02
 // recording showed. Two of its keywords are adopted (#822, an owner decision):
 // all six are closed with additionalProperties:false, and edit's old_string
-// carries minLength:1, the floor the edit tool already holds (file.go). The
-// rest stays the SDK's, and docs/DIVERGENCES.md says why. The two web tools
+// carries minLength:1, the floor the edit tool already holds (file.go). grep
+// went further and took the recorded schema and tool description whole
+// (#827). The rest stays the SDK's, and docs/DIVERGENCES.md says why. A
+// closed schema is also enforced: Runner refuses any property its tool's
+// schema does not declare (toolset.go unknownProperties). The two web tools
 // have no such Input types (see their own comment below).
 var definitions = []toolDef{
 	{
@@ -114,12 +117,46 @@ var definitions = []toolDef{
 		required: []string{"pattern"},
 		closed:   true,
 	},
+	// grep's schema is the recorded reference's, property for property and
+	// description for description (#827, an owner decision): the SDK's Input
+	// type has pattern and path alone, and the echo has twelve more. The
+	// descriptions name ripgrep's flags because the reference runs ripgrep,
+	// and so does grep.go, which hands each property to rg as the flag its
+	// description names. type's mentions an `include` property the schema
+	// does not have; it is kept as recorded, and a model that sends one is
+	// refused with the list of the properties grep does take
+	// (unknownProperties). Unlike the other five, grep's tool description is
+	// the reference's too (grepDescription), now that grep is ripgrep.
 	{
 		name:        "grep",
-		description: "Search file contents for a regular expression, returning matching lines as path:line:text.",
+		description: grepDescription,
 		props: map[string]any{
-			"pattern": prop("string", "Regular expression to search for."),
-			"path":    prop("string", "Directory to search in. Defaults to the workdir."),
+			"pattern": prop("string", "The regular expression pattern to search for in file contents"),
+			"path":    prop("string", "File or directory to search in (rg PATH). Defaults to current working directory."),
+			"type": prop("string", "File type to search (rg --type). Common types: js, py, rust, go, java, etc. "+
+				"More efficient than include for standard file types."),
+			"glob": prop("string", `Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}") - maps to rg --glob`),
+			"output_mode": map[string]any{
+				"type": "string",
+				"enum": []string{grepContent, grepFiles, grepCount},
+				"description": `Output mode: "content" shows matching lines (supports -A/-B/-C context, -n line numbers, ` +
+					`head_limit), "files_with_matches" shows file paths (supports head_limit), "count" shows match ` +
+					`counts (supports head_limit). Defaults to "files_with_matches".`,
+			},
+			"-n": prop("boolean", `Show line numbers in output (rg -n). Requires output_mode: "content", ignored otherwise. `+
+				`Defaults to true.`),
+			"-A":      prop("number", `Number of lines to show after each match (rg -A). Requires output_mode: "content", ignored otherwise.`),
+			"-B":      prop("number", `Number of lines to show before each match (rg -B). Requires output_mode: "content", ignored otherwise.`),
+			"-C":      prop("number", "Alias for context."),
+			"context": prop("number", `Number of lines to show before and after each match (rg -C). Requires output_mode: "content", ignored otherwise.`),
+			"-i":      prop("boolean", "Case insensitive search (rg -i)"),
+			"head_limit": prop("number", `Limit output to first N lines/entries, equivalent to "| head -N". Works across all `+
+				`output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count `+
+				`entries). Defaults to 0 (unlimited).`),
+			"offset": prop("number", `Skip first N lines/entries before applying head_limit, equivalent to "| tail -n +N | `+
+				`head -N". Works across all output modes. Defaults to 0.`),
+			"multiline": prop("boolean", "Enable multiline mode where . matches newlines and patterns can span lines "+
+				"(rg -U --multiline-dotall). Default: false."),
 		},
 		required: []string{"pattern"},
 		closed:   true,
@@ -154,6 +191,27 @@ var definitions = []toolDef{
 		web:      true,
 	},
 }
+
+// grepDescription is grep's: the reference's, as the 2026-09-02 recording
+// echoed it. #822 kept all six sandbox descriptions ours; grep's is replaced
+// (#827) because the reference's describes ripgrep, which grep now is. One
+// reading the echo leaves open is settled: its
+// regex examples carry one backslash each — "function\s+\w+", not
+// "function\\s+\\w+". The echo spells two, in prose whose quotes it
+// unescaped, which is the JSON spelling of one; Claude Code's GrepTool, whose
+// text this is word for word, carries one; and only one makes the examples
+// regexes that mean what they say (docs/DIVERGENCES.md, the INFERRED grep
+// entry). Trailing whitespace the echo cannot show is left off, as
+// webFetchDescription's is.
+const grepDescription = "A powerful search tool built on ripgrep\n\n" +
+	"  Usage:\n" +
+	"  - ALWAYS use grep for search tasks. NEVER invoke `grep` or `rg` as a bash command. The grep tool has been optimized for correct permissions and access.\n" +
+	"  - Supports full regex syntax (e.g., \"log.*Error\", \"function\\s+\\w+\")\n" +
+	"  - Filter files with glob parameter (e.g., \"*.js\", \"**/*.tsx\") or type parameter (e.g., \"js\", \"py\", \"rust\")\n" +
+	"  - Output modes: \"content\" shows matching lines, \"files_with_matches\" shows only file paths (default), \"count\" shows match counts\n" +
+	"  - Use bash tool for open-ended searches requiring multiple rounds\n" +
+	"  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n" +
+	"  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\{[\\s\\S]*?field`, use `multiline: true`"
 
 // WebSearchMinQueryLength is web_search's minLength on query, as the reference
 // was recorded handing it to the model (#682). The executor's input check holds

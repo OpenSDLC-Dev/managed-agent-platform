@@ -149,6 +149,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/ripgrep"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
 	secretsbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
@@ -382,6 +383,13 @@ func run(ctx context.Context) error {
 		slog.Info("secrets cipher not configured; github_repository resources will not clone and vault-credentialed MCP dials will fail")
 	}
 
+	// A build made without `make ripgrep` still runs, and its grep answers
+	// every call with a tool error saying why; this says so once, up front,
+	// for each sandbox architecture whose rg this build cannot hand out.
+	for _, u := range ripgrep.Check() {
+		slog.Warn("the grep tool cannot run in a linux/"+u.Arch+" sandbox in this build: every grep call there will be a tool error",
+			"arch", "linux/"+u.Arch, "error", u.Err)
+	}
 	slog.Info("executor running", "version", version.Version)
 	return executor.New(pool, events.NewLog(pool), queue.New(pool), provider, blobs, cipher, cfg).Run(ctx)
 }

@@ -538,12 +538,14 @@ func editConfig() Task {
 	}
 }
 
-// needleSearch pins the grep tool's path:line:text output contract against one
-// seeded needle among decoys. The nonce makes the needle findable and the decoys
-// not: a case-sensitive grep for NEEDLE_{{NONCE}} passes over the lowercase
-// "needle" decoy. ToolCallResult ties the assertion to the grep call itself — a
-// grep whose input carries the needle pattern, whose own result names the seeded
-// location — so unrelated bash output cannot stand in for it.
+// needleSearch pins the grep tool's path:line:text output contract — its
+// content mode, which the prompt names because the default lists files only
+// (#827) — against one seeded needle among decoys. The nonce makes the needle
+// findable and the decoys not: a case-sensitive grep for NEEDLE_{{NONCE}}
+// passes over the lowercase "needle" decoy. ToolCallResult ties the assertion
+// to the grep call itself — a grep whose input carries the needle pattern,
+// whose own result names the seeded location — so unrelated bash output cannot
+// stand in for it.
 //
 // glob is required (ToolUseAtLeast, Model — the prompt names it), so a glob that
 // never runs reds here, and its output is graded in the two halves that can be
@@ -567,8 +569,9 @@ func needleSearch() Task {
 			{Path: "src/decoy.go", Content: "package src\n\n// a needle in a haystack (decoy, lowercase)\nvar X = 1\n"},
 		},
 		Turns: []Turn{{Message: "Search /workspace for the Go source file that contains the exact " +
-			"text NEEDLE_{{NONCE}}. Use the glob tool to list the .go files and the grep tool to " +
-			"find the match. Write the location to /workspace/answer.txt as a single line " +
+			"text NEEDLE_{{NONCE}}. Use the glob tool to list the .go files and the grep tool, with " +
+			"output_mode \"content\", to find the matching line. Write the location to " +
+			"/workspace/answer.txt as a single line " +
 			"`path:line` — the path relative to /workspace, e.g. src/foo.go:12 — then reply DONE:{{NONCE}}."}},
 		Graders: []Grader{
 			ToolUseAtLeast("glob", 1, Model),

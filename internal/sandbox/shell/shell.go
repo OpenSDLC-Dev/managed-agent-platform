@@ -107,13 +107,10 @@ type Request struct {
 	Timeout time.Duration // per-command; 0 means only the context bounds it
 }
 
-// Result mirrors sandbox.ExecResult with the restart flag the tool reports back.
+// Result is the command's sandbox.ExecResult, with the restart flag the tool
+// reports back.
 type Result struct {
-	Stdout    string
-	Stderr    string
-	ExitCode  int
-	TimedOut  bool
-	Truncated bool
+	sandbox.ExecResult
 	Restarted bool
 }
 
@@ -168,8 +165,7 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	if err != nil {
 		return Result{}, err
 	}
-	res.Stdout, res.Stderr = er.Stdout, er.Stderr
-	res.ExitCode, res.TimedOut, res.Truncated = er.ExitCode, er.TimedOut, er.Truncated
+	res.ExecResult = er
 
 	// Commit this call's snapshot only if the call finished inside its deadline
 	// AND the snapshot is complete. Both halves are load-bearing.

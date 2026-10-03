@@ -29,11 +29,13 @@
 // Divergences from that reference, all deliberate:
 //   - No workdir confinement (above). Absolute paths and absolute glob
 //     patterns are accepted.
-//   - grep shells out to GNU grep inside the sandbox (PCRE where the image's
-//     grep has it, POSIX ERE otherwise) rather than preferring ripgrep and
-//     falling back to a Go walker. One implementation, one behaviour, and no
-//     dependence on what the image happens to ship beyond the /bin/bash the
-//     sandbox already requires.
+//   - grep runs ripgrep in the sandbox, as the reference does, but always the
+//     platform's own: a static rg this package writes into the sandbox the
+//     first time it greps there (grep.go, internal/ripgrep), rather than an rg
+//     found on the PATH with a Go walker behind it. One implementation, one
+//     behaviour, whatever the image ships — and where that rg cannot run (an
+//     architecture other than amd64 or arm64, a /tmp mounted noexec, a build
+//     without the binaries) grep is a tool error, never a second search.
 //   - The tools carry no state between calls except bash's, which is the
 //     shell package's snapshot; there is no per-runner session object to close.
 //   - write and edit preserve the permission bits of an existing regular file they
@@ -49,8 +51,12 @@ package toolset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"path"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -133,6 +139,9 @@ func (r Runner) Run(ctx context.Context, id domain.ID, name string, input json.R
 }
 
 func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input json.RawMessage) (Result, error) {
+	if refusal, bad := unknownProperties(name, input); bad {
+		return Result{Content: CapOutput(refusal), IsError: true}, nil
+	}
 	var (
 		res Result
 		err error
@@ -157,6 +166,22 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 		// (IsWebTool) — so a name landing on this arm is one the platform does
 		// not recognise at all. Telling the model so lets it try something else.
 		return failf("unknown tool %q", name)
+	}
+	// Nor is a command too long for one exec argument, which the sandbox
+	// refused before anything ran. One that grew with what the model sent —
+	// a search's (inputTooLong) — the model can shorten; the file tools
+	// answer theirs, which grew with the path, themselves (fileFault). Any
+	// other is a command of the platform's own, which a retry would only run
+	// again unchanged: so not a fault, which the executor leaves to a
+	// reclaim, but a tool error that says whose it is.
+	var model *inputTooLong
+	var tooLong *sandbox.CommandTooLongError
+	switch {
+	case errors.As(err, &model):
+		return failf("%s: %v; shorten them", name, model)
+	case errors.As(err, &tooLong):
+		return failf("%s: a command of the platform's own came to %d bytes, over the %d bytes one exec argument can carry: "+
+			"a fault in the platform, not in this call's input", name, tooLong.Bytes, sandbox.MaxCommandBytes)
 	}
 	if err != nil {
 		return Result{}, err
@@ -263,6 +288,12 @@ func (r Runner) resolve(p string) string {
 // repository mounts out of it.
 const MemoryMountRoot = "/mnt/memory"
 
+// MemorySyncDir holds the memory sync's baselines, one file per store (plan 36
+// decision 11): beside the mounts rather than inside them, so it is never a
+// memory and never hashed. The executor and the worker keep them there; grep
+// leaves it out of a search (memoryGlobs).
+const MemorySyncDir = MemoryMountRoot + "/.sync"
+
 // unwritable says why a resolved path may not be written by the file tools —
 // the read-only store it is inside, or the reserved tree it is loose in — or
 // "" when it may. display is the path the model used, for the message; the
@@ -313,6 +344,52 @@ func badField(tool, field, value string) (Result, bool) {
 		return Result{Content: fmt.Sprintf("%s: %s must not contain a NUL byte", tool, field), IsError: true}, true
 	}
 	return Result{}, false
+}
+
+// unknownProperties is the refusal of a sandbox tool call whose input names a
+// property the tool's schema does not declare, and true; or false when it
+// names none, or is not a JSON object at all (the tool's own decode answers
+// that). Every schema is closed, but the schema is only a hint: an
+// OpenAI-protocol route strips additionalProperties (#682), and a model may
+// send a stray property under either protocol. Dropping it silently would run
+// a different search from the one asked for — a -i ignored is a
+// case-sensitive grep that finds nothing — so the call is refused, naming
+// what was not understood and what is (#827). The names are quoted, so a key
+// carrying a NUL or a newline cannot forge the message. The gate reads the
+// schema, not the tool's input type, and
+// TestSchemaPropertiesAreWhatEachToolDecodes holds the two together; the
+// second decode it costs is a linear scan beside the sandbox round trip the
+// call is about to make.
+func unknownProperties(name string, input json.RawMessage) (string, bool) {
+	var props map[string]any
+	for _, d := range definitions {
+		if d.name == name && !d.web {
+			props = d.props
+		}
+	}
+	var obj map[string]json.RawMessage
+	if props == nil || json.Unmarshal(input, &obj) != nil {
+		return "", false
+	}
+	var unknown []string
+	for k := range obj {
+		if _, ok := props[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return "", false
+	}
+	slices.Sort(unknown)
+	for i, k := range unknown {
+		unknown[i] = strconv.Quote(k)
+	}
+	noun := "property"
+	if len(unknown) > 1 {
+		noun = "properties"
+	}
+	return fmt.Sprintf("%s: unknown input %s %s; %s accepts %s", name, noun, strings.Join(unknown, ", "),
+		name, strings.Join(slices.Sorted(maps.Keys(props)), ", ")), true
 }
 
 // TruncateRunes returns s cut to at most n bytes, backing off to a rune
@@ -383,7 +460,7 @@ func combine(res sandbox.ExecResult) string {
 		}
 		out += res.Stderr
 	}
-	if res.Truncated {
+	if res.Truncated() {
 		out = truncationNotice + "\n" + out
 	}
 	return out

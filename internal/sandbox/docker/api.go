@@ -39,6 +39,12 @@ func daemonHost(host string) string {
 	return host
 }
 
+// DaemonHost is the address a Provider built with an empty Config.Host
+// reaches (daemonHost). A test that also drives the `docker` CLI gives it this
+// as `--host`, and its provider this or nothing, so the two reach one daemon
+// whatever `docker context` the CLI would otherwise follow (#627).
+func DaemonHost() string { return daemonHost("") }
+
 func newAPIClient(host string) (*apiClient, error) {
 	host = daemonHost(host)
 	switch {
@@ -479,10 +485,11 @@ const (
 
 // demux splits Docker's frame-multiplexed exec stream. Each frame is an 8-byte
 // header — stream id, then a big-endian payload length — followed by payload.
-// Output past limit is drained and dropped rather than buffered: the command
-// must be free to finish, and the executor must not die of its output.
-func demux(r io.Reader, limit int) (stdout, stderr []byte, truncated bool, err error) {
-	keep := func(dst *[]byte, n int64) error {
+// Output past limit, which applies to each stream on its own, is drained and
+// dropped rather than buffered: the command must be free to finish, and the
+// executor must not die of its output. cut says which streams lost some.
+func demux(r io.Reader, limit int) (stdout, stderr []byte, cut streamsCut, err error) {
+	keep := func(dst *[]byte, truncated *bool, n int64) error {
 		if room := int64(limit - len(*dst)); room > 0 {
 			if room > n {
 				room = n
@@ -500,7 +507,7 @@ func demux(r io.Reader, limit int) (stdout, stderr []byte, truncated bool, err e
 			n -= room
 		}
 		if n > 0 {
-			truncated = true
+			*truncated = true
 			if _, err := io.CopyN(io.Discard, r, n); err != nil {
 				return err
 			}
@@ -512,35 +519,39 @@ func demux(r io.Reader, limit int) (stdout, stderr []byte, truncated bool, err e
 	for {
 		if _, err := io.ReadFull(r, header[:]); err != nil {
 			if err == io.EOF {
-				return stdout, stderr, truncated, nil
+				return stdout, stderr, cut, nil
 			}
-			return stdout, stderr, truncated, fmt.Errorf("docker: read exec frame: %w", err)
+			return stdout, stderr, cut, fmt.Errorf("docker: read exec frame: %w", err)
 		}
 		size := int64(binary.BigEndian.Uint32(header[4:]))
 
 		var dst *[]byte
+		var truncated *bool
 		switch header[0] {
 		case streamStdout:
-			dst = &stdout
+			dst, truncated = &stdout, &cut.stdout
 		case streamStderr:
-			dst = &stderr
+			dst, truncated = &stderr, &cut.stderr
 		case streamSystemErr:
 			// The daemon is reporting on the exec, not relaying the command.
 			// Folding this into stdout would hand the model a plausible-looking
 			// tool result built out of an infrastructure failure.
 			var reason []byte
 			if err := keepInto(r, &reason, size, 8<<10); err != nil {
-				return stdout, stderr, truncated, fmt.Errorf("docker: read exec frame: %w", err)
+				return stdout, stderr, cut, fmt.Errorf("docker: read exec frame: %w", err)
 			}
-			return stdout, stderr, truncated, fmt.Errorf("docker: exec stream error: %s", reason)
+			return stdout, stderr, cut, fmt.Errorf("docker: exec stream error: %s", reason)
 		default:
-			return stdout, stderr, truncated, fmt.Errorf("docker: unknown exec stream id %d", header[0])
+			return stdout, stderr, cut, fmt.Errorf("docker: unknown exec stream id %d", header[0])
 		}
-		if err := keep(dst, size); err != nil {
-			return stdout, stderr, truncated, fmt.Errorf("docker: read exec frame: %w", err)
+		if err := keep(dst, truncated, size); err != nil {
+			return stdout, stderr, cut, fmt.Errorf("docker: read exec frame: %w", err)
 		}
 	}
 }
+
+// streamsCut says which of an exec's two streams demux cut at its limit.
+type streamsCut struct{ stdout, stderr bool }
 
 // keepInto reads n bytes, retaining at most limit of them.
 func keepInto(r io.Reader, dst *[]byte, n int64, limit int64) error {

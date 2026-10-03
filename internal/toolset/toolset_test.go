@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,35 +14,66 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/k8s"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 const testImage = "debian:stable-slim"
 
-// runner gives the whole suite one real container. Each subtest works under its
-// own directory beneath the workdir, and bash subtests take a fresh session so
-// they never inherit another's shell state. A missing daemon is a hard failure,
-// as with the other suites — skipping would hollow out the coverage gate.
-func runner(t *testing.T) toolset.Runner {
+// runner gives a test one real container, from testImage unless an option
+// says otherwise, and a Runner over it. Each subtest works under its own
+// directory beneath the workdir, and bash subtests take a fresh session so they
+// never inherit another's shell state. A missing daemon is a hard failure, as
+// with the other suites — skipping would hollow out the coverage gate.
+//
+// The provider resolves its daemon itself, and every docker CLI call in these
+// tests names that same address (docker.DaemonHost), so a fixture the CLI
+// builds or starts is on the daemon the provider uses.
+func runner(t *testing.T, opts ...runnerOption) toolset.Runner {
 	t.Helper()
 	provider, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("toolset tests require Docker: %v", err)
 	}
-	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+	spec := sandbox.Spec{
 		SessionID:  domain.NewID("sesn"),
 		Image:      testImage,
 		Networking: domain.Networking{Type: domain.NetUnrestricted},
-	})
+	}
+	r := toolset.Runner{Session: domain.NewID("sesn")}
+	for _, o := range opts {
+		o(&spec, &r)
+	}
+	sb, err := provider.Provision(context.Background(), spec)
 	if err != nil {
-		t.Fatalf("provision: %v", err)
+		t.Fatalf("provision %s: %v", spec.Image, err)
 	}
 	t.Cleanup(func() {
 		if err := sb.Destroy(context.Background()); err != nil {
 			t.Errorf("destroy: %v", err)
 		}
 	})
-	return toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
+	r.Sandbox = sb
+	return r
+}
+
+// runnerOption shapes the sandbox runner provisions and the Runner over it.
+type runnerOption func(*sandbox.Spec, *toolset.Runner)
+
+// fromImage provisions the sandbox from image rather than testImage.
+func fromImage(image string) runnerOption {
+	return func(s *sandbox.Spec, _ *toolset.Runner) { s.Image = image }
+}
+
+// hardened provisions the sandbox with h.
+func hardened(h sandbox.Hardening) runnerOption {
+	return func(s *sandbox.Spec, _ *toolset.Runner) { s.Hardening = h }
+}
+
+// inWorkdir makes workdir both the sandbox's — where an exec starts — and the
+// Runner's, where relative paths resolve and grep runs rg.
+func inWorkdir(workdir string) runnerOption {
+	return func(s *sandbox.Spec, r *toolset.Runner) { s.Workdir, r.Workdir = workdir, workdir }
 }
 
 // call runs one tool and fails the test on an infrastructure error — the tests
@@ -303,6 +335,156 @@ func TestReadWriteEdit(t *testing.T) {
 	})
 }
 
+// A file_path too long for Linux — resolving past PATH_MAX's 4095 bytes, or
+// holding a name past NAME_MAX's 255 — is a tool error naming the bound on
+// every backend, where the k8s backend would hand it to an exec that cannot
+// start and Docker's archive endpoint would answer a 500, both faults a
+// reclaim would only repeat. So, for write and edit, is a path whose
+// directory leaves no room for the 27-byte temporary name a write lands
+// under beside the file, which both backends refused as the path's own
+// "file name too long", though the path is within the bounds. One at the
+// bounds is the sandbox's, written, read and edited as any other — the
+// largest directory a write may land in, 4067 bytes, included.
+func TestFilePathsTooLongForLinux(t *testing.T) {
+	filePathBounds(t, runner(t))
+}
+
+// The same in a Kubernetes pod, under a read-only root as the chart runs one:
+// the cluster MAP_K8S_CONTEXT names.
+func TestFilePathsTooLongForLinuxInAKubernetesPod(t *testing.T) {
+	filePathBounds(t, podRunner(t))
+}
+
+// podRunner gives a test a Runner over one pod from testImage, under a
+// read-only root as the chart runs one, in the cluster MAP_K8S_CONTEXT names.
+// A missing cluster is a hard failure, as with the k8s contract test.
+func podRunner(t *testing.T) toolset.Runner {
+	t.Helper()
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
+	}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+		SessionID:  domain.NewID("sesn"),
+		Image:      testImage,
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+		Hardening:  sandbox.Hardening{ReadOnlyRootfs: true},
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+	return toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
+}
+
+// filePathBounds is TestFilePathsTooLongForLinux on the sandbox r runs in.
+func filePathBounds(t *testing.T, r toolset.Runner) {
+	t.Helper()
+	// Fifteen 255-byte directories under /workspace, then a name that brings
+	// the resolved path to 4095 bytes, or one past.
+	dirs := strings.Repeat(strings.Repeat("d", 255)+"/", 15)
+	atBound, pastBound := dirs+strings.Repeat("f", 244), dirs+strings.Repeat("f", 245)
+	inputs := map[string]func(p string) string{
+		"read":  func(p string) string { return `{"file_path":"` + p + `"}` },
+		"write": func(p string) string { return `{"file_path":"` + p + `","content":"x"}` },
+		"edit":  func(p string) string { return `{"file_path":"` + p + `","old_string":"x","new_string":"y"}` },
+	}
+	for _, tool := range []string{"read", "write", "edit"} {
+		in := inputs[tool]
+		fails(t, r, tool, in(pastBound),
+			tool+": file name too long: the file_path resolves to a 4096-byte path, over the 4095 bytes a Linux path can hold; shorten it")
+		fails(t, r, tool, in("/workspace/"+pastBound), "resolves to a 4096-byte path")
+		fails(t, r, tool, in("bounds/"+strings.Repeat("n", 256)),
+			tool+": file name too long: the file_path holds a 256-byte name, over the 255 bytes a Linux file name can hold; shorten it")
+		// Past what one exec argument carries, which the k8s backend's
+		// would have been.
+		fails(t, r, tool, in(strings.Repeat("x/", 100<<10)), "resolves to a 204810-byte path")
+	}
+	// A 4095-byte path whose directory leaves no room for the 27-byte
+	// temporary name a write lands under beside it: refused by write and
+	// edit, and read as any other path is.
+	short := dirs + strings.Repeat("e", 242) + "/f"
+	for _, tool := range []string{"write", "edit"} {
+		fails(t, r, tool, inputs[tool](short), tool+": file name too long: the file lands first under a 27-byte temporary name beside it, "+
+			"and in the file_path's 4093-byte directory that is a 4121-byte path, over the 4095 bytes a Linux path can hold; shorten it")
+	}
+	fails(t, r, "read", inputs["read"](short), "read "+short+": no such file or directory")
+	// The largest a write's directory may be, 4067 bytes, with a 27-byte
+	// name: the target and the temporary are both 4095-byte paths.
+	tightest := dirs + strings.Repeat("e", 216) + "/" + strings.Repeat("f", 27)
+	for _, p := range []string{atBound, tightest, "bounds/" + strings.Repeat("n", 255)} {
+		if got, want := ok(t, r, "write", `{"file_path":"`+p+`","content":"one x"}`), "wrote 5 bytes to "+p; got != want {
+			t.Fatalf("write at the bound = %q, want %q", got, want)
+		}
+		ok(t, r, "edit", `{"file_path":"`+p+`","old_string":"x","new_string":"two"}`)
+		if got := ok(t, r, "read", `{"file_path":"`+p+`"}`); got != "one two" {
+			t.Fatalf("read at the bound = %q, want the edited file", got)
+		}
+	}
+}
+
+// A file_path within Linux's bounds can still make a command past what one
+// exec argument carries: Docker's rename quotes the path into its script
+// eleven times, and quoting makes each `'` four bytes. The path the model
+// chose is what made it long, so it is the model's tool error, naming the
+// command's size — not a fault a reclaim would only repeat — and the write
+// lands nothing: the file an edit was given keeps its bytes, and no
+// temporary is left beside it.
+func TestAQuoteHeavyFilePathMakesACommandTooLong(t *testing.T) {
+	r := runner(t)
+	p := quotePath
+	const tooLong = "-byte command, over the 122880 bytes one exec argument can carry; shorten it"
+	size := func(content, verb string) int {
+		t.Helper()
+		got, ok := strings.CutPrefix(content, verb+": the file_path makes a ")
+		got, whole := strings.CutSuffix(got, tooLong)
+		n, err := strconv.Atoi(got)
+		if !ok || !whole || err != nil || n <= sandbox.MaxCommandBytes {
+			t.Fatalf("%s of a %d-byte path of quotes = %q; want the command's size, past the bound", verb, len(p), content)
+		}
+		return n
+	}
+	in, _ := json.Marshal(map[string]string{"file_path": p, "content": "y"})
+	t.Logf("a %d-byte path of quotes makes a %d-byte rename", len(p), size(fails(t, r, "write", string(in), tooLong), "write"))
+
+	// The file is put there by bash, which hands the path to no command.
+	ok(t, r, "bash", `{"command":"q=$(printf '%255s' '' | tr ' ' \"'\"); d=/workspace; `+
+		`for i in $(seq 15); do d=$d/$q; done; printf x > \"$d/${q:11}\""}`)
+	in, _ = json.Marshal(map[string]string{"file_path": p, "old_string": "x", "new_string": "y"})
+	size(fails(t, r, "edit", string(in), tooLong), "edit")
+	in, _ = json.Marshal(map[string]string{"file_path": p})
+	if got := ok(t, r, "read", string(in)); got != "x" {
+		t.Errorf("read after the refused edit = %q, want the file as it was", got)
+	}
+	if left := ok(t, r, "bash", `{"command":"find /workspace -name '.map-write-*'"}`); left != "" {
+		t.Errorf("the refused writes left %q behind", left)
+	}
+}
+
+// quotePath is fifteen 255-byte directories under /workspace, then a 244-byte
+// name: a 4095-byte path, every byte past /workspace/ but the slashes a quote.
+var quotePath = "/workspace/" + strings.Repeat(strings.Repeat("'", 255)+"/", 15) + strings.Repeat("'", 244)
+
+// The k8s backend hands the path to its write script as an argument, quoted
+// into no command, so the path Docker refuses is one a pod writes, edits and
+// reads as any other (docs/DIVERGENCES.md).
+func TestAQuoteHeavyFilePathInAKubernetesPod(t *testing.T) {
+	r := podRunner(t)
+	in, _ := json.Marshal(map[string]string{"file_path": quotePath, "content": "one x"})
+	if got, want := ok(t, r, "write", string(in)), "wrote 5 bytes to "+quotePath; got != want {
+		t.Fatalf("write = %q, want %q", got, want)
+	}
+	in, _ = json.Marshal(map[string]string{"file_path": quotePath, "old_string": "x", "new_string": "two"})
+	ok(t, r, "edit", string(in))
+	in, _ = json.Marshal(map[string]string{"file_path": quotePath})
+	if got := ok(t, r, "read", string(in)); got != "one two" {
+		t.Fatalf("read = %q, want the edited file", got)
+	}
+}
+
 func TestGlob(t *testing.T) {
 	r := runner(t)
 	// Distinct, ascending mtimes: newest-first ordering is part of the contract,
@@ -378,6 +560,23 @@ func TestGlob(t *testing.T) {
 		fails(t, r, "glob", `{"pattern":"*","path":"g/absent"}`, "no such")
 	})
 
+	// The search is one exec argument, which Linux caps near 128 KiB: a
+	// pattern that would push it past is refused before anything runs, where
+	// the exec would otherwise fail before it started.
+	t.Run("a pattern too long for one exec argument", func(t *testing.T) {
+		exactly := func(in, want string) {
+			t.Helper()
+			if got := ok(t, r, "glob", in); got != want {
+				t.Fatalf("glob(%.40s…) = %q, want %q", in, got, want)
+			}
+		}
+		exactly(`{"pattern":"`+strings.Repeat("z", 100<<10)+`","path":"g"}`, "no matches")
+		fails(t, r, "glob", `{"pattern":"`+strings.Repeat("z", 130<<10)+`","path":"g"}`,
+			"glob: the pattern and path make a ")
+		fails(t, r, "glob", `{"pattern":"*","path":"`+strings.Repeat("p", 125<<10)+`"}`,
+			"over the 122880 bytes one exec argument can carry; shorten them")
+	})
+
 	t.Run("pattern is required", func(t *testing.T) {
 		fails(t, r, "glob", `{}`, "pattern is required")
 	})
@@ -411,15 +610,22 @@ func TestGrep(t *testing.T) {
 	ok(t, r, "write", `{"file_path":"gr/a.txt","content":"alpha\nneedle 42\nomega\n"}`)
 	ok(t, r, "write", `{"file_path":"gr/b.txt","content":"nothing here\n"}`)
 
-	t.Run("matches carry path, line number and text", func(t *testing.T) {
-		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr"}`)
+	// The recorded schema's default output mode is files_with_matches.
+	t.Run("by default a search lists the files that match", func(t *testing.T) {
+		if got := ok(t, r, "grep", `{"pattern":"needle","path":"gr"}`); got != "/workspace/gr/a.txt" {
+			t.Fatalf("content = %q", got)
+		}
+	})
+
+	t.Run("content matches carry path, line number and text", func(t *testing.T) {
+		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr","output_mode":"content"}`)
 		if got != "/workspace/gr/a.txt:2:needle 42" {
 			t.Fatalf("content = %q", got)
 		}
 	})
 
 	t.Run("a perl character class works", func(t *testing.T) {
-		got := ok(t, r, "grep", `{"pattern":"needle \\d+","path":"gr"}`)
+		got := ok(t, r, "grep", `{"pattern":"needle \\d+","path":"gr","output_mode":"content"}`)
 		if !strings.Contains(got, "needle 42") {
 			t.Fatalf("content = %q", got)
 		}
@@ -432,23 +638,23 @@ func TestGrep(t *testing.T) {
 	})
 
 	t.Run("an invalid regex is an error result", func(t *testing.T) {
-		fails(t, r, "grep", `{"pattern":"[unclosed","path":"gr"}`, "grep")
+		fails(t, r, "grep", `{"pattern":"[unclosed","path":"gr"}`, "rg: regex parse error")
 	})
 
 	t.Run("a missing search root is an error result", func(t *testing.T) {
-		fails(t, r, "grep", `{"pattern":"x","path":"gr/absent"}`, "grep")
+		fails(t, r, "grep", `{"pattern":"x","path":"gr/absent"}`, "/workspace/gr/absent: IO error")
 	})
 
 	t.Run("pattern is required", func(t *testing.T) {
 		fails(t, r, "grep", `{}`, "pattern is required")
 	})
 
-	t.Run("binary files and vendored trees are skipped", func(t *testing.T) {
-		ok(t, r, "bash", `{"command":"mkdir -p gr/node_modules && printf 'needle\\0bin' > gr/bin.dat && `+
-			`echo needle > gr/node_modules/dep.txt"}`)
-		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr"}`)
+	t.Run("binary files and ignored trees are skipped", func(t *testing.T) {
+		ok(t, r, "bash", `{"command":"mkdir -p gr/.git gr/node_modules && printf 'needle\\0bin' > gr/bin.dat && `+
+			`echo needle > gr/node_modules/dep.txt && echo node_modules/ > gr/.gitignore"}`)
+		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr","output_mode":"content"}`)
 		if strings.Contains(got, "bin.dat") || strings.Contains(got, "node_modules") {
-			t.Fatalf("content = %q, want binary and node_modules skipped", got)
+			t.Fatalf("content = %q, want binary and git-ignored files skipped", got)
 		}
 	})
 
@@ -461,7 +667,7 @@ func TestGrep(t *testing.T) {
 
 	t.Run("output is capped", func(t *testing.T) {
 		ok(t, r, "bash", fmt.Sprintf(`{"command":"mkdir -p big && for i in $(seq 1 %d); do echo needle-line-with-some-padding-$i; done > big/f.txt"}`, 14000))
-		got := ok(t, r, "grep", `{"pattern":"needle","path":"big"}`)
+		got := ok(t, r, "grep", `{"pattern":"needle","path":"big","output_mode":"content"}`)
 		cut := strings.LastIndex(got, "\n[output truncated; full output written to /tmp/tool_outputs/")
 		if cut < 0 {
 			t.Fatalf("content does not report the truncation and the spill file: %q", got[max(0, len(got)-80):])
@@ -497,6 +703,44 @@ func TestGrep(t *testing.T) {
 func TestUnknownTool(t *testing.T) {
 	r := runner(t)
 	fails(t, r, "web_search", `{"query":"x"}`, "unknown tool")
+}
+
+// Each of the six sandbox tools refuses an input property its schema does not
+// declare, naming it and what the tool does accept, rather than dropping it
+// and running a different call from the one asked for (#827). The Runner has
+// no sandbox at all: a refusal must come before anything runs, and a call that
+// reached the sandbox would panic here instead.
+func TestUnknownInputPropertiesAreRefused(t *testing.T) {
+	r := toolset.Runner{Session: domain.NewID("sesn")}
+	for _, tc := range []struct {
+		tool, input, want string
+	}{
+		{"bash", `{"command":"touch /tmp/ran","cwd":"/tmp"}`,
+			`bash: unknown input property "cwd"; bash accepts command, restart, timeout_ms`},
+		{"read", `{"file_path":"a.txt","offset":3,"limit":10}`,
+			`read: unknown input properties "limit", "offset"; read accepts file_path, view_range`},
+		{"write", `{"file_path":"a.txt","content":"x","mode":"0755"}`,
+			`write: unknown input property "mode"; write accepts content, file_path`},
+		{"edit", `{"file_path":"a.txt","old_string":"a","new_string":"b","count":2}`,
+			`edit: unknown input property "count"; edit accepts file_path, new_string, old_string, replace_all`},
+		{"glob", `{"pattern":"*","exclude":"*.md"}`,
+			`glob: unknown input property "exclude"; glob accepts path, pattern`},
+		{"grep", `{"pattern":"todo","include":"*.go"}`,
+			`grep: unknown input property "include"; grep accepts -A, -B, -C, -i, -n, context, glob, ` +
+				`head_limit, multiline, offset, output_mode, path, pattern, type`},
+		// A key is quoted, so one carrying a NUL or a newline cannot reach
+		// the event log raw or forge the message.
+		{"glob", `{"pattern":"*","a\u0000b\nc":1}`,
+			`glob: unknown input property "a\x00b\nc"; glob accepts path, pattern`},
+	} {
+		res, err := r.Run(context.Background(), domain.NewID("sevt"), tc.tool, json.RawMessage(tc.input))
+		if err != nil {
+			t.Fatalf("%s(%s): %v", tc.tool, tc.input, err)
+		}
+		if !res.IsError || res.Content != tc.want {
+			t.Errorf("%s(%s) = %+v, want the is_error refusal %q", tc.tool, tc.input, res, tc.want)
+		}
+	}
 }
 
 // A NUL byte in tool output must never reach the Result: Postgres's jsonb
