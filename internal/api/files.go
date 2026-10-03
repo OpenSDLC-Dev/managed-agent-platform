@@ -36,18 +36,19 @@ const maxFileListIDs = 100
 // answer that, but at runtime rather than in the tags — respjson.Field.Raw()
 // reads "null" for a null and "" for an omitted key — so the schema alone
 // cannot decide which of these two we owe. The recorded bytes can, and they
-// split: all eight file objects in the archive carry expires_at, and the six
-// without a scope carry no scope key. Those readings check each other, because
-// the six that omit scope still spell out expires_at: null — so the absence is
-// the reference's and not the recorder's.
+// split: all 24 file objects in the archive carry expires_at, and the unscoped
+// ones carry no scope key. Those readings check each other, because the files
+// that omit scope still spell out expires_at: null — so the absence is the
+// reference's and not the recorder's.
 //
-// The two halves are not evidenced equally, and the asymmetry is worth keeping
-// in view. The omission is broad: six objects across upload, get and list, on
-// the bare path and ?beta=true alike. The presence is one file read twice on
-// GET /v1/files/{id}, bare path — no recorded list entry and no ?beta=true
-// response ever held a scoped file. We render scope on every surface anyway,
-// because renderFile is the only renderer and the reference gives no reason to
-// think a lane strips it.
+// Where a scoped file shows its scope is gated on the reference by the
+// managed-agents beta header, not by the path: session-scoped files read or
+// listed under that header carry scope (2026-09-02 batch2 idx 396 and 408;
+// 2026-09-12-console-141 ui-network idx 243–300), and the same kind of file
+// read on ?beta=true without it does not (ui-network idx 236 and 269). This
+// platform accepts and ignores that header (docs/DIVERGENCES.md, the
+// anthropic-version / anthropic-beta entry), so renderFile — the only
+// renderer — sends scope on every surface whenever the file has one.
 //
 // omitempty is not what enforces "only when it has one" — it omits a nil
 // pointer and nothing else, so a non-nil pointer to a zero-value scope would
