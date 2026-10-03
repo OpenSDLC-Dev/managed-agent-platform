@@ -37,7 +37,7 @@ func grepFixture(t *testing.T, r toolset.Runner) {
 	t.Helper()
 	ok(t, r, "bash", `{"command":"(set -e; mkdir -p gp/code/util gp/code/web gp/many gp/sp gp/hid/.hd gp/repo/.git gp/repo/vendor && cd gp && `+
 		`printf '1\\n2\\n3\\nX\\n5\\n6\\n7\\nX\\n9\\n' > ctx.txt && `+
-		`printf 'Needle\\nNEEDLE\\nneedle\\n' > case.txt && `+
+		`printf 'Needle\\nNEEDLE\\nneedle\\n' > case.txt && printf 'a\\n\\nb\\n' > blank.txt && `+
 		`printf 'one\\nfoo start\\nmiddle\\nend bar\\nfive\\nsix foo x bar\\nseven\\n' > ml.txt && `+
 		`printf 'foo\\nbar\\0baz\\nfoo\\n' > bin.dat && `+
 		`for f in code/main.go code/main_test.go code/util/util.go code/readme.md `+
@@ -67,19 +67,34 @@ func under(dir string, names ...string) string {
 	return strings.Join(names, "\n")
 }
 
-// rgRan, in a canned result, stands where rg's own output begins: the fakes
-// put there the begin line the search's script prints just before rg runs
-// (framed), so the result reads as one that came from rg.
-const rgRan = "\x00rg-ran\x00"
+// rgRan and rgDone, in a canned result, stand where the search's script
+// began and where it exited: the fakes put there the begin and end lines the
+// command carries (framed), so the result reads as one the script printed. A
+// stream with rgRan and no rgDone gets its end line last, as a script that
+// ran to its end prints it; rgNoEnd, in its place, leaves it off.
+const (
+	rgRan   = "\x00rg-ran\x00"
+	rgDone  = "\x00rg-done\x00"
+	rgNoEnd = "\x00rg-no-end\x00"
+)
 
-var grepBegin = regexp.MustCompile(`map-grep-begin-[0-9a-f]+`)
+// grepNonce is the nonce a search's begin line carries, which its end line
+// carries too.
+var grepNonce = regexp.MustCompile(`map-grep-begin-([0-9a-f]+)`)
 
-// framed is a canned result as a search's script would have produced it: its
-// rgRan, on either stream, replaced with the begin line the command carries.
+// framed is a canned result as a search's script would have produced it.
 func framed(command string, res sandbox.ExecResult) sandbox.ExecResult {
-	line := "\n" + grepBegin.FindString(command) + "\n"
-	res.Stdout = strings.ReplaceAll(res.Stdout, rgRan, line)
-	res.Stderr = strings.ReplaceAll(res.Stderr, rgRan, line)
+	nonce := ""
+	if m := grepNonce.FindStringSubmatch(command); m != nil {
+		nonce = m[1]
+	}
+	frame := func(s string) string {
+		if strings.Contains(s, rgRan) && !strings.Contains(s, rgDone) && !strings.Contains(s, rgNoEnd) {
+			s += rgDone
+		}
+		return strings.NewReplacer(rgRan, "\nmap-grep-begin-"+nonce+"\n", rgDone, "\nmap-grep-end-"+nonce+"\n", rgNoEnd, "").Replace(s)
+	}
+	res.Stdout, res.Stderr = frame(res.Stdout), frame(res.Stderr)
 	return res
 }
 
@@ -113,6 +128,12 @@ func TestGrepParameters(t *testing.T) {
 		exactly(t, r, `{"pattern":"needle","path":"gp/code/util","output_mode":"content","-n":false}`, code+"util/util.go:x needle")
 		// Ignored outside content mode, as its description says.
 		exactly(t, r, `{"pattern":"needle","path":"gp/code/util","-n":false}`, code+"util/util.go")
+		// A lone empty line is an answer, paged or not — no text at all — and
+		// a page past it is "no matches".
+		exactly(t, r, `{"pattern":"^$","path":"gp/blank.txt","output_mode":"content","-n":true}`, "2:")
+		exactly(t, r, `{"pattern":"^$","path":"gp/blank.txt","output_mode":"content","-n":false}`, "")
+		exactly(t, r, `{"pattern":"^$","path":"gp/blank.txt","output_mode":"content","-n":false,"head_limit":1}`, "")
+		exactly(t, r, `{"pattern":"^$","path":"gp/blank.txt","output_mode":"content","-n":false,"offset":1}`, "no matches")
 	})
 
 	t.Run("-i", func(t *testing.T) {
@@ -685,14 +706,27 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 // search that reaches them from above leaves them out — whatever directory rg
 // runs in, which decides how rg matches the glob naming the baselines
 // (memoryGlobs): from the default workdir, which does not lead
-// /mnt/memory/.sync, and from /mnt and from /, which do. A memory directory
-// that happens to be named .sync is a memory, and a search rooted at the
-// baselines searches them, as rg searches a hidden directory it is handed.
+// /mnt/memory/.sync, and from /mnt and from /, which do. rg runs in the
+// Runner's workdir, cleaned, whatever directory the exec started in — one
+// spelled with a trailing slash or a "..", or one the sandbox's exec does not
+// start in, here standing in for anything that moves the shell first. A
+// memory directory that happens to be named .sync is a memory, and a search
+// rooted at the baselines searches them, as rg searches a hidden directory it
+// is handed.
 func TestGrepLeavesOutTheMemorySyncState(t *testing.T) {
-	for _, workdir := range []string{"", "/mnt", "/"} {
-		t.Run("workdir "+workdir, func(t *testing.T) {
-			r := runner(t, inWorkdir(workdir))
-			ok(t, r, "bash", `{"command":"mkdir -p /mnt/memory/.sync /mnt/memory/s1/.sync /mnt/memory/s1/sub`+
+	for _, tc := range []struct{ name, sandbox, runner string }{
+		{"default workdir", "", ""},
+		{"workdir /mnt", "/mnt", "/mnt"},
+		{"workdir /", "/", "/"},
+		{"workdir /mnt/", "/mnt/", "/mnt/"},
+		{"workdir /mnt/x/..", "/mnt/x/..", "/mnt/x/.."},
+		{"an exec that starts in / under workdir /mnt/", "/", "/mnt/"},
+		{"an exec that starts in /mnt under the default workdir", "/mnt", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runner(t, inWorkdir(tc.sandbox))
+			r.Workdir = tc.runner
+			ok(t, r, "bash", `{"command":"mkdir -p /workspace /mnt/memory/.sync /mnt/memory/s1/.sync /mnt/memory/s1/sub`+
 				` && echo needle > /mnt/memory/.sync/memstore_1 && echo needle > /mnt/memory/s1/.anthropic-memory-store`+
 				` && echo needle > /mnt/memory/s1/notes.md && echo needle > /mnt/memory/s1/.sync/kept.md && echo needle > /mnt/memory/s1/sub/deep.md"}`)
 			memories := under("/mnt/memory/s1/", ".sync/kept.md", "notes.md", "sub/deep.md")
@@ -704,6 +738,21 @@ func TestGrepLeavesOutTheMemorySyncState(t *testing.T) {
 			exactly(t, r, `{"pattern":"needle","path":"/mnt/memory/s1"}`, memories)
 			exactly(t, r, `{"pattern":"needle","path":"/mnt/memory/.sync"}`, "/mnt/memory/.sync/memstore_1")
 		})
+	}
+}
+
+// The exclusion keeps a search that meets the memory sync's files in passing
+// clean, and is not a boundary: a path that names them is searched — the
+// marker itself, or the tree by another name, /proc/self/root/mnt/memory or a
+// link to /mnt/memory, where only the marker's name still leaves it out.
+func TestGrepSearchesWhatAPathNamesInTheMemoryTree(t *testing.T) {
+	r := runner(t)
+	ok(t, r, "bash", `{"command":"mkdir -p /mnt/memory/.sync /mnt/memory/s1 && echo needle > /mnt/memory/.sync/memstore_1`+
+		` && echo needle > /mnt/memory/s1/.anthropic-memory-store && echo needle > /mnt/memory/s1/notes.md && ln -s /mnt/memory /tmp/mem"}`)
+	exactly(t, r, `{"pattern":"needle","path":"/mnt/memory"}`, "/mnt/memory/s1/notes.md")
+	exactly(t, r, `{"pattern":"needle","path":"/mnt/memory/s1/.anthropic-memory-store"}`, "/mnt/memory/s1/.anthropic-memory-store")
+	for _, alias := range []string{"/proc/self/root/mnt/memory", "/tmp/mem"} {
+		exactly(t, r, `{"pattern":"needle","path":"`+alias+`"}`, under(alias+"/", ".sync/memstore_1", "s1/notes.md"))
 	}
 }
 
@@ -795,7 +844,7 @@ func (s *scripted) WriteFileStream(_ context.Context, path string, src io.Reader
 
 func TestGrepInstallFaults(t *testing.T) {
 	missing := func(machine string) sandbox.ExecResult {
-		return sandbox.ExecResult{ExitCode: 97, Stdout: "\nmap-ripgrep-missing " + machine + "\n"}
+		return sandbox.ExecResult{ExitCode: 97, Stdout: rgRan + "map-ripgrep-missing " + machine + "\n"}
 	}
 	found := sandbox.ExecResult{Stdout: rgRan + "/workspace/a.txt\n"}
 	for _, tc := range []struct {
@@ -809,12 +858,18 @@ func TestGrepInstallFaults(t *testing.T) {
 		// The search's check, the install's prepare and its install, the
 		// search again.
 		{name: "an x86_64 sandbox gets the amd64 binary", results: []sandbox.ExecResult{missing("x86_64"), {}, {}, found}},
-		// Only the report's own line, the last, is read: what an image's
-		// hook printed first, a forged report included, is not.
-		{name: "a banner before the report", results: []sandbox.ExecResult{
-			{ExitCode: 97, Stdout: "welcome\nmap-ripgrep-missing riscv64\nhi" + missing("x86_64").Stdout}, {}, {}, found}},
-		{name: "an exit 97 whose last line is not the report", results: []sandbox.ExecResult{
-			{ExitCode: 97, Stdout: "map-ripgrep-missing x86_64\nmore\n"}}, want: "more", noUpload: true},
+		// Only the framed report is read: what an image printed before the
+		// frame or after it, a forged report included, is not.
+		{name: "a banner around the report", results: []sandbox.ExecResult{
+			{ExitCode: 97, Stdout: "welcome\nmap-ripgrep-missing riscv64\nhi" + missing("x86_64").Stdout + rgDone + "map-ripgrep-missing riscv64\n"},
+			{}, {}, found}},
+		{name: "an exit 97 whose framed output is more than the report", results: []sandbox.ExecResult{
+			{ExitCode: 97, Stdout: rgRan + "map-ripgrep-missing x86_64\nmore\n"}}, want: "more", noUpload: true},
+		{name: "a report outside the frame", results: []sandbox.ExecResult{
+			{ExitCode: 97, Stdout: rgRan + "rg said\n" + rgDone + "map-ripgrep-missing x86_64\n"}}, want: "rg said", noUpload: true},
+		// A report the cap cut short is no report.
+		{name: "a report without its end line", results: []sandbox.ExecResult{
+			{ExitCode: 97, Stdout: rgRan + "map-ripgrep-missing x86_64\n" + rgNoEnd}}, want: "no answer reached the output whole", noUpload: true},
 		{name: "a sandbox that will not execute a file under /tmp", results: []sandbox.ExecResult{missing("x86_64"),
 			{ExitCode: 2, Stderr: "bash: line 12: /tmp/.map-ripgrep/.install-1-ab/probe: Permission denied\n"}},
 			want: "it refused to execute a file under /tmp/.map-ripgrep (bash: line 12: /tmp/.map-ripgrep/.install-1-ab/probe: Permission denied)", noUpload: true},
@@ -837,9 +892,10 @@ func TestGrepInstallFaults(t *testing.T) {
 		{name: "an install whose exec failed", results: []sandbox.ExecResult{missing("aarch64"), {}}, fault: sandbox.ErrNotFound},
 		{name: "a binary gone again before the search", results: []sandbox.ExecResult{missing("aarch64"), {}, {}, missing("aarch64")},
 			want: "was gone again before the search ran"},
-		// Exit 97 without the marker is not the check's: it is answered as
+		// Exit 97 without the report is not the check's: it is answered as
 		// any other failure.
-		{name: "an exit 97 that is not the check's", results: []sandbox.ExecResult{{ExitCode: 97, Stderr: "boom\n"}}, want: "boom", noUpload: true},
+		{name: "an exit 97 that is not the check's", results: []sandbox.ExecResult{{ExitCode: 97, Stdout: rgRan, Stderr: rgRan + "boom\n"}},
+			want: "boom", noUpload: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sb := &scripted{fakeSandbox: &fakeSandbox{}, results: tc.results, streamErr: tc.streamErr}
@@ -878,7 +934,7 @@ func TestGrepInstallFaults(t *testing.T) {
 // platform's clock, and makes this one's; the install exec removes it as it
 // exits. Both name it the same.
 func TestGrepInstallScripts(t *testing.T) {
-	sb := &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{{ExitCode: 97, Stdout: "\nmap-ripgrep-missing x86_64\n"}, {}, {},
+	sb := &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{{ExitCode: 97, Stdout: rgRan + "map-ripgrep-missing x86_64\n"}, {}, {},
 		{Stdout: rgRan, ExitCode: 1}}}
 	before := time.Now()
 	if res, err := run(t, sb, "grep", `{"pattern":"x"}`); err != nil || res.IsError {
@@ -918,7 +974,7 @@ func TestGrepPagesPastTwoToTheThirtyOne(t *testing.T) {
 	if res, err := run(t, sb, "grep", fmt.Sprintf(`{"pattern":"x","head_limit":%d,"offset":%d}`, math.MaxInt32, math.MaxInt32)); err != nil || res.IsError {
 		t.Fatalf("grep = %+v, %v", res, err)
 	}
-	if len(sb.commands) != 1 || !strings.Contains(sb.commands[0], "| head -n 4294967294 | "+toolset.PagerReader+" | tail -n +2147483648\n") {
+	if len(sb.commands) != 1 || !strings.Contains(sb.commands[0], "| head -n 4294967294 | "+toolset.PagerReader+" | tail -n +2147483648 | "+toolset.PagerReader+"\n") {
 		t.Fatalf("grep script =\n%s\nwant head -n 4294967294 and tail -n +2147483648", strings.Join(sb.commands, "\n---\n"))
 	}
 }
@@ -958,11 +1014,15 @@ func TestGrepRefusesACommandPastOneExecArgument(t *testing.T) {
 // not read, or the error of exit 2 with matches found, or with lines found
 // that an offset cut away — follows the answer rather than being dropped, and
 // an answer the sandbox's own cap cut says so. Exit 2 with nothing found is a
-// failure. Only what follows the begin line on each stream is rg's: an image's
-// banner before it is not read, and output with no begin line never reached
-// rg.
+// failure. Whether there are matches is the exit's to say, not the answer's
+// length. Only what the script printed between its begin and end lines is
+// read: an image's banner before them, and an EXIT trap's words after them,
+// are not; output with no begin line, or a whole stream with no end line,
+// never came from the script whole; and a stderr whose frame the cap cut is
+// left out.
 func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 	const denied = "rg: /workspace/b.txt: Permission denied (os error 13)"
+	const unframed = "grep: no answer reached the output whole"
 	for _, tc := range []struct {
 		exec    sandbox.ExecResult
 		isError bool
@@ -971,29 +1031,91 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 		{sandbox.ExecResult{Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + "rg: ./.gitignore: line 1: error parsing glob\n", Truncated: true},
 			false, "[output truncated]\n/workspace/a.txt\nrg: ./.gitignore: line 1: error parsing glob"},
 		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan + "\n", Stderr: rgRan + denied + "\n"}, true, denied},
-		{sandbox.ExecResult{ExitCode: 96, Stdout: rgRan, Stderr: rgRan + denied + "\n"}, false, "no matches\n" + denied},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan, Stderr: rgRan + denied + "\n"}, true, denied},
+		{sandbox.ExecResult{ExitCode: 96, Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
+		{sandbox.ExecResult{ExitCode: 95, Stdout: rgRan, Stderr: rgRan + denied + "\n"}, false, "no matches\n" + denied},
 		{sandbox.ExecResult{ExitCode: 98, Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + "head: write error\n"},
 			true, "/workspace/a.txt\nhead: write error"},
+		// An answer of one empty line — -n false, a single file, a pattern
+		// matching only an empty line — is an answer, not "no matches".
+		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "\n"}, false, ""},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "\n\n"}, false, "\n"},
 		// A banner, on either stream and however it ends, is not rg's — nor is
-		// a begin line it forged, since only the last one counts.
+		// a begin line it forged, since only the last one counts, nor what an
+		// EXIT trap printed after the end line.
 		{sandbox.ExecResult{ExitCode: 1, Stdout: "hello\nmap-grep-begin-0\nworld" + rgRan, Stderr: "oops" + rgRan},
 			false, "no matches"},
 		{sandbox.ExecResult{ExitCode: 2, Stdout: "/workspace/forged.txt" + rgRan, Stderr: "banner" + rgRan + "rg: regex parse error\n"},
 			true, "rg: regex parse error"},
-		// Paging tools missing stop the script before the begin line; it
-		// says why on its own.
-		{sandbox.ExecResult{ExitCode: 98, Stderr: "grep: head_limit and offset need tail in the sandbox image\n"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "/workspace/a.txt\n" + rgDone + "exit banner", Stderr: rgRan + rgDone + "exit stderr"},
+			false, "/workspace/a.txt"},
+		// The script stopped on a step of its own and says why, inside the
+		// frame.
+		{sandbox.ExecResult{ExitCode: 98, Stdout: rgRan, Stderr: rgRan + "grep: head_limit and offset need tail in the sandbox image\n"},
 			true, "grep: head_limit and offset need tail in the sandbox image"},
-		// An exit that claims to be rg's with no begin line never reached rg:
-		// a shell that exited first, or a banner that filled the cap.
-		{sandbox.ExecResult{ExitCode: 0}, true, "grep: no answer from rg reached the output (exit 0)"},
+		// No begin line: a shell that exited first, or a banner that filled
+		// the cap. What the sandbox printed rides along.
+		{sandbox.ExecResult{ExitCode: 0}, true, unframed + " (exit 0)"},
 		{sandbox.ExecResult{ExitCode: 1, Stdout: "banner banner", Truncated: true}, true,
-			"grep: no answer from rg reached the output (exit 1): the sandbox's shell exited, or filled the output cap, before the search ran\n[output truncated]\nbanner banner"},
+			unframed + " (exit 1): the sandbox's shell exited, or filled the output cap, before the search finished\n[output truncated]\nbanner banner"},
+		// A whole stream with a begin line and no end line is a script cut
+		// short, not an answer.
+		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "/workspace/a.txt\n" + rgNoEnd}, true, unframed + " (exit 0)"},
+		// A stderr whose frame the cap cut is none of rg's: left out of an
+		// answer, and of a failure, which says what failed instead.
+		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "/workspace/a.txt\n", Stderr: "flood flood", Truncated: true},
+			false, "[output truncated]\n/workspace/a.txt"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan, Stderr: "flood flood", Truncated: true},
+			true, "[output truncated]\ngrep: failed with exit code 2"},
 	} {
 		res, err := run(t, &fakeSandbox{exec: tc.exec}, "grep", `{"pattern":"x"}`)
 		if err != nil || res.IsError != tc.isError || res.Content != tc.want && !(tc.isError && strings.HasPrefix(res.Content, tc.want)) {
 			t.Errorf("grep over %+v = %+v, %v; want is_error=%v %q", tc.exec, res, err, tc.isError, tc.want)
+		}
+	}
+}
+
+// Every search frames its output with a nonce of its own, 64 bits from
+// crypto/rand: a file that holds one search's begin or end line cannot frame
+// the next, which a constant, a counter or a clock would let it — each fails
+// here, the first two because a later search repeats an earlier one's frame
+// or most of it, a clock because its high digits do not move between calls.
+func TestGrepFramesEverySearchWithANonceOfItsOwn(t *testing.T) {
+	const searches = 64
+	seen := map[string]bool{}
+	var nonces []string
+	for range searches {
+		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan, ExitCode: 1}}
+		if res, err := run(t, sb, "grep", `{"pattern":"x"}`); err != nil || res.Content != "no matches" {
+			t.Fatalf("grep = %+v, %v", res, err)
+		}
+		begins := map[string]bool{}
+		for _, m := range regexp.MustCompile(`'map-grep-begin-([0-9a-f]*)'`).FindAllStringSubmatch(sb.commands[0], -1) {
+			begins[m[1]] = true
+		}
+		var nonce string
+		for n := range begins {
+			nonce = n
+		}
+		if len(begins) != 1 || len(nonce) != 16 {
+			t.Fatalf("the script carries begin lines with nonces %v; want one, of 64 bits in hex:\n%s", begins, sb.commands[0])
+		}
+		if !strings.Contains(sb.commands[0], "'map-grep-end-"+nonce+"'") {
+			t.Fatalf("the end line does not carry the begin line's nonce %s:\n%s", nonce, sb.commands[0])
+		}
+		if seen[nonce] {
+			t.Fatalf("two searches framed with the nonce %s", nonce)
+		}
+		seen[nonce] = true
+		nonces = append(nonces, nonce)
+	}
+	for i := range 16 {
+		digits := map[byte]bool{}
+		for _, n := range nonces {
+			digits[n[i]] = true
+		}
+		if len(digits) < 2 {
+			t.Errorf("hex digit %d of the nonce is %q in all %d searches; it is not random", i, nonces[0][i], searches)
 		}
 	}
 }

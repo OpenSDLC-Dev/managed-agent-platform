@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -45,12 +46,14 @@ type grepInput struct {
 	Multiline  bool     `json:"multiline"`
 }
 
-// grepQuery is a validated grepInput: rg's arguments, the paging rg does not
-// do itself, and the line that opens rg's part of the output (newGrepBegin).
+// grepQuery is a validated grepInput: rg's arguments, the directory rg runs
+// in, the paging rg does not do itself, and the frame the search's script
+// prints around what it says (newGrepFrame).
 type grepQuery struct {
 	args        []string
+	cwd         string
 	skip, limit int
-	begin       string
+	frame       grepFrame
 }
 
 // whole reads one of the schema's number options: a whole number from 0 to
@@ -83,7 +86,9 @@ func number(v float64) string {
 var vcsDirs = []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
 
 // query maps the input onto rg, flag for the flag each recorded description
-// names, searching root from cwd, the directory rg runs in. The rest is ours
+// names, searching root from cwd, the directory the script enters before rg
+// runs, so the one memoryGlobs spells the baselines' glob from is the one rg
+// matches it in. The rest is ours
 // and fixed: --no-config, so an image's RIPGREP_CONFIG_PATH cannot change what
 // a call means; --no-heading, so every line carries its file; --hidden with
 // the version-control directories globbed out, as the reference's GrepTool
@@ -97,7 +102,7 @@ var vcsDirs = []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
 // their flag, so none of them can be read as an option whatever it begins
 // with, and the path after "--".
 func (in grepInput) query(root, cwd string) (grepQuery, string) {
-	q := grepQuery{args: []string{"--no-config", "--no-heading", "--hidden", "--sort=path"}}
+	q := grepQuery{args: []string{"--no-config", "--no-heading", "--hidden", "--sort=path"}, cwd: cwd}
 	for _, d := range vcsDirs {
 		q.args = append(q.args, "--glob=!"+d)
 	}
@@ -178,6 +183,12 @@ func (in grepInput) query(root, cwd string) (grepQuery, string) {
 // above it; a search rooted at it or inside it searches it, as rg searches a
 // hidden directory it is handed.
 //
+// That keeps a search that meets them in passing clean; it is not a boundary.
+// A path that names them is searched — the marker file itself, the baselines'
+// directory, or the same tree by another name, a symbolic link to /mnt/memory
+// or /proc/self/root/mnt/memory — as is everything else in the model's own
+// sandbox, which bash reads all the same.
+//
 // rg 15.2.0 matches a glob against each path as its walk yields it — the root
 // as given, joined with what lies under it — less rg's working directory: the
 // override matcher is rooted there, not at the search root, and strips the
@@ -186,7 +197,13 @@ func (in grepInput) query(root, cwd string) (grepQuery, string) {
 // with "/" must match all of what is left. So the glob naming the baselines is
 // "/" and their path below cwd where cwd leads it — "/memory/.sync" from /mnt
 // — and "/" and their absolute path where it does not: "//mnt/memory/.sync"
-// from /workspace. TestGrepLeavesOutTheMemorySyncState holds rg to both.
+// from /workspace. rg takes its working directory from the kernel, so cwd is
+// the Runner's workdir cleaned — no trailing slash, no ".." — and the script
+// enters it before rg runs (grepQuery.script), whatever directory the exec
+// started in. Only a workdir whose path runs through a symbolic link can still
+// part the two, the kernel naming it by where the link leads: the tree named
+// another way, as above. TestGrepLeavesOutTheMemorySyncState holds rg to the
+// rest.
 func memoryGlobs(root, cwd string) []string {
 	globs := []string{"--glob=!" + memsync.MarkerName}
 	if root == MemorySyncDir || (root != "/" && !under(MemorySyncDir, root)) {
@@ -220,50 +237,103 @@ const ripgrepDir = "/tmp/.map-ripgrep"
 func ripgrepPath() string { return ripgrepDir + "/rg-" + ripgrep.Pinned.Version }
 
 // The exit codes script claims for itself, outside rg's 0, 1 and 2 and
-// below the 126 a shell takes for a command it could not run.
+// below the 126 a shell takes for a command it could not run. A paged
+// search's exit says what its page holds, in rg's own terms where they fit —
+// 0 for a page with lines on it, 1 for one without, whether rg found none or
+// an offset paged past them — and in the first two of these for rg's 2.
 const (
-	// exitErrorBesideLines: rg exited 2, an error, after printing lines that
-	// paging may have cut away to the last — an offset past the end. That is
-	// an error beside an answer, not an error alone (grepAnswer).
+	// exitErrorBesideEmptyPage: rg exited 2, an error, after printing lines
+	// an offset paged away to the last — no matches on this page, beside the
+	// error (grepAnswer).
+	exitErrorBesideEmptyPage = 95
+	// exitErrorBesideLines: rg exited 2 after printing lines, and the page
+	// holds some of them — an error beside an answer, not an error alone.
 	exitErrorBesideLines = 96
 	// exitNoRipgrep: rg is not installed — or not runnable, or not this
-	// build's — and stdout's last line is ripgrepMissing and the machine.
+	// build's — and the script's framed stdout is ripgrepMissing and the
+	// machine.
 	exitNoRipgrep = 97
-	// exitPager: paging the output failed; stderr says why.
-	exitPager = 98
+	// exitStopped: the script stopped on a step of its own — the directory rg
+	// runs in could not be entered, a paging tool is missing, or paging
+	// failed — and its framed stderr says why.
+	exitStopped = 98
 )
 
 const ripgrepMissing = "map-ripgrep-missing "
 
-// grepBeginPrefix opens the line a search prints on stdout and on stderr
-// immediately before rg runs (script). Its suffix is a 64-bit nonce per search
-// (newGrepBegin), which no searched file will hold by chance: rg prints a
-// matched line bare from a single file with -n false, and such a line must
-// never be read as the frame.
-const grepBeginPrefix = "map-grep-begin-"
+// grepBeginPrefix and grepEndPrefix open the two lines a search's script
+// prints around everything it says, on stdout and on stderr alike: the begin
+// line before anything else, the end line as it exits. Their suffix is one
+// 64-bit nonce per search (newGrepFrame), which no searched file holds but by
+// a 2⁻⁶⁴ chance: rg prints a matched line bare from a single file with -n
+// false, and such a line must never be read as the frame.
+//
+// The frame keeps out what reaches an exec's streams that the script did not
+// print: an image's banner before it — an `ENV LD_PRELOAD` library's, since
+// Exec starts the script with -p and no `ENV BASH_ENV` file runs
+// (sandbox.ExecRequest) — and anything after it, such as an EXIT trap's. It is
+// not a boundary against the sandbox's own processes: the script, nonce and
+// all, is the exec's argv, which any process in the sandbox may read, and a
+// model that forges a search's output from inside its own sandbox is
+// tampering with what it alone reads.
+const (
+	grepBeginPrefix = "map-grep-begin-"
+	grepEndPrefix   = "map-grep-end-"
+)
 
-func newGrepBegin() string {
+// grepFrame is one search's begin and end lines.
+type grepFrame struct{ begin, end string }
+
+func newGrepFrame() grepFrame {
 	var nonce [8]byte
 	_, _ = rand.Read(nonce[:])
-	return grepBeginPrefix + hex.EncodeToString(nonce[:])
+	n := hex.EncodeToString(nonce[:])
+	return grepFrame{begin: grepBeginPrefix + n, end: grepEndPrefix + n}
+}
+
+// cut returns what the script printed on one stream — what lies between the
+// last begin line and the end line after it — and true. Each line is printed
+// after a newline of its own, so it is a line however what came before it
+// ended, and the newline before the end line is the frame's, not the
+// script's. A stream the sandbox's cap cut (truncated) has lost its end line,
+// so all that follows the begin line is what there is. A stream with no begin
+// line, or a whole one with no end line after it, is not one the script
+// printed to its end: "", false.
+func (f grepFrame) cut(s string, truncated bool) (string, bool) {
+	t := "\n" + s
+	begin := "\n" + f.begin + "\n"
+	i := strings.LastIndex(t, begin)
+	if i < 0 {
+		return "", false
+	}
+	rest := t[i+len(begin):]
+	if j := strings.Index(rest, "\n"+f.end+"\n"); j >= 0 {
+		return rest[:j], true
+	}
+	if truncated {
+		return rest, true
+	}
+	return "", false
 }
 
 // openRipgrep is ripgrep.Open, a variable so a test can play a build that
 // fetched no binaries.
 var openRipgrep = ripgrep.Open
 
-// pagerReader is the paging stage behind head when an offset skips lines: it
-// passes its input through untouched, and exits 3 when there is none — rg
-// printed nothing — so the script can tell an exit 2 whose every line the
-// offset cut away from one that printed nothing at all. It reads the first
+// pagerReader is the paging stage that says whether anything reached it: it
+// passes its input through untouched, and exits 3 when there is none. Behind
+// head it tells an exit 2 whose every line an offset cut away from one that
+// printed nothing at all; at the end of the pipeline it tells an empty page
+// from one that holds lines — a lone empty line among them. It reads the first
 // character itself, which bash's read -n takes off a pipe a byte at a time,
 // never past it, and writes it back: a newline, which read -n consumes and
 // stores as nothing, as a newline. (read -n is bash 2's; the -N that would
 // store the newline is bash 4.1's, past what the image contract asks.)
 const pagerReader = `{ IFS= read -r -n 1 c || exit 3; if [ -n "$c" ]; then printf '%s' "$c"; else echo; fi; exec cat; }`
 
-// script renders one search: rg, checked first, then run over the query's
-// arguments and paged.
+// script renders one search: the frame opened, the directory rg runs in
+// entered, rg checked, then run over the query's arguments and paged, and the
+// frame closed as the script exits, whichever way it does (close_frame).
 //
 // The check runs on every call because the sandbox is the model's: it can
 // delete the binary, replace it, or have lost it to a restore, and the check
@@ -274,85 +344,101 @@ const pagerReader = `{ IFS= read -r -n 1 c || exit 3; if [ -n "$c" ]; then print
 // tampering with its own sandbox, where bash already runs whatever it likes.
 // A failed check reports the machine, so the caller can install rg and call
 // again; `uname -m` reports it, and bash's own $HOSTTYPE stands in where an
-// image ships no uname. The report is the script's last line, printed after a
-// newline of its own, and only the last line is read (missingRipgrep).
-//
-// What reaches stdout or stderr before rg runs is not rg's: an image's `ENV
-// BASH_ENV` hook prints first, on either stream, possibly without ending its
-// line. So immediately before rg runs the script prints the query's begin
-// line on both, each after a newline of its own, and only what follows the
-// last of them is read (grepAnswer) — the framing sandbox.bulkLeftBeginMarker
-// argues.
+// image ships no uname. The report is the whole of the framed stdout
+// (missingRipgrep).
 //
 // head_limit and offset page rg's output lines as the descriptions' "| tail
 // -n +N | head -N" does: through head and tail in the sandbox, so a large
 // answer is cut where it is made rather than carried out of the sandbox and
 // thrown away, and head stops rg once it has its lines (rg exits 0 when the
 // pipe closes under it). rg's stderr does not pass through either, so its
-// errors survive the paging. An offset can cut away every line rg printed, so
-// pagerReader stands before tail, and an exit 2 with lines behind it is
-// exitErrorBesideLines. The line counts are summed in int64: each is up to
-// 2³¹−1, and a 32-bit int (the worker's linux/arm build) would wrap.
+// errors survive the paging. pagerReader stands behind head when an offset
+// skips lines and at the end of every paged pipeline, and the script folds
+// what they saw into its exit: 1 for an empty page whatever rg's 0 or 1, 0
+// for one with lines, and for rg's 2 the exit that says whether it printed
+// any and whether the page kept them (exitErrorBesideLines,
+// exitErrorBesideEmptyPage). So whether there are matches is the exit's
+// answer, never the output's length. The line counts are summed in int64:
+// each is up to 2³¹−1, and a 32-bit int (the worker's linux/arm build) would
+// wrap.
 func (q grepQuery) script() string {
 	words := make([]string, len(q.args))
 	for i, a := range q.args {
 		words[i] = singleQuote(a)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, `rg=%s
+	fmt.Fprintf(&b, `close_frame() { printf '\n%%s\n' %[2]s; printf '\n%%s\n' %[2]s >&2; exit "$1"; }
+printf '\n%%s\n' %[1]s; printf '\n%%s\n' %[1]s >&2
+cd -- %[3]s >/dev/null || close_frame %[4]d
+rg=%[5]s
 v=
 if [ -f "$rg" ] && [ -x "$rg" ]; then v=$("$rg" --version 2>/dev/null); fi
 case $v in
-%s*) ;;
-*) printf '\n%s%%s\n' "$(uname -m 2>/dev/null || printf '%%s' "$HOSTTYPE")"; exit %d ;;
+%[6]s*) ;;
+*) printf '%[7]s%%s\n' "$(uname -m 2>/dev/null || printf '%%s' "$HOSTTYPE")"; close_frame %[8]d ;;
 esac
-`, singleQuote(ripgrepPath()), singleQuote("ripgrep "+ripgrep.Pinned.Version+" "), ripgrepMissing, exitNoRipgrep)
+`, singleQuote(q.frame.begin), singleQuote(q.frame.end), singleQuote(q.cwd), exitStopped,
+		singleQuote(ripgrepPath()), singleQuote("ripgrep "+ripgrep.Pinned.Version+" "), ripgrepMissing, exitNoRipgrep)
 	var tools, stages []string
 	if q.limit > 0 {
 		tools = append(tools, "head")
 		stages = append(stages, fmt.Sprintf("head -n %d", int64(q.skip)+int64(q.limit)))
 	}
 	if q.skip > 0 {
-		tools = append(tools, "cat", "tail")
+		tools = append(tools, "tail")
 		stages = append(stages, pagerReader, fmt.Sprintf("tail -n +%d", int64(q.skip)+1))
 	}
-	for _, tool := range tools {
-		fmt.Fprintf(&b, "command -v %[1]s >/dev/null 2>&1 || { printf 'grep: head_limit and offset need %[1]s in the sandbox image\\n' >&2; exit %[2]d; }\n",
-			tool, exitPager)
-	}
-	fmt.Fprintf(&b, "printf '\\n%%s\\n' %[1]s; printf '\\n%%s\\n' %[1]s >&2\n", singleQuote(q.begin))
 	if len(stages) == 0 {
-		fmt.Fprintf(&b, "exec \"$rg\" %s\n", strings.Join(words, " "))
+		fmt.Fprintf(&b, "\"$rg\" %s\nclose_frame \"$?\"\n", strings.Join(words, " "))
 		return b.String()
 	}
+	tools = append(tools, "cat")
+	stages = append(stages, pagerReader)
+	for _, tool := range tools {
+		fmt.Fprintf(&b, "command -v %[1]s >/dev/null 2>&1 || { printf 'grep: head_limit and offset need %[1]s in the sandbox image\\n' >&2; close_frame %[2]d; }\n",
+			tool, exitStopped)
+	}
 	fmt.Fprintf(&b, "\"$rg\" %s | %s\ns=(\"${PIPESTATUS[@]}\")\n", strings.Join(words, " "), strings.Join(stages, " | "))
-	reader := 0
+	printed := 0 // the first reader: did rg print anything at all
 	for i, stage := range stages {
 		if stage == pagerReader {
-			reader = i + 1
-			fmt.Fprintf(&b, "case ${s[%d]} in 0|3) ;; *) exit %d ;; esac\n", reader, exitPager)
+			if printed == 0 {
+				printed = i + 1
+			}
+			fmt.Fprintf(&b, "case ${s[%d]} in 0|3) ;; *) close_frame %d ;; esac\n", i+1, exitStopped)
 			continue
 		}
-		fmt.Fprintf(&b, "[ \"${s[%d]}\" = 0 ] || exit %d\n", i+1, exitPager)
+		fmt.Fprintf(&b, "[ \"${s[%d]}\" = 0 ] || close_frame %d\n", i+1, exitStopped)
 	}
-	if reader > 0 {
-		fmt.Fprintf(&b, "[ \"${s[0]}\" = 2 ] && [ \"${s[%d]}\" = 0 ] && exit %d\n", reader, exitErrorBesideLines)
-	}
-	b.WriteString("exit \"${s[0]}\"\n")
+	page := len(stages) // the last reader: did the page keep any of it
+	fmt.Fprintf(&b, `case ${s[0]} in
+0|1) [ "${s[%[2]d]}" = 3 ] && close_frame 1; close_frame 0 ;;
+2) [ "${s[%[1]d]}" = 3 ] && close_frame 2; [ "${s[%[2]d]}" = 3 ] && close_frame %[3]d; close_frame %[4]d ;;
+*) close_frame "${s[0]}" ;;
+esac
+`, printed, page, exitErrorBesideEmptyPage, exitErrorBesideLines)
 	return b.String()
 }
 
 // missingRipgrep reads a search's exit as the check's report that rg is not
-// there: the machine, and true, when the script exited exitNoRipgrep and the
-// last line of its stdout is the report. Anything before that line — an
-// image's banner — is not read, and an exit 97 without the report is not the
-// check's.
-func missingRipgrep(res sandbox.ExecResult) (string, bool) {
+// there: the machine, and true, when the script exited exitNoRipgrep and its
+// framed stdout is the report and nothing else. What lies outside the frame —
+// an image's banner, a forged report — is not read, and an exit 97 without
+// the report is not the check's.
+func missingRipgrep(res sandbox.ExecResult, f grepFrame) (string, bool) {
 	if res.ExitCode != exitNoRipgrep {
 		return "", false
 	}
-	out := strings.TrimRight(res.Stdout, "\n")
-	return strings.CutPrefix(out[strings.LastIndexByte(out, '\n')+1:], ripgrepMissing)
+	out, ok := f.cut(res.Stdout, res.Truncated)
+	if !ok {
+		return "", false
+	}
+	machine, report := strings.CutPrefix(out, ripgrepMissing)
+	machine, whole := strings.CutSuffix(machine, "\n")
+	if !report || !whole || strings.Contains(machine, "\n") {
+		return "", false
+	}
+	return machine, true
 }
 
 // An install works in a directory of its own under ripgrepDir,
@@ -536,13 +622,13 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if in.Path != "" {
 		root = r.resolve(in.Path)
 	}
-	q, why := in.query(root, r.workdir())
+	q, why := in.query(root, path.Clean(r.workdir()))
 	if why != "" {
 		return failf("grep: %s", why)
 	}
 	// The script is one exec argument, and the pattern, path, type and glob
 	// are all in it, the pattern again in rg's own argv.
-	q.begin = newGrepBegin()
+	q.frame = newGrepFrame()
 	script := q.script()
 	if len(script) > sandbox.MaxCommandBytes {
 		return failf("grep: the pattern, path, type and glob make a %d-byte command, over the %d bytes one exec argument can carry; shorten them",
@@ -556,9 +642,9 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 		if res.TimedOut {
 			return failf("grep: timed out after %s", DefaultTimeout)
 		}
-		machine, missing := missingRipgrep(res)
+		machine, missing := missingRipgrep(res, q.frame)
 		if !missing {
-			return grepAnswer(res, q.begin)
+			return grepAnswer(res, q.frame)
 		}
 		if installed {
 			return failf("grep: ripgrep was installed at %s and was gone again before the search ran", ripgrepPath())
@@ -572,47 +658,54 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 	}
 }
 
-// grepAnswer reads a search: rg's output, what follows the last begin line on
-// stdout, and its messages, what follows it on stderr (script). rg exits 0
-// for matches, 1 for none — or for a search head cut short, which rg may also
-// report as 1 — and 2 for an error. An error beside an answer — one
-// unreadable file among the matches, say — is still the answer, with rg's
-// messages after it, as the reference's GrepTool keeps what rg found when it
-// exits 2 (docs/DIVERGENCES.md), and so is an error beside lines an offset cut
-// away (exitErrorBesideLines), whose answer is "no matches", as any page past
-// the end is; an error with nothing printed, and any other exit, is a failure
-// whose message is rg's own. A message rg printed beside a successful answer,
-// such as an ignore file it could not parse, follows it the same way rather
-// than being lost.
+// grepAnswer reads a search: rg's output, the script's framed stdout, and its
+// messages, the framed stderr (grepFrame.cut). Whether there are matches is
+// the exit's to say (script): 0 is an answer, whatever its length — a lone
+// empty line one too, which reads back as no text at all — and 1 is "no
+// matches". An error beside an answer — one unreadable file among the
+// matches, say — is still the answer, with rg's messages after it, as the
+// reference's GrepTool keeps what rg found when it exits 2 (docs/
+// DIVERGENCES.md): unpaged, an exit 2 after rg printed anything at all;
+// paged, exitErrorBesideLines, and exitErrorBesideEmptyPage, whose answer is
+// "no matches", as any page past the end is. An error with nothing printed,
+// and any other exit, is a failure whose message is rg's own — or the
+// script's, where it stopped on a step of its own (exitStopped). A message rg
+// printed beside a successful answer, such as an ignore file it could not
+// parse, follows it the same way rather than being lost.
 //
-// Output with no begin line never reached rg. A script that stopped short of
-// it — paging tools missing — says why itself; an exit that claims to be rg's
-// without one — a shell that exited before the script ran, or an image that
-// printed past the output cap first — is a failure, never an empty answer.
-func grepAnswer(res sandbox.ExecResult, begin string) (Result, error) {
-	out, framed := afterBegin(res.Stdout, begin)
+// Output the script did not print to its end — no begin line on stdout, a
+// shell that exited before the script ran or an image that printed past the
+// output cap first, or no end line on a stream the cap did not cut — is a
+// failure carrying what the sandbox printed, never an answer. A stderr without
+// its frame is none of rg's and is left out: only the cap takes a begin line
+// that the script printed first, and with it whatever came after.
+func grepAnswer(res sandbox.ExecResult, f grepFrame) (Result, error) {
+	out, framed := f.cut(res.Stdout, res.Truncated)
 	if !framed {
-		switch res.ExitCode {
-		case 0, 1, 2, exitErrorBesideLines:
-			msg := fmt.Sprintf("grep: no answer from rg reached the output (exit %d): the sandbox's shell exited, or filled the output cap, before the search ran", res.ExitCode)
-			if more := strings.TrimSpace(combine(res)); more != "" {
-				msg += "\n" + more
-			}
-			return failf("%s", msg)
+		msg := fmt.Sprintf("grep: no answer reached the output whole (exit %d): the sandbox's shell exited, or filled the output cap, before the search finished", res.ExitCode)
+		if more := strings.TrimSpace(combine(res)); more != "" {
+			msg += "\n" + more
 		}
-		return searchFailure("grep", res)
+		return failf("%s", msg)
 	}
-	msg, _ := afterBegin(res.Stderr, begin)
+	msg, _ := f.cut(res.Stderr, res.Truncated)
 	msg = strings.TrimSpace(msg)
-	out = strings.TrimRight(out, "\n")
+	printed := out != ""
+	// rg ends every line it prints; the last one's newline is not the answer's.
+	out = strings.TrimSuffix(out, "\n")
 	switch {
-	case res.ExitCode == 0, res.ExitCode == 1, res.ExitCode == exitErrorBesideLines:
-	case res.ExitCode == 2 && strings.TrimSpace(out) != "":
-	default:
-		return searchFailure("grep", sandbox.ExecResult{Stdout: out, Stderr: msg, ExitCode: res.ExitCode, Truncated: res.Truncated})
-	}
-	if out == "" {
+	case res.ExitCode == 0, res.ExitCode == exitErrorBesideLines, res.ExitCode == 2 && printed:
+	case res.ExitCode == 1, res.ExitCode == exitErrorBesideEmptyPage:
 		out = "no matches"
+	default:
+		failure := strings.TrimSpace(combine(sandbox.ExecResult{Stdout: out, Stderr: msg}))
+		if failure == "" {
+			failure = fmt.Sprintf("grep: failed with exit code %d", res.ExitCode)
+		}
+		if res.Truncated {
+			failure = truncationNotice + "\n" + failure
+		}
+		return failf("%s", failure)
 	}
 	// The sandbox's own per-stream cap may already have cut this stream; the
 	// marker must ride along, or a spill of it would read as the full result.
@@ -623,16 +716,4 @@ func grepAnswer(res sandbox.ExecResult, begin string) (Result, error) {
 		out += "\n" + msg
 	}
 	return succeed(out)
-}
-
-// afterBegin returns what follows the last line of s that is begin, and true;
-// or s, and false, when no line is.
-func afterBegin(s, begin string) (string, bool) {
-	line := "\n" + begin + "\n"
-	t := "\n" + s
-	i := strings.LastIndex(t, line)
-	if i < 0 {
-		return s, false
-	}
-	return t[i+len(line):], true
 }

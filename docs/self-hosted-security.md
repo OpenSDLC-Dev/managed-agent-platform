@@ -380,8 +380,8 @@ so, and the branch that knows the members were delivered empties the platform's
 own list instead; and only the lines after the shed's own opening marker are
 read, so a hook that prints before the script does is not mistaken for it — an
 `ENV LD_PRELOAD` library's constructor, say, since the `bash -p` the shed runs
-under already keeps an `ENV BASH_ENV` file out. What remains is narrower: the batch's emptying needs the shed
-exec to have *run*. A sandbox too broken to exec at all keeps a failed batch's
+under already keeps an `ENV BASH_ENV` file out. What remains is narrower: the
+batch's emptying needs the shed exec to have *run*. A sandbox too broken to exec at all keeps a failed batch's
 payload where a single write's would still be taken back — closing that would
 cost a round trip per member, ten thousand of them, to serve a container that is
 about to be destroyed anyway.
