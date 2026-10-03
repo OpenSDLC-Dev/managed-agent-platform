@@ -288,15 +288,16 @@ const pagerReader = `{ IFS= read -r -n 1 c || exit 3; if [ -n "$c" ]; then print
 // that plants a fake answering the right version, which would be the model
 // tampering with its own sandbox, where bash already runs whatever it likes.
 // A failed check reports the machine, so the caller can install rg and call
-// again. bash's own $HOSTTYPE names it, in the script's own process: no
-// child prints it, so nothing the loader runs in a child — an `ENV
-// LD_PRELOAD` library's constructor printing a banner — can corrupt it.
-// `uname -m` is asked only where $HOSTTYPE names no machine rg is shipped
-// for — a 32-bit bash on a 64-bit kernel, whose kernel may run rg all the
-// same — and $HOSTTYPE stands again where the image ships no uname. That
-// fallback is a child such a banner reaches, as it reaches every exec the
-// platform makes (#860). The report is the whole of the framed stdout
-// (missingRipgrep).
+// again. The machine bash was built for names it (compiledMachine), read in
+// the script's own process: no child prints it, so nothing the loader runs in
+// a child — an `ENV LD_PRELOAD` library's constructor printing a banner — can
+// corrupt it, and no environment sets it, as an image's `ENV` or a vault
+// credential can set $HOSTTYPE. `uname -m` is asked only where that machine
+// is none rg is shipped for — a 32-bit bash on a 64-bit kernel, whose kernel
+// may run rg all the same — and the compiled machine stands again where the
+// image ships no uname. That fallback is a child such a banner reaches, as it
+// reaches every exec the platform makes (#860). The report is the whole of
+// the framed stdout (missingRipgrep).
 //
 // head_limit and offset page rg's output lines as the descriptions' "| tail
 // -n +N | head -N" does: through head and tail in the sandbox, so a large
@@ -325,11 +326,13 @@ v=
 if [ -f "$rg" ] && [ -x "$rg" ]; then v=$("$rg" --version 2>/dev/null); fi
 case $v in
 %[4]s*) ;;
-*) case $HOSTTYPE in x86_64|amd64|aarch64|arm64) m=$HOSTTYPE ;; *) m=$(uname -m 2>/dev/null) || m=$HOSTTYPE ;; esac
+*) mt=%[7]s; m=${mt%%%%-*}
+  case $m in x86_64|amd64|aarch64|arm64) ;; *) m=$(uname -m 2>/dev/null) || m=${mt%%%%-*} ;; esac
   printf '%[5]s%%s\n' "$m"; close_frame %[6]d ;;
 esac
 `, singleQuote(q.cwd), exitStopped,
-		singleQuote(ripgrepPath()), singleQuote("ripgrep "+ripgrep.Pinned.Version+" "), ripgrepMissing, exitNoRipgrep)
+		singleQuote(ripgrepPath()), singleQuote("ripgrep "+ripgrep.Pinned.Version+" "), ripgrepMissing, exitNoRipgrep,
+		compiledMachine)
 	var tools, stages []string
 	if q.limit > 0 {
 		tools = append(tools, "head")
@@ -493,9 +496,20 @@ case $st/$v in
 esac
 `
 
-// linuxArch names the GOARCH of a sandbox's machine — bash's $HOSTTYPE, or
-// `uname -m` (grepQuery.script) — or "" for a machine no binary is shipped
-// for.
+// compiledMachine is the shell word grep's script reads the sandbox's
+// machine from (grepQuery.script): ${BASH_VERSINFO[5]}, the machine type
+// compiled into bash — x86_64-pc-linux-gnu, aarch64-unknown-linux-gnu,
+// x86_64-alpine-linux-musl — whose machine is what comes before its first
+// '-'. bash sets the array itself as it starts and makes it read-only, so no
+// environment variable reaches it, where the $HOSTTYPE and $MACHTYPE an
+// image's `ENV` or a vault credential sets are taken over bash's own. It is a
+// variable so that a test can play a bash built for a machine rg is not
+// shipped for (export_test.go).
+var compiledMachine = `"${BASH_VERSINFO[5]}"`
+
+// linuxArch names the GOARCH of a sandbox's machine — the one its bash was
+// built for, or `uname -m` (grepQuery.script) — or "" for a machine no binary
+// is shipped for.
 func linuxArch(machine string) string {
 	switch machine {
 	case "x86_64", "amd64":

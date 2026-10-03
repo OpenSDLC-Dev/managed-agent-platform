@@ -390,9 +390,9 @@ func TestGrepInstallsRipgrepInTheSandbox(t *testing.T) {
 		}
 	}
 
-	// The machine is bash's own $HOSTTYPE, which no child process prints: a
-	// uname that answers with a banner — as one an `ENV LD_PRELOAD` library
-	// printed would — is never asked where $HOSTTYPE names a machine rg is
+	// The machine is the one bash was built for, which no child process
+	// prints: a uname that answers with a banner — as one an `ENV LD_PRELOAD`
+	// library printed would — is never asked where that machine is one rg is
 	// shipped for.
 	ok(t, r, "bash", `{"command":"printf '#!/bin/sh\\necho welcome banner\\necho riscv64\\n' > /usr/local/bin/uname && chmod +x /usr/local/bin/uname && rm -f `+rg+`"}`)
 	if got := ok(t, r, "grep", in); got != want {
@@ -409,18 +409,34 @@ func withEnv(env map[string]string) runnerOption {
 	return func(s *sandbox.Spec, _ *toolset.Runner) { s.Env = env }
 }
 
-// Where bash's $HOSTTYPE names no machine rg is shipped for — set here by the
-// sandbox's environment, which bash takes it from, as a 32-bit bash on a
-// 64-bit kernel would report i686 — `uname -m` is asked: rg is installed when
-// the kernel's machine is one rg is shipped for, and a machine neither names
-// is a tool error naming uname's.
-func TestGrepAsksUnameWhereHosttypeNamesNoShippedMachine(t *testing.T) {
-	r := runner(t, withEnv(map[string]string{"HOSTTYPE": "i686"}))
+// The machine is the one bash was built for, ${BASH_VERSINFO[5]}, which bash
+// sets itself and no environment reaches: a $HOSTTYPE and $MACHTYPE the
+// sandbox's environment sets — as an image's ENV or a vault credential can —
+// and a uname naming another machine change nothing. Where bash was built for
+// a machine rg is not shipped for — played here, as a 32-bit bash on a 64-bit
+// kernel is i686 — `uname -m` is asked: rg is installed when the kernel's
+// machine is one rg is shipped for, a machine neither names is a tool error
+// naming uname's, and with no uname in the image, bash's own.
+func TestGrepAsksUnameWhereBashNamesNoShippedMachine(t *testing.T) {
+	r := runner(t, withEnv(map[string]string{"HOSTTYPE": "i686", "MACHTYPE": "i686-pc-linux-gnu"}))
 	ok(t, r, "bash", `{"command":"mkdir -p lc && echo needle > lc/a.txt"}`)
 	const in = `{"pattern":"needle","path":"lc","output_mode":"content"}`
-	exactly(t, r, in, "/workspace/lc/a.txt:1:needle")
-	ok(t, r, "bash", `{"command":"printf '#!/bin/sh\\necho riscv64\\n' > /usr/local/bin/uname && chmod +x /usr/local/bin/uname && rm -f `+toolset.RipgrepPath()+`"}`)
+	const want = "/workspace/lc/a.txt:1:needle"
+	if got := strings.TrimSpace(ok(t, r, "bash", `{"command":"echo $HOSTTYPE $MACHTYPE"}`)); got != "i686 i686-pc-linux-gnu" {
+		t.Fatalf("$HOSTTYPE $MACHTYPE = %q, want the environment's i686 i686-pc-linux-gnu", got)
+	}
+	rg := toolset.RipgrepPath()
+	riscv := `printf '#!/bin/sh\\necho riscv64\\n' > /usr/local/bin/uname && chmod +x /usr/local/bin/uname`
+	ok(t, r, "bash", `{"command":"`+riscv+`"}`)
+	exactly(t, r, in, want)
+
+	toolset.CompiledMachineAs(t, "i686-pc-linux-gnu")
+	ok(t, r, "bash", `{"command":"rm -f `+rg+`"}`)
 	fails(t, r, "grep", in, `ripgrep is shipped for linux x86_64 and aarch64, and this sandbox is "riscv64"`)
+	ok(t, r, "bash", `{"command":"rm -f /usr/local/bin/uname"}`)
+	exactly(t, r, in, want)
+	ok(t, r, "bash", `{"command":"rm -f `+rg+` && mv \"$(command -v uname)\" /tmp/uname.hidden"}`)
+	fails(t, r, "grep", in, `ripgrep is shipped for linux x86_64 and aarch64, and this sandbox is "i686"`)
 }
 
 // Calls that race to install on a fresh sandbox each land a whole binary —

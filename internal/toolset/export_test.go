@@ -17,6 +17,16 @@ func WithoutRipgrep(t *testing.T) {
 	t.Cleanup(func() { openRipgrep = was })
 }
 
+// CompiledMachineAs plays, for the rest of t, a bash built for machtype — what
+// ${BASH_VERSINFO[5]} says, which grep reads the sandbox's machine from and no
+// environment can set.
+func CompiledMachineAs(t *testing.T, machtype string) {
+	t.Helper()
+	was := compiledMachine
+	compiledMachine = singleQuote(machtype)
+	t.Cleanup(func() { compiledMachine = was })
+}
+
 // RipgrepPath is where grep installs rg in a sandbox.
 var RipgrepPath = ripgrepPath
 
