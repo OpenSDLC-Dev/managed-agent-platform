@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -56,11 +57,19 @@ type fakeSandbox struct {
 	// cmds records every Exec command, so a test can read the script a tool
 	// handed the sandbox.
 	cmds []string
+	// execHook, when set and returning non-nil, answers an Exec in place of
+	// the defaults below.
+	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	f.cmds = append(f.cmds, req.Command)
+	if f.execHook != nil {
+		if res := f.execHook(req); res != nil {
+			return *res, nil
+		}
+	}
 	// The memory sync's listing and deletions, answered from the in-memory
 	// tree (memory_test.go), so the three-phase sync runs without a shell.
 	if res, ok := f.memoryExec(req.Command); ok {
@@ -504,7 +513,15 @@ func TestToolLevelErrorIsAnsweredNotAbandoned(t *testing.T) {
 // reference's properties reaches the sandbox with them. The worker runs the
 // executor's own toolset Runner, so the two deployment points answer alike.
 func TestToolInputPropertiesOnTheWorkerPath(t *testing.T) {
-	sb := &fakeSandbox{}
+	// The grep script prints a begin line just before rg runs and reads only
+	// what follows it; this rg finds nothing.
+	begin := regexp.MustCompile(`map-grep-begin-[0-9a-f]+`)
+	sb := &fakeSandbox{execHook: func(req sandbox.ExecRequest) *sandbox.ExecResult {
+		if m := begin.FindString(req.Command); m != "" {
+			return &sandbox.ExecResult{Stdout: "\n" + m + "\n", ExitCode: 1}
+		}
+		return nil
+	}}
 	h := newHarness(t, sb)
 	use := func(name string, input map[string]any) string {
 		b, _ := json.Marshal(map[string]any{"name": name, "input": input})

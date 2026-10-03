@@ -39,7 +39,7 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 	if f.execErr != nil {
 		return sandbox.ExecResult{}, f.execErr
 	}
-	return f.exec, nil
+	return framed(req.Command, f.exec), nil
 }
 
 func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error) {
@@ -571,7 +571,7 @@ func TestSearchPatternsAreQuoted(t *testing.T) {
 // must back off to a boundary, a property the fallback path pins separately.
 func TestOversizedOutputSpillsToTheSandbox(t *testing.T) {
 	full := strings.Repeat("€", 40_000) // 120000 bytes; 102400 % 3 != 0
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan + full}}
 	r := toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
 	id := domain.NewID("sevt")
 	res, err := r.Run(context.Background(), id, "grep", json.RawMessage(`{"pattern":"x"}`))
@@ -596,7 +596,7 @@ func TestOversizedOutputSpillsToTheSandbox(t *testing.T) {
 }
 
 func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: "hello\n"}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan + "hello\n"}}
 	res, err := run(t, sb, "grep", `{"pattern":"h"}`)
 	if err != nil || res.Content != "hello" {
 		t.Fatalf("grep: err=%v content=%q", err, res.Content)
@@ -614,7 +614,7 @@ func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
 // sandbox itself already cut.
 func TestExecTruncatedGrepCarriesTheUpstreamMarker(t *testing.T) {
 	full := strings.Repeat("z", toolset.MaxOutputBytes+64)
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full, Truncated: true}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan + full, Truncated: true}}
 	res, err := run(t, sb, "grep", `{"pattern":"z"}`)
 	if err != nil || res.IsError {
 		t.Fatalf("grep: err=%v", err)
@@ -651,7 +651,7 @@ func TestReadNeverSpills(t *testing.T) {
 // made, or this fixture would also pass with the hook deleted.
 func TestSpillWriteFailureFallsBackToPlainTruncation(t *testing.T) {
 	full := strings.Repeat("y", toolset.MaxOutputBytes+64)
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full}, writeErr: errors.New("disk full")}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan + full}, writeErr: errors.New("disk full")}
 	res, err := run(t, sb, "grep", `{"pattern":"y"}`)
 	if err != nil || res.IsError {
 		t.Fatalf("grep: err=%v content=%s", err, tail(res.Content))

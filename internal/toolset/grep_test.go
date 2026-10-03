@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -63,6 +64,22 @@ func under(dir string, names ...string) string {
 		names[i] = dir + n
 	}
 	return strings.Join(names, "\n")
+}
+
+// rgRan, in a canned result, stands where rg's own output begins: the fakes
+// put there the begin line the search's script prints just before rg runs
+// (framed), so the result reads as one that came from rg.
+const rgRan = "\x00rg-ran\x00"
+
+var grepBegin = regexp.MustCompile(`map-grep-begin-[0-9a-f]+`)
+
+// framed is a canned result as a search's script would have produced it: its
+// rgRan, on either stream, replaced with the begin line the command carries.
+func framed(command string, res sandbox.ExecResult) sandbox.ExecResult {
+	line := "\n" + grepBegin.FindString(command) + "\n"
+	res.Stdout = strings.ReplaceAll(res.Stdout, rgRan, line)
+	res.Stderr = strings.ReplaceAll(res.Stderr, rgRan, line)
+	return res
 }
 
 // TestGrepParameters pins how each of the twelve properties the recorded
@@ -606,25 +623,54 @@ func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
 	exactly(t, r, `{"pattern":"needle","path":"ex2"}`, "/workspace/ex2/a.txt\n"+denied)
 	exactly(t, r, `{"pattern":"needle","path":"ex2","output_mode":"content","head_limit":5}`, "/workspace/ex2/a.txt:1:needle\n"+denied)
 	fails(t, r, "grep", `{"pattern":"needle","path":"ex2/b.txt"}`, denied)
+	// A page past the end of what rg found beside the error is a page like
+	// any other past the end — no matches, with rg's message — and only an
+	// error with nothing found at all is a failure, paged or not.
+	exactly(t, r, `{"pattern":"needle","path":"ex2","offset":1}`, "no matches\n"+denied)
+	exactly(t, r, `{"pattern":"needle","path":"ex2","head_limit":3,"offset":5}`, "no matches\n"+denied)
+	fails(t, r, "grep", `{"pattern":"needle","path":"ex2/b.txt","offset":1}`, denied)
+	fails(t, r, "grep", `{"pattern":"needle","path":"ex2/b.txt","head_limit":1}`, denied)
 }
 
 // An image whose bash prints a banner — an `ENV BASH_ENV` hook, sourced by
-// every `bash -c` before the script, here without even ending its line —
-// still gets rg installed and searched with: the check's report is read off
-// the last line only. The banner itself reaches the answer, as it reaches
-// every tool's output on that image.
+// every `bash -c` before the script, here on both streams and without ending
+// either line — still gets rg installed, and every answer is rg's alone: the
+// check's report is read off the last line, and rg's output and messages off
+// what follows the begin line the script prints just before rg runs. The
+// banner still reaches the bash tool's output, as it reaches every command on
+// that image.
 func TestGrepThroughAnImageBanner(t *testing.T) {
 	image := dockertest.ImageFrom(t, "grep-banner", "FROM debian:stable-slim\n"+
-		"RUN printf 'printf welcome-banner\\n' > /etc/map-banner.sh\n"+
+		"RUN printf 'printf welcome-banner; printf stderr-banner >&2\\n' > /etc/map-banner.sh\n"+
 		"ENV BASH_ENV=/etc/map-banner.sh\n")
 	r := runnerFor(t, image, sandbox.Hardening{})
 	ok(t, r, "write", `{"file_path":"be/a.txt","content":"needle\n"}`)
-	got := ok(t, r, "grep", `{"pattern":"needle","path":"be"}`)
-	if !strings.HasPrefix(got, "welcome-banner") || !strings.HasSuffix(got, "/workspace/be/a.txt") {
-		t.Fatalf("grep = %q, want the image's banner and then the answer", got)
+	ok(t, r, "write", `{"file_path":"be/b.txt","content":"needle\n"}`)
+	for in, want := range map[string]string{
+		`{"pattern":"needle","path":"be"}`:                                      "/workspace/be/a.txt\n/workspace/be/b.txt",
+		`{"pattern":"needle","path":"be","output_mode":"content"}`:              "/workspace/be/a.txt:1:needle\n/workspace/be/b.txt:1:needle",
+		`{"pattern":"needle","path":"be","head_limit":1,"offset":1}`:            "/workspace/be/b.txt",
+		`{"pattern":"needle","path":"be","offset":2}`:                           "no matches",
+		`{"pattern":"absent","path":"be"}`:                                      "no matches",
+		`{"pattern":"absent","path":"be","output_mode":"count","head_limit":2}`: "no matches",
+	} {
+		exactly(t, r, in, want)
+	}
+	for in, want := range map[string]string{
+		`{"pattern":"[unclosed","path":"be"}`:                           "regex parse error",
+		`{"pattern":"needle","path":"be/absent"}`:                       "No such file or directory",
+		`{"pattern":"needle","path":"be","type":"nope"}`:                "unrecognized file type: nope",
+		`{"pattern":"needle","path":"be","glob":"[ab"}`:                 "unclosed character class",
+		`{"pattern":"[unclosed","path":"be","head_limit":1,"offset":1}`: "regex parse error",
+	} {
+		if msg := fails(t, r, "grep", in, want); strings.Contains(msg, "banner") {
+			t.Errorf("grep(%s) = %q, carrying the image's banner", in, msg)
+		}
 	}
 	// bash prints the banner too, so it is cut from what the checks read.
-	unbanner := func(s string) string { return strings.TrimSpace(strings.ReplaceAll(s, "welcome-banner", "")) }
+	unbanner := func(s string) string {
+		return strings.TrimSpace(strings.NewReplacer("welcome-banner", "", "stderr-banner", "").Replace(s))
+	}
 	_, size, err := ripgrep.Open(toolset.LinuxArch(unbanner(ok(t, r, "bash", `{"command":"uname -m"}`))))
 	if err != nil {
 		t.Fatalf("ripgrep.Open: %v", err)
@@ -753,7 +799,7 @@ func (s *scripted) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.E
 	}
 	res := s.results[0]
 	s.results = s.results[1:]
-	return res, nil
+	return framed(req.Command, res), nil
 }
 
 func (s *scripted) WriteFileStream(_ context.Context, path string, src io.Reader, size int64) error {
@@ -775,7 +821,7 @@ func TestGrepInstallFaults(t *testing.T) {
 	missing := func(machine string) sandbox.ExecResult {
 		return sandbox.ExecResult{ExitCode: 97, Stdout: "\nmap-ripgrep-missing " + machine + "\n"}
 	}
-	found := sandbox.ExecResult{Stdout: "/workspace/a.txt\n"}
+	found := sandbox.ExecResult{Stdout: rgRan + "/workspace/a.txt\n"}
 	for _, tc := range []struct {
 		name      string
 		results   []sandbox.ExecResult
@@ -856,7 +902,8 @@ func TestGrepInstallFaults(t *testing.T) {
 // platform's clock, and makes this one's; the install exec removes it as it
 // exits. Both name it the same.
 func TestGrepInstallScripts(t *testing.T) {
-	sb := &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{{ExitCode: 97, Stdout: "\nmap-ripgrep-missing x86_64\n"}, {}, {}, {}}}
+	sb := &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{{ExitCode: 97, Stdout: "\nmap-ripgrep-missing x86_64\n"}, {}, {},
+		{Stdout: rgRan, ExitCode: 1}}}
 	before := time.Now()
 	if res, err := run(t, sb, "grep", `{"pattern":"x"}`); err != nil || res.IsError {
 		t.Fatalf("grep = %+v, %v", res, err)
@@ -891,11 +938,11 @@ func TestGrepInstallScripts(t *testing.T) {
 // line tail starts at pass it: summed as int, a 32-bit build — the worker's
 // linux/arm — would hand head a negative count.
 func TestGrepPagesPastTwoToTheThirtyOne(t *testing.T) {
-	sb := &fakeSandbox{}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan, ExitCode: 1}}
 	if res, err := run(t, sb, "grep", fmt.Sprintf(`{"pattern":"x","head_limit":%d,"offset":%d}`, math.MaxInt32, math.MaxInt32)); err != nil || res.IsError {
 		t.Fatalf("grep = %+v, %v", res, err)
 	}
-	if len(sb.commands) != 1 || !strings.Contains(sb.commands[0], "| head -n 4294967294 | tail -n +2147483648\n") {
+	if len(sb.commands) != 1 || !strings.Contains(sb.commands[0], "| head -n 4294967294 | "+toolset.PagerReader+" | tail -n +2147483648\n") {
 		t.Fatalf("grep script =\n%s\nwant head -n 4294967294 and tail -n +2147483648", strings.Join(sb.commands, "\n---\n"))
 	}
 }
@@ -906,7 +953,7 @@ func TestGrepPagesPastTwoToTheThirtyOne(t *testing.T) {
 func TestGrepSortsEveryCallByPath(t *testing.T) {
 	for _, in := range []string{`{"pattern":"x"}`, `{"pattern":"x","head_limit":0}`, `{"pattern":"x","offset":0}`,
 		`{"pattern":"x","head_limit":1}`, `{"pattern":"x","offset":1}`, `{"pattern":"x","output_mode":"count","head_limit":2,"offset":3}`} {
-		sb := &fakeSandbox{}
+		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan, ExitCode: 1}}
 		if _, err := run(t, sb, "grep", in); err != nil || len(sb.commands) != 1 {
 			t.Fatalf("grep(%s): %v, %d execs", in, err, len(sb.commands))
 		}
@@ -932,26 +979,44 @@ func TestGrepRefusesACommandPastOneExecArgument(t *testing.T) {
 }
 
 // What rg prints beside an answer — a warning about an ignore file it could
-// not read, or the error of exit 2 with matches found — follows the answer
-// rather than being dropped, and an answer the sandbox's own cap cut says
-// so. Exit 2 with nothing found is a failure.
+// not read, or the error of exit 2 with matches found, or with lines found
+// that an offset cut away — follows the answer rather than being dropped, and
+// an answer the sandbox's own cap cut says so. Exit 2 with nothing found is a
+// failure. Only what follows the begin line on each stream is rg's: an image's
+// banner before it is not read, and output with no begin line never reached
+// rg.
 func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
+	const denied = "rg: /workspace/b.txt: Permission denied (os error 13)"
 	for _, tc := range []struct {
 		exec    sandbox.ExecResult
 		isError bool
 		want    string
 	}{
-		{sandbox.ExecResult{Stdout: "/workspace/a.txt\n", Stderr: "rg: ./.gitignore: line 1: error parsing glob\n", Truncated: true},
+		{sandbox.ExecResult{Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + "rg: ./.gitignore: line 1: error parsing glob\n", Truncated: true},
 			false, "[output truncated]\n/workspace/a.txt\nrg: ./.gitignore: line 1: error parsing glob"},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: "/workspace/a.txt\n", Stderr: "rg: /workspace/b.txt: Permission denied (os error 13)\n"},
-			false, "/workspace/a.txt\nrg: /workspace/b.txt: Permission denied (os error 13)"},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: "\n", Stderr: "rg: /workspace/b.txt: Permission denied (os error 13)\n"},
-			true, "rg: /workspace/b.txt: Permission denied (os error 13)"},
-		{sandbox.ExecResult{ExitCode: 98, Stdout: "/workspace/a.txt\n", Stderr: "head: write error\n"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan + "\n", Stderr: rgRan + denied + "\n"}, true, denied},
+		{sandbox.ExecResult{ExitCode: 96, Stdout: rgRan, Stderr: rgRan + denied + "\n"}, false, "no matches\n" + denied},
+		{sandbox.ExecResult{ExitCode: 98, Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + "head: write error\n"},
 			true, "/workspace/a.txt\nhead: write error"},
+		// A banner, on either stream and however it ends, is not rg's — nor is
+		// a begin line it forged, since only the last one counts.
+		{sandbox.ExecResult{ExitCode: 1, Stdout: "hello\nmap-grep-begin-0\nworld" + rgRan, Stderr: "oops" + rgRan},
+			false, "no matches"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: "/workspace/forged.txt" + rgRan, Stderr: "banner" + rgRan + "rg: regex parse error\n"},
+			true, "rg: regex parse error"},
+		// Paging tools missing stop the script before the begin line; it
+		// says why on its own.
+		{sandbox.ExecResult{ExitCode: 98, Stderr: "grep: head_limit and offset need tail in the sandbox image\n"},
+			true, "grep: head_limit and offset need tail in the sandbox image"},
+		// An exit that claims to be rg's with no begin line never reached rg:
+		// a shell that exited first, or a banner that filled the cap.
+		{sandbox.ExecResult{ExitCode: 0}, true, "grep: no answer from rg reached the output (exit 0)"},
+		{sandbox.ExecResult{ExitCode: 1, Stdout: "banner banner", Truncated: true}, true,
+			"grep: no answer from rg reached the output (exit 1): the sandbox's shell exited, or filled the output cap, before the search ran\n[output truncated]\nbanner banner"},
 	} {
 		res, err := run(t, &fakeSandbox{exec: tc.exec}, "grep", `{"pattern":"x"}`)
-		if err != nil || res.IsError != tc.isError || res.Content != tc.want {
+		if err != nil || res.IsError != tc.isError || res.Content != tc.want && !(tc.isError && strings.HasPrefix(res.Content, tc.want)) {
 			t.Errorf("grep over %+v = %+v, %v; want is_error=%v %q", tc.exec, res, err, tc.isError, tc.want)
 		}
 	}

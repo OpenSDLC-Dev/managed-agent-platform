@@ -22,3 +22,7 @@ var RipgrepPath = ripgrepPath
 
 // LinuxArch is the uname-to-GOARCH mapping grep picks a binary by.
 var LinuxArch = linuxArch
+
+// PagerReader is the paging stage that tells an offset that cut every line
+// rg printed from rg printing none.
+const PagerReader = pagerReader
