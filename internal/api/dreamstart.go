@@ -564,7 +564,10 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 		if err != nil {
 			return createdSession{}, err
 		}
-		inputs = append(inputs, resourceInput{kind: resourceKindFile, fileID: f.id, mountPath: mount})
+		// The transcript is this session's already, so it mounts as itself:
+		// a session copy (mountFileCopy) would outlive the dream's close,
+		// which deletes the rows by dream_id, and keep its object alive.
+		inputs = append(inputs, resourceInput{kind: resourceKindFile, fileID: f.id, mountPath: mount, ownFile: true})
 	}
 
 	var instructions string

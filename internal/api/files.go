@@ -397,6 +397,15 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	if scopeID != "" {
 		args = append(args, scopeID)
 		query += fmt.Sprintf(` AND scope_id = $%d`, len(args))
+	} else {
+		// A session's files list under its scope_id and nowhere else: the
+		// copies its mounts mint were recorded absent from both unfiltered
+		// lists taken while they existed (2026-09-02 batch2 idx 391;
+		// 2026-09-12-console-141 api-fixtures idx 30) and present under
+		// ?scope_id= (ui-network idx 243, 274 and 292). That the harvested
+		// outputs, scoped the same way, are left out too is ours, and so is
+		// ids[] meeting the same default (docs/DIVERGENCES.md, #578).
+		query += ` AND scope_id IS NULL`
 	}
 	if idsSupplied {
 		// scope_id is not on the exclusivity list, so the two filters intersect.
@@ -476,9 +485,10 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		// page null is exactly has_more, while a non-empty before_id page
 		// always carries a cursor, continuing into the row its own cursor named
 		// — which is why has_more, answering whether rows remain the way that
-		// page was fetched, does not decide it there. Under scope_id that
-		// continuation can be one further request that comes back empty, the
-		// boundary row being resolved unfiltered.
+		// page was fetched, does not decide it there. The list is always
+		// filtered by scope (scope_id's, or none at all), so that continuation
+		// can be one further request that comes back empty, the boundary row
+		// being resolved unfiltered.
 		//
 		// An empty page still sends the key, null: this branch is inside
 		// len(files) > 0, so no value is minted, not that none is sent — the

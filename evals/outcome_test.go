@@ -331,7 +331,7 @@ func RubricConfidential(token string, class Class) Grader {
 
 // HarvestedDeliverable asserts the outputs harvest published the deliverable
 // to the files registry — a row whose filename is the outputs-relative path.
-// The walk, the registry write, and the GET /v1/files exposure are all
+// The walk, the registry write, and the GET /v1/files?scope_id= exposure are all
 // platform machinery (docs/DIVERGENCES.md, "The outputs harvest"): the file
 // sitting in the sandbox with no registry row is ours. Vacuous when the
 // sandbox file is absent (the model never wrote it) — and vacuous unless the
@@ -355,7 +355,9 @@ func HarvestedDeliverable(filename string, class Class) Grader {
 			if _, err := tr.readFile(t, "/mnt/session/outputs/"+name); err != nil {
 				return nil
 			}
-			res := tr.stack.do(t, http.MethodGet, "/v1/files?limit=1000", nil)
+			// Under the session's scope: the unfiltered list leaves a
+			// session's files out (#578).
+			res := tr.stack.do(t, http.MethodGet, "/v1/files?limit=1000&scope_id="+tr.SessionID, nil)
 			data, ok := res["data"].([]any)
 			if !ok {
 				return fmt.Errorf("files list has no data array: %v", res)

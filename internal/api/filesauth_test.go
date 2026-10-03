@@ -24,13 +24,18 @@ func TestFileContentEnvironmentKeyLane(t *testing.T) {
 	oct := "application/octet-stream"
 
 	// A file mounted by a session in this environment: the worker reads its bytes
-	// over the env lane even though an upload is downloadable=false.
-	mounted := s.uploadFile(t, "mounted.bin", &oct, "mounted secret")
-	mountedID := mounted["id"].(string)
-	createSession(t, s, map[string]any{
+	// over the env lane even though an upload is downloadable=false. What the
+	// session mounts is its own copy (#578), the id its resources[] echo and a
+	// worker reads; the upload itself no session mounts, so it is answered as
+	// absent like any other.
+	upload := s.uploadFile(t, "mounted.bin", &oct, "mounted secret")
+	uploadID := upload["id"].(string)
+	mountedID := mountedFileID(t, createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": envID,
-		"resources": []any{map[string]any{"type": "file", "file_id": mountedID}},
-	})
+		"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
+	}))
+	status, obj := readJSON(t, s.doRaw("GET", "/v1/files/"+uploadID+"/content", nil, bearer))
+	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Not found")
 
 	res := s.doRaw("GET", "/v1/files/"+mountedID+"/content", nil, bearer)
 	body, _ := io.ReadAll(res.Body)
@@ -50,7 +55,7 @@ func TestFileContentEnvironmentKeyLane(t *testing.T) {
 	// expired mounted file answer it too, below.
 	unmounted := s.uploadFile(t, "unmounted.bin", &oct, "private")
 	unmountedID := unmounted["id"].(string)
-	status, obj := readJSON(t, s.doRaw("GET", "/v1/files/"+unmountedID+"/content", nil, bearer))
+	status, obj = readJSON(t, s.doRaw("GET", "/v1/files/"+unmountedID+"/content", nil, bearer))
 	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Not found")
 
 	// A file mounted only by a session in a DIFFERENT environment: still 404 for
@@ -58,11 +63,10 @@ func TestFileContentEnvironmentKeyLane(t *testing.T) {
 	otherEnv := createEnvironment(t, s, map[string]any{"name": "other-env"})
 	otherID := otherEnv["id"].(string)
 	crossed := s.uploadFile(t, "crossed.bin", &oct, "other env secret")
-	crossedID := crossed["id"].(string)
-	createSession(t, s, map[string]any{
+	crossedID := mountedFileID(t, createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": otherID,
-		"resources": []any{map[string]any{"type": "file", "file_id": crossedID}},
-	})
+		"resources": []any{map[string]any{"type": "file", "file_id": crossed["id"]}},
+	}))
 	status, obj = readJSON(t, s.doRaw("GET", "/v1/files/"+crossedID+"/content", nil, bearer))
 	wantErrMsg(t, status, obj, http.StatusNotFound, "not_found_error", "Not found")
 
@@ -70,11 +74,10 @@ func TestFileContentEnvironmentKeyLane(t *testing.T) {
 	// same words on this lane; the management lane, never recorded missing a
 	// file, keeps ours.
 	expiring := s.uploadFile(t, "expiring.bin", &oct, "soon gone")
-	expiringID := expiring["id"].(string)
-	createSession(t, s, map[string]any{
+	expiringID := mountedFileID(t, createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": envID,
-		"resources": []any{map[string]any{"type": "file", "file_id": expiringID}},
-	})
+		"resources": []any{map[string]any{"type": "file", "file_id": expiring["id"]}},
+	}))
 	expire(t, s, expiringID)
 	absentID := "file_0000000000000000000000ab"
 	for _, id := range []string{absentID, "file_0000000000000000000000ok", expiringID} {

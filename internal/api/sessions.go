@@ -855,8 +855,14 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, err
 	}
 
+	// The id comes ahead of the resources: each file the session mounts is
+	// minted as a copy scoped to it (mountFileCopy).
+	id := in.id
+	if id == "" {
+		id = domain.NewID(domain.PrefixSession).String()
+	}
 	now := time.Now().UTC()
-	resources, repoIDs, err := materializeResourceInputs(ctx, tx, in.resourceInputs, now)
+	resources, repoIDs, err := materializeResourceInputs(ctx, tx, id, in.resourceInputs, now)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return createdSession{}, err
@@ -874,10 +880,6 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		}
 	}
 
-	id := in.id
-	if id == "" {
-		id = domain.NewID(domain.PrefixSession).String()
-	}
 	var createdBy *string
 	if p := principalFrom(ctx); p != "" {
 		createdBy = &p
@@ -1719,10 +1721,15 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// through the files API do not — the reference's own split: "Files you
 	// uploaded through the Files API are also unaffected, but files the session
 	// itself produced are scoped to it and are permanently deleted along with
-	// its filesystem." Session-produced is exactly scope_type='session' here,
-	// because internal/executor's harvest is the only writer of those rows,
-	// an upload writes neither scope column and a dream's files carry dream_id
-	// instead. files.scope_id is polymorphic and so carries no foreign key,
+	// its filesystem." The session's rows are exactly the scope_type='session'
+	// ones: internal/executor's harvest writes its outputs that way and
+	// mountFileCopy (#578) its copies of the files it mounted, while an upload
+	// writes neither scope column and a dream's files carry dream_id instead.
+	// The copies go with the session too, which the docs' sentence does not
+	// settle — a copy is scoped to the session without being produced by it —
+	// so that is ours, INFERRED (docs/DIVERGENCES.md); deleting one never takes
+	// its upload's bytes, which the reference count keeps while the upload
+	// lives. files.scope_id is polymorphic and so carries no foreign key,
 	// which is why this is by hand rather than a cascade — the checkpoint row
 	// above is deleted for the same reason (#266). Since 0036 the schema does
 	// hold half of that "exactly" — the two scope columns are present together
@@ -1779,6 +1786,9 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// what accumulates is a row per deleted session naming a checkpoint that
 	// was never written, and the first sweeper to run deletes a missing key,
 	// which every backend answers nil, and drains them.
+	//
+	// A copy's key is its upload's, and is dropped from the queue while the
+	// upload or another copy still names it (EnqueueObjectDeletes).
 	keys := append([]string{blob.SessionCheckpointKey(id)}, fileKeys...)
 	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
 		return nil, err
