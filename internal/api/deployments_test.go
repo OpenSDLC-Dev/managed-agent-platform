@@ -1553,9 +1553,9 @@ func TestDeploymentBoundsTheStoredSpelling(t *testing.T) {
 	}
 	body["resources"] = file(tooLong)
 	status, res := s.do(http.MethodPost, "/v1/deployments", body)
-	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes")
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes as sent")
 	status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": file(tooLong)})
-	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes")
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes as sent")
 }
 
 // TestDeploymentRefusesResolvedMountOverlapsUpFront: echoing a mount_path as
@@ -1564,11 +1564,11 @@ func TestDeploymentBoundsTheStoredSpelling(t *testing.T) {
 // that land on one mount, or a resource at a proper ancestor of a
 // repository's — "/uploads/x" beside "/x" included — before anything is
 // stored. No recording shows a deployment holding such a pair. The words are
-// the deployment routes' own, naming the spelling the caller sent and what it
-// resolves to, or the default it took; session create keeps its own, an
-// overlapping repository's being the reference's recorded sentence (2026-09-03
-// batch1 `session.create.repo-same-repo-twice` and `repo-nested-mounts`),
-// which no deployment recording holds (#540).
+// the deployment routes' own, naming both spellings the caller sent — or the
+// default one took — and what they resolve to; session create keeps its own,
+// an overlapping repository's being the reference's recorded sentence
+// (2026-09-03 batch1 `session.create.repo-same-repo-twice` and
+// `repo-nested-mounts`), which no deployment recording holds (#540).
 func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -1579,7 +1579,6 @@ func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 		return map[string]any{"type": "file", "file_id": id, "mount_path": mount}
 	}
 	const taken = `mount_path "/mnt/session/uploads/x" is used by more than one resource`
-	const takenAsX = `mount_path "/x" (resolves to "/mnt/session/uploads/x") is used by more than one resource`
 	overlap := func(a, b string) string {
 		return "Invalid `github_repository` resource: `mount_path` overlaps another resource: " + a + " and " + b + "; set distinct `mount_path` values"
 	}
@@ -1588,12 +1587,19 @@ func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 		resources         []any
 		session, deployed string
 	}{
-		"the uploads alias beside a rooted spelling": {[]any{file(fileA, "/uploads/x"), file(fileB, "/x")}, taken, takenAsX},
-		"one spelling twice":                         {[]any{file(fileA, "/x"), file(fileB, "/x")}, taken, takenAsX},
-		"a relative spelling beside the full path":   {[]any{file(fileA, "x"), file(fileB, "/mnt/session/uploads/x")}, taken, taken},
+		"the uploads alias beside a rooted spelling": {[]any{file(fileA, "/uploads/x"), file(fileB, "/x")}, taken,
+			`mount_path "/uploads/x" and mount_path "/x" both resolve to "/mnt/session/uploads/x"`},
+		"one spelling twice": {[]any{file(fileA, "/x"), file(fileB, "/x")}, taken,
+			`mount_path "/x" and mount_path "/x" both resolve to "/mnt/session/uploads/x"`},
+		"a relative spelling beside the full path": {[]any{file(fileA, "x"), file(fileB, "/mnt/session/uploads/x")}, taken,
+			`mount_path "x" and mount_path "/mnt/session/uploads/x" both resolve to "/mnt/session/uploads/x"`},
 		"one repository twice at its default": {[]any{repoBody("g", nil), repoBody("g", nil)},
 			overlap("/workspace/example-repo", "/workspace/example-repo"),
-			`the default mount_path "/workspace/example-repo" is used by more than one resource`},
+			`the default mount_path and the default mount_path both resolve to "/workspace/example-repo"`},
+		"a repository above another's default": {
+			[]any{repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace"}), repoBody("g", nil)},
+			overlap("/workspace", "/workspace/example-repo"),
+			`mount_path "/workspace" is an ancestor of the repository's default mount_path "/workspace/example-repo"`},
 		"a file above a repository": {
 			[]any{file(fileA, "repo"), repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
 			overlap("/mnt/session/uploads/repo", "/mnt/session/uploads/repo/src"),
