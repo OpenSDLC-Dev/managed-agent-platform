@@ -1206,6 +1206,7 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 		return sandbox.ExecResult{
 			Stdout: stdout.String(), Stderr: stderr.String(),
 			ExitCode: sigkillExit, TimedOut: true, Truncated: stdout.truncated || stderr.truncated,
+			StdoutTruncated: stdout.truncated, StderrTruncated: stderr.truncated,
 		}, nil
 	}
 	// The stream closed on its own. A non-nil error that is not our own deadline
@@ -1226,6 +1227,9 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 		ExitCode:  code,
 		TimedOut:  timedOut,
 		Truncated: stdout.truncated || stderr.truncated,
+
+		StdoutTruncated: stdout.truncated,
+		StderrTruncated: stderr.truncated,
 	}, nil
 }
 

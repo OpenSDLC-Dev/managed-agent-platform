@@ -1034,13 +1034,13 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	// wait on the command before reading what it wrote.
 	type output struct {
 		stdout, stderr []byte
-		truncated      bool
+		cut            streamsCut
 		err            error
 	}
 	drained := make(chan output, 1)
 	go func() {
-		stdout, stderr, truncated, err := demux(stream, sandbox.MaxOutputBytes)
-		drained <- output{stdout, stderr, truncated, err}
+		stdout, stderr, cut, err := demux(stream, sandbox.MaxOutputBytes)
+		drained <- output{stdout, stderr, cut, err}
 	}()
 
 	var out output
@@ -1073,7 +1073,8 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		// running dies with the session's container.
 		return sandbox.ExecResult{
 			Stdout: string(out.stdout), Stderr: string(out.stderr),
-			ExitCode: sigkillExit, TimedOut: true, Truncated: out.truncated,
+			ExitCode: sigkillExit, TimedOut: true, Truncated: out.cut.stdout || out.cut.stderr,
+			StdoutTruncated: out.cut.stdout, StderrTruncated: out.cut.stderr,
 		}, nil
 	}
 
@@ -1113,7 +1114,10 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		Stderr:    string(out.stderr),
 		ExitCode:  code,
 		TimedOut:  timedOut,
-		Truncated: out.truncated,
+		Truncated: out.cut.stdout || out.cut.stderr,
+
+		StdoutTruncated: out.cut.stdout,
+		StderrTruncated: out.cut.stderr,
 	}, nil
 }
 

@@ -399,8 +399,9 @@ func CheckCommand(command string) error {
 // still running past the deadline and exiting later on its own terms. TimedOut
 // is the authoritative field — ExitCode may be the kill's code, or the code a
 // command that dodged the kill chose for itself — and the output is whatever
-// arrived. Truncated means output exceeded MaxOutputBytes and the tail was
-// discarded.
+// arrived. Each stream is capped at MaxOutputBytes on its own, its tail past
+// the cap discarded: StdoutTruncated and StderrTruncated say which stream the
+// cap cut, and Truncated that either did.
 //
 // A backend must decide TimedOut where the sandboxed command cannot reach the
 // decision. Anything inside the sandbox is the agent's to tamper with, so a
@@ -415,6 +416,8 @@ type ExecResult struct {
 	ExitCode  int
 	TimedOut  bool
 	Truncated bool
+
+	StdoutTruncated, StderrTruncated bool
 }
 
 // Sandbox is one session's execution environment.

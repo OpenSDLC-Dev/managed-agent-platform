@@ -598,14 +598,31 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if len(res.Stdout) != sandbox.MaxOutputBytes {
 			t.Errorf("stdout kept %d bytes, want the %d-byte cap", len(res.Stdout), sandbox.MaxOutputBytes)
 		}
-		if !res.Truncated {
-			t.Error("Truncated not reported")
+		if !res.Truncated || !res.StdoutTruncated || res.StderrTruncated {
+			t.Errorf("truncated = %v, stdout %v, stderr %v; want stdout's cut reported, and stdout's alone",
+				res.Truncated, res.StdoutTruncated, res.StderrTruncated)
 		}
 		if res.ExitCode != 0 {
 			t.Errorf("exit code = %d — the drained command did not finish cleanly", res.ExitCode)
 		}
 		if res.Stderr != "done\n" {
 			t.Errorf("stderr = %q — capping one stream must not lose the other", res.Stderr)
+		}
+
+		// The same on the other stream: each has a cap of its own, and the
+		// result names the one it cut.
+		res, err = sb.Exec(ctx, sandbox.ExecRequest{
+			Command: `yes a | head -c 1400000 >&2; echo done`,
+		})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if len(res.Stderr) != sandbox.MaxOutputBytes || res.Stdout != "done\n" {
+			t.Errorf("stderr kept %d bytes and stdout %q; want the %d-byte cap and stdout whole", len(res.Stderr), res.Stdout, sandbox.MaxOutputBytes)
+		}
+		if !res.Truncated || res.StdoutTruncated || !res.StderrTruncated {
+			t.Errorf("truncated = %v, stdout %v, stderr %v; want stderr's cut reported, and stderr's alone",
+				res.Truncated, res.StdoutTruncated, res.StderrTruncated)
 		}
 	})
 
