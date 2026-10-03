@@ -2,9 +2,15 @@
 // its assets directory, where the next build embeds them (`make ripgrep`).
 //
 // Each archive is downloaded only when the directory does not already hold a
-// file of that name with the pinned sha256, and lands only once its own bytes
-// hash to the pin: a download is written beside its target under a dot name
-// the embed never picks up, and renamed into place after the digest matches.
+// regular file of that name with the pinned sha256, and lands only once its
+// own bytes hash to the pin: a download is written beside its target under a
+// dot name the embed never picks up, and renamed into place after the digest
+// matches. What stands at an archive's name and is not a regular file is not
+// one the embed takes — go:embed skips a symbolic link in a directory it
+// embeds — so a link whose target holds the pin is replaced by a regular copy
+// of those bytes, checked the same way, and a link to anything else, a
+// directory or any other kind of file there is removed and the archive
+// fetched.
 // Then everything else in the directory is removed — an archive the manifest
 // no longer names, an interrupted download, a stray file or directory — but
 // the manifest: internal/ripgrep embeds the whole directory, since a build
@@ -64,7 +70,7 @@ func fetch(ctx context.Context, client *http.Client, m ripgrep.Manifest, dir str
 		a := m.Archives[arch]
 		keep[a.Name()] = true
 		dst := filepath.Join(dir, a.Name())
-		ok, err := matches(dst, a.SHA256)
+		ok, err := present(dst, a.SHA256)
 		if err != nil {
 			return err
 		}
@@ -110,6 +116,33 @@ const partPrefix = ".ripgrepfetch-"
 // Fetching it again would fetch the same wrong bytes, so it is not retried.
 var errDigest = errors.New("does not match its pinned sha256")
 
+// present reports whether dst is the pinned archive as the embed will take
+// it: a regular file whose bytes hash to want. A symbolic link whose target's
+// bytes do becomes a regular copy of them (land); whatever else stands at dst
+// and is not a regular file — a link to anything else, a directory — is
+// removed, so the download can land in its place.
+func present(dst, want string) (bool, error) {
+	info, err := os.Lstat(dst)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	case info.Mode().IsRegular():
+		return matches(dst, want)
+	case info.Mode()&os.ModeSymlink != 0:
+		if f, err := os.Open(dst); err == nil {
+			err = land(f, dst, want)
+			f.Close()
+			if err == nil {
+				return true, nil
+			}
+		}
+	}
+	// RemoveAll removes a link, never what it names.
+	return false, os.RemoveAll(dst)
+}
+
 func matches(file, want string) (bool, error) {
 	f, err := os.Open(file)
 	if errors.Is(err, os.ErrNotExist) {
@@ -139,24 +172,35 @@ func download(ctx context.Context, client *http.Client, a ripgrep.Archive, dst s
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: %s", a.URL, resp.Status)
 	}
+	if err := land(resp.Body, dst, a.SHA256); err != nil {
+		return fmt.Errorf("GET %s: %w", a.URL, err)
+	}
+	return nil
+}
+
+// land writes src to dst as a regular file, once its bytes hash to want: into
+// a file beside dst under a dot name the embed never picks up, renamed over
+// dst — over a link there too, never through it — only after the digest
+// matches.
+func land(src io.Reader, dst, want string) error {
 	tmp, err := os.CreateTemp(filepath.Dir(dst), partPrefix+"*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, maxArchive+1))
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(src, maxArchive+1))
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
 	switch {
 	case err != nil:
-		return fmt.Errorf("GET %s: %w", a.URL, err)
+		return err
 	case n > maxArchive:
-		return fmt.Errorf("GET %s: larger than %d bytes", a.URL, maxArchive)
+		return fmt.Errorf("larger than %d bytes", maxArchive)
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != a.SHA256 {
-		return fmt.Errorf("%s (sha256 %s) %w %s", a.URL, got, errDigest, a.SHA256)
+	if got := hex.EncodeToString(h.Sum(nil)); got != want {
+		return fmt.Errorf("sha256 %s %w %s", got, errDigest, want)
 	}
 	// CreateTemp makes the file 0600; an archive is no secret, and a checkout
 	// another user builds from must be able to read it.

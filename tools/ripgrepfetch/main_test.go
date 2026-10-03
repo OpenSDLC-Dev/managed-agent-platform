@@ -149,3 +149,69 @@ func TestFetchRetriesAndThenFails(t *testing.T) {
 		t.Errorf("requests = %d, want %d", hits.Load(), attempts)
 	}
 }
+
+// What stands at an archive's name must end a regular file: go:embed skips a
+// symbolic link in the directory it embeds, so a link there would build a
+// binary with no ripgrep while the fetch said the archive was present. A link
+// whose target is the pin becomes a regular copy of it, with no download; a
+// link to other bytes, a dangling one, and a directory are removed and the
+// archive fetched — and what a link named is left as it was.
+func TestFetchReplacesWhatIsNotARegularFileAtAnArchivesName(t *testing.T) {
+	backoff = 0
+	srv, hits := server(t, map[string]string{"rg-amd64.tar.gz": "amd64 bytes"})
+	m := manifest(srv.URL, map[string]string{"amd64": sum("amd64 bytes")})
+	elsewhere := t.TempDir()
+	write := func(p, body string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(elsewhere, "pinned"), "amd64 bytes")
+	write(filepath.Join(elsewhere, "other"), "other bytes")
+	for _, tc := range []struct {
+		name      string
+		plant     func(dst string)
+		downloads int32
+	}{
+		{"a link to the pin", func(dst string) { _ = os.Symlink(filepath.Join(elsewhere, "pinned"), dst) }, 0},
+		{"a link to other bytes", func(dst string) { _ = os.Symlink(filepath.Join(elsewhere, "other"), dst) }, 1},
+		{"a dangling link", func(dst string) { _ = os.Symlink(filepath.Join(elsewhere, "absent"), dst) }, 1},
+		{"a link to a directory", func(dst string) { _ = os.Symlink(elsewhere, dst) }, 1},
+		{"a directory", func(dst string) {
+			_ = os.MkdirAll(filepath.Join(dst, "sub"), 0o755)
+			write(filepath.Join(dst, "sub", "f"), "x")
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dst := filepath.Join(dir, "rg-amd64.tar.gz")
+			tc.plant(dst)
+			before := hits.Load()
+			if err := fetch(context.Background(), srv.Client(), m, dir, quiet); err != nil {
+				t.Fatalf("fetch: %v", err)
+			}
+			if got := hits.Load() - before; got != tc.downloads {
+				t.Errorf("downloads = %d, want %d", got, tc.downloads)
+			}
+			fi, err := os.Lstat(dst)
+			if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o644 {
+				t.Fatalf("%s = %v, %v; want a regular 0644 file", dst, fi, err)
+			}
+			if b, _ := os.ReadFile(dst); string(b) != "amd64 bytes" {
+				t.Errorf("archive = %q, want the pin", b)
+			}
+			if got := names(t, dir); !slices.Equal(got, []string{"rg-amd64.tar.gz"}) {
+				t.Errorf("assets = %v", got)
+			}
+			if got := names(t, elsewhere); !slices.Equal(got, []string{"other", "pinned"}) {
+				t.Errorf("what a link named holds %v, want what it held", got)
+			}
+			for f, want := range map[string]string{"pinned": "amd64 bytes", "other": "other bytes"} {
+				if b, _ := os.ReadFile(filepath.Join(elsewhere, f)); string(b) != want {
+					t.Errorf("%s = %q, want it untouched", f, b)
+				}
+			}
+		})
+	}
+}
