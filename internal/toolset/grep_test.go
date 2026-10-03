@@ -2,6 +2,7 @@ package toolset_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -610,44 +611,66 @@ func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
 	fails(t, r, "grep", `{"pattern":"needle","path":"ex2/b.txt","head_limit":1}`, denied)
 }
 
-// An image whose bash prints a banner — an `ENV BASH_ENV` hook, sourced by
-// every `bash -c` before the script, here on both streams and without ending
-// either line — still gets rg installed, and every answer is rg's alone: the
-// check's report is read off the last line, and rg's output and messages off
-// what follows the begin line the script prints just before rg runs. The
-// banner still reaches the bash tool's output, as it reaches every command on
-// that image.
-func TestGrepThroughAnImageBanner(t *testing.T) {
-	image := dockertest.ImageFrom(t, "grep-banner", "FROM debian:stable-slim\n"+
-		"RUN printf 'printf welcome-banner; printf stderr-banner >&2\\n' > /etc/map-banner.sh\n"+
+// bannerHook is an image's `ENV BASH_ENV` file at its most disruptive: it
+// prints on both streams without ending either line, with spaces in what it
+// prints, leaves the directory the exec started in, and sets an EXIT trap that
+// prints on both streams after whatever the shell ran.
+const bannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2; cd /; ` +
+	`trap "printf 'exit banner '; printf 'exit stderr ' >&2" EXIT` + "\n"
+
+// An image whose bash runs bannerHook runs it for the model's own commands and
+// for none of the platform's scripts (sandbox.ExecRequest): rg is installed,
+// and every glob and grep answer, and every refusal, is the tool's alone —
+// where a glob used to read the banner's words into its first path and the
+// trap's into a path of their own. The bash tool's output carries the banner
+// once, as any `bash -c` on that image would print it.
+func TestSearchesThroughAnImageBanner(t *testing.T) {
+	image := dockertest.ImageFrom(t, "search-banner", "FROM debian:stable-slim\n"+
+		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(bannerHook))+" | base64 -d > /etc/map-banner.sh\n"+
 		"ENV BASH_ENV=/etc/map-banner.sh\n", "--host", dockertest.Host())
 	r := runner(t, fromImage(image))
 	ok(t, r, "write", `{"file_path":"be/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"be/b.txt","content":"needle\n"}`)
-	for in, want := range map[string]string{
-		`{"pattern":"needle","path":"be"}`:                                      "/workspace/be/a.txt\n/workspace/be/b.txt",
-		`{"pattern":"needle","path":"be","output_mode":"content"}`:              "/workspace/be/a.txt:1:needle\n/workspace/be/b.txt:1:needle",
-		`{"pattern":"needle","path":"be","head_limit":1,"offset":1}`:            "/workspace/be/b.txt",
-		`{"pattern":"needle","path":"be","offset":2}`:                           "no matches",
-		`{"pattern":"absent","path":"be"}`:                                      "no matches",
-		`{"pattern":"absent","path":"be","output_mode":"count","head_limit":2}`: "no matches",
-	} {
-		exactly(t, r, in, want)
+	if out := ok(t, r, "bash", `{"command":"echo hi"}`); strings.Count(out, "welcome to the image") != 1 {
+		t.Errorf("bash = %q, want the image's banner once: the model's command runs in the image's environment", out)
 	}
-	for in, want := range map[string]string{
-		`{"pattern":"[unclosed","path":"be"}`:                           "regex parse error",
-		`{"pattern":"needle","path":"be/absent"}`:                       "No such file or directory",
-		`{"pattern":"needle","path":"be","type":"nope"}`:                "unrecognized file type: nope",
-		`{"pattern":"needle","path":"be","glob":"[ab"}`:                 "unclosed character class",
-		`{"pattern":"[unclosed","path":"be","head_limit":1,"offset":1}`: "regex parse error",
+	for tool, answers := range map[string]map[string]string{
+		"glob": {
+			`{"pattern":"a.txt","path":"be"}`:   "/workspace/be/a.txt",
+			`{"pattern":"/workspace/be/b.txt"}`: "/workspace/be/b.txt",
+			`{"pattern":"none*","path":"be"}`:   "no matches",
+		},
+		"grep": {
+			`{"pattern":"needle","path":"be"}`:                                      "/workspace/be/a.txt\n/workspace/be/b.txt",
+			`{"pattern":"needle","path":"be","output_mode":"content"}`:              "/workspace/be/a.txt:1:needle\n/workspace/be/b.txt:1:needle",
+			`{"pattern":"needle","path":"be","head_limit":1,"offset":1}`:            "/workspace/be/b.txt",
+			`{"pattern":"needle","path":"be","offset":2}`:                           "no matches",
+			`{"pattern":"absent","path":"be"}`:                                      "no matches",
+			`{"pattern":"absent","path":"be","output_mode":"count","head_limit":2}`: "no matches",
+		},
 	} {
-		if msg := fails(t, r, "grep", in, want); strings.Contains(msg, "banner") {
-			t.Errorf("grep(%s) = %q, carrying the image's banner", in, msg)
+		for in, want := range answers {
+			if got := ok(t, r, tool, in); got != want {
+				t.Errorf("%s(%s) = %q, want %q", tool, in, got, want)
+			}
+		}
+	}
+	for _, tc := range []struct{ tool, in, want string }{
+		{"glob", `{"pattern":"*","path":"be/absent"}`, "no such directory"},
+		{"grep", `{"pattern":"[unclosed","path":"be"}`, "regex parse error"},
+		{"grep", `{"pattern":"needle","path":"be/absent"}`, "No such file or directory"},
+		{"grep", `{"pattern":"needle","path":"be","type":"nope"}`, "unrecognized file type: nope"},
+		{"grep", `{"pattern":"needle","path":"be","glob":"[ab"}`, "unclosed character class"},
+		{"grep", `{"pattern":"[unclosed","path":"be","head_limit":1,"offset":1}`, "regex parse error"},
+	} {
+		if msg := fails(t, r, tc.tool, tc.in, tc.want); strings.Contains(msg, "banner") {
+			t.Errorf("%s(%s) = %q, carrying the image's banner", tc.tool, tc.in, msg)
 		}
 	}
 	// bash prints the banner too, so it is cut from what the checks read.
 	unbanner := func(s string) string {
-		return strings.TrimSpace(strings.NewReplacer("welcome-banner", "", "stderr-banner", "").Replace(s))
+		return strings.TrimSpace(strings.NewReplacer("welcome to the image", "", "stderr banner", "",
+			"exit banner", "", "exit stderr", "").Replace(s))
 	}
 	_, size, err := ripgrep.Open(toolset.LinuxArch(unbanner(ok(t, r, "bash", `{"command":"uname -m"}`))))
 	if err != nil {

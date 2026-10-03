@@ -390,7 +390,7 @@ func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 	defer cancel()
 
 	const blindTheProbe = `
-	  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)
+	  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 2 | head -n 1)
 	  w=
 	  for i in $(seq 100); do
 	    for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do [ "$p" != "$$" ] && w=$p; done

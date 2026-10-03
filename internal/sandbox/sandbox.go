@@ -359,9 +359,39 @@ func ValidEnvName(k string) bool {
 
 // ExecRequest runs Command through /bin/bash -c inside the sandbox's workdir.
 // A zero Timeout means "no limit", and then only the context bounds the call.
+//
+// Unless ImageStartup is set, bash runs Command in privileged mode (`bash -p`),
+// which is a script of the platform's own run as written whatever the image's
+// environment says: it reads no startup file — not the $BASH_ENV a
+// non-interactive bash otherwise sources first, whose hook can print on either
+// stream, change directory or set an EXIT trap that prints after the script —
+// imports no function from the environment, and ignores the environment's
+// SHELLOPTS (and from bash 4.4 its BASHOPTS, CDPATH and GLOBIGNORE).
+// Environment variables still reach it. Privileged mode's one other effect,
+// keeping an effective uid that differs from the real one, has nothing to keep
+// in an exec, where the two are the same.
 type ExecRequest struct {
 	Command string
 	Timeout time.Duration
+	// ImageStartup runs Command in a bash started as the image configures a
+	// non-interactive one — reading $BASH_ENV, importing exported functions,
+	// honouring SHELLOPTS — for a command that runs in the image's environment
+	// rather than as the platform's script: the model's own, through the bash
+	// tool, and the package install, which runs the image's own managers, one
+	// an image may put on PATH only from a startup file. The backend's wrapper
+	// around the command is the platform's either way, and reads none.
+	ImageStartup bool
+}
+
+// BashMode is the option a backend starts the bash that runs req.Command with:
+// "-p" for a script of the platform's own, and for an ImageStartup command
+// "+p", which is bash's default spelled as an option, so the wrapper can pass
+// either as one argument.
+func (req ExecRequest) BashMode() string {
+	if req.ImageStartup {
+		return "+p"
+	}
+	return "-p"
 }
 
 // MaxCommandBytes bounds a Command the platform assembles itself. Each backend

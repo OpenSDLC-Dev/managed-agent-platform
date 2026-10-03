@@ -122,7 +122,7 @@ func (pd *pod) aliveOrTimedOut(ctx context.Context, state string) bool {
 // killing the probe process before it prints its answer.
 func (pd *pod) probeAlive(ctx context.Context, state string) (bool, error) {
 	out, code, err := pd.client.execOutput(ctx, pd.name, containerName,
-		[]string{"/bin/bash", "-c", aliveScript, "map-alive", state})
+		[]string{"/bin/bash", "-p", "-c", aliveScript, "map-alive", state})
 	if err != nil {
 		return false, err
 	}

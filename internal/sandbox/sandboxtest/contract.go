@@ -138,6 +138,47 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A script of the platform's own runs as written: bash reads no startup
+	// file for it, so an image's $BASH_ENV — here one that prints on both
+	// streams, leaves the workdir and sets an EXIT trap that prints after the
+	// script — reaches none of its output and moves none of its paths. A
+	// command run in the image's environment, as the bash tool's is, gets the
+	// file once: the backend's own wrapper around it reads none.
+	t.Run("OnlyAnImageStartupExecReadsTheStartupFile", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := context.Background()
+		const hook = "/tmp/map-startup-hook"
+		sb, err := h.Provider.Provision(ctx, sandbox.Spec{
+			SessionID: domain.NewID("sesn"), Image: h.Image, Workdir: workdir,
+			Networking: unrestricted, Env: map[string]string{"BASH_ENV": hook},
+		})
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := sb.Destroy(context.Background()); err != nil {
+				t.Errorf("destroy: %v", err)
+			}
+		})
+		if err := sb.WriteFile(ctx, hook, []byte("echo hook-out; echo hook-err >&2; cd /; trap 'echo hook-exit' EXIT\n")); err != nil {
+			t.Fatalf("write the hook: %v", err)
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: `echo "body $PWD"`})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.Stdout != "body "+workdir+"\n" || res.Stderr != "" || res.ExitCode != 0 {
+			t.Errorf("a platform exec = %+v; want its own line alone, from %s", res, workdir)
+		}
+		res, err = sb.Exec(ctx, sandbox.ExecRequest{Command: `echo "body $PWD"`, ImageStartup: true})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.Stdout != "hook-out\nbody /\nhook-exit\n" || res.Stderr != "hook-err\n" || res.ExitCode != 0 {
+			t.Errorf("an ImageStartup exec = %+v; want the hook's lines around the command's, once each", res)
+		}
+	})
+
 	t.Run("ExecReportsExitCode", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
 		res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: `exit 7`})

@@ -785,9 +785,14 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			}
 		}
 		progress()
+		// The managers are the image's own, run as the image's environment
+		// sets them up — an image may put one on PATH only from its startup
+		// file — so the install, unlike the probe and the cleanup, runs with
+		// that file read.
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
-			Command: cmd,
-			Timeout: e.cfg.PackageInstallTimeout,
+			Command:      cmd,
+			Timeout:      e.cfg.PackageInstallTimeout,
+			ImageStartup: true,
 		})
 		removeCreds()
 		if err != nil {

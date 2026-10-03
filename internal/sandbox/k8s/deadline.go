@@ -12,7 +12,11 @@ import "time"
 // the deadline's own kill was what ended it ($3.killed).
 //
 // $1 is the command, $2 the timeout in whole seconds ("0" = no limit), $3 the
-// state-file base path (unique per exec).
+// state-file base path (unique per exec), $4 the option bash starts the command
+// with (sandbox.ExecRequest.BashMode). The wrapper is the platform's own script
+// whatever the command is, so Exec starts it with -p, as it starts every script
+// of this backend's own, and an image's startup file runs at most once, for the
+// command.
 //
 // `setsid` puts the command in its own session — and so its own process group,
 // led by its own pid — so the watchdog's `kill -9 -"$cmd"` takes its children
@@ -79,7 +83,7 @@ import "time"
 // rather than whatever value the environment happened to give the name.
 const execWrapper = `
 exec 3>&2 2>/dev/null
-setsid /bin/bash -c "$1" 2>&3 3>&- &
+setsid /bin/bash "$4" -c "$1" 2>&3 3>&- &
 cmd=$!
 t0=
 read -r t0 _ </proc/uptime

@@ -82,7 +82,8 @@ const fakeExecPid = 4242
 //
 // Every exec this backend makes — a tool call, and equally the mkdir, rename and
 // shed the write path runs — goes through Exec and so through the same wrapper,
-// whose argv is `/bin/bash -c <wrapper> map-exec <command> <seconds> <state>`.
+// whose argv is `/bin/bash -p -c <wrapper> map-exec <command> <seconds> <state>
+// <mode>`.
 // The command therefore sits at a fixed index from the front. These tests used to
 // read it from the *back*, which was correct only for as long as the wrapper's
 // argument count never changed: #390 appended the state path and silently shifted
@@ -90,7 +91,7 @@ const fakeExecPid = 4242
 // the next argument a compile-or-fail question rather than a set of assertions
 // that quietly begin describing the wrong thing.
 func wrapperCommand(cmd []string) string {
-	const commandArg = 4
+	const commandArg = 5
 	if len(cmd) <= commandArg {
 		return ""
 	}
@@ -101,7 +102,7 @@ func wrapperCommand(cmd []string) string {
 // daemon can hold Exec to the path it actually handed the wrapper rather than
 // answering any archive HEAD it happens to receive.
 func wrapperState(cmd []string) string {
-	const stateArg = 6
+	const stateArg = 7
 	if len(cmd) <= stateArg {
 		return ""
 	}
@@ -841,11 +842,11 @@ func TestExecWrapperWritesOnlyTheWatchdogsMark(t *testing.T) {
 	if !strings.Contains(execWrapper, "set -m") {
 		t.Error("the wrapper must enable job control so the deadline kills the command's process group")
 	}
-	// The command must BECOME the exec (exec /bin/bash -c "$1"), not run as a
-	// child of a wrapper shell. Otherwise the pid Exec watches is a wrapper the
-	// command can kill to look finished while it runs on — the bypass this
-	// structure closes.
-	if !strings.Contains(execWrapper, `exec /bin/bash -c "$1"`) {
+	// The command must BECOME the exec (exec /bin/bash "$4" -c "$1"), not run
+	// as a child of a wrapper shell. Otherwise the pid Exec watches is a
+	// wrapper the command can kill to look finished while it runs on — the
+	// bypass this structure closes.
+	if !strings.Contains(execWrapper, `exec /bin/bash "$4" -c "$1"`) {
 		t.Error("the wrapper must exec the command so the exec's pid is the command's own")
 	}
 	// The watchdog must poll rather than sleep the whole deadline, so it exits
