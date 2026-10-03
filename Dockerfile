@@ -6,7 +6,7 @@
 # Helm chart's Deployments invoke, so this one image serves compose and Helm both.
 #
 # syntax=docker/dockerfile:1
-# The build stages (modules, and the two built from it) are pinned to the
+# The build stages (modules, and the three built from it) are pinned to the
 # build host's own platform and Go cross-compiles to the target — a multi-arch
 # `buildx --platform` run must not execute the whole Go toolchain under QEMU
 # emulation.
@@ -50,21 +50,34 @@ HEALTHCHECK --interval=2s --timeout=3s --start-period=2s --retries=15 \
     CMD ["/gate", "-healthcheck"]
 ENTRYPOINT ["/gate"]
 
+# The two packages the early ripgrep fetch below takes — internal/ripgrep, its
+# assets directory included, and the fetcher — copied whole, every file a
+# later change adds to either included, and their tests removed: the build
+# stage copies what is left with COPY --from, which BuildKit keys by the
+# content it copies, so an edit to a test re-runs this stage and not the fetch.
+# (COPY --exclude would say this in one line, but it needs the Dockerfile 1.19
+# frontend, and this file is built with each builder's own: the `# syntax=`
+# line above is not the file's first, so no builder reads it as a directive.)
+FROM modules AS ripgrep-sources
+COPY internal/ripgrep/ internal/ripgrep/
+COPY tools/ripgrepfetch/ tools/ripgrepfetch/
+RUN find internal/ripgrep tools/ripgrepfetch -name '*_test.go' -delete
+
 FROM modules AS build
 # The pinned static ripgrep the executor and worker embed for the grep tool
 # (internal/ripgrep; `make ripgrep` is the same command), fetched twice. First
-# with the two packages it takes — internal/ripgrep, its assets directory
-# included, and the fetcher — copied whole and nothing else, so the fetch is a
-# layer the build cache keeps until one of them changes rather than one every
-# source change re-runs, and it sees the archives the build context carries:
-# a checkout that ran `make ripgrep` checks them against the manifest's sha256
-# and downloads nothing, and a clean one downloads once per pin. Then again
-# after `COPY . .`, which brings the assets directory in again from the
-# context: each archive is checked again, fetched again if it does not match,
-# and everything else there but the manifest removed, so nothing the context
+# with the two packages it takes, less their tests, and nothing else
+# (ripgrep-sources), so the fetch is a layer the build cache keeps until one
+# of their other files changes rather than one every source change re-runs,
+# and it sees the archives the build context carries: a checkout that ran
+# `make ripgrep` checks them against the manifest's sha256 and downloads
+# nothing, and a clean one downloads once per pin. Then again after `COPY .
+# .`, which brings the assets directory in again from the context: each
+# archive is checked again, fetched again if it does not match, and
+# everything else there but the manifest removed, so nothing the context
 # carried is embedded unchecked.
-COPY internal/ripgrep/ internal/ripgrep/
-COPY tools/ripgrepfetch/ tools/ripgrepfetch/
+COPY --from=ripgrep-sources /src/internal/ripgrep/ internal/ripgrep/
+COPY --from=ripgrep-sources /src/tools/ripgrepfetch/ tools/ripgrepfetch/
 RUN go run ./tools/ripgrepfetch
 COPY . .
 RUN go run ./tools/ripgrepfetch
