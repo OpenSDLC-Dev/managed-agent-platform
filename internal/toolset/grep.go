@@ -154,7 +154,7 @@ const ripgrepDir = "/tmp/.map-ripgrep"
 // old rather than running the old.
 func ripgrepPath() string { return ripgrepDir + "/rg-" + ripgrep.Pinned.Version }
 
-// The exit codes grepScript claims for itself, outside rg's 0, 1 and 2 and
+// The exit codes script claims for itself, outside rg's 0, 1 and 2 and
 // below the 126 a shell takes for a command it could not run.
 const (
 	// exitNoRipgrep: rg is not installed — or not runnable, or not this

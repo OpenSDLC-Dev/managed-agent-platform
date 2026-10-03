@@ -307,6 +307,40 @@ func ripgrepLifecycle(t *testing.T, r toolset.Runner, where string) {
 	ok(t, r, "bash", `{"command":"rm -f /usr/local/bin/uname"}`)
 }
 
+// Calls that race to install on a fresh sandbox each land a whole binary —
+// every upload has its own name and every move is atomic — and leave nothing
+// but the one rg behind.
+func TestGrepInstallsUnderConcurrentCalls(t *testing.T) {
+	r := runner(t)
+	ok(t, r, "bash", `{"command":"mkdir -p cc && echo needle > cc/a.txt"}`)
+	const n = 4
+	errs := make(chan string, n)
+	for range n {
+		go func() {
+			res, err := r.Run(context.Background(), domain.NewID("sevt"), "grep", []byte(`{"pattern":"needle","path":"cc"}`))
+			switch {
+			case err != nil:
+				errs <- err.Error()
+			case res.IsError || res.Content != "/workspace/cc/a.txt":
+				errs <- res.Content
+			default:
+				errs <- ""
+			}
+		}()
+	}
+	for range n {
+		if e := <-errs; e != "" {
+			t.Errorf("a concurrent grep failed: %s", e)
+		}
+	}
+	if out := ok(t, r, "bash", `{"command":"ls -A /tmp/.map-ripgrep"}`); strings.TrimSpace(out) != "rg-"+ripgrep.Pinned.Version {
+		t.Errorf("/tmp/.map-ripgrep holds %q after the race", out)
+	}
+	if got, want := installedRipgrep(t, r), fmt.Sprintf("755 %d", ripgrepSize(t, r)); got != want {
+		t.Errorf("installed rg = %q, want %q", got, want)
+	}
+}
+
 // rg is static, so the same binary answers the same search on an image with
 // no glibc at all — musl and busybox — as on Debian.
 func TestGrepRunsOnAMuslBusyboxImage(t *testing.T) {
