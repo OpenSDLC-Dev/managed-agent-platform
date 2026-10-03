@@ -57,7 +57,7 @@ func exactly(t *testing.T, r toolset.Runner, input, want string) {
 }
 
 // under joins names onto a directory, one per line: a file list as rg prints
-// it, sorted by path.
+// it under --sort=path, which walks each directory's entries in name order.
 func under(dir string, names ...string) string {
 	for i, n := range names {
 		names[i] = dir + n
@@ -65,29 +65,11 @@ func under(dir string, names ...string) string {
 	return strings.Join(names, "\n")
 }
 
-// unordered asserts a grep whose answer is want in some order. A call that
-// does not page keeps rg's parallel search, so what it lists, and the files a
-// content answer walks through, come in its threads' order, run to run.
-func unordered(t *testing.T, r toolset.Runner, input, want string) {
-	t.Helper()
-	got := ok(t, r, "grep", input)
-	if sortedLines(got) != sortedLines(want) {
-		t.Fatalf("grep(%s) =\n%s\nwant, in any order,\n%s", input, got, want)
-	}
-}
-
-func sortedLines(s string) string {
-	lines := strings.Split(s, "\n")
-	slices.Sort(lines)
-	return strings.Join(lines, "\n")
-}
-
 // TestGrepParameters pins how each of the twelve properties the recorded
 // reference adds to grep (#827) reaches ripgrep, by the flag its description
 // names, and the shape of what comes back. The answers are rg's own; what is
-// ours is the mapping, the paging and the text around them. A call that does
-// not page lists in rg's own order, so its many-line answers are compared as
-// sets (unordered).
+// ours is the mapping, the paging and the text around them. Every search
+// sorts by path, so every answer is held to one order.
 func TestGrepParameters(t *testing.T) {
 	r := runner(t)
 	grepFixture(t, r)
@@ -95,7 +77,7 @@ func TestGrepParameters(t *testing.T) {
 
 	t.Run("output_mode", func(t *testing.T) {
 		// files_with_matches is the default: rg -l.
-		unordered(t, r, `{"pattern":"needle","path":"gp/code"}`,
+		exactly(t, r, `{"pattern":"needle","path":"gp/code"}`,
 			under(code, "main.go", "main_test.go", "readme.md", "util/util.go", "web/app.js", "web/app.ts", "web/app.tsx"))
 		exactly(t, r, `{"pattern":"needle","path":"gp/code/util","output_mode":"files_with_matches"}`, code+"util/util.go")
 		exactly(t, r, `{"pattern":"needle","path":"gp/code/util","output_mode":"content"}`, code+"util/util.go:1:x needle")
@@ -135,15 +117,10 @@ func TestGrepParameters(t *testing.T) {
 		// context and -C are one option; given both, context wins.
 		exactly(t, r, base+`"-C":0,"context":2}`, "2-2\n3-3\n4:X\n5-5\n6-6\n7-7\n8:X\n9-9")
 		exactly(t, r, base+`"-C":0}`, "4:X\n8:X")
-		// Groups in different files are separated as groups in one are,
-		// whichever file rg reaches first.
-		in := `{"pattern":"X|foo start","path":"gp","glob":"{ctx,ml}.txt","output_mode":"content","-A":1}`
-		groups := strings.Split(ok(t, r, "grep", in), "\n--\n")
-		slices.Sort(groups)
-		if want := []string{"/workspace/gp/ctx.txt:4:X\n/workspace/gp/ctx.txt-5-5", "/workspace/gp/ctx.txt:8:X\n/workspace/gp/ctx.txt-9-9",
-			"/workspace/gp/ml.txt:2:foo start\n/workspace/gp/ml.txt-3-middle"}; !slices.Equal(groups, want) {
-			t.Fatalf("grep(%s) groups = %q, want %q", in, groups, want)
-		}
+		// Groups in different files are separated as groups in one are.
+		exactly(t, r, `{"pattern":"X|foo start","path":"gp","glob":"{ctx,ml}.txt","output_mode":"content","-A":1}`,
+			"/workspace/gp/ctx.txt:4:X\n/workspace/gp/ctx.txt-5-5\n--\n/workspace/gp/ctx.txt:8:X\n/workspace/gp/ctx.txt-9-9\n--\n"+
+				"/workspace/gp/ml.txt:2:foo start\n/workspace/gp/ml.txt-3-middle")
 		// Ignored outside content mode — not even validated, as the recorded
 		// descriptions say ("Requires output_mode: content, ignored otherwise").
 		exactly(t, r, `{"pattern":"X","path":"gp/ctx.txt","-C":2}`, "/workspace/gp/ctx.txt")
@@ -165,15 +142,19 @@ func TestGrepParameters(t *testing.T) {
 		exactly(t, r, `{"pattern":"X","path":"gp/ctx.txt","output_mode":"content","-A":1,"head_limit":3}`, "4:X\n5-5\n--")
 		exactly(t, r, `{"pattern":"X","path":"gp/ctx.txt","output_mode":"content","-A":1,"head_limit":2,"offset":2}`, "--\n8:X")
 
-		// Paging a file list: a paged call sorts by path, so the pages are
-		// disjoint and together are the list, call after call.
+		// Paging a file list: every call sorts by path, so the pages are
+		// disjoint and together are the list an unpaged call gives, call after
+		// call — a page picks up where an unpaged answer that was cut short
+		// stopped.
 		var all []string
 		for _, page := range []string{`"head_limit":2`, `"head_limit":2,"offset":2`, `"offset":4`} {
 			all = append(all, ok(t, r, "grep", `{"pattern":"needle","path":"gp/many",`+page+`}`))
 		}
-		if want := under("/workspace/gp/many/", "f1.txt", "f2.txt", "f3.txt", "f4.txt", "f5.txt"); strings.Join(all, "\n") != want {
+		want := under("/workspace/gp/many/", "f1.txt", "f2.txt", "f3.txt", "f4.txt", "f5.txt")
+		if strings.Join(all, "\n") != want {
 			t.Fatalf("three pages =\n%s\nwant\n%s", strings.Join(all, "\n"), want)
 		}
+		exactly(t, r, `{"pattern":"needle","path":"gp/many"}`, want)
 		exactly(t, r, `{"pattern":"needle","path":"gp/many","output_mode":"count","head_limit":3}`,
 			"/workspace/gp/many/f1.txt:1\n/workspace/gp/many/f2.txt:1\n/workspace/gp/many/f3.txt:1")
 		// head stops rg once its page is full, and a page deep into a large
@@ -193,17 +174,17 @@ func TestGrepParameters(t *testing.T) {
 	})
 
 	t.Run("type", func(t *testing.T) {
-		unordered(t, r, `{"pattern":"needle","path":"gp/code","type":"go"}`, under(code, "main.go", "main_test.go", "util/util.go"))
-		unordered(t, r, `{"pattern":"needle","path":"gp/code","type":"ts"}`, under(code, "web/app.ts", "web/app.tsx"))
+		exactly(t, r, `{"pattern":"needle","path":"gp/code","type":"go"}`, under(code, "main.go", "main_test.go", "util/util.go"))
+		exactly(t, r, `{"pattern":"needle","path":"gp/code","type":"ts"}`, under(code, "web/app.ts", "web/app.tsx"))
 		fails(t, r, "grep", `{"pattern":"needle","path":"gp/code","type":"golang"}`, "unrecognized file type: golang")
 		// A file named outright is searched whatever its type, as rg does.
 		exactly(t, r, `{"pattern":"needle","path":"gp/code/readme.md","type":"go"}`, code+"readme.md")
 	})
 
 	t.Run("glob", func(t *testing.T) {
-		unordered(t, r, `{"pattern":"needle","path":"gp/code","glob":"*.go"}`, under(code, "main.go", "main_test.go", "util/util.go"))
-		unordered(t, r, `{"pattern":"needle","path":"gp/code","glob":"*.{ts,tsx}"}`, under(code, "web/app.ts", "web/app.tsx"))
-		unordered(t, r, `{"pattern":"needle","path":"gp/code","glob":"!*_test.go","type":"go"}`, under(code, "main.go", "util/util.go"))
+		exactly(t, r, `{"pattern":"needle","path":"gp/code","glob":"*.go"}`, under(code, "main.go", "main_test.go", "util/util.go"))
+		exactly(t, r, `{"pattern":"needle","path":"gp/code","glob":"*.{ts,tsx}"}`, under(code, "web/app.ts", "web/app.tsx"))
+		exactly(t, r, `{"pattern":"needle","path":"gp/code","glob":"!*_test.go","type":"go"}`, under(code, "main.go", "util/util.go"))
 		// The value is one glob, whole: a space or a comma outside braces is
 		// part of it, as it is to rg --glob.
 		exactly(t, r, `{"pattern":"needle","path":"gp/sp","glob":"foo bar.txt"}`, "/workspace/gp/sp/foo bar.txt")
@@ -218,9 +199,9 @@ func TestGrepParameters(t *testing.T) {
 	// .gitignore names. A path that names an ignored file, or one inside
 	// .git, is searched all the same, as rg searches what it is given.
 	t.Run("hidden, version-control and ignored files", func(t *testing.T) {
-		unordered(t, r, `{"pattern":"needle","path":"gp/hid"}`, under("/workspace/gp/hid/", ".h.go", ".hd/x.txt", "a.txt"))
+		exactly(t, r, `{"pattern":"needle","path":"gp/hid"}`, under("/workspace/gp/hid/", ".h.go", ".hd/x.txt", "a.txt"))
 		exactly(t, r, `{"pattern":"needle","path":"gp/hid/.hd"}`, "/workspace/gp/hid/.hd/x.txt")
-		unordered(t, r, `{"pattern":"needle","path":"gp/vcs"}`, under("/workspace/gp/vcs/", ".other/x.txt", "keep.txt"))
+		exactly(t, r, `{"pattern":"needle","path":"gp/vcs"}`, under("/workspace/gp/vcs/", ".other/x.txt", "keep.txt"))
 		exactly(t, r, `{"pattern":"needle","path":"gp/vcs","glob":"*.txt","head_limit":9}`, under("/workspace/gp/vcs/", ".other/x.txt", "keep.txt"))
 		exactly(t, r, `{"pattern":"needle","path":"gp/repo"}`, "/workspace/gp/repo/main.go")
 		exactly(t, r, `{"pattern":"needle","path":"gp/repo/run.log"}`, "/workspace/gp/repo/run.log")
@@ -432,13 +413,7 @@ func sameAnswers(t *testing.T, a, b toolset.Runner, an, bn string) {
 		if y.IsError != wantErr || y.Content == "no matches" {
 			t.Fatalf("grep(%s) on %s = %+v, a fixture that no longer exercises the search", in, bn, y)
 		}
-		// A call that does not page lists in rg's thread order, which is
-		// not the same twice.
-		xc, yc := x.Content, y.Content
-		if !strings.Contains(in, "head_limit") && !strings.Contains(in, "offset") {
-			xc, yc = sortedLines(xc), sortedLines(yc)
-		}
-		if x.IsError != y.IsError || xc != yc {
+		if x.IsError != y.IsError || x.Content != y.Content {
 			t.Errorf("grep(%s) differs:\n%s (is_error=%v): %q\n%s (is_error=%v): %q", in, an, x.IsError, x.Content, bn, y.IsError, y.Content)
 		}
 	}
@@ -874,23 +849,18 @@ func TestGrepPagesPastTwoToTheThirtyOne(t *testing.T) {
 	}
 }
 
-// A call that pages sorts by path, so that offset walks one list; one that
-// does not keeps rg's parallel search and its order.
-func TestGrepSortsOnlyWhenItPages(t *testing.T) {
-	for in, sorted := range map[string]bool{
-		`{"pattern":"x"}`:                                                 false,
-		`{"pattern":"x","head_limit":0}`:                                  false,
-		`{"pattern":"x","offset":0}`:                                      false,
-		`{"pattern":"x","head_limit":1}`:                                  true,
-		`{"pattern":"x","offset":1}`:                                      true,
-		`{"pattern":"x","output_mode":"count","head_limit":2,"offset":3}`: true,
-	} {
+// Every call sorts by path, paged or not, so a page continues the order an
+// unpaged answer that was cut short listed in; and every call searches hidden
+// files with the version-control directories globbed out.
+func TestGrepSortsEveryCallByPath(t *testing.T) {
+	for _, in := range []string{`{"pattern":"x"}`, `{"pattern":"x","head_limit":0}`, `{"pattern":"x","offset":0}`,
+		`{"pattern":"x","head_limit":1}`, `{"pattern":"x","offset":1}`, `{"pattern":"x","output_mode":"count","head_limit":2,"offset":3}`} {
 		sb := &fakeSandbox{}
 		if _, err := run(t, sb, "grep", in); err != nil || len(sb.commands) != 1 {
 			t.Fatalf("grep(%s): %v, %d execs", in, err, len(sb.commands))
 		}
-		if got := strings.Contains(sb.commands[0], "'--sort=path'"); got != sorted {
-			t.Errorf("grep(%s) sorts = %v, want %v", in, got, sorted)
+		if !strings.Contains(sb.commands[0], "'--sort=path'") {
+			t.Errorf("grep(%s) does not sort by path", in)
 		}
 		for _, d := range []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"} {
 			if !strings.Contains(sb.commands[0], "'--hidden'") || !strings.Contains(sb.commands[0], "'--glob=!"+d+"'") {

@@ -85,16 +85,15 @@ var vcsDirs = []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
 // image's RIPGREP_CONFIG_PATH cannot change what a call means; --no-heading,
 // so every line carries its file; --hidden with the version-control
 // directories globbed out, as the reference's GrepTool searches (vcsDirs) —
-// .gitignore and the other ignore files rg reads still apply; and, only when
-// the call pages, --sort=path, so that offset pages through one list rather
-// than rg's thread order, which differs run to run. Sorting costs rg its
-// parallel search, so a call that does not page keeps it and lists in the
-// order rg found things. Every value the model chose is one argv word: the
-// pattern after -e and the type and glob joined to their flag, so none of
-// them can be read as an option whatever it begins with, and the path after
-// "--".
+// .gitignore and the other ignore files rg reads still apply; and
+// --sort=path, so an answer lists in one order run after run, and offset
+// pages through that order whether or not the call that came before paged —
+// which costs rg its parallel search, as sorting does (docs/DIVERGENCES.md).
+// Every value the model chose is one argv word: the pattern after -e and the
+// type and glob joined to their flag, so none of them can be read as an
+// option whatever it begins with, and the path after "--".
 func (in grepInput) query(root string) (grepQuery, string) {
-	q := grepQuery{args: []string{"--no-config", "--no-heading", "--hidden"}}
+	q := grepQuery{args: []string{"--no-config", "--no-heading", "--hidden", "--sort=path"}}
 	for _, d := range vcsDirs {
 		q.args = append(q.args, "--glob=!"+d)
 	}
@@ -106,9 +105,6 @@ func (in grepInput) query(root string) (grepQuery, string) {
 		return q, why
 	}
 	q.limit, q.skip = max(q.limit, 0), max(q.skip, 0)
-	if q.limit > 0 || q.skip > 0 {
-		q.args = append(q.args, "--sort=path")
-	}
 
 	switch in.OutputMode {
 	case "", grepFiles:
