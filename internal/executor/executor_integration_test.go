@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modeltest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -398,12 +398,7 @@ func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("integration test requires Docker: %v", err)
 	}
-	image := "map-nonroot-memory-test:latest"
-	build := exec.Command("docker", "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(nonRootImage)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the non-root sandbox image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "nonroot-memory", nonRootImage)
 	uid := int64(nonRootUID)
 	h := newHarnessWith(t, provider, Config{Image: image, Hardening: sandbox.Hardening{RunAsUser: &uid}})
 	t.Cleanup(func() {

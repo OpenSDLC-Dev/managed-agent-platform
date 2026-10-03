@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
@@ -34,12 +35,7 @@ USER app
 // backend's problem alone: the k8s backend extracts inside the pod, where
 // everything is already the sandbox user's.
 func TestBulkWriteOnANonRootImage(t *testing.T) {
-	image := "map-nonroot-test:latest"
-	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(nonRootDockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the non-root image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHostForTest())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -129,12 +125,7 @@ USER app
 // shell is the agent's and its own uid is no escalation, and uid 0 must never
 // be among them.
 func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
-	image := "map-hooked-test:latest"
-	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(hookedDockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the hooked image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "hooked", hookedDockerfile, "--host", docker.DaemonHostForTest())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -190,12 +181,7 @@ func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 // created by the sandbox user) classifies the same sandbox at the create. A
 // docker-backend row for TestBulkWriteOnANonRootImage's reason.
 func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
-	image := "map-nonroot-test:latest"
-	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(nonRootDockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the non-root image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHostForTest())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -254,12 +240,7 @@ func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 // the emptying reaches the whole batch rather than the one the rename stopped
 // on.
 func TestBulkWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
-	image := "map-nonroot-test:latest"
-	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(nonRootDockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the non-root image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHostForTest())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {

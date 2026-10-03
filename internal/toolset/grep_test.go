@@ -2,8 +2,6 @@ package toolset_test
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/ripgrep"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -81,28 +80,6 @@ func sortedLines(s string) string {
 	lines := strings.Split(s, "\n")
 	slices.Sort(lines)
 	return strings.Join(lines, "\n")
-}
-
-// testImageFrom builds an image from a Dockerfile for one test and removes it
-// when the test is done. The tag is the test's own, so a parallel run building
-// the same Dockerfile shares its layers and not its name, and removing it
-// takes only this run's tag.
-func testImageFrom(t *testing.T, name, dockerfile string) string {
-	t.Helper()
-	var nonce [6]byte
-	_, _ = rand.Read(nonce[:])
-	image := "map-grep-" + name + "-test:" + hex.EncodeToString(nonce[:])
-	build := exec.Command("docker", "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(dockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build %s: %v\n%s", image, err, out)
-	}
-	t.Cleanup(func() {
-		if out, err := exec.Command("docker", "rmi", image).CombinedOutput(); err != nil {
-			t.Errorf("remove %s: %v\n%s", image, err, out)
-		}
-	})
-	return image
 }
 
 // TestGrepParameters pins how each of the twelve properties the recorded
@@ -499,7 +476,7 @@ func runnerFor(t *testing.T, image string, h sandbox.Hardening) toolset.Runner {
 // volume there that is root's 0755 too, so the first bash call fails either
 // way.
 func TestGrepInstallsRipgrepWhereTheSandboxIsNotRoot(t *testing.T) {
-	image := testImageFrom(t, "nonroot", "FROM debian:stable-slim\nRUN useradd -m app && mkdir -p /workspace && chown app:app /workspace\nUSER app\n")
+	image := dockertest.ImageFrom(t, "grep-nonroot", "FROM debian:stable-slim\nRUN useradd -m app && mkdir -p /workspace && chown app:app /workspace\nUSER app\n")
 	for _, tc := range []struct {
 		name, image string
 		h           sandbox.Hardening
@@ -629,7 +606,7 @@ func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
 // the last line only. The banner itself reaches the answer, as it reaches
 // every tool's output on that image.
 func TestGrepThroughAnImageBanner(t *testing.T) {
-	image := testImageFrom(t, "banner", "FROM debian:stable-slim\n"+
+	image := dockertest.ImageFrom(t, "grep-banner", "FROM debian:stable-slim\n"+
 		"RUN printf 'printf welcome-banner\\n' > /etc/map-banner.sh\n"+
 		"ENV BASH_ENV=/etc/map-banner.sh\n")
 	r := runnerFor(t, image, sandbox.Hardening{})
