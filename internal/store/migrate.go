@@ -44,10 +44,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 // transaction has rolled back whole, so a retry starts from the same schema.
 // The wait before each retry doubles from migrateBackoff, 1+2+4+8 = 15 seconds
 // across five attempts, and each attempt can itself wait up to the 2s
-// lock_timeout for each table lock those four ask for (0043's two, 0045's
-// one, 0046's three and 0047's two, which those two take before any work;
-// after 0046 in the same run, 0047 still has only deleted_sessions' to take),
-// so a conflict that outlasts all five fails the start after up to about 85
+// lock_timeout for each table lock those four ask for: 0043's two, 0045's
+// one, 0046's three, taken before any of its work, and 0047's two, taken
+// first when it runs alone. After 0046 in the same run, 0047 can wait only for
+// the one on deleted_sessions, after 0046's work, files being held already.
+// So a conflict that outlasts all five fails the start after up to about 85
 // seconds, like any other migration error. Variables so a test can run the
 // schedule to exhaustion quickly (export_test.go).
 var (

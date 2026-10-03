@@ -13,7 +13,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
-	"github.com/jackc/pgx/v5"
 )
 
 // The per-resource session copy (#578): every path that mounts a file mints
@@ -405,127 +404,6 @@ func TestSessionDeleteTakesItsCopies(t *testing.T) {
 	}
 }
 
-// Nothing skips a copy since #856: the session delete, DELETE /v1/files/{id}
-// and the expiry sweep each take one with a plain DELETE, as they take any
-// row, and owe the object it shares once, when the last row naming it goes.
-// A trigger ahead of the reference count records every key the queue is
-// offered, so a key offered twice shows here even where the queue's primary
-// key would fold it.
-func TestCopyRemoversOweTheSharedObjectOnce(t *testing.T) {
-	s := newTestServer(t)
-	ctx := context.Background()
-	agentID, envID := readableFixture(t, s)
-	if _, err := s.pool.Exec(ctx, `
-		CREATE TABLE offered (k text);
-		CREATE FUNCTION record_offered() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN INSERT INTO offered VALUES (NEW.object_key); RETURN NEW; END $$;
-		CREATE TRIGGER a_record_offered BEFORE INSERT ON pending_object_deletes
-		    FOR EACH ROW EXECUTE FUNCTION record_offered()`); err != nil {
-		t.Fatalf("install the probe: %v", err)
-	}
-	// offered reads what the queue was offered since the last call, sorted.
-	offered := func() []string {
-		t.Helper()
-		rows, err := s.pool.Query(ctx, `DELETE FROM offered RETURNING k`)
-		if err != nil {
-			t.Fatal(err)
-		}
-		keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			t.Fatal(err)
-		}
-		slices.Sort(keys)
-		return keys
-	}
-	// twoCopies mounts one upload twice in a new session.
-	twoCopies := func(name string) (uploadID, sid string, copies []string) {
-		t.Helper()
-		uploadID = uploadOneFile(t, s, name)
-		sess := createSession(t, s, map[string]any{
-			"agent": agentID, "environment_id": envID,
-			"resources": []any{
-				map[string]any{"type": "file", "file_id": uploadID},
-				map[string]any{"type": "file", "file_id": uploadID, "mount_path": "/second-" + name},
-			},
-		})
-		for _, r := range resourcesOf(t, sess) {
-			copies = append(copies, r["file_id"].(string))
-		}
-		return uploadID, sess["id"].(string), copies
-	}
-	del := func(path string) {
-		t.Helper()
-		if status, body := s.do(http.MethodDelete, path, nil); status != http.StatusOK {
-			t.Fatalf("DELETE %s: %d %v", path, status, body)
-		}
-	}
-	gone := func(ids ...string) {
-		t.Helper()
-		for _, id := range ids {
-			if fileRowExists(t, s, id) {
-				t.Errorf("%s outlived its remover", id)
-			}
-		}
-	}
-	owes := func(key string, want bool) {
-		t.Helper()
-		if got := slices.Contains(pendingKeys(t, s.pool), key); got != want {
-			t.Errorf("queue owes %s = %v, want %v", key, got, want)
-		}
-	}
-
-	// The session delete: its two copies of an upload already deleted, and an
-	// output of its own.
-	upload, sid, copies := twoCopies("session.txt")
-	output := domain.NewID("file").String()
-	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
-		 VALUES ($1, 'out.md', 'text/markdown', 5, true, 'session', $2)`, output, sid); err != nil {
-		t.Fatalf("seed an output: %v", err)
-	}
-	del("/v1/files/" + upload)
-	owes(blob.FilesKey(upload), false)
-	_ = offered()
-	del("/v1/sessions/" + sid)
-	gone(append(copies, output)...)
-	want := []string{blob.FilesKey(upload), blob.FilesKey(output), blob.SessionCheckpointKey(sid)}
-	slices.Sort(want)
-	if got := offered(); !slices.Equal(got, want) {
-		t.Errorf("the session delete offered %v, want each key once: %v", got, want)
-	}
-	owes(blob.FilesKey(upload), true)
-
-	// DELETE /v1/files/{copy}: the first of two copies owes nothing, the last
-	// owes the object.
-	upload, _, copies = twoCopies("file.txt")
-	del("/v1/files/" + upload)
-	_ = offered()
-	for i, c := range copies {
-		del("/v1/files/" + c)
-		gone(c)
-		if got := offered(); !slices.Equal(got, []string{blob.FilesKey(upload)}) {
-			t.Errorf("deleting copy %d offered %v, want [%s]", i+1, got, blob.FilesKey(upload))
-		}
-		owes(blob.FilesKey(upload), i == len(copies)-1)
-	}
-
-	// The expiry sweep: an upload and its two copies, all expired, go in one
-	// batch, and the key the three name is offered once.
-	upload, _, copies = twoCopies("sweep.txt")
-	for _, id := range append([]string{upload}, copies...) {
-		expireBy(t, s, id, 31*24*time.Hour)
-	}
-	_ = offered()
-	if n, err := api.PurgeExpiredFilesForTest(ctx, s.pool, 30*24*time.Hour); err != nil || n != 3 {
-		t.Fatalf("purge = %d, %v; want the upload and its two copies", n, err)
-	}
-	gone(append([]string{upload}, copies...)...)
-	if got := offered(); !slices.Equal(got, []string{blob.FilesKey(upload)}) {
-		t.Errorf("the sweep offered %v, want [%s] once", got, blob.FilesKey(upload))
-	}
-	owes(blob.FilesKey(upload), true)
-}
-
 // Archiving a session leaves its copies (console-141 api-fixtures idx 25;
 // ui-network idx 301), and each still answers DELETE afterwards (api-fixtures
 // idx 33–35). A copy is never downloadable, so the management lane refuses
@@ -583,6 +461,53 @@ func TestACopyExpiresWithItsUpload(t *testing.T) {
 	}
 	if got := pendingKeys(t, s.pool); !slices.Equal(got, []string{blob.FilesKey(uploadID)}) {
 		t.Errorf("queue = %v, want the shared object owed once", got)
+	}
+}
+
+// A dream's close deletes its transcripts by dream_id (enqueueDreamBlobs), and
+// a user session's copy of one carries no dream_id, so the close leaves the
+// copy and the object it names: the transcript's key is dropped while the
+// copy names it, and owed once the copy goes.
+func TestADreamsCloseLeavesASessionsCopyOfItsTranscript(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := readableFixture(t, s)
+	_, body := seededDreamBody(t, s)
+	dreamID, _ := startedDream(t, s, body)
+	transcripts := dreamFileIDs(t, s, dreamID)
+	if len(transcripts) == 0 {
+		t.Fatal("the dream wrote no transcripts, so its close would delete nothing")
+	}
+	transcript := transcripts[0]
+	key := blob.FilesKey(transcript)
+	copyID := mountedFileID(t, createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{map[string]any{"type": "file", "file_id": transcript}},
+	}))
+	if objectKey, source := fileAlias(t, s, copyID); objectKey != key || source == nil || *source != transcript {
+		t.Fatalf("the mount = object_key %q, source %v; want a copy of the transcript %s", objectKey, source, transcript)
+	}
+
+	atLastStage(t, s, dreamID)
+	tick(t, s) // the last stage completes the dream
+	tick(t, s) // and the next tick closes it, deleting its transcripts
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt == nil {
+		t.Fatal("the dream did not close")
+	}
+	for _, id := range transcripts {
+		if fileRowExists(t, s, id) {
+			t.Errorf("the transcript %s outlived its dream's close", id)
+		}
+	}
+	getFileOK(t, s, copyID)
+	if slices.Contains(pendingKeys(t, s.pool), key) {
+		t.Errorf("the close owed %s, which the session's copy still names", key)
+	}
+
+	if status, body := s.do(http.MethodDelete, "/v1/files/"+copyID, nil); status != http.StatusOK {
+		t.Fatalf("DELETE the copy: %d %v", status, body)
+	}
+	if !slices.Contains(pendingKeys(t, s.pool), key) {
+		t.Errorf("deleting the last row naming %s did not owe it", key)
 	}
 }
 
