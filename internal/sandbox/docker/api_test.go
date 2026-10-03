@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	gopath "path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2023,61 +2024,129 @@ func TestABulkRefusedAtALaterDirectoryEmptiesWhatEarlierOnesLanded(t *testing.T)
 		dirs = append(dirs, put.dir)
 	}
 	// The bookkeeping, the pack directory (landed), /etc (refused), then the
-	// emptying: the pack member at its own directory, the manifest at the workdir.
-	want := []string{"/workspace", "/workspace/skills/pack", "/etc", "/workspace/skills/pack", "/workspace"}
-	if strings.Join(dirs, " ") != strings.Join(want, " ") {
-		t.Fatalf("archives at %v, want %v", dirs, want)
+	// emptying — concurrent, so in either order: the pack member at its own
+	// directory, the manifest at the workdir.
+	if len(dirs) != 5 {
+		t.Fatalf("archives at %v, want five", dirs)
 	}
-	landed, emptied := (*puts)[1].entries, (*puts)[3].entries
-	if len(emptied) != 1 || emptied[0].name != landed[0].name || emptied[0].size != 0 || landed[0].size == 0 {
-		t.Errorf("the pack directory's emptying is %+v, want the landed member %+v at 0 bytes", emptied, landed)
+	if want := []string{"/workspace", "/workspace/skills/pack", "/etc"}; !slices.Equal(dirs[:3], want) {
+		t.Errorf("deliveries at %v, want %v", dirs[:3], want)
 	}
-	if bk := (*puts)[4].entries; len(bk) != 1 || bk[0].size != 0 || strings.HasSuffix(bk[0].name, ".dirs") ||
-		strings.Contains(bk[0].name, "/") {
-		t.Errorf("the workdir's emptying is %+v, want the manifest alone, by its base name, at 0 bytes", bk)
+	emptied := slices.Sorted(slices.Values(dirs[3:]))
+	if want := []string{"/workspace", "/workspace/skills/pack"}; !slices.Equal(emptied, want) {
+		t.Fatalf("emptying at %v, want %v", dirs[3:], want)
+	}
+	landed := (*puts)[1].entries
+	for _, put := range (*puts)[3:] {
+		switch e := put.entries; put.dir {
+		case "/workspace/skills/pack":
+			if len(e) != 1 || e[0].name != landed[0].name || e[0].size != 0 || landed[0].size == 0 {
+				t.Errorf("the pack directory's emptying is %+v, want the landed member %+v at 0 bytes", e, landed)
+			}
+		case "/workspace":
+			if len(e) != 1 || e[0].size != 0 || strings.HasSuffix(e[0].name, ".dirs") || strings.Contains(e[0].name, "/") {
+				t.Errorf("the workdir's emptying is %+v, want the manifest alone, by its base name, at 0 bytes", e)
+			}
+		}
 	}
 }
 
-// Each of a read-only root's emptyings gets a cleanup budget of its own. An
-// emptying the daemon answers too slowly spends only its own: the directories
-// after it are still emptied, where one shared budget would have run out on the
-// first and left every later directory's payload in place.
+// Each of a read-only root's emptyings gets a cleanup budget of its own. With
+// every worker held by an emptying the daemon answers too slowly, the directory
+// queued behind them still gets a full budget once one gives up, and reaches the
+// daemon — where one shared budget would have run out with the first round and
+// left every later directory's payload in place.
 func TestEachEmptyingHasABudgetOfItsOwn(t *testing.T) {
 	budget := cleanupBudget
 	cleanupBudget = 200 * time.Millisecond
 	t.Cleanup(func() { cleanupBudget = budget })
 
+	dirs := emptyingWorkers + 1
 	var n int
 	var mu sync.Mutex
 	c, puts, _ := bulkDaemon(t, true, func(string) (int, string) {
 		mu.Lock()
 		n++
-		first := n == 5 // bookkeeping, three members' directories, then the emptying
+		// The bookkeeping and one delivery per directory come first; the first
+		// round of emptyings after them stalls past its budget.
+		stall := n > 1+dirs && n <= 1+dirs+emptyingWorkers
 		mu.Unlock()
-		if first {
+		if stall {
 			time.Sleep(cleanupBudget + 300*time.Millisecond)
 		}
 		return 0, ""
 	}, map[string]bulkAnswer{
-		"__map_bulk_rename": {code: 1,
-			stdout: "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\nmap-bulk-left 2\n",
+		"__map_bulk_rename": {code: 1, stdout: leftReport(dirs),
 			stderr: "mv: cannot move: Permission denied\nmap-bulk-fail 0\n"},
 	})
-	if err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
-		{Path: "/workspace/a/x", Data: []byte("XXXX")},
-		{Path: "/mnt/memory/y", Data: []byte("YYYY")},
-		{Path: "/tmp/z", Data: []byte("ZZZZ")},
-	}); err == nil {
+	if err := c.WriteFiles(context.Background(), batchAcross(dirs)); err == nil {
 		t.Fatal("the batch reported success where every move was refused")
 	}
-	var emptied []string
-	for _, put := range (*puts)[4:] {
-		emptied = append(emptied, put.dir)
+	mu.Lock()
+	defer mu.Unlock()
+	if got := len(*puts) - (1 + dirs); got != dirs {
+		t.Errorf("%d emptyings reached the daemon, want all %d though the first round outlived its budget", got, dirs)
 	}
-	if want := "/workspace/a /mnt/memory /tmp"; strings.Join(emptied, " ") != want {
-		t.Errorf("emptyings reached the daemon at %v, want all three (%s) though the first outlived its budget",
-			emptied, want)
+}
+
+// A daemon that answers no emptying at all holds a failed batch for the
+// emptying's deadline, not a budget per directory: here 200 directories, which
+// at eight at a time on per-request budgets alone would take 25 budgets, return
+// within the deadline's six.
+func TestAStalledDaemonEmptiesWithinTheDeadline(t *testing.T) {
+	budget := cleanupBudget
+	cleanupBudget = 100 * time.Millisecond
+	t.Cleanup(func() { cleanupBudget = budget })
+
+	dirs := 200
+	var n int
+	var mu sync.Mutex
+	c, puts, _ := bulkDaemon(t, true, func(string) (int, string) {
+		mu.Lock()
+		n++
+		stall := n > 1+dirs // every emptying
+		mu.Unlock()
+		if stall {
+			time.Sleep(3 * cleanupBudget)
+		}
+		return 0, ""
+	}, map[string]bulkAnswer{
+		"__map_bulk_rename": {code: 1, stdout: leftReport(dirs),
+			stderr: "mv: cannot move: Permission denied\nmap-bulk-fail 0\n"},
+	})
+	start := time.Now()
+	if err := c.WriteFiles(context.Background(), batchAcross(dirs)); err == nil {
+		t.Fatal("the batch reported success where every move was refused")
 	}
+	took := time.Since(start)
+	// The deadline is 600ms; uncapped, 25 rounds of 100ms would be 2.5s.
+	if limit := emptyingDeadline() + 500*time.Millisecond; took > limit {
+		t.Errorf("the failed batch held its caller %v, want within the emptying's deadline (%v) plus slack", took, limit)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if tried := len(*puts) - (1 + dirs); tried == 0 || tried >= dirs {
+		t.Errorf("%d of %d emptyings were tried, want some — eight at a time — and not all of them before the deadline", tried, dirs)
+	}
+}
+
+// batchAcross is a batch of one member in each of dirs directories under /tmp.
+func batchAcross(dirs int) []sandbox.FileWrite {
+	files := make([]sandbox.FileWrite, dirs)
+	for i := range files {
+		files[i] = sandbox.FileWrite{Path: fmt.Sprintf("/tmp/d%d/f", i), Data: []byte("PAYLOAD")}
+	}
+	return files
+}
+
+// leftReport is a shed's report that every one of n members is still there.
+func leftReport(n int) string {
+	var r strings.Builder
+	r.WriteString("\nmap-bulk-left-begin\n")
+	for i := range n {
+		fmt.Fprintf(&r, "map-bulk-left %d\n", i)
+	}
+	return r.String()
 }
 
 // On a read-only root the emptying is cut as the deliveries were — one
@@ -2085,11 +2154,15 @@ func TestEachEmptyingHasABudgetOfItsOwn(t *testing.T) {
 // by base name — and every one is tried: a refused emptying leaves the next
 // directory's payload no reason to stay.
 func TestABulkFaultOnAReadOnlyRootEmptiesEachDirectory(t *testing.T) {
-	var emptied []string
-	n := 0
-	c, puts, _ := bulkDaemon(t, true, func(string) (int, string) {
-		// The fourth delivery is the first emptying, and it is refused.
-		if n++; n == 4 {
+	pack := "/workspace/skills/pack"
+	seen := map[string]int{}
+	var mu sync.Mutex
+	c, puts, _ := bulkDaemon(t, true, func(dir string) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		// The pack directory's second delivery is its emptying, and it is
+		// refused.
+		if seen[dir]++; dir == pack && seen[dir] == 2 {
 			return http.StatusInternalServerError, "daemon gave up"
 		}
 		return 0, ""
@@ -2099,18 +2172,20 @@ func TestABulkFaultOnAReadOnlyRootEmptiesEachDirectory(t *testing.T) {
 			stderr: "mv: cannot move: Permission denied\nmap-bulk-fail 0\n"},
 	})
 	files := []sandbox.FileWrite{
-		{Path: "/workspace/skills/pack/a", Data: []byte("AAAA")},
+		{Path: pack + "/a", Data: []byte("AAAA")},
 		{Path: "/mnt/memory/notes/b", Data: []byte("BBBB")},
-		{Path: "/workspace/skills/pack/c", Data: []byte("CCCC")},
+		{Path: pack + "/c", Data: []byte("CCCC")},
 	}
 	if err := c.WriteFiles(context.Background(), files); err == nil {
 		t.Fatal("the batch reported success where every move was refused")
 	}
 	// Bookkeeping, two members extractions, then all three emptyings — the
-	// two after the refused one still tried.
+	// others tried though one was refused. They run concurrently, so in no
+	// particular order.
 	if len(*puts) != 6 {
 		t.Fatalf("%d archives delivered (%+v), want 6", len(*puts), *puts)
 	}
+	var emptied []string
 	for _, put := range (*puts)[3:] {
 		emptied = append(emptied, put.dir)
 		for _, e := range put.entries {
@@ -2118,13 +2193,14 @@ func TestABulkFaultOnAReadOnlyRootEmptiesEachDirectory(t *testing.T) {
 				t.Errorf("emptying entry %q at %s is %d bytes, want a temporary's base name at 0", e.name, put.dir, e.size)
 			}
 		}
+		if put.dir == pack && (len(put.entries) != 2 || put.entries[0].name != (*puts)[1].entries[0].name ||
+			put.entries[1].name != (*puts)[1].entries[1].name) {
+			t.Errorf("the pack directory's emptying carries %+v, want both of its members' temporaries", put.entries)
+		}
 	}
-	if want := "/workspace/skills/pack /mnt/memory/notes /workspace"; strings.Join(emptied, " ") != want {
-		t.Errorf("emptying at %v, want %s", emptied, want)
-	}
-	if pack := (*puts)[3].entries; len(pack) != 2 || pack[0].name != (*puts)[1].entries[0].name ||
-		pack[1].name != (*puts)[1].entries[1].name {
-		t.Errorf("the pack directory's emptying carries %+v, want both of its members' temporaries", pack)
+	slices.Sort(emptied)
+	if want := []string{"/mnt/memory/notes", "/workspace", pack}; !slices.Equal(emptied, want) {
+		t.Errorf("emptying at %v, want %v", emptied, want)
 	}
 }
 

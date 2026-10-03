@@ -1694,19 +1694,56 @@ func (c *container) reclaimBulkPaths(ctx context.Context, b *sandbox.BulkWrite, 
 	if len(paths) == 0 {
 		return
 	}
-	// Every extraction is tried, unlike a delivery's, and each on a cleanup
-	// budget of its own: one the daemon refuses, or answers slowly, is no
-	// reason to leave the others' payloads where they are — and a read-only
-	// root's emptying is one extraction per directory, which a single shared
-	// budget could run out on long before the last of them.
-	for _, x := range b.Emptying(paths, c.readOnlyRoot) {
-		func() {
-			ctx, cancel := cleanup(ctx)
-			defer cancel()
-			_ = c.putExtraction(ctx, x)
-		}()
+	// Every extraction is tried, unlike a delivery's: one the daemon refuses, or
+	// answers slowly, is no reason to leave the others' payloads where they are.
+	// A read-only root's emptying is one extraction per directory, so they run
+	// emptyingWorkers at a time, each on a cleanup budget of its own — one
+	// shared budget would run out long before the last of them — and all of them
+	// under emptyingDeadline, which a stalled daemon would otherwise stretch to a
+	// budget per directory. What the deadline cuts off keeps its payload, as any
+	// emptying the daemon will not answer does.
+	xs := b.Emptying(paths, c.readOnlyRoot)
+	all, cancel := context.WithTimeout(context.WithoutCancel(ctx), emptyingDeadline())
+	defer cancel()
+	next := make(chan sandbox.Extraction)
+	var wg sync.WaitGroup
+	for range min(emptyingWorkers, len(xs)) {
+		wg.Go(func() {
+			for x := range next {
+				one, cancel := context.WithTimeout(all, cleanupBudget)
+				_ = c.putExtraction(one, x)
+				cancel()
+			}
+		})
 	}
+feed:
+	for _, x := range xs {
+		select {
+		case next <- x:
+		case <-all.Done():
+			break feed
+		}
+	}
+	close(next)
+	wg.Wait()
 }
+
+// emptyingWorkers is how many of a batch's emptyings are in flight at once. Each
+// is a small archive of zero-byte entries into a directory of its own, so they
+// cannot collide; eight keeps a skill's few dozen directories to a handful of
+// rounds without opening a connection per directory on a ten-thousand-member
+// batch.
+const emptyingWorkers = 8
+
+// emptyingDeadline caps a batch's whole emptying at six cleanup budgets — a
+// minute — and so the emptying's share of what a failed batch can hold its
+// caller for: a daemon that answers nothing costs six rounds of eight budgets
+// rather than a budget per directory, which on a ten-thousand-directory batch
+// would be over a day. A daemon that answers takes milliseconds a directory (a
+// whole 61-file skill's write, eleven deliveries and two execs, measured
+// ~150ms), so a minute leaves room for thousands of directories before it cuts
+// anything off.
+func emptyingDeadline() time.Duration { return 6 * cleanupBudget }
 
 // rename puts a landed temporary file at its target — the step that makes a write
 // atomic — after refusing the targets a rename would quietly do the wrong thing
@@ -1862,10 +1899,10 @@ func (c *container) notWritable(ctx context.Context, path string) error {
 // that sheds both ways — the single write's three, and the batch's own three
 // through shedBulk (#316) — can hold a failed write for two of these before it
 // returns; that ceiling is the caller's whole exposure, and it is not the
-// caller's context that bounds it any more. One cleanup is the exception: a
-// batch's emptying on a read-only root takes one budget per directory it
-// empties into (reclaimBulkPaths), so there the ceiling grows with the
-// directories a failed batch left payloads in.
+// caller's context that bounds it any more. A batch's emptying is the one
+// cleanup that is several requests — one per directory on a read-only root —
+// and it gives each its own budget under a cap of six (emptyingDeadline), so
+// there the ceiling is that cap rather than a budget per directory.
 //
 // A variable only so a test can shorten it.
 var cleanupBudget = 10 * time.Second
