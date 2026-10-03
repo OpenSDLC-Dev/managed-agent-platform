@@ -411,15 +411,22 @@ func TestGrep(t *testing.T) {
 	ok(t, r, "write", `{"file_path":"gr/a.txt","content":"alpha\nneedle 42\nomega\n"}`)
 	ok(t, r, "write", `{"file_path":"gr/b.txt","content":"nothing here\n"}`)
 
-	t.Run("matches carry path, line number and text", func(t *testing.T) {
-		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr"}`)
+	// The recorded schema's default output mode is files_with_matches.
+	t.Run("by default a search lists the files that match", func(t *testing.T) {
+		if got := ok(t, r, "grep", `{"pattern":"needle","path":"gr"}`); got != "/workspace/gr/a.txt" {
+			t.Fatalf("content = %q", got)
+		}
+	})
+
+	t.Run("content matches carry path, line number and text", func(t *testing.T) {
+		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr","output_mode":"content"}`)
 		if got != "/workspace/gr/a.txt:2:needle 42" {
 			t.Fatalf("content = %q", got)
 		}
 	})
 
 	t.Run("a perl character class works", func(t *testing.T) {
-		got := ok(t, r, "grep", `{"pattern":"needle \\d+","path":"gr"}`)
+		got := ok(t, r, "grep", `{"pattern":"needle \\d+","path":"gr","output_mode":"content"}`)
 		if !strings.Contains(got, "needle 42") {
 			t.Fatalf("content = %q", got)
 		}
@@ -446,7 +453,7 @@ func TestGrep(t *testing.T) {
 	t.Run("binary files and vendored trees are skipped", func(t *testing.T) {
 		ok(t, r, "bash", `{"command":"mkdir -p gr/node_modules && printf 'needle\\0bin' > gr/bin.dat && `+
 			`echo needle > gr/node_modules/dep.txt"}`)
-		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr"}`)
+		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr","output_mode":"content"}`)
 		if strings.Contains(got, "bin.dat") || strings.Contains(got, "node_modules") {
 			t.Fatalf("content = %q, want binary and node_modules skipped", got)
 		}
@@ -461,7 +468,7 @@ func TestGrep(t *testing.T) {
 
 	t.Run("output is capped", func(t *testing.T) {
 		ok(t, r, "bash", fmt.Sprintf(`{"command":"mkdir -p big && for i in $(seq 1 %d); do echo needle-line-with-some-padding-$i; done > big/f.txt"}`, 14000))
-		got := ok(t, r, "grep", `{"pattern":"needle","path":"big"}`)
+		got := ok(t, r, "grep", `{"pattern":"needle","path":"big","output_mode":"content"}`)
 		cut := strings.LastIndex(got, "\n[output truncated; full output written to /tmp/tool_outputs/")
 		if cut < 0 {
 			t.Fatalf("content does not report the truncation and the spill file: %q", got[max(0, len(got)-80):])
@@ -497,6 +504,44 @@ func TestGrep(t *testing.T) {
 func TestUnknownTool(t *testing.T) {
 	r := runner(t)
 	fails(t, r, "web_search", `{"query":"x"}`, "unknown tool")
+}
+
+// Each of the six sandbox tools refuses an input property its schema does not
+// declare, naming it and what the tool does accept, rather than dropping it
+// and running a different call from the one asked for (#827). The Runner has
+// no sandbox at all: a refusal must come before anything runs, and a call that
+// reached the sandbox would panic here instead.
+func TestUnknownInputPropertiesAreRefused(t *testing.T) {
+	r := toolset.Runner{Session: domain.NewID("sesn")}
+	for _, tc := range []struct {
+		tool, input, want string
+	}{
+		{"bash", `{"command":"touch /tmp/ran","cwd":"/tmp"}`,
+			`bash: unknown input property "cwd"; bash accepts command, restart, timeout_ms`},
+		{"read", `{"file_path":"a.txt","offset":3,"limit":10}`,
+			`read: unknown input properties "limit", "offset"; read accepts file_path, view_range`},
+		{"write", `{"file_path":"a.txt","content":"x","mode":"0755"}`,
+			`write: unknown input property "mode"; write accepts content, file_path`},
+		{"edit", `{"file_path":"a.txt","old_string":"a","new_string":"b","count":2}`,
+			`edit: unknown input property "count"; edit accepts file_path, new_string, old_string, replace_all`},
+		{"glob", `{"pattern":"*","exclude":"*.md"}`,
+			`glob: unknown input property "exclude"; glob accepts path, pattern`},
+		{"grep", `{"pattern":"todo","include":"*.go"}`,
+			`grep: unknown input property "include"; grep accepts -A, -B, -C, -i, -n, context, glob, ` +
+				`head_limit, multiline, offset, output_mode, path, pattern, type`},
+		// A key is quoted, so one carrying a NUL or a newline cannot reach
+		// the event log raw or forge the message.
+		{"glob", `{"pattern":"*","a\u0000b\nc":1}`,
+			`glob: unknown input property "a\x00b\nc"; glob accepts path, pattern`},
+	} {
+		res, err := r.Run(context.Background(), domain.NewID("sevt"), tc.tool, json.RawMessage(tc.input))
+		if err != nil {
+			t.Fatalf("%s(%s): %v", tc.tool, tc.input, err)
+		}
+		if !res.IsError || res.Content != tc.want {
+			t.Errorf("%s(%s) = %+v, want the is_error refusal %q", tc.tool, tc.input, res, tc.want)
+		}
+	}
 }
 
 // A NUL byte in tool output must never reach the Result: Postgres's jsonb

@@ -29,11 +29,12 @@
 // Divergences from that reference, all deliberate:
 //   - No workdir confinement (above). Absolute paths and absolute glob
 //     patterns are accepted.
-//   - grep shells out to GNU grep inside the sandbox (PCRE where the image's
-//     grep has it, POSIX ERE otherwise) rather than preferring ripgrep and
-//     falling back to a Go walker. One implementation, one behaviour, and no
-//     dependence on what the image happens to ship beyond the /bin/bash the
-//     sandbox already requires.
+//   - grep shells out to GNU grep and find inside the sandbox (PCRE where the
+//     image's grep has it, POSIX ERE otherwise) rather than preferring ripgrep
+//     and falling back to a Go walker, and gives the ripgrep flags of the
+//     recorded reference's schema their ripgrep meaning on top (grep.go). One
+//     implementation, one behaviour, and no dependence on whether the image
+//     ships ripgrep.
 //   - The tools carry no state between calls except bash's, which is the
 //     shell package's snapshot; there is no per-runner session object to close.
 //   - write and edit preserve the permission bits of an existing regular file they
@@ -50,7 +51,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -133,6 +137,9 @@ func (r Runner) Run(ctx context.Context, id domain.ID, name string, input json.R
 }
 
 func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input json.RawMessage) (Result, error) {
+	if refusal, bad := unknownProperties(name, input); bad {
+		return Result{Content: CapOutput(refusal), IsError: true}, nil
+	}
 	var (
 		res Result
 		err error
@@ -313,6 +320,48 @@ func badField(tool, field, value string) (Result, bool) {
 		return Result{Content: fmt.Sprintf("%s: %s must not contain a NUL byte", tool, field), IsError: true}, true
 	}
 	return Result{}, false
+}
+
+// unknownProperties is the refusal of a sandbox tool call whose input names a
+// property the tool's schema does not declare, and true; or false when it
+// names none, or is not a JSON object at all (the tool's own decode answers
+// that). Every schema is closed, but the schema is only a hint: an
+// OpenAI-protocol route strips additionalProperties (#682), and a model may
+// send a stray property under either protocol. Dropping it silently would run
+// a different search from the one asked for — a -i ignored is a
+// case-sensitive grep that finds nothing — so the call is refused, naming
+// what was not understood and what is (#827). The names are quoted, so a key
+// carrying a NUL or a newline cannot forge the message.
+func unknownProperties(name string, input json.RawMessage) (string, bool) {
+	var props map[string]any
+	for _, d := range definitions {
+		if d.name == name && !d.web {
+			props = d.props
+		}
+	}
+	var obj map[string]json.RawMessage
+	if props == nil || json.Unmarshal(input, &obj) != nil {
+		return "", false
+	}
+	var unknown []string
+	for k := range obj {
+		if _, ok := props[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return "", false
+	}
+	slices.Sort(unknown)
+	for i, k := range unknown {
+		unknown[i] = strconv.Quote(k)
+	}
+	noun := "property"
+	if len(unknown) > 1 {
+		noun = "properties"
+	}
+	return fmt.Sprintf("%s: unknown input %s %s; %s accepts %s", name, noun, strings.Join(unknown, ", "),
+		name, strings.Join(slices.Sorted(maps.Keys(props)), ", ")), true
 }
 
 // TruncateRunes returns s cut to at most n bytes, backing off to a rune

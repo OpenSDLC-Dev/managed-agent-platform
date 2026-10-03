@@ -454,10 +454,10 @@ func convertTools(tools []json.RawMessage, builtin map[string]bool) ([]chatTool,
 // them, and the built-ins are on by default. What the model loses here is a
 // hint, not the check: the executor validates the web tools' input, the edit
 // tool refuses an empty old_string wherever it runs (executor or BYOC
-// worker), and a property a closed schema would have refused is one the tools
-// ignore. A custom or MCP tool's schema is never touched: it is a contract
-// its author set, which no platform check stands behind, and whatever it
-// carries it carried before #682.
+// worker), and a sandbox tool refuses, naming it, a property a closed schema
+// would have refused (#827). A custom or MCP tool's schema is never touched:
+// it is a contract its author set, which no platform check stands behind, and
+// whatever it carries it carried before #682.
 // unevaluatedProperties goes with additionalProperties: it is the 2019-09
 // keyword that closes an object the same way, and no built-in carries it yet.
 var strippedKeywords = []string{"format", "minLength", "additionalProperties", "unevaluatedProperties"}

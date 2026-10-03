@@ -740,6 +740,62 @@ func TestToolLevelErrorIsAnsweredNotAbandoned(t *testing.T) {
 	}
 }
 
+// A sandbox tool call carrying a property its schema does not declare is
+// answered with a tool error naming it, and runs nothing (#827); a grep call
+// carrying the recorded reference's properties reaches the sandbox with them.
+// Both are the toolset Runner's — this pins that the executor's path is it.
+func TestToolInputPropertiesOnTheExecutorPath(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	use := func(name string, input map[string]any) string {
+		b, _ := json.Marshal(map[string]any{"name": name, "input": input})
+		return string(b)
+	}
+	h.suspend(t,
+		use("write", map[string]any{"file_path": "out.txt", "content": "x", "mode": "0755"}),
+		use("grep", map[string]any{"pattern": "todo", "-i": true, "glob": "*.go", "include": "*.go"}),
+		use("grep", map[string]any{"pattern": "todo", "-i": true, "glob": "*.go", "output_mode": "content",
+			"-C": 2, "-A": 1, "head_limit": 5, "offset": 1}))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	type result struct {
+		IsError bool `json:"is_error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	for i, want := range []string{`write: unknown input property "mode"`, `grep: unknown input property "include"`, "no matches"} {
+		var body result
+		_ = json.Unmarshal(results[i].Body, &body)
+		if body.IsError != (i < 2) || len(body.Content) != 1 || !strings.HasPrefix(body.Content[0].Text, want) {
+			t.Errorf("result %d = %+v, want %q", i, body, want)
+		}
+	}
+	if _, ok := sb.files["/workspace/out.txt"]; ok {
+		t.Error("the refused write wrote its file")
+	}
+	var greps []string
+	for _, c := range sb.cmds {
+		if strings.Contains(c, "flavor=-P") {
+			greps = append(greps, c)
+		}
+	}
+	if len(greps) != 1 {
+		t.Fatalf("grep scripts run = %d, want only the accepted call's", len(greps))
+	}
+	for _, want := range []string{"mode='content'", "skip=1", "limit=5", "flags=('-i' '-n' '-B' '2' '-A' '1')", `[^/]*\.go$`} {
+		if !strings.Contains(greps[0], want) {
+			t.Errorf("grep script lacks %q", want)
+		}
+	}
+}
+
 func TestBackendFaultLeavesItemForReclaim(t *testing.T) {
 	// A backend fault (the sandbox write fails) is the executor's problem, not
 	// the model's: the tool stays unanswered, no resume is scheduled, and the

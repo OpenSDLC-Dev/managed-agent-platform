@@ -62,18 +62,6 @@ for f in "$prefix"$pat; do
 done | xargs -0 -r stat --printf '%.9Y %n\0' | sort -z -rn -k1,1
 `
 
-// grepScript searches with the image's own grep: PCRE where it has it — a model
-// writes \d and \b far more readily than their POSIX spellings — and ERE where
-// it does not. The probe tells the two apart by exit code: a grep with PCRE
-// finds nothing in /dev/null and exits 1, one without it rejects -P and exits 2.
-const grepScript = `root=__ROOT__
-pat=__PAT__
-flavor=-P
-grep -qP -- '' /dev/null 2>/dev/null
-if [ "$?" -ge 2 ]; then flavor=-E; fi
-grep -rnI "$flavor" --exclude-dir=.git --exclude-dir=node_modules -e "$pat" -- "$root"
-`
-
 func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 	var in searchInput
 	if err := json.Unmarshal(raw, &in); err != nil {
@@ -135,56 +123,8 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 	return succeed(strings.Join(paths, "\n"))
 }
 
-func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
-	var in searchInput
-	if err := json.Unmarshal(raw, &in); err != nil {
-		return failf("invalid grep input: %v", err)
-	}
-	if in.Pattern == "" {
-		return failf("grep: pattern is required")
-	}
-	if res, bad := badField("grep", "pattern", in.Pattern); bad {
-		return res, nil
-	}
-	if res, bad := badField("grep", "path", in.Path); bad {
-		return res, nil
-	}
-
-	root := r.workdir()
-	if in.Path != "" {
-		root = r.resolve(in.Path)
-	}
-	// No absolute-pattern handling here: a grep pattern is a regex, not a path,
-	// and one that happens to start with "/" must not be mistaken for an
-	// absolute root and turned loose on the whole filesystem.
-	res, err := r.execScript(ctx, grepScript, root, "", in.Pattern)
-	if err != nil {
-		return Result{}, err
-	}
-	switch {
-	case res.TimedOut:
-		return failf("grep: timed out after %s", DefaultTimeout)
-	case res.ExitCode == 1:
-		// grep's own "nothing matched". It is the answer, not a failure.
-		return succeed("no matches")
-	case res.ExitCode != 0:
-		return searchFailure("grep", res)
-	}
-	out := strings.TrimRight(res.Stdout, "\n")
-	if out == "" {
-		return succeed("no matches")
-	}
-	// The sandbox's own per-stream cap may already have cut this stream; the
-	// marker must ride along, or a spill of it would read as the full result.
-	if res.Truncated {
-		out = truncationNotice + "\n" + out
-	}
-	return succeed(out)
-}
-
 // execScript renders a search script with the model's search root, prefix and
 // pattern as data — single-quoted, never interpolated as code — and runs it.
-// grep passes an empty prefix, which grepScript does not reference.
 func (r Runner) execScript(ctx context.Context, script, root, prefix, pattern string) (sandbox.ExecResult, error) {
 	cmd := strings.NewReplacer(
 		"__ROOT__", singleQuote(root),

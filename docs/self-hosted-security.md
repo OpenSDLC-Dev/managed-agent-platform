@@ -170,8 +170,8 @@ without one loses skill materialization outright, where Docker hands the same
 archive to the daemon and needs nothing (#206). `internal/sandbox/k8s/client.go`
 is the exact list. On **Docker** that same `stat` is only wanted, not required
 (below). The `grep` built-in expects GNU
-grep/coreutils — a busybox-only image gets a clear tool error, not degraded
-behaviour.
+grep/findutils/coreutils, and a grep with PCRE (`-P`) for its `multiline`
+option — a busybox-only image gets a clear tool error, not degraded behaviour.
 
 A cloud environment's `config.packages` adds a contract of its own, and only for
 the managers it names: the executor runs `apt`, `cargo`, `gem`, `go`, `npm` and

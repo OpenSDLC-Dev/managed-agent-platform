@@ -123,7 +123,9 @@ func TestToolsRejectsMalformedEntry(t *testing.T) {
 }
 
 // The schema the model is handed is the one the wire documents, field for
-// field (checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// field — but for grep, which carries the recorded reference's twelve more
+// (TestGrepSchemaMatchesTheRecording) beside the SDK's two
+// (checked against anthropic-sdk-go v1.70.1 — betaagent.go
 // BetaManagedAgentsAgentToolset20260401BashInput and
 // BetaManagedAgentsAgentToolset20260401ReadInput and
 // BetaManagedAgentsAgentToolset20260401WriteInput and
@@ -141,7 +143,8 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 		"edit": {props: []string{"file_path", "new_string", "old_string", "replace_all"},
 			required: []string{"file_path", "new_string", "old_string"}},
 		"glob": {props: []string{"path", "pattern"}, required: []string{"pattern"}},
-		"grep": {props: []string{"path", "pattern"}, required: []string{"pattern"}},
+		"grep": {props: []string{"-A", "-B", "-C", "-i", "-n", "context", "glob", "head_limit", "multiline",
+			"offset", "output_mode", "path", "pattern", "type"}, required: []string{"pattern"}},
 		// The wire carries no Input types for the web tools; their schemas are
 		// the recorded reference's (TestWebToolSchemasMatchTheRecording).
 		"web_fetch":  {props: []string{"url"}, required: []string{"url"}},
@@ -294,6 +297,55 @@ func TestWebToolSchemasMatchTheRecording(t *testing.T) {
 	if seen != len(recorded) {
 		t.Fatalf("saw %d of the %d web tools", seen, len(recorded))
 	}
+}
+
+// grep's input schema is the reference's, keyword for keyword and description
+// for description, as the 2026-09-02 recording echoed it (#827, an owner
+// decision; the echo is model-mediated, docs/DIVERGENCES.md weighs it).
+func TestGrepSchemaMatchesTheRecording(t *testing.T) {
+	const recorded = `{"type":"object","properties":{` +
+		`"pattern":{"type":"string","description":"The regular expression pattern to search for in file contents"},` +
+		`"path":{"type":"string","description":"File or directory to search in (rg PATH). Defaults to current working directory."},` +
+		`"type":{"type":"string","description":"File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than include for standard file types."},` +
+		`"glob":{"type":"string","description":"Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg --glob"},` +
+		`"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"description":"Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."},` +
+		`"-n":{"type":"boolean","description":"Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true."},` +
+		`"-A":{"type":"number","description":"Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise."},` +
+		`"-B":{"type":"number","description":"Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise."},` +
+		`"-C":{"type":"number","description":"Alias for context."},` +
+		`"context":{"type":"number","description":"Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise."},` +
+		`"-i":{"type":"boolean","description":"Case insensitive search (rg -i)"},` +
+		`"head_limit":{"type":"number","description":"Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). Defaults to 0 (unlimited)."},` +
+		`"offset":{"type":"number","description":"Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0."},` +
+		`"multiline":{"type":"boolean","description":"Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."}` +
+		`},"required":["pattern"],"additionalProperties":false}`
+
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	var want map[string]any
+	if err := json.Unmarshal([]byte(recorded), &want); err != nil {
+		t.Fatalf("recorded: %v", err)
+	}
+	for _, raw := range defs {
+		var d struct {
+			Name        string         `json:"name"`
+			InputSchema map[string]any `json:"input_schema"`
+		}
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("definition: %v", err)
+		}
+		if d.Name != "grep" {
+			continue
+		}
+		if !reflect.DeepEqual(d.InputSchema, want) {
+			got, _ := json.Marshal(d.InputSchema)
+			t.Fatalf("grep input_schema = %s, want the recorded %s", got, recorded)
+		}
+		return
+	}
+	t.Fatal("no grep definition")
 }
 
 func sortStrings(s []string) {
