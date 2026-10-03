@@ -26,8 +26,9 @@ heading says. Every other file is fetched from the URL listed, at the sha256
 pinned beside it. The packages the lock files name by path, their own
 workspaces, are listed under WORKSPACE PACKAGES with the component whose
 texts cover each. Every text is as its source has it but for whitespace no
-text's meaning rests on: CRLF line ends are made LF, the spaces and tabs that
-end a line are dropped, and so are the blank lines that end a text.
+text's meaning rests on: CRLF line ends are made LF, the spaces, tabs and
+carriage returns that end a line are dropped, and so are the blank lines that
+end a text.
 
 COMPONENTS
 ----------

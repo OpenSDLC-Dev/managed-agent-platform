@@ -23,9 +23,13 @@
 // lock file's crates a build links depends on its target and features, which
 // this does not resolve, so build tools and other platforms' crates are
 // included too. Each text is written as its source has it but for
-// whitespace no text's meaning rests on (normText), so the file holds no line
-// `git diff --check` flags. The output is a function of the pinned bytes
-// alone, so running it twice writes the same file. Its header records the sha256 of
+// whitespace no text's meaning rests on (normText): CRLF line ends are made
+// LF, the spaces, tabs and carriage returns that end a line are dropped, and
+// so are the blank lines that end a text. So no line ends in whitespace, and
+// the file ends in no blank line, which `git diff --check` would flag; a
+// space before a tab in a line's indent, which it flags as well, is left as
+// the source has it. The output is a function of the pinned bytes alone, so
+// running it twice writes the same file. Its header records the sha256 of
 // sources.json and of the rest of the file, which is what its test can hold
 // the committed file to without the network (TestTheGeneratedFileIsCurrent).
 package main
@@ -299,8 +303,9 @@ heading says. Every other file is fetched from the URL listed, at the sha256
 pinned beside it. The packages the lock files name by path, their own
 workspaces, are listed under WORKSPACE PACKAGES with the component whose
 texts cover each. Every text is as its source has it but for whitespace no
-text's meaning rests on: CRLF line ends are made LF, the spaces and tabs that
-end a line are dropped, and so are the blank lines that end a text.
+text's meaning rests on: CRLF line ends are made LF, the spaces, tabs and
+carriage returns that end a line are dropped, and so are the blank lines that
+end a text.
 
 `
 	b.WriteString(bodyStart + "\n")
