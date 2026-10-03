@@ -1412,8 +1412,9 @@ func TestWriteFileStreamClassifiesAnUnmakeableParent(t *testing.T) {
 
 // A probe whose output never carried its frame — a shell that died first, a
 // startup that filled the output cap — said nothing the platform reads: the
-// mkdir's refusal stays the raw error, never a reason taken from a banner, and
-// the writability probe's exit still classifies the write, with no reason.
+// mkdir's exit and the writability probe's still classify the write as one the
+// path refuses, with no reason, as the k8s write script's exit does, and never
+// a reason taken from a banner.
 func TestWriteProbesReadNoReasonOutsideTheirFrame(t *testing.T) {
 	var execN int
 	kinds := map[string]string{}
@@ -1464,13 +1465,13 @@ func TestWriteProbesReadNoReasonOutsideTheirFrame(t *testing.T) {
 		}
 	})
 	c := p.attach("abc", "/workspace", "", false)
-	if err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1); errors.Is(err, sandbox.ErrNotWritable) ||
-		err == nil || !strings.Contains(err.Error(), "mkdir -p /newtop: exit 1") {
-		t.Errorf("mkdir's unframed refusal = %v; want the raw error, unclassified", err)
-	}
-	err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x"))
 	var pnw *sandbox.PathNotWritableError
-	if !errors.As(err, &pnw) || pnw.Reason != "" {
+	if err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1); !errors.As(err, &pnw) ||
+		pnw.Path != "/newtop" || pnw.Reason != "" {
+		t.Errorf("mkdir's unframed refusal = %v; want ErrNotWritable for /newtop with no reason", err)
+	}
+	pnw = nil
+	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); !errors.As(err, &pnw) || pnw.Reason != "" {
 		t.Errorf("the probe's unframed refusal = %v; want ErrNotWritable with no reason", err)
 	}
 }
@@ -2763,6 +2764,7 @@ func TestWriteFileKeepsPathFailuresDistinctFromAMissingSandbox(t *testing.T) {
 
 func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 	var commands []string
+	var cmd []string
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/containers/abc/archive":
@@ -2774,9 +2776,12 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 				t.Errorf("decode exec create: %v", err)
 			}
 			commands = append(commands, wrapperCommand(body.Cmd))
+			cmd = body.Cmd
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
-			w.Write(frame(2, "Read-only file system\n"))
+			if _, _, framed := sandboxtest.Unwrap(wrapperCommand(cmd)); framed {
+				w.Write(framedOutput(t, cmd, "", "mkdir: cannot create directory '/workspace/a': Read-only file system\n"))
+			}
 		case r.URL.Path == "/exec/e1/json":
 			io.WriteString(w, `{"Running":false,"ExitCode":1}`)
 		}

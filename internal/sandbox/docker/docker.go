@@ -2001,8 +2001,7 @@ func (c *container) reclaim(ctx context.Context, tmp string) {
 // mkdir's message is read from inside the script's frame (sandbox.ExecFramed),
 // so what an image's startup prints on stderr ahead of it — a BASH_ENV file's
 // banner, which would otherwise be the first line the reason is taken from —
-// is no part of it (#860). Output whose frame did not arrive whole carries no
-// reason, and the raw error keeps what the sandbox printed.
+// is no part of it (#860).
 func (c *container) mkdirAll(ctx context.Context, dir string) error {
 	res, framed, err := sandbox.ExecFramed(ctx, c, "mkdir", sandbox.ExecRequest{Command: sandbox.PathFaultShell +
 		fmt.Sprintf("export LC_ALL=C\nmkdir -p %[1]s || { __map_path_fault %[1]s; exit 1; }", shellQuote(dir))})
@@ -2014,15 +2013,22 @@ func (c *container) mkdirAll(ctx context.Context, dir string) error {
 		return nil
 	case sandbox.ExitPathNotDirectory:
 		return fmt.Errorf("%s: %w", dir, sandbox.ErrNotDirectory)
-	default:
+	case 1:
 		// mkdir failed for a reason that is not a blocking file — a read-only
-		// root, a root-owned parent, a full disk. Its own stderr names why,
-		// and the strerror tail is the reason the classified refusal carries,
-		// as the k8s write script's mkdir branch carries its own (plan 23,
-		// #306); a mkdir that said nothing keeps the raw error.
-		if reason := strerrorTail(res.Stderr); framed && reason != "" {
-			return &sandbox.PathNotWritableError{Path: dir, Reason: reason}
+		// root, a root-owned parent, a full disk. The exit says so, as the k8s
+		// write script's mkdir branch says it with its exit 20 (plan 23, #306),
+		// and mkdir's own stderr names why: its strerror tail is the reason the
+		// classified refusal carries. A message that did not reach the output
+		// whole, or that names nothing, leaves the refusal without one, as the
+		// k8s script's does.
+		reason := ""
+		if framed {
+			reason = strerrorTail(res.Stderr)
 		}
+		return &sandbox.PathNotWritableError{Path: dir, Reason: reason}
+	default:
+		// The script exits 0, 1 or the path fault's code; anything else is the
+		// shell's own end — killed, or never started — and keeps the raw error.
 		return fmt.Errorf("docker: mkdir -p %s: exit %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 }
