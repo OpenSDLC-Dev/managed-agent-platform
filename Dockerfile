@@ -15,10 +15,12 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 # The pinned static ripgrep the executor and worker embed for the grep tool
-# (internal/ripgrep; `make ripgrep` is the same command). Fetched before the
-# rest of the source arrives, so the layer caches until the manifest or the
-# fetcher changes, and checked against its sha256 either way. Archives already
-# in the build context are checked rather than fetched again.
+# (internal/ripgrep; `make ripgrep` is the same command), downloaded here and
+# checked against the manifest's sha256. Fetched before the rest of the source
+# arrives, so the layer caches until the manifest or the fetcher changes. The
+# build context carries no archives of its own (.dockerignore keeps a
+# checkout's fetched ones out), so `COPY . .` below cannot land a copy over
+# the ones checked here.
 COPY internal/ripgrep internal/ripgrep
 COPY tools/ripgrepfetch tools/ripgrepfetch
 RUN go run ./tools/ripgrepfetch
