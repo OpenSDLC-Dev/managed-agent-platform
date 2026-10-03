@@ -288,3 +288,58 @@ func TestBulkWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 		t.Errorf("%s bytes left in /etc = %s, want 0 (#316)", sandbox.TempPrefix, got)
 	}
 }
+
+// quotedParentDockerfile is the non-root image contract plus a directory tree
+// root owns and the sandbox user cannot write, fifteen levels of 255 quotes
+// deep under /srv.
+const quotedParentDockerfile = `FROM debian:stable-slim
+RUN useradd -m app && mkdir -p /workspace && chown app:app /workspace
+RUN q=$(printf '%255s' '' | tr ' ' "'") && d=/srv && for i in $(seq 15); do d="$d/$q"; done && mkdir -p "$d"
+USER app
+`
+
+// A write whose rename the sandbox refused as too long to run — a path of
+// quotes, which the rename script quotes eleven times — never ran its script,
+// so no `mv` can be in flight and the daemon can take back what it landed.
+// Under a parent the sandbox user cannot write, its own `rm -f` cannot shed
+// the temporary, and the refused payload stayed for the container's life
+// where every other rename failure empties it (#310).
+func TestARenameTooLongToRunLeavesNoPayloadOnANonRootImage(t *testing.T) {
+	image := dockertest.ImageFrom(t, "nonroot-quoted", quotedParentDockerfile, "--host", docker.DaemonHost())
+
+	p, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	ctx := context.Background()
+	sb, err := p.Provision(ctx, sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: image, Workdir: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+
+	q := strings.Repeat("'", 255)
+	path := "/srv/" + strings.Repeat(q+"/", 15) + strings.Repeat("'", 200)
+	var tooLong *sandbox.CommandTooLongError
+	if err := sb.WriteFile(ctx, path, []byte(strings.Repeat("A", 4096))); !errors.As(err, &tooLong) {
+		t.Fatalf("write of a %d-byte path of quotes = %v; want the rename refused as too long", len(path), err)
+	}
+
+	// The temporary's name is still there — the sandbox user cannot unlink
+	// it — but the daemon emptied it.
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{
+		Command: "find /srv -name '" + sandbox.TempPrefix + "*' -printf '%s\\n'",
+	})
+	if err != nil {
+		t.Fatalf("size what is left under /srv: %v", err)
+	}
+	if got := strings.TrimSpace(res.Stdout); got != "0" {
+		t.Errorf("%s files left under /srv, by size: %q; want one, emptied (#310)", sandbox.TempPrefix, got)
+	}
+}

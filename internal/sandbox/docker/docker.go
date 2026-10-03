@@ -1686,8 +1686,17 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// (`reclaim`) would let the `mv` succeed and put a zero-byte file where the
 		// caller's old data was, while the caller is being told the write failed.
 		// So the shed here is the one the sandbox user can do, and a payload under
-		// a parent that user cannot write survives on this branch (#310).
+		// a parent that user cannot write survives on this branch (#310) — but
+		// for the one error that says the script never ran: a command Exec
+		// refused as too long (sandbox.CommandTooLongError), which a path the
+		// script quotes eleven times can make. No `mv` is in flight then, so the
+		// daemon takes back what the sandbox user's `rm` could not, as on every
+		// failure below.
 		c.discard(ctx, tmp)
+		var tooLong *sandbox.CommandTooLongError
+		if errors.As(err, &tooLong) {
+			c.reclaim(ctx, tmp)
+		}
 		return err
 	}
 	if res.ExitCode == 0 {
@@ -1850,7 +1859,8 @@ func (c *container) discard(ctx context.Context, tmp string) {
 //
 // Callers must also be sure no write script is still running against tmp; a `mv`
 // racing this one lands the empty file on the target. rename's exec-error branch
-// is the site where that is possible, and it does not call this.
+// is the site where that is possible, and it calls this only for an exec
+// refused before it ran.
 func (c *container) reclaim(ctx context.Context, tmp string) {
 	ctx, cancel := cleanup(ctx)
 	defer cancel()
