@@ -1838,12 +1838,12 @@ const (
 // transport failure this guards, a per-call crypto/rand nonce is what keeps a
 // file's own bytes from holding the end line by accident.
 //
-// `cat` is not exec'd, because the script has to outlive it for the frame to
-// close; that is the whole reason, and not the one #103 had for dropping `exec`
-// on the write side. `|| exit 1` collapses every `cat` failure onto a code that means
-// nothing else: codes 10-14 are one flat namespace shared with writeScript, and
-// the filesystem is agent-controlled, so a `cat` left to exit 13 on its own would
-// be reported to the model as a file too large.
+// `cat` is not exec'd, so the script outlives it — a reason of its own, not
+// the one #103 had for dropping `exec` on the write side: `|| exit 1`
+// collapses every `cat` failure onto a code that means nothing else. Codes
+// 10-14 are one flat namespace shared with writeScript, and the filesystem is
+// agent-controlled, so a `cat` left to exit 13 on its own would be reported to
+// the model as a file too large.
 //
 // A path that does not exist is asked *why* before it is reported as missing: a
 // non-directory somewhere above it is a different answer, and the model can act on
