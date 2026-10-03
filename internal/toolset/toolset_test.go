@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/k8s"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
@@ -331,6 +333,73 @@ func TestReadWriteEdit(t *testing.T) {
 			t.Fatalf("bash saw %q", got)
 		}
 	})
+}
+
+// A file_path too long for Linux — resolving past PATH_MAX's 4095 bytes, or
+// holding a name past NAME_MAX's 255 — is a tool error naming the bound on
+// every backend, where the k8s backend would hand it to an exec that cannot
+// start and Docker's archive endpoint would answer a 500, both faults a
+// reclaim would only repeat. One at the bounds is the sandbox's, written,
+// read and edited as any other.
+func TestFilePathsTooLongForLinux(t *testing.T) {
+	filePathBounds(t, runner(t))
+}
+
+// The same in a Kubernetes pod, under a read-only root as the chart runs one:
+// the cluster MAP_K8S_CONTEXT names.
+func TestFilePathsTooLongForLinuxInAKubernetesPod(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
+	}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+		SessionID:  domain.NewID("sesn"),
+		Image:      testImage,
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+		Hardening:  sandbox.Hardening{ReadOnlyRootfs: true},
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+	filePathBounds(t, toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")})
+}
+
+// filePathBounds is TestFilePathsTooLongForLinux on the sandbox r runs in.
+func filePathBounds(t *testing.T, r toolset.Runner) {
+	t.Helper()
+	// Fifteen 255-byte directories under /workspace, then a name that brings
+	// the resolved path to 4095 bytes, or one past.
+	dirs := strings.Repeat(strings.Repeat("d", 255)+"/", 15)
+	atBound, pastBound := dirs+strings.Repeat("f", 244), dirs+strings.Repeat("f", 245)
+	inputs := map[string]func(p string) string{
+		"read":  func(p string) string { return `{"file_path":"` + p + `"}` },
+		"write": func(p string) string { return `{"file_path":"` + p + `","content":"x"}` },
+		"edit":  func(p string) string { return `{"file_path":"` + p + `","old_string":"x","new_string":"y"}` },
+	}
+	for _, tool := range []string{"read", "write", "edit"} {
+		in := inputs[tool]
+		fails(t, r, tool, in(pastBound),
+			tool+": file name too long: the file_path resolves to a 4096-byte path, over the 4095 bytes a Linux path can hold; shorten it")
+		fails(t, r, tool, in("/workspace/"+pastBound), "resolves to a 4096-byte path")
+		fails(t, r, tool, in("bounds/"+strings.Repeat("n", 256)),
+			tool+": file name too long: the file_path holds a 256-byte name, over the 255 bytes a Linux file name can hold; shorten it")
+		// Past what one exec argument carries, which the k8s backend's
+		// would have been.
+		fails(t, r, tool, in(strings.Repeat("x/", 100<<10)), "resolves to a 204810-byte path")
+	}
+	for _, p := range []string{atBound, "bounds/" + strings.Repeat("n", 255)} {
+		if got, want := ok(t, r, "write", `{"file_path":"`+p+`","content":"one x"}`), "wrote 5 bytes to "+p; got != want {
+			t.Fatalf("write at the bound = %q, want %q", got, want)
+		}
+		ok(t, r, "edit", `{"file_path":"`+p+`","old_string":"x","new_string":"two"}`)
+		if got := ok(t, r, "read", `{"file_path":"`+p+`"}`); got != "one two" {
+			t.Fatalf("read at the bound = %q, want the edited file", got)
+		}
+	}
 }
 
 func TestGlob(t *testing.T) {

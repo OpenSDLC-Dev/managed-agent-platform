@@ -1165,8 +1165,9 @@ func (s *refusing) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.E
 // One that carries none of it — grep's install, the bash tool's own script,
 // whose command the shell hands over in a file — is the platform's: a tool
 // error that says so, never "shorten them", and no fault for a reclaim to run
-// again. A file tool's command grows with the path the model named, which it
-// can shorten.
+// again. So is a file tool's: it refuses a path too long for Linux before the
+// sandbox is asked (TestFilePathsTooLongForLinux), and one within the bounds
+// makes no command that long.
 func TestACommandTooLongIsTheModelsOnlyWhereItsInputMadeIt(t *testing.T) {
 	const platform = "a command of the platform's own came to 133120 bytes, over the 122880 bytes one exec argument can carry: " +
 		"a fault in the platform, not in this call's input"
@@ -1179,8 +1180,7 @@ func TestACommandTooLongIsTheModelsOnlyWhereItsInputMadeIt(t *testing.T) {
 			&refusing{scripted: &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{
 				{ExitCode: 97, Stdout: scriptBegan + "map-ripgrep-missing x86_64\n"}}}, refuse: 2}},
 		{"the bash tool's script", "bash", `{"command":"true"}`, "bash: " + platform, &fakeSandbox{execErr: tooLong}},
-		{"a file tool's path", "write", `{"file_path":"a.txt","content":"x"}`,
-			"write: the file_path makes a 133120-byte command, over the 122880 bytes one exec argument can carry; shorten it",
+		{"a file tool's write", "write", `{"file_path":"a.txt","content":"x"}`, "write: " + platform,
 			&fakeSandbox{writeErr: fmt.Errorf("rename: %w", tooLong)}},
 	} {
 		res, err := run(t, tc.sb, tc.tool, tc.in)

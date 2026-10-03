@@ -553,6 +553,37 @@ func tail(s string) string {
 	return s
 }
 
+// A file_path too long for Linux is refused before the sandbox is asked —
+// no read, no write, no exec — and one at the bounds is handed to it.
+func TestFilePathsTooLongForLinuxAreRefusedBeforeTheSandbox(t *testing.T) {
+	name := strings.Repeat("n", 255)
+	atBound := "/" + strings.Repeat(name+"/", 15) + strings.Repeat("f", 4095-1-15*256)
+	inputs := map[string]string{"read": `}`, "write": `,"content":"x"}`, "edit": `,"old_string":"x","new_string":"y"}`}
+	for tool, rest := range inputs {
+		in := func(p string) string { return `{"file_path":"` + p + `"` + rest }
+		for p, want := range map[string]string{
+			atBound + "f":               tool + ": file name too long: the file_path resolves to a 4096-byte path",
+			"a/" + name + "n/b":         tool + ": file name too long: the file_path holds a 256-byte name",
+			strings.Repeat("x/", 70000): tool + ": file name too long: the file_path resolves to a 140010-byte path",
+		} {
+			sb := &fakeSandbox{}
+			res, err := run(t, sb, tool, in(p))
+			if err != nil || !res.IsError || !strings.HasPrefix(res.Content, want) {
+				t.Errorf("%s of a %d-byte path = %+v, %v; want %q", tool, len(p), res, err, want)
+			}
+			if n := len(sb.reads) + len(sb.writes) + len(sb.commands); n != 0 {
+				t.Errorf("%s of a %d-byte path asked the sandbox %d times", tool, len(p), n)
+			}
+		}
+		for _, p := range []string{atBound, "a/" + name} {
+			sb := &fakeSandbox{files: map[string]string{atBound: "x", "/workspace/a/" + name: "x"}}
+			if res, err := run(t, sb, tool, in(p)); err != nil || res.IsError {
+				t.Errorf("%s at the bounds = %+v, %v; want the sandbox's answer", tool, res, err)
+			}
+		}
+	}
+}
+
 // A sandbox-level truncation says so, and stderr follows stdout whole rather
 // than being run onto the end of its last line.
 func TestCombine(t *testing.T) {
