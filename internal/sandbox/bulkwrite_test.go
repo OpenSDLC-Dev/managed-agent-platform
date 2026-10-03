@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	gopath "path"
 	"strings"
 	"testing"
 	"time"
@@ -272,6 +273,45 @@ func TestBulkWriteFault(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "mv: cannot move") {
 		t.Errorf("err = %v, want the sandbox's own message carried through", err)
 	}
+
+	err = b.Fault("docker", sandbox.ExitPathNotReplaceable, "map-bulk-fail 1\n")
+	if !errors.Is(err, sandbox.ErrNotReplaceable) || !strings.Contains(err.Error(), "/workspace/second") {
+		t.Errorf("err = %v, want ErrNotReplaceable naming the member", err)
+	}
+
+	// Not writable names a member's target, or — `d` and an index — one of the
+	// batch's directories, with the shell's own reason after it. The last
+	// marker naming one of the batch's own wins, as it does for blamed.
+	var pnw *sandbox.PathNotWritableError
+	for _, tc := range []struct{ stderr, path, reason string }{
+		{"map-bulk-unwritable 1 Read-only file system\n", "/workspace/second", "Read-only file system"},
+		{"map-bulk-unwritable d0 Permission denied\n", "/workspace", "Permission denied"},
+		{"map-bulk-unwritable 0 Forged\nnoise\nmap-bulk-unwritable 1 Read-only file system\nmap-bulk-unwritable 7 Forged\n",
+			"/workspace/second", "Read-only file system"},
+	} {
+		err := b.Fault("k8s", sandbox.ExitPathNotWritable, tc.stderr)
+		if !errors.As(err, &pnw) || pnw.Path != tc.path || pnw.Reason != tc.reason {
+			t.Errorf("stderr %q: err = %#v, want %s not writable: %s", tc.stderr, err, tc.path, tc.reason)
+		}
+	}
+	for _, stderr := range []string{"", "map-bulk-unwritable\n", "map-bulk-unwritable x y\n",
+		"map-bulk-unwritable 2 z\n", "map-bulk-unwritable d1 z\n", "map-bulk-unwritable -1 z\n"} {
+		err := b.Fault("docker", sandbox.ExitPathNotWritable, stderr)
+		if !errors.Is(err, sandbox.ErrNotWritable) || errors.As(err, &pnw) {
+			t.Errorf("stderr %q: err = %#v, want a bare ErrNotWritable naming no member", stderr, err)
+		}
+	}
+
+	// Refusal answers only for the three codes the refused pass exits with; for
+	// anything else the delivery's own error is the one the caller keeps.
+	for _, code := range []int{0, 1, sandbox.ExitPathNotDirectory, sandbox.ExitBulkIncomplete, sandbox.ExitBulkExtract} {
+		if err := b.Refusal("docker", code, "map-bulk-fail 0\n"); err != nil {
+			t.Errorf("Refusal(%d) = %v, want nil", code, err)
+		}
+	}
+	if err := b.Refusal("docker", sandbox.ExitPathIsDirectory, "map-bulk-fail 0\n"); !errors.Is(err, sandbox.ErrIsDirectory) {
+		t.Errorf("Refusal(ExitPathIsDirectory) = %v, want ErrIsDirectory", err)
+	}
 }
 
 // What a shed pass names it could not remove is resolved against the batch's own
@@ -405,53 +445,262 @@ func TestBulkWriteLeftBehindSurvivesAnUnterminatedImageLine(t *testing.T) {
 	}
 }
 
-// The emptying archive puts the names back without the payloads: one zero-byte
-// entry per path, relative like every other entry this file builds, so the one
-// extraction at `/` covers a whole batch's residue.
-func TestBulkWriteEmptyArchive(t *testing.T) {
+// extracted is one extraction read back the way the daemon's untar sees it: the
+// directory it is extracted at, each entry's name in the archive as sent, and
+// each entry under its absolute landing path — Dir joined with that name.
+type extracted struct {
+	dir     string
+	names   []string
+	entries []entry
+}
+
+func readExtractions(t *testing.T, xs []sandbox.Extraction) []extracted {
+	t.Helper()
+	var out []extracted
+	for _, x := range xs {
+		var buf bytes.Buffer
+		if err := x.Archive(&buf); err != nil {
+			t.Fatalf("build the extraction at %s: %v", x.Dir, err)
+		}
+		got := extracted{dir: x.Dir}
+		tr := tar.NewReader(&buf)
+		for {
+			h, err := tr.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("read the extraction at %s: %v", x.Dir, err)
+			}
+			if h.Typeflag != tar.TypeReg {
+				t.Errorf("entry %s is type %q, want a regular file", h.Name, h.Typeflag)
+			}
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read entry %s: %v", h.Name, err)
+			}
+			got.names = append(got.names, h.Name)
+			got.entries = append(got.entries, entry{name: gopath.Join(x.Dir, h.Name), mode: h.Mode, data: data})
+		}
+		out = append(out, got)
+	}
+	return out
+}
+
+func extractionDirs(xs []extracted) string {
+	dirs := make([]string, len(xs))
+	for i, x := range xs {
+		dirs[i] = x.dir
+	}
+	return strings.Join(dirs, " ")
+}
+
+// On a read-only root the docker daemon resolves and checks the one directory an
+// extraction names, and nothing below it (#859). So there every directory is its
+// own extraction and every entry is named by its base name alone: nothing in an
+// archive names a directory the daemon did not check, so a symlink the sandbox
+// made under a mount cannot carry a member past it. A target that is itself a
+// mount point — /tmp — has its temporary in `/`, and that is an extraction too,
+// for the daemon to refuse.
+func TestBulkWriteExtractsEachDirectoryOnItsOwn(t *testing.T) {
+	files := []sandbox.FileWrite{
+		{Path: "/workspace/skills/pack/SKILL.md", Data: []byte("skill")},
+		{Path: "/tmp/a.txt", Data: []byte("tmp")},
+		{Path: "/workspace/skills/pack/scripts/deep/run.sh", Data: []byte("#!/bin/sh\n"), Mode: 0o755},
+		{Path: "/mnt/memory/notes/todo.md", Data: []byte("rw"), Mode: 0o666},
+		{Path: "/workspace/skills/pack/README.md", Data: []byte("readme")},
+		{Path: "/tmp", Data: []byte("onto a mount point")},
+	}
+	b, err := sandbox.NewBulkWrite("/workspace", files)
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+	xs := readExtractions(t, b.Members(true))
+	// In the order each directory first appears in the batch, one each.
+	want := "/workspace/skills/pack /tmp /workspace/skills/pack/scripts/deep /mnt/memory/notes /"
+	if got := extractionDirs(xs); got != want {
+		t.Fatalf("extractions at %s, want %s", got, want)
+	}
+	// Every member lands exactly where the whole-batch archive lands it — under
+	// its temporary name in its target's own directory — with its bytes and its
+	// mode, named by its base name alone, in the batch's order.
+	whole := readArchive(t, b)[2:] // past the manifest and the directory list
+	byPath := map[string]entry{}
+	for _, x := range xs {
+		for i, e := range x.entries {
+			if strings.Contains(x.names[i], "/") {
+				t.Errorf("entry %q at %s names a directory; every name is a base name", x.names[i], x.dir)
+			}
+			byPath[e.name] = e
+		}
+	}
+	for _, w := range whole {
+		e, ok := byPath["/"+w.name]
+		if !ok {
+			t.Errorf("member %s is in no extraction", w.name)
+			continue
+		}
+		if !bytes.Equal(e.data, w.data) || e.mode != w.mode {
+			t.Errorf("member %s carries %q mode %o, want %q mode %o", w.name, e.data, e.mode, w.data, w.mode)
+		}
+	}
+	if len(byPath) != len(files) {
+		t.Errorf("the extractions carry %d members, want %d", len(byPath), len(files))
+	}
+	if pack := xs[0].entries; len(pack) != 2 || pack[0].name != "/"+whole[0].name || pack[1].name != "/"+whole[4].name {
+		t.Errorf("the pack directory's extraction carries %v, want SKILL.md's then README.md's temporaries", pack)
+	}
+
+	// The bookkeeping is one extraction at the workdir, which both files share.
+	bk := readExtractions(t, b.Bookkeeping(true))
+	if len(bk) != 1 || bk[0].dir != "/workspace" {
+		t.Fatalf("bookkeeping extractions at %q, want one at the workdir", extractionDirs(bk))
+	}
+	if es := bk[0].entries; len(es) != 2 || es[0].name != b.Manifest || es[1].name != b.DirList {
+		t.Errorf("bookkeeping carries %+v, want the manifest then the directory list", es)
+	}
+}
+
+// On a writable root nothing changes from before #859: the bookkeeping is one
+// extraction at `/` and the members are another, each the whole tree with every
+// entry named by its path made relative — one request each, carrying what the
+// whole-batch archive carries.
+func TestBulkWriteExtractsTheWholeTreeAtTheRoot(t *testing.T) {
 	b, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{
-		{Path: "/etc/first", Data: bytes.Repeat([]byte("A"), 4096)},
+		{Path: "/workspace/skills/pack/SKILL.md", Data: []byte("skill")},
+		{Path: "/workspace/skills/pack/scripts/run.sh", Data: []byte("#!/bin/sh\n"), Mode: 0o755},
+		{Path: "/mnt/memory/notes/todo.md", Data: []byte("rw"), Mode: 0o666},
+		{Path: "/tmp/a.txt", Data: []byte("tmp")},
 	})
 	if err != nil {
 		t.Fatalf("NewBulkWrite: %v", err)
 	}
-	left := b.LeftBehind("map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left m\n")
+	bk, members := readExtractions(t, b.Bookkeeping(false)), readExtractions(t, b.Members(false))
+	if len(bk) != 1 || bk[0].dir != "/" || len(members) != 1 || members[0].dir != "/" {
+		t.Fatalf("bookkeeping at %q and members at %q, want one extraction each, at /",
+			extractionDirs(bk), extractionDirs(members))
+	}
+	whole := readArchive(t, b)
+	got := append(append([]string(nil), bk[0].names...), members[0].names...)
+	if len(got) != len(whole) {
+		t.Fatalf("the two extractions carry %d entries, want the whole archive's %d", len(got), len(whole))
+	}
+	sent := append(append([]entry(nil), bk[0].entries...), members[0].entries...)
+	for i, w := range whole {
+		if got[i] != w.name || !bytes.Equal(sent[i].data, w.data) || sent[i].mode != w.mode {
+			t.Errorf("entry %d is %q (%d bytes, mode %o), want the whole archive's %q (%d bytes, mode %o)",
+				i, got[i], len(sent[i].data), sent[i].mode, w.name, len(w.data), w.mode)
+		}
+	}
+}
 
-	var buf bytes.Buffer
-	if err := b.EmptyArchive(left, &buf); err != nil {
-		t.Fatalf("EmptyArchive: %v", err)
+// An extraction refuses to build an archive naming anything its shape does not
+// allow — below its directory, beside it, above it, the directory itself, a path
+// that is not absolute and clean, or a whole tree anywhere but `/` — and it
+// checks before writing the first header, so an extraction that fails sends the
+// daemon nothing at all, not even the entries ahead of the one that failed.
+func TestExtractionRefusesAnEntryOutsideItsDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		dir  string
+		tree bool
+		ok   string
+		bad  string
+	}{
+		{"/workspace/skills/pack", false, "/workspace/skills/pack/ok", "/workspace/skills/pack/scripts/run.sh"},
+		{"/workspace/skills/pack", false, "/workspace/skills/pack/ok", "/workspace/skills/other/x"},
+		{"/workspace/skills/pack", false, "/workspace/skills/pack/ok", "/workspace/skills/pack"},
+		{"/workspace/skills/pack", false, "/workspace/skills/pack/ok", "/workspace/skills/x"},
+		{"/workspace", false, "/workspace/ok", "/workspace/../etc/x"},
+		{"/workspace", false, "/workspace/ok", "workspace/x"},
+		{"/", false, "/ok", "/etc/x"},
+		{"/", true, "/a/ok", "/"},
+		{"/", true, "/a/ok", "/a/../b"},
+		{"/workspace", true, "", "/workspace/x"},
+	} {
+		paths := []string{tc.bad}
+		if tc.ok != "" {
+			paths = []string{tc.ok, tc.bad}
+		}
+		var buf bytes.Buffer
+		err := sandbox.ExtractionForTest(tc.dir, tc.tree, paths...).Archive(&buf)
+		if err == nil || !strings.Contains(err.Error(), tc.bad) {
+			t.Errorf("an extraction at %s (tree %v) carrying %s: err = %v, want a refusal naming it",
+				tc.dir, tc.tree, tc.bad, err)
+		}
+		if buf.Len() != 0 {
+			t.Errorf("an extraction at %s carrying %s wrote %d bytes before refusing, want none",
+				tc.dir, tc.bad, buf.Len())
+		}
+	}
+	// What fits is named as the daemon must see it.
+	for _, tc := range []struct {
+		dir, path, name string
+		tree            bool
+	}{
+		{"/", "/x", "x", false},
+		{"/workspace/skills/pack", "/workspace/skills/pack/x", "x", false},
+		{"/", "/a/b/c", "a/b/c", true},
+	} {
+		xs := readExtractions(t, []sandbox.Extraction{sandbox.ExtractionForTest(tc.dir, tc.tree, tc.path)})
+		if len(xs[0].names) != 1 || xs[0].names[0] != tc.name {
+			t.Errorf("%s at %s (tree %v) is named %v, want %q", tc.path, tc.dir, tc.tree, xs[0].names, tc.name)
+		}
+	}
+}
+
+// The emptying puts the names back without the payloads, one zero-byte entry per
+// path, cut as the deliveries were: on a read-only root one extraction per
+// directory a left-behind path sits in, so the daemon checks each directory it
+// empties into; on a writable root one at `/`, as before #859.
+func TestBulkWriteEmptying(t *testing.T) {
+	b, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{
+		{Path: "/mnt/memory/notes/first", Data: bytes.Repeat([]byte("A"), 4096)},
+		{Path: "/mnt/memory/notes/second", Data: bytes.Repeat([]byte("B"), 4096)},
+		{Path: "/workspace/skills/pack/third", Data: bytes.Repeat([]byte("C"), 4096)},
+	})
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+	left := b.LeftBehind("map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left m\nmap-bulk-left 2\nmap-bulk-left 1\n")
+	if len(left) != 4 {
+		t.Fatalf("LeftBehind = %v, want four paths", left)
+	}
+
+	perDir := readExtractions(t, b.Emptying(left, true))
+	if want := "/mnt/memory/notes /workspace /workspace/skills/pack"; extractionDirs(perDir) != want {
+		t.Fatalf("emptying extractions at %s, want %s", extractionDirs(perDir), want)
 	}
 	var names []string
-	tr := tar.NewReader(&buf)
-	for {
-		h, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
+	for _, x := range perDir {
+		for i, e := range x.entries {
+			if len(e.data) != 0 {
+				t.Errorf("entry %s is %d bytes, want 0: the payload is the whole point", e.name, len(e.data))
+			}
+			if x.names[i] != gopath.Base(e.name) {
+				t.Errorf("entry %q at %s, want its base name", x.names[i], x.dir)
+			}
+			names = append(names, e.name)
 		}
-		if err != nil {
-			t.Fatalf("read the emptying archive: %v", err)
-		}
-		if h.Size != 0 {
-			t.Errorf("entry %s is %d bytes, want 0: the payload is the whole point", h.Name, h.Size)
-		}
-		if h.Typeflag != tar.TypeReg {
-			t.Errorf("entry %s is type %q, want a regular file", h.Name, h.Typeflag)
-		}
-		if strings.HasPrefix(h.Name, "/") {
-			t.Errorf("entry %s is absolute, want a relative name the untar extracts at /", h.Name)
-		}
-		names = append(names, "/"+h.Name)
 	}
-	if len(names) != 2 || names[0] != left[0] || names[1] != b.Manifest {
-		t.Errorf("the emptying archive carries %v, want exactly what was named: %v", names, left)
+	if want := []string{left[0], left[3], left[1], left[2]}; strings.Join(names, " ") != strings.Join(want, " ") {
+		t.Errorf("the emptying carries %v, want exactly what was named, by directory: %v", names, want)
+	}
+
+	whole := readExtractions(t, b.Emptying(left, false))
+	if len(whole) != 1 || whole[0].dir != "/" {
+		t.Fatalf("emptying on a writable root at %q, want one extraction at /", extractionDirs(whole))
+	}
+	for i, e := range whole[0].entries {
+		if e.name != left[i] || len(e.data) != 0 {
+			t.Errorf("entry %d empties %s (%d bytes), want %s at 0 bytes", i, e.name, len(e.data), left[i])
+		}
 	}
 
 	// Nothing named is nothing to send; the caller is what decides not to.
-	var none bytes.Buffer
-	if err := b.EmptyArchive(nil, &none); err != nil {
-		t.Fatalf("EmptyArchive(nil): %v", err)
+	if xs := b.Emptying(nil, true); len(xs) != 0 {
+		t.Errorf("an empty list built %d extractions, want none", len(xs))
 	}
-	if _, err := tar.NewReader(&none).Next(); !errors.Is(err, io.EOF) {
-		t.Errorf("an empty batch built an archive with entries in it: %v", err)
+	if xs := b.Emptying(nil, false); len(xs) != 0 {
+		t.Errorf("an empty list built %d extractions at /, want none", len(xs))
 	}
 }

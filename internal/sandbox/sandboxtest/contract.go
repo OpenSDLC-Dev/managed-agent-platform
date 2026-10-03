@@ -1375,6 +1375,249 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A read-only root leaves the writable mounts writable to a batch as it does to
+	// a single write. Every batch the platform writes lands in one — a skill in the
+	// workdir, a memory store under /mnt, package credentials in /tmp — and none
+	// did on the docker backend: its daemon extracted each archive at `/`, which a
+	// read-only root refuses (`container rootfs is marked read-only`) whatever the
+	// entries below it name, so skills and memory never materialized there (#859).
+	// The issue's three reproductions come first, verbatim, then the platform's own
+	// shapes in one batch: fresh nested directories under every mount, a member
+	// sitting directly in a mount point, and one asking for a mode.
+	t.Run("BulkWriteUnderReadOnlyRoot", func(t *testing.T) {
+		sb := provisionHardened(t, sandbox.Hardening{ReadOnlyRootfs: true})
+		ctx := context.Background()
+		for _, batch := range [][]sandbox.FileWrite{
+			{{Path: workdir + "/two-a.txt", Data: []byte("a")}, {Path: workdir + "/two-b.txt", Data: []byte("b")}},
+			{{Path: workdir + "/one.txt", Data: []byte("one")}},
+			{{Path: "/tmp/two-a.txt", Data: []byte("a")}, {Path: "/tmp/two-b.txt", Data: []byte("b")}},
+			{
+				{Path: workdir + "/skills/pack/SKILL.md", Data: []byte("# skill")},
+				{Path: workdir + "/skills/pack/scripts/deep/run.sh", Data: []byte("#!/bin/sh\necho hi\n")},
+				{Path: "/mnt/memory/notes/todo.md", Data: []byte("rw"), Mode: 0o666},
+				{Path: "/mnt/memory/.sync/baseline", Data: []byte("{}")},
+				{Path: "/tmp/fresh/nested/creds", Data: []byte("machine x")},
+				{Path: "/tmp/flat.txt", Data: []byte("flat")},
+			},
+		} {
+			if err := sb.WriteFiles(ctx, batch); err != nil {
+				t.Errorf("bulk write of %d files (first %s) under a read-only root: %v", len(batch), batch[0].Path, err)
+				continue
+			}
+			for _, f := range batch {
+				if got, err := sb.ReadFile(ctx, f.Path); err != nil || !bytes.Equal(got, f.Data) {
+					t.Errorf("%s = %q, %v; want %q", f.Path, got, err, f.Data)
+				}
+			}
+		}
+		// What lands lands as it does on a writable root (BulkWriteRoundTrip).
+		if got := fileMode(t, sb, workdir+"/skills/pack/SKILL.md"); got != "644" {
+			t.Errorf("a file the batch created has mode %s, want 644", got)
+		}
+		if got := fileMode(t, sb, "/tmp/fresh/nested"); got != "755" {
+			t.Errorf("a directory the batch created has mode %s, want 755", got)
+		}
+		if got := fileMode(t, sb, "/mnt/memory/notes/todo.md"); got != "666" {
+			t.Errorf("a member written with Mode 0666 has mode %s, want 666", got)
+		}
+		// Re-materializing over what landed is the ordinary second pass.
+		if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/skills/pack/SKILL.md", Data: []byte("x")},
+			{Path: "/mnt/memory/notes/todo.md", Data: []byte("y"), Mode: 0o666},
+		}); err != nil {
+			t.Errorf("second batch under a read-only root: %v", err)
+		} else if got, err := sb.ReadFile(ctx, workdir+"/skills/pack/SKILL.md"); err != nil || string(got) != "x" {
+			t.Errorf("after overwrite = %q, %v; want %q", got, err, "x")
+		}
+		assertNoWriteResidue(t, sb, workdir, workdir+"/skills/pack", workdir+"/skills/pack/scripts/deep",
+			"/tmp", "/tmp/fresh/nested", "/mnt/memory/notes", "/mnt/memory/.sync")
+
+		// The root itself stays read-only to a batch: one naming a path outside
+		// the mounts fails in the single write's terms
+		// (HardeningReadOnlyRootFilesystem), whether its directory exists or
+		// would have to be made — and its other member, bound for the workdir,
+		// is not written either: nothing is renamed until every member has
+		// landed.
+		for _, blocked := range []string{"/etc/map-859-blocked.conf", "/etc/map-859-new/blocked.conf"} {
+			err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+				{Path: workdir + "/beside-blocked.txt", Data: []byte("x")},
+				{Path: blocked, Data: []byte("x")},
+			})
+			if !errors.Is(err, sandbox.ErrNotWritable) || !strings.Contains(err.Error(), gopath.Dir(blocked)) {
+				t.Errorf("a batch into %s on a read-only root: err = %v, want ErrNotWritable naming it", blocked, err)
+			}
+			for _, path := range []string{blocked, workdir + "/beside-blocked.txt"} {
+				if _, err := sb.ReadFile(ctx, path); !errors.Is(err, sandbox.ErrFileNotExist) {
+					t.Errorf("%s after the refused batch: err = %v, want ErrFileNotExist", path, err)
+				}
+			}
+		}
+		// A target that is itself a directory — a mount point, /tmp or the workdir
+		// — has its temporary bound for `/`, outside the mounts, so the delivery
+		// is refused before the rename pass could say why. It is still the single
+		// write's ErrIsDirectory (WriteOntoDirectory), and the directory is whole.
+		for _, dir := range []string{"/tmp", workdir} {
+			err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+				{Path: workdir + "/beside-dir.txt", Data: []byte("x")},
+				{Path: dir, Data: []byte("clobber")},
+			})
+			if !errors.Is(err, sandbox.ErrIsDirectory) || !strings.Contains(err.Error(), dir+":") {
+				t.Errorf("a batch onto %s on a read-only root: err = %v, want ErrIsDirectory naming it", dir, err)
+			}
+		}
+		// And a target a rename cannot replace — /etc/hosts, bind-mounted into
+		// the sandbox — is ErrNotReplaceable, as the single write's is
+		// (WriteOntoUnreplaceableTargetUnderReadOnlyRoot).
+		if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/beside-hosts.txt", Data: []byte("x")},
+			{Path: "/etc/hosts", Data: []byte("clobber\n")},
+		}); !errors.Is(err, sandbox.ErrNotReplaceable) || !strings.Contains(err.Error(), "/etc/hosts:") {
+			t.Errorf("a batch onto /etc/hosts on a read-only root: err = %v, want ErrNotReplaceable naming it", err)
+		}
+		if got, err := sb.ReadFile(ctx, workdir+"/skills/pack/SKILL.md"); err != nil || string(got) != "x" {
+			t.Errorf("the workdir after a batch onto it holds SKILL.md = %q, %v; want it whole", got, err)
+		}
+		assertNoWriteResidue(t, sb, workdir, "/tmp", "/etc")
+	})
+
+	// On a read-only root the docker daemon checks the one directory an
+	// extraction names, resolved, and nothing below it. A batch extracted at a
+	// mount with entries naming subdirectories therefore followed a symlink the
+	// sandbox had made under it — `ln -s /etc <workdir>/skills/pack/scripts` —
+	// and landed a root-owned payload in /etc on the read-only root, where a
+	// single write to the same path is refused (#859's first fix, measured). A
+	// batch must be refused there the way the single write is, in its terms, and
+	// leave nothing in /etc — not even an emptied temporary.
+	t.Run("BulkWriteThroughASymlinkOutOfTheMounts", func(t *testing.T) {
+		sb := provisionHardened(t, sandbox.Hardening{ReadOnlyRootfs: true})
+		ctx := context.Background()
+		pack := workdir + "/skills/pack"
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "mkdir -p " + pack + " && ln -s /etc " + pack + "/scripts",
+		}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("make the symlink: %+v, %v", res, err)
+		}
+		escape := pack + "/scripts/map-859-escape.conf"
+		if err := sb.WriteFile(ctx, escape, []byte("x")); !errors.Is(err, sandbox.ErrNotWritable) {
+			t.Errorf("a single write through the symlink: err = %v, want ErrNotWritable", err)
+		}
+		err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: pack + "/SKILL.md", Data: []byte("# skill")},
+			{Path: escape, Data: bytes.Repeat([]byte("P"), 4096)},
+		})
+		var pnw *sandbox.PathNotWritableError
+		if !errors.As(err, &pnw) || pnw.Path != escape {
+			t.Errorf("a batch through the symlink: err = %v, want ErrNotWritable naming %s", err, escape)
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "ls -A /etc | grep -e '^" + sandbox.TempPrefix + "' -e map-859 || true",
+		})
+		if err != nil || strings.TrimSpace(res.Stdout) != "" {
+			t.Errorf("/etc after the refused batch holds %q (%v), want nothing of it", res.Stdout, err)
+		}
+		if _, err := sb.ReadFile(ctx, pack+"/SKILL.md"); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("the batch's other member: err = %v, want ErrFileNotExist", err)
+		}
+		assertNoWriteResidue(t, sb, workdir, pack)
+	})
+
+	// The same under a uid the image did not choose, for HardeningRunsAsTheConfiguredUser's
+	// reason, and in /tmp because that is the mount both backends make writable to
+	// it: Kubernetes' emptyDirs are world-writable, and Docker's volume takes the
+	// image's own 1777 /tmp — where its workdir volume is root-owned unless the
+	// image ships one (TestBulkWriteOnANonRootImage covers that on Docker). What the
+	// row pins is what such a sandbox needs of a batch: the directories it made are
+	// its own, so it can work in them, and what landed is readable and — for a
+	// 0666 member, the memory store's — appendable in place by it. Who owns a
+	// *member* is not asserted: the docker daemon lands it root-owned, the pod's
+	// `tar` as the sandbox user, which is why the memory store asks for 0666. That
+	// is also why no member sits directly in /tmp here: it is sticky, and a
+	// root-owned temporary there is one the sandbox user may not rename — on
+	// Docker, a single write's as much as a batch's — so the members go under a
+	// directory the batch makes, as package credentials do.
+	t.Run("BulkWriteUnderReadOnlyRootAsNonRoot", func(t *testing.T) {
+		uid := int64(65534)
+		sb := provisionHardened(t, sandbox.Hardening{RunAsUser: &uid, ReadOnlyRootfs: true})
+		ctx := context.Background()
+		batch := []sandbox.FileWrite{
+			{Path: "/tmp/nonroot/skills/pack/SKILL.md", Data: []byte("# skill")},
+			{Path: "/tmp/nonroot/skills/pack/scripts/run.sh", Data: []byte("echo hi\n")},
+			{Path: "/tmp/nonroot/memory/todo.md", Data: []byte("rw"), Mode: 0o666},
+			{Path: "/tmp/nonroot/flat.txt", Data: []byte("flat")},
+		}
+		if err := sb.WriteFiles(ctx, batch); err != nil {
+			t.Fatalf("bulk write as uid %d under a read-only root: %v", uid, err)
+		}
+		for _, f := range batch {
+			// Read by the sandbox user itself, not by the backend's own read path.
+			res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "cat " + f.Path})
+			if err != nil || res.ExitCode != 0 || res.Stdout != string(f.Data) {
+				t.Errorf("cat %s as the sandbox user = %+v, %v; want %q", f.Path, res, err, f.Data)
+			}
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "stat -c %u /tmp/nonroot /tmp/nonroot/skills/pack /tmp/nonroot/skills/pack/scripts /tmp/nonroot/memory",
+		})
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("stat the batch's directories: %+v, %v", res, err)
+		}
+		for _, owner := range strings.Fields(res.Stdout) {
+			if owner != "65534" {
+				t.Errorf("a directory the batch created is owned by uid %s, want the sandbox user's 65534", owner)
+			}
+		}
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "printf ' more' >> /tmp/nonroot/memory/todo.md && cat /tmp/nonroot/memory/todo.md",
+		}); err != nil || res.ExitCode != 0 || res.Stdout != "rw more" {
+			t.Errorf("append in place to a 0666 member as the sandbox user = %+v, %v; want %q", res, err, "rw more")
+		}
+		assertNoWriteResidue(t, sb, "/tmp/nonroot", "/tmp/nonroot/skills/pack", "/tmp/nonroot/memory")
+
+		// The workdir is where the bookkeeping lands, and on Docker it is
+		// root-owned here: the sandbox user's `rm` cannot take what the daemon
+		// landed, so the daemon empties it (#316) — its names stay, its payload
+		// may not. A batch whose members land there too fails at its renames,
+		// and its members are emptied the same way, a directory at a time. On a
+		// workdir the sandbox user can write (Kubernetes' emptyDir) the batch
+		// lands and nothing is left at all.
+		big := bytes.Repeat([]byte("P"), 4096)
+		err = sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/map-859-a.txt", Data: big},
+			{Path: workdir + "/map-859-b.txt", Data: big},
+		})
+		res, rerr := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "[ -w " + workdir + " ] && echo writable; " +
+				"find " + workdir + " -maxdepth 1 -name '" + sandbox.TempPrefix + "*' -printf '%s %f\\n'",
+		})
+		if rerr != nil || res.ExitCode != 0 {
+			t.Fatalf("list the workdir's temporaries: %+v, %v", res, rerr)
+		}
+		lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
+		if lines[0] == "writable" {
+			if err != nil || len(lines) != 1 {
+				t.Errorf("a batch into a workdir the sandbox user can write: err = %v, left %q", err, lines[1:])
+			}
+		} else {
+			if err == nil {
+				t.Error("a batch renamed into a workdir the sandbox user cannot write reported success")
+			}
+			// This batch's two members' temporaries, and both batches'
+			// bookkeeping — every one of them emptied.
+			var members int
+			for _, line := range lines {
+				if !strings.HasPrefix(line, "0 ") {
+					t.Errorf("temporary %q in the workdir still holds a payload, want it emptied", line)
+				}
+				if strings.HasSuffix(line, "-0") || strings.HasSuffix(line, "-1") {
+					members++
+				}
+			}
+			if members != 2 || len(lines) != 6 {
+				t.Errorf("the workdir holds temporaries %q, want this batch's two members' and both batches' bookkeeping", lines)
+			}
+		}
+	})
+
 	// Files and commands see one filesystem — the whole point of the sandbox.
 	t.Run("FilesAndExecShareTheFilesystem", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)

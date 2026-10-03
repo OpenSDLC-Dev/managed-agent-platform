@@ -1617,7 +1617,12 @@ func (pd *pod) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error 
 			return err
 		}
 		if code == sandbox.ExitBulkExtract {
+			// Asked before the shed, which takes away the manifest it reads.
+			rErr := pd.refusedBulk(ctx, b)
 			pd.discardBulk(ctx, b)
+			if rErr != nil {
+				return rErr
+			}
 			return fmt.Errorf("k8s: bulk write: the pod could not extract the archive: %s",
 				strings.TrimSpace(stderr))
 		}
@@ -1639,6 +1644,19 @@ func (pd *pod) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error {
 		return nil
 	}
 	return b.Fault("k8s", code, stderr)
+}
+
+// refusedBulk answers an extraction that failed even after the prepare pass in
+// the single write's terms — a target that is a directory or cannot be
+// replaced, a directory the sandbox user cannot create in — where the write
+// script's own checks answer them for one file (sandbox.BulkRefusedShell). Nil
+// when no member answers yes, or the question could not be asked.
+func (pd *pod) refusedBulk(ctx context.Context, b *sandbox.BulkWrite) error {
+	code, stderr, err := pd.bulkExec(ctx, bulkRefusedScript, b, nil)
+	if err != nil {
+		return nil
+	}
+	return b.Refusal("k8s", code, stderr)
 }
 
 // discardBulk sheds what a failed batch left in the pod. Its own failure is not
@@ -1717,6 +1735,12 @@ __map_bulk_rename "$1" "$2"
 // and again before the retry. $2 is the directory list.
 const bulkPrepareScript = sandbox.BulkPrepareShell + `
 __map_bulk_prepare "$2"
+`
+
+// bulkRefusedScript says why an extraction that failed twice failed, in the
+// caller's terms. $1 is the manifest.
+const bulkRefusedScript = sandbox.BulkRefusedShell + `
+__map_bulk_refused "$1"
 `
 
 // bulkDiscardScript sheds what a batch that ended badly left behind.

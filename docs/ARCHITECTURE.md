@@ -643,8 +643,9 @@ and holds the two OS-touching adapters `gaterun/` declares.
   or `LD_DEBUG_OUTPUT`, or an `/etc/ld.so.preload` no environment setting closes, all
   reach it. The daemon empties what it landed instead, executing nothing (#310) — and
   the same for a **batch**, whose two sheds now name on stdout what their own `rm` could
-  not take so the daemon can empty what is left in one archive (#316) — best effort, and
-  with the exec-error branch's carve-out, exactly as the single write's. What
+  not take so the daemon can empty what is left in one archive — one per directory
+  under a read-only root, cut as that root's deliveries are (#316, #859) — best
+  effort, and with the exec-error branch's carve-out, exactly as the single write's. What
   pins the invariant is structural — docker's `execConfig` carries no `User` field to
   set, so no exec can name one — with a real-image row
   (`TestTheRootShedRunsNoAgentCodeOnANonRootImage`) covering the shell-hook channel
