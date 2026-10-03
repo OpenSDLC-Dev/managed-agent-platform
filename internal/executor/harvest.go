@@ -31,6 +31,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel/codes"
 )
 
@@ -370,32 +371,26 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 
 	// The snapshot is keyed per path (the files_scope_filename_idx unique
 	// index): delete-all + insert-all under the lock replaces changed paths,
-	// drops vanished ones, and keeps the whole move atomic.
-	var oldIDs []string
+	// drops vanished ones, and keeps the whole move atomic. "All" is the
+	// harvest's own rows: the session's copies of the files it mounts are
+	// scoped to it as well, and carry the source_file_id these never do (#578).
+	var oldKeys []string
 	if replace {
 		rows, qerr := tx.Query(ctx,
-			`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`,
+			`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 AND source_file_id IS NULL
+			 RETURNING object_key`,
 			item.SessionID.String())
 		if qerr != nil {
 			return qerr
 		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			oldIDs = append(oldIDs, id)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
+		if oldKeys, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
 			return err
 		}
 		for _, f := range files {
 			if _, err := tx.Exec(ctx,
-				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
-				 VALUES ($1, $2, $3, $4, true, 'session', $5)`,
-				f.id.String(), f.path, f.mime, f.size, item.SessionID.String()); err != nil {
+				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, object_key)
+				 VALUES ($1, $2, $3, $4, true, 'session', $5, $6)`,
+				f.id.String(), f.path, f.mime, f.size, item.SessionID.String(), blob.FilesKey(f.id.String())); err != nil {
 				return err
 			}
 		}
@@ -431,11 +426,10 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 	// to it. The table is the contract, not the process (#693) — so what this
 	// costs, against the control-plane sites, is the wait for the drain's next
 	// interval rather than a wake, on a path with no client waiting on it.
-	keys := make([]string, 0, len(oldIDs))
-	for _, id := range oldIDs {
-		keys = append(keys, blob.FilesKey(id))
-	}
-	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
+	//
+	// A replaced output another session mounted is still named by that
+	// session's copy, and the queue leaves it alone (EnqueueObjectDeletes).
+	if err := store.EnqueueObjectDeletes(ctx, tx, oldKeys); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

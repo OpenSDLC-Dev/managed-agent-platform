@@ -13,7 +13,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -679,7 +678,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			return evals, nil
 		}
 	}
-	if err := s.snapshotRubrics(ctx, defs); err != nil {
+	if err := s.snapshotRubrics(ctx, tx, defs); err != nil {
 		return nil, err
 	}
 
@@ -1450,8 +1449,11 @@ func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, t
 // snapshotRubrics copies each file rubric's bytes to an outcome-owned blob
 // key at acceptance, so deleting the source file mid-outcome cannot break
 // replay or grading. A snapshot orphaned by a failed commit is harmless —
-// keyed by an outcome id that never came to exist.
-func (s *server) snapshotRubrics(ctx context.Context, defs []events.DefineOutcome) error {
+// keyed by an outcome id that never came to exist. The bytes are read at the
+// row's object_key, on the transaction that has just taken the row FOR SHARE
+// (events.ValidateDefineOutcomes), so a session's copy of an upload (#578)
+// reads as the upload does.
+func (s *server) snapshotRubrics(ctx context.Context, db querier, defs []events.DefineOutcome) error {
 	for _, d := range defs {
 		if d.RubricType != "file" {
 			continue
@@ -1459,7 +1461,11 @@ func (s *server) snapshotRubrics(ctx context.Context, defs []events.DefineOutcom
 		if s.blobs == nil {
 			return errInvalid("file rubrics require the files surface, which this deployment does not configure")
 		}
-		rc, size, err := s.blobs.Get(ctx, blob.FilesKey(d.RubricFileID))
+		var key string
+		if err := db.QueryRow(ctx, `SELECT object_key FROM files WHERE id = $1`, d.RubricFileID).Scan(&key); err != nil {
+			return fmt.Errorf("read rubric file %s: %w", d.RubricFileID, err)
+		}
+		rc, size, err := s.blobs.Get(ctx, key)
 		if err != nil {
 			return fmt.Errorf("read rubric file %s: %w", d.RubricFileID, err)
 		}

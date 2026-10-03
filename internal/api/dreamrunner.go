@@ -1067,20 +1067,12 @@ func mirrorDreamUsage(ctx context.Context, tx pgx.Tx, d dreamRow) error {
 // wrote no files leaves the statement unrun rather than sending Postgres a
 // zero-length unnest.
 func enqueueDreamBlobs(ctx context.Context, tx pgx.Tx, dreamID string) error {
-	rows, err := tx.Query(ctx, `DELETE FROM files WHERE dream_id = $1 RETURNING id`, dreamID)
+	rows, err := tx.Query(ctx, `DELETE FROM files WHERE dream_id = $1 RETURNING object_key`, dreamID)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	var keys []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		keys = append(keys, blob.FilesKey(id))
-	}
-	if err := rows.Err(); err != nil {
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
 		return err
 	}
 	return store.EnqueueObjectDeletes(ctx, tx, keys)

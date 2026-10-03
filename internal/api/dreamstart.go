@@ -354,9 +354,9 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 	}
 	for _, f := range files { // step 5
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, dream_id)
-			VALUES ($1, $2, $3, $4, false, $5)`,
-			f.id, f.filename, dreamFileMIME, int64(len(f.data)), d.id); err != nil {
+			INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, dream_id, object_key)
+			VALUES ($1, $2, $3, $4, false, $5, $6)`,
+			f.id, f.filename, dreamFileMIME, int64(len(f.data)), d.id, f.key()); err != nil {
 			return createdSession{}, false, err
 		}
 	}

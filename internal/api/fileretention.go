@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -195,8 +194,8 @@ var filePurgeAfterCommitHook func()
 // purgeExpiredFiles removes one batch of files whose grace window has elapsed
 // and, in the same transaction, records what those removals leave owed.
 //
-// One transaction rather than two statements, because an id is the only name an
-// object has. A DELETE that committed without the enqueue would take the names
+// One transaction rather than two statements, because its rows are the only
+// names an object has. A DELETE that committed without the enqueue would take the names
 // with it and no tier could enumerate what was left in the store — #645's class,
 // reached here three ways that have nothing to do with each other: a
 // cancellation landing in the RETURNING drain (#696), a store refusing every key
@@ -254,22 +253,18 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 		               ORDER BY f.expires_at, f.id
 		               LIMIT $2
 		               FOR UPDATE SKIP LOCKED)
-		 RETURNING id`, retention.Seconds(), filePurgeBatch)
+		 RETURNING object_key`, retention.Seconds(), filePurgeBatch)
 	if err != nil {
 		return 0, err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	// A session's copy of an expired upload expires with it and shares its
+	// object (#578); the queue takes the key once no surviving row names it.
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return 0, err
 	}
-	if len(ids) > 0 {
-		keys := make([]string, len(ids))
-		for i, id := range ids {
-			keys[i] = blob.FilesKey(id)
-		}
-		if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
-			return 0, err
-		}
+	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
+		return 0, err
 	}
 	// Test seam: read the queue from another connection in exactly this window,
 	// or fail the sweep here to watch the rollback. nil in production.
@@ -285,8 +280,8 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 	if filePurgeAfterCommitHook != nil {
 		filePurgeAfterCommitHook()
 	}
-	recordExpiredFilesPurged(ctx, len(ids))
-	return len(ids), nil
+	recordExpiredFilesPurged(ctx, len(keys))
+	return len(keys), nil
 }
 
 // recordExpiredFilesPurged counts what one sweep removed; a sweep that removed

@@ -948,7 +948,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		if err != nil {
 			return createdSession{}, errInvalid("initial_events: %s", err)
 		}
-		if err := s.snapshotRubrics(ctx, defs); err != nil {
+		if err := s.snapshotRubrics(ctx, tx, defs); err != nil {
 			return createdSession{}, err
 		}
 		// The log announces the status the session was born into, then the
@@ -1728,9 +1728,10 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// hold half of that "exactly" — the two scope columns are present together
 	// or not at all — but not the half this clause turns on: nothing pins the
 	// type's value, so a scope_id paired with some other type would still slip
-	// a DELETE that dropped `scope_type = 'session'`, which is why it stays. The ids come back because the objects they
-	// name outlive the rows; how completely those are removed after the commit
-	// is the enqueue's own paragraph below.
+	// a DELETE that dropped `scope_type = 'session'`, which is why it stays. The
+	// object keys come back because the objects outlive the rows; how
+	// completely those are removed after the commit is the enqueue's own
+	// paragraph below.
 	//
 	// Taking these rows while holding the session is the right way round, and
 	// worth saying because the wrong way round is a deadlock (#313). Every
@@ -1741,11 +1742,11 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// one, DELETE /v1/files/{id} among them, ask for no session lock afterwards,
 	// so no reverse edge exists for this to close a cycle against.
 	deliverables, err := tx.Query(ctx,
-		`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`, id)
+		`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING object_key`, id)
 	if err != nil {
 		return nil, err
 	}
-	fileIDs, err := pgx.CollectRows(deliverables, pgx.RowTo[string])
+	fileKeys, err := pgx.CollectRows(deliverables, pgx.RowTo[string])
 	if err != nil {
 		return nil, err
 	}
@@ -1778,11 +1779,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// what accumulates is a row per deleted session naming a checkpoint that
 	// was never written, and the first sweeper to run deletes a missing key,
 	// which every backend answers nil, and drains them.
-	keys := make([]string, 0, len(fileIDs)+1)
-	keys = append(keys, blob.SessionCheckpointKey(id))
-	for _, fid := range fileIDs {
-		keys = append(keys, blob.FilesKey(fid))
-	}
+	keys := append([]string{blob.SessionCheckpointKey(id)}, fileKeys...)
 	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
 		return nil, err
 	}

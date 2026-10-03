@@ -273,6 +273,61 @@ func TestReHarvestReplacesSnapshotPerPath(t *testing.T) {
 	}
 }
 
+// TestReHarvestLeavesTheSessionsCopies: a session's copies of the files it
+// mounts are scoped to it as its outputs are (#578), and a harvest replaces
+// only its own rows — a copy survives every cycle, its name free to match an
+// output's path. A replaced output that another session mounted is still
+// named by that session's copy, so its object is not owed.
+func TestReHarvestLeavesTheSessionsCopies(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	h.seedFile(t, "file_upload", "input bytes")
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id, object_key, source_file_id)
+		 VALUES ('file_copy', 'report.json', 'text/plain', 11, 'session', $1, $2, 'file_upload')`,
+		h.sid.String(), blob.FilesKey("file_upload")); err != nil {
+		t.Fatalf("seed the session's copy: %v", err)
+	}
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	var output string
+	for _, r := range h.fileRows(t) {
+		if r.id != "file_copy" && r.id != "file_upload" {
+			output = r.id
+		}
+	}
+	if output == "" {
+		t.Fatalf("the first harvest published nothing: %+v", h.fileRows(t))
+	}
+	// Another session mounts the output: its copy names the output's object.
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id, object_key, source_file_id)
+		 SELECT 'file_elsewhere', filename, mime_type, size_bytes, 'session', 'sesn_elsewhere', object_key, id
+		   FROM files WHERE id = $1`, output); err != nil {
+		t.Fatalf("seed the other session's copy: %v", err)
+	}
+
+	sb.files[outputsDir+"/report.json"] = "v2"
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	ids := map[string]bool{}
+	for _, r := range h.fileRows(t) {
+		ids[r.id] = true
+	}
+	if !ids["file_copy"] || !ids["file_elsewhere"] {
+		t.Errorf("rows after the re-harvest = %v, want both copies kept", ids)
+	}
+	if ids[output] {
+		t.Errorf("the replaced output %s survived the re-harvest", output)
+	}
+	if owed := h.pendingKeys(t); len(owed) != 0 {
+		t.Errorf("the re-harvest owes %v, want nothing: the replaced output's object is still a copy's", owed)
+	}
+}
+
 // pendingKeys reads what the executor's publish left the control plane's
 // sweeper to remove.
 func (h *harness) pendingKeys(t *testing.T) []string {

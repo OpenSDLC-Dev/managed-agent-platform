@@ -26,7 +26,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -573,10 +572,11 @@ func (b *Brain) completeStaleItem(ctx context.Context, item *queue.Item) error {
 
 // deliverable is one harvested registry row the grader is shown.
 type deliverable struct {
-	id       string
-	filename string
-	mimeType string
-	size     int64
+	id        string
+	filename  string
+	mimeType  string
+	size      int64
+	objectKey string
 }
 
 // deliverablesSection renders the session's harvested outputs snapshot for
@@ -587,9 +587,13 @@ type deliverable struct {
 // registry (no harvest ran, or the agent left nothing) renders nothing; a
 // storage-less deploy (nil blobs) gets the listing without contents.
 func (b *Brain) deliverablesSection(ctx context.Context, sid domain.ID) (string, error) {
+	// The session's copies of the files it mounts are scoped to it too
+	// (#578), and are its inputs rather than its work: source_file_id marks
+	// them, and the harvest's own rows have none.
 	rows, err := b.pool.Query(ctx,
-		`SELECT id, filename, mime_type, size_bytes FROM files
-		  WHERE scope_type = 'session' AND scope_id = $1 ORDER BY filename`,
+		`SELECT id, filename, mime_type, size_bytes, object_key FROM files
+		  WHERE scope_type = 'session' AND scope_id = $1 AND source_file_id IS NULL
+		  ORDER BY filename`,
 		sid.String())
 	if err != nil {
 		return "", fmt.Errorf("list deliverables: %w", err)
@@ -598,7 +602,7 @@ func (b *Brain) deliverablesSection(ctx context.Context, sid domain.ID) (string,
 	var files []deliverable
 	for rows.Next() {
 		var f deliverable
-		if err := rows.Scan(&f.id, &f.filename, &f.mimeType, &f.size); err != nil {
+		if err := rows.Scan(&f.id, &f.filename, &f.mimeType, &f.size, &f.objectKey); err != nil {
 			return "", fmt.Errorf("list deliverables: %w", err)
 		}
 		files = append(files, f)
@@ -620,7 +624,7 @@ func (b *Brain) deliverablesSection(ctx context.Context, sid domain.ID) (string,
 		if b.blobs == nil || !inlineableMime(f.mimeType) || f.size > remaining {
 			continue
 		}
-		content, err := b.readDeliverable(ctx, f.id, f.size)
+		content, err := b.readDeliverable(ctx, f.objectKey, f.size)
 		if err != nil {
 			// The row committed with its blob, so this is residue or a
 			// transient; the listing already names the file — grade on
@@ -648,13 +652,14 @@ func inlineableMime(m string) bool {
 	return strings.HasPrefix(mt, "text/") || mt == "application/json"
 }
 
-// readDeliverable fetches one harvested file's bytes from the blob store. The
-// registry size bounds the read rather than being trusted (the rubricText
-// posture): the read caps one byte past it, and a blob whose length disagrees
-// with its row is an error — the caller lists the file instead of inlining it
-// truncated, and the budget deduction of f.size stays exact.
-func (b *Brain) readDeliverable(ctx context.Context, fileID string, size int64) (string, error) {
-	rc, _, err := b.blobs.Get(ctx, blob.FilesKey(fileID))
+// readDeliverable fetches one harvested file's bytes from the blob store, at
+// its row's object_key. The registry size bounds the read rather than being
+// trusted (the rubricText posture): the read caps one byte past it, and a blob
+// whose length disagrees with its row is an error — the caller lists the file
+// instead of inlining it truncated, and the budget deduction of f.size stays
+// exact.
+func (b *Brain) readDeliverable(ctx context.Context, key string, size int64) (string, error) {
+	rc, _, err := b.blobs.Get(ctx, key)
 	if err != nil {
 		return "", err
 	}

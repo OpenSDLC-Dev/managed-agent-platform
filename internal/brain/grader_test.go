@@ -754,6 +754,38 @@ func TestOutcomeGraderDeliverablesWithoutBlobStoreListsOnly(t *testing.T) {
 	}
 }
 
+// TestOutcomeGraderLeavesTheSessionsCopiesOut: the session's copies of the
+// files it mounts are scoped to it as its outputs are (#578), but they are its
+// inputs, not its work, and the grader is shown the harvest's rows alone.
+func TestOutcomeGraderLeavesTheSessionsCopiesOut(t *testing.T) {
+	h := newHarnessWithBlobs(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("judged the output", "satisfied"),
+	}, nil)
+	ctx := context.Background()
+	if err := h.blobs.Put(ctx, blob.FilesKey("file_upload"), strings.NewReader("INPUT-MARKER"), 12, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id, object_key, source_file_id)
+		 VALUES ('file_copy', 'input.txt', 'text/plain', 12, 'session', $1, $2, 'file_upload')`,
+		h.sessionID.String(), blob.FilesKey("file_upload")); err != nil {
+		t.Fatal(err)
+	}
+	seedDeliverable(t, h.harness, h.blobs, "report.txt", "text/plain", "OUTPUT-MARKER")
+
+	h.wakeOutcome(t, "Ship the report", 3)
+	h.drain(t)
+
+	user := graderUserText(t, h.harness)
+	if !strings.Contains(user, "report.txt (text/plain, 13 bytes)") || !strings.Contains(user, "OUTPUT-MARKER") {
+		t.Errorf("the output is missing from the deliverables: %q", user)
+	}
+	if strings.Contains(user, "input.txt") || strings.Contains(user, "INPUT-MARKER") {
+		t.Errorf("the session's copy of its input was graded as a deliverable: %q", user)
+	}
+}
+
 func TestOutcomeGraderNoDeliverablesNoSection(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		agentReply("work"),

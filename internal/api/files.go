@@ -205,15 +205,15 @@ func (s *server) insertFile(ctx context.Context, id string, up *fileUpload) (tim
 	defer func() { _ = tx.Rollback(ctx) }()
 	var createdAt time.Time
 	var expiresAt *time.Time
+	key := blob.FilesKey(id)
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, expires_at)
-		 VALUES ($1, $2, $3, $4, false, now() + make_interval(secs => $5::bigint))
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, expires_at, object_key)
+		 VALUES ($1, $2, $3, $4, false, now() + make_interval(secs => $5::bigint), $6)
 		 RETURNING created_at, expires_at`,
-		id, up.filename, up.mimeType, int64(len(up.data)), up.expiresIn).
+		id, up.filename, up.mimeType, int64(len(up.data)), up.expiresIn, key).
 		Scan(&createdAt, &expiresAt); err != nil {
 		return time.Time{}, nil, err
 	}
-	key := blob.FilesKey(id)
 	if err := s.blobs.Put(ctx, key, bytes.NewReader(up.data), int64(len(up.data)), up.mimeType); err != nil {
 		return time.Time{}, nil, fmt.Errorf("store file: %w", err)
 	}
@@ -534,8 +534,8 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 		return nil, errInvalid("file %s is owned by dream %s", id, *dreamID)
 	}
 	// One object, and a transaction opened for it rather than the bare Exec
-	// this delete used to be. The row is the object's only name, so the debt
-	// has to be recorded by the same commit that takes the name away
+	// this delete used to be. The rows are the object's only names, so the
+	// debt has to be recorded by the same commit that takes the last one away
 	// (plan 50 decision 2, #703): beside the transaction, a delete that rolls
 	// back would leave a row claiming bytes nobody orphaned, and a process that
 	// died between the commit and the insert would leave the object
@@ -547,14 +547,20 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	tag, err := tx.Exec(ctx, `DELETE FROM files WHERE id = $1`, id)
+	// The key is the row's own (0046): an upload's copies share its object, so
+	// deleting the upload leaves the bytes to them — the reference's behavior,
+	// the copy still answering after its upload's delete (2026-09-02 batch2 idx
+	// 405 and 408) — and deleting the last row that names the object owes it
+	// to the drain. EnqueueObjectDeletes holds that count.
+	var key string
+	err = tx.QueryRow(ctx, `DELETE FROM files WHERE id = $1 RETURNING object_key`, id).Scan(&key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("file %s not found", id)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
-		return nil, errNotFound("file %s not found", id)
-	}
-	if err := store.EnqueueObjectDeletes(ctx, tx, []string{blob.FilesKey(id)}); err != nil {
+	if err := store.EnqueueObjectDeletes(ctx, tx, []string{key}); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -598,17 +604,19 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var (
-		filename, mimeType string
-		downloadable       bool
-		expired            bool
+		filename, mimeType, key string
+		downloadable            bool
+		expired                 bool
 	)
 	// Postgres answers whether the file has expired, rather than this process
 	// comparing a scanned timestamp: expires_at was computed from the database's
-	// now() at upload, and no replica's clock may decide when it arrives.
+	// now() at upload, and no replica's clock may decide when it arrives. The
+	// bytes are at the row's object_key, which a session's copy shares with its
+	// upload (#578), never at a key derived from the id asked for.
 	err := s.pool.QueryRow(ctx,
-		`SELECT filename, mime_type, downloadable, NOT `+store.FileLiveSQL+`
+		`SELECT filename, mime_type, downloadable, NOT `+store.FileLiveSQL+`, object_key
 		   FROM files WHERE id = $1`, id).
-		Scan(&filename, &mimeType, &downloadable, &expired)
+		Scan(&filename, &mimeType, &downloadable, &expired, &key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, r, notFound())
 		return
@@ -661,7 +669,7 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 			errorDetails{ErrorCode: "file_not_downloadable"})))
 		return
 	}
-	rc, size, err := s.blobs.Get(ctx, blob.FilesKey(id))
+	rc, size, err := s.blobs.Get(ctx, key)
 	if err != nil {
 		// A row whose object is gone is an operator incident, not a client 404.
 		slog.ErrorContext(ctx, "file missing from object storage", "file_id", id, "err", err)
