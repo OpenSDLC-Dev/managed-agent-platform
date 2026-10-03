@@ -633,12 +633,12 @@ func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
 }
 
 // A successful grep whose output hit the sandbox's own per-stream Exec cap
-// arrives with ExecResult.Truncated set, and the marker must survive into the
-// content — or the spill notice's "full output" would vouch for a result the
-// sandbox itself already cut.
+// arrives with ExecResult.StdoutTruncated set and no end line, and the marker
+// must survive into the content — or the spill notice's "full output" would
+// vouch for a result the sandbox itself already cut.
 func TestExecTruncatedGrepCarriesTheUpstreamMarker(t *testing.T) {
 	full := strings.Repeat("z", toolset.MaxOutputBytes+64)
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full, Truncated: true}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full + scriptNoEnd, Truncated: true, StdoutTruncated: true}}
 	res, err := run(t, sb, "grep", `{"pattern":"z"}`)
 	if err != nil || res.IsError {
 		t.Fatalf("grep: err=%v", err)
