@@ -12,11 +12,14 @@
 -- id-ordered statement, and the expiry sweep. The outputs harvest leaves
 -- copies by its own predicate (source_file_id IS NULL), and a dream's close
 -- deletes by dream_id, which no copy carries. store's
--- TestEveryFilesDeleteOwesItsKeyAndDecidesAboutCopies holds each DELETE FROM
--- files to owing the key its rows name and to either excluding copies or
--- saying why it may meet one. A binary built between 0046 and this one loses
--- nothing here: its set_config reaches nothing that reads it, and its session
--- delete takes its session's files itself.
+-- TestEveryFilesDeleteOwesItsKeyAndDecidesAboutCopies reads every constant
+-- string in the non-test Go under cmd/ and internal/, concatenations and
+-- named constants folded, and every migration after this one. Each DELETE FROM files in Go must return
+-- store.FileObjectKeySQL and either exclude copies or be listed with why it
+-- may meet one, each in a later migration must be listed, and a DELETE FROM
+-- whose table comes at run time fails it. A binary built between 0046 and
+-- this one loses nothing here: its set_config reaches nothing that reads it,
+-- and its session delete takes its session's files itself.
 --
 -- What stays is the reference count on pending_object_deletes, with its
 -- advisory lock and its refusal of a files/ key outside READ COMMITTED. Those
