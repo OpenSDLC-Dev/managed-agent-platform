@@ -562,10 +562,7 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	// the copy still answering after its upload's delete (2026-09-02 batch2 idx
 	// 405 and 408) — and deleting the last row that names the object owes it
 	// to the drain. EnqueueObjectDeletes holds that count. The id may be a
-	// copy's, which only a transaction that allows it can delete.
-	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
-		return nil, err
-	}
+	// copy's, whose key is its source's.
 	var key string
 	err = tx.QueryRow(ctx, `DELETE FROM files WHERE id = $1 RETURNING `+store.FileObjectKeySQL, id).Scan(&key)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -13,7 +13,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // The per-resource session copy (#578): every path that mounts a file mints
@@ -405,90 +404,6 @@ func TestSessionDeleteTakesItsCopies(t *testing.T) {
 	}
 }
 
-// deleteSession takes its session's files itself, having allowed copy
-// deletes in its transaction before it writes the tombstone, so 0046's
-// trigger on deleted_sessions, which serves the previous build alone (#856),
-// leaves them to it. store's TestEveryFilesDeleteDecidesAboutCopies counts the
-// call; this watches the order, through two probe triggers: one records, as
-// the tombstone goes in, whether its transaction had allowed copy deletes; the
-// other records each deleted files row's trigger depth, 1 under the handler's
-// own statement and 2 under the tombstone's trigger, and its transaction.
-func TestSessionDeleteAllowsCopyDeletesBeforeItsTombstone(t *testing.T) {
-	s := newTestServer(t)
-	ctx := context.Background()
-	agentID, envID := readableFixture(t, s)
-	uploadID := uploadOneFile(t, s, "in.txt")
-	sess := createSession(t, s, map[string]any{
-		"agent": agentID, "environment_id": envID,
-		"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
-	})
-	sid, copyID := sess["id"].(string), mountedFileID(t, sess)
-	outputID := domain.NewID("file").String()
-	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
-		 VALUES ($1, 'out.md', 'text/markdown', 5, true, 'session', $2)`, outputID, sid); err != nil {
-		t.Fatalf("seed an output: %v", err)
-	}
-	if _, err := s.pool.Exec(ctx, `
-		CREATE TABLE probe (what text, detail text, xact xid8);
-		CREATE FUNCTION probe_tombstone() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN
-		    INSERT INTO probe VALUES ('tombstone', coalesce(current_setting('map.copy_delete', true), ''), pg_current_xact_id());
-		    RETURN NEW;
-		END $$;
-		CREATE TRIGGER probe_tombstone BEFORE INSERT ON deleted_sessions
-		    FOR EACH ROW EXECUTE FUNCTION probe_tombstone();
-		CREATE FUNCTION probe_file_delete() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN
-		    INSERT INTO probe VALUES (OLD.id, pg_trigger_depth()::text, pg_current_xact_id());
-		    RETURN NULL;
-		END $$;
-		CREATE TRIGGER probe_file_delete AFTER DELETE ON files
-		    FOR EACH ROW EXECUTE FUNCTION probe_file_delete();`); err != nil {
-		t.Fatalf("install the probes: %v", err)
-	}
-
-	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
-		t.Fatalf("DELETE session: %d %v", status, body)
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT what, detail, xact::text FROM probe`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	type entry struct{ detail, xact string }
-	got := map[string]entry{}
-	for rows.Next() {
-		var what string
-		var e entry
-		if err := rows.Scan(&what, &e.detail, &e.xact); err != nil {
-			t.Fatal(err)
-		}
-		got[what] = e
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	tomb, ok := got["tombstone"]
-	if !ok {
-		t.Fatalf("no tombstone written: %v", got)
-	}
-	if tomb.detail != "on" {
-		t.Errorf("the tombstone went in with map.copy_delete = %q, want on: AllowFileCopyDeletes comes first", tomb.detail)
-	}
-	for _, id := range []string{copyID, outputID} {
-		e, ok := got[id]
-		switch {
-		case !ok:
-			t.Errorf("the session delete left %s", id)
-		case e.detail != "1":
-			t.Errorf("%s was deleted at trigger depth %s, want 1: the tombstone's trigger took it, not the handler", id, e.detail)
-		case e.xact != tomb.xact:
-			t.Errorf("%s was deleted in transaction %s, the tombstone in %s", id, e.xact, tomb.xact)
-		}
-	}
-}
-
 // Archiving a session leaves its copies (console-141 api-fixtures idx 25;
 // ui-network idx 301), and each still answers DELETE afterwards (api-fixtures
 // idx 33–35). A copy is never downloadable, so the management lane refuses
@@ -549,6 +464,53 @@ func TestACopyExpiresWithItsUpload(t *testing.T) {
 	}
 }
 
+// A dream's close deletes its transcripts by dream_id (enqueueDreamBlobs), and
+// a user session's copy of one carries no dream_id, so the close leaves the
+// copy and the object it names: the transcript's key is dropped while the
+// copy names it, and owed once the copy goes.
+func TestADreamsCloseLeavesASessionsCopyOfItsTranscript(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := readableFixture(t, s)
+	_, body := seededDreamBody(t, s)
+	dreamID, _ := startedDream(t, s, body)
+	transcripts := dreamFileIDs(t, s, dreamID)
+	if len(transcripts) == 0 {
+		t.Fatal("the dream wrote no transcripts, so its close would delete nothing")
+	}
+	transcript := transcripts[0]
+	key := blob.FilesKey(transcript)
+	copyID := mountedFileID(t, createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{map[string]any{"type": "file", "file_id": transcript}},
+	}))
+	if objectKey, source := fileAlias(t, s, copyID); objectKey != key || source == nil || *source != transcript {
+		t.Fatalf("the mount = object_key %q, source %v; want a copy of the transcript %s", objectKey, source, transcript)
+	}
+
+	atLastStage(t, s, dreamID)
+	tick(t, s) // the last stage completes the dream
+	tick(t, s) // and the next tick closes it, deleting its transcripts
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt == nil {
+		t.Fatal("the dream did not close")
+	}
+	for _, id := range transcripts {
+		if fileRowExists(t, s, id) {
+			t.Errorf("the transcript %s outlived its dream's close", id)
+		}
+	}
+	getFileOK(t, s, copyID)
+	if slices.Contains(pendingKeys(t, s.pool), key) {
+		t.Errorf("the close owed %s, which the session's copy still names", key)
+	}
+
+	if status, body := s.do(http.MethodDelete, "/v1/files/"+copyID, nil); status != http.StatusOK {
+		t.Fatalf("DELETE the copy: %d %v", status, body)
+	}
+	if !slices.Contains(pendingKeys(t, s.pool), key) {
+		t.Errorf("deleting the last row naming %s did not owe it", key)
+	}
+}
+
 // A legacy session — written before #578, its resources[] naming the upload
 // itself — keeps working: the worker lane serves the upload it mounts, from
 // the key its id derives, which migration 0046 left it.
@@ -569,19 +531,8 @@ func TestALegacySessionKeepsMountingTheUpload(t *testing.T) {
 		sid, uploadID); err != nil {
 		t.Fatal(err)
 	}
-	tx, err := s.pool.Begin(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := store.AllowFileCopyDeletes(context.Background(), tx); err != nil {
-		t.Fatal(err)
-	}
-	if tag, err := tx.Exec(context.Background(), `DELETE FROM files WHERE id = $1`, copyID); err != nil || tag.RowsAffected() != 1 {
+	if tag, err := s.pool.Exec(context.Background(), `DELETE FROM files WHERE id = $1`, copyID); err != nil || tag.RowsAffected() != 1 {
 		t.Fatalf("delete the copy: %v rows, err %v", tag.RowsAffected(), err)
-	}
-	if err := tx.Commit(context.Background()); err != nil {
-		t.Fatal(err)
 	}
 	if got := mountedFileID(t, createGetSession(t, s, sid)); got != uploadID {
 		t.Fatalf("legacy resource file_id = %s, want the upload %s", got, uploadID)

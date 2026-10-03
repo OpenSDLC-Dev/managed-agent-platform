@@ -164,17 +164,6 @@ func pendingKeys(t *testing.T, pool *pgxpool.Pool) []string {
 	return keys
 }
 
-// inTx runs fn in a plain transaction, as the previous build begins one, and
-// commits it.
-func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx) error) {
-	t.Helper()
-	tx, err := pool.Begin(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	commitTx(t, tx, fn)
-}
-
 // inObjectDeleteTx runs fn in a transaction a remover of this build begins,
 // and commits it.
 func inObjectDeleteTx(t *testing.T, pool *pgxpool.Pool, fn func(store.ObjectDeleteTx) error) {
@@ -212,10 +201,10 @@ func TestEnqueueObjectDeletesSkipsReferencedKeys(t *testing.T) {
 		inObjectDeleteTx(t, pool, func(tx store.ObjectDeleteTx) error { return store.EnqueueObjectDeletes(ctx, tx, keys) })
 	}
 	// file_upload's row is gone and its copy lives; file_owner's row lives.
-	// Neither key is owed. The previous build's raw INSERT is held to the same
-	// count.
+	// Neither key is owed. An INSERT run by hand is held to the same count.
 	enqueue("files/file_upload", "files/file_owner", "files/file_gone", "skills/skill_x/1.zip")
-	if _, err := pool.Exec(ctx, pgtest.PrevObjectEnqueueSQL, []string{"files/file_upload", "files/file_owner"}); err != nil {
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO pending_object_deletes (object_key) VALUES ('files/file_upload'), ('files/file_owner')`); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := pendingKeys(t, pool), []string{"files/file_gone", "skills/skill_x/1.zip"}; !slices.Equal(got, want) {
@@ -223,9 +212,6 @@ func TestEnqueueObjectDeletesSkipsReferencedKeys(t *testing.T) {
 	}
 	// The last row naming it goes: now it is owed.
 	inObjectDeleteTx(t, pool, func(tx store.ObjectDeleteTx) error {
-		if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
-			return err
-		}
 		var key string
 		if err := tx.QueryRow(ctx, `DELETE FROM files WHERE id = 'file_copy' RETURNING `+store.FileObjectKeySQL).Scan(&key); err != nil {
 			return err
@@ -264,8 +250,8 @@ func TestFilesNameObjectNamesOnlyFilesKeys(t *testing.T) {
 
 // Each key goes into the queue once, however often a remover names it — two of
 // a session's copies of one upload name one key — so the reference count is
-// asked about it once, as the tombstone trigger asks. A trigger ahead of the
-// count records every row the statement offers it.
+// asked about it once. A trigger ahead of the count records every row the
+// statement offers it.
 func TestEnqueueOffersEachKeyOnce(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -315,9 +301,6 @@ func TestConcurrentLastDeletesStillOweTheObject(t *testing.T) {
 				t.Helper()
 				tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: iso})
 				if err != nil {
-					t.Fatal(err)
-				}
-				if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
 					t.Fatal(err)
 				}
 				return tx

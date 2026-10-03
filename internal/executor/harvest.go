@@ -374,12 +374,11 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 	// index): delete-all + insert-all under the lock replaces changed paths,
 	// drops vanished ones, and keeps the whole move atomic. "All" is the
 	// harvest's own rows: the session's copies of the files it mounts are
-	// scoped to it as well, and carry the source_file_id these never do (#578);
-	// migration 0046's guard would keep them from this DELETE anyway, which is
-	// what protects them from a previous build's harvest. The rows are locked
-	// in id order, as a session create mounting several of them holds them
-	// (internal/api's lockFileRows), so neither can hold a row the other waits
-	// for while waiting for one the other holds.
+	// scoped to it as well, and carry the source_file_id these never do (#578),
+	// so this predicate is all that keeps them from this DELETE (#856). The
+	// rows are locked in id order, as a session create mounting several of
+	// them holds them (internal/api's lockFileRows), so neither can hold a row
+	// the other waits for while waiting for one the other holds.
 	var oldKeys []string
 	if replace {
 		rows, qerr := tx.Query(ctx,
