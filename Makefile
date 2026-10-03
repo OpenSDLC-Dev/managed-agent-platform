@@ -176,10 +176,12 @@ changelog-archive:
 # `verify` — they are offline, and `go test ./...` runs tools/registrycheck's
 # own test, which calls Check on the real docs/DIVERGENCES.md. This target is
 # the other half: whether each live `Tracked: #N` still names an OPEN issue,
-# which only GitHub can answer. NOT part of `verify`, for the one reason the
-# gcp-* and eval groups are not either — the gate is offline and
-# credential-free by design, and a check that reaches the network cannot be
-# made to fail honestly inside it. .github/workflows/registry.yml runs this
+# which only GitHub can answer. NOT part of `verify`: the gate is
+# credential-free by design, and the only network it reaches is for pinned
+# inputs whose bytes cannot change under it — the modules go.sum pins, the
+# ripgrep `make ripgrep` checks against its sha256, each fetched once — while
+# this check's answer is live state elsewhere, which a gate cannot be made to
+# fail on honestly. .github/workflows/registry.yml runs this
 # daily and on every PR that touches the registry; GITHUB_TOKEN is optional
 # (the repository is public) and only raises the API rate limit.
 registry-check:

@@ -174,9 +174,10 @@ static ripgrep the executor and worker carry, which it writes to
 `/tmp/.map-ripgrep/` the first time a sandbox greps. So it needs a **Linux
 x86_64 or aarch64** sandbox whose `/tmp` the sandbox user can write and
 **execute from** — not mounted `noexec`, which both backends' own `/tmp` mounts
-under a read-only root are not — and `cat`, `chmod`, `mv` and `rm` to install
-the binary, `head` and `tail` for `head_limit` and `offset`; glibc, musl and
-busybox userlands alike. Where any of that is missing, grep is a tool error
+under a read-only root are not, and which an install checks with an empty probe
+before it carries the 5 MB binary in — and `mkdir`, `cat`, `chmod`, `mv` and
+`rm` to install it, `head` and `tail` for `head_limit` and `offset`; glibc,
+musl and busybox userlands alike. Where any of that is missing, grep is a tool error
 naming it, not degraded behaviour. Its scripts use no bash feature newer than
 3.2.
 

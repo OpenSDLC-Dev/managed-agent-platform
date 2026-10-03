@@ -780,7 +780,9 @@ inside the source, so a bump moves one and not the other. Shape is syntax — pl
 files git tracks and which modules `go.mod` requires — and runs in the gate as the
 package's own test. Resolution runs in the gate too, but only at the version `go.mod`
 pins: `make verify` begins with `build`, so that module is guaranteed present while no
-other tag is, and requiring one would put the network in an offline gate. Both fail the
+other tag is, and requiring one would have the gate download a module nothing pins — the
+only downloads it makes are pinned inputs fetched once, go.sum's modules and the ripgrep
+`make ripgrep` checks against its sha256. Both fail the
 gate on any finding, and `make sdk-bump-report` prints what they find too, above its
 report. The report is the judgment rung, outside the gate — it resolves every anchor into
 a pinned module against that pin, whatever the citation's stamp, falsifies a line span's
