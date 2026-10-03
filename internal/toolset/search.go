@@ -66,10 +66,14 @@ printf '\n%%s\n' %[1]s; printf '\n%%s\n' %[1]s >&2
 // last begin line and the end line after it — and true. Each line is printed
 // after a newline of its own, so it is a line however what came before it
 // ended, and the newline before the end line is the frame's, not the
-// script's. A stream the sandbox's cap cut (truncated) has lost its end line,
-// so all that follows the begin line is what there is. A stream with no begin
-// line, or a whole one with no end line after it, is not one the script
-// printed to its end: "", false.
+// script's. The last begin line, because whatever printed before the script —
+// an image's banner — can print a line that looks like one, nonce and all,
+// having read the script from the exec's argv; the script's own comes after
+// it. A stream the sandbox's cap cut (truncated: that stream's own flag,
+// never the other's) has lost its end line, so all that follows the begin line
+// is what there is, less any start of the end line the cap left at its tail. A
+// stream with no begin line, or a whole one with no end line after it, is not
+// one the script printed to its end: "", false.
 func (f searchFrame) cut(s string, truncated bool) (string, bool) {
 	t := "\n" + s
 	begin := "\n" + f.begin + "\n"
@@ -78,13 +82,19 @@ func (f searchFrame) cut(s string, truncated bool) (string, bool) {
 		return "", false
 	}
 	rest := t[i+len(begin):]
-	if j := strings.Index(rest, "\n"+f.end+"\n"); j >= 0 {
+	end := "\n" + f.end + "\n"
+	if j := strings.Index(rest, end); j >= 0 {
 		return rest[:j], true
 	}
-	if truncated {
-		return rest, true
+	if !truncated {
+		return "", false
 	}
-	return "", false
+	for k := min(len(end)-1, len(rest)); k > 0; k-- {
+		if strings.HasSuffix(rest, end[:k]) {
+			return rest[:len(rest)-k], true
+		}
+	}
+	return rest, true
 }
 
 // unframed is a search's answer to output its script did not print to its
@@ -189,20 +199,22 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if res.TimedOut {
 		return failf("glob: timed out after %s", DefaultTimeout)
 	}
-	out, framed := frame.cut(res.Stdout, res.Truncated)
+	out, framed := frame.cut(res.Stdout, res.StdoutTruncated)
 	if !framed {
 		return unframed("glob", res)
 	}
 	if res.ExitCode != 0 {
-		msg, _ := frame.cut(res.Stderr, res.Truncated)
+		msg, _ := frame.cut(res.Stderr, res.StderrTruncated)
 		return searchFailure("glob", sandbox.ExecResult{Stdout: out, Stderr: msg, ExitCode: res.ExitCode, Truncated: res.Truncated})
 	}
 
 	// stat printed "<mtime> <path>\0" per match, newest first. Records split on
-	// NUL (paths may contain newlines and spaces); the mtime splits off on the
-	// first space.
+	// NUL (paths may contain newlines and spaces), and only a record its NUL
+	// ends counts — what follows the last is nothing, or a record the output
+	// cap cut; the mtime splits off on the first space.
+	recs := strings.Split(out, "\x00")
 	var paths []string
-	for _, rec := range strings.Split(out, "\x00") {
+	for _, rec := range recs[:len(recs)-1] {
 		_, p, ok := strings.Cut(rec, " ")
 		if !ok {
 			continue

@@ -417,6 +417,23 @@ func TestGlobLimit(t *testing.T) {
 	}
 }
 
+// A glob answer the output cap cut keeps only the records their NUL ends: a
+// path the cap cut short is not a path, and the end line's start, which the
+// cap may leave too, is none of the answer.
+func TestGlobKeepsOnlyWholeRecords(t *testing.T) {
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + "2.000000000 /workspace/a.go\x001.000000000 /workspace/b-cut" + scriptCutInEnd,
+		Truncated: true, StdoutTruncated: true}}
+	if res, err := run(t, sb, "glob", `{"pattern":"*.go"}`); err != nil || res.IsError || res.Content != "/workspace/a.go" {
+		t.Fatalf("glob = %+v, %v; want the one whole record", res, err)
+	}
+	// A stderr flood beside a whole answer is no reason to doubt it.
+	sb = &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + "2.000000000 /workspace/a.go\x00", Stderr: "flood",
+		Truncated: true, StderrTruncated: true}}
+	if res, err := run(t, sb, "glob", `{"pattern":"*.go"}`); err != nil || res.IsError || res.Content != "/workspace/a.go" {
+		t.Fatalf("glob = %+v, %v; want the answer", res, err)
+	}
+}
+
 // An absolute pattern names its own root, so it is not hung off the search root.
 func TestAbsoluteGlobPattern(t *testing.T) {
 	sb := &fakeSandbox{}

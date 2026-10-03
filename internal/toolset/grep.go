@@ -373,7 +373,7 @@ func missingRipgrep(res sandbox.ExecResult, f searchFrame) (string, bool) {
 	if res.ExitCode != exitNoRipgrep {
 		return "", false
 	}
-	out, ok := f.cut(res.Stdout, res.Truncated)
+	out, ok := f.cut(res.Stdout, res.StdoutTruncated)
 	if !ok {
 		return "", false
 	}
@@ -631,17 +631,25 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 //
 // Output the script did not print to its end — no begin line on stdout, a
 // shell that exited before the script ran or an image that printed past the
-// output cap first, or no end line on a stream the cap did not cut — is a
-// failure carrying what the sandbox printed, never an answer. A stderr without
-// its frame is none of rg's and is left out: only the cap takes a begin line
-// that the script printed first, and with it whatever came after.
+// output cap first, or no end line on a stdout the cap did not cut — is a
+// failure carrying what the sandbox printed, never an answer. Each stream is
+// read by its own cut (sandbox.ExecResult's per-stream flags): a stderr flood
+// neither marks a whole answer as cut nor lets one without its end line
+// through. A stderr without its frame is none of rg's and is left out: only
+// the cap takes a begin line that the script printed first, and with it
+// whatever came after. What the cap cut says so — in front of the answer when
+// it cut the answer, after rg's messages when it cut them, and in front of a
+// failure when it cut either.
 func grepAnswer(res sandbox.ExecResult, f searchFrame) (Result, error) {
-	out, framed := f.cut(res.Stdout, res.Truncated)
+	out, framed := f.cut(res.Stdout, res.StdoutTruncated)
 	if !framed {
 		return unframed("grep", res)
 	}
-	msg, _ := f.cut(res.Stderr, res.Truncated)
+	msg, msgFramed := f.cut(res.Stderr, res.StderrTruncated)
 	msg = strings.TrimSpace(msg)
+	if res.StderrTruncated && msgFramed {
+		msg = strings.TrimSpace(msg + "\n" + truncationNotice)
+	}
 	printed := out != ""
 	// rg ends every line it prints; the last one's newline is not the answer's.
 	out = strings.TrimSuffix(out, "\n")
@@ -654,14 +662,14 @@ func grepAnswer(res sandbox.ExecResult, f searchFrame) (Result, error) {
 		if failure == "" {
 			failure = fmt.Sprintf("grep: failed with exit code %d", res.ExitCode)
 		}
-		if res.Truncated {
+		if res.StdoutTruncated || (res.StderrTruncated && !msgFramed) {
 			failure = truncationNotice + "\n" + failure
 		}
 		return failf("%s", failure)
 	}
 	// The sandbox's own per-stream cap may already have cut this stream; the
 	// marker must ride along, or a spill of it would read as the full result.
-	if res.Truncated {
+	if res.StdoutTruncated {
 		out = truncationNotice + "\n" + out
 	}
 	if msg != "" {

@@ -72,11 +72,16 @@ func under(dir string, names ...string) string {
 // the begin and end lines the command carries (framed), so the result reads as
 // one the script printed. A stream with scriptBegan and no scriptEnded gets
 // its end line last, as a script that ran to its end prints it; scriptNoEnd,
-// in its place, leaves it off.
+// in its place, leaves it off, and scriptCutInEnd leaves the start of it, as
+// an output cap that cut the stream inside the end line would. forgedBegin is
+// the search's own begin line, nonce and all, printed by something other than
+// the script — an image's banner that read the script from the exec's argv.
 const (
-	scriptBegan = "\x00script-began\x00"
-	scriptEnded = "\x00script-ended\x00"
-	scriptNoEnd = "\x00script-no-end\x00"
+	scriptBegan    = "\x00script-began\x00"
+	scriptEnded    = "\x00script-ended\x00"
+	scriptNoEnd    = "\x00script-no-end\x00"
+	scriptCutInEnd = "\x00script-cut-in-end\x00"
+	forgedBegin    = "\x00forged-begin\x00"
 )
 
 // searchNonce is the nonce a search's begin line carries, which its end line
@@ -89,11 +94,14 @@ func framed(command string, res sandbox.ExecResult) sandbox.ExecResult {
 	if m := searchNonce.FindStringSubmatch(command); m != nil {
 		nonce = m[1]
 	}
+	begin, end := "\nmap-search-begin-"+nonce+"\n", "\nmap-search-end-"+nonce+"\n"
 	frame := func(s string) string {
-		if strings.Contains(s, scriptBegan) && !strings.Contains(s, scriptEnded) && !strings.Contains(s, scriptNoEnd) {
+		if strings.Contains(s, scriptBegan) && !strings.Contains(s, scriptEnded) && !strings.Contains(s, scriptNoEnd) &&
+			!strings.Contains(s, scriptCutInEnd) {
 			s += scriptEnded
 		}
-		return strings.NewReplacer(scriptBegan, "\nmap-search-begin-"+nonce+"\n", scriptEnded, "\nmap-search-end-"+nonce+"\n", scriptNoEnd, "").Replace(s)
+		return strings.NewReplacer(scriptBegan, begin, scriptEnded, end, scriptNoEnd, "",
+			scriptCutInEnd, end[:len(end)/2], forgedBegin, begin).Replace(s)
 	}
 	res.Stdout, res.Stderr = frame(res.Stdout), frame(res.Stderr)
 	return res
@@ -1091,10 +1099,12 @@ func TestSearchesRefuseACommandPastOneExecArgument(t *testing.T) {
 // an answer the sandbox's own cap cut says so. Exit 2 with nothing found is a
 // failure. Whether there are matches is the exit's to say, not the answer's
 // length. Only what the script printed between its begin and end lines is
-// read: an image's banner before them, and an EXIT trap's words after them,
-// are not; output with no begin line, or a whole stream with no end line,
-// never came from the script whole; and a stderr whose frame the cap cut is
-// left out.
+// read: an image's banner before them, a begin line it forged included, and
+// an EXIT trap's words after them, are not; output with no begin line, or a
+// whole stream with no end line, never came from the script whole; and a
+// stderr whose frame the cap cut is left out. Each stream is read by its own
+// cut: a stderr flood marks no whole answer as cut and lets no answer without
+// its end line through, and a stream cut inside its end line keeps none of it.
 func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 	const denied = "rg: /workspace/b.txt: Permission denied (os error 13)"
 	const unframed = "grep: no answer reached the output whole"
@@ -1103,7 +1113,8 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 		isError bool
 		want    string
 	}{
-		{sandbox.ExecResult{Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "rg: ./.gitignore: line 1: error parsing glob\n", Truncated: true},
+		{sandbox.ExecResult{Stdout: scriptBegan + "/workspace/a.txt\n" + scriptNoEnd, Stderr: scriptBegan + "rg: ./.gitignore: line 1: error parsing glob\n",
+			Truncated: true, StdoutTruncated: true},
 			false, "[output truncated]\n/workspace/a.txt\nrg: ./.gitignore: line 1: error parsing glob"},
 		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
 		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: scriptBegan + denied + "\n"}, true, denied},
@@ -1116,10 +1127,12 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "\n"}, false, ""},
 		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "\n\n"}, false, "\n"},
 		// A banner, on either stream and however it ends, is not rg's — nor is
-		// a begin line it forged, since only the last one counts, nor what an
-		// EXIT trap printed after the end line.
-		{sandbox.ExecResult{ExitCode: 1, Stdout: "hello\nmap-search-begin-0\nworld" + scriptBegan, Stderr: "oops" + scriptBegan},
+		// a begin line it forged, the search's own nonce and all, since only the
+		// last one counts, nor what an EXIT trap printed after the end line.
+		{sandbox.ExecResult{ExitCode: 1, Stdout: "hello\nworld" + scriptBegan, Stderr: "oops" + scriptBegan},
 			false, "no matches"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: "hello" + forgedBegin + "/workspace/forged.txt\n" + scriptBegan + "/workspace/a.txt\n",
+			Stderr: forgedBegin + "rg: forged message\n" + scriptBegan}, false, "/workspace/a.txt"},
 		{sandbox.ExecResult{ExitCode: 2, Stdout: "/workspace/forged.txt" + scriptBegan, Stderr: "banner" + scriptBegan + "rg: regex parse error\n"},
 			true, "rg: regex parse error"},
 		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptEnded + "exit banner", Stderr: scriptBegan + scriptEnded + "exit stderr"},
@@ -1131,16 +1144,26 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 		// No begin line: a shell that exited first, or a banner that filled
 		// the cap. What the sandbox printed rides along.
 		{sandbox.ExecResult{ExitCode: 0}, true, unframed + " (exit 0)"},
-		{sandbox.ExecResult{ExitCode: 1, Stdout: "banner banner", Truncated: true}, true,
+		{sandbox.ExecResult{ExitCode: 1, Stdout: "banner banner", Truncated: true, StdoutTruncated: true}, true,
 			unframed + " (exit 1): the sandbox's shell exited, or filled the output cap, before the search finished\n[output truncated]\nbanner banner"},
 		// A whole stream with a begin line and no end line is a script cut
-		// short, not an answer.
+		// short, not an answer — whatever the cap did to the other stream.
 		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptNoEnd}, true, unframed + " (exit 0)"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptNoEnd, Stderr: scriptBegan + "flood flood",
+			Truncated: true, StderrTruncated: true}, true, unframed + " (exit 0)"},
+		// A stdout the cap cut inside its end line keeps the answer before it,
+		// and none of the end line.
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptCutInEnd, Truncated: true, StdoutTruncated: true},
+			false, "[output truncated]\n/workspace/a.txt"},
+		// A stderr flood marks no whole answer as cut: the answer stands as it
+		// is, and only rg's messages, which the cap cut, say so.
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "rg: a\nrg: b" + scriptNoEnd,
+			Truncated: true, StderrTruncated: true}, false, "/workspace/a.txt\nrg: a\nrg: b\n[output truncated]"},
 		// A stderr whose frame the cap cut is none of rg's: left out of an
 		// answer, and of a failure, which says what failed instead.
-		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: "flood flood", Truncated: true},
-			false, "[output truncated]\n/workspace/a.txt"},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "flood flood", Truncated: true},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: "flood flood", Truncated: true, StderrTruncated: true},
+			false, "/workspace/a.txt"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "flood flood", Truncated: true, StderrTruncated: true},
 			true, "[output truncated]\ngrep: failed with exit code 2"},
 	} {
 		res, err := run(t, &fakeSandbox{exec: tc.exec}, "grep", `{"pattern":"x"}`)
