@@ -9,7 +9,8 @@ import (
 
 // deploymentResource is one element of deployments.resources as stored: the
 // wire's SessionResourceConfig, plus — for a repository — the sealed token that
-// config deliberately omits.
+// config deliberately omits, with the resolved mount path in mount_path and
+// the caller's spelling, which config echoes there instead, beside it.
 //
 // A deployment's resources are *configuration*, not materialized session
 // resources: no sesrsc_ id, no timestamps, and a memory store keeps only its
@@ -32,9 +33,23 @@ type deploymentResource struct {
 	Access        string  `json:"access,omitempty"`
 	Instructions  *string `json:"instructions,omitempty"`
 
-	// MountPath is absent on a memory store, whose path is derived from the
-	// store's name when a session mounts it.
+	// MountPath is the resolved container path, what a fire mounts; absent on
+	// a memory store, whose path is derived from the store's name when a
+	// session mounts it. It stays resolved, as before #849, so every reader of
+	// the column — a fire, and a binary from before #849 during a rolling
+	// update or after a rollback — mounts a path create or update resolved and
+	// judged, and never re-resolves a spelling.
 	MountPath string `json:"mount_path,omitempty"`
+
+	// GivenMountPath is storage only: the caller's own mount_path, which
+	// config() echoes in MountPath's place, as the reference does
+	// ("/uploads/rec141-input.txt" sent and echoed, 2026-09-12-console-141
+	// api-fixtures idx 15; a repository's omitted one echoed as no key,
+	// 2026-09-05 batch3 idx 19). "" records that the caller sent none, so the
+	// echo carries no key. nil is an element written before #849, which keeps
+	// echoing its resolved path: what it was sent is recorded nowhere. Held to
+	// maxMountPathBytes at parse (#849).
+	GivenMountPath *string `json:"given_mount_path,omitempty"`
 
 	// Token is storage only and never echoed: config() drops it, and every
 	// render path goes through config(). The plaintext never lands here —
@@ -52,10 +67,14 @@ type sealedTokenJSON struct {
 }
 
 // config strips what the wire calls write-only — "the authorization token is
-// write-only and never returned" — leaving the SessionResourceConfig the
-// reference echoes.
+// write-only and never returned" — and puts the caller's mount_path where the
+// resolved one was stored, leaving the SessionResourceConfig the reference
+// echoes: "Echoes the input minus write-only credentials".
 func (r deploymentResource) config() deploymentResource {
 	r.Token = nil
+	if r.GivenMountPath != nil {
+		r.MountPath, r.GivenMountPath = *r.GivenMountPath, nil
+	}
 	return r
 }
 
@@ -74,6 +93,7 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 			el := deploymentResource{
 				Type: "github_repository", URL: in.url,
 				Checkout: in.checkout, MountPath: in.mountPath,
+				GivenMountPath: &in.givenMountPath,
 				Token: &sealedTokenJSON{
 					Ciphertext: sealed[repo].ciphertext,
 					KeyID:      sealed[repo].keyID,
@@ -89,6 +109,7 @@ func deploymentResourcesFrom(inputs []resourceInput, sealed []sealedToken) []dep
 		default:
 			out = append(out, deploymentResource{
 				Type: "file", FileID: in.fileID, MountPath: in.mountPath,
+				GivenMountPath: &in.givenMountPath,
 			})
 		}
 	}

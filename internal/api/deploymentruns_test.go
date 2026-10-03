@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -262,6 +263,89 @@ func TestDeploymentRunRecordsAClassifiedFailure(t *testing.T) {
 	if orphans != 0 {
 		t.Errorf("%d session rows survived a failed fire; the savepoint rollback must discard them", orphans)
 	}
+}
+
+// TestDeploymentRowsStoredResolvedFireWhereTheyDid: a deployment stored before
+// #849 holds only its resolved paths — a file's rooted under
+// /mnt/session/uploads, doubled for an "/uploads/<name>" stored before #848,
+// and a repository's default derived — with no given_mount_path beside them.
+// Nothing rewrites them: they echo as stored, since what the caller sent is
+// recorded nowhere, and the fire mounts each where it did, the doubled one
+// included. Sending the echoed resources back, as the console's deployment
+// editor does, keeps them too — the files as echoed, a repository only once
+// its write-only authorization_token is restored, which the echo never
+// carries.
+func TestDeploymentRowsStoredResolvedFireWhereTheyDid(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileA := uploadOneFile(t, s, "rec141-input.txt")
+	fileB := uploadOneFile(t, s, "notes.txt")
+	body := deploymentBody(agentID, envID)
+	body["resources"] = []any{
+		map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/rec141-input.txt"},
+		map[string]any{"type": "file", "file_id": fileB, "mount_path": "notes.txt"},
+		repoBody("g", nil),
+	}
+	id := createDeployment(t, s, body)["id"].(string)
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE deployments SET resources = (SELECT jsonb_agg(el - 'given_mount_path' ORDER BY i)
+		   FROM jsonb_array_elements(resources) WITH ORDINALITY AS e(el, i)) WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []string{
+		"/mnt/session/uploads/uploads/rec141-input.txt",
+		"/mnt/session/uploads/notes.txt",
+		"/workspace/example-repo",
+	}
+	for i, p := range legacy {
+		if _, err := s.pool.Exec(t.Context(),
+			`UPDATE deployments SET resources = jsonb_set(resources, ARRAY[$1::text, 'mount_path'], to_jsonb($2::text))
+			  WHERE id = $3`, strconv.Itoa(i), p, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mounts := func(where string, rs any, want []string) {
+		t.Helper()
+		var got []string
+		for _, el := range rs.([]any) {
+			p, _ := el.(map[string]any)["mount_path"].(string)
+			got = append(got, p)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: mount paths = %v, want %v", where, got, want)
+		}
+	}
+	fire := func(want []string) {
+		t.Helper()
+		sid, _ := runDeployment(t, s, id)["session_id"].(string)
+		if sid == "" {
+			t.Fatal("the run settled without a session")
+		}
+		status, sess := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+		if status != http.StatusOK {
+			t.Fatalf("get fired session: %d %v", status, sess)
+		}
+		mounts("fired session", sess["resources"], want)
+	}
+
+	status, d := s.do(http.MethodGet, "/v1/deployments/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get: %d %v", status, d)
+	}
+	mounts("echo", d["resources"], legacy)
+	fire(legacy)
+
+	echoed := d["resources"].([]any)
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"resources": echoed})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "resources.2.authorization_token: Field required")
+	echoed[2].(map[string]any)["authorization_token"] = "g"
+	status, d = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"resources": echoed})
+	if status != http.StatusOK {
+		t.Fatalf("re-send the echoed resources, the token restored: %d %v", status, d)
+	}
+	mounts("echo after the re-send", d["resources"], legacy)
+	fire(legacy)
 }
 
 // The sessions-list deployment_id filter is real from this slice (it

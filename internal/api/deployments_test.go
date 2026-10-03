@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1301,6 +1302,325 @@ func TestDeploymentResourcesEchoWithoutTheToken(t *testing.T) {
 	}
 	if strings.Contains(string(stored), "ghp_secret") {
 		t.Error("the repository token is stored in plaintext")
+	}
+}
+
+// TestDeploymentEchoesMountPathsAsGiven pins the reference's resource echo
+// (#849): a file's mount_path as the request spelled it — "/uploads/
+// rec141-input.txt" (2026-09-12-console-141 api-fixtures idx 15), the same
+// spelling on every later answer for that deployment: the list (ui-network idx
+// 232 and 305), pause (250), unpause (254), an update that sent no resources
+// (255) and archive (api-fixtures idx 23) — and a repository's as given
+// (2026-09-05 batch3 idx 20) or, omitted, no key at all (idx 19). By idx 19's
+// analogy a file whose mount_path is omitted or null echoes no key either,
+// and by the config's "echoes the input" an unclean spelling echoes uncleaned.
+// The fired session mounts each resource where a session create would
+// (ui-network idx 266, the session read at idx 268), and the deployment still
+// echoes the given spellings afterwards. What the column holds is
+// TestDeploymentStoresTheResolvedPathBesideTheSpelling's.
+func TestDeploymentEchoesMountPathsAsGiven(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileID := uploadOneFile(t, s, "rec141-input.txt")
+	other := uploadOneFile(t, s, "other.txt")
+	unclean := uploadOneFile(t, s, "notes.txt")
+	null := uploadOneFile(t, s, "null.txt")
+	storeID := createMemoryStore(t, s, "rec141-console-memory")
+	const sdk = "https://github.com/anthropics/anthropic-sdk-go"
+
+	body := deploymentBody(agentID, envID)
+	body["schedule"] = map[string]any{"type": "cron", "expression": "0 0 1 1 *", "timezone": "UTC"}
+	body["resources"] = []any{
+		map[string]any{"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"},
+		map[string]any{"type": "memory_store", "memory_store_id": storeID, "access": "read_only", "instructions": "Synthetic reference notes."},
+		map[string]any{"type": "github_repository", "url": sdk, "authorization_token": "ghp_x"},
+		map[string]any{"type": "github_repository", "url": sdk, "authorization_token": "ghp_x", "mount_path": "/workspace/sdk"},
+		map[string]any{"type": "file", "file_id": other},
+		map[string]any{"type": "file", "file_id": unclean, "mount_path": "uploads//notes.txt/"},
+		map[string]any{"type": "file", "file_id": null, "mount_path": nil},
+	}
+	want := []map[string]any{
+		{"type": "file", "file_id": fileID, "mount_path": "/uploads/rec141-input.txt"},
+		{"type": "memory_store", "memory_store_id": storeID, "access": "read_only", "instructions": "Synthetic reference notes."},
+		{"type": "github_repository", "url": sdk},
+		{"type": "github_repository", "url": sdk, "mount_path": "/workspace/sdk"},
+		{"type": "file", "file_id": other},
+		{"type": "file", "file_id": unclean, "mount_path": "uploads//notes.txt/"},
+		{"type": "file", "file_id": null},
+	}
+	echoes := func(where string, d map[string]any) {
+		t.Helper()
+		var got []map[string]any
+		raw, _ := json.Marshal(d["resources"])
+		if err := json.Unmarshal(raw, &got); err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: resources = %s, want %v", where, raw, want)
+		}
+	}
+
+	d := createDeployment(t, s, body)
+	id := d["id"].(string)
+	echoes("create", d)
+
+	for _, step := range []struct{ name, method, path string }{
+		{"get", http.MethodGet, "/v1/deployments/" + id},
+		{"pause", http.MethodPost, "/v1/deployments/" + id + "/pause"},
+		{"unpause", http.MethodPost, "/v1/deployments/" + id + "/unpause"},
+	} {
+		status, res := s.do(step.method, step.path, nil)
+		if status != http.StatusOK {
+			t.Fatalf("%s: %d %v", step.name, status, res)
+		}
+		echoes(step.name, res)
+	}
+	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"name": "rec141-console-deployment"})
+	if status != http.StatusOK {
+		t.Fatalf("update: %d %v", status, res)
+	}
+	echoes("update without resources", res)
+	status, res = s.do(http.MethodGet, "/v1/deployments", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list: %d %v", status, res)
+	}
+	listed := false
+	for _, el := range listData(t, res) {
+		if el["id"] == id {
+			listed = true
+			echoes("list", el)
+		}
+	}
+	if !listed {
+		t.Errorf("the list does not carry deployment %s", id)
+	}
+
+	run := runDeployment(t, s, id)
+	sid, _ := run["session_id"].(string)
+	if sid == "" {
+		t.Fatalf("run settled without a session: %v", run["error"])
+	}
+	status, sess := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get fired session: %d %v", status, sess)
+	}
+	var mounts []any
+	for _, el := range sess["resources"].([]any) {
+		mounts = append(mounts, el.(map[string]any)["mount_path"])
+	}
+	if wantMounts := []any{
+		"/mnt/session/uploads/rec141-input.txt", "/mnt/memory/rec141-console-memory",
+		"/workspace/anthropic-sdk-go", "/workspace/sdk", "/mnt/session/uploads/" + other,
+		"/mnt/session/uploads/notes.txt", "/mnt/session/uploads/" + null,
+	}; !reflect.DeepEqual(mounts, wantMounts) {
+		t.Errorf("fired session mounts = %v, want %v", mounts, wantMounts)
+	}
+	status, res = s.do(http.MethodGet, "/v1/deployments/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get after the run: %d %v", status, res)
+	}
+	echoes("get after the run", res)
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+id+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, res)
+	}
+	echoes("archive", res)
+}
+
+// TestDeploymentValidatesMountPathsUpFront: storing a mount_path as given does
+// not defer judging it (#849). A path session create would refuse on its own
+// — one resolveMountPath roots nowhere, or a repository path
+// validateRepoMountPath refuses — is refused by deployment create and update
+// too, in the words session create answers it with.
+func TestDeploymentValidatesMountPathsUpFront(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileID := uploadOneFile(t, s, "in.txt")
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	file := func(mount string) map[string]any {
+		return map[string]any{"type": "file", "file_id": fileID, "mount_path": mount}
+	}
+	repo := func(mount string) map[string]any { return repoBody("g", map[string]any{"mount_path": mount}) }
+
+	for name, res := range map[string]map[string]any{
+		"a file at the filesystem root":     file("/"),
+		"a file naming the uploads root":    file("/mnt/session/uploads"),
+		"a file climbing out":               file("../etc/passwd"),
+		"a file too long once resolved":     file("/" + strings.Repeat("a", 1010)),
+		"a repository at a relative path":   repo("workspace/r"),
+		"a repository at an unclean path":   repo("/workspace/./r"),
+		"a repository at a reserved path":   repo("/tmp"),
+		"a repository among memory mounts":  repo("/mnt/memory/r"),
+		"a repository whose default is bad": repoBody("g", map[string]any{"url": "https://github.com/acme/" + strings.Repeat("r", 1020)}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resources := []any{res}
+			status, refused := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+				"agent": agentID, "environment_id": envID, "resources": resources})
+			if status != http.StatusBadRequest {
+				t.Fatalf("session create: %d %v, want 400", status, refused)
+			}
+			body := deploymentBody(agentID, envID)
+			body["resources"] = resources
+			status, created := s.do(http.MethodPost, "/v1/deployments", body)
+			wantErrMsg(t, status, created, http.StatusBadRequest, "invalid_request_error", errMessage(refused))
+			status, updated := s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": resources})
+			wantErrMsg(t, status, updated, http.StatusBadRequest, "invalid_request_error", errMessage(refused))
+		})
+	}
+}
+
+// TestDeploymentStoresTheResolvedPathBesideTheSpelling: the stored element's
+// mount_path is the resolved path, as before #849, and the caller's spelling
+// rides beside it in given_mount_path, which only the echo reads. So any
+// reader of the column that predates #849 — the fire as it was, or an older
+// binary during a rolling update or after a rollback — decodes a mount_path
+// create already resolved and judged, never a spelling it would root a second
+// time ("/uploads/x" at /mnt/session/uploads/uploads/x). An omitted
+// mount_path stores its default and an empty spelling.
+func TestDeploymentStoresTheResolvedPathBesideTheSpelling(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileA := uploadOneFile(t, s, "rec141-input.txt")
+	fileB := uploadOneFile(t, s, "b.txt")
+	body := deploymentBody(agentID, envID)
+	body["resources"] = []any{
+		map[string]any{"type": "file", "file_id": fileA, "mount_path": "/uploads/rec141-input.txt"},
+		map[string]any{"type": "file", "file_id": fileB},
+		repoBody("g", nil),
+		repoBody("g", map[string]any{"mount_path": "/workspace/sdk"}),
+	}
+	id := createDeployment(t, s, body)["id"].(string)
+
+	var raw []byte
+	if err := s.pool.QueryRow(t.Context(), `SELECT resources FROM deployments WHERE id = $1`, id).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	// The element as a binary from before #849 decodes it.
+	var older []struct {
+		Type      string `json:"type"`
+		MountPath string `json:"mount_path"`
+	}
+	var given []struct {
+		GivenMountPath *string `json:"given_mount_path"`
+	}
+	if err := json.Unmarshal(raw, &older); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &given); err != nil {
+		t.Fatal(err)
+	}
+	wantResolved := []string{"/mnt/session/uploads/rec141-input.txt", "/mnt/session/uploads/" + fileB,
+		"/workspace/example-repo", "/workspace/sdk"}
+	wantGiven := []string{"/uploads/rec141-input.txt", "", "", "/workspace/sdk"}
+	for i, el := range older {
+		if el.MountPath != wantResolved[i] {
+			t.Errorf("element %d (%s): stored mount_path = %q, want the resolved %q", i, el.Type, el.MountPath, wantResolved[i])
+		}
+		if g := given[i].GivenMountPath; g == nil || *g != wantGiven[i] {
+			t.Errorf("element %d (%s): stored given_mount_path = %v, want %q", i, el.Type, g, wantGiven[i])
+		}
+	}
+	if len(older) != len(wantResolved) {
+		t.Errorf("stored %d elements, want %d: %s", len(older), len(wantResolved), raw)
+	}
+}
+
+// TestDeploymentBoundsTheStoredSpelling: a deployment stores and echoes the
+// caller's mount_path (#849), and resolution bounds only what a spelling
+// resolves to, so the spelling is held to maxMountPathBytes itself — in this
+// platform's words, on create and update alike. Session create, which stores
+// only the resolved path, still takes the long spelling.
+func TestDeploymentBoundsTheStoredSpelling(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileID := uploadOneFile(t, s, "xyz")
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	climb := "/" + strings.Repeat("a/../", 204) // 1021 bytes, cleaned away
+	file := func(mount string) []any {
+		return []any{map[string]any{"type": "file", "file_id": fileID, "mount_path": mount}}
+	}
+
+	longest := climb + "xyz" // 1024 bytes
+	body := deploymentBody(agentID, envID)
+	body["resources"] = file(longest)
+	rs := createDeployment(t, s, body)["resources"].([]any)
+	if got := rs[0].(map[string]any)["mount_path"]; got != longest {
+		t.Errorf("a %d-byte spelling echoed as %v", len(longest), got)
+	}
+
+	tooLong := climb + "wxyz" // 1025 bytes, resolving to /mnt/session/uploads/wxyz
+	if status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "resources": file(tooLong)}); status != http.StatusOK {
+		t.Errorf("session create: %d %v, want 200 — it stores only the resolved path", status, res)
+	}
+	body["resources"] = file(tooLong)
+	status, res := s.do(http.MethodPost, "/v1/deployments", body)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes as sent")
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": file(tooLong)})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes as sent")
+}
+
+// TestDeploymentRefusesResolvedMountOverlapsUpFront: echoing a mount_path as
+// given (#849) does not defer judging where two meet. Deployment create and
+// update resolve each spelling, with session create's rules, and refuse two
+// that land on one mount, or a resource at a proper ancestor of a
+// repository's — "/uploads/x" beside "/x" included — before anything is
+// stored. No recording shows a deployment holding such a pair. The words are
+// the deployment routes' own, naming both spellings the caller sent — or the
+// default one took — and what they resolve to; session create keeps its own,
+// an overlapping repository's being the reference's recorded sentence
+// (2026-09-03 batch1 `session.create.repo-same-repo-twice` and
+// `repo-nested-mounts`), which no deployment recording holds (#540).
+func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	fileA := uploadOneFile(t, s, "a.txt")
+	fileB := uploadOneFile(t, s, "b.txt")
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	file := func(id, mount string) map[string]any {
+		return map[string]any{"type": "file", "file_id": id, "mount_path": mount}
+	}
+	const taken = `mount_path "/mnt/session/uploads/x" is used by more than one resource`
+	overlap := func(a, b string) string {
+		return "Invalid `github_repository` resource: `mount_path` overlaps another resource: " + a + " and " + b + "; set distinct `mount_path` values"
+	}
+
+	for name, tc := range map[string]struct {
+		resources         []any
+		session, deployed string
+	}{
+		"the uploads alias beside a rooted spelling": {[]any{file(fileA, "/uploads/x"), file(fileB, "/x")}, taken,
+			`mount_path "/uploads/x" and mount_path "/x" both resolve to "/mnt/session/uploads/x"`},
+		"one spelling twice": {[]any{file(fileA, "/x"), file(fileB, "/x")}, taken,
+			`mount_path "/x" and mount_path "/x" both resolve to "/mnt/session/uploads/x"`},
+		"a relative spelling beside the full path": {[]any{file(fileA, "x"), file(fileB, "/mnt/session/uploads/x")}, taken,
+			`mount_path "x" and mount_path "/mnt/session/uploads/x" both resolve to "/mnt/session/uploads/x"`},
+		"one repository twice at its default": {[]any{repoBody("g", nil), repoBody("g", nil)},
+			overlap("/workspace/example-repo", "/workspace/example-repo"),
+			`the default mount_path and the default mount_path both resolve to "/workspace/example-repo"`},
+		"a repository above another's default": {
+			[]any{repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace"}), repoBody("g", nil)},
+			overlap("/workspace", "/workspace/example-repo"),
+			`mount_path "/workspace" is an ancestor of the repository's default mount_path "/workspace/example-repo"`},
+		"a file above a repository": {
+			[]any{file(fileA, "repo"), repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
+			overlap("/mnt/session/uploads/repo", "/mnt/session/uploads/repo/src"),
+			`mount_path "repo" (resolves to "/mnt/session/uploads/repo") is an ancestor of repository mount_path "/mnt/session/uploads/repo/src"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+				"agent": agentID, "environment_id": envID, "resources": tc.resources})
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.session)
+			body := deploymentBody(agentID, envID)
+			body["resources"] = tc.resources
+			status, res = s.do(http.MethodPost, "/v1/deployments", body)
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.deployed)
+			status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": tc.resources})
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.deployed)
+		})
+	}
+
+	status, d := s.do(http.MethodGet, "/v1/deployments/"+deplID, nil)
+	if rs, _ := d["resources"].([]any); status != http.StatusOK || len(rs) != 0 {
+		t.Errorf("after the refused updates: %d resources %v, want none stored", status, d["resources"])
 	}
 }
 
