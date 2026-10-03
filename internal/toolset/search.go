@@ -70,7 +70,13 @@ printf '\n%%s\n' %[1]s; printf '\n%%s\n' %[1]s >&2
 // script's. The last begin line, because whatever printed before the script —
 // an image's banner — can print a line that looks like one, nonce and all,
 // having read the script from the exec's argv; the script's own comes after
-// it. A stream the sandbox's cap cut (truncated: that stream's own flag,
+// it. That choice opens the other side as far as it closes this one: what
+// prints after the script's end line — an EXIT trap an image's startup file
+// set, which runs in the script's own shell and reads the nonce there — can
+// print a begin line, an answer and an end line of its own, and that is what
+// is read. Neither is a boundary the frame keeps: it keeps out what an
+// image's startup prints by accident, not what a process in the sandbox
+// forges on purpose (searchBeginPrefix, #860). A stream the sandbox's cap cut (truncated: that stream's own flag,
 // never the other's) has lost its end line, so all that follows the begin line
 // is what there is, less any start of the end line the cap left at its tail. A
 // stream with no begin line, or a whole one with no end line after it, is not
