@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1057,8 +1058,9 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 // count work: a delete of the source waits for this transaction, and the count
 // then finds the copy; a source deleted first is not found here. The add path
 // holds its session's row lock by then, the session-before-file order every
-// path that holds both takes (deleteSession's comment); a create holds no
-// session row yet.
+// path that holds both takes (deleteSession's comment), and mounts one file. A
+// create holds no session row yet, and has already taken every file row it
+// names FOR SHARE in id order (lockFileRows), so the lock here is one it holds.
 //
 // A missing source is fileMustExist's refusal, an expired one included.
 func mountFileCopy(ctx context.Context, db querier, sessionID, fileID string) (string, error) {
@@ -1074,6 +1076,37 @@ func mountFileCopy(ctx context.Context, db querier, sessionID, fileID string) (s
 		return "", errFileGone(fileID)
 	}
 	return copyID, err
+}
+
+// lockFileRows takes FOR SHARE on every files row a session create is about to
+// name — each source it mints a copy of and the rubric file a define_outcome in
+// its initial events names — in one statement, in id order. Every remover that
+// deletes several file rows locks them in that order too (deleteSession, the
+// outputs harvest, a dream's close), so a create mounting two rows of a set
+// being deleted waits for the delete or the delete for it; locking each row as
+// its resource came up would let each hold one row the other waits for. Rows
+// that do not exist are skipped, and each one's absence is the refusal its
+// resource or rubric meets later, where it always was. An id that is not a
+// well-formed file_ id names no row and is left out rather than bound, so an
+// unstorable one is refused there too rather than failing here (#135).
+func lockFileRows(ctx context.Context, tx pgx.Tx, ids []string) error {
+	ids = slices.DeleteFunc(ids, func(id string) bool { return checkFileID(id) != nil })
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `SELECT 1 FROM files WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
+	return err
+}
+
+// mountSourceIDs is the files a create's inputs mint copies of.
+func mountSourceIDs(inputs []resourceInput) []string {
+	var ids []string
+	for _, in := range inputs {
+		if in.kind == resourceKindFile && !in.ownFile {
+			ids = append(ids, in.fileID)
+		}
+	}
+	return ids
 }
 
 // fileMustExist reports whether a file row exists and still has content,

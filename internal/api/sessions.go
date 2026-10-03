@@ -855,6 +855,21 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, err
 	}
 
+	// Initial events are validated through the same per-type normalizers a
+	// posted batch gets, before the row exists (fail fast); the DB-backed
+	// outcome checks run after the insert, against the fresh row. They are
+	// normalized ahead of the resources for the rubric file a define_outcome
+	// names, which lockFileRows takes with the mounts' sources below, and a
+	// refusal still answers after the resources', where it always has.
+	var initialEvents []events.NewEvent
+	var initialErr error
+	if len(in.rawInitial) > 0 {
+		initialEvents, initialErr = events.NormalizeInitialEvents(envKind, events.ManagementCredential, in.rawInitial)
+	}
+	if err := lockFileRows(ctx, tx, append(mountSourceIDs(in.resourceInputs), rubricFileIDs(initialEvents)...)); err != nil {
+		return createdSession{}, err
+	}
+
 	// The id comes ahead of the resources: each file the session mounts is
 	// minted as a copy scoped to it (mountFileCopy).
 	id := in.id
@@ -868,16 +883,8 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, err
 	}
 	resourcesJSON := mustJSON(resources)
-
-	// Initial events are validated through the same per-type normalizers a
-	// posted batch gets, before the row exists (fail fast); the DB-backed
-	// outcome checks run after the insert, against the fresh row.
-	var initialEvents []events.NewEvent
-	if len(in.rawInitial) > 0 {
-		initialEvents, err = events.NormalizeInitialEvents(envKind, events.ManagementCredential, in.rawInitial)
-		if err != nil {
-			return createdSession{}, errInvalid("initial_events: %s", err)
-		}
+	if initialErr != nil {
+		return createdSession{}, errInvalid("initial_events: %s", initialErr)
 	}
 
 	var createdBy *string
@@ -991,6 +998,20 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	}
 
 	return createdSession{row: row, resources: len(resources), initialEvents: len(initialEvents)}, nil
+}
+
+// rubricFileIDs is the files the define_outcomes among evs name as rubrics. A
+// define_outcome that does not parse names none here and is refused where it
+// always was.
+func rubricFileIDs(evs []events.NewEvent) []string {
+	defs, _ := events.DefineOutcomes(evs)
+	var ids []string
+	for _, d := range defs {
+		if d.RubricType == "file" {
+			ids = append(ids, d.RubricFileID)
+		}
+	}
+	return ids
 }
 
 func mustJSON(v any) []byte {
@@ -1756,9 +1777,16 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// snapshot, and an outcome submission locks its own session before taking a
 	// referenced rubric file FOR SHARE. The paths that touch a file row without
 	// one, DELETE /v1/files/{id} among them, ask for no session lock afterwards,
-	// so no reverse edge exists for this to close a cycle against.
+	// so no reverse edge exists for this to close a cycle against. Among the
+	// file rows the locks go in id order, which is the order every path that
+	// holds several takes them in: a create mounting two of this session's
+	// files holds them FOR SHARE in that order (lockFileRows), so this cannot
+	// hold one it waits for while it waits for the other.
 	deliverables, err := tx.Query(ctx,
-		`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING `+store.FileObjectKeySQL, id)
+		`DELETE FROM files
+		  WHERE id IN (SELECT id FROM files WHERE scope_type = 'session' AND scope_id = $1
+		                ORDER BY id FOR UPDATE)
+		 RETURNING `+store.FileObjectKeySQL, id)
 	if err != nil {
 		return nil, err
 	}

@@ -79,7 +79,10 @@ func DefineOutcomes(evs []NewEvent) ([]DefineOutcome, error) {
 //     (v1's single-tenant boundary — the registry itself) whose size fits the
 //     rubric cap. The row is taken FOR SHARE so a concurrent DELETE /v1/files
 //     cannot remove the row and object between this check and the snapshot —
-//     the deleter blocks until this transaction commits.
+//     the deleter blocks until this transaction commits. It is one row, a
+//     batch with two outcomes being refused first, so it owes no lock order
+//     of its own; a session create, which also holds the files it mounts, has
+//     taken it with them in id order already (internal/api's lockFileRows).
 //
 // batchInterrupts reports a user.interrupt in the same batch: the interrupt
 // settles the active outcome as `interrupted` in the same transaction — the

@@ -1068,10 +1068,15 @@ func mirrorDreamUsage(ctx context.Context, tx pgx.Tx, d dreamRow) error {
 // wrote no files leaves the statement unrun rather than sending Postgres a
 // zero-length unnest.
 //
-// A session that mounted a transcript holds a copy of it, which is not a
-// dream_id row and outlives the close, its object with it (#578).
+// A transcript is listed while the dream runs and can be mounted, so a session
+// create can hold several of these rows FOR SHARE; the rows are locked in id
+// order, as that create takes them (lockFileRows). The session's copy of one
+// is not a dream_id row and outlives the close, its object with it (#578).
 func enqueueDreamBlobs(ctx context.Context, tx pgx.Tx, dreamID string) error {
-	rows, err := tx.Query(ctx, `DELETE FROM files WHERE dream_id = $1 RETURNING `+store.FileObjectKeySQL, dreamID)
+	rows, err := tx.Query(ctx,
+		`DELETE FROM files
+		  WHERE id IN (SELECT id FROM files WHERE dream_id = $1 ORDER BY id FOR UPDATE)
+		 RETURNING `+store.FileObjectKeySQL, dreamID)
 	if err != nil {
 		return err
 	}
