@@ -599,11 +599,12 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 	}
 	// The script is one exec argument, and the pattern, path, type and glob
 	// are all in it, the pattern again in rg's own argv: Exec refuses one
-	// past sandbox.MaxCommandBytes before it runs, which Run answers.
+	// past sandbox.MaxCommandBytes before it runs, which is the model's to
+	// shorten (searchExec). The install's scripts carry none of them.
 	q.frame = newSearchFrame()
 	script := q.script()
 	for installed := false; ; installed = true {
-		res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: DefaultTimeout})
+		res, err := r.searchExec(ctx, script, "the pattern, path, type and glob")
 		if err != nil {
 			return Result{}, err
 		}

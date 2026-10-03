@@ -168,12 +168,20 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 		return failf("unknown tool %q", name)
 	}
 	// Nor is a command too long for one exec argument, which the sandbox
-	// refused before anything ran: it grew with what the model sent, and the
-	// model can send less.
+	// refused before anything ran. One that grew with what the model sent —
+	// a search's (inputTooLong) — the model can shorten; the file tools
+	// answer theirs, which grew with the path, themselves (fileFault). Any
+	// other is a command of the platform's own, which a retry would only run
+	// again unchanged: so not a fault, which the executor leaves to a
+	// reclaim, but a tool error that says whose it is.
+	var model *inputTooLong
 	var tooLong *sandbox.CommandTooLongError
-	if errors.As(err, &tooLong) {
-		return failf("%s: %s a %d-byte command, over the %d bytes one exec argument can carry; shorten them",
-			name, commandInputs(name), tooLong.Bytes, sandbox.MaxCommandBytes)
+	switch {
+	case errors.As(err, &model):
+		return failf("%s: %v; shorten them", name, model)
+	case errors.As(err, &tooLong):
+		return failf("%s: a command of the platform's own came to %d bytes, over the %d bytes one exec argument can carry: "+
+			"a fault in the platform, not in this call's input", name, tooLong.Bytes, sandbox.MaxCommandBytes)
 	}
 	if err != nil {
 		return Result{}, err
@@ -194,18 +202,6 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	}
 	res.Content = CapOutput(res.Content)
 	return res, nil
-}
-
-// commandInputs names the inputs a tool's command grows with, for the
-// refusal of one too long to run.
-func commandInputs(tool string) string {
-	switch tool {
-	case "glob":
-		return "the pattern and path make"
-	case "grep":
-		return "the pattern, path, type and glob make"
-	}
-	return "its input makes"
 }
 
 // spillDir is where an oversized output's full bytes land in the sandbox —

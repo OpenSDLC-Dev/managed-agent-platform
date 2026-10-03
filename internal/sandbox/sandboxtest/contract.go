@@ -139,7 +139,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	})
 
 	// A command past MaxCommandBytes is refused before anything runs, with a
-	// *CommandTooLongError the toolset can answer as the model's; one at the
+	// *CommandTooLongError the toolset can answer as a tool error; one at the
 	// bound runs.
 	t.Run("ExecRefusesACommandPastMaxCommandBytes", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)

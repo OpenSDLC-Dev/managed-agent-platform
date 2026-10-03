@@ -1127,6 +1127,49 @@ func TestSearchesRefuseACommandPastOneExecArgument(t *testing.T) {
 	}
 }
 
+// refusing answers as scripted does, but refuses its refuse-th exec (from 1)
+// as a command too long to run, before scripted sees it.
+type refusing struct {
+	*scripted
+	refuse, n int
+}
+
+func (s *refusing) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if s.n++; s.n == s.refuse {
+		return sandbox.ExecResult{}, &sandbox.CommandTooLongError{Bytes: 130 << 10}
+	}
+	return s.scripted.Exec(ctx, req)
+}
+
+// Only a command that grew with what the model sent is the model's to shorten.
+// One that carries none of it — grep's install, the bash tool's own script,
+// whose command the shell hands over in a file — is the platform's: a tool
+// error that says so, never "shorten them", and no fault for a reclaim to run
+// again. A file tool's command grows with the path the model named, which it
+// can shorten.
+func TestACommandTooLongIsTheModelsOnlyWhereItsInputMadeIt(t *testing.T) {
+	const platform = "a command of the platform's own came to 133120 bytes, over the 122880 bytes one exec argument can carry: " +
+		"a fault in the platform, not in this call's input"
+	tooLong := &sandbox.CommandTooLongError{Bytes: 130 << 10}
+	for _, tc := range []struct {
+		name, tool, in, want string
+		sb                   sandbox.Sandbox
+	}{
+		{"grep's install", "grep", `{"pattern":"x"}`, "grep: " + platform,
+			&refusing{scripted: &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{
+				{ExitCode: 97, Stdout: scriptBegan + "map-ripgrep-missing x86_64\n"}}}, refuse: 2}},
+		{"the bash tool's script", "bash", `{"command":"true"}`, "bash: " + platform, &fakeSandbox{execErr: tooLong}},
+		{"a file tool's path", "write", `{"file_path":"a.txt","content":"x"}`,
+			"write: the file_path makes a 133120-byte command, over the 122880 bytes one exec argument can carry; shorten it",
+			&fakeSandbox{writeErr: fmt.Errorf("rename: %w", tooLong)}},
+	} {
+		res, err := run(t, tc.sb, tc.tool, tc.in)
+		if err != nil || !res.IsError || res.Content != tc.want {
+			t.Errorf("%s: %s = %+v, %v; want the tool error %q", tc.name, tc.tool, res, err, tc.want)
+		}
+	}
+}
+
 // What rg prints beside an answer — a warning about an ignore file it could
 // not read, or the error of exit 2 with matches found, or with lines found
 // that an offset cut away — follows the answer rather than being dropped, and

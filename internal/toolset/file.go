@@ -131,15 +131,22 @@ func (r Runner) edit(ctx context.Context, raw json.RawMessage) (Result, error) {
 
 // fileFault classifies a sandbox file error. The sentinels describe the file the
 // model asked for — it can read a different one, or make the one it wanted — so
-// they are tool results. Anything else is the sandbox itself failing, and that
-// is the executor's to handle. The path in the message is the one the model
-// used, not the resolved one: it is the name the model can act on.
+// they are tool results. So is a command the backend refused as too long to
+// run (sandbox.CommandTooLongError): what grows in a file primitive's commands
+// is the path, which the model chose. Anything else is the sandbox itself
+// failing, and that is the executor's to handle. The path in the message is
+// the one the model used, not the resolved one: it is the name the model can
+// act on.
 //
 // The distinction is not cosmetic: a fault left unclassified reaches the executor,
 // which stops the tool set and abandons the work item to lease reclaim — so the
 // same doomed call is retried until the lease runs out (#71).
 func fileFault(verb, display string, err error) (Result, error) {
+	var tooLong *sandbox.CommandTooLongError
 	switch {
+	case errors.As(err, &tooLong):
+		return failf("%s: the file_path makes a %d-byte command, over the %d bytes one exec argument can carry; shorten it",
+			verb, tooLong.Bytes, sandbox.MaxCommandBytes)
 	case errors.Is(err, sandbox.ErrFileNotExist):
 		return failf("%s %s: no such file or directory", verb, display)
 	case errors.Is(err, sandbox.ErrIsDirectory), errors.Is(err, sandbox.ErrNotRegularFile):

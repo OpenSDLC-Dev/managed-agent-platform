@@ -371,10 +371,12 @@ type ExecRequest struct {
 // as a fault. The bound sits below the ceiling with room for the wrapper, and
 // every backend's Exec refuses a Command past it before anything runs, with a
 // *CommandTooLongError (CheckCommand). The toolset answers that refusal with a
-// tool error naming what the model can shorten — glob's and grep's commands
-// grow with its pattern and path — and the package-install pass, whose command
-// grows with a client's list, refuses one past the bound itself, terminally
-// and before its probe, as it refuses an invalid entry.
+// tool error — naming what the model can shorten where its input made the
+// command long (glob's and grep's searches carry its pattern and path, a file
+// primitive's commands its path), and the platform otherwise — and the
+// package-install pass, whose command grows with a client's list, refuses one
+// past the bound itself, terminally and before its probe, as it refuses an
+// invalid entry.
 const MaxCommandBytes = 120 << 10
 
 // CommandTooLongError is Exec's refusal of a Command past MaxCommandBytes:
@@ -432,7 +434,7 @@ type Sandbox interface {
 	// (ErrNotFound), unreachable, the context cancelled — which the toolset
 	// carries up as a backend fault rather than folding into a tool result;
 	// and a Command past MaxCommandBytes, refused before anything runs with a
-	// *CommandTooLongError, which the toolset answers as the model's.
+	// *CommandTooLongError, which the toolset answers as a tool error.
 	Exec(ctx context.Context, req ExecRequest) (ExecResult, error)
 	// ReadFile returns a file's bytes verbatim, binary included.
 	ReadFile(ctx context.Context, path string) ([]byte, error)

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -95,6 +96,32 @@ func (f searchFrame) cut(s string, truncated bool) (string, bool) {
 		}
 	}
 	return rest, true
+}
+
+// inputTooLong is Exec's refusal (sandbox.CommandTooLongError) of a search's
+// command, which grew with the values the model sent — inputs names them — so
+// the model can send less. Only searchExec makes one; Runner.dispatch answers
+// it, and answers any other command too long as the platform's own.
+type inputTooLong struct {
+	inputs string
+	bytes  int
+}
+
+func (e *inputTooLong) Error() string {
+	return fmt.Sprintf("%s make a %d-byte command, over the %d bytes one exec argument can carry",
+		e.inputs, e.bytes, sandbox.MaxCommandBytes)
+}
+
+// searchExec runs a search's script — glob's, grep's — under the tools'
+// default deadline. The script carries inputs, the model's values, so Exec's
+// refusal of it as too long is theirs (inputTooLong).
+func (r Runner) searchExec(ctx context.Context, script, inputs string) (sandbox.ExecResult, error) {
+	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: DefaultTimeout})
+	var tooLong *sandbox.CommandTooLongError
+	if errors.As(err, &tooLong) {
+		return res, &inputTooLong{inputs: inputs, bytes: tooLong.Bytes}
+	}
+	return res, err
 }
 
 // unframed is a search's answer to output its script did not print to its
@@ -192,7 +219,7 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 		"__PREFIX__", singleQuote(prefix),
 		"__PAT__", singleQuote(in.Pattern),
 	).Replace(globScript)
-	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: cmd, Timeout: DefaultTimeout})
+	res, err := r.searchExec(ctx, cmd, "the pattern and path")
 	if err != nil {
 		return Result{}, err
 	}
