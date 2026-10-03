@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -2280,6 +2281,93 @@ func TestBulkScriptsClassifyAnArchiveThatDidNotArrive(t *testing.T) {
 	if got := run(nil); got != sandbox.ExitBulkExtract && got != sandbox.ExitBulkIncomplete {
 		t.Errorf("an empty stream: exit %d, want ExitBulkExtract (%d) or ExitBulkIncomplete (%d) — never a success",
 			got, sandbox.ExitBulkExtract, sandbox.ExitBulkIncomplete)
+	}
+}
+
+// refusedBulk asks the pod with the batch's own bookkeeping in argv — the
+// manifest as $1 — and Refusal turns what the script answers into the caller's
+// error. The exec is faked in two halves, because client-go's SPDY stream has no
+// seam to fake it whole: an API server that records the argv and refuses the
+// upgrade (refusedBulk then answers nil, and the caller keeps its own error),
+// and that same argv run under a real bash on a staged batch, standing in for
+// the pod. Its answer is the single write's: a target that is a directory.
+func TestTheRefusedBulkScriptAnswersInTheSingleWritesTerms(t *testing.T) {
+	var mu sync.Mutex
+	var argvs [][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/exec") {
+			mu.Lock()
+			argvs = append(argvs, r.URL.Query()["command"])
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	rc := &rest.Config{Host: srv.URL}
+	cs, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		t.Fatalf("build the clientset: %v", err)
+	}
+	dir := t.TempDir()
+	pd := &pod{client: &client{cs: cs, rest: rc, namespace: "default"}, name: "map-sesn-x", workdir: dir}
+
+	if err := os.MkdirAll(dir+"/adir", 0o755); err != nil {
+		t.Fatalf("stage a directory target: %v", err)
+	}
+	b, err := sandbox.NewBulkWrite(dir, []sandbox.FileWrite{
+		{Path: dir + "/fine.txt", Data: []byte("x")},
+		{Path: dir + "/adir", Data: []byte("clobber")},
+	})
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+	// What the delivery landed before it was refused: the bookkeeping.
+	var archive bytes.Buffer
+	if err := b.Archive(&archive); err != nil {
+		t.Fatalf("build the archive: %v", err)
+	}
+	tr := tar.NewReader(&archive)
+	for _, path := range []string{b.Manifest, b.DirList} {
+		if _, err := tr.Next(); err != nil {
+			t.Fatalf("read the bookkeeping: %v", err)
+		}
+		data, _ := io.ReadAll(tr)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("stage %s: %v", path, err)
+		}
+	}
+
+	if err := pd.refusedBulk(context.Background(), b); err != nil {
+		t.Errorf("refusedBulk over an exec that could not run = %v, want nil", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(argvs) != 1 {
+		t.Fatalf("the pod was asked %d times, want once", len(argvs))
+	}
+	want := []string{"/bin/bash", "-c", bulkRefusedScript, "map-bulk-write", b.Manifest, b.DirList}
+	if !slices.Equal(argvs[0], want) {
+		t.Fatalf("the pod was asked to run %q, want the refused script over the batch's bookkeeping", argvs[0])
+	}
+
+	var stderr bytes.Buffer
+	cmd := exec.Command(argvs[0][0], argvs[0][1:]...)
+	cmd.Stderr = &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("run the refused script: %v", err)
+		}
+		code = ee.ExitCode()
+	}
+	if code != sandbox.ExitPathIsDirectory {
+		t.Fatalf("the script exited %d, want ExitPathIsDirectory (%d); stderr: %s",
+			code, sandbox.ExitPathIsDirectory, stderr.String())
+	}
+	if err := b.Refusal("k8s", code, stderr.String()); !errors.Is(err, sandbox.ErrIsDirectory) ||
+		!strings.Contains(err.Error(), dir+"/adir") {
+		t.Errorf("Refusal = %v, want ErrIsDirectory naming %s/adir", err, dir)
 	}
 }
 

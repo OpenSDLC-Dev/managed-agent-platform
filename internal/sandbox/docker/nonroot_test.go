@@ -37,13 +37,30 @@ USER app
 func TestBulkWriteOnANonRootImage(t *testing.T) {
 	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHost())
 
+	// And under a read-only root, where the workdir is a volume that takes the
+	// image directory's ownership: the batch's archives must then be extracted
+	// inside that volume rather than at `/`, which the daemon refuses (#859).
+	for _, tc := range []struct {
+		name      string
+		hardening sandbox.Hardening
+	}{
+		{"writable root", sandbox.Hardening{}},
+		{"read-only root", sandbox.Hardening{ReadOnlyRootfs: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bulkWriteOnANonRootImage(t, image, tc.hardening)
+		})
+	}
+}
+
+func bulkWriteOnANonRootImage(t *testing.T, image string, hardening sandbox.Hardening) {
 	p, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("provider: %v", err)
 	}
 	ctx := context.Background()
 	sb, err := p.Provision(ctx, sandbox.Spec{
-		SessionID: domain.NewID("sesn"), Image: image, Workdir: "/workspace",
+		SessionID: domain.NewID("sesn"), Image: image, Workdir: "/workspace", Hardening: hardening,
 	})
 	if err != nil {
 		t.Fatalf("provision: %v", err)

@@ -378,8 +378,9 @@ never the platform creating a batch's directories inside the container — that
 uses `mkdir -p`, which leaves a root-owned directory that already exists exactly
 as it found it, so an image shipping one under the workdir opened the gap. Both
 sheds now report which of the batch's own files they could not remove, and the
-daemon empties those in a single archive — one round trip for a whole batch, and
-still executing nothing. A batch that *succeeds* is asked too: its last act is to
+daemon empties those in a single archive — one round trip for a whole batch, or
+one per directory they sit in under a read-only root (§4) — still executing
+nothing. A batch that *succeeds* is asked too: its last act is to
 remove the two bookkeeping files, which the same root extraction landed in your
 workdir.
 
@@ -407,6 +408,23 @@ the temporary under a live `mv` would put zero bytes onto the file the caller wa
 just told it had not touched. Keeping a payload the container will take away is
 the lesser harm than destroying data the write promised to leave alone, so that
 branch unlinks with your sandbox user's own `rm` and stops there.
+
+One limit predates all of this and is tracked in
+[#863](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/863). On a
+**writable** root the daemon's root-credentialed extraction follows a symlink
+your sandbox user made — `ln -s /etc /workspace/x` — into a directory that user
+cannot write. A single write to `/workspace/x/f` hands the daemon `/workspace/x`
+as the directory to extract at, which it resolves to `/etc`; a batch hands it `/`
+and an entry named `workspace/x/.map-write-…`, whose intermediate components the
+untar follows to the same place. Measured on Docker, both alike: the temporary
+lands root-owned in `/etc` with the write's full payload, the sandbox user's
+rename is refused, and the emptying leaves a zero-byte root-owned `.map-write-`
+file there for the container's life. Its name is the platform's, never the
+agent's choice. Where the link leads out of the writable set and is in place
+when the write arrives, the read-only root (§4) refuses the write before anything
+lands, single or batch — §4 says what that does not cover. The Kubernetes
+backend's extraction runs as your sandbox user, so it lands nothing there to
+begin with.
 
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not
@@ -594,6 +612,29 @@ a tmpfs (`container rootfs is marked read-only`) and allows it when the
 destination resolves into a volume. Every file that backend writes goes through
 that endpoint, so a tmpfs workdir would give you a sandbox that runs commands but
 can never receive a file — no skills, no files, no `write` tool.
+
+What the daemon checks is the one directory a request names: it resolves that
+directory through any symlink, checks where it landed, and then untars the
+archive by path beneath it. The bulk write behind skill and memory-store
+materialization used to name `/` for every batch, so under this knob no skill or
+memory store reached a Docker sandbox: each was refused (`container rootfs is
+marked read-only`), logged and skipped, though every file was bound for a volume
+([#859](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/859)). Under
+this knob a batch is now delivered a directory at a time: each archive is
+extracted at the directory its files land in and names no directory below it, so
+the daemon checks every directory a file lands in as it checks a single write's.
+A symlink your sandbox makes under a volume — `ln -s /etc
+/workspace/skills/pack/scripts` — is then refused rather than followed onto the
+root, whether it was there before the batch or swapped in between the platform
+making the batch's directories and delivering into them (both measured). What
+that does not cover is a link swapped in *inside* the daemon, between its check
+and its untar: that window is the daemon's own, a single write has it too, and
+[#863](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/863) closes
+it structurally by having Docker writes run as your sandbox user instead.
+That costs a request per distinct directory, plus one for the bookkeeping, where
+a writable root still takes two for any batch: measured, a 12-file skill in 2
+directories takes 3, a 61-file one in 10 takes 11. A file outside the set above
+fails in a batch as in a single write, and with the same error.
 
 What is still yours: an **image that tolerates a read-only root elsewhere**. A
 tool that writes outside the set above — a package manager, a language runtime

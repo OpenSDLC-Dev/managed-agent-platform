@@ -468,7 +468,7 @@ func TestDestroyRemovesGatePair(t *testing.T) {
 		}
 		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 	})
-	c := p.attach("sb1", "/workspace", "gate1")
+	c := p.attach("sb1", "/workspace", "gate1", false)
 	if err := c.Destroy(context.Background()); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
@@ -492,7 +492,7 @@ func TestDestroyBothFailuresSurface(t *testing.T) {
 		}
 		http.Error(w, msg, http.StatusInternalServerError)
 	})
-	err := p.attach("sb1", "/workspace", "gate1").Destroy(context.Background())
+	err := p.attach("sb1", "/workspace", "gate1", false).Destroy(context.Background())
 	if err == nil {
 		t.Fatal("both removals failed but Destroy reported success")
 	}
@@ -553,7 +553,7 @@ func TestDestroyUngatedRemovesOnlySandbox(t *testing.T) {
 		}
 		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 	})
-	c := p.attach("sb1", "/workspace", "")
+	c := p.attach("sb1", "/workspace", "", false)
 	if err := c.Destroy(context.Background()); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
