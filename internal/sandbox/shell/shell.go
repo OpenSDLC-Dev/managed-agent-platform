@@ -107,19 +107,12 @@ type Request struct {
 	Timeout time.Duration // per-command; 0 means only the context bounds it
 }
 
-// Result mirrors sandbox.ExecResult with the restart flag the tool reports back.
+// Result is the command's sandbox.ExecResult, with the restart flag the tool
+// reports back.
 type Result struct {
-	Stdout    string
-	Stderr    string
-	ExitCode  int
-	TimedOut  bool
+	sandbox.ExecResult
 	Restarted bool
-
-	StdoutTruncated, StderrTruncated bool
 }
-
-// Truncated says the cap cut either stream, as sandbox.ExecResult's does.
-func (r Result) Truncated() bool { return r.StdoutTruncated || r.StderrTruncated }
 
 // Run executes one bash tool call against sb, carrying the shell's state in the
 // container between calls. session scopes the state; id names this call's command
@@ -172,9 +165,7 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	if err != nil {
 		return Result{}, err
 	}
-	res.Stdout, res.Stderr = er.Stdout, er.Stderr
-	res.ExitCode, res.TimedOut = er.ExitCode, er.TimedOut
-	res.StdoutTruncated, res.StderrTruncated = er.StdoutTruncated, er.StderrTruncated
+	res.ExecResult = er
 
 	// Commit this call's snapshot only if the call finished inside its deadline
 	// AND the snapshot is complete. Both halves are load-bearing.
