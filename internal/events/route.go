@@ -22,7 +22,8 @@ func (e *ThreadNotFoundError) Error() string { return "Thread not found: " + e.I
 
 // Refusal is the client's error in a send batch the log-reading checks refuse
 // — RouteInbound, ValidateToolResults, ValidateToolConfirmations and
-// ValidateDefineOutcomes: the API answers it 400. Every other error they
+// ValidateDefineOutcomes, with DefineOutcomes, which parses for it: the API
+// answers it 400. Every other error they
 // return, a *ThreadNotFoundError and a *NoPendingConfirmationError aside, is a
 // fault reading the log — a database error, a cancelled context — and none of
 // it is the client's to read.

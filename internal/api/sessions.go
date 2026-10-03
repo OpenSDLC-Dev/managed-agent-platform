@@ -855,29 +855,43 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, err
 	}
 
+	// Initial events are validated through the same per-type normalizers a
+	// posted batch gets, before the row exists (fail fast); the DB-backed
+	// outcome checks run after the insert, against the fresh row. They are
+	// normalized ahead of the resources for the rubric file a define_outcome
+	// names, which lockFileRows takes with the mounts' sources below, and a
+	// refusal still answers after the resources', where it always has. The
+	// define_outcomes are parsed once, here, for that lock and for the outcome
+	// checks and the rubric snapshot after the insert; one that does not parse
+	// is refused with those checks, ahead of them, where it always was.
+	var initialEvents []events.NewEvent
+	var defs []events.DefineOutcome
+	var initialErr, defsErr error
+	if len(in.rawInitial) > 0 {
+		initialEvents, initialErr = events.NormalizeInitialEvents(envKind, events.ManagementCredential, in.rawInitial)
+		defs, defsErr = events.DefineOutcomes(initialEvents)
+	}
+	if err := lockFileRows(ctx, tx, append(mountSourceIDs(in.resourceInputs), rubricFileIDs(defs)...)); err != nil {
+		return createdSession{}, err
+	}
+
+	// The id comes ahead of the resources: each file the session mounts is
+	// minted as a copy scoped to it (mountFileCopy).
+	id := in.id
+	if id == "" {
+		id = domain.NewID(domain.PrefixSession).String()
+	}
 	now := time.Now().UTC()
-	resources, repoIDs, err := materializeResourceInputs(ctx, tx, in.resourceInputs, now)
+	resources, repoIDs, err := materializeResourceInputs(ctx, tx, id, in.resourceInputs, now)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return createdSession{}, err
 	}
 	resourcesJSON := mustJSON(resources)
-
-	// Initial events are validated through the same per-type normalizers a
-	// posted batch gets, before the row exists (fail fast); the DB-backed
-	// outcome checks run after the insert, against the fresh row.
-	var initialEvents []events.NewEvent
-	if len(in.rawInitial) > 0 {
-		initialEvents, err = events.NormalizeInitialEvents(envKind, events.ManagementCredential, in.rawInitial)
-		if err != nil {
-			return createdSession{}, errInvalid("initial_events: %s", err)
-		}
+	if initialErr != nil {
+		return createdSession{}, errInvalid("initial_events: %s", initialErr)
 	}
 
-	id := in.id
-	if id == "" {
-		id = domain.NewID(domain.PrefixSession).String()
-	}
 	var createdBy *string
 	if p := principalFrom(ctx); p != "" {
 		createdBy = &p
@@ -936,7 +950,11 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	}
 
 	if len(initialEvents) > 0 {
-		if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), initialEvents, false); err != nil {
+		err := defsErr
+		if err == nil {
+			err = events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), defs, false)
+		}
+		if err != nil {
 			// The client's mistake is the 400; a fault reading the log is not.
 			var refusal *events.Refusal
 			if errors.As(err, &refusal) {
@@ -944,11 +962,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 			}
 			return createdSession{}, err
 		}
-		defs, err := events.DefineOutcomes(initialEvents)
-		if err != nil {
-			return createdSession{}, errInvalid("initial_events: %s", err)
-		}
-		if err := s.snapshotRubrics(ctx, defs); err != nil {
+		if err := s.snapshotRubrics(ctx, tx, defs); err != nil {
 			return createdSession{}, err
 		}
 		// The log announces the status the session was born into, then the
@@ -989,6 +1003,19 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	}
 
 	return createdSession{row: row, resources: len(resources), initialEvents: len(initialEvents)}, nil
+}
+
+// rubricFileIDs is the files defs name as rubrics. A define_outcome that does
+// not parse leaves defs empty, so it names none here and is refused where it
+// always was.
+func rubricFileIDs(defs []events.DefineOutcome) []string {
+	var ids []string
+	for _, d := range defs {
+		if d.RubricType == "file" {
+			ids = append(ids, d.RubricFileID)
+		}
+	}
+	return ids
 }
 
 func mustJSON(v any) []byte {
@@ -1666,7 +1693,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, s.pool)
 	if err != nil {
 		return nil, err
 	}
@@ -1677,6 +1704,19 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := requireNotRunning(ctx, tx, id, func() error {
 		return errInvalid("Cannot delete session while it is running. Send an interrupt event or wait for the session to complete.")
 	}); err != nil {
+		return nil, err
+	}
+	// This delete takes the session's files itself, its copies with its
+	// outputs and before it enqueues a key (EnqueueObjectDeletes says why that
+	// order), so it says so before the tombstone: migration 0046's trigger on
+	// deleted_sessions takes the same rows for a previous build's delete, which
+	// cannot reach the copies and would lock the rest out of id order, and
+	// leaves them to a transaction that has said it will. The trigger is that
+	// build's alone, to go with the guard (#856), which is why this keeps a
+	// statement of its own rather than leaning on it; said late, the trigger
+	// would take the rows instead, unnoticed
+	// (TestSessionDeleteAllowsCopyDeletesBeforeItsTombstone).
+	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
 		return nil, err
 	}
 	// The tombstone rides the deleting transaction, written while the row can
@@ -1719,18 +1759,25 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// through the files API do not — the reference's own split: "Files you
 	// uploaded through the Files API are also unaffected, but files the session
 	// itself produced are scoped to it and are permanently deleted along with
-	// its filesystem." Session-produced is exactly scope_type='session' here,
-	// because internal/executor's harvest is the only writer of those rows,
-	// an upload writes neither scope column and a dream's files carry dream_id
-	// instead. files.scope_id is polymorphic and so carries no foreign key,
-	// which is why this is by hand rather than a cascade — the checkpoint row
-	// above is deleted for the same reason (#266). Since 0036 the schema does
+	// its filesystem." The session's rows are exactly the scope_type='session'
+	// ones: internal/executor's harvest writes its outputs that way and
+	// mountFileCopy (#578) its copies of the files it mounted, while an upload
+	// writes neither scope column and a dream's files carry dream_id instead.
+	// The copies go with the session too, which the docs' sentence does not
+	// settle — a copy is scoped to the session without being produced by it —
+	// so that is ours, INFERRED (docs/DIVERGENCES.md); deleting one never takes
+	// its upload's bytes, which the reference count keeps while the upload
+	// lives, and only a transaction that allows it can delete a copy at all
+	// (AllowFileCopyDeletes, above). files.scope_id is polymorphic and so
+	// carries no foreign key, which is why this is by hand rather than a
+	// cascade — the checkpoint row above is deleted for the same reason (#266). Since 0036 the schema does
 	// hold half of that "exactly" — the two scope columns are present together
 	// or not at all — but not the half this clause turns on: nothing pins the
 	// type's value, so a scope_id paired with some other type would still slip
-	// a DELETE that dropped `scope_type = 'session'`, which is why it stays. The ids come back because the objects they
-	// name outlive the rows; how completely those are removed after the commit
-	// is the enqueue's own paragraph below.
+	// a DELETE that dropped `scope_type = 'session'`, which is why it stays. The
+	// object keys come back because the objects outlive the rows; how
+	// completely those are removed after the commit is the enqueue's own
+	// paragraph below.
 	//
 	// Taking these rows while holding the session is the right way round, and
 	// worth saying because the wrong way round is a deadlock (#313). Every
@@ -1739,21 +1786,28 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// snapshot, and an outcome submission locks its own session before taking a
 	// referenced rubric file FOR SHARE. The paths that touch a file row without
 	// one, DELETE /v1/files/{id} among them, ask for no session lock afterwards,
-	// so no reverse edge exists for this to close a cycle against.
+	// so no reverse edge exists for this to close a cycle against. Among the
+	// file rows the locks go in id order, which is the order every path that
+	// holds several takes them in: a create mounting two of this session's
+	// files holds them FOR SHARE in that order (lockFileRows), so this cannot
+	// hold one it waits for while it waits for the other.
 	deliverables, err := tx.Query(ctx,
-		`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`, id)
+		`DELETE FROM files
+		  WHERE id IN (SELECT id FROM files WHERE scope_type = 'session' AND scope_id = $1
+		                ORDER BY id FOR UPDATE)
+		 RETURNING `+store.FileObjectKeySQL, id)
 	if err != nil {
 		return nil, err
 	}
-	fileIDs, err := pgx.CollectRows(deliverables, pgx.RowTo[string])
+	fileKeys, err := pgx.CollectRows(deliverables, pgx.RowTo[string])
 	if err != nil {
 		return nil, err
 	}
 	// The bytes are owed here rather than deleted here (plan 50, #645 + #320).
-	// Enqueued in this transaction, from the ids it has just taken, so the
-	// record of what is owed commits with the rows that stopped referring to
-	// it: an enqueue after the commit would leave the crash window it exists to
-	// close still open, and a delete on the request path — which is what this
+	// Enqueued in this transaction, from the keys of the rows it has just
+	// taken, so the record of what is owed commits with the rows that stopped
+	// referring to it: an enqueue after the commit would leave the crash
+	// window it exists to close still open, and a delete on the request path — which is what this
 	// replaces — left anything a slow or refusing store did not finish orphaned
 	// for good, since nothing revisited it.
 	//
@@ -1778,11 +1832,11 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// what accumulates is a row per deleted session naming a checkpoint that
 	// was never written, and the first sweeper to run deletes a missing key,
 	// which every backend answers nil, and drains them.
-	keys := make([]string, 0, len(fileIDs)+1)
-	keys = append(keys, blob.SessionCheckpointKey(id))
-	for _, fid := range fileIDs {
-		keys = append(keys, blob.FilesKey(fid))
-	}
+	//
+	// A copy's key is its upload's, so two copies of one upload return it
+	// twice; it goes in once, and is dropped from the queue while the upload
+	// or another copy still names it (EnqueueObjectDeletes).
+	keys := append([]string{blob.SessionCheckpointKey(id)}, fileKeys...)
 	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
 		return nil, err
 	}

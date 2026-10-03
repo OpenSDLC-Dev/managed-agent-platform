@@ -40,7 +40,11 @@ func TestSendChecksTellRefusalsFromFaults(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = tx.Rollback(context.Background()) }()
-		return events.ValidateDefineOutcomes(ctx, tx, sid, normalize(ev), false)
+		defs, err := events.DefineOutcomes(normalize(ev))
+		if err != nil {
+			t.Fatalf("parse %s: %v", ev, err)
+		}
+		return events.ValidateDefineOutcomes(ctx, tx, sid, defs, false)
 	}
 	checks := []struct {
 		name string
@@ -83,5 +87,27 @@ func TestSendChecksTellRefusalsFromFaults(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("%s under a cancelled context: err = %v, want it to wrap context.Canceled", c.name, err)
 		}
+	}
+}
+
+// A define_outcome payload that does not parse is the client's batch: a
+// *Refusal carrying the parse error's text, which is what
+// ValidateDefineOutcomes answered when it parsed the payloads itself, and what
+// a send and a create still answer in its place, ahead of its checks. The
+// normalizer writes every payload it admits, so only a payload it did not
+// write reaches this.
+func TestDefineOutcomesRefusesAPayloadThatDoesNotParse(t *testing.T) {
+	bad := json.RawMessage(`{"description":"d","max_iterations":"three"}`)
+	_, parseErr := events.ParseDefineOutcome(bad)
+	if parseErr == nil {
+		t.Fatal("the payload parsed; pick one that does not")
+	}
+	_, err := events.DefineOutcomes([]events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: json.RawMessage(`{}`)},
+		{Type: domain.EventUserDefineOutcome, Payload: bad},
+	})
+	var refusal *events.Refusal
+	if !errors.As(err, &refusal) || err.Error() != parseErr.Error() {
+		t.Errorf("DefineOutcomes => %v (%T), want a *Refusal reading %q", err, err, parseErr)
 	}
 }

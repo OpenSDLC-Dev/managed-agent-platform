@@ -52,7 +52,12 @@ func ParseDefineOutcome(payload json.RawMessage) (DefineOutcome, error) {
 	}, nil
 }
 
-// DefineOutcomes returns the batch's define_outcome payloads in order.
+// DefineOutcomes returns the batch's define_outcome payloads in order, parsed
+// once for every check and write a send or a create makes of them. A payload
+// that does not parse is refused (a *Refusal), as the client's batch, and a
+// caller answers that refusal where it calls ValidateDefineOutcomes, ahead of
+// that function's checks. The normalizer writes every payload it admits, so
+// this is a backstop.
 func DefineOutcomes(evs []NewEvent) ([]DefineOutcome, error) {
 	var out []DefineOutcome
 	for _, ev := range evs {
@@ -61,15 +66,16 @@ func DefineOutcomes(evs []NewEvent) ([]DefineOutcome, error) {
 		}
 		d, err := ParseDefineOutcome(ev.Payload)
 		if err != nil {
-			return nil, err
+			return nil, refuse("%v", err)
 		}
 		out = append(out, d)
 	}
 	return out, nil
 }
 
-// ValidateDefineOutcomes enforces the DB-backed halves of accepting a
-// user.define_outcome, under the send transaction's session row lock:
+// ValidateDefineOutcomes enforces the DB-backed halves of accepting a batch's
+// user.define_outcomes, defs as DefineOutcomes parsed them, under the send
+// transaction's session row lock:
 //
 //   - one active outcome at a time — the reference documents chaining only
 //     "after the terminal span.outcome_evaluation_end event of the previous
@@ -79,17 +85,16 @@ func DefineOutcomes(evs []NewEvent) ([]DefineOutcome, error) {
 //     (v1's single-tenant boundary — the registry itself) whose size fits the
 //     rubric cap. The row is taken FOR SHARE so a concurrent DELETE /v1/files
 //     cannot remove the row and object between this check and the snapshot —
-//     the deleter blocks until this transaction commits.
+//     the deleter blocks until this transaction commits. It is one row, a
+//     batch with two outcomes being refused first, so it owes no lock order
+//     of its own; a session create, which also holds the files it mounts, has
+//     taken it with them in id order already (internal/api's lockFileRows).
 //
 // batchInterrupts reports a user.interrupt in the same batch: the interrupt
 // settles the active outcome as `interrupted` in the same transaction — the
 // documented way to chain outcomes in one send — so it clears the
 // stored-entry half of the check.
-func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID, evs []NewEvent, batchInterrupts bool) error {
-	defs, err := DefineOutcomes(evs)
-	if err != nil {
-		return refuse("%v", err)
-	}
+func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID, defs []DefineOutcome, batchInterrupts bool) error {
 	if len(defs) == 0 {
 		return nil
 	}

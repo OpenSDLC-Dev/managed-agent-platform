@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -191,6 +192,10 @@ type resourceInput struct {
 	givenMountPath string
 	// file variant
 	fileID string
+	// ownFile mounts fileID itself rather than a session copy of it: the file
+	// is already this session's own, a dream's transcript (dreamstart.go),
+	// written for it in the same transaction and deleted when the dream closes.
+	ownFile bool
 	// github_repository variant
 	url      string
 	token    string
@@ -864,18 +869,19 @@ func sealRepoTokens(ctx context.Context, cipher secrets.Cipher, inputs []resourc
 	return sealed, nil
 }
 
-// materializeResourceInputs verifies each referenced file exists in the same
-// transaction as the create (cheaper failure locality than an unvalidated
-// reference — an INFERRED divergence, docs/DIVERGENCES.md) and stamps each input
-// with a fresh sesrsc_ id and the create timestamp. A file deleted between this
-// check and a later materialization is tolerated by design (plan decision 2).
+// materializeResourceInputs mints the session's own copy of each referenced
+// file in the same transaction as the create (mountFileCopy; a missing file is
+// the create's 404 rather than a deferred materialization miss — an INFERRED
+// divergence, docs/DIVERGENCES.md) and stamps each input with a fresh sesrsc_
+// id and the create timestamp. A copy deleted before a later materialization
+// is tolerated by design (plan decision 2).
 // Repositories render token-free (plan 25 decision 2); their fresh sesrsc_
 // ids come back in input order for the caller to bind to the pre-sealed
 // ciphertexts (sealRepoTokens walks the same inputs in the same order) once
 // the session row exists — the credential rows FK the session. Memory stores
 // whose slugs collide all attach (#671, suffixCollidingMemoryMounts), so their
 // elements are marshaled only once every store's mount is settled.
-func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time) ([]json.RawMessage, []string, error) {
+func materializeResourceInputs(ctx context.Context, db querier, sessionID string, inputs []resourceInput, now time.Time) ([]json.RawMessage, []string, error) {
 	out := make([]json.RawMessage, 0, len(inputs))
 	var repoIDs []string
 	var stores []memoryResourceJSON
@@ -899,12 +905,20 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			}))
 			repoIDs = append(repoIDs, id)
 		default:
-			if err := fileMustExist(ctx, db, in.fileID); err != nil {
-				return nil, nil, err
+			fileID := in.fileID
+			if in.ownFile {
+				if err := fileMustExist(ctx, db, fileID); err != nil {
+					return nil, nil, err
+				}
+			} else {
+				var err error
+				if fileID, err = mountFileCopy(ctx, db, sessionID, in.fileID); err != nil {
+					return nil, nil, err
+				}
 			}
 			id := domain.NewID(domain.PrefixResource).String()
 			out = append(out, mustJSON(fileResourceJSON{
-				ID: id, CreatedAt: now, FileID: in.fileID,
+				ID: id, CreatedAt: now, FileID: fileID,
 				MountPath: in.mountPath, Type: "file", UpdatedAt: now,
 			}))
 		}
@@ -1029,10 +1043,80 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 	return nil
 }
 
+// mountFileCopy mints the session's own copy of a file it mounts and returns
+// the copy's id, which is what the resource echoes — the reference's behavior
+// on every path that mounts a file (session create, resources add, a
+// deployment's manual run and scheduled fire; docs/DIVERGENCES.md, the
+// per-resource copy entry). The copy is a files row of its own: the source's
+// filename, size and MIME type, a created_at of its own, never downloadable,
+// scoped to the session, and the source's expires_at, which is ours (a copy is
+// the same content, so it lives as long). Its org, workspace and project are
+// the source's, so a copy never lands in a tenant its bytes are not from. It
+// aliases the source's object rather than copying bytes, so it costs no
+// storage; migration 0046's reference count keeps that object while any row
+// names it.
+//
+// The source is read FOR SHARE in the same statement. That is what lets the
+// count work: a delete of the source waits for this transaction, and the count
+// then finds the copy; a source deleted first is not found here. The add path
+// holds its session's row lock by then, the session-before-file order every
+// path that holds both takes (deleteSession's comment), and mounts one file. A
+// create holds no session row yet, and has already taken every file row it
+// names FOR SHARE in id order (lockFileRows), so the lock here is one it holds.
+//
+// A missing source is fileMustExist's refusal, an expired one included.
+func mountFileCopy(ctx context.Context, db querier, sessionID, fileID string) (string, error) {
+	var copyID string
+	err := db.QueryRow(ctx,
+		`INSERT INTO files (id, org_id, workspace_id, project_id, filename, mime_type, size_bytes,
+		                    downloadable, scope_type, scope_id, expires_at, object_key, source_file_id)
+		 SELECT $1, org_id, workspace_id, project_id, filename, mime_type, size_bytes,
+		        false, 'session', $2, expires_at, `+store.FileObjectKeySQL+`, id
+		   FROM files WHERE id = $3 AND `+store.FileLiveSQL+` FOR SHARE
+		 RETURNING id`,
+		domain.NewID(domain.PrefixFile).String(), sessionID, fileID).Scan(&copyID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", errFileGone(fileID)
+	}
+	return copyID, err
+}
+
+// lockFileRows takes FOR SHARE on every files row a session create is about to
+// name — each source it mints a copy of and the rubric file a define_outcome in
+// its initial events names — in one statement, in id order. Every remover that
+// deletes several file rows locks them in that order too (deleteSession, the
+// outputs harvest, a dream's close), so a create mounting two rows of a set
+// being deleted waits for the delete or the delete for it; locking each row as
+// its resource came up would let each hold one row the other waits for. Rows
+// that do not exist are skipped, and each one's absence is the refusal its
+// resource or rubric meets later, where it always was. An id that is not a
+// well-formed file_ id names no row and is left out rather than bound, so an
+// unstorable one is refused there too rather than failing here (#135).
+func lockFileRows(ctx context.Context, tx pgx.Tx, ids []string) error {
+	ids = slices.DeleteFunc(ids, func(id string) bool { return checkFileID(id) != nil })
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `SELECT 1 FROM files WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
+	return err
+}
+
+// mountSourceIDs is the files a create's inputs mint copies of.
+func mountSourceIDs(inputs []resourceInput) []string {
+	var ids []string
+	for _, in := range inputs {
+		if in.kind == resourceKindFile && !in.ownFile {
+			ids = append(ids, in.fileID)
+		}
+	}
+	return ids
+}
+
 // fileMustExist reports whether a file row exists and still has content,
-// mapping absence to the wire 404. The referencing session's transaction holds
-// no lock on the file row, so a concurrent delete may still leave a dangling
-// reference — accepted (decision 2).
+// mapping absence to the wire 404 — the check for a file a session mounts as
+// itself (resourceInput.ownFile), which takes no copy and so no lock. A
+// concurrent delete may still leave a dangling reference — accepted (decision
+// 2).
 //
 // An expired file is absent for this purpose: its content is contractually gone
 // (the download route 404s it), so mounting it would place a file in the
@@ -1045,18 +1129,22 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 // A session that outlives a file it already mounted is a different case and
 // needs no clause: the worker reads the content lane's 404 as not_found, skips
 // that mount and materializes the rest (internal/worker/files.go).
-//
-// The refusal is a createRefusal, which a session create answers in the
-// reference's words (#540); the add endpoint, never recorded, keeps ours.
 func fileMustExist(ctx context.Context, db querier, fileID string) error {
 	var exists bool
 	err := db.QueryRow(ctx,
 		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, fileID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return classified("file_not_found_error",
-			&createRefusal{refusedFileGone, fileID, errNotFound("file %s not found", fileID)})
+		return errFileGone(fileID)
 	}
 	return err
+}
+
+// errFileGone is a mounted file's absence. The refusal is a createRefusal,
+// which a session create answers in the reference's words (#540); the add
+// endpoint, never recorded, keeps ours.
+func errFileGone(fileID string) error {
+	return classified("file_not_found_error",
+		&createRefusal{refusedFileGone, fileID, errNotFound("file %s not found", fileID)})
 }
 
 // sessionResourceRows loads a session's stored resources array and archived
@@ -1280,13 +1368,14 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 		// supported overlay — stays legal.
 		return fileResourceJSON{}, errInvalid("mount_path %q is an ancestor of repository mount_path %q", in.mountPath, rm)
 	}
-	if err := fileMustExist(ctx, tx, in.fileID); err != nil {
+	copyID, err := mountFileCopy(ctx, tx, id, in.fileID)
+	if err != nil {
 		return fileResourceJSON{}, err
 	}
 	now := time.Now().UTC()
 	res := fileResourceJSON{
 		ID: domain.NewID(domain.PrefixResource).String(), CreatedAt: now,
-		FileID: in.fileID, MountPath: in.mountPath, Type: "file", UpdatedAt: now,
+		FileID: copyID, MountPath: in.mountPath, Type: "file", UpdatedAt: now,
 	}
 	resources = append(resources, mustJSON(res))
 	if err := updateSessionResources(ctx, tx, id, resources); err != nil {

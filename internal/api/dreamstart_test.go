@@ -141,6 +141,26 @@ func TestDreamStartLandsEverythingInOneCommit(t *testing.T) {
 			t.Errorf("no session resource mounts at %s (have %v)", want, mounts)
 		}
 	}
+	// The transcripts mount as themselves, never through a session copy
+	// (#578): they are the dream's own rows, and the close that deletes them
+	// by dream_id must leave nothing scoped to the session aliasing them.
+	owned := map[string]bool{}
+	for _, f := range files {
+		owned[f.id] = true
+	}
+	for _, r := range sessionResources(t, s, sessionID) {
+		if id, ok := r["file_id"].(string); ok && !owned[id] {
+			t.Errorf("the session mounts %s, which is not one of the dream's own files", id)
+		}
+	}
+	var scoped int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM files WHERE scope_id = $1`, sessionID).Scan(&scoped); err != nil {
+		t.Fatal(err)
+	}
+	if scoped != 0 {
+		t.Errorf("the pipeline session holds %d session-scoped files, want none", scoped)
+	}
 
 	// The overridden snapshot: the dream's model verbatim, the prompt naming
 	// the store's own mount, and a roster whose single member is this agent.

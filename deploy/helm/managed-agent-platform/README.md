@@ -129,6 +129,29 @@ This is a deliberate divergence from bundling a Postgres subchart: a self-hostab
 air-gap-friendly platform should not require pulling an external chart from a repo, and
 production operators run their own database anyway.
 
+**SQL you run by hand against the files tables** meets three rules of migration 0046
+(#578), which the platform's own transactions follow. They hold for any Postgres the
+platform runs on, the compose stack's included:
+
+- A `DELETE FROM files` skips every session's file copy (a row with `source_file_id` set)
+  as if its `WHERE` had not matched, unless its transaction first runs
+  `SELECT set_config('map.copy_delete', 'on', true)`.
+- An `INSERT INTO deleted_sessions`, a session's tombstone, fires the
+  `files_follow_session` trigger unless its transaction has set `map.copy_delete` first,
+  which leaves the session's rows to that transaction. The trigger deletes every `files`
+  row scoped to that session, copies and outputs, and enqueues their keys, which the count
+  in the next rule then drops while another `files` row names them: a copy's key is its
+  upload's, so it is dropped while the upload remains.
+- An `INSERT INTO pending_object_deletes` of a `files/` key, which is how the bytes of a
+  `files` row you delete get removed (its key is `coalesce(object_key, 'files/' || id)`),
+  is counted: a key another `files` row still names is dropped rather than queued, and the
+  bytes stay. Under `REPEATABLE READ` or `SERIALIZABLE` the insert fails before it is
+  counted, and so does a tombstone whose trigger enqueues one. Any other key, a skill
+  archive's or a checkpoint's, goes in at any level. Each platform transaction that
+  enqueues a key names `READ COMMITTED` when it begins, so a stricter
+  `default_transaction_isolation` does not fail it; a hand-run transaction inherits the
+  default unless it says `BEGIN ISOLATION LEVEL READ COMMITTED`.
+
 ### Cloud SQL Auth Proxy (`cloudSQLProxy.enabled`)
 
 On GKE, Google's documented way to reach a **private-IP** Cloud SQL instance is the Cloud

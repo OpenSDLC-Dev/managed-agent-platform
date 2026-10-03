@@ -375,7 +375,7 @@ func (s *server) runDreamArm(ctx context.Context, id string, now time.Time, cfg 
 }
 
 func (s *server) dreamArmTx(ctx context.Context, id string, now time.Time, cfg DreamRunnerConfig) (dreamStepResult, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, s.pool)
 	if err != nil {
 		return dreamStepResult{}, err
 	}
@@ -465,7 +465,7 @@ func lockDream(ctx context.Context, tx pgx.Tx, id string, now time.Time) (dreamR
 
 // dreamStep is §4.1's decision table: the arms in order, the first that
 // matches and only that one.
-func (s *server) dreamStep(ctx context.Context, tx pgx.Tx, d dreamRow, now time.Time, cfg DreamRunnerConfig) (dreamStepResult, error) {
+func (s *server) dreamStep(ctx context.Context, tx store.ObjectDeleteTx, d dreamRow, now time.Time, cfg DreamRunnerConfig) (dreamStepResult, error) {
 	switch {
 	case d.status != "pending" && d.status != "running": // 1. closing
 		return s.dreamClosingArm(ctx, tx, d)
@@ -532,7 +532,7 @@ func (s *server) dreamStep(ctx context.Context, tx pgx.Tx, d dreamRow, now time.
 }
 
 // dreamTurnArms is arms 6 to 10, the ones the stage's turn count precedes.
-func (s *server) dreamTurnArms(ctx context.Context, tx pgx.Tx, d dreamRow, turns int) (dreamStepResult, error) {
+func (s *server) dreamTurnArms(ctx context.Context, tx store.ObjectDeleteTx, d dreamRow, turns int) (dreamStepResult, error) {
 	// The stage is a database column with no CHECK behind it, and the cap
 	// below indexes an array with it. Nothing this code writes can leave the
 	// range — the start writes 1, arm 9 only increments below the last — so a
@@ -572,7 +572,7 @@ func (s *server) dreamTurnArms(ctx context.Context, tx pgx.Tx, d dreamRow, turns
 // last, so the next stage's message opens on the primary thread and its turn
 // is enqueued. The dream's own status does not move — the stage does — so the
 // arm reports no transition, only the session's.
-func (s *server) dreamAdvanceArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dreamStepResult, error) {
+func (s *server) dreamAdvanceArm(ctx context.Context, tx store.ObjectDeleteTx, d dreamRow) (dreamStepResult, error) {
 	mount, err := dreamStoreMount(ctx, tx, *d.sessionID)
 	if err != nil {
 		return dreamStepResult{}, err
@@ -636,7 +636,7 @@ func dreamStoreMount(ctx context.Context, db querier, sessionID string) (string,
 // transcript rows and objects go, and closed_at is stamped. A session still
 // running is interrupted again (idempotent) and the close waits for the next
 // tick — a turn ends, so the wait is bounded by the turn.
-func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dreamStepResult, error) {
+func (s *server) dreamClosingArm(ctx context.Context, tx store.ObjectDeleteTx, d dreamRow) (dreamStepResult, error) {
 	if d.sessionFound {
 		// lockDream read this session without a lock on its row, which §3.3's
 		// read order makes safe for *choosing* an arm: an ask commits with the
@@ -709,7 +709,8 @@ func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 	}
 	// The objects were written down as owed by the statement above's own
 	// transaction rather than deleted after it, which is what deleteFile does
-	// too: the transcript ids are the objects' only names, and this commit is
+	// too: the transcript rows are the objects' only names, unless a session
+	// mounted one and its copy keeps the object (#578), and this commit is
 	// what takes them away (#703).
 	return dreamStepResult{wakeObjectDeletes: true, sessionMoves: sessionMoves}, nil
 }
@@ -717,7 +718,7 @@ func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 // dreamCompleteArm is arm 10: the end-of-stage checks of §3.3, then completed.
 // The output store's liveness is arm 4's, taken in this same transaction, so
 // what is left here is the secret scan — the cheap half of the secret defence.
-func (s *server) dreamCompleteArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dreamStepResult, error) {
+func (s *server) dreamCompleteArm(ctx context.Context, tx store.ObjectDeleteTx, d dreamRow) (dreamStepResult, error) {
 	storeID, err := dreamOutputStoreID(d.outputs)
 	if err != nil {
 		return dreamStepResult{}, err
@@ -757,7 +758,7 @@ func (s *server) dreamCompleteArm(ctx context.Context, tx pgx.Tx, d dreamRow) (d
 // hand it a sixth claim. The cap is therefore enforced here as well, and this
 // side has no last error to carry — settleExhaustedDream keeps the case that
 // does.
-func (s *server) dreamClaim(ctx context.Context, tx pgx.Tx, d dreamRow, cfg DreamRunnerConfig) (dreamStepResult, error) {
+func (s *server) dreamClaim(ctx context.Context, tx store.ObjectDeleteTx, d dreamRow, cfg DreamRunnerConfig) (dreamStepResult, error) {
 	if d.attempts >= dreamStartAttempts {
 		return s.dreamFail(ctx, tx, d, "internal_error", fmt.Sprintf(
 			"the dream could not be started in %d attempts; the last claim did not complete",
@@ -774,7 +775,7 @@ func (s *server) dreamClaim(ctx context.Context, tx pgx.Tx, d dreamRow, cfg Drea
 // dreamFail settles a failed dream and interrupts its session where one is
 // still live; arm 1 archives and closes on a later tick. A dream with no
 // session has nothing to wind down, so it closes in the same commit (§4.6).
-func (s *server) dreamFail(ctx context.Context, tx pgx.Tx, d dreamRow, errType, msg string) (dreamStepResult, error) {
+func (s *server) dreamFail(ctx context.Context, tx store.ObjectDeleteTx, d dreamRow, errType, msg string) (dreamStepResult, error) {
 	var moves []domain.SessionStatus
 	if d.sessionFound && d.sessionArchived == nil && d.sessionStatus != string(domain.SessionTerminated) {
 		var err error
@@ -795,7 +796,7 @@ func (s *server) dreamFail(ctx context.Context, tx pgx.Tx, d dreamRow, errType, 
 // the transcript rows with it (§4.6): their ownership is the dream's, and the
 // closing arm, which would otherwise delete them, never runs on a dream this
 // commit closes.
-func (s *server) dreamSettle(ctx context.Context, tx pgx.Tx, d dreamRow, status string, failure *dreamErrorJSON) (dreamStepResult, error) {
+func (s *server) dreamSettle(ctx context.Context, tx store.ObjectDeleteTx, d dreamRow, status string, failure *dreamErrorJSON) (dreamStepResult, error) {
 	var errJSON []byte
 	if failure != nil {
 		errJSON = mustJSON(failure)
@@ -1066,21 +1067,21 @@ func mirrorDreamUsage(ctx context.Context, tx pgx.Tx, d dreamRow) error {
 // An empty set enqueues nothing rather than an empty array, so a dream that
 // wrote no files leaves the statement unrun rather than sending Postgres a
 // zero-length unnest.
-func enqueueDreamBlobs(ctx context.Context, tx pgx.Tx, dreamID string) error {
-	rows, err := tx.Query(ctx, `DELETE FROM files WHERE dream_id = $1 RETURNING id`, dreamID)
+//
+// A transcript is listed while the dream runs and can be mounted, so a session
+// create can hold several of these rows FOR SHARE; the rows are locked in id
+// order, as that create takes them (lockFileRows). The session's copy of one
+// is not a dream_id row and outlives the close, its object with it (#578).
+func enqueueDreamBlobs(ctx context.Context, tx store.ObjectDeleteTx, dreamID string) error {
+	rows, err := tx.Query(ctx,
+		`DELETE FROM files
+		  WHERE id IN (SELECT id FROM files WHERE dream_id = $1 ORDER BY id FOR UPDATE)
+		 RETURNING `+store.FileObjectKeySQL, dreamID)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	var keys []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		keys = append(keys, blob.FilesKey(id))
-	}
-	if err := rows.Err(); err != nil {
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
 		return err
 	}
 	return store.EnqueueObjectDeletes(ctx, tx, keys)

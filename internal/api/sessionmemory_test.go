@@ -386,7 +386,9 @@ func TestSessionResourceListPagesAcrossMemoryElements(t *testing.T) {
 			page = "&page=" + next
 		}
 	}
-	want := fileA + " memstore " + fileB
+	// Each file element names the session's own copy of its upload (#578).
+	res := resourcesOf(t, sess)
+	want := res[0]["file_id"].(string) + " memstore " + res[2]["file_id"].(string)
 	// limit=2 ends page one on the memory element; limit=1 starts page two on it.
 	for _, limit := range []string{"1", "2", "3"} {
 		if got := strings.Join(walk(limit), " "); got != want {

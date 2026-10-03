@@ -84,11 +84,14 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 			body["config"] = map[string]any{"type": "self_hosted"}
 		}
 		envID := createEnvironment(t, s, body)["id"].(string)
-		fileID := s.uploadFile(t, kind+".bin", &oct, "mounted by "+kind)["id"].(string)
-		sessionID := createSession(t, s, map[string]any{
+		uploadID := s.uploadFile(t, kind+".bin", &oct, "mounted by "+kind)["id"].(string)
+		sess := createSession(t, s, map[string]any{
 			"agent": agentID, "environment_id": envID,
-			"resources": []any{map[string]any{"type": "file", "file_id": fileID}},
-		})["id"].(string)
+			"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
+		})
+		// The file the session mounts is its own copy (#578), which is what
+		// a worker reads.
+		sessionID, fileID := sess["id"].(string), mountedFileID(t, sess)
 		if _, err := queue.New(s.pool).Enqueue(ctx, s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
@@ -284,11 +287,12 @@ func TestAnArchivedSelfHostedEnvironmentKeyKeepsItsLanes(t *testing.T) {
 	oct := "application/octet-stream"
 	envID, _, key := selfHostedWorker(t, s, "archived-lanes")
 	agentID := createAgent(t, s, map[string]any{"name": "archived-lanes", "model": "claude-opus-4-8"})["id"].(string)
-	fileID := s.uploadFile(t, "archived.bin", &oct, "still mine")["id"].(string)
-	sessionID := createSession(t, s, map[string]any{
+	uploadID := s.uploadFile(t, "archived.bin", &oct, "still mine")["id"].(string)
+	sess := createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": envID,
-		"resources": []any{map[string]any{"type": "file", "file_id": fileID}},
-	})["id"].(string)
+		"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
+	})
+	sessionID, fileID := sess["id"].(string), mountedFileID(t, sess)
 	skill := s.createSkill(t)
 	if status, body := s.do(http.MethodPost, "/v1/environments/"+envID+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: status %d, body %v", status, body)
