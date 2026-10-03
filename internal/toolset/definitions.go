@@ -49,10 +49,10 @@ const (
 // all six are closed with additionalProperties:false, and edit's old_string
 // carries minLength:1, the floor the edit tool already holds (file.go). grep
 // went further and took the recorded schema and tool description whole
-// (#827). The rest stays the SDK's, and docs/DIVERGENCES.md says why. A closed schema is also enforced:
-// Runner refuses any property its tool's schema does not declare (toolset.go
-// unknownProperties). The two web tools have no such Input types (see their
-// own comment below).
+// (#827). The rest stays the SDK's, and docs/DIVERGENCES.md says why. A
+// closed schema is also enforced: Runner refuses any property its tool's
+// schema does not declare (toolset.go unknownProperties). The two web tools
+// have no such Input types (see their own comment below).
 var definitions = []toolDef{
 	{
 		name: "bash",

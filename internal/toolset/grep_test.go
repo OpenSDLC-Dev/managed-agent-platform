@@ -922,9 +922,9 @@ func TestGrepSearchesWhatAPathNamesInTheMemoryTree(t *testing.T) {
 // TestGrepRunsTheSameInAKubernetesPod installs and runs rg in a pod — over
 // the k8s backend's exec, whose stdin carries the binary, into the emptyDir a
 // read-only root mounts at /tmp — on the Debian and the musl image, installs
-// it again once it is removed, and holds each answer to Docker's. A missing cluster is a
-// hard failure, as with the k8s contract test; point it at a local one with
-// MAP_K8S_CONTEXT.
+// it again once it is removed, and holds each answer to Docker's. A missing
+// cluster is a hard failure, as with the k8s contract test; point it at a
+// local one with MAP_K8S_CONTEXT.
 func TestGrepRunsTheSameInAKubernetesPod(t *testing.T) {
 	provider, err := k8s.New(k8s.Config{
 		Context:   os.Getenv("MAP_K8S_CONTEXT"),

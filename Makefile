@@ -187,11 +187,11 @@ changelog-archive:
 # by a tag that moves (debian:stable-slim, postgres:16-alpine, bash:3.2 for
 # glob's refusal of a bash without globstar, busybox for the Kubernetes
 # backend's net-setup init container, and golang:1.26-bookworm for the gate
-# image it builds, whose build also runs apt-get), so those can
-# change between runs — while this check's answer is live state elsewhere,
-# which a gate cannot be made to fail on honestly. .github/workflows/registry.yml
-# runs this daily and on every PR that touches the registry; GITHUB_TOKEN is optional
-# (the repository is public) and only raises the API rate limit.
+# image it builds, whose build also runs apt-get), so those can change
+# between runs — while this check's answer is live state elsewhere, which a
+# gate cannot be made to fail on honestly. .github/workflows/registry.yml
+# runs this daily and on every PR that touches the registry; GITHUB_TOKEN is
+# optional (the repository is public) and only raises the API rate limit.
 registry-check:
 	go run ./tools/registrycheck -issues
 

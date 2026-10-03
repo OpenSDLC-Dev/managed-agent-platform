@@ -89,17 +89,18 @@ var vcsDirs = []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
 // names, searching root from cwd, the directory the script enters before rg
 // runs, so the one memoryGlobs spells the baselines' glob from is the one rg
 // matches it in. The rest is ours and fixed: --no-config, so an image's
-// RIPGREP_CONFIG_PATH cannot change what a call means; --no-heading, so every line carries its file; --hidden with
-// the version-control directories globbed out, as the reference's GrepTool
-// searches (vcsDirs) — .gitignore and the other ignore files rg reads still
-// apply; --sort=path, so an answer lists in one order run after run, and
-// offset pages through that order whether or not the call that came before
-// paged — which costs rg its parallel search, as sorting does (docs/
-// DIVERGENCES.md); and, after the model's own glob so that one cannot bring
-// them back, the memory sync's files (memoryGlobs). Every value the model
-// chose is one argv word: the pattern after -e and the type and glob joined to
-// their flag, so none of them can be read as an option whatever it begins
-// with, and the path after "--".
+// RIPGREP_CONFIG_PATH cannot change what a call means; --no-heading, so
+// every line carries its file; --hidden with the version-control directories
+// globbed out, as the reference's GrepTool searches (vcsDirs) — .gitignore
+// and the other ignore files rg reads still apply; --sort=path, so an answer
+// lists in one order run after run, and offset pages through that order
+// whether or not the call that came before paged — which costs rg its
+// parallel search, as sorting does (docs/DIVERGENCES.md); and, after the
+// model's own glob so that one cannot bring them back, the memory sync's
+// files (memoryGlobs). Every value the model chose is one argv word: the
+// pattern after -e and the type and glob joined to their flag, so none of
+// them can be read as an option whatever it begins with, and the path after
+// "--".
 func (in grepInput) query(root, cwd string) (grepQuery, string) {
 	q := grepQuery{args: []string{"--no-config", "--no-heading", "--hidden", "--sort=path"}, cwd: cwd}
 	for _, d := range vcsDirs {
