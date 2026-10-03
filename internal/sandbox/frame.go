@@ -22,15 +22,15 @@ import (
 // `bash -c` sources an `ENV BASH_ENV` file before it runs anything, and that
 // file can print — on either stream, ending its line or not — leave the
 // directory the exec started in, and set an EXIT trap that prints after the
-// script is done; an exported function can print as it is called. The frame
-// keeps out what reaches the streams before the begin line and after the end
-// line. It keeps out what the startup prints, not what it changes: the
-// startup file still runs, as it runs for every exec, so a framed script must
-// not depend on the directory the exec started in, and a function an image
-// exports under a command's name still answers for that command. Nor does it
-// keep out what a child the script runs prints between the lines — a library
-// an `ENV LD_PRELOAD` names printing a banner from its constructor in every
-// process it loads into — which the image contract forbids
+// script is done. The frame keeps out what reaches the streams before the
+// begin line and after the end line. It keeps out what the startup prints, not
+// what it changes: the startup file still runs, as it runs for every exec, so
+// a framed script names every path whole rather than depend on the directory
+// the exec started in, and a function an image exports under a command's name
+// still answers — and prints — for that command when the script calls it. Nor
+// does it keep out what a child the script runs prints between the lines — a
+// library an `ENV LD_PRELOAD` names printing a banner from its constructor in
+// every process it loads into — which the image contract forbids
 // (docs/self-hosted-security.md). And it is no boundary against the sandbox's
 // own processes: the script, nonce and all, is the exec's argv, which any
 // process in the sandbox may read, and one that forges a frame is tampering
