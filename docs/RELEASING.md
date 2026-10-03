@@ -141,7 +141,11 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    still in review.
 3. `make release-images PUSH=1 VERSION=X.Y.Z` — one server build
    (linux/amd64 + arm64; the build stage cross-compiles rather than
-   emulating the Go toolchain) pushed as
+   emulating the Go toolchain, after fetching the pinned static ripgrep the
+   executor and worker embed for the `grep` tool — `go run
+   ./tools/ripgrepfetch`, which `make ripgrep` runs too, checking each
+   archive's sha256 against `internal/ripgrep/assets/manifest.json`, so a
+   release cannot build from anything else) pushed as
    `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
    (same digest, three names — the coordinates the Helm chart composes) plus
    `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag.
@@ -149,7 +153,10 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    `oci://ghcr.io/opensdlc-dev/charts` (its guards re-run as a
    prerequisite).
 5. `make release-binaries VERSION=X.Y.Z` — version-stamped worker tarballs
-   for linux/darwin × amd64/arm64, plus a sha256sums file.
+   for linux/darwin × amd64/arm64, plus a sha256sums file. It runs `make
+   ripgrep` first, so every worker — the darwin ones included, since they
+   drive Linux sandboxes — embeds both Linux ripgrep binaries, and each
+   tarball carries [NOTICE](../NOTICE) beside the worker for their license.
 6. The GitHub Release, from the notes rendered in step 2: created if
    missing, then reconciled (`gh release edit` republishes a stuck draft
    and refreshes title/notes), then assets uploaded with `--clobber`.

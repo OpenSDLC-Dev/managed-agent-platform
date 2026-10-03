@@ -84,16 +84,25 @@ Deferred past v1 — **seams reserved, not implemented**, each tracked as an iss
 
 Requires **Go 1.26+** and Docker: the storage and API contract tests start
 their own disposable Postgres containers, and the sandbox, shell, toolset, and
-executor tests start a disposable `debian:stable-slim` container. The fixtures
+executor tests start a disposable `debian:stable-slim` container (the toolset's
+grep tests a `postgres:16-alpine` one too). The fixtures
 that drive the daemon through the `docker` CLI rather than its HTTP API — the
-storage, API and sandbox ones — need that binary on PATH as well. The Kubernetes
+storage, API, sandbox and toolset ones — need that binary on PATH as well. The Kubernetes
 sandbox provider's contract test additionally needs a cluster — a local
 [kind](https://kind.sigs.k8s.io) cluster works, and CI provisions one. A missing
 daemon, binary or cluster is a hard test failure, not a skip, so the coverage
 gate cannot be hollowed out.
 
+The executor and the worker embed the static ripgrep their `grep` tool runs in
+a sandbox. It is fetched, not committed: `make ripgrep` downloads the pinned
+release archives from GitHub and checks their digests, and `make test`, `make
+eval`, the release targets and the Dockerfile run it first. A plain `go build`
+without it still compiles, into binaries whose `grep` reports that they carry
+no ripgrep.
+
 ```bash
 make build                 # build (go build ./...)
+make ripgrep               # fetch the pinned static ripgrep the executor and worker embed
 make test                  # unit + contract tests (go test -count=1, with coverage profile)
 make vet fmt-check         # lint
 make verify                # the whole Go gate (CI additionally runs its helm, terraform and compose jobs)

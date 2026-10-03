@@ -169,10 +169,16 @@ for its exec wrapper, `tee`/`wc` for the write path's delivered-byte count, a
 without one loses skill materialization outright, where Docker hands the same
 archive to the daemon and needs nothing (#206). `internal/sandbox/k8s/client.go`
 is the exact list. On **Docker** that same `stat` is only wanted, not required
-(below). The `grep` built-in expects GNU
-grep/findutils/coreutils and a POSIX awk, and a grep with PCRE (`-P`) for its
-`multiline` option — a busybox-only image gets a tool error, not degraded
-behaviour. Its script uses no bash feature newer than 3.2.
+(below). The `grep` built-in needs no search tool from the image: it runs a
+static ripgrep the executor and worker carry, which it writes to
+`/tmp/.map-ripgrep/` the first time a sandbox greps. So it needs a **Linux
+x86_64 or aarch64** sandbox whose `/tmp` the sandbox user can write and
+**execute from** — not mounted `noexec`, which both backends' own `/tmp` mounts
+under a read-only root are not — and `cat`, `chmod`, `mv` and `rm` to install
+the binary, `head` and `tail` for `head_limit` and `offset`; glibc, musl and
+busybox userlands alike. Where any of that is missing, grep is a tool error
+naming it, not degraded behaviour. Its scripts use no bash feature newer than
+3.2.
 
 A cloud environment's `config.packages` adds a contract of its own, and only for
 the managers it names: the executor runs `apt`, `cargo`, `gem`, `go`, `npm` and
@@ -543,7 +549,8 @@ That set is every path the platform writes inside a sandbox, and it is one list
 in the code (`sandbox.WritablePaths`) precisely so neither backend can forget one:
 
 - the **session workdir**;
-- **`/tmp`**, where the Kubernetes backend keeps each exec's state file;
+- **`/tmp`**, where the Kubernetes backend keeps each exec's state file and
+  `grep` installs and runs its ripgrep — so neither mount is `noexec`;
 - **`/var/lib/map-shell`**, where the persistent shell keeps each session's cwd
   and environment — without it the *first* `bash` call of every session fails,
   and fails as a backend fault rather than an answer the model can see;
