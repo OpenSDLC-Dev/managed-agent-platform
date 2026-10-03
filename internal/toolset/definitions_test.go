@@ -3,6 +3,7 @@ package toolset_test
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -344,6 +345,54 @@ func TestGrepSchemaMatchesTheRecording(t *testing.T) {
 			t.Fatalf("grep input_schema = %s, want the recorded %s", got, recorded)
 		}
 		return
+	}
+	t.Fatal("no grep definition")
+}
+
+// echoedGrepDescription is grep's description as the 2026-09-02 recording's
+// echo spells it, between its "**Description:** " label and its "**JSON
+// Schema:**" heading (managed-agents-wire-recordings 2026-09-02/batch2.json,
+// probe sessA.events.after-turn2). The file holds each regex example's
+// backslash as eight: two JSON layers, the recording's and the event body's,
+// leave the two the model wrote.
+const echoedGrepDescription = "A powerful search tool built on ripgrep\n\n" +
+	"  Usage:\n" +
+	"  - ALWAYS use grep for search tasks. NEVER invoke `grep` or `rg` as a bash command. The grep tool has been optimized for correct permissions and access.\n" +
+	`  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")` + "\n" +
+	`  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")` + "\n" +
+	`  - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts` + "\n" +
+	"  - Use bash tool for open-ended searches requiring multiple rounds\n" +
+	"  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\\\{\\\\}` to find `interface{}` in Go code)\n" +
+	"  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\\\{[\\\\s\\\\S]*?field`, use `multiline: true`"
+
+// grep's tool description is the reference's (#827), the echo's text with
+// the one reading it leaves open settled: each doubled backslash is the JSON
+// spelling of one, which is what Claude Code's GrepTool — whose text this is —
+// carries, and what makes "function\s+\w+" a regex for what it says
+// (docs/DIVERGENCES.md, the INFERRED grep entry).
+func TestGrepDescriptionMatchesTheRecording(t *testing.T) {
+	want := strings.ReplaceAll(echoedGrepDescription, `\\`, `\`)
+	if !strings.Contains(want, `"function\s+\w+"`) || strings.Contains(want, `\\`) {
+		t.Fatalf("the settled reading is not one backslash per escape: %q", want)
+	}
+	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	for _, raw := range defs {
+		var d struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("definition: %v", err)
+		}
+		if d.Name == "grep" {
+			if d.Description != want {
+				t.Fatalf("grep description =\n%s\nwant the recorded\n%s", d.Description, want)
+			}
+			return
+		}
 	}
 	t.Fatal("no grep definition")
 }
