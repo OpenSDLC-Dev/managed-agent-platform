@@ -860,13 +860,17 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	// outcome checks run after the insert, against the fresh row. They are
 	// normalized ahead of the resources for the rubric file a define_outcome
 	// names, which lockFileRows takes with the mounts' sources below, and a
-	// refusal still answers after the resources', where it always has.
+	// refusal still answers after the resources', where it always has. The
+	// define_outcomes are parsed once, here, for both that lock and the
+	// rubric snapshot after the insert.
 	var initialEvents []events.NewEvent
-	var initialErr error
+	var defs []events.DefineOutcome
+	var initialErr, defsErr error
 	if len(in.rawInitial) > 0 {
 		initialEvents, initialErr = events.NormalizeInitialEvents(envKind, events.ManagementCredential, in.rawInitial)
+		defs, defsErr = events.DefineOutcomes(initialEvents)
 	}
-	if err := lockFileRows(ctx, tx, append(mountSourceIDs(in.resourceInputs), rubricFileIDs(initialEvents)...)); err != nil {
+	if err := lockFileRows(ctx, tx, append(mountSourceIDs(in.resourceInputs), rubricFileIDs(defs)...)); err != nil {
 		return createdSession{}, err
 	}
 
@@ -953,9 +957,8 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 			}
 			return createdSession{}, err
 		}
-		defs, err := events.DefineOutcomes(initialEvents)
-		if err != nil {
-			return createdSession{}, errInvalid("initial_events: %s", err)
+		if defsErr != nil {
+			return createdSession{}, errInvalid("initial_events: %s", defsErr)
 		}
 		if err := s.snapshotRubrics(ctx, tx, defs); err != nil {
 			return createdSession{}, err
@@ -1000,11 +1003,10 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	return createdSession{row: row, resources: len(resources), initialEvents: len(initialEvents)}, nil
 }
 
-// rubricFileIDs is the files the define_outcomes among evs name as rubrics. A
-// define_outcome that does not parse names none here and is refused where it
+// rubricFileIDs is the files defs name as rubrics. A define_outcome that does
+// not parse leaves defs empty, so it names none here and is refused where it
 // always was.
-func rubricFileIDs(evs []events.NewEvent) []string {
-	defs, _ := events.DefineOutcomes(evs)
+func rubricFileIDs(defs []events.DefineOutcome) []string {
 	var ids []string
 	for _, d := range defs {
 		if d.RubricType == "file" {
