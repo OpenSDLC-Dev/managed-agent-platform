@@ -140,9 +140,9 @@ its upload's, is dropped while the upload remains. Under `REPEATABLE READ` or
 checkpoint's, goes in at any level. Each platform transaction that enqueues a key names
 `READ COMMITTED` when it begins, so a stricter `default_transaction_isolation` does not
 fail it; a hand-run transaction inherits the default unless it says
-`BEGIN ISOLATION LEVEL READ COMMITTED`. Nothing else is asked of it since migration 0047
-(#856): a `DELETE FROM files` takes a copy (a row with `source_file_id` set) like any other
-row, and an `INSERT INTO deleted_sessions`, a session's tombstone, leaves its files alone.
+`BEGIN ISOLATION LEVEL READ COMMITTED`. Nothing else is asked of it: a `DELETE FROM files`
+takes a copy (a row with `source_file_id` set) like any other row, and an
+`INSERT INTO deleted_sessions`, a session's tombstone, leaves its files alone.
 
 ### Cloud SQL Auth Proxy (`cloudSQLProxy.enabled`)
 

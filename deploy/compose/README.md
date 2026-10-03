@@ -305,9 +305,8 @@ SQL you run against the bundled Postgres's `files` tables meets one rule of migr
 (#578), which the platform's own transactions follow: `pending_object_deletes` drops a
 `files/` key another `files` row still names, so a session file copy's key, which is its
 upload's, is dropped while the upload remains, and refuses a `files/` key outright under
-`REPEATABLE READ` or `SERIALIZABLE`. Since migration 0047 (#856) a `DELETE FROM files` takes
-a copy like any other row, and a hand-written `deleted_sessions` tombstone leaves the
-session's files alone. The
+`REPEATABLE READ` or `SERIALIZABLE`. A `DELETE FROM files` takes a copy like any other row,
+and a hand-written `deleted_sessions` tombstone leaves the session's files alone. The
 [Helm chart's Database section](../helm/managed-agent-platform/README.md#database) spells
 the rule out.
 
