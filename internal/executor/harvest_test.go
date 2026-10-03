@@ -330,10 +330,10 @@ func TestReHarvestLeavesTheSessionsCopies(t *testing.T) {
 }
 
 // TestAHarvestBeginsReadCommitted: a re-harvest owes the snapshot it
-// replaces, and migration 0046's reference count refuses a files/ key at any
-// isolation level but READ COMMITTED (#578). The settle names it when it begins
-// (store.BeginObjectDelete), so a database defaulting to a stricter level
-// still publishes. internal/api's TestEveryObjectDeleteBeginsReadCommitted
+// replaces, and migration 0046's reference count refuses a files/ key under
+// REPEATABLE READ and SERIALIZABLE (#578). The settle names READ COMMITTED
+// when it begins (store.BeginObjectDelete), so a database defaulting to a
+// stricter level still publishes. internal/api's TestEveryObjectDeleteBeginsReadCommitted
 // holds the control plane's removers.
 func TestAHarvestBeginsReadCommitted(t *testing.T) {
 	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}

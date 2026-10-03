@@ -237,6 +237,31 @@ func TestEnqueueObjectDeletesSkipsReferencedKeys(t *testing.T) {
 	}
 }
 
+// files_name_object answers for a files/ key alone, on its own as well as
+// behind the trigger's own test: it reads no other key's tail as an id, so a
+// key under another prefix that ends in a live row's id names nothing.
+func TestFilesNameObjectNamesOnlyFilesKeys(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	insertUpload(t, pool, "file_owner")
+	insertCopy(t, pool, "file_copy", "file_upload", blob.FilesKey("file_upload"), "sesn_1")
+	for k, want := range map[string]bool{
+		"files/file_owner":  true, // an owner, by its id
+		"files/file_upload": true, // a copy, by its object_key
+		"files/file_copy":   false,
+		"files/file_gone":   false,
+		"other/file_owner":  false,
+	} {
+		var got bool
+		if err := pool.QueryRow(ctx, `SELECT files_name_object($1)`, k).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("files_name_object(%q) = %v, want %v", k, got, want)
+		}
+	}
+}
+
 // Each key goes into the queue once, however often a remover names it — two of
 // a session's copies of one upload name one key — so the reference count is
 // asked about it once, as the tombstone trigger asks. A trigger ahead of the
@@ -275,54 +300,64 @@ func TestEnqueueOffersEachKeyOnce(t *testing.T) {
 // would, under READ COMMITTED, each see the other's row and skip the key, and
 // the object would never be deleted. The trigger's advisory lock makes the
 // second wait out the first and then see its delete, so the key is owed once
-// both commit.
+// both commit. READ UNCOMMITTED, which Postgres runs as READ COMMITTED, takes
+// a new snapshot per statement too, so the count accepts it and holds there.
+// The statement runs bare, as a transaction begun at either level runs it.
 func TestConcurrentLastDeletesStillOweTheObject(t *testing.T) {
-	ctx := context.Background()
-	pool := pgtest.NewPool(t)
-	const key = "files/file_upload"
-	insertUpload(t, pool, "file_upload")
-	insertCopy(t, pool, "file_copy", "file_upload", key, "sesn_1")
-	begin := func() store.ObjectDeleteTx {
-		t.Helper()
-		tx, err := store.BeginObjectDelete(ctx, pool)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
-			t.Fatal(err)
-		}
-		return tx
-	}
-	first, second := begin(), begin()
-	defer func() { _ = first.Rollback(ctx) }()
-	defer func() { _ = second.Rollback(ctx) }()
-	// The second deletes its row first, so the first's check sees that row
-	// still there, takes the lock, and skips the key.
-	if _, err := second.Exec(ctx, `DELETE FROM files WHERE id = 'file_copy'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := first.Exec(ctx, `DELETE FROM files WHERE id = 'file_upload'`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.EnqueueObjectDeletes(ctx, first, []string{key}); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- store.EnqueueObjectDeletes(ctx, second, []string{key}) }()
-	// The second's check sees the first's row, so it waits on the lock the
-	// first holds to its commit.
-	awaitLockWaiters(t, pool, 1, done)
-	if err := first.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if err := second.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if got := pendingKeys(t, pool); !slices.Equal(got, []string{key}) {
-		t.Errorf("queue = %v, want [%s]: the last delete owes the object", got, key)
+	for _, iso := range []pgx.TxIsoLevel{pgx.ReadCommitted, pgx.ReadUncommitted} {
+		t.Run(string(iso), func(t *testing.T) {
+			ctx := context.Background()
+			pool := pgtest.NewPool(t)
+			const key = "files/file_upload"
+			insertUpload(t, pool, "file_upload")
+			insertCopy(t, pool, "file_copy", "file_upload", key, "sesn_1")
+			begin := func() pgx.Tx {
+				t.Helper()
+				tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: iso})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
+					t.Fatal(err)
+				}
+				return tx
+			}
+			enqueue := func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{key})
+				return err
+			}
+			first, second := begin(), begin()
+			defer func() { _ = first.Rollback(ctx) }()
+			defer func() { _ = second.Rollback(ctx) }()
+			// The second deletes its row first, so the first's check sees that
+			// row still there, takes the lock, and skips the key.
+			if _, err := second.Exec(ctx, `DELETE FROM files WHERE id = 'file_copy'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := first.Exec(ctx, `DELETE FROM files WHERE id = 'file_upload'`); err != nil {
+				t.Fatal(err)
+			}
+			if err := enqueue(first); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- enqueue(second) }()
+			// The second's check sees the first's row, so it waits on the lock
+			// the first holds to its commit.
+			awaitLockWaiters(t, pool, 1, done)
+			if err := first.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if err := second.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := pendingKeys(t, pool); !slices.Equal(got, []string{key}) {
+				t.Errorf("queue = %v, want [%s]: the last delete owes the object", got, key)
+			}
+		})
 	}
 }
 
@@ -356,13 +391,14 @@ func awaitLockWaiters(t *testing.T, pool *pgxpool.Pool, n int, done ...chan erro
 }
 
 // Looking again after the lock sees the other remover's commit only because a
-// READ COMMITTED statement takes a new snapshot. Under REPEATABLE READ or
-// SERIALIZABLE both removers would keep seeing each other's row and the
-// object would never be owed, so the trigger refuses a files/ key at those
-// levels outright. No files row can name any other key, which the count
-// leaves alone at every level: a skill archive's or a checkpoint's is
-// enqueued as before 0046. The statement runs bare here, as a transaction
-// that did not begin through BeginObjectDelete would run it.
+// READ COMMITTED statement takes a new snapshot, as a READ UNCOMMITTED one
+// does in Postgres. Under REPEATABLE READ or SERIALIZABLE both removers would
+// keep seeing each other's row and the object would never be owed, so the
+// trigger refuses a files/ key at those levels outright, and accepts it at the
+// other two. No files row can name any other key, which the count leaves alone
+// at every level: a skill archive's or a checkpoint's is enqueued as before
+// 0046. The statement runs bare here, as a transaction that did not begin
+// through BeginObjectDelete would run it.
 func TestObjectDeleteEnqueueRefusesAFilesKeyUnderStricterIsolation(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -399,6 +435,17 @@ func TestObjectDeleteEnqueueRefusesAFilesKeyUnderStricterIsolation(t *testing.T)
 	})
 	if got := pendingKeys(t, pool); !slices.Contains(got, "files/file_x") {
 		t.Errorf("queue = %v under READ COMMITTED, want files/file_x owed", got)
+	}
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadUncommitted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitTx(t, tx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{"files/file_y"})
+		return err
+	})
+	if got := pendingKeys(t, pool); !slices.Contains(got, "files/file_y") {
+		t.Errorf("queue = %v under READ UNCOMMITTED, want files/file_y owed", got)
 	}
 }
 

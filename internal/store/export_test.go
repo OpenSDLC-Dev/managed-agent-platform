@@ -2,6 +2,11 @@ package store
 
 import "time"
 
+// PendingObjectDeleteInsertSQL exposes EnqueueObjectDeletes' statement, so
+// the external tests can run it in a transaction BeginObjectDelete did not
+// begin, as nothing outside this package can.
+const PendingObjectDeleteInsertSQL = pendingObjectDeleteInsertSQL
+
 // MigrateThrough exposes the migrate-through seam to the external tests.
 var MigrateThrough = migrate
 

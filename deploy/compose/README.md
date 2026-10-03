@@ -300,12 +300,14 @@ knowing before you drop volumes mid-debugging with a token open in a terminal.
 
 SQL you run against the bundled Postgres's `files` tables meets three rules of migration
 0046 (#578), which the platform's own transactions follow: a `DELETE FROM files` skips
-session file copies unless its transaction first sets `map.copy_delete`; a hand-written
-`deleted_sessions` tombstone deletes that session's files and enqueues their objects,
-through a trigger, unless the same setting came first; and enqueueing a `files/` key into
-`pending_object_deletes`, which a tombstone's trigger also does, needs `READ COMMITTED`.
-The [Helm chart's Database section](../helm/managed-agent-platform/README.md#database)
-spells them out, with the statements to run.
+session file copies unless its transaction first sets `map.copy_delete`; unless the same
+setting came first, a hand-written `deleted_sessions` tombstone deletes that session's
+files through a trigger and enqueues their keys; and `pending_object_deletes` drops a
+`files/` key another `files` row still names, so a copy's key, which is its upload's, is
+dropped while the upload remains, and refuses a `files/` key outright under
+`REPEATABLE READ` or `SERIALIZABLE`. The
+[Helm chart's Database section](../helm/managed-agent-platform/README.md#database) spells
+them out.
 
 ## Teardown
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/jackc/pgx/v5"
@@ -176,8 +177,8 @@ func TestTheDreamCloseWakesTheDrainThroughItsRunner(t *testing.T) {
 }
 
 // TestEveryObjectDeleteBeginsReadCommitted: migration 0046's reference count
-// refuses a files/ key at any isolation level but READ COMMITTED (#578), and a
-// database may default to a stricter one. Every transaction that owes an
+// refuses a files/ key under REPEATABLE READ and SERIALIZABLE (#578), and a
+// database may default to one of them. Every transaction that owes an
 // object names READ COMMITTED when it begins (store.BeginObjectDelete), so each
 // remover here still deletes on such a database: a file, a session, a skill
 // version and a skill, the expiry sweep, and a dream's close. The two skill
@@ -257,24 +258,44 @@ func TestEveryObjectDeleteBeginsReadCommitted(t *testing.T) {
 }
 
 // The previous build begins every transaction at the database's default, and
-// migration 0046's reference count refuses a files/ key outside READ COMMITTED
-// (#578). So on a database defaulting to REPEATABLE READ, each of that build's
-// deletes that enqueues a files/ key fails: an upload's, and a session's that
-// holds a file, whose tombstone trigger enqueues the file's key. Its skill
-// delete and the delete of a session holding no file owe only a skill archive
-// and a checkpoint, which no files row can name, and succeed as before 0046.
-func TestAPreviousBuildOnAStricterDefaultFailsOnlyWhatOwesAFilesKey(t *testing.T) {
+// migration 0046's reference count refuses a files/ key under REPEATABLE READ
+// and SERIALIZABLE (#578), before it counts. So on a database defaulting to
+// REPEATABLE READ, each of that build's transactions that enqueues a files/
+// key fails, even one whose key the count would drop. Here that is all five
+// the migration lists: the delete of an upload a session's copy still names,
+// and of that session, whose tombstone trigger enqueues the copy's key, which
+// the upload still names, so neither would owe anything; an expiry sweep that
+// takes a row; a harvest replacing an output; and a dream's close deleting its
+// transcripts. Its skill delete and the delete of a session holding no file
+// enqueue only a skill archive and a checkpoint, which no files row can name,
+// and succeed as before 0046.
+func TestAPreviousBuildOnAStricterDefaultFailsEveryTransactionEnqueuingAFilesKey(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 	agentID, envID := readableFixture(t, s)
 	uploadID := uploadOneFile(t, s, "in.txt")
+	expiringID := uploadOneFile(t, s, "old.txt")
 	fileless := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
 	holding := createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": envID,
 		"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
 	})["id"].(string)
+	output := domain.NewID("file").String()
+	if _, err := s.pool.Exec(ctx, pgtest.PrevHarvestInsertSQL, output, "out.txt", "text/plain", 1, holding); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE files SET expires_at = now() - interval '31 days' WHERE id = $1`, expiringID); err != nil {
+		t.Fatal(err)
+	}
 	skillID := s.createSkill(t)["id"].(string)
 	version := s.latestVersion(t, skillID)
+	_, body := seededDreamBody(t, s)
+	dreamID, _ := startedDream(t, s, body)
+	transcripts := dreamFileIDs(t, s, dreamID)
+	if len(transcripts) == 0 {
+		t.Fatal("the dream wrote no transcripts, so its close would enqueue nothing")
+	}
 	pgtest.DefaultRepeatableRead(t, s.pool)
 
 	if err := prevDeleteSkill(ctx, s.pool, skillID); err != nil {
@@ -283,9 +304,20 @@ func TestAPreviousBuildOnAStricterDefaultFailsOnlyWhatOwesAFilesKey(t *testing.T
 	if err := prevDeleteSession(ctx, s.pool, fileless); err != nil {
 		t.Errorf("the previous build's delete of a session holding no file: %v", err)
 	}
+	reharvest := func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, pgtest.PrevHarvestInsertSQL,
+			domain.NewID("file").String(), "out.txt", "text/plain", 2, holding)
+		return err
+	}
 	for what, err := range map[string]error{
 		"the previous build's delete of a session holding a copy": prevDeleteSession(ctx, s.pool, holding),
 		"the previous build's delete of an upload":                prevDeleteFile(ctx, s.pool, uploadID),
+		"the previous build's expiry sweep": prevRemoveFiles(ctx, s.pool, nil,
+			pgtest.PrevPurgeSQL, (30 * 24 * time.Hour).Seconds(), 1000),
+		"the previous build's harvest replacing an output": prevRemoveFiles(ctx, s.pool, reharvest,
+			pgtest.PrevHarvestDeleteSQL, holding),
+		"the previous build's dream close": prevRemoveFiles(ctx, s.pool, nil,
+			pgtest.PrevDreamFilesDeleteSQL, dreamID),
 	} {
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "25000" {
@@ -297,16 +329,56 @@ func TestAPreviousBuildOnAStricterDefaultFailsOnlyWhatOwesAFilesKey(t *testing.T
 	want := []string{skills.BlobKey(skillID, version), blob.SessionCheckpointKey(fileless)}
 	slices.Sort(want)
 	if !slices.Equal(owed, want) {
-		t.Errorf("queue = %v, want %v: the refused deletes owe nothing", owed, want)
+		t.Errorf("queue = %v, want %v: the refused transactions owe nothing", owed, want)
 	}
 	var left int
 	if err := s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM files WHERE id = $1 OR scope_id = $2`, uploadID, holding).Scan(&left); err != nil {
+		`SELECT count(*) FROM files WHERE id = ANY($1) OR scope_id = $2`,
+		append([]string{uploadID, expiringID}, transcripts...), holding).Scan(&left); err != nil {
 		t.Fatal(err)
 	}
-	if left != 2 {
-		t.Errorf("%d of the upload and its copy left, want both: the refused deletes rolled back", left)
+	// The upload, the expired upload, the transcripts, and the session's copy
+	// and output.
+	if want := 2 + len(transcripts) + 2; left != want {
+		t.Errorf("%d of the %d rows the refused transactions deleted are left, want all: they rolled back", left, want)
 	}
+}
+
+// prevRemoveFiles runs one of the previous build's removers that deletes files
+// rows by a statement returning their ids and then enqueues their keys, in a
+// transaction begun as that build begins it: its expiry sweep, its harvest
+// replacing a snapshot, which writes the new one (then) in between, and its
+// dream close, past the transcripts it deletes.
+func prevRemoveFiles(ctx context.Context, pool *pgxpool.Pool, then func(pgx.Tx) error, del string, args ...any) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, del, args...)
+	if err != nil {
+		return err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return errors.New("deleted no row, so it enqueues nothing")
+	}
+	if then != nil {
+		if err := then(tx); err != nil {
+			return err
+		}
+	}
+	keys := make([]string, len(ids))
+	for i, id := range ids {
+		keys[i] = blob.FilesKey(id)
+	}
+	if _, err := tx.Exec(ctx, pgtest.PrevObjectEnqueueSQL, keys); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // prevDeleteFile runs the previous build's DELETE /v1/files/{id} past its

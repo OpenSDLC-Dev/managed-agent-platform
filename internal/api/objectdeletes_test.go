@@ -20,7 +20,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // refusingStore is an object store that can be told to refuse every delete and
@@ -205,7 +204,8 @@ func TestDrainSweepsBeforeItsFirstTick(t *testing.T) {
 		t.Fatalf("seed the object: %v", err)
 	}
 	// The row a dead process's transaction left behind.
-	if _, err := s.pool.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{key}); err != nil {
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, key); err != nil {
 		t.Fatalf("seed the owed key: %v", err)
 	}
 
@@ -220,7 +220,8 @@ func TestDrainSweepsBeforeItsFirstTick(t *testing.T) {
 	if err := s.blobs.Put(ctx, second, strings.NewReader("bytes"), 5, "text/markdown"); err != nil {
 		t.Fatalf("seed the second object: %v", err)
 	}
-	if _, err := s.pool.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{second}); err != nil {
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO pending_object_deletes (object_key) VALUES ($1)`, second); err != nil {
 		t.Fatalf("seed the second owed key: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond)

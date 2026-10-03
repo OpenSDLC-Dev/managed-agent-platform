@@ -6,10 +6,10 @@
 // Query SQL is not owned here — it belongs to the packages that issue it
 // (internal/api, internal/events, internal/queue and friends). The exceptions
 // below live on the schema's owner precisely because separate packages must
-// agree on them exactly: SessionTombstoneInsertSQL,
-// PendingObjectDeleteInsertSQL (run through EnqueueObjectDeletes), FileLiveSQL
-// and FileObjectKeySQL, and the two that put a transaction where migration
-// 0046's triggers require it, AllowFileCopyDeletes (its set_config) and
+// agree on them exactly: SessionTombstoneInsertSQL, EnqueueObjectDeletes (its
+// statement unexported, so no other package runs it bare), FileLiveSQL and
+// FileObjectKeySQL, and the two that put a transaction where migration 0046's
+// triggers require it, AllowFileCopyDeletes (its set_config) and
 // BeginObjectDelete (READ COMMITTED).
 //
 // Three properties of Migrate (migrate.go) are contract, not implementation
@@ -123,11 +123,12 @@ const SessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment
 	 WHERE s.id = $1
 	 ON CONFLICT (id) DO NOTHING`
 
-// PendingObjectDeleteInsertSQL enqueues object keys the caller's transaction
+// pendingObjectDeleteInsertSQL enqueues object keys the caller's transaction
 // has just orphaned, for the sweeper that deletes them (plan 50). One
 // definition on the schema's owner for the same reason as the tombstone above:
 // the producer and the consumer are in different packages and must agree on
-// the shape exactly.
+// the shape exactly. Unexported, so a producer outside this package runs it
+// only through EnqueueObjectDeletes, and so only on an ObjectDeleteTx.
 //
 // One statement for the whole set, because a session's deliverables are up to
 // two hundred keys and a delete should not become two hundred round trips
@@ -141,7 +142,7 @@ const SessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment
 // the advisory lock migration 0046's count can take per key: two removers
 // sharing a pair of keys take the pair in one order, and two keys whose hashes
 // collide are one lock, so no order between them is owed.
-const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object_key)
+const pendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object_key)
 	 SELECT k FROM (SELECT DISTINCT unnest($1::text[]) AS k) AS d ORDER BY hashtext(k)
 	 ON CONFLICT (object_key) DO NOTHING`
 
@@ -162,21 +163,34 @@ const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object
 // per key and hold it to the commit, so a remover enqueues once it has deleted
 // every row it is going to: a row lock asked for after one of these locks can
 // close a cycle with a remover holding that row and waiting on this key. The
-// count refuses a files/ key outside READ COMMITTED, so the transaction is an
-// ObjectDeleteTx, which only BeginObjectDelete makes.
+// count refuses a files/ key under REPEATABLE READ and SERIALIZABLE, so the
+// transaction is an ObjectDeleteTx, which BeginObjectDelete makes.
 func EnqueueObjectDeletes(ctx context.Context, tx ObjectDeleteTx, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	_, err := tx.Exec(ctx, PendingObjectDeleteInsertSQL, keys)
+	_, err := tx.Exec(ctx, pendingObjectDeleteInsertSQL, keys)
 	return err
 }
 
 // ObjectDeleteTx is a transaction BeginObjectDelete began, and the only kind
-// EnqueueObjectDeletes takes, so a remover that began a plain transaction
-// fails to compile rather than failing on a database whose default isolation
-// is stricter than READ COMMITTED. The unexported method keeps any other
-// package from making one; it is a pgx.Tx to everything else.
+// EnqueueObjectDeletes takes: a remover that hands it a plain pgx.Tx fails to
+// compile rather than failing on a database whose default isolation is
+// stricter than READ COMMITTED. The unexported method keeps another package
+// from declaring a type that satisfies it outright; it is a pgx.Tx to
+// everything else.
+//
+// That is all it guards. It does not see a transaction that enqueues without
+// calling EnqueueObjectDeletes: one that writes a session's tombstone without
+// setting map.copy_delete first, whose trigger then enqueues the session's
+// files/ keys itself, or one that runs an INSERT INTO pending_object_deletes
+// of its own (this package's statement is unexported, so only the package
+// itself can Exec that one). Nor does it stop another package from embedding
+// an ObjectDeleteTx in a struct of its own, whose method set then includes the
+// unexported method, and wrapping any transaction in it. Each remover's
+// isolation level is pinned by a test instead: internal/api's
+// TestEveryObjectDeleteBeginsReadCommitted and internal/executor's
+// TestAHarvestBeginsReadCommitted.
 //
 // A type rather than a test that scans for EnqueueObjectDeletes' callers, as
 // TestEveryFilesDeleteDecidesAboutCopies does for its DELETEs: a remover's
@@ -197,10 +211,11 @@ func (objectDeleteTx) beganByBeginObjectDelete() {}
 // READ COMMITTED, named rather than inherited. Migration 0046's reference
 // count looks again for a row naming a files/ key after waiting out the
 // remover that held it, and only a new snapshot per statement sees that
-// remover's commit, so the trigger refuses such a key at any other level. A
-// plain Begin takes the database's default_transaction_isolation, which an
-// operator may have set stricter, and every delete that owes a file's object
-// would then fail. Every remover begins here: a file, session, skill or
+// remover's commit, so the trigger refuses such a key under REPEATABLE READ
+// and SERIALIZABLE. A plain Begin takes the database's
+// default_transaction_isolation, which an operator may have set stricter, and
+// every transaction that enqueues a files/ key would then fail, even one the
+// count would drop. Every remover begins here: a file, session, skill or
 // skill-version delete, the expiry sweep, a dream runner's tick (its close
 // deletes the transcripts) and the executor's harvest settle.
 func BeginObjectDelete(ctx context.Context, pool *pgxpool.Pool) (ObjectDeleteTx, error) {

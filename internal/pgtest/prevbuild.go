@@ -1,11 +1,11 @@
 package pgtest
 
-import "github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
-
 // The previous build's statements, verbatim from origin/main before #578
 // (0ae74169). During a rolling upgrade, and after a rollback, that build runs
 // them against migration 0046's schema; internal/store's and internal/api's
 // tests run them from here, so the two suites cannot remember it differently.
+// Each is a frozen copy rather than a reference to this build's statement, so
+// a later change to this build's SQL leaves what that build runs alone.
 const (
 	// internal/executor's settleHarvest, replacing a session's snapshot.
 	PrevHarvestDeleteSQL = `DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`
@@ -25,16 +25,26 @@ const (
 		               LIMIT $2
 		               FOR UPDATE SKIP LOCKED)
 		 RETURNING id`
+	// internal/api's enqueueDreamBlobs, which a dream's close runs: its
+	// transcripts, in scan order.
+	PrevDreamFilesDeleteSQL = `DELETE FROM files WHERE dream_id = $1 RETURNING id`
 	// internal/api's deleteSkill, in its order: the parent lock, the versions
 	// and the skill, then each version's archive enqueued.
 	PrevSkillLockSQL           = `SELECT source FROM skills WHERE id = $1 FOR UPDATE`
 	PrevSkillVersionsDeleteSQL = `DELETE FROM skill_versions WHERE skill_id = $1 RETURNING version`
 	PrevSkillDeleteSQL         = `DELETE FROM skills WHERE id = $1`
+	// That build's store.SessionTombstoneInsertSQL, which its deleteSession
+	// ran.
+	PrevSessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment_kind)
+	 SELECT s.id, e.kind FROM sessions s JOIN environments e ON e.id = s.environment_id
+	 WHERE s.id = $1
+	 ON CONFLICT (id) DO NOTHING`
 	// internal/api's deleteSession, after PrevSessionDeleteSQL: every
-	// session-scoped files row, in scan order.
-	PrevSessionFilesDeleteSQL = `DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`
-	// store.PendingObjectDeleteInsertSQL, which each of that build's removers
-	// enqueued through: its keys unsorted, a duplicate offered twice.
+	// session-scoped files row, in scan order. That build spelled it as its
+	// harvest did, character for character, so it is the one constant.
+	PrevSessionFilesDeleteSQL = PrevHarvestDeleteSQL
+	// That build's store.PendingObjectDeleteInsertSQL, which each of its
+	// removers enqueued through: its keys unsorted, a duplicate offered twice.
 	PrevObjectEnqueueSQL = `INSERT INTO pending_object_deletes (object_key)
 	 SELECT unnest($1::text[])
 	 ON CONFLICT (object_key) DO NOTHING`
@@ -42,12 +52,12 @@ const (
 
 // PrevSessionDeleteSQL is that build's session delete up to its files, in its
 // order, each statement taking the session id: requireNotRunning's lock, the
-// tombstone (store.SessionTombstoneInsertSQL, unchanged), and the session and
-// checkpoint rows, its reads and its NOTIFY left out. PrevSessionFilesDeleteSQL
-// follows, and then the checkpoint's key and each deleted row's are enqueued.
+// tombstone, and the session and checkpoint rows, its reads and its NOTIFY
+// left out. PrevSessionFilesDeleteSQL follows, and then the checkpoint's key
+// and each deleted row's are enqueued.
 var PrevSessionDeleteSQL = []string{
 	`SELECT status FROM sessions WHERE id = $1 FOR UPDATE`,
-	store.SessionTombstoneInsertSQL,
+	PrevSessionTombstoneInsertSQL,
 	`DELETE FROM sessions WHERE id = $1`,
 	`DELETE FROM session_checkpoints WHERE session_id = $1`,
 }

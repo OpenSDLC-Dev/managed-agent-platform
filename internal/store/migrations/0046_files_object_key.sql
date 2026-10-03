@@ -70,22 +70,23 @@
 -- and the object would never be deleted. So a check that finds a row takes a
 -- transaction-scoped advisory lock on the key and looks again. The lock is
 -- held to commit, so the second checker waits out the first one and then sees
--- its delete. Looking again sees that commit only under READ COMMITTED, where
--- each statement takes a new snapshot, so the trigger refuses a files/ key
--- under any other isolation level outright rather than skipping a key it has
--- stopped being able to count. Every remover in this build names READ
--- COMMITTED when it begins (store.BeginObjectDelete) rather than inheriting a
--- database default that may be stricter; the refusal is for whatever does
--- not. Only a files/ key can be named by a files row, an owner by its id and a
--- copy by its object_key (files_copy_names_a_files_key), so any other key, a
--- skill archive's or a session checkpoint's, is not counted and passes under
--- every level, as before 0046. A files/ key no other row names, which is
--- almost every one, takes no lock. Class 578 keeps these locks apart from the
+-- its delete. Looking again sees that commit only where each statement takes a
+-- new snapshot: READ COMMITTED, and READ UNCOMMITTED, which Postgres runs as
+-- READ COMMITTED. So the trigger refuses a files/ key under REPEATABLE READ
+-- and SERIALIZABLE outright rather than skipping a key it has stopped being
+-- able to count. Every remover in this build names READ COMMITTED when it
+-- begins (store.BeginObjectDelete) rather than inheriting a database default
+-- that may be stricter; the refusal is for whatever does not. Only a files/
+-- key can be named by a files row, an owner by its id and a copy by its
+-- object_key (files_copy_names_a_files_key), so any other key, a skill
+-- archive's or a session checkpoint's, is not counted and passes under every
+-- level, as before 0046. A files/ key no other row names, which is almost
+-- every one, takes no lock. Class 578 keeps these locks apart from the
 -- single-key advisory locks the migrator and the executor take; the one-key
--- and two-key forms are separate lock spaces.
--- store.PendingObjectDeleteInsertSQL inserts each key once, in hashtext order,
--- the lock's own id, so two removers take a shared pair in one order; two keys
--- that collide are one lock.
+-- and two-key forms are separate lock spaces. store.EnqueueObjectDeletes
+-- inserts each key once, in hashtext order, the lock's own id, so two
+-- removers take a shared pair in one order; two keys that collide are one
+-- lock.
 --
 -- A copy is minted with its source row held FOR SHARE (internal/api's
 -- mountFileCopy), so it cannot name a key whose last row is being deleted: the
@@ -126,12 +127,13 @@
 --   * on a database whose default_transaction_isolation is stricter than READ
 --     COMMITTED, that build begins every transaction at the default, so each
 --     of its transactions that enqueues a files/ key fails at the count's
---     refusal (25000): DELETE /v1/files/{id} of a file it finds, the delete of
---     a session holding any file (the trigger enqueues their keys), an expiry
---     sweep that takes a row, a harvest replacing earlier outputs, and a dream
---     close that deletes transcripts. Its skill and skill-version deletes, and
---     the delete of a session holding no file, enqueue no files/ key and
---     succeed.
+--     refusal (25000), which comes before the count, so a key another row
+--     still names fails it too: DELETE /v1/files/{id} of a file it finds, the
+--     delete of a session holding any file (the trigger enqueues their keys),
+--     an expiry sweep that takes a row, a harvest replacing earlier outputs,
+--     and a dream close that deletes transcripts. Its skill and skill-version
+--     deletes, and the delete of a session holding no file, enqueue no files/
+--     key and succeed.
 --
 -- Rolling back after 0046 leaves the schema and its three triggers in place,
 -- so nothing is lost. Every degradation above but the last comes of copies
@@ -230,12 +232,15 @@ END $$;
 CREATE TRIGGER files_follow_session AFTER INSERT ON deleted_sessions
     FOR EACH ROW EXECUTE FUNCTION files_follow_session();
 
--- Whether some files row names the object at k, a files/ key: a copy by its
--- object_key, an owner by its id.
+-- Whether some files row names the object at k: a copy by its object_key, an
+-- owner by its id. Only a files/ key can be named, and the guard keeps the
+-- owner lookup from reading any other key's tail as an id, so the function
+-- answers rightly on its own and not only behind the trigger's own test.
 CREATE FUNCTION files_name_object(k text) RETURNS boolean
 LANGUAGE sql AS $$
-    SELECT EXISTS (SELECT 1 FROM files WHERE object_key = k)
-        OR EXISTS (SELECT 1 FROM files WHERE id = substr(k, 7) AND object_key IS NULL)
+    SELECT starts_with(k, 'files/')
+       AND (EXISTS (SELECT 1 FROM files WHERE object_key = k)
+            OR EXISTS (SELECT 1 FROM files WHERE id = substr(k, 7) AND object_key IS NULL))
 $$;
 
 CREATE FUNCTION pending_object_deletes_skip_referenced() RETURNS trigger
@@ -244,7 +249,7 @@ BEGIN
     IF NOT starts_with(NEW.object_key, 'files/') THEN
         RETURN NEW;
     END IF;
-    IF current_setting('transaction_isolation') <> 'read committed' THEN
+    IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
         RAISE EXCEPTION 'pending_object_deletes: a files/ key is enqueued under READ COMMITTED only, not %',
             current_setting('transaction_isolation')
             USING ERRCODE = 'invalid_transaction_state';

@@ -265,9 +265,9 @@ func TestEveryFilesDeleteDecidesAboutCopies(t *testing.T) {
 			rel, _ := filepath.Rel(root, path)
 			rel = filepath.ToSlash(rel)
 			switch {
-			case strings.HasPrefix(rel, "internal/pgtest/"):
-				// Test support: the previous build's statements, which tests
-				// run against the guard; production code never imports it.
+			case rel == "internal/pgtest/prevbuild.go":
+				// The previous build's statements, which tests run against
+				// the guard; production code never imports pgtest.
 			case strings.HasSuffix(path, ".sql"):
 				src, err := os.ReadFile(path)
 				if err != nil {
