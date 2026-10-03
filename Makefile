@@ -184,11 +184,12 @@ changelog-archive:
 # credential-free by design and downloads only build and test input — the
 # modules go.sum pins and the ripgrep `make ripgrep` checks against its
 # sha256, both fixed by digest, and the container images its suites run, some
-# by a tag that moves (debian:stable-slim, postgres:16-alpine, and
-# golang:1.26-bookworm for the gate image it builds, whose build also runs
-# apt-get), so those can change between runs — while this check's answer is
-# live state elsewhere, which a gate cannot be made to fail on honestly. .github/workflows/registry.yml runs this
-# daily and on every PR that touches the registry; GITHUB_TOKEN is optional
+# by a tag that moves (debian:stable-slim, postgres:16-alpine, busybox for the
+# Kubernetes backend's net-setup init container, and golang:1.26-bookworm for
+# the gate image it builds, whose build also runs apt-get), so those can
+# change between runs — while this check's answer is live state elsewhere,
+# which a gate cannot be made to fail on honestly. .github/workflows/registry.yml
+# runs this daily and on every PR that touches the registry; GITHUB_TOKEN is optional
 # (the repository is public) and only raises the API rate limit.
 registry-check:
 	go run ./tools/registrycheck -issues

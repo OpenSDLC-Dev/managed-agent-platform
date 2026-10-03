@@ -8,10 +8,11 @@ name: registry
 # asks GitHub about an issue: what it downloads is build and test input —
 # go.sum's modules and the ripgrep `make ripgrep` checks against its sha256,
 # both fixed by digest, and the container images its suites run, some by a
-# tag that moves (debian:stable-slim, postgres:16-alpine, and
-# golang:1.26-bookworm for the gate image it builds, whose build also runs
-# apt-get). So it can never notice, which is why 65 of 111 pointers were wrong
-# before anyone looked (#445). The shape half of the guard does run in the
+# tag that moves (debian:stable-slim, postgres:16-alpine, busybox for the
+# Kubernetes backend's net-setup init container, and golang:1.26-bookworm for
+# the gate image it builds, whose build also runs apt-get). So it can never
+# notice, which is why 65 of 111 pointers were wrong before anyone looked
+# (#445). The shape half of the guard does run in the
 # gate, as tools/registrycheck's own test; this workflow is the half that needs
 # live state from the network, and it exists so the state half surfaces on the
 # next scheduled run rather than at whoever's next manual sweep.
