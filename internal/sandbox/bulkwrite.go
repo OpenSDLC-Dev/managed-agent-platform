@@ -29,9 +29,10 @@ import (
 //
 // The daemon also decides *where* an archive may land, which the pod's `tar`
 // does not: it extracts at one directory per request, and on a read-only root it
-// refuses any directory outside a writable mount — `/` included, even when every
-// entry is bound for a mount below it (#859). So that backend's deliveries are
-// split into Extractions, one per writable mount a batch touches (split).
+// refuses a directory that does not resolve into a writable mount — `/` included,
+// even when every entry is bound for a mount below it (#859). It checks that one
+// directory and nothing under it, so on a read-only root that backend extracts
+// each directory's members at that directory (Extraction, split).
 
 // FileWrite is one member of a bulk write. Path must be absolute and clean
 // (`/a/b`, never `/a/../b` or `/a/b/`), because it also names an entry in the
@@ -70,6 +71,7 @@ type BulkWrite struct {
 	files    []FileWrite
 	tmps     []string
 	modes    []fs.FileMode
+	dirList  []string
 	manifest []byte
 	dirs     []byte
 	// stamp is taken once so the archive is byte-identical every time it is
@@ -128,6 +130,7 @@ func NewBulkWrite(workdir string, files []FileWrite) (*BulkWrite, error) {
 		manifest.WriteByte(0)
 		if !seen[dir] {
 			seen[dir] = true
+			b.dirList = append(b.dirList, dir)
 			dirs.WriteString(dir)
 			dirs.WriteByte(0)
 		}
@@ -155,24 +158,24 @@ func NewBulkWrite(workdir string, files []FileWrite) (*BulkWrite, error) {
 // Made inside the sandbox they belong to the sandbox user, exactly as the single
 // write's own `mkdir -p` makes them.
 func (b *BulkWrite) Archive(w io.Writer) error {
-	return Extraction{Dir: "/", entries: append(b.bookkeepingEntries(), b.memberEntries()...), stamp: b.stamp}.Archive(w)
+	return b.tree(append(b.bookkeepingEntries(), b.memberEntries()...)).Archive(w)
 }
 
 // Bookkeeping is the manifest and the directory list as Extractions — the first
 // of the two deliveries a backend makes when the sandbox cannot extract for
-// itself. Both land in the workdir, which exists and is itself one of the
-// writable mounts, so this is one extraction needing no directory made for it;
-// what it carries is the list of the ones that must be.
-func (b *BulkWrite) Bookkeeping(roots []string) []Extraction {
-	return b.split(b.bookkeepingEntries(), roots)
+// itself. Both land in the workdir, which exists, so this delivery needs no
+// directory made for it; what it carries is the list of the ones that must be.
+// It is one extraction either way (split): at `/`, or at the workdir the two
+// files share.
+func (b *BulkWrite) Bookkeeping(perDirectory bool) []Extraction {
+	return b.split(b.bookkeepingEntries(), perDirectory)
 }
 
 // Members is the members, under their temporary names, as Extractions. They are
-// delivered after the prepare pass has made the directories they land in, which
-// is also what makes every Extraction's Dir exist: each is an ancestor of, or
-// is, a directory that pass made.
-func (b *BulkWrite) Members(roots []string) []Extraction {
-	return b.split(b.memberEntries(), roots)
+// delivered after the prepare pass has made the directories they land in, so
+// every Extraction's Dir exists by then.
+func (b *BulkWrite) Members(perDirectory bool) []Extraction {
+	return b.split(b.memberEntries(), perDirectory)
 }
 
 // The bookkeeping is world-readable, unlike a temporary file whose bytes are the
@@ -200,23 +203,37 @@ type bulkEntry struct {
 
 // Extraction is one archive and the directory it is extracted at — the unit of
 // delivery for a backend that hands archives to something extracting at one
-// directory per request, as the docker daemon's archive endpoint does. Its entry
-// names are relative to Dir, which exists by the time it is delivered.
+// directory per request, as the docker daemon's archive endpoint does.
+//
+// It has two shapes, and Archive refuses an entry that does not fit its own. The
+// whole tree is extracted at `/`, each entry named by its path made relative, as
+// it always was. Every other extraction carries only entries lying directly in
+// Dir, each named by its base name alone, so nothing in the archive names a
+// directory below the one the daemon resolved and checked (#859; split).
 type Extraction struct {
 	Dir     string
+	tree    bool
 	entries []bulkEntry
 	stamp   time.Time
 }
 
 // Archive streams the extraction as a tar. Like the whole batch's, it is
 // byte-identical every time it is built, so a delivery that failed can be
-// retried from the same value.
+// retried from the same value. Every entry is checked before the first header is
+// written, so an extraction that does not fit its shape sends nothing at all.
 func (x Extraction) Archive(w io.Writer) error {
+	names := make([]string, len(x.entries))
+	for i, e := range x.entries {
+		name, err := x.name(e.path)
+		if err != nil {
+			return err
+		}
+		names[i] = name
+	}
 	tw := tar.NewWriter(w)
-	for _, e := range x.entries {
-		name := strings.TrimPrefix(strings.TrimPrefix(e.path, x.Dir), "/")
+	for i, e := range x.entries {
 		if err := tw.WriteHeader(&tar.Header{
-			Name:     name,
+			Name:     names[i],
 			Mode:     e.mode,
 			Size:     int64(len(e.data)),
 			Typeflag: tar.TypeReg,
@@ -231,65 +248,66 @@ func (x Extraction) Archive(w io.Writer) error {
 	return tw.Close()
 }
 
-// split groups entries into the Extractions that deliver them, and is the answer
-// to #859: the docker daemon refuses an extraction at `/` on a read-only root —
-// `container rootfs is marked read-only` — even when every entry is bound for a
-// writable mount below it, because what it checks is the directory the request
-// names, not where the entries go. So each extraction names a directory inside
-// the mount its entries are bound for.
+// name is what an entry is called in this extraction's archive: relative to `/`
+// in the whole tree, its base name everywhere else — and an error for a path
+// that is not absolute and clean, or that lies anywhere but directly in Dir.
+func (x Extraction) name(path string) (string, error) {
+	clean := path != "/" && gopath.IsAbs(path) && gopath.Clean(path) == path
+	switch {
+	case clean && x.tree && x.Dir == "/":
+		return path[1:], nil
+	case clean && !x.tree && gopath.Dir(path) == x.Dir:
+		return gopath.Base(path), nil
+	}
+	return "", fmt.Errorf("sandbox: build bulk archive: %q does not lie directly in %s", path, x.Dir)
+}
+
+// split cuts entries into the Extractions that deliver them. Without
+// perDirectory it is the whole tree, one extraction at `/` — what every batch
+// was before #859, and still what a writable root gets, where the daemon
+// accepts `/` and one request is the cheapest delivery there is.
 //
-// roots are the sandbox's writable mounts (WritablePaths, which is what a
-// read-only root mounts). An entry's group is the deepest root holding its
-// directory; an entry under none of them is grouped with the others sharing its
-// own directory, which is where the single write extracts too, and where the
-// daemon decides for itself whether it may. Each group is extracted at the
-// deepest directory all its entries lie within — a mount point at the shallowest,
-// never above one — so the root's own writability decides nothing for a batch
-// bound for its mounts.
+// perDirectory is for a read-only root. There the daemon refuses an extraction
+// at a directory that does not resolve into a writable mount — `/` among them,
+// whatever the entries below it name — and what it resolves and checks is that
+// one directory and nothing under it. An extraction at a mount whose entries
+// named subdirectories would let those names' own components — a symlink the
+// sandbox made, pointing at /etc — carry a payload past the check onto the
+// read-only root. So each directory is its own extraction and each entry is
+// named by its base name: the daemon resolves every directory a member lands
+// in and refuses one that leads out of the mounts, exactly as it does for a
+// single write. The price is a round trip per distinct directory.
 //
-// That keeps the round trips per batch, not per member or per directory: every
-// batch the platform writes today — a skill under the workdir, a memory store
-// under /mnt, package credentials under /tmp — is one extraction for its members,
-// whatever the shape of the tree. The cost of a batch spanning mounts is one
-// extraction per mount, and of one outside them one per directory there.
-//
-// Groups come in the order of their first entries, and each keeps its entries in
-// the batch's order. The order a caller can see is untouched by any of it: which
-// member's failure stops the run is the manifest's order, which the rename pass
-// walks only once every extraction has landed, and the bookkeeping, delivered on
-// its own first, still lands before any member does.
-func (b *BulkWrite) split(entries []bulkEntry, roots []string) []Extraction {
+// Extractions come in the order of their directories' first entries, and each
+// keeps its entries in the batch's order. The order a caller can see is untouched
+// by any of it: which member's failure stops the run is the manifest's order,
+// which the rename pass walks only once every extraction has landed, and the
+// bookkeeping, delivered on its own first, still lands before any member does.
+func (b *BulkWrite) split(entries []bulkEntry, perDirectory bool) []Extraction {
+	if len(entries) == 0 {
+		return nil
+	}
+	if !perDirectory {
+		return []Extraction{b.tree(entries)}
+	}
 	var out []Extraction
-	group := map[string]int{}
+	at := map[string]int{}
 	for _, e := range entries {
 		dir := gopath.Dir(e.path)
-		key := ""
-		for _, r := range roots {
-			if within(dir, r) && len(r) > len(key) {
-				key = r
-			}
-		}
-		if key == "" {
-			key = dir
-		}
-		i, ok := group[key]
+		i, ok := at[dir]
 		if !ok {
 			i = len(out)
-			group[key] = i
+			at[dir] = i
 			out = append(out, Extraction{Dir: dir, stamp: b.stamp})
-		}
-		for !within(dir, out[i].Dir) {
-			out[i].Dir = gopath.Dir(out[i].Dir)
 		}
 		out[i].entries = append(out[i].entries, e)
 	}
 	return out
 }
 
-// within reports whether path is dir or lies beneath it. Both are clean and
-// absolute, so a prefix that stops at a separator is the whole answer.
-func within(path, dir string) bool {
-	return path == dir || dir == "/" || strings.HasPrefix(path, dir+"/")
+// tree is entries as the whole-tree extraction at `/`.
+func (b *BulkWrite) tree(entries []bulkEntry) Extraction {
+	return Extraction{Dir: "/", tree: true, entries: entries, stamp: b.stamp}
 }
 
 // Fault turns what a shared bulk script exited with into the error the caller
@@ -303,6 +321,13 @@ func (b *BulkWrite) Fault(backend string, code int, stderr string) error {
 	switch code {
 	case ExitPathIsDirectory:
 		return fmt.Errorf("%s: %w", b.blamed(stderr), ErrIsDirectory)
+	case ExitPathNotReplaceable:
+		return fmt.Errorf("%s: %w", b.blamed(stderr), ErrNotReplaceable)
+	case ExitPathNotWritable:
+		if path, reason, ok := b.unwritable(stderr); ok {
+			return &PathNotWritableError{Path: path, Reason: reason}
+		}
+		return fmt.Errorf("%s: bulk write %s: %w", backend, b.blamed(""), ErrNotWritable)
 	case ExitPathNotDirectory:
 		return fmt.Errorf("%s: bulk write: %w (%s)", backend, ErrNotDirectory, stderr)
 	case ExitBulkIncomplete:
@@ -311,6 +336,18 @@ func (b *BulkWrite) Fault(backend string, code int, stderr string) error {
 	default:
 		return fmt.Errorf("%s: bulk write: exit %d: %s", backend, code, stderr)
 	}
+}
+
+// Refusal is Fault for what BulkRefusedShell exited with, and nil for anything
+// but the three answers it gives — the caller then keeps the error the delivery
+// itself failed with, as a single write keeps the daemon's when its own probes
+// find nothing.
+func (b *BulkWrite) Refusal(backend string, code int, stderr string) error {
+	switch code {
+	case ExitPathIsDirectory, ExitPathNotReplaceable, ExitPathNotWritable:
+		return b.Fault(backend, code, stderr)
+	}
+	return nil
 }
 
 // bulkFailMarker prefixes the line a script prints to name the member it failed
@@ -338,6 +375,39 @@ func (b *BulkWrite) blamed(stderr string) string {
 		return b.files[n].Path
 	}
 	return fmt.Sprintf("(one of %d files)", len(b.files))
+}
+
+// bulkUnwritableMarker prefixes the line a script prints when the sandbox user
+// cannot create a file where the batch needs one (ExitPathNotWritable): an index
+// — a member's, or `d` and an index into the directory list for a directory the
+// prepare pass could not make — then the shell's own strerror text, the reason a
+// PathNotWritableError carries. An index rather than a path for bulkFailMarker's
+// reason; the reason is the shell's own words, as the single write's probe hands
+// them over too.
+const bulkUnwritableMarker = "map-bulk-unwritable "
+
+// unwritable resolves the last unwritable marker in stderr to the path it names
+// — the member's target, or the directory — and the reason after it. ok is false
+// when there is no marker naming one of this batch's own.
+func (b *BulkWrite) unwritable(stderr string) (path, reason string, ok bool) {
+	lines := strings.Split(stderr, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		rest, found := strings.CutPrefix(strings.TrimSpace(lines[i]), bulkUnwritableMarker)
+		if !found {
+			continue
+		}
+		token, reason, _ := strings.Cut(rest, " ")
+		d, isDir := strings.CutPrefix(token, "d")
+		n, err := strconv.Atoi(d)
+		switch {
+		case err != nil || n < 0:
+		case isDir && n < len(b.dirList):
+			return b.dirList[n], strings.TrimSpace(reason), true
+		case !isDir && n < len(b.files):
+			return b.files[n].Path, strings.TrimSpace(reason), true
+		}
+	}
+	return "", "", false
 }
 
 // bulkLeftMarker prefixes the line __map_bulk_left prints for each of a batch's
@@ -520,24 +590,26 @@ func (b *BulkWrite) Delivered() []string {
 }
 
 // Emptying is a zero-byte entry for each of paths, as Extractions — the batch's
-// form of the single write's own emptying (docker's `reclaim`), grouped the way
-// the deliveries that landed them were rather than one archive per member,
+// form of the single write's own emptying (docker's `reclaim`), cut the way the
+// deliveries that landed them were (split) rather than one archive per member,
 // because a batch that failed under a root-owned parent left one file per member
-// and ten thousand round trips is not a cleanup. Extracting them puts the names
-// back without the payloads.
+// and ten thousand round trips is not a cleanup. perDirectory puts each path's
+// emptying at its own directory, so on a read-only root the daemon checks every
+// directory it empties into as it checked every one it delivered to. Extracting
+// them puts the names back without the payloads.
 //
 // What it must not do is put a name back that the shed had just taken away, and
 // nothing here can check: it writes what the caller passes. A caller passing
 // LeftBehind's answer is asking about files a `[ -f ]` found after the `rm`, so
 // an honest report recreates nothing — and a forged one, framed out by
 // bulkLeftBeginMarker, would at worst leave a zero-byte file at one of this
-// batch's own temporary names, never at a target and never outside the batch.
-func (b *BulkWrite) Emptying(paths, roots []string) []Extraction {
+// batch's own temporary names, never at a target.
+func (b *BulkWrite) Emptying(paths []string, perDirectory bool) []Extraction {
 	entries := make([]bulkEntry, len(paths))
 	for i, path := range paths {
 		entries[i] = bulkEntry{path, nil, 0o644}
 	}
-	return b.split(entries, roots)
+	return b.split(entries, perDirectory)
 }
 
 // BulkRenameShell defines __map_bulk_rename, which both backends embed: given
@@ -672,6 +744,13 @@ __map_bulk_rename() {
 // their distinct directories run to a few hundred kilobytes against the couple of
 // megabytes a command line holds. The walk that classifies a blocked path is all
 // shell builtins, so it costs nothing at all.
+//
+// A `mkdir` that failed for any other reason — a read-only root, a parent the
+// sandbox user cannot write — is the single write's ExitPathNotWritable, as its
+// own `mkdir -p` reports it (plan 23, #306): the first directory still missing is
+// made once more on its own, under LC_ALL=C, and its strerror is the reason, with
+// that directory's index in the list behind bulkUnwritableMarker. Only a failed
+// pass pays for it: one more `mkdir`, for the first directory still missing.
 const BulkPrepareShell = PathFaultShell + `
 __map_bulk_prepare() {
   [ -f "$1" ] || return 0
@@ -681,7 +760,64 @@ __map_bulk_prepare() {
   umask 022
   mkdir -p "${__dirs[@]}" && return 0
   for __d in "${__dirs[@]}"; do __map_path_fault "$__d"; done
+  __i=0
+  for __d in "${__dirs[@]}"; do
+    if [ ! -d "$__d" ]; then
+      __msg=$(export LC_ALL=C; mkdir -p "$__d" 2>&1) || {
+        __msg=${__msg%%$'\n'*}
+        printf '\n` + bulkUnwritableMarker + `d%d %s\n' "$__i" "${__msg##*: }" >&2
+        return 20
+      }
+    fi
+    __i=$((__i+1))
+  done
   return 1
+}
+`
+
+// BulkRefusedShell defines __map_bulk_refused, which both backends embed and run
+// only once a members delivery has been refused — the docker daemon refusing an
+// extraction, or the pod's `tar` failing twice. Given the manifest ($1) it asks,
+// member by member in the manifest's order, the single write's questions about a
+// refused write: is the target a directory (ExitPathIsDirectory), one a rename
+// cannot replace (ExitPathNotReplaceable), or is its directory one the sandbox
+// user cannot create a file in (ExitPathNotWritable, with the shell's strerror
+// behind bulkUnwritableMarker)? The first member that answers yes is the batch's
+// fault; a run where none does returns 0, and the caller keeps the delivery's
+// own error. It must run before a shed, which takes the manifest away.
+//
+// It is what keeps a batch's refusal in the caller's terms on a read-only root,
+// where a target that is itself a directory — /tmp, the workdir — has its
+// temporary bound for a directory outside the mounts, so the delivery is refused
+// before the rename pass could say why. The directory questions come first for
+// that reason, as in the single write. The writability question is `[ -w ]`, a
+// builtin — no file is created to ask it, so nothing is left behind and the walk
+// costs no process — and only a directory it says no to is asked for the reason,
+// by attempting the create the delivery needed (one that succeeds after all is
+// removed, and the walk goes on). A delivery refused on a read-only root answers
+// EROFS there, and so does one through a sandbox-made symlink out of the mounts.
+const BulkRefusedShell = UnreplaceableShell + `
+__map_bulk_refused() {
+  [ -f "$1" ] || return 0
+  export LC_ALL=C
+  __i=0
+  while IFS= read -r -d '' __t && IFS= read -r -d '' __d && IFS= read -r -d '' __m; do
+    if [ -d "$__d" ]; then printf '\nmap-bulk-fail %d\n' "$__i" >&2; return 16; fi
+    if __map_unreplaceable "$__d"; then printf '\nmap-bulk-fail %d\n' "$__i" >&2; return 19; fi
+    __p=${__t%/*}
+    [ -n "$__p" ] || __p=/
+    if [ ! -w "$__p" ]; then
+      if __msg=$({ : > "$__t.probe"; } 2>&1); then
+        rm -f "$__t.probe"
+      else
+        __msg=${__msg%%$'\n'*}
+        printf '\n` + bulkUnwritableMarker + `%d %s\n' "$__i" "${__msg##*: }" >&2
+        return 20
+      fi
+    fi
+    __i=$((__i+1))
+  done < "$1"
+  return 0
 }
 `
 

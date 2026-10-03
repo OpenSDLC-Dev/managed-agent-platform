@@ -357,6 +357,134 @@ func TestBulkPrepareShellClassifiesABlockedPath(t *testing.T) {
 	}
 }
 
+// stageBulk writes a real batch's own bookkeeping — NewBulkWrite's manifest and
+// directory list — at the paths the batch names, so a shell's markers can be
+// read back through the batch's own Fault and Refusal: the index the shell
+// prints and the list Go resolves it against are then one and the same.
+func stageBulk(t *testing.T, workdir string, targets ...string) *sandbox.BulkWrite {
+	t.Helper()
+	files := make([]sandbox.FileWrite, len(targets))
+	for i, target := range targets {
+		files[i] = sandbox.FileWrite{Path: target, Data: []byte("x")}
+	}
+	b, err := sandbox.NewBulkWrite(workdir, files)
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+	whole := readArchive(t, b)
+	if err := os.WriteFile(b.Manifest, whole[0].data, 0o600); err != nil {
+		t.Fatalf("stage the manifest: %v", err)
+	}
+	if err := os.WriteFile(b.DirList, whole[1].data, 0o600); err != nil {
+		t.Fatalf("stage the directory list: %v", err)
+	}
+	return b
+}
+
+// A directory the prepare pass cannot make for any reason but a non-directory in
+// the way — a read-only root, a parent the sandbox user cannot write — is the
+// single write's ExitPathNotWritable, carrying `mkdir`'s own strerror and the
+// directory it could not make, as that write's mkdirAll reports it (#859).
+func TestBulkPrepareShellClassifiesAnUnwritableDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the write bit, so this proves nothing")
+	}
+	dir := t.TempDir()
+	locked := dir + "/locked"
+	if err := os.Mkdir(locked, 0o555); err != nil {
+		t.Fatalf("stage an unwritable directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	b := stageBulk(t, dir, dir+"/fine/a.txt", locked+"/new/b.txt")
+
+	code, stderr := bulkShell(t, sandbox.BulkPrepareShell, "__map_bulk_prepare", b.DirList, "")
+	if code != sandbox.ExitPathNotWritable {
+		t.Fatalf("exit %d, want ExitPathNotWritable (%d); stderr: %s", code, sandbox.ExitPathNotWritable, stderr)
+	}
+	var pnw *sandbox.PathNotWritableError
+	if err := b.Fault("docker", code, stderr); !errors.As(err, &pnw) ||
+		pnw.Path != locked+"/new" || pnw.Reason != "Permission denied" {
+		t.Errorf("Fault = %v, want a PathNotWritableError for %s/new: Permission denied", err, locked)
+	}
+	// The directories ahead of it were made, as a `mkdir -p` makes them.
+	if fi, err := os.Stat(dir + "/fine"); err != nil || !fi.IsDir() {
+		t.Errorf("the directory the batch could make: %v", err)
+	}
+}
+
+// A refused members delivery is answered member by member, in the manifest's
+// order, with the single write's questions about a refused write: a target that
+// is a directory, a target a rename cannot replace, a directory the sandbox user
+// cannot create a file in. The first member that answers yes is the batch's
+// fault; a batch where none does leaves the delivery's own error standing. The
+// writability question creates nothing where the answer is yes, so a refusal
+// leaves no probe behind.
+func TestBulkRefusedShell(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the write bit, so this proves nothing")
+	}
+	dir := t.TempDir()
+	locked, fine, adir := dir+"/locked", dir+"/fine", dir+"/adir"
+	for _, d := range []string{locked, fine, adir} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("stage %s: %v", d, err)
+		}
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatalf("make %s unwritable: %v", locked, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	for _, tc := range []struct {
+		name    string
+		targets []string
+		code    int
+		blamed  string
+		want    error
+	}{
+		{"unwritable", []string{fine + "/a", locked + "/b", adir}, sandbox.ExitPathNotWritable, locked + "/b", sandbox.ErrNotWritable},
+		{"directory", []string{fine + "/a", adir, locked + "/b"}, sandbox.ExitPathIsDirectory, adir, sandbox.ErrIsDirectory},
+		{"device", []string{fine + "/a", "/dev/null"}, sandbox.ExitPathNotReplaceable, "/dev/null", sandbox.ErrNotReplaceable},
+		{"none", []string{fine + "/a", fine + "/b"}, 0, "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := stageBulk(t, dir, tc.targets...)
+			code, stderr := bulkShell(t, sandbox.BulkRefusedShell, "__map_bulk_refused", b.Manifest, "")
+			if code != tc.code {
+				t.Fatalf("exit %d, want %d; stderr: %s", code, tc.code, stderr)
+			}
+			err := b.Refusal("docker", code, stderr)
+			if tc.want == nil {
+				if err != nil {
+					t.Errorf("Refusal = %v, want nil: no member is at fault", err)
+				}
+			} else if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), tc.blamed) {
+				t.Errorf("Refusal = %v, want %v naming %s", err, tc.want, tc.blamed)
+			}
+			var pnw *sandbox.PathNotWritableError
+			if tc.want == sandbox.ErrNotWritable && (!errors.As(err, &pnw) || pnw.Reason != "Permission denied") {
+				t.Errorf("Refusal = %#v, want the shell's own reason, Permission denied", err)
+			}
+			for _, d := range []string{dir, fine, locked} {
+				entries, _ := os.ReadDir(d)
+				for _, e := range entries {
+					if strings.HasSuffix(e.Name(), ".probe") {
+						t.Errorf("probe %s/%s left behind", d, e.Name())
+					}
+				}
+			}
+			_ = os.Remove(b.Manifest)
+			_ = os.Remove(b.DirList)
+		})
+	}
+
+	// A manifest that is not there is a question that cannot be asked: the
+	// caller keeps the delivery's own error.
+	if code, _ := bulkShell(t, sandbox.BulkRefusedShell, "__map_bulk_refused", dir+"/no-such-manifest", ""); code != 0 {
+		t.Errorf("refused pass with no manifest exited %d, want 0", code)
+	}
+}
+
 // The discard pass is what a batch that ended badly leaves behind with: every
 // member it delivered, and then the two bookkeeping files themselves.
 func TestBulkDiscardShell(t *testing.T) {

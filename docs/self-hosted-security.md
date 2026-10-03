@@ -350,9 +350,9 @@ never the platform creating a batch's directories inside the container — that
 uses `mkdir -p`, which leaves a root-owned directory that already exists exactly
 as it found it, so an image shipping one under the workdir opened the gap. Both
 sheds now report which of the batch's own files they could not remove, and the
-daemon empties those with one archive per writable mount they sit in, or per
-directory outside those mounts (§4) — a handful of round trips rather than one
-per file, and still executing nothing. A batch that *succeeds* is asked too: its last act is to
+daemon empties those in a single archive — one round trip for a whole batch, or
+one per directory they sit in under a read-only root (§4) — still executing
+nothing. A batch that *succeeds* is asked too: its last act is to
 remove the two bookkeeping files, which the same root extraction landed in your
 workdir.
 
@@ -380,6 +380,19 @@ the temporary under a live `mv` would put zero bytes onto the file the caller wa
 just told it had not touched. Keeping a payload the container will take away is
 the lesser harm than destroying data the write promised to leave alone, so that
 branch unlinks with your sandbox user's own `rm` and stops there.
+
+One limit predates all of this and is tracked separately. On a **writable** root
+the daemon lands a temporary wherever the directory it is handed resolves, so a
+non-root sandbox user can aim a write at a directory it cannot write through a
+symlink it made itself — `ln -s /etc /workspace/x`, then a write to
+`/workspace/x/f`. Measured on Docker, a single write and a batch alike: the
+temporary lands root-owned in `/etc` with the write's full payload, the sandbox
+user's rename is refused, and the emptying leaves a zero-byte root-owned
+`.map-write-` file there for the container's life. Its name is the platform's,
+never the agent's choice. Where the link leads out of the writable set, the
+read-only root (§4) refuses the write before anything lands, single or batch;
+the Kubernetes backend's extraction runs as your sandbox user, so it lands
+nothing there to begin with.
 
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not
@@ -567,15 +580,21 @@ destination resolves into a volume. Every file that backend writes goes through
 that endpoint, so a tmpfs workdir would give you a sandbox that runs commands but
 can never receive a file — no skills, no files, no `write` tool.
 
-What the daemon checks is the directory a request names, not where the files in
-the archive go. The bulk write behind skill and memory-store materialization used
-to name `/` for every batch, so under this knob no skill or memory store reached a
-Docker sandbox: each was refused (`container rootfs is marked read-only`), logged
-and skipped, though every file was bound for a volume
-([#859](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/859)). A
-batch is now extracted inside the volume it is bound for: one request per volume
-it touches, at the deepest directory its files share there. A file outside the set
-above still fails, in a batch as in a single write.
+What the daemon checks is the one directory a request names, resolved through
+any symlink, and nothing under it. The bulk write behind skill and memory-store
+materialization used to name `/` for every batch, so under this knob no skill or
+memory store reached a Docker sandbox: each was refused (`container rootfs is
+marked read-only`), logged and skipped, though every file was bound for a volume
+([#859](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/859)). Under
+this knob a batch is now delivered a directory at a time: each archive is
+extracted at the directory its files land in and names no directory below it, so
+the daemon checks every directory a file lands in exactly as it checks a single
+write's, and a symlink your sandbox makes under a volume — `ln -s /etc
+/workspace/skills/pack/scripts` — is refused rather than followed onto the root.
+That costs a request per distinct directory, plus one for the bookkeeping, where
+a writable root still takes two for any batch: measured, a 12-file skill in 2
+directories takes 3, a 61-file one in 10 takes 11. A file outside the set above
+fails in a batch as in a single write, and with the same error.
 
 What is still yours: an **image that tolerates a read-only root elsewhere**. A
 tool that writes outside the set above — a package manager, a language runtime

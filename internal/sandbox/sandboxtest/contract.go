@@ -1395,22 +1395,82 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			"/tmp", "/tmp/fresh/nested", "/mnt/memory/notes", "/mnt/memory/.sync")
 
 		// The root itself stays read-only to a batch: one naming a path outside
-		// the mounts fails rather than reporting success, and its other member,
-		// bound for the workdir, is not written either — nothing is renamed until
-		// every member has landed.
-		err := sb.WriteFiles(ctx, []sandbox.FileWrite{
-			{Path: workdir + "/beside-blocked.txt", Data: []byte("x")},
-			{Path: "/etc/map-859-blocked.conf", Data: []byte("x")},
-		})
-		if err == nil {
-			t.Error("a batch into /etc on a read-only root reported success")
-		}
-		for _, path := range []string{"/etc/map-859-blocked.conf", workdir + "/beside-blocked.txt"} {
-			if _, err := sb.ReadFile(ctx, path); !errors.Is(err, sandbox.ErrFileNotExist) {
-				t.Errorf("%s after the refused batch: err = %v, want ErrFileNotExist", path, err)
+		// the mounts fails, in the single write's terms (ReadOnlyRootIsEnforced),
+		// whether its directory exists or would have to be made — and its other
+		// member, bound for the workdir, is not written either: nothing is
+		// renamed until every member has landed.
+		for _, blocked := range []string{"/etc/map-859-blocked.conf", "/etc/map-859-new/blocked.conf"} {
+			err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+				{Path: workdir + "/beside-blocked.txt", Data: []byte("x")},
+				{Path: blocked, Data: []byte("x")},
+			})
+			if !errors.Is(err, sandbox.ErrNotWritable) || !strings.Contains(err.Error(), gopath.Dir(blocked)) {
+				t.Errorf("a batch into %s on a read-only root: err = %v, want ErrNotWritable naming it", blocked, err)
+			}
+			for _, path := range []string{blocked, workdir + "/beside-blocked.txt"} {
+				if _, err := sb.ReadFile(ctx, path); !errors.Is(err, sandbox.ErrFileNotExist) {
+					t.Errorf("%s after the refused batch: err = %v, want ErrFileNotExist", path, err)
+				}
 			}
 		}
-		assertNoWriteResidue(t, sb, workdir)
+		// A target that is itself a directory — a mount point, /tmp or the workdir
+		// — has its temporary bound for `/`, outside the mounts, so the delivery
+		// is refused before the rename pass could say why. It is still the single
+		// write's ErrIsDirectory (WriteOntoDirectory), and the directory is whole.
+		for _, dir := range []string{"/tmp", workdir} {
+			err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+				{Path: workdir + "/beside-dir.txt", Data: []byte("x")},
+				{Path: dir, Data: []byte("clobber")},
+			})
+			if !errors.Is(err, sandbox.ErrIsDirectory) || !strings.Contains(err.Error(), dir+":") {
+				t.Errorf("a batch onto %s on a read-only root: err = %v, want ErrIsDirectory naming it", dir, err)
+			}
+		}
+		if got, err := sb.ReadFile(ctx, workdir+"/skills/pack/SKILL.md"); err != nil || string(got) != "x" {
+			t.Errorf("the workdir after a batch onto it holds SKILL.md = %q, %v; want it whole", got, err)
+		}
+		assertNoWriteResidue(t, sb, workdir, "/tmp", "/etc")
+	})
+
+	// On a read-only root the docker daemon checks the one directory an
+	// extraction names, resolved, and nothing below it. A batch extracted at a
+	// mount with entries naming subdirectories therefore followed a symlink the
+	// sandbox had made under it — `ln -s /etc <workdir>/skills/pack/scripts` —
+	// and landed a root-owned payload in /etc on the read-only root, where a
+	// single write to the same path is refused (#859's first fix, measured). A
+	// batch must be refused there the way the single write is, in its terms, and
+	// leave nothing in /etc — not even an emptied temporary.
+	t.Run("BulkWriteThroughASymlinkOutOfTheMounts", func(t *testing.T) {
+		sb := provisionHardened(t, sandbox.Hardening{ReadOnlyRootfs: true})
+		ctx := context.Background()
+		pack := workdir + "/skills/pack"
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "mkdir -p " + pack + " && ln -s /etc " + pack + "/scripts",
+		}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("make the symlink: %+v, %v", res, err)
+		}
+		escape := pack + "/scripts/map-859-escape.conf"
+		if err := sb.WriteFile(ctx, escape, []byte("x")); !errors.Is(err, sandbox.ErrNotWritable) {
+			t.Errorf("a single write through the symlink: err = %v, want ErrNotWritable", err)
+		}
+		err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: pack + "/SKILL.md", Data: []byte("# skill")},
+			{Path: escape, Data: bytes.Repeat([]byte("P"), 4096)},
+		})
+		var pnw *sandbox.PathNotWritableError
+		if !errors.As(err, &pnw) || pnw.Path != escape {
+			t.Errorf("a batch through the symlink: err = %v, want ErrNotWritable naming %s", err, escape)
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "ls -A /etc | grep -e '^" + sandbox.TempPrefix + "' -e map-859 || true",
+		})
+		if err != nil || strings.TrimSpace(res.Stdout) != "" {
+			t.Errorf("/etc after the refused batch holds %q (%v), want nothing of it", res.Stdout, err)
+		}
+		if _, err := sb.ReadFile(ctx, pack+"/SKILL.md"); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("the batch's other member: err = %v, want ErrFileNotExist", err)
+		}
+		assertNoWriteResidue(t, sb, workdir, pack)
 	})
 
 	// The same under a uid the image did not choose, for HardeningRunsAsTheConfiguredUser's
@@ -1463,10 +1523,51 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}); err != nil || res.ExitCode != 0 || res.Stdout != "rw more" {
 			t.Errorf("append in place to a 0666 member as the sandbox user = %+v, %v; want %q", res, err, "rw more")
 		}
-		// The workdir is not asked: on Docker it is root-owned here, so the
-		// bookkeeping the daemon lands there is emptied rather than removed and
-		// its names stay (#316's documented limit).
 		assertNoWriteResidue(t, sb, "/tmp/nonroot", "/tmp/nonroot/skills/pack", "/tmp/nonroot/memory")
+
+		// The workdir is where the bookkeeping lands, and on Docker it is
+		// root-owned here: the sandbox user's `rm` cannot take what the daemon
+		// landed, so the daemon empties it (#316) — its names stay, its payload
+		// may not. A batch whose members land there too fails at its renames,
+		// and its members are emptied the same way, a directory at a time. On a
+		// workdir the sandbox user can write (Kubernetes' emptyDir) the batch
+		// lands and nothing is left at all.
+		big := bytes.Repeat([]byte("P"), 4096)
+		err = sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/map-859-a.txt", Data: big},
+			{Path: workdir + "/map-859-b.txt", Data: big},
+		})
+		res, rerr := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "[ -w " + workdir + " ] && echo writable; " +
+				"find " + workdir + " -maxdepth 1 -name '" + sandbox.TempPrefix + "*' -printf '%s %f\\n'",
+		})
+		if rerr != nil || res.ExitCode != 0 {
+			t.Fatalf("list the workdir's temporaries: %+v, %v", res, rerr)
+		}
+		lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
+		if lines[0] == "writable" {
+			if err != nil || len(lines) != 1 {
+				t.Errorf("a batch into a workdir the sandbox user can write: err = %v, left %q", err, lines[1:])
+			}
+		} else {
+			if err == nil {
+				t.Error("a batch renamed into a workdir the sandbox user cannot write reported success")
+			}
+			// This batch's two members' temporaries, and both batches'
+			// bookkeeping — every one of them emptied.
+			var members int
+			for _, line := range lines {
+				if !strings.HasPrefix(line, "0 ") {
+					t.Errorf("temporary %q in the workdir still holds a payload, want it emptied", line)
+				}
+				if strings.HasSuffix(line, "-0") || strings.HasSuffix(line, "-1") {
+					members++
+				}
+			}
+			if members != 2 || len(lines) != 6 {
+				t.Errorf("the workdir holds temporaries %q, want this batch's two members' and both batches' bookkeeping", lines)
+			}
+		}
 	})
 
 	// Files and commands see one filesystem — the whole point of the sandbox.

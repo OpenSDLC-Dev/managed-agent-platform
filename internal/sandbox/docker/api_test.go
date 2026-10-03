@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	gopath "path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -216,7 +217,7 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 	// Registered after fakeDaemon's, so it runs before it: cleanups are LIFO,
 	// and the test server will not shut down while a handler is still held.
 	t.Cleanup(func() { close(held) })
-	return p.attach("abc", "/workspace", "")
+	return p.attach("abc", "/workspace", "", false)
 }
 
 func TestNewResolvesDaemonAddress(t *testing.T) {
@@ -529,6 +530,87 @@ func TestProvisionSurfacesPullError(t *testing.T) {
 	}
 }
 
+// A handle knows whether its root is read-only from the container itself, as it
+// knows its workdir: the create config on a fresh container, an inspect on one
+// it adopts or attaches to — the adopted container's own flag, whatever the spec
+// asked for, since hardening is adopted as created — and never by probing. It
+// decides how a batch is cut (#859), so a handle that guessed wrong on a
+// read-only root would send its archives to `/` and have every one refused.
+func TestAHandleTakesItsReadOnlyRootFromTheContainer(t *testing.T) {
+	readOnly := func(inspect string) string {
+		return strings.Replace(inspect, `"HostConfig":{`, `"HostConfig":{"ReadonlyRootfs":true,`, 1)
+	}
+	s := spec()
+	hardened := s
+	hardened.Hardening = sandbox.Hardening{ReadOnlyRootfs: true}
+	for _, tc := range []struct {
+		name string
+		spec sandbox.Spec
+		// inspects answers the n-th container inspect (from 1); "" is a 404.
+		inspects func(n int) string
+		create   int // the create's status, 0 when none is expected
+		attach   bool
+		want     bool
+	}{
+		{"created read-only", hardened, func(int) string { return "" }, http.StatusCreated, false, true},
+		{"created writable", s, func(int) string { return "" }, http.StatusCreated, false, false},
+		{"adopted read-only for a writable spec", s,
+			func(int) string { return readOnly(inspectJSON("abc", s, true)) }, 0, false, true},
+		{"adopted writable for a read-only spec", hardened,
+			func(int) string { return inspectJSON("abc", s, true) }, 0, false, false},
+		{"race winner read-only", s, func(n int) string {
+			if n == 1 {
+				return ""
+			}
+			return readOnly(inspectJSON("abc", s, true))
+		}, http.StatusConflict, false, true},
+		{"attached read-only", s, func(int) string { return readOnly(inspectJSON("abc", s, true)) }, 0, true, true},
+		{"attached writable", s, func(int) string { return inspectJSON("abc", s, true) }, 0, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var inspects int
+			p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					inspects++
+					body := tc.inspects(inspects)
+					if body == "" {
+						w.WriteHeader(http.StatusNotFound)
+						io.WriteString(w, `{"message":"No such container"}`)
+						return
+					}
+					io.WriteString(w, body)
+				case r.URL.Path == "/containers/create" && tc.create != 0:
+					if tc.create == http.StatusConflict {
+						w.WriteHeader(http.StatusConflict)
+						io.WriteString(w, `{"message":"Conflict. The container name is already in use"}`)
+						return
+					}
+					w.WriteHeader(tc.create)
+					io.WriteString(w, `{"Id":"abc"}`)
+				case strings.HasSuffix(r.URL.Path, "/start"):
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected %s %s — the flag is never probed", r.Method, r.URL.Path)
+				}
+			})
+			var sb sandbox.Sandbox
+			var err error
+			if tc.attach {
+				sb, err = p.Attach(context.Background(), tc.spec.SessionID)
+			} else {
+				sb, err = p.Provision(context.Background(), tc.spec)
+			}
+			if err != nil {
+				t.Fatalf("handle: %v", err)
+			}
+			if got := sb.(*container).readOnlyRoot; got != tc.want {
+				t.Errorf("readOnlyRoot = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // Two executors provisioning one session: the create loser adopts the winner's
 // container instead of failing the tool call.
 func TestProvisionAdoptsRaceWinner(t *testing.T) {
@@ -633,7 +715,7 @@ func TestDestroyIsIdempotentAndSurfacesRealFailures(t *testing.T) {
 	c := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such container: gone"}`)
-	}).attach("gone", "/workspace", "")
+	}).attach("gone", "/workspace", "", false)
 	if err := c.Destroy(context.Background()); err != nil {
 		t.Errorf("destroy of a missing container: %v, want nil", err)
 	}
@@ -641,7 +723,7 @@ func TestDestroyIsIdempotentAndSurfacesRealFailures(t *testing.T) {
 	c = fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		io.WriteString(w, `{"message":"removal in progress"}`)
-	}).attach("busy", "/workspace", "")
+	}).attach("busy", "/workspace", "", false)
 	if err := c.Destroy(context.Background()); err == nil {
 		t.Error("a failed removal reported success")
 	}
@@ -654,7 +736,7 @@ func TestGoneContainerMapsToErrNotFound(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such container: gone"}`)
 	})
-	c := p.attach("gone", "/workspace", "")
+	c := p.attach("gone", "/workspace", "", false)
 	if _, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"}); !errors.Is(err, sandbox.ErrNotFound) {
 		t.Errorf("exec: %v, want ErrNotFound", err)
 	}
@@ -686,7 +768,7 @@ func TestExecWaitsForTheExitCode(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "echo hi"})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
@@ -950,7 +1032,7 @@ func TestPathProseCannotFakeAMissingSandbox(t *testing.T) {
 		// "No such container".
 		io.WriteString(w, `{"message":"Could not find the file /workspace/No such container/f in container abc"}`)
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	_, err := c.ReadFile(context.Background(), "/workspace/No such container/f")
 	if !errors.Is(err, sandbox.ErrFileNotExist) {
 		t.Errorf("read: %v, want ErrFileNotExist", err)
@@ -969,7 +1051,7 @@ func TestStaleExecIsNotAMissingSandbox(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such exec instance: e1"}`)
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	_, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"})
 	if err == nil || errors.Is(err, sandbox.ErrNotFound) {
 		t.Errorf("exec: %v, want the daemon's own error", err)
@@ -1013,7 +1095,7 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	if err := c.WriteFile(context.Background(), "/workspace/a/b/f.txt", []byte("x")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -1082,7 +1164,7 @@ func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "daemon gave up mid-transfer") {
 		t.Fatalf("err = %v, want the daemon's failure", err)
@@ -1152,7 +1234,7 @@ func TestCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	if err := c.WriteFile(ctx, "/workspace/f.txt", []byte("x")); err == nil {
 		t.Fatal("write returned nil, want the failure the cancellation caused")
 	}
@@ -1198,7 +1280,7 @@ func TestTheBatchesCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFiles(ctx, []sandbox.FileWrite{{Path: "/workspace/a.txt", Data: []byte("x")}})
 	if err == nil {
 		t.Fatal("write returned nil, want the failure the cancellation caused")
@@ -1260,7 +1342,7 @@ func TestWriteFileClassifiesAnUnwritableParentWhenThePutFails(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x"))
 	if !errors.Is(err, sandbox.ErrNotWritable) {
 		t.Fatalf("err = %v, want ErrNotWritable", err)
@@ -1289,7 +1371,7 @@ func TestWriteFileStreamClassifiesAnUnmakeableParent(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1)
 	if !errors.Is(err, sandbox.ErrNotWritable) {
 		t.Fatalf("err = %v, want ErrNotWritable", err)
@@ -1357,7 +1439,7 @@ func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
 	if !errors.Is(err, sandbox.ErrNotWritable) {
 		t.Fatalf("err = %v, want ErrNotWritable", err)
@@ -1442,7 +1524,7 @@ func TestARefusedRenameReclaimsItsTempThroughTheDaemon(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
 	if !errors.Is(err, sandbox.ErrNotWritable) {
 		t.Fatalf("err = %v, want ErrNotWritable", err)
@@ -1521,7 +1603,7 @@ func TestARenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "exec start went away") {
 		t.Fatalf("err = %v, want the exec's own failure", err)
@@ -1575,6 +1657,7 @@ func tarEntries(t *testing.T, body []byte) []struct {
 func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 	var commands []string
 	var puts [][]byte
+	var at []string
 	kinds := map[string]string{}
 	var execN int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1585,6 +1668,7 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
 			body, _ := io.ReadAll(r.Body)
 			puts = append(puts, body)
+			at = append(at, r.URL.Query().Get("path"))
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
 			var body execConfig
@@ -1617,7 +1701,7 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
 		{Path: "/etc/a.txt", Data: []byte("AAAA")},
 		{Path: "/etc/b.txt", Data: []byte("BBBB")},
@@ -1627,9 +1711,13 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 	}
 
 	// Three deliveries: the bookkeeping, the members, and the emptying — one
-	// archive for the members' directory, not one per member.
+	// archive for the whole batch, not one per member, and on this writable
+	// root every one of them at `/`, as before #859.
 	if len(puts) != 3 {
 		t.Fatalf("%d archives delivered, want 3 (bookkeeping, members, emptying)", len(puts))
+	}
+	if strings.Join(at, " ") != "/ / /" {
+		t.Errorf("archives delivered at %v, want all three at /", at)
 	}
 	members, emptying := tarEntries(t, puts[1]), tarEntries(t, puts[2])
 	if len(emptying) != len(members) {
@@ -1660,77 +1748,285 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 	}
 }
 
-// On a read-only root the daemon refuses an extraction at any directory outside
-// a writable mount — `/` included, whatever the entries below it name — with
-// `container rootfs is marked read-only` (#859, measured with `docker cp` into a
-// `--read-only` container). This fake enforces exactly that rule over the mounts
-// a read-only root gets, so a batch that sent its archives to `/` fails here the
-// way it failed on a real daemon. The shape is the platform's own three callers
-// at once: a skill under the workdir, a memory store under /mnt, package
-// credentials under /tmp — with new nested directories, and members sitting
-// directly in a mount point.
-func TestABulkWriteExtractsInsideTheWritableMounts(t *testing.T) {
-	mounts := sandbox.WritablePaths("/workspace")
-	var at []string
-	var landed []string
+// bulkPut is one archive delivery a fake daemon took: the directory the request
+// named, and the entries the archive carried.
+type bulkPut struct {
+	dir     string
+	entries []struct {
+		name string
+		size int64
+	}
+}
+
+// bulkAnswer is what a fake daemon's exec says for one of the batch's shell
+// functions: its exit code and its two streams.
+type bulkAnswer struct {
+	code           int
+	stdout, stderr string
+}
+
+// bulkDaemon is a fake daemon for one batch on a container whose root is
+// read-only or not. refuse answers each archive PUT by the directory it names —
+// a status and message, or 0 to take it — and answers maps a bulk function's
+// name to what its exec says; any other exec exits 0 and says nothing. It
+// returns the handle, and the PUTs and the functions the execs called, in order.
+func bulkDaemon(t *testing.T, readOnlyRoot bool, refuse func(dir string) (int, string),
+	answers map[string]bulkAnswer) (*container, *[]bulkPut, *[]string) {
+	t.Helper()
+	var puts []bulkPut
+	var calls []string
+	kinds := map[string]string{}
+	var execN int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
 		switch {
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
-			dir := r.URL.Query().Get("path")
-			at = append(at, dir)
-			inMount := false
-			for _, m := range mounts {
-				inMount = inMount || dir == m || strings.HasPrefix(dir, m+"/")
-			}
-			if !inMount {
-				w.WriteHeader(http.StatusBadRequest)
-				io.WriteString(w, `{"message":"container rootfs is marked read-only"}`)
-				return
-			}
 			body, _ := io.ReadAll(r.Body)
-			for _, e := range tarEntries(t, body) {
-				landed = append(landed, dir+"/"+e.name)
+			dir := r.URL.Query().Get("path")
+			puts = append(puts, bulkPut{dir: dir, entries: tarEntries(t, body)})
+			if status, msg := refuse(dir); status != 0 {
+				w.WriteHeader(status)
+				fmt.Fprintf(w, `{"message":%q}`, msg)
+				return
 			}
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
-			io.WriteString(w, `{"Id":"e1"}`)
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			// The function a bulk exec calls is its command's last line.
+			lines := strings.Split(strings.TrimSpace(wrapperCommand(body.Cmd)), "\n")
+			kinds[id], _, _ = strings.Cut(lines[len(lines)-1], " ")
+			calls = append(calls, kinds[id])
+			fmt.Fprintf(w, `{"Id":%q}`, id)
 		case strings.HasSuffix(r.URL.Path, "/start"):
 			w.WriteHeader(http.StatusOK)
+			a := answers[kinds[execID]]
+			if a.stdout != "" {
+				w.Write(frame(streamStdout, a.stdout))
+			}
+			if a.stderr != "" {
+				w.Write(frame(streamStderr, a.stderr))
+			}
 		case strings.HasSuffix(r.URL.Path, "/json"):
-			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, answers[kinds[execID]].code)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
-	files := []sandbox.FileWrite{
+	return p.attach("abc", "/workspace", "", readOnlyRoot), &puts, &calls
+}
+
+// readOnlyDaemon is the daemon's own rule on a read-only root (#859, measured
+// with `docker cp` into a `--read-only` container): an extraction at a directory
+// that does not resolve into a writable mount is refused, `/` included, whatever
+// the entries below it name. The fake cannot resolve a symlink; the live
+// contract rows cover that half.
+func readOnlyDaemon(dir string) (int, string) {
+	for _, m := range sandbox.WritablePaths("/workspace") {
+		if dir == m || strings.HasPrefix(dir, m+"/") {
+			return 0, ""
+		}
+	}
+	return http.StatusBadRequest, "container rootfs is marked read-only"
+}
+
+func acceptAll(string) (int, string) { return 0, "" }
+
+// platformBatch is the platform's own three callers in one batch: a skill under
+// the workdir, a memory store under /mnt, package credentials under /tmp — with
+// new nested directories, and members sitting directly in a mount point.
+func platformBatch() []sandbox.FileWrite {
+	return []sandbox.FileWrite{
 		{Path: "/workspace/skills/pack/SKILL.md", Data: []byte("skill")},
 		{Path: "/workspace/skills/pack/scripts/deep/run.sh", Data: []byte("#!/bin/sh\n")},
 		{Path: "/mnt/memory/notes/todo.md", Data: []byte("rw"), Mode: 0o666},
+		{Path: "/workspace/skills/pack/README.md", Data: []byte("readme")},
 		{Path: "/mnt/memory/.sync/memstore_1", Data: []byte("baseline")},
 		{Path: "/tmp/.map-pkgcreds-1/.netrc", Data: []byte("machine x"), Mode: 0o600},
 		{Path: "/tmp/b.txt", Data: []byte("b")},
 	}
+}
+
+// On a read-only root a batch is extracted a directory at a time, each entry
+// named by its base name, so the daemon checks every directory a member lands in
+// — and every one of the platform's own shapes lands under its rule. The
+// bookkeeping comes first, at the workdir; then one extraction per directory,
+// in the order each first appears in the batch.
+func TestABulkWriteOnAReadOnlyRootExtractsEachDirectory(t *testing.T) {
+	c, puts, _ := bulkDaemon(t, true, readOnlyDaemon, nil)
+	files := platformBatch()
 	if err := c.WriteFiles(context.Background(), files); err != nil {
-		t.Fatalf("bulk write under a read-only root: %v (extractions at %v)", err, at)
+		t.Fatalf("bulk write under a read-only root: %v (extractions: %+v)", err, *puts)
 	}
-	// The bookkeeping at the workdir, then one extraction per mount the members
-	// touch — at the deepest directory they share there, the mount point itself
-	// for /tmp, whose members share nothing deeper.
-	if want := []string{"/workspace", "/workspace/skills/pack", "/mnt/memory", "/tmp"}; strings.Join(at, " ") != strings.Join(want, " ") {
-		t.Errorf("extractions at %v, want %v", at, want)
+	var dirs []string
+	for _, put := range *puts {
+		dirs = append(dirs, put.dir)
+		for _, e := range put.entries {
+			if strings.Contains(e.name, "/") {
+				t.Errorf("entry %q at %s names a directory; the daemon checks only the one the request names", e.name, put.dir)
+			}
+		}
 	}
-	// And each member's temporary still lands in its own target's directory,
-	// which is what keeps its rename atomic.
+	want := []string{"/workspace", "/workspace/skills/pack", "/workspace/skills/pack/scripts/deep",
+		"/mnt/memory/notes", "/mnt/memory/.sync", "/tmp/.map-pkgcreds-1", "/tmp"}
+	if strings.Join(dirs, " ") != strings.Join(want, " ") {
+		t.Errorf("extractions at %v, want %v", dirs, want)
+	}
+	// Each member's temporary lands in its own target's directory, which is what
+	// keeps its rename atomic, and the pack directory's two arrive together.
 	for _, f := range files {
-		dir := f.Path[:strings.LastIndex(f.Path, "/")]
 		found := false
-		for _, l := range landed {
-			found = found || strings.HasPrefix(l, dir+"/"+sandbox.TempPrefix) && !strings.Contains(l[len(dir)+1:], "/")
+		for _, put := range *puts {
+			for _, e := range put.entries {
+				found = found || put.dir == gopath.Dir(f.Path) && strings.HasPrefix(e.name, sandbox.TempPrefix)
+			}
 		}
 		if !found {
-			t.Errorf("no temporary landed in %s (landed: %v)", dir, landed)
+			t.Errorf("no temporary landed in %s", gopath.Dir(f.Path))
 		}
+	}
+	if n := len((*puts)[1].entries); n != 2 {
+		t.Errorf("the pack directory's extraction carries %d entries, want SKILL.md's and README.md's", n)
+	}
+}
+
+// On a writable root nothing changed from before #859: the bookkeeping is one
+// extraction at `/` and the members another, each named by its path made
+// relative — two round trips for the batch, whatever its shape.
+func TestABulkWriteOnAWritableRootIsOneExtractionAtTheRoot(t *testing.T) {
+	c, puts, _ := bulkDaemon(t, false, acceptAll, nil)
+	files := platformBatch()
+	if err := c.WriteFiles(context.Background(), files); err != nil {
+		t.Fatalf("bulk write: %v", err)
+	}
+	if len(*puts) != 2 || (*puts)[0].dir != "/" || (*puts)[1].dir != "/" {
+		t.Fatalf("extractions %+v, want two, both at /", *puts)
+	}
+	if bk := (*puts)[0].entries; len(bk) != 2 || !strings.HasPrefix(bk[0].name, "workspace/"+sandbox.TempPrefix) {
+		t.Errorf("bookkeeping entries %+v, want the manifest and the directory list, relative to /", bk)
+	}
+	members := (*puts)[1].entries
+	if len(members) != len(files) {
+		t.Fatalf("the members' extraction carries %d entries, want %d", len(members), len(files))
+	}
+	for i, f := range files {
+		if dir := gopath.Dir("/" + members[i].name); dir != gopath.Dir(f.Path) {
+			t.Errorf("member %d is %q, want its temporary in %s, named relative to /", i, members[i].name, gopath.Dir(f.Path))
+		}
+	}
+}
+
+// A members delivery stops at the first extraction the daemon refuses: what
+// follows it is never sent, and the batch is shed. The refusal is then asked
+// about in the single write's terms, BEFORE the shed takes the manifest the
+// question reads — and what it answers is what the caller gets.
+func TestABulkDeliveryStopsAtTheFirstRefusedExtraction(t *testing.T) {
+	refused := "/workspace/skills/pack/scripts"
+	c, puts, calls := bulkDaemon(t, true, func(dir string) (int, string) {
+		if dir == refused {
+			return http.StatusBadRequest, "container rootfs is marked read-only"
+		}
+		return 0, ""
+	}, map[string]bulkAnswer{
+		"__map_bulk_refused": {code: sandbox.ExitPathNotWritable, stderr: "\nmap-bulk-unwritable 0 Read-only file system\n"},
+		"__map_bulk_discard": {stdout: "\nmap-bulk-left-begin\n"},
+	})
+	err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+		{Path: refused + "/run.sh", Data: []byte("x")},
+		{Path: "/workspace/skills/pack/SKILL.md", Data: []byte("y")},
+		{Path: "/mnt/memory/notes/todo.md", Data: []byte("z")},
+	})
+	var pnw *sandbox.PathNotWritableError
+	if !errors.As(err, &pnw) || pnw.Path != refused+"/run.sh" || pnw.Reason != "Read-only file system" {
+		t.Errorf("err = %v, want ErrNotWritable for %s/run.sh: Read-only file system", err, refused)
+	}
+	var dirs []string
+	for _, put := range *puts {
+		dirs = append(dirs, put.dir)
+	}
+	// The bookkeeping, then the first members extraction — refused — and
+	// nothing after it; the shed's `rm` took everything, so nothing is emptied.
+	if want := []string{"/workspace", refused}; strings.Join(dirs, " ") != strings.Join(want, " ") {
+		t.Errorf("extractions at %v, want %v", dirs, want)
+	}
+	if want := "__map_bulk_prepare __map_bulk_refused __map_bulk_discard"; strings.Join(*calls, " ") != want {
+		t.Errorf("execs %v, want %s: the refusal asked about before the shed", *calls, want)
+	}
+}
+
+// What the refusal is asked about is answered as WriteFile answers it: a target
+// that is itself a directory — a mount point such as /tmp, whose temporary is
+// bound for `/` and so refused on a read-only root before the rename pass could
+// say why — is ErrIsDirectory; and a pass that finds no member at fault leaves
+// the daemon's own error standing.
+func TestABulkRefusalIsAnsweredInTheSingleWritesTerms(t *testing.T) {
+	c, _, _ := bulkDaemon(t, true, readOnlyDaemon, map[string]bulkAnswer{
+		"__map_bulk_refused": {code: sandbox.ExitPathIsDirectory, stderr: "\nmap-bulk-fail 1\n"},
+	})
+	err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+		{Path: "/tmp/fine.txt", Data: []byte("x")},
+		{Path: "/tmp", Data: []byte("onto a mount point")},
+	})
+	if !errors.Is(err, sandbox.ErrIsDirectory) || !strings.Contains(err.Error(), "/tmp:") {
+		t.Errorf("err = %v, want ErrIsDirectory naming /tmp", err)
+	}
+
+	c, _, _ = bulkDaemon(t, true, readOnlyDaemon, nil)
+	err = c.WriteFiles(context.Background(), []sandbox.FileWrite{{Path: "/etc/x.conf", Data: []byte("x")}})
+	if err == nil || !strings.Contains(err.Error(), "container rootfs is marked read-only") {
+		t.Errorf("err = %v, want the daemon's own refusal where no member answered", err)
+	}
+}
+
+// On a read-only root the emptying is cut as the deliveries were — one
+// extraction per directory a left-behind file sits in, zero-byte entries named
+// by base name — and every one is tried: a refused emptying leaves the next
+// directory's payload no reason to stay.
+func TestABulkFaultOnAReadOnlyRootEmptiesEachDirectory(t *testing.T) {
+	var emptied []string
+	n := 0
+	c, puts, _ := bulkDaemon(t, true, func(string) (int, string) {
+		// The fourth delivery is the first emptying, and it is refused.
+		if n++; n == 4 {
+			return http.StatusInternalServerError, "daemon gave up"
+		}
+		return 0, ""
+	}, map[string]bulkAnswer{
+		"__map_bulk_rename": {code: 1,
+			stdout: "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\nmap-bulk-left 2\nmap-bulk-left m\n",
+			stderr: "mv: cannot move: Permission denied\nmap-bulk-fail 0\n"},
+	})
+	files := []sandbox.FileWrite{
+		{Path: "/workspace/skills/pack/a", Data: []byte("AAAA")},
+		{Path: "/mnt/memory/notes/b", Data: []byte("BBBB")},
+		{Path: "/workspace/skills/pack/c", Data: []byte("CCCC")},
+	}
+	if err := c.WriteFiles(context.Background(), files); err == nil {
+		t.Fatal("the batch reported success where every move was refused")
+	}
+	// Bookkeeping, two members extractions, then all three emptyings — the
+	// two after the refused one still tried.
+	if len(*puts) != 6 {
+		t.Fatalf("%d archives delivered (%+v), want 6", len(*puts), *puts)
+	}
+	for _, put := range (*puts)[3:] {
+		emptied = append(emptied, put.dir)
+		for _, e := range put.entries {
+			if e.size != 0 || strings.Contains(e.name, "/") || !strings.HasPrefix(e.name, sandbox.TempPrefix) {
+				t.Errorf("emptying entry %q at %s is %d bytes, want a temporary's base name at 0", e.name, put.dir, e.size)
+			}
+		}
+	}
+	if want := "/workspace/skills/pack /mnt/memory/notes /workspace"; strings.Join(emptied, " ") != want {
+		t.Errorf("emptying at %v, want %s", emptied, want)
+	}
+	if pack := (*puts)[3].entries; len(pack) != 2 || pack[0].name != (*puts)[1].entries[0].name ||
+		pack[1].name != (*puts)[1].entries[1].name {
+		t.Errorf("the pack directory's emptying carries %+v, want both of its members' temporaries", pack)
 	}
 }
 
@@ -1801,7 +2097,7 @@ func TestABulkShedsBothWaysBeforeTheRenameCanRun(t *testing.T) {
 					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 				}
 			})
-			c := p.attach("abc", "/workspace", "")
+			c := p.attach("abc", "/workspace", "", false)
 			err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
 				{Path: "/etc/a.txt", Data: []byte("AAAA")},
 				{Path: "/etc/b.txt", Data: []byte("BBBB")},
@@ -1872,7 +2168,7 @@ func TestASuccessfulBulkStillEmptiesBookkeepingItCouldNotRemove(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	if err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
 		{Path: "/workspace/a.txt", Data: []byte("AAAA")},
 	}); err != nil {
@@ -1941,7 +2237,7 @@ func TestABulkThatLostItsManifestEmptiesThePlatformsOwnList(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
 		{Path: "/etc/a.txt", Data: []byte("AAAA")},
 		{Path: "/etc/b.txt", Data: []byte("BBBB")},
@@ -1977,7 +2273,6 @@ func TestABulkThatLostItsManifestEmptiesThePlatformsOwnList(t *testing.T) {
 // it looked at. A pass with no list still looks at those two.
 func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
 	var puts [][]byte
-	var at []string
 	kinds := map[string]string{}
 	var execN int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1988,7 +2283,6 @@ func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
 			body, _ := io.ReadAll(r.Body)
 			puts = append(puts, body)
-			at = append(at, r.URL.Query().Get("path"))
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
 			var body execConfig
@@ -2018,26 +2312,23 @@ func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	if err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
 		{Path: "/etc/a.txt", Data: []byte("AAAA")},
 	}); err == nil {
 		t.Fatal("the batch reported success where its manifest had been deleted")
 	}
-	// The bookkeeping and the members, then the emptying — which is two
-	// extractions here, because the member is in /etc and the directory list in
-	// the workdir, and an extraction is made inside one directory (#859).
-	if len(puts) != 4 {
-		t.Fatalf("%d archives delivered (at %v), want 4", len(puts), at)
+	if len(puts) != 3 {
+		t.Fatalf("%d archives delivered, want 3", len(puts))
 	}
 	// The one member from the platform's list, plus the one bookkeeping file the
 	// shed named — never the manifest, which it removed and did not name.
-	member, dirs := tarEntries(t, puts[2]), tarEntries(t, puts[3])
-	if at[2] != "/etc" || len(member) != 1 || !strings.HasPrefix(member[0].name, sandbox.TempPrefix) {
-		t.Errorf("first emptying is %v at %s, want the member's temporary at /etc", member, at[2])
+	emptying := tarEntries(t, puts[2])
+	if len(emptying) != 2 {
+		t.Fatalf("the emptying archive carries %d entries, want the member and the named directory list", len(emptying))
 	}
-	if at[3] != "/workspace" || len(dirs) != 1 || !strings.HasSuffix(dirs[0].name, ".dirs") {
-		t.Errorf("second emptying is %v at %s, want the directory list the shed named, at the workdir", dirs, at[3])
+	if !strings.HasSuffix(emptying[1].name, ".dirs") {
+		t.Errorf("second emptying entry is %q, want the directory list the shed named", emptying[1].name)
 	}
 }
 
@@ -2093,7 +2384,7 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
 		{Path: "/etc/a.txt", Data: []byte("AAAA")},
 		{Path: "/etc/b.txt", Data: []byte("BBBB")},
@@ -2157,7 +2448,7 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x"))
 	if errors.Is(err, sandbox.ErrNotWritable) {
 		t.Fatalf("err = %v; a writable target must keep the raw error", err)
@@ -2190,7 +2481,7 @@ func TestWriteFileKeepsPathFailuresDistinctFromAMissingSandbox(t *testing.T) {
 			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFile(context.Background(), "/workspace/a/f.txt", []byte("x"))
 	if err == nil || errors.Is(err, sandbox.ErrNotFound) {
 		t.Fatalf("err = %v, want the daemon's path error", err)
@@ -2220,7 +2511,7 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 			io.WriteString(w, `{"Running":false,"ExitCode":1}`)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	err := c.WriteFile(context.Background(), "/workspace/a/f.txt", []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "Read-only file system") {
 		t.Errorf("err = %v, want the mkdir's stderr", err)
@@ -2261,7 +2552,7 @@ func TestWriteFileShedsItsTempWhenTheRenameCannotRun(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); err == nil {
 		t.Fatal("write returned nil, want the failed rename")
 	}
@@ -2401,7 +2692,7 @@ func TestExecSurfacesStartAndInspectFailures(t *testing.T) {
 				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
 			}
 		})
-		return p.attach("abc", "/workspace", "")
+		return p.attach("abc", "/workspace", "", false)
 	}
 	for _, path := range []string{"/exec/e1/start", "/exec/e1/json"} {
 		_, err := failing(path).Exec(context.Background(), sandbox.ExecRequest{Command: "true"})
@@ -2433,7 +2724,7 @@ func TestExecFailsLoudlyWhenTheDaemonWillNotNameTheProcess(t *testing.T) {
 			io.WriteString(w, `{"Titles":["PID"],"Processes":[]}`)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	c.exitBudget = 100 * time.Millisecond
 
 	_, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true", Timeout: time.Second})
@@ -2476,7 +2767,7 @@ func TestAnUnreadableProcessListPrefersTheTimeout(t *testing.T) {
 					io.WriteString(w, tc.top)
 				}
 			})
-			c := p.attach("abc", "/workspace", "")
+			c := p.attach("abc", "/workspace", "", false)
 			c.overrunSlop = 100 * time.Millisecond
 
 			res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "exit 0", Timeout: time.Second})
@@ -2500,7 +2791,7 @@ func TestExecRefusesToInventAnExitCode(t *testing.T) {
 			io.WriteString(w, `{"Running":true}`)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	c.exitBudget = 200 * time.Millisecond
 	if _, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"}); err == nil ||
 		!strings.Contains(err.Error(), "still running") {
@@ -2583,7 +2874,7 @@ func TestOverrunSurvivesTheStreamClosingDuringItsProbe(t *testing.T) {
 	// Registered after fakeDaemon's cleanup so it runs first (LIFO): the server
 	// will not shut down while the start handler is still holding the stream.
 	t.Cleanup(releaseStream)
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 
 	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "x", Timeout: time.Second})
 	if err != nil {
@@ -2664,7 +2955,7 @@ func TestOverrunDetectedWhenTheFirstProbeStalls(t *testing.T) {
 		}
 	})
 	t.Cleanup(releaseStream)
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 
 	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "x", Timeout: time.Second})
 	if err != nil {
@@ -2764,7 +3055,7 @@ func tarball(t *testing.T, header *tar.Header, body string) []byte {
 func TestReadFileRejectsWhatItCannotReturn(t *testing.T) {
 	serve := func(archive []byte) *container {
 		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) { w.Write(archive) })
-		return p.attach("abc", "/workspace", "")
+		return p.attach("abc", "/workspace", "", false)
 	}
 
 	// A symlink carries no contents; returning its (empty) body as the file

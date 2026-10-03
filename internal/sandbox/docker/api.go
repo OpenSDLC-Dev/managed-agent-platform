@@ -172,9 +172,11 @@ type containerInfo struct {
 	// HostConfig.NetworkMode is the container's fixed-at-create networking. A
 	// gated sandbox must be `container:<gateID>`; adoption checks it so a sandbox
 	// paired with a since-removed gate (or a pre-gate `bridge` sandbox) is rebuilt
-	// rather than adopted with the wrong egress path.
+	// rather than adopted with the wrong egress path. ReadonlyRootfs is fixed at
+	// create too, and is how a handle learns its root is read-only (#859).
 	HostConfig struct {
-		NetworkMode string `json:"NetworkMode"`
+		NetworkMode    string `json:"NetworkMode"`
+		ReadonlyRootfs bool   `json:"ReadonlyRootfs"`
 	} `json:"HostConfig"`
 }
 
