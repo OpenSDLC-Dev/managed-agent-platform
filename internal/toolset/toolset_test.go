@@ -402,6 +402,47 @@ func filePathBounds(t *testing.T, r toolset.Runner) {
 	}
 }
 
+// A file_path within Linux's bounds can still make a command past what one
+// exec argument carries: Docker's rename quotes the path into its script
+// eleven times, and quoting makes each `'` four bytes. The path the model
+// chose is what made it long, so it is the model's tool error, naming the
+// command's size — not a fault a reclaim would only repeat — and the write
+// lands nothing: the file an edit was given keeps its bytes, and no
+// temporary is left beside it.
+func TestAQuoteHeavyFilePathMakesACommandTooLong(t *testing.T) {
+	r := runner(t)
+	// Fifteen 255-byte directories under /workspace, then a 244-byte name:
+	// a 4095-byte path, every byte past /workspace/ but the slashes a quote.
+	q := strings.Repeat("'", 255)
+	p := "/workspace/" + strings.Repeat(q+"/", 15) + strings.Repeat("'", 244)
+	const tooLong = "-byte command, over the 122880 bytes one exec argument can carry; shorten it"
+	size := func(content, verb string) int {
+		t.Helper()
+		got, ok := strings.CutPrefix(content, verb+": the file_path makes a ")
+		got, whole := strings.CutSuffix(got, tooLong)
+		n, err := strconv.Atoi(got)
+		if !ok || !whole || err != nil || n <= sandbox.MaxCommandBytes {
+			t.Fatalf("%s of a %d-byte path of quotes = %q; want the command's size, past the bound", verb, len(p), content)
+		}
+		return n
+	}
+	in, _ := json.Marshal(map[string]string{"file_path": p, "content": "y"})
+	t.Logf("a %d-byte path of quotes makes a %d-byte rename", len(p), size(fails(t, r, "write", string(in), tooLong), "write"))
+
+	// The file is put there by bash, which hands the path to no command.
+	ok(t, r, "bash", `{"command":"q=$(printf '%255s' '' | tr ' ' \"'\"); d=/workspace; `+
+		`for i in $(seq 15); do d=$d/$q; done; printf x > \"$d/${q:11}\""}`)
+	in, _ = json.Marshal(map[string]string{"file_path": p, "old_string": "x", "new_string": "y"})
+	size(fails(t, r, "edit", string(in), tooLong), "edit")
+	in, _ = json.Marshal(map[string]string{"file_path": p})
+	if got := ok(t, r, "read", string(in)); got != "x" {
+		t.Errorf("read after the refused edit = %q, want the file as it was", got)
+	}
+	if left := ok(t, r, "bash", `{"command":"find /workspace -name '.map-write-*'"}`); left != "" {
+		t.Errorf("the refused writes left %q behind", left)
+	}
+}
+
 func TestGlob(t *testing.T) {
 	r := runner(t)
 	// Distinct, ascending mtimes: newest-first ordering is part of the contract,

@@ -170,10 +170,9 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	// Nor is a command too long for one exec argument, which the sandbox
 	// refused before anything ran. One that grew with what the model sent —
 	// a search's (inputTooLong) — the model can shorten; the file tools
-	// refuse a path too long for Linux before the sandbox sees it
-	// (pathTooLong), and one within its bounds makes no command that long.
-	// Any other is a command of the platform's own, which a retry would only
-	// run again unchanged: so not a fault, which the executor leaves to a
+	// answer theirs, which grew with the path, themselves (fileFault). Any
+	// other is a command of the platform's own, which a retry would only run
+	// again unchanged: so not a fault, which the executor leaves to a
 	// reclaim, but a tool error that says whose it is.
 	var model *inputTooLong
 	var tooLong *sandbox.CommandTooLongError
