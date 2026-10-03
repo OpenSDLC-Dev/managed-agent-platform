@@ -576,12 +576,16 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 
 	// No absolute-pattern handling here: a grep pattern is a regex, not a path,
 	// and one that happens to start with "/" must not be mistaken for an
-	// absolute root and turned loose on the whole filesystem.
-	root := r.workdir()
+	// absolute root and turned loose on the whole filesystem. The root is clean
+	// either way — resolve cleans a path, and the workdir is cleaned here — as
+	// memoryGlobs compares it to MemorySyncDir by its path elements: "/mnt/" or
+	// "/mnt/x/.." would otherwise not lead it.
+	cwd := path.Clean(r.workdir())
+	root := cwd
 	if in.Path != "" {
 		root = r.resolve(in.Path)
 	}
-	q, why := in.query(root, path.Clean(r.workdir()))
+	q, why := in.query(root, cwd)
 	if why != "" {
 		return failf("grep: %s", why)
 	}

@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -782,10 +783,10 @@ func TestGlobOnBashThreeTwoSaysItNeedsBashFour(t *testing.T) {
 // /mnt/memory/.sync, and from /mnt and from /, which do. rg runs in the
 // Runner's workdir, cleaned, whatever directory the exec started in — one
 // spelled with a trailing slash or a "..", or one the sandbox's exec does not
-// start in, here standing in for anything that moves the shell first. A
-// memory directory that happens to be named .sync is a memory, and a search
-// rooted at the baselines searches them, as rg searches a hidden directory it
-// is handed.
+// start in, here standing in for anything that moves the shell first; and a
+// search with no path roots at that workdir cleaned too. A memory directory
+// that happens to be named .sync is a memory, and a search rooted at the
+// baselines searches them, as rg searches a hidden directory it is handed.
 func TestGrepLeavesOutTheMemorySyncState(t *testing.T) {
 	for _, tc := range []struct{ name, sandbox, runner string }{
 		{"default workdir", "", ""},
@@ -810,6 +811,12 @@ func TestGrepLeavesOutTheMemorySyncState(t *testing.T) {
 			}
 			exactly(t, r, `{"pattern":"needle","path":"/mnt/memory/s1"}`, memories)
 			exactly(t, r, `{"pattern":"needle","path":"/mnt/memory/.sync"}`, "/mnt/memory/.sync/memstore_1")
+			// With no path the search's root is the workdir, cleaned as a path
+			// is: from /mnt, however it is spelled, the walk reaches the
+			// baselines from above and leaves them out.
+			if path.Clean(tc.runner) == "/mnt" {
+				exactly(t, r, `{"pattern":"needle"}`, memories)
+			}
 		})
 	}
 }
