@@ -162,16 +162,22 @@ The sandbox image is **your** choice, not baked into the platform: the executor
 and worker launch whatever image `EXECUTOR_IMAGE` / `WORKER_IMAGE` names, defaulting
 to `debian:stable-slim` for local development (`cmd/executor/main.go`,
 `cmd/worker/main.go`). The contract the platform imposes is a POSIX userland with
-`/bin/bash`. What the image's environment sets for a shell — an `ENV BASH_ENV`
-startup file, exported functions, `SHELLOPTS` — applies to the commands the
-model runs through the `bash` tool and to a `config.packages` install, which
-runs your image's own managers, and to nothing else: every script the platform
-runs to read or change the sandbox for itself (the other tools, the file
-transfers, the memory sync, the exec wrapper around even the `bash` tool's
-command) starts as `bash -p`, which reads no startup file, imports no function
-and ignores `SHELLOPTS`. Environment variables reach both alike. The **Kubernetes** backend needs more, and needs it hard: `setsid`
-for its exec wrapper, `tee`/`wc` for the write path's delivered-byte count, a
-`stat` accepting `-c` (GNU or BusyBox), on which every file **read** exits, and
+`/bin/bash`, and that bash **4.0 or newer** for two tools, which use what 4.0
+added: the `bash` tool's shell carries its state from one call to the next
+with an associative array (`declare -A`), so on bash 3.2 every call after the
+first fails, and `glob` expands its pattern with `globstar`, which 3.2 refuses
+outright. `grep`'s scripts need only 3.2 (below). What the image's environment
+sets for a shell — an `ENV BASH_ENV` startup file, exported functions,
+`SHELLOPTS` — applies to the commands the model runs through the `bash` tool
+and to a `config.packages` install, which runs your image's own managers, and
+to nothing else: every script the platform runs to read or change the sandbox
+for itself (the other tools, the file transfers, the memory sync, the exec
+wrapper around even the `bash` tool's command) starts as `bash -p`, which
+reads no startup file, imports no function and ignores `SHELLOPTS`.
+Environment variables reach both alike. The **Kubernetes** backend needs more,
+and needs it hard: `setsid` for its exec wrapper, `tee`/`wc` for the write
+path's delivered-byte count, a `stat` accepting `-c` (GNU or BusyBox), on which
+every file **read** exits, and
 `tar`, which it extracts a bulk write's archive with inside the pod — an image
 without one loses skill materialization outright, where Docker hands the same
 archive to the daemon and needs nothing (#206). `internal/sandbox/k8s/client.go`
