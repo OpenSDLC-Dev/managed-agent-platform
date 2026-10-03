@@ -150,12 +150,16 @@ const (
 // with ENAMETOOLONG ("file name too long"): resolved — the path the sandbox
 // would be handed — past maxPathBytes, or a name in it past maxNameBytes. It
 // is asked before the sandbox is, because no backend answers that refusal as
-// the path's: the k8s backend hands the path to its exec as an argument, which
-// one long enough overflows (E2BIG) before anything runs, and Docker's archive
-// endpoint answers it with a 500 naming no cause — each a fault the executor
-// would leave to a reclaim, which would make the same call again. Within the
-// bounds, every command a file primitive builds around the path stays far
-// below sandbox.MaxCommandBytes.
+// the path's. The k8s backend hands the path to its exec as an argument: a
+// read past the bounds finds "no such file or directory", and one long
+// enough keeps the exec from starting — the API server refuses a write's
+// request (431), and a read's exec exits 255 before its script runs. Docker's
+// archive endpoint answers a read with a 500 (`lstat …: file name too long`).
+// The first is the wrong answer; the others are faults the executor would
+// leave to a reclaim, which would make the same call again (measured on kind
+// and Docker Desktop, #827).
+// Within the bounds, every command a file primitive builds around the path
+// stays far below sandbox.MaxCommandBytes.
 func pathTooLong(verb, resolved string) (Result, bool) {
 	if n := len(resolved); n > maxPathBytes {
 		res, _ := failf("%s: file name too long: the file_path resolves to a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
