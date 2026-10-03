@@ -7,10 +7,11 @@
 // dot name the embed never picks up, and renamed into place after the digest
 // matches. What stands at an archive's name and is not a regular file is not
 // one the embed takes — go:embed skips a symbolic link in a directory it
-// embeds — so a link whose target holds the pin is replaced by a regular copy
-// of those bytes, checked the same way, and a link to anything else, a
-// directory or any other kind of file there is removed and the archive
-// fetched.
+// embeds — so a link to a regular file that holds the pin is replaced by a
+// regular copy of those bytes, checked the same way, and a link to anything
+// else, a directory or any other kind of file there is removed and the
+// archive fetched. An archive the directory already holds is left 0644, as a
+// download lands.
 // Then everything else in the directory is removed — an archive the manifest
 // no longer names, an interrupted download, a stray file or directory — but
 // the manifest: internal/ripgrep embeds the whole directory, since a build
@@ -117,10 +118,13 @@ const partPrefix = ".ripgrepfetch-"
 var errDigest = errors.New("does not match its pinned sha256")
 
 // present reports whether dst is the pinned archive as the embed will take
-// it: a regular file whose bytes hash to want. A symbolic link whose target's
-// bytes do becomes a regular copy of them (land); whatever else stands at dst
-// and is not a regular file — a link to anything else, a directory — is
-// removed, so the download can land in its place.
+// it: a regular file whose bytes hash to want, which is left 0644, as land
+// leaves a download, whatever mode it came with. A symbolic link to a regular
+// file whose bytes do becomes a regular copy of them (land); whatever else
+// stands at dst and is not a regular file — a link to anything else, a
+// directory, a FIFO — is removed, so the download can land in its place.
+// What a link names is opened only once it is known to be a regular file: an
+// open of a FIFO would wait for a writer that never comes.
 func present(dst, want string) (bool, error) {
 	info, err := os.Lstat(dst)
 	switch {
@@ -129,13 +133,19 @@ func present(dst, want string) (bool, error) {
 	case err != nil:
 		return false, err
 	case info.Mode().IsRegular():
-		return matches(dst, want)
+		ok, err := matches(dst, want)
+		if !ok || err != nil || info.Mode().Perm() == 0o644 {
+			return ok, err
+		}
+		return true, os.Chmod(dst, 0o644)
 	case info.Mode()&os.ModeSymlink != 0:
-		if f, err := os.Open(dst); err == nil {
-			err = land(f, dst, want)
-			f.Close()
-			if err == nil {
-				return true, nil
+		if target, err := os.Stat(dst); err == nil && target.Mode().IsRegular() {
+			if f, err := os.Open(dst); err == nil {
+				err = land(f, dst, want)
+				f.Close()
+				if err == nil {
+					return true, nil
+				}
 			}
 		}
 	}

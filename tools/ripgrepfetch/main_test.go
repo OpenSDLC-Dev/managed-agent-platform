@@ -111,6 +111,34 @@ func TestFetchLandsThePinAndOnlyThePin(t *testing.T) {
 	}
 }
 
+// An archive already present as the pin is taken as it is, with no download,
+// and left 0644 as a download lands, whatever mode it was put there with: a
+// checkout another user builds from must be able to read it.
+func TestFetchLeavesAPresentArchive0644(t *testing.T) {
+	backoff = 0
+	srv, hits := server(t, map[string]string{})
+	m := manifest(srv.URL, map[string]string{"amd64": sum("amd64 bytes")})
+	for _, mode := range []os.FileMode{0o600, 0o755, 0o644} {
+		dir := t.TempDir()
+		dst := filepath.Join(dir, "rg-amd64.tar.gz")
+		if err := os.WriteFile(dst, []byte("amd64 bytes"), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dst, mode); err != nil { // past the umask
+			t.Fatal(err)
+		}
+		if err := fetch(context.Background(), srv.Client(), m, dir, quiet); err != nil {
+			t.Fatalf("fetch over a %v archive: %v", mode, err)
+		}
+		if fi, err := os.Stat(dst); err != nil || fi.Mode().Perm() != 0o644 {
+			t.Errorf("a %v archive is %v, %v after the fetch; want 0644", mode, fi.Mode().Perm(), err)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Errorf("a present archive was downloaded again: %d requests", hits.Load())
+	}
+}
+
 // Bytes that are not the pin never land, under the archive's name or any
 // other, and a file already there under the name is replaced only by the pin.
 func TestFetchRefusesBytesThatAreNotThePin(t *testing.T) {
@@ -153,7 +181,8 @@ func TestFetchRetriesAndThenFails(t *testing.T) {
 // What stands at an archive's name must end a regular file: go:embed skips a
 // symbolic link in the directory it embeds, so a link there would build a
 // binary with no ripgrep while the fetch said the archive was present. A link
-// whose target is the pin becomes a regular copy of it, with no download; a
+// to a regular file that is the pin becomes a regular copy of it, with no
+// download (a FIFO is TestFetchNeverOpensAFIFO's); a
 // link to other bytes, a dangling one, and a directory are removed and the
 // archive fetched — and what a link named is left as it was.
 func TestFetchReplacesWhatIsNotARegularFileAtAnArchivesName(t *testing.T) {
