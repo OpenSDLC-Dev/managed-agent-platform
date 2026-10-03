@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
@@ -18,30 +19,60 @@ import (
 
 const testImage = "debian:stable-slim"
 
-// runner gives the whole suite one real container. Each subtest works under its
-// own directory beneath the workdir, and bash subtests take a fresh session so
-// they never inherit another's shell state. A missing daemon is a hard failure,
-// as with the other suites — skipping would hollow out the coverage gate.
-func runner(t *testing.T) toolset.Runner {
+// runner gives a test one real container, from testImage unless an option
+// says otherwise, and a Runner over it. Each subtest works under its own
+// directory beneath the workdir, and bash subtests take a fresh session so they
+// never inherit another's shell state. A missing daemon is a hard failure, as
+// with the other suites — skipping would hollow out the coverage gate.
+//
+// The provider is given dockertest.Host, the address every docker CLI call in
+// these tests names too, so a fixture the CLI builds or starts is on the
+// daemon the provider uses.
+func runner(t *testing.T, opts ...runnerOption) toolset.Runner {
 	t.Helper()
-	provider, err := docker.New(docker.Config{})
+	provider, err := docker.New(docker.Config{Host: dockertest.Host()})
 	if err != nil {
 		t.Fatalf("toolset tests require Docker: %v", err)
 	}
-	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+	spec := sandbox.Spec{
 		SessionID:  domain.NewID("sesn"),
 		Image:      testImage,
 		Networking: domain.Networking{Type: domain.NetUnrestricted},
-	})
+	}
+	r := toolset.Runner{Session: domain.NewID("sesn")}
+	for _, o := range opts {
+		o(&spec, &r)
+	}
+	sb, err := provider.Provision(context.Background(), spec)
 	if err != nil {
-		t.Fatalf("provision: %v", err)
+		t.Fatalf("provision %s: %v", spec.Image, err)
 	}
 	t.Cleanup(func() {
 		if err := sb.Destroy(context.Background()); err != nil {
 			t.Errorf("destroy: %v", err)
 		}
 	})
-	return toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
+	r.Sandbox = sb
+	return r
+}
+
+// runnerOption shapes the sandbox runner provisions and the Runner over it.
+type runnerOption func(*sandbox.Spec, *toolset.Runner)
+
+// fromImage provisions the sandbox from image rather than testImage.
+func fromImage(image string) runnerOption {
+	return func(s *sandbox.Spec, _ *toolset.Runner) { s.Image = image }
+}
+
+// hardened provisions the sandbox with h.
+func hardened(h sandbox.Hardening) runnerOption {
+	return func(s *sandbox.Spec, _ *toolset.Runner) { s.Hardening = h }
+}
+
+// inWorkdir makes workdir both the sandbox's — where an exec starts — and the
+// Runner's, where relative paths resolve and grep runs rg.
+func inWorkdir(workdir string) runnerOption {
+	return func(s *sandbox.Spec, r *toolset.Runner) { s.Workdir, r.Workdir = workdir, workdir }
 }
 
 // call runs one tool and fails the test on an infrastructure error — the tests

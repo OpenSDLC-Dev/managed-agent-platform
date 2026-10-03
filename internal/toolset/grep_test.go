@@ -401,7 +401,7 @@ func TestGrepInstallsUnderConcurrentCalls(t *testing.T) {
 // rg is static, so the same binary answers the same search on an image with
 // no glibc at all — musl and busybox — as on Debian.
 func TestGrepRunsOnAMuslBusyboxImage(t *testing.T) {
-	alpine := runnerFor(t, muslImage, sandbox.Hardening{})
+	alpine := runner(t, fromImage(muslImage))
 	debian := runner(t)
 	if out := ok(t, alpine, "bash", `{"command":"ls -l /bin/ls; ldd --version 2>&1 | head -n1"}`); !strings.Contains(out, "busybox") || !strings.Contains(out, "musl") {
 		t.Fatalf("%s is not a musl/busybox image: %q", muslImage, out)
@@ -436,30 +436,6 @@ func sameAnswers(t *testing.T, a, b toolset.Runner, an, bn string) {
 	}
 }
 
-// runnerFor is runner with an image and hardening of the test's choosing.
-func runnerFor(t *testing.T, image string, h sandbox.Hardening) toolset.Runner {
-	t.Helper()
-	provider, err := docker.New(docker.Config{})
-	if err != nil {
-		t.Fatalf("toolset tests require Docker: %v", err)
-	}
-	sb, err := provider.Provision(context.Background(), sandbox.Spec{
-		SessionID:  domain.NewID("sesn"),
-		Image:      image,
-		Networking: domain.Networking{Type: domain.NetUnrestricted},
-		Hardening:  h,
-	})
-	if err != nil {
-		t.Fatalf("provision %s: %v", image, err)
-	}
-	t.Cleanup(func() {
-		if err := sb.Destroy(context.Background()); err != nil {
-			t.Errorf("destroy: %v", err)
-		}
-	})
-	return toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
-}
-
 // On an image that does not run as root, Docker still writes the upload as
 // root; the install copies it, as the sandbox user, into a file that user can
 // make executable. A read-only root moves /tmp onto a volume, which rg runs
@@ -471,7 +447,8 @@ func runnerFor(t *testing.T, image string, h sandbox.Hardening) toolset.Runner {
 // volume there that is root's 0755 too, so the first bash call fails either
 // way.
 func TestGrepInstallsRipgrepWhereTheSandboxIsNotRoot(t *testing.T) {
-	image := dockertest.ImageFrom(t, "grep-nonroot", "FROM debian:stable-slim\nRUN useradd -m app && mkdir -p /workspace && chown app:app /workspace\nUSER app\n")
+	image := dockertest.ImageFrom(t, "grep-nonroot", "FROM debian:stable-slim\nRUN useradd -m app && mkdir -p /workspace && chown app:app /workspace\nUSER app\n",
+		"--host", dockertest.Host())
 	for _, tc := range []struct {
 		name, image string
 		h           sandbox.Hardening
@@ -481,7 +458,7 @@ func TestGrepInstallsRipgrepWhereTheSandboxIsNotRoot(t *testing.T) {
 		{"root without capabilities", testImage, sandbox.Hardening{CapDrop: []string{"ALL"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := runnerFor(t, tc.image, tc.h)
+			r := runner(t, fromImage(tc.image), hardened(tc.h))
 			ok(t, r, "write", `{"file_path":"nr/a.txt","content":"needle\n"}`)
 			exactly(t, r, `{"pattern":"needle","path":"nr","output_mode":"count"}`, "/workspace/nr/a.txt:1")
 		})
@@ -512,11 +489,12 @@ func attached(t *testing.T, args ...string) toolset.Runner {
 	run := append([]string{"run", "-d", "--name", name,
 		"--label", "dev.opensdlc.managed-agent-platform.session-id=" + string(sid), "-w", "/workspace"}, args...)
 	run = append(run, testImage, "/bin/bash", "-c", "while :; do sleep 3600; done")
-	if out, err := exec.Command("docker", run...).CombinedOutput(); err != nil {
+	host := dockertest.Host()
+	if out, err := exec.Command("docker", append([]string{"--host", host}, run...)...).CombinedOutput(); err != nil {
 		t.Fatalf("docker run: %v\n%s", err, out)
 	}
-	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", "-v", name).Run() })
-	provider, err := docker.New(docker.Config{})
+	t.Cleanup(func() { _ = exec.Command("docker", "--host", host, "rm", "-f", "-v", name).Run() })
+	provider, err := docker.New(docker.Config{Host: host})
 	if err != nil {
 		t.Fatalf("toolset tests require Docker: %v", err)
 	}
@@ -617,7 +595,7 @@ func TestGrepInstallNeverSweepsThroughALink(t *testing.T) {
 // found nothing but that error is still one. A root without capabilities
 // cannot read a mode-000 file, so no second user is needed.
 func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
-	r := runnerFor(t, testImage, sandbox.Hardening{CapDrop: []string{"ALL"}})
+	r := runner(t, hardened(sandbox.Hardening{CapDrop: []string{"ALL"}}))
 	ok(t, r, "bash", `{"command":"mkdir -p ex2 && echo needle > ex2/a.txt && echo needle > ex2/b.txt && chmod 000 ex2/b.txt"}`)
 	const denied = "rg: /workspace/ex2/b.txt: Permission denied (os error 13)"
 	exactly(t, r, `{"pattern":"needle","path":"ex2"}`, "/workspace/ex2/a.txt\n"+denied)
@@ -642,8 +620,8 @@ func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
 func TestGrepThroughAnImageBanner(t *testing.T) {
 	image := dockertest.ImageFrom(t, "grep-banner", "FROM debian:stable-slim\n"+
 		"RUN printf 'printf welcome-banner; printf stderr-banner >&2\\n' > /etc/map-banner.sh\n"+
-		"ENV BASH_ENV=/etc/map-banner.sh\n")
-	r := runnerFor(t, image, sandbox.Hardening{})
+		"ENV BASH_ENV=/etc/map-banner.sh\n", "--host", dockertest.Host())
+	r := runner(t, fromImage(image))
 	ok(t, r, "write", `{"file_path":"be/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"be/b.txt","content":"needle\n"}`)
 	for in, want := range map[string]string{
@@ -690,7 +668,7 @@ func TestGrepThroughAnImageBanner(t *testing.T) {
 func TestGrepLeavesOutTheMemorySyncState(t *testing.T) {
 	for _, workdir := range []string{"", "/mnt", "/"} {
 		t.Run("workdir "+workdir, func(t *testing.T) {
-			r := runnerIn(t, workdir)
+			r := runner(t, inWorkdir(workdir))
 			ok(t, r, "bash", `{"command":"mkdir -p /mnt/memory/.sync /mnt/memory/s1/.sync /mnt/memory/s1/sub`+
 				` && echo needle > /mnt/memory/.sync/memstore_1 && echo needle > /mnt/memory/s1/.anthropic-memory-store`+
 				` && echo needle > /mnt/memory/s1/notes.md && echo needle > /mnt/memory/s1/.sync/kept.md && echo needle > /mnt/memory/s1/sub/deep.md"}`)
@@ -704,31 +682,6 @@ func TestGrepLeavesOutTheMemorySyncState(t *testing.T) {
 			exactly(t, r, `{"pattern":"needle","path":"/mnt/memory/.sync"}`, "/mnt/memory/.sync/memstore_1")
 		})
 	}
-}
-
-// runnerIn is runner for a sandbox whose workdir — where rg runs, and where
-// relative paths resolve — is workdir, or the default when it is "".
-func runnerIn(t *testing.T, workdir string) toolset.Runner {
-	t.Helper()
-	provider, err := docker.New(docker.Config{})
-	if err != nil {
-		t.Fatalf("toolset tests require Docker: %v", err)
-	}
-	sb, err := provider.Provision(context.Background(), sandbox.Spec{
-		SessionID:  domain.NewID("sesn"),
-		Image:      testImage,
-		Workdir:    workdir,
-		Networking: domain.Networking{Type: domain.NetUnrestricted},
-	})
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := sb.Destroy(context.Background()); err != nil {
-			t.Errorf("destroy: %v", err)
-		}
-	})
-	return toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn"), Workdir: workdir}
 }
 
 // TestGrepRunsTheSameInAKubernetesPod installs and runs rg in a pod — over
