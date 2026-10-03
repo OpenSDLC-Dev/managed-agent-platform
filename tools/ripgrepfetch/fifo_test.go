@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -58,5 +59,45 @@ func TestFetchNeverOpensAFIFO(t *testing.T) {
 				t.Errorf("what the link named = %v, %v; want the FIFO it was", fi, err)
 			}
 		})
+	}
+}
+
+// What present reads, it reads through a descriptor it has checked: a FIFO
+// put where a regular file was, after the type was asked and before the
+// open, is opened without waiting for a writer and refused as no regular
+// file.
+func TestOpenRegularNeverWaitsOnAFIFO(t *testing.T) {
+	dir := t.TempDir()
+	fifo, file := filepath.Join(dir, "fifo"), filepath.Join(dir, "file")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		f, err := openRegular(fifo)
+		if f != nil {
+			f.Close()
+			err = errors.New("opened the FIFO as a regular file")
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("openRegular(a FIFO) = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("openRegular is blocked opening the FIFO")
+	}
+	f, err := openRegular(file)
+	if err != nil || f == nil {
+		t.Fatalf("openRegular(a regular file) = %v, %v", f, err)
+	}
+	f.Close()
+	if f, err := openRegular(filepath.Join(dir, "absent")); f != nil || err != nil {
+		t.Fatalf("openRegular(nothing) = %v, %v; want nil, nil", f, err)
 	}
 }

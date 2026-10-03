@@ -11,7 +11,8 @@
 // regular copy of those bytes, checked the same way, and a link to anything
 // else, a directory or any other kind of file there is removed and the
 // archive fetched. An archive the directory already holds is left 0644, as a
-// download lands.
+// download lands, where its mode can be changed; where it cannot, it is taken
+// as it is, and the refusal logged.
 // Then everything else in the directory is removed — an archive the manifest
 // no longer names, an interrupted download, a stray file or directory — but
 // the manifest: internal/ripgrep embeds the whole directory, since a build
@@ -35,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/ripgrep"
@@ -71,7 +73,7 @@ func fetch(ctx context.Context, client *http.Client, m ripgrep.Manifest, dir str
 		a := m.Archives[arch]
 		keep[a.Name()] = true
 		dst := filepath.Join(dir, a.Name())
-		ok, err := present(dst, a.SHA256)
+		ok, err := present(dst, a.SHA256, logf)
 		if err != nil {
 			return err
 		}
@@ -119,13 +121,19 @@ var errDigest = errors.New("does not match its pinned sha256")
 
 // present reports whether dst is the pinned archive as the embed will take
 // it: a regular file whose bytes hash to want, which is left 0644, as land
-// leaves a download, whatever mode it came with. A symbolic link to a regular
-// file whose bytes do becomes a regular copy of them (land); whatever else
-// stands at dst and is not a regular file — a link to anything else, a
-// directory, a FIFO — is removed, so the download can land in its place.
-// What a link names is opened only once it is known to be a regular file: an
-// open of a FIFO would wait for a writer that never comes.
-func present(dst, want string) (bool, error) {
+// leaves a download, whatever mode it came with — or, where the chmod is
+// refused (a file another user owns, a read-only checkout), left as it is,
+// the refusal logged: its bytes are still the pin, which is what the embed
+// needs. A symbolic link to a regular file whose bytes do becomes a regular
+// copy of them (land); whatever else stands at dst and is not a regular file
+// — a link to anything else, a directory, a FIFO — is removed, so the
+// download can land in its place.
+//
+// What stands at dst is read only through a descriptor that is a regular
+// file's (openRegular): an open of a FIFO would wait for a writer that never
+// comes, and one can be put at dst, or at what a link names, between the
+// check of its type and the open.
+func present(dst, want string, logf func(string, ...any)) (bool, error) {
 	info, err := os.Lstat(dst)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -133,14 +141,27 @@ func present(dst, want string) (bool, error) {
 	case err != nil:
 		return false, err
 	case info.Mode().IsRegular():
-		ok, err := matches(dst, want)
-		if !ok || err != nil || info.Mode().Perm() == 0o644 {
+		f, err := openRegular(dst)
+		if err != nil {
+			return false, err
+		}
+		if f == nil {
+			break
+		}
+		defer f.Close()
+		ok, err := matches(f, want)
+		if !ok || err != nil {
 			return ok, err
 		}
-		return true, os.Chmod(dst, 0o644)
+		if fi, err := f.Stat(); err == nil && fi.Mode().Perm() != 0o644 {
+			if err := f.Chmod(0o644); err != nil {
+				logf("ripgrepfetch: %s is the pin, left %v: %v", dst, fi.Mode().Perm(), err)
+			}
+		}
+		return true, nil
 	case info.Mode()&os.ModeSymlink != 0:
 		if target, err := os.Stat(dst); err == nil && target.Mode().IsRegular() {
-			if f, err := os.Open(dst); err == nil {
+			if f, err := openRegular(dst); err == nil && f != nil {
 				err = land(f, dst, want)
 				f.Close()
 				if err == nil {
@@ -153,15 +174,26 @@ func present(dst, want string) (bool, error) {
 	return false, os.RemoveAll(dst)
 }
 
-func matches(file, want string) (bool, error) {
-	f, err := os.Open(file)
+// openRegular opens name, through a link if it is one, without waiting on
+// it — O_NONBLOCK, which a FIFO's open honours and a regular file's read
+// ignores — and hands back the file only if the descriptor it opened is a
+// regular file's; nil, with no error, if it is not, or if nothing is there.
+func openRegular(name string) (*os.File, error) {
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	defer f.Close()
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func matches(f *os.File, want string) (bool, error) {
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return false, err
