@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	gopath "path"
 	"strings"
 	"testing"
 	"time"
@@ -405,53 +406,215 @@ func TestBulkWriteLeftBehindSurvivesAnUnterminatedImageLine(t *testing.T) {
 	}
 }
 
-// The emptying archive puts the names back without the payloads: one zero-byte
-// entry per path, relative like every other entry this file builds, so the one
-// extraction at `/` covers a whole batch's residue.
-func TestBulkWriteEmptyArchive(t *testing.T) {
-	b, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{
-		{Path: "/etc/first", Data: bytes.Repeat([]byte("A"), 4096)},
+// readExtractions reads every extraction back the way the daemon's untar sees it:
+// the directory it is extracted at, and each entry's absolute landing path —
+// Dir joined with the entry's relative name.
+func readExtractions(t *testing.T, xs []sandbox.Extraction) map[string][]entry {
+	t.Helper()
+	out := map[string][]entry{}
+	for _, x := range xs {
+		if _, dup := out[x.Dir]; dup {
+			t.Errorf("two extractions at %s; one directory is one delivery", x.Dir)
+		}
+		var buf bytes.Buffer
+		if err := x.Archive(&buf); err != nil {
+			t.Fatalf("build the extraction at %s: %v", x.Dir, err)
+		}
+		out[x.Dir] = []entry{}
+		tr := tar.NewReader(&buf)
+		for {
+			h, err := tr.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("read the extraction at %s: %v", x.Dir, err)
+			}
+			if h.Typeflag != tar.TypeReg {
+				t.Errorf("entry %s is type %q, want a regular file", h.Name, h.Typeflag)
+			}
+			if h.Name == "" || strings.HasPrefix(h.Name, "/") || strings.Contains(h.Name, "..") {
+				t.Errorf("entry %q at %s, want a name relative to the extraction's directory", h.Name, x.Dir)
+			}
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read entry %s: %v", h.Name, err)
+			}
+			out[x.Dir] = append(out[x.Dir], entry{name: gopath.Join(x.Dir, h.Name), mode: h.Mode, data: data})
+		}
+	}
+	return out
+}
+
+// The docker daemon extracts an archive at one directory per request and, on a
+// read-only root, refuses any directory outside a writable mount — `/` among
+// them, whatever the entries below it name (#859). So the batch is split into
+// one extraction per writable mount it touches, each at the deepest directory its
+// entries share and never above the mount; an entry under none of the mounts is
+// extracted at its own directory, where the single write extracts too.
+func TestBulkWriteSplitsAtTheWritableMounts(t *testing.T) {
+	roots := sandbox.WritablePaths("/workspace")
+	files := []sandbox.FileWrite{
+		{Path: "/workspace/skills/pack/SKILL.md", Data: []byte("skill")},
+		{Path: "/tmp/a.txt", Data: []byte("tmp")},
+		{Path: "/workspace/skills/pack/scripts/deep/run.sh", Data: []byte("#!/bin/sh\n"), Mode: 0o755},
+		{Path: "/mnt/memory/notes/todo.md", Data: []byte("rw"), Mode: 0o666},
+		{Path: "/tmp/new/nested/b.txt", Data: []byte("nested")},
+		{Path: "/mnt/memory/.sync/memstore_1", Data: []byte("baseline")},
+		{Path: "/etc/x.conf", Data: []byte("outside")},
+		{Path: "/etc/sub/y.conf", Data: []byte("outside, deeper")},
+	}
+	b, err := sandbox.NewBulkWrite("/workspace", files)
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+	xs := b.Members(roots)
+	var dirs []string
+	for _, x := range xs {
+		dirs = append(dirs, x.Dir)
+	}
+	// In the order the groups first appear in the batch. /tmp is the mount point
+	// itself — its members share nothing deeper — and /etc and /etc/sub are two,
+	// because a directory outside the mounts is extracted at on its own.
+	want := []string{"/workspace/skills/pack", "/tmp", "/mnt/memory", "/etc", "/etc/sub"}
+	if strings.Join(dirs, " ") != strings.Join(want, " ") {
+		t.Fatalf("extractions at %v, want %v", dirs, want)
+	}
+
+	// Every member lands exactly where the whole-batch archive lands it — under its
+	// temporary name in its target's own directory — with its bytes and its mode,
+	// and each extraction keeps the batch's order.
+	whole := readArchive(t, b)[2:] // past the manifest and the directory list
+	got := readExtractions(t, xs)
+	byPath := map[string]entry{}
+	for _, dir := range want {
+		var last = -1
+		for _, e := range got[dir] {
+			byPath[e.name] = e
+			at := -1
+			for i, w := range whole {
+				if "/"+w.name == e.name {
+					at = i
+				}
+			}
+			if at <= last {
+				t.Errorf("%s: %s is out of the batch's order", dir, e.name)
+			}
+			last = at
+		}
+	}
+	if len(byPath) != len(files) {
+		t.Fatalf("the extractions carry %d members, want %d", len(byPath), len(files))
+	}
+	for _, w := range whole {
+		e, ok := byPath["/"+w.name]
+		if !ok {
+			t.Errorf("member %s is in no extraction", w.name)
+			continue
+		}
+		if !bytes.Equal(e.data, w.data) || e.mode != w.mode {
+			t.Errorf("member %s carries %q mode %o, want %q mode %o", w.name, e.data, e.mode, w.data, w.mode)
+		}
+	}
+
+	// The bookkeeping is one extraction at the workdir, which is a mount itself.
+	bk := b.Bookkeeping(roots)
+	if len(bk) != 1 || bk[0].Dir != "/workspace" {
+		t.Fatalf("bookkeeping extractions = %+v, want one at the workdir", bk)
+	}
+	if es := readExtractions(t, bk)["/workspace"]; len(es) != 2 || es[0].name != b.Manifest || es[1].name != b.DirList {
+		t.Errorf("bookkeeping carries %+v, want the manifest then the directory list", es)
+	}
+
+	// A retried delivery sends the same bytes, as the whole archive's does.
+	var first, second bytes.Buffer
+	if err := xs[0].Archive(&first); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	now := time.Now()
+	time.Sleep(now.Truncate(time.Second).Add(time.Second + 10*time.Millisecond).Sub(now))
+	if err := xs[0].Archive(&second); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if !bytes.Equal(first.Bytes(), second.Bytes()) {
+		t.Error("two builds of one extraction differ; a retried delivery must send the same bytes")
+	}
+}
+
+// A mount nested in another — a workdir under /mnt — takes its own members: the
+// deepest mount holding an entry is the one it is grouped under, so a batch never
+// leans on extracting across a mount boundary.
+func TestBulkWriteSplitTakesTheDeepestMount(t *testing.T) {
+	roots := sandbox.WritablePaths("/mnt/work")
+	b, err := sandbox.NewBulkWrite("/mnt/work", []sandbox.FileWrite{
+		{Path: "/mnt/work/a/x", Data: []byte("1")},
+		{Path: "/mnt/session/uploads/y", Data: []byte("2")},
+		{Path: "/mnt/work/b/z", Data: []byte("3")},
 	})
 	if err != nil {
 		t.Fatalf("NewBulkWrite: %v", err)
 	}
-	left := b.LeftBehind("map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left m\n")
+	var dirs []string
+	for _, x := range b.Members(roots) {
+		dirs = append(dirs, x.Dir)
+	}
+	if want := "/mnt/work /mnt/session/uploads"; strings.Join(dirs, " ") != want {
+		t.Errorf("extractions at %v, want %s", dirs, want)
+	}
 
-	var buf bytes.Buffer
-	if err := b.EmptyArchive(left, &buf); err != nil {
-		t.Fatalf("EmptyArchive: %v", err)
+	// With no mounts named, every entry is extracted at its own directory.
+	dirs = dirs[:0]
+	for _, x := range b.Members(nil) {
+		dirs = append(dirs, x.Dir)
+	}
+	if want := "/mnt/work/a /mnt/session/uploads /mnt/work/b"; strings.Join(dirs, " ") != want {
+		t.Errorf("with no mounts the extractions are at %v, want %s", dirs, want)
+	}
+	// And a mount at `/` holds everything: one extraction, at the deepest
+	// directory the batch shares rather than at `/` itself.
+	dirs = dirs[:0]
+	for _, x := range b.Members([]string{"/"}) {
+		dirs = append(dirs, x.Dir)
+	}
+	if want := "/mnt"; strings.Join(dirs, " ") != want {
+		t.Errorf("under a mount at / the extractions are at %v, want %s", dirs, want)
+	}
+}
+
+// The emptying puts the names back without the payloads: one zero-byte entry per
+// path, grouped the way the deliveries that landed them were — so a batch's
+// residue in the workdir and in a memory mount is two extractions, never one at
+// `/` that a read-only root would refuse.
+func TestBulkWriteEmptying(t *testing.T) {
+	roots := sandbox.WritablePaths("/workspace")
+	b, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{
+		{Path: "/mnt/memory/notes/first", Data: bytes.Repeat([]byte("A"), 4096)},
+		{Path: "/mnt/memory/notes/second", Data: bytes.Repeat([]byte("B"), 4096)},
+	})
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+	left := b.LeftBehind("map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left m\nmap-bulk-left 1\n")
+
+	got := readExtractions(t, b.Emptying(left, roots))
+	if len(got) != 2 {
+		t.Fatalf("emptying extractions at %d directories, want 2 (the memory mount and the workdir)", len(got))
 	}
 	var names []string
-	tr := tar.NewReader(&buf)
-	for {
-		h, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
+	for _, dir := range []string{"/mnt/memory/notes", "/workspace"} {
+		for _, e := range got[dir] {
+			if len(e.data) != 0 {
+				t.Errorf("entry %s is %d bytes, want 0: the payload is the whole point", e.name, len(e.data))
+			}
+			names = append(names, e.name)
 		}
-		if err != nil {
-			t.Fatalf("read the emptying archive: %v", err)
-		}
-		if h.Size != 0 {
-			t.Errorf("entry %s is %d bytes, want 0: the payload is the whole point", h.Name, h.Size)
-		}
-		if h.Typeflag != tar.TypeReg {
-			t.Errorf("entry %s is type %q, want a regular file", h.Name, h.Typeflag)
-		}
-		if strings.HasPrefix(h.Name, "/") {
-			t.Errorf("entry %s is absolute, want a relative name the untar extracts at /", h.Name)
-		}
-		names = append(names, "/"+h.Name)
 	}
-	if len(names) != 2 || names[0] != left[0] || names[1] != b.Manifest {
-		t.Errorf("the emptying archive carries %v, want exactly what was named: %v", names, left)
+	if want := []string{left[0], left[2], b.Manifest}; strings.Join(names, " ") != strings.Join(want, " ") {
+		t.Errorf("the emptying carries %v, want exactly what was named: %v", names, want)
 	}
 
 	// Nothing named is nothing to send; the caller is what decides not to.
-	var none bytes.Buffer
-	if err := b.EmptyArchive(nil, &none); err != nil {
-		t.Fatalf("EmptyArchive(nil): %v", err)
-	}
-	if _, err := tar.NewReader(&none).Next(); !errors.Is(err, io.EOF) {
-		t.Errorf("an empty batch built an archive with entries in it: %v", err)
+	if xs := b.Emptying(nil, roots); len(xs) != 0 {
+		t.Errorf("an empty list built %d extractions, want none", len(xs))
 	}
 }

@@ -1446,9 +1446,15 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 }
 
 // WriteFiles lands a whole batch for two execs rather than one per member: the
-// members travel as a single archive the daemon extracts, and one exec then
-// renames them all into place. That is what #206 asked for — a small write's cost
-// here is mostly the exec, and a skill may hold ten thousand files.
+// members travel as archives the daemon extracts — one per writable mount the
+// batch touches (or directory outside them), which for every batch the platform
+// writes is one — and one exec then renames them all into place. That is what #206 asked for — a small
+// write's cost here is mostly the exec, and a skill may hold ten thousand files.
+//
+// Each archive is extracted at a directory inside the mount its members are bound
+// for, never at `/`: on a read-only root the daemon refuses an extraction at any
+// directory outside a writable mount, whatever the entries below it name (#859;
+// sandbox.BulkWrite's split carries the rule).
 //
 // It is four steps, and the first two are what make it work on a sandbox that does
 // not run as root. The bookkeeping is delivered first, into the workdir, which
@@ -1472,7 +1478,7 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 	if err != nil {
 		return err
 	}
-	if err := c.putBulk(ctx, b.Bookkeeping); err != nil {
+	if err := c.putBulk(ctx, b.Bookkeeping(c.mounts())); err != nil {
 		if containerGone(err) {
 			return c.gone()
 		}
@@ -1483,7 +1489,7 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		c.shedBulk(ctx, b)
 		return err
 	}
-	if err := c.putBulk(ctx, b.Members); err != nil {
+	if err := c.putBulk(ctx, b.Members(c.mounts())); err != nil {
 		c.shedBulk(ctx, b)
 		if containerGone(err) {
 			return c.gone()
@@ -1544,14 +1550,32 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 	return b.Fault("docker", res.ExitCode, res.Stderr)
 }
 
-// putBulk streams one of the batch's archives to the daemon, which extracts it at
-// the container's root. The tar is built on the fly over a pipe rather than
-// buffered, as the streaming single write's is: the members are already in memory,
-// and a second copy of a large skill is not worth having.
-func (c *container) putBulk(ctx context.Context, archive func(io.Writer) error) error {
+// mounts are the writable mounts sandboxConfig gives a read-only root — the
+// directories a batch's archives are extracted within (sandbox.BulkWrite's
+// split). On a writable root the same grouping holds, and costs the platform's
+// own batches nothing extra: each still sits under one mount.
+func (c *container) mounts() []string { return sandbox.WritablePaths(c.workdir) }
+
+// putBulk delivers a batch's extractions in order, stopping at the first the
+// daemon refuses — the caller sheds what any of them landed, as it would for one
+// archive that died part way.
+func (c *container) putBulk(ctx context.Context, xs []sandbox.Extraction) error {
+	for _, x := range xs {
+		if err := c.putExtraction(ctx, x); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// putExtraction streams one extraction to the daemon, which extracts it at its
+// Dir. The tar is built on the fly over a pipe rather than buffered, as the
+// streaming single write's is: the members are already in memory, and a second
+// copy of a large skill is not worth having.
+func (c *container) putExtraction(ctx context.Context, x sandbox.Extraction) error {
 	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(archive(pw)) }()
-	err := c.api.putArchive(ctx, c.id, "/", pr)
+	go func() { pw.CloseWithError(x.Archive(pw)) }()
+	err := c.api.putArchive(ctx, c.id, x.Dir, pr)
 	pr.CloseWithError(err)
 	return err
 }
@@ -1602,9 +1626,10 @@ func (c *container) discardBulk(ctx context.Context, b *sandbox.BulkWrite) strin
 // anyone but that user — so what put them there empties them, executing nothing
 // (#316, the batch's half of #310).
 //
-// One archive for the whole batch, where reclaim sends one per path: a batch
-// refused under a root-owned parent leaves every member behind at once, and the
-// ten thousand a skill may carry are not worth ten thousand round trips.
+// One archive per extraction directory, grouped as the deliveries were, where
+// reclaim sends one per path: a batch refused under a root-owned parent leaves
+// every member behind at once, and the ten thousand a skill may carry are not
+// worth ten thousand round trips.
 //
 // reclaim guards that delivery with a HEAD, so a temporary the script's own `rm`
 // already removed is not recreated as an empty file. This asks no HEAD at all —
@@ -1637,7 +1662,11 @@ func (c *container) reclaimBulkPaths(ctx context.Context, b *sandbox.BulkWrite, 
 	}
 	ctx, cancel := cleanup(ctx)
 	defer cancel()
-	_ = c.putBulk(ctx, func(w io.Writer) error { return b.EmptyArchive(paths, w) })
+	// Every extraction is tried, unlike a delivery's: one the daemon refuses
+	// is no reason to leave the others' payloads where they are.
+	for _, x := range b.Emptying(paths, c.mounts()) {
+		_ = c.putExtraction(ctx, x)
+	}
 }
 
 // rename puts a landed temporary file at its target — the step that makes a write

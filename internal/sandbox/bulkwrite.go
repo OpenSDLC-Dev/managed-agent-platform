@@ -26,6 +26,12 @@ import (
 // backend delivers the bookkeeping, runs BulkPrepareShell to make the
 // directories inside the sandbox, then delivers the members — two execs,
 // still a fixed cost rather than one per member.
+//
+// The daemon also decides *where* an archive may land, which the pod's `tar`
+// does not: it extracts at one directory per request, and on a read-only root it
+// refuses any directory outside a writable mount — `/` included, even when every
+// entry is bound for a mount below it (#859). So that backend's deliveries are
+// split into Extractions, one per writable mount a batch touches (split).
 
 // FileWrite is one member of a bulk write. Path must be absolute and clean
 // (`/a/b`, never `/a/../b` or `/a/b/`), because it also names an entry in the
@@ -133,14 +139,15 @@ func NewBulkWrite(workdir string, files []FileWrite) (*BulkWrite, error) {
 
 // Archive streams the whole batch as one tar: the bookkeeping, then one entry per
 // member under its temporary name. It is what a backend whose sandbox extracts for
-// itself delivers, in one stream.
+// itself delivers, in one stream, and that untar extracts it at `/` — the entry
+// names are the members' absolute paths made relative.
 //
-// Entry names are relative, so both untars extract it at `/`. It carries no
-// directory entries, and that is deliberate: an explicit directory entry chmods a
-// directory that already exists (measured, 0700 → 0755 under both untars), and a
-// write must not change the mode of a directory it merely passes through.
+// It carries no directory entries, and that is deliberate: an explicit directory
+// entry chmods a directory that already exists (measured, 0700 → 0755 under both
+// untars), and a write must not change the mode of a directory it merely passes
+// through. Neither do the Extractions the docker backend delivers instead.
 //
-// The parents a member needs are made by Bookkeeping + the prepare pass rather
+// The parents a member needs are made by the bookkeeping + the prepare pass rather
 // than left to the untar, because *who* makes them decides whether the write can
 // finish. An untar running on the host makes them root's, and a sandbox whose
 // image runs as anyone else then cannot rename anything into them — measured: on
@@ -148,71 +155,141 @@ func NewBulkWrite(workdir string, files []FileWrite) (*BulkWrite, error) {
 // Made inside the sandbox they belong to the sandbox user, exactly as the single
 // write's own `mkdir -p` makes them.
 func (b *BulkWrite) Archive(w io.Writer) error {
-	tw := tar.NewWriter(w)
-	if err := b.bookkeeping(tw); err != nil {
-		return err
-	}
-	if err := b.members(tw); err != nil {
-		return err
-	}
-	return tw.Close()
+	return Extraction{Dir: "/", entries: append(b.bookkeepingEntries(), b.memberEntries()...), stamp: b.stamp}.Archive(w)
 }
 
-// Bookkeeping streams a tar carrying only the manifest and the directory list —
-// the first of the two deliveries a backend makes when the sandbox cannot extract
-// for itself. Both land in the workdir, which exists, so this delivery needs no
-// directory made for it; what it carries is the list of the ones that must be.
-func (b *BulkWrite) Bookkeeping(w io.Writer) error {
-	tw := tar.NewWriter(w)
-	if err := b.bookkeeping(tw); err != nil {
-		return err
-	}
-	return tw.Close()
+// Bookkeeping is the manifest and the directory list as Extractions — the first
+// of the two deliveries a backend makes when the sandbox cannot extract for
+// itself. Both land in the workdir, which exists and is itself one of the
+// writable mounts, so this is one extraction needing no directory made for it;
+// what it carries is the list of the ones that must be.
+func (b *BulkWrite) Bookkeeping(roots []string) []Extraction {
+	return b.split(b.bookkeepingEntries(), roots)
 }
 
-// Members streams a tar carrying only the members, under their temporary names.
-// It is delivered after the prepare pass has made the directories they land in.
-func (b *BulkWrite) Members(w io.Writer) error {
-	tw := tar.NewWriter(w)
-	if err := b.members(tw); err != nil {
-		return err
-	}
-	return tw.Close()
+// Members is the members, under their temporary names, as Extractions. They are
+// delivered after the prepare pass has made the directories they land in, which
+// is also what makes every Extraction's Dir exist: each is an ancestor of, or
+// is, a directory that pass made.
+func (b *BulkWrite) Members(roots []string) []Extraction {
+	return b.split(b.memberEntries(), roots)
 }
 
 // The bookkeeping is world-readable, unlike a temporary file whose bytes are the
 // caller's: a host-side untar lands it owned by root, and the sandbox user has to
 // be able to read it to act on it. It names paths the sandbox can already list.
-func (b *BulkWrite) bookkeeping(tw *tar.Writer) error {
-	if err := b.entry(tw, b.Manifest, b.manifest, 0o644); err != nil {
-		return err
-	}
-	return b.entry(tw, b.DirList, b.dirs, 0o644)
+func (b *BulkWrite) bookkeepingEntries() []bulkEntry {
+	return []bulkEntry{{b.Manifest, b.manifest, 0o644}, {b.DirList, b.dirs, 0o644}}
 }
 
-func (b *BulkWrite) members(tw *tar.Writer) error {
+func (b *BulkWrite) memberEntries() []bulkEntry {
+	out := make([]bulkEntry, len(b.files))
 	for i, f := range b.files {
-		if err := b.entry(tw, b.tmps[i], f.Data, int64(b.modes[i])); err != nil {
-			return err
+		out[i] = bulkEntry{b.tmps[i], f.Data, int64(b.modes[i])}
+	}
+	return out
+}
+
+// bulkEntry is one regular file an archive carries: where it lands in the
+// sandbox (absolute), its bytes, and the mode its header gives it.
+type bulkEntry struct {
+	path string
+	data []byte
+	mode int64
+}
+
+// Extraction is one archive and the directory it is extracted at — the unit of
+// delivery for a backend that hands archives to something extracting at one
+// directory per request, as the docker daemon's archive endpoint does. Its entry
+// names are relative to Dir, which exists by the time it is delivered.
+type Extraction struct {
+	Dir     string
+	entries []bulkEntry
+	stamp   time.Time
+}
+
+// Archive streams the extraction as a tar. Like the whole batch's, it is
+// byte-identical every time it is built, so a delivery that failed can be
+// retried from the same value.
+func (x Extraction) Archive(w io.Writer) error {
+	tw := tar.NewWriter(w)
+	for _, e := range x.entries {
+		name := strings.TrimPrefix(strings.TrimPrefix(e.path, x.Dir), "/")
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Mode:     e.mode,
+			Size:     int64(len(e.data)),
+			Typeflag: tar.TypeReg,
+			ModTime:  x.stamp,
+		}); err != nil {
+			return fmt.Errorf("sandbox: build bulk archive: %w", err)
+		}
+		if _, err := tw.Write(e.data); err != nil {
+			return fmt.Errorf("sandbox: build bulk archive: %w", err)
 		}
 	}
-	return nil
+	return tw.Close()
 }
 
-func (b *BulkWrite) entry(tw *tar.Writer, path string, data []byte, mode int64) error {
-	if err := tw.WriteHeader(&tar.Header{
-		Name:     strings.TrimPrefix(path, "/"),
-		Mode:     mode,
-		Size:     int64(len(data)),
-		Typeflag: tar.TypeReg,
-		ModTime:  b.stamp,
-	}); err != nil {
-		return fmt.Errorf("sandbox: build bulk archive: %w", err)
+// split groups entries into the Extractions that deliver them, and is the answer
+// to #859: the docker daemon refuses an extraction at `/` on a read-only root —
+// `container rootfs is marked read-only` — even when every entry is bound for a
+// writable mount below it, because what it checks is the directory the request
+// names, not where the entries go. So each extraction names a directory inside
+// the mount its entries are bound for.
+//
+// roots are the sandbox's writable mounts (WritablePaths, which is what a
+// read-only root mounts). An entry's group is the deepest root holding its
+// directory; an entry under none of them is grouped with the others sharing its
+// own directory, which is where the single write extracts too, and where the
+// daemon decides for itself whether it may. Each group is extracted at the
+// deepest directory all its entries lie within — a mount point at the shallowest,
+// never above one — so the root's own writability decides nothing for a batch
+// bound for its mounts.
+//
+// That keeps the round trips per batch, not per member or per directory: every
+// batch the platform writes today — a skill under the workdir, a memory store
+// under /mnt, package credentials under /tmp — is one extraction for its members,
+// whatever the shape of the tree. The cost of a batch spanning mounts is one
+// extraction per mount, and of one outside them one per directory there.
+//
+// Groups come in the order of their first entries, and each keeps its entries in
+// the batch's order. The order a caller can see is untouched by any of it: which
+// member's failure stops the run is the manifest's order, which the rename pass
+// walks only once every extraction has landed, and the bookkeeping, delivered on
+// its own first, still lands before any member does.
+func (b *BulkWrite) split(entries []bulkEntry, roots []string) []Extraction {
+	var out []Extraction
+	group := map[string]int{}
+	for _, e := range entries {
+		dir := gopath.Dir(e.path)
+		key := ""
+		for _, r := range roots {
+			if within(dir, r) && len(r) > len(key) {
+				key = r
+			}
+		}
+		if key == "" {
+			key = dir
+		}
+		i, ok := group[key]
+		if !ok {
+			i = len(out)
+			group[key] = i
+			out = append(out, Extraction{Dir: dir, stamp: b.stamp})
+		}
+		for !within(dir, out[i].Dir) {
+			out[i].Dir = gopath.Dir(out[i].Dir)
+		}
+		out[i].entries = append(out[i].entries, e)
 	}
-	if _, err := tw.Write(data); err != nil {
-		return fmt.Errorf("sandbox: build bulk archive: %w", err)
-	}
-	return nil
+	return out
+}
+
+// within reports whether path is dir or lies beneath it. Both are clean and
+// absolute, so a prefix that stops at a separator is the whole answer.
+func within(path, dir string) bool {
+	return path == dir || dir == "/" || strings.HasPrefix(path, dir+"/")
 }
 
 // Fault turns what a shared bulk script exited with into the error the caller
@@ -442,12 +519,12 @@ func (b *BulkWrite) Delivered() []string {
 	return append([]string(nil), b.tmps...)
 }
 
-// EmptyArchive streams a tar carrying a zero-byte entry for each of paths — the
-// batch's form of the single write's own emptying (docker's `reclaim`), and one
-// archive for the whole batch rather than one per member, because a batch that
-// failed under a root-owned parent left one file per member and ten thousand
-// round trips is not a cleanup. Extracting it puts the name back without the
-// payload.
+// Emptying is a zero-byte entry for each of paths, as Extractions — the batch's
+// form of the single write's own emptying (docker's `reclaim`), grouped the way
+// the deliveries that landed them were rather than one archive per member,
+// because a batch that failed under a root-owned parent left one file per member
+// and ten thousand round trips is not a cleanup. Extracting them puts the names
+// back without the payloads.
 //
 // What it must not do is put a name back that the shed had just taken away, and
 // nothing here can check: it writes what the caller passes. A caller passing
@@ -455,14 +532,12 @@ func (b *BulkWrite) Delivered() []string {
 // an honest report recreates nothing — and a forged one, framed out by
 // bulkLeftBeginMarker, would at worst leave a zero-byte file at one of this
 // batch's own temporary names, never at a target and never outside the batch.
-func (b *BulkWrite) EmptyArchive(paths []string, w io.Writer) error {
-	tw := tar.NewWriter(w)
-	for _, path := range paths {
-		if err := b.entry(tw, path, nil, 0o644); err != nil {
-			return err
-		}
+func (b *BulkWrite) Emptying(paths, roots []string) []Extraction {
+	entries := make([]bulkEntry, len(paths))
+	for i, path := range paths {
+		entries[i] = bulkEntry{path, nil, 0o644}
 	}
-	return tw.Close()
+	return b.split(entries, roots)
 }
 
 // BulkRenameShell defines __map_bulk_rename, which both backends embed: given

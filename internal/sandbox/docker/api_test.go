@@ -1627,7 +1627,7 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 	}
 
 	// Three deliveries: the bookkeeping, the members, and the emptying — one
-	// archive for the whole batch, not one per member.
+	// archive for the members' directory, not one per member.
 	if len(puts) != 3 {
 		t.Fatalf("%d archives delivered, want 3 (bookkeeping, members, emptying)", len(puts))
 	}
@@ -1656,6 +1656,80 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 	for _, cmd := range commands {
 		if strings.Contains(cmd, "__map_bulk_discard") {
 			t.Errorf("exec %q ran on the fault branch, where the script's own rm has already failed", cmd)
+		}
+	}
+}
+
+// On a read-only root the daemon refuses an extraction at any directory outside
+// a writable mount — `/` included, whatever the entries below it name — with
+// `container rootfs is marked read-only` (#859, measured with `docker cp` into a
+// `--read-only` container). This fake enforces exactly that rule over the mounts
+// a read-only root gets, so a batch that sent its archives to `/` fails here the
+// way it failed on a real daemon. The shape is the platform's own three callers
+// at once: a skill under the workdir, a memory store under /mnt, package
+// credentials under /tmp — with new nested directories, and members sitting
+// directly in a mount point.
+func TestABulkWriteExtractsInsideTheWritableMounts(t *testing.T) {
+	mounts := sandbox.WritablePaths("/workspace")
+	var at []string
+	var landed []string
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			dir := r.URL.Query().Get("path")
+			at = append(at, dir)
+			inMount := false
+			for _, m := range mounts {
+				inMount = inMount || dir == m || strings.HasPrefix(dir, m+"/")
+			}
+			if !inMount {
+				w.WriteHeader(http.StatusBadRequest)
+				io.WriteString(w, `{"message":"container rootfs is marked read-only"}`)
+				return
+			}
+			body, _ := io.ReadAll(r.Body)
+			for _, e := range tarEntries(t, body) {
+				landed = append(landed, dir+"/"+e.name)
+			}
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			io.WriteString(w, `{"Id":"e1"}`)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	files := []sandbox.FileWrite{
+		{Path: "/workspace/skills/pack/SKILL.md", Data: []byte("skill")},
+		{Path: "/workspace/skills/pack/scripts/deep/run.sh", Data: []byte("#!/bin/sh\n")},
+		{Path: "/mnt/memory/notes/todo.md", Data: []byte("rw"), Mode: 0o666},
+		{Path: "/mnt/memory/.sync/memstore_1", Data: []byte("baseline")},
+		{Path: "/tmp/.map-pkgcreds-1/.netrc", Data: []byte("machine x"), Mode: 0o600},
+		{Path: "/tmp/b.txt", Data: []byte("b")},
+	}
+	if err := c.WriteFiles(context.Background(), files); err != nil {
+		t.Fatalf("bulk write under a read-only root: %v (extractions at %v)", err, at)
+	}
+	// The bookkeeping at the workdir, then one extraction per mount the members
+	// touch — at the deepest directory they share there, the mount point itself
+	// for /tmp, whose members share nothing deeper.
+	if want := []string{"/workspace", "/workspace/skills/pack", "/mnt/memory", "/tmp"}; strings.Join(at, " ") != strings.Join(want, " ") {
+		t.Errorf("extractions at %v, want %v", at, want)
+	}
+	// And each member's temporary still lands in its own target's directory,
+	// which is what keeps its rename atomic.
+	for _, f := range files {
+		dir := f.Path[:strings.LastIndex(f.Path, "/")]
+		found := false
+		for _, l := range landed {
+			found = found || strings.HasPrefix(l, dir+"/"+sandbox.TempPrefix) && !strings.Contains(l[len(dir)+1:], "/")
+		}
+		if !found {
+			t.Errorf("no temporary landed in %s (landed: %v)", dir, landed)
 		}
 	}
 }
@@ -1903,6 +1977,7 @@ func TestABulkThatLostItsManifestEmptiesThePlatformsOwnList(t *testing.T) {
 // it looked at. A pass with no list still looks at those two.
 func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
 	var puts [][]byte
+	var at []string
 	kinds := map[string]string{}
 	var execN int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1913,6 +1988,7 @@ func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
 			body, _ := io.ReadAll(r.Body)
 			puts = append(puts, body)
+			at = append(at, r.URL.Query().Get("path"))
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
 			var body execConfig
@@ -1948,17 +2024,20 @@ func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
 	}); err == nil {
 		t.Fatal("the batch reported success where its manifest had been deleted")
 	}
-	if len(puts) != 3 {
-		t.Fatalf("%d archives delivered, want 3", len(puts))
+	// The bookkeeping and the members, then the emptying — which is two
+	// extractions here, because the member is in /etc and the directory list in
+	// the workdir, and an extraction is made inside one directory (#859).
+	if len(puts) != 4 {
+		t.Fatalf("%d archives delivered (at %v), want 4", len(puts), at)
 	}
 	// The one member from the platform's list, plus the one bookkeeping file the
 	// shed named — never the manifest, which it removed and did not name.
-	emptying := tarEntries(t, puts[2])
-	if len(emptying) != 2 {
-		t.Fatalf("the emptying archive carries %d entries, want the member and the named directory list", len(emptying))
+	member, dirs := tarEntries(t, puts[2]), tarEntries(t, puts[3])
+	if at[2] != "/etc" || len(member) != 1 || !strings.HasPrefix(member[0].name, sandbox.TempPrefix) {
+		t.Errorf("first emptying is %v at %s, want the member's temporary at /etc", member, at[2])
 	}
-	if !strings.HasSuffix(emptying[1].name, ".dirs") {
-		t.Errorf("second emptying entry is %q, want the directory list the shed named", emptying[1].name)
+	if at[3] != "/workspace" || len(dirs) != 1 || !strings.HasSuffix(dirs[0].name, ".dirs") {
+		t.Errorf("second emptying is %v at %s, want the directory list the shed named, at the workdir", dirs, at[3])
 	}
 }
 

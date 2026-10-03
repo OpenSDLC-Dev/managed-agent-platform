@@ -350,8 +350,9 @@ never the platform creating a batch's directories inside the container — that
 uses `mkdir -p`, which leaves a root-owned directory that already exists exactly
 as it found it, so an image shipping one under the workdir opened the gap. Both
 sheds now report which of the batch's own files they could not remove, and the
-daemon empties those in a single archive — one round trip for a whole batch, and
-still executing nothing. A batch that *succeeds* is asked too: its last act is to
+daemon empties those with one archive per writable mount they sit in, or per
+directory outside those mounts (§4) — a handful of round trips rather than one
+per file, and still executing nothing. A batch that *succeeds* is asked too: its last act is to
 remove the two bookkeeping files, which the same root extraction landed in your
 workdir.
 
@@ -565,6 +566,16 @@ a tmpfs (`container rootfs is marked read-only`) and allows it when the
 destination resolves into a volume. Every file that backend writes goes through
 that endpoint, so a tmpfs workdir would give you a sandbox that runs commands but
 can never receive a file — no skills, no files, no `write` tool.
+
+What the daemon checks is the directory a request names, not where the files in
+the archive go. The bulk write behind skill and memory-store materialization used
+to name `/` for every batch, so under this knob no skill or memory store reached a
+Docker sandbox: each was refused (`container rootfs is marked read-only`), logged
+and skipped, though every file was bound for a volume
+([#859](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/859)). A
+batch is now extracted inside the volume it is bound for: one request per volume
+it touches, at the deepest directory its files share there. A file outside the set
+above still fails, in a batch as in a single write.
 
 What is still yours: an **image that tolerates a read-only root elsewhere**. A
 tool that writes outside the set above — a package manager, a language runtime

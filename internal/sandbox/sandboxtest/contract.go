@@ -1337,6 +1337,138 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A read-only root leaves the writable mounts writable to a batch as it does to
+	// a single write. Every batch the platform writes lands in one — a skill in the
+	// workdir, a memory store under /mnt, package credentials in /tmp — and none
+	// did on the docker backend: its daemon extracted each archive at `/`, which a
+	// read-only root refuses (`container rootfs is marked read-only`) whatever the
+	// entries below it name, so skills and memory never materialized there (#859).
+	// The issue's three reproductions come first, verbatim, then the platform's own
+	// shapes in one batch: fresh nested directories under every mount, a member
+	// sitting directly in a mount point, and one asking for a mode.
+	t.Run("BulkWriteUnderReadOnlyRoot", func(t *testing.T) {
+		sb := provisionHardened(t, sandbox.Hardening{ReadOnlyRootfs: true})
+		ctx := context.Background()
+		for _, batch := range [][]sandbox.FileWrite{
+			{{Path: workdir + "/two-a.txt", Data: []byte("a")}, {Path: workdir + "/two-b.txt", Data: []byte("b")}},
+			{{Path: workdir + "/one.txt", Data: []byte("one")}},
+			{{Path: "/tmp/two-a.txt", Data: []byte("a")}, {Path: "/tmp/two-b.txt", Data: []byte("b")}},
+			{
+				{Path: workdir + "/skills/pack/SKILL.md", Data: []byte("# skill")},
+				{Path: workdir + "/skills/pack/scripts/deep/run.sh", Data: []byte("#!/bin/sh\necho hi\n")},
+				{Path: "/mnt/memory/notes/todo.md", Data: []byte("rw"), Mode: 0o666},
+				{Path: "/mnt/memory/.sync/baseline", Data: []byte("{}")},
+				{Path: "/tmp/fresh/nested/creds", Data: []byte("machine x")},
+				{Path: "/tmp/flat.txt", Data: []byte("flat")},
+			},
+		} {
+			if err := sb.WriteFiles(ctx, batch); err != nil {
+				t.Errorf("bulk write of %d files (first %s) under a read-only root: %v", len(batch), batch[0].Path, err)
+				continue
+			}
+			for _, f := range batch {
+				if got, err := sb.ReadFile(ctx, f.Path); err != nil || !bytes.Equal(got, f.Data) {
+					t.Errorf("%s = %q, %v; want %q", f.Path, got, err, f.Data)
+				}
+			}
+		}
+		// What lands lands as it does on a writable root (BulkWriteRoundTrip).
+		if got := fileMode(t, sb, workdir+"/skills/pack/SKILL.md"); got != "644" {
+			t.Errorf("a file the batch created has mode %s, want 644", got)
+		}
+		if got := fileMode(t, sb, "/tmp/fresh/nested"); got != "755" {
+			t.Errorf("a directory the batch created has mode %s, want 755", got)
+		}
+		if got := fileMode(t, sb, "/mnt/memory/notes/todo.md"); got != "666" {
+			t.Errorf("a member written with Mode 0666 has mode %s, want 666", got)
+		}
+		// Re-materializing over what landed is the ordinary second pass.
+		if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/skills/pack/SKILL.md", Data: []byte("x")},
+			{Path: "/mnt/memory/notes/todo.md", Data: []byte("y"), Mode: 0o666},
+		}); err != nil {
+			t.Errorf("second batch under a read-only root: %v", err)
+		} else if got, err := sb.ReadFile(ctx, workdir+"/skills/pack/SKILL.md"); err != nil || string(got) != "x" {
+			t.Errorf("after overwrite = %q, %v; want %q", got, err, "x")
+		}
+		assertNoWriteResidue(t, sb, workdir, workdir+"/skills/pack", workdir+"/skills/pack/scripts/deep",
+			"/tmp", "/tmp/fresh/nested", "/mnt/memory/notes", "/mnt/memory/.sync")
+
+		// The root itself stays read-only to a batch: one naming a path outside
+		// the mounts fails rather than reporting success, and its other member,
+		// bound for the workdir, is not written either — nothing is renamed until
+		// every member has landed.
+		err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/beside-blocked.txt", Data: []byte("x")},
+			{Path: "/etc/map-859-blocked.conf", Data: []byte("x")},
+		})
+		if err == nil {
+			t.Error("a batch into /etc on a read-only root reported success")
+		}
+		for _, path := range []string{"/etc/map-859-blocked.conf", workdir + "/beside-blocked.txt"} {
+			if _, err := sb.ReadFile(ctx, path); !errors.Is(err, sandbox.ErrFileNotExist) {
+				t.Errorf("%s after the refused batch: err = %v, want ErrFileNotExist", path, err)
+			}
+		}
+		assertNoWriteResidue(t, sb, workdir)
+	})
+
+	// The same under a uid the image did not choose, for HardeningRunsAsTheConfiguredUser's
+	// reason, and in /tmp because that is the mount both backends make writable to
+	// it: Kubernetes' emptyDirs are world-writable, and Docker's volume takes the
+	// image's own 1777 /tmp — where its workdir volume is root-owned unless the
+	// image ships one (TestBulkWriteOnANonRootImage covers that on Docker). What the
+	// row pins is what such a sandbox needs of a batch: the directories it made are
+	// its own, so it can work in them, and what landed is readable and — for a
+	// 0666 member, the memory store's — appendable in place by it. Who owns a
+	// *member* is not asserted: the docker daemon lands it root-owned, the pod's
+	// `tar` as the sandbox user, which is why the memory store asks for 0666. That
+	// is also why no member sits directly in /tmp here: it is sticky, and a
+	// root-owned temporary there is one the sandbox user may not rename — on
+	// Docker, a single write's as much as a batch's — so the members go under a
+	// directory the batch makes, as package credentials do.
+	t.Run("BulkWriteUnderReadOnlyRootAsNonRoot", func(t *testing.T) {
+		uid := int64(65534)
+		sb := provisionHardened(t, sandbox.Hardening{RunAsUser: &uid, ReadOnlyRootfs: true})
+		ctx := context.Background()
+		batch := []sandbox.FileWrite{
+			{Path: "/tmp/nonroot/skills/pack/SKILL.md", Data: []byte("# skill")},
+			{Path: "/tmp/nonroot/skills/pack/scripts/run.sh", Data: []byte("echo hi\n")},
+			{Path: "/tmp/nonroot/memory/todo.md", Data: []byte("rw"), Mode: 0o666},
+			{Path: "/tmp/nonroot/flat.txt", Data: []byte("flat")},
+		}
+		if err := sb.WriteFiles(ctx, batch); err != nil {
+			t.Fatalf("bulk write as uid %d under a read-only root: %v", uid, err)
+		}
+		for _, f := range batch {
+			// Read by the sandbox user itself, not by the backend's own read path.
+			res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "cat " + f.Path})
+			if err != nil || res.ExitCode != 0 || res.Stdout != string(f.Data) {
+				t.Errorf("cat %s as the sandbox user = %+v, %v; want %q", f.Path, res, err, f.Data)
+			}
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "stat -c %u /tmp/nonroot /tmp/nonroot/skills/pack /tmp/nonroot/skills/pack/scripts /tmp/nonroot/memory",
+		})
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("stat the batch's directories: %+v, %v", res, err)
+		}
+		for _, owner := range strings.Fields(res.Stdout) {
+			if owner != "65534" {
+				t.Errorf("a directory the batch created is owned by uid %s, want the sandbox user's 65534", owner)
+			}
+		}
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "printf ' more' >> /tmp/nonroot/memory/todo.md && cat /tmp/nonroot/memory/todo.md",
+		}); err != nil || res.ExitCode != 0 || res.Stdout != "rw more" {
+			t.Errorf("append in place to a 0666 member as the sandbox user = %+v, %v; want %q", res, err, "rw more")
+		}
+		// The workdir is not asked: on Docker it is root-owned here, so the
+		// bookkeeping the daemon lands there is emptied rather than removed and
+		// its names stay (#316's documented limit).
+		assertNoWriteResidue(t, sb, "/tmp/nonroot", "/tmp/nonroot/skills/pack", "/tmp/nonroot/memory")
+	})
+
 	// Files and commands see one filesystem — the whole point of the sandbox.
 	t.Run("FilesAndExecShareTheFilesystem", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
