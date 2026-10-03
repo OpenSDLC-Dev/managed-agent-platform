@@ -1777,13 +1777,18 @@ func bulkDaemon(t *testing.T, readOnlyRoot bool, refuse func(dir string) (int, s
 	var calls []string
 	kinds := map[string]string{}
 	var execN int
+	// Handlers may overlap — an emptying the client gave up on is still being
+	// answered when the next arrives — so what they record is locked.
+	var mu sync.Mutex
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		execID := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
 		switch {
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
 			body, _ := io.ReadAll(r.Body)
 			dir := r.URL.Query().Get("path")
+			mu.Lock()
 			puts = append(puts, bulkPut{dir: dir, entries: tarEntries(t, body)})
+			mu.Unlock()
 			if status, msg := refuse(dir); status != 0 {
 				w.WriteHeader(status)
 				fmt.Fprintf(w, `{"message":%q}`, msg)
@@ -1795,16 +1800,20 @@ func bulkDaemon(t *testing.T, readOnlyRoot bool, refuse func(dir string) (int, s
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
+			mu.Lock()
 			execN++
 			id := fmt.Sprintf("e%d", execN)
 			// The function a bulk exec calls is its command's last line.
 			lines := strings.Split(strings.TrimSpace(wrapperCommand(body.Cmd)), "\n")
 			kinds[id], _, _ = strings.Cut(lines[len(lines)-1], " ")
 			calls = append(calls, kinds[id])
+			mu.Unlock()
 			fmt.Fprintf(w, `{"Id":%q}`, id)
 		case strings.HasSuffix(r.URL.Path, "/start"):
 			w.WriteHeader(http.StatusOK)
+			mu.Lock()
 			a := answers[kinds[execID]]
+			mu.Unlock()
 			if a.stdout != "" {
 				w.Write(frame(streamStdout, a.stdout))
 			}
@@ -1812,7 +1821,10 @@ func bulkDaemon(t *testing.T, readOnlyRoot bool, refuse func(dir string) (int, s
 				w.Write(frame(streamStderr, a.stderr))
 			}
 		case strings.HasSuffix(r.URL.Path, "/json"):
-			fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, answers[kinds[execID]].code)
+			mu.Lock()
+			code := answers[kinds[execID]].code
+			mu.Unlock()
+			fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -1975,10 +1987,96 @@ func TestABulkRefusalIsAnsweredInTheSingleWritesTerms(t *testing.T) {
 		t.Errorf("err = %v, want ErrIsDirectory naming /tmp", err)
 	}
 
+	// The daemon's refusal still says which extraction it was for.
 	c, _, _ = bulkDaemon(t, true, readOnlyDaemon, nil)
 	err = c.WriteFiles(context.Background(), []sandbox.FileWrite{{Path: "/etc/x.conf", Data: []byte("x")}})
-	if err == nil || !strings.Contains(err.Error(), "container rootfs is marked read-only") {
-		t.Errorf("err = %v, want the daemon's own refusal where no member answered", err)
+	if err == nil || !strings.Contains(err.Error(), "extract at /etc: ") ||
+		!strings.Contains(err.Error(), "container rootfs is marked read-only") || !statusIs(err, http.StatusBadRequest) {
+		t.Errorf("err = %v, want the daemon's own refusal, naming /etc, where no member answered", err)
+	}
+}
+
+// A members delivery refused at its SECOND directory has already landed the
+// first: the shed is asked for both ways, and what its `rm` could not take is
+// emptied as a read-only root delivers — at the landed member's own directory
+// and at the workdir for the bookkeeping, never at `/`, which that root refuses.
+func TestABulkRefusedAtALaterDirectoryEmptiesWhatEarlierOnesLanded(t *testing.T) {
+	c, puts, calls := bulkDaemon(t, true, readOnlyDaemon, map[string]bulkAnswer{
+		"__map_bulk_refused": {code: sandbox.ExitPathNotWritable, stderr: "\nmap-bulk-unwritable 1 Read-only file system\n"},
+		// The sandbox user's `rm` could take neither the member that landed nor
+		// the manifest.
+		"__map_bulk_discard": {stdout: "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left m\n"},
+	})
+	err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+		{Path: "/workspace/skills/pack/a", Data: []byte("AAAA")},
+		{Path: "/etc/b", Data: []byte("BBBB")},
+	})
+	var pnw *sandbox.PathNotWritableError
+	if !errors.As(err, &pnw) || pnw.Path != "/etc/b" {
+		t.Errorf("err = %v, want ErrNotWritable for /etc/b", err)
+	}
+	if want := "__map_bulk_prepare __map_bulk_refused __map_bulk_discard"; strings.Join(*calls, " ") != want {
+		t.Errorf("execs %v, want %s", *calls, want)
+	}
+	var dirs []string
+	for _, put := range *puts {
+		dirs = append(dirs, put.dir)
+	}
+	// The bookkeeping, the pack directory (landed), /etc (refused), then the
+	// emptying: the pack member at its own directory, the manifest at the workdir.
+	want := []string{"/workspace", "/workspace/skills/pack", "/etc", "/workspace/skills/pack", "/workspace"}
+	if strings.Join(dirs, " ") != strings.Join(want, " ") {
+		t.Fatalf("archives at %v, want %v", dirs, want)
+	}
+	landed, emptied := (*puts)[1].entries, (*puts)[3].entries
+	if len(emptied) != 1 || emptied[0].name != landed[0].name || emptied[0].size != 0 || landed[0].size == 0 {
+		t.Errorf("the pack directory's emptying is %+v, want the landed member %+v at 0 bytes", emptied, landed)
+	}
+	if bk := (*puts)[4].entries; len(bk) != 1 || bk[0].size != 0 || strings.HasSuffix(bk[0].name, ".dirs") ||
+		strings.Contains(bk[0].name, "/") {
+		t.Errorf("the workdir's emptying is %+v, want the manifest alone, by its base name, at 0 bytes", bk)
+	}
+}
+
+// Each of a read-only root's emptyings gets a cleanup budget of its own. An
+// emptying the daemon answers too slowly spends only its own: the directories
+// after it are still emptied, where one shared budget would have run out on the
+// first and left every later directory's payload in place.
+func TestEachEmptyingHasABudgetOfItsOwn(t *testing.T) {
+	budget := cleanupBudget
+	cleanupBudget = 200 * time.Millisecond
+	t.Cleanup(func() { cleanupBudget = budget })
+
+	var n int
+	var mu sync.Mutex
+	c, puts, _ := bulkDaemon(t, true, func(string) (int, string) {
+		mu.Lock()
+		n++
+		first := n == 5 // bookkeeping, three members' directories, then the emptying
+		mu.Unlock()
+		if first {
+			time.Sleep(cleanupBudget + 300*time.Millisecond)
+		}
+		return 0, ""
+	}, map[string]bulkAnswer{
+		"__map_bulk_rename": {code: 1,
+			stdout: "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\nmap-bulk-left 2\n",
+			stderr: "mv: cannot move: Permission denied\nmap-bulk-fail 0\n"},
+	})
+	if err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+		{Path: "/workspace/a/x", Data: []byte("XXXX")},
+		{Path: "/mnt/memory/y", Data: []byte("YYYY")},
+		{Path: "/tmp/z", Data: []byte("ZZZZ")},
+	}); err == nil {
+		t.Fatal("the batch reported success where every move was refused")
+	}
+	var emptied []string
+	for _, put := range (*puts)[4:] {
+		emptied = append(emptied, put.dir)
+	}
+	if want := "/workspace/a /mnt/memory /tmp"; strings.Join(emptied, " ") != want {
+		t.Errorf("emptyings reached the daemon at %v, want all three (%s) though the first outlived its budget",
+			emptied, want)
 	}
 }
 

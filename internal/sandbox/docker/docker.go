@@ -1570,11 +1570,12 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 
 // putBulk delivers a batch's extractions in order, stopping at the first the
 // daemon refuses — the caller sheds what any of them landed, as it would for one
-// archive that died part way.
+// archive that died part way. The refusal names the directory it was for, so one
+// that no member answers for (refusedBulk) still says where.
 func (c *container) putBulk(ctx context.Context, xs []sandbox.Extraction) error {
 	for _, x := range xs {
 		if err := c.putExtraction(ctx, x); err != nil {
-			return err
+			return fmt.Errorf("docker: bulk write: extract at %s: %w", x.Dir, err)
 		}
 	}
 	return nil
@@ -1688,12 +1689,17 @@ func (c *container) reclaimBulkPaths(ctx context.Context, b *sandbox.BulkWrite, 
 	if len(paths) == 0 {
 		return
 	}
-	ctx, cancel := cleanup(ctx)
-	defer cancel()
-	// Every extraction is tried, unlike a delivery's: one the daemon refuses
-	// is no reason to leave the others' payloads where they are.
+	// Every extraction is tried, unlike a delivery's, and each on a cleanup
+	// budget of its own: one the daemon refuses, or answers slowly, is no
+	// reason to leave the others' payloads where they are — and a read-only
+	// root's emptying is one extraction per directory, which a single shared
+	// budget could run out on long before the last of them.
 	for _, x := range b.Emptying(paths, c.readOnlyRoot) {
-		_ = c.putExtraction(ctx, x)
+		func() {
+			ctx, cancel := cleanup(ctx)
+			defer cancel()
+			_ = c.putExtraction(ctx, x)
+		}()
 	}
 }
 
@@ -1842,8 +1848,13 @@ func (c *container) notWritable(ctx context.Context, path string) error {
 // that sheds both ways — the single write's three, and the batch's own three
 // through shedBulk (#316) — can hold a failed write for two of these before it
 // returns; that ceiling is the caller's whole exposure, and it is not the
-// caller's context that bounds it any more.
-const cleanupBudget = 10 * time.Second
+// caller's context that bounds it any more. One cleanup is the exception: a
+// batch's emptying on a read-only root takes one budget per directory it
+// empties into (reclaimBulkPaths), so there the ceiling grows with the
+// directories a failed batch left payloads in.
+//
+// A variable only so a test can shorten it.
+var cleanupBudget = 10 * time.Second
 
 // cleanup detaches a cleanup from the write's own context, keeping its values
 // (the trace it belongs to) and dropping its cancellation.

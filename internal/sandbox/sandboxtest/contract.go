@@ -1395,10 +1395,11 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			"/tmp", "/tmp/fresh/nested", "/mnt/memory/notes", "/mnt/memory/.sync")
 
 		// The root itself stays read-only to a batch: one naming a path outside
-		// the mounts fails, in the single write's terms (ReadOnlyRootIsEnforced),
-		// whether its directory exists or would have to be made — and its other
-		// member, bound for the workdir, is not written either: nothing is
-		// renamed until every member has landed.
+		// the mounts fails in the single write's terms
+		// (HardeningReadOnlyRootFilesystem), whether its directory exists or
+		// would have to be made — and its other member, bound for the workdir,
+		// is not written either: nothing is renamed until every member has
+		// landed.
 		for _, blocked := range []string{"/etc/map-859-blocked.conf", "/etc/map-859-new/blocked.conf"} {
 			err := sb.WriteFiles(ctx, []sandbox.FileWrite{
 				{Path: workdir + "/beside-blocked.txt", Data: []byte("x")},
@@ -1425,6 +1426,15 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			if !errors.Is(err, sandbox.ErrIsDirectory) || !strings.Contains(err.Error(), dir+":") {
 				t.Errorf("a batch onto %s on a read-only root: err = %v, want ErrIsDirectory naming it", dir, err)
 			}
+		}
+		// And a target a rename cannot replace — /etc/hosts, bind-mounted into
+		// the sandbox — is ErrNotReplaceable, as the single write's is
+		// (WriteOntoUnreplaceableTargetUnderReadOnlyRoot).
+		if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/beside-hosts.txt", Data: []byte("x")},
+			{Path: "/etc/hosts", Data: []byte("clobber\n")},
+		}); !errors.Is(err, sandbox.ErrNotReplaceable) || !strings.Contains(err.Error(), "/etc/hosts:") {
+			t.Errorf("a batch onto /etc/hosts on a read-only root: err = %v, want ErrNotReplaceable naming it", err)
 		}
 		if got, err := sb.ReadFile(ctx, workdir+"/skills/pack/SKILL.md"); err != nil || string(got) != "x" {
 			t.Errorf("the workdir after a batch onto it holds SKILL.md = %q, %v; want it whole", got, err)

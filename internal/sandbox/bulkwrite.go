@@ -275,8 +275,14 @@ func (x Extraction) name(path string) (string, error) {
 // sandbox made, pointing at /etc — carry a payload past the check onto the
 // read-only root. So each directory is its own extraction and each entry is
 // named by its base name: the daemon resolves every directory a member lands
-// in and refuses one that leads out of the mounts, exactly as it does for a
-// single write. The price is a round trip per distinct directory.
+// in and refuses one that leads out of the mounts, as it does for a single
+// write. The price is a round trip per distinct directory.
+//
+// That holds against a link in place when the request arrives — made before the
+// batch, or swapped in after the prepare pass made its directories. It does not
+// hold against one swapped in inside the daemon, between its check and the
+// untar that follows it by path: that window is the daemon's own, the single
+// write shares it, and #863 removes it by writing as the sandbox user instead.
 //
 // Extractions come in the order of their directories' first entries, and each
 // keeps its entries in the batch's order. The order a caller can see is untouched
@@ -796,14 +802,31 @@ __map_bulk_prepare() {
 // by attempting the create the delivery needed (one that succeeds after all is
 // removed, and the walk goes on). A delivery refused on a read-only root answers
 // EROFS there, and so does one through a sandbox-made symlink out of the mounts.
-const BulkRefusedShell = UnreplaceableShell + `
+//
+// The unreplaceable question is __map_unreplaceable's (UnreplaceableShell, which
+// carries why each half is asked as it is), over /proc/self/mountinfo read once
+// before the walk rather than once per member: a batch is up to ten thousand of
+// them, and every existing target would otherwise reread the whole table.
+const BulkRefusedShell = `
 __map_bulk_refused() {
   [ -f "$1" ] || return 0
   export LC_ALL=C
+  __mps=()
+  if [ -r /proc/self/mountinfo ]; then
+    while read -r __a __b __c __e __mp __rest; do __mps+=("$__mp"); done < /proc/self/mountinfo
+  fi
   __i=0
   while IFS= read -r -d '' __t && IFS= read -r -d '' __d && IFS= read -r -d '' __m; do
     if [ -d "$__d" ]; then printf '\nmap-bulk-fail %d\n' "$__i" >&2; return 16; fi
-    if __map_unreplaceable "$__d"; then printf '\nmap-bulk-fail %d\n' "$__i" >&2; return 19; fi
+    if [ ! -h "$__d" ]; then
+      __u=1
+      if [ -b "$__d" ] || [ -c "$__d" ]; then
+        __u=0
+      elif [ -e "$__d" ]; then
+        for __mp in "${__mps[@]}"; do [ "$__mp" = "$__d" ] && __u=0 && break; done
+      fi
+      if [ "$__u" -eq 0 ]; then printf '\nmap-bulk-fail %d\n' "$__i" >&2; return 19; fi
+    fi
     __p=${__t%/*}
     [ -n "$__p" ] || __p=/
     if [ ! -w "$__p" ]; then
