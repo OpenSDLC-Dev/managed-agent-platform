@@ -1326,10 +1326,14 @@ with tracking issues, not silent omissions:
   judge is where the reader backend's own fetch lands — a remote reader
   resolves the target and any redirects server-side (our adapters refuse to
   follow 3xx themselves), so an open redirect on an allowed host can still
-  return a fenced-off domain's content. Network-layer controls at the executor
-  remain the hard boundary.
+  return a fenced-off domain's content. No reader can be asked not to follow a
+  redirect or to say where it landed, so the platform cannot close this.
+  Network-layer controls remain the hard boundary, and for where a
+  fetch lands they sit on the reader's own egress — for a self-hosted reader,
+  its egress policy — not on the executor's.
   [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
-  [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)
+  [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225),
+  [#831](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/831)
 - **Environment-key issuance UX** — **closed (#43); the console screens remain.**
   Keys are issued, listed and revoked through the console API (§6 above) — off
   the `/v1` wire, reached with either the management `x-api-key` or an SSO
