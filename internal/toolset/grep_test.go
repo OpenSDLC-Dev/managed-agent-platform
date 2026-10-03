@@ -611,6 +611,50 @@ func TestGrepInstallNeverSweepsThroughALink(t *testing.T) {
 	}
 }
 
+// swapping is a sandbox that runs swap — the model's own command, racing the
+// platform — once the upload has landed and before the install runs.
+type swapping struct {
+	sandbox.Sandbox
+	swap string
+}
+
+func (s swapping) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
+	if err := s.Sandbox.WriteFileStream(ctx, path, src, size); err != nil {
+		return err
+	}
+	_, err := s.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: s.swap})
+	return err
+}
+
+// The install runs from inside /tmp/.map-ripgrep, on names relative to it, so
+// a link the model swaps in while the binary is carried in — at
+// /tmp/.map-ripgrep itself or at the install's own directory, pointing at a
+// directory it filled to look like the install's — redirects nothing: the
+// install refuses, and what the link points at is left as it was, its planted
+// upload unread and no rg landed beside it.
+func TestGrepInstallFollowsNoLinkSwappedInMidInstall(t *testing.T) {
+	const plant = `n=$(cd /tmp/.map-ripgrep && ls -d .install-*) && mkdir -p /workspace/victim/"$n" && ` +
+		`printf '#!/bin/sh\necho ripgrep ` + "%[1]s" + ` planted\n' > /workspace/victim/"$n"/upload && `
+	for _, tc := range []struct{ name, swap, want string }{
+		{"/tmp/.map-ripgrep", plant + `mv /tmp/.map-ripgrep /tmp/aside && ln -s /workspace/victim /tmp/.map-ripgrep`,
+			"/tmp/.map-ripgrep was replaced while ripgrep was being installed"},
+		{"the install's directory", plant + `mv /tmp/.map-ripgrep/"$n" /tmp/aside && ln -s /workspace/victim/"$n" /tmp/.map-ripgrep/"$n"`,
+			"was replaced while ripgrep was being installed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runner(t)
+			ok(t, r, "bash", `{"command":"echo needle > sw.txt"}`)
+			r.Sandbox = swapping{Sandbox: r.Sandbox, swap: fmt.Sprintf(tc.swap, ripgrep.Pinned.Version)}
+			fails(t, r, "grep", `{"pattern":"needle","path":"sw.txt"}`, tc.want)
+			out := ok(t, r, "bash", `{"command":"cd /workspace/victim && find . | LC_ALL=C sort && cat .install-*/upload"}`)
+			// ".", the planted directory, its upload, and the upload's two lines.
+			if strings.Contains(out, "rg-") || len(strings.Split(strings.TrimSpace(out), "\n")) != 5 || !strings.Contains(out, "planted") {
+				t.Errorf("the link's target holds\n%s\nwant its planted install directory and upload alone, untouched", out)
+			}
+		})
+	}
+}
+
 // What rg prints beside an answer stays with it — here the file it could
 // not read among the ones it matched, which is rg's exit 2 with matches
 // found, answered as the matches rather than as a failure. A search that
@@ -957,8 +1001,8 @@ func TestGrepInstallScripts(t *testing.T) {
 		t.Errorf("prepare's cutoff = %d (%v), want ten minutes before the call by the platform's clock", cutoff, err)
 	}
 	for _, c := range []string{prepare, install} {
-		if !strings.Contains(c, "s='"+dir+"'") {
-			t.Errorf("a script does not work in the upload's directory %s:\n%s", dir, c)
+		if !strings.Contains(c, "d='/tmp/.map-ripgrep'\ns='"+strings.TrimPrefix(dir, "/tmp/.map-ripgrep/")+"'\n") {
+			t.Errorf("a script does not work in the upload's directory %s, by its name inside /tmp/.map-ripgrep:\n%s", dir, c)
 		}
 	}
 	if !strings.Contains(install, `trap 'rm -rf -- "$s"' EXIT`) {

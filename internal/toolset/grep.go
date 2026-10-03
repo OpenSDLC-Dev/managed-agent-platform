@@ -470,17 +470,17 @@ const (
 // link there — the model's, or an image's — would take it to wherever the
 // link points, and a stale-looking name there would go; so what stands at
 // ripgrepDir and is not a directory is removed (rm on a link removes the link,
-// never what it names), the directory is made afresh, and the sweep runs from
-// inside it, on names relative to it, once the directory the script stands in
-// is shown to be the one at ripgrepDir and that to be no link. A link swapped
-// in after that cannot redirect it: a relative name resolves from the
-// directory the script stands in, not from the path.
+// never what it names), the directory is made afresh, and the script enters
+// it (enterRipgrepDir) and works from inside it, on names relative to it. A
+// link swapped in after that cannot redirect it: a relative name resolves from
+// the directory the script stands in, not from the path. The install's own
+// directory is made fresh — mkdir refuses a name already there — so the
+// upload lands in one this install made.
 const prepareScript = `d=%[1]s
 s=%[2]s
 if [ -h "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then rm -f -- "$d" || exit 1; fi
-mkdir -p -- "$d" && cd -- "$d" || exit 1
-if [ -h "$d" ] || [ ! . -ef "$d" ]; then printf '%%s was replaced while ripgrep was being installed\n' "$d" >&2; exit 1; fi
-for o in ` + installPrefix + `*; do
+mkdir -p -- "$d" || exit 1
+` + enterRipgrepDir + `for o in ` + installPrefix + `*; do
   [ -d "$o" ] && [ ! -h "$o" ] || continue
   n=${o#` + installPrefix + `}
   n=${n%%%%-*}
@@ -489,35 +489,50 @@ for o in ` + installPrefix + `*; do
 done
 mkdir -- "$s" || exit 1
 : > "$s/probe" && chmod 755 -- "$s/probe" || { rm -rf -- "$s"; exit 1; }
-m=$("$s/probe" 2>&1)
+m=$("./$s/probe" 2>&1)
 if [ $? != 0 ]; then rm -rf -- "$s"; printf '%%s\n' "$m" >&2; exit 2; fi
 rm -f -- "$s/probe"
 `
 
-// installScript lands the uploaded binary as rg and proves it runs. It copies
-// rather than renames: Docker writes the upload as root, so on an image that
-// does not run as root only a copy the sandbox user makes is one it can mark
-// executable. What sits at rg's path and is not a regular file — a directory
-// or a link the model made there — is removed first, because mv would move
-// the binary into it rather than over it; one that reappears before the move
-// lands is reported, its stray copy removed. Exit 1 is a step that failed and
-// said why; exit 2 is a binary in place that did not answer as this build's
-// rg — a machine the kernel cannot run it on.
-const installScript = `s=%[1]s
-rg=%[2]s
+// enterRipgrepDir enters ripgrepDir ($d) and proves the directory the script
+// then stands in is the one there and that no link: a script that goes on to
+// name only what lies inside it, relatively, can then reach nothing outside
+// it, whatever is swapped in at the path afterwards.
+const enterRipgrepDir = `cd -- "$d" || exit 1
+if [ -h "$d" ] || [ ! . -ef "$d" ]; then printf '%%s was replaced while ripgrep was being installed\n' "$d" >&2; exit 1; fi
+`
+
+// installScript lands the uploaded binary as rg and proves it runs, from
+// inside ripgrepDir as prepareScript works (enterRipgrepDir), on names
+// relative to it: the install's own directory, which must still be the
+// directory prepare made rather than a link the model swapped in while the
+// binary was carried in, and rg's own name. So the EXIT trap that removes the
+// install's directory, and every step before it, acts inside ripgrepDir and
+// nowhere else. It copies rather than renames: Docker writes the upload as
+// root, so on an image that does not run as root only a copy the sandbox user
+// makes is one it can mark executable. What sits at rg's path and is not a
+// regular file — a directory or a link the model made there — is removed
+// first, because mv would move the binary into it rather than over it; one
+// that reappears before the move lands is reported, its stray copy removed.
+// Exit 1 is a step that failed and said why; exit 2 is a binary in place that
+// did not answer as this build's rg — a machine the kernel cannot run it on.
+const installScript = `d=%[1]s
+s=%[2]s
+rg=%[3]s
+` + enterRipgrepDir + `if [ -h "$s" ] || [ ! -d "$s" ]; then printf '%%s/%%s was replaced while ripgrep was being installed\n' "$d" "$s" >&2; exit 1; fi
 trap 'rm -rf -- "$s"' EXIT
 cat -- "$s/upload" > "$s/rg" && chmod 755 -- "$s/rg" || exit 1
 if [ -h "$rg" ] || { [ -e "$rg" ] && [ ! -f "$rg" ]; }; then rm -rf -- "$rg" || exit 1; fi
 mv -f -- "$s/rg" "$rg" || exit 1
 if [ -d "$rg" ]; then
   rm -f -- "$rg/rg"
-  printf '%%s became a directory while ripgrep was being installed\n' "$rg" >&2
+  printf '%%s/%%s became a directory while ripgrep was being installed\n' "$d" "$rg" >&2
   exit 1
 fi
-v=$("$rg" --version 2>&1)
+v=$("./$rg" --version 2>&1)
 st=$?
 case $st/$v in
-0/%[3]s*) ;;
+0/%[4]s*) ;;
 *) printf 'exit %%s: %%s\n' "$st" "$v" >&2; exit 2 ;;
 esac
 `
@@ -555,10 +570,10 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 	now := time.Now()
 	var nonce [8]byte
 	_, _ = rand.Read(nonce[:])
-	dir := fmt.Sprintf("%s/%s%d-%s", ripgrepDir, installPrefix, now.Unix(), hex.EncodeToString(nonce[:]))
+	name := fmt.Sprintf("%s%d-%s", installPrefix, now.Unix(), hex.EncodeToString(nonce[:]))
 
 	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{
-		Command: fmt.Sprintf(prepareScript, singleQuote(ripgrepDir), singleQuote(dir), now.Add(-staleInstall).Unix()),
+		Command: fmt.Sprintf(prepareScript, singleQuote(ripgrepDir), singleQuote(name), now.Add(-staleInstall).Unix()),
 		Timeout: installTimeout,
 	})
 	switch {
@@ -573,7 +588,7 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 		return fail("cannot install ripgrep under %s: %s", ripgrepDir, strings.TrimSpace(combine(res)))
 	}
 
-	if err := r.Sandbox.WriteFileStream(ctx, dir+"/upload", rg, size); err != nil {
+	if err := r.Sandbox.WriteFileStream(ctx, ripgrepDir+"/"+name+"/upload", rg, size); err != nil {
 		switch {
 		case errors.Is(err, sandbox.ErrNotWritable):
 			return fail("cannot install ripgrep under %s: %s", ripgrepDir, notWritableReason(err))
@@ -583,7 +598,7 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 		return nil, err
 	}
 	res, err = r.Sandbox.Exec(ctx, sandbox.ExecRequest{
-		Command: fmt.Sprintf(installScript, singleQuote(dir), singleQuote(ripgrepPath()),
+		Command: fmt.Sprintf(installScript, singleQuote(ripgrepDir), singleQuote(name), singleQuote(path.Base(ripgrepPath())),
 			singleQuote("ripgrep "+ripgrep.Pinned.Version+" ")),
 		Timeout: installTimeout,
 	})
