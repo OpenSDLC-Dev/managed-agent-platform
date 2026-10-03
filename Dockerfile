@@ -14,6 +14,14 @@ WORKDIR /src
 # Download modules first so the layer caches across source-only changes.
 COPY go.mod go.sum ./
 RUN go mod download
+# The pinned static ripgrep the executor and worker embed for the grep tool
+# (internal/ripgrep; `make ripgrep` is the same command). Fetched before the
+# rest of the source arrives, so the layer caches until the manifest or the
+# fetcher changes, and checked against its sha256 either way. Archives already
+# in the build context are checked rather than fetched again.
+COPY internal/ripgrep internal/ripgrep
+COPY tools/ripgrepfetch tools/ripgrepfetch
+RUN go run ./tools/ripgrepfetch
 COPY . .
 # Build every binary into /out (named controlplane, brain, executor, worker).
 # VERSION is stamped into internal/version.Version by the release pipeline
@@ -49,6 +57,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # Copy only the four server binaries — the gate binary has its own image (above)
-# and does not belong in the server image.
+# and does not belong in the server image. NOTICE carries the license of the
+# ripgrep the executor and worker embed.
 COPY --from=build /out/controlplane /out/brain /out/executor /out/worker /
+COPY NOTICE /NOTICE
 # No default command: each service sets one of /controlplane|/brain|/executor|/worker.

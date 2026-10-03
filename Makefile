@@ -17,7 +17,7 @@ SHELL := /usr/bin/env bash
 # internally), so refuse it rather than gate on a stale profile.
 .NOTPARALLEL:
 
-.PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
+.PHONY: build crossbuild vet fmt-check test cover-gate verify eval ripgrep \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
@@ -55,6 +55,19 @@ fmt-check:
 		exit 1; \
 	fi
 
+# The static ripgrep the grep tool installs in a sandbox (internal/ripgrep):
+# upstream's release archives, pinned by URL and sha256 in
+# internal/ripgrep/assets/manifest.json, downloaded into that gitignored
+# directory and checked against the pin before anything embeds them. Every
+# target below that builds or runs something that greps depends on it — test
+# (so the gate searches with the real rg), eval, release-binaries — and the
+# Dockerfile's build stage runs the same command. A plain `go build` without it
+# still compiles, into a binary whose grep answers that it carries no ripgrep.
+# Idempotent: an archive already present with the pinned digest is not fetched
+# again, so this costs nothing after the first run.
+ripgrep:
+	go run ./tools/ripgrepfetch
+
 # Coverage denominator: logic packages only. internal/pgtest, internal/dockertest,
 # internal/sandbox/sandboxtest, internal/modeltest, internal/blob/blobtest,
 # internal/blob/gcs/gcstest, internal/provider/providertest, internal/secrets/secretstest,
@@ -80,7 +93,7 @@ fmt-check:
 # its pgtest fixture, so the ceiling also fed the next run's contention. This
 # buys room rather than fixing the cause: the per-test database creation behind
 # the growth, and reaping a fixture whose owner died, are #499.
-test:
+test: ripgrep
 	@set -euo pipefail; \
 	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest)$$' | paste -sd, -)"; \
 	set -x; \
@@ -125,7 +138,7 @@ verify: build crossbuild vet fmt-check test cover-gate
 #
 # Artifacts land in evals/artifacts/ (gitignored): report.json, summary.md, and
 # one transcript per failed attempt (a retried-then-failed task leaves two).
-eval:
+eval: ripgrep
 	RUN_EVALS=1 go test -count=1 -v -timeout 120m ./evals/...
 
 # Release-time changelog tooling (docs/RELEASING.md; the fragment format is
@@ -250,7 +263,10 @@ release-chart: release-chart-check
 
 # Worker binaries for the platforms BYOC users run. No Windows: the worker
 # drives Docker sandboxes and has no Windows user story (plan 27 decision 4).
-release-binaries:
+# Every one embeds both Linux ripgrep binaries, the darwin builds included: a
+# worker on a Mac drives Linux sandboxes, of either architecture. NOTICE rides
+# in each tarball because of them.
+release-binaries: ripgrep
 	@set -euo pipefail; \
 	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
 	mkdir -p dist; \
@@ -258,7 +274,8 @@ release-binaries:
 		os="$${target%/*}"; arch="$${target#*/}"; \
 		dir="dist/worker_$(VERSION)_$${os}_$${arch}"; \
 		CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" go build -trimpath $(RELEASE_LDFLAGS) -o "$$dir/worker" ./cmd/worker; \
-		tar -czf "$$dir.tar.gz" -C "$$dir" worker; \
+		cp NOTICE "$$dir/NOTICE"; \
+		tar -czf "$$dir.tar.gz" -C "$$dir" worker NOTICE; \
 		rm -r "$$dir"; \
 	done; \
 	(cd dist && shasum -a 256 worker_$(VERSION)_*.tar.gz > "worker_$(VERSION)_sha256sums.txt"); \
