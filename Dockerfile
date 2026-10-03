@@ -53,18 +53,18 @@ ENTRYPOINT ["/gate"]
 FROM modules AS build
 # The pinned static ripgrep the executor and worker embed for the grep tool
 # (internal/ripgrep; `make ripgrep` is the same command), fetched twice. First
-# from the manifest and the fetcher's own source alone, so the download is a
-# layer the build cache keeps until one of those changes — the pin moving,
-# chiefly — rather than one every source change re-runs. Then again after
-# `COPY . .`, over whatever the build context carried into the assets
-# directory: each archive is checked against the manifest's sha256 and fetched
-# again if it does not match, and everything else there but the manifest is
-# removed. So a checkout that ran `make ripgrep` builds without reaching
-# GitHub, a clean one downloads once per pin, and nothing the context carried
-# is embedded unchecked.
-COPY internal/ripgrep/ripgrep.go internal/ripgrep/
-COPY internal/ripgrep/assets/manifest.json internal/ripgrep/assets/
-COPY tools/ripgrepfetch/main.go tools/ripgrepfetch/
+# with the two packages it takes — internal/ripgrep, its assets directory
+# included, and the fetcher — copied whole and nothing else, so the fetch is a
+# layer the build cache keeps until one of them changes rather than one every
+# source change re-runs, and it sees the archives the build context carries:
+# a checkout that ran `make ripgrep` checks them against the manifest's sha256
+# and downloads nothing, and a clean one downloads once per pin. Then again
+# after `COPY . .`, which brings the assets directory in again from the
+# context: each archive is checked again, fetched again if it does not match,
+# and everything else there but the manifest removed, so nothing the context
+# carried is embedded unchecked.
+COPY internal/ripgrep/ internal/ripgrep/
+COPY tools/ripgrepfetch/ tools/ripgrepfetch/
 RUN go run ./tools/ripgrepfetch
 COPY . .
 RUN go run ./tools/ripgrepfetch
