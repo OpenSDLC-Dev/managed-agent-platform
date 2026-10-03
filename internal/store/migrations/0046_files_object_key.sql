@@ -250,7 +250,7 @@ BEGIN
         RETURN NEW;
     END IF;
     IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
-        RAISE EXCEPTION 'pending_object_deletes: a files/ key is enqueued under READ COMMITTED only, not %',
+        RAISE EXCEPTION 'pending_object_deletes: a files/ key is enqueued under READ COMMITTED (or READ UNCOMMITTED, which runs as it), not %',
             current_setting('transaction_isolation')
             USING ERRCODE = 'invalid_transaction_state';
     END IF;
