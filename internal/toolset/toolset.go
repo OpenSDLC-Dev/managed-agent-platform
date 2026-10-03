@@ -29,12 +29,13 @@
 // Divergences from that reference, all deliberate:
 //   - No workdir confinement (above). Absolute paths and absolute glob
 //     patterns are accepted.
-//   - grep shells out to GNU grep and find inside the sandbox (PCRE where the
-//     image's grep has it, POSIX ERE otherwise) rather than preferring ripgrep
-//     and falling back to a Go walker, and gives the ripgrep flags of the
-//     recorded reference's schema their ripgrep meaning on top (grep.go). One
-//     implementation, one behaviour, and no dependence on whether the image
-//     ships ripgrep.
+//   - grep runs ripgrep in the sandbox, as the reference does, but always the
+//     platform's own: a static rg this package writes into the sandbox the
+//     first time it greps there (grep.go, internal/ripgrep), rather than an rg
+//     found on the PATH with a Go walker behind it. One implementation, one
+//     behaviour, whatever the image ships — and where that rg cannot run (an
+//     architecture other than amd64 or arm64, a /tmp mounted noexec, a build
+//     without the binaries) grep is a tool error, never a second search.
 //   - The tools carry no state between calls except bash's, which is the
 //     shell package's snapshot; there is no per-runner session object to close.
 //   - write and edit preserve the permission bits of an existing regular file they

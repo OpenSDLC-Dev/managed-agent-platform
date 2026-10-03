@@ -534,14 +534,14 @@ func TestToolInputPropertiesOnTheWorkerPath(t *testing.T) {
 	}
 	var greps []string
 	for _, c := range sb.cmds {
-		if strings.Contains(c, "flavor=-P") {
+		if strings.Contains(c, "map-ripgrep-missing") {
 			greps = append(greps, c)
 		}
 	}
 	if len(greps) != 1 {
 		t.Fatalf("grep scripts run = %d, want only the accepted call's", len(greps))
 	}
-	for _, want := range []string{"mode='count'", "limit=3", "ml=1", "ci=('-i')", "'-name' '*.go'"} {
+	for _, want := range []string{`'-c' '-i' '-U' '--multiline-dotall' '--type=go' '-e' 'todo\n' '--' '/workspace'`, "head -n 3"} {
 		if !strings.Contains(greps[0], want) {
 			t.Errorf("grep script lacks %q", want)
 		}

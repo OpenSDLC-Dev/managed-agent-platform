@@ -439,23 +439,23 @@ func TestGrep(t *testing.T) {
 	})
 
 	t.Run("an invalid regex is an error result", func(t *testing.T) {
-		fails(t, r, "grep", `{"pattern":"[unclosed","path":"gr"}`, "grep")
+		fails(t, r, "grep", `{"pattern":"[unclosed","path":"gr"}`, "rg: regex parse error")
 	})
 
 	t.Run("a missing search root is an error result", func(t *testing.T) {
-		fails(t, r, "grep", `{"pattern":"x","path":"gr/absent"}`, "grep")
+		fails(t, r, "grep", `{"pattern":"x","path":"gr/absent"}`, "/workspace/gr/absent: IO error")
 	})
 
 	t.Run("pattern is required", func(t *testing.T) {
 		fails(t, r, "grep", `{}`, "pattern is required")
 	})
 
-	t.Run("binary files and vendored trees are skipped", func(t *testing.T) {
-		ok(t, r, "bash", `{"command":"mkdir -p gr/node_modules && printf 'needle\\0bin' > gr/bin.dat && `+
-			`echo needle > gr/node_modules/dep.txt"}`)
+	t.Run("binary files and ignored trees are skipped", func(t *testing.T) {
+		ok(t, r, "bash", `{"command":"mkdir -p gr/.git gr/node_modules && printf 'needle\\0bin' > gr/bin.dat && `+
+			`echo needle > gr/node_modules/dep.txt && echo node_modules/ > gr/.gitignore"}`)
 		got := ok(t, r, "grep", `{"pattern":"needle","path":"gr","output_mode":"content"}`)
 		if strings.Contains(got, "bin.dat") || strings.Contains(got, "node_modules") {
-			t.Fatalf("content = %q, want binary and node_modules skipped", got)
+			t.Fatalf("content = %q, want binary and git-ignored files skipped", got)
 		}
 	})
 

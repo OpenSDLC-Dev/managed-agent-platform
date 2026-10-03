@@ -2,14 +2,17 @@ package toolset
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
-	"path"
-	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/ripgrep"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -41,21 +44,11 @@ type grepInput struct {
 	Multiline  bool     `json:"multiline"`
 }
 
-// grepQuery is a validated grepInput, in the terms the script takes.
+// grepQuery is a validated grepInput: rg's arguments, and the paging rg does
+// not do itself.
 type grepQuery struct {
-	mode          string
-	lineNums      bool
-	before, after int
-	skip, limit   int
-	ignoreCase    bool
-	// pattern is the line-oriented search's; ml, when multiline is set, the
-	// multiline search's (greppattern.go).
-	pattern   string
-	multiline bool
-	ml        multiline
-	// sel and prune are find's file test and directory-prune test, from the
-	// type and the glob (grepglob.go).
-	sel, prune []string
+	args        []string
+	skip, limit int
 }
 
 // whole reads one of the schema's number options: a whole number from 0 to
@@ -70,21 +63,17 @@ func whole(name string, v *float64) (int, string) {
 	return int(*v), ""
 }
 
-// query validates the input's twelve options and resolves their defaults —
-// the recorded schema's, each named in its description. anchor is where an
-// anchored glob is anchored (globAnchor).
-func (in grepInput) query(anchor string) (grepQuery, string) {
-	q := grepQuery{mode: in.OutputMode, lineNums: true, ignoreCase: in.IgnoreCase, pattern: in.Pattern}
-	switch q.mode {
-	case "":
-		q.mode = grepFiles
-	case grepContent, grepFiles, grepCount:
-	default:
-		return q, fmt.Sprintf("output_mode %q is not one of %q, %q, %q", in.OutputMode, grepContent, grepFiles, grepCount)
-	}
-	if in.LineNums != nil {
-		q.lineNums = *in.LineNums
-	}
+// query maps the input onto rg, flag for the flag each recorded description
+// names, searching root. The rest is ours and fixed: --no-config, so an
+// image's RIPGREP_CONFIG_PATH cannot change what a call means; --no-heading,
+// so every line carries its file; and --sort=path, so an answer is the same
+// on every call and offset pages through one list rather than rg's thread
+// order, which differs run to run — the price is that rg searches with one
+// thread. Every value the model chose is one argv word: the pattern after -e
+// and the type and glob joined to their flag, so none of them can be read as
+// an option whatever it begins with, and the path after "--".
+func (in grepInput) query(root string) (grepQuery, string) {
+	q := grepQuery{args: []string{"--no-config", "--no-heading", "--sort=path"}}
 	var why string
 	if q.limit, why = whole("head_limit", in.HeadLimit); why != "" {
 		return q, why
@@ -93,10 +82,24 @@ func (in grepInput) query(anchor string) (grepQuery, string) {
 		return q, why
 	}
 	q.limit, q.skip = max(q.limit, 0), max(q.skip, 0)
-	// The context counts "require output_mode: content, ignored otherwise",
-	// as the recorded descriptions say — so outside content mode they are not
-	// even read.
-	if q.mode == grepContent {
+
+	switch in.OutputMode {
+	case "", grepFiles:
+		q.args = append(q.args, "-l")
+	case grepCount:
+		q.args = append(q.args, "-c")
+	case grepContent:
+		if in.LineNums == nil || *in.LineNums {
+			q.args = append(q.args, "-n")
+		} else {
+			q.args = append(q.args, "-N")
+		}
+		// The context counts "require output_mode: content, ignored
+		// otherwise", as the recorded descriptions say — so outside content
+		// mode they are not even read. context and -C are one option under two
+		// names; where both are given, context wins. -A and -B go to rg as
+		// they came, and rg lets each override -C for its own side whatever
+		// the order.
 		var counts [4]int
 		for i, f := range []struct {
 			name string
@@ -106,397 +109,204 @@ func (in grepInput) query(anchor string) (grepQuery, string) {
 				return q, why
 			}
 		}
-		// context and -C are one option under two names; where both are
-		// given, context wins. -A and -B then override it for their own
-		// side, as rg's do whichever order the flags come in.
-		base := max(counts[2], 0)
-		if counts[3] >= 0 {
-			base = counts[3]
+		switch {
+		case in.Context != nil:
+			q.args = append(q.args, "-C", strconv.Itoa(counts[3]))
+		case in.C != nil:
+			q.args = append(q.args, "-C", strconv.Itoa(counts[2]))
 		}
-		q.after, q.before = base, base
 		if counts[0] >= 0 {
-			q.after = counts[0]
+			q.args = append(q.args, "-A", strconv.Itoa(counts[0]))
 		}
 		if counts[1] >= 0 {
-			q.before = counts[1]
+			q.args = append(q.args, "-B", strconv.Itoa(counts[1]))
 		}
+	default:
+		return q, fmt.Sprintf("output_mode %q is not one of %q, %q, %q", in.OutputMode, grepContent, grepFiles, grepCount)
 	}
-
+	if in.IgnoreCase {
+		q.args = append(q.args, "-i")
+	}
 	if in.Multiline {
-		q.ml, q.multiline = multilinePatterns(in.Pattern)
-	} else if strings.Contains(in.Pattern, "\n") {
-		// rg's own refusal, which grep -P would answer with a stranger one and
-		// grep -E would not give at all, reading the lines as two patterns.
-		return q, `the literal "\n" is not allowed in a regex; set multiline to match across lines`
+		q.args = append(q.args, "-U", "--multiline-dotall")
 	}
-
-	var types []string
 	if in.Type != "" {
-		var ok bool
-		if types, ok = grepTypes[in.Type]; !ok {
-			return q, fmt.Sprintf("unrecognized file type %q; type takes ripgrep's type names, such as go, py, js, ts, rust or java", in.Type)
-		}
+		q.args = append(q.args, "--type="+in.Type)
 	}
-	rule, err := compileGlob(in.Glob, anchor)
-	if err != nil {
-		return q, err.Error()
+	if in.Glob != "" {
+		q.args = append(q.args, "--glob="+in.Glob)
 	}
-	q.sel, q.prune = selection(types, rule)
+	q.args = append(q.args, "-e", in.Pattern, "--", root)
 	return q, ""
 }
 
-// findPath is how a resolved path reaches find, grep and awk: an absolute one
-// as it is, and a relative one — a relative workdir makes them so — behind
-// "./", so that a name beginning with "-" is never read as an option or as a
-// find expression.
-func findPath(p string) string {
-	if path.IsAbs(p) || p == "." {
-		return p
-	}
-	return "./" + p
-}
+// ripgrepDir is where grep installs rg in a sandbox: under /tmp, which is
+// writable in every hardening shape on both backends (sandbox.WritablePaths —
+// an emptyDir or a volume under a read-only root, neither mounted noexec) and
+// outside the workdir, so the model's own searches and the checkpoint never
+// meet it. A platform directory rather than /tmp itself, so the sandbox user
+// owns it: Docker lands a written file as root, and only the owner of a
+// directory without /tmp's sticky bit can move that file and remove it.
+const ripgrepDir = "/tmp/.map-ripgrep"
 
-// globAnchor is the ERE for the prefix rg strips from a path before matching
-// a glob against it — its working directory, which here is the workdir — or ""
-// for a root outside the workdir, whose paths rg matches as walked.
-func globAnchor(root, workdir string) string {
-	under := root == workdir || strings.HasPrefix(root, strings.TrimSuffix(workdir, "/")+"/") ||
-		(workdir == "." && !path.IsAbs(root))
-	if !under {
-		return ""
-	}
-	return regexp.QuoteMeta(strings.TrimSuffix(findPath(workdir), "/")) + "/"
-}
+// ripgrepPath is where this build's rg lives in a sandbox. The version is in
+// the name, so a sandbox that outlives an upgrade gets the new one beside the
+// old rather than running the old.
+func ripgrepPath() string { return ripgrepDir + "/rg-" + ripgrep.Pinned.Version }
 
-// grepScript is one search, over the image's own grep: PCRE where it has it — a
-// model writes \d and \b far more readily than their POSIX spellings — and ERE
-// where it does not. The probe tells the two apart by exit code: a grep with
-// PCRE finds nothing in /dev/null and exits 1, one without it rejects -P and
-// exits 2.
+// The exit codes grepScript claims for itself, outside rg's 0, 1 and 2 and
+// below the 126 a shell takes for a command it could not run.
+const (
+	// exitNoRipgrep: rg is not installed — or not runnable, or not this
+	// build's — and stdout carries the machine after ripgrepMissing.
+	exitNoRipgrep = 97
+	// exitPager: paging the output failed; stderr says why.
+	exitPager = 98
+)
+
+const ripgrepMissing = "map-ripgrep-missing "
+
+// openRipgrep is ripgrep.Open, a variable so a test can play a build that
+// fetched no binaries.
+var openRipgrep = ripgrep.Open
+
+// script renders one search: rg, checked first, then run over the query's
+// arguments and paged.
 //
-// The model's pattern, path, glob and type reach it only as the values of
-// variables and array elements, each single-quoted by the renderer, and from
-// there only as argv: nothing it carries is ever read as code.
+// The check runs on every call because the sandbox is the model's: it can
+// delete the binary, replace it, or have lost it to a restore, and the check
+// costs no round trip — it rides in the same exec as the search. It asks the
+// binary for its version, which a missing file, one that cannot run, and one
+// that is some other program all fail; it is not a defence against a model
+// that plants a fake answering the right version, which would be the model
+// tampering with its own sandbox, where bash already runs whatever it likes.
+// A failed check reports the machine, so the caller can install rg and call
+// again; `uname -m` reports it, and bash's own $HOSTTYPE stands in where an
+// image ships no uname.
 //
-// The files come from find, under the C locale so that ? and a class match a
-// byte, as rg's globs do: every regular file under the root that is not
-// hidden, outside node_modules, and admitted by type and glob, with rg's
-// precedence (grepglob.go's selection). A root that is a file is searched as
-// given, whatever type and glob say, as rg searches a path it is handed — and
-// a binary one is searched too, its content answer rg's one-line notice.
-// xargs runs grep over the files in batches, through a wrapper that turns
-// grep's "no match" exit into success.
-//
-// head_limit stops the work, not just the output. The pager (page) exits once
-// it has its lines and removes the flag file MAPSTOP names; every stage
-// upstream then dies of SIGPIPE at its next write — grep writes line-buffered
-// — or, writing nothing more, finds the flag gone before its next batch or
-// file. The wrapper turns its grep's SIGPIPE into an exit of 255, on which
-// xargs stops at once and exits 124, while any other failure kills the
-// wrapper and xargs exits 125. So every stage's status is read from
-// PIPESTATUS and must be 0, 141 (SIGPIPE) or xargs's 124; anything else fails
-// the call, never reaching the model as a short answer or as "no matches".
-//
-// Context output separates its groups with "--" across files as within one;
-// grep does that within a batch, and wrapsep puts one before every batch's
-// output, the first of which the pager drops.
-//
-// multiline runs rg -U's search where the pattern can match a newline
-// (greppattern.go), each file read as one record (-z). A file list needs
-// nothing more; content runs grep -o over each matching file with scan, whose
-// records include its empty matches, and grepAwk prints the lines they touch
-// as rg -U's searcher and printer do; count runs first beside it, whose
-// records lack the empty ones, so grepAwk can tell them apart. Each stream
-// carries its grep's exit status and message as its last record, so the
-// merge fails when a grep did. The streams are process substitutions holding
-// none of the exec's stdio: one cut off by the pager runs on, unwaited, only
-// to its next write. mawk reads a pipe a block at a time unless -W
-// interactive, which content uses when paging, so that the page is not
-// waiting on a block. -z also turns off grep's binary check, so texts drops
-// binary files first.
-const grepScript = `IFS=
-root=__ROOT__
-pat=__PAT__
-mlfirst=__MLFIRST__
-mlany=__MLANY__
-mllisted=__MLLISTED__
-mlscan=__MLSCAN__
-mlend=__MLEND__
-mlawk=__MLAWK__
-mode=__MODE__
-ml=__ML__
-skip=__SKIP__
-limit=__LIMIT__
-num=__NUM__
-before=__BEFORE__
-after=__AFTER__
-ci=(__CI__)
-prune=(__PRUNE__)
-sel=(__SEL__)
-need=(find xargs head tail tr wc)
-if [ "$ml" = 1 ] && [ "$mode" != files_with_matches ]; then need+=(awk); fi
-for t in "${need[@]}"; do
-  command -v "$t" >/dev/null 2>&1 || { printf 'grep: %s not found in the sandbox image\n' "$t" >&2; exit 2; }
-done
-flavor=-P
-grep -qP -- '' /dev/null 2>/dev/null
-if [ "$?" -ge 2 ]; then flavor=-E; fi
-if [ "$ml" = 1 ] && [ "$flavor" != -P ]; then
-  printf 'grep: multiline needs a grep with PCRE (-P), and this sandbox image has none\n' >&2; exit 2
-fi
-if [ ! -e "$root" ]; then printf 'grep: %s: No such file or directory\n' "$root" >&2; exit 2; fi
-if [ "$ml" = 1 ]; then
-  err=$(grep -qzP "${ci[@]}" -e "$mlfirst" -- /dev/null 2>&1)
-else
-  err=$(grep -q "$flavor" "${ci[@]}" -e "$pat" -- /dev/null 2>&1)
-fi
-if [ "$?" -ge 2 ]; then printf '%s\n' "$err" >&2; exit 2; fi
-fn=-h bin=-a
-if [ -d "$root" ]; then fn=-H bin=-I; fi
-sep=0
-if [ "$mode" = content ] && [ "$fn" = -H ] && [ "$((before + after))" -gt 0 ]; then sep=1; fi
-hd=(cat) tl=(cat) lb=() aw=(awk) stop=
-if [ "$limit" -gt 0 ]; then
-  hd=(page) lb=(--line-buffered)
-  stop=$(mktemp 2>/dev/null) || stop=
-  trap '[ -z "$stop" ] || rm -f -- "$stop"' EXIT
-  case $(awk -W version 2>&1 </dev/null) in mawk*) aw=(awk -W interactive) ;; esac
-fi
-if [ "$((sep + skip))" -gt 0 ]; then tl=(tail -n "+$((sep + skip + 1))"); fi
-export MAPSTOP=$stop
-page() {
-  head -n "$((sep + skip + limit))"
-  local s=$?
-  [ -z "$stop" ] || rm -f -- "$stop"
-  return "$s"
-}
-stopped() { [ -n "$MAPSTOP" ] && [ ! -e "$MAPSTOP" ]; }
-wrap='if [ -n "$MAPSTOP" ] && [ ! -e "$MAPSTOP" ]; then exit 255; fi
-grep "$@"; s=$?
-case $s in 0|1) exit 0 ;; 141) exit 255 ;; esac
-kill -TERM "$$"; exit 2'
-wrapsep='if [ -n "$MAPSTOP" ] && [ ! -e "$MAPSTOP" ]; then exit 255; fi
-grep "$@" | { IFS= read -r l || exit 0; printf -- "--\n%s\n" "$l" || exit 2; exec cat; }
-set -- "${PIPESTATUS[@]}"
-case $1 in 0|1|141) ;; *) kill -TERM "$$"; exit 2 ;; esac
-case $2 in 0|141) ;; *) kill -TERM "$$"; exit 2 ;; esac
-if [ "$1" = 141 ] || [ "$2" = 141 ]; then exit 255; fi
-exit 0'
-each() { xargs -0 -r bash -c "$wrap" grep "$@"; }
-eachsep() { xargs -0 -r bash -c "$wrapsep" grep "$@"; }
-files() {
-  if [ "$fn" = -h ]; then printf '%s\0' "$root"; return; fi
-  LC_ALL=C find -H "$root" -mindepth 1 -regextype posix-extended \
-    -type d \( "${prune[@]}" \) -prune -o -type f \( "${sel[@]}" \) -print0
-}
-texts() {
-  if [ "$fn" = -h ]; then cat; else each -IlZ -e '' --; fi
-}
-nonzero() {
-  grep "${lb[@]}" -av -E '(^|:)0$'
-  local s=$?
-  if [ "$s" -le 1 ]; then return 0; fi
-  return "$s"
-}
-pipeok() {
-  for s in "$@"; do
-    case $s in 0|141) ;; *) return 1 ;; esac
-  done
-}
-binary() {
-  local has at
-  has=$(LC_ALL=C tr -dc '\000' < "$root" | head -c1 | wc -c; pipeok "${PIPESTATUS[@]}") || return 2
-  if [ "$has" -eq 0 ]; then return 1; fi
-  at=$(LC_ALL=C tr '\000\n' '\n\000' < "$root" | head -n1 | wc -c; pipeok "${PIPESTATUS[@]}") || return 2
-  printf '%d\n' "$((at - 1))"
-}
-stream() {
-  exec </dev/null 2>/dev/null
-  { err=$(grep -obzaP "${ci[@]}" -e "$1" -- "$f" 2>&1 >&3); printf 'E%d:%s\0' "$?" "$err"; } 3>&1 |
-    LC_ALL=C tr '\n\000' '\001\n'
-}
-mlfile() {
-  local kind=$1 f=$2 pre= eofm=0 size=0 last s
-  if [ "$fn" = -H ]; then pre=$f; fi
-  if [ "$kind" = content ]; then
-    last=$(tail -c1 -- "$f" | wc -l; exit "${PIPESTATUS[0]}") || return 2
-    if [ "$last" -eq 0 ] || [ "$before" -gt 0 ]; then
-      grep -qzaP "${ci[@]}" -e "$mlend" -- "$f"
-      s=$?
-      case $s in 0) eofm=1 ;; 1) ;; *) return 2 ;; esac
-    fi
-    size=$(wc -c < "$f") || return 2
-  fi
-  if [ "$kind" = count ]; then
-    F=$f PRE=$pre K=count LC_ALL=C awk "$mlawk" 3< <(stream "$mlfirst") < <(stream "$mlscan")
-  else
-    F=$f PRE=$pre K=content NUM=$num BEFORE=$before AFTER=$after SEP=$sep EOFM=$eofm SIZE=$size \
-      LIMIT=$limit LC_ALL=C "${aw[@]}" "$mlawk" < <(stream "$mlscan")
-  fi
-}
-mlloop() {
-  local f s
-  while IFS= read -r -d '' f; do
-    if stopped; then return 141; fi
-    mlfile "$1" "$f"
-    s=$?
-    if [ "$s" -ne 0 ]; then return "$s"; fi
-  done
-}
-if [ "$fn" = -h ] && [ "$mode" = content ]; then
-  at=$(binary)
-  s=$?
-  if [ "$s" -ge 2 ]; then exit 2; fi
-  if [ "$s" -eq 0 ]; then
-    if [ "$ml" = 1 ]; then
-      grep -qzaP "${ci[@]}" -e "$mlfirst" -- "$root"
-    else
-      grep -qa "$flavor" "${ci[@]}" -e "$pat" -- "$root"
-    fi
-    s=$?
-    if [ "$s" -ge 2 ]; then exit 2; fi
-    if [ "$s" -eq 0 ]; then
-      printf 'binary file matches (found "\\0" byte around offset %d)\n' "$at" | "${hd[@]}" | "${tl[@]}"
-    fi
-    exit 0
-  fi
-fi
-ctx=()
-if [ "$num" = 1 ]; then ctx+=(-n); fi
-if [ "$before" -gt 0 ]; then ctx+=(-B "$before"); fi
-if [ "$after" -gt 0 ]; then ctx+=(-A "$after"); fi
-case $mode/$ml in
-  files_with_matches/0)
-    files | each "${lb[@]}" -l "$bin" "$flavor" "${ci[@]}" -e "$pat" -- | "${hd[@]}" | "${tl[@]}"
-    st=("${PIPESTATUS[@]}") ;;
-  count/0)
-    files | each "${lb[@]}" -c "$fn" "$bin" "$flavor" "${ci[@]}" -e "$pat" -- | nonzero | "${hd[@]}" | "${tl[@]}"
-    st=("${PIPESTATUS[@]}") ;;
-  content/0)
-    if [ "$sep" = 1 ]; then e=eachsep; else e=each; fi
-    files | "$e" "${lb[@]}" "$fn" "$bin" "$flavor" "${ci[@]}" "${ctx[@]}" -e "$pat" -- | "${hd[@]}" | "${tl[@]}"
-    st=("${PIPESTATUS[@]}") ;;
-  files_with_matches/1)
-    files | texts | each "${lb[@]}" -l "$bin" -zP "${ci[@]}" -e "$mllisted" -- | "${hd[@]}" | "${tl[@]}"
-    st=("${PIPESTATUS[@]}") ;;
-  count/1)
-    files | texts | each "${lb[@]}" -lZ "$bin" -zP "${ci[@]}" -e "$mllisted" -- | mlloop count | "${hd[@]}" | "${tl[@]}"
-    st=("${PIPESTATUS[@]}") ;;
-  *)
-    files | texts | each "${lb[@]}" -lZ "$bin" -zP "${ci[@]}" -e "$mlany" -- | mlloop content | "${hd[@]}" | "${tl[@]}"
-    st=("${PIPESTATUS[@]}") ;;
+// head_limit and offset page rg's output lines as the descriptions' "| tail
+// -n +N | head -N" does: through head and tail in the sandbox, so a large
+// answer is cut where it is made rather than carried out of the sandbox and
+// thrown away, and head stops rg once it has its lines (rg exits 0 when the
+// pipe closes under it). rg's stderr does not pass through either, so its
+// errors survive the paging.
+func (q grepQuery) script() string {
+	words := make([]string, len(q.args))
+	for i, a := range q.args {
+		words[i] = singleQuote(a)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `rg=%s
+v=
+if [ -f "$rg" ] && [ -x "$rg" ]; then v=$("$rg" --version 2>/dev/null); fi
+case $v in
+%s*) ;;
+*) printf '%s%%s\n' "$(uname -m 2>/dev/null || printf '%%s' "$HOSTTYPE")"; exit %d ;;
 esac
-for s in "${st[@]}"; do
-  case $s in 0|124|141) ;; *) exit 2 ;; esac
-done
-exit 0
+`, singleQuote(ripgrepPath()), singleQuote("ripgrep "+ripgrep.Pinned.Version+" "), ripgrepMissing, exitNoRipgrep)
+	var pager []string
+	if q.limit > 0 {
+		pager = append(pager, fmt.Sprintf("head -n %d", q.skip+q.limit))
+	}
+	if q.skip > 0 {
+		pager = append(pager, fmt.Sprintf("tail -n +%d", q.skip+1))
+	}
+	if len(pager) == 0 {
+		fmt.Fprintf(&b, "exec \"$rg\" %s\n", strings.Join(words, " "))
+		return b.String()
+	}
+	for _, p := range pager {
+		tool, _, _ := strings.Cut(p, " ")
+		fmt.Fprintf(&b, "command -v %[1]s >/dev/null 2>&1 || { printf 'grep: head_limit and offset need %[1]s in the sandbox image\\n' >&2; exit %[2]d; }\n",
+			tool, exitPager)
+	}
+	fmt.Fprintf(&b, `"$rg" %s | %s
+s=("${PIPESTATUS[@]}")
+for x in "${s[@]:1}"; do [ "$x" = 0 ] || exit %d; done
+exit "${s[0]}"
+`, strings.Join(words, " "), strings.Join(pager, " | "), exitPager)
+	return b.String()
+}
+
+// installScript lands the uploaded binary as rg and proves it runs. It copies
+// rather than renames: Docker writes the upload as root, so on an image that
+// does not run as root only a copy the sandbox user makes is one it can mark
+// executable. Exit 1 is a step that failed and said why; exit 2 is a binary
+// in place that did not answer as this build's rg — `noexec` on /tmp, or a
+// machine the kernel cannot run it on.
+const installScript = `u=%[1]s
+rg=%[2]s
+t="$rg.$$"
+trap 'rm -f -- "$u" "$t"' EXIT
+cat -- "$u" > "$t" && chmod 755 -- "$t" && mv -f -- "$t" "$rg" || exit 1
+v=$("$rg" --version 2>&1)
+s=$?
+case $s/$v in
+0/%[3]s*) ;;
+*) printf 'exit %%s: %%s\n' "$s" "$v" >&2; exit 2 ;;
+esac
 `
 
-// grepAwk is rg -U's answer for one file, from scan's records on its stdin:
-// "offset:text", in order, each text's newlines turned to \001 so a record
-// is a line. For count, first's records come beside them on fd 3, and a scan
-// record that first lacks is an empty match; for content the two need not be
-// told apart, an empty match at a character touching the line that character
-// is on. Its memory is bounded by the context asked for, not by the file: it
-// reads the file's lines alongside and keeps only the last -B of them.
-//
-// count is rg -U -c: every match, except an empty one just where the match
-// before it ended (grep-matcher's find_iter skips those). content prints every
-// line a match touches, with rg's markers and "--" between groups that do not
-// touch; an empty match at the very end of the file prints the last line when
-// the file has no final newline, and only its before-context when it has, as
-// rg's searcher does. The line holding byte x is the one whose span [ls, le)
-// contains it.
-const grepAwk = `
-function die() { exit 2 }
-function trailer(r,   m) {
-  if (r ~ /^E[01]:/) return
-  m = substr(r, index(r, ":") + 1); gsub(/\001/, "\n", m)
-  if (m != "") print m > "/dev/stderr"
-  die()
+// linuxArch names the GOARCH of a sandbox's `uname -m`, or "" for a machine
+// no binary is shipped for.
+func linuxArch(machine string) string {
+	switch machine {
+	case "x86_64", "amd64":
+		return "amd64"
+	case "aarch64", "arm64":
+		return "arm64"
+	}
+	return ""
 }
-function lost() { print "grep: a match stream ended early" > "/dev/stderr"; die() }
-function next1(   r, n) {
-  if (end1) return -1
-  n = (getline r < G1)
-  if (n <= 0) lost()
-  if (substr(r, 1, 1) == "E") { trailer(r); end1 = 1; return -1 }
-  return substr(r, 1, index(r, ":") - 1) + 0
-}
-function readln(   n) {
-  n = (getline cur < F)
-  if (n < 0) { print "grep: " F ": cannot read" > "/dev/stderr"; die() }
-  if (n == 0) return 0
-  ln++; ls = le; le = ls + length(cur) + 1; done = 0
-  return 1
-}
-function show(l, c, t,   p) {
-  if ((B > 0 || A > 0) && ((shown > 0 && l > shown + 1) || (shown == 0 && SEP))) print "--"
-  p = ""
-  if (PRE != "") p = PRE c
-  if (NUM) p = p l c
-  print p t
-  if (LIMIT) fflush()
-  shown = l
-}
-function pass() {
-  if (ln <= aft) show(ln, "-", cur)
-  else if (B > 0) { keep[ln] = cur; delete keep[ln - B] }
-}
-function seek(x) {
-  while (ln == 0 || le <= x) {
-    if (ln > 0 && !done) pass()
-    if (!readln()) return 0
-  }
-  return 1
-}
-function event(s, t,   j) {
-  if (!seek(s)) {
-    for (j = ln + 1 - B; j <= ln; j++) if (j > shown && (j in keep)) show(j, "-", keep[j])
-    return
-  }
-  if (!done) {
-    if (gb == 0 || ln > gb + 1)
-      for (j = ln - B; j < ln; j++) if (j > shown && (j in keep)) show(j, "-", keep[j])
-    show(ln, ":", cur); done = 1
-  }
-  while (le <= t) {
-    if (!readln()) break
-    show(ln, ":", cur); done = 1
-  }
-  gb = ln; aft = ln + A
-}
-BEGIN {
-  F = ENVIRON["F"]; G1 = "/dev/fd/3"; K = ENVIRON["K"]; PRE = ENVIRON["PRE"]
-  NUM = ENVIRON["NUM"] + 0; B = ENVIRON["BEFORE"] + 0; A = ENVIRON["AFTER"] + 0
-  SEP = ENVIRON["SEP"] + 0; EOFM = ENVIRON["EOFM"] + 0; SIZE = ENVIRON["SIZE"] + 0
-  LIMIT = ENVIRON["LIMIT"] + 0
-  if (K == "count") n1 = next1()
-  while (1) {
-    if ((getline r) <= 0) lost()
-    if (substr(r, 1, 1) == "E") { trailer(r); break }
-    i = index(r, ":"); s = substr(r, 1, i - 1) + 0; e = s + length(r) - i; last = e
-    if (K != "count") { event(s, e - 1); continue }
-    while (n1 >= 0 && n1 < s) n1 = next1()
-    ne = (n1 == s)
-    if (ne) n1 = next1()
-    if (ne || !(pne && s == pend)) cnt++
-    pne = ne; pend = ne ? e : s
-  }
-  if (K == "count") {
-    while (n1 >= 0) n1 = next1()
-    if (cnt > 0) { if (PRE != "") print PRE ":" cnt; else print cnt }
-    exit 0
-  }
-  if (EOFM && last < SIZE) event(SIZE, SIZE)
-  while (ln < aft && readln()) pass()
-  exit 0
-}
-`
 
-// xargsKill is the line xargs adds when the wrapper kills itself over a
-// failed grep; the grep's own message says what failed.
-var xargsKill = regexp.MustCompile(`(?m)^xargs: bash: terminated by signal 15\n?`)
+// installRipgrep writes this build's rg for machine into the sandbox and
+// checks it runs. A nil Result is success. A non-nil one is the tool error
+// grep answers with instead, naming why rg cannot run here — there is no
+// second implementation to fall back on (#827, an owner decision). An error is
+// the sandbox itself failing.
+func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, error) {
+	fail := func(format string, a ...any) (*Result, error) {
+		res, _ := failf("grep: "+format, a...)
+		return &res, nil
+	}
+	arch := linuxArch(machine)
+	if arch == "" {
+		return fail("ripgrep is shipped for linux x86_64 and aarch64, and this sandbox is %q", machine)
+	}
+	rg, size, err := openRipgrep(arch)
+	if err != nil {
+		return fail("%v", err)
+	}
+	var nonce [8]byte
+	_, _ = rand.Read(nonce[:])
+	upload := ripgrepDir + "/.upload-" + hex.EncodeToString(nonce[:])
+	if err := r.Sandbox.WriteFileStream(ctx, upload, rg, size); err != nil {
+		switch {
+		case errors.Is(err, sandbox.ErrNotWritable):
+			return fail("cannot install ripgrep under %s: %s", ripgrepDir, notWritableReason(err))
+		case errors.Is(err, sandbox.ErrNotDirectory), errors.Is(err, sandbox.ErrIsDirectory), errors.Is(err, sandbox.ErrNotReplaceable):
+			return fail("cannot install ripgrep under %s: %v", ripgrepDir, err)
+		}
+		return nil, err
+	}
+	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{
+		Command: fmt.Sprintf(installScript, singleQuote(upload), singleQuote(ripgrepPath()),
+			singleQuote("ripgrep "+ripgrep.Pinned.Version+" ")),
+		Timeout: time.Minute,
+	})
+	switch {
+	case err != nil:
+		return nil, err
+	case res.TimedOut:
+		return fail("installing ripgrep timed out")
+	case res.ExitCode == 2:
+		return fail("ripgrep %s for %s was written to %s but does not run there (%s); grep needs /tmp to be writable and to allow executing files",
+			ripgrep.Pinned.Version, machine, ripgrepPath(), strings.TrimSpace(res.Stderr))
+	case res.ExitCode != 0:
+		return fail("cannot install ripgrep at %s: %s", ripgrepPath(), strings.TrimSpace(combine(res)))
+	}
+	return nil, nil
+}
 
 func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 	var in grepInput
@@ -512,79 +322,61 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 		}
 	}
 
+	// No absolute-pattern handling here: a grep pattern is a regex, not a path,
+	// and one that happens to start with "/" must not be mistaken for an
+	// absolute root and turned loose on the whole filesystem.
 	root := r.workdir()
 	if in.Path != "" {
 		root = r.resolve(in.Path)
 	}
-	q, why := in.query(globAnchor(root, r.workdir()))
+	q, why := in.query(root)
 	if why != "" {
 		return failf("grep: %s", why)
 	}
-	// No absolute-pattern handling here: a grep pattern is a regex, not a path,
-	// and one that happens to start with "/" must not be mistaken for an
-	// absolute root and turned loose on the whole filesystem.
-	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: q.script(findPath(root)), Timeout: DefaultTimeout})
-	if err != nil {
-		return Result{}, err
+	script := q.script()
+	for installed := false; ; installed = true {
+		res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: DefaultTimeout})
+		if err != nil {
+			return Result{}, err
+		}
+		if res.TimedOut {
+			return failf("grep: timed out after %s", DefaultTimeout)
+		}
+		machine, missing := strings.CutPrefix(strings.TrimSpace(res.Stdout), ripgrepMissing)
+		if res.ExitCode != exitNoRipgrep || !missing {
+			return grepAnswer(res)
+		}
+		if installed {
+			return failf("grep: ripgrep was installed at %s and was gone again before the search ran", ripgrepPath())
+		}
+		if bad, err := r.installRipgrep(ctx, machine); bad != nil || err != nil {
+			if err != nil {
+				return Result{}, err
+			}
+			return *bad, nil
+		}
 	}
-	switch {
-	case res.TimedOut:
-		return failf("grep: timed out after %s", DefaultTimeout)
-	case res.ExitCode != 0:
-		res.Stderr = xargsKill.ReplaceAllString(res.Stderr, "")
+}
+
+// grepAnswer reads rg's exit: 0 for matches, 1 for none — or for a search
+// head cut short, which rg may also report as 1 — and anything else a failure,
+// whose message is rg's own. A message rg printed beside an answer, such as an
+// ignore file it could not parse, follows the answer rather than being lost.
+func grepAnswer(res sandbox.ExecResult) (Result, error) {
+	if res.ExitCode != 0 && res.ExitCode != 1 {
 		return searchFailure("grep", res)
 	}
 	out := strings.TrimRight(res.Stdout, "\n")
 	if out == "" {
-		return succeed("no matches")
+		out = "no matches"
 	}
 	// The sandbox's own per-stream cap may already have cut this stream; the
 	// marker must ride along, or a spill of it would read as the full result.
 	if res.Truncated {
 		out = truncationNotice + "\n" + out
 	}
+	if msg := strings.TrimSpace(res.Stderr); msg != "" {
+		out += "\n" + msg
+	}
 	return succeed(out)
-}
-
-// script renders grepScript for one search. Every string is single-quoted, so
-// the script carries the model's input as data; every number is one query
-// validated.
-func (q grepQuery) script(root string) string {
-	words := func(ws []string) string {
-		quoted := make([]string, len(ws))
-		for i, w := range ws {
-			quoted[i] = singleQuote(w)
-		}
-		return strings.Join(quoted, " ")
-	}
-	bit := func(b bool) string {
-		if b {
-			return "1"
-		}
-		return "0"
-	}
-	var ci []string
-	if q.ignoreCase {
-		ci = []string{"-i"}
-	}
-	return strings.NewReplacer(
-		"__ROOT__", singleQuote(root),
-		"__PAT__", singleQuote(q.pattern),
-		"__MLFIRST__", singleQuote(q.ml.first),
-		"__MLANY__", singleQuote(q.ml.anywhere),
-		"__MLLISTED__", singleQuote(q.ml.listed),
-		"__MLSCAN__", singleQuote(q.ml.scan),
-		"__MLEND__", singleQuote(q.ml.atEnd),
-		"__MLAWK__", singleQuote(grepAwk),
-		"__MODE__", singleQuote(q.mode),
-		"__ML__", bit(q.multiline),
-		"__SKIP__", strconv.Itoa(q.skip),
-		"__LIMIT__", strconv.Itoa(q.limit),
-		"__NUM__", bit(q.lineNums),
-		"__BEFORE__", strconv.Itoa(q.before),
-		"__AFTER__", strconv.Itoa(q.after),
-		"__CI__", words(ci),
-		"__PRUNE__", words(q.prune),
-		"__SEL__", words(q.sel),
-	).Replace(grepScript)
 }

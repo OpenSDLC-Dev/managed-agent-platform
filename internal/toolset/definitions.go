@@ -120,16 +120,16 @@ var definitions = []toolDef{
 	// grep's schema is the recorded reference's, property for property and
 	// description for description (#827, an owner decision): the SDK's Input
 	// type has pattern and path alone, and the echo has twelve more. The
-	// descriptions name ripgrep's flags because the reference runs ripgrep;
-	// grep.go gives each flag that meaning over GNU grep. The tool description
-	// stays ours: the reference's says the pattern is ripgrep's syntax, which
-	// it is not here.
+	// descriptions name ripgrep's flags because the reference runs ripgrep,
+	// and so does grep.go, which hands each property to rg as the flag its
+	// description names. The tool description stays ours, as all six do
+	// (#822).
 	{
 		name: "grep",
-		description: "Search file contents for a regular expression (PCRE where the sandbox's grep supports it, " +
-			"POSIX ERE otherwise). By default it lists the files that match; output_mode \"content\" returns " +
-			"the matching lines as path:line:text, and \"count\" the number of matching lines per file (of matches, " +
-			"when multiline lets a pattern span lines).",
+		description: "Search file contents for a regular expression with ripgrep (its Rust regex syntax). " +
+			"By default it lists the files that match; output_mode \"content\" returns the matching lines as " +
+			"path:line:text, and \"count\" the number of matching lines per file (of matches, when multiline lets " +
+			"a pattern span lines).",
 		props: map[string]any{
 			"pattern": prop("string", "The regular expression pattern to search for in file contents"),
 			"path":    prop("string", "File or directory to search in (rg PATH). Defaults to current working directory."),

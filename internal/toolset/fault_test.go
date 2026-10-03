@@ -350,7 +350,7 @@ func TestGrepPatternStartingWithSlashSearchesTheWorkdir(t *testing.T) {
 		t.Fatalf("grep: %v", err)
 	}
 	script := sb.commands[0]
-	if !strings.Contains(script, "root='"+sandbox.DefaultWorkdir+"'") {
+	if !strings.Contains(script, "'-e' '/usr/local' '--' '"+sandbox.DefaultWorkdir+"'") {
 		t.Fatalf("grep did not root at the workdir:\n%s", script)
 	}
 }
