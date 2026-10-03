@@ -5,14 +5,10 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
-
-	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -184,8 +180,13 @@ func TestK8sLimitedNetworkingFailsClosedWhenFlushNoOps(t *testing.T) {
 // listener the gate sidecar can reach from a pod.
 func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 	image := sandboxtest.BuildGateImage(t)
-	kubeCtx := clusterContext(t)
-	loadGateImage(t, kubeCtx, image)
+	kubeCtx := sandboxtest.KubeContext(t)
+	// Not removed afterwards: the gate image is the suite's one shared tag,
+	// rebuilt and reloaded by every run. A context that is not kind's must share
+	// the daemon's image store or have the image loaded by hand —
+	// MAP_K8S_HOST_ADDR fixes only how pods address the stub controlplane, not
+	// image distribution.
+	sandboxtest.LoadIntoKind(t, kubeCtx, image)
 	stub := sandboxtest.StartGateStubAt(t, k8sHostAddr(t, kubeCtx))
 	return sandboxtest.GateFixture{
 		Spec: &sandbox.GateSpec{
@@ -197,48 +198,6 @@ func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 		DeniedHost:  "denied.invalid",
 		Placeholder: stub.Placeholder,
 		Secret:      stub.Secret,
-	}
-}
-
-// clusterContext resolves the kube context the tests run against —
-// MAP_K8S_CONTEXT when set (local), otherwise the kubeconfig's current context
-// (CI, where the kind-action sets it).
-func clusterContext(t *testing.T) string {
-	t.Helper()
-	if ctx := os.Getenv("MAP_K8S_CONTEXT"); ctx != "" {
-		return ctx
-	}
-	cfg, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
-	if err != nil {
-		t.Fatalf("load kubeconfig for the gate fixture: %v", err)
-	}
-	return cfg.CurrentContext
-}
-
-// loadGateImage sideloads the locally-built gate image into a kind cluster —
-// kind's containerd cannot see the host daemon's images. `docker save
-// --platform` keeps the archive single-platform (a multi-arch manifest breaks
-// `kind load` on darwin; an older docker without the flag falls back to a
-// plain save). Non-kind contexts (Docker Desktop) share the daemon's image
-// store, so there is nothing to load.
-func loadGateImage(t *testing.T, kubeCtx, image string) {
-	t.Helper()
-	cluster, ok := strings.CutPrefix(kubeCtx, "kind-")
-	if !ok {
-		// Not kind: assume the cluster shares the local daemon's image store
-		// (docker-desktop does). Other clusters (minikube, k3d, remote) must have
-		// the image loaded by hand before the run — MAP_K8S_HOST_ADDR fixes only
-		// how pods address the stub controlplane, not image distribution.
-		return
-	}
-	tar := filepath.Join(t.TempDir(), "gate.tar")
-	if out, err := exec.Command("docker", "save", "--platform", "linux/"+runtime.GOARCH, "-o", tar, image).CombinedOutput(); err != nil {
-		if out2, err2 := exec.Command("docker", "save", "-o", tar, image).CombinedOutput(); err2 != nil {
-			t.Fatalf("docker save %s: %v\n%s\nfallback: %v\n%s", image, err, out, err2, out2)
-		}
-	}
-	if out, err := exec.Command("kind", "load", "image-archive", tar, "--name", cluster).CombinedOutput(); err != nil {
-		t.Fatalf("kind load image-archive: %v\n%s", err, out)
 	}
 }
 

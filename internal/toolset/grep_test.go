@@ -22,6 +22,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/k8s"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
@@ -736,14 +737,18 @@ func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
 	fails(t, r, "grep", `{"pattern":"needle","path":"ex2/b.txt","head_limit":1}`, denied)
 }
 
-// bannerHook is an image's `ENV BASH_ENV` file at its most disruptive: it
-// prints on both streams without ending either line, with spaces in what it
-// prints, leaves the directory the exec started in, and sets an EXIT trap that
-// prints on both streams after whatever the shell ran.
-const bannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2; cd /; ` +
-	`trap "printf 'exit banner '; printf 'exit stderr ' >&2" EXIT` + "\n"
+// hookedImage builds an image whose `ENV BASH_ENV` file is hook.
+func hookedImage(t *testing.T, name, hook string) string {
+	t.Helper()
+	return dockertest.ImageFrom(t, name, "FROM debian:stable-slim\n"+
+		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(hook))+" | base64 -d > /etc/map-banner.sh\n"+
+		"ENV BASH_ENV=/etc/map-banner.sh\n", "--host", docker.DaemonHost())
+}
 
-// An image whose bash runs bannerHook runs it for every exec, the platform's
+// An image whose bash runs sandboxtest.BannerHook — an `ENV BASH_ENV` file
+// that prints on both streams without ending either line, with spaces in what
+// it prints, leaves the directory the exec started in, and sets an EXIT trap
+// that prints on both after whatever the shell ran — runs it for every exec, the platform's
 // scripts as well as the model's commands: rg is installed all the same, and
 // every glob and grep answer, and every refusal, is the tool's alone, read
 // from inside the search's frame — where a glob used to read the banner's
@@ -751,10 +756,7 @@ const bannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2;
 // banner reaches the bash tool's output, as it reaches every command on that
 // image.
 func TestSearchesThroughAnImageBanner(t *testing.T) {
-	image := dockertest.ImageFrom(t, "search-banner", "FROM debian:stable-slim\n"+
-		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(bannerHook))+" | base64 -d > /etc/map-banner.sh\n"+
-		"ENV BASH_ENV=/etc/map-banner.sh\n", "--host", docker.DaemonHost())
-	r := runner(t, fromImage(image))
+	r := runner(t, fromImage(hookedImage(t, "search-banner", sandboxtest.BannerHook)))
 	ok(t, r, "write", `{"file_path":"be/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"be/b.txt","content":"needle\n"}`)
 	if out := ok(t, r, "bash", `{"command":"echo hi"}`); !strings.Contains(out, "welcome to the image") {
@@ -795,10 +797,7 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 		}
 	}
 	// bash prints the banner too, so it is cut from what the checks read.
-	unbanner := func(s string) string {
-		return strings.TrimSpace(strings.NewReplacer("welcome to the image", "", "stderr banner", "",
-			"exit banner", "", "exit stderr", "").Replace(s))
-	}
+	unbanner := func(s string) string { return strings.TrimSpace(sandboxtest.Unbanner(s)) }
 	_, size, err := ripgrep.Open(toolset.LinuxArch(unbanner(ok(t, r, "bash", `{"command":"uname -m"}`))))
 	if err != nil {
 		t.Fatalf("ripgrep.Open: %v", err)
@@ -806,6 +805,47 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 	if got, want := unbanner(installedRipgrep(t, r)), fmt.Sprintf("755 %d", size); got != want {
 		t.Errorf("installed rg = %q, want %q", got, want)
 	}
+}
+
+// An image whose startup file turns errexit on, as well as printing around
+// every exec, leaves every search answering as it does on any other image: a
+// search's script is written for the shell's defaults and turns errexit off
+// as it opens its frame (sandbox.Frame.Open), so rg finding nothing — its
+// exit 1, or an empty page — is "no matches" rather than a shell that ended
+// before it could close the frame, and a failure is still the tool's message.
+func TestSearchesThroughAnErrexitStartup(t *testing.T) {
+	r := runner(t, fromImage(hookedImage(t, "search-errexit", "set -e\n"+sandboxtest.BannerHook)))
+	ok(t, r, "write", `{"file_path":"ee/a.txt","content":"needle\n"}`)
+	ok(t, r, "write", `{"file_path":"ee/b.txt","content":"needle\n"}`)
+	for tool, answers := range map[string]map[string]string{
+		"glob": {
+			`{"pattern":"*.txt","path":"ee"}`: "",
+			`{"pattern":"none*","path":"ee"}`: "no matches",
+		},
+		"grep": {
+			`{"pattern":"needle","path":"ee"}`:                           "/workspace/ee/a.txt\n/workspace/ee/b.txt",
+			`{"pattern":"absent","path":"ee"}`:                           "no matches",
+			`{"pattern":"needle","path":"ee","offset":2}`:                "no matches",
+			`{"pattern":"needle","path":"ee","head_limit":1,"offset":1}`: "/workspace/ee/b.txt",
+		},
+	} {
+		for in, want := range answers {
+			got := ok(t, r, tool, in)
+			if want == "" {
+				// glob lists newest first; both files are the answer.
+				if lines := strings.Split(got, "\n"); len(lines) != 2 || !slices.Contains(lines, "/workspace/ee/a.txt") ||
+					!slices.Contains(lines, "/workspace/ee/b.txt") {
+					t.Errorf("%s(%s) = %q, want the two files", tool, in, got)
+				}
+				continue
+			}
+			if got != want {
+				t.Errorf("%s(%s) = %q, want %q", tool, in, got, want)
+			}
+		}
+	}
+	fails(t, r, "grep", `{"pattern":"[unclosed","path":"ee"}`, "regex parse error")
+	fails(t, r, "glob", `{"pattern":"*","path":"ee/absent"}`, "no such directory")
 }
 
 // floodHook is an image's BASH_ENV file whose EXIT trap prints past the
@@ -816,10 +856,7 @@ const floodHook = `trap "head -c 1100000 /dev/zero | tr '\0' x; head -c 1100000 
 // search's script has printed its end line before the flood begins: the cap
 // cut nothing the search said, and no answer or failure says it did.
 func TestASearchCutOnlyPastItsEndLineSaysNothingOfTheCap(t *testing.T) {
-	image := dockertest.ImageFrom(t, "search-flood", "FROM debian:stable-slim\n"+
-		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(floodHook))+" | base64 -d > /etc/map-flood.sh\n"+
-		"ENV BASH_ENV=/etc/map-flood.sh\n", "--host", docker.DaemonHost())
-	r := runner(t, fromImage(image))
+	r := runner(t, fromImage(hookedImage(t, "search-flood", floodHook)))
 	ok(t, r, "write", `{"file_path":"fl/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"fl/b.txt","content":"needle\n"}`)
 	for in, want := range map[string]string{

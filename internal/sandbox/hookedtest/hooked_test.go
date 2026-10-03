@@ -6,12 +6,15 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
 
 // Every primitive a backend implements with a script of its own answers
@@ -28,7 +31,7 @@ func TestBackendScriptsAnswerThroughAnImageHook(t *testing.T) {
 			sb, sid := b.Provision(t, sandbox.Hardening{})
 
 			res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "echo hi; exit 7", Timeout: 30 * time.Second})
-			if err != nil || res.ExitCode != 7 || res.TimedOut || hookedtest.Unbanner(res.Stdout) != "hi\n" ||
+			if err != nil || res.ExitCode != 7 || res.TimedOut || sandboxtest.Unbanner(res.Stdout) != "hi\n" ||
 				!strings.Contains(res.Stdout, "welcome to the image") {
 				t.Errorf("exec = %+v, %v; want exit 7, hi, and the image's banner around it", res, err)
 			}
@@ -74,6 +77,12 @@ func TestBackendScriptsAnswerThroughAnImageHook(t *testing.T) {
 					t.Errorf("read %s = %q, %v; want %q", w.Path, got, err, w.Data)
 				}
 			}
+			// A batch refused at one member names that member, the image's
+			// banner on the same stream notwithstanding.
+			refused := []sandbox.FileWrite{{Path: "/workspace/hooked/batch/d.md", Data: []byte("delta")}, {Path: "/workspace/hooked/batch/b", Data: []byte("a directory")}}
+			if err := sb.WriteFiles(ctx, refused); !errors.Is(err, sandbox.ErrIsDirectory) || !strings.Contains(err.Error(), "/workspace/hooked/batch/b") {
+				t.Errorf("a batch onto a directory = %v; want ErrIsDirectory naming /workspace/hooked/batch/b", err)
+			}
 
 			rc, err := b.Provider.Export(ctx, sid, "/workspace")
 			if err != nil {
@@ -109,6 +118,47 @@ func TestBackendScriptsAnswerThroughAnImageHook(t *testing.T) {
 					t.Errorf("write %s = %v; want ErrNotWritable for the read-only file system, and no banner", p, err)
 				}
 			}
+			// A batch lands under the read-only root where its mounts are
+			// writable, and one refused outside them says why the same way.
+			if err := ro.WriteFiles(ctx, batch); err != nil {
+				t.Errorf("a batch under a read-only root: %v", err)
+			} else if got, err := ro.ReadFile(ctx, batch[1].Path); err != nil || !bytes.Equal(got, batch[1].Data) {
+				t.Errorf("read %s = %q, %v", batch[1].Path, got, err)
+			}
+			var pnw *sandbox.PathNotWritableError
+			if err := ro.WriteFiles(ctx, []sandbox.FileWrite{{Path: "/usr/hooked/batch.md", Data: []byte("x")}}); !errors.As(err, &pnw) ||
+				pnw.Reason != "Read-only file system" {
+				t.Errorf("a batch onto the read-only root = %v; want ErrNotWritable for the read-only file system, and no banner", err)
+			}
 		})
+	}
+}
+
+// Every call to Backends builds a hooked image of its own. The same Dockerfile
+// would build one image ID for every package that asks at once, and removing
+// one package's image from a kind node — crictl removes an image by its ID,
+// every tag with it — would take the others' out from under their running
+// pods. A package that finished, its image removed from the daemon and the
+// nodes, leaves another package's image working on both backends.
+func TestHookedImagesOfParallelPackagesAreTheirOwn(t *testing.T) {
+	kept := hookedtest.Backends(t)
+	id := func(image string) string {
+		out, err := exec.Command("docker", "--host", docker.DaemonHost(), "image", "inspect", "-f", "{{.Id}}", image).Output()
+		if err != nil {
+			t.Fatalf("inspect %s: %v", image, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	t.Run("a package that finished", func(t *testing.T) {
+		if other := hookedtest.Backends(t)[0].Image; id(other) == id(kept[0].Image) {
+			t.Errorf("two builds made one image, %s", id(other))
+		}
+	})
+	for _, b := range kept {
+		sb, _ := b.Provision(t, sandbox.Hardening{})
+		if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "echo ok", Timeout: 30 * time.Second}); err != nil ||
+			sandboxtest.Unbanner(res.Stdout) != "ok\n" {
+			t.Errorf("%s: exec on the image another package's removal left = %+v, %v", b.Name, res, err)
+		}
 	}
 }
