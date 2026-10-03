@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"unicode"
 
@@ -40,7 +41,7 @@ func (r Runner) read(ctx context.Context, raw json.RawMessage) (Result, error) {
 		return res, nil
 	}
 	p := r.resolve(in.FilePath)
-	if res, bad := pathTooLong("read", p); bad {
+	if res, bad := pathTooLong("read", p, false); bad {
 		return res, nil
 	}
 	data, err := r.Sandbox.ReadFile(ctx, p)
@@ -86,7 +87,7 @@ func (r Runner) write(ctx context.Context, raw json.RawMessage) (Result, error) 
 		return res, nil
 	}
 	p := r.resolve(in.FilePath)
-	if res, bad := pathTooLong("write", p); bad {
+	if res, bad := pathTooLong("write", p, true); bad {
 		return res, nil
 	}
 	if why := r.unwritable(in.FilePath, p); why != "" {
@@ -113,7 +114,7 @@ func (r Runner) edit(ctx context.Context, raw json.RawMessage) (Result, error) {
 		return res, nil
 	}
 	p := r.resolve(in.FilePath)
-	if res, bad := pathTooLong("edit", p); bad {
+	if res, bad := pathTooLong("edit", p, true); bad {
 		return res, nil
 	}
 	if why := r.unwritable(in.FilePath, p); why != "" {
@@ -159,11 +160,20 @@ const (
 // leave to a reclaim, which would make the same call again (measured on kind
 // and Docker Desktop, #827).
 //
+// A write or an edit (lands) is held to one bound more. Both backends land
+// its bytes under a temporary name in the target's directory first —
+// `<dir>/.map-write-<16 hex>`, sandbox.TempNameBytes (27) of name — and
+// rename them into place, so that path must fit as well: the file_path is
+// refused when len(dir)+1+27 is past maxPathBytes, though the target alone
+// would fit — where both backends answered the target's own "file name too
+// long" (measured, #827). A read lands nothing, and reads any path within the
+// bounds.
+//
 // The bounds are Linux's, not the commands': a backend that builds a command
 // around the path can still make one past sandbox.MaxCommandBytes from a path
 // within them — Docker's rename quotes it into its script eleven times — and
 // fileFault answers that.
-func pathTooLong(verb, resolved string) (Result, bool) {
+func pathTooLong(verb, resolved string, lands bool) (Result, bool) {
 	if n := len(resolved); n > maxPathBytes {
 		res, _ := failf("%s: file name too long: the file_path resolves to a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
 			verb, n, maxPathBytes)
@@ -175,6 +185,12 @@ func pathTooLong(verb, resolved string) (Result, bool) {
 				verb, n, maxNameBytes)
 			return res, true
 		}
+	}
+	if dir := path.Dir(resolved); lands && len(dir)+1+sandbox.TempNameBytes > maxPathBytes {
+		res, _ := failf("%s: file name too long: the file lands first under a %d-byte temporary name beside it, and in the file_path's %d-byte directory "+
+			"that is a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
+			verb, sandbox.TempNameBytes, len(dir), len(dir)+1+sandbox.TempNameBytes, maxPathBytes)
+		return res, true
 	}
 	return Result{}, false
 }

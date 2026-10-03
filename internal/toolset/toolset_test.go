@@ -339,8 +339,12 @@ func TestReadWriteEdit(t *testing.T) {
 // holding a name past NAME_MAX's 255 — is a tool error naming the bound on
 // every backend, where the k8s backend would hand it to an exec that cannot
 // start and Docker's archive endpoint would answer a 500, both faults a
-// reclaim would only repeat. One at the bounds is the sandbox's, written,
-// read and edited as any other.
+// reclaim would only repeat. So, for write and edit, is a path whose
+// directory leaves no room for the 27-byte temporary name a write lands
+// under beside the file, which both backends refused as the path's own
+// "file name too long", though the path is within the bounds. One at the
+// bounds is the sandbox's, written, read and edited as any other — the
+// largest directory a write may land in, 4067 bytes, included.
 func TestFilePathsTooLongForLinux(t *testing.T) {
 	filePathBounds(t, runner(t))
 }
@@ -391,7 +395,19 @@ func filePathBounds(t *testing.T, r toolset.Runner) {
 		// would have been.
 		fails(t, r, tool, in(strings.Repeat("x/", 100<<10)), "resolves to a 204810-byte path")
 	}
-	for _, p := range []string{atBound, "bounds/" + strings.Repeat("n", 255)} {
+	// A 4095-byte path whose directory leaves no room for the 27-byte
+	// temporary name a write lands under beside it: refused by write and
+	// edit, and read as any other path is.
+	short := dirs + strings.Repeat("e", 242) + "/f"
+	for _, tool := range []string{"write", "edit"} {
+		fails(t, r, tool, inputs[tool](short), tool+": file name too long: the file lands first under a 27-byte temporary name beside it, "+
+			"and in the file_path's 4093-byte directory that is a 4121-byte path, over the 4095 bytes a Linux path can hold; shorten it")
+	}
+	fails(t, r, "read", inputs["read"](short), "read "+short+": no such file or directory")
+	// The largest a write's directory may be, 4067 bytes, with a 27-byte
+	// name: the target and the temporary are both 4095-byte paths.
+	tightest := dirs + strings.Repeat("e", 216) + "/" + strings.Repeat("f", 27)
+	for _, p := range []string{atBound, tightest, "bounds/" + strings.Repeat("n", 255)} {
 		if got, want := ok(t, r, "write", `{"file_path":"`+p+`","content":"one x"}`), "wrote 5 bytes to "+p; got != want {
 			t.Fatalf("write at the bound = %q, want %q", got, want)
 		}

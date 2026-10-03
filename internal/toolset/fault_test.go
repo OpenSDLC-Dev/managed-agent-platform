@@ -554,7 +554,9 @@ func tail(s string) string {
 }
 
 // A file_path too long for Linux is refused before the sandbox is asked —
-// no read, no write, no exec — and one at the bounds is handed to it.
+// no read, no write, no exec — and one at the bounds is handed to it. A write
+// or an edit lands under a 27-byte temporary name in the file's directory
+// first, so its directory is held to 4067 bytes too.
 func TestFilePathsTooLongForLinuxAreRefusedBeforeTheSandbox(t *testing.T) {
 	name := strings.Repeat("n", 255)
 	atBound := "/" + strings.Repeat(name+"/", 15) + strings.Repeat("f", 4095-1-15*256)
@@ -575,11 +577,33 @@ func TestFilePathsTooLongForLinuxAreRefusedBeforeTheSandbox(t *testing.T) {
 				t.Errorf("%s of a %d-byte path asked the sandbox %d times", tool, len(p), n)
 			}
 		}
-		for _, p := range []string{atBound, "a/" + name} {
-			sb := &fakeSandbox{files: map[string]string{atBound: "x", "/workspace/a/" + name: "x"}}
+		// The 4067-byte directory a write may land in, with the 27-byte
+		// name that fills the path, and with one more byte of directory and
+		// one less of name — a 4095-byte path that a write and an edit
+		// refuse, for its temporary, and a read hands to the sandbox.
+		tightest := "/" + strings.Repeat(name+"/", 15) + strings.Repeat("e", 226) + "/" + strings.Repeat("f", 27)
+		oneOver := "/" + strings.Repeat(name+"/", 15) + strings.Repeat("e", 227) + "/" + strings.Repeat("f", 26)
+		for _, p := range []string{atBound, tightest, "a/" + name} {
+			sb := &fakeSandbox{files: map[string]string{atBound: "x", tightest: "x", "/workspace/a/" + name: "x"}}
 			if res, err := run(t, sb, tool, in(p)); err != nil || res.IsError {
 				t.Errorf("%s at the bounds = %+v, %v; want the sandbox's answer", tool, res, err)
 			}
+		}
+		sb := &fakeSandbox{files: map[string]string{oneOver: "x"}}
+		res, err := run(t, sb, tool, in(oneOver))
+		if tool == "read" {
+			if err != nil || res.IsError {
+				t.Errorf("read of a 4095-byte path in a 4068-byte directory = %+v, %v; want the sandbox's answer", res, err)
+			}
+			continue
+		}
+		want := tool + ": file name too long: the file lands first under a 27-byte temporary name beside it, " +
+			"and in the file_path's 4068-byte directory that is a 4096-byte path, over the 4095 bytes a Linux path can hold; shorten it"
+		if err != nil || !res.IsError || res.Content != want {
+			t.Errorf("%s of a 4095-byte path in a 4068-byte directory = %+v, %v; want %q", tool, res, err, want)
+		}
+		if n := len(sb.reads) + len(sb.writes) + len(sb.commands); n != 0 {
+			t.Errorf("%s of a 4095-byte path in a 4068-byte directory asked the sandbox %d times", tool, n)
 		}
 	}
 }
