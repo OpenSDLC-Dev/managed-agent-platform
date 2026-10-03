@@ -1050,9 +1050,11 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 // per-resource copy entry). The copy is a files row of its own: the source's
 // filename, size and MIME type, a created_at of its own, never downloadable,
 // scoped to the session, and the source's expires_at, which is ours (a copy is
-// the same content, so it lives as long). It aliases the source's object rather
-// than copying bytes, so it costs no storage; migration 0046's reference count
-// keeps that object while any row names it.
+// the same content, so it lives as long). Its org, workspace and project are
+// the source's, so a copy never lands in a tenant its bytes are not from. It
+// aliases the source's object rather than copying bytes, so it costs no
+// storage; migration 0046's reference count keeps that object while any row
+// names it.
 //
 // The source is read FOR SHARE in the same statement. That is what lets the
 // count work: a delete of the source waits for this transaction, and the count
@@ -1066,9 +1068,10 @@ func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID 
 func mountFileCopy(ctx context.Context, db querier, sessionID, fileID string) (string, error) {
 	var copyID string
 	err := db.QueryRow(ctx,
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id,
-		                    expires_at, object_key, source_file_id)
-		 SELECT $1, filename, mime_type, size_bytes, false, 'session', $2, expires_at, `+store.FileObjectKeySQL+`, id
+		`INSERT INTO files (id, org_id, workspace_id, project_id, filename, mime_type, size_bytes,
+		                    downloadable, scope_type, scope_id, expires_at, object_key, source_file_id)
+		 SELECT $1, org_id, workspace_id, project_id, filename, mime_type, size_bytes,
+		        false, 'session', $2, expires_at, `+store.FileObjectKeySQL+`, id
 		   FROM files WHERE id = $3 AND `+store.FileLiveSQL+` FOR SHARE
 		 RETURNING id`,
 		domain.NewID(domain.PrefixFile).String(), sessionID, fileID).Scan(&copyID)
