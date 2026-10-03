@@ -7,32 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
-
-// Hook is an image's `ENV BASH_ENV` file at its most disruptive, as the
-// hooked image (internal/sandbox/hookedtest) carries it: it prints on both
-// streams without ending either line, leaves the directory the shell started
-// in, and sets an EXIT trap that prints on both after whatever the shell ran.
-const hook = `printf 'welcome to the image '; printf 'stderr banner ' >&2; cd /; ` +
-	`trap "printf 'exit banner '; printf 'exit stderr ' >&2" EXIT` + "\n"
-
-// lines are the frame's begin and end lines for one test frame, read back out
-// of the script Open writes, which spells them.
-func lines(t *testing.T, f sandbox.Frame) (begin, end string) {
-	t.Helper()
-	m := regexp.MustCompile(`'(map-[a-z0-9]+-begin-[0-9a-f]{16})'`).FindStringSubmatch(f.Open())
-	e := regexp.MustCompile(`'(map-[a-z0-9]+-end-[0-9a-f]{16})'`).FindStringSubmatch(f.Open())
-	if m == nil || e == nil {
-		t.Fatalf("Open names no begin or end line:\n%s", f.Open())
-	}
-	return "\n" + m[1] + "\n", "\n" + e[1] + "\n"
-}
 
 // Cut reads what a framed script printed on one stream — what lies between
 // the last begin line and the end line after it — whatever came before or
@@ -40,12 +21,15 @@ func lines(t *testing.T, f sandbox.Frame) (begin, end string) {
 // from the exec's argv, an EXIT trap's words. A stream with no begin line, or
 // a whole one with no end line, is not one the script printed to its end. A
 // stream the cap cut before its end line is short, keeping what came before
-// the cut less any start of the end line; one cut inside the end line's nonce,
-// or only after the end line, lost nothing of the script's.
+// the cut less any start of the end line; one cut at least 8 digits into the
+// end line's nonce, or only after the end line, lost nothing of the script's —
+// fewer digits than that could be the script's own output ending as the end
+// line begins by chance, one digit in sixteen.
 func TestFrameCutReadsOnlyWhatTheScriptPrinted(t *testing.T) {
 	f := sandbox.NewFrame("test")
-	begin, end := lines(t, f)
+	begin, end := f.Lines()
 	constant := end[:len(end)-17] // "\nmap-test-end-": before the nonce
+	nonce := end[len(constant) : len(end)-1]
 	for _, tc := range []struct {
 		name          string
 		s             string
@@ -69,7 +53,13 @@ func TestFrameCutReadsOnlyWhatTheScriptPrinted(t *testing.T) {
 		{"cut inside the end line's constant part", begin + "a\n" + constant[:5], true, "a\n", true, true},
 		{"cut on the end line's newline alone", begin + "a\n" + "\n", true, "a\n", true, true},
 		{"cut at the end line's last constant byte", begin + "a\n" + constant, true, "a\n", true, true},
-		{"cut inside the end line's nonce", begin + "a\n" + end[:len(end)-5], true, "a\n", true, false},
+		{"cut 12 digits into the end line's nonce", begin + "a\n" + end[:len(end)-5], true, "a\n", true, false},
+		{"cut 8 digits into the end line's nonce", begin + "a\n" + constant + nonce[:8], true, "a\n", true, false},
+		{"cut 7 digits into the end line's nonce", begin + "a\n" + constant + nonce[:7], true, "a\n", true, true},
+		// Output of the script's own that happens to end in the end line's
+		// constant part and the nonce's first digit, the cap cutting there,
+		// is not taken for the end line.
+		{"cut one digit into what looks like the end line", begin + "a\n" + constant + nonce[:1], true, "a\n", true, true},
 		{"cut before the end line's last newline", begin + "a\n" + end[:len(end)-1], true, "a\n", true, false},
 		{"cut only after the end line", begin + "a\n" + end + "trap flood", true, "a\n", true, false},
 		{"cut right after the begin line", begin, true, "", true, true},
@@ -82,6 +72,14 @@ func TestFrameCutReadsOnlyWhatTheScriptPrinted(t *testing.T) {
 			b, bFramed, bShort := f.CutBytes([]byte(tc.s), tc.truncated)
 			if string(b) != tc.text || bFramed != tc.framed || bShort != tc.short {
 				t.Errorf("CutBytes(%q, %v) = %q, %v, %v; want Cut's %q, %v, %v", tc.s, tc.truncated, b, bFramed, bShort, tc.text, tc.framed, tc.short)
+			}
+			// A window that covers each case's output around the frame
+			// answers as the whole-stream search does.
+			for _, room := range []int{1 << 10} {
+				w, wFramed, wShort := f.CutBytesWithin([]byte(tc.s), tc.truncated, room)
+				if string(w) != tc.text || wFramed != tc.framed || wShort != tc.short {
+					t.Errorf("CutBytesWithin(%q, %v, %d) = %q, %v, %v; want Cut's %q, %v, %v", tc.s, tc.truncated, room, w, wFramed, wShort, tc.text, tc.framed, tc.short)
+				}
 			}
 		})
 	}
@@ -98,6 +96,91 @@ func TestFrameCutReadsOnlyWhatTheScriptPrinted(t *testing.T) {
 	}
 }
 
+// CutBytesWithin looks for the begin line only in the stream's first room
+// bytes and for the end line in its last room bytes, so a file between them
+// is not scanned — and a file that holds the frame's own lines by chance is
+// read as the file it is, where the whole-stream search would cut it there.
+// Output around the frame past the room — a startup's banner longer than it,
+// a trap's flood — sends the search over the whole stream, as CutBytes does.
+func TestFrameCutBytesWithinLooksNearTheEnds(t *testing.T) {
+	f := sandbox.NewFrame("test")
+	begin, end := f.Lines()
+	const room = 64
+	file := strings.Repeat("x", 4*room) + begin + "middle" + end + strings.Repeat("y", 4*room)
+	for _, tc := range []struct {
+		name, s, text string
+		truncated     bool
+		framed, short bool
+	}{
+		{"a file holding the frame's lines", "banner" + begin + file + end + "trap", file, false, true, false},
+		{"a banner past the room", strings.Repeat("b", 2*room) + begin + "f" + end, "f", false, true, false},
+		{"a trap past the room", begin + "f" + end + strings.Repeat("t", 2*room), "f", false, true, false},
+		{"a trap flood past the room the cap cut", begin + "f" + end + strings.Repeat("t", 2*room), "f", true, true, false},
+		{"no end line, the cap cut", begin + strings.Repeat("f", 4*room), strings.Repeat("f", 4*room), true, true, true},
+		{"no begin line", strings.Repeat("b", 4*room), "", false, false, false},
+	} {
+		got, framed, short := f.CutBytesWithin([]byte(tc.s), tc.truncated, room)
+		if string(got) != tc.text || framed != tc.framed || short != tc.short {
+			t.Errorf("%s: CutBytesWithin = %d bytes, %v, %v; want %d bytes, %v, %v", tc.name, len(got), framed, short, len(tc.text), tc.framed, tc.short)
+		}
+	}
+	// The whole-stream search cuts that file at the lines it holds.
+	if got, _, _ := f.CutBytes([]byte("banner"+begin+file+end+"trap"), false); string(got) == file {
+		t.Error("CutBytes read a file holding the frame's lines whole; the test no longer shows what the window buys")
+	}
+}
+
+// CutInBegin answers whether a stream ends partway into the begin line — the
+// stream lost while the line was on its way, after whatever banner came first —
+// and only that: a stream whose begin line arrived whole, or that ends on
+// anything else, does not.
+func TestFrameCutInBegin(t *testing.T) {
+	f := sandbox.NewFrame("test")
+	begin, _ := f.Lines()
+	for s, want := range map[string]bool{
+		"":                          false,
+		"banner":                    false,
+		"banner\n":                  true,
+		"banner" + begin[:1]:        true,
+		"banner" + begin[:10]:       true,
+		begin[:len(begin)-1]:        true,
+		"banner" + begin:            false,
+		"banner" + begin + "K 0":    false,
+		"banner" + begin[:10] + "x": false,
+		// Another frame's begin line, cut short.
+		"\nmap-test-begin-0123456789abcd": false,
+	} {
+		if got := f.CutInBegin(s); got != want {
+			t.Errorf("CutInBegin(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// FrameOf rebuilds the frame a label and a nonce name, which is the frame
+// NewFrame made with them; Lines spells its two lines as a stream carries
+// them. A label or a nonce NewFrame would not have made is refused.
+func TestFrameOfRebuildsAFrame(t *testing.T) {
+	f := sandbox.NewFrame("probe")
+	begin, end := f.Lines()
+	nonce := strings.TrimSuffix(strings.TrimPrefix(begin, "\nmap-probe-begin-"), "\n")
+	if g := sandbox.FrameOf("probe", nonce); g != f {
+		t.Errorf("FrameOf(probe, %s) = %v, want %v", nonce, g, f)
+	}
+	if end != "\nmap-probe-end-"+nonce+"\n" {
+		t.Errorf("Lines = %q, %q", begin, end)
+	}
+	for _, c := range [][2]string{{"Probe", nonce}, {"probe", nonce[:15]}, {"probe", strings.ToUpper(nonce) + "x"}, {"probe", "0123456789abcdeg"}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("FrameOf(%q, %q) made a frame", c[0], c[1])
+				}
+			}()
+			sandbox.FrameOf(c[0], c[1])
+		}()
+	}
+}
+
 // Unframe cuts both streams of a result, each by its own flag: what the cap
 // took of the script's output is said per stream, a stderr whose begin line
 // the cap took — a startup flood filled it first — has lost all the script
@@ -105,7 +188,7 @@ func TestFrameCutReadsOnlyWhatTheScriptPrinted(t *testing.T) {
 // framed comes back as it was.
 func TestFrameUnframeCutsEachStreamByItsOwnFlag(t *testing.T) {
 	f := sandbox.NewFrame("test")
-	begin, end := lines(t, f)
+	begin, end := f.Lines()
 	for _, tc := range []struct {
 		name string
 		in   sandbox.ExecResult
@@ -142,8 +225,15 @@ func TestFrameUnframeCutsEachStreamByItsOwnFlag(t *testing.T) {
 
 // run runs a framed command under a shell the way a sandbox's exec does —
 // `<shell> -c <command> <label> <args…>` — with a BASH_ENV file that prints,
-// moves and traps (hook), and the result as Exec would report it.
+// moves and traps (sandboxtest.BannerHook), and the result as Exec would
+// report it.
 func run(t *testing.T, shell, command, stdin string, args ...string) sandbox.ExecResult {
+	t.Helper()
+	return runHooked(t, sandboxtest.BannerHook, shell, command, stdin, args...)
+}
+
+// runHooked is run with hook as the BASH_ENV file.
+func runHooked(t *testing.T, hook, shell, command, stdin string, args ...string) sandbox.ExecResult {
 	t.Helper()
 	dir := t.TempDir()
 	hookFile := filepath.Join(dir, "hook.sh")
@@ -171,7 +261,9 @@ func run(t *testing.T, shell, command, stdin string, args ...string) sandbox.Exe
 // without ending its lines, leaves the directory and sets an EXIT trap that
 // prints after it, answers exactly what the script printed, on each stream,
 // with the script's own exit status — however the script exits: falling off
-// its end, an `exit`, an `exit` from inside one of its functions. It gets its
+// its end, an `exit`, an `exit` from inside one of its functions, an `exec`,
+// which replaces the subshell the script runs in and not the shell that
+// closes the frame. It gets its
 // positional parameters and its stdin, and it does not depend on the
 // directory the exec started in. The banner is still there around the frame,
 // and the trap still runs, once, after it: the frame keeps the startup's
@@ -191,6 +283,8 @@ func TestFrameWrapAnswersThroughAStartupFile(t *testing.T) {
 		{"ends on a comment", "echo ok # no newline after", "", nil, "ok\n", "", 0},
 		{"prints NULs and no newline", `printf 'a\0b\0'`, "", nil, "a\x00b\x00", "", 0},
 		{"fails a command", "false", "", nil, "", "", 1},
+		{"execs", "echo before; exec printf 'after'", "", nil, "before\nafter", "", 0},
+		{"execs a command that fails", "exec sh -c 'echo gone; exit 5'", "", nil, "gone\n", "", 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := sandbox.NewFrame("test")
@@ -214,6 +308,47 @@ func TestFrameWrapAnswersThroughAStartupFile(t *testing.T) {
 	}
 }
 
+// An image's startup file can turn errexit on, which the script inherits:
+// the frame still closes — and with the script's own status — whether the
+// script fails a command along the way and goes on, as it was written to, or
+// ends on one, under bash and POSIX sh alike. A script that opens its own
+// frame (Open) and exits through close_frame runs past a failing command as
+// well. sh reads no BASH_ENV, so its errexit is turned on ahead of the
+// command, as it would be for a shell an image left that way.
+func TestFrameClosesUnderErrexit(t *testing.T) {
+	const errexit = "set -e\n"
+	for _, tc := range []struct {
+		name, script string
+		stdout       string
+		code         int
+		open         bool
+	}{
+		{"fails a command and goes on", "false\necho after", "after\n", 0, false},
+		{"ends on a failing command", "echo before\nfalse", "before\n", 1, false},
+		{"exits non-zero", "echo before\nexit 4", "before\n", 4, false},
+		{"opens its own frame and exits through it", "false\necho after\nclose_frame 6", "after\n", 6, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, shell := range []string{"/bin/bash", "/bin/sh"} {
+				f := sandbox.NewFrame("test")
+				cmd := f.Wrap(tc.script)
+				if tc.open {
+					cmd = f.Open() + tc.script
+				}
+				var raw sandbox.ExecResult
+				if shell == "/bin/bash" {
+					raw = runHooked(t, errexit+sandboxtest.BannerHook, shell, cmd, "")
+				} else {
+					raw = run(t, shell, errexit+cmd, "")
+				}
+				if res, ok := f.Unframe(raw); !ok || res.Stdout != tc.stdout || res.ExitCode != tc.code {
+					t.Errorf("%s: Unframe = %+v, %v; want stdout %q, exit %d\nraw: %+v", shell, res, ok, tc.stdout, tc.code, raw)
+				}
+			}
+		})
+	}
+}
+
 // Open and Wrap are POSIX shell, so a script `sh -c` runs is framed the same
 // way. sh reads no BASH_ENV, so nothing prints around it here.
 func TestFrameWrapIsPOSIXShell(t *testing.T) {
@@ -224,14 +359,14 @@ func TestFrameWrapIsPOSIXShell(t *testing.T) {
 	}
 }
 
-// Unwrap reads back the script and frame Wrap put in a command, so a fake
-// sandbox answers the script and frames its answer (Framed) as a run of it
-// would print it. Anything else — a bare script, one only opened, one cut
+// sandboxtest.Unwrap reads back the script and frame Wrap put in a command,
+// so a fake sandbox answers the script and frames its answer
+// (sandboxtest.Framed) as a run of it would print it. Anything else — a bare script, one only opened, one cut
 // short — is no wrapped command.
 func TestFrameUnwrapAndFramedRoundTrip(t *testing.T) {
 	f := sandbox.NewFrame("memsync")
 	const script = "[ -d '/mnt/m' ] || exit 0\nfind . -print0"
-	got, g, ok := sandbox.Unwrap(f.Wrap(script))
+	got, g, ok := sandboxtest.Unwrap(f.Wrap(script))
 	if !ok || got != script || g != f {
 		t.Fatalf("Unwrap = %q, %v, %v; want the script and the frame back", got, g, ok)
 	}
@@ -242,12 +377,12 @@ func TestFrameUnwrapAndFramedRoundTrip(t *testing.T) {
 		{Stdout: "ou", StdoutTruncated: true},
 		{Stdout: "out", Stderr: "er", StderrTruncated: true},
 	} {
-		if back, ok := f.Unframe(g.Framed(want)); !ok || back != want {
+		if back, ok := f.Unframe(sandboxtest.Framed(g, want)); !ok || back != want {
 			t.Errorf("Unframe(Framed(%+v)) = %+v, %v", want, back, ok)
 		}
 	}
 	for _, cmd := range []string{script, f.Open() + script, f.Wrap(script)[:len(f.Wrap(script))-3], "x" + f.Wrap(script)} {
-		if _, _, ok := sandbox.Unwrap(cmd); ok {
+		if _, _, ok := sandboxtest.Unwrap(cmd); ok {
 			t.Errorf("Unwrap(%q) read a wrapped command", cmd)
 		}
 	}
@@ -264,7 +399,7 @@ func TestNewFrameNoncesAreRandomAndLabelsPlain(t *testing.T) {
 	seen := map[string]bool{}
 	var nonces []string
 	for range frames {
-		begin, end := lines(t, sandbox.NewFrame("test"))
+		begin, end := sandbox.NewFrame("test").Lines()
 		nonce := strings.TrimSuffix(strings.TrimPrefix(begin, "\nmap-test-begin-"), "\n")
 		if end != "\nmap-test-end-"+nonce+"\n" {
 			t.Fatalf("end line %q does not carry the begin line's nonce %s", end, nonce)
@@ -313,11 +448,11 @@ func TestExecFramedRunsTheScriptFramedAndAnswersItsOutput(t *testing.T) {
 	var got sandbox.ExecRequest
 	sb := execOnly{exec: func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 		got = req
-		script, f, ok := sandbox.Unwrap(req.Command)
+		script, f, ok := sandboxtest.Unwrap(req.Command)
 		if !ok || script != "echo hi" {
 			t.Fatalf("Exec got %q; want echo hi wrapped", req.Command)
 		}
-		res := f.Framed(sandbox.ExecResult{Stdout: "hi\n", ExitCode: 5})
+		res := sandboxtest.Framed(f, sandbox.ExecResult{Stdout: "hi\n", ExitCode: 5})
 		res.Stdout = "banner" + res.Stdout + "trap"
 		return res, nil
 	}}

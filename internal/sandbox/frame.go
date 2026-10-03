@@ -40,52 +40,90 @@ type Frame struct{ begin, end string }
 // frameNonceDigits is the length of a frame's nonce in hex: 64 bits.
 const frameNonceDigits = 16
 
-// frameLabel is what NewFrame accepts as a label, so Unwrap can read one back
-// out of a command unambiguously.
+// frameNonceTrusted is how many of the nonce's digits a stream's cut tail has
+// to carry before Cut takes it for the end line rather than for what the
+// script printed: 32 bits' worth, where one digit would be a coincidence any
+// sixteenth of the time output ends in the end line's constant part.
+const frameNonceTrusted = 8
+
+// frameLabel is what NewFrame and FrameOf accept as a label, so a command's
+// frame can be read back out of it unambiguously.
 var frameLabel = regexp.MustCompile(`^[a-z0-9]+$`)
+
+// frameNonce is a nonce as NewFrame writes one.
+var frameNonce = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // NewFrame is a frame for one run of a script: "map-<label>-begin-<nonce>"
 // and "map-<label>-end-<nonce>", the nonce 64 bits from crypto/rand. The
 // label names the script in what the sandbox printed, for whoever reads it,
 // and must be lowercase letters and digits.
 func NewFrame(label string) Frame {
+	var nonce [frameNonceDigits / 2]byte
+	_, _ = rand.Read(nonce[:])
+	return FrameOf(label, hex.EncodeToString(nonce[:]))
+}
+
+// FrameOf is the frame a label and a nonce name — NewFrame's, rebuilt from
+// what a framed command spells, for a fake sandbox to answer it
+// (sandboxtest.Unwrap). It panics on a label NewFrame would refuse, or a
+// nonce that is not 16 lowercase hex digits.
+func FrameOf(label, nonce string) Frame {
 	if !frameLabel.MatchString(label) {
 		panic(fmt.Sprintf("sandbox: frame label %q is not lowercase letters and digits", label))
 	}
-	var nonce [frameNonceDigits / 2]byte
-	_, _ = rand.Read(nonce[:])
-	return frameOf(label, hex.EncodeToString(nonce[:]))
+	if !frameNonce.MatchString(nonce) {
+		panic(fmt.Sprintf("sandbox: frame nonce %q is not %d lowercase hex digits", nonce, frameNonceDigits))
+	}
+	return Frame{begin: "map-" + label + "-begin-" + nonce, end: "map-" + label + "-end-" + nonce}
 }
 
-func frameOf(label, nonce string) Frame {
-	return Frame{begin: "map-" + label + "-begin-" + nonce, end: "map-" + label + "-end-" + nonce}
+// Lines is the frame's begin and end lines as a stream carries them, each
+// with the newline the script prints before it and the one after.
+func (f Frame) Lines() (begin, end string) {
+	return "\n" + f.begin + "\n", "\n" + f.end + "\n"
 }
 
 // Open is what a framed script begins with: close_frame, which prints the end
 // line on both streams and exits with its argument — the one way the script
-// may exit — and then the begin line on both. Each line is printed after a
-// newline of its own, so it is a line however what came before it ended. It
-// is POSIX shell, so a script `sh -c` runs can open with it too. A script
-// that cannot route each of its exits through close_frame takes Wrap instead.
+// may exit — then `set +e`, and then the begin line on both. Each line is
+// printed after a newline of its own, so it is a line however what came before
+// it ended. It is POSIX shell, so a script `sh -c` runs can open with it too.
+//
+// The script inherits the shell options an image's startup set, and errexit
+// among them would end it at the first command that fails — rg finding no
+// match — before it reached close_frame, so the frame would never close. A
+// script that routes every exit through close_frame itself is written for the
+// shell's defaults, so Open turns errexit off. A script that cannot route each
+// of its exits through close_frame takes Wrap instead.
 func (f Frame) Open() string {
 	return fmt.Sprintf(`close_frame() { printf '\n%%s\n' '%[2]s'; printf '\n%%s\n' '%[2]s' >&2; exit "$1"; }
+set +e
 printf '\n%%s\n' '%[1]s'; printf '\n%%s\n' '%[1]s' >&2
 `, f.begin, f.end)
 }
 
 // wrapClose is what Wrap puts after the script: the subshell's end, and the
 // frame closed with the status the script left.
-const wrapClose = "\n)\nclose_frame \"$?\"\n"
+const wrapClose = "\n) || close_frame \"$?\"\nclose_frame 0\n"
 
 // Wrap frames a whole script: Open, then the script in a subshell, then
 // close_frame with the status the subshell left — so every way the script
-// exits, an `exit` from inside one of its functions included, still closes
-// the frame, and the exec exits as the script did. The subshell inherits the
-// positional parameters, stdin and the functions and variables the shell has,
-// and not its traps, so an EXIT trap an image's startup file set runs once,
-// after the end line, as the outer shell exits. The script is parsed whole
-// before it runs, as a subshell is, so it must not turn on a shell option that
-// changes how bash parses — extglob — and use it in the same script.
+// exits, an `exit` from inside one of its functions included, and an `exec`,
+// which replaces the subshell alone, still closes the frame, and the exec
+// exits as the script did. The subshell inherits the positional parameters,
+// stdin and the functions and variables the shell has, and not its traps, so
+// an EXIT trap an image's startup file set runs once, after the end line, as
+// the outer shell exits.
+//
+// It inherits the shell's options as well, errexit among them where the
+// startup set it. Open turns errexit off, and Wrap does not lean on that: the
+// subshell is the left side of `||`, where bash and POSIX sh alike ignore
+// errexit — for the subshell's own status and for every command inside it —
+// so a script that fails a command runs on as written, and one that fails
+// still reaches close_frame, whatever an image does to `set`. The script is
+// parsed whole before it runs, as a subshell is, so it must not turn on a
+// shell option that changes how bash parses — extglob — and use it in the
+// same script.
 func (f Frame) Wrap(script string) string {
 	return f.Open() + "(\n" + script + wrapClose
 }
@@ -109,28 +147,71 @@ func (f Frame) Wrap(script string) string {
 // what there is, less any start of the end line the cap left at its tail. One
 // the cap cut only after its end line — an EXIT trap's flood — is whole, and
 // not short; so is one it cut inside the end line, where what it left of it
-// reaches into the nonce: the script prints the end line after all else it
-// prints there, and a tail that carries the nonce is that line's, which
-// nothing the script prints holds but by chance. A tail of the end line's
-// constant part alone — "\n", or "\nmap-search-e" — could be the script's
-// own, so a stream cut there is short. A stream with no begin line, or a whole
-// one with no end line after it, is not one the script printed to its end:
-// "", false, false.
+// carries at least 8 of the nonce's 16 digits: the script prints the end line
+// after all else it prints there, and a tail that carries that much of the
+// nonce is that line's, which nothing the script prints holds but by a 2⁻³²
+// chance. A shorter tail — "\n", the constant "\nmap-<label>-end-", or that
+// and a digit or seven — could be the script's own, so a stream cut there is
+// short. A stream with no begin line, or a whole one with no end line after
+// it, is not one the script printed to its end: "", false, false.
 func (f Frame) Cut(s string, truncated bool) (text string, framed, short bool) {
-	return cutFrame(f, s, truncated)
+	return cutFrame(f, s, truncated, 0)
 }
 
 // CutBytes is Cut over bytes, for a stream that is a file's bytes, which it
 // slices rather than copies.
 func (f Frame) CutBytes(b []byte, truncated bool) (text []byte, framed, short bool) {
-	return cutFrame(f, b, truncated)
+	return cutFrame(f, b, truncated, 0)
 }
 
-func cutFrame[T string | []byte](f Frame, s T, truncated bool) (T, bool, bool) {
+// CutBytesWithin is CutBytes for a stream whose output outside the frame is
+// expected within room bytes on each side, and whose bytes between the lines
+// can be tens of megabytes — a file read's, whose buffer keeps that room
+// beside the file. The begin line is looked for in the stream's first room
+// bytes and the end line in its last room bytes, so the file between them is
+// not scanned for either: the last begin line there, and the first end line
+// there. Only a stream with neither there — a startup that printed more than
+// room before the frame, or a trap more after it — is searched whole, as
+// CutBytes searches it. Beyond reading 50 MB in a few milliseconds rather than
+// tens of them, it reads a file that holds the frame's own lines by chance,
+// which CutBytes would cut at them, as the file it is.
+func (f Frame) CutBytesWithin(b []byte, truncated bool, room int) (text []byte, framed, short bool) {
+	return cutFrame(f, b, truncated, room)
+}
+
+// CutInBegin reports whether s ends partway through the frame's begin line —
+// a stream that lost its tail while the begin line was on its way, which
+// carries none of the script's output and no sign that anything else ended it.
+// A stream ending in a newline is one, the begin line starting with its own;
+// one ending in the whole begin line is not.
+func (f Frame) CutInBegin(s string) bool {
+	begin, _ := f.Lines()
+	if strings.HasSuffix(s, begin) {
+		return false
+	}
+	for k := min(len(begin)-1, len(s)); k > 0; k-- {
+		if strings.HasSuffix(s, begin[:k]) {
+			return true
+		}
+	}
+	return false
+}
+
+// cutFrame is Cut, with room > 0 bounding where the lines are looked for
+// first (CutBytesWithin).
+func cutFrame[T string | []byte](f Frame, s T, truncated bool, room int) (T, bool, bool) {
 	var none T
-	begin := "\n" + f.begin + "\n"
+	begin, end := f.Lines()
+	head := len(s)
+	if room > 0 {
+		head = min(len(s), room+len(begin))
+	}
+	i := lastIndex(s[:head], begin)
+	if i < 0 && head < len(s) {
+		i = lastIndex(s, begin)
+	}
 	var rest T
-	switch i := lastIndex(s, begin); {
+	switch {
 	case i >= 0:
 		rest = s[i+len(begin):]
 	case hasPrefix(s, begin[1:]):
@@ -139,8 +220,16 @@ func cutFrame[T string | []byte](f Frame, s T, truncated bool) (T, bool, bool) {
 	default:
 		return none, false, false
 	}
-	end := "\n" + f.end + "\n"
-	if j := index(rest, end); j >= 0 {
+	j := -1
+	if from := len(rest) - room - len(end); room > 0 && from > 0 {
+		if k := index(rest[from:], end); k >= 0 {
+			j = from + k
+		}
+	}
+	if j < 0 {
+		j = index(rest, end)
+	}
+	if j >= 0 {
 		return rest[:j], true, false
 	}
 	if !truncated {
@@ -149,7 +238,7 @@ func cutFrame[T string | []byte](f Frame, s T, truncated bool) (T, bool, bool) {
 	constant := len(end) - frameNonceDigits - len("\n")
 	for k := min(len(end)-1, len(rest)); k > 0; k-- {
 		if string(rest[len(rest)-k:]) == end[:k] {
-			return rest[:len(rest)-k], true, k <= constant
+			return rest[:len(rest)-k], true, k < constant+frameNonceTrusted
 		}
 	}
 	return rest, true, true
@@ -208,40 +297,4 @@ func ExecFramed(ctx context.Context, sb Sandbox, label string, req ExecRequest) 
 	}
 	res, framed := f.Unframe(res)
 	return res, framed, nil
-}
-
-// wrapped matches the head of a command Wrap made, for Unwrap: its end line,
-// whose label and nonce are the frame's.
-var wrapped = regexp.MustCompile(`^close_frame\(\) \{ printf '\\n%s\\n' 'map-([a-z0-9]+)-end-([0-9a-f]{16})'; `)
-
-// Unwrap undoes Wrap: the script a framed command carries, and its frame. It
-// is for a fake sandbox, which answers the script as a sandbox would and
-// frames its answer (Framed) as the script's run would have.
-func Unwrap(command string) (script string, f Frame, ok bool) {
-	m := wrapped.FindStringSubmatch(command)
-	if m == nil {
-		return "", Frame{}, false
-	}
-	f = frameOf(m[1], m[2])
-	head := f.Open() + "(\n"
-	if !strings.HasPrefix(command, head) || !strings.HasSuffix(command, wrapClose) || len(command) < len(head)+len(wrapClose) {
-		return "", Frame{}, false
-	}
-	return command[len(head) : len(command)-len(wrapClose)], f, true
-}
-
-// Framed is res as a framed script's run prints it: each stream between the
-// frame's begin and end lines — but for a stream res marks truncated, which
-// the cap cut inside what the script printed, so it keeps its begin line and
-// loses its end line with the rest. Like Unwrap it is for fakes.
-func (f Frame) Framed(res ExecResult) ExecResult {
-	frame := func(s string, truncated bool) string {
-		s = "\n" + f.begin + "\n" + s
-		if !truncated {
-			s += "\n" + f.end + "\n"
-		}
-		return s
-	}
-	res.Stdout, res.Stderr = frame(res.Stdout, res.StdoutTruncated), frame(res.Stderr, res.StderrTruncated)
-	return res
 }

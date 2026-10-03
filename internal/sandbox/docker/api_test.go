@@ -23,6 +23,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
 
 // fakeDaemon serves a scripted Docker API so the provider's error and race
@@ -107,11 +108,11 @@ func wrapperCommand(cmd []string) string {
 // words after.
 func framedOutput(t *testing.T, cmd []string, stdout, stderr string) []byte {
 	t.Helper()
-	_, f, ok := sandbox.Unwrap(wrapperCommand(cmd))
+	_, f, ok := sandboxtest.Unwrap(wrapperCommand(cmd))
 	if !ok {
 		t.Fatalf("exec %q is not a framed script", wrapperCommand(cmd))
 	}
-	res := f.Framed(sandbox.ExecResult{Stdout: stdout, Stderr: stderr})
+	res := sandboxtest.Framed(f, sandbox.ExecResult{Stdout: stdout, Stderr: stderr})
 	return append(frame(streamStdout, "welcome to the image "+res.Stdout+"exit banner "),
 		frame(streamStderr, "stderr: banner\n"+res.Stderr+"exit stderr ")...)
 }

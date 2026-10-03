@@ -24,6 +24,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -72,7 +73,7 @@ func (f *fakeSandbox) ID() string { return "fake" }
 // recorded, hooked and answered bare — and frames the answer as the script's
 // run would have printed it, unless unframed says the frame never arrived.
 func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	script, frame, framed := sandbox.Unwrap(req.Command)
+	script, frame, framed := sandboxtest.Unwrap(req.Command)
 	if !framed {
 		return f.exec(ctx, req)
 	}
@@ -81,7 +82,7 @@ func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbo
 	if err != nil || f.unframed {
 		return res, err
 	}
-	return frame.Framed(res), nil
+	return sandboxtest.Framed(frame, res), nil
 }
 
 func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
