@@ -256,9 +256,11 @@ var openRipgrep = ripgrep.Open
 // passes its input through untouched, and exits 3 when there is none — rg
 // printed nothing — so the script can tell an exit 2 whose every line the
 // offset cut away from one that printed nothing at all. It reads the first
-// character itself, which bash's read -N takes off a pipe a byte at a time,
-// never past it.
-const pagerReader = `{ IFS= read -r -N 1 c || exit 3; printf '%s' "$c"; exec cat; }`
+// character itself, which bash's read -n takes off a pipe a byte at a time,
+// never past it, and writes it back: a newline, which read -n consumes and
+// stores as nothing, as a newline. (read -n is bash 2's; the -N that would
+// store the newline is bash 4.1's, past what the image contract asks.)
+const pagerReader = `{ IFS= read -r -n 1 c || exit 3; if [ -n "$c" ]; then printf '%s' "$c"; else echo; fi; exec cat; }`
 
 // script renders one search: rg, checked first, then run over the query's
 // arguments and paged.
