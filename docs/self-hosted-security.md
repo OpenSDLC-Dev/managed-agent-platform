@@ -174,13 +174,25 @@ error, and the memory sync hashes a store with GNU `sha256sum -z`, so on
 BusyBox its listing of a store that holds files fails. What the image's
 environment sets for a shell — an `ENV BASH_ENV` startup file, exported
 functions, `SHELLOPTS` — applies to every script that runs in the sandbox,
-the model's commands and the platform's own alike. `glob` and `grep` read
-their answers from between a begin and an end line their own scripts print,
-so what a startup file prints around them is not taken for one. Whether the
-platform's own scripts should run without the startup file at all — the
-others, whose output it can still corrupt, and these two, whose behaviour it
-can still change — is
-[#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860).
+the model's commands and the platform's own alike, so an image whose `PATH`
+or options come from that file works for both. What the startup file
+*prints* does not corrupt the platform's scripts: each one whose output the
+platform reads — `glob` and `grep`, the outputs harvest's listing, the memory
+sync's tree hash, the package-install probe, Docker's refused-write reasons
+and, on Kubernetes, every file read, an exec's exit record and liveness
+probe, a refused write's reason and the checkpoint's root probe — prints its
+answer between a begin and an end line carrying a nonce of its own, and only
+what lies between them is read: a banner on either stream, ending its line or
+not, and what an `EXIT` trap prints after the script fall outside, and the
+scripts name every path whole, so a `cd` in the file moves none of them
+([#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860)).
+What the file *changes* still applies — a function an image exports under
+the name of a command the scripts call answers for that command — and one
+channel prints inside the frame, where no line can keep it out: a library an
+`ENV LD_PRELOAD` or `/etc/ld.so.preload` names, printing from its constructor
+in every process it loads into, the scripts' children included. The image
+must do neither: a script either reaches can fail, and on Kubernetes a file
+read takes a child's banner in with the file's bytes.
 The **Kubernetes** backend needs more,
 and needs it hard: `setsid` for its exec wrapper, `tee`/`wc` for the write
 path's delivered-byte count, a `stat` accepting `-c` (GNU or BusyBox), on which
