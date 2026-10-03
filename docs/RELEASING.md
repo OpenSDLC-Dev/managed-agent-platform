@@ -141,11 +141,12 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    still in review.
 3. `make release-images PUSH=1 VERSION=X.Y.Z` — one server build
    (linux/amd64 + arm64; the build stage cross-compiles rather than
-   emulating the Go toolchain, after fetching the pinned static ripgrep the
-   executor and worker embed for the `grep` tool — `go run
-   ./tools/ripgrepfetch`, which `make ripgrep` runs too, checking each
-   archive's sha256 against `internal/ripgrep/assets/manifest.json`, so a
-   release cannot build from anything else) pushed as
+   emulating the Go toolchain, after `go run ./tools/ripgrepfetch` — what
+   `make ripgrep` runs — has put the pinned static ripgrep the executor and
+   worker embed for the `grep` tool in place: it checks each archive the
+   checkout carried against its sha256 in
+   `internal/ripgrep/assets/manifest.json` and fetches any that is missing
+   or does not match, so a release cannot build from anything else) pushed as
    `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
    (same digest, three names — the coordinates the Helm chart composes) plus
    `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag. The

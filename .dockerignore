@@ -36,10 +36,3 @@ coverage.out
 /executor
 /gate
 /worker
-
-# The ripgrep archives `make ripgrep` fetched into this checkout. The build
-# stage fetches and checks its own (Dockerfile); a copy from the context would
-# be carried in by `COPY . .` on top of them, unchecked until run time. Only
-# the manifest that pins them goes in, as in .gitignore.
-internal/ripgrep/assets/*
-!internal/ripgrep/assets/manifest.json

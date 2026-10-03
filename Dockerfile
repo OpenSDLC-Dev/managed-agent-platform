@@ -6,26 +6,20 @@
 # Helm chart's Deployments invoke, so this one image serves compose and Helm both.
 #
 # syntax=docker/dockerfile:1
-# The build stage is pinned to the build host's own platform and Go
-# cross-compiles to the target — a multi-arch `buildx --platform` run must
-# not execute the whole Go toolchain under QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
+# The build stages (source, and the two built from it) are pinned to the build
+# host's own platform and Go cross-compiles to the target — a multi-arch
+# `buildx --platform` run must not execute the whole Go toolchain under QEMU
+# emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS source
 WORKDIR /src
 # Download modules first so the layer caches across source-only changes.
 COPY go.mod go.sum ./
 RUN go mod download
-# The pinned static ripgrep the executor and worker embed for the grep tool
-# (internal/ripgrep; `make ripgrep` is the same command), downloaded here and
-# checked against the manifest's sha256. Fetched before the rest of the source
-# arrives, so the layer caches until the manifest or the fetcher changes. The
-# build context carries no archives of its own (.dockerignore keeps a
-# checkout's fetched ones out), so `COPY . .` below cannot land a copy over
-# the ones checked here.
-COPY internal/ripgrep internal/ripgrep
-COPY tools/ripgrepfetch tools/ripgrepfetch
-RUN go run ./tools/ripgrepfetch
 COPY . .
-# Build every binary into /out (named controlplane, brain, executor, worker).
+
+# The egress gate's binary is built apart from the server binaries: it embeds
+# no ripgrep, so `--target gate` neither needs the archives nor fetches them.
+FROM source AS gate-build
 # VERSION is stamped into internal/version.Version by the release pipeline
 # (docs/RELEASING.md); an unarged build reports "dev".
 ARG VERSION=dev
@@ -33,7 +27,25 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
-    -o /out/ ./cmd/...
+    -o /out/ ./cmd/gate
+
+FROM source AS build
+# The pinned static ripgrep the executor and worker embed for the grep tool
+# (internal/ripgrep; `make ripgrep` is the same command). It runs after
+# `COPY . .`, over the archives the build context carried: each is checked
+# against the manifest's sha256 and fetched again if it does not match, any
+# the manifest no longer names is removed, and only what is missing is
+# downloaded. So a checkout that ran `make ripgrep` builds without reaching
+# GitHub, and nothing the context carried is embedded unchecked.
+RUN go run ./tools/ripgrepfetch
+# Build the four server binaries into /out (named controlplane, brain,
+# executor, worker).
+ARG VERSION=dev
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
+    -o /out/ ./cmd/controlplane ./cmd/brain ./cmd/executor ./cmd/worker
 
 # The per-session egress gate is a separate image (built with --target gate): it
 # needs iptables (to install owner-match rules) and a dedicated UID it drops to,
@@ -47,7 +59,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 65532 gate \
     && useradd -u 65532 -g 65532 -M -s /usr/sbin/nologin gate
-COPY --from=build /out/gate /gate
+COPY --from=gate-build /out/gate /gate
 HEALTHCHECK --interval=2s --timeout=3s --start-period=2s --retries=15 \
     CMD ["/gate", "-healthcheck"]
 ENTRYPOINT ["/gate"]
@@ -58,8 +70,8 @@ FROM debian:stable-slim AS server
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-# Copy only the four server binaries — the gate binary has its own image (above)
-# and does not belong in the server image. NOTICE says what third-party
+# The four server binaries — the gate binary has its own image (above) and
+# does not belong in the server image. NOTICE says what third-party
 # software the executor and worker embed (the ripgrep their grep tool runs),
 # THIRD_PARTY_LICENSES carries its license texts, and LICENSE is the
 # project's own, which NOTICE refers to.
