@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	gopath "path"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +32,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
 
 // These unit tests cover the branches a real cluster cannot easily stage —
@@ -900,23 +900,15 @@ func teeRecordingEnv(t *testing.T, record string) []string {
 	return env
 }
 
-// bannerHook is an image's `ENV BASH_ENV` file at its most disruptive, as the
-// hooked image the live tests run carries it (internal/sandbox/hookedtest): it
-// prints on both streams without ending either line, leaves the directory the
-// shell started in, and sets an EXIT trap that prints on both after whatever
-// the shell ran.
-const bannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2; cd /; ` +
-	`trap "printf 'exit banner '; printf 'exit stderr ' >&2" EXIT` + "\n"
-
 // hookedEnv is env (nil inheriting this process's) with BASH_ENV naming a file
-// that holds bannerHook, as the hooked image's sets it.
+// that holds sandboxtest.BannerHook, as the hooked image's sets it.
 func hookedEnv(t *testing.T, env []string) []string {
 	t.Helper()
 	if env == nil {
 		env = os.Environ()
 	}
 	hook := t.TempDir() + "/hook.sh"
-	if err := os.WriteFile(hook, []byte(bannerHook), 0o644); err != nil {
+	if err := os.WriteFile(hook, []byte(sandboxtest.BannerHook), 0o644); err != nil {
 		t.Fatalf("stage the hook: %v", err)
 	}
 	return append(append([]string{}, env...), "BASH_ENV="+hook)
@@ -931,7 +923,7 @@ func hookedEnv(t *testing.T, env []string) []string {
 // is observable from the host's shell, on any machine, in milliseconds.
 //
 // This runs the exec ReadFile makes (readArgv) through the host's /bin/bash
-// rather than the sandbox image, with bannerHook as its BASH_ENV file, as the
+// rather than the sandbox image, with sandboxtest.BannerHook as its BASH_ENV file, as the
 // write-side test does. It pins what the script does with its arguments; that
 // the image carries a userland able to run it is the live contract test's job.
 func TestReadScriptFramesWhatItSent(t *testing.T) {
@@ -1073,9 +1065,8 @@ func TestReadScriptFramesWhatItSent(t *testing.T) {
 // beside the cap (readRoom).
 func TestReadStdoutRequiresTheFrame(t *testing.T) {
 	f := sandbox.NewFrame("read")
-	open := regexp.MustCompile(`'(map-read-begin-[0-9a-f]{16})'`).FindStringSubmatch(f.Open())[1]
-	closing := regexp.MustCompile(`'(map-read-end-[0-9a-f]{16})'`).FindStringSubmatch(f.Open())[1]
-	begin, end := []byte("\n"+open+"\n"), []byte("\n"+closing+"\n")
+	b, e := f.Lines()
+	begin, end := []byte(b), []byte(e)
 	// The buffer ReadFile hands the exec, filled the way the stream fills it.
 	recv := func(chunks ...[]byte) *cappedBuffer {
 		out := &cappedBuffer{limit: sandbox.MaxFileBytes + readRoom}
@@ -1191,6 +1182,17 @@ func TestReadStdoutRequiresTheFrame(t *testing.T) {
 		}
 	})
 
+	// A file that holds this read's own end line, more than the room away from
+	// either end of the stream, is read whole: the lines are looked for near
+	// the stream's ends (readRoom), where the frame puts them.
+	t.Run("ContentHoldingThisReadsEndLine", func(t *testing.T) {
+		want := append(append(append([]byte{}, body(readRoom+10)...), end...), body(readRoom+10)...)
+		got, err := read(recv([]byte("welcome to the image "), begin, want, end, []byte("exit banner ")))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("readStdout = %d bytes, %v; want the %d-byte file whole", len(got), err, len(want))
+		}
+	})
+
 	// The returned slice must not lend its spare capacity back over the end line.
 	t.Run("ReturnedSliceIsClipped", func(t *testing.T) {
 		got, err := read(recv(begin, body(4), end))
@@ -1201,6 +1203,29 @@ func TestReadStdoutRequiresTheFrame(t *testing.T) {
 			t.Errorf("cap %d, len %d: appending would write over the end line", cap(got), len(got))
 		}
 	})
+}
+
+// BenchmarkReadStdout reads a file at the read cap and one at the harvest's
+// 50 MB cap out of their buffers, banner and trap around them: the frame's
+// lines are looked for within readRoom of the stream's ends, so the cost does
+// not grow with the file (measured on an M-series laptop: 6.3 ms and 69 ms
+// when the whole buffer was searched, about 2 ms for both since).
+func BenchmarkReadStdout(b *testing.B) {
+	for _, size := range []int{sandbox.MaxFileBytes, 50 << 20} {
+		f := sandbox.NewFrame("read")
+		begin, end := f.Lines()
+		out := &cappedBuffer{limit: size + readRoom}
+		_, _ = out.Write([]byte("welcome to the image " + begin))
+		_, _ = out.Write(bytes.Repeat([]byte("abcdefghij\n"), size/11+1)[:size])
+		_, _ = out.Write([]byte(end + "exit banner "))
+		b.Run(strconv.Itoa(size>>20)+"MiB", func(b *testing.B) {
+			for b.Loop() {
+				if _, err := readStdout("/f", f, int64(size), out); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
 
 // classifier is a pod handle with Exec's default slop and nothing else: all
@@ -1856,7 +1881,7 @@ func TestExitScriptReportsAndClearsTheWatchdogsMark(t *testing.T) {
 // the frame its banner was read as the exit record's first field, which failed
 // every exec on the image, and as the liveness verdict, which read every
 // command as dead; and the refused write's reason carried it. Each runs here
-// through the host's shell with bannerHook as its BASH_ENV file, framed as the
+// through the host's shell with sandboxtest.BannerHook as its BASH_ENV file, framed as the
 // provider frames it; the live hooked test (internal/sandbox/hookedtest) runs
 // them in a pod.
 func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
@@ -1956,14 +1981,18 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 
 // readExitRecord reads what reached the output of exitScript's frame: a record
 // whose end line was lost reads as far as it got, as a cut stream does; a
-// stream with no begin line and nothing else is a lost answer — no record, the
-// kill's code, as an empty stream always was — and one with something else and
-// no begin line is no record to parse.
+// stream with no begin line is a lost answer — no record, the kill's code, as
+// an empty stream always was — when nothing else reached it, or when it ends
+// partway through the begin line, after a banner or not; and one with
+// something else and no begin line is no record to parse.
 func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 	f := sandbox.NewFrame("exit")
-	open := regexp.MustCompile(`'(map-exit-begin-[0-9a-f]{16})'`).FindStringSubmatch(f.Open())[1]
-	closing := regexp.MustCompile(`'(map-exit-end-[0-9a-f]{16})'`).FindStringSubmatch(f.Open())[1]
-	begin, end := "\n"+open+"\n", "\n"+closing+"\n"
+	begin, end := f.Lines()
+	// Another frame's begin line: this one's but for the nonce's first digit.
+	other := "\nmap-exit-begin-1"
+	if strings.HasPrefix(begin, other) {
+		other = "\nmap-exit-begin-0"
+	}
 	for _, c := range []struct {
 		name, out string
 		code      int
@@ -1977,7 +2006,11 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 		{"the record's tail lost", begin + " 5 1.0", 5, false, 0, false},
 		{"nothing after the begin line", begin, sigkillExit, false, 0, false},
 		{"nothing at all", "", sigkillExit, false, 0, false},
+		{"cut inside the begin line", begin[:9], sigkillExit, false, 0, false},
+		{"cut inside the begin line, after a banner", "welcome 0 1.0 2.0" + begin[:len(begin)-1], sigkillExit, false, 0, false},
+		{"cut on the begin line's own newline, after a banner", "welcome 0 1.0 2.0" + begin[:1], sigkillExit, false, 0, false},
 		{"something, but no begin line", "welcome 0 1.0 2.0", 0, false, 0, true},
+		{"something, and another frame's begin line cut short", "welcome 0 1.0 2.0" + other, 0, false, 0, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code, killed, ran, err := readExitRecord(f, c.out)
@@ -1993,9 +2026,7 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 // which the probe's callers read as still running.
 func TestAliveVerdictNeedsTheWholeFrame(t *testing.T) {
 	f := sandbox.NewFrame("alive")
-	open := regexp.MustCompile(`'(map-alive-begin-[0-9a-f]{16})'`).FindStringSubmatch(f.Open())[1]
-	closing := regexp.MustCompile(`'(map-alive-end-[0-9a-f]{16})'`).FindStringSubmatch(f.Open())[1]
-	begin, end := "\n"+open+"\n", "\n"+closing+"\n"
+	begin, end := f.Lines()
 	for _, c := range []struct {
 		out       string
 		truncated bool

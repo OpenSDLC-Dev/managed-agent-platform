@@ -135,15 +135,15 @@ if [ -z "$p" ] || kill -0 "$p" 2>/dev/null; then echo A; else echo D; fi
 // The mark is printed *first* because it is the most load-bearing and what
 // this stream can lose is its tail: client-go stops copying stdout at its
 // first error, so what a lost stream drops is always a suffix — the frame's
-// end line first (readExit, which reads what arrived after the begin line). Losing the code leaves a
-// synthesized SIGKILL and a mark that still says the deadline caused it; losing
-// the mark instead would put a real timeout back on the probe race #95 was filed
-// for. Reading the mark here rather than in the wrapper is what lets it survive
-// the wrapper's own sabotage: a command that kills its parent before the exit
-// code is recorded leaves the mark, and the timeout still shows. The run time
-// rides last, the cheapest to lose: the probes still stand without it, and a
-// reading cut short is only ever a smaller number, so a lost suffix can drop the
-// record but never lengthen it.
+// end line first (readExitRecord reads what arrived after the begin line).
+// Losing the code leaves a synthesized SIGKILL and a mark that still says the
+// deadline caused it; losing the mark instead would put a real timeout back on
+// the probe race #95 was filed for. Reading the mark here rather than in the
+// wrapper is what lets it survive the wrapper's own sabotage: a command that
+// kills its parent before the exit code is recorded leaves the mark, and the
+// timeout still shows. The run time rides last, the cheapest to lose: the
+// probes still stand without it, and a reading cut short is only ever a
+// smaller number, so a lost suffix can drop the record but never lengthen it.
 //
 // `rm -rf` on the mark, because the tenant chooses what type of thing sits at
 // that path; `rm -f` would leave a directory or a planted FIFO behind forever.

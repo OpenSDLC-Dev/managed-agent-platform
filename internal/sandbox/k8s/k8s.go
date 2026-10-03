@@ -1341,13 +1341,15 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Dura
 // banner made every exec on that image fail here. What a lost stream drops is
 // a suffix (exitScript), so an answer whose end line never arrived is read as
 // far as it got, as a stream the cap cut is, and parseExit makes of it what it
-// makes of any record cut short. A stream with no begin line at all is the
-// script's whole answer lost when nothing else reached it either — read as no
-// record, as an empty stream always was — and otherwise output that is not the
-// script's, which is no record to parse: an error, as an unparseable line is.
+// makes of any record cut short. A stream with no begin line is the same loss
+// one step earlier — no record, as an empty stream always was — when nothing
+// reached it, or when it ends partway through the begin line, which was on its
+// way when the stream was lost (Frame.CutInBegin). Anything else with no begin
+// line is output that is not the script's, which is no record to parse: an
+// error, as an unparseable line is.
 func readExitRecord(f sandbox.Frame, out string) (int, bool, time.Duration, error) {
 	line, framed, _ := f.Cut(out, true)
-	if !framed && strings.TrimSpace(out) != "" {
+	if !framed && strings.TrimSpace(out) != "" && !f.CutInBegin(out) {
 		return 0, false, 0, errors.New("k8s: the exit record did not reach the output: no begin line")
 	}
 	return parseExit(line)
@@ -1480,8 +1482,10 @@ func readArgv(f sandbox.Frame, path string, maxBytes int64) []string {
 }
 
 // readStdout turns what readScript sent into the file's bytes — what lies
-// between the frame's lines (sandbox.Frame.CutBytes), so an image's startup
-// output around them is no part of the file (#860) — and is the only place a
+// between the frame's lines, looked for within readRoom of each end of the
+// stream (sandbox.Frame.CutBytesWithin), so an image's startup output around
+// them is no part of the file (#860) and a large file is not scanned for
+// them — and is the only place a
 // short read can be caught. Nothing else in the path can notice one: client-go
 // hands a failed stdout copy to runtime.HandleError and never to the caller,
 // so a stream that ended early is byte-for-byte a shorter file (issue #105).
@@ -1499,7 +1503,7 @@ func readArgv(f sandbox.Frame, path string, maxBytes int64) []string {
 // ahead of the script, not to the file, and says so rather than guessing at a
 // size.
 func readStdout(path string, f sandbox.Frame, maxBytes int64, out *cappedBuffer) ([]byte, error) {
-	b, framed, short := f.CutBytes(out.Bytes(), out.truncated)
+	b, framed, short := f.CutBytesWithin(out.Bytes(), out.truncated, readRoom)
 	switch {
 	case !framed && out.truncated:
 		return nil, fmt.Errorf("k8s: read %s: the sandbox printed past the read's room before the file's bytes", path)
