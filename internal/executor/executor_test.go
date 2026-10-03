@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -132,7 +133,7 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 	// the in-memory tree (or a forged/truncated listing when a test sets one).
 	if req.Command == harvestListScript {
 		if f.execTruncated {
-			return sandbox.ExecResult{Stdout: f.execStdout, Truncated: true}, nil
+			return sandbox.ExecResult{Stdout: f.execStdout, StdoutTruncated: true}, nil
 		}
 		if f.execStdout != "" {
 			return sandbox.ExecResult{Stdout: f.execStdout}, nil
@@ -168,7 +169,7 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		if f.listExit != 0 {
 			return sandbox.ExecResult{ExitCode: f.listExit, Stderr: "find: './a': Permission denied\n"}, nil
 		}
-		return sandbox.ExecResult{Stdout: out.String(), Truncated: f.listTruncated}, nil
+		return sandbox.ExecResult{Stdout: out.String(), StdoutTruncated: f.listTruncated}, nil
 	}
 	if strings.Contains(req.Command, "sha256sum -z") {
 		// A listing whose shape the fake no longer recognizes must not fall
@@ -737,6 +738,71 @@ func TestToolLevelErrorIsAnsweredNotAbandoned(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.ToolExec); got != 0 {
 		t.Errorf("tool_exec live = %d, want 0", got)
+	}
+}
+
+// A sandbox tool call carrying a property its schema does not declare is
+// answered with a tool error naming it, and runs nothing (#827); a grep call
+// carrying the recorded reference's properties reaches the sandbox with them.
+// Both are the toolset Runner's — this pins that the executor's path is it.
+func TestToolInputPropertiesOnTheExecutorPath(t *testing.T) {
+	// The grep script frames all it prints between a begin line and an end
+	// line, which share a nonce, and reads only what lies between them; this
+	// rg finds nothing.
+	nonce := regexp.MustCompile(`map-search-begin-([0-9a-f]+)`)
+	sb := &fakeSandbox{execHook: func(req sandbox.ExecRequest) *sandbox.ExecResult {
+		if m := nonce.FindStringSubmatch(req.Command); m != nil {
+			return &sandbox.ExecResult{Stdout: "\nmap-search-begin-" + m[1] + "\n\nmap-search-end-" + m[1] + "\n", ExitCode: 1}
+		}
+		return nil
+	}}
+	h := newHarness(t, sb)
+	use := func(name string, input map[string]any) string {
+		b, _ := json.Marshal(map[string]any{"name": name, "input": input})
+		return string(b)
+	}
+	h.suspend(t,
+		use("write", map[string]any{"file_path": "out.txt", "content": "x", "mode": "0755"}),
+		use("grep", map[string]any{"pattern": "todo", "-i": true, "glob": "*.go", "include": "*.go"}),
+		use("grep", map[string]any{"pattern": "todo", "-i": true, "glob": "*.go", "output_mode": "content",
+			"-C": 2, "-A": 1, "head_limit": 5, "offset": 1}))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	type result struct {
+		IsError bool `json:"is_error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	for i, want := range []string{`write: unknown input property "mode"`, `grep: unknown input property "include"`, "no matches"} {
+		var body result
+		_ = json.Unmarshal(results[i].Body, &body)
+		if body.IsError != (i < 2) || len(body.Content) != 1 || !strings.HasPrefix(body.Content[0].Text, want) {
+			t.Errorf("result %d = %+v, want %q", i, body, want)
+		}
+	}
+	if _, ok := sb.files["/workspace/out.txt"]; ok {
+		t.Error("the refused write wrote its file")
+	}
+	var greps []string
+	for _, c := range sb.cmds {
+		if strings.Contains(c, "map-ripgrep-missing") {
+			greps = append(greps, c)
+		}
+	}
+	if len(greps) != 1 {
+		t.Fatalf("grep scripts run = %d, want only the accepted call's", len(greps))
+	}
+	for _, want := range []string{"'-n' '-C' '2' '-A' '1' '-i' '--glob=*.go' '--glob=!.anthropic-memory-store' '-e' 'todo' '--' '/workspace'", "head -n 6", "tail -n +2"} {
+		if !strings.Contains(greps[0], want) {
+			t.Errorf("grep script lacks %q", want)
+		}
 	}
 }
 

@@ -438,6 +438,7 @@ Layout order is by layer, as the repo is.
 | `executor/` | The platform-managed half of that protocol: pull work, run the built-in toolset in the session's sandbox, append the results the brain resumes on. Also the web and MCP work, which run in its own process for **both** environment kinds, and the outputs harvest, which only a `cloud` session enqueues — on either trigger, grading or idle — because a `self_hosted` sandbox has no file lane to snapshot, so its grading stays transcript-only and its deliverables never reach the Files API (`brain/grader.go`). |
 | `worker/` | The customer-hosted twin. It holds no database handle and reaches everything over the wire with its environment key — which is what makes "customer compute, zero inbound network access" the same code path as the executor's. |
 | `toolset/` | What the model is offered and how one call runs: the built-in `agent_toolset_20260401` (bash, read, write, edit, glob, grep), the `web_fetch`/`web_search` definitions and the `IsWebTool` predicate that routes them, the six delegation tools a coordinator session's threads are offered by role with the `IsDelegationTool` twin, and the `mcp_toolset` arm — validation, and resolving an entry's `default_config`/`configs[]` against a server's listing. Nothing here knows what a call means for the session; that is the executor's. |
+| `ripgrep/` | The static ripgrep the grep tool runs in the sandbox, written in the first time a sandbox greps: upstream's musl release archives for linux amd64 and arm64, pinned by URL and sha256 and embedded compressed. They are fetched (`make ripgrep`), never committed, and only a binary that can reach the toolset's `Runner` links them — the executor and the worker, darwin builds included. |
 | `sandbox/` | The "hands" boundary: a disposable per-session container, `docker/` and `k8s/` behind one interface with one contract suite (`sandboxtest/`), plus `shell/`, the persistent per-session bash built on the stateless primitives. |
 | `webtool/` | The `web_fetch` / `web_search` seam (`tavily/`, `jina/`). These run in the executor's process on both deployment modes — never in the sandbox, never on the worker, never through the egress gate. |
 | `mcp/` | The MCP client: a thin wrapper over the official go-sdk, whose types never reach the domain layer. Connections are per-work-item, so a crashed executor loses nothing a fresh one cannot rebuild. |
@@ -485,8 +486,9 @@ container — `pgtest`, `dockertest`, `sandboxtest`, `blobtest`, `gcstest`,
 skip, because a skipped contract test hollows out the coverage gate silently.
 They drive it through the `docker` CLI rather than its HTTP API, so the binary is
 a requirement of theirs too, and of the suites that use them — but not of a suite
-that reaches the daemon through the Go client, which is why `toolset` and
-`sandbox/shell` pass with no `docker` on PATH;
+that reaches the daemon through the Go client, which is why `sandbox/shell`
+passes with no `docker` on PATH (and `toolset` does not: its grep suite builds
+and starts containers the provider has no knob for);
 the rest serve an in-process fake (an httptest server, a fake gRPC endpoint, a
 fake OpenID provider) and need no daemon. And the ones gating a paid tier take
 consent from an environment variable, never from the presence of a configured
@@ -780,7 +782,10 @@ inside the source, so a bump moves one and not the other. Shape is syntax — pl
 files git tracks and which modules `go.mod` requires — and runs in the gate as the
 package's own test. Resolution runs in the gate too, but only at the version `go.mod`
 pins: `make verify` begins with `build`, so that module is guaranteed present while no
-other tag is, and requiring one would put the network in an offline gate. Both fail the
+other tag is, and requiring one would have the gate download a module nothing pins: the
+Go code and ripgrep it fetches are fixed by digest — go.sum's modules, the archives
+`make ripgrep` checks against their sha256 — beside the container images its suites
+pull by tag. Both fail the
 gate on any finding, and `make sdk-bump-report` prints what they find too, above its
 report. The report is the judgment rung, outside the gate — it resolves every anchor into
 a pinned module against that pin, whatever the citation's stamp, falsifies a line span's

@@ -3237,30 +3237,40 @@ func TestDemuxSplitsStreams(t *testing.T) {
 	raw := bytes.Join([][]byte{
 		frame(1, "out1"), frame(2, "err1"), frame(1, "out2"),
 	}, nil)
-	stdout, stderr, truncated, err := demux(bytes.NewReader(raw), 1024)
+	stdout, stderr, cut, err := demux(bytes.NewReader(raw), 1024)
 	if err != nil {
 		t.Fatalf("demux: %v", err)
 	}
-	if string(stdout) != "out1out2" || string(stderr) != "err1" || truncated {
-		t.Errorf("stdout=%q stderr=%q truncated=%v", stdout, stderr, truncated)
+	if string(stdout) != "out1out2" || string(stderr) != "err1" || cut.stdout || cut.stderr {
+		t.Errorf("stdout=%q stderr=%q cut=%+v", stdout, stderr, cut)
 	}
 }
 
 // Past the cap the payload is drained, not buffered — the command must be free
-// to finish, and later frames on the other stream must still arrive.
+// to finish, and later frames on the other stream must still arrive. Each
+// stream has a cap of its own, and the cut names the stream it cut.
 func TestDemuxCapsEachStreamAndKeepsReading(t *testing.T) {
 	raw := bytes.Join([][]byte{
 		frame(1, strings.Repeat("a", 10)), frame(1, strings.Repeat("b", 10)), frame(2, "kept"),
 	}, nil)
-	stdout, stderr, truncated, err := demux(bytes.NewReader(raw), 4)
+	stdout, stderr, cut, err := demux(bytes.NewReader(raw), 4)
 	if err != nil {
 		t.Fatalf("demux: %v", err)
 	}
-	if string(stdout) != "aaaa" || !truncated {
-		t.Errorf("stdout=%q truncated=%v", stdout, truncated)
+	if string(stdout) != "aaaa" || !cut.stdout {
+		t.Errorf("stdout=%q cut=%+v", stdout, cut)
 	}
-	if string(stderr) != "kept" {
-		t.Errorf("stderr=%q — capping stdout lost the other stream", stderr)
+	if string(stderr) != "kept" || cut.stderr {
+		t.Errorf("stderr=%q cut=%+v — capping stdout lost or cut the other stream", stderr, cut)
+	}
+
+	raw = bytes.Join([][]byte{frame(1, "out"), frame(2, strings.Repeat("e", 10))}, nil)
+	stdout, stderr, cut, err = demux(bytes.NewReader(raw), 4)
+	if err != nil {
+		t.Fatalf("demux: %v", err)
+	}
+	if string(stdout) != "out" || cut.stdout || string(stderr) != "eeee" || !cut.stderr {
+		t.Errorf("stdout=%q stderr=%q cut=%+v; want stderr alone cut", stdout, stderr, cut)
 	}
 }
 

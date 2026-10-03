@@ -183,3 +183,8 @@ func TempName() string {
 	_, _ = rand.Read(b[:])
 	return TempPrefix + hex.EncodeToString(b[:])
 }
+
+// TempNameBytes is how long every TempName is: the prefix and sixteen hex
+// digits, 27 bytes. A write's target directory must leave room for it under
+// Linux's PATH_MAX, which the toolset checks before it writes.
+const TempNameBytes = len(TempPrefix) + 16

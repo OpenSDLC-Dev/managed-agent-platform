@@ -21,7 +21,7 @@ deliberate divergences from the reference are in
 
 | Concern | Platform enforces (in code) | You (the operator) own |
 |---|---|---|
-| **Sandbox image** | Requires `/bin/bash` + a POSIX userland, and wants a `stat` accepting `-c`; pulls the image you name | Building and pinning a hardened, minimal image; keeping it patched |
+| **Sandbox image** | Requires `/bin/bash` + a POSIX userland — bash 4.0 or newer for the `bash` tool and `glob` — and wants a `stat` accepting `-c`; pulls the image you name | Building and pinning a hardened, minimal image; keeping it patched |
 | **Resource limits** | **By default** caps every sandbox at 2 CPUs (`SANDBOX_CPU_MILLIS`) and every **Docker** sandbox at 512 processes (`SANDBOX_PIDS_LIMIT`); an optional memory cap, plus an optional **Kubernetes-only** disk cap (`SANDBOX_EPHEMERAL_STORAGE_BYTES`, enforced by evicting the pod). The gap runs both ways: Kubernetes has no per-pod process limit to set, so `SANDBOX_PIDS_LIMIT` does nothing there, and whether a Docker daemon enforces a disk quota depends on its storage driver, so the disk cap does nothing there rather than sometimes-nothing | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit`; on Docker, bounding the disk at the host |
 | **Non-root execution** | Runs the image's default user, or the uid `SANDBOX_RUN_AS_USER` names | Shipping an image whose default user is unprivileged, and whose workdir that user can reach |
 | **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; AppArmor/SELinux profiles |
@@ -162,16 +162,44 @@ The sandbox image is **your** choice, not baked into the platform: the executor
 and worker launch whatever image `EXECUTOR_IMAGE` / `WORKER_IMAGE` names, defaulting
 to `debian:stable-slim` for local development (`cmd/executor/main.go`,
 `cmd/worker/main.go`). The contract the platform imposes is a POSIX userland with
-`/bin/bash`. The **Kubernetes** backend needs more, and needs it hard: `setsid`
-for its exec wrapper, `tee`/`wc` for the write path's delivered-byte count, a
-`stat` accepting `-c` (GNU or BusyBox), on which every file **read** exits, and
+`/bin/bash`, and that bash **4.0 or newer** for two tools, which use what 4.0
+added: the `bash` tool's shell carries its state from one call to the next
+with an associative array (`declare -A`), so on bash 3.2 every call after the
+first fails, and `glob` expands its pattern with `globstar`, which 3.2 does
+not have — there every `glob` is a tool error naming the bash it needs.
+`grep`'s scripts need only 3.2 (below). Two of the platform's scripts want GNU
+coreutils, which a BusyBox userland does not provide, and neither want is new:
+`glob` stamps each match with GNU `stat --printf`, so on BusyBox it is a tool
+error, and the memory sync hashes a store with GNU `sha256sum -z`, so on
+BusyBox its listing of a store that holds files fails. What the image's
+environment sets for a shell — an `ENV BASH_ENV` startup file, exported
+functions, `SHELLOPTS` — applies to every script that runs in the sandbox,
+the model's commands and the platform's own alike. `glob` and `grep` read
+their answers from between a begin and an end line their own scripts print,
+so what a startup file prints around them is not taken for one. Whether the
+platform's own scripts should run without the startup file at all — the
+others, whose output it can still corrupt, and these two, whose behaviour it
+can still change — is
+[#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860).
+The **Kubernetes** backend needs more,
+and needs it hard: `setsid` for its exec wrapper, `tee`/`wc` for the write
+path's delivered-byte count, a `stat` accepting `-c` (GNU or BusyBox), on which
+every file **read** exits, and
 `tar`, which it extracts a bulk write's archive with inside the pod — an image
 without one loses skill materialization outright, where Docker hands the same
 archive to the daemon and needs nothing (#206). `internal/sandbox/k8s/client.go`
 is the exact list. On **Docker** that same `stat` is only wanted, not required
-(below). The `grep` built-in expects GNU
-grep/coreutils — a busybox-only image gets a clear tool error, not degraded
-behaviour.
+(below). The `grep` built-in needs no search tool from the image: it runs a
+static ripgrep the executor and worker carry, which it writes to
+`/tmp/.map-ripgrep/` the first time a sandbox greps. So it needs a **Linux
+x86_64 or aarch64** sandbox whose `/tmp` the sandbox user can write and
+**execute from** — not mounted `noexec`, which both backends' own `/tmp` mounts
+under a read-only root are not, and which an install checks with an empty probe
+before it carries the 5 MB binary in — and `mkdir`, `cat`, `chmod`, `mv` and
+`rm` to install it, `head`, `tail` and `cat` for `head_limit` and `offset`; glibc,
+musl and busybox userlands alike. Where any of that is missing, grep is a tool error
+naming it, not degraded behaviour. Its scripts use no bash feature newer than
+3.2.
 
 A cloud environment's `config.packages` adds a contract of its own, and only for
 the managers it names: the executor runs `apt`, `cargo`, `gem`, `go`, `npm` and
@@ -560,7 +588,8 @@ That set is every path the platform writes inside a sandbox, and it is one list
 in the code (`sandbox.WritablePaths`) precisely so neither backend can forget one:
 
 - the **session workdir**;
-- **`/tmp`**, where the Kubernetes backend keeps each exec's state file;
+- **`/tmp`**, where the Kubernetes backend keeps each exec's state file and
+  `grep` installs and runs its ripgrep — so neither mount is `noexec`;
 - **`/var/lib/map-shell`**, where the persistent shell keeps each session's cwd
   and environment — without it the *first* `bash` call of every session fails,
   and fails as a backend fault rather than an answer the model can see;

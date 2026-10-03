@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -53,10 +54,22 @@ type fakeSandbox struct {
 	// hold a materializer to one batched call carrying a skill's whole tree,
 	// rather than one write per file (#206).
 	bulkSizes []int
+	// cmds records every Exec command, so a test can read the script a tool
+	// handed the sandbox.
+	cmds []string
+	// execHook, when set and returning non-nil, answers an Exec in place of
+	// the defaults below.
+	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	f.cmds = append(f.cmds, req.Command)
+	if f.execHook != nil {
+		if res := f.execHook(req); res != nil {
+			return *res, nil
+		}
+	}
 	// The memory sync's listing and deletions, answered from the in-memory
 	// tree (memory_test.go), so the three-phase sync runs without a shell.
 	if res, ok := f.memoryExec(req.Command); ok {
@@ -491,6 +504,68 @@ func TestToolLevelErrorIsAnsweredNotAbandoned(t *testing.T) {
 	}
 	if got := h.liveModelTurns(t); got != 1 {
 		t.Errorf("model_turn = %d, want 1 (a tool error still resumes)", got)
+	}
+}
+
+// TestToolInputPropertiesOnTheWorkerPath: a sandbox tool call carrying a
+// property its schema does not declare is answered over the wire with a tool
+// error naming it, and runs nothing (#827); a grep call carrying the recorded
+// reference's properties reaches the sandbox with them. The worker runs the
+// executor's own toolset Runner, so the two deployment points answer alike.
+func TestToolInputPropertiesOnTheWorkerPath(t *testing.T) {
+	// The grep script frames all it prints between a begin line and an end
+	// line, which share a nonce, and reads only what lies between them; this
+	// rg finds nothing.
+	nonce := regexp.MustCompile(`map-search-begin-([0-9a-f]+)`)
+	sb := &fakeSandbox{execHook: func(req sandbox.ExecRequest) *sandbox.ExecResult {
+		if m := nonce.FindStringSubmatch(req.Command); m != nil {
+			return &sandbox.ExecResult{Stdout: "\nmap-search-begin-" + m[1] + "\n\nmap-search-end-" + m[1] + "\n", ExitCode: 1}
+		}
+		return nil
+	}}
+	h := newHarness(t, sb)
+	use := func(name string, input map[string]any) string {
+		b, _ := json.Marshal(map[string]any{"name": name, "input": input})
+		return string(b)
+	}
+	h.suspend(t,
+		use("write", map[string]any{"file_path": "out.txt", "content": "x", "mode": "0755"}),
+		use("grep", map[string]any{"pattern": "todo", "-i": true, "glob": "*.go", "include": "*.go"}),
+		use("grep", map[string]any{"pattern": `todo\n`, "-i": true, "type": "go", "output_mode": "count",
+			"head_limit": 3, "multiline": true}))
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunSessionTools: %v", err)
+	}
+	results := h.results(t)
+	if len(results) != 3 {
+		t.Fatalf("user.tool_result = %d, want 3", len(results))
+	}
+	for i, want := range []string{`write: unknown input property "mode"`, `grep: unknown input property "include"`, "no matches"} {
+		text, _ := results[i].Content[0]["text"].(string)
+		if results[i].IsError != (i < 2) || !strings.HasPrefix(text, want) {
+			t.Errorf("result %d = %+v, want %q", i, results[i], want)
+		}
+	}
+	if _, ok := sb.files["/workspace/out.txt"]; ok {
+		t.Error("the refused write wrote its file")
+	}
+	var greps []string
+	for _, c := range sb.cmds {
+		if strings.Contains(c, "map-ripgrep-missing") {
+			greps = append(greps, c)
+		}
+	}
+	if len(greps) != 1 {
+		t.Fatalf("grep scripts run = %d, want only the accepted call's", len(greps))
+	}
+	for _, want := range []string{`'-c' '-i' '-U' '--multiline-dotall' '--type=go' '--glob=!.anthropic-memory-store' '-e' 'todo\n' '--' '/workspace'`, "head -n 3"} {
+		if !strings.Contains(greps[0], want) {
+			t.Errorf("grep script lacks %q", want)
+		}
+	}
+	if got := h.liveModelTurns(t); got != 1 {
+		t.Errorf("model_turn items = %d, want 1 (refusals still resume)", got)
 	}
 }
 

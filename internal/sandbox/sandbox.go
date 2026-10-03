@@ -364,13 +364,47 @@ type ExecRequest struct {
 	Timeout time.Duration
 }
 
+// MaxCommandBytes bounds an ExecRequest's Command. Each backend hands the
+// command to its exec wrapper as one execve argument, which Linux caps near
+// 128 KiB (MAX_ARG_STRLEN, 32 pages); past that the exec would fail before
+// anything ran ("argument list too long"), which a backend could only report
+// as a fault. The bound sits below the ceiling with room for the wrapper, and
+// every backend's Exec refuses a Command past it before anything runs, with a
+// *CommandTooLongError (CheckCommand). The toolset answers that refusal with a
+// tool error — naming what the model can shorten where its input made the
+// command long (glob's and grep's searches carry its pattern and path, a file
+// primitive's commands its path, which a path within Linux's bounds does not
+// keep short: Docker's rename quotes it into its script eleven times), and
+// the platform otherwise — and the package-install pass, whose command grows
+// with a client's list, refuses one past the bound itself, terminally and
+// before its probe, as it refuses an invalid entry.
+const MaxCommandBytes = 120 << 10
+
+// CommandTooLongError is Exec's refusal of a Command past MaxCommandBytes:
+// nothing ran.
+type CommandTooLongError struct{ Bytes int }
+
+func (e *CommandTooLongError) Error() string {
+	return fmt.Sprintf("sandbox: a %d-byte command is over the %d bytes one exec argument can carry", e.Bytes, MaxCommandBytes)
+}
+
+// CheckCommand is the bound every backend's Exec applies before it runs
+// anything (MaxCommandBytes).
+func CheckCommand(command string) error {
+	if len(command) > MaxCommandBytes {
+		return &CommandTooLongError{Bytes: len(command)}
+	}
+	return nil
+}
+
 // ExecResult is a finished command. TimedOut means the command itself outlived
 // its deadline: the sandbox stopped it, or stopped waiting for it, or caught it
 // still running past the deadline and exiting later on its own terms. TimedOut
 // is the authoritative field — ExitCode may be the kill's code, or the code a
 // command that dodged the kill chose for itself — and the output is whatever
-// arrived. Truncated means output exceeded MaxOutputBytes and the tail was
-// discarded.
+// arrived. Each stream is capped at MaxOutputBytes on its own, its tail past
+// the cap discarded: StdoutTruncated and StderrTruncated say which stream the
+// cap cut, and Truncated that either did.
 //
 // A backend must decide TimedOut where the sandboxed command cannot reach the
 // decision. Anything inside the sandbox is the agent's to tamper with, so a
@@ -380,12 +414,18 @@ type ExecRequest struct {
 // of what it leaves behind: a process the command backgrounds inherits its
 // output stream and can hold it open long after the command has exited.
 type ExecResult struct {
-	Stdout    string
-	Stderr    string
-	ExitCode  int
-	TimedOut  bool
-	Truncated bool
+	Stdout   string
+	Stderr   string
+	ExitCode int
+	TimedOut bool
+
+	StdoutTruncated, StderrTruncated bool
 }
+
+// Truncated says the cap cut either stream. It is derived from the two
+// per-stream flags rather than set beside them, so it cannot disagree with
+// them.
+func (r ExecResult) Truncated() bool { return r.StdoutTruncated || r.StderrTruncated }
 
 // Sandbox is one session's execution environment.
 type Sandbox interface {
@@ -397,7 +437,9 @@ type Sandbox interface {
 	// ExecResult, because each is something the model reads and answers. The
 	// error return is the sandbox failing the caller instead — gone
 	// (ErrNotFound), unreachable, the context cancelled — which the toolset
-	// carries up as a backend fault rather than folding into a tool result.
+	// carries up as a backend fault rather than folding into a tool result;
+	// and a Command past MaxCommandBytes, refused before anything runs with a
+	// *CommandTooLongError, which the toolset answers as a tool error.
 	Exec(ctx context.Context, req ExecRequest) (ExecResult, error)
 	// ReadFile returns a file's bytes verbatim, binary included.
 	ReadFile(ctx context.Context, path string) ([]byte, error)

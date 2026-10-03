@@ -173,5 +173,5 @@ func TestTheStateHelperTrimsRatherThanSlices(t *testing.T) {
 // naming no context fails on its own and succeeds beside `--host`.
 func dockerCLI(ctx context.Context, arg ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "docker",
-		append([]string{"--host", docker.DaemonHostForTest()}, arg...)...)
+		append([]string{"--host", docker.DaemonHost()}, arg...)...)
 }

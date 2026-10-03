@@ -6,6 +6,12 @@
 /notes.md
 *.exe
 
+# The pinned ripgrep archives internal/ripgrep embeds. `make ripgrep` fetches
+# them (tools/ripgrepfetch); they are upstream's release binaries, never
+# source, so only the manifest that pins them is committed.
+/internal/ripgrep/assets/*
+!/internal/ripgrep/assets/manifest.json
+
 # Go test / coverage artifacts
 *.test
 *.out

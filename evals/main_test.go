@@ -25,9 +25,11 @@ import (
 //
 // Debian-slim underneath, so it is the same bash and coreutils userland the
 // toolset's scripts probe for — verified: /bin/bash exists at the exact path
-// the docker provider requires, glob's stat/sort/xargs are present, and grep's
-// PCRE probe passes so -P is kept rather than downgraded to -E. Python is here
-// for exactly one task (fib-quickstart); every other task is image-agnostic.
+// the docker provider requires, and glob's stat/sort/xargs are present. grep
+// asks nothing of it but a /tmp it can write and execute from: it runs the
+// static ripgrep the platform carries, which it installs there, not the
+// image's GNU grep. Python is here for exactly one task (fib-quickstart);
+// every other task is image-agnostic.
 const evalImage = "python:3.12-slim"
 
 // TestMain gates before pgtest.Main, and the order is the point.

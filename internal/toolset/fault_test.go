@@ -34,12 +34,16 @@ type fakeSandbox struct {
 func (f *fakeSandbox) ID() string { return "fake" }
 
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// A backend refuses a command too long to run before anything runs.
+	if err := sandbox.CheckCommand(req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
 	f.commands = append(f.commands, req.Command)
 	f.timeouts = append(f.timeouts, req.Timeout)
 	if f.execErr != nil {
 		return sandbox.ExecResult{}, f.execErr
 	}
-	return f.exec, nil
+	return framed(req.Command, f.exec), nil
 }
 
 func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error) {
@@ -350,7 +354,7 @@ func TestGrepPatternStartingWithSlashSearchesTheWorkdir(t *testing.T) {
 		t.Fatalf("grep: %v", err)
 	}
 	script := sb.commands[0]
-	if !strings.Contains(script, "root='"+sandbox.DefaultWorkdir+"'") {
+	if !strings.Contains(script, "'-e' '/usr/local' '--' '"+sandbox.DefaultWorkdir+"'") {
 		t.Fatalf("grep did not root at the workdir:\n%s", script)
 	}
 }
@@ -373,19 +377,47 @@ func TestSearchTimeoutIsAnErrorResult(t *testing.T) {
 	}
 }
 
-// A failed search hands back what the command itself said; a silent failure
-// still names the tool and its exit code rather than reading as an empty result.
+// A failed search hands back what the command itself said, from inside its
+// frame; a silent failure still names the tool and its exit code rather than
+// reading as an empty result. Each stream's cut is said where it cut, by both
+// tools alike (sandbox.ExecResult's per-stream flags): after the messages the
+// cap cut, and in front where it cut the output, or took the messages whole,
+// begin line and all — and nowhere where it cut only past the end lines.
 func TestSearchFailure(t *testing.T) {
-	sb := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 2, Stderr: "grep: unmatched [\n"}}
-	res, _ := run(t, sb, "grep", `{"pattern":"[","path":"x"}`)
-	if !res.IsError || !strings.Contains(res.Content, "unmatched [") {
-		t.Fatalf("result = %+v, want the command's own message", res)
-	}
+	for _, tool := range []string{"glob", "grep"} {
+		sb := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "banner" + scriptBegan + "unmatched [\n"}}
+		res, _ := run(t, sb, tool, `{"pattern":"[","path":"x"}`)
+		if !res.IsError || res.Content != "unmatched [" {
+			t.Fatalf("%s = %+v, want the command's own message alone", tool, res)
+		}
 
-	silent := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 9}}
-	res, _ = run(t, silent, "glob", `{"pattern":"*"}`)
-	if !res.IsError || !strings.Contains(res.Content, "exit code 9") {
-		t.Fatalf("result = %+v, want the exit code", res)
+		silent := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan, Stderr: scriptBegan}}
+		res, _ = run(t, silent, tool, `{"pattern":"*"}`)
+		if !res.IsError || res.Content != tool+": failed with exit code 9" {
+			t.Fatalf("%s = %+v, want the exit code", tool, res)
+		}
+
+		for _, tc := range []struct {
+			exec sandbox.ExecResult
+			want string
+		}{
+			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan, Stderr: scriptBegan + "err: a\nerr: b" + scriptNoEnd, StderrTruncated: true},
+				"err: a\nerr: b\n[output truncated]"},
+			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan, Stderr: "flood flood", StderrTruncated: true},
+				"[output truncated]\n" + tool + ": failed with exit code 9"},
+			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan + "partial" + scriptNoEnd, Stderr: scriptBegan + "err: a\n", StdoutTruncated: true},
+				"[output truncated]\npartial\nerr: a"},
+			// A cap that cut both streams only after their end lines — an
+			// EXIT trap's flood — took nothing the command said.
+			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan + "partial" + scriptEnded + "trap flood",
+				Stderr: scriptBegan + "err: a\n" + scriptEnded + "trap flood", StdoutTruncated: true, StderrTruncated: true},
+				"partial\nerr: a"},
+		} {
+			res, _ := run(t, &fakeSandbox{exec: tc.exec}, tool, `{"pattern":"*"}`)
+			if !res.IsError || res.Content != tc.want {
+				t.Errorf("%s over %+v = %+v, want the error %q", tool, tc.exec, res, tc.want)
+			}
+		}
 	}
 }
 
@@ -396,7 +428,7 @@ func TestGlobLimit(t *testing.T) {
 	for i := 0; i < 250; i++ {
 		fmt.Fprintf(&stdout, "1700000000.%09d /workspace/f%d.go\x00", i, i)
 	}
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: stdout.String()}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + stdout.String()}}
 	res, err := run(t, sb, "glob", `{"pattern":"**/*.go"}`)
 	if err != nil {
 		t.Fatalf("glob: %v", err)
@@ -407,6 +439,23 @@ func TestGlobLimit(t *testing.T) {
 	}
 	if lines[0] != "/workspace/f0.go" {
 		t.Fatalf("first path = %q, want the shell's own order preserved", lines[0])
+	}
+}
+
+// A glob answer the output cap cut keeps only the records their NUL ends: a
+// path the cap cut short is not a path, and the end line's start, which the
+// cap may leave too, is none of the answer.
+func TestGlobKeepsOnlyWholeRecords(t *testing.T) {
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + "2.000000000 /workspace/a.go\x001.000000000 /workspace/b-cut" + scriptCutInEnd,
+		StdoutTruncated: true}}
+	if res, err := run(t, sb, "glob", `{"pattern":"*.go"}`); err != nil || res.IsError || res.Content != "/workspace/a.go" {
+		t.Fatalf("glob = %+v, %v; want the one whole record", res, err)
+	}
+	// A stderr flood beside a whole answer is no reason to doubt it.
+	sb = &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + "2.000000000 /workspace/a.go\x00", Stderr: "flood",
+		StderrTruncated: true}}
+	if res, err := run(t, sb, "glob", `{"pattern":"*.go"}`); err != nil || res.IsError || res.Content != "/workspace/a.go" {
+		t.Fatalf("glob = %+v, %v; want the answer", res, err)
 	}
 }
 
@@ -509,11 +558,66 @@ func tail(s string) string {
 	return s
 }
 
+// A file_path too long for Linux is refused before the sandbox is asked —
+// no read, no write, no exec — and one at the bounds is handed to it. A write
+// or an edit lands under a 27-byte temporary name in the file's directory
+// first, so its directory is held to 4067 bytes too.
+func TestFilePathsTooLongForLinuxAreRefusedBeforeTheSandbox(t *testing.T) {
+	name := strings.Repeat("n", 255)
+	atBound := "/" + strings.Repeat(name+"/", 15) + strings.Repeat("f", 4095-1-15*256)
+	inputs := map[string]string{"read": `}`, "write": `,"content":"x"}`, "edit": `,"old_string":"x","new_string":"y"}`}
+	for tool, rest := range inputs {
+		in := func(p string) string { return `{"file_path":"` + p + `"` + rest }
+		for p, want := range map[string]string{
+			atBound + "f":               tool + ": file name too long: the file_path resolves to a 4096-byte path",
+			"a/" + name + "n/b":         tool + ": file name too long: the file_path holds a 256-byte name",
+			strings.Repeat("x/", 70000): tool + ": file name too long: the file_path resolves to a 140010-byte path",
+		} {
+			sb := &fakeSandbox{}
+			res, err := run(t, sb, tool, in(p))
+			if err != nil || !res.IsError || !strings.HasPrefix(res.Content, want) {
+				t.Errorf("%s of a %d-byte path = %+v, %v; want %q", tool, len(p), res, err, want)
+			}
+			if n := len(sb.reads) + len(sb.writes) + len(sb.commands); n != 0 {
+				t.Errorf("%s of a %d-byte path asked the sandbox %d times", tool, len(p), n)
+			}
+		}
+		// The 4067-byte directory a write may land in, with the 27-byte
+		// name that fills the path, and with one more byte of directory and
+		// one less of name — a 4095-byte path that a write and an edit
+		// refuse, for its temporary, and a read hands to the sandbox.
+		tightest := "/" + strings.Repeat(name+"/", 15) + strings.Repeat("e", 226) + "/" + strings.Repeat("f", 27)
+		oneOver := "/" + strings.Repeat(name+"/", 15) + strings.Repeat("e", 227) + "/" + strings.Repeat("f", 26)
+		for _, p := range []string{atBound, tightest, "a/" + name} {
+			sb := &fakeSandbox{files: map[string]string{atBound: "x", tightest: "x", "/workspace/a/" + name: "x"}}
+			if res, err := run(t, sb, tool, in(p)); err != nil || res.IsError {
+				t.Errorf("%s at the bounds = %+v, %v; want the sandbox's answer", tool, res, err)
+			}
+		}
+		sb := &fakeSandbox{files: map[string]string{oneOver: "x"}}
+		res, err := run(t, sb, tool, in(oneOver))
+		if tool == "read" {
+			if err != nil || res.IsError {
+				t.Errorf("read of a 4095-byte path in a 4068-byte directory = %+v, %v; want the sandbox's answer", res, err)
+			}
+			continue
+		}
+		want := tool + ": file name too long: the file lands first under a 27-byte temporary name beside it, " +
+			"and in the file_path's 4068-byte directory that is a 4096-byte path, over the 4095 bytes a Linux path can hold; shorten it"
+		if err != nil || !res.IsError || res.Content != want {
+			t.Errorf("%s of a 4095-byte path in a 4068-byte directory = %+v, %v; want %q", tool, res, err, want)
+		}
+		if n := len(sb.reads) + len(sb.writes) + len(sb.commands); n != 0 {
+			t.Errorf("%s of a 4095-byte path in a 4068-byte directory asked the sandbox %d times", tool, n)
+		}
+	}
+}
+
 // A sandbox-level truncation says so, and stderr follows stdout whole rather
 // than being run onto the end of its last line.
 func TestCombine(t *testing.T) {
 	sb := &fakeSandbox{exec: sandbox.ExecResult{
-		Stdout: "out", Stderr: "err", Truncated: true, ExitCode: 1,
+		Stdout: "out", Stderr: "err", StdoutTruncated: true, ExitCode: 1,
 	}}
 	res, err := run(t, sb, "bash", `{"command":"x"}`)
 	if err != nil {
@@ -571,7 +675,7 @@ func TestSearchPatternsAreQuoted(t *testing.T) {
 // must back off to a boundary, a property the fallback path pins separately.
 func TestOversizedOutputSpillsToTheSandbox(t *testing.T) {
 	full := strings.Repeat("€", 40_000) // 120000 bytes; 102400 % 3 != 0
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full}}
 	r := toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
 	id := domain.NewID("sevt")
 	res, err := r.Run(context.Background(), id, "grep", json.RawMessage(`{"pattern":"x"}`))
@@ -596,7 +700,7 @@ func TestOversizedOutputSpillsToTheSandbox(t *testing.T) {
 }
 
 func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: "hello\n"}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + "hello\n"}}
 	res, err := run(t, sb, "grep", `{"pattern":"h"}`)
 	if err != nil || res.Content != "hello" {
 		t.Fatalf("grep: err=%v content=%q", err, res.Content)
@@ -609,12 +713,12 @@ func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
 }
 
 // A successful grep whose output hit the sandbox's own per-stream Exec cap
-// arrives with ExecResult.Truncated set, and the marker must survive into the
-// content — or the spill notice's "full output" would vouch for a result the
-// sandbox itself already cut.
+// arrives with ExecResult.StdoutTruncated set and no end line, and the marker
+// must survive into the content — or the spill notice's "full output" would
+// vouch for a result the sandbox itself already cut.
 func TestExecTruncatedGrepCarriesTheUpstreamMarker(t *testing.T) {
 	full := strings.Repeat("z", toolset.MaxOutputBytes+64)
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full, Truncated: true}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full + scriptNoEnd, StdoutTruncated: true}}
 	res, err := run(t, sb, "grep", `{"pattern":"z"}`)
 	if err != nil || res.IsError {
 		t.Fatalf("grep: err=%v", err)
@@ -651,7 +755,7 @@ func TestReadNeverSpills(t *testing.T) {
 // made, or this fixture would also pass with the hook deleted.
 func TestSpillWriteFailureFallsBackToPlainTruncation(t *testing.T) {
 	full := strings.Repeat("y", toolset.MaxOutputBytes+64)
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full}, writeErr: errors.New("disk full")}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full}, writeErr: errors.New("disk full")}
 	res, err := run(t, sb, "grep", `{"pattern":"y"}`)
 	if err != nil || res.IsError {
 		t.Fatalf("grep: err=%v content=%s", err, tail(res.Content))

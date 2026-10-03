@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"unicode"
 
@@ -39,7 +40,11 @@ func (r Runner) read(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if res, bad := badField("read", "file_path", in.FilePath); bad {
 		return res, nil
 	}
-	data, err := r.Sandbox.ReadFile(ctx, r.resolve(in.FilePath))
+	p := r.resolve(in.FilePath)
+	if res, bad := pathTooLong("read", p, false); bad {
+		return res, nil
+	}
+	data, err := r.Sandbox.ReadFile(ctx, p)
 	if err != nil {
 		return fileFault("read", in.FilePath, err)
 	}
@@ -82,6 +87,9 @@ func (r Runner) write(ctx context.Context, raw json.RawMessage) (Result, error) 
 		return res, nil
 	}
 	p := r.resolve(in.FilePath)
+	if res, bad := pathTooLong("write", p, true); bad {
+		return res, nil
+	}
 	if why := r.unwritable(in.FilePath, p); why != "" {
 		return failf("write: %s", why)
 	}
@@ -106,6 +114,9 @@ func (r Runner) edit(ctx context.Context, raw json.RawMessage) (Result, error) {
 		return res, nil
 	}
 	p := r.resolve(in.FilePath)
+	if res, bad := pathTooLong("edit", p, true); bad {
+		return res, nil
+	}
 	if why := r.unwritable(in.FilePath, p); why != "" {
 		return failf("edit: %s", why)
 	}
@@ -129,17 +140,82 @@ func (r Runner) edit(ctx context.Context, raw json.RawMessage) (Result, error) {
 	return succeed(fmt.Sprintf("edited %s (%d replacement(s))", in.FilePath, count))
 }
 
+// Linux's bounds on a path: PATH_MAX, 4096 bytes counting the NUL that ends
+// it, and NAME_MAX, the longest name a directory entry can hold.
+const (
+	maxPathBytes = 4096 - 1
+	maxNameBytes = 255
+)
+
+// pathTooLong refuses, as a tool error, a file_path the kernel would refuse
+// with ENAMETOOLONG ("file name too long"): resolved — the path the sandbox
+// would be handed — past maxPathBytes, or a name in it past maxNameBytes. It
+// is asked before the sandbox is, because no backend answers that refusal as
+// the path's. The k8s backend hands the path to its exec as an argument: a
+// read past the bounds finds "no such file or directory", and one long
+// enough keeps the exec from starting — the API server refuses a write's
+// request (431), and a read's exec exits 255 before its script runs. Docker's
+// archive endpoint answers a read with a 500 (`lstat …: file name too long`).
+// The first is the wrong answer; the others are faults the executor would
+// leave to a reclaim, which would make the same call again (measured on kind
+// and Docker Desktop, #827).
+//
+// A write or an edit (lands) is held to one bound more. Both backends land
+// its bytes under a temporary name in the target's directory first —
+// `<dir>/.map-write-<16 hex>`, sandbox.TempNameBytes (27) of name — and
+// rename them into place, so that path must fit as well: the file_path is
+// refused when len(dir)+1+27 is past maxPathBytes, though the target alone
+// would fit — where both backends answered the target's own "file name too
+// long" (measured, #827). A read lands nothing, and reads any path within the
+// bounds.
+//
+// The bounds are Linux's, not the commands': a backend that builds a command
+// around the path can still make one past sandbox.MaxCommandBytes from a path
+// within them — Docker's rename quotes it into its script eleven times — and
+// fileFault answers that.
+func pathTooLong(verb, resolved string, lands bool) (Result, bool) {
+	if n := len(resolved); n > maxPathBytes {
+		res, _ := failf("%s: file name too long: the file_path resolves to a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
+			verb, n, maxPathBytes)
+		return res, true
+	}
+	for name := range strings.SplitSeq(resolved, "/") {
+		if n := len(name); n > maxNameBytes {
+			res, _ := failf("%s: file name too long: the file_path holds a %d-byte name, over the %d bytes a Linux file name can hold; shorten it",
+				verb, n, maxNameBytes)
+			return res, true
+		}
+	}
+	if dir := path.Dir(resolved); lands && len(dir)+1+sandbox.TempNameBytes > maxPathBytes {
+		res, _ := failf("%s: file name too long: the file lands first under a %d-byte temporary name beside it, and in the file_path's %d-byte directory "+
+			"that is a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
+			verb, sandbox.TempNameBytes, len(dir), len(dir)+1+sandbox.TempNameBytes, maxPathBytes)
+		return res, true
+	}
+	return Result{}, false
+}
+
 // fileFault classifies a sandbox file error. The sentinels describe the file the
 // model asked for — it can read a different one, or make the one it wanted — so
-// they are tool results. Anything else is the sandbox itself failing, and that
-// is the executor's to handle. The path in the message is the one the model
-// used, not the resolved one: it is the name the model can act on.
+// they are tool results. So is a command the backend refused as too long to
+// run (sandbox.CommandTooLongError): what grows in a file primitive's commands
+// is the path, which the model chose, and Linux's bounds (pathTooLong) do not
+// bound them — Docker's rename quotes the path into its script eleven times,
+// and quoting makes each `'` in it four bytes, so a 4095-byte path of quotes
+// made a 175,336-byte command (measured, #827). Anything else is the sandbox
+// itself failing, and that is the executor's to handle. The path in the
+// message is the one the model used, not the resolved one: it is the name the
+// model can act on.
 //
 // The distinction is not cosmetic: a fault left unclassified reaches the executor,
 // which stops the tool set and abandons the work item to lease reclaim — so the
 // same doomed call is retried until the lease runs out (#71).
 func fileFault(verb, display string, err error) (Result, error) {
+	var tooLong *sandbox.CommandTooLongError
 	switch {
+	case errors.As(err, &tooLong):
+		return failf("%s: the file_path makes a %d-byte command, over the %d bytes one exec argument can carry; shorten it",
+			verb, tooLong.Bytes, sandbox.MaxCommandBytes)
 	case errors.Is(err, sandbox.ErrFileNotExist):
 		return failf("%s %s: no such file or directory", verb, display)
 	case errors.Is(err, sandbox.ErrIsDirectory), errors.Is(err, sandbox.ErrNotRegularFile):

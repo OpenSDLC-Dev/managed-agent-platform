@@ -84,16 +84,26 @@ Deferred past v1 — **seams reserved, not implemented**, each tracked as an iss
 
 Requires **Go 1.26+** and Docker: the storage and API contract tests start
 their own disposable Postgres containers, and the sandbox, shell, toolset, and
-executor tests start a disposable `debian:stable-slim` container. The fixtures
+executor tests start a disposable `debian:stable-slim` container (the toolset's
+search tests start a `postgres:16-alpine` one too, and one built from
+`bash:3.2`). The fixtures
 that drive the daemon through the `docker` CLI rather than its HTTP API — the
-storage, API and sandbox ones — need that binary on PATH as well. The Kubernetes
+storage, API, sandbox and toolset ones — need that binary on PATH as well. The Kubernetes
 sandbox provider's contract test additionally needs a cluster — a local
 [kind](https://kind.sigs.k8s.io) cluster works, and CI provisions one. A missing
 daemon, binary or cluster is a hard test failure, not a skip, so the coverage
 gate cannot be hollowed out.
 
+The executor and the worker embed the static ripgrep their `grep` tool runs in
+a sandbox. It is fetched, not committed: `make ripgrep` downloads the pinned
+release archives from GitHub and checks their digests, and `make test`, `make
+eval`, the release targets and the Dockerfile run it first. A plain `go build`
+or `go run` without it still compiles, into an executor and a worker that log a
+warning at startup and whose `grep` reports that they carry no ripgrep.
+
 ```bash
 make build                 # build (go build ./...)
+make ripgrep               # fetch the pinned static ripgrep the executor and worker embed
 make test                  # unit + contract tests (go test -count=1, with coverage profile)
 make vet fmt-check         # lint
 make verify                # the whole Go gate (CI additionally runs its helm, terraform and compose jobs)
@@ -147,7 +157,7 @@ cp .env.example .env          # set CONTROLPLANE_API_KEY
 docker compose up --build     # control plane on http://localhost:8080 (loopback)
 ```
 
-Then drive it with the real CLI: `ANTHROPIC_API_KEY=<key> ant --base-url http://localhost:8080 beta:agents list` (management commands take `--base-url` explicitly; they ignore `ANTHROPIC_BASE_URL`, which only the worker/auth subcommands honor). The stack idles until you point the brain at your model endpoint (copy `model-providers.example.json` and set `MODEL_PROVIDERS_FILE`). See [`deploy/compose/README.md`](./deploy/compose/README.md) for details; production deploys use the [Helm chart](./deploy/helm) — from v0.2.0 onward installable straight from the registry (`helm install map oci://ghcr.io/opensdlc-dev/charts/managed-agent-platform --version <X.Y.Z> ...`), with prebuilt worker binaries attached to each [GitHub Release](https://github.com/OpenSDLC-Dev/managed-agent-platform/releases).
+Then drive it with the real CLI: `ANTHROPIC_API_KEY=<key> ant --base-url http://localhost:8080 beta:agents list` (management commands take `--base-url` explicitly; they ignore `ANTHROPIC_BASE_URL`, which only the worker/auth subcommands honor). The stack idles until you point the brain at your model endpoint (copy `model-providers.example.json` and set `MODEL_PROVIDERS_FILE`). See [`deploy/compose/README.md`](./deploy/compose/README.md) for details; production deploys use the [Helm chart](./deploy/helm) — from v0.2.0 onward installable straight from the registry (`helm install map oci://ghcr.io/opensdlc-dev/charts/managed-agent-platform --version <X.Y.Z> ...`), with prebuilt worker binaries attached to each [GitHub Release](https://github.com/OpenSDLC-Dev/managed-agent-platform/releases). Upgrade BYOC workers together with the platform: the brain offers the model the tools of its release and a worker runs those of its own, and the work protocol, the reference's, carries no worker version, so nothing refuses or flags a mismatch.
 
 Contributions are welcome. Please read [CLAUDE.md](./CLAUDE.md) first — it documents the non-negotiable design principles and the working conventions (notably: **never guess at the wire schema**; verify against the real `ant` CLI) — and [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for how the platform is built.
 

@@ -197,12 +197,14 @@ const (
 )
 
 // memoryCheckFirst is the reference's "Check memory first" section, changed
-// where the recorded text is false here. rg is not in the default sandbox
-// image, so grep and ls -R stand in for it; grep is told to skip the sync's
-// baselines (/mnt/memory/.sync) and the markers, the hidden files rg skips
-// by default and ls -R skips too. And "may already have", without "on this
-// exact environment": a store belongs to a workspace, may be empty, and is
-// not bound to one environment.
+// where the recorded text is false here. The reference names rg, which is not
+// on the default sandbox image's PATH, so GNU grep and ls -R stand in for it.
+// grep -r reads hidden files, so the line excludes by name the sync's
+// baselines (/mnt/memory/.sync) and the stores' markers, which are not
+// memories; ls -R skips them as hidden. (The grep tool, ripgrep run with
+// --hidden, leaves both out of a search itself: toolset's memoryGlobs.) And
+// "may already have", without "on this exact environment": a store belongs to
+// a workspace, may be empty, and is not bound to one environment.
 const memoryCheckFirst = "**Check memory first.** Before fresh research, `grep -ri --exclude-dir=.sync --exclude=.anthropic-memory-store '<keyword>' /mnt/memory/` with two or three keywords and read matching sections in full. " +
 	"If nothing matches, `ls -R /mnt/memory/` to check whether the store is empty or your keywords missed; read any relevant-looking file directly. " +
 	"Prior sessions on this project may already have researched many of these topics and saved verified findings here — written after doing the same searches you'd do now. " +

@@ -414,7 +414,8 @@ jobs:
             .
           # The gate is a separate image: the per-session egress sidecar needs
           # iptables and a dedicated UID that do not belong in the server image.
-          # Reuses the layers just built, so it is cheap.
+          # It shares the module-download layer with the build above and
+          # compiles only its own binary, fetching no ripgrep.
           docker build --target gate \
             -t "$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
             .

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
@@ -34,12 +35,7 @@ USER app
 // backend's problem alone: the k8s backend extracts inside the pod, where
 // everything is already the sandbox user's.
 func TestBulkWriteOnANonRootImage(t *testing.T) {
-	image := "map-nonroot-test:latest"
-	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(nonRootDockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the non-root image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHost())
 
 	// And under a read-only root, where the workdir is a volume that takes the
 	// image directory's ownership: the batch's archives must then be extracted
@@ -146,12 +142,7 @@ USER app
 // shell is the agent's and its own uid is no escalation, and uid 0 must never
 // be among them.
 func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
-	image := "map-hooked-test:latest"
-	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(hookedDockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the hooked image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "hooked", hookedDockerfile, "--host", docker.DaemonHost())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -207,12 +198,7 @@ func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 // created by the sandbox user) classifies the same sandbox at the create. A
 // docker-backend row for TestBulkWriteOnANonRootImage's reason.
 func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
-	image := "map-nonroot-test:latest"
-	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(nonRootDockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the non-root image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHost())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -271,12 +257,7 @@ func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 // the emptying reaches the whole batch rather than the one the rename stopped
 // on.
 func TestBulkWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
-	image := "map-nonroot-test:latest"
-	build := dockerCLI(context.Background(), "build", "-q", "-t", image, "-")
-	build.Stdin = strings.NewReader(nonRootDockerfile)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the non-root image: %v\n%s", err, out)
-	}
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHost())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -322,5 +303,60 @@ func TestBulkWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 	}
 	if got := strings.TrimSpace(res.Stdout); got != "0" {
 		t.Errorf("%s bytes left in /etc = %s, want 0 (#316)", sandbox.TempPrefix, got)
+	}
+}
+
+// quotedParentDockerfile is the non-root image contract plus a directory tree
+// root owns and the sandbox user cannot write, fifteen levels of 255 quotes
+// deep under /srv.
+const quotedParentDockerfile = `FROM debian:stable-slim
+RUN useradd -m app && mkdir -p /workspace && chown app:app /workspace
+RUN q=$(printf '%255s' '' | tr ' ' "'") && d=/srv && for i in $(seq 15); do d="$d/$q"; done && mkdir -p "$d"
+USER app
+`
+
+// A write whose rename the sandbox refused as too long to run — a path of
+// quotes, which the rename script quotes eleven times — never ran its script,
+// so no `mv` can be in flight and the daemon can take back what it landed.
+// Under a parent the sandbox user cannot write, its own `rm -f` cannot shed
+// the temporary, and the refused payload stayed for the container's life
+// where every other rename failure empties it (#310).
+func TestARenameTooLongToRunLeavesNoPayloadOnANonRootImage(t *testing.T) {
+	image := dockertest.ImageFrom(t, "nonroot-quoted", quotedParentDockerfile, "--host", docker.DaemonHost())
+
+	p, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	ctx := context.Background()
+	sb, err := p.Provision(ctx, sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: image, Workdir: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+
+	q := strings.Repeat("'", 255)
+	path := "/srv/" + strings.Repeat(q+"/", 15) + strings.Repeat("'", 200)
+	var tooLong *sandbox.CommandTooLongError
+	if err := sb.WriteFile(ctx, path, []byte(strings.Repeat("A", 4096))); !errors.As(err, &tooLong) {
+		t.Fatalf("write of a %d-byte path of quotes = %v; want the rename refused as too long", len(path), err)
+	}
+
+	// The temporary's name is still there — the sandbox user cannot unlink
+	// it — but the daemon emptied it.
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{
+		Command: "find /srv -name '" + sandbox.TempPrefix + "*' -printf '%s\\n'",
+	})
+	if err != nil {
+		t.Fatalf("size what is left under /srv: %v", err)
+	}
+	if got := strings.TrimSpace(res.Stdout); got != "0" {
+		t.Errorf("%s files left under /srv, by size: %q; want one, emptied (#310)", sandbox.TempPrefix, got)
 	}
 }

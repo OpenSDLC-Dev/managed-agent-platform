@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/shell"
 )
 
@@ -53,9 +52,7 @@ func (r Runner) bash(ctx context.Context, id domain.ID, raw json.RawMessage) (Re
 	// Sanitized here, not just in dispatch: the failure arms below cap through
 	// capWithTrailer first, and NUL bytes must not spend the budget that a
 	// command's real output (its stderr above all) needs to survive.
-	out := SanitizeText(combine(sandbox.ExecResult{
-		Stdout: res.Stdout, Stderr: res.Stderr, Truncated: res.Truncated,
-	}))
+	out := SanitizeText(combine(res.ExecResult))
 	// The failure arms below spill for the same reason: they cap before
 	// dispatch, so by the time dispatch's own spill hook runs the tail is
 	// already gone. The success arm falls through to dispatch uncapped and
