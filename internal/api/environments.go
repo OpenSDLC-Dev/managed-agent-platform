@@ -357,7 +357,7 @@ func parsePackages(raw json.RawMessage, base packagesJSON) (packagesJSON, error)
 		// is not the whole guard — `go` expands to one invocation per entry, so
 		// the assembled command can exceed the ceiling while the entry bytes stay
 		// small; the executor bounds the assembled command itself
-		// (maxInstallCommandBytes). This cap keeps a request cheap to reject and a
+		// (sandbox.MaxCommandBytes). This cap keeps a request cheap to reject and a
 		// real list (a few kilobytes) well clear of both.
 		if total > maxPackagesManagerBytes {
 			return base, errInvalid("packages.%s is too large: %d bytes exceeds the %d-byte limit", manager, total, maxPackagesManagerBytes)

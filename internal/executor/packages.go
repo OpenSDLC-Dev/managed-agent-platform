@@ -69,16 +69,6 @@ const packagesCredsRemoveTimeout = 30 * time.Second
 // (decision 2).
 const packageInstallAttempts = 3
 
-// maxInstallCommandBytes bounds the assembled command handed to one Exec. It
-// is one execve argument, which Linux caps near 128 KiB (MAX_ARG_STRLEN); a
-// command past that faults at exec startup rather than running, and a fault
-// reclaim-loops the item. The API's per-manager byte cap does not bound this:
-// it counts entry bytes, while `go` emits one `go install` per entry (far more
-// than the entry's own bytes), and a row stored before that cap existed never
-// passed it. This is the backstop, set below the ceiling with room for the
-// pipefail/tail wrapper.
-const maxInstallCommandBytes = 120 << 10
-
 // packageOutputTailBytes is what the install command's own pipeline keeps —
 // the LAST bytes of the combined output, which is the failure, where Exec's
 // own cap would keep the head. It matches maxPackageMessage on purpose: the
@@ -704,20 +694,23 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			continue
 		}
 		// The assembled command is one execve argument, which Linux caps near
-		// 128 KiB. `go`'s per-entry amplification or a row stored before the
-		// API's byte cap existed can exceed it, faulting the install at exec
-		// startup and reclaim-looping the item. Refused terminally here, before
-		// the probe, exactly like an invalid entry.
+		// 128 KiB (sandbox.MaxCommandBytes); past it the install faults at exec
+		// startup, and a fault reclaim-loops the item. The API's per-manager
+		// byte cap does not bound this: it counts entry bytes, while `go` emits
+		// one `go install` per entry (far more than the entry's own bytes), and
+		// a row stored before that cap existed never passed it. This is the
+		// backstop, refused terminally here, before the probe, exactly like an
+		// invalid entry.
 		credsDir := ""
 		if len(stripped.creds) > 0 {
 			credsDir = packagesCredsDir()
 		}
 		cmd := m.command(stripped.entries, credsDir)
-		if len(cmd) > maxInstallCommandBytes {
+		if len(cmd) > sandbox.MaxCommandBytes {
 			failed++
 			recordPackageInstalled(ctx, m.name, packageOutcomeInvalid)
 			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
-				fmt.Sprintf("the assembled install command is %d bytes, over the %d-byte exec-argument limit", len(cmd), maxInstallCommandBytes),
+				fmt.Sprintf("the assembled install command is %d bytes, over the %d-byte exec-argument limit", len(cmd), sandbox.MaxCommandBytes),
 				published, true, changed)
 			continue
 		}

@@ -364,6 +364,16 @@ type ExecRequest struct {
 	Timeout time.Duration
 }
 
+// MaxCommandBytes bounds a Command the platform assembles itself. Each backend
+// hands the command to its exec wrapper as one execve argument, which Linux
+// caps near 128 KiB (MAX_ARG_STRLEN, 32 pages); past that the exec fails
+// before anything runs ("argument list too long"), which a backend reports as
+// a fault. The bound sits below the ceiling with room for the wrapper. The
+// package-install pass (internal/executor) and grep (internal/toolset), the
+// two places a command grows with what a client or a model chose, refuse one
+// past it before they exec.
+const MaxCommandBytes = 120 << 10
+
 // ExecResult is a finished command. TimedOut means the command itself outlived
 // its deadline: the sandbox stopped it, or stopped waiting for it, or caught it
 // still running past the deadline and exiting later on its own terms. TimedOut

@@ -182,14 +182,6 @@ const (
 
 const ripgrepMissing = "map-ripgrep-missing "
 
-// maxGrepCommandBytes bounds the script one grep hands to Exec. The script
-// is one execve argument, which Linux caps near 128 KiB (MAX_ARG_STRLEN); past
-// it the exec fails before anything runs ("argument list too long") — and the
-// pattern, path, type and glob are all in it, the pattern again in rg's own
-// argv. The bound is internal/executor's maxInstallCommandBytes, for the same
-// reason: below the ceiling, with room for the wrapper Exec runs it under.
-const maxGrepCommandBytes = 120 << 10
-
 // openRipgrep is ripgrep.Open, a variable so a test can play a build that
 // fetched no binaries.
 var openRipgrep = ripgrep.Open
@@ -441,10 +433,12 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if why != "" {
 		return failf("grep: %s", why)
 	}
+	// The script is one exec argument, and the pattern, path, type and glob
+	// are all in it, the pattern again in rg's own argv.
 	script := q.script()
-	if len(script) > maxGrepCommandBytes {
+	if len(script) > sandbox.MaxCommandBytes {
 		return failf("grep: the pattern, path, type and glob make a %d-byte command, over the %d bytes one exec argument can carry; shorten them",
-			len(script), maxGrepCommandBytes)
+			len(script), sandbox.MaxCommandBytes)
 	}
 	for installed := false; ; installed = true {
 		res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: DefaultTimeout})
