@@ -2,8 +2,6 @@ package toolset
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,100 +20,17 @@ type searchInput struct {
 	Path    string `json:"path"`
 }
 
-// searchBeginPrefix and searchEndPrefix open the two lines a search's script —
-// glob's and grep's — prints around everything it says, on stdout and on
-// stderr alike: the begin line before anything else, the end line as it
-// exits. Their suffix is one 64-bit nonce per search (newSearchFrame), which
-// no searched file holds but by a 2⁻⁶⁴ chance: rg prints a matched line bare
-// from a single file with -n false, and such a line must never be read as the
-// frame.
-//
-// The frame keeps out what reaches an exec's streams that the script did not
-// print: an image's banner before it — what an `ENV BASH_ENV` file prints as
-// the shell starts, say — and anything after it, such as an EXIT trap's. It
-// keeps out what an image's startup prints, not what it changes; whether the
-// platform's own scripts should run without it is #860. Nor is it a boundary
-// against the sandbox's own processes: the script, nonce and all, is the
-// exec's argv, which any process in the sandbox may read, and a model that
-// forges a search's output from inside its own sandbox is tampering with what
-// it alone reads.
-const (
-	searchBeginPrefix = "map-search-begin-"
-	searchEndPrefix   = "map-search-end-"
-)
+// A search's script — glob's, grep's — prints its output inside a frame
+// (sandbox.Frame) of its own, opened first (Frame.Open) and closed by
+// close_frame as it exits, on stdout and on stderr alike, so what an image's
+// startup prints around it is not read as a match. Its label is "search", so
+// its lines are "map-search-begin-<nonce>" and "map-search-end-<nonce>": rg
+// prints a matched line bare from a single file with -n false, and such a
+// line is never read as the frame but by a 2⁻⁶⁴ chance.
+func newSearchFrame() sandbox.Frame { return sandbox.NewFrame("search") }
 
-// searchFrame is one search's begin and end lines.
-type searchFrame struct{ begin, end string }
-
-func newSearchFrame() searchFrame {
-	var nonce [8]byte
-	_, _ = rand.Read(nonce[:])
-	n := hex.EncodeToString(nonce[:])
-	return searchFrame{begin: searchBeginPrefix + n, end: searchEndPrefix + n}
-}
-
-// open is what a search's script begins with: close_frame, which prints the
-// end line on both streams and exits with its argument — the one way the
-// script exits — and then the begin line on both.
-func (f searchFrame) open() string {
-	return fmt.Sprintf(`close_frame() { printf '\n%%s\n' %[2]s; printf '\n%%s\n' %[2]s >&2; exit "$1"; }
-printf '\n%%s\n' %[1]s; printf '\n%%s\n' %[1]s >&2
-`, singleQuote(f.begin), singleQuote(f.end))
-}
-
-// cut returns what the script printed on one stream — what lies between the
-// last begin line and the end line after it — with framed true, and short
-// true where the sandbox's cap cut the stream before its end line. Each line
-// is printed after a newline of its own, so it is a line however what came
-// before it ended, and the newline before the end line is the frame's, not
-// the script's. The last begin line, because whatever printed before the
-// script — an image's banner — can print a line that looks like one, nonce
-// and all, having read the script from the exec's argv; the script's own
-// comes after it. That choice opens the other side as far as it closes this
-// one: what prints after the script's end line — an EXIT trap an image's
-// startup file set, which runs in the script's own shell and reads the nonce
-// there — can print a begin line, an answer and an end line of its own, and
-// that is what is read. Neither is a boundary the frame keeps: it keeps out
-// what an image's startup prints by accident, not what a process in the
-// sandbox forges on purpose (searchBeginPrefix, #860).
-//
-// A stream the sandbox's cap cut (truncated: that stream's own flag, never
-// the other's) before its end line is short: all that follows the begin
-// line is what there is, less any start of the end line the cap left at its
-// tail. One the cap cut only after its end line — an EXIT trap's flood — is
-// whole, and not short; so is one it cut inside the end line, where what it
-// left of it reaches into the nonce: the script prints the end line after
-// all else it prints there, and a tail that carries the nonce is that line's,
-// which no searched file holds but by chance. A tail of the end line's
-// constant part alone — "\n", or "\nmap-search-e" — could be a searched
-// file's, so a stream cut there is short. A stream with no begin line, or a
-// whole one with no end line after it, is not one the script printed to its
-// end: "", false, false.
-func (f searchFrame) cut(s string, truncated bool) (text string, framed, short bool) {
-	t := "\n" + s
-	begin := "\n" + f.begin + "\n"
-	i := strings.LastIndex(t, begin)
-	if i < 0 {
-		return "", false, false
-	}
-	rest := t[i+len(begin):]
-	end := "\n" + f.end + "\n"
-	if j := strings.Index(rest, end); j >= 0 {
-		return rest[:j], true, false
-	}
-	if !truncated {
-		return "", false, false
-	}
-	for k := min(len(end)-1, len(rest)); k > 0; k-- {
-		if strings.HasSuffix(rest, end[:k]) {
-			return rest[:len(rest)-k], true, k <= len("\n"+searchEndPrefix)
-		}
-	}
-	return rest, true, true
-}
-
-// messages is what a search's script printed on stderr (cut), trimmed, and
-// what the sandbox's cap took of it there. A stderr the cap cut between the
+// messages is what a search's script printed on stderr (Frame.Cut), trimmed,
+// and what the sandbox's cap took of it there. A stderr the cap cut between the
 // begin and end lines keeps what came before the cut, with the truncation
 // notice after it; one it cut only after the end line — an EXIT trap's flood
 // — took none of the script's, and says nothing of the cap. One the cap cut
@@ -124,8 +39,8 @@ func (f searchFrame) cut(s string, truncated bool) (text string, framed, short b
 // lost tells the caller to say the cap cut them (searchFailure, grepAnswer).
 // A stderr the cap did not cut and with no frame is none of the script's:
 // "".
-func (f searchFrame) messages(res sandbox.ExecResult) (msg string, lost bool) {
-	msg, framed, short := f.cut(res.Stderr, res.StderrTruncated)
+func messages(f sandbox.Frame, res sandbox.ExecResult) (msg string, lost bool) {
+	msg, framed, short := f.Cut(res.Stderr, res.StderrTruncated)
 	msg = strings.TrimSpace(msg)
 	if short {
 		msg = strings.TrimSpace(msg + "\n" + truncationNotice)
@@ -160,7 +75,7 @@ func (r Runner) searchExec(ctx context.Context, script, inputs string) (sandbox.
 }
 
 // unframed is a search's answer to output its script did not print to its
-// end (searchFrame.cut): a failure carrying what the sandbox printed, never an
+// end (Frame.Cut): a failure carrying what the sandbox printed, never an
 // answer.
 func unframed(tool string, res sandbox.ExecResult) (Result, error) {
 	msg := fmt.Sprintf("%s: no answer reached the output whole (exit %d): the sandbox's shell exited, or filled the output cap, before the search finished", tool, res.ExitCode)
@@ -177,7 +92,7 @@ func unframed(tool string, res sandbox.ExecResult) (Result, error) {
 // their mtimes and sorted newest first. globstar is bash 4.0's: a bash that
 // refuses it stops the search with a message naming the version, rather than
 // expanding `**` as `*`. The script runs inside a search frame
-// (searchFrame.open), which only close_frame exits, so what it prints is read
+// (Frame.Open), which only close_frame exits, so what it prints is read
 // from between the frame's lines.
 //
 // The pattern is a variable, never a literal in the script, and IFS is empty so
@@ -249,7 +164,7 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 	}
 
 	frame := newSearchFrame()
-	cmd := frame.open() + strings.NewReplacer(
+	cmd := frame.Open() + strings.NewReplacer(
 		"__ROOT__", singleQuote(root),
 		"__PREFIX__", singleQuote(prefix),
 		"__PAT__", singleQuote(in.Pattern),
@@ -261,12 +176,12 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if res.TimedOut {
 		return failf("glob: timed out after %s", DefaultTimeout)
 	}
-	out, framed, short := frame.cut(res.Stdout, res.StdoutTruncated)
+	out, framed, short := frame.Cut(res.Stdout, res.StdoutTruncated)
 	if !framed {
 		return unframed("glob", res)
 	}
 	if res.ExitCode != 0 {
-		msg, lost := frame.messages(res)
+		msg, lost := messages(frame, res)
 		return searchFailure("glob", out, msg, res.ExitCode, short || lost)
 	}
 
@@ -293,7 +208,7 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 }
 
 // searchFailure hands the model what a search's script itself said — out, its
-// framed stdout, and msg, its messages (searchFrame.messages): the bad regex,
+// framed stdout, and msg, its messages (messages): the bad regex,
 // the missing directory — rather than a message of our own invention, and the
 // exit code where it said nothing. Each stream's cut is said where it cut: a
 // msg the cap cut carries its own notice after it, and cut — stdout cut, or

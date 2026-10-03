@@ -48,12 +48,12 @@ type grepInput struct {
 
 // grepQuery is a validated grepInput: rg's arguments, the directory rg runs
 // in, the paging rg does not do itself, and the frame the search's script
-// prints around what it says (searchFrame).
+// prints around what it says (newSearchFrame).
 type grepQuery struct {
 	args        []string
 	cwd         string
 	skip, limit int
-	frame       searchFrame
+	frame       sandbox.Frame
 }
 
 // whole reads one of the schema's number options: a whole number from 0 to
@@ -276,7 +276,7 @@ var openRipgrep = ripgrep.Open
 // store the newline is bash 4.1's, past what the image contract asks.)
 const pagerReader = `{ IFS= read -r -n 1 c || exit 3; if [ -n "$c" ]; then printf '%s' "$c"; else echo; fi; exec cat; }`
 
-// script renders one search: the frame opened (searchFrame.open), the
+// script renders one search: the frame opened (Frame.Open), the
 // directory rg runs in entered, rg checked, then run over the query's
 // arguments and paged, and the frame closed as the script exits, whichever way
 // it does (close_frame).
@@ -296,9 +296,10 @@ const pagerReader = `{ IFS= read -r -n 1 c || exit 3; if [ -n "$c" ]; then print
 // credential can set $HOSTTYPE. `uname -m` is asked only where that machine
 // is none rg is shipped for — a 32-bit bash on a 64-bit kernel, whose kernel
 // may run rg all the same — and the compiled machine stands again where the
-// image ships no uname. That fallback is a child such a banner reaches, as it
-// reaches every exec the platform makes (#860). The report is the whole of
-// the framed stdout (missingRipgrep).
+// image ships no uname. That fallback is a child such a banner reaches inside
+// the frame, as it reaches every child a platform script runs — a limit the
+// image contract states rather than one the frame closes (sandbox.Frame). The
+// report is the whole of the framed stdout (missingRipgrep).
 //
 // head_limit and offset page rg's output lines as the descriptions' "| tail
 // -n +N | head -N" does: through head and tail in the sandbox, so a large
@@ -320,7 +321,7 @@ func (q grepQuery) script() string {
 		words[i] = singleQuote(a)
 	}
 	var b strings.Builder
-	b.WriteString(q.frame.open())
+	b.WriteString(q.frame.Open())
 	fmt.Fprintf(&b, `cd -- %[1]s >/dev/null || close_frame %[2]d
 rg=%[3]s
 v=
@@ -380,11 +381,11 @@ esac
 // framed stdout is the report and nothing else. What lies outside the frame —
 // an image's banner, a forged report — is not read, and an exit 97 without
 // the report is not the check's.
-func missingRipgrep(res sandbox.ExecResult, f searchFrame) (string, bool) {
+func missingRipgrep(res sandbox.ExecResult, f sandbox.Frame) (string, bool) {
 	if res.ExitCode != exitNoRipgrep {
 		return "", false
 	}
-	out, ok, _ := f.cut(res.Stdout, res.StdoutTruncated)
+	out, ok, _ := f.Cut(res.Stdout, res.StdoutTruncated)
 	if !ok {
 		return "", false
 	}
@@ -648,7 +649,7 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 }
 
 // grepAnswer reads a search: rg's output, the script's framed stdout, and its
-// messages, the framed stderr (searchFrame.cut). Whether there are matches is
+// messages, the framed stderr (Frame.Cut). Whether there are matches is
 // the exit's to say (script): 0 is an answer, whatever its length — a lone
 // empty line one too, which reads back as no text at all — and 1 is "no
 // matches". An error beside an answer — one unreadable file among the
@@ -673,18 +674,18 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 // whatever came after. What the cap cut of the script's says so, where it
 // cut: rg's messages the cap cut between their begin and end lines carry the
 // notice after them, beside an answer and in a failure alike
-// (searchFrame.messages); an answer the cap cut before its end line carries
+// (messages); an answer the cap cut before its end line carries
 // it in front, and so does a failure whose output it cut (searchFailure);
 // and messages it took whole, begin line and all, are said after an answer
 // and in front of a failure. A stream it cut only after its end line — an
 // EXIT trap's flood — or inside the end line's nonce lost nothing of the
 // script's, and says nothing.
-func grepAnswer(res sandbox.ExecResult, f searchFrame) (Result, error) {
-	out, framed, short := f.cut(res.Stdout, res.StdoutTruncated)
+func grepAnswer(res sandbox.ExecResult, f sandbox.Frame) (Result, error) {
+	out, framed, short := f.Cut(res.Stdout, res.StdoutTruncated)
 	if !framed {
 		return unframed("grep", res)
 	}
-	msg, lost := f.messages(res)
+	msg, lost := messages(f, res)
 	printed := out != ""
 	// rg ends every line it prints; the last one's newline is not the answer's.
 	out = strings.TrimSuffix(out, "\n")
