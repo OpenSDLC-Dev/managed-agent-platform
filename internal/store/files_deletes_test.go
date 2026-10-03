@@ -110,7 +110,8 @@ func TestEveryFilesDeleteOwesItsKeyAndDecidesAboutCopies(t *testing.T) {
 
 // Each way of writing a DELETE FROM files that a scan of lone literals would
 // miss is read: pieces concatenated, a named constant, a table that comes at
-// run time, and a migration after 0047. The two well-formed statements, one
+// run time, a RETURNING that names more than the key, and a migration after
+// 0047. The two well-formed statements, one
 // spelled through constants, break nothing, and only the one that leaves
 // copies in reach counts.
 func TestFilesDeleteScanCatchesEachEvasion(t *testing.T) {
@@ -131,6 +132,7 @@ func removers(exec func(string), table string) {
 	exec("DELETE FROM " + table)                                                                  // run-time table
 	exec(prefix + key)                                                                            // well formed, may meet a copy
 	exec("DELETE FROM files WHERE id = $1 AND source_file_id IS NULL RETURNING " + key)          // well formed, excludes copies
+	exec("DELETE FROM files WHERE id = $1 RETURNING id, " + key)                                  // returns more than the key
 }
 `
 	fset := token.NewFileSet()
@@ -156,13 +158,14 @@ func removers(exec func(string), table string) {
 		lines = append(lines, line)
 	}
 	slices.Sort(lines)
-	// The concatenation, the named constant, and the two run-time tables.
-	if want := []int{12, 13, 14, 15}; !slices.Equal(lines, want) {
+	// The concatenation, the named constant, the two run-time tables, and the
+	// RETURNING that names more than the key.
+	if want := []int{12, 13, 14, 15, 18}; !slices.Equal(lines, want) {
 		t.Errorf("breaks on lines %v, want %v:\n%s", lines, want, strings.Join(scan.breaks, "\n"))
 	}
-	// The concatenation, the named constant and prefix + key in Go; the
-	// migration's, listed whatever its predicate.
-	want := map[string]int{"internal/p/p.go": 3, "internal/store/migrations/0048_later.sql": 1}
+	// The concatenation, the named constant, prefix + key and the over-wide
+	// RETURNING in Go; the migration's, listed whatever its predicate.
+	want := map[string]int{"internal/p/p.go": 4, "internal/store/migrations/0048_later.sql": 1}
 	if !maps.Equal(scan.reach, want) {
 		t.Errorf("reach = %v, want %v", scan.reach, want)
 	}
@@ -201,8 +204,11 @@ func (d *deleteScan) statement(file, site, sql string, inGo bool) {
 		}
 		if inGo {
 			norm := strings.ToLower(strings.TrimSpace(spaceRE.ReplaceAllString(sql, " ")))
-			key := strings.ToLower(spaceRE.ReplaceAllString("returning "+store.FileObjectKeySQL, " "))
-			if len(returningRE.FindAllString(sql, -1)) != 1 || !strings.HasSuffix(norm, key) {
+			key := strings.ToLower(strings.TrimSpace(spaceRE.ReplaceAllString(store.FileObjectKeySQL, " ")))
+			// The whole RETURNING clause is the key: `RETURNING id, ` + the key
+			// ends right yet owes more than the key.
+			at := returningRE.FindAllStringIndex(norm, -1)
+			if len(at) != 1 || strings.TrimSpace(norm[at[0][1]:]) != key {
 				d.breaks = append(d.breaks, fmt.Sprintf(
 					"%s: a DELETE FROM files that does not end `RETURNING ` + store.FileObjectKeySQL, "+
 						"so it cannot owe the object a copy shares:\n%s", site, sql))
