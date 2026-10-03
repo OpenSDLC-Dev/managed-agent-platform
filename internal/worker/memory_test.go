@@ -475,10 +475,11 @@ func TestMemoryPullOnlyStores(t *testing.T) {
 // from inside its frame (sandbox.ExecFramed), and one whose output never
 // carried the frame — a shell that died first, a startup that filled the
 // output cap — says nothing of the directory. The store is not landed over
-// it, as over a directory whose listing failed, and the run's end does not
-// sync it: what the agent wrote there is not pushed. Once the listing answers
-// again, the store lands.
+// it, as over a directory whose listing failed, under a warning that says why,
+// and the run's end does not sync it: what the agent wrote there is not
+// pushed. Once the listing answers again, the store lands.
 func TestMemoryUnframedListingVouchesForNothing(t *testing.T) {
+	warnings := captureWarnings(t)
 	sb := &fakeSandbox{unframed: true}
 	h := newHarness(t, sb)
 	h.seedMemoryStore(t, memStoreID, "Notes")
@@ -491,6 +492,11 @@ func TestMemoryUnframedListingVouchesForNothing(t *testing.T) {
 	}
 	if _, ok := h.memoryContent(t, memStoreID, "/log/b.md"); ok {
 		t.Error("a store whose listing never carried its frame was pushed to")
+	}
+	// Its log says the listing did not answer, not that the directory holds
+	// files, which nothing showed.
+	if w := warnings(); !strings.Contains(w, "its listing did not answer") || strings.Contains(w, "holds files but no trusted marker") {
+		t.Errorf("warnings:\n%s\nwant the listing's own reason, and not the untrusted directory's", w)
 	}
 	sb.unframed = false
 	delete(sb.files, memMount+"/log/b.md")

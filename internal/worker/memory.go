@@ -209,6 +209,12 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 		outcome, err := m.materializeStore(ctx, ref, progress)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
+		case outcome == memoryOutcomeUntrusted && err != nil:
+			// Held as an untrusted directory is (below), but not for its
+			// files: its listing did not answer (materializeStore).
+			existing++
+			slog.WarnContext(ctx, "memory store directory not re-materialized: its listing did not answer; pull-only this run, and asked again the next",
+				"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "mount_path", ref.MountPath, "err", err)
 		case err != nil:
 			slog.WarnContext(ctx, "memory store not materialized",
 				"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "mount_path", ref.MountPath,
@@ -251,7 +257,13 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	// failed, or one that did not reach the output whole (sandbox.Frame) — is
 	// a directory nothing vouches for. An absent directory lists nothing and
 	// exits 0, which is the fresh case.
-	if !framed || len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
+	if !framed {
+		// A listing that did not answer says nothing of the directory: it is
+		// held as an untrusted one is, under a reason of its own, and the next
+		// run asks again.
+		return memoryOutcomeUntrusted, fmt.Errorf("its listing did not reach the output whole (exit %d)", res.ExitCode)
+	}
+	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
 	// One batch for the whole store, bounded by the store's own caps (2,000

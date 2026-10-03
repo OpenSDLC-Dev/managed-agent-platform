@@ -726,6 +726,7 @@ func TestMemoryStoreMissingOrUntrusted(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// A listing that fails vouches for nothing: the directory is
 			// neither overwritten with the store nor synced from.
+			logged := captureLogs(t)
 			h := newHarness(t, sb)
 			h.seedMemoryStore(t, memStoreID, "Notes")
 			h.seedMemory(t, memStoreID, "/notes.md", "hello")
@@ -734,6 +735,18 @@ func TestMemoryStoreMissingOrUntrusted(t *testing.T) {
 			for _, p := range []string{memMount + "/.anthropic-memory-store", memMount + "/notes.md", baselinePath(memStoreID)} {
 				if _, ok := sb.files[p]; ok {
 					t.Errorf("%s was written over a directory whose listing did not answer", p)
+				}
+			}
+			// An unframed listing says so, and not that the directory holds
+			// files, which nothing showed.
+			if sb.unframed {
+				var said, misread bool
+				for _, r := range logged() {
+					said = said || strings.Contains(r.message, "its listing did not answer")
+					misread = misread || strings.Contains(r.message, "holds files but no trusted marker")
+				}
+				if !said || misread {
+					t.Errorf("logged %+v; want the listing's own reason, and not the untrusted directory's", logged())
 				}
 			}
 		})
