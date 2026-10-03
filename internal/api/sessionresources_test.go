@@ -41,6 +41,20 @@ func resourcesOf(t *testing.T, sess map[string]any) []map[string]any {
 	return out
 }
 
+// mountedFileID is the file_id of a session's first file resource: the
+// session's own copy of the file it was created with (#578).
+func mountedFileID(t *testing.T, sess map[string]any) string {
+	t.Helper()
+	for _, r := range resourcesOf(t, sess) {
+		if r["type"] == "file" {
+			id, _ := r["file_id"].(string)
+			return id
+		}
+	}
+	t.Fatalf("session %v mounts no file", sess["id"])
+	return ""
+}
+
 // wantResourceFields asserts the materialized file-resource wire shape — every
 // field is api:"required" (checked against anthropic-sdk-go v1.70.1 —
 // betasessionresource.go BetaManagedAgentsFileResource).
@@ -77,8 +91,11 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 		t.Fatalf("resources = %v, want one", res)
 	}
 	wantResourceFields(t, res[0])
-	if res[0]["file_id"] != fileA {
-		t.Errorf("file_id = %v, want %s", res[0]["file_id"], fileA)
+	// The resource names the session's own copy of the upload, while the
+	// default mount path keeps the id asked for (#578; filescopies_test.go).
+	copyA, _ := res[0]["file_id"].(string)
+	if !strings.HasPrefix(copyA, "file_") || copyA == fileA {
+		t.Errorf("file_id = %v, want a fresh file_ id, not the upload's %s", res[0]["file_id"], fileA)
 	}
 	if want := "/mnt/session/uploads/" + fileA; res[0]["mount_path"] != want {
 		t.Errorf("mount_path = %v, want the default %s", res[0]["mount_path"], want)
@@ -135,8 +152,8 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 		t.Fatalf("get resource: %d %v", status, one)
 	}
 	wantResourceFields(t, one)
-	if one["file_id"] != fileA {
-		t.Errorf("get resource file_id = %v, want %s", one["file_id"], fileA)
+	if one["file_id"] != copyA {
+		t.Errorf("get resource file_id = %v, want %s", one["file_id"], copyA)
 	}
 
 	// Add a second resource (a different file), then confirm the session shows two.

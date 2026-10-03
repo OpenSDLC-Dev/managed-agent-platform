@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // seedFile plants a files-table row and its object, as the /v1/files upload
@@ -71,6 +72,35 @@ func TestMaterializesFiles(t *testing.T) {
 	}
 	if _, ok := sb.files[sandbox.DefaultWorkdir+"/"+filesSentinelName]; !ok {
 		t.Error("no files sentinel written")
+	}
+}
+
+// TestMaterializesASessionCopy: a session's copy of an upload (#578) has no
+// object at its own id's key — it aliases the upload's, named by object_key —
+// and mounts from there, even once the upload's row is gone. Reading
+// blob.FilesKey(copy) would find nothing and skip the mount.
+func TestMaterializesASessionCopy(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedFile(t, "file_upload", "aliased bytes")
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id, object_key, source_file_id)
+		 SELECT 'file_copy', filename, mime_type, size_bytes, 'session', $1, `+store.FileObjectKeySQL+`, id
+		   FROM files WHERE id = 'file_upload'`, h.sid.String()); err != nil {
+		t.Fatalf("seed the copy: %v", err)
+	}
+	if _, err := h.pool.Exec(context.Background(), `DELETE FROM files WHERE id = 'file_upload'`); err != nil {
+		t.Fatal(err)
+	}
+	mount := "/mnt/session/uploads/file_upload"
+	h.refFiles(t, [2]string{"file_copy", mount})
+
+	h.suspend(t, writeUse("out.txt", "x"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got := sb.files[mount]; got != "aliased bytes" {
+		t.Errorf("mounted content = %q, want the upload's bytes through the copy", got)
 	}
 }
 

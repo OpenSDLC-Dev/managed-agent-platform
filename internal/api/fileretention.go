@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,7 +55,9 @@ import (
 // never sees one — what removes them is a session delete, which takes every
 // row scoped to the session, and the next replacing harvest, which drops the
 // whole snapshot before writing the new one. The index still earns its place
-// on the uploads, which do expire.
+// on the uploads, which do expire, and on the session copies of them that
+// migration 0046 introduced (#578): a copy is session-scoped like an output
+// but inherits its upload's expires_at, so this sweep does reach those.
 //
 // And it omits the note 0031 and 0035 both carry: migrate.go applies every
 // pending file inside one transaction, so CREATE INDEX cannot be CONCURRENTLY.
@@ -195,8 +196,8 @@ var filePurgeAfterCommitHook func()
 // purgeExpiredFiles removes one batch of files whose grace window has elapsed
 // and, in the same transaction, records what those removals leave owed.
 //
-// One transaction rather than two statements, because an id is the only name an
-// object has. A DELETE that committed without the enqueue would take the names
+// One transaction rather than two statements, because its rows are the only
+// names an object has. A DELETE that committed without the enqueue would take the names
 // with it and no tier could enumerate what was left in the store — #645's class,
 // reached here three ways that have nothing to do with each other: a
 // cancellation landing in the RETURNING drain (#696), a store refusing every key
@@ -238,12 +239,19 @@ var filePurgeAfterCommitHook func()
 // up at all, which takes the choice away, and it selects the same rows either
 // way: a row with no dream satisfies the NOT EXISTS already.
 func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.Duration) (int, error) {
-	tx, err := pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, pool)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
 
+	// A session's copy of an upload inherits its expires_at (#578), so expired
+	// copies are this sweep's too, and only a transaction that allows it can
+	// delete one. The batch never waits on a row lock (SKIP LOCKED), so the
+	// order it locks in cannot close a cycle.
+	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
+		return 0, err
+	}
 	rows, err := tx.Query(ctx, `
 		DELETE FROM files
 		 WHERE id IN (SELECT f.id FROM files f
@@ -254,22 +262,19 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 		               ORDER BY f.expires_at, f.id
 		               LIMIT $2
 		               FOR UPDATE SKIP LOCKED)
-		 RETURNING id`, retention.Seconds(), filePurgeBatch)
+		 RETURNING `+store.FileObjectKeySQL, retention.Seconds(), filePurgeBatch)
 	if err != nil {
 		return 0, err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	// A copy shares its upload's object, so expired copies of one upload
+	// return its key once each; the key goes in once, and the queue takes it
+	// once no surviving row names it (EnqueueObjectDeletes).
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return 0, err
 	}
-	if len(ids) > 0 {
-		keys := make([]string, len(ids))
-		for i, id := range ids {
-			keys[i] = blob.FilesKey(id)
-		}
-		if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
-			return 0, err
-		}
+	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
+		return 0, err
 	}
 	// Test seam: read the queue from another connection in exactly this window,
 	// or fail the sweep here to watch the rollback. nil in production.
@@ -285,8 +290,8 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 	if filePurgeAfterCommitHook != nil {
 		filePurgeAfterCommitHook()
 	}
-	recordExpiredFilesPurged(ctx, len(ids))
-	return len(ids), nil
+	recordExpiredFilesPurged(ctx, len(keys))
+	return len(keys), nil
 }
 
 // recordExpiredFilesPurged counts what one sweep removed; a sweep that removed

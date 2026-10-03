@@ -328,11 +328,11 @@ func TestExpiredFileEnvironmentKeyLane(t *testing.T) {
 	oct := "application/octet-stream"
 
 	mounted := s.uploadFile(t, "mounted.bin", &oct, "mounted secret")
-	mountedID := mounted["id"].(string)
-	createSession(t, s, map[string]any{
+	// The worker reads the session's copy (#578), whose expiry is its own row's.
+	mountedID := mountedFileID(t, createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": envID,
-		"resources": []any{map[string]any{"type": "file", "file_id": mountedID}},
-	})
+		"resources": []any{map[string]any{"type": "file", "file_id": mounted["id"]}},
+	}))
 	res := s.doRaw("GET", "/v1/files/"+mountedID+"/content", nil, bearer)
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK {

@@ -158,16 +158,19 @@ func (e *Executor) materializeFile(ctx context.Context, sb sandbox.Sandbox, m fi
 	// above: past expires_at the content route answers 404, so mounting the bytes
 	// here would make the platform-managed half serve what the BYOC half refuses
 	// (#655, plan 49).
-	var exists bool
+	//
+	// The bytes are at the row's key, not at one derived from the id: a
+	// session's copy of an upload shares the upload's object (#578).
+	var key string
 	err := e.pool.QueryRow(ctx,
-		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).Scan(&exists)
+		`SELECT `+store.FileObjectKeySQL+` FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).Scan(&key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s", errFileMissing, m.FileID)
 	}
 	if err != nil {
 		return err
 	}
-	rc, size, err := e.blobs.Get(ctx, blob.FilesKey(m.FileID))
+	rc, size, err := e.blobs.Get(ctx, key)
 	if errors.Is(err, blob.ErrNotFound) {
 		return fmt.Errorf("%w: %s", errFileMissing, m.FileID)
 	}

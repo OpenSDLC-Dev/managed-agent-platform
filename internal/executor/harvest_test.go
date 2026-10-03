@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // seedOutcome puts one outcome entry with the given result onto the session
@@ -270,6 +271,92 @@ func TestReHarvestReplacesSnapshotPerPath(t *testing.T) {
 	// objects, the two replaced and the two that replaced them.
 	if h.blobs.Len() != 4 {
 		t.Errorf("stored blobs = %d, want all 4: the re-harvest enqueues rather than deleting", h.blobs.Len())
+	}
+}
+
+// TestReHarvestLeavesTheSessionsCopies: a session's copies of the files it
+// mounts are scoped to it as its outputs are (#578), and a harvest replaces
+// only its own rows — a copy survives every cycle, its name free to match an
+// output's path. A replaced output that another session mounted is still
+// named by that session's copy, so its object is not owed.
+func TestReHarvestLeavesTheSessionsCopies(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	h.seedFile(t, "file_upload", "input bytes")
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id, object_key, source_file_id)
+		 VALUES ('file_copy', 'report.json', 'text/plain', 11, 'session', $1, $2, 'file_upload')`,
+		h.sid.String(), blob.FilesKey("file_upload")); err != nil {
+		t.Fatalf("seed the session's copy: %v", err)
+	}
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	var output string
+	for _, r := range h.fileRows(t) {
+		if r.id != "file_copy" && r.id != "file_upload" {
+			output = r.id
+		}
+	}
+	if output == "" {
+		t.Fatalf("the first harvest published nothing: %+v", h.fileRows(t))
+	}
+	// Another session mounts the output: its copy names the output's object.
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id, object_key, source_file_id)
+		 SELECT 'file_elsewhere', filename, mime_type, size_bytes, 'session', 'sesn_elsewhere', `+store.FileObjectKeySQL+`, id
+		   FROM files WHERE id = $1`, output); err != nil {
+		t.Fatalf("seed the other session's copy: %v", err)
+	}
+
+	sb.files[outputsDir+"/report.json"] = "v2"
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	ids := map[string]bool{}
+	for _, r := range h.fileRows(t) {
+		ids[r.id] = true
+	}
+	if !ids["file_copy"] || !ids["file_elsewhere"] {
+		t.Errorf("rows after the re-harvest = %v, want both copies kept", ids)
+	}
+	if ids[output] {
+		t.Errorf("the replaced output %s survived the re-harvest", output)
+	}
+	if owed := h.pendingKeys(t); len(owed) != 0 {
+		t.Errorf("the re-harvest owes %v, want nothing: the replaced output's object is still a copy's", owed)
+	}
+}
+
+// TestAHarvestBeginsReadCommitted: a re-harvest owes the snapshot it
+// replaces, and migration 0046's reference count refuses a files/ key under
+// REPEATABLE READ and SERIALIZABLE (#578). The settle names READ COMMITTED
+// when it begins (store.BeginObjectDelete), so a database defaulting to a
+// stricter level still publishes. internal/api's TestEveryObjectDeleteBeginsReadCommitted
+// holds the control plane's removers.
+func TestAHarvestBeginsReadCommitted(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+	first := h.fileRows(t)
+	if len(first) != 1 {
+		t.Fatalf("the first harvest published %d rows, want 1", len(first))
+	}
+
+	pgtest.DefaultRepeatableRead(t, h.pool)
+	sb.files[outputsDir+"/report.json"] = "v2"
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	rows := h.fileRows(t)
+	if len(rows) != 1 || rows[0].id == first[0].id {
+		t.Fatalf("rows after the re-harvest = %+v, want one replacing %s", rows, first[0].id)
+	}
+	if got, want := h.pendingKeys(t), []string{blob.FilesKey(first[0].id)}; !slices.Equal(got, want) {
+		t.Errorf("the re-harvest owes %v, want %v", got, want)
 	}
 }
 

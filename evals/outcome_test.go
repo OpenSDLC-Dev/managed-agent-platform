@@ -330,8 +330,9 @@ func RubricConfidential(token string, class Class) Grader {
 }
 
 // HarvestedDeliverable asserts the outputs harvest published the deliverable
-// to the files registry — a row whose filename is the outputs-relative path.
-// The walk, the registry write, and the GET /v1/files exposure are all
+// to the files registry — a downloadable row whose filename is the
+// outputs-relative path.
+// The walk, the registry write, and the GET /v1/files?scope_id= exposure are all
 // platform machinery (docs/DIVERGENCES.md, "The outputs harvest"): the file
 // sitting in the sandbox with no registry row is ours. Vacuous when the
 // sandbox file is absent (the model never wrote it) — and vacuous unless the
@@ -355,18 +356,23 @@ func HarvestedDeliverable(filename string, class Class) Grader {
 			if _, err := tr.readFile(t, "/mnt/session/outputs/"+name); err != nil {
 				return nil
 			}
-			res := tr.stack.do(t, http.MethodGet, "/v1/files?limit=1000", nil)
+			// Under the session's scope: the unfiltered list leaves a
+			// session's files out (#578).
+			res := tr.stack.do(t, http.MethodGet, "/v1/files?limit=1000&scope_id="+tr.SessionID, nil)
 			data, ok := res["data"].([]any)
 			if !ok {
 				return fmt.Errorf("files list has no data array: %v", res)
 			}
+			// downloadable is what tells the harvest's row from a copy the
+			// session's mounts minted (#578), which lists under the same
+			// scope and can carry the same name: a copy of an input never is.
 			for _, e := range data {
 				m, _ := e.(map[string]any)
-				if fn, _ := m["filename"].(string); fn == name {
+				if fn, _ := m["filename"].(string); fn == name && m["downloadable"] == true {
 					return nil
 				}
 			}
-			return fmt.Errorf("deliverable %s exists in the sandbox outputs but the files registry has no row for it (%d rows listed)",
+			return fmt.Errorf("deliverable %s exists in the sandbox outputs but the files registry has no downloadable row for it (%d rows listed)",
 				name, len(data))
 		},
 	}
