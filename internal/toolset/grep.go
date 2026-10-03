@@ -288,8 +288,14 @@ const pagerReader = `{ IFS= read -r -n 1 c || exit 3; if [ -n "$c" ]; then print
 // that plants a fake answering the right version, which would be the model
 // tampering with its own sandbox, where bash already runs whatever it likes.
 // A failed check reports the machine, so the caller can install rg and call
-// again; `uname -m` reports it, and bash's own $HOSTTYPE stands in where an
-// image ships no uname. The report is the whole of the framed stdout
+// again. bash's own $HOSTTYPE names it, in the script's own process: no
+// child prints it, so nothing the loader runs in a child — an `ENV
+// LD_PRELOAD` library's constructor printing a banner — can corrupt it.
+// `uname -m` is asked only where $HOSTTYPE names no machine rg is shipped
+// for — a 32-bit bash on a 64-bit kernel, whose kernel may run rg all the
+// same — and $HOSTTYPE stands again where the image ships no uname. That
+// fallback is a child such a banner reaches, as it reaches every exec the
+// platform makes (#860). The report is the whole of the framed stdout
 // (missingRipgrep).
 //
 // head_limit and offset page rg's output lines as the descriptions' "| tail
@@ -319,7 +325,8 @@ v=
 if [ -f "$rg" ] && [ -x "$rg" ]; then v=$("$rg" --version 2>/dev/null); fi
 case $v in
 %[4]s*) ;;
-*) printf '%[5]s%%s\n' "$(uname -m 2>/dev/null || printf '%%s' "$HOSTTYPE")"; close_frame %[6]d ;;
+*) case $HOSTTYPE in x86_64|amd64|aarch64|arm64) m=$HOSTTYPE ;; *) m=$(uname -m 2>/dev/null) || m=$HOSTTYPE ;; esac
+  printf '%[5]s%%s\n' "$m"; close_frame %[6]d ;;
 esac
 `, singleQuote(q.cwd), exitStopped,
 		singleQuote(ripgrepPath()), singleQuote("ripgrep "+ripgrep.Pinned.Version+" "), ripgrepMissing, exitNoRipgrep)
@@ -481,8 +488,9 @@ case $st/$v in
 esac
 `
 
-// linuxArch names the GOARCH of a sandbox's `uname -m`, or "" for a machine
-// no binary is shipped for.
+// linuxArch names the GOARCH of a sandbox's machine — bash's $HOSTTYPE, or
+// `uname -m` (grepQuery.script) — or "" for a machine no binary is shipped
+// for.
 func linuxArch(machine string) string {
 	switch machine {
 	case "x86_64", "amd64":

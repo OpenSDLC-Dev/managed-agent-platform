@@ -390,10 +390,37 @@ func TestGrepInstallsRipgrepInTheSandbox(t *testing.T) {
 		}
 	}
 
-	// A machine no binary is shipped for: the check reports what uname says.
+	// The machine is bash's own $HOSTTYPE, which no child process prints: a
+	// uname that answers with a banner — as one an `ENV LD_PRELOAD` library
+	// printed would — is never asked where $HOSTTYPE names a machine rg is
+	// shipped for.
+	ok(t, r, "bash", `{"command":"printf '#!/bin/sh\\necho welcome banner\\necho riscv64\\n' > /usr/local/bin/uname && chmod +x /usr/local/bin/uname && rm -f `+rg+`"}`)
+	if got := ok(t, r, "grep", in); got != want {
+		t.Fatalf("grep beside a bannered uname = %q, want %q", got, want)
+	}
+	ok(t, r, "bash", `{"command":"rm -f /usr/local/bin/uname"}`)
+	if got, want := installedRipgrep(t, r), fmt.Sprintf("755 %d", ripgrepSize(t, r)); got != want {
+		t.Fatalf("installed rg = %q, want %q", got, want)
+	}
+}
+
+// withEnv provisions the sandbox with env.
+func withEnv(env map[string]string) runnerOption {
+	return func(s *sandbox.Spec, _ *toolset.Runner) { s.Env = env }
+}
+
+// Where bash's $HOSTTYPE names no machine rg is shipped for — set here by the
+// sandbox's environment, which bash takes it from, as a 32-bit bash on a
+// 64-bit kernel would report i686 — `uname -m` is asked: rg is installed when
+// the kernel's machine is one rg is shipped for, and a machine neither names
+// is a tool error naming uname's.
+func TestGrepAsksUnameWhereHosttypeNamesNoShippedMachine(t *testing.T) {
+	r := runner(t, withEnv(map[string]string{"HOSTTYPE": "i686"}))
+	ok(t, r, "bash", `{"command":"mkdir -p lc && echo needle > lc/a.txt"}`)
+	const in = `{"pattern":"needle","path":"lc","output_mode":"content"}`
+	exactly(t, r, in, "/workspace/lc/a.txt:1:needle")
 	ok(t, r, "bash", `{"command":"printf '#!/bin/sh\\necho riscv64\\n' > /usr/local/bin/uname && chmod +x /usr/local/bin/uname && rm -f `+toolset.RipgrepPath()+`"}`)
 	fails(t, r, "grep", in, `ripgrep is shipped for linux x86_64 and aarch64, and this sandbox is "riscv64"`)
-	ok(t, r, "bash", `{"command":"rm -f /usr/local/bin/uname"}`)
 }
 
 // Calls that race to install on a fresh sandbox each land a whole binary —
