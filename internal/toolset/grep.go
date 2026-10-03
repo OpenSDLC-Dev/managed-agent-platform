@@ -236,8 +236,8 @@ const (
 const ripgrepMissing = "map-ripgrep-missing "
 
 // grepBeginPrefix opens the line a search prints on stdout and on stderr
-// immediately before rg runs (script). Its suffix is a nonce per search
-// (newGrepBegin), so no file a model searches can hold the line: rg prints a
+// immediately before rg runs (script). Its suffix is a 64-bit nonce per search
+// (newGrepBegin), which no searched file will hold by chance: rg prints a
 // matched line bare from a single file with -n false, and such a line must
 // never be read as the frame.
 const grepBeginPrefix = "map-grep-begin-"
