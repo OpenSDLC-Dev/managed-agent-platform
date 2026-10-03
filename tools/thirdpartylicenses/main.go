@@ -22,8 +22,10 @@
 // The crate list is a superset, said so in the file it writes: which of a
 // lock file's crates a build links depends on its target and features, which
 // this does not resolve, so build tools and other platforms' crates are
-// included too. The output is a function of the pinned bytes alone, so
-// running it twice writes the same file. Its header records the sha256 of
+// included too. Each text is written as its source has it but for
+// whitespace no text's meaning rests on (normText), so the file holds no line
+// `git diff --check` flags. The output is a function of the pinned bytes
+// alone, so running it twice writes the same file. Its header records the sha256 of
 // sources.json and of the rest of the file, which is what its test can hold
 // the committed file to without the network (TestTheGeneratedFileIsCurrent).
 package main
@@ -296,7 +298,9 @@ repository's, at the commit the crate was published from, as its text's
 heading says. Every other file is fetched from the URL listed, at the sha256
 pinned beside it. The packages the lock files name by path, their own
 workspaces, are listed under WORKSPACE PACKAGES with the component whose
-texts cover each.
+texts cover each. Every text is as its source has it but for whitespace no
+text's meaning rests on: CRLF line ends are made LF, the spaces and tabs that
+end a line are dropped, and so are the blank lines that end a text.
 
 `
 	b.WriteString(bodyStart + "\n")
@@ -354,7 +358,7 @@ texts cover each.
 	who := map[string][]string{}
 	body := map[string]string{}
 	for _, t := range texts {
-		norm := strings.TrimRight(strings.ReplaceAll(t.text, "\r\n", "\n"), "\n \t") + "\n"
+		norm := normText(t.text)
 		k := digest([]byte(norm))
 		if _, ok := body[k]; !ok {
 			order = append(order, k)
@@ -367,6 +371,19 @@ texts cover each.
 		fmt.Fprintf(&b, "\n%s\n%s\n%s\n\n%s", rule, wrap(fmt.Sprintf("%d. %s", i+1, strings.Join(who[k], ", ")), "   "), rule, body[k])
 	}
 	return []byte(fmt.Sprintf(header, src.Ripgrep, sourcesDigest, digest([]byte(b.String()))) + b.String()), nil
+}
+
+// normText is a license text as the file carries it: CRLF line ends made LF,
+// the spaces, tabs and carriage returns that end each line dropped, and the
+// blank lines that end the text, and one newline to end it. None of that is
+// any text's meaning, and what is left has no whitespace git counts as
+// trailing; two texts that differ only there are one.
+func normText(s string) string {
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " \t\r")
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n"
 }
 
 // bodyStart opens the part of the file whose sha256 the header records.

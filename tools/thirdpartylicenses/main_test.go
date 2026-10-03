@@ -172,7 +172,7 @@ func fixture(t *testing.T) (world, sources) {
 
 	alpha := crateArchive(t, "alpha-1.0.0", map[string]string{
 		"Cargo.toml":     "[package]\nname = \"alpha\"\nlicense = \"MIT OR Apache-2.0\"\n",
-		"LICENSE-MIT":    "MIT text, (c) Alpha\n",
+		"LICENSE-MIT":    "MIT text, \t\n(c) Alpha  \n\n \n",
 		"LICENSE-APACHE": "Apache text\r\n",
 		"src/lib.rs":     "// not a license\n",
 	})
@@ -194,7 +194,7 @@ func fixture(t *testing.T) (world, sources) {
 		"crate:beta-0.2.0+x.1":  beta,
 		"crate:gamma-3.0.0":     gamma,
 		"file:one":              []byte("Project terms\n"),
-		"file:two":              []byte("Project terms\n"),
+		"file:two":              []byte("Project terms \r\n\r\n"),
 		"file:gamma-repo-terms": []byte("Zlib text, (c) Gamma\n"),
 	}
 	src := sources{
@@ -230,8 +230,10 @@ func TestGenerateWritesEachTextOnceNamingWhoShipsIt(t *testing.T) {
 		"- alpha 1.0.0 — MIT OR Apache-2.0 — in first; second\n",
 		"- beta 0.2.0+x.1 — MIT/Apache-2.0 — in first\n",
 		"- gamma 3.0.0 — Zlib — in second\n",
-		// Identical texts, CRLF or not, are one, headed by all who ship it.
+		// Identical texts, CRLF or not, and whatever whitespace ends their
+		// lines, are one, headed by all who ship it.
 		"1. Project 1 (file:one), Project 2 (file:two)\n",
+		"alpha 1.0.0 (LICENSE-MIT)\n" + strings.Repeat("=", 78) + "\n\nMIT text,\n(c) Alpha\n",
 		"alpha 1.0.0 (LICENSE-APACHE), beta 0.2.0+x.1 (LICENSE-APACHE)\n" + strings.Repeat("=", 78) + "\n\nApache text\n",
 		"beta 0.2.0+x.1 (vendored/COPYING)\n" + strings.Repeat("=", 78) + "\n\nvendored library's terms\n",
 		"gamma 3.0.0 (file:gamma-repo-terms)\n" + strings.Repeat("=", 78) + "\n\nZlib text, (c) Gamma\n",
@@ -248,6 +250,11 @@ func TestGenerateWritesEachTextOnceNamingWhoShipsIt(t *testing.T) {
 	for _, not := range []string{"not a license", "int main", "\r"} {
 		if strings.Contains(text, not) {
 			t.Errorf("output carries %q", not)
+		}
+	}
+	for i, line := range strings.Split(text, "\n") {
+		if strings.TrimRight(line, " \t") != line {
+			t.Errorf("line %d ends in whitespace: %q", i+1, line)
 		}
 	}
 	again, err := generate(context.Background(), w.fetch, src, "feed")
