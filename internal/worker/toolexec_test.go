@@ -516,10 +516,10 @@ func TestToolInputPropertiesOnTheWorkerPath(t *testing.T) {
 	// The grep script frames all it prints between a begin line and an end
 	// line, which share a nonce, and reads only what lies between them; this
 	// rg finds nothing.
-	nonce := regexp.MustCompile(`map-grep-begin-([0-9a-f]+)`)
+	nonce := regexp.MustCompile(`map-search-begin-([0-9a-f]+)`)
 	sb := &fakeSandbox{execHook: func(req sandbox.ExecRequest) *sandbox.ExecResult {
 		if m := nonce.FindStringSubmatch(req.Command); m != nil {
-			return &sandbox.ExecResult{Stdout: "\nmap-grep-begin-" + m[1] + "\n\nmap-grep-end-" + m[1] + "\n", ExitCode: 1}
+			return &sandbox.ExecResult{Stdout: "\nmap-search-begin-" + m[1] + "\n\nmap-search-end-" + m[1] + "\n", ExitCode: 1}
 		}
 		return nil
 	}}

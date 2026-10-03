@@ -377,19 +377,22 @@ func TestSearchTimeoutIsAnErrorResult(t *testing.T) {
 	}
 }
 
-// A failed search hands back what the command itself said; a silent failure
-// still names the tool and its exit code rather than reading as an empty result.
+// A failed search hands back what the command itself said, from inside its
+// frame; a silent failure still names the tool and its exit code rather than
+// reading as an empty result.
 func TestSearchFailure(t *testing.T) {
-	sb := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 2, Stderr: "grep: unmatched [\n"}}
-	res, _ := run(t, sb, "grep", `{"pattern":"[","path":"x"}`)
-	if !res.IsError || !strings.Contains(res.Content, "unmatched [") {
-		t.Fatalf("result = %+v, want the command's own message", res)
-	}
+	for _, tool := range []string{"glob", "grep"} {
+		sb := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "banner" + scriptBegan + "unmatched [\n"}}
+		res, _ := run(t, sb, tool, `{"pattern":"[","path":"x"}`)
+		if !res.IsError || res.Content != "unmatched [" {
+			t.Fatalf("%s = %+v, want the command's own message alone", tool, res)
+		}
 
-	silent := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 9}}
-	res, _ = run(t, silent, "glob", `{"pattern":"*"}`)
-	if !res.IsError || !strings.Contains(res.Content, "exit code 9") {
-		t.Fatalf("result = %+v, want the exit code", res)
+		silent := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan, Stderr: scriptBegan}}
+		res, _ = run(t, silent, tool, `{"pattern":"*"}`)
+		if !res.IsError || res.Content != tool+": failed with exit code 9" {
+			t.Fatalf("%s = %+v, want the exit code", tool, res)
+		}
 	}
 }
 
@@ -400,7 +403,7 @@ func TestGlobLimit(t *testing.T) {
 	for i := 0; i < 250; i++ {
 		fmt.Fprintf(&stdout, "1700000000.%09d /workspace/f%d.go\x00", i, i)
 	}
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: stdout.String()}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + stdout.String()}}
 	res, err := run(t, sb, "glob", `{"pattern":"**/*.go"}`)
 	if err != nil {
 		t.Fatalf("glob: %v", err)
@@ -575,7 +578,7 @@ func TestSearchPatternsAreQuoted(t *testing.T) {
 // must back off to a boundary, a property the fallback path pins separately.
 func TestOversizedOutputSpillsToTheSandbox(t *testing.T) {
 	full := strings.Repeat("€", 40_000) // 120000 bytes; 102400 % 3 != 0
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan + full}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full}}
 	r := toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
 	id := domain.NewID("sevt")
 	res, err := r.Run(context.Background(), id, "grep", json.RawMessage(`{"pattern":"x"}`))
@@ -600,7 +603,7 @@ func TestOversizedOutputSpillsToTheSandbox(t *testing.T) {
 }
 
 func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan + "hello\n"}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + "hello\n"}}
 	res, err := run(t, sb, "grep", `{"pattern":"h"}`)
 	if err != nil || res.Content != "hello" {
 		t.Fatalf("grep: err=%v content=%q", err, res.Content)
@@ -618,7 +621,7 @@ func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
 // sandbox itself already cut.
 func TestExecTruncatedGrepCarriesTheUpstreamMarker(t *testing.T) {
 	full := strings.Repeat("z", toolset.MaxOutputBytes+64)
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan + full, Truncated: true}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full, Truncated: true}}
 	res, err := run(t, sb, "grep", `{"pattern":"z"}`)
 	if err != nil || res.IsError {
 		t.Fatalf("grep: err=%v", err)
@@ -655,7 +658,7 @@ func TestReadNeverSpills(t *testing.T) {
 // made, or this fixture would also pass with the hook deleted.
 func TestSpillWriteFailureFallsBackToPlainTruncation(t *testing.T) {
 	full := strings.Repeat("y", toolset.MaxOutputBytes+64)
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan + full}, writeErr: errors.New("disk full")}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full}, writeErr: errors.New("disk full")}
 	res, err := run(t, sb, "grep", `{"pattern":"y"}`)
 	if err != nil || res.IsError {
 		t.Fatalf("grep: err=%v content=%s", err, tail(res.Content))

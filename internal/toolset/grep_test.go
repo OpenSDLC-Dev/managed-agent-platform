@@ -67,32 +67,33 @@ func under(dir string, names ...string) string {
 	return strings.Join(names, "\n")
 }
 
-// rgRan and rgDone, in a canned result, stand where the search's script
-// began and where it exited: the fakes put there the begin and end lines the
-// command carries (framed), so the result reads as one the script printed. A
-// stream with rgRan and no rgDone gets its end line last, as a script that
-// ran to its end prints it; rgNoEnd, in its place, leaves it off.
+// scriptBegan and scriptEnded, in a canned result, stand where a search's
+// script — glob's or grep's — began and where it exited: the fakes put there
+// the begin and end lines the command carries (framed), so the result reads as
+// one the script printed. A stream with scriptBegan and no scriptEnded gets
+// its end line last, as a script that ran to its end prints it; scriptNoEnd,
+// in its place, leaves it off.
 const (
-	rgRan   = "\x00rg-ran\x00"
-	rgDone  = "\x00rg-done\x00"
-	rgNoEnd = "\x00rg-no-end\x00"
+	scriptBegan = "\x00script-began\x00"
+	scriptEnded = "\x00script-ended\x00"
+	scriptNoEnd = "\x00script-no-end\x00"
 )
 
-// grepNonce is the nonce a search's begin line carries, which its end line
+// searchNonce is the nonce a search's begin line carries, which its end line
 // carries too.
-var grepNonce = regexp.MustCompile(`map-grep-begin-([0-9a-f]+)`)
+var searchNonce = regexp.MustCompile(`map-search-begin-([0-9a-f]+)`)
 
 // framed is a canned result as a search's script would have produced it.
 func framed(command string, res sandbox.ExecResult) sandbox.ExecResult {
 	nonce := ""
-	if m := grepNonce.FindStringSubmatch(command); m != nil {
+	if m := searchNonce.FindStringSubmatch(command); m != nil {
 		nonce = m[1]
 	}
 	frame := func(s string) string {
-		if strings.Contains(s, rgRan) && !strings.Contains(s, rgDone) && !strings.Contains(s, rgNoEnd) {
-			s += rgDone
+		if strings.Contains(s, scriptBegan) && !strings.Contains(s, scriptEnded) && !strings.Contains(s, scriptNoEnd) {
+			s += scriptEnded
 		}
-		return strings.NewReplacer(rgRan, "\nmap-grep-begin-"+nonce+"\n", rgDone, "\nmap-grep-end-"+nonce+"\n", rgNoEnd, "").Replace(s)
+		return strings.NewReplacer(scriptBegan, "\nmap-search-begin-"+nonce+"\n", scriptEnded, "\nmap-search-end-"+nonce+"\n", scriptNoEnd, "").Replace(s)
 	}
 	res.Stdout, res.Stderr = frame(res.Stdout), frame(res.Stderr)
 	return res
@@ -685,9 +686,11 @@ const bannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2;
 
 // An image whose bash runs bannerHook runs it for every exec, the platform's
 // scripts as well as the model's commands: rg is installed all the same, and
-// every grep answer, and every refusal, is the tool's alone, read from inside
-// the search's frame. The banner reaches the bash tool's output, as it reaches
-// every command on that image.
+// every glob and grep answer, and every refusal, is the tool's alone, read
+// from inside the search's frame — where a glob used to read the banner's
+// words into its first path and the trap's into a path of their own. The
+// banner reaches the bash tool's output, as it reaches every command on that
+// image.
 func TestSearchesThroughAnImageBanner(t *testing.T) {
 	image := dockertest.ImageFrom(t, "search-banner", "FROM debian:stable-slim\n"+
 		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(bannerHook))+" | base64 -d > /etc/map-banner.sh\n"+
@@ -699,6 +702,12 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 		t.Errorf("bash = %q, want the image's banner: the model's command runs in the image's environment", out)
 	}
 	for tool, answers := range map[string]map[string]string{
+		"glob": {
+			`{"pattern":"a.txt","path":"be"}`:   "/workspace/be/a.txt",
+			`{"pattern":"/workspace/be/b.txt"}`: "/workspace/be/b.txt",
+			`{"pattern":"**/b.txt"}`:            "/workspace/be/b.txt",
+			`{"pattern":"none*","path":"be"}`:   "no matches",
+		},
 		"grep": {
 			`{"pattern":"needle","path":"be"}`:                                      "/workspace/be/a.txt\n/workspace/be/b.txt",
 			`{"pattern":"needle","path":"be","output_mode":"content"}`:              "/workspace/be/a.txt:1:needle\n/workspace/be/b.txt:1:needle",
@@ -715,6 +724,7 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct{ tool, in, want string }{
+		{"glob", `{"pattern":"*","path":"be/absent"}`, "no such directory"},
 		{"grep", `{"pattern":"[unclosed","path":"be"}`, "regex parse error"},
 		{"grep", `{"pattern":"needle","path":"be/absent"}`, "No such file or directory"},
 		{"grep", `{"pattern":"needle","path":"be","type":"nope"}`, "unrecognized file type: nope"},
@@ -737,6 +747,24 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 	if got, want := unbanner(installedRipgrep(t, r)), fmt.Sprintf("755 %d", size); got != want {
 		t.Errorf("installed rg = %q, want %q", got, want)
 	}
+}
+
+// glob expands `**` with bash's globstar, which bash 3.2 does not have: on a
+// 3.2 image every glob is a tool error naming the bash it needs, never a
+// search in which `**` quietly means `*`. grep, whose scripts stay within 3.2,
+// searches there all the same. bash:3.2 is the official image, Alpine's
+// busybox under bash 3.2.57, given the /bin/bash the image contract asks for.
+func TestGlobOnBashThreeTwoSaysItNeedsBashFour(t *testing.T) {
+	image := dockertest.ImageFrom(t, "bash32", "FROM bash:3.2\nRUN ln -s /usr/local/bin/bash /bin/bash\n", "--host", dockertest.Host())
+	r := runner(t, fromImage(image))
+	ok(t, r, "write", `{"file_path":"b3/deep/a.go","content":"needle\n"}`)
+	for _, in := range []string{`{"pattern":"**/*.go","path":"b3"}`, `{"pattern":"*","path":"b3"}`, `{"pattern":"/workspace/b3/deep/a.go"}`} {
+		msg := fails(t, r, "glob", in, "glob: needs bash 4.0 or later in the sandbox image, for ** (globstar); this one is bash 3.2.")
+		if strings.Contains(msg, "a.go") || strings.Contains(msg, "shopt") {
+			t.Errorf("glob(%s) = %q; want the refusal alone", in, msg)
+		}
+	}
+	exactly(t, r, `{"pattern":"needle","path":"b3"}`, "/workspace/b3/deep/a.go")
 }
 
 // The memory sync's baselines and each store's marker are not memories, and a
@@ -881,9 +909,9 @@ func (s *scripted) WriteFileStream(_ context.Context, path string, src io.Reader
 
 func TestGrepInstallFaults(t *testing.T) {
 	missing := func(machine string) sandbox.ExecResult {
-		return sandbox.ExecResult{ExitCode: 97, Stdout: rgRan + "map-ripgrep-missing " + machine + "\n"}
+		return sandbox.ExecResult{ExitCode: 97, Stdout: scriptBegan + "map-ripgrep-missing " + machine + "\n"}
 	}
-	found := sandbox.ExecResult{Stdout: rgRan + "/workspace/a.txt\n"}
+	found := sandbox.ExecResult{Stdout: scriptBegan + "/workspace/a.txt\n"}
 	for _, tc := range []struct {
 		name      string
 		results   []sandbox.ExecResult
@@ -898,15 +926,15 @@ func TestGrepInstallFaults(t *testing.T) {
 		// Only the framed report is read: what an image printed before the
 		// frame or after it, a forged report included, is not.
 		{name: "a banner around the report", results: []sandbox.ExecResult{
-			{ExitCode: 97, Stdout: "welcome\nmap-ripgrep-missing riscv64\nhi" + missing("x86_64").Stdout + rgDone + "map-ripgrep-missing riscv64\n"},
+			{ExitCode: 97, Stdout: "welcome\nmap-ripgrep-missing riscv64\nhi" + missing("x86_64").Stdout + scriptEnded + "map-ripgrep-missing riscv64\n"},
 			{}, {}, found}},
 		{name: "an exit 97 whose framed output is more than the report", results: []sandbox.ExecResult{
-			{ExitCode: 97, Stdout: rgRan + "map-ripgrep-missing x86_64\nmore\n"}}, want: "more", noUpload: true},
+			{ExitCode: 97, Stdout: scriptBegan + "map-ripgrep-missing x86_64\nmore\n"}}, want: "more", noUpload: true},
 		{name: "a report outside the frame", results: []sandbox.ExecResult{
-			{ExitCode: 97, Stdout: rgRan + "rg said\n" + rgDone + "map-ripgrep-missing x86_64\n"}}, want: "rg said", noUpload: true},
+			{ExitCode: 97, Stdout: scriptBegan + "rg said\n" + scriptEnded + "map-ripgrep-missing x86_64\n"}}, want: "rg said", noUpload: true},
 		// A report the cap cut short is no report.
 		{name: "a report without its end line", results: []sandbox.ExecResult{
-			{ExitCode: 97, Stdout: rgRan + "map-ripgrep-missing x86_64\n" + rgNoEnd}}, want: "no answer reached the output whole", noUpload: true},
+			{ExitCode: 97, Stdout: scriptBegan + "map-ripgrep-missing x86_64\n" + scriptNoEnd}}, want: "no answer reached the output whole", noUpload: true},
 		{name: "a sandbox that will not execute a file under /tmp", results: []sandbox.ExecResult{missing("x86_64"),
 			{ExitCode: 2, Stderr: "bash: line 12: /tmp/.map-ripgrep/.install-1-ab/probe: Permission denied\n"}},
 			want: "it refused to execute a file under /tmp/.map-ripgrep (bash: line 12: /tmp/.map-ripgrep/.install-1-ab/probe: Permission denied)", noUpload: true},
@@ -931,7 +959,7 @@ func TestGrepInstallFaults(t *testing.T) {
 			want: "was gone again before the search ran"},
 		// Exit 97 without the report is not the check's: it is answered as
 		// any other failure.
-		{name: "an exit 97 that is not the check's", results: []sandbox.ExecResult{{ExitCode: 97, Stdout: rgRan, Stderr: rgRan + "boom\n"}},
+		{name: "an exit 97 that is not the check's", results: []sandbox.ExecResult{{ExitCode: 97, Stdout: scriptBegan, Stderr: scriptBegan + "boom\n"}},
 			want: "boom", noUpload: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -971,8 +999,8 @@ func TestGrepInstallFaults(t *testing.T) {
 // platform's clock, and makes this one's; the install exec removes it as it
 // exits. Both name it the same.
 func TestGrepInstallScripts(t *testing.T) {
-	sb := &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{{ExitCode: 97, Stdout: rgRan + "map-ripgrep-missing x86_64\n"}, {}, {},
-		{Stdout: rgRan, ExitCode: 1}}}
+	sb := &scripted{fakeSandbox: &fakeSandbox{}, results: []sandbox.ExecResult{{ExitCode: 97, Stdout: scriptBegan + "map-ripgrep-missing x86_64\n"}, {}, {},
+		{Stdout: scriptBegan, ExitCode: 1}}}
 	before := time.Now()
 	if res, err := run(t, sb, "grep", `{"pattern":"x"}`); err != nil || res.IsError {
 		t.Fatalf("grep = %+v, %v", res, err)
@@ -1007,7 +1035,7 @@ func TestGrepInstallScripts(t *testing.T) {
 // line tail starts at pass it: summed as int, a 32-bit build — the worker's
 // linux/arm — would hand head a negative count.
 func TestGrepPagesPastTwoToTheThirtyOne(t *testing.T) {
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan, ExitCode: 1}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan, ExitCode: 1}}
 	if res, err := run(t, sb, "grep", fmt.Sprintf(`{"pattern":"x","head_limit":%d,"offset":%d}`, math.MaxInt32, math.MaxInt32)); err != nil || res.IsError {
 		t.Fatalf("grep = %+v, %v", res, err)
 	}
@@ -1022,7 +1050,7 @@ func TestGrepPagesPastTwoToTheThirtyOne(t *testing.T) {
 func TestGrepSortsEveryCallByPath(t *testing.T) {
 	for _, in := range []string{`{"pattern":"x"}`, `{"pattern":"x","head_limit":0}`, `{"pattern":"x","offset":0}`,
 		`{"pattern":"x","head_limit":1}`, `{"pattern":"x","offset":1}`, `{"pattern":"x","output_mode":"count","head_limit":2,"offset":3}`} {
-		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan, ExitCode: 1}}
+		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan, ExitCode: 1}}
 		if _, err := run(t, sb, "grep", in); err != nil || len(sb.commands) != 1 {
 			t.Fatalf("grep(%s): %v, %d execs", in, err, len(sb.commands))
 		}
@@ -1075,30 +1103,30 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 		isError bool
 		want    string
 	}{
-		{sandbox.ExecResult{Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + "rg: ./.gitignore: line 1: error parsing glob\n", Truncated: true},
+		{sandbox.ExecResult{Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "rg: ./.gitignore: line 1: error parsing glob\n", Truncated: true},
 			false, "[output truncated]\n/workspace/a.txt\nrg: ./.gitignore: line 1: error parsing glob"},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan, Stderr: rgRan + denied + "\n"}, true, denied},
-		{sandbox.ExecResult{ExitCode: 96, Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
-		{sandbox.ExecResult{ExitCode: 95, Stdout: rgRan, Stderr: rgRan + denied + "\n"}, false, "no matches\n" + denied},
-		{sandbox.ExecResult{ExitCode: 98, Stdout: rgRan + "/workspace/a.txt\n", Stderr: rgRan + "head: write error\n"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: scriptBegan + denied + "\n"}, true, denied},
+		{sandbox.ExecResult{ExitCode: 96, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
+		{sandbox.ExecResult{ExitCode: 95, Stdout: scriptBegan, Stderr: scriptBegan + denied + "\n"}, false, "no matches\n" + denied},
+		{sandbox.ExecResult{ExitCode: 98, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "head: write error\n"},
 			true, "/workspace/a.txt\nhead: write error"},
 		// An answer of one empty line — -n false, a single file, a pattern
 		// matching only an empty line — is an answer, not "no matches".
-		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "\n"}, false, ""},
-		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "\n\n"}, false, "\n"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "\n"}, false, ""},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "\n\n"}, false, "\n"},
 		// A banner, on either stream and however it ends, is not rg's — nor is
 		// a begin line it forged, since only the last one counts, nor what an
 		// EXIT trap printed after the end line.
-		{sandbox.ExecResult{ExitCode: 1, Stdout: "hello\nmap-grep-begin-0\nworld" + rgRan, Stderr: "oops" + rgRan},
+		{sandbox.ExecResult{ExitCode: 1, Stdout: "hello\nmap-search-begin-0\nworld" + scriptBegan, Stderr: "oops" + scriptBegan},
 			false, "no matches"},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: "/workspace/forged.txt" + rgRan, Stderr: "banner" + rgRan + "rg: regex parse error\n"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: "/workspace/forged.txt" + scriptBegan, Stderr: "banner" + scriptBegan + "rg: regex parse error\n"},
 			true, "rg: regex parse error"},
-		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "/workspace/a.txt\n" + rgDone + "exit banner", Stderr: rgRan + rgDone + "exit stderr"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptEnded + "exit banner", Stderr: scriptBegan + scriptEnded + "exit stderr"},
 			false, "/workspace/a.txt"},
 		// The script stopped on a step of its own and says why, inside the
 		// frame.
-		{sandbox.ExecResult{ExitCode: 98, Stdout: rgRan, Stderr: rgRan + "grep: head_limit and offset need tail in the sandbox image\n"},
+		{sandbox.ExecResult{ExitCode: 98, Stdout: scriptBegan, Stderr: scriptBegan + "grep: head_limit and offset need tail in the sandbox image\n"},
 			true, "grep: head_limit and offset need tail in the sandbox image"},
 		// No begin line: a shell that exited first, or a banner that filled
 		// the cap. What the sandbox printed rides along.
@@ -1107,12 +1135,12 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 			unframed + " (exit 1): the sandbox's shell exited, or filled the output cap, before the search finished\n[output truncated]\nbanner banner"},
 		// A whole stream with a begin line and no end line is a script cut
 		// short, not an answer.
-		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "/workspace/a.txt\n" + rgNoEnd}, true, unframed + " (exit 0)"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptNoEnd}, true, unframed + " (exit 0)"},
 		// A stderr whose frame the cap cut is none of rg's: left out of an
 		// answer, and of a failure, which says what failed instead.
-		{sandbox.ExecResult{ExitCode: 0, Stdout: rgRan + "/workspace/a.txt\n", Stderr: "flood flood", Truncated: true},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: "flood flood", Truncated: true},
 			false, "[output truncated]\n/workspace/a.txt"},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: rgRan, Stderr: "flood flood", Truncated: true},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "flood flood", Truncated: true},
 			true, "[output truncated]\ngrep: failed with exit code 2"},
 	} {
 		res, err := run(t, &fakeSandbox{exec: tc.exec}, "grep", `{"pattern":"x"}`)
@@ -1122,22 +1150,24 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 	}
 }
 
-// Every search frames its output with a nonce of its own, 64 bits from
-// crypto/rand: a file that holds one search's begin or end line cannot frame
-// the next, which a constant, a counter or a clock would let it — each fails
-// here, the first two because a later search repeats an earlier one's frame
-// or most of it, a clock because its high digits do not move between calls.
-func TestGrepFramesEverySearchWithANonceOfItsOwn(t *testing.T) {
+// Every search — glob's and grep's alike — frames its output with a nonce of
+// its own, 64 bits from crypto/rand: a file that holds one search's begin or
+// end line cannot frame the next, which a constant, a counter or a clock would
+// let it — each fails here, the first two because a later search repeats an
+// earlier one's frame or most of it, a clock because its high digits do not
+// move between calls.
+func TestSearchesFrameEverySearchWithANonceOfItsOwn(t *testing.T) {
 	const searches = 64
 	seen := map[string]bool{}
 	var nonces []string
-	for range searches {
-		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: rgRan, ExitCode: 1}}
-		if res, err := run(t, sb, "grep", `{"pattern":"x"}`); err != nil || res.Content != "no matches" {
-			t.Fatalf("grep = %+v, %v", res, err)
+	for i := range searches {
+		tool := []string{"glob", "grep"}[i%2]
+		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan, ExitCode: map[string]int{"glob": 0, "grep": 1}[tool]}}
+		if res, err := run(t, sb, tool, `{"pattern":"x"}`); err != nil || res.Content != "no matches" {
+			t.Fatalf("%s = %+v, %v", tool, res, err)
 		}
 		begins := map[string]bool{}
-		for _, m := range regexp.MustCompile(`'map-grep-begin-([0-9a-f]*)'`).FindAllStringSubmatch(sb.commands[0], -1) {
+		for _, m := range regexp.MustCompile(`'map-search-begin-([0-9a-f]*)'`).FindAllStringSubmatch(sb.commands[0], -1) {
 			begins[m[1]] = true
 		}
 		var nonce string
@@ -1147,7 +1177,7 @@ func TestGrepFramesEverySearchWithANonceOfItsOwn(t *testing.T) {
 		if len(begins) != 1 || len(nonce) != 16 {
 			t.Fatalf("the script carries begin lines with nonces %v; want one, of 64 bits in hex:\n%s", begins, sb.commands[0])
 		}
-		if !strings.Contains(sb.commands[0], "'map-grep-end-"+nonce+"'") {
+		if !strings.Contains(sb.commands[0], "'map-search-end-"+nonce+"'") {
 			t.Fatalf("the end line does not carry the begin line's nonce %s:\n%s", nonce, sb.commands[0])
 		}
 		if seen[nonce] {

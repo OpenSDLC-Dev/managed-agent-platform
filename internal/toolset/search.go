@@ -2,6 +2,8 @@ package toolset
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -19,11 +21,92 @@ type searchInput struct {
 	Path    string `json:"path"`
 }
 
+// searchBeginPrefix and searchEndPrefix open the two lines a search's script —
+// glob's and grep's — prints around everything it says, on stdout and on
+// stderr alike: the begin line before anything else, the end line as it
+// exits. Their suffix is one 64-bit nonce per search (newSearchFrame), which
+// no searched file holds but by a 2⁻⁶⁴ chance: rg prints a matched line bare
+// from a single file with -n false, and such a line must never be read as the
+// frame.
+//
+// The frame keeps out what reaches an exec's streams that the script did not
+// print: an image's banner before it — what an `ENV BASH_ENV` file prints as
+// the shell starts, say — and anything after it, such as an EXIT trap's. It
+// keeps out what an image's startup prints, not what it changes; whether the
+// platform's own scripts should run without it is #860. Nor is it a boundary
+// against the sandbox's own processes: the script, nonce and all, is the
+// exec's argv, which any process in the sandbox may read, and a model that
+// forges a search's output from inside its own sandbox is tampering with what
+// it alone reads.
+const (
+	searchBeginPrefix = "map-search-begin-"
+	searchEndPrefix   = "map-search-end-"
+)
+
+// searchFrame is one search's begin and end lines.
+type searchFrame struct{ begin, end string }
+
+func newSearchFrame() searchFrame {
+	var nonce [8]byte
+	_, _ = rand.Read(nonce[:])
+	n := hex.EncodeToString(nonce[:])
+	return searchFrame{begin: searchBeginPrefix + n, end: searchEndPrefix + n}
+}
+
+// open is what a search's script begins with: close_frame, which prints the
+// end line on both streams and exits with its argument — the one way the
+// script exits — and then the begin line on both.
+func (f searchFrame) open() string {
+	return fmt.Sprintf(`close_frame() { printf '\n%%s\n' %[2]s; printf '\n%%s\n' %[2]s >&2; exit "$1"; }
+printf '\n%%s\n' %[1]s; printf '\n%%s\n' %[1]s >&2
+`, singleQuote(f.begin), singleQuote(f.end))
+}
+
+// cut returns what the script printed on one stream — what lies between the
+// last begin line and the end line after it — and true. Each line is printed
+// after a newline of its own, so it is a line however what came before it
+// ended, and the newline before the end line is the frame's, not the
+// script's. A stream the sandbox's cap cut (truncated) has lost its end line,
+// so all that follows the begin line is what there is. A stream with no begin
+// line, or a whole one with no end line after it, is not one the script
+// printed to its end: "", false.
+func (f searchFrame) cut(s string, truncated bool) (string, bool) {
+	t := "\n" + s
+	begin := "\n" + f.begin + "\n"
+	i := strings.LastIndex(t, begin)
+	if i < 0 {
+		return "", false
+	}
+	rest := t[i+len(begin):]
+	if j := strings.Index(rest, "\n"+f.end+"\n"); j >= 0 {
+		return rest[:j], true
+	}
+	if truncated {
+		return rest, true
+	}
+	return "", false
+}
+
+// unframed is a search's answer to output its script did not print to its
+// end (searchFrame.cut): a failure carrying what the sandbox printed, never an
+// answer.
+func unframed(tool string, res sandbox.ExecResult) (Result, error) {
+	msg := fmt.Sprintf("%s: no answer reached the output whole (exit %d): the sandbox's shell exited, or filled the output cap, before the search finished", tool, res.ExitCode)
+	if more := strings.TrimSpace(combine(res)); more != "" {
+		msg += "\n" + more
+	}
+	return failf("%s", msg)
+}
+
 // globScript expands the pattern with bash's own globstar, which is where
 // doublestar semantics already live: `**` spans directories, `*` does not cross
 // a separator, and dotglob makes a leading dot ordinary — the same set the
 // reference's hand-rolled matcher implements. Matches are then stamped with
-// their mtimes and sorted newest first.
+// their mtimes and sorted newest first. globstar is bash 4.0's: a bash that
+// refuses it stops the search with a message naming the version, rather than
+// expanding `**` as `*`. The script runs inside a search frame
+// (searchFrame.open), which only close_frame exits, so what it prints is read
+// from between the frame's lines.
 //
 // The pattern is a variable, never a literal in the script, and IFS is empty so
 // its value is not word-split: it is expanded exactly once, as a pathname
@@ -48,18 +131,19 @@ type searchInput struct {
 // retryable error rather than returning the survivors — the conservative
 // direction, chosen because it never returns a silently wrong answer.
 const globScript = `set -o pipefail
-shopt -s globstar dotglob nullglob
+shopt -s globstar dotglob nullglob 2>/dev/null || { printf 'glob: needs bash 4.0 or later in the sandbox image, for ** (globstar); this one is bash %s\n' "$BASH_VERSION" >&2; close_frame 2; }
 IFS=
 for t in stat sort xargs; do
-  command -v "$t" >/dev/null 2>&1 || { printf 'glob: %s not found in the sandbox image\n' "$t" >&2; exit 2; }
+  command -v "$t" >/dev/null 2>&1 || { printf 'glob: %s not found in the sandbox image\n' "$t" >&2; close_frame 2; }
 done
 root=__ROOT__
 prefix=__PREFIX__
 pat=__PAT__
-if [ ! -d "$root" ]; then printf 'glob: %s: no such directory\n' "$root" >&2; exit 2; fi
+if [ ! -d "$root" ]; then printf 'glob: %s: no such directory\n' "$root" >&2; close_frame 2; fi
 for f in "$prefix"$pat; do
   if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi
 done | xargs -0 -r stat --printf '%.9Y %n\0' | sort -z -rn -k1,1
+close_frame "$?"
 `
 
 func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
@@ -92,22 +176,33 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 		root, prefix = "/", ""
 	}
 
-	res, err := r.execScript(ctx, globScript, root, prefix, in.Pattern)
+	frame := newSearchFrame()
+	cmd := frame.open() + strings.NewReplacer(
+		"__ROOT__", singleQuote(root),
+		"__PREFIX__", singleQuote(prefix),
+		"__PAT__", singleQuote(in.Pattern),
+	).Replace(globScript)
+	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: cmd, Timeout: DefaultTimeout})
 	if err != nil {
 		return Result{}, err
 	}
-	switch {
-	case res.TimedOut:
+	if res.TimedOut {
 		return failf("glob: timed out after %s", DefaultTimeout)
-	case res.ExitCode != 0:
-		return searchFailure("glob", res)
+	}
+	out, framed := frame.cut(res.Stdout, res.Truncated)
+	if !framed {
+		return unframed("glob", res)
+	}
+	if res.ExitCode != 0 {
+		msg, _ := frame.cut(res.Stderr, res.Truncated)
+		return searchFailure("glob", sandbox.ExecResult{Stdout: out, Stderr: msg, ExitCode: res.ExitCode, Truncated: res.Truncated})
 	}
 
 	// stat printed "<mtime> <path>\0" per match, newest first. Records split on
 	// NUL (paths may contain newlines and spaces); the mtime splits off on the
 	// first space.
 	var paths []string
-	for _, rec := range strings.Split(res.Stdout, "\x00") {
+	for _, rec := range strings.Split(out, "\x00") {
 		_, p, ok := strings.Cut(rec, " ")
 		if !ok {
 			continue
@@ -121,17 +216,6 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 		return succeed("no matches")
 	}
 	return succeed(strings.Join(paths, "\n"))
-}
-
-// execScript renders a search script with the model's search root, prefix and
-// pattern as data — single-quoted, never interpolated as code — and runs it.
-func (r Runner) execScript(ctx context.Context, script, root, prefix, pattern string) (sandbox.ExecResult, error) {
-	cmd := strings.NewReplacer(
-		"__ROOT__", singleQuote(root),
-		"__PREFIX__", singleQuote(prefix),
-		"__PAT__", singleQuote(pattern),
-	).Replace(script)
-	return r.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: cmd, Timeout: DefaultTimeout})
 }
 
 // searchFailure hands the model what the command itself said — the bad regex,
