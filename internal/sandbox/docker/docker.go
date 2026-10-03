@@ -1073,7 +1073,7 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		// running dies with the session's container.
 		return sandbox.ExecResult{
 			Stdout: string(out.stdout), Stderr: string(out.stderr),
-			ExitCode: sigkillExit, TimedOut: true, Truncated: out.cut.stdout || out.cut.stderr,
+			ExitCode: sigkillExit, TimedOut: true,
 			StdoutTruncated: out.cut.stdout, StderrTruncated: out.cut.stderr,
 		}, nil
 	}
@@ -1110,12 +1110,10 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	// is paid on the rare path rather than on every command.
 	timedOut := classifyTimeout(seconds > 0, code, c.watchdogFired(ctx, seconds, code, v, state), v)
 	return sandbox.ExecResult{
-		Stdout:    string(out.stdout),
-		Stderr:    string(out.stderr),
-		ExitCode:  code,
-		TimedOut:  timedOut,
-		Truncated: out.cut.stdout || out.cut.stderr,
-
+		Stdout:          string(out.stdout),
+		Stderr:          string(out.stderr),
+		ExitCode:        code,
+		TimedOut:        timedOut,
 		StdoutTruncated: out.cut.stdout,
 		StderrTruncated: out.cut.stderr,
 	}, nil

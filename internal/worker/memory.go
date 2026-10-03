@@ -250,7 +250,7 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	// A listing with anything in it — or one too long to capture, or one
 	// that failed — is a directory nothing vouches for. An absent directory
 	// lists nothing and exits 0, which is the fresh case.
-	if len(res.Stdout) > 0 || res.Truncated || res.ExitCode != 0 {
+	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
 	// One batch for the whole store, bounded by the store's own caps (2,000
@@ -497,7 +497,7 @@ func (m *memoryStores) readStore(ctx context.Context, st *storeSync, progress fu
 	if err != nil {
 		return err
 	}
-	if res.Truncated {
+	if res.Truncated() {
 		return errors.New("the listing overflows the exec output cap")
 	}
 	// A non-zero exit is a listing not to act on — under the command's

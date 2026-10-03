@@ -721,8 +721,9 @@ greet
 		if len(big.Stdout) != sandbox.MaxOutputBytes {
 			t.Errorf("stdout kept %d bytes, want the %d cap", len(big.Stdout), sandbox.MaxOutputBytes)
 		}
-		if !big.Truncated {
-			t.Error("Truncated not reported past the cap")
+		if !big.Truncated() || !big.StdoutTruncated || big.StderrTruncated {
+			t.Errorf("truncated = %v, stdout %v, stderr %v; want stdout's cut reported past the cap, and stdout's alone",
+				big.Truncated(), big.StdoutTruncated, big.StderrTruncated)
 		}
 		if strings.TrimSpace(big.Stderr) != "err" {
 			t.Errorf("stderr = %q — capping one stream must not lose the other", big.Stderr)

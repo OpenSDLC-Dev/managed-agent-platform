@@ -1205,7 +1205,7 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 		// being abandoned, so the residue dies with the pod rather than accruing.
 		return sandbox.ExecResult{
 			Stdout: stdout.String(), Stderr: stderr.String(),
-			ExitCode: sigkillExit, TimedOut: true, Truncated: stdout.truncated || stderr.truncated,
+			ExitCode: sigkillExit, TimedOut: true,
 			StdoutTruncated: stdout.truncated, StderrTruncated: stderr.truncated,
 		}, nil
 	}
@@ -1222,12 +1222,10 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 
 	timedOut := pd.classifyTimeout(req.Timeout, code, watchdogFired, ran, v)
 	return sandbox.ExecResult{
-		Stdout:    stdout.String(),
-		Stderr:    stderr.String(),
-		ExitCode:  code,
-		TimedOut:  timedOut,
-		Truncated: stdout.truncated || stderr.truncated,
-
+		Stdout:          stdout.String(),
+		Stderr:          stderr.String(),
+		ExitCode:        code,
+		TimedOut:        timedOut,
 		StdoutTruncated: stdout.truncated,
 		StderrTruncated: stderr.truncated,
 	}, nil

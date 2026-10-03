@@ -459,7 +459,7 @@ func combine(res sandbox.ExecResult) string {
 		}
 		out += res.Stderr
 	}
-	if res.Truncated {
+	if res.Truncated() {
 		out = truncationNotice + "\n" + out
 	}
 	return out

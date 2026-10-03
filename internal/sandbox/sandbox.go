@@ -413,14 +413,18 @@ func CheckCommand(command string) error {
 // of what it leaves behind: a process the command backgrounds inherits its
 // output stream and can hold it open long after the command has exited.
 type ExecResult struct {
-	Stdout    string
-	Stderr    string
-	ExitCode  int
-	TimedOut  bool
-	Truncated bool
+	Stdout   string
+	Stderr   string
+	ExitCode int
+	TimedOut bool
 
 	StdoutTruncated, StderrTruncated bool
 }
+
+// Truncated says the cap cut either stream. It is derived from the two
+// per-stream flags rather than set beside them, so it cannot disagree with
+// them.
+func (r ExecResult) Truncated() bool { return r.StdoutTruncated || r.StderrTruncated }
 
 // Sandbox is one session's execution environment.
 type Sandbox interface {

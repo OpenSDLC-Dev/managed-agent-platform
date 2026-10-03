@@ -171,7 +171,7 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, sid
 	// files the listing could not read, or a path that is no longer the
 	// directory. An absent directory lists nothing and exits 0, which is the
 	// fresh case.
-	if len(res.Stdout) > 0 || res.Truncated || res.ExitCode != 0 {
+	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
 
@@ -305,7 +305,7 @@ func (e *Executor) readStore(ctx context.Context, sb sandbox.Sandbox, st *storeS
 	if err != nil {
 		return err
 	}
-	if res.Truncated {
+	if res.Truncated() {
 		return errors.New("the listing overflows the exec output cap")
 	}
 	// A non-zero exit is a listing not to act on — under the command's

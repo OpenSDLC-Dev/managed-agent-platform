@@ -218,8 +218,8 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sb sand
 		return nil, fmt.Errorf("list outputs: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	listing := res.Stdout
-	if res.Truncated {
-		// The exec cap cut the listing. The glob emits paths sorted, so its
+	if res.StdoutTruncated {
+		// The exec cap cut the listing — stdout; a cut stderr leaves it whole. The glob emits paths sorted, so its
 		// complete entries are the tree's lexicographic prefix — what greedy
 		// admission takes first anyway. Keep them and drop the trailing
 		// mid-path fragment: the tree is static during grading, so a fault

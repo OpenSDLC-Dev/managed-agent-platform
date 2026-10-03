@@ -133,7 +133,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if res.Stdout != "out\n" || res.Stderr != "err\n" {
 			t.Errorf("stdout=%q stderr=%q", res.Stdout, res.Stderr)
 		}
-		if res.ExitCode != 0 || res.TimedOut || res.Truncated {
+		if res.ExitCode != 0 || res.TimedOut || res.Truncated() {
 			t.Errorf("result = %+v", res)
 		}
 	})
@@ -598,9 +598,9 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if len(res.Stdout) != sandbox.MaxOutputBytes {
 			t.Errorf("stdout kept %d bytes, want the %d-byte cap", len(res.Stdout), sandbox.MaxOutputBytes)
 		}
-		if !res.Truncated || !res.StdoutTruncated || res.StderrTruncated {
+		if !res.Truncated() || !res.StdoutTruncated || res.StderrTruncated {
 			t.Errorf("truncated = %v, stdout %v, stderr %v; want stdout's cut reported, and stdout's alone",
-				res.Truncated, res.StdoutTruncated, res.StderrTruncated)
+				res.Truncated(), res.StdoutTruncated, res.StderrTruncated)
 		}
 		if res.ExitCode != 0 {
 			t.Errorf("exit code = %d — the drained command did not finish cleanly", res.ExitCode)
@@ -620,9 +620,9 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if len(res.Stderr) != sandbox.MaxOutputBytes || res.Stdout != "done\n" {
 			t.Errorf("stderr kept %d bytes and stdout %q; want the %d-byte cap and stdout whole", len(res.Stderr), res.Stdout, sandbox.MaxOutputBytes)
 		}
-		if !res.Truncated || res.StdoutTruncated || !res.StderrTruncated {
+		if !res.Truncated() || res.StdoutTruncated || !res.StderrTruncated {
 			t.Errorf("truncated = %v, stdout %v, stderr %v; want stderr's cut reported, and stderr's alone",
-				res.Truncated, res.StdoutTruncated, res.StderrTruncated)
+				res.Truncated(), res.StdoutTruncated, res.StderrTruncated)
 		}
 	})
 

@@ -54,7 +54,8 @@ func (r Runner) bash(ctx context.Context, id domain.ID, raw json.RawMessage) (Re
 	// capWithTrailer first, and NUL bytes must not spend the budget that a
 	// command's real output (its stderr above all) needs to survive.
 	out := SanitizeText(combine(sandbox.ExecResult{
-		Stdout: res.Stdout, Stderr: res.Stderr, Truncated: res.Truncated,
+		Stdout: res.Stdout, Stderr: res.Stderr,
+		StdoutTruncated: res.StdoutTruncated, StderrTruncated: res.StderrTruncated,
 	}))
 	// The failure arms below spill for the same reason: they cap before
 	// dispatch, so by the time dispatch's own spill hook runs the tail is

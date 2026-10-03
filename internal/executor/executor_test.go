@@ -133,7 +133,7 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 	// the in-memory tree (or a forged/truncated listing when a test sets one).
 	if req.Command == harvestListScript {
 		if f.execTruncated {
-			return sandbox.ExecResult{Stdout: f.execStdout, Truncated: true}, nil
+			return sandbox.ExecResult{Stdout: f.execStdout, StdoutTruncated: true}, nil
 		}
 		if f.execStdout != "" {
 			return sandbox.ExecResult{Stdout: f.execStdout}, nil
@@ -169,7 +169,7 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		if f.listExit != 0 {
 			return sandbox.ExecResult{ExitCode: f.listExit, Stderr: "find: './a': Permission denied\n"}, nil
 		}
-		return sandbox.ExecResult{Stdout: out.String(), Truncated: f.listTruncated}, nil
+		return sandbox.ExecResult{Stdout: out.String(), StdoutTruncated: f.listTruncated}, nil
 	}
 	if strings.Contains(req.Command, "sha256sum -z") {
 		// A listing whose shape the fake no longer recognizes must not fall

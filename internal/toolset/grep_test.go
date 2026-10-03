@@ -1183,9 +1183,11 @@ func TestACommandTooLongIsTheModelsOnlyWhereItsInputMadeIt(t *testing.T) {
 // read: an image's banner before them, a begin line it forged included, and
 // an EXIT trap's words after them, are not; output with no begin line, or a
 // whole stream with no end line, never came from the script whole; and a
-// stderr whose frame the cap cut is left out. Each stream is read by its own
-// cut: a stderr flood marks no whole answer as cut and lets no answer without
-// its end line through, and a stream cut inside its end line keeps none of it.
+// stderr the cap cut before its begin line has lost rg's messages, which the
+// answer says rather than dropping them silently. Each stream is read by its
+// own cut: a stderr flood marks no whole answer as cut and lets no answer
+// without its end line through, and a stream cut inside its end line keeps
+// none of it.
 func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 	const denied = "rg: /workspace/b.txt: Permission denied (os error 13)"
 	const unframed = "grep: no answer reached the output whole"
@@ -1195,7 +1197,7 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 		want    string
 	}{
 		{sandbox.ExecResult{Stdout: scriptBegan + "/workspace/a.txt\n" + scriptNoEnd, Stderr: scriptBegan + "rg: ./.gitignore: line 1: error parsing glob\n",
-			Truncated: true, StdoutTruncated: true},
+			StdoutTruncated: true},
 			false, "[output truncated]\n/workspace/a.txt\nrg: ./.gitignore: line 1: error parsing glob"},
 		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + denied + "\n"}, false, "/workspace/a.txt\n" + denied},
 		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: scriptBegan + denied + "\n"}, true, denied},
@@ -1225,26 +1227,33 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 		// No begin line: a shell that exited first, or a banner that filled
 		// the cap. What the sandbox printed rides along.
 		{sandbox.ExecResult{ExitCode: 0}, true, unframed + " (exit 0)"},
-		{sandbox.ExecResult{ExitCode: 1, Stdout: "banner banner", Truncated: true, StdoutTruncated: true}, true,
+		{sandbox.ExecResult{ExitCode: 1, Stdout: "banner banner", StdoutTruncated: true}, true,
 			unframed + " (exit 1): the sandbox's shell exited, or filled the output cap, before the search finished\n[output truncated]\nbanner banner"},
 		// A whole stream with a begin line and no end line is a script cut
 		// short, not an answer — whatever the cap did to the other stream.
 		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptNoEnd}, true, unframed + " (exit 0)"},
 		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptNoEnd, Stderr: scriptBegan + "flood flood",
-			Truncated: true, StderrTruncated: true}, true, unframed + " (exit 0)"},
+			StderrTruncated: true}, true, unframed + " (exit 0)"},
 		// A stdout the cap cut inside its end line keeps the answer before it,
 		// and none of the end line.
-		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptCutInEnd, Truncated: true, StdoutTruncated: true},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptCutInEnd, StdoutTruncated: true},
 			false, "[output truncated]\n/workspace/a.txt"},
 		// A stderr flood marks no whole answer as cut: the answer stands as it
 		// is, and only rg's messages, which the cap cut, say so.
 		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "rg: a\nrg: b" + scriptNoEnd,
-			Truncated: true, StderrTruncated: true}, false, "/workspace/a.txt\nrg: a\nrg: b\n[output truncated]"},
-		// A stderr whose frame the cap cut is none of rg's: left out of an
-		// answer, and of a failure, which says what failed instead.
-		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: "flood flood", Truncated: true, StderrTruncated: true},
-			false, "/workspace/a.txt"},
-		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "flood flood", Truncated: true, StderrTruncated: true},
+			StderrTruncated: true}, false, "/workspace/a.txt\nrg: a\nrg: b\n[output truncated]"},
+		// A stderr the cap cut before its begin line — a banner that filled
+		// it — holds none of rg's messages, and has lost any rg printed: the
+		// flood is left out, and the cut is said where the messages would
+		// have followed an answer, and in front of a failure, which says what
+		// failed.
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: "flood flood", StderrTruncated: true},
+			false, "/workspace/a.txt\n[output truncated]"},
+		{sandbox.ExecResult{ExitCode: 1, Stdout: scriptBegan, Stderr: "flood flood", StderrTruncated: true},
+			false, "no matches\n[output truncated]"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptCutInEnd, Stderr: "flood flood",
+			StdoutTruncated: true, StderrTruncated: true}, false, "[output truncated]\n/workspace/a.txt\n[output truncated]"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "flood flood", StderrTruncated: true},
 			true, "[output truncated]\ngrep: failed with exit code 2"},
 	} {
 		res, err := run(t, &fakeSandbox{exec: tc.exec}, "grep", `{"pattern":"x"}`)

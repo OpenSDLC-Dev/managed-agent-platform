@@ -98,6 +98,23 @@ func (f searchFrame) cut(s string, truncated bool) (string, bool) {
 	return rest, true
 }
 
+// messages is what a search's script printed on stderr (cut), trimmed, and
+// what the sandbox's cap took of it there. A stderr the cap cut after the
+// begin line keeps what came before the cut, with the truncation notice after
+// it. One the cap cut before the begin line — what an image's startup printed
+// filled the cap first — has lost all the script printed there: its messages
+// are "", and lost tells the caller to say the cap cut them (searchFailure,
+// grepAnswer). A stderr the cap did not cut and with no frame is none of the
+// script's: "".
+func (f searchFrame) messages(res sandbox.ExecResult) (msg string, lost bool) {
+	msg, framed := f.cut(res.Stderr, res.StderrTruncated)
+	msg = strings.TrimSpace(msg)
+	if res.StderrTruncated && framed {
+		msg = strings.TrimSpace(msg + "\n" + truncationNotice)
+	}
+	return msg, res.StderrTruncated && !framed
+}
+
 // inputTooLong is Exec's refusal (sandbox.CommandTooLongError) of a search's
 // command, which grew with the values the model sent — inputs names them — so
 // the model can send less. Only searchExec makes one; Runner.dispatch answers
@@ -231,8 +248,8 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 		return unframed("glob", res)
 	}
 	if res.ExitCode != 0 {
-		msg, _ := frame.cut(res.Stderr, res.StderrTruncated)
-		return searchFailure("glob", sandbox.ExecResult{Stdout: out, Stderr: msg, ExitCode: res.ExitCode, Truncated: res.Truncated})
+		msg, lost := frame.messages(res)
+		return searchFailure("glob", out, msg, res.ExitCode, res.StdoutTruncated || lost)
 	}
 
 	// stat printed "<mtime> <path>\0" per match, newest first. Records split on
@@ -257,12 +274,19 @@ func (r Runner) glob(ctx context.Context, raw json.RawMessage) (Result, error) {
 	return succeed(strings.Join(paths, "\n"))
 }
 
-// searchFailure hands the model what the command itself said — the bad regex,
-// the missing directory — rather than a message of our own invention.
-func searchFailure(tool string, res sandbox.ExecResult) (Result, error) {
-	msg := strings.TrimSpace(combine(res))
-	if msg == "" {
-		msg = fmt.Sprintf("%s: failed with exit code %d", tool, res.ExitCode)
+// searchFailure hands the model what a search's script itself said — out, its
+// framed stdout, and msg, its messages (searchFrame.messages): the bad regex,
+// the missing directory — rather than a message of our own invention, and the
+// exit code where it said nothing. Each stream's cut is said where it cut: a
+// msg the cap cut carries its own notice after it, and cut — stdout cut, or
+// the messages lost whole — puts one in front.
+func searchFailure(tool, out, msg string, code int, cut bool) (Result, error) {
+	failure := strings.TrimSpace(combine(sandbox.ExecResult{Stdout: out, Stderr: msg}))
+	if failure == "" {
+		failure = fmt.Sprintf("%s: failed with exit code %d", tool, code)
 	}
-	return failf("%s", msg)
+	if cut {
+		failure = truncationNotice + "\n" + failure
+	}
+	return failf("%s", failure)
 }

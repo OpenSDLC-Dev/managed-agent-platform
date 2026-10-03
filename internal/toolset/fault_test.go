@@ -379,7 +379,10 @@ func TestSearchTimeoutIsAnErrorResult(t *testing.T) {
 
 // A failed search hands back what the command itself said, from inside its
 // frame; a silent failure still names the tool and its exit code rather than
-// reading as an empty result.
+// reading as an empty result. Each stream's cut is said where it cut, by both
+// tools alike (sandbox.ExecResult's per-stream flags): after the messages the
+// cap cut, and in front where it cut the output, or took the messages whole,
+// begin line and all.
 func TestSearchFailure(t *testing.T) {
 	for _, tool := range []string{"glob", "grep"} {
 		sb := &fakeSandbox{exec: sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan, Stderr: "banner" + scriptBegan + "unmatched [\n"}}
@@ -392,6 +395,23 @@ func TestSearchFailure(t *testing.T) {
 		res, _ = run(t, silent, tool, `{"pattern":"*"}`)
 		if !res.IsError || res.Content != tool+": failed with exit code 9" {
 			t.Fatalf("%s = %+v, want the exit code", tool, res)
+		}
+
+		for _, tc := range []struct {
+			exec sandbox.ExecResult
+			want string
+		}{
+			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan, Stderr: scriptBegan + "err: a\nerr: b" + scriptNoEnd, StderrTruncated: true},
+				"err: a\nerr: b\n[output truncated]"},
+			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan, Stderr: "flood flood", StderrTruncated: true},
+				"[output truncated]\n" + tool + ": failed with exit code 9"},
+			{sandbox.ExecResult{ExitCode: 9, Stdout: scriptBegan + "partial" + scriptNoEnd, Stderr: scriptBegan + "err: a\n", StdoutTruncated: true},
+				"[output truncated]\npartial\nerr: a"},
+		} {
+			res, _ := run(t, &fakeSandbox{exec: tc.exec}, tool, `{"pattern":"*"}`)
+			if !res.IsError || res.Content != tc.want {
+				t.Errorf("%s over %+v = %+v, want the error %q", tool, tc.exec, res, tc.want)
+			}
 		}
 	}
 }
@@ -422,13 +442,13 @@ func TestGlobLimit(t *testing.T) {
 // cap may leave too, is none of the answer.
 func TestGlobKeepsOnlyWholeRecords(t *testing.T) {
 	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + "2.000000000 /workspace/a.go\x001.000000000 /workspace/b-cut" + scriptCutInEnd,
-		Truncated: true, StdoutTruncated: true}}
+		StdoutTruncated: true}}
 	if res, err := run(t, sb, "glob", `{"pattern":"*.go"}`); err != nil || res.IsError || res.Content != "/workspace/a.go" {
 		t.Fatalf("glob = %+v, %v; want the one whole record", res, err)
 	}
 	// A stderr flood beside a whole answer is no reason to doubt it.
 	sb = &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + "2.000000000 /workspace/a.go\x00", Stderr: "flood",
-		Truncated: true, StderrTruncated: true}}
+		StderrTruncated: true}}
 	if res, err := run(t, sb, "glob", `{"pattern":"*.go"}`); err != nil || res.IsError || res.Content != "/workspace/a.go" {
 		t.Fatalf("glob = %+v, %v; want the answer", res, err)
 	}
@@ -537,7 +557,7 @@ func tail(s string) string {
 // than being run onto the end of its last line.
 func TestCombine(t *testing.T) {
 	sb := &fakeSandbox{exec: sandbox.ExecResult{
-		Stdout: "out", Stderr: "err", Truncated: true, ExitCode: 1,
+		Stdout: "out", Stderr: "err", StdoutTruncated: true, ExitCode: 1,
 	}}
 	res, err := run(t, sb, "bash", `{"command":"x"}`)
 	if err != nil {
@@ -638,7 +658,7 @@ func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
 // vouch for a result the sandbox itself already cut.
 func TestExecTruncatedGrepCarriesTheUpstreamMarker(t *testing.T) {
 	full := strings.Repeat("z", toolset.MaxOutputBytes+64)
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full + scriptNoEnd, Truncated: true, StdoutTruncated: true}}
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: scriptBegan + full + scriptNoEnd, StdoutTruncated: true}}
 	res, err := run(t, sb, "grep", `{"pattern":"z"}`)
 	if err != nil || res.IsError {
 		t.Fatalf("grep: err=%v", err)
