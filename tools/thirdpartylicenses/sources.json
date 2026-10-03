@@ -1,0 +1,134 @@
+{
+  "ripgrep": "15.2.0",
+  "lockfiles": [
+    {
+      "name": "ripgrep 15.2.0",
+      "note": "the crates of upstream's release build, made with --features pcre2; on the musl targets it also links tikv-jemallocator",
+      "url": "https://raw.githubusercontent.com/BurntSushi/ripgrep/15.2.0/Cargo.lock",
+      "sha256": "7a7d39cda8a03930e578f1dbb724e055771901842eca239e03b01e19da946a64"
+    },
+    {
+      "name": "Rust 1.97.0 standard library",
+      "note": "the aarch64 build was compiled by rustc 1.97.0 (2d8144b78 2026-07-07), as the binary's .comment section says",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/Cargo.lock",
+      "sha256": "02120dd57c4c5fd70c81fd92472681c8de5cc2dd78258276da37bb2253666061"
+    },
+    {
+      "name": "Rust 1.99.0-nightly standard library",
+      "note": "the x86_64 build was compiled by rustc 1.99.0-nightly (da80ed070 2026-07-14), as the binary's .comment section says",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/da80ed0708a09dc096c184345d6eb42cbcd50a1e/library/Cargo.lock",
+      "sha256": "c3fea000130cad91f2969c3bf0d4e15c282d41d46e719b383c1a82ef0e266513"
+    }
+  ],
+  "files": [
+    {
+      "component": "ripgrep 15.2.0",
+      "note": "dual-licensed under the MIT license and the Unlicense; COPYING says so",
+      "url": "https://raw.githubusercontent.com/BurntSushi/ripgrep/15.2.0/COPYING",
+      "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+    },
+    {
+      "component": "ripgrep 15.2.0",
+      "url": "https://raw.githubusercontent.com/BurntSushi/ripgrep/15.2.0/LICENSE-MIT",
+      "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+    },
+    {
+      "component": "ripgrep 15.2.0",
+      "url": "https://raw.githubusercontent.com/BurntSushi/ripgrep/15.2.0/UNLICENSE",
+      "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    },
+    {
+      "component": "PCRE2 10.46",
+      "note": "compiled into both builds from the sources pcre2-sys 0.2.10 vendors, which do not include this file",
+      "url": "https://raw.githubusercontent.com/PCRE2Project/pcre2/pcre2-10.46/LICENCE.md",
+      "sha256": "9cf7ac6976099a1d856826d3ef1b093bd6b84489dc6100628ac79e740cf9885a"
+    },
+    {
+      "component": "musl 1.2.5",
+      "note": "the C library both builds link statically. Rust ships a libc.a built from musl 1.2.5 with its musl targets, at both compilers, and ripgrep's release workflow links through cross 0.2.5, whose images carry musl 1.1.24; which one each build took is not established here, so both COPYRIGHT files are included",
+      "url": "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v1.2.5",
+      "sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af"
+    },
+    {
+      "component": "musl 1.1.24",
+      "note": "the musl cross 0.2.5's images carry (above)",
+      "url": "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v1.1.24",
+      "sha256": "3520d478bccbdf68d9dc0c03984efb0fa4b99868ab2599f5b5f72f3fb3b07a49"
+    },
+    {
+      "component": "Rust 1.97.0",
+      "note": "the standard library the aarch64 build links",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/COPYRIGHT",
+      "sha256": "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af"
+    },
+    {
+      "component": "Rust 1.97.0",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+      "component": "Rust 1.97.0",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/LICENSE-MIT",
+      "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1"
+    },
+    {
+      "component": "Rust 1.99.0-nightly",
+      "note": "the standard library the x86_64 build links",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/da80ed0708a09dc096c184345d6eb42cbcd50a1e/COPYRIGHT",
+      "sha256": "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af"
+    },
+    {
+      "component": "Rust 1.99.0-nightly",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/da80ed0708a09dc096c184345d6eb42cbcd50a1e/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+    },
+    {
+      "component": "Rust 1.99.0-nightly",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/da80ed0708a09dc096c184345d6eb42cbcd50a1e/LICENSE-MIT",
+      "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1"
+    },
+    {
+      "component": "LLVM libunwind (Rust 1.97.0)",
+      "note": "the unwinder Rust links statically on its musl targets, from the llvm-project commit rust 2d8144b78 pins",
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/08c84e69a84d95936296dfcab0e38b34100725d5/libunwind/LICENSE.TXT",
+      "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d"
+    },
+    {
+      "component": "LLVM libunwind (Rust 1.99.0-nightly)",
+      "note": "the same, from the llvm-project commit rust da80ed070 pins",
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04/libunwind/LICENSE.TXT",
+      "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d"
+    }
+  ],
+  "crate_files": {
+    "fortanix-sgx-abi 0.6.1": [
+      {
+        "note": "the crate ships no license file; this is its repository's, at the commit the crate was published from",
+        "url": "https://raw.githubusercontent.com/fortanix/rust-sgx/adcc6cdb981bcf2101437edbd3ef6144246621d3/LICENSE",
+        "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+      }
+    ],
+    "vex-sdk 0.27.1": [
+      {
+        "note": "the crate ships no license file; this is its repository's, at the commit the crate was published from",
+        "url": "https://raw.githubusercontent.com/vexide/vex-sdk/6c0b83d35b6fc31a7607efe456e387df45476314/LICENSE.md",
+        "sha256": "7bc7d5de2a0b793d4e1adb7ffcb99387776adc1f15f055bc3b667ea449249e6a"
+      }
+    ],
+    "wasip1 1.0.0": [
+      {
+        "note": "the crate ships no license file; these are its repository's, at the commit the crate was published from",
+        "url": "https://raw.githubusercontent.com/bytecodealliance/wasi/e55b3b02fcda2a016f5df14573ff05c5b1e313d6/LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/bytecodealliance/wasi/e55b3b02fcda2a016f5df14573ff05c5b1e313d6/LICENSE-Apache-2.0_WITH_LLVM-exception",
+        "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/bytecodealliance/wasi/e55b3b02fcda2a016f5df14573ff05c5b1e313d6/LICENSE-MIT",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+      }
+    ]
+  }
+}

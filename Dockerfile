@@ -57,8 +57,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # Copy only the four server binaries — the gate binary has its own image (above)
-# and does not belong in the server image. NOTICE carries the license of the
-# ripgrep the executor and worker embed.
+# and does not belong in the server image. NOTICE says what third-party
+# software the executor and worker embed (the ripgrep their grep tool runs),
+# THIRD_PARTY_LICENSES carries its license texts, and LICENSE is the
+# project's own, which NOTICE refers to.
 COPY --from=build /out/controlplane /out/brain /out/executor /out/worker /
-COPY NOTICE /NOTICE
+COPY LICENSE NOTICE THIRD_PARTY_LICENSES /
 # No default command: each service sets one of /controlplane|/brain|/executor|/worker.

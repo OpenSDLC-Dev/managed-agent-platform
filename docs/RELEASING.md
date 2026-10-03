@@ -148,7 +148,8 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    release cannot build from anything else) pushed as
    `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
    (same digest, three names — the coordinates the Helm chart composes) plus
-   `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag.
+   `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag. The
+   server image carries LICENSE, NOTICE and THIRD_PARTY_LICENSES at its root.
 4. `make release-chart PUSH=1 VERSION=X.Y.Z` — the chart to
    `oci://ghcr.io/opensdlc-dev/charts` (its guards re-run as a
    prerequisite).
@@ -156,7 +157,10 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    for linux/darwin × amd64/arm64, plus a sha256sums file. It runs `make
    ripgrep` first, so every worker — the darwin ones included, since they
    drive Linux sandboxes — embeds both Linux ripgrep binaries, and each
-   tarball carries [NOTICE](../NOTICE) beside the worker for their license.
+   tarball carries [NOTICE](../NOTICE), [THIRD_PARTY_LICENSES](../THIRD_PARTY_LICENSES)
+   and [LICENSE](../LICENSE) beside the worker for their licenses. A ripgrep
+   pin bump regenerates THIRD_PARTY_LICENSES first (`make
+   third-party-licenses`); the gate fails until it does.
 6. The GitHub Release, from the notes rendered in step 2: created if
    missing, then reconciled (`gh release edit` republishes a stuck draft
    and refreshes title/notes), then assets uploaded with `--clobber`.

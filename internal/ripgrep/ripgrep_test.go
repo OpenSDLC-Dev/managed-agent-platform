@@ -180,14 +180,16 @@ func TestPinnedIsTheManifestFile(t *testing.T) {
 }
 
 // The repository's NOTICE carries ripgrep's license into every artifact that
-// embeds it, and names the release it describes: a pin moved without it is a
-// notice describing a binary nobody ships.
+// embeds it, names the release it describes — a pin moved without it is a
+// notice describing a binary nobody ships — and points at the file carrying
+// the license texts of what that release links (tools/thirdpartylicenses
+// holds that file to the pin).
 func TestNoticeNamesThePinnedRelease(t *testing.T) {
 	b, err := os.ReadFile("../../NOTICE")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ripgrep " + Pinned.Version + " ", "Copyright (c) 2015 Andrew Gallant", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"} {
+	for _, want := range []string{"ripgrep " + Pinned.Version + " ", "Copyright (c) 2015 Andrew Gallant", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "THIRD_PARTY_LICENSES"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("NOTICE does not mention %q", want)
 		}

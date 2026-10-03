@@ -21,7 +21,9 @@
 // stray file under the pinned name cannot be embedded and run in its place.
 //
 // ripgrep is dual-licensed MIT and Unlicense; NOTICE at the repository root
-// carries its license for the artifacts that embed it.
+// carries its license for the artifacts that embed it, and
+// THIRD_PARTY_LICENSES the license texts of everything those static builds
+// link (tools/thirdpartylicenses).
 package ripgrep
 
 import (

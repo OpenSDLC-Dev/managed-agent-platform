@@ -17,7 +17,7 @@ SHELL := /usr/bin/env bash
 # internally), so refuse it rather than gate on a stale profile.
 .NOTPARALLEL:
 
-.PHONY: build crossbuild vet fmt-check test cover-gate verify eval ripgrep \
+.PHONY: build crossbuild vet fmt-check test cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
@@ -67,6 +67,17 @@ fmt-check:
 # again, so this costs nothing after the first run.
 ripgrep:
 	go run ./tools/ripgrepfetch
+
+# THIRD_PARTY_LICENSES, the license texts of what that ripgrep was built from,
+# which the worker tarballs and the server image ship beside NOTICE and
+# LICENSE. Generated from tools/thirdpartylicenses/sources.json, whose every
+# input — the lock files, each crate, each upstream license file — is checked
+# against a sha256 before it is used. It needs the network, so it is run when
+# the ripgrep pin moves, not by the gate; tools/thirdpartylicenses' own test,
+# which is in the gate, fails while the committed file is not the one the
+# committed sources generate or describes another ripgrep than the one pinned.
+third-party-licenses:
+	go run ./tools/thirdpartylicenses
 
 # Coverage denominator: logic packages only. internal/pgtest, internal/dockertest,
 # internal/sandbox/sandboxtest, internal/modeltest, internal/blob/blobtest,
@@ -264,8 +275,9 @@ release-chart: release-chart-check
 # Worker binaries for the platforms BYOC users run. No Windows: the worker
 # drives Docker sandboxes and has no Windows user story (plan 27 decision 4).
 # Every one embeds both Linux ripgrep binaries, the darwin builds included: a
-# worker on a Mac drives Linux sandboxes, of either architecture. NOTICE rides
-# in each tarball because of them.
+# worker on a Mac drives Linux sandboxes, of either architecture. NOTICE and
+# THIRD_PARTY_LICENSES ride in each tarball because of them, and LICENSE, which
+# NOTICE refers to.
 release-binaries: ripgrep
 	@set -euo pipefail; \
 	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
@@ -274,8 +286,8 @@ release-binaries: ripgrep
 		os="$${target%/*}"; arch="$${target#*/}"; \
 		dir="dist/worker_$(VERSION)_$${os}_$${arch}"; \
 		CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" go build -trimpath $(RELEASE_LDFLAGS) -o "$$dir/worker" ./cmd/worker; \
-		cp NOTICE "$$dir/NOTICE"; \
-		tar -czf "$$dir.tar.gz" -C "$$dir" worker NOTICE; \
+		cp LICENSE NOTICE THIRD_PARTY_LICENSES "$$dir/"; \
+		tar -czf "$$dir.tar.gz" -C "$$dir" worker LICENSE NOTICE THIRD_PARTY_LICENSES; \
 		rm -r "$$dir"; \
 	done; \
 	(cd dist && shasum -a 256 worker_$(VERSION)_*.tar.gz > "worker_$(VERSION)_sha256sums.txt"); \

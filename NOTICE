@@ -35,12 +35,11 @@ ripgrep 15.2.0 (https://github.com/BurntSushi/ripgrep)
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 
-  Those builds statically link, as upstream compiles them, PCRE2 10.45
-  (BSD-3-Clause with the PCRE2 exception;
-  https://github.com/PCRE2Project/pcre2/blob/pcre2-10.45/LICENCE.md), jemalloc
-  (BSD-2-Clause; https://github.com/jemalloc/jemalloc/blob/dev/COPYING), the
-  musl C library (MIT; https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT),
-  and Rust's standard library and ripgrep's crate dependencies, each under the
-  permissive license its crate states (MIT, Apache-2.0, the Unlicense or
-  BSD-3-Clause). Upstream's own release archives carry ripgrep's license files
-  alone.
+  Those builds are statically linked, as upstream compiles them (with its
+  pcre2 feature, and jemalloc as the allocator on musl), so they also carry
+  PCRE2 10.46 (BSD-3-Clause with the PCRE2 exception), jemalloc 5.3.1
+  (BSD-2-Clause), the musl C library (MIT), LLVM's libunwind (Apache-2.0
+  with LLVM exceptions), the Rust standard library and ripgrep's crate
+  dependencies, each under the permissive license it states.
+  THIRD_PARTY_LICENSES, which ships beside this file, carries all of their
+  license texts; tools/thirdpartylicenses generates it from pinned sources.
