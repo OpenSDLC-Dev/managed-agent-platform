@@ -162,16 +162,16 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, sid
 	if prev, err := sb.ReadFile(ctx, marker); err == nil && bytes.Equal(prev, want) {
 		return memoryOutcomeUnchanged, nil
 	}
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: memsync.HashTreeCommand(m.MountPath)})
+	res, framed, err := sandbox.ExecFramed(ctx, sb, "memsync", sandbox.ExecRequest{Command: memsync.HashTreeCommand(m.MountPath)})
 	if err != nil {
 		return memoryOutcomeFailed, err
 	}
-	// A listing with anything in it — or one too long to capture, or one
-	// that failed — is a directory nothing vouches for: files with no marker,
-	// files the listing could not read, or a path that is no longer the
-	// directory. An absent directory lists nothing and exits 0, which is the
-	// fresh case.
-	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
+	// A listing with anything in it — or one too long to capture, one that
+	// failed, or one that did not reach the output whole (sandbox.Frame) — is
+	// a directory nothing vouches for: files with no marker, files the
+	// listing could not read, or a path that is no longer the directory. An
+	// absent directory lists nothing and exits 0, which is the fresh case.
+	if !framed || len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
 
@@ -301,9 +301,15 @@ func (e *Executor) readStore(ctx context.Context, sb sandbox.Sandbox, st *storeS
 	marker, err := sb.ReadFile(ctx, path.Join(mount, memsync.MarkerName))
 	st.markerOK = err == nil && bytes.Equal(marker, memsync.MarkerBytes(id))
 
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: memsync.HashTreeCommand(mount)})
+	// Framed, so what an image's startup prints around the listing is no
+	// record of it (#860); one that did not reach the output whole skips the
+	// store's sync, as one that failed does.
+	res, framed, err := sandbox.ExecFramed(ctx, sb, "memsync", sandbox.ExecRequest{Command: memsync.HashTreeCommand(mount)})
 	if err != nil {
 		return err
+	}
+	if !framed {
+		return fmt.Errorf("the listing did not reach the output whole (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	if res.Truncated() {
 		return errors.New("the listing overflows the exec output cap")

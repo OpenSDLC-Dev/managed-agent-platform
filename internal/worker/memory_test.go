@@ -471,6 +471,35 @@ func TestMemoryPullOnlyStores(t *testing.T) {
 	}
 }
 
+// TestMemoryUnframedListingVouchesForNothing: the tree listing is read only
+// from inside its frame (sandbox.ExecFramed), and one whose output never
+// carried the frame — a shell that died first, a startup that filled the
+// output cap — says nothing of the directory. The store is not landed over
+// it, as over a directory whose listing failed, and the run's end does not
+// sync it: what the agent wrote there is not pushed. Once the listing answers
+// again, the store lands.
+func TestMemoryUnframedListingVouchesForNothing(t *testing.T) {
+	sb := &fakeSandbox{unframed: true}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token, writeUse(memMount+"/log/b.md", "hello"))
+	if _, ok := sb.files[memMount+"/"+memsync.MarkerName]; ok {
+		t.Error("the store was landed over a directory whose listing never carried its frame")
+	}
+	if _, ok := h.memoryContent(t, memStoreID, "/log/b.md"); ok {
+		t.Error("a store whose listing never carried its frame was pushed to")
+	}
+	sb.unframed = false
+	delete(sb.files, memMount+"/log/b.md")
+	h.runWith(t, token)
+	if got := sb.files[memMount+"/facts/a.md"]; got != "alpha" {
+		t.Errorf("landed memory = %q once the listing answered, want alpha", got)
+	}
+}
+
 // TestMemoryStoreRefusalsOverTheWire: the occupancy 409 on a create removes
 // the file the store's memory is in the way of; the 2,000 cap's 400 is the
 // store's state, refused but not remembered (so a retry lands once room is

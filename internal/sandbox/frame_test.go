@@ -101,7 +101,8 @@ func TestFrameCutReadsOnlyWhatTheScriptPrinted(t *testing.T) {
 // Unframe cuts both streams of a result, each by its own flag: what the cap
 // took of the script's output is said per stream, a stderr whose begin line
 // the cap took — a startup flood filled it first — has lost all the script
-// printed there, and ok is stdout's frame alone.
+// printed there, and ok is stdout's frame alone. A result whose stdout is not
+// framed comes back as it was.
 func TestFrameUnframeCutsEachStreamByItsOwnFlag(t *testing.T) {
 	f := sandbox.NewFrame("test")
 	begin, end := lines(t, f)
@@ -123,8 +124,12 @@ func TestFrameUnframeCutsEachStreamByItsOwnFlag(t *testing.T) {
 			sandbox.ExecResult{Stdout: "out", StderrTruncated: true}, true},
 		{"stderr with no frame, whole", sandbox.ExecResult{Stdout: begin + "out" + end, Stderr: "banner"},
 			sandbox.ExecResult{Stdout: "out"}, true},
-		{"no begin line on stdout", sandbox.ExecResult{Stdout: "banner", ExitCode: 127, TimedOut: true},
-			sandbox.ExecResult{ExitCode: 127, TimedOut: true}, false},
+		// Unframed, the result is Exec's own, for the caller to say what the
+		// sandbox printed instead.
+		{"no begin line on stdout", sandbox.ExecResult{Stdout: "banner", Stderr: "e" + begin + "err" + end, ExitCode: 127, TimedOut: true},
+			sandbox.ExecResult{Stdout: "banner", Stderr: "e" + begin + "err" + end, ExitCode: 127, TimedOut: true}, false},
+		{"whole stdout with no end line", sandbox.ExecResult{Stdout: begin + "out", StderrTruncated: true},
+			sandbox.ExecResult{Stdout: begin + "out", StderrTruncated: true}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := f.Unframe(tc.in)
@@ -230,9 +235,16 @@ func TestFrameUnwrapAndFramedRoundTrip(t *testing.T) {
 	if !ok || got != script || g != f {
 		t.Fatalf("Unwrap = %q, %v, %v; want the script and the frame back", got, g, ok)
 	}
-	res := g.Framed(sandbox.ExecResult{Stdout: "out", Stderr: "err", ExitCode: 2})
-	if back, ok := f.Unframe(res); !ok || back != (sandbox.ExecResult{Stdout: "out", Stderr: "err", ExitCode: 2}) {
-		t.Errorf("Unframe(Framed(...)) = %+v, %v", back, ok)
+	for _, want := range []sandbox.ExecResult{
+		{Stdout: "out", Stderr: "err", ExitCode: 2},
+		// A stream marked truncated was cut inside the script's output, and
+		// comes back cut short.
+		{Stdout: "ou", StdoutTruncated: true},
+		{Stdout: "out", Stderr: "er", StderrTruncated: true},
+	} {
+		if back, ok := f.Unframe(g.Framed(want)); !ok || back != want {
+			t.Errorf("Unframe(Framed(%+v)) = %+v, %v", want, back, ok)
+		}
 	}
 	for _, cmd := range []string{script, f.Open() + script, f.Wrap(script)[:len(f.Wrap(script))-3], "x" + f.Wrap(script)} {
 		if _, _, ok := sandbox.Unwrap(cmd); ok {

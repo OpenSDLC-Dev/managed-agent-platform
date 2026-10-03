@@ -209,18 +209,30 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sb sand
 		}
 	}()
 
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: harvestListScript})
+	// Framed (sandbox.ExecFramed), so what an image's startup prints around
+	// the listing — a BASH_ENV file's banner, an EXIT trap's words — is no
+	// path of it (#860).
+	res, framed, err := sandbox.ExecFramed(ctx, sb, "harvest", sandbox.ExecRequest{Command: harvestListScript})
 	if err != nil {
 		return nil, fmt.Errorf("list outputs: %w", err)
 	}
 	progress()
+	// A listing that did not reach the output whole — no begin line, or no
+	// end line on a stdout the cap did not cut — is no listing at all, and
+	// faults the harvest as one that exited non-zero does: the reclaim
+	// retries it, and the previous snapshot stays until a whole one commits.
+	if !framed {
+		return nil, fmt.Errorf("list outputs: the listing did not reach the output whole (exit %d): %s",
+			res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("list outputs: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	listing := res.Stdout
 	if res.StdoutTruncated {
-		// The exec cap cut the listing — stdout; a cut stderr leaves it
-		// whole. The glob emits paths sorted, so its complete entries are
+		// The exec cap cut the listing — stdout, before its end line; a cut
+		// stderr, or a cap that cut only past the end line, leaves it whole.
+		// The glob emits paths sorted, so its complete entries are
 		// the tree's lexicographic prefix — what greedy admission takes
 		// first anyway. Keep them and drop the trailing mid-path fragment:
 		// the tree is static during grading, so a fault here would repeat

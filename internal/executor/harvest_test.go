@@ -606,6 +606,31 @@ func TestHarvestTruncatedListingDegradesToSortedPrefix(t *testing.T) {
 	}
 }
 
+// A listing whose output never carried its frame (sandbox.ExecFramed) — a
+// shell that died before the script began, or an image whose startup filled
+// the output cap first — is no listing, whatever it holds: the harvest faults
+// as one whose listing exited non-zero does, leaving the item for reclaim and
+// publishing nothing from words that may be a banner's.
+func TestHarvestUnframedListingFaults(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/a.txt": "alpha"}, unframed: true}
+	h := newHarness(t, sb)
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	var faulted error
+	h.exec.onFault = func(_ *queue.Item, err error) { faulted = err }
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	if faulted == nil || !strings.Contains(faulted.Error(), "did not reach the output whole") {
+		t.Fatalf("fault = %v; want the unframed listing's", faulted)
+	}
+	if rows := h.fileRows(t); len(rows) != 0 {
+		t.Errorf("rows = %+v, want none published from an unframed listing", rows)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 1 {
+		t.Errorf("outputs_harvest live = %d, want 1 (left for reclaim)", got)
+	}
+}
+
 func TestHarvestHostileListingPathsAreExcluded(t *testing.T) {
 	// The sandbox is agent-writable, so the listing is untrusted output: a
 	// path that escapes the outputs tree must never become a registry row or

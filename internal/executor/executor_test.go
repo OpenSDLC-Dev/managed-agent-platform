@@ -109,10 +109,31 @@ type fakeSandbox struct {
 	// modes records the Mode each WriteFiles member asked for, by path — the
 	// fake lands no permission bits, so this is where a test reads them.
 	modes map[string]fs.FileMode
+	// unframed answers a framed platform script (sandbox.ExecFramed) bare, as
+	// a sandbox whose output never carried the script's frame — a shell that
+	// died first, or a startup that filled the output cap before it.
+	unframed bool
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
-func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+
+// Exec answers a framed platform script (sandbox.ExecFramed) as its script —
+// recorded, hooked and answered bare — and frames the answer as the script's
+// run would have printed it, unless unframed says the frame never arrived.
+func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	script, frame, framed := sandbox.Unwrap(req.Command)
+	if !framed {
+		return f.exec(ctx, req)
+	}
+	req.Command = script
+	res, err := f.exec(ctx, req)
+	if err != nil || f.unframed {
+		return res, err
+	}
+	return frame.Framed(res), nil
+}
+
+func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	f.cmds = append(f.cmds, req.Command)
 	f.execTimeouts = append(f.execTimeouts, req.Timeout)
 	if f.execErr != nil && (f.execErrOn == "" || strings.Contains(req.Command, f.execErrOn)) {

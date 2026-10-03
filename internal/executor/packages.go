@@ -874,17 +874,25 @@ func packageMessage(out string) string {
 var anySchemeUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/?#]+@`)
 
 // probeSandboxForPackages answers decision 7's question, returning the reason the pass
-// must be refused or "" to proceed. An answer the probe cannot have produced —
-// a shell so broken it printed something else — proceeds with a log line
+// must be refused or "" to proceed. The probe is framed (sandbox.ExecFramed),
+// so what an image's startup prints around its answer — a BASH_ENV file's
+// banner, an EXIT trap's words — is not read as one (#860). An answer the
+// probe cannot have produced — a shell so broken it printed something else,
+// or no answer that reached the output whole — proceeds with a log line
 // rather than inventing a reason for the wire: the install's own failure is
 // then the honest diagnosis.
 func probeSandboxForPackages(ctx context.Context, sb sandbox.Sandbox, timeout time.Duration) (string, error) {
 	// Bounded by the same budget as an install: the probe is trivial, but a
 	// container whose shell wedges answering it must not hang provisioning on the
 	// outer lease alone (review).
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: packagesProbeCommand, Timeout: timeout})
+	res, framed, err := sandbox.ExecFramed(ctx, sb, "packages", sandbox.ExecRequest{Command: packagesProbeCommand, Timeout: timeout})
 	if err != nil {
 		return "", err
+	}
+	if !framed {
+		slog.WarnContext(ctx, "the package-install probe's answer did not reach the output whole; installing anyway",
+			"exit_code", res.ExitCode, "timed_out", res.TimedOut)
+		return "", nil
 	}
 	switch answer := strings.TrimSpace(res.Stdout); answer {
 	case packageReasonNotRoot, packageReasonReadOnly:

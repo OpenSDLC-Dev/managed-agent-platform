@@ -657,6 +657,8 @@ func TestMemorySyncSkipsAnUnreliableListing(t *testing.T) {
 	for name, arm := range map[string]func(*fakeSandbox){
 		"truncated": func(sb *fakeSandbox) { sb.listTruncated = true },
 		"failed":    func(sb *fakeSandbox) { sb.listExit = 1 },
+		// A listing whose output never carried its frame (sandbox.Frame).
+		"unframed": func(sb *fakeSandbox) { sb.unframed = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, sb := materialized(t, "read_write")
@@ -715,21 +717,27 @@ func TestMemoryStoreMissingOrUntrusted(t *testing.T) {
 			t.Error("the untrusted directory's own file was changed")
 		}
 	})
-	t.Run("listing failed", func(t *testing.T) {
-		// A listing that fails vouches for nothing: the directory is neither
-		// overwritten with the store nor synced from.
-		sb := &fakeSandbox{listExit: 123}
-		h := newHarness(t, sb)
-		h.seedMemoryStore(t, memStoreID, "Notes")
-		h.seedMemory(t, memStoreID, "/notes.md", "hello")
-		h.refMemory(t, memStoreID, memMount, "read_write")
-		h.step(t)
-		for _, p := range []string{memMount + "/.anthropic-memory-store", memMount + "/notes.md", baselinePath(memStoreID)} {
-			if _, ok := sb.files[p]; ok {
-				t.Errorf("%s was written over a directory whose listing failed", p)
+	for name, sb := range map[string]*fakeSandbox{
+		"listing failed": {listExit: 123},
+		// An empty directory's listing whose output never carried its frame
+		// (sandbox.Frame) says nothing of the directory either.
+		"listing unframed": {unframed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// A listing that fails vouches for nothing: the directory is
+			// neither overwritten with the store nor synced from.
+			h := newHarness(t, sb)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			h.seedMemory(t, memStoreID, "/notes.md", "hello")
+			h.refMemory(t, memStoreID, memMount, "read_write")
+			h.step(t)
+			for _, p := range []string{memMount + "/.anthropic-memory-store", memMount + "/notes.md", baselinePath(memStoreID)} {
+				if _, ok := sb.files[p]; ok {
+					t.Errorf("%s was written over a directory whose listing did not answer", p)
+				}
 			}
-		}
-	})
+		})
+	}
 	t.Run("store deleted after attach", func(t *testing.T) {
 		h, sb := materialized(t, "read_write")
 		if _, err := h.pool.Exec(context.Background(), `DELETE FROM memory_stores WHERE id = $1`, memStoreID); err != nil {

@@ -549,6 +549,25 @@ func TestAnUnrecognizedProbeAnswerInstallsAnyway(t *testing.T) {
 	}
 }
 
+// TestAnUnframedProbeAnswerInstallsAnyway: the probe reads only what its
+// script printed inside its frame (sandbox.ExecFramed), so an answer that
+// never carried the frame — here one that would have refused the pass — is
+// no answer, and the pass proceeds as it does past an unrecognized one.
+func TestAnUnframedProbeAnswerInstallsAnyway(t *testing.T) {
+	sb := &fakeSandbox{probeOut: packageReasonNotRoot, unframed: true}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"apt": {"jq"}})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	if n := len(installCmds(sb)); n != 1 {
+		t.Errorf("install commands = %d, want 1", n)
+	}
+	if errs := h.packageErrors(t); len(errs) != 0 {
+		t.Errorf("package errors = %+v, want none: an unframed probe is not a reason", errs)
+	}
+}
+
 // TestTheFailureMessageIsSanitizedAndRedacted: this is the one session.error
 // this platform writes whose text is sandbox-controlled, so both of its guards
 // are pinned here. A NUL would fault the jsonb append and reclaim-loop the item;

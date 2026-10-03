@@ -181,10 +181,14 @@ func hasPrefix[T string | []byte](s T, prefix string) bool {
 // holds none of the script's and is "". ok is whether stdout was framed: the
 // script printed its begin line there and either its end line or as much as
 // the cap kept. Where it is false the script's answer did not reach the
-// output, and what the caller makes of that is its own — each caller's
-// failure handling says.
+// output, and res comes back as Exec reported it, for the caller to say what
+// the sandbox printed instead; what the caller makes of it is its own — each
+// caller's failure handling says.
 func (f Frame) Unframe(res ExecResult) (ExecResult, bool) {
 	out, framed, outShort := f.Cut(res.Stdout, res.StdoutTruncated)
+	if !framed {
+		return res, false
+	}
 	msg, msgFramed, msgShort := f.Cut(res.Stderr, res.StderrTruncated)
 	res.Stdout, res.StdoutTruncated = out, outShort
 	res.Stderr, res.StderrTruncated = msg, msgShort || (res.StderrTruncated && !msgFramed)
@@ -227,9 +231,17 @@ func Unwrap(command string) (script string, f Frame, ok bool) {
 }
 
 // Framed is res as a framed script's run prints it: each stream between the
-// frame's begin and end lines. Like Unwrap it is for fakes.
+// frame's begin and end lines — but for a stream res marks truncated, which
+// the cap cut inside what the script printed, so it keeps its begin line and
+// loses its end line with the rest. Like Unwrap it is for fakes.
 func (f Frame) Framed(res ExecResult) ExecResult {
-	frame := func(s string) string { return "\n" + f.begin + "\n" + s + "\n" + f.end + "\n" }
-	res.Stdout, res.Stderr = frame(res.Stdout), frame(res.Stderr)
+	frame := func(s string, truncated bool) string {
+		s = "\n" + f.begin + "\n" + s
+		if !truncated {
+			s += "\n" + f.end + "\n"
+		}
+		return s
+	}
+	res.Stdout, res.Stderr = frame(res.Stdout, res.StdoutTruncated), frame(res.Stderr, res.StderrTruncated)
 	return res
 }
