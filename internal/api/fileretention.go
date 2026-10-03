@@ -266,8 +266,9 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 	if err != nil {
 		return 0, err
 	}
-	// A copy shares its upload's object; the queue takes the key once no
-	// surviving row names it.
+	// A copy shares its upload's object, so expired copies of one upload
+	// return its key once each; the key goes in once, and the queue takes it
+	// once no surviving row names it (EnqueueObjectDeletes).
 	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return 0, err

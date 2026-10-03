@@ -101,10 +101,13 @@ func TestFilesObjectKeyMigratesWithoutARewrite(t *testing.T) {
 	if key != nil || source != nil {
 		t.Errorf("a legacy row's object_key, source_file_id = %v, %v; want both NULL", key, source)
 	}
-	// The two columns are a copy's together or no row's.
+	// The two columns are a copy's together or no row's, and a copy names a
+	// files/ key, the only kind the reference count counts.
 	for _, q := range []string{
 		`INSERT INTO files (id, filename, mime_type, size_bytes, object_key) VALUES ('file_half1', 'a', 'text/plain', 1, 'files/x')`,
 		`INSERT INTO files (id, filename, mime_type, size_bytes, source_file_id) VALUES ('file_half2', 'a', 'text/plain', 1, 'file_x')`,
+		`INSERT INTO files (id, filename, mime_type, size_bytes, object_key, source_file_id)
+		 VALUES ('file_notfiles', 'a', 'text/plain', 1, 'skills/skill_x/1.zip', 'file_x')`,
 	} {
 		_, err := pool.Exec(ctx, q)
 		var pgErr *pgconn.PgError
@@ -161,14 +164,31 @@ func pendingKeys(t *testing.T, pool *pgxpool.Pool) []string {
 	return keys
 }
 
-// inTx runs fn in a transaction and commits it.
+// inTx runs fn in a plain transaction, as the previous build begins one, and
+// commits it.
 func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx) error) {
 	t.Helper()
-	ctx := context.Background()
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.Begin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	commitTx(t, tx, fn)
+}
+
+// inObjectDeleteTx runs fn in a transaction a remover of this build begins,
+// and commits it.
+func inObjectDeleteTx(t *testing.T, pool *pgxpool.Pool, fn func(store.ObjectDeleteTx) error) {
+	t.Helper()
+	tx, err := store.BeginObjectDelete(context.Background(), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitTx(t, tx, fn)
+}
+
+func commitTx[T pgx.Tx](t *testing.T, tx T, fn func(T) error) {
+	t.Helper()
+	ctx := context.Background()
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := fn(tx); err != nil {
 		t.Fatal(err)
@@ -189,21 +209,20 @@ func TestEnqueueObjectDeletesSkipsReferencedKeys(t *testing.T) {
 	insertCopy(t, pool, "file_copy", "file_upload", blob.FilesKey("file_upload"), "sesn_1")
 	enqueue := func(keys ...string) {
 		t.Helper()
-		inTx(t, pool, func(tx pgx.Tx) error { return store.EnqueueObjectDeletes(ctx, tx, keys) })
+		inObjectDeleteTx(t, pool, func(tx store.ObjectDeleteTx) error { return store.EnqueueObjectDeletes(ctx, tx, keys) })
 	}
 	// file_upload's row is gone and its copy lives; file_owner's row lives.
 	// Neither key is owed. The previous build's raw INSERT is held to the same
 	// count.
 	enqueue("files/file_upload", "files/file_owner", "files/file_gone", "skills/skill_x/1.zip")
-	if _, err := pool.Exec(ctx, `INSERT INTO pending_object_deletes (object_key)
-		 SELECT unnest($1::text[]) ON CONFLICT (object_key) DO NOTHING`, []string{"files/file_upload", "files/file_owner"}); err != nil {
+	if _, err := pool.Exec(ctx, pgtest.PrevObjectEnqueueSQL, []string{"files/file_upload", "files/file_owner"}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := pendingKeys(t, pool), []string{"files/file_gone", "skills/skill_x/1.zip"}; !slices.Equal(got, want) {
 		t.Errorf("queue = %v, want %v", got, want)
 	}
 	// The last row naming it goes: now it is owed.
-	inTx(t, pool, func(tx pgx.Tx) error {
+	inObjectDeleteTx(t, pool, func(tx store.ObjectDeleteTx) error {
 		if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
 			return err
 		}
@@ -218,6 +237,40 @@ func TestEnqueueObjectDeletesSkipsReferencedKeys(t *testing.T) {
 	}
 }
 
+// Each key goes into the queue once, however often a remover names it — two of
+// a session's copies of one upload name one key — so the reference count is
+// asked about it once, as the tombstone trigger asks. A trigger ahead of the
+// count records every row the statement offers it.
+func TestEnqueueOffersEachKeyOnce(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE offered (k text);
+		CREATE FUNCTION record_offered() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN INSERT INTO offered VALUES (NEW.object_key); RETURN NEW; END $$;
+		CREATE TRIGGER a_record_offered BEFORE INSERT ON pending_object_deletes
+		    FOR EACH ROW EXECUTE FUNCTION record_offered()`); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"files/file_a", "skills/skill_x/1.zip", "files/file_a", "files/file_b", "skills/skill_x/1.zip"}
+	inObjectDeleteTx(t, pool, func(tx store.ObjectDeleteTx) error { return store.EnqueueObjectDeletes(ctx, tx, keys) })
+	rows, err := pool.Query(ctx, `SELECT k FROM offered ORDER BY k`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offered, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"files/file_a", "files/file_b", "skills/skill_x/1.zip"}
+	if !slices.Equal(offered, want) {
+		t.Errorf("the statement offered %v, want each key once: %v", offered, want)
+	}
+	if got := pendingKeys(t, pool); !slices.Equal(got, want) {
+		t.Errorf("queue = %v, want %v", got, want)
+	}
+}
+
 // Two transactions each deleting one of the last two rows that name a key
 // would, under READ COMMITTED, each see the other's row and skip the key, and
 // the object would never be deleted. The trigger's advisory lock makes the
@@ -229,9 +282,9 @@ func TestConcurrentLastDeletesStillOweTheObject(t *testing.T) {
 	const key = "files/file_upload"
 	insertUpload(t, pool, "file_upload")
 	insertCopy(t, pool, "file_copy", "file_upload", key, "sesn_1")
-	begin := func() pgx.Tx {
+	begin := func() store.ObjectDeleteTx {
 		t.Helper()
-		tx, err := pool.Begin(ctx)
+		tx, err := store.BeginObjectDelete(ctx, pool)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,8 +358,12 @@ func awaitLockWaiters(t *testing.T, pool *pgxpool.Pool, n int, done ...chan erro
 // Looking again after the lock sees the other remover's commit only because a
 // READ COMMITTED statement takes a new snapshot. Under REPEATABLE READ or
 // SERIALIZABLE both removers would keep seeing each other's row and the
-// object would never be owed, so the trigger refuses those levels outright.
-func TestObjectDeleteEnqueueRefusesStricterIsolation(t *testing.T) {
+// object would never be owed, so the trigger refuses a files/ key at those
+// levels outright. No files row can name any other key, which the count
+// leaves alone at every level: a skill archive's or a checkpoint's is
+// enqueued as before 0046. The statement runs bare here, as a transaction
+// that did not begin through BeginObjectDelete would run it.
+func TestObjectDeleteEnqueueRefusesAFilesKeyUnderStricterIsolation(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	for _, iso := range []pgx.TxIsoLevel{pgx.RepeatableRead, pgx.Serializable} {
@@ -314,23 +371,42 @@ func TestObjectDeleteEnqueueRefusesStricterIsolation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = store.EnqueueObjectDeletes(ctx, tx, []string{"files/file_x"})
+		_, err = tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{"files/file_x"})
 		_ = tx.Rollback(ctx)
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "25000" {
-			t.Errorf("enqueue under %s => %v, want invalid_transaction_state (25000)", iso, err)
+			t.Errorf("enqueue of a files/ key under %s => %v, want invalid_transaction_state (25000)", iso, err)
+		}
+
+		level := strings.ReplaceAll(string(iso), " ", "_")
+		other := []string{"skills/skill_x/" + level + ".zip", blob.SessionCheckpointKey("sesn_" + level)}
+		tx, err = pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: iso})
+		if err != nil {
+			t.Fatal(err)
+		}
+		commitTx(t, tx, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, store.PendingObjectDeleteInsertSQL, other)
+			return err
+		})
+		for _, k := range other {
+			if got := pendingKeys(t, pool); !slices.Contains(got, k) {
+				t.Errorf("queue = %v after an enqueue under %s, want %s owed", got, iso, k)
+			}
 		}
 	}
-	inTx(t, pool, func(tx pgx.Tx) error { return store.EnqueueObjectDeletes(ctx, tx, []string{"files/file_x"}) })
-	if got := pendingKeys(t, pool); !slices.Equal(got, []string{"files/file_x"}) {
-		t.Errorf("queue = %v under READ COMMITTED, want [files/file_x]", got)
+	inObjectDeleteTx(t, pool, func(tx store.ObjectDeleteTx) error {
+		return store.EnqueueObjectDeletes(ctx, tx, []string{"files/file_x"})
+	})
+	if got := pendingKeys(t, pool); !slices.Contains(got, "files/file_x") {
+		t.Errorf("queue = %v under READ COMMITTED, want files/file_x owed", got)
 	}
 }
 
 // A database can default to a stricter level than the count accepts, which a
 // plain Begin inherits. BeginObjectDelete names READ COMMITTED, so a remover
-// that begins there enqueues on such a database, and one that does not meets
-// the refusal rather than skipping a key.
+// that begins there enqueues on such a database, and a plain transaction
+// running the statement bare (EnqueueObjectDeletes takes none) meets the
+// refusal rather than skipping a key.
 func TestBeginObjectDeleteIsReadCommittedWhateverTheDefault(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -339,7 +415,7 @@ func TestBeginObjectDeleteIsReadCommittedWhateverTheDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = store.EnqueueObjectDeletes(ctx, plain, []string{"files/file_x"})
+	_, err = plain.Exec(ctx, store.PendingObjectDeleteInsertSQL, []string{"files/file_x"})
 	_ = plain.Rollback(ctx)
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "25000" {
@@ -403,8 +479,8 @@ func TestEnqueueTakesSharedKeysInLockOrder(t *testing.T) {
 	if _, err := gate.Exec(ctx, `SELECT pg_advisory_xact_lock(578, hashtext($1))`, b); err != nil {
 		t.Fatal(err)
 	}
-	remove := func(keys ...string) (pgx.Tx, chan error) {
-		tx, err := pool.Begin(ctx)
+	remove := func(keys ...string) (store.ObjectDeleteTx, chan error) {
+		tx, err := store.BeginObjectDelete(ctx, pool)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -426,7 +502,7 @@ func TestEnqueueTakesSharedKeysInLockOrder(t *testing.T) {
 	// deadlock (40P01) instead.
 	for _, r := range []struct {
 		name string
-		tx   pgx.Tx
+		tx   store.ObjectDeleteTx
 		done chan error
 	}{{"[b c]", second, secondDone}, {"[a b]", first, firstDone}} {
 		select {

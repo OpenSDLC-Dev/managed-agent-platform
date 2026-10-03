@@ -22,39 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// The previous build's statements, verbatim from origin/main before #578
-// (0ae74169). During a rolling upgrade they run against this schema, and each
-// must leave a session's copies alone.
-const (
-	// internal/executor's settleHarvest, replacing a session's snapshot.
-	prevHarvestDelete = `DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`
-	prevHarvestInsert = `INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
-				 VALUES ($1, $2, $3, $4, true, 'session', $5)`
-	// internal/api's deleteFile, which answers 404 when it deleted no row.
-	prevFileDelete = `DELETE FROM files WHERE id = $1`
-	// internal/api's purgeExpiredFiles.
-	prevPurge = `
-		DELETE FROM files
-		 WHERE id IN (SELECT f.id FROM files f
-		               WHERE f.expires_at < now() - make_interval(secs => $1)
-		                 AND (f.dream_id IS NULL
-		                      OR NOT EXISTS (SELECT 1 FROM dreams d
-		                                      WHERE d.id = f.dream_id AND d.closed_at IS NULL))
-		               ORDER BY f.expires_at, f.id
-		               LIMIT $2
-		               FOR UPDATE SKIP LOCKED)
-		 RETURNING id`
-	// internal/api's deleteSession, in its order; the tombstone is
-	// store.SessionTombstoneInsertSQL, unchanged.
-	prevSessionLock          = `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`
-	prevSessionDelete        = `DELETE FROM sessions WHERE id = $1`
-	prevCheckpointDelete     = `DELETE FROM session_checkpoints WHERE session_id = $1`
-	prevSessionFilesDelete   = `DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`
-	prevPendingObjectEnqueue = `INSERT INTO pending_object_deletes (object_key)
-	 SELECT unnest($1::text[])
-	 ON CONFLICT (object_key) DO NOTHING`
-)
-
 // fileIDs lists the files rows, sorted.
 func fileIDs(t *testing.T, pool *pgxpool.Pool) []string {
 	t.Helper()
@@ -79,11 +46,11 @@ func TestAPreviousBuildHarvestLeavesTheCopies(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	insertUpload(t, pool, "file_upload")
 	insertCopy(t, pool, "file_copy", "file_upload", blob.FilesKey("file_upload"), "sesn_1")
-	if _, err := pool.Exec(ctx, prevHarvestInsert, "file_out1", "a.txt", "text/plain", 1, "sesn_1"); err != nil {
+	if _, err := pool.Exec(ctx, pgtest.PrevHarvestInsertSQL, "file_out1", "a.txt", "text/plain", 1, "sesn_1"); err != nil {
 		t.Fatalf("the first snapshot: %v", err)
 	}
 	inTx(t, pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, prevHarvestDelete, "sesn_1")
+		rows, err := tx.Query(ctx, pgtest.PrevHarvestDeleteSQL, "sesn_1")
 		if err != nil {
 			return err
 		}
@@ -94,14 +61,14 @@ func TestAPreviousBuildHarvestLeavesTheCopies(t *testing.T) {
 		if !slices.Equal(gone, []string{"file_out1"}) {
 			t.Errorf("the harvest's delete returned %v, want only its own output", gone)
 		}
-		if _, err := tx.Exec(ctx, prevHarvestInsert, "file_out2", "a.txt", "text/plain", 1, "sesn_1"); err != nil {
+		if _, err := tx.Exec(ctx, pgtest.PrevHarvestInsertSQL, "file_out2", "a.txt", "text/plain", 1, "sesn_1"); err != nil {
 			return err
 		}
 		keys := make([]string, len(gone))
 		for i, id := range gone {
 			keys[i] = blob.FilesKey(id)
 		}
-		_, err = tx.Exec(ctx, prevPendingObjectEnqueue, keys)
+		_, err = tx.Exec(ctx, pgtest.PrevObjectEnqueueSQL, keys)
 		return err
 	})
 	if got, want := fileIDs(t, pool), []string{"file_copy", "file_out2", "file_upload"}; !slices.Equal(got, want) {
@@ -124,7 +91,7 @@ func TestOnlyATransactionThatAllowsItDeletesACopy(t *testing.T) {
 	insertUpload(t, pool, "file_upload")
 	insertCopy(t, pool, "file_copy", "file_upload", blob.FilesKey("file_upload"), "sesn_1")
 
-	tag, err := pool.Exec(ctx, prevFileDelete, "file_copy")
+	tag, err := pool.Exec(ctx, pgtest.PrevFileDeleteSQL, "file_copy")
 	if err != nil || tag.RowsAffected() != 0 {
 		t.Errorf("the previous build's delete of a copy: %v rows, err %v; want 0", tag.RowsAffected(), err)
 	}
@@ -133,7 +100,7 @@ func TestOnlyATransactionThatAllowsItDeletesACopy(t *testing.T) {
 		`UPDATE files SET expires_at = now() - interval '31 days' WHERE id IN ('file_upload', 'file_copy')`); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := pool.Query(ctx, prevPurge, float64(30*24*3600), 1000)
+	rows, err := pool.Query(ctx, pgtest.PrevPurgeSQL, float64(30*24*3600), 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +129,7 @@ func TestOnlyATransactionThatAllowsItDeletesACopy(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if tag, err := conn.Exec(ctx, prevFileDelete, "file_copy"); err != nil || tag.RowsAffected() != 0 {
+	if tag, err := conn.Exec(ctx, pgtest.PrevFileDeleteSQL, "file_copy"); err != nil || tag.RowsAffected() != 0 {
 		t.Errorf("a delete after the allowing transaction committed: %v rows, err %v; want 0", tag.RowsAffected(), err)
 	}
 	tx, err = conn.Begin(ctx)
@@ -173,7 +140,7 @@ func TestOnlyATransactionThatAllowsItDeletesACopy(t *testing.T) {
 	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
 		t.Fatal(err)
 	}
-	if tag, err := tx.Exec(ctx, prevFileDelete, "file_copy"); err != nil || tag.RowsAffected() != 1 {
+	if tag, err := tx.Exec(ctx, pgtest.PrevFileDeleteSQL, "file_copy"); err != nil || tag.RowsAffected() != 1 {
 		t.Errorf("a delete in an allowing transaction: %v rows, err %v; want 1", tag.RowsAffected(), err)
 	}
 }
@@ -192,19 +159,19 @@ func TestAPreviousBuildSessionDeleteTakesItsFiles(t *testing.T) {
 	insertCopy(t, pool, "file_copykept", "file_kept", blob.FilesKey("file_kept"), "sesn_1")
 	// file_gone's upload was deleted already: this copy is its object's last name.
 	insertCopy(t, pool, "file_copylast", "file_gone", blob.FilesKey("file_gone"), "sesn_1")
-	if _, err := pool.Exec(ctx, prevHarvestInsert, "file_output", "out.txt", "text/plain", 1, "sesn_1"); err != nil {
+	if _, err := pool.Exec(ctx, pgtest.PrevHarvestInsertSQL, "file_output", "out.txt", "text/plain", 1, "sesn_1"); err != nil {
 		t.Fatal(err)
 	}
 	// Another session's copy of the same upload stays.
 	insertCopy(t, pool, "file_elsewhere", "file_kept", blob.FilesKey("file_kept"), "sesn_other")
 
 	inTx(t, pool, func(tx pgx.Tx) error {
-		for _, q := range []string{prevSessionLock, store.SessionTombstoneInsertSQL, prevSessionDelete, prevCheckpointDelete} {
+		for _, q := range pgtest.PrevSessionDeleteSQL {
 			if _, err := tx.Exec(ctx, q, "sesn_1"); err != nil {
 				return err
 			}
 		}
-		rows, err := tx.Query(ctx, prevSessionFilesDelete, "sesn_1")
+		rows, err := tx.Query(ctx, pgtest.PrevSessionFilesDeleteSQL, "sesn_1")
 		if err != nil {
 			return err
 		}
@@ -219,7 +186,7 @@ func TestAPreviousBuildSessionDeleteTakesItsFiles(t *testing.T) {
 		for _, id := range gone {
 			keys = append(keys, blob.FilesKey(id))
 		}
-		_, err = tx.Exec(ctx, prevPendingObjectEnqueue, keys)
+		_, err = tx.Exec(ctx, pgtest.PrevObjectEnqueueSQL, keys)
 		return err
 	})
 	if got, want := fileIDs(t, pool), []string{"file_elsewhere", "file_kept"}; !slices.Equal(got, want) {
@@ -240,7 +207,7 @@ func TestATombstoneLeavesFilesToATransactionThatDeletesThem(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	seedSessionChain(t, pool)
 	insertCopy(t, pool, "file_copy", "file_upload", blob.FilesKey("file_upload"), "sesn_1")
-	if _, err := pool.Exec(ctx, prevHarvestInsert, "file_output", "out.txt", "text/plain", 1, "sesn_1"); err != nil {
+	if _, err := pool.Exec(ctx, pgtest.PrevHarvestInsertSQL, "file_output", "out.txt", "text/plain", 1, "sesn_1"); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := pool.Begin(ctx)
@@ -298,6 +265,9 @@ func TestEveryFilesDeleteDecidesAboutCopies(t *testing.T) {
 			rel, _ := filepath.Rel(root, path)
 			rel = filepath.ToSlash(rel)
 			switch {
+			case strings.HasPrefix(rel, "internal/pgtest/"):
+				// Test support: the previous build's statements, which tests
+				// run against the guard; production code never imports it.
 			case strings.HasSuffix(path, ".sql"):
 				src, err := os.ReadFile(path)
 				if err != nil {

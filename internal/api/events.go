@@ -265,12 +265,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// it settles one.
 	interruptCanSettle := hasInterrupt && at("").interrupt &&
 		(primaryStatus == string(domain.SessionIdle) || primaryStatus == string(domain.SessionRunning))
-	if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), newEvents, interruptCanSettle); err != nil {
-		return nil, sendCheckError(err)
-	}
 	defs, err := events.DefineOutcomes(newEvents)
+	if err == nil {
+		err = events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), defs, interruptCanSettle)
+	}
 	if err != nil {
-		return nil, errInvalid("%s", err)
+		return nil, sendCheckError(err)
 	}
 	hasDefineOutcome := len(defs) > 0
 	// The batch is laid out in processing order, not the order posted

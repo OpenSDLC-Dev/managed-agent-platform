@@ -296,6 +296,17 @@ mints when it initializes an empty database. The next `up` re-seeds the accounts
 a **different** signing key, so every token issued before the wipe stops verifying — worth
 knowing before you drop volumes mid-debugging with a token open in a terminal.
 
+## SQL by hand
+
+SQL you run against the bundled Postgres's `files` tables meets three rules of migration
+0046 (#578), which the platform's own transactions follow: a `DELETE FROM files` skips
+session file copies unless its transaction first sets `map.copy_delete`; a hand-written
+`deleted_sessions` tombstone deletes that session's files and enqueues their objects,
+through a trigger, unless the same setting came first; and enqueueing a `files/` key into
+`pending_object_deletes`, which a tombstone's trigger also does, needs `READ COMMITTED`.
+The [Helm chart's Database section](../helm/managed-agent-platform/README.md#database)
+spells them out, with the statements to run.
+
 ## Teardown
 
 ```sh

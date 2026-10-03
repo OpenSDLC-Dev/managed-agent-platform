@@ -12,10 +12,12 @@
 -- owner's value so that this migration rewrites no row and a previous build's
 -- INSERT, which names neither column, writes an owner correctly.
 -- source_file_id is the row a copy was minted from. The two are set together,
--- on a copy, or not at all; the CHECK is NOT VALID because both columns are
--- new and NULL on every existing row, which it already accepts, so validating
--- would scan the table to learn nothing. Neither is a foreign key: a copy
--- outlives its source.
+-- on a copy, or not at all, and a copy's key is under files/, being its
+-- source's key, which is 'files/' || an id at the end of every chain
+-- (internal/api's mountFileCopy): the reference count below counts files/ keys
+-- alone. The CHECKs are NOT VALID because both columns are new and NULL on
+-- every existing row, which they already accept, so validating would scan the
+-- table to learn nothing. Neither is a foreign key: a copy outlives its source.
 --
 -- source_file_id is what tells a copy from the rows its session produced. The
 -- outputs harvest replaces only its own snapshot rows, and the grader lists
@@ -69,17 +71,21 @@
 -- transaction-scoped advisory lock on the key and looks again. The lock is
 -- held to commit, so the second checker waits out the first one and then sees
 -- its delete. Looking again sees that commit only under READ COMMITTED, where
--- each statement takes a new snapshot, so the trigger refuses any other
--- isolation level outright rather than skipping a key it has stopped being
--- able to count. Every remover in this build names READ COMMITTED when it
--- begins (store.BeginObjectDelete) rather than inheriting a database default
--- that may be stricter; the refusal is for whatever does not. A key no other
--- row names, which is almost every key, takes no
--- lock. Class 578 keeps these locks apart from the single-key advisory locks
--- the migrator and the executor take; the one-key and two-key forms are
--- separate lock spaces. store.PendingObjectDeleteInsertSQL inserts its keys in
--- hashtext order, the lock's own id, so two removers take a shared pair in one
--- order; two keys that collide are one lock.
+-- each statement takes a new snapshot, so the trigger refuses a files/ key
+-- under any other isolation level outright rather than skipping a key it has
+-- stopped being able to count. Every remover in this build names READ
+-- COMMITTED when it begins (store.BeginObjectDelete) rather than inheriting a
+-- database default that may be stricter; the refusal is for whatever does
+-- not. Only a files/ key can be named by a files row, an owner by its id and a
+-- copy by its object_key (files_copy_names_a_files_key), so any other key, a
+-- skill archive's or a session checkpoint's, is not counted and passes under
+-- every level, as before 0046. A files/ key no other row names, which is
+-- almost every one, takes no lock. Class 578 keeps these locks apart from the
+-- single-key advisory locks the migrator and the executor take; the one-key
+-- and two-key forms are separate lock spaces.
+-- store.PendingObjectDeleteInsertSQL inserts each key once, in hashtext order,
+-- the lock's own id, so two removers take a shared pair in one order; two keys
+-- that collide are one lock.
 --
 -- A copy is minted with its source row held FOR SHARE (internal/api's
 -- mountFileCopy), so it cannot name a key whose last row is being deleted: the
@@ -111,20 +117,33 @@
 --     rather than by id, and every remover of that build enqueues its keys
 --     unsorted, so the count's advisory locks come in no fixed order. The
 --     victim can be this build's request, POST /v1/sessions answering 500, as
---     readily as that build's. Its session delete is not among them: the
---     trigger above has taken the session's rows by then.
+--     readily as that build's, its session delete included: the trigger above
+--     takes the session's rows in id order but locks their keys in hashtext
+--     order, an order that build's other removers do not keep. A session
+--     whose copies name two expired uploads, deleted while that build's expiry
+--     sweep takes the uploads and enqueues their keys the other way round, is
+--     such a pair, and Postgres decides which of the two fails.
 --   * on a database whose default_transaction_isolation is stricter than READ
---     COMMITTED, every object delete of that build fails at the count's
---     refusal (25000): it begins at the default.
+--     COMMITTED, that build begins every transaction at the default, so each
+--     of its transactions that enqueues a files/ key fails at the count's
+--     refusal (25000): DELETE /v1/files/{id} of a file it finds, the delete of
+--     a session holding any file (the trigger enqueues their keys), an expiry
+--     sweep that takes a row, a harvest replacing earlier outputs, and a dream
+--     close that deletes transcripts. Its skill and skill-version deletes, and
+--     the delete of a session holding no file, enqueue no files/ key and
+--     succeed.
 --
 -- Rolling back after 0046 leaves the schema and its three triggers in place,
--- so nothing is lost, but the degradations above last until each session
--- holding copies is deleted, the tombstone trigger then taking its copies and
--- owing their objects: the previous build never mounts a copy, answers 404 to
--- DELETE /v1/files/{copy}, and never sweeps an expired copy, so an upload a
--- copy shares stays stored and its sweep stalls behind such copies. Rolling
--- forward resumes every path. #856 tracks dropping the guard and the tombstone
--- trigger once no pre-0046 binary can run.
+-- so nothing is lost. Every degradation above but the last comes of copies
+-- and lasts until each session holding copies is deleted, the tombstone
+-- trigger then taking its copies and owing their objects: the previous build
+-- never mounts a copy, answers 404 to DELETE /v1/files/{copy}, and never
+-- sweeps an expired copy, so an upload a copy shares stays stored and its
+-- sweep stalls behind such copies. The last has nothing to do with copies:
+-- the deletes it names fail for as long as the previous build runs on this
+-- schema, on a database defaulting stricter than READ COMMITTED. Rolling
+-- forward resumes every path. #856 tracks dropping the guard and the
+-- tombstone trigger once no pre-0046 binary can run.
 --
 -- Every table lock this needs is taken first, before any work, so a give-up
 -- wastes no work and nothing waits for a second lock while holding the first
@@ -149,7 +168,9 @@ ALTER TABLE files
     ADD COLUMN object_key text,
     ADD COLUMN source_file_id text,
     ADD CONSTRAINT files_copy_pair_agrees
-        CHECK ((object_key IS NULL) = (source_file_id IS NULL)) NOT VALID;
+        CHECK ((object_key IS NULL) = (source_file_id IS NULL)) NOT VALID,
+    ADD CONSTRAINT files_copy_names_a_files_key
+        CHECK (starts_with(object_key, 'files/')) NOT VALID;
 
 -- The reference count's lookup of copies; owners are found by id.
 CREATE INDEX files_object_key_idx ON files (object_key) WHERE object_key IS NOT NULL;
@@ -209,20 +230,22 @@ END $$;
 CREATE TRIGGER files_follow_session AFTER INSERT ON deleted_sessions
     FOR EACH ROW EXECUTE FUNCTION files_follow_session();
 
--- Whether some files row names the object at k: a copy by its object_key, an
--- owner by its id.
+-- Whether some files row names the object at k, a files/ key: a copy by its
+-- object_key, an owner by its id.
 CREATE FUNCTION files_name_object(k text) RETURNS boolean
 LANGUAGE sql AS $$
     SELECT EXISTS (SELECT 1 FROM files WHERE object_key = k)
-        OR (starts_with(k, 'files/')
-            AND EXISTS (SELECT 1 FROM files WHERE id = substr(k, 7) AND object_key IS NULL))
+        OR EXISTS (SELECT 1 FROM files WHERE id = substr(k, 7) AND object_key IS NULL)
 $$;
 
 CREATE FUNCTION pending_object_deletes_skip_referenced() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
+    IF NOT starts_with(NEW.object_key, 'files/') THEN
+        RETURN NEW;
+    END IF;
     IF current_setting('transaction_isolation') <> 'read committed' THEN
-        RAISE EXCEPTION 'pending_object_deletes: an object delete is enqueued under READ COMMITTED only, not %',
+        RAISE EXCEPTION 'pending_object_deletes: a files/ key is enqueued under READ COMMITTED only, not %',
             current_setting('transaction_isolation')
             USING ERRCODE = 'invalid_transaction_state';
     END IF;

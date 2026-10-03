@@ -135,12 +135,14 @@ const SessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment
 // object already owed is owed once, and a key enqueued twice would otherwise
 // fail a delete that has nothing wrong with it.
 //
-// The keys go in in hashtext order, which is the id of the advisory lock
-// migration 0046's reference count can take per key: two removers sharing a
-// pair of keys take the pair in one order, and two keys whose hashes collide
-// are one lock, so no order between them is owed.
+// Each key goes in once, as the tombstone trigger enqueues its keys: two of a
+// session's copies of one upload name one object, and the reference count is
+// asked about it once. The keys go in in hashtext order, which is the id of
+// the advisory lock migration 0046's count can take per key: two removers
+// sharing a pair of keys take the pair in one order, and two keys whose hashes
+// collide are one lock, so no order between them is owed.
 const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object_key)
-	 SELECT k FROM unnest($1::text[]) AS k ORDER BY hashtext(k)
+	 SELECT k FROM (SELECT DISTINCT unnest($1::text[]) AS k) AS d ORDER BY hashtext(k)
 	 ON CONFLICT (object_key) DO NOTHING`
 
 // EnqueueObjectDeletes runs that statement on the caller's transaction, and is
@@ -160,9 +162,9 @@ const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object
 // per key and hold it to the commit, so a remover enqueues once it has deleted
 // every row it is going to: a row lock asked for after one of these locks can
 // close a cycle with a remover holding that row and waiting on this key. The
-// transaction must be READ COMMITTED, which the trigger checks; begin it with
-// BeginObjectDelete.
-func EnqueueObjectDeletes(ctx context.Context, tx pgx.Tx, keys []string) error {
+// count refuses a files/ key outside READ COMMITTED, so the transaction is an
+// ObjectDeleteTx, which only BeginObjectDelete makes.
+func EnqueueObjectDeletes(ctx context.Context, tx ObjectDeleteTx, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -170,18 +172,43 @@ func EnqueueObjectDeletes(ctx context.Context, tx pgx.Tx, keys []string) error {
 	return err
 }
 
+// ObjectDeleteTx is a transaction BeginObjectDelete began, and the only kind
+// EnqueueObjectDeletes takes, so a remover that began a plain transaction
+// fails to compile rather than failing on a database whose default isolation
+// is stricter than READ COMMITTED. The unexported method keeps any other
+// package from making one; it is a pgx.Tx to everything else.
+//
+// A type rather than a test that scans for EnqueueObjectDeletes' callers, as
+// TestEveryFilesDeleteDecidesAboutCopies does for its DELETEs: a remover's
+// transaction reaches the enqueue through helpers (the dream runner's passes
+// through as many as six functions before its close enqueues), which a scan
+// would have to follow through the call graph, while a parameter type follows
+// it for free.
+type ObjectDeleteTx interface {
+	pgx.Tx
+	beganByBeginObjectDelete()
+}
+
+type objectDeleteTx struct{ pgx.Tx }
+
+func (objectDeleteTx) beganByBeginObjectDelete() {}
+
 // BeginObjectDelete begins a transaction that may enqueue an object delete:
 // READ COMMITTED, named rather than inherited. Migration 0046's reference
-// count looks again for a row naming a key after waiting out the remover that
-// held it, and only a new snapshot per statement sees that remover's commit,
-// so the trigger refuses any other level. A plain Begin takes the database's
-// default_transaction_isolation, which an operator may have set stricter, and
-// every delete that owes an object would then fail. Every remover begins here:
-// a file, session, skill or skill-version delete, the expiry sweep, a dream
-// runner's tick (its close deletes the transcripts) and the executor's
-// harvest settle.
-func BeginObjectDelete(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
-	return pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+// count looks again for a row naming a files/ key after waiting out the
+// remover that held it, and only a new snapshot per statement sees that
+// remover's commit, so the trigger refuses such a key at any other level. A
+// plain Begin takes the database's default_transaction_isolation, which an
+// operator may have set stricter, and every delete that owes a file's object
+// would then fail. Every remover begins here: a file, session, skill or
+// skill-version delete, the expiry sweep, a dream runner's tick (its close
+// deletes the transcripts) and the executor's harvest settle.
+func BeginObjectDelete(ctx context.Context, pool *pgxpool.Pool) (ObjectDeleteTx, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	return objectDeleteTx{tx}, nil
 }
 
 // Open connects to the database at dsn, verifies the connection, and applies

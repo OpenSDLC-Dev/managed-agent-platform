@@ -343,6 +343,67 @@ func TestDefineOutcomeFileRubricRejections(t *testing.T) {
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }
 
+// A create's and a send's define_outcomes are parsed once and checked in one
+// fixed order, each refusal answering ahead of the next. On a create the
+// resources answer first, then the initial events' shapes, then the outcome
+// checks, the rubric file's existence before its size; a second
+// define_outcome is refused as the body is read, ahead of all of them. On a
+// send the batch's count answers first, then a live stored outcome, then the
+// rubric file. A payload that does not parse cannot be posted, the normalizer
+// writing every payload it admits; events'
+// TestDefineOutcomesRefusesAPayloadThatDoesNotParse holds how it is refused.
+func TestDefineOutcomeRefusalsKeepTheirOrder(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	const missing = "file_0123456789abcdefghjkmnpq"
+	big := s.uploadFile(t, "big.md", nil, strings.Repeat("x", 256*1024+1))["id"].(string)
+	rubric := func(fileID string) map[string]any {
+		return map[string]any{"rubric": map[string]any{"type": "file", "file_id": fileID}}
+	}
+	create := func(resources, initial []any) (int, map[string]any) {
+		body := map[string]any{"agent": agentID, "environment_id": envID, "initial_events": initial}
+		if resources != nil {
+			body["resources"] = resources
+		}
+		return s.do(http.MethodPost, "/v1/sessions", body)
+	}
+	mountMissing := []any{map[string]any{"type": "file", "file_id": missing}}
+	notFound := "One or more files not found. Check that each `file_id` exists and is accessible: " + missing
+	noRubric := map[string]any{"type": "user.define_outcome", "description": "d"}
+
+	status, res := create(mountMissing, []any{noRubric})
+	wantErrMsg(t, status, res, http.StatusNotFound, "not_found_error", notFound)
+	status, res = create(mountMissing, []any{defineOutcome("a", rubric(missing))})
+	wantErrMsg(t, status, res, http.StatusNotFound, "not_found_error", notFound)
+	status, res = create(mountMissing, []any{defineOutcome("a", rubric(missing)), defineOutcome("b", nil)})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"initial_events supports at most one user.define_outcome event")
+	status, res = create(nil, []any{noRubric})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"initial_events: events[0]: rubric is required")
+	status, res = create(nil, []any{defineOutcome("a", rubric(missing))})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"initial_events: rubric file "+missing+" not found")
+	status, res = create(nil, []any{defineOutcome("a", rubric(big))})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"initial_events: rubric file "+big+" is 262145 bytes; the rubric cap is 262144 bytes")
+
+	send := func(sid string, evs ...any) (int, map[string]any) {
+		return s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": evs})
+	}
+	const oneAtATime = "only one outcome is supported at a time: send the next user.define_outcome " +
+		"after the previous outcome's terminal span.outcome_evaluation_end"
+	live := eventsFixture(t, s)
+	first := sendEvents(t, s, live, defineOutcome("first", nil))[0]["outcome_id"].(string)
+	status, res = send(live, defineOutcome("a", rubric(missing)), defineOutcome("b", rubric(missing)))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", oneAtATime)
+	status, res = send(live, defineOutcome("second", rubric(missing)))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"only one outcome is supported at a time: outcome "+first+" is still pending")
+	status, res = send(eventsFixture(t, s), defineOutcome("a", rubric(missing)))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "rubric file "+missing+" not found")
+}
+
 // --- initial_events on POST /v1/sessions (absorbing #161) ---
 
 func TestCreateSessionInitialEvents(t *testing.T) {

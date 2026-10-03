@@ -11,7 +11,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -149,40 +149,23 @@ func TestCopyMintsAndBulkDeletesLockInOneOrder(t *testing.T) {
 	}
 }
 
-// The previous build's session delete: the statements that lock or write,
-// verbatim from origin/main before #578 (0ae74169) and in its order, its
-// reads and its NOTIFY left out. requireNotRunning's lock, the tombstone
-// (store.SessionTombstoneInsertSQL, unchanged), the session and checkpoint
-// rows, then every session-scoped files row in scan order, and its keys
-// enqueued unsorted. During a rolling upgrade it runs beside this build's
-// creates.
-var prevSessionDeleteSQL = []string{
-	`SELECT status FROM sessions WHERE id = $1 FOR UPDATE`,
-	store.SessionTombstoneInsertSQL,
-	`DELETE FROM sessions WHERE id = $1`,
-	`DELETE FROM session_checkpoints WHERE session_id = $1`,
-}
-
-const (
-	prevSessionFilesDeleteSQL = `DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING id`
-	prevObjectEnqueueSQL      = `INSERT INTO pending_object_deletes (object_key)
-	 SELECT unnest($1::text[])
-	 ON CONFLICT (object_key) DO NOTHING`
-)
-
-// prevDeleteSession runs that delete in its own transaction.
+// prevDeleteSession runs the previous build's session delete in its own
+// transaction, begun as that build begins it: the statements that lock or
+// write, in its order (pgtest.PrevSessionDeleteSQL), then every session-scoped
+// files row in scan order, and its keys enqueued unsorted. During a rolling
+// upgrade it runs beside this build's creates.
 func prevDeleteSession(ctx context.Context, pool *pgxpool.Pool, id string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	for _, q := range prevSessionDeleteSQL {
+	for _, q := range pgtest.PrevSessionDeleteSQL {
 		if _, err := tx.Exec(ctx, q, id); err != nil {
 			return err
 		}
 	}
-	rows, err := tx.Query(ctx, prevSessionFilesDeleteSQL, id)
+	rows, err := tx.Query(ctx, pgtest.PrevSessionFilesDeleteSQL, id)
 	if err != nil {
 		return err
 	}
@@ -194,7 +177,7 @@ func prevDeleteSession(ctx context.Context, pool *pgxpool.Pool, id string) error
 	for _, fid := range gone {
 		keys = append(keys, blob.FilesKey(fid))
 	}
-	if _, err := tx.Exec(ctx, prevObjectEnqueueSQL, keys); err != nil {
+	if _, err := tx.Exec(ctx, pgtest.PrevObjectEnqueueSQL, keys); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

@@ -330,8 +330,8 @@ func TestReHarvestLeavesTheSessionsCopies(t *testing.T) {
 }
 
 // TestAHarvestBeginsReadCommitted: a re-harvest owes the snapshot it
-// replaces, and migration 0046's reference count refuses any isolation level
-// but READ COMMITTED (#578). The settle names it when it begins
+// replaces, and migration 0046's reference count refuses a files/ key at any
+// isolation level but READ COMMITTED (#578). The settle names it when it begins
 // (store.BeginObjectDelete), so a database defaulting to a stricter level
 // still publishes. internal/api's TestEveryObjectDeleteBeginsReadCommitted
 // holds the control plane's removers.

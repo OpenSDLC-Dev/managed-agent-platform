@@ -861,8 +861,9 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	// normalized ahead of the resources for the rubric file a define_outcome
 	// names, which lockFileRows takes with the mounts' sources below, and a
 	// refusal still answers after the resources', where it always has. The
-	// define_outcomes are parsed once, here, for both that lock and the
-	// rubric snapshot after the insert.
+	// define_outcomes are parsed once, here, for that lock and for the outcome
+	// checks and the rubric snapshot after the insert; one that does not parse
+	// is refused with those checks, ahead of them, where it always was.
 	var initialEvents []events.NewEvent
 	var defs []events.DefineOutcome
 	var initialErr, defsErr error
@@ -949,16 +950,17 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	}
 
 	if len(initialEvents) > 0 {
-		if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), initialEvents, false); err != nil {
+		err := defsErr
+		if err == nil {
+			err = events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), defs, false)
+		}
+		if err != nil {
 			// The client's mistake is the 400; a fault reading the log is not.
 			var refusal *events.Refusal
 			if errors.As(err, &refusal) {
 				return createdSession{}, errInvalid("initial_events: %s", err)
 			}
 			return createdSession{}, err
-		}
-		if defsErr != nil {
-			return createdSession{}, errInvalid("initial_events: %s", defsErr)
 		}
 		if err := s.snapshotRubrics(ctx, tx, defs); err != nil {
 			return createdSession{}, err
@@ -1831,8 +1833,9 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// was never written, and the first sweeper to run deletes a missing key,
 	// which every backend answers nil, and drains them.
 	//
-	// A copy's key is its upload's, and is dropped from the queue while the
-	// upload or another copy still names it (EnqueueObjectDeletes).
+	// A copy's key is its upload's, so two copies of one upload return it
+	// twice; it goes in once, and is dropped from the queue while the upload
+	// or another copy still names it (EnqueueObjectDeletes).
 	keys := append([]string{blob.SessionCheckpointKey(id)}, fileKeys...)
 	if err := store.EnqueueObjectDeletes(ctx, tx, keys); err != nil {
 		return nil, err
