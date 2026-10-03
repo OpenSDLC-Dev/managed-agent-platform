@@ -180,10 +180,13 @@ func TestGrepParameters(t *testing.T) {
 		// answer is cut in the sandbox, never carried out whole.
 		exactly(t, r, `{"pattern":"^1","path":"gp/seq.txt","output_mode":"content","head_limit":2,"offset":11109}`,
 			"19998:19998\n19999:19999")
-		fails(t, r, "grep", base+`,"head_limit":-2}`, "head_limit must be a whole number")
-		fails(t, r, "grep", base+`,"offset":1e12}`, "offset must be a whole number")
+		// A refusal quotes the number as a whole number when it is one, never
+		// in an exponent the model did not write.
+		fails(t, r, "grep", base+`,"head_limit":-2}`, "head_limit must be a whole number from 0 to 2147483647, not -2")
+		fails(t, r, "grep", base+`,"offset":1e12}`, "offset must be a whole number from 0 to 2147483647, not 1000000000000")
+		fails(t, r, "grep", base+`,"head_limit":2147483648}`, "not 2147483648")
 		// Unlike the context counts, both are read in every mode.
-		fails(t, r, "grep", `{"pattern":"x","head_limit":0.5}`, "head_limit must be a whole number")
+		fails(t, r, "grep", `{"pattern":"x","head_limit":0.5}`, "head_limit must be a whole number from 0 to 2147483647, not 0.5")
 		fails(t, r, "grep", `{"pattern":"x","output_mode":"count","offset":-1}`, "offset must be a whole number")
 		// The largest counts the schema admits, whose sums pass 2³¹−1.
 		exactly(t, r, base+fmt.Sprintf(`,"head_limit":%d,"offset":%d}`, math.MaxInt32, math.MaxInt32), "no matches")

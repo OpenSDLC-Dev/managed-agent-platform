@@ -58,9 +58,20 @@ func whole(name string, v *float64) (int, string) {
 		return -1, ""
 	}
 	if *v < 0 || *v != math.Trunc(*v) || *v > math.MaxInt32 {
-		return 0, fmt.Sprintf("%s must be a whole number from 0 to %d, not %v", name, math.MaxInt32, *v)
+		return 0, fmt.Sprintf("%s must be a whole number from 0 to %d, not %s", name, math.MaxInt32, number(*v))
 	}
 	return int(*v), ""
+}
+
+// number spells a JSON number as a refusal quotes it: a whole one as its
+// digits — 2147483648, where %v would print 2.147483648e+09 — up to where
+// JavaScript too turns to an exponent, and any other in Go's shortest form
+// (1.5, -0.25, 1e+21).
+func number(v float64) string {
+	if v == math.Trunc(v) && math.Abs(v) < 1e21 {
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // vcsDirs are the version-control directories a search never enters, which
