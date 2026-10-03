@@ -88,9 +88,8 @@ var vcsDirs = []string{".git", ".svn", ".hg", ".bzr", ".jj", ".sl"}
 // query maps the input onto rg, flag for the flag each recorded description
 // names, searching root from cwd, the directory the script enters before rg
 // runs, so the one memoryGlobs spells the baselines' glob from is the one rg
-// matches it in. The rest is ours
-// and fixed: --no-config, so an image's RIPGREP_CONFIG_PATH cannot change what
-// a call means; --no-heading, so every line carries its file; --hidden with
+// matches it in. The rest is ours and fixed: --no-config, so an image's
+// RIPGREP_CONFIG_PATH cannot change what a call means; --no-heading, so every line carries its file; --hidden with
 // the version-control directories globbed out, as the reference's GrepTool
 // searches (vcsDirs) — .gitignore and the other ignore files rg reads still
 // apply; --sort=path, so an answer lists in one order run after run, and
