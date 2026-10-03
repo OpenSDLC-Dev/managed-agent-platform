@@ -129,6 +129,19 @@ This is a deliberate divergence from bundling a Postgres subchart: a self-hostab
 air-gap-friendly platform should not require pulling an external chart from a repo, and
 production operators run their own database anyway.
 
+**SQL you run by hand against the files tables** meets two rules of migration 0046 (#578),
+which the platform's own transactions follow:
+
+- A `DELETE FROM files` skips every session's file copy (a row with `source_file_id` set)
+  as if its `WHERE` had not matched, unless its transaction first runs
+  `SELECT set_config('map.copy_delete', 'on', true)`.
+- An `INSERT INTO pending_object_deletes`, which is how the bytes of a row you delete get
+  removed (its key is `coalesce(object_key, 'files/' || id)`), fails unless the
+  transaction is `READ COMMITTED`. The platform names that level on every transaction
+  that deletes stored bytes, so a stricter `default_transaction_isolation` does not fail
+  them; a hand-run transaction inherits the default unless it says
+  `BEGIN ISOLATION LEVEL READ COMMITTED`.
+
 ### Cloud SQL Auth Proxy (`cloudSQLProxy.enabled`)
 
 On GKE, Google's documented way to reach a **private-IP** Cloud SQL instance is the Cloud

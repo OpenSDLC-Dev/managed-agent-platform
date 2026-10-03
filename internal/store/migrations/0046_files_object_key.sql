@@ -96,16 +96,35 @@
 --     read at the copy's own key finds nothing and that build lists only.
 --   * control plane: a create, a resources add or a deployment fire mounts
 --     the upload itself, as before #578. DELETE /v1/files/{copy} answers 404,
---     the guard leaving that build's DELETE nothing to report, and its expiry
---     sweep skips expired copies until this build's sweeps them. A rubric
---     naming a copy answers 500, and so does a worker's GET
---     /v1/files/{copy}/content, with a "file missing from object storage"
---     ERROR log: both read the copy's own key. Its unfiltered GET /v1/files
+--     the guard leaving that build's DELETE nothing to report. A rubric naming
+--     a copy answers 500, and so does a worker's GET /v1/files/{copy}/content,
+--     with a "file missing from object storage" ERROR log: both read the
+--     copy's own key. The management route's answer is this build's, the 400
+--     file_not_downloadable every upload gets. Its unfiltered GET /v1/files
 --     lists session-scoped rows, copies included.
---   * any of them can meet a deadlock (40P01), which fails that one
---     transaction: that build enqueues its keys unsorted, so the count's
---     advisory locks come in no fixed order, and locks the rows it deletes in
---     scan order rather than by id.
+--   * its expiry sweep skips expired copies until this build's sweeps them,
+--     and ends a pass at its first short batch (n < filePurgeBatch): every
+--     copy among the oldest expired rows shortens each batch, so its purge of
+--     later uploads slows, and stops once a batch's worth of them is oldest.
+--   * a transaction on either side can meet a deadlock (40P01) and fail: that
+--     build's harvest and dream close lock the rows they delete in scan order
+--     rather than by id, and every remover of that build enqueues its keys
+--     unsorted, so the count's advisory locks come in no fixed order. The
+--     victim can be this build's request, POST /v1/sessions answering 500, as
+--     readily as that build's. Its session delete is not among them: the
+--     trigger above has taken the session's rows by then.
+--   * on a database whose default_transaction_isolation is stricter than READ
+--     COMMITTED, every object delete of that build fails at the count's
+--     refusal (25000): it begins at the default.
+--
+-- Rolling back after 0046 leaves the schema and its three triggers in place,
+-- so nothing is lost, but the degradations above last until each session
+-- holding copies is deleted, the tombstone trigger then taking its copies and
+-- owing their objects: the previous build never mounts a copy, answers 404 to
+-- DELETE /v1/files/{copy}, and never sweeps an expired copy, so an upload a
+-- copy shares stays stored and its sweep stalls behind such copies. Rolling
+-- forward resumes every path. #856 tracks dropping the guard and the tombstone
+-- trigger once no pre-0046 binary can run.
 --
 -- Every table lock this needs is taken first, before any work, so a give-up
 -- wastes no work and nothing waits for a second lock while holding the first
@@ -142,7 +161,9 @@ CREATE UNIQUE INDEX files_scope_filename_idx ON files (scope_id, filename)
 -- GET /v1/files without scope_id lists unscoped rows only, newest first. Every
 -- session-scoped row (each mount's copy, each harvested output) would
 -- otherwise be walked past in files_created_at_id_idx to find them, and copies
--- grow with every session that mounts a file.
+-- grow with every session that mounts a file. files_created_at_id_idx stays:
+-- the previous build's unfiltered list has no other ordered path, and a
+-- ?scope_id= list of a session holding much of the table plans through it.
 CREATE INDEX files_unscoped_created_at_id_idx ON files (created_at DESC, id DESC)
     WHERE scope_id IS NULL;
 
