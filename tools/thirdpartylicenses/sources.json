@@ -5,19 +5,73 @@
       "name": "ripgrep 15.2.0",
       "note": "the crates of upstream's release build, made with --features pcre2; on the musl targets it also links tikv-jemallocator",
       "url": "https://raw.githubusercontent.com/BurntSushi/ripgrep/15.2.0/Cargo.lock",
-      "sha256": "7a7d39cda8a03930e578f1dbb724e055771901842eca239e03b01e19da946a64"
+      "sha256": "7a7d39cda8a03930e578f1dbb724e055771901842eca239e03b01e19da946a64",
+      "path_packages": {
+        "globset 0.4.19": "ripgrep 15.2.0",
+        "grep 0.4.1": "ripgrep 15.2.0",
+        "grep-cli 0.1.12": "ripgrep 15.2.0",
+        "grep-matcher 0.1.9": "ripgrep 15.2.0",
+        "grep-pcre2 0.1.10": "ripgrep 15.2.0",
+        "grep-printer 0.3.1": "ripgrep 15.2.0",
+        "grep-regex 0.1.14": "ripgrep 15.2.0",
+        "grep-searcher 0.1.17": "ripgrep 15.2.0",
+        "ignore 0.4.29": "ripgrep 15.2.0",
+        "ripgrep 15.2.0": "ripgrep 15.2.0"
+      }
     },
     {
       "name": "Rust 1.97.0 standard library",
       "note": "the aarch64 build was compiled by rustc 1.97.0 (2d8144b78 2026-07-07), as the binary's .comment section says",
       "url": "https://raw.githubusercontent.com/rust-lang/rust/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/Cargo.lock",
-      "sha256": "02120dd57c4c5fd70c81fd92472681c8de5cc2dd78258276da37bb2253666061"
+      "sha256": "02120dd57c4c5fd70c81fd92472681c8de5cc2dd78258276da37bb2253666061",
+      "path_packages": {
+        "alloc 0.0.0": "Rust 1.97.0",
+        "alloctests 0.0.0": "Rust 1.97.0",
+        "compiler_builtins 0.1.160": "compiler-builtins 0.1.160 (Rust 1.97.0)",
+        "core 0.0.0": "Rust 1.97.0",
+        "coretests 0.0.0": "Rust 1.97.0",
+        "panic_abort 0.0.0": "Rust 1.97.0",
+        "panic_unwind 0.0.0": "Rust 1.97.0",
+        "proc_macro 0.0.0": "Rust 1.97.0",
+        "profiler_builtins 0.0.0": "LLVM compiler-rt (Rust 1.97.0)",
+        "rustc-std-workspace-alloc 1.99.0": "Rust 1.97.0",
+        "rustc-std-workspace-core 1.99.0": "Rust 1.97.0",
+        "rustc-std-workspace-std 1.99.0": "Rust 1.97.0",
+        "std 0.0.0": "Rust 1.97.0",
+        "std_detect 0.1.5": "Rust 1.97.0",
+        "sysroot 0.0.0": "Rust 1.97.0",
+        "test 0.0.0": "Rust 1.97.0",
+        "unwind 0.0.0": "Rust 1.97.0",
+        "windows-link 0.0.0": "Rust 1.97.0",
+        "windows-sys 0.61.100": "Rust 1.97.0"
+      }
     },
     {
       "name": "Rust 1.99.0-nightly standard library",
       "note": "the x86_64 build was compiled by rustc 1.99.0-nightly (da80ed070 2026-07-14), as the binary's .comment section says",
       "url": "https://raw.githubusercontent.com/rust-lang/rust/da80ed0708a09dc096c184345d6eb42cbcd50a1e/library/Cargo.lock",
-      "sha256": "c3fea000130cad91f2969c3bf0d4e15c282d41d46e719b383c1a82ef0e266513"
+      "sha256": "c3fea000130cad91f2969c3bf0d4e15c282d41d46e719b383c1a82ef0e266513",
+      "path_packages": {
+        "alloc 0.0.0": "Rust 1.99.0-nightly",
+        "alloctests 0.0.0": "Rust 1.99.0-nightly",
+        "compiler_builtins 0.1.160": "compiler-builtins 0.1.160 (Rust 1.99.0-nightly)",
+        "core 0.0.0": "Rust 1.99.0-nightly",
+        "coretests 0.0.0": "Rust 1.99.0-nightly",
+        "panic_abort 0.0.0": "Rust 1.99.0-nightly",
+        "panic_unwind 0.0.0": "Rust 1.99.0-nightly",
+        "proc_macro 0.0.0": "Rust 1.99.0-nightly",
+        "profiler_builtins 0.0.0": "LLVM compiler-rt (Rust 1.99.0-nightly)",
+        "rustc-std-workspace-alloc 1.99.0": "Rust 1.99.0-nightly",
+        "rustc-std-workspace-core 1.99.0": "Rust 1.99.0-nightly",
+        "rustc-std-workspace-std 1.99.0": "Rust 1.99.0-nightly",
+        "std 0.0.0": "Rust 1.99.0-nightly",
+        "std_detect 0.1.5": "Rust 1.99.0-nightly",
+        "sysroot 0.0.0": "Rust 1.99.0-nightly",
+        "test 0.0.0": "Rust 1.99.0-nightly",
+        "unwind 0.0.0": "Rust 1.99.0-nightly",
+        "windows-link 0.0.0": "Rust 1.99.0-nightly",
+        "windows-sys 0.61.100": "Rust 1.99.0-nightly"
+      }
     }
   ],
   "files": [
@@ -72,6 +126,12 @@
       "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1"
     },
     {
+      "component": "compiler-builtins 0.1.160 (Rust 1.97.0)",
+      "note": "the compiler intrinsics the aarch64 build links: a path package of that standard library (library/compiler-builtins), not a crates.io crate, under its own terms",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/compiler-builtins/LICENSE.txt",
+      "sha256": "ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b"
+    },
+    {
       "component": "Rust 1.99.0-nightly",
       "note": "the standard library the x86_64 build links",
       "url": "https://raw.githubusercontent.com/rust-lang/rust/da80ed0708a09dc096c184345d6eb42cbcd50a1e/COPYRIGHT",
@@ -88,16 +148,34 @@
       "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1"
     },
     {
+      "component": "compiler-builtins 0.1.160 (Rust 1.99.0-nightly)",
+      "note": "the compiler intrinsics the x86_64 build links: a path package of that standard library (library/compiler-builtins), not a crates.io crate, under its own terms",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/da80ed0708a09dc096c184345d6eb42cbcd50a1e/library/compiler-builtins/LICENSE.txt",
+      "sha256": "ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b"
+    },
+    {
       "component": "LLVM libunwind (Rust 1.97.0)",
       "note": "the unwinder Rust links statically on its musl targets, from the llvm-project commit rust 2d8144b78 pins",
       "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/08c84e69a84d95936296dfcab0e38b34100725d5/libunwind/LICENSE.TXT",
       "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d"
     },
     {
+      "component": "LLVM compiler-rt (Rust 1.97.0)",
+      "note": "the C runtime builtins compiler_builtins compiles in, and the crtbegin.o and crtend.o Rust links on its musl targets, from the llvm-project commit rust 2d8144b78 pins. No GCC runtime object is linked: rustc links both musl targets with -nostartfiles -nodefaultlibs and its own crt objects, so the GCC 9.4.0 and 9.2.0 the binaries' .comment names compiled their C code (Rust's musl objects, and cross 0.2.5's PCRE2 and jemalloc) and contributed none of its own",
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/08c84e69a84d95936296dfcab0e38b34100725d5/compiler-rt/LICENSE.TXT",
+      "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d"
+    },
+    {
       "component": "LLVM libunwind (Rust 1.99.0-nightly)",
       "note": "the same, from the llvm-project commit rust da80ed070 pins",
       "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04/libunwind/LICENSE.TXT",
       "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d"
+    },
+    {
+      "component": "LLVM compiler-rt (Rust 1.99.0-nightly)",
+      "note": "the same, from the llvm-project commit rust da80ed070 pins",
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04/compiler-rt/LICENSE.TXT",
+      "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d"
     }
   ],
   "crate_files": {

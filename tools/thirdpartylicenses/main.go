@@ -9,16 +9,23 @@
 // those lock files name, fetched from static.crates.io and checked against
 // the lock file's own checksum; and the upstream license files of what no
 // crate carries — ripgrep's own, PCRE2's (pcre2-sys vendors PCRE2's sources
-// without it), musl's, Rust's and LLVM libunwind's. jemalloc's comes inside
-// the tikv-jemalloc-sys crate, which vendors it. Each crate contributes every
-// file in its archive named as a license, copyright, notice or authors file,
-// at any depth, so a vendored library's own license comes along.
+// without it), musl's, Rust's, compiler-builtins' and LLVM's compiler-rt and
+// libunwind. jemalloc's comes inside the tikv-jemalloc-sys crate, which
+// vendors it. Each crate contributes every file in its archive named as a
+// license, copyright, notice or authors file, at any depth, so a vendored
+// library's own license comes along. A package a lock file names by path —
+// its own workspace, which crates.io does not serve — must be put under one
+// of those upstream components in sources.json, or the run stops: not every
+// workspace crate is under its project's terms (the standard library's
+// compiler_builtins is not).
 //
 // The crate list is a superset, said so in the file it writes: which of a
 // lock file's crates a build links depends on its target and features, which
 // this does not resolve, so build tools and other platforms' crates are
 // included too. The output is a function of the pinned bytes alone, so
-// running it twice writes the same file.
+// running it twice writes the same file. Its header records the sha256 of
+// sources.json and of the rest of the file, which is what its test can hold
+// the committed file to without the network (TestTheGeneratedFileIsCurrent).
 package main
 
 import (
@@ -34,6 +41,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path"
@@ -51,6 +59,10 @@ type source struct {
 	Note      string `json:"note,omitempty"`
 	URL       string `json:"url"`
 	SHA256    string `json:"sha256"`
+	// PathPackages, on a lock file, puts each package the lock file names by
+	// path, keyed "<name> <version>", under the component in files whose
+	// texts cover it.
+	PathPackages map[string]string `json:"path_packages,omitempty"`
 }
 
 // sources is sources.json. CrateFiles, keyed "<name> <version>", supplies
@@ -81,6 +93,18 @@ var licenseName = regexp.MustCompile(`(?i)^(licen[cs]e|copying|copyright|unlicen
 // cargoLicense reads the license expression of a crate's Cargo.toml.
 var cargoLicense = regexp.MustCompile(`(?m)^license\s*=\s*"([^"]*)"`)
 
+// lockField reads one of a Cargo.lock [[package]] block's string fields.
+var lockField = map[string]*regexp.Regexp{}
+
+func init() {
+	for _, key := range []string{"name", "version", "source", "checksum"} {
+		lockField[key] = regexp.MustCompile(`(?m)^` + key + ` = "([^"]*)"`)
+	}
+}
+
+// sha256Hex is a lock file's checksum, as a crates.io package carries one.
+var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // fetchFunc returns the bytes at a URL.
 type fetchFunc func(ctx context.Context, url string) ([]byte, error)
 
@@ -90,15 +114,14 @@ type crate struct {
 	locks                   []string // the lock files naming it
 }
 
-// parseLock reads the crates.io packages out of a Cargo.lock. A package from
-// any other registry or from git is refused — this tool can check neither —
-// and a path package (the lock file's own workspace) is skipped: its license
-// is the project's, pinned as a file.
-func parseLock(data []byte) ([]crate, error) {
-	var out []crate
+// parseLock reads a Cargo.lock: its crates.io packages, and as "<name>
+// <version>" the packages it names by path (its own workspace). A package
+// from any other registry or from git is refused — this tool can check
+// neither.
+func parseLock(data []byte) (crates []crate, paths []string, err error) {
 	for _, block := range strings.Split(string(data), "[[package]]")[1:] {
 		field := func(key string) string {
-			m := regexp.MustCompile(`(?m)^` + key + ` = "([^"]*)"`).FindStringSubmatch(block)
+			m := lockField[key].FindStringSubmatch(block)
 			if m == nil {
 				return ""
 			}
@@ -107,17 +130,18 @@ func parseLock(data []byte) ([]crate, error) {
 		c := crate{name: field("name"), version: field("version"), checksum: field("checksum")}
 		switch src := field("source"); {
 		case c.name == "" || c.version == "":
-			return nil, fmt.Errorf("a [[package]] without a name and version:%s", block)
+			return nil, nil, fmt.Errorf("a [[package]] without a name and version:%s", block)
 		case src == "":
+			paths = append(paths, c.name+" "+c.version)
 			continue
 		case src != registry:
-			return nil, fmt.Errorf("%s %s comes from %s, which this tool cannot check", c.name, c.version, src)
-		case !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(c.checksum):
-			return nil, fmt.Errorf("%s %s has no sha256 checksum", c.name, c.version)
+			return nil, nil, fmt.Errorf("%s %s comes from %s, which this tool cannot check", c.name, c.version, src)
+		case !sha256Hex.MatchString(c.checksum):
+			return nil, nil, fmt.Errorf("%s %s has no sha256 checksum", c.name, c.version)
 		}
-		out = append(out, c)
+		crates = append(crates, c)
 	}
-	return out, nil
+	return crates, paths, nil
 }
 
 // licenseFile is one license file and what it came from.
@@ -187,16 +211,40 @@ func digest(b []byte) string {
 // generate renders THIRD_PARTY_LICENSES from the sources, whose own bytes
 // hash to sourcesDigest.
 func generate(ctx context.Context, fetch fetchFunc, src sources, sourcesDigest string) ([]byte, error) {
+	components := map[string]bool{}
+	for _, f := range src.Files {
+		components[f.Component] = true
+	}
 	byKey := map[string]*crate{}
-	var keys []string
+	var keys, workspace []string
 	for _, l := range src.Lockfiles {
 		data, err := pinned(ctx, fetch, l.URL, l.SHA256)
 		if err != nil {
 			return nil, err
 		}
-		crates, err := parseLock(data)
+		crates, paths, err := parseLock(data)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", l.URL, err)
+		}
+		// A path package's terms are not crates.io's to supply, and not
+		// always its project's: each must be put under a component whose
+		// texts files carries, and a stale entry is an error too.
+		named := map[string]bool{}
+		for _, k := range paths {
+			c, ok := l.PathPackages[k]
+			switch {
+			case !ok:
+				return nil, fmt.Errorf("%s names %s by path, and its path_packages does not say whose terms it is under", l.Name, k)
+			case !components[c]:
+				return nil, fmt.Errorf("%s: path_packages puts %s under %q, which files does not carry", l.Name, k, c)
+			}
+			named[k] = true
+			workspace = append(workspace, wrap(fmt.Sprintf("- %s — in %s — under %s", k, l.Name, c), "  "))
+		}
+		for _, k := range slices.Sorted(maps.Keys(l.PathPackages)) {
+			if !named[k] {
+				return nil, fmt.Errorf("%s: path_packages names %s, which the lock file does not name by path", l.Name, k)
+			}
 		}
 		for _, c := range crates {
 			k := c.name + " " + c.version
@@ -221,7 +269,7 @@ func generate(ctx context.Context, fetch fetchFunc, src sources, sourcesDigest s
 
 	var b strings.Builder
 	var texts []licenseFile
-	fmt.Fprintf(&b, `THIRD-PARTY LICENSES
+	header := `THIRD-PARTY LICENSES
 ====================
 
 managed-agent-platform's executor and worker binaries, and the server image
@@ -232,6 +280,7 @@ embedded and why; LICENSE is this project's own license.
 
 Generated by tools/thirdpartylicenses (make third-party-licenses) from
 tools/thirdpartylicenses/sources.json, sha256 %[2]s.
+Everything from COMPONENTS on hashes to sha256 %[3]s.
 Do not edit it by hand.
 
 The crate list below is a superset. It is every crates.io package named by
@@ -245,11 +294,12 @@ file, at any depth, so a library a crate vendors brings its own (jemalloc's,
 in tikv-jemalloc-sys). A crate whose archive carries none takes its
 repository's, at the commit the crate was published from, as its text's
 heading says. Every other file is fetched from the URL listed, at the sha256
-pinned beside it.
+pinned beside it. The packages the lock files name by path, their own
+workspaces, are listed under WORKSPACE PACKAGES with the component whose
+texts cover each.
 
-`, src.Ripgrep, sourcesDigest)
-
-	b.WriteString("COMPONENTS\n----------\n\n")
+`
+	b.WriteString(bodyStart + "\n")
 	for _, f := range src.Files {
 		data, err := pinned(ctx, fetch, f.URL, f.SHA256)
 		if err != nil {
@@ -265,6 +315,10 @@ pinned beside it.
 	b.WriteString("\nLOCK FILES\n----------\n\n")
 	for _, l := range src.Lockfiles {
 		b.WriteString(wrap("- "+l.Name+": "+l.URL+"\n  "+l.Note, "  ") + "\n")
+	}
+	b.WriteString("\nWORKSPACE PACKAGES\n------------------\n\n")
+	for _, w := range workspace {
+		b.WriteString(w + "\n")
 	}
 
 	b.WriteString("\nCRATES\n------\n\n")
@@ -312,8 +366,11 @@ pinned beside it.
 	for i, k := range order {
 		fmt.Fprintf(&b, "\n%s\n%s\n%s\n\n%s", rule, wrap(fmt.Sprintf("%d. %s", i+1, strings.Join(who[k], ", ")), "   "), rule, body[k])
 	}
-	return []byte(b.String()), nil
+	return []byte(fmt.Sprintf(header, src.Ripgrep, sourcesDigest, digest([]byte(b.String()))) + b.String()), nil
 }
+
+// bodyStart opens the part of the file whose sha256 the header records.
+const bodyStart = "COMPONENTS\n----------\n"
 
 // wrap breaks each line of s at spaces to fit 78 columns, continuing a broken
 // line with indent.

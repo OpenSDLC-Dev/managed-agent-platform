@@ -73,9 +73,13 @@ ripgrep:
 # LICENSE. Generated from tools/thirdpartylicenses/sources.json, whose every
 # input — the lock files, each crate, each upstream license file — is checked
 # against a sha256 before it is used. It needs the network, so it is run when
-# the ripgrep pin moves, not by the gate; tools/thirdpartylicenses' own test,
-# which is in the gate, fails while the committed file is not the one the
-# committed sources generate or describes another ripgrep than the one pinned.
+# the ripgrep pin moves, not by the gate. tools/thirdpartylicenses' own test,
+# which is in the gate, holds the committed file to the sha256s its header
+# records — of sources.json and of the file's own body — and to the pinned
+# ripgrep: it fails when sources.json changed without a regeneration, when
+# the body was edited since, or when the file describes another ripgrep. It
+# cannot regenerate offline, so a generator change not followed by a run, or
+# a body edited together with its recorded digest, gets past it.
 third-party-licenses:
 	go run ./tools/thirdpartylicenses
 

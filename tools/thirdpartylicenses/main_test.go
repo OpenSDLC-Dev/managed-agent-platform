@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -40,12 +41,51 @@ func TestSourcesPinThePinnedRelease(t *testing.T) {
 	if !lock || !license {
 		t.Errorf("sources.json does not take ripgrep's Cargo.lock and LICENSE-MIT from the %s tag", src.Ripgrep)
 	}
+	// Each Rust standard library's lock file brings its toolchain's
+	// compiler-builtins, a path package under its own terms, and the
+	// compiler-rt and libunwind its musl targets link: their texts must be
+	// pinned at that toolchain's commit, and compiler_builtins put under
+	// compiler-builtins' own.
+	files := map[string]source{}
+	for _, f := range src.Files {
+		files[f.URL] = f
+	}
+	for _, l := range src.Lockfiles {
+		commit, ok := strings.CutPrefix(l.URL, "https://raw.githubusercontent.com/rust-lang/rust/")
+		if !ok {
+			continue
+		}
+		commit, _, _ = strings.Cut(commit, "/")
+		cb, ok := files["https://raw.githubusercontent.com/rust-lang/rust/"+commit+"/library/compiler-builtins/LICENSE.txt"]
+		if !ok {
+			t.Errorf("%s: compiler-builtins' LICENSE.txt at %s is not pinned", l.Name, commit)
+		}
+		for k, c := range l.PathPackages {
+			if strings.HasPrefix(k, "compiler_builtins ") && c != cb.Component {
+				t.Errorf("%s: %s is put under %q, not compiler-builtins' own terms", l.Name, k, c)
+			}
+		}
+		var rt, unwind bool
+		for url, f := range files {
+			if strings.HasPrefix(url, "https://raw.githubusercontent.com/rust-lang/llvm-project/") && strings.Contains(f.Component, "("+strings.TrimSuffix(l.Name, " standard library")+")") {
+				rt = rt || strings.HasSuffix(url, "/compiler-rt/LICENSE.TXT")
+				unwind = unwind || strings.HasSuffix(url, "/libunwind/LICENSE.TXT")
+			}
+		}
+		if !rt || !unwind {
+			t.Errorf("%s: compiler-rt's and libunwind's licenses are not both pinned for it (compiler-rt %v, libunwind %v)", l.Name, rt, unwind)
+		}
+	}
 }
 
-// The committed file is the one the committed sources generate: it names the
-// sources' digest, which any edit to them changes, so an edit that was not
-// followed by `make third-party-licenses` fails here. (Regenerating needs the
-// network; this does not.)
+// The committed file is held to what the generator recorded when it wrote it,
+// offline — regenerating needs the network. Its header carries the sha256 of
+// sources.json and of the rest of the file, so this fails when sources.json
+// changed since (an edit not followed by `make third-party-licenses`), when
+// the body was edited, cut or re-encoded since, and when the file describes
+// another ripgrep than the one pinned. It cannot catch a body edited along
+// with the digest beside it, or a generator change not followed by a run:
+// only regenerating shows those.
 func TestTheGeneratedFileIsCurrent(t *testing.T) {
 	raw, err := os.ReadFile("sources.json")
 	if err != nil {
@@ -61,6 +101,26 @@ func TestTheGeneratedFileIsCurrent(t *testing.T) {
 			t.Errorf("THIRD_PARTY_LICENSES does not carry %q; run `make third-party-licenses`", want)
 		}
 	}
+	if err := bodyMatches(out); err != nil {
+		t.Errorf("THIRD_PARTY_LICENSES: %v; run `make third-party-licenses`", err)
+	}
+}
+
+// bodyMatches checks a generated file's body against the digest its header
+// records for it.
+func bodyMatches(file []byte) error {
+	m := regexp.MustCompile(`(?m)^Everything from COMPONENTS on hashes to sha256 ([0-9a-f]{64})\.$`).FindSubmatch(file)
+	if m == nil {
+		return fmt.Errorf("its header records no digest of its body")
+	}
+	i := bytes.Index(file, []byte("\n"+bodyStart))
+	if i < 0 {
+		return fmt.Errorf("it has no COMPONENTS section")
+	}
+	if got := digest(file[i+1:]); got != string(m[1]) {
+		return fmt.Errorf("its body hashes to %s, not the %s its header records", got, m[1])
+	}
+	return nil
 }
 
 // crateArchive builds a .crate holding the given files under its root.
@@ -140,7 +200,8 @@ func fixture(t *testing.T) (world, sources) {
 	src := sources{
 		Ripgrep: "9.9.9",
 		Lockfiles: []source{
-			{Name: "first", Note: "the first lock", URL: "lock:1", SHA256: digest(w["lock:1"])},
+			{Name: "first", Note: "the first lock", URL: "lock:1", SHA256: digest(w["lock:1"]),
+				PathPackages: map[string]string{"workspace-member 0.1.0": "Project 2"}},
 			{Name: "second", Note: "the second lock", URL: "lock:2", SHA256: digest(w["lock:2"])},
 		},
 		Files: []source{
@@ -174,12 +235,17 @@ func TestGenerateWritesEachTextOnceNamingWhoShipsIt(t *testing.T) {
 		"alpha 1.0.0 (LICENSE-APACHE), beta 0.2.0+x.1 (LICENSE-APACHE)\n" + strings.Repeat("=", 78) + "\n\nApache text\n",
 		"beta 0.2.0+x.1 (vendored/COPYING)\n" + strings.Repeat("=", 78) + "\n\nvendored library's terms\n",
 		"gamma 3.0.0 (file:gamma-repo-terms)\n" + strings.Repeat("=", 78) + "\n\nZlib text, (c) Gamma\n",
+		// A path package is listed under the component it was put under.
+		"WORKSPACE PACKAGES\n------------------\n\n- workspace-member 0.1.0 — in first — under Project 2\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output lacks %q:\n%s", want, text)
 		}
 	}
-	for _, not := range []string{"workspace-member", "not a license", "int main", "\r"} {
+	if err := bodyMatches(out); err != nil {
+		t.Errorf("generated file: %v", err)
+	}
+	for _, not := range []string{"not a license", "int main", "\r"} {
 		if strings.Contains(text, not) {
 			t.Errorf("output carries %q", not)
 		}
@@ -212,6 +278,15 @@ func TestGenerateRefusesWhatItCannotCheck(t *testing.T) {
 			s.Lockfiles[1].SHA256 = digest(w["lock:2"])
 		}, "g 1.0.0 has no sha256 checksum"},
 		"a download that fails": {func(w world, _ *sources) { delete(w, "file:one") }, "GET file:one: 404"},
+		// A lock file's own workspace is not crates.io's to license: each
+		// package it names by path must be put under a pinned component.
+		"a path package put under no component": {func(_ world, s *sources) { s.Lockfiles[0].PathPackages = nil },
+			"first names workspace-member 0.1.0 by path, and its path_packages does not say whose terms it is under"},
+		"a path package put under a component files lacks": {func(_ world, s *sources) {
+			s.Lockfiles[0].PathPackages = map[string]string{"workspace-member 0.1.0": "Project 9"}
+		}, `path_packages puts workspace-member 0.1.0 under "Project 9", which files does not carry`},
+		"a path package the lock file does not name": {func(_ world, s *sources) { s.Lockfiles[1].PathPackages = map[string]string{"gone 1.0.0": "Project 1"} },
+			"second: path_packages names gone 1.0.0, which the lock file does not name by path"},
 	} {
 		w, src := fixture(t)
 		tc.edit(w, &src)
