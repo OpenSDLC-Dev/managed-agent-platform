@@ -507,7 +507,7 @@ func sameAnswers(t *testing.T, a, b toolset.Runner, an, bn string) {
 // way.
 func TestGrepInstallsRipgrepWhereTheSandboxIsNotRoot(t *testing.T) {
 	image := dockertest.ImageFrom(t, "grep-nonroot", "FROM debian:stable-slim\nRUN useradd -m app && mkdir -p /workspace && chown app:app /workspace\nUSER app\n",
-		"--host", dockertest.Host())
+		"--host", docker.DaemonHost())
 	for _, tc := range []struct {
 		name, image string
 		h           sandbox.Hardening
@@ -548,12 +548,12 @@ func attached(t *testing.T, args ...string) toolset.Runner {
 	run := append([]string{"run", "-d", "--name", name,
 		"--label", "dev.opensdlc.managed-agent-platform.session-id=" + string(sid), "-w", "/workspace"}, args...)
 	run = append(run, testImage, "/bin/bash", "-c", "while :; do sleep 3600; done")
-	host := dockertest.Host()
+	host := docker.DaemonHost()
 	if out, err := exec.Command("docker", append([]string{"--host", host}, run...)...).CombinedOutput(); err != nil {
 		t.Fatalf("docker run: %v\n%s", err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "--host", host, "rm", "-f", "-v", name).Run() })
-	provider, err := docker.New(docker.Config{Host: host})
+	provider, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("toolset tests require Docker: %v", err)
 	}
@@ -730,7 +730,7 @@ const bannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2;
 func TestSearchesThroughAnImageBanner(t *testing.T) {
 	image := dockertest.ImageFrom(t, "search-banner", "FROM debian:stable-slim\n"+
 		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(bannerHook))+" | base64 -d > /etc/map-banner.sh\n"+
-		"ENV BASH_ENV=/etc/map-banner.sh\n", "--host", dockertest.Host())
+		"ENV BASH_ENV=/etc/map-banner.sh\n", "--host", docker.DaemonHost())
 	r := runner(t, fromImage(image))
 	ok(t, r, "write", `{"file_path":"be/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"be/b.txt","content":"needle\n"}`)
@@ -791,7 +791,7 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 // searches there all the same. bash:3.2 is the official image, Alpine's
 // busybox under bash 3.2.57, given the /bin/bash the image contract asks for.
 func TestGlobOnBashThreeTwoSaysItNeedsBashFour(t *testing.T) {
-	image := dockertest.ImageFrom(t, "bash32", "FROM bash:3.2\nRUN ln -s /usr/local/bin/bash /bin/bash\n", "--host", dockertest.Host())
+	image := dockertest.ImageFrom(t, "bash32", "FROM bash:3.2\nRUN ln -s /usr/local/bin/bash /bin/bash\n", "--host", docker.DaemonHost())
 	r := runner(t, fromImage(image))
 	ok(t, r, "write", `{"file_path":"b3/deep/a.go","content":"needle\n"}`)
 	for _, in := range []string{`{"pattern":"**/*.go","path":"b3"}`, `{"pattern":"*","path":"b3"}`, `{"pattern":"/workspace/b3/deep/a.go"}`} {

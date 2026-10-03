@@ -394,12 +394,12 @@ RUN useradd -m -u 10001 app \
 // sandbox contract suite), which a maintainer flipping it would update in
 // lockstep; this is the first that shows why it has to be 0666.
 func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
-	// One daemon for the image and the sandbox run from it (dockertest.Host).
-	provider, err := docker.New(docker.Config{Host: dockertest.Host()})
+	// One daemon for the image and the sandbox run from it (docker.DaemonHost).
+	provider, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("integration test requires Docker: %v", err)
 	}
-	image := dockertest.ImageFrom(t, "nonroot-memory", nonRootImage, "--host", dockertest.Host())
+	image := dockertest.ImageFrom(t, "nonroot-memory", nonRootImage, "--host", docker.DaemonHost())
 	uid := int64(nonRootUID)
 	h := newHarnessWith(t, provider, Config{Image: image, Hardening: sandbox.Hardening{RunAsUser: &uid}})
 	t.Cleanup(func() {

@@ -35,7 +35,7 @@ USER app
 // backend's problem alone: the k8s backend extracts inside the pod, where
 // everything is already the sandbox user's.
 func TestBulkWriteOnANonRootImage(t *testing.T) {
-	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHostForTest())
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHost())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -125,7 +125,7 @@ USER app
 // shell is the agent's and its own uid is no escalation, and uid 0 must never
 // be among them.
 func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
-	image := dockertest.ImageFrom(t, "hooked", hookedDockerfile, "--host", docker.DaemonHostForTest())
+	image := dockertest.ImageFrom(t, "hooked", hookedDockerfile, "--host", docker.DaemonHost())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -181,7 +181,7 @@ func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 // created by the sandbox user) classifies the same sandbox at the create. A
 // docker-backend row for TestBulkWriteOnANonRootImage's reason.
 func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
-	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHostForTest())
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHost())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {
@@ -240,7 +240,7 @@ func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 // the emptying reaches the whole batch rather than the one the rename stopped
 // on.
 func TestBulkWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
-	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHostForTest())
+	image := dockertest.ImageFrom(t, "nonroot", nonRootDockerfile, "--host", docker.DaemonHost())
 
 	p, err := docker.New(docker.Config{})
 	if err != nil {

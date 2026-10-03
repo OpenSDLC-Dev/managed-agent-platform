@@ -39,6 +39,12 @@ func daemonHost(host string) string {
 	return host
 }
 
+// DaemonHost is the address a Provider built with an empty Config.Host
+// reaches (daemonHost). A test that also drives the `docker` CLI gives it this
+// as `--host`, and its provider this or nothing, so the two reach one daemon
+// whatever `docker context` the CLI would otherwise follow (#627).
+func DaemonHost() string { return daemonHost("") }
+
 func newAPIClient(host string) (*apiClient, error) {
 	host = daemonHost(host)
 	switch {

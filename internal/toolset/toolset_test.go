@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
@@ -25,12 +24,12 @@ const testImage = "debian:stable-slim"
 // never inherit another's shell state. A missing daemon is a hard failure, as
 // with the other suites — skipping would hollow out the coverage gate.
 //
-// The provider is given dockertest.Host, the address every docker CLI call in
-// these tests names too, so a fixture the CLI builds or starts is on the
-// daemon the provider uses.
+// The provider resolves its daemon itself, and every docker CLI call in these
+// tests names that same address (docker.DaemonHost), so a fixture the CLI
+// builds or starts is on the daemon the provider uses.
 func runner(t *testing.T, opts ...runnerOption) toolset.Runner {
 	t.Helper()
-	provider, err := docker.New(docker.Config{Host: dockertest.Host()})
+	provider, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("toolset tests require Docker: %v", err)
 	}
