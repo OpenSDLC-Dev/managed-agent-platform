@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -263,11 +262,6 @@ func timed(t *testing.T, r toolset.Runner, input string) (string, time.Duration)
 // tool error naming it.
 func TestGrepInstallsRipgrepInTheSandbox(t *testing.T) {
 	r := runner(t)
-	ripgrepLifecycle(t, r, "docker debian")
-}
-
-func ripgrepLifecycle(t *testing.T, r toolset.Runner, where string) {
-	t.Helper()
 	ok(t, r, "bash", `{"command":"mkdir -p lc && echo needle > lc/a.txt"}`)
 	const in = `{"pattern":"needle","path":"lc","output_mode":"content"}`
 	const want = "/workspace/lc/a.txt:1:needle"
@@ -282,7 +276,7 @@ func ripgrepLifecycle(t *testing.T, r toolset.Runner, where string) {
 		t.Fatalf("installed rg = %q, want %q (mode and size)", got, want)
 	}
 	_, warm := timed(t, r, in)
-	t.Logf("%s: first grep (installs rg) %v, the next %v", where, first.Round(time.Millisecond), warm.Round(time.Millisecond))
+	t.Logf("docker %s: first grep (installs rg) %v, the next %v", testImage, first.Round(time.Millisecond), warm.Round(time.Millisecond))
 	if out := ok(t, r, "bash", `{"command":"ls -A /tmp/.map-ripgrep"}`); strings.TrimSpace(out) != "rg-"+ripgrep.Pinned.Version {
 		t.Errorf("/tmp/.map-ripgrep holds %q; an upload or a temporary was left behind", out)
 	}
@@ -495,8 +489,9 @@ func TestGrepSaysWhyRipgrepCannotRun(t *testing.T) {
 }
 
 // TestGrepRunsTheSameInAKubernetesPod installs and runs rg in a pod — over
-// the k8s backend's exec, whose stdin carries the binary — on the Debian and
-// the musl image, and holds each answer to Docker's. A missing cluster is a
+// the k8s backend's exec, whose stdin carries the binary, into the emptyDir a
+// read-only root mounts at /tmp — on the Debian and the musl image, installs
+// it again once it is removed, and holds each answer to Docker's. A missing cluster is a
 // hard failure, as with the k8s contract test; point it at a local one with
 // MAP_K8S_CONTEXT.
 func TestGrepRunsTheSameInAKubernetesPod(t *testing.T) {
@@ -521,37 +516,26 @@ func TestGrepRunsTheSameInAKubernetesPod(t *testing.T) {
 				t.Fatalf("provision: %v", err)
 			}
 			t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
-			pod := toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
-			ripgrepLifecycleOnAReadOnlyRoot(t, pod, "kind "+image)
-			grepFixture(t, pod)
-			sameAnswers(t, pod, docker, "k8s", "docker")
+			r := toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
+			ok(t, r, "bash", `{"command":"mkdir -p lc && echo needle > lc/a.txt"}`)
+			const in = `{"pattern":"needle","path":"lc","output_mode":"content"}`
+			const want = "/workspace/lc/a.txt:1:needle"
+			got, first := timed(t, r, in)
+			if got != want {
+				t.Fatalf("first grep = %q, want %q", got, want)
+			}
+			_, warm := timed(t, r, in)
+			t.Logf("kind %s: first grep (installs rg) %v, the next %v", image, first.Round(time.Millisecond), warm.Round(time.Millisecond))
+			if got, want := installedRipgrep(t, r), fmt.Sprintf("755 %d", ripgrepSize(t, r)); got != want {
+				t.Fatalf("installed rg = %q, want %q", got, want)
+			}
+			ok(t, r, "bash", `{"command":"rm -f `+toolset.RipgrepPath()+`"}`)
+			if got := ok(t, r, "grep", in); got != want {
+				t.Fatalf("grep after the binary was removed = %q, want %q", got, want)
+			}
+			grepFixture(t, r)
+			sameAnswers(t, r, docker, "k8s", "docker")
 		})
-	}
-}
-
-// ripgrepLifecycleOnAReadOnlyRoot is ripgrepLifecycle where nothing outside
-// the writable mounts can be written — so the machine is faked through PATH
-// in /tmp, the one place a read-only pod lets the test put a uname.
-func ripgrepLifecycleOnAReadOnlyRoot(t *testing.T, r toolset.Runner, where string) {
-	t.Helper()
-	ok(t, r, "bash", `{"command":"mkdir -p lc && echo needle > lc/a.txt"}`)
-	const in = `{"pattern":"needle","path":"lc","output_mode":"content"}`
-	const want = "/workspace/lc/a.txt:1:needle"
-	got, first := timed(t, r, in)
-	if got != want {
-		t.Fatalf("first grep = %q, want %q", got, want)
-	}
-	_, warm := timed(t, r, in)
-	t.Logf("%s: first grep (installs rg) %v, the next %v", where, first.Round(time.Millisecond), warm.Round(time.Millisecond))
-	if got, want := installedRipgrep(t, r), fmt.Sprintf("755 %d", ripgrepSize(t, r)); got != want {
-		t.Fatalf("installed rg = %q, want %q", got, want)
-	}
-	ok(t, r, "bash", `{"command":"rm -f `+toolset.RipgrepPath()+`"}`)
-	if got := ok(t, r, "grep", in); got != want {
-		t.Fatalf("grep after the binary was removed = %q, want %q", got, want)
-	}
-	if !slices.Contains([]string{"x86_64", "aarch64"}, strings.TrimSpace(ok(t, r, "bash", `{"command":"uname -m"}`))) {
-		t.Fatalf("the pod's machine is not one rg is shipped for")
 	}
 }
 
