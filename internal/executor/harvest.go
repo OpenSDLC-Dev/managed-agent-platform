@@ -302,7 +302,7 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 		}
 	}()
 
-	tx, err := e.pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, e.pool)
 	if err != nil {
 		return err
 	}

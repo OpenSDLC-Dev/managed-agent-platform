@@ -552,7 +552,7 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	// unreferenced and unrecorded — which is the state no later pass can
 	// discover. A deleted file cannot be recovered: the reference has no file
 	// archival, unlike sessions.
-	tx, err := s.pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, s.pool)
 	if err != nil {
 		return nil, err
 	}

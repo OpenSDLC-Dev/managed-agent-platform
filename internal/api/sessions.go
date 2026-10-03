@@ -1689,7 +1689,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, s.pool)
 	if err != nil {
 		return nil, err
 	}

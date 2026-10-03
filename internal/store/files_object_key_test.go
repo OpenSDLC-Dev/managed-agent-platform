@@ -327,6 +327,45 @@ func TestObjectDeleteEnqueueRefusesStricterIsolation(t *testing.T) {
 	}
 }
 
+// A database can default to a stricter level than the count accepts, which a
+// plain Begin inherits. BeginObjectDelete names READ COMMITTED, so a remover
+// that begins there enqueues on such a database, and one that does not meets
+// the refusal rather than skipping a key.
+func TestBeginObjectDeleteIsReadCommittedWhateverTheDefault(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	pgtest.DefaultRepeatableRead(t, pool)
+	plain, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.EnqueueObjectDeletes(ctx, plain, []string{"files/file_x"})
+	_ = plain.Rollback(ctx)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "25000" {
+		t.Errorf("enqueue in a plain transaction => %v, want invalid_transaction_state (25000)", err)
+	}
+
+	tx, err := store.BeginObjectDelete(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var iso string
+	if err := tx.QueryRow(ctx, `SHOW transaction_isolation`).Scan(&iso); err != nil || iso != "read committed" {
+		t.Fatalf("BeginObjectDelete's transaction is %q (err %v), want read committed", iso, err)
+	}
+	if err := store.EnqueueObjectDeletes(ctx, tx, []string{"files/file_x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingKeys(t, pool); !slices.Equal(got, []string{"files/file_x"}) {
+		t.Errorf("queue = %v, want [files/file_x]", got)
+	}
+}
+
 // The count's advisory lock is keyed by hashtext, so the keys go in in that
 // order: two removers sharing keys then take the locks in one order. Ordered
 // as strings instead, two keys whose hashes collide (one lock) would let a

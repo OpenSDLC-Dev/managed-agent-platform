@@ -10,6 +10,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
@@ -167,6 +168,86 @@ func TestTheDreamCloseWakesTheDrainThroughItsRunner(t *testing.T) {
 	for _, id := range fileIDs {
 		if _, _, err := s.blobs.Get(context.Background(), blob.FilesKey(id)); !errors.Is(err, blob.ErrNotFound) {
 			t.Errorf("the transcript object for %s outlived the drain the close woke: %v", id, err)
+		}
+	}
+}
+
+// TestEveryObjectDeleteBeginsReadCommitted: migration 0046's reference count
+// refuses any isolation level but READ COMMITTED (#578), and a database may
+// default to a stricter one. Every transaction that owes an object names READ
+// COMMITTED when it begins (store.BeginObjectDelete), so each remover here
+// still deletes on such a database: a file, a session, a skill version and a
+// skill, the expiry sweep, and a dream's close. internal/executor's
+// TestAHarvestBeginsReadCommitted holds the harvest.
+func TestEveryObjectDeleteBeginsReadCommitted(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	// The fixtures go in at the default; the deletes are what is under test.
+	agentID, envID := readableFixture(t, s)
+	uploadID := uploadOneFile(t, s, "in.txt")
+	expiringID := uploadOneFile(t, s, "old.txt")
+	sid := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
+	})["id"].(string)
+	skillID := s.createSkill(t)["id"].(string)
+	first := s.latestVersion(t, skillID)
+	s.addSkillVersion(t, skillID)
+	second := s.latestVersion(t, skillID)
+	_, body := seededDreamBody(t, s)
+	dreamID, _ := startedDream(t, s, body)
+	transcripts := dreamFileIDs(t, s, dreamID)
+	atLastStage(t, s, dreamID)
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE files SET expires_at = now() - interval '31 days' WHERE id = $1`, expiringID); err != nil {
+		t.Fatal(err)
+	}
+
+	pgtest.DefaultRepeatableRead(t, s.pool)
+	plain, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var iso string
+	err = plain.QueryRow(ctx, `SHOW transaction_isolation`).Scan(&iso)
+	_ = plain.Rollback(ctx)
+	if err != nil || iso != "repeatable read" {
+		t.Fatalf("a plain transaction is %q (err %v), want repeatable read", iso, err)
+	}
+
+	for _, d := range []string{
+		"/v1/files/" + uploadID,
+		"/v1/sessions/" + sid,
+		"/v1/skills/" + skillID + "/versions/" + second,
+		"/v1/skills/" + skillID,
+	} {
+		if status, res := s.do(http.MethodDelete, d, nil); status != http.StatusOK {
+			t.Errorf("DELETE %s = %d %v", d, status, res)
+		}
+	}
+	if n, err := api.PurgeExpiredFilesForTest(ctx, s.pool, 30*24*time.Hour); err != nil || n != 1 {
+		t.Errorf("the expiry sweep took %d rows (err %v), want the expired upload", n, err)
+	}
+	tick(t, s) // arm 10 completes the dream
+	tick(t, s) // arm 1 closes it, deleting its transcripts
+	if _, _, closedAt := dreamInternals(t, s, dreamID); closedAt == nil {
+		t.Error("the dream's close did not commit")
+	}
+
+	owed := pendingKeys(t, s.pool)
+	want := []string{
+		blob.FilesKey(uploadID), // its session's copy, the last row naming it, went with the session
+		blob.FilesKey(expiringID),
+		blob.SessionCheckpointKey(sid),
+		skills.BlobKey(skillID, first),
+		skills.BlobKey(skillID, second),
+	}
+	for _, id := range transcripts {
+		want = append(want, blob.FilesKey(id))
+	}
+	for _, k := range want {
+		if !slices.Contains(owed, k) {
+			t.Errorf("the queue %v does not owe %s", owed, k)
 		}
 	}
 }

@@ -239,7 +239,7 @@ var filePurgeAfterCommitHook func()
 // up at all, which takes the choice away, and it selects the same rows either
 // way: a row with no dream satisfies the NOT EXISTS already.
 func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.Duration) (int, error) {
-	tx, err := pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, pool)
 	if err != nil {
 		return 0, err
 	}

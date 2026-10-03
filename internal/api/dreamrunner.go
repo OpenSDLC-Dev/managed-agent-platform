@@ -375,7 +375,7 @@ func (s *server) runDreamArm(ctx context.Context, id string, now time.Time, cfg 
 }
 
 func (s *server) dreamArmTx(ctx context.Context, id string, now time.Time, cfg DreamRunnerConfig) (dreamStepResult, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, s.pool)
 	if err != nil {
 		return dreamStepResult{}, err
 	}

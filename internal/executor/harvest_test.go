@@ -329,6 +329,37 @@ func TestReHarvestLeavesTheSessionsCopies(t *testing.T) {
 	}
 }
 
+// TestAHarvestBeginsReadCommitted: a re-harvest owes the snapshot it
+// replaces, and migration 0046's reference count refuses any isolation level
+// but READ COMMITTED (#578). The settle names it when it begins
+// (store.BeginObjectDelete), so a database defaulting to a stricter level
+// still publishes. internal/api's TestEveryObjectDeleteBeginsReadCommitted
+// holds the control plane's removers.
+func TestAHarvestBeginsReadCommitted(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+	h := newHarness(t, sb)
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+	first := h.fileRows(t)
+	if len(first) != 1 {
+		t.Fatalf("the first harvest published %d rows, want 1", len(first))
+	}
+
+	pgtest.DefaultRepeatableRead(t, h.pool)
+	sb.files[outputsDir+"/report.json"] = "v2"
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	rows := h.fileRows(t)
+	if len(rows) != 1 || rows[0].id == first[0].id {
+		t.Fatalf("rows after the re-harvest = %+v, want one replacing %s", rows, first[0].id)
+	}
+	if got, want := h.pendingKeys(t), []string{blob.FilesKey(first[0].id)}; !slices.Equal(got, want) {
+		t.Errorf("the re-harvest owes %v, want %v", got, want)
+	}
+}
+
 // pendingKeys reads what the executor's publish left the control plane's
 // sweeper to remove.
 func (h *harness) pendingKeys(t *testing.T) []string {

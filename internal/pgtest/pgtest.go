@@ -219,6 +219,25 @@ func NewPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// DefaultRepeatableRead sets pool's database to begin every transaction that
+// names no isolation level at REPEATABLE READ, as an operator may, and drops
+// the pool's connections so each new one takes the setting. The database is
+// the test's own, so no other test sees it.
+func DefaultRepeatableRead(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `DO $$ BEGIN
+		EXECUTE format('ALTER DATABASE %I SET default_transaction_isolation = %L', current_database(), 'repeatable read');
+	END $$`); err != nil {
+		t.Fatalf("default the database to repeatable read: %v", err)
+	}
+	pool.Reset()
+	var iso string
+	if err := pool.QueryRow(ctx, `SHOW default_transaction_isolation`).Scan(&iso); err != nil || iso != "repeatable read" {
+		t.Fatalf("default_transaction_isolation = %q (err %v), want repeatable read", iso, err)
+	}
+}
+
 // NewSession inserts the minimum fixture rows (agent, agent version,
 // environment of the given kind, session) and returns the session and
 // environment ids.

@@ -5,9 +5,12 @@
 // database at startup.
 // Query SQL is not owned here — it belongs to the packages that issue it
 // (internal/api, internal/events, internal/queue and friends). The exceptions
-// are SessionTombstoneInsertSQL, FileLiveSQL and FileObjectKeySQL below, which
-// live on the schema's owner precisely because separate packages must agree on
-// them exactly.
+// below live on the schema's owner precisely because separate packages must
+// agree on them exactly: SessionTombstoneInsertSQL,
+// PendingObjectDeleteInsertSQL (run through EnqueueObjectDeletes), FileLiveSQL
+// and FileObjectKeySQL, and the two that put a transaction where migration
+// 0046's triggers require it, AllowFileCopyDeletes (its set_config) and
+// BeginObjectDelete (READ COMMITTED).
 //
 // Three properties of Migrate (migrate.go) are contract, not implementation
 // detail, and are what a contributor breaks by accident.
@@ -157,13 +160,28 @@ const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object
 // per key and hold it to the commit, so a remover enqueues once it has deleted
 // every row it is going to: a row lock asked for after one of these locks can
 // close a cycle with a remover holding that row and waiting on this key. The
-// transaction must be READ COMMITTED, which the trigger checks.
+// transaction must be READ COMMITTED, which the trigger checks; begin it with
+// BeginObjectDelete.
 func EnqueueObjectDeletes(ctx context.Context, tx pgx.Tx, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
 	_, err := tx.Exec(ctx, PendingObjectDeleteInsertSQL, keys)
 	return err
+}
+
+// BeginObjectDelete begins a transaction that may enqueue an object delete:
+// READ COMMITTED, named rather than inherited. Migration 0046's reference
+// count looks again for a row naming a key after waiting out the remover that
+// held it, and only a new snapshot per statement sees that remover's commit,
+// so the trigger refuses any other level. A plain Begin takes the database's
+// default_transaction_isolation, which an operator may have set stricter, and
+// every delete that owes an object would then fail. Every remover begins here:
+// a file, session, skill or skill-version delete, the expiry sweep, a dream
+// runner's tick (its close deletes the transcripts) and the executor's
+// harvest settle.
+func BeginObjectDelete(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
+	return pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 }
 
 // Open connects to the database at dsn, verifies the connection, and applies

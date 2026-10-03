@@ -71,7 +71,10 @@
 -- its delete. Looking again sees that commit only under READ COMMITTED, where
 -- each statement takes a new snapshot, so the trigger refuses any other
 -- isolation level outright rather than skipping a key it has stopped being
--- able to count. A key no other row names, which is almost every key, takes no
+-- able to count. Every remover in this build names READ COMMITTED when it
+-- begins (store.BeginObjectDelete) rather than inheriting a database default
+-- that may be stricter; the refusal is for whatever does not. A key no other
+-- row names, which is almost every key, takes no
 -- lock. Class 578 keeps these locks apart from the single-key advisory locks
 -- the migrator and the executor take; the one-key and two-key forms are
 -- separate lock spaces. store.PendingObjectDeleteInsertSQL inserts its keys in

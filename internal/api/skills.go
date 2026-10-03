@@ -599,7 +599,7 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	if err := checkSkillID(id); err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, s.pool)
 	if err != nil {
 		return nil, err
 	}
@@ -930,7 +930,7 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := store.BeginObjectDelete(ctx, s.pool)
 	if err != nil {
 		return nil, err
 	}
