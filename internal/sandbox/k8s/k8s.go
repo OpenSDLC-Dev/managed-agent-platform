@@ -419,21 +419,22 @@ func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string)
 	// shell root before any bash call, is an ordinary miss). `-e` follows
 	// symlinks, so the `-L` arm keeps a root an agent replaced with a
 	// dangling symlink: the entry exists and tar archives the link itself.
-	out, _, err := p.client.execOutput(ctx, name, containerName, []string{"sh", "-c",
-		`if [ -e "$1" ] || [ -L "$1" ]; then echo P; exit 0; fi
-p=$(dirname "$1")
-while :; do
-  if [ -e "$p" ]; then
-    if [ -d "$p" ] && [ ! -x "$p" ]; then echo E; else echo M; fi
-    exit 0
-  fi
-  [ "$p" = "/" ] && { echo M; exit 0; }
-  p=$(dirname "$p")
-done`, "probe", root})
+	//
+	// The answer is read from inside the probe's frame (sandbox.Frame), so
+	// what prints around it — `sh` reads no BASH_ENV, but a library an image's
+	// LD_PRELOAD names prints in it as in any process — is not taken for it
+	// (#860). One that did not reach the output whole is unanswerable, and
+	// fails the capture as an ancestor that denies search does.
+	f := sandbox.NewFrame("export")
+	out, cut, _, err := p.client.execOutput(ctx, name, containerName, []string{"sh", "-c", f.Wrap(exportProbe), "probe", root})
 	if err != nil {
 		return nil, fmt.Errorf("k8s: probe %s in pod %s: %w", root, name, err)
 	}
-	switch strings.TrimSpace(out) {
+	answer, framed, short := f.Cut(out, cut)
+	if !framed || short {
+		return nil, fmt.Errorf("k8s: probe %s in pod %s: its answer did not reach the output whole", root, name)
+	}
+	switch strings.TrimSpace(answer) {
 	case "P":
 	case "M":
 		return nil, sandbox.ErrFileNotExist
@@ -454,6 +455,19 @@ done`, "probe", root})
 	}()
 	return pr, nil
 }
+
+// exportProbe answers Export's three-way question about $1: P present, M
+// missing, E unanswerable (Export).
+const exportProbe = `if [ -e "$1" ] || [ -L "$1" ]; then echo P; exit 0; fi
+p=$(dirname "$1")
+while :; do
+  if [ -e "$p" ]; then
+    if [ -d "$p" ] && [ ! -x "$p" ]; then echo E; else echo M; fi
+    exit 0
+  fi
+  [ "$p" = "/" ] && { echo M; exit 0; }
+  p=$(dirname "$p")
+done`
 
 // deleteAndWaitGone removes a pod (UID-guarded, no grace) and waits for the
 // name to free up, so the caller can immediately recreate it — a pod delete is
@@ -1312,12 +1326,31 @@ func (pd *pod) classifyTimeout(timeout time.Duration, code int, watchdogFired bo
 // reports the exit code, whether the watchdog marked itself the killer, and how
 // long the command ran (0 when the line carries no record of it).
 func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Duration, error) {
-	out, _, err := pd.client.execOutput(ctx, pd.name, containerName,
-		[]string{"/bin/bash", "-c", exitScript, "map-exit", state})
+	f := sandbox.NewFrame("exit")
+	out, _, _, err := pd.client.execOutput(ctx, pd.name, containerName,
+		[]string{"/bin/bash", "-c", f.Wrap(exitScript), "map-exit", state})
 	if err != nil {
 		return 0, false, 0, err
 	}
-	return parseExit(out)
+	return readExitRecord(f, out)
+}
+
+// readExitRecord reads exitScript's answer from inside its frame (f), so what
+// an image's startup prints around it — a BASH_ENV file's banner, an EXIT
+// trap's words — is not parsed as part of it (#860); before the frame such a
+// banner made every exec on that image fail here. What a lost stream drops is
+// a suffix (exitScript), so an answer whose end line never arrived is read as
+// far as it got, as a stream the cap cut is, and parseExit makes of it what it
+// makes of any record cut short. A stream with no begin line at all is the
+// script's whole answer lost when nothing else reached it either — read as no
+// record, as an empty stream always was — and otherwise output that is not the
+// script's, which is no record to parse: an error, as an unparseable line is.
+func readExitRecord(f sandbox.Frame, out string) (int, bool, time.Duration, error) {
+	line, framed, _ := f.Cut(out, true)
+	if !framed && strings.TrimSpace(out) != "" {
+		return 0, false, 0, errors.New("k8s: the exit record did not reach the output: no begin line")
+	}
+	return parseExit(line)
 }
 
 // parseExit reads exitScript's output: killedMark if the watchdog fired, then
@@ -1378,8 +1411,7 @@ func decimalDigits(s string) bool {
 }
 
 // nonce is a per-exec random token: the suffix for the wrapper's state files, so
-// concurrent execs in one pod cannot collide, and the marker a read uses to frame
-// its stdout.
+// concurrent execs in one pod cannot collide.
 func nonce() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
@@ -1393,9 +1425,10 @@ func (pd *pod) ReadFile(ctx context.Context, path string) ([]byte, error) {
 }
 
 // ReadFileStream matches the interface's streaming shape, but this backend
-// buffers the file first: the exec transport frames stdout with a trailing
-// marker whose presence — the proof the stream did not end early — can only
-// be checked once the whole stream has arrived. maxBytes bounds the buffer.
+// buffers the file first: the read frames its stdout (sandbox.Frame), and the
+// frame's end line — the proof the stream did not end early — can only be
+// checked once the whole stream has arrived. maxBytes, and the room beside
+// it (readRoom), bound the buffer.
 func (pd *pod) ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error) {
 	data, err := pd.readFileMax(ctx, path, maxBytes)
 	if err != nil {
@@ -1404,23 +1437,27 @@ func (pd *pod) ReadFileStream(ctx context.Context, path string, maxBytes int64) 
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 
+// readRoom is what a read's buffer holds beyond the file's own cap: the
+// frame's two lines, and what an image's startup prints around them — a
+// BASH_ENV file's banner before, an EXIT trap's words after — up to the cap
+// Exec keeps of a stream.
+const readRoom = sandbox.MaxOutputBytes
+
 // readFileMax runs one probe-and-cat script: the exit code classifies the
-// path, and on success stdout carries the raw bytes (binary included)
-// followed by this call's marker.
+// path, and on success stdout carries the raw bytes (binary included) inside
+// this call's frame (readArgv).
 func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]byte, error) {
-	marker := nonce()
-	var out cappedBuffer
-	// Room for a file at the cap and its marker, and not one byte more, so
-	// out.truncated means exactly "the file was over the cap" — see readStdout.
-	out.limit = int(maxBytes) + len(marker)
-	argv := []string{"/bin/bash", "-c", readScript, "map-read", path, strconv.FormatInt(maxBytes, 10), marker}
-	res, err := pd.client.exec(ctx, pd.name, containerName, argv, nil, &out, io.Discard)
+	f := sandbox.NewFrame("read")
+	// Room for a file at the cap and what prints around it (readRoom); what
+	// the cap then makes of a stream is readStdout's to read.
+	out := cappedBuffer{limit: int(maxBytes) + readRoom}
+	res, err := pd.client.exec(ctx, pd.name, containerName, readArgv(f, path, maxBytes), nil, &out, io.Discard)
 	if err != nil {
 		return nil, pd.execErr(ctx, err)
 	}
 	switch res.code {
 	case 0:
-		return readStdout(path, marker, &out)
+		return readStdout(path, f, maxBytes, &out)
 	case readNotExist:
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
 	case readIsDir:
@@ -1436,32 +1473,45 @@ func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]
 	}
 }
 
-// readStdout turns what readScript sent into the file's bytes, and is the only
-// place a short read can be caught. Nothing else in the path can notice one:
-// client-go hands a failed stdout copy to runtime.HandleError and never to the
-// caller, so a stream that ended early is byte-for-byte a shorter file (issue
-// #105). The harm is why a hazard never seen firing is still worth a guard —
-// `edit` reads a file and writes back what it read, so a truncation handed to the
+// readArgv is the exec that reads path: readScript framed by f, given the path
+// and the byte cap.
+func readArgv(f sandbox.Frame, path string, maxBytes int64) []string {
+	return []string{"/bin/bash", "-c", f.Wrap(readScript), "map-read", path, strconv.FormatInt(maxBytes, 10)}
+}
+
+// readStdout turns what readScript sent into the file's bytes — what lies
+// between the frame's lines (sandbox.Frame.CutBytes), so an image's startup
+// output around them is no part of the file (#860) — and is the only place a
+// short read can be caught. Nothing else in the path can notice one: client-go
+// hands a failed stdout copy to runtime.HandleError and never to the caller,
+// so a stream that ended early is byte-for-byte a shorter file (issue #105).
+// The harm is why a hazard never seen firing is still worth a guard — `edit`
+// reads a file and writes back what it read, so a truncation handed to the
 // model is a truncation committed to disk.
 //
-// Size is decided first, and by out.truncated rather than by a length. The
-// buffer's room is a capped file plus its marker exactly, so the flag is set
-// precisely when the file held more than the cap — it grew between readScript's
-// stat and its cat. Such a read loses its marker along with the excess, so this
-// order is the whole of what decides which error the caller gets. A length
-// comparison would not do the same job: the buffer stops at its limit, so it can
-// never exceed it.
-func readStdout(path, marker string, out *cappedBuffer) ([]byte, error) {
-	b := out.Bytes()
+// A whole stream with no end line ended early: a short read. One with no begin
+// line had its script's output lost entirely, or — where the cap cut it — the
+// startup's output filled the read's room before the script printed. Size is
+// decided next, by the length of what the frame holds: past the cap, the file
+// grew between readScript's stat and its cat, whether the bytes arrived whole
+// (the room beside the cap took them) or the cap cut them. A stream the cap
+// cut short that still holds no more than the cap lost its end to what printed
+// ahead of the script, not to the file, and says so rather than guessing at a
+// size.
+func readStdout(path string, f sandbox.Frame, maxBytes int64, out *cappedBuffer) ([]byte, error) {
+	b, framed, short := f.CutBytes(out.Bytes(), out.truncated)
 	switch {
-	case out.truncated:
-		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
-	case !bytes.HasSuffix(b, []byte(marker)):
+	case !framed && out.truncated:
+		return nil, fmt.Errorf("k8s: read %s: the sandbox printed past the read's room before the file's bytes", path)
+	case !framed:
 		return nil, fmt.Errorf("k8s: read %s: short read (exec stdout ended before the pod finished sending)", path)
+	case int64(len(b)) > maxBytes:
+		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
+	case short:
+		return nil, fmt.Errorf("k8s: read %s: the sandbox printed past the read's room before the file's end", path)
 	default:
-		n := len(b) - len(marker)
-		// Clipped, so a caller that appends cannot write over the marker's bytes.
-		return b[:n:n], nil
+		// Clipped, so a caller that appends cannot write over the end line.
+		return b[:len(b):len(b)], nil
 	}
 }
 
@@ -1485,11 +1535,14 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 	}
 	dir := gopath.Dir(path)
 	tmp := gopath.Join(dir, sandbox.TempName())
-	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.FormatInt(size, 10), tmp}
 	// The script's stdout is the classified refusal's reason (exit 20 rides
-	// with the shell's own strerror text, plan 23); capped because the sandbox
-	// writes it.
-	out := &cappedBuffer{limit: 4096}
+	// with the shell's own strerror text, plan 23), read from inside the
+	// script's frame (sandbox.Frame) so an image's startup output around it is
+	// no part of it (#860); capped at what Exec keeps of a stream because the
+	// sandbox writes it.
+	f := sandbox.NewFrame("write")
+	argv := []string{"/bin/bash", "-c", f.Wrap(writeScript), "map-write", path, dir, strconv.FormatInt(size, 10), tmp}
+	out := &cappedBuffer{limit: sandbox.MaxOutputBytes}
 	// A write of no bytes opens no stdin stream, the way the bulk scripts that
 	// read no stdin are given none. Five CI stalls in one week hung here and
 	// nowhere else (#318): the exec for a zero-byte write opened a stdin stream,
@@ -1551,7 +1604,14 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 	case sandbox.ExitPathNotReplaceable:
 		return fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
 	case sandbox.ExitPathNotWritable:
-		return &sandbox.PathNotWritableError{Path: path, Reason: string(bytes.TrimSpace(out.buf.Bytes()))}
+		// A reason that did not reach the output whole is none: the refusal
+		// stands on the exit code, and says only that the path cannot be
+		// written.
+		reason, framed, _ := f.Cut(out.String(), out.truncated)
+		if !framed {
+			reason = ""
+		}
+		return &sandbox.PathNotWritableError{Path: path, Reason: strings.TrimSpace(reason)}
 	default:
 		// The write failed in the pod for a reason that is the sandbox's, not the
 		// path's — a read-only mount, a full disk. A clean exec that exited
@@ -1740,9 +1800,10 @@ const (
 	writeShort     = 14
 )
 
-// readScript classifies $1, cats it on success, and marks the end of what it
-// sent. $2 is the byte cap and $3 the marker. ($0 is the "map-read" label, so the
-// real args start at $1 — bash -c's convention.)
+// readScript classifies $1 and cats it on success, inside the read's frame
+// (readArgv), whose end line marks the end of what it sent. $2 is the byte cap.
+// ($0 is the "map-read" label, so the real args start at $1 — bash -c's
+// convention.)
 //
 // A symlink is rejected up front, as the docker backend rejects a non-regular
 // tar entry: `stat -c %s` on a link reports the link's own tiny size while `cat`
@@ -1751,34 +1812,35 @@ const (
 // lstat, so it catches the link before the size and regular-file checks (which
 // follow it) ever run.
 //
-// The marker is the read-side half of writeScript's guard (issue #105), and says
-// the same thing from the other end: only the pod knows what it sent. The `sz`
-// above cannot say it — that is the size of the file, not the length of the
-// stream, and here the difference is not a fine point. A file rewritten between
-// the `stat` and the `cat` would fail a read that returned exactly what the file
-// then held, and every procfs entry reports a `stat` size of 0 while `cat`
-// streams real content, so /proc/meminfo would stop being readable. The marker
-// rides the same stream as the bytes, so it measures the delivery and nothing
-// else.
+// The end line is the read-side half of writeScript's guard (issue #105), and
+// says the same thing from the other end: only the pod knows what it sent. The
+// `sz` above cannot say it — that is the size of the file, not the length of
+// the stream, and here the difference is not a fine point. A file rewritten
+// between the `stat` and the `cat` would fail a read that returned exactly what
+// the file then held, and every procfs entry reports a `stat` size of 0 while
+// `cat` streams real content, so /proc/meminfo would stop being readable. The
+// end line rides the same stream as the bytes, so it measures the delivery and
+// nothing else.
 //
-// A marker rather than a byte count because every loss this transport can suffer
-// is a suffix: client-go copies stdout with a single io.Copy, which stops at its
-// first error, so the stream can end early but cannot arrive with a hole in it. A
-// stream still ending in the marker therefore lost nothing in transit. That is
-// read out of client-go's stream protocol, not instrumented — nobody induced a
-// hole, and there is no way to. It says nothing about what else wrote to stdout:
-// a shell profile that prints a banner ahead of the `cat` corrupts every read in
-// this backend, marker or not, and always has.
+// An end line rather than a byte count because every loss this transport can
+// suffer is a suffix: client-go copies stdout with a single io.Copy, which stops
+// at its first error, so the stream can end early but cannot arrive with a hole
+// in it. A stream that still carries the end line therefore lost nothing in
+// transit. That is read out of client-go's stream protocol, not instrumented —
+// nobody induced a hole, and there is no way to. The begin line is what keeps
+// out what else writes to stdout: an image's BASH_ENV file printing a banner
+// ahead of the `cat` used to corrupt every read in this backend, and an EXIT
+// trap printing after it failed every one as short (#860).
 //
-// The marker rides in argv, so a process inside the pod can read it out of /proc
+// The frame rides in argv, so a process inside the pod can read it out of /proc
 // and plant it. That is the deliberately-malicious-command case the derived-name
 // adoption check (`ours`) and Exec's pid file do not defend either; against the
-// transport failure this guards, a per-call crypto/rand token is what keeps a
-// file's own bytes from ending in the marker by accident.
+// transport failure this guards, a per-call crypto/rand nonce is what keeps a
+// file's own bytes from holding the end line by accident.
 //
-// `cat` is not exec'd, because the script has to outlive it to emit the marker;
-// that is the whole reason, and not the one #103 had for dropping `exec` on the
-// write side. `|| exit 1` collapses every `cat` failure onto a code that means
+// `cat` is not exec'd, because the script has to outlive it for the frame to
+// close; that is the whole reason, and not the one #103 had for dropping `exec`
+// on the write side. `|| exit 1` collapses every `cat` failure onto a code that means
 // nothing else: codes 10-14 are one flat namespace shared with writeScript, and
 // the filesystem is agent-controlled, so a `cat` left to exit 13 on its own would
 // be reported to the model as a file too large.
@@ -1798,7 +1860,6 @@ if [ ! -f "$f" ]; then exit 12; fi
 sz=$(stat -c %s "$f") || exit 1
 if [ "$sz" -gt "$2" ]; then exit 13; fi
 cat "$f" || exit 1
-printf %s "$3"
 `
 
 // writeScript makes $2 (the parent dir), writes stdin to $4 (a temporary file in

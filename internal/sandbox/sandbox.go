@@ -452,8 +452,8 @@ type Sandbox interface {
 	// harvest moves files up to its own per-file cap out of the sandbox — so
 	// the ceiling is the caller's to name per read. The docker backend
 	// streams the bytes through; the k8s backend buffers up to maxBytes
-	// internally, because its exec transport frames stdout with a trailing
-	// marker that can only be verified once the stream has ended.
+	// internally, because its exec transport frames stdout (Frame), and the
+	// frame's end line can only be verified once the stream has ended.
 	ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error)
 	// WriteFile writes data, creating parent directories and overwriting any
 	// existing file.

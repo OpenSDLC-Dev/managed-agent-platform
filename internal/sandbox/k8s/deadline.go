@@ -132,9 +132,10 @@ if [ -z "$p" ] || kill -0 "$p" 2>/dev/null; then echo A; else echo D; fi
 // calls this), so the cleanup cannot race a probe, and it keeps /tmp from
 // accumulating three entries per command over a session's thousands of execs.
 //
-// The mark is printed *first* because it is the most load-bearing and this
-// stream is unframed: client-go stops copying stdout at its first error, so
-// what a lost stream drops is always a suffix. Losing the code leaves a
+// The mark is printed *first* because it is the most load-bearing and what
+// this stream can lose is its tail: client-go stops copying stdout at its
+// first error, so what a lost stream drops is always a suffix — the frame's
+// end line first (readExit, which reads what arrived after the begin line). Losing the code leaves a
 // synthesized SIGKILL and a mark that still says the deadline caused it; losing
 // the mark instead would put a real timeout back on the probe race #95 was filed
 // for. Reading the mark here rather than in the wrapper is what lets it survive

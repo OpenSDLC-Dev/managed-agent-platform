@@ -18,7 +18,6 @@
 package k8s
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -161,12 +160,15 @@ func (c *client) exec(ctx context.Context, pod, container string, argv []string,
 }
 
 // execOutput runs argv and returns its stdout, for the provider's own probes
-// (liveness, stat) where the command is trusted and its output is small.
-func (c *client) execOutput(ctx context.Context, pod, container string, argv []string) (string, int, error) {
-	var out bytes.Buffer
-	res, err := c.exec(ctx, pod, container, argv, nil, &out, io.Discard)
+// (liveness, the exit record, the export probe), whose own output is small:
+// kept up to the cap Exec keeps of a stream, since an image's startup prints
+// to it too, with truncated saying whether the cap cut it. Each probe frames
+// its script (sandbox.Frame) and reads its answer from between the lines.
+func (c *client) execOutput(ctx context.Context, pod, container string, argv []string) (out string, truncated bool, code int, err error) {
+	buf := cappedBuffer{limit: sandbox.MaxOutputBytes}
+	res, err := c.exec(ctx, pod, container, argv, nil, &buf, io.Discard)
 	if err != nil {
-		return "", 0, err
+		return "", false, 0, err
 	}
-	return out.String(), res.code, nil
+	return buf.String(), buf.truncated, res.code, nil
 }

@@ -1779,15 +1779,25 @@ func (c *container) unreplaceable(ctx context.Context, path string) error {
 // in the target's own directory, under a temporary name it removes on success.
 // A failed rename asks it too: the daemon extracts as root, so a parent the
 // sandbox user cannot write takes the PUT and refuses only the move.
+//
+// The reason is read from inside the probe's frame (sandbox.ExecFramed), so
+// what an image's startup prints around it — a BASH_ENV file's banner, an EXIT
+// trap's words — is no part of it (#860). A reason that did not reach the
+// output whole is none: the refusal stands on the exit code, and says only
+// that the path cannot be written, as the k8s write script's does.
 func (c *container) notWritable(ctx context.Context, path string) error {
 	probe := gopath.Join(gopath.Dir(path), sandbox.TempName())
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: fmt.Sprintf(
+	res, framed, err := sandbox.ExecFramed(ctx, c, "writable", sandbox.ExecRequest{Command: fmt.Sprintf(
 		"export LC_ALL=C\nmsg=$({ : > %[1]s; } 2>&1) || { printf '%%s' \"${msg##*: }\"; exit %[2]d; }\nrm -f %[1]s\nexit 0",
 		shellQuote(probe), sandbox.ExitPathNotWritable)})
 	if err != nil || res.ExitCode != sandbox.ExitPathNotWritable {
 		return nil
 	}
-	return &sandbox.PathNotWritableError{Path: path, Reason: strings.TrimSpace(res.Stdout)}
+	reason := ""
+	if framed {
+		reason = strings.TrimSpace(res.Stdout)
+	}
+	return &sandbox.PathNotWritableError{Path: path, Reason: reason}
 }
 
 // cleanupBudget bounds a cleanup that has to outlive the write it cleans up
@@ -1878,8 +1888,14 @@ func (c *container) reclaim(ctx context.Context, tmp string) {
 // mkdirAll makes the directory a write needs, and is where a path blocked by a
 // non-directory is named: `mkdir -p` fails there, and the shared shell says
 // whether that is why (both backends embed it, so both answer alike).
+//
+// mkdir's message is read from inside the script's frame (sandbox.ExecFramed),
+// so what an image's startup prints on stderr ahead of it — a BASH_ENV file's
+// banner, which would otherwise be the first line the reason is taken from —
+// is no part of it (#860). Output whose frame did not arrive whole carries no
+// reason, and the raw error keeps what the sandbox printed.
 func (c *container) mkdirAll(ctx context.Context, dir string) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.PathFaultShell +
+	res, framed, err := sandbox.ExecFramed(ctx, c, "mkdir", sandbox.ExecRequest{Command: sandbox.PathFaultShell +
 		fmt.Sprintf("export LC_ALL=C\nmkdir -p %[1]s || { __map_path_fault %[1]s; exit 1; }", shellQuote(dir))})
 	if err != nil {
 		return err
@@ -1895,7 +1911,7 @@ func (c *container) mkdirAll(ctx context.Context, dir string) error {
 		// and the strerror tail is the reason the classified refusal carries,
 		// as the k8s write script's mkdir branch carries its own (plan 23,
 		// #306); a mkdir that said nothing keeps the raw error.
-		if reason := strerrorTail(res.Stderr); reason != "" {
+		if reason := strerrorTail(res.Stderr); framed && reason != "" {
 			return &sandbox.PathNotWritableError{Path: dir, Reason: reason}
 		}
 		return fmt.Errorf("docker: mkdir -p %s: exit %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
