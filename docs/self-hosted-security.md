@@ -1326,8 +1326,12 @@ with tracking issues, not silent omissions:
   judge is where the reader backend's own fetch lands — a remote reader
   resolves the target and any redirects server-side (our adapters refuse to
   follow 3xx themselves), so an open redirect on an allowed host can still
-  return a fenced-off domain's content. No reader can be asked not to follow a
-  redirect or to say where it landed, so the platform cannot close this.
+  return a fenced-off domain's content. Neither Jina nor the platform's reader
+  contract (one GET, the target in the path) has a per-request way to refuse a
+  redirect or a field naming where the fetch landed, so the platform can
+  neither enforce nor verify it. An operator running a self-hosted reader can
+  configure that reader to refuse redirects — a mitigation the platform cannot
+  check.
   Network-layer controls remain the hard boundary, and for where a
   fetch lands they sit on the reader's own egress — for a self-hosted reader,
   its egress policy — not on the executor's.
