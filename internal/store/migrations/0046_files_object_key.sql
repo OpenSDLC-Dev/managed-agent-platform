@@ -22,7 +22,7 @@
 -- only those. The (scope, filename) uniqueness is the harvest's per-path key
 -- and leaves copies out: two resources mounting one upload get two copies with
 -- one filename, and a copy may share its name with an output. And the guard
--- and the tombstone trigger below act on copies alone.
+-- below acts on copies alone.
 --
 -- A copy is deleted only by a transaction that has said it means to, with
 -- set_config('map.copy_delete', 'on', true) (store.AllowFileCopyDeletes). Any
@@ -36,13 +36,23 @@
 -- files it has not been told about, so a new remover is a decision, not a
 -- silent skip.
 --
--- The session's copies follow its tombstone. A previous build's session
--- delete writes the deleted_sessions row too, in the same transaction and
--- under the session's row lock, so the trigger on it deletes the copies the
--- guard kept from that build's DELETE, and owes their object through the
--- count below. This build's delete has set the flag by then and deletes them
--- itself, so the trigger leaves them to it. It rides the tombstone rather than
--- the sessions row so this migration need not lock the busiest table.
+-- A session's files follow its tombstone. A previous build's session delete
+-- writes the deleted_sessions row too, in the same transaction, under the
+-- session's row lock and before it touches files, so the trigger on it
+-- deletes every session-scoped row: the copies the guard would keep from that
+-- build's DELETE and the outputs it would take. One statement takes them in id
+-- order, the order a create holds the rows it mounts FOR SHARE in
+-- (internal/api's lockFileRows), and their keys are enqueued once each, in
+-- the count's lock order below. That build's own DELETE then finds nothing
+-- left to lock. Had the outputs been left to it, they would go in scan order
+-- after the copies the trigger took, and a create holding one of each would
+-- close a cycle with it (internal/api's
+-- TestAPreviousBuildSessionDeleteLocksInTheCreatesOrder). This build's delete
+-- has set the flag by then and takes the same rows the same way itself, so the
+-- trigger leaves them to it: the trigger serves the previous build alone, and
+-- dropping it with the guard (#856) changes nothing this build does. It rides
+-- the tombstone rather than the sessions row so this migration need not lock
+-- the busiest table.
 --
 -- Reference counting, at the one door every object delete goes through. Each
 -- remover enqueues the key of every row it deletes, in the same transaction
@@ -146,7 +156,7 @@ END $$;
 CREATE TRIGGER files_copy_delete_guard BEFORE DELETE ON files
     FOR EACH ROW EXECUTE FUNCTION files_copy_delete_guard();
 
-CREATE FUNCTION files_copies_follow_session() RETURNS trigger
+CREATE FUNCTION files_follow_session() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
     keys text[];
@@ -159,11 +169,10 @@ BEGIN
         DELETE FROM files
          WHERE id IN (SELECT id FROM files
                        WHERE scope_type = 'session' AND scope_id = NEW.id
-                         AND source_file_id IS NOT NULL
                        ORDER BY id
                        FOR UPDATE)
-        RETURNING object_key)
-    SELECT array_agg(object_key) INTO keys FROM gone;
+        RETURNING coalesce(object_key, 'files/' || id) AS k)
+    SELECT array_agg(DISTINCT k) INTO keys FROM gone;
     PERFORM set_config('map.copy_delete', '', true);
     IF keys IS NOT NULL THEN
         INSERT INTO pending_object_deletes (object_key)
@@ -173,8 +182,8 @@ BEGIN
     RETURN NULL;
 END $$;
 
-CREATE TRIGGER files_copies_follow_session AFTER INSERT ON deleted_sessions
-    FOR EACH ROW EXECUTE FUNCTION files_copies_follow_session();
+CREATE TRIGGER files_follow_session AFTER INSERT ON deleted_sessions
+    FOR EACH ROW EXECUTE FUNCTION files_follow_session();
 
 -- Whether some files row names the object at k: a copy by its object_key, an
 -- owner by its id.

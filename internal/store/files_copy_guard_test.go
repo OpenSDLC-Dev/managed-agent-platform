@@ -178,12 +178,13 @@ func TestOnlyATransactionThatAllowsItDeletesACopy(t *testing.T) {
 	}
 }
 
-// A previous-build session delete removes only the session's outputs — the
-// guard keeps its DELETE off the copies — but it writes the tombstone first,
-// and 0046's trigger on it takes the copies and owes their objects through
-// the reference count: kept while another row names one, owed once none does.
-// Nothing is left behind for a sweep to find.
-func TestAPreviousBuildSessionDeleteTakesItsCopies(t *testing.T) {
+// A previous-build session delete writes the tombstone before it touches
+// files, and 0046's trigger on it takes every session-scoped row, copies and
+// outputs, and owes their objects through the reference count: kept while
+// another row names one, owed once none does. That build's own DELETE then
+// finds nothing, so it locks no row out of id order, and nothing is left
+// behind for a sweep to find.
+func TestAPreviousBuildSessionDeleteTakesItsFiles(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	seedSessionChain(t, pool)
@@ -211,6 +212,9 @@ func TestAPreviousBuildSessionDeleteTakesItsCopies(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		if len(gone) != 0 {
+			t.Errorf("the previous build's own DELETE took %v, want nothing: the trigger took the session's rows first", gone)
+		}
 		keys := []string{blob.SessionCheckpointKey("sesn_1")}
 		for _, id := range gone {
 			keys = append(keys, blob.FilesKey(id))
@@ -230,12 +234,15 @@ func TestAPreviousBuildSessionDeleteTakesItsCopies(t *testing.T) {
 
 // This build's session delete has allowed copy deletes before it writes the
 // tombstone, and removes the copies with its outputs in one statement before
-// it enqueues anything, so the trigger leaves them to it.
-func TestATombstoneLeavesCopiesToATransactionThatDeletesThem(t *testing.T) {
+// it enqueues anything, so the trigger leaves the session's rows to it.
+func TestATombstoneLeavesFilesToATransactionThatDeletesThem(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	seedSessionChain(t, pool)
 	insertCopy(t, pool, "file_copy", "file_upload", blob.FilesKey("file_upload"), "sesn_1")
+	if _, err := pool.Exec(ctx, prevHarvestInsert, "file_output", "out.txt", "text/plain", 1, "sesn_1"); err != nil {
+		t.Fatal(err)
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -248,11 +255,11 @@ func TestATombstoneLeavesCopiesToATransactionThatDeletesThem(t *testing.T) {
 		t.Fatal(err)
 	}
 	var left int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM files WHERE id = 'file_copy'`).Scan(&left); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM files WHERE scope_id = 'sesn_1'`).Scan(&left); err != nil {
 		t.Fatal(err)
 	}
-	if left != 1 {
-		t.Error("the tombstone's trigger took the copy from a transaction that deletes it itself")
+	if left != 2 {
+		t.Errorf("%d of the session's 2 rows left: the tombstone's trigger took rows from a transaction that deletes them itself", left)
 	}
 }
 
@@ -260,11 +267,14 @@ func TestATombstoneLeavesCopiesToATransactionThatDeletesThem(t *testing.T) {
 // session copies (#578): those that do call store.AllowFileCopyDeletes in
 // their transaction, and those that do not are listed as such. A new one fails
 // here until it is added, because the guard's silent skip is right for the
-// previous build and wrong for a path this build forgot. Each allowing path
-// has a behavioural test that the copy goes: internal/api's
-// TestArchivingASessionLeavesItsCopies (DELETE /v1/files/{copy}),
-// TestSessionDeleteTakesItsCopies and TestACopyExpiresWithItsUpload, and
-// TestAPreviousBuildSessionDeleteTakesItsCopies above for the trigger.
+// previous build and wrong for a path this build forgot. This counts per file;
+// each allowing path has a behavioural test that the copy goes:
+// internal/api's TestArchivingASessionLeavesItsCopies (DELETE
+// /v1/files/{copy}), TestSessionDeleteTakesItsCopies and
+// TestACopyExpiresWithItsUpload, and TestAPreviousBuildSessionDeleteTakesItsFiles
+// above for the trigger. Where the session delete allows it is pinned by
+// internal/api's TestSessionDeleteAllowsCopyDeletesBeforeItsTombstone, since
+// the trigger would take the same rows from a delete that allowed it late.
 func TestEveryFilesDeleteDecidesAboutCopies(t *testing.T) {
 	type decision struct{ deletes, allows int }
 	want := map[string]decision{
@@ -273,7 +283,7 @@ func TestEveryFilesDeleteDecidesAboutCopies(t *testing.T) {
 		"internal/api/fileretention.go": {1, 1}, // purgeExpiredFiles: copies expire with their upload
 		"internal/api/dreamrunner.go":   {1, 0}, // a dream's transcripts; a copy carries no dream_id
 		"internal/executor/harvest.go":  {1, 0}, // the outputs snapshot, never a copy
-		// The trigger on deleted_sessions, for a previous build's session delete.
+		// The trigger on deleted_sessions, for a previous build's session delete (#856).
 		"internal/store/migrations/0046_files_object_key.sql": {1, 1},
 	}
 	deleteRE := regexp.MustCompile(`(?i)\bdelete\s+from\s+files\b`)

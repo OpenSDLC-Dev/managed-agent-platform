@@ -1702,11 +1702,16 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	}); err != nil {
 		return nil, err
 	}
-	// This delete takes the session's file copies itself, with its outputs and
-	// before it enqueues a key (EnqueueObjectDeletes says why that order), so
-	// it says so before the tombstone: migration 0046's trigger on
-	// deleted_sessions removes the copies for a previous build's delete, which
-	// cannot, and leaves them to a transaction that has said it will.
+	// This delete takes the session's files itself, its copies with its
+	// outputs and before it enqueues a key (EnqueueObjectDeletes says why that
+	// order), so it says so before the tombstone: migration 0046's trigger on
+	// deleted_sessions takes the same rows for a previous build's delete, which
+	// cannot reach the copies and would lock the rest out of id order, and
+	// leaves them to a transaction that has said it will. The trigger is that
+	// build's alone, to go with the guard (#856), which is why this keeps a
+	// statement of its own rather than leaning on it; said late, the trigger
+	// would take the rows instead, unnoticed
+	// (TestSessionDeleteAllowsCopyDeletesBeforeItsTombstone).
 	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
 		return nil, err
 	}

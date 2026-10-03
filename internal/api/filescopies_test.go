@@ -405,6 +405,90 @@ func TestSessionDeleteTakesItsCopies(t *testing.T) {
 	}
 }
 
+// deleteSession takes its session's files itself, having allowed copy
+// deletes in its transaction before it writes the tombstone, so 0046's
+// trigger on deleted_sessions, which serves the previous build alone (#856),
+// leaves them to it. store's TestEveryFilesDeleteDecidesAboutCopies counts the
+// call; this watches the order, through two probe triggers: one records, as
+// the tombstone goes in, whether its transaction had allowed copy deletes; the
+// other records each deleted files row's trigger depth, 1 under the handler's
+// own statement and 2 under the tombstone's trigger, and its transaction.
+func TestSessionDeleteAllowsCopyDeletesBeforeItsTombstone(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	agentID, envID := readableFixture(t, s)
+	uploadID := uploadOneFile(t, s, "in.txt")
+	sess := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
+	})
+	sid, copyID := sess["id"].(string), mountedFileID(t, sess)
+	outputID := domain.NewID("file").String()
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'out.md', 'text/markdown', 5, true, 'session', $2)`, outputID, sid); err != nil {
+		t.Fatalf("seed an output: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `
+		CREATE TABLE probe (what text, detail text, xact xid8);
+		CREATE FUNCTION probe_tombstone() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+		    INSERT INTO probe VALUES ('tombstone', coalesce(current_setting('map.copy_delete', true), ''), pg_current_xact_id());
+		    RETURN NEW;
+		END $$;
+		CREATE TRIGGER probe_tombstone BEFORE INSERT ON deleted_sessions
+		    FOR EACH ROW EXECUTE FUNCTION probe_tombstone();
+		CREATE FUNCTION probe_file_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+		    INSERT INTO probe VALUES (OLD.id, pg_trigger_depth()::text, pg_current_xact_id());
+		    RETURN NULL;
+		END $$;
+		CREATE TRIGGER probe_file_delete AFTER DELETE ON files
+		    FOR EACH ROW EXECUTE FUNCTION probe_file_delete();`); err != nil {
+		t.Fatalf("install the probes: %v", err)
+	}
+
+	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
+		t.Fatalf("DELETE session: %d %v", status, body)
+	}
+
+	rows, err := s.pool.Query(ctx, `SELECT what, detail, xact::text FROM probe`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type entry struct{ detail, xact string }
+	got := map[string]entry{}
+	for rows.Next() {
+		var what string
+		var e entry
+		if err := rows.Scan(&what, &e.detail, &e.xact); err != nil {
+			t.Fatal(err)
+		}
+		got[what] = e
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	tomb, ok := got["tombstone"]
+	if !ok {
+		t.Fatalf("no tombstone written: %v", got)
+	}
+	if tomb.detail != "on" {
+		t.Errorf("the tombstone went in with map.copy_delete = %q, want on: AllowFileCopyDeletes comes first", tomb.detail)
+	}
+	for _, id := range []string{copyID, outputID} {
+		e, ok := got[id]
+		switch {
+		case !ok:
+			t.Errorf("the session delete left %s", id)
+		case e.detail != "1":
+			t.Errorf("%s was deleted at trigger depth %s, want 1: the tombstone's trigger took it, not the handler", id, e.detail)
+		case e.xact != tomb.xact:
+			t.Errorf("%s was deleted in transaction %s, the tombstone in %s", id, e.xact, tomb.xact)
+		}
+	}
+}
+
 // Archiving a session leaves its copies (console-141 api-fixtures idx 25;
 // ui-network idx 301), and each still answers DELETE afterwards (api-fixtures
 // idx 33–35). A copy is never downloadable, so the management lane refuses
