@@ -352,6 +352,14 @@ func TestFilePathsTooLongForLinux(t *testing.T) {
 // The same in a Kubernetes pod, under a read-only root as the chart runs one:
 // the cluster MAP_K8S_CONTEXT names.
 func TestFilePathsTooLongForLinuxInAKubernetesPod(t *testing.T) {
+	filePathBounds(t, podRunner(t))
+}
+
+// podRunner gives a test a Runner over one pod from testImage, under a
+// read-only root as the chart runs one, in the cluster MAP_K8S_CONTEXT names.
+// A missing cluster is a hard failure, as with the k8s contract test.
+func podRunner(t *testing.T) toolset.Runner {
+	t.Helper()
 	provider, err := k8s.New(k8s.Config{
 		Context:   os.Getenv("MAP_K8S_CONTEXT"),
 		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
@@ -369,7 +377,7 @@ func TestFilePathsTooLongForLinuxInAKubernetesPod(t *testing.T) {
 		t.Fatalf("provision: %v", err)
 	}
 	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
-	filePathBounds(t, toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")})
+	return toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
 }
 
 // filePathBounds is TestFilePathsTooLongForLinux on the sandbox r runs in.
@@ -427,10 +435,7 @@ func filePathBounds(t *testing.T, r toolset.Runner) {
 // temporary is left beside it.
 func TestAQuoteHeavyFilePathMakesACommandTooLong(t *testing.T) {
 	r := runner(t)
-	// Fifteen 255-byte directories under /workspace, then a 244-byte name:
-	// a 4095-byte path, every byte past /workspace/ but the slashes a quote.
-	q := strings.Repeat("'", 255)
-	p := "/workspace/" + strings.Repeat(q+"/", 15) + strings.Repeat("'", 244)
+	p := quotePath
 	const tooLong = "-byte command, over the 122880 bytes one exec argument can carry; shorten it"
 	size := func(content, verb string) int {
 		t.Helper()
@@ -456,6 +461,27 @@ func TestAQuoteHeavyFilePathMakesACommandTooLong(t *testing.T) {
 	}
 	if left := ok(t, r, "bash", `{"command":"find /workspace -name '.map-write-*'"}`); left != "" {
 		t.Errorf("the refused writes left %q behind", left)
+	}
+}
+
+// quotePath is fifteen 255-byte directories under /workspace, then a 244-byte
+// name: a 4095-byte path, every byte past /workspace/ but the slashes a quote.
+var quotePath = "/workspace/" + strings.Repeat(strings.Repeat("'", 255)+"/", 15) + strings.Repeat("'", 244)
+
+// The k8s backend hands the path to its write script as an argument, quoted
+// into no command, so the path Docker refuses is one a pod writes, edits and
+// reads as any other (docs/DIVERGENCES.md).
+func TestAQuoteHeavyFilePathInAKubernetesPod(t *testing.T) {
+	r := podRunner(t)
+	in, _ := json.Marshal(map[string]string{"file_path": quotePath, "content": "one x"})
+	if got, want := ok(t, r, "write", string(in)), "wrote 5 bytes to "+quotePath; got != want {
+		t.Fatalf("write = %q, want %q", got, want)
+	}
+	in, _ = json.Marshal(map[string]string{"file_path": quotePath, "old_string": "x", "new_string": "two"})
+	ok(t, r, "edit", string(in))
+	in, _ = json.Marshal(map[string]string{"file_path": quotePath})
+	if got := ok(t, r, "read", string(in)); got != "one two" {
+		t.Fatalf("read = %q, want the edited file", got)
 	}
 }
 
