@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -242,5 +243,75 @@ func TestFetchReplacesWhatIsNotARegularFileAtAnArchivesName(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An archive this user cannot read is one the build, which runs as this user,
+// could not embed: it is replaced by the download, as bytes that are not the
+// pin are, and the fetch says why — where it used to fail the fetch, and every
+// build behind it, on the open. (Root reads it all the same, and takes it as
+// the pin it is.)
+func TestFetchReplacesAnArchiveItCannotRead(t *testing.T) {
+	backoff = 0
+	srv, hits := server(t, map[string]string{"rg-amd64.tar.gz": "amd64 bytes"})
+	m := manifest(srv.URL, map[string]string{"amd64": sum("amd64 bytes")})
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "rg-amd64.tar.gz")
+	if err := os.WriteFile(dst, []byte("amd64 bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dst, 0); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	logf := func(format string, a ...any) { logged = append(logged, fmt.Sprintf(format, a...)) }
+	if err := fetch(context.Background(), srv.Client(), m, dir, logf); err != nil {
+		t.Fatalf("fetch over an archive it cannot read: %v", err)
+	}
+	fi, err := os.Lstat(dst)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("%s = %v, %v; want a regular 0644 file", dst, fi, err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "amd64 bytes" {
+		t.Errorf("archive = %q, want the pin", b)
+	}
+	if os.Geteuid() == 0 {
+		return
+	}
+	if hits.Load() != 1 {
+		t.Errorf("downloads = %d, want the one that replaced it", hits.Load())
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), dst+" cannot be read, so it is replaced: ") {
+		t.Errorf("logged %q; want why it was replaced", logged)
+	}
+}
+
+// Where present found a regular file it opens without following a link: one
+// put at the name after the check is refused, not opened — and what it names
+// is never read or chmodded — while a link present found as one is followed.
+func TestOpenRegularFollowsALinkOnlyWhenTold(t *testing.T) {
+	dir := t.TempDir()
+	target, link := filepath.Join(dir, "target"), filepath.Join(dir, "link")
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openRegular(link, false); f != nil || err != nil {
+		if f != nil {
+			f.Close()
+		}
+		t.Fatalf("openRegular(a link, false) = %v, %v; want nil, nil", f, err)
+	}
+	f, err := openRegular(link, true)
+	if err != nil || f == nil {
+		t.Fatalf("openRegular(a link, true) = %v, %v; want what it names", f, err)
+	}
+	f.Close()
+	if f, err := openRegular(target, false); err != nil || f == nil {
+		t.Fatalf("openRegular(a regular file, false) = %v, %v", f, err)
+	} else {
+		f.Close()
 	}
 }

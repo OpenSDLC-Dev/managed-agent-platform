@@ -12,7 +12,7 @@
 // else, a directory or any other kind of file there is removed and the
 // archive fetched. An archive the directory already holds is left 0644, as a
 // download lands, where its mode can be changed; where it cannot, it is taken
-// as it is, and the refusal logged.
+// as it is, and the refusal logged. One this user cannot read is replaced.
 // Then everything else in the directory is removed — an archive the manifest
 // no longer names, an interrupted download, a stray file or directory — but
 // the manifest: internal/ripgrep embeds the whole directory, since a build
@@ -30,6 +30,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"maps"
 	"net/http"
@@ -124,15 +125,22 @@ var errDigest = errors.New("does not match its pinned sha256")
 // leaves a download, whatever mode it came with — or, where the chmod is
 // refused (a file another user owns, a read-only checkout), left as it is,
 // the refusal logged: its bytes are still the pin, which is what the embed
-// needs. A symbolic link to a regular file whose bytes do becomes a regular
-// copy of them (land); whatever else stands at dst and is not a regular file
-// — a link to anything else, a directory, a FIFO — is removed, so the
-// download can land in its place.
+// needs. A regular file this user cannot read at all (EACCES — another
+// user's, say, at 0600) is replaced as one that is not the pin is, the
+// refusal logged: the build, which runs as this user, could not embed it
+// either, and removing it asks only for the directory's write permission,
+// which the sweep below needs anyway. A symbolic link to a regular file whose
+// bytes are the pin becomes a regular copy of them (land); whatever else
+// stands at dst and is not a regular file — a link to anything else, a
+// directory, a FIFO — is removed, so the download can land in its place.
 //
 // What stands at dst is read only through a descriptor that is a regular
 // file's (openRegular): an open of a FIFO would wait for a writer that never
 // comes, and one can be put at dst, or at what a link names, between the
-// check of its type and the open.
+// check of its type and the open. Where the check found a regular file the
+// open does not follow a link (O_NOFOLLOW): one swapped in after the check
+// is refused like any other link that is not the pin — removed, never
+// followed, and what it names never chmodded.
 func present(dst, want string, logf func(string, ...any)) (bool, error) {
 	info, err := os.Lstat(dst)
 	switch {
@@ -141,7 +149,11 @@ func present(dst, want string, logf func(string, ...any)) (bool, error) {
 	case err != nil:
 		return false, err
 	case info.Mode().IsRegular():
-		f, err := openRegular(dst)
+		f, err := openRegular(dst, false)
+		if errors.Is(err, fs.ErrPermission) {
+			logf("ripgrepfetch: %s cannot be read, so it is replaced: %v", dst, err)
+			break
+		}
 		if err != nil {
 			return false, err
 		}
@@ -160,13 +172,11 @@ func present(dst, want string, logf func(string, ...any)) (bool, error) {
 		}
 		return true, nil
 	case info.Mode()&os.ModeSymlink != 0:
-		if target, err := os.Stat(dst); err == nil && target.Mode().IsRegular() {
-			if f, err := openRegular(dst); err == nil && f != nil {
-				err = land(f, dst, want)
-				f.Close()
-				if err == nil {
-					return true, nil
-				}
+		if f, err := openRegular(dst, true); err == nil && f != nil {
+			err = land(f, dst, want)
+			f.Close()
+			if err == nil {
+				return true, nil
 			}
 		}
 	}
@@ -174,16 +184,26 @@ func present(dst, want string, logf func(string, ...any)) (bool, error) {
 	return false, os.RemoveAll(dst)
 }
 
-// openRegular opens name, through a link if it is one, without waiting on
-// it — O_NONBLOCK, which a FIFO's open honours and a regular file's read
-// ignores — and hands back the file only if the descriptor it opened is a
-// regular file's; nil, with no error, if it is not, or if nothing is there.
-func openRegular(name string) (*os.File, error) {
-	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+// openRegular opens name without waiting on it — O_NONBLOCK, which a FIFO's
+// open honours and a regular file's read ignores — through a link only where
+// follow says so, and hands back the file only if the descriptor it opened is
+// a regular file's: nil, with no error, if it is not, if nothing is there, or
+// if a link is there and follow is false. That last is O_NOFOLLOW's refusal,
+// ELOOP on Linux and darwin (EMLINK on FreeBSD, EFTYPE on NetBSD), so whether
+// a link is what was refused is asked of the name rather than of the errno.
+func openRegular(name string, follow bool) (*os.File, error) {
+	flag := os.O_RDONLY | syscall.O_NONBLOCK
+	if !follow {
+		flag |= syscall.O_NOFOLLOW
+	}
+	f, err := os.OpenFile(name, flag, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
+		if info, lerr := os.Lstat(name); !follow && lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, nil
+		}
 		return nil, err
 	}
 	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {

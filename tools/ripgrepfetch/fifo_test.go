@@ -77,7 +77,7 @@ func TestOpenRegularNeverWaitsOnAFIFO(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		f, err := openRegular(fifo)
+		f, err := openRegular(fifo, true)
 		if f != nil {
 			f.Close()
 			err = errors.New("opened the FIFO as a regular file")
@@ -92,12 +92,12 @@ func TestOpenRegularNeverWaitsOnAFIFO(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("openRegular is blocked opening the FIFO")
 	}
-	f, err := openRegular(file)
+	f, err := openRegular(file, true)
 	if err != nil || f == nil {
 		t.Fatalf("openRegular(a regular file) = %v, %v", f, err)
 	}
 	f.Close()
-	if f, err := openRegular(filepath.Join(dir, "absent")); f != nil || err != nil {
+	if f, err := openRegular(filepath.Join(dir, "absent"), true); f != nil || err != nil {
 		t.Fatalf("openRegular(nothing) = %v, %v; want nil, nil", f, err)
 	}
 }
