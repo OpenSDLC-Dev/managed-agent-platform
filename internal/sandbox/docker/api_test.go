@@ -1462,7 +1462,7 @@ func TestWriteProbesReadNoReasonOutsideTheirFrame(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace", "")
+	c := p.attach("abc", "/workspace", "", false)
 	if err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1); errors.Is(err, sandbox.ErrNotWritable) ||
 		err == nil || !strings.Contains(err.Error(), "mkdir -p /newtop: exit 1") {
 		t.Errorf("mkdir's unframed refusal = %v; want the raw error, unclassified", err)
