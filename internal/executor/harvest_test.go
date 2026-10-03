@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // seedOutcome puts one outcome entry with the given result onto the session
@@ -304,7 +305,7 @@ func TestReHarvestLeavesTheSessionsCopies(t *testing.T) {
 	// Another session mounts the output: its copy names the output's object.
 	if _, err := h.pool.Exec(context.Background(),
 		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id, object_key, source_file_id)
-		 SELECT 'file_elsewhere', filename, mime_type, size_bytes, 'session', 'sesn_elsewhere', object_key, id
+		 SELECT 'file_elsewhere', filename, mime_type, size_bytes, 'session', 'sesn_elsewhere', `+store.FileObjectKeySQL+`, id
 		   FROM files WHERE id = $1`, output); err != nil {
 		t.Fatalf("seed the other session's copy: %v", err)
 	}

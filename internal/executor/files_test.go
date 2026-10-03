@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // seedFile plants a files-table row and its object, as the /v1/files upload
@@ -84,7 +85,7 @@ func TestMaterializesASessionCopy(t *testing.T) {
 	h.seedFile(t, "file_upload", "aliased bytes")
 	if _, err := h.pool.Exec(context.Background(),
 		`INSERT INTO files (id, filename, mime_type, size_bytes, scope_type, scope_id, object_key, source_file_id)
-		 SELECT 'file_copy', filename, mime_type, size_bytes, 'session', $1, object_key, id
+		 SELECT 'file_copy', filename, mime_type, size_bytes, 'session', $1, `+store.FileObjectKeySQL+`, id
 		   FROM files WHERE id = 'file_upload'`, h.sid.String()); err != nil {
 		t.Fatalf("seed the copy: %v", err)
 	}

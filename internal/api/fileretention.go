@@ -55,7 +55,9 @@ import (
 // never sees one — what removes them is a session delete, which takes every
 // row scoped to the session, and the next replacing harvest, which drops the
 // whole snapshot before writing the new one. The index still earns its place
-// on the uploads, which do expire.
+// on the uploads, which do expire, and on the session copies of them that
+// migration 0046 introduced (#578): a copy is session-scoped like an output
+// but inherits its upload's expires_at, so this sweep does reach those.
 //
 // And it omits the note 0031 and 0035 both carry: migrate.go applies every
 // pending file inside one transaction, so CREATE INDEX cannot be CONCURRENTLY.
@@ -243,6 +245,13 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 	}
 	defer tx.Rollback(ctx)
 
+	// A session's copy of an upload inherits its expires_at (#578), so expired
+	// copies are this sweep's too, and only a transaction that allows it can
+	// delete one. The batch never waits on a row lock (SKIP LOCKED), so the
+	// order it locks in cannot close a cycle.
+	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
+		return 0, err
+	}
 	rows, err := tx.Query(ctx, `
 		DELETE FROM files
 		 WHERE id IN (SELECT f.id FROM files f
@@ -253,12 +262,12 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 		               ORDER BY f.expires_at, f.id
 		               LIMIT $2
 		               FOR UPDATE SKIP LOCKED)
-		 RETURNING object_key`, retention.Seconds(), filePurgeBatch)
+		 RETURNING `+store.FileObjectKeySQL, retention.Seconds(), filePurgeBatch)
 	if err != nil {
 		return 0, err
 	}
-	// A session's copy of an expired upload expires with it and shares its
-	// object (#578); the queue takes the key once no surviving row names it.
+	// A copy shares its upload's object; the queue takes the key once no
+	// surviving row names it.
 	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return 0, err

@@ -205,15 +205,15 @@ func (s *server) insertFile(ctx context.Context, id string, up *fileUpload) (tim
 	defer func() { _ = tx.Rollback(ctx) }()
 	var createdAt time.Time
 	var expiresAt *time.Time
-	key := blob.FilesKey(id)
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, expires_at, object_key)
-		 VALUES ($1, $2, $3, $4, false, now() + make_interval(secs => $5::bigint), $6)
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, expires_at)
+		 VALUES ($1, $2, $3, $4, false, now() + make_interval(secs => $5::bigint))
 		 RETURNING created_at, expires_at`,
-		id, up.filename, up.mimeType, int64(len(up.data)), up.expiresIn, key).
+		id, up.filename, up.mimeType, int64(len(up.data)), up.expiresIn).
 		Scan(&createdAt, &expiresAt); err != nil {
 		return time.Time{}, nil, err
 	}
+	key := blob.FilesKey(id)
 	if err := s.blobs.Put(ctx, key, bytes.NewReader(up.data), int64(len(up.data)), up.mimeType); err != nil {
 		return time.Time{}, nil, fmt.Errorf("store file: %w", err)
 	}
@@ -557,13 +557,17 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// The key is the row's own (0046): an upload's copies share its object, so
+	// The key is the row's (0046): an upload's copies share its object, so
 	// deleting the upload leaves the bytes to them — the reference's behavior,
 	// the copy still answering after its upload's delete (2026-09-02 batch2 idx
 	// 405 and 408) — and deleting the last row that names the object owes it
-	// to the drain. EnqueueObjectDeletes holds that count.
+	// to the drain. EnqueueObjectDeletes holds that count. The id may be a
+	// copy's, which only a transaction that allows it can delete.
+	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
+		return nil, err
+	}
 	var key string
-	err = tx.QueryRow(ctx, `DELETE FROM files WHERE id = $1 RETURNING object_key`, id).Scan(&key)
+	err = tx.QueryRow(ctx, `DELETE FROM files WHERE id = $1 RETURNING `+store.FileObjectKeySQL, id).Scan(&key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("file %s not found", id)
 	}
@@ -621,10 +625,10 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	// Postgres answers whether the file has expired, rather than this process
 	// comparing a scanned timestamp: expires_at was computed from the database's
 	// now() at upload, and no replica's clock may decide when it arrives. The
-	// bytes are at the row's object_key, which a session's copy shares with its
-	// upload (#578), never at a key derived from the id asked for.
+	// bytes are at the row's key, which for a session's copy is its upload's
+	// (#578), never at a key derived from the id asked for.
 	err := s.pool.QueryRow(ctx,
-		`SELECT filename, mime_type, downloadable, NOT `+store.FileLiveSQL+`, object_key
+		`SELECT filename, mime_type, downloadable, NOT `+store.FileLiveSQL+`, `+store.FileObjectKeySQL+`
 		   FROM files WHERE id = $1`, id).
 		Scan(&filename, &mimeType, &downloadable, &expired, &key)
 	if errors.Is(err, pgx.ErrNoRows) {

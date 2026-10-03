@@ -709,7 +709,8 @@ func (s *server) dreamClosingArm(ctx context.Context, tx pgx.Tx, d dreamRow) (dr
 	}
 	// The objects were written down as owed by the statement above's own
 	// transaction rather than deleted after it, which is what deleteFile does
-	// too: the transcript ids are the objects' only names, and this commit is
+	// too: the transcript rows are the objects' only names, unless a session
+	// mounted one and its copy keeps the object (#578), and this commit is
 	// what takes them away (#703).
 	return dreamStepResult{wakeObjectDeletes: true, sessionMoves: sessionMoves}, nil
 }
@@ -1066,8 +1067,11 @@ func mirrorDreamUsage(ctx context.Context, tx pgx.Tx, d dreamRow) error {
 // An empty set enqueues nothing rather than an empty array, so a dream that
 // wrote no files leaves the statement unrun rather than sending Postgres a
 // zero-length unnest.
+//
+// A session that mounted a transcript holds a copy of it, which is not a
+// dream_id row and outlives the close, its object with it (#578).
 func enqueueDreamBlobs(ctx context.Context, tx pgx.Tx, dreamID string) error {
-	rows, err := tx.Query(ctx, `DELETE FROM files WHERE dream_id = $1 RETURNING object_key`, dreamID)
+	rows, err := tx.Query(ctx, `DELETE FROM files WHERE dream_id = $1 RETURNING `+store.FileObjectKeySQL, dreamID)
 	if err != nil {
 		return err
 	}

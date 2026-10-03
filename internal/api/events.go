@@ -16,6 +16,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 )
@@ -1450,7 +1451,7 @@ func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, t
 // key at acceptance, so deleting the source file mid-outcome cannot break
 // replay or grading. A snapshot orphaned by a failed commit is harmless —
 // keyed by an outcome id that never came to exist. The bytes are read at the
-// row's object_key, on the transaction that has just taken the row FOR SHARE
+// row's key, on the transaction that has just taken the row FOR SHARE
 // (events.ValidateDefineOutcomes), so a session's copy of an upload (#578)
 // reads as the upload does.
 func (s *server) snapshotRubrics(ctx context.Context, db querier, defs []events.DefineOutcome) error {
@@ -1462,7 +1463,7 @@ func (s *server) snapshotRubrics(ctx context.Context, db querier, defs []events.
 			return errInvalid("file rubrics require the files surface, which this deployment does not configure")
 		}
 		var key string
-		if err := db.QueryRow(ctx, `SELECT object_key FROM files WHERE id = $1`, d.RubricFileID).Scan(&key); err != nil {
+		if err := db.QueryRow(ctx, `SELECT `+store.FileObjectKeySQL+` FROM files WHERE id = $1`, d.RubricFileID).Scan(&key); err != nil {
 			return fmt.Errorf("read rubric file %s: %w", d.RubricFileID, err)
 		}
 		rc, size, err := s.blobs.Get(ctx, key)

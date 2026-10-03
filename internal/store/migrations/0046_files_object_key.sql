@@ -1,97 +1,201 @@
--- A files row names the object that holds its bytes (#578). Until now every
--- reader derived the key from the row's own id (blob.FilesKey: files/{id}),
--- which made "one object per row" a law of the schema. A session's file mount
--- now mints a session-scoped copy, as the reference does: a row of its own,
--- with a fresh file_id the session's resources[] echo. The copy aliases the
--- upload's object instead of duplicating its bytes, so two rows can name one
--- object and the key has to be data.
+-- A files row can name another row's object (#578). Until now every reader
+-- derived a file's key from its own id (blob.FilesKey: files/{id}), which made
+-- "one object per row" a law of the schema. A session's file mount now mints a
+-- session-scoped copy, as the reference does: a row of its own, with a fresh
+-- file_id the session's resources[] echo, aliasing the upload's object instead
+-- of duplicating its bytes.
 --
--- object_key is that key, and every reader of a file's bytes reads it. Each
--- existing row is backfilled to the key its id derived, which is where its
--- bytes are, so a row written before this keeps working unchanged. A row
--- inserted without one gets the same derivation from the trigger below. That
--- is for a replica still on the previous build, which writes no object_key,
--- during a rolling upgrade. This build always writes the key itself.
+-- object_key is the key a copy's bytes are at, and NULL on every row that owns
+-- its object: an upload, a harvested output, a dream transcript, whose key is
+-- still its own id's. Every reader of a file's bytes reads
+-- coalesce(object_key, 'files/' || id) (store.FileObjectKeySQL). NULL is the
+-- owner's value so that this migration rewrites no row and a previous build's
+-- INSERT, which names neither column, writes an owner correctly.
+-- source_file_id is the row a copy was minted from. The two are set together,
+-- on a copy, or not at all; the CHECK is NOT VALID because both columns are
+-- new and NULL on every existing row, which it already accepts, so validating
+-- would scan the table to learn nothing. Neither is a foreign key: a copy
+-- outlives its source.
 --
--- source_file_id is the row a copy was minted from, and NULL for every row
--- that owns its object: an upload, a harvested output, a dream transcript. Two
--- things read it. The outputs harvest replaces only its own snapshot rows, and
--- the grader lists only those. The (scope, filename) uniqueness below is the
--- harvest's per-path key, and a copy is not under it: two resources mounting
--- one upload get two copies with one filename, and a copy may share its name
--- with an output. It is not a foreign key, because a copy outlives its source.
+-- source_file_id is what tells a copy from the rows its session produced. The
+-- outputs harvest replaces only its own snapshot rows, and the grader lists
+-- only those. The (scope, filename) uniqueness is the harvest's per-path key
+-- and leaves copies out: two resources mounting one upload get two copies with
+-- one filename, and a copy may share its name with an output. And the guard
+-- and the tombstone trigger below act on copies alone.
 --
--- Rolling upgrade. Only the control plane mints copies, so roll the brain and
--- executor fleets before it. Two previous-build readers mistake a copy for
--- something else: an executor's harvest deletes every session-scoped row,
--- copies included, and a brain grades copies as deliverables. The rest of the
--- previous build degrades without losing anything. It reads a copy's bytes at
--- its own id's key, where no object exists, so that mount is skipped and the
--- run goes on. It cannot delete a shared object, because the trigger on
--- pending_object_deletes drops a key a live row still names, whoever enqueues
--- it. It can leak one: when it deletes the last row naming a shared object, it
--- enqueues that row's own id key instead, and the object is left behind.
+-- A copy is deleted only by a transaction that has said it means to, with
+-- set_config('map.copy_delete', 'on', true) (store.AllowFileCopyDeletes). Any
+-- other DELETE skips the row, as if its WHERE had not matched. That is for the
+-- previous build, which knows nothing of copies and deletes every
+-- session-scoped row in two places: its executor's harvest, which would take a
+-- live session's copies and leave resources[] naming files that are gone, and
+-- its session delete. This build sets the flag in the three transactions that
+-- remove copies: DELETE /v1/files/{id}, the session delete and the expiry
+-- sweep. store's TestEveryFilesDeleteDecidesAboutCopies fails on a DELETE FROM
+-- files it has not been told about, so a new remover is a decision, not a
+-- silent skip.
 --
--- The ALTERs take files ACCESS EXCLUSIVE, held until the migration commits,
--- and the backfill rewrites every row inside that. So, as 0043 and 0045 do,
--- this waits at most 2s for the lock. Migrate retries the give-up (55P03).
+-- The session's copies follow its tombstone. A previous build's session
+-- delete writes the deleted_sessions row too, in the same transaction and
+-- under the session's row lock, so the trigger on it deletes the copies the
+-- guard kept from that build's DELETE, and owes their object through the
+-- count below. This build's delete has set the flag by then and deletes them
+-- itself, so the trigger leaves them to it. It rides the tombstone rather than
+-- the sessions row so this migration need not lock the busiest table.
+--
+-- Reference counting, at the one door every object delete goes through. Each
+-- remover enqueues the key of every row it deletes, in the same transaction
+-- (plan 50, #703), and the trigger on pending_object_deletes drops a key some
+-- files row still names. So deleting an upload whose copies live leaves their
+-- object alone, and deleting the last row that names it enqueues it for the
+-- drain. It sits in the database so a previous build's remover is counted too:
+-- its unconditional enqueue would otherwise reach a drain that deletes
+-- whatever is queued.
+--
+-- The lock is for two transactions that each delete one of the last two rows
+-- naming a key. Each would see the other's row still there and skip the key,
+-- and the object would never be deleted. So a check that finds a row takes a
+-- transaction-scoped advisory lock on the key and looks again. The lock is
+-- held to commit, so the second checker waits out the first one and then sees
+-- its delete. Looking again sees that commit only under READ COMMITTED, where
+-- each statement takes a new snapshot, so the trigger refuses any other
+-- isolation level outright rather than skipping a key it has stopped being
+-- able to count. A key no other row names, which is almost every key, takes no
+-- lock. Class 578 keeps these locks apart from the single-key advisory locks
+-- the migrator and the executor take; the one-key and two-key forms are
+-- separate lock spaces. store.PendingObjectDeleteInsertSQL inserts its keys in
+-- hashtext order, the lock's own id, so two removers take a shared pair in one
+-- order; two keys that collide are one lock.
+--
+-- A copy is minted with its source row held FOR SHARE (internal/api's
+-- mountFileCopy), so it cannot name a key whose last row is being deleted: the
+-- delete waits for the mint to commit, and this check then sees the copy.
+--
+-- Rolling upgrade: no order is needed between the binaries, so one helm
+-- upgrade or compose up rolls them together. No previous-build statement
+-- deletes a copy, or an object some row still names. A previous-build replica
+-- degrades while it overlaps this build, without losing anything:
+--   * executor: a copy has no object at its own id's key, where that build
+--     reads, so the mount is skipped and the turn runs without it.
+--   * brain: a grading cycle lists a session's copies among its deliverables,
+--     by name, MIME type and size; their contents are not inlined, because the
+--     read at the copy's own key finds nothing and that build lists only.
+--   * control plane: a create, a resources add or a deployment fire mounts
+--     the upload itself, as before #578. DELETE /v1/files/{copy} answers 404,
+--     the guard leaving that build's DELETE nothing to report, and its expiry
+--     sweep skips expired copies until this build's sweeps them. A rubric
+--     naming a copy answers 500, and so does a worker's GET
+--     /v1/files/{copy}/content, with a "file missing from object storage"
+--     ERROR log: both read the copy's own key. Its unfiltered GET /v1/files
+--     lists session-scoped rows, copies included.
+--   * any of them can meet a deadlock (40P01), which fails that one
+--     transaction: that build enqueues its keys unsorted, so the count's
+--     advisory locks come in no fixed order, and locks the rows it deletes in
+--     scan order rather than by id.
+--
+-- Every table lock this needs is taken first, before any work, so a give-up
+-- wastes no work and nothing waits for a second lock while holding the first
+-- for long. The order is the one a session delete takes the tables in, the
+-- tombstone, the files and then the queue, and until the trigger this adds no
+-- transaction reads files after writing the queue, so no live transaction
+-- holds one of these while waiting for one taken before it. files is held ACCESS EXCLUSIVE from there to the
+-- commit, which covers three index builds; on a million rows that measured
+-- under 0.4s, and every reader and writer of files queues behind it.
+-- pending_object_deletes and deleted_sessions are held SHARE ROW EXCLUSIVE,
+-- for their triggers, which for as long stops every enqueue, the drain and
+-- session deletes, but not the reaper's reads. As 0043 and 0045 do, this waits
+-- at most 2s for each lock, and migrate.go retries the give-up (55P03) and a
+-- deadlock (40P01).
 SET LOCAL lock_timeout = '2s';
 
-ALTER TABLE files ADD COLUMN object_key text, ADD COLUMN source_file_id text;
-UPDATE files SET object_key = 'files/' || id;
-ALTER TABLE files ALTER COLUMN object_key SET NOT NULL;
+LOCK TABLE deleted_sessions IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE files IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE pending_object_deletes IN SHARE ROW EXCLUSIVE MODE;
 
--- A BEFORE trigger runs ahead of the NOT NULL check, so a previous build's
--- INSERT, which names no object_key, passes it carrying the key that build is
--- about to put its bytes at.
-CREATE FUNCTION files_object_key_default() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    IF NEW.object_key IS NULL THEN
-        NEW.object_key := 'files/' || NEW.id;
-    END IF;
-    RETURN NEW;
-END $$;
+ALTER TABLE files
+    ADD COLUMN object_key text,
+    ADD COLUMN source_file_id text,
+    ADD CONSTRAINT files_copy_pair_agrees
+        CHECK ((object_key IS NULL) = (source_file_id IS NULL)) NOT VALID;
 
-CREATE TRIGGER files_object_key_default BEFORE INSERT ON files
-    FOR EACH ROW EXECUTE FUNCTION files_object_key_default();
-
--- The reference count's lookup, below.
-CREATE INDEX files_object_key_idx ON files (object_key);
+-- The reference count's lookup of copies; owners are found by id.
+CREATE INDEX files_object_key_idx ON files (object_key) WHERE object_key IS NOT NULL;
 
 DROP INDEX files_scope_filename_idx;
 CREATE UNIQUE INDEX files_scope_filename_idx ON files (scope_id, filename)
     WHERE scope_id IS NOT NULL AND source_file_id IS NULL;
 
--- Reference counting, at the one door every object delete goes through. Each
--- remover enqueues the key of every row it deletes, in the same transaction
--- (plan 50, #703), and this drops a key some files row still names. So deleting
--- an upload whose copies live leaves their object alone, and deleting the last
--- row that names it enqueues it for the drain. It sits in the database rather
--- than in store.EnqueueObjectDeletes so a previous build's remover is counted
--- too. Otherwise its unconditional enqueue would reach a drain that deletes
--- whatever is queued.
---
--- The lock is for two transactions that each delete one of the last two rows
--- naming a key. Under READ COMMITTED each would see the other's row still
--- there and skip the key, and the object would never be deleted. So a check
--- that finds a row takes a transaction-scoped advisory lock on the key and
--- looks again. The lock is held to commit, so the second checker waits out the
--- first one and then sees its delete. A key no other row names, which is almost
--- every key, takes no lock. Class 578 keeps these locks apart from the
--- single-key advisory locks the migrator and the executor take; the one-key and
--- two-key forms are separate lock spaces. store.EnqueueObjectDeletes sorts its
--- keys so two removers take a shared pair of keys in one order.
---
--- A copy is minted with its source row held FOR SHARE (internal/api's
--- mountFileCopy), so it cannot name a key whose last row is being deleted: the
--- delete waits for the mint to commit, and this check then sees the copy.
+-- GET /v1/files without scope_id lists unscoped rows only, newest first. Every
+-- session-scoped row (each mount's copy, each harvested output) would
+-- otherwise be walked past in files_created_at_id_idx to find them, and copies
+-- grow with every session that mounts a file.
+CREATE INDEX files_unscoped_created_at_id_idx ON files (created_at DESC, id DESC)
+    WHERE scope_id IS NULL;
+
+CREATE FUNCTION files_copy_delete_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.source_file_id IS NOT NULL
+       AND current_setting('map.copy_delete', true) IS DISTINCT FROM 'on' THEN
+        RETURN NULL;
+    END IF;
+    RETURN OLD;
+END $$;
+
+CREATE TRIGGER files_copy_delete_guard BEFORE DELETE ON files
+    FOR EACH ROW EXECUTE FUNCTION files_copy_delete_guard();
+
+CREATE FUNCTION files_copies_follow_session() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    keys text[];
+BEGIN
+    IF current_setting('map.copy_delete', true) = 'on' THEN
+        RETURN NULL;
+    END IF;
+    PERFORM set_config('map.copy_delete', 'on', true);
+    WITH gone AS (
+        DELETE FROM files
+         WHERE id IN (SELECT id FROM files
+                       WHERE scope_type = 'session' AND scope_id = NEW.id
+                         AND source_file_id IS NOT NULL
+                       ORDER BY id
+                       FOR UPDATE)
+        RETURNING object_key)
+    SELECT array_agg(object_key) INTO keys FROM gone;
+    PERFORM set_config('map.copy_delete', '', true);
+    IF keys IS NOT NULL THEN
+        INSERT INTO pending_object_deletes (object_key)
+        SELECT k FROM unnest(keys) AS k ORDER BY hashtext(k)
+        ON CONFLICT (object_key) DO NOTHING;
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE TRIGGER files_copies_follow_session AFTER INSERT ON deleted_sessions
+    FOR EACH ROW EXECUTE FUNCTION files_copies_follow_session();
+
+-- Whether some files row names the object at k: a copy by its object_key, an
+-- owner by its id.
+CREATE FUNCTION files_name_object(k text) RETURNS boolean
+LANGUAGE sql AS $$
+    SELECT EXISTS (SELECT 1 FROM files WHERE object_key = k)
+        OR (starts_with(k, 'files/')
+            AND EXISTS (SELECT 1 FROM files WHERE id = substr(k, 7) AND object_key IS NULL))
+$$;
+
 CREATE FUNCTION pending_object_deletes_skip_referenced() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM files WHERE object_key = NEW.object_key) THEN
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION 'pending_object_deletes: an object delete is enqueued under READ COMMITTED only, not %',
+            current_setting('transaction_isolation')
+            USING ERRCODE = 'invalid_transaction_state';
+    END IF;
+    IF files_name_object(NEW.object_key) THEN
         PERFORM pg_advisory_xact_lock(578, hashtext(NEW.object_key));
-        IF EXISTS (SELECT 1 FROM files WHERE object_key = NEW.object_key) THEN
+        IF files_name_object(NEW.object_key) THEN
             RETURN NULL;
         END IF;
     END IF;

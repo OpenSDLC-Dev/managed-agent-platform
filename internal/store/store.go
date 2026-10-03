@@ -5,9 +5,9 @@
 // database at startup.
 // Query SQL is not owned here — it belongs to the packages that issue it
 // (internal/api, internal/events, internal/queue and friends). The exceptions
-// are SessionTombstoneInsertSQL and FileLiveSQL below, which live on the
-// schema's owner precisely because separate packages must agree on them
-// exactly.
+// are SessionTombstoneInsertSQL, FileLiveSQL and FileObjectKeySQL below, which
+// live on the schema's owner precisely because separate packages must agree on
+// them exactly.
 //
 // Three properties of Migrate (migrate.go) are contract, not implementation
 // detail, and are what a contributor breaks by accident.
@@ -47,7 +47,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -87,6 +86,28 @@ import (
 // out. Composing it there would guard a state no writer can reach.
 const FileLiveSQL = `(expires_at IS NULL OR expires_at > now())`
 
+// FileObjectKeySQL is the key a files row's bytes are at (#578, migration
+// 0046): a session's copy of a file names its source's object in object_key,
+// and every other row, which owns its object, leaves object_key NULL and keeps
+// the key its id derives — blob.FilesKey's files/{id}, spelled again here
+// because Postgres has to compute it too. Every reader of a file's bytes reads
+// this rather than deriving a key from the id it was asked for, which would
+// find nothing behind a copy. Unqualified, as FileLiveSQL is.
+const FileObjectKeySQL = `coalesce(object_key, 'files/' || id)`
+
+// AllowFileCopyDeletes lets the caller's transaction delete a session's file
+// copies. Without it a DELETE skips every copy it matches, as if its WHERE had
+// not (migration 0046's guard): that is what keeps a previous build, which
+// deletes every session-scoped row, from taking copies during a rolling
+// upgrade. Transaction-local, so it ends with the commit and never reaches the
+// next transaction on the pooled connection. store's
+// TestEveryFilesDeleteDecidesAboutCopies holds the list of the DELETEs that
+// call it and those that deliberately do not.
+func AllowFileCopyDeletes(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT set_config('map.copy_delete', 'on', true)`)
+	return err
+}
+
 // SessionTombstoneInsertSQL writes a session's deleted_sessions tombstone —
 // id and environment kind, read while the sessions row can still be joined,
 // so it must run before the DELETE in the same transaction. One definition on
@@ -110,8 +131,13 @@ const SessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment
 // inside a transaction that holds the session row. Conflicts are ignored: an
 // object already owed is owed once, and a key enqueued twice would otherwise
 // fail a delete that has nothing wrong with it.
+//
+// The keys go in in hashtext order, which is the id of the advisory lock
+// migration 0046's reference count can take per key: two removers sharing a
+// pair of keys take the pair in one order, and two keys whose hashes collide
+// are one lock, so no order between them is owed.
 const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object_key)
-	 SELECT unnest($1::text[])
+	 SELECT k FROM unnest($1::text[]) AS k ORDER BY hashtext(k)
 	 ON CONFLICT (object_key) DO NOTHING`
 
 // EnqueueObjectDeletes runs that statement on the caller's transaction, and is
@@ -127,15 +153,16 @@ const PendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object
 //
 // A key some files row still names is dropped by the database, not owed:
 // migration 0046's trigger counts the references, because a session's file
-// copy shares its upload's object (#578). The keys go in sorted, on a copy of
-// the caller's slice, because that count can take an advisory lock per key, and
-// two removers taking a shared pair in opposite orders would deadlock.
+// copy shares its upload's object (#578). That count can take an advisory lock
+// per key and hold it to the commit, so a remover enqueues once it has deleted
+// every row it is going to: a row lock asked for after one of these locks can
+// close a cycle with a remover holding that row and waiting on this key. The
+// transaction must be READ COMMITTED, which the trigger checks.
 func EnqueueObjectDeletes(ctx context.Context, tx pgx.Tx, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	sorted := slices.Sorted(slices.Values(keys))
-	_, err := tx.Exec(ctx, PendingObjectDeleteInsertSQL, sorted)
+	_, err := tx.Exec(ctx, PendingObjectDeleteInsertSQL, keys)
 	return err
 }
 

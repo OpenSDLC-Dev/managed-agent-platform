@@ -30,6 +30,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
 	"github.com/jackc/pgx/v5"
@@ -591,7 +592,7 @@ func (b *Brain) deliverablesSection(ctx context.Context, sid domain.ID) (string,
 	// (#578), and are its inputs rather than its work: source_file_id marks
 	// them, and the harvest's own rows have none.
 	rows, err := b.pool.Query(ctx,
-		`SELECT id, filename, mime_type, size_bytes, object_key FROM files
+		`SELECT id, filename, mime_type, size_bytes, `+store.FileObjectKeySQL+` FROM files
 		  WHERE scope_type = 'session' AND scope_id = $1 AND source_file_id IS NULL
 		  ORDER BY filename`,
 		sid.String())
@@ -653,7 +654,7 @@ func inlineableMime(m string) bool {
 }
 
 // readDeliverable fetches one harvested file's bytes from the blob store, at
-// its row's object_key. The registry size bounds the read rather than being
+// its row's key. The registry size bounds the read rather than being
 // trusted (the rubricText posture): the read caps one byte past it, and a blob
 // whose length disagrees with its row is an error — the caller lists the file
 // instead of inlining it truncated, and the budget deduction of f.size stays

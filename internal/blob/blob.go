@@ -24,10 +24,9 @@ var ErrNotFound = errors.New("blob: object not found")
 // dream runner all write files objects.
 //
 // It names where a writer puts bytes, never where a reader finds them. Since
-// #578 a files row records its key in object_key, and a session's copy of an
-// upload records the upload's, so every reader reads the column; migration 0046
-// backfills it, and fills it for a previous build's INSERT, with this same
-// layout.
+// #578 a session's copy of an upload is a files row of its own that names the
+// upload's key in object_key, so every reader reads store.FileObjectKeySQL,
+// which spells this same layout in SQL for every row that owns its object.
 func FilesKey(id string) string { return "files/" + id }
 
 // SessionCheckpointKey is the object-storage key for a session's workspace

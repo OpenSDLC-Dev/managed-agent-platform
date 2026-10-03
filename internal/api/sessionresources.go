@@ -1066,7 +1066,7 @@ func mountFileCopy(ctx context.Context, db querier, sessionID, fileID string) (s
 	err := db.QueryRow(ctx,
 		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id,
 		                    expires_at, object_key, source_file_id)
-		 SELECT $1, filename, mime_type, size_bytes, false, 'session', $2, expires_at, object_key, id
+		 SELECT $1, filename, mime_type, size_bytes, false, 'session', $2, expires_at, `+store.FileObjectKeySQL+`, id
 		   FROM files WHERE id = $3 AND `+store.FileLiveSQL+` FOR SHARE
 		 RETURNING id`,
 		domain.NewID(domain.PrefixFile).String(), sessionID, fileID).Scan(&copyID)

@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // The per-resource session copy (#578): every path that mounts a file mints
@@ -441,7 +442,7 @@ func TestACopyExpiresWithItsUpload(t *testing.T) {
 
 // A legacy session — written before #578, its resources[] naming the upload
 // itself — keeps working: the worker lane serves the upload it mounts, from
-// the key migration 0046 backfilled to the upload's own.
+// the key its id derives, which migration 0046 left it.
 func TestALegacySessionKeepsMountingTheUpload(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := selfHostedFixture(t, s)
@@ -459,7 +460,18 @@ func TestALegacySessionKeepsMountingTheUpload(t *testing.T) {
 		sid, uploadID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(context.Background(), `DELETE FROM files WHERE id = $1`, copyID); err != nil {
+	tx, err := s.pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err := store.AllowFileCopyDeletes(context.Background(), tx); err != nil {
+		t.Fatal(err)
+	}
+	if tag, err := tx.Exec(context.Background(), `DELETE FROM files WHERE id = $1`, copyID); err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("delete the copy: %v rows, err %v", tag.RowsAffected(), err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := mountedFileID(t, createGetSession(t, s, sid)); got != uploadID {

@@ -1681,6 +1681,14 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	}); err != nil {
 		return nil, err
 	}
+	// This delete takes the session's file copies itself, with its outputs and
+	// before it enqueues a key (EnqueueObjectDeletes says why that order), so
+	// it says so before the tombstone: migration 0046's trigger on
+	// deleted_sessions removes the copies for a previous build's delete, which
+	// cannot, and leaves them to a transaction that has said it will.
+	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
+		return nil, err
+	}
 	// The tombstone rides the deleting transaction, written while the row can
 	// still be joined: it is the affirmative evidence the reaper's deleted
 	// tier runs on — a missing row alone also describes a sandbox that was
@@ -1729,9 +1737,10 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// settle — a copy is scoped to the session without being produced by it —
 	// so that is ours, INFERRED (docs/DIVERGENCES.md); deleting one never takes
 	// its upload's bytes, which the reference count keeps while the upload
-	// lives. files.scope_id is polymorphic and so carries no foreign key,
-	// which is why this is by hand rather than a cascade — the checkpoint row
-	// above is deleted for the same reason (#266). Since 0036 the schema does
+	// lives, and only a transaction that allows it can delete a copy at all
+	// (AllowFileCopyDeletes, above). files.scope_id is polymorphic and so
+	// carries no foreign key, which is why this is by hand rather than a
+	// cascade — the checkpoint row above is deleted for the same reason (#266). Since 0036 the schema does
 	// hold half of that "exactly" — the two scope columns are present together
 	// or not at all — but not the half this clause turns on: nothing pins the
 	// type's value, so a scope_id paired with some other type would still slip
@@ -1749,7 +1758,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// one, DELETE /v1/files/{id} among them, ask for no session lock afterwards,
 	// so no reverse edge exists for this to close a cycle against.
 	deliverables, err := tx.Query(ctx,
-		`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING object_key`, id)
+		`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 RETURNING `+store.FileObjectKeySQL, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1758,10 +1767,10 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// The bytes are owed here rather than deleted here (plan 50, #645 + #320).
-	// Enqueued in this transaction, from the ids it has just taken, so the
-	// record of what is owed commits with the rows that stopped referring to
-	// it: an enqueue after the commit would leave the crash window it exists to
-	// close still open, and a delete on the request path — which is what this
+	// Enqueued in this transaction, from the keys of the rows it has just
+	// taken, so the record of what is owed commits with the rows that stopped
+	// referring to it: an enqueue after the commit would leave the crash
+	// window it exists to close still open, and a delete on the request path — which is what this
 	// replaces — left anything a slow or refusing store did not finish orphaned
 	// for good, since nothing revisited it.
 	//

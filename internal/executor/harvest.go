@@ -373,12 +373,14 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 	// index): delete-all + insert-all under the lock replaces changed paths,
 	// drops vanished ones, and keeps the whole move atomic. "All" is the
 	// harvest's own rows: the session's copies of the files it mounts are
-	// scoped to it as well, and carry the source_file_id these never do (#578).
+	// scoped to it as well, and carry the source_file_id these never do (#578);
+	// migration 0046's guard would keep them from this DELETE anyway, which is
+	// what protects them from a previous build's harvest.
 	var oldKeys []string
 	if replace {
 		rows, qerr := tx.Query(ctx,
 			`DELETE FROM files WHERE scope_type = 'session' AND scope_id = $1 AND source_file_id IS NULL
-			 RETURNING object_key`,
+			 RETURNING `+store.FileObjectKeySQL,
 			item.SessionID.String())
 		if qerr != nil {
 			return qerr
@@ -388,9 +390,9 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 		}
 		for _, f := range files {
 			if _, err := tx.Exec(ctx,
-				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, object_key)
-				 VALUES ($1, $2, $3, $4, true, 'session', $5, $6)`,
-				f.id.String(), f.path, f.mime, f.size, item.SessionID.String(), blob.FilesKey(f.id.String())); err != nil {
+				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+				 VALUES ($1, $2, $3, $4, true, 'session', $5)`,
+				f.id.String(), f.path, f.mime, f.size, item.SessionID.String()); err != nil {
 				return err
 			}
 		}
@@ -415,8 +417,9 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 		return err
 	}
 	// The replaced snapshot's bytes go unreferenced the moment these deletes
-	// commit, and the ids are the objects' only names — so the debt is written
-	// down by the same transaction, not after it (plan 50 decision 2, #703).
+	// commit, and the rows are the objects' only names, bar a copy another
+	// session mounted (below) — so the debt is written down by the same
+	// transaction, not after it (plan 50 decision 2, #703).
 	// The old shape removed the objects best-effort once the commit had already
 	// taken the names away, which a store having a bad day turned into bytes
 	// nothing could enumerate.

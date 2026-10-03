@@ -159,11 +159,11 @@ func (e *Executor) materializeFile(ctx context.Context, sb sandbox.Sandbox, m fi
 	// here would make the platform-managed half serve what the BYOC half refuses
 	// (#655, plan 49).
 	//
-	// The bytes are at the row's object_key, not at a key derived from the id:
-	// a session's copy of an upload shares the upload's object (#578).
+	// The bytes are at the row's key, not at one derived from the id: a
+	// session's copy of an upload shares the upload's object (#578).
 	var key string
 	err := e.pool.QueryRow(ctx,
-		`SELECT object_key FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).Scan(&key)
+		`SELECT `+store.FileObjectKeySQL+` FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).Scan(&key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s", errFileMissing, m.FileID)
 	}
