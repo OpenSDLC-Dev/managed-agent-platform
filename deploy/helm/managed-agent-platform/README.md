@@ -142,7 +142,10 @@ checkpoint's, goes in at any level. Each platform transaction that enqueues a ke
 fail it; a hand-run transaction inherits the default unless it says
 `BEGIN ISOLATION LEVEL READ COMMITTED`. Nothing else is asked of it: a `DELETE FROM files`
 takes a copy (a row with `source_file_id` set) like any other row, and an
-`INSERT INTO deleted_sessions`, a session's tombstone, leaves its files alone.
+`INSERT INTO deleted_sessions`, a session's tombstone, leaves its files alone: to take
+them with a session you delete by hand, delete its session-scoped `files` rows
+(`RETURNING coalesce(object_key, 'files/' || id)`) and enqueue those keys in the same
+`READ COMMITTED` transaction, as the platform's session delete does.
 
 ### Cloud SQL Auth Proxy (`cloudSQLProxy.enabled`)
 
