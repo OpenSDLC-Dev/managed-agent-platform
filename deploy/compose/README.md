@@ -10,8 +10,11 @@ laptop. It's the compose companion to the [Helm chart](../helm); same binaries
 (built from the repo-root `Dockerfile`), wired for local use.
 
 The **BYOC worker** is intentionally not here — it runs on your own compute,
-outside the platform. Run it separately with `go run ./cmd/worker` (or the built
-`worker` binary) pointed at this controlplane.
+outside the platform. Run it separately, pointed at this controlplane and from
+the same release as this stack: a release's `worker` binary, or from source
+`make ripgrep && go run ./cmd/worker`. Without `make ripgrep` first the worker
+still runs, but logs a warning at startup and answers every `grep` call with a
+tool error saying it carries no ripgrep.
 
 ## Quick start
 

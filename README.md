@@ -97,8 +97,8 @@ The executor and the worker embed the static ripgrep their `grep` tool runs in
 a sandbox. It is fetched, not committed: `make ripgrep` downloads the pinned
 release archives from GitHub and checks their digests, and `make test`, `make
 eval`, the release targets and the Dockerfile run it first. A plain `go build`
-without it still compiles, into binaries whose `grep` reports that they carry
-no ripgrep.
+or `go run` without it still compiles, into an executor and a worker that log a
+warning at startup and whose `grep` reports that they carry no ripgrep.
 
 ```bash
 make build                 # build (go build ./...)

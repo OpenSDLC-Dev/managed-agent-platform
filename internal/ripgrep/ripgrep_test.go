@@ -164,6 +164,22 @@ func TestOpenRefusesWhatThePinDoesNot(t *testing.T) {
 	}
 }
 
+// Check is Open over every pinned archive: nil for a build carrying them all,
+// and otherwise the first failure — the case a startup warning exists for
+// being a build that fetched none.
+func TestCheckOpensEveryPinnedArchive(t *testing.T) {
+	if err := Check(); err != nil {
+		t.Fatalf("Check: %v — run `make ripgrep` first", err)
+	}
+	good := archive(t, map[string]string{"ripgrep-9.9.9-x86_64-unknown-linux-musl/rg": "\x7fELF-rg"})
+	if err := check(holding(good), pinning(digest(good))); err != nil {
+		t.Errorf("check over a good archive: %v", err)
+	}
+	if err := check(holding(nil), pinning(digest(good))); !errors.Is(err, ErrNotEmbedded) {
+		t.Errorf("check over nothing fetched = %v, want ErrNotEmbedded", err)
+	}
+}
+
 // The embedded manifest is the file in the tree, read whole: a field it
 // carries that Manifest does not would be a pin nothing enforces.
 func TestPinnedIsTheManifestFile(t *testing.T) {

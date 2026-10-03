@@ -38,7 +38,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -96,6 +98,22 @@ func mustLoadManifest() Manifest {
 // stream of exactly size bytes, decompressed from the embedded archive after
 // the archive's digest has been checked against the manifest.
 func Open(goarch string) (rg io.Reader, size int64, err error) { return open(assets, Pinned, goarch) }
+
+// Check opens every pinned archive as an install would, and answers the
+// first that cannot be — ErrNotEmbedded in a build made without `make
+// ripgrep`. The executor and the worker call it at startup, so a build whose
+// grep can only answer with a tool error says so in its log before a model
+// finds out.
+func Check() error { return check(assets, Pinned) }
+
+func check(fsys fs.FS, m Manifest) error {
+	for _, arch := range slices.Sorted(maps.Keys(m.Archives)) {
+		if _, _, err := open(fsys, m, arch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func open(fsys fs.FS, m Manifest, goarch string) (io.Reader, int64, error) {
 	a, ok := m.Archives[goarch]
