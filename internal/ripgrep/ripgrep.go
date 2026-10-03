@@ -17,7 +17,10 @@
 // release tarballs, the Dockerfile's build stage — runs it first. A build that
 // skipped it still compiles, because the manifest alone satisfies the embed,
 // and Open then answers ErrNotEmbedded: grep is a tool error in that build,
-// never a second implementation. Open re-checks the digest on every call, so a
+// never a second implementation. The embed is the whole directory — a pattern
+// naming the archives would fail to compile without them — so the fetch also
+// removes whatever else stands there, and a build it ran before carries the
+// manifest and the pin alone. Open re-checks the digest on every call, so a
 // stray file under the pinned name cannot be embedded and run in its place.
 //
 // ripgrep is dual-licensed MIT and Unlicense; NOTICE at the repository root

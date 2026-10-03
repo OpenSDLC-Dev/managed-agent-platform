@@ -32,7 +32,8 @@ steps:
       - -t
       - "${_IMAGE_PREFIX}/executor:${_TAG}"
       - .
-  # Reuses the build stage's layers from the same daemon, so this is cheap.
+  # Shares the module-download layer with the step above on the same daemon
+  # and compiles only the gate's own binary, fetching no ripgrep.
   - name: gcr.io/cloud-builders/docker
     id: gate
     env: ["DOCKER_BUILDKIT=1"] # same reason as the step above

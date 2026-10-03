@@ -5,9 +5,13 @@
 // file of that name with the pinned sha256, and lands only once its own bytes
 // hash to the pin: a download is written beside its target under a dot name
 // the embed never picks up, and renamed into place after the digest matches.
-// An archive the manifest no longer names is removed, so a build embeds the
-// pin and nothing older. A host that cannot reach GitHub can put the archives
-// there by any other route; they are checked all the same.
+// Then everything else in the directory is removed — an archive the manifest
+// no longer names, an interrupted download, a stray file or directory — but
+// the manifest: internal/ripgrep embeds the whole directory, since a build
+// made without the archives must still compile, so what it holds is what a
+// build carries, and this leaves it the manifest and the pin. A host that
+// cannot reach GitHub can put the archives there by any other route; they are
+// checked all the same.
 package main
 
 import (
@@ -24,7 +28,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/ripgrep"
@@ -51,8 +54,12 @@ func main() {
 	}
 }
 
+// manifestName is the manifest's file in the assets directory, which
+// internal/ripgrep embeds under that name.
+const manifestName = "manifest.json"
+
 func fetch(ctx context.Context, client *http.Client, m ripgrep.Manifest, dir string, logf func(string, ...any)) error {
-	keep := map[string]bool{}
+	keep := map[string]bool{manifestName: true}
 	for _, arch := range slices.Sorted(maps.Keys(m.Archives)) {
 		a := m.Archives[arch]
 		keep[a.Name()] = true
@@ -84,10 +91,9 @@ func fetch(ctx context.Context, client *http.Client, m ripgrep.Manifest, dir str
 		return err
 	}
 	for _, e := range entries {
-		n := e.Name()
-		stale := (strings.HasSuffix(n, ".tar.gz") && !keep[n]) || strings.HasPrefix(n, partPrefix)
-		if e.Type().IsRegular() && stale {
-			if err := os.Remove(filepath.Join(dir, n)); err != nil {
+		if n := e.Name(); !keep[n] {
+			// RemoveAll removes a link, never what it names.
+			if err := os.RemoveAll(filepath.Join(dir, n)); err != nil {
 				return err
 			}
 			logf("removed %s", n)

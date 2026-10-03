@@ -63,23 +63,38 @@ func names(t *testing.T, dir string) []string {
 func quiet(string, ...any) {}
 
 // A fetch lands each pinned archive once, leaves an archive that is already
-// the pin alone, and sweeps what the pin no longer names — an older archive,
-// an interrupted download — while keeping the manifest and anything else.
+// the pin alone, and sweeps everything else but the manifest — an older
+// archive, an interrupted download, a stray file, a directory, a link, whose
+// target it leaves alone — since the embed carries whatever the directory
+// holds.
 func TestFetchLandsThePinAndOnlyThePin(t *testing.T) {
 	backoff = 0
 	srv, hits := server(t, map[string]string{"rg-amd64.tar.gz": "amd64 bytes", "rg-arm64.tar.gz": "arm64 bytes"})
 	m := manifest(srv.URL, map[string]string{"amd64": sum("amd64 bytes"), "arm64": sum("arm64 bytes")})
-	dir := t.TempDir()
-	for _, f := range []string{"manifest.json", "ripgrep-1.0.0-old.tar.gz", partPrefix + "123", "notes.txt"} {
-		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+	dir, elsewhere := t.TempDir(), t.TempDir()
+	for _, f := range []string{"manifest.json", "ripgrep-1.0.0-old.tar.gz", partPrefix + "123", "notes.txt", ".DS_Store",
+		"old/ripgrep-1.0.0-old.tar.gz", filepath.Join(elsewhere, "kept")} {
+		if !filepath.IsAbs(f) {
+			f = filepath.Join(dir, f)
+		}
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
 	}
 	if err := fetch(context.Background(), srv.Client(), m, dir, quiet); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if got, want := names(t, dir), []string{"manifest.json", "notes.txt", "rg-amd64.tar.gz", "rg-arm64.tar.gz"}; !slices.Equal(got, want) {
+	if got, want := names(t, dir), []string{"manifest.json", "rg-amd64.tar.gz", "rg-arm64.tar.gz"}; !slices.Equal(got, want) {
 		t.Fatalf("assets = %v, want %v", got, want)
+	}
+	if got := names(t, elsewhere); !slices.Equal(got, []string{"kept"}) {
+		t.Errorf("the link's target holds %v, want what it held", got)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "rg-arm64.tar.gz")); string(b) != "arm64 bytes" {
 		t.Errorf("arm64 archive = %q", b)

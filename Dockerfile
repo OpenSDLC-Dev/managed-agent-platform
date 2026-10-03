@@ -6,20 +6,24 @@
 # Helm chart's Deployments invoke, so this one image serves compose and Helm both.
 #
 # syntax=docker/dockerfile:1
-# The build stages (source, and the two built from it) are pinned to the build
-# host's own platform and Go cross-compiles to the target — a multi-arch
+# The build stages (modules, and the two built from it) are pinned to the
+# build host's own platform and Go cross-compiles to the target — a multi-arch
 # `buildx --platform` run must not execute the whole Go toolchain under QEMU
 # emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS source
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS modules
 WORKDIR /src
 # Download modules first so the layer caches across source-only changes.
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
 
 # The egress gate's binary is built apart from the server binaries: it embeds
 # no ripgrep, so `--target gate` neither needs the archives nor fetches them.
-FROM source AS gate-build
+# Its stages come first, so that holds for a builder that builds every stage
+# before its target, in file order — the classic one does, though this file's
+# `--platform=$BUILDPLATFORM` already shuts it out — as well as for BuildKit,
+# which builds only the stages a target needs.
+FROM modules AS gate-build
+COPY . .
 # VERSION is stamped into internal/version.Version by the release pipeline
 # (docs/RELEASING.md); an unarged build reports "dev".
 ARG VERSION=dev
@@ -28,24 +32,6 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
     -o /out/ ./cmd/gate
-
-FROM source AS build
-# The pinned static ripgrep the executor and worker embed for the grep tool
-# (internal/ripgrep; `make ripgrep` is the same command). It runs after
-# `COPY . .`, over the archives the build context carried: each is checked
-# against the manifest's sha256 and fetched again if it does not match, any
-# the manifest no longer names is removed, and only what is missing is
-# downloaded. So a checkout that ran `make ripgrep` builds without reaching
-# GitHub, and nothing the context carried is embedded unchecked.
-RUN go run ./tools/ripgrepfetch
-# Build the four server binaries into /out (named controlplane, brain,
-# executor, worker).
-ARG VERSION=dev
-ARG TARGETOS
-ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
-    -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
-    -o /out/ ./cmd/controlplane ./cmd/brain ./cmd/executor ./cmd/worker
 
 # The per-session egress gate is a separate image (built with --target gate): it
 # needs iptables (to install owner-match rules) and a dedicated UID it drops to,
@@ -63,6 +49,33 @@ COPY --from=gate-build /out/gate /gate
 HEALTHCHECK --interval=2s --timeout=3s --start-period=2s --retries=15 \
     CMD ["/gate", "-healthcheck"]
 ENTRYPOINT ["/gate"]
+
+FROM modules AS build
+# The pinned static ripgrep the executor and worker embed for the grep tool
+# (internal/ripgrep; `make ripgrep` is the same command), fetched twice. First
+# from the manifest and the fetcher's own source alone, so the download is a
+# layer the build cache keeps until one of those changes — the pin moving,
+# chiefly — rather than one every source change re-runs. Then again after
+# `COPY . .`, over whatever the build context carried into the assets
+# directory: each archive is checked against the manifest's sha256 and fetched
+# again if it does not match, and everything else there but the manifest is
+# removed. So a checkout that ran `make ripgrep` builds without reaching
+# GitHub, a clean one downloads once per pin, and nothing the context carried
+# is embedded unchecked.
+COPY internal/ripgrep/ripgrep.go internal/ripgrep/
+COPY internal/ripgrep/assets/manifest.json internal/ripgrep/assets/
+COPY tools/ripgrepfetch/main.go tools/ripgrepfetch/
+RUN go run ./tools/ripgrepfetch
+COPY . .
+RUN go run ./tools/ripgrepfetch
+# Build the four server binaries into /out (named controlplane, brain,
+# executor, worker).
+ARG VERSION=dev
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
+    -o /out/ ./cmd/controlplane ./cmd/brain ./cmd/executor ./cmd/worker
 
 # The default (last) stage is the server image carrying the four server binaries.
 FROM debian:stable-slim AS server

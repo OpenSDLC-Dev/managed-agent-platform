@@ -145,8 +145,9 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    `make ripgrep` runs — has put the pinned static ripgrep the executor and
    worker embed for the `grep` tool in place: it checks each archive the
    checkout carried against its sha256 in
-   `internal/ripgrep/assets/manifest.json` and fetches any that is missing
-   or does not match, so a release cannot build from anything else) pushed as
+   `internal/ripgrep/assets/manifest.json`, fetches any that is missing or
+   does not match and removes anything else there, so a release cannot build
+   from anything else) pushed as
    `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
    (same digest, three names — the coordinates the Helm chart composes) plus
    `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag. The
