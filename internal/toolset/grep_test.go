@@ -74,15 +74,18 @@ func under(dir string, names ...string) string {
 // one the script printed. A stream with scriptBegan and no scriptEnded gets
 // its end line last, as a script that ran to its end prints it; scriptNoEnd,
 // in its place, leaves it off, and scriptCutInEnd leaves the start of it, as
-// an output cap that cut the stream inside the end line would. forgedBegin is
+// an output cap that cut the stream inside the end line would — its constant
+// part, before the nonce; scriptCutInNonce leaves it but for its last four
+// bytes, twelve of the nonce's sixteen digits included. forgedBegin is
 // the search's own begin line, nonce and all, printed by something other than
 // the script — an image's banner that read the script from the exec's argv.
 const (
-	scriptBegan    = "\x00script-began\x00"
-	scriptEnded    = "\x00script-ended\x00"
-	scriptNoEnd    = "\x00script-no-end\x00"
-	scriptCutInEnd = "\x00script-cut-in-end\x00"
-	forgedBegin    = "\x00forged-begin\x00"
+	scriptBegan      = "\x00script-began\x00"
+	scriptEnded      = "\x00script-ended\x00"
+	scriptNoEnd      = "\x00script-no-end\x00"
+	scriptCutInEnd   = "\x00script-cut-in-end\x00"
+	scriptCutInNonce = "\x00script-cut-in-nonce\x00"
+	forgedBegin      = "\x00forged-begin\x00"
 )
 
 // searchNonce is the nonce a search's begin line carries, which its end line
@@ -98,11 +101,11 @@ func framed(command string, res sandbox.ExecResult) sandbox.ExecResult {
 	begin, end := "\nmap-search-begin-"+nonce+"\n", "\nmap-search-end-"+nonce+"\n"
 	frame := func(s string) string {
 		if strings.Contains(s, scriptBegan) && !strings.Contains(s, scriptEnded) && !strings.Contains(s, scriptNoEnd) &&
-			!strings.Contains(s, scriptCutInEnd) {
+			!strings.Contains(s, scriptCutInEnd) && !strings.Contains(s, scriptCutInNonce) {
 			s += scriptEnded
 		}
 		return strings.NewReplacer(scriptBegan, begin, scriptEnded, end, scriptNoEnd, "",
-			scriptCutInEnd, end[:len(end)/2], forgedBegin, begin).Replace(s)
+			scriptCutInEnd, end[:len(end)/2], scriptCutInNonce, end[:len(end)-5], forgedBegin, begin).Replace(s)
 	}
 	res.Stdout, res.Stderr = frame(res.Stdout), frame(res.Stderr)
 	return res
@@ -835,7 +838,8 @@ func TestASearchCutOnlyPastItsEndLineSaysNothingOfTheCap(t *testing.T) {
 		{"grep", `{"pattern":"[unclosed","path":"fl"}`, "regex parse error"},
 		{"glob", `{"pattern":"*","path":"fl/absent"}`, "no such directory"},
 	} {
-		if msg := fails(t, r, tc.tool, tc.in, tc.want); strings.Contains(msg, "truncated") || strings.Contains(msg, "xxx") {
+		if msg := fails(t, r, tc.tool, tc.in, tc.want); strings.Contains(msg, "truncated") || strings.Contains(msg, "xxx") ||
+			strings.Contains(msg, "yyy") {
 			t.Errorf("%s(%s) = %q; want the failure alone, nothing of the cap", tc.tool, tc.in, msg)
 		}
 	}
@@ -1292,9 +1296,17 @@ func TestGrepKeepsWhatRipgrepSaidBesideTheAnswer(t *testing.T) {
 		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptNoEnd, Stderr: scriptBegan + "flood flood",
 			StderrTruncated: true}, true, unframed + " (exit 0)"},
 		// A stdout the cap cut inside its end line keeps the answer before it,
-		// and none of the end line.
+		// and none of the end line. Cut before the end line's nonce, it may
+		// have been cut inside the answer, and says so; cut inside the nonce,
+		// the answer before it arrived whole, and so did rg's messages.
 		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptCutInEnd, StdoutTruncated: true},
 			false, "[output truncated]\n/workspace/a.txt"},
+		{sandbox.ExecResult{ExitCode: 0, Stdout: scriptBegan + "/workspace/a.txt\n" + scriptCutInNonce, StdoutTruncated: true},
+			false, "/workspace/a.txt"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "rg: a\n" + scriptCutInNonce,
+			StderrTruncated: true}, false, "/workspace/a.txt\nrg: a"},
+		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "rg: a\n" + scriptCutInEnd,
+			StderrTruncated: true}, false, "/workspace/a.txt\nrg: a\n[output truncated]"},
 		// A stderr flood marks no whole answer as cut: the answer stands as it
 		// is, and only rg's messages, which the cap cut, say so.
 		{sandbox.ExecResult{ExitCode: 2, Stdout: scriptBegan + "/workspace/a.txt\n", Stderr: scriptBegan + "rg: a\nrg: b" + scriptNoEnd,

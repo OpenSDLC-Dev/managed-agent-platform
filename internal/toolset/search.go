@@ -83,9 +83,14 @@ printf '\n%%s\n' %[1]s; printf '\n%%s\n' %[1]s >&2
 // the other's) before its end line is short: all that follows the begin
 // line is what there is, less any start of the end line the cap left at its
 // tail. One the cap cut only after its end line — an EXIT trap's flood — is
-// whole, and not short. A stream with no begin line, or a whole one with no
-// end line after it, is not one the script printed to its end: "", false,
-// false.
+// whole, and not short; so is one it cut inside the end line, where what it
+// left of it reaches into the nonce: the script prints the end line after
+// all else it prints there, and a tail that carries the nonce is that line's,
+// which no searched file holds but by chance. A tail of the end line's
+// constant part alone — "\n", or "\nmap-search-e" — could be a searched
+// file's, so a stream cut there is short. A stream with no begin line, or a
+// whole one with no end line after it, is not one the script printed to its
+// end: "", false, false.
 func (f searchFrame) cut(s string, truncated bool) (text string, framed, short bool) {
 	t := "\n" + s
 	begin := "\n" + f.begin + "\n"
@@ -103,7 +108,7 @@ func (f searchFrame) cut(s string, truncated bool) (text string, framed, short b
 	}
 	for k := min(len(end)-1, len(rest)); k > 0; k-- {
 		if strings.HasSuffix(rest, end[:k]) {
-			return rest[:len(rest)-k], true, true
+			return rest[:len(rest)-k], true, k <= len("\n"+searchEndPrefix)
 		}
 	}
 	return rest, true, true

@@ -670,12 +670,15 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 // neither marks a whole answer as cut nor lets one without its end line
 // through. A stderr without its frame is none of rg's and is left out: only
 // the cap takes a begin line that the script printed first, and with it
-// whatever came after. What the cap cut of the script's says so — in front of
-// the answer when it cut the answer, after rg's messages when it cut them,
-// after the answer when it took them whole, its begin line included, and in
-// front of a failure when it cut either (searchFrame.messages,
-// searchFailure); a stream it cut only after the end line — an EXIT trap's
-// flood — lost nothing of the script's, and says nothing.
+// whatever came after. What the cap cut of the script's says so, where it
+// cut: rg's messages the cap cut between their begin and end lines carry the
+// notice after them, beside an answer and in a failure alike
+// (searchFrame.messages); an answer the cap cut before its end line carries
+// it in front, and so does a failure whose output it cut (searchFailure);
+// and messages it took whole, begin line and all, are said after an answer
+// and in front of a failure. A stream it cut only after its end line — an
+// EXIT trap's flood — or inside the end line's nonce lost nothing of the
+// script's, and says nothing.
 func grepAnswer(res sandbox.ExecResult, f searchFrame) (Result, error) {
 	out, framed, short := f.cut(res.Stdout, res.StdoutTruncated)
 	if !framed {
