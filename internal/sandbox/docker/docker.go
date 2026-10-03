@@ -1710,6 +1710,10 @@ func (c *container) reclaimBulkPaths(ctx context.Context, b *sandbox.BulkWrite, 
 	for range min(emptyingWorkers, len(xs)) {
 		wg.Go(func() {
 			for x := range next {
+				// The feed's select may hand one over as the deadline passes.
+				if all.Err() != nil {
+					continue
+				}
 				one, cancel := context.WithTimeout(all, cleanupBudget)
 				_ = c.putExtraction(one, x)
 				cancel()
