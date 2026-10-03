@@ -1719,15 +1719,16 @@ func TestWroteFileNeedsASuccessfulResult(t *testing.T) {
 }
 
 // ReadsFile must count the read shapes the toolset admits: a relative read
-// path resolves against the workdir, a grep that matched reads contents under
-// its root where glob returns names and no bytes, and the sandbox shell keeps
-// state across bash calls, so `cd` then `cat` legitimately splits the mount
-// path across two commands — which is why the bash arm matches the basename
-// alone, cwd-blind, a deliberate looseness the answer grader beside it
-// carries. It must still reject name-dropping that reads nothing — a glob, a
-// write naming the path, a grep rooted elsewhere or one whose answer was "no
-// matches" — and, as the write grader requires for writes, a call that failed
-// or was never answered.
+// path resolves against the workdir, a content-mode grep whose answer shows
+// the file's lines reads them where glob returns names and no bytes, and the
+// sandbox shell keeps state across bash calls, so `cd` then `cat`
+// legitimately splits the mount path across two commands — which is why the
+// bash arm matches the basename alone, cwd-blind, a deliberate looseness the
+// answer grader beside it carries. It must still reject name-dropping that
+// reads nothing — a glob, a write naming the path, a grep that listed or
+// counted files (grep's default since #827), one whose type or glob left the
+// file out, or one whose answer was "no matches" — and, as the write grader
+// requires for writes, a call that failed or was never answered.
 func TestReadsFileCountsEachReadShape(t *testing.T) {
 	const file = "/workspace/fixture/PASSPHRASE.txt"
 	g := ReadsFile(file, Either)
@@ -1740,6 +1741,16 @@ func TestReadsFileCountsEachReadShape(t *testing.T) {
 	one := func(name string, input map[string]any) []map[string]any {
 		return []map[string]any{use("u1", name, input), result("u1", false)}
 	}
+	// answered is one call whose successful result is text.
+	answered := func(name string, input map[string]any, text string) []map[string]any {
+		return []map[string]any{use("u1", name, input),
+			{"type": "agent.tool_result", "tool_use_id": "u1", "is_error": false, "content": textBlocks(text)}}
+	}
+	content := func(input map[string]any) map[string]any {
+		input["output_mode"] = "content"
+		return input
+	}
+	const hit = file + ":3:the passphrase is swordfish"
 	for name, tc := range map[string]struct {
 		events []map[string]any
 		read   bool
@@ -1760,26 +1771,33 @@ func TestReadsFileCountsEachReadShape(t *testing.T) {
 		// the persistent shell's cwd, so the basename counts wherever the
 		// command ran — the answer grader beside it carries correctness.
 		"a bash cat of the basename alone":     {one("bash", map[string]any{"command": "cat PASSPHRASE.txt"}), true},
-		"a grep rooted at an ancestor":         {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}), true},
-		"a grep rooted at the file itself":     {one("grep", map[string]any{"pattern": ".", "path": file}), true},
-		"a grep rooted at the filesystem root": {one("grep", map[string]any{"pattern": "passphrase", "path": "/"}), true},
-		"a grep of the default root":           {one("grep", map[string]any{"pattern": "passphrase"}), true},
-		"a grep of a relative root":            {one("grep", map[string]any{"pattern": "passphrase", "path": "fixture"}), true},
-		"a grep rooted elsewhere":              {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/other"}), false},
+		"a content grep rooted at an ancestor": {answered("grep", content(map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}), hit), true},
+		"a content grep of the default root":   {answered("grep", content(map[string]any{"pattern": "passphrase"}), "/workspace/other.txt:1:x\n"+hit), true},
+		"a content grep of a relative root":    {answered("grep", content(map[string]any{"pattern": "passphrase", "path": "fixture"}), hit), true},
+		"a content grep without line numbers":  {answered("grep", content(map[string]any{"pattern": "passphrase", "-n": false}), file+":the passphrase"), true},
+		// A search of the file alone prints its lines without its name.
+		"a content grep of the file itself": {answered("grep", content(map[string]any{"pattern": ".", "path": file}), "1:the passphrase"), true},
+		"a content grep of its relative path": {answered("grep", content(map[string]any{"pattern": ".", "path": "fixture/PASSPHRASE.txt"}),
+			"1:the passphrase"), true},
+		// A file list or a count names the file and shows none of its bytes.
+		"a grep that listed the file":  {answered("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}, file), false},
+		"a grep that counted the file": {answered("grep", map[string]any{"pattern": "passphrase", "output_mode": "count"}, file+":1"), false},
+		// A content grep whose type or glob left the file out showed others.
+		"a content grep whose glob left the file out": {answered("grep", content(map[string]any{"pattern": "passphrase", "glob": "*.md"}),
+			"/workspace/fixture/README.md:1:passphrase"), false},
+		"a content grep whose answer only names a longer path": {answered("grep", content(map[string]any{"pattern": "x"}),
+			file+".bak:1:x"), false},
+		"a content grep of a binary file named outright": {answered("grep", content(map[string]any{"pattern": ".", "path": file}),
+			`binary file matches (found "\0" byte around offset 3)`), false},
 		// Covering root, empty answer: grep spells "the pattern was nowhere
 		// under the root" as a success, and it put no bytes before the model.
-		"a grep that matched nothing": {[]map[string]any{
-			use("u1", "grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fixture"}),
-			{"type": "agent.tool_result", "tool_use_id": "u1", "is_error": false,
-				"content": textBlocks("no matches")},
-		}, false},
-		"a grep rooted at a non-ancestor prefix": {one("grep", map[string]any{"pattern": "passphrase", "path": "/workspace/fix"}), false},
-		"a glob that would list the file":        {one("glob", map[string]any{"pattern": "**/*.txt", "path": "/workspace/fixture"}), false},
-		"a write naming the path":                {one("write", map[string]any{"file_path": file, "content": "x"}), false},
-		"a failed read of the mount path":        {[]map[string]any{use("u1", "read", map[string]any{"file_path": file}), result("u1", true)}, false},
-		"a failed bash cat":                      {[]map[string]any{use("u1", "bash", map[string]any{"command": "cat " + file}), result("u1", true)}, false},
-		"a read that was never answered":         {[]map[string]any{use("u1", "read", map[string]any{"file_path": file})}, false},
-		"no tool calls at all":                   {nil, false},
+		"a content grep that matched nothing": {answered("grep", content(map[string]any{"pattern": "passphrase", "path": file}), "no matches"), false},
+		"a glob that would list the file":     {one("glob", map[string]any{"pattern": "**/*.txt", "path": "/workspace/fixture"}), false},
+		"a write naming the path":             {one("write", map[string]any{"file_path": file, "content": "x"}), false},
+		"a failed read of the mount path":     {[]map[string]any{use("u1", "read", map[string]any{"file_path": file}), result("u1", true)}, false},
+		"a failed bash cat":                   {[]map[string]any{use("u1", "bash", map[string]any{"command": "cat " + file}), result("u1", true)}, false},
+		"a read that was never answered":      {[]map[string]any{use("u1", "read", map[string]any{"file_path": file})}, false},
+		"no tool calls at all":                {nil, false},
 	} {
 		err := g.Check(t, trialWith(tc.events))
 		if got := err == nil; got != tc.read {
@@ -1787,13 +1805,14 @@ func TestReadsFileCountsEachReadShape(t *testing.T) {
 		}
 	}
 
-	// A mount outside the workdir is not covered by a default-root grep: the
-	// toolset roots one at /workspace, which cannot reach /mnt.
+	// A mount outside the workdir is read by a grep only where its answer
+	// shows the mount's lines.
 	mnt := ReadsFile("/mnt/session/uploads/answer.txt", Either)
-	defaultRoot := trialWith([]map[string]any{
-		use("u1", "grep", map[string]any{"pattern": "passphrase"}), result("u1", false),
-	})
-	if err := mnt.Check(t, defaultRoot); err == nil {
-		t.Error("a default-root grep cannot read a /mnt mount and must not count")
+	if err := mnt.Check(t, trialWith(answered("grep", content(map[string]any{"pattern": "passphrase"}), hit))); err == nil {
+		t.Error("a grep that showed another file's lines must not count for a /mnt mount")
+	}
+	if err := mnt.Check(t, trialWith(answered("grep", content(map[string]any{"pattern": "x", "path": "/mnt/session/uploads"}),
+		"/mnt/session/uploads/answer.txt:1:x"))); err != nil {
+		t.Errorf("a grep that showed the mount's lines must count: %v", err)
 	}
 }

@@ -545,11 +545,9 @@ func ReadsSkillFile(name, file string, class Class) Grader {
 // required, as the write grader draws the same line for writes: a failed cat
 // named the file and read nothing. Three shapes count: a read whose file_path
 // resolves to the mount path under the toolset's rule (absolute or
-// workdir-relative, readRangeUse's two spellings); a grep rooted at the file
-// or an ancestor directory whose result carried matches — grep reads contents
-// where glob returns names and no bytes, but its "no matches" success put none
-// of them in front of the model; and a bash command carrying the file's
-// basename. The bash arm is deliberately loose evidence: the sandbox shell
+// workdir-relative, readRangeUse's two spellings); a grep that put the file's
+// lines in front of the model (grepShowed); and a bash command carrying the
+// file's basename. The bash arm is deliberately loose evidence: the sandbox shell
 // keeps state across calls, so `cd` then `cat` splits the path across two
 // commands and the basename is the only fragment guaranteed to appear — the
 // rule cannot see the shell's cwd, so a bare `cat` of a same-named file
@@ -578,8 +576,7 @@ func ReadsFile(path string, class Class) Grader {
 
 // readCovers is ReadsFile's per-call rule: whether this one successful tool
 // call's shape covers the file at p. res is the call's own result — the grep
-// arm reads it, because grep spells "the pattern was nowhere under the root"
-// as a success (GlobPathList keeps the same sentinel out for the same reason).
+// arm reads it (grepShowed).
 func readCovers(use, res map[string]any, p string) bool {
 	input, _ := use["input"].(map[string]any)
 	switch use["name"] {
@@ -587,19 +584,36 @@ func readCovers(use, res map[string]any, p string) bool {
 		fp, _ := input["file_path"].(string)
 		return resolveInWorkdir(fp) == p
 	case "grep":
-		if textOf(res) == "no matches" {
-			return false
-		}
-		root := sandbox.DefaultWorkdir
-		if rp, _ := input["path"].(string); rp != "" {
-			root = resolveInWorkdir(rp)
-		}
-		// TrimSuffix so the one root Clean leaves slashed — "/" — still covers,
-		// rather than building a "//" prefix no path carries.
-		return root == p || strings.HasPrefix(p, strings.TrimSuffix(root, "/")+"/")
+		return grepShowed(input, textOf(res), p)
 	case "bash":
 		cmd, _ := input["command"].(string)
 		return strings.Contains(cmd, path.Base(p))
+	}
+	return false
+}
+
+// grepShowed is whether a successful grep call put lines of the file at p in
+// front of the model. Only content mode prints a file's lines — the default,
+// files_with_matches, and count print paths and numbers (#827) — so nothing
+// else counts, and the answer itself is the evidence: over a directory a
+// matching line starts with its file's path, whatever the type or glob let
+// through, and a search of the file alone prints its lines without one. Its
+// "no matches" put no bytes before the model, and nor does rg's one-line
+// notice for a binary file.
+func grepShowed(input map[string]any, text, p string) bool {
+	if mode, _ := input["output_mode"].(string); mode != "content" {
+		return false
+	}
+	if text == "no matches" || strings.HasPrefix(text, "binary file matches") {
+		return false
+	}
+	if rp, _ := input["path"].(string); rp != "" && resolveInWorkdir(rp) == p {
+		return true
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, p+":") {
+			return true
+		}
 	}
 	return false
 }

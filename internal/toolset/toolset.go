@@ -331,7 +331,10 @@ func badField(tool, field, value string) (Result, bool) {
 // a different search from the one asked for — a -i ignored is a
 // case-sensitive grep that finds nothing — so the call is refused, naming
 // what was not understood and what is (#827). The names are quoted, so a key
-// carrying a NUL or a newline cannot forge the message.
+// carrying a NUL or a newline cannot forge the message. The gate reads the
+// schema, not the tool's input type, and TestSchemaPropertiesAreWhatEachToolDecodes
+// holds the two together; the second decode it costs is a linear scan beside
+// the sandbox round trip the call is about to make.
 func unknownProperties(name string, input json.RawMessage) (string, bool) {
 	var props map[string]any
 	for _, d := range definitions {

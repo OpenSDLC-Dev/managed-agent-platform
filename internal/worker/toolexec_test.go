@@ -513,7 +513,7 @@ func TestToolInputPropertiesOnTheWorkerPath(t *testing.T) {
 	h.suspend(t,
 		use("write", map[string]any{"file_path": "out.txt", "content": "x", "mode": "0755"}),
 		use("grep", map[string]any{"pattern": "todo", "-i": true, "glob": "*.go", "include": "*.go"}),
-		use("grep", map[string]any{"pattern": "todo", "-i": true, "type": "go", "output_mode": "count",
+		use("grep", map[string]any{"pattern": `todo\n`, "-i": true, "type": "go", "output_mode": "count",
 			"head_limit": 3, "multiline": true}))
 
 	if err := h.run(); err != nil {
@@ -541,7 +541,7 @@ func TestToolInputPropertiesOnTheWorkerPath(t *testing.T) {
 	if len(greps) != 1 {
 		t.Fatalf("grep scripts run = %d, want only the accepted call's", len(greps))
 	}
-	for _, want := range []string{"mode='count'", "limit=3", "multiline=1", "flags=('-i')", "'-name' '*.go'"} {
+	for _, want := range []string{"mode='count'", "limit=3", "ml=1", "ci=('-i')", "'-name' '*.go'"} {
 		if !strings.Contains(greps[0], want) {
 			t.Errorf("grep script lacks %q", want)
 		}

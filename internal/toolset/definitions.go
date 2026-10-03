@@ -128,7 +128,8 @@ var definitions = []toolDef{
 		name: "grep",
 		description: "Search file contents for a regular expression (PCRE where the sandbox's grep supports it, " +
 			"POSIX ERE otherwise). By default it lists the files that match; output_mode \"content\" returns " +
-			"the matching lines as path:line:text, and \"count\" the number of matching lines per file.",
+			"the matching lines as path:line:text, and \"count\" the number of matching lines per file (of matches, " +
+			"when multiline lets a pattern span lines).",
 		props: map[string]any{
 			"pattern": prop("string", "The regular expression pattern to search for in file contents"),
 			"path":    prop("string", "File or directory to search in (rg PATH). Defaults to current working directory."),

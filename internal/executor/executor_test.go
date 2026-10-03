@@ -789,7 +789,7 @@ func TestToolInputPropertiesOnTheExecutorPath(t *testing.T) {
 	if len(greps) != 1 {
 		t.Fatalf("grep scripts run = %d, want only the accepted call's", len(greps))
 	}
-	for _, want := range []string{"mode='content'", "skip=1", "limit=5", "flags=('-i' '-n' '-B' '2' '-A' '1')", `[^/]*\.go$`} {
+	for _, want := range []string{"mode='content'", "skip=1", "limit=5", "ci=('-i')", "num=1", "before=2", "after=1", `[^/]*\.go$`} {
 		if !strings.Contains(greps[0], want) {
 			t.Errorf("grep script lacks %q", want)
 		}
