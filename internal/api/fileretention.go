@@ -246,12 +246,8 @@ func purgeExpiredFiles(ctx context.Context, pool *pgxpool.Pool, retention time.D
 	defer tx.Rollback(ctx)
 
 	// A session's copy of an upload inherits its expires_at (#578), so expired
-	// copies are this sweep's too, and only a transaction that allows it can
-	// delete one. The batch never waits on a row lock (SKIP LOCKED), so the
-	// order it locks in cannot close a cycle.
-	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
-		return 0, err
-	}
+	// copies are this sweep's too. The batch never waits on a row lock (SKIP
+	// LOCKED), so the order it locks in cannot close a cycle.
 	rows, err := tx.Query(ctx, `
 		DELETE FROM files
 		 WHERE id IN (SELECT f.id FROM files f

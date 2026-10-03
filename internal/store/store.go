@@ -8,9 +8,8 @@
 // below live on the schema's owner precisely because separate packages must
 // agree on them exactly: SessionTombstoneInsertSQL, EnqueueObjectDeletes (its
 // statement unexported, so no other package runs it bare), FileLiveSQL and
-// FileObjectKeySQL, and the two that put a transaction where migration 0046's
-// triggers require it, AllowFileCopyDeletes (its set_config) and
-// BeginObjectDelete (READ COMMITTED).
+// FileObjectKeySQL, and BeginObjectDelete, which puts a transaction where
+// migration 0046's reference count requires it (READ COMMITTED).
 //
 // Three properties of Migrate (migrate.go) are contract, not implementation
 // detail, and are what a contributor breaks by accident.
@@ -98,19 +97,6 @@ const FileLiveSQL = `(expires_at IS NULL OR expires_at > now())`
 // find nothing behind a copy. Unqualified, as FileLiveSQL is.
 const FileObjectKeySQL = `coalesce(object_key, 'files/' || id)`
 
-// AllowFileCopyDeletes lets the caller's transaction delete a session's file
-// copies. Without it a DELETE skips every copy it matches, as if its WHERE had
-// not (migration 0046's guard): that is what keeps a previous build, which
-// deletes every session-scoped row, from taking copies during a rolling
-// upgrade. Transaction-local, so it ends with the commit and never reaches the
-// next transaction on the pooled connection. store's
-// TestEveryFilesDeleteDecidesAboutCopies holds the list of the DELETEs that
-// call it and those that deliberately do not.
-func AllowFileCopyDeletes(ctx context.Context, tx pgx.Tx) error {
-	_, err := tx.Exec(ctx, `SELECT set_config('map.copy_delete', 'on', true)`)
-	return err
-}
-
 // SessionTombstoneInsertSQL writes a session's deleted_sessions tombstone —
 // id and environment kind, read while the sessions row can still be joined,
 // so it must run before the DELETE in the same transaction. One definition on
@@ -136,12 +122,12 @@ const SessionTombstoneInsertSQL = `INSERT INTO deleted_sessions (id, environment
 // object already owed is owed once, and a key enqueued twice would otherwise
 // fail a delete that has nothing wrong with it.
 //
-// Each key goes in once, as the tombstone trigger enqueues its keys: two of a
-// session's copies of one upload name one object, and the reference count is
-// asked about it once. The keys go in in hashtext order, which is the id of
-// the advisory lock migration 0046's count can take per key: two removers
-// sharing a pair of keys take the pair in one order, and two keys whose hashes
-// collide are one lock, so no order between them is owed.
+// Each key goes in once: two of a session's copies of one upload name one
+// object, and the reference count is asked about it once. The keys go in in
+// hashtext order, which is the id of the advisory lock migration 0046's count
+// can take per key: two removers sharing a pair of keys take the pair in one
+// order, and two keys whose hashes collide are one lock, so no order between
+// them is owed.
 const pendingObjectDeleteInsertSQL = `INSERT INTO pending_object_deletes (object_key)
 	 SELECT k FROM (SELECT DISTINCT unnest($1::text[]) AS k) AS d ORDER BY hashtext(k)
 	 ON CONFLICT (object_key) DO NOTHING`
@@ -181,23 +167,20 @@ func EnqueueObjectDeletes(ctx context.Context, tx ObjectDeleteTx, keys []string)
 // everything else.
 //
 // That is all it guards. It does not see a transaction that enqueues without
-// calling EnqueueObjectDeletes: one that writes a session's tombstone without
-// setting map.copy_delete first, whose trigger then enqueues the session's
-// files/ keys itself, or one that runs an INSERT INTO pending_object_deletes
-// of its own (this package's statement is unexported, so only the package
-// itself can Exec that one). Nor does it stop another package from embedding
-// an ObjectDeleteTx in a struct of its own, whose method set then includes the
-// unexported method, and wrapping any transaction in it. Each remover's
-// isolation level is pinned by a test instead: internal/api's
-// TestEveryObjectDeleteBeginsReadCommitted and internal/executor's
-// TestAHarvestBeginsReadCommitted.
+// calling EnqueueObjectDeletes, one that runs an INSERT INTO
+// pending_object_deletes of its own (this package's statement is unexported,
+// so only the package itself can Exec that one). Nor does it stop another
+// package from embedding an ObjectDeleteTx in a struct of its own, whose
+// method set then includes the unexported method, and wrapping any
+// transaction in it. Each remover's isolation level is pinned by a test
+// instead: internal/api's TestEveryObjectDeleteBeginsReadCommitted and
+// internal/executor's TestAHarvestBeginsReadCommitted.
 //
-// A type rather than a test that scans for EnqueueObjectDeletes' callers, as
-// TestEveryFilesDeleteDecidesAboutCopies does for its DELETEs: a remover's
-// transaction reaches the enqueue through helpers (the dream runner's passes
-// through as many as six functions before its close enqueues), which a scan
-// would have to follow through the call graph, while a parameter type follows
-// it for free.
+// A type rather than a test that scans the source for EnqueueObjectDeletes'
+// callers: a remover's transaction reaches the enqueue through helpers (the
+// dream runner's passes through as many as six functions before its close
+// enqueues), which a scan would have to follow through the call graph, while
+// a parameter type follows it for free.
 type ObjectDeleteTx interface {
 	pgx.Tx
 	beganByBeginObjectDelete()

@@ -13,7 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/jackc/pgx/v5"
 )
 
 // The per-resource session copy (#578): every path that mounts a file mints
@@ -405,88 +405,125 @@ func TestSessionDeleteTakesItsCopies(t *testing.T) {
 	}
 }
 
-// deleteSession takes its session's files itself, having allowed copy
-// deletes in its transaction before it writes the tombstone, so 0046's
-// trigger on deleted_sessions, which serves the previous build alone (#856),
-// leaves them to it. store's TestEveryFilesDeleteDecidesAboutCopies counts the
-// call; this watches the order, through two probe triggers: one records, as
-// the tombstone goes in, whether its transaction had allowed copy deletes; the
-// other records each deleted files row's trigger depth, 1 under the handler's
-// own statement and 2 under the tombstone's trigger, and its transaction.
-func TestSessionDeleteAllowsCopyDeletesBeforeItsTombstone(t *testing.T) {
+// Nothing skips a copy since #856: the session delete, DELETE /v1/files/{id}
+// and the expiry sweep each take one with a plain DELETE, as they take any
+// row, and owe the object it shares once, when the last row naming it goes.
+// A trigger ahead of the reference count records every key the queue is
+// offered, so a key offered twice shows here even where the queue's primary
+// key would fold it.
+func TestCopyRemoversOweTheSharedObjectOnce(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 	agentID, envID := readableFixture(t, s)
-	uploadID := uploadOneFile(t, s, "in.txt")
-	sess := createSession(t, s, map[string]any{
-		"agent": agentID, "environment_id": envID,
-		"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
-	})
-	sid, copyID := sess["id"].(string), mountedFileID(t, sess)
-	outputID := domain.NewID("file").String()
-	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
-		 VALUES ($1, 'out.md', 'text/markdown', 5, true, 'session', $2)`, outputID, sid); err != nil {
-		t.Fatalf("seed an output: %v", err)
-	}
 	if _, err := s.pool.Exec(ctx, `
-		CREATE TABLE probe (what text, detail text, xact xid8);
-		CREATE FUNCTION probe_tombstone() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN
-		    INSERT INTO probe VALUES ('tombstone', coalesce(current_setting('map.copy_delete', true), ''), pg_current_xact_id());
-		    RETURN NEW;
-		END $$;
-		CREATE TRIGGER probe_tombstone BEFORE INSERT ON deleted_sessions
-		    FOR EACH ROW EXECUTE FUNCTION probe_tombstone();
-		CREATE FUNCTION probe_file_delete() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN
-		    INSERT INTO probe VALUES (OLD.id, pg_trigger_depth()::text, pg_current_xact_id());
-		    RETURN NULL;
-		END $$;
-		CREATE TRIGGER probe_file_delete AFTER DELETE ON files
-		    FOR EACH ROW EXECUTE FUNCTION probe_file_delete();`); err != nil {
-		t.Fatalf("install the probes: %v", err)
+		CREATE TABLE offered (k text);
+		CREATE FUNCTION record_offered() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN INSERT INTO offered VALUES (NEW.object_key); RETURN NEW; END $$;
+		CREATE TRIGGER a_record_offered BEFORE INSERT ON pending_object_deletes
+		    FOR EACH ROW EXECUTE FUNCTION record_offered()`); err != nil {
+		t.Fatalf("install the probe: %v", err)
 	}
-
-	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+sid, nil); status != http.StatusOK {
-		t.Fatalf("DELETE session: %d %v", status, body)
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT what, detail, xact::text FROM probe`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	type entry struct{ detail, xact string }
-	got := map[string]entry{}
-	for rows.Next() {
-		var what string
-		var e entry
-		if err := rows.Scan(&what, &e.detail, &e.xact); err != nil {
+	// offered reads what the queue was offered since the last call, sorted.
+	offered := func() []string {
+		t.Helper()
+		rows, err := s.pool.Query(ctx, `DELETE FROM offered RETURNING k`)
+		if err != nil {
 			t.Fatal(err)
 		}
-		got[what] = e
+		keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(keys)
+		return keys
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
+	// twoCopies mounts one upload twice in a new session.
+	twoCopies := func(name string) (uploadID, sid string, copies []string) {
+		t.Helper()
+		uploadID = uploadOneFile(t, s, name)
+		sess := createSession(t, s, map[string]any{
+			"agent": agentID, "environment_id": envID,
+			"resources": []any{
+				map[string]any{"type": "file", "file_id": uploadID},
+				map[string]any{"type": "file", "file_id": uploadID, "mount_path": "/second-" + name},
+			},
+		})
+		for _, r := range resourcesOf(t, sess) {
+			copies = append(copies, r["file_id"].(string))
+		}
+		return uploadID, sess["id"].(string), copies
 	}
-	tomb, ok := got["tombstone"]
-	if !ok {
-		t.Fatalf("no tombstone written: %v", got)
-	}
-	if tomb.detail != "on" {
-		t.Errorf("the tombstone went in with map.copy_delete = %q, want on: AllowFileCopyDeletes comes first", tomb.detail)
-	}
-	for _, id := range []string{copyID, outputID} {
-		e, ok := got[id]
-		switch {
-		case !ok:
-			t.Errorf("the session delete left %s", id)
-		case e.detail != "1":
-			t.Errorf("%s was deleted at trigger depth %s, want 1: the tombstone's trigger took it, not the handler", id, e.detail)
-		case e.xact != tomb.xact:
-			t.Errorf("%s was deleted in transaction %s, the tombstone in %s", id, e.xact, tomb.xact)
+	del := func(path string) {
+		t.Helper()
+		if status, body := s.do(http.MethodDelete, path, nil); status != http.StatusOK {
+			t.Fatalf("DELETE %s: %d %v", path, status, body)
 		}
 	}
+	gone := func(ids ...string) {
+		t.Helper()
+		for _, id := range ids {
+			if fileRowExists(t, s, id) {
+				t.Errorf("%s outlived its remover", id)
+			}
+		}
+	}
+	owes := func(key string, want bool) {
+		t.Helper()
+		if got := slices.Contains(pendingKeys(t, s.pool), key); got != want {
+			t.Errorf("queue owes %s = %v, want %v", key, got, want)
+		}
+	}
+
+	// The session delete: its two copies of an upload already deleted, and an
+	// output of its own.
+	upload, sid, copies := twoCopies("session.txt")
+	output := domain.NewID("file").String()
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'out.md', 'text/markdown', 5, true, 'session', $2)`, output, sid); err != nil {
+		t.Fatalf("seed an output: %v", err)
+	}
+	del("/v1/files/" + upload)
+	owes(blob.FilesKey(upload), false)
+	_ = offered()
+	del("/v1/sessions/" + sid)
+	gone(append(copies, output)...)
+	want := []string{blob.FilesKey(upload), blob.FilesKey(output), blob.SessionCheckpointKey(sid)}
+	slices.Sort(want)
+	if got := offered(); !slices.Equal(got, want) {
+		t.Errorf("the session delete offered %v, want each key once: %v", got, want)
+	}
+	owes(blob.FilesKey(upload), true)
+
+	// DELETE /v1/files/{copy}: the first of two copies owes nothing, the last
+	// owes the object.
+	upload, _, copies = twoCopies("file.txt")
+	del("/v1/files/" + upload)
+	_ = offered()
+	for i, c := range copies {
+		del("/v1/files/" + c)
+		gone(c)
+		if got := offered(); !slices.Equal(got, []string{blob.FilesKey(upload)}) {
+			t.Errorf("deleting copy %d offered %v, want [%s]", i+1, got, blob.FilesKey(upload))
+		}
+		owes(blob.FilesKey(upload), i == len(copies)-1)
+	}
+
+	// The expiry sweep: an upload and its two copies, all expired, go in one
+	// batch, and the key the three name is offered once.
+	upload, _, copies = twoCopies("sweep.txt")
+	for _, id := range append([]string{upload}, copies...) {
+		expireBy(t, s, id, 31*24*time.Hour)
+	}
+	_ = offered()
+	if n, err := api.PurgeExpiredFilesForTest(ctx, s.pool, 30*24*time.Hour); err != nil || n != 3 {
+		t.Fatalf("purge = %d, %v; want the upload and its two copies", n, err)
+	}
+	gone(append([]string{upload}, copies...)...)
+	if got := offered(); !slices.Equal(got, []string{blob.FilesKey(upload)}) {
+		t.Errorf("the sweep offered %v, want [%s] once", got, blob.FilesKey(upload))
+	}
+	owes(blob.FilesKey(upload), true)
 }
 
 // Archiving a session leaves its copies (console-141 api-fixtures idx 25;
@@ -569,19 +606,8 @@ func TestALegacySessionKeepsMountingTheUpload(t *testing.T) {
 		sid, uploadID); err != nil {
 		t.Fatal(err)
 	}
-	tx, err := s.pool.Begin(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := store.AllowFileCopyDeletes(context.Background(), tx); err != nil {
-		t.Fatal(err)
-	}
-	if tag, err := tx.Exec(context.Background(), `DELETE FROM files WHERE id = $1`, copyID); err != nil || tag.RowsAffected() != 1 {
+	if tag, err := s.pool.Exec(context.Background(), `DELETE FROM files WHERE id = $1`, copyID); err != nil || tag.RowsAffected() != 1 {
 		t.Fatalf("delete the copy: %v rows, err %v", tag.RowsAffected(), err)
-	}
-	if err := tx.Commit(context.Background()); err != nil {
-		t.Fatal(err)
 	}
 	if got := mountedFileID(t, createGetSession(t, s, sid)); got != uploadID {
 		t.Fatalf("legacy resource file_id = %s, want the upload %s", got, uploadID)
