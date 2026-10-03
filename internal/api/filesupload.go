@@ -16,8 +16,8 @@ import (
 // maxFileBytes is the public docs' per-file cap (500 MB). A package var, not a
 // const, so export_test.go can lower it to exercise the 413 path without
 // streaming half a gigabyte through a test. Self-hosted operators own their
-// disk, so the reference's 500 GB per-org quota is deliberately not enforced
-// (docs/DIVERGENCES.md).
+// disk, so the reference's per-org storage quota (1 TB in the docs as of
+// 2026-10-02) is deliberately not enforced (docs/DIVERGENCES.md).
 var maxFileBytes int64 = 500 << 20
 
 // fileUploadHeadroom is the multipart-framing slop added to the total-body
