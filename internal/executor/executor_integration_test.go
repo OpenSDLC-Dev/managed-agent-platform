@@ -472,3 +472,80 @@ func TestMemoryRoundTripRealSandboxAsNonRoot(t *testing.T) {
 		t.Errorf("versions of /new.md = %v, want one created by the session", got)
 	}
 }
+
+// TestSkillsAndMemoryMaterializeOnAReadOnlyRootRealSandbox is #859's
+// executor-level row: under SANDBOX_READONLY_ROOTFS the docker backend's bulk
+// write extracted every archive at `/`, which the daemon refuses on a read-only
+// root, so neither a skill nor a memory store ever reached the sandbox — logged
+// and skipped, the agent running on without them. Both go through
+// Sandbox.WriteFiles, into the workdir and under /mnt; the tool reads them back
+// in the same call that shows the root really is read-only, and the memory sync
+// that follows writes its baseline through the same path, which is read back
+// last.
+func TestSkillsAndMemoryMaterializeOnAReadOnlyRootRealSandbox(t *testing.T) {
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
+	hardening := defaultHardening()
+	hardening.ReadOnlyRootfs = true
+	h := newHarnessWith(t, provider, Config{Image: testImage, Hardening: hardening})
+	t.Cleanup(func() {
+		// Attach, the read-only half, as the non-root row above does: a
+		// cleanup must never create the container it is here to remove.
+		sb, err := provider.Attach(context.Background(), h.sid)
+		if errors.Is(err, sandbox.ErrNotFound) {
+			return
+		}
+		if err != nil {
+			t.Errorf("attach for teardown: %v", err)
+			return
+		}
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+
+	h.seedSkill(t, "skill_ro_root", "100", "ro-notes", map[string]string{
+		"SKILL.md":            "# read-only root\n",
+		"scripts/deep/run.sh": "echo ran-from-skill\n",
+	})
+	h.refSkills(t, [2]string{"skill_ro_root", "latest"})
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello\n")
+	h.refMemory(t, memStoreID, memMount, "read_write")
+
+	bash, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{
+			"command": "cat skills/ro-notes/SKILL.md; sh skills/ro-notes/scripts/deep/run.sh; cat " + memMount + "/notes.md; " +
+				"echo appended >> " + memMount + "/notes.md; " +
+				"touch /etc/map-859-probe 2>/dev/null && echo root-writable || echo root-read-only"},
+	})
+	h.suspend(t, string(bash))
+	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
+		t.Fatalf("step worked=%v err=%v", worked, err)
+	}
+	text := lastResultText(t, h)
+	for _, want := range []string{"# read-only root", "ran-from-skill", "hello", "root-read-only"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the tool saw %q, want it to contain %q", text, want)
+		}
+	}
+
+	// The sync pushed the append and wrote its new baseline back into the
+	// sandbox — the second bulk write of the run, at /mnt/memory/.sync.
+	if got, _ := h.memoryContent(t, memStoreID, "/notes.md"); got != "hello\nappended\n" {
+		t.Errorf("the store's /notes.md = %q, want the appended line pushed", got)
+	}
+	sb, err := provider.Attach(context.Background(), h.sid)
+	if err != nil {
+		t.Fatalf("attach to read the baseline: %v", err)
+	}
+	raw, err := sb.ReadFile(context.Background(), baselinePath(memStoreID))
+	if err != nil {
+		t.Fatalf("read the sync's baseline: %v", err)
+	}
+	if !strings.Contains(string(raw), sha256hex([]byte("hello\nappended\n"))) {
+		t.Errorf("the baseline is %s, want it to record the pushed content's digest", raw)
+	}
+}

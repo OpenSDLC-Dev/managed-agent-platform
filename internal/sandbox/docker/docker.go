@@ -423,7 +423,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 					return nil, serr
 				}
 			}
-			return p.attach(info.ID, workdir, gateID), nil
+			return p.attach(info.ID, workdir, gateID, info.HostConfig.ReadonlyRootfs), nil
 		}
 		// The sandbox's egress path no longer matches the session's shape: gated
 		// but attached to a different (or since-removed) gate — a stale pairing (a
@@ -474,6 +474,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 	}
 
 	cfg := sandboxConfig(spec, workdir, gateID, p.clampCPU(ctx, spec.Hardening.CPUMillis))
+	readOnlyRoot := cfg.HostConfig.ReadonlyRootfs
 	id, cerr := p.api.createContainer(ctx, name, cfg)
 	if statusIs(cerr, 404) { // the image is not on this host yet
 		if perr := p.api.pullImage(ctx, spec.Image); perr != nil {
@@ -500,7 +501,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		if aerr := adoptable(winner, spec, workdir, gateID); aerr != nil {
 			return nil, aerr
 		}
-		id, cerr = winner.ID, nil
+		// Adopted as created, hardening included (adoptable): the root is
+		// read-only if the winner's is, whatever this spec asked for.
+		id, cerr, readOnlyRoot = winner.ID, nil, winner.HostConfig.ReadonlyRootfs
 	}
 	if cerr != nil {
 		return nil, cerr
@@ -515,7 +518,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		}
 		return nil, serr
 	}
-	return p.attach(id, workdir, gateID), nil
+	return p.attach(id, workdir, gateID, readOnlyRoot), nil
 }
 
 // pairedWithGate reports whether an existing sandbox's egress path matches the
@@ -748,7 +751,8 @@ func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.San
 	if !info.State.Running {
 		return nil, sandbox.ErrNotFound
 	}
-	return p.attach(info.ID, info.Config.WorkingDir, p.pairedGate(ctx, sessionID, info)), nil
+	return p.attach(info.ID, info.Config.WorkingDir, p.pairedGate(ctx, sessionID, info),
+		info.HostConfig.ReadonlyRootfs), nil
 }
 
 // pairedGate is the gate the attached handle may tear down with its sandbox: the
@@ -773,9 +777,9 @@ func (p *Provider) pairedGate(ctx context.Context, sessionID domain.ID, info con
 	return gateID
 }
 
-func (p *Provider) attach(id, workdir, gateID string) *container {
+func (p *Provider) attach(id, workdir, gateID string, readOnlyRoot bool) *container {
 	return &container{
-		api: p.api, id: id, workdir: workdir, gateID: gateID,
+		api: p.api, id: id, workdir: workdir, gateID: gateID, readOnlyRoot: readOnlyRoot,
 		killGrace: defaultKillGrace, overrunSlop: defaultOverrunSlop,
 		exitBudget: defaultExitBudget, probeLead: defaultProbeLead,
 	}
@@ -820,6 +824,12 @@ type container struct {
 	overrunSlop time.Duration
 	exitBudget  time.Duration
 	probeLead   time.Duration
+
+	// readOnlyRoot is the container's own ReadonlyRootfs, fixed at create as its
+	// workdir is and known the same way — from the create config or an inspect,
+	// never by probing. It decides how a batch's archives are cut
+	// (sandbox.BulkWrite's split).
+	readOnlyRoot bool
 }
 
 func (c *container) ID() string { return c.id }
@@ -1451,9 +1461,17 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 }
 
 // WriteFiles lands a whole batch for two execs rather than one per member: the
-// members travel as a single archive the daemon extracts, and one exec then
-// renames them all into place. That is what #206 asked for — a small write's cost
-// here is mostly the exec, and a skill may hold ten thousand files.
+// members travel as archives the daemon extracts, and one exec then renames them
+// all into place. That is what #206 asked for — a small write's cost here is
+// mostly the exec, and a skill may hold ten thousand files.
+//
+// On a writable root the members are one archive extracted at `/`. On a read-only
+// root the daemon refuses that — it refuses an extraction at any directory that
+// does not resolve into a writable mount, whatever the entries below it name — so
+// there each directory's members are their own archive, extracted at that
+// directory: a round trip per distinct directory, and the daemon's own check on
+// every directory a member lands in (#859; sandbox.BulkWrite's split argues it).
+// A refused delivery is answered in the single write's terms (refusedBulk).
 //
 // It is four steps, and the first two are what make it work on a sandbox that does
 // not run as root. The bookkeeping is delivered first, into the workdir, which
@@ -1477,7 +1495,7 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 	if err != nil {
 		return err
 	}
-	if err := c.putBulk(ctx, b.Bookkeeping); err != nil {
+	if err := c.putBulk(ctx, b.Bookkeeping(c.readOnlyRoot)); err != nil {
 		if containerGone(err) {
 			return c.gone()
 		}
@@ -1488,10 +1506,16 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		c.shedBulk(ctx, b)
 		return err
 	}
-	if err := c.putBulk(ctx, b.Members); err != nil {
-		c.shedBulk(ctx, b)
+	if err := c.putBulk(ctx, b.Members(c.readOnlyRoot)); err != nil {
 		if containerGone(err) {
+			c.shedBulk(ctx, b)
 			return c.gone()
+		}
+		// Asked before the shed, which takes away the manifest it reads.
+		rErr := c.refusedBulk(ctx, b)
+		c.shedBulk(ctx, b)
+		if rErr != nil {
+			return rErr
 		}
 		return err
 	}
@@ -1549,20 +1573,49 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 	return b.Fault("docker", res.ExitCode, res.Stderr)
 }
 
-// putBulk streams one of the batch's archives to the daemon, which extracts it at
-// the container's root. The tar is built on the fly over a pipe rather than
-// buffered, as the streaming single write's is: the members are already in memory,
-// and a second copy of a large skill is not worth having.
-func (c *container) putBulk(ctx context.Context, archive func(io.Writer) error) error {
+// putBulk delivers a batch's extractions in order, stopping at the first the
+// daemon refuses — the caller sheds what any of them landed, as it would for one
+// archive that died part way. The refusal names the directory it was for, so one
+// that no member answers for (refusedBulk) still says where.
+func (c *container) putBulk(ctx context.Context, xs []sandbox.Extraction) error {
+	for _, x := range xs {
+		if err := c.putExtraction(ctx, x); err != nil {
+			return fmt.Errorf("docker: bulk write: extract at %s: %w", x.Dir, err)
+		}
+	}
+	return nil
+}
+
+// putExtraction streams one extraction to the daemon, which extracts it at its
+// Dir. The tar is built on the fly over a pipe rather than buffered, as the
+// streaming single write's is: the members are already in memory, and a second
+// copy of a large skill is not worth having.
+func (c *container) putExtraction(ctx context.Context, x sandbox.Extraction) error {
 	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(archive(pw)) }()
-	err := c.api.putArchive(ctx, c.id, "/", pr)
+	go func() { pw.CloseWithError(x.Archive(pw)) }()
+	err := c.api.putArchive(ctx, c.id, x.Dir, pr)
 	pr.CloseWithError(err)
 	return err
 }
 
+// refusedBulk is a refused members delivery answered the way WriteFile answers
+// a refused PUT — is the target a directory, one a rename cannot replace, or in
+// a directory the sandbox user cannot create a file in — for each member, in the
+// manifest's order (sandbox.BulkRefusedShell). Nil when no member answers yes,
+// or when the question could not be asked, and the caller keeps the daemon's own
+// error then, as WriteFile does.
+func (c *container) refusedBulk(ctx context.Context, b *sandbox.BulkWrite) error {
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkRefusedShell +
+		fmt.Sprintf("__map_bulk_refused %s", shellQuote(b.Manifest))})
+	if err != nil {
+		return nil
+	}
+	return b.Refusal("docker", res.ExitCode, res.Stderr)
+}
+
 // prepareBulk makes the members' directories inside the sandbox, which is also
-// where a path blocked by a non-directory is named.
+// where a path blocked by a non-directory is named, and a directory that cannot
+// be made is a PathNotWritableError, as the single write's mkdirAll makes it.
 func (c *container) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error {
 	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkPrepareShell +
 		fmt.Sprintf("__map_bulk_prepare %s", shellQuote(b.DirList))})
@@ -1607,7 +1660,8 @@ func (c *container) discardBulk(ctx context.Context, b *sandbox.BulkWrite) strin
 // anyone but that user — so what put them there empties them, executing nothing
 // (#316, the batch's half of #310).
 //
-// One archive for the whole batch, where reclaim sends one per path: a batch
+// One archive for the whole list at `/`, or one per directory on a read-only
+// root — cut as the deliveries were — where reclaim sends one per path: a batch
 // refused under a root-owned parent leaves every member behind at once, and the
 // ten thousand a skill may carry are not worth ten thousand round trips.
 //
@@ -1640,10 +1694,60 @@ func (c *container) reclaimBulkPaths(ctx context.Context, b *sandbox.BulkWrite, 
 	if len(paths) == 0 {
 		return
 	}
-	ctx, cancel := cleanup(ctx)
+	// Every extraction is tried, unlike a delivery's: one the daemon refuses, or
+	// answers slowly, is no reason to leave the others' payloads where they are.
+	// A read-only root's emptying is one extraction per directory, so they run
+	// emptyingWorkers at a time, each on a cleanup budget of its own — one
+	// shared budget would run out long before the last of them — and all of them
+	// under emptyingDeadline, which a stalled daemon would otherwise stretch to a
+	// budget per directory. What the deadline cuts off keeps its payload, as any
+	// emptying the daemon will not answer does.
+	xs := b.Emptying(paths, c.readOnlyRoot)
+	all, cancel := context.WithTimeout(context.WithoutCancel(ctx), emptyingDeadline())
 	defer cancel()
-	_ = c.putBulk(ctx, func(w io.Writer) error { return b.EmptyArchive(paths, w) })
+	next := make(chan sandbox.Extraction)
+	var wg sync.WaitGroup
+	for range min(emptyingWorkers, len(xs)) {
+		wg.Go(func() {
+			for x := range next {
+				// The feed's select may hand one over as the deadline passes.
+				if all.Err() != nil {
+					continue
+				}
+				one, cancel := context.WithTimeout(all, cleanupBudget)
+				_ = c.putExtraction(one, x)
+				cancel()
+			}
+		})
+	}
+feed:
+	for _, x := range xs {
+		select {
+		case next <- x:
+		case <-all.Done():
+			break feed
+		}
+	}
+	close(next)
+	wg.Wait()
 }
+
+// emptyingWorkers is how many of a batch's emptyings are in flight at once. Each
+// is a small archive of zero-byte entries into a directory of its own, so they
+// cannot collide; eight keeps a skill's few dozen directories to a handful of
+// rounds without opening a connection per directory on a ten-thousand-member
+// batch.
+const emptyingWorkers = 8
+
+// emptyingDeadline caps a batch's whole emptying at six cleanup budgets — a
+// minute — and so the emptying's share of what a failed batch can hold its
+// caller for: a daemon that answers nothing costs six rounds of eight budgets
+// rather than a budget per directory, which on a ten-thousand-directory batch
+// would be over a day. A daemon that answers takes milliseconds a directory (a
+// whole 61-file skill's write, eleven deliveries and two execs, measured
+// ~150ms), so a minute leaves room for thousands of directories before it cuts
+// anything off.
+func emptyingDeadline() time.Duration { return 6 * cleanupBudget }
 
 // rename puts a landed temporary file at its target — the step that makes a write
 // atomic — after refusing the targets a rename would quietly do the wrong thing
@@ -1809,8 +1913,13 @@ func (c *container) notWritable(ctx context.Context, path string) error {
 // that sheds both ways — the single write's three, and the batch's own three
 // through shedBulk (#316) — can hold a failed write for two of these before it
 // returns; that ceiling is the caller's whole exposure, and it is not the
-// caller's context that bounds it any more.
-const cleanupBudget = 10 * time.Second
+// caller's context that bounds it any more. A batch's emptying is the one
+// cleanup that is several requests — one per directory on a read-only root —
+// and it gives each its own budget under a cap of six (emptyingDeadline), so
+// there the ceiling is that cap rather than a budget per directory.
+//
+// A variable only so a test can shorten it.
+var cleanupBudget = 10 * time.Second
 
 // cleanup detaches a cleanup from the write's own context, keeping its values
 // (the trace it belongs to) and dropping its cancellation.
