@@ -616,9 +616,7 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 				// arbitrary sandbox image cannot be assumed to bundle one; PID 1 is
 				// this bash. Orphans it does not reap linger as zombies until the
 				// pod is destroyed — cheap, but a divergence noted for a later fix.
-				// A script of the platform's own, so -p, as Exec starts every one
-				// (sandbox.ExecRequest).
-				Command: []string{"/bin/bash", "-p", "-c",
+				Command: []string{"/bin/bash", "-c",
 					"mkdir -p " + shellQuote(workdir) + " && while :; do sleep 3600; done"},
 				WorkingDir:      workdir,
 				Env:             envVars(env),
@@ -1154,7 +1152,7 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 	}
 
 	state := "/tmp/.map-exec-" + nonce()
-	argv := []string{"/bin/bash", "-p", "-c", execWrapper, "map-exec", req.Command, strconv.Itoa(seconds), state, req.BashMode()}
+	argv := []string{"/bin/bash", "-c", execWrapper, "map-exec", req.Command, strconv.Itoa(seconds), state}
 
 	var stdout, stderr cappedBuffer
 	stdout.limit, stderr.limit = sandbox.MaxOutputBytes, sandbox.MaxOutputBytes
@@ -1313,7 +1311,7 @@ func (pd *pod) classifyTimeout(timeout time.Duration, code int, watchdogFired bo
 // long the command ran (0 when the line carries no record of it).
 func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Duration, error) {
 	out, _, err := pd.client.execOutput(ctx, pd.name, containerName,
-		[]string{"/bin/bash", "-p", "-c", exitScript, "map-exit", state})
+		[]string{"/bin/bash", "-c", exitScript, "map-exit", state})
 	if err != nil {
 		return 0, false, 0, err
 	}
@@ -1413,7 +1411,7 @@ func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]
 	// Room for a file at the cap and its marker, and not one byte more, so
 	// out.truncated means exactly "the file was over the cap" — see readStdout.
 	out.limit = int(maxBytes) + len(marker)
-	argv := []string{"/bin/bash", "-p", "-c", readScript, "map-read", path, strconv.FormatInt(maxBytes, 10), marker}
+	argv := []string{"/bin/bash", "-c", readScript, "map-read", path, strconv.FormatInt(maxBytes, 10), marker}
 	res, err := pd.client.exec(ctx, pd.name, containerName, argv, nil, &out, io.Discard)
 	if err != nil {
 		return nil, pd.execErr(ctx, err)
@@ -1485,7 +1483,7 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 	}
 	dir := gopath.Dir(path)
 	tmp := gopath.Join(dir, sandbox.TempName())
-	argv := []string{"/bin/bash", "-p", "-c", writeScript, "map-write", path, dir, strconv.FormatInt(size, 10), tmp}
+	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.FormatInt(size, 10), tmp}
 	// The script's stdout is the classified refusal's reason (exit 20 rides
 	// with the shell's own strerror text, plan 23); capped because the sandbox
 	// writes it.
@@ -1675,7 +1673,7 @@ func (pd *pod) deliverBulk(ctx context.Context, b *sandbox.BulkWrite) (int, stri
 // reads stdin; the others are given none.
 func (pd *pod) bulkExec(ctx context.Context, script string, b *sandbox.BulkWrite, stdin io.Reader) (int, string, error) {
 	stderr := &cappedBuffer{limit: sandbox.MaxOutputBytes}
-	argv := []string{"/bin/bash", "-p", "-c", script, "map-bulk-write", b.Manifest, b.DirList}
+	argv := []string{"/bin/bash", "-c", script, "map-bulk-write", b.Manifest, b.DirList}
 	res, err := pd.client.exec(ctx, pd.name, containerName, argv, stdin, io.Discard, stderr)
 	if err != nil {
 		return 0, "", pd.execErr(ctx, err)

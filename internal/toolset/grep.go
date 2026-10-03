@@ -268,9 +268,8 @@ const ripgrepMissing = "map-ripgrep-missing "
 // false, and such a line must never be read as the frame.
 //
 // The frame keeps out what reaches an exec's streams that the script did not
-// print: an image's banner before it — an `ENV LD_PRELOAD` library's, since
-// Exec starts the script with -p and no `ENV BASH_ENV` file runs
-// (sandbox.ExecRequest) — and anything after it, such as an EXIT trap's. It is
+// print: an image's banner before it — what an `ENV BASH_ENV` file prints as
+// the shell starts, say — and anything after it, such as an EXIT trap's. It is
 // not a boundary against the sandbox's own processes: the script, nonce and
 // all, is the exec's argv, which any process in the sandbox may read, and a
 // model that forges a search's output from inside its own sandbox is

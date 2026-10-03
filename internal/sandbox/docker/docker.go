@@ -39,10 +39,7 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // execWrapper kills the command when its deadline passes. Docker has no API to
 // kill a running exec, so this has to happen inside the container. $1 is the
 // command, $2 the timeout in whole seconds ("0" = no limit), $3 the per-exec
-// state path whose `.killed` suffix the watchdog marks when it fires, $4 the
-// option bash starts the command with (sandbox.ExecRequest.BashMode). The
-// wrapper is the platform's own script whatever the command is, so Exec starts
-// it with -p, and an image's startup file runs at most once, for the command.
+// state path whose `.killed` suffix the watchdog marks when it fires.
 //
 // The command runs via `exec`, so it *becomes* this process — the pid Docker
 // reports for the exec is the command itself, not a shell wrapping it. That is
@@ -121,7 +118,7 @@ if [ "$2" != "0" ]; then
     fi
   ) >/dev/null 2>&1 &
 fi
-exec /bin/bash "$4" -c "$1"
+exec /bin/bash -c "$1"
 `
 
 // sigkillExit is what bash reports for a job killed by SIGKILL (128 + 9).
@@ -626,9 +623,8 @@ func sandboxConfig(spec sandbox.Spec, workdir, gateID string, cpuMillis int64) c
 		Image: spec.Image,
 		Env:   envSlice(env),
 		// Hold the container open and guarantee the workdir exists. Nothing
-		// else runs here: every tool call is its own exec. A script of the
-		// platform's own, so -p, as Exec starts every one (sandbox.ExecRequest).
-		Entrypoint: []string{"/bin/bash", "-p", "-c",
+		// else runs here: every tool call is its own exec.
+		Entrypoint: []string{"/bin/bash", "-c",
 			"mkdir -p " + shellQuote(workdir) + " && while :; do sleep 3600; done"},
 		Cmd:        []string{},
 		WorkingDir: workdir,
@@ -990,8 +986,8 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	execID, err := c.api.execCreate(ctx, c.id, execConfig{
 		AttachStdout: true,
 		AttachStderr: true,
-		Cmd: []string{"/bin/bash", "-p", "-c", execWrapper,
-			"map-exec", req.Command, strconv.Itoa(seconds), state, req.BashMode()},
+		Cmd: []string{"/bin/bash", "-c", execWrapper,
+			"map-exec", req.Command, strconv.Itoa(seconds), state},
 		WorkingDir: c.workdir,
 	})
 	if err != nil {
@@ -1617,11 +1613,10 @@ func (c *container) discardBulk(ctx context.Context, b *sandbox.BulkWrite) strin
 // already removed is not recreated as an empty file. This asks no HEAD at all —
 // the shed pass answered the same question for every member with a `[ -f ]` it
 // was already walking the list to run, which is the whole reason it reports at
-// all. What that report may not do is come from the image: an image's hook can
-// print to this stream before the script does — an `ENV LD_PRELOAD` library
-// does even under the -p that keeps an `ENV BASH_ENV` file out — and a forged
-// marker naming a member the `rm` really did remove would put an empty file
-// back exactly where the cleanup had just taken one away. bulkLeftBeginMarker is what frames it out.
+// all. What that report may not do is come from the image: an `ENV BASH_ENV`
+// file prints to this stream before the script does, and a forged marker naming
+// a member the `rm` really did remove would put an empty file back exactly where
+// the cleanup had just taken one away. bulkLeftBeginMarker is what frames it out.
 //
 // Best effort, as reclaim is — it raises no error of its own, and a daemon that
 // refuses it leaves the residue the sandbox user already could not shed — with

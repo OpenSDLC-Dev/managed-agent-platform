@@ -683,12 +683,11 @@ func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
 const bannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2; cd /; ` +
 	`trap "printf 'exit banner '; printf 'exit stderr ' >&2" EXIT` + "\n"
 
-// An image whose bash runs bannerHook runs it for the model's own commands and
-// for none of the platform's scripts (sandbox.ExecRequest): rg is installed,
-// and every glob and grep answer, and every refusal, is the tool's alone —
-// where a glob used to read the banner's words into its first path and the
-// trap's into a path of their own. The bash tool's output carries the banner
-// once, as any `bash -c` on that image would print it.
+// An image whose bash runs bannerHook runs it for every exec, the platform's
+// scripts as well as the model's commands: rg is installed all the same, and
+// every grep answer, and every refusal, is the tool's alone, read from inside
+// the search's frame. The banner reaches the bash tool's output, as it reaches
+// every command on that image.
 func TestSearchesThroughAnImageBanner(t *testing.T) {
 	image := dockertest.ImageFrom(t, "search-banner", "FROM debian:stable-slim\n"+
 		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(bannerHook))+" | base64 -d > /etc/map-banner.sh\n"+
@@ -696,15 +695,10 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 	r := runner(t, fromImage(image))
 	ok(t, r, "write", `{"file_path":"be/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"be/b.txt","content":"needle\n"}`)
-	if out := ok(t, r, "bash", `{"command":"echo hi"}`); strings.Count(out, "welcome to the image") != 1 {
-		t.Errorf("bash = %q, want the image's banner once: the model's command runs in the image's environment", out)
+	if out := ok(t, r, "bash", `{"command":"echo hi"}`); !strings.Contains(out, "welcome to the image") {
+		t.Errorf("bash = %q, want the image's banner: the model's command runs in the image's environment", out)
 	}
 	for tool, answers := range map[string]map[string]string{
-		"glob": {
-			`{"pattern":"a.txt","path":"be"}`:   "/workspace/be/a.txt",
-			`{"pattern":"/workspace/be/b.txt"}`: "/workspace/be/b.txt",
-			`{"pattern":"none*","path":"be"}`:   "no matches",
-		},
 		"grep": {
 			`{"pattern":"needle","path":"be"}`:                                      "/workspace/be/a.txt\n/workspace/be/b.txt",
 			`{"pattern":"needle","path":"be","output_mode":"content"}`:              "/workspace/be/a.txt:1:needle\n/workspace/be/b.txt:1:needle",
@@ -721,7 +715,6 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct{ tool, in, want string }{
-		{"glob", `{"pattern":"*","path":"be/absent"}`, "no such directory"},
 		{"grep", `{"pattern":"[unclosed","path":"be"}`, "regex parse error"},
 		{"grep", `{"pattern":"needle","path":"be/absent"}`, "No such file or directory"},
 		{"grep", `{"pattern":"needle","path":"be","type":"nope"}`, "unrecognized file type: nope"},

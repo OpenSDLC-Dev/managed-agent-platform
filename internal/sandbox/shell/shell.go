@@ -164,9 +164,7 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 		"__SNAP__", shellSingleQuote(snap),
 	).Replace(templateScript)
 
-	// The model's command runs in the image's environment, as any `bash -c`
-	// there would: its startup file, exported functions and SHELLOPTS apply.
-	er, err := sb.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: req.Timeout, ImageStartup: true})
+	er, err := sb.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: req.Timeout})
 	if err != nil {
 		return Result{}, err
 	}

@@ -50,7 +50,7 @@ func TestTheWatchdogReallyWritesTheMark(t *testing.T) {
 		t.Helper()
 		state := filepath.Join(dir, name)
 		cmd := exec.Command("/bin/bash", "-c", execWrapper,
-			"map-exec", command, strconv.Itoa(int(deadline.Seconds())), state, "-p")
+			"map-exec", command, strconv.Itoa(int(deadline.Seconds())), state)
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start the wrapper: %v", err)
 		}

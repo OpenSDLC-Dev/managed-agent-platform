@@ -1344,7 +1344,7 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	run := func(t *testing.T, name, command string, seconds int, extraEnv ...string) string {
 		t.Helper()
 		state := dir + "/" + name
-		wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", command, strconv.Itoa(seconds), state, "-p")
+		wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", command, strconv.Itoa(seconds), state)
 		base := env
 		if base == nil {
 			base = os.Environ()
@@ -1533,7 +1533,7 @@ func TestExecWrapperRecordsHowLongTheCommandRan(t *testing.T) {
 		env = os.Environ()
 	}
 	state := t.TempDir() + "/state"
-	wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", `echo "$t0 $t1"; sleep 0.3; exit 7`, "30", state, "-p")
+	wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", `echo "$t0 $t1"; sleep 0.3; exit 7`, "30", state)
 	wrapper.Env = append(append([]string{}, env...), "t0=100.00", "t1=999.00")
 	stdout, err := wrapper.Output()
 	if err != nil {
@@ -1574,7 +1574,7 @@ func TestExecWrapperRecordsHowLongTheCommandRan(t *testing.T) {
 // rather than retries.) The step before the reading — the launch itself — is
 // the fork no host test can stretch, so the script's own order is asserted too.
 func TestExecWrapperStartsTheRecordAtTheCommandsLaunch(t *testing.T) {
-	launch := strings.Index(execWrapper, `setsid /bin/bash "$4" -c "$1"`)
+	launch := strings.Index(execWrapper, `setsid /bin/bash -c "$1"`)
 	reading := strings.Index(execWrapper, "read -r t0 ")
 	watchdog := strings.Index(execWrapper, ") >/dev/null 2>&1 3>&- &")
 	if launch < 0 || reading < 0 || watchdog < 0 || !(launch < reading && reading < watchdog) {
@@ -1589,7 +1589,7 @@ func TestExecWrapperStartsTheRecordAtTheCommandsLaunch(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	wrapper := exec.CommandContext(ctx, "/bin/bash", "-c", execWrapper, "map-exec", "sleep 1", "30", state, "-p")
+	wrapper := exec.CommandContext(ctx, "/bin/bash", "-c", execWrapper, "map-exec", "sleep 1", "30", state)
 	if env != nil {
 		wrapper.Env = env
 	}
@@ -1670,7 +1670,7 @@ func TestExecWrapperReleasesTheStreamWhenTheCommandExits(t *testing.T) {
 	// descriptor was closed, which is a guard that proves nothing rather than a
 	// flake. A fifth of a second is far past the microseconds that first poll
 	// takes and far short of the poll interval the regression waits out.
-	cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", "echo hi >&2; sleep 0.2", "30", t.TempDir()+"/state", "-p")
+	cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", "echo hi >&2; sleep 0.2", "30", t.TempDir()+"/state")
 	cmd.Stderr = w
 	if env != nil {
 		cmd.Env = env

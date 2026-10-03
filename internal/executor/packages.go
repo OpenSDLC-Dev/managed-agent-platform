@@ -695,12 +695,12 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		}
 		// The assembled command is one execve argument, which Linux caps near
 		// 128 KiB; past sandbox.MaxCommandBytes Exec refuses it before it runs,
-		// an error that would fault the pass, and a fault reclaim-loops the item. The API's per-manager
-		// byte cap does not bound this: it counts entry bytes, while `go` emits
-		// one `go install` per entry (far more than the entry's own bytes), and
-		// a row stored before that cap existed never passed it. This is the
-		// backstop, refused terminally here, before the probe, exactly like an
-		// invalid entry.
+		// an error that would fault the pass, and a fault reclaim-loops the
+		// item. The API's per-manager byte cap does not bound this: it counts
+		// entry bytes, while `go` emits one `go install` per entry (far more
+		// than the entry's own bytes), and a row stored before that cap existed
+		// never passed it. This is the backstop, refused terminally here,
+		// before the probe, exactly like an invalid entry.
 		credsDir := ""
 		if len(stripped.creds) > 0 {
 			credsDir = packagesCredsDir()
@@ -785,14 +785,9 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			}
 		}
 		progress()
-		// The managers are the image's own, run as the image's environment
-		// sets them up — an image may put one on PATH only from its startup
-		// file — so the install, unlike the probe and the cleanup, runs with
-		// that file read.
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
-			Command:      cmd,
-			Timeout:      e.cfg.PackageInstallTimeout,
-			ImageStartup: true,
+			Command: cmd,
+			Timeout: e.cfg.PackageInstallTimeout,
 		})
 		removeCreds()
 		if err != nil {

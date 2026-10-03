@@ -276,13 +276,11 @@ func (b *BulkWrite) blamed(stderr string) string {
 const bulkLeftMarker = "map-bulk-left "
 
 // bulkLeftBeginMarker opens the report, and is what makes the markers after it
-// the *shed's* rather than the image's. An image can write to this stream before
-// the script runs — a plain `bash -c` sources an `ENV BASH_ENV` file first, the
-// channel #310 measured, and though Exec starts the platform's scripts with -p,
-// which reads none (ExecRequest), the loader still runs an `ENV LD_PRELOAD`
-// library's constructors in that bash — so a forged `map-bulk-left 0` printed
-// there would name a file the shed had just removed, and emptying it would put
-// back, as a zero-byte file, exactly the litter this cleanup exists to remove. Only the lines after
+// the *shed's* rather than the image's. An image controls this stream before the
+// script ever runs — `bash -c` sources an `ENV BASH_ENV` file first, the channel
+// #310 measured — so a forged `map-bulk-left 0` printed there would name a file
+// the shed had just removed, and emptying it would put back, as a zero-byte
+// file, exactly the litter this cleanup exists to remove. Only the lines after
 // the LAST of these count, which is the bound blamed already takes for the fail
 // marker and for the same reason: the image's turn at the stream comes first,
 // and the shed prints this immediately before its own answer. A report with no

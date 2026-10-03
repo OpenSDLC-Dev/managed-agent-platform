@@ -120,11 +120,10 @@ USER app
 // instead: `bash -c` sources $BASH_ENV before it runs anything, so the hook's
 // record came back carrying uid 0 — twice per cleanup, once for the wrapper's
 // shell and once for the command's. No exec does the cleaning now (the daemon
-// empties what it landed), and the platform's own scripts read no startup file
-// at all (sandbox.ExecRequest), so what this row pins is the invariant rather
-// than one hole in it: the hook runs for a command run in the image's
-// environment — the agent's own shell, whose uid is no escalation — once, and
-// for nothing the platform runs, uid 0 least of all.
+// empties what it landed), so what this row pins is the invariant rather than
+// one hole in it: the hook still runs for the sandbox's own execs, because that
+// shell is the agent's and its own uid is no escalation, and uid 0 must never
+// be among them.
 func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 	image := dockertest.ImageFrom(t, "hooked", hookedDockerfile, "--host", docker.DaemonHostForTest())
 
@@ -156,30 +155,21 @@ func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotWritable — the route whose shed needs the daemon's credential", err)
 	}
 
-	// The agent's own shell, which the hook is for.
-	if _, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "true", ImageStartup: true}); err != nil {
-		t.Fatalf("run a command in the image's environment: %v", err)
-	}
 	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "cat /workspace/ran 2>/dev/null || true"})
 	if err != nil {
 		t.Fatalf("read the hook's record: %v", err)
 	}
 	// An image that never sourced the hook at all would satisfy "no uid 0
-	// appears" without proving anything, so the record must show the hook
-	// firing for the agent's command — the mechanism a privileged exec would
-	// have inherited — and for nothing else: not the write's own execs, not
-	// this read, not the wrapper around the agent's command.
-	uids := strings.Fields(res.Stdout)
-	if len(uids) == 0 {
+	// appears" without proving anything, so the record must first show the hook
+	// firing for the sandbox's own execs — the mechanism a privileged exec would
+	// have inherited.
+	if len(strings.Fields(res.Stdout)) == 0 {
 		t.Fatalf("the hook recorded nothing (%q): this row cannot tell a closed channel from an unused one", res.Stdout)
 	}
-	for _, uid := range uids {
+	for _, uid := range strings.Fields(res.Stdout) {
 		if uid == "0" {
 			t.Fatalf("the hook ran as uid 0 (record: %q): the root shed must run no agent-chosen code", res.Stdout)
 		}
-	}
-	if len(uids) != 1 {
-		t.Errorf("the hook ran %d times (record: %q), want once: for the agent's command and for nothing the platform ran", len(uids), res.Stdout)
 	}
 }
 

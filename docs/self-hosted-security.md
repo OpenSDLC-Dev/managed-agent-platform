@@ -168,13 +168,10 @@ with an associative array (`declare -A`), so on bash 3.2 every call after the
 first fails, and `glob` expands its pattern with `globstar`, which 3.2 refuses
 outright. `grep`'s scripts need only 3.2 (below). What the image's environment
 sets for a shell — an `ENV BASH_ENV` startup file, exported functions,
-`SHELLOPTS` — applies to the commands the model runs through the `bash` tool
-and to a `config.packages` install, which runs your image's own managers, and
-to nothing else: every script the platform runs to read or change the sandbox
-for itself (the other tools, the file transfers, the memory sync, the exec
-wrapper around even the `bash` tool's command) starts as `bash -p`, which
-reads no startup file, imports no function and ignores `SHELLOPTS`.
-Environment variables reach both alike. The **Kubernetes** backend needs more,
+`SHELLOPTS` — applies to every script that runs in the sandbox, the model's
+commands and the platform's own alike; whether the platform's own should run
+without it is [#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860).
+The **Kubernetes** backend needs more,
 and needs it hard: `setsid` for its exec wrapper, `tee`/`wc` for the write
 path's delivered-byte count, a `stat` accepting `-c` (GNU or BusyBox), on which
 every file **read** exits, and
@@ -384,10 +381,9 @@ sandbox can delete that manifest, and an image can print to the same stream the
 report arrives on. Neither is left to trust — a shed that lost its manifest says
 so, and the branch that knows the members were delivered empties the platform's
 own list instead; and only the lines after the shed's own opening marker are
-read, so a hook that prints before the script does is not mistaken for it — an
-`ENV LD_PRELOAD` library's constructor, say, since the `bash -p` the shed runs
-under already keeps an `ENV BASH_ENV` file out. What remains is narrower: the
-batch's emptying needs the shed exec to have *run*. A sandbox too broken to exec at all keeps a failed batch's
+read, so an `ENV BASH_ENV` file that prints before the script does is not
+mistaken for it. What remains is narrower: the batch's emptying needs the shed
+exec to have *run*. A sandbox too broken to exec at all keeps a failed batch's
 payload where a single write's would still be taken back — closing that would
 cost a round trip per member, ten thousand of them, to serve a container that is
 about to be destroyed anyway.
