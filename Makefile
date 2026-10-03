@@ -181,11 +181,13 @@ changelog-archive:
 # own test, which calls Check on the real docs/DIVERGENCES.md. This target is
 # the other half: whether each live `Tracked: #N` still names an OPEN issue,
 # which only GitHub can answer. NOT part of `verify`: the gate is
-# credential-free by design, and the only network it reaches is for pinned
-# inputs whose bytes cannot change under it — the modules go.sum pins, the
-# ripgrep `make ripgrep` checks against its sha256, each fetched once — while
-# this check's answer is live state elsewhere, which a gate cannot be made to
-# fail on honestly. .github/workflows/registry.yml runs this
+# credential-free by design and downloads only build and test input — the
+# modules go.sum pins and the ripgrep `make ripgrep` checks against its
+# sha256, both fixed by digest, and the container images its suites run, some
+# by a tag that moves (debian:stable-slim, postgres:16-alpine, and
+# golang:1.26-bookworm for the gate image it builds, whose build also runs
+# apt-get), so those can change between runs — while this check's answer is
+# live state elsewhere, which a gate cannot be made to fail on honestly. .github/workflows/registry.yml runs this
 # daily and on every PR that touches the registry; GITHUB_TOKEN is optional
 # (the repository is public) and only raises the API rate limit.
 registry-check:
