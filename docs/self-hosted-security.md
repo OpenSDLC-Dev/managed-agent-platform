@@ -176,16 +176,25 @@ environment sets for a shell — an `ENV BASH_ENV` startup file, exported
 functions, `SHELLOPTS` — applies to every script that runs in the sandbox,
 the model's commands and the platform's own alike, so an image whose `PATH`
 or options come from that file works for both. What the startup file
-*prints* does not corrupt the platform's scripts: each one whose output the
-platform reads — `glob` and `grep`, the outputs harvest's listing, the memory
-sync's tree hash, the package-install probe, Docker's refused-write reasons
-and, on Kubernetes, every file read, an exec's exit record and liveness
-probe, a refused write's reason and the checkpoint's root probe — prints its
+*prints* does not corrupt the scripts whose answers the platform parses:
+`glob` and `grep`, the outputs harvest's listing, the memory sync's tree
+hash, the package-install probe, Docker's refused-write reasons and, on
+Kubernetes, every file read, an exec's exit record and liveness probe, a
+refused write's reason and the checkpoint's root probe each print their
 answer between a begin and an end line carrying a nonce of its own, and only
-what lies between them is read: a banner on either stream, ending its line or
-not, and what an `EXIT` trap prints after the script fall outside, and the
-scripts name every path whole, so a `cd` in the file moves none of them
+what lies between them is read. A banner on either stream, ending its line or
+not, and what an `EXIT` trap prints after the script fall outside; the
+scripts name every path whole, so a `cd` in the file moves none of them; and
+errexit (`set -e`) in the file does not end one before its end line
 ([#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860)).
+Not every script is framed. A bulk write's reports — the member it failed on,
+a directory it could not make, what its shed left behind — are marker lines,
+each printed on a line of its own and the last one read, which a banner
+around them does not displace. The output of the package install and of the
+`grep` tool's ripgrep install is relayed, not parsed — the former as the
+session error's message, the latter in the tool error when the install
+fails — banner and all, and the `bash` tool's output is the model's own
+command's, which the startup file reaches as it reaches any command.
 What the file *changes* still applies — a function an image exports under
 the name of a command the scripts call answers for that command — and one
 channel prints inside the frame, where no line can keep it out: a library an
