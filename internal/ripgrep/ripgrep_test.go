@@ -164,19 +164,34 @@ func TestOpenRefusesWhatThePinDoesNot(t *testing.T) {
 	}
 }
 
-// Check is Open over every pinned archive: nil for a build carrying them all,
-// and otherwise the first failure — the case a startup warning exists for
-// being a build that fetched none.
+// Check is Open over every pinned archive, one architecture at a time:
+// nothing for a build carrying them all, and otherwise each architecture that
+// cannot be opened, named, with why — every one, for a build that fetched
+// none, which is the case the startup warning exists for.
 func TestCheckOpensEveryPinnedArchive(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Fatalf("Check: %v — run `make ripgrep` first", err)
+	if bad := Check(); len(bad) != 0 {
+		t.Fatalf("Check: %v — run `make ripgrep` first", bad)
 	}
 	good := archive(t, map[string]string{"ripgrep-9.9.9-x86_64-unknown-linux-musl/rg": "\x7fELF-rg"})
-	if err := check(holding(good), pinning(digest(good))); err != nil {
-		t.Errorf("check over a good archive: %v", err)
+	if bad := check(holding(good), pinning(digest(good))); len(bad) != 0 {
+		t.Errorf("check over a good archive: %v", bad)
 	}
-	if err := check(holding(nil), pinning(digest(good))); !errors.Is(err, ErrNotEmbedded) {
-		t.Errorf("check over nothing fetched = %v, want ErrNotEmbedded", err)
+	// Two architectures pinned, the arm64 archive never fetched and the
+	// amd64 one present: only arm64 is named.
+	both := pinning(digest(good))
+	both.Archives["arm64"] = Archive{URL: "https://example.invalid/ripgrep-9.9.9-aarch64-unknown-linux-musl.tar.gz", SHA256: digest(good)}
+	if bad := check(holding(good), both); len(bad) != 1 || bad[0].Arch != "arm64" || !errors.Is(bad[0].Err, ErrNotEmbedded) {
+		t.Errorf("check with arm64 missing = %v, want arm64 alone, not embedded", bad)
+	}
+	// Neither fetched: both named, in architecture order.
+	bad := check(holding(nil), both)
+	if len(bad) != 2 || bad[0].Arch != "amd64" || bad[1].Arch != "arm64" || !errors.Is(bad[0].Err, ErrNotEmbedded) || !errors.Is(bad[1].Err, ErrNotEmbedded) {
+		t.Errorf("check over nothing fetched = %v, want amd64 and arm64, not embedded", bad)
+	}
+	// A wrong archive is named with its own error.
+	if bad := check(holding(append(good, 0)), pinning(digest(good))); len(bad) != 1 || bad[0].Arch != "amd64" ||
+		!strings.Contains(bad[0].Err.Error(), "does not match its pinned sha256") {
+		t.Errorf("check over a wrong archive = %v", bad)
 	}
 }
 

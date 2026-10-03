@@ -384,9 +384,11 @@ func run(ctx context.Context) error {
 	}
 
 	// A build made without `make ripgrep` still runs, and its grep answers
-	// every call with a tool error saying why; this says so once, up front.
-	if err := ripgrep.Check(); err != nil {
-		slog.Warn("the grep tool cannot run in this build: every grep call will be a tool error", "error", err)
+	// every call with a tool error saying why; this says so once, up front,
+	// for each sandbox architecture whose rg this build cannot hand out.
+	for _, u := range ripgrep.Check() {
+		slog.Warn("the grep tool cannot run in a linux/"+u.Arch+" sandbox in this build: every grep call there will be a tool error",
+			"arch", "linux/"+u.Arch, "error", u.Err)
 	}
 	slog.Info("executor running", "version", version.Version)
 	return executor.New(pool, events.NewLog(pool), queue.New(pool), provider, blobs, cipher, cfg).Run(ctx)

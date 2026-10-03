@@ -99,20 +99,28 @@ func mustLoadManifest() Manifest {
 // the archive's digest has been checked against the manifest.
 func Open(goarch string) (rg io.Reader, size int64, err error) { return open(assets, Pinned, goarch) }
 
-// Check opens every pinned archive as an install would, and answers the
-// first that cannot be — ErrNotEmbedded in a build made without `make
-// ripgrep`. The executor and the worker call it at startup, so a build whose
-// grep can only answer with a tool error says so in its log before a model
-// finds out.
-func Check() error { return check(assets, Pinned) }
+// Unusable is a sandbox architecture this build cannot hand rg to, and why.
+type Unusable struct {
+	Arch string // the Linux GOARCH: "amd64" or "arm64"
+	Err  error
+}
 
-func check(fsys fs.FS, m Manifest) error {
+// Check opens every pinned archive as an install would, and answers each
+// that cannot be, in architecture order — every one, with ErrNotEmbedded, in
+// a build made without `make ripgrep`. The executor and the worker call it at
+// startup and warn once per architecture named, so a build whose grep can
+// only answer with a tool error in a sandbox of that architecture says so in
+// its log before a model finds out.
+func Check() []Unusable { return check(assets, Pinned) }
+
+func check(fsys fs.FS, m Manifest) []Unusable {
+	var bad []Unusable
 	for _, arch := range slices.Sorted(maps.Keys(m.Archives)) {
 		if _, _, err := open(fsys, m, arch); err != nil {
-			return err
+			bad = append(bad, Unusable{Arch: arch, Err: err})
 		}
 	}
-	return nil
+	return bad
 }
 
 func open(fsys fs.FS, m Manifest, goarch string) (io.Reader, int64, error) {
