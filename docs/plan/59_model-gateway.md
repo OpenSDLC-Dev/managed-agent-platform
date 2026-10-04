@@ -80,8 +80,8 @@ must be preserved unchanged
 **Vendors.** Each publishes an Anthropic-compatible endpoint beside its
 OpenAI-compatible one. The CN and international sites are separate consoles issuing
 their own keys — the user's MiniMax account is on the CN site — so a profile carries
-both regions and a provider names one; whether a key crosses regions is the live tier's
-to show. OpenAI hosts are listed where documented; the live tier confirms the rest.
+both regions and a provider names one; whether MiniMax's CN key also works on the
+international host is the live tier's to show. OpenAI hosts are listed where documented.
 
 | Vendor | Anthropic endpoint, CN · international | OpenAI endpoint | Field-support table |
 |---|---|---|---|
@@ -175,7 +175,8 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
 
 - **Pass through** by default; the upstream's own error reaches the caller, redacted.
   What the docs leave uncertain (MiniMax's two `tool_choice` pages; every Zhipu field)
-  passes through until the live tier says otherwise.
+  passes through until evidence says otherwise — the live tier, for a vendor it has a
+  key for.
 - **Edit** only what (a) the platform's own traffic needs — `search_result` flattened to
   text through `provider.SearchResultText` where a vendor refuses it, which is the
   brain's `flatten_search_results` moved behind the gateway — or (b) the vendor
@@ -305,7 +306,8 @@ frozen by slice 2.
 2. **Anthropic inference:** `/v1/messages` streamed and not, `count_tokens`,
    `/v1/models`, the passthrough relay, profile edits, routing with retry, fallback and
    affinity, the stall guard, usage rows, limits, telemetry; compose and Helm; the live
-   tier. Freezes the admin API for the console.
+   tier on MiniMax (CN) and DeepSeek through the official Anthropic SDK. Freezes the
+   admin API for the console.
 3. **Console** (the console repository's own plan): the Models section and the editors'
    alias choice.
 4. **OpenAI surfaces:** Chat Completions and Embeddings passthrough, Models in OpenAI's
@@ -314,8 +316,8 @@ frozen by slice 2.
    docs/REFERENCE_PROJECTS.md.
 5. **Brain cutover:** the `traceparent` and session-id headers, the one-route default in
    compose and Helm with the seeded key; `flatten_search_results` stays accepted for the
-   no-gateway mode. Acceptance: an `ant` session per vendor through brain → gateway, its
-   transcript in docs/HISTORY.md. Waits on slice 0.
+   no-gateway mode. Acceptance: an `ant` session on MiniMax (CN) and one on DeepSeek
+   through brain → gateway, transcripts in docs/HISTORY.md. Waits on slice 0.
 6. **Responses, stateless:** `/v1/responses` streamed and not, converted to Anthropic;
    `previous_response_id`, `conversation` and the retrieve and delete routes answer with
    a refusal that says why.
@@ -336,15 +338,25 @@ writes.
 - **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests.
 - **Clients:** the official Anthropic and OpenAI Go SDKs drive the gateway in-process —
   streaming, tool loops with thinking, errors.
-- **Live tier:** `RUN_LIVE_MODELGATEWAY` gives consent; `.env` supplies
-  `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `ZHIPU_API_KEY` and `MOONSHOT_API_KEY`, each
-  beside the host of the region that issued it
-  (`MINIMAX_BASE_URL=https://api.minimax.cn/anthropic` for the user's CN account), and
-  once opted in a missing one fails. Per vendor: streamed text, a tool round trip carrying
-  thinking, a `search_result` replay, `count_tokens`, usage and cache fields, an upstream
-  4xx. Its results settle the uncertainties above — all of Zhipu, MiniMax's
-  `tool_choice`, `count_tokens` on DeepSeek, Zhipu and Kimi — and land in
-  docs/HISTORY.md.
+- **Live tier — MiniMax (CN) and DeepSeek, the keys the user has, driven through the
+  official Anthropic SDK** (anthropic-sdk-go at the `go.mod` pin, pointed at a running
+  gateway with `option.WithBaseURL` and a gateway key, as any SDK caller would be).
+  `RUN_LIVE_MODELGATEWAY` names the vendors consented to (`deepseek,minimax`), so the
+  fail-rather-than-skip contract holds per vendor: a named vendor with missing
+  configuration fails, an unnamed one never runs. `.env` supplies `DEEPSEEK_API_KEY`, and
+  `MINIMAX_API_KEY` beside `MINIMAX_BASE_URL=https://api.minimax.cn/anthropic`.
+  - **Model list:** `Models.List`, `Models.ListAutoPaging` over more aliases than one
+    page, and `Models.Get` return every configured alias, each with every `ModelInfo`
+    field the SDK marks required present (`respjson.Field.Valid`).
+  - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with
+    `Message.Accumulate`) on an alias routed to each vendor: text, a tool-use round trip
+    that sends the thinking blocks back unchanged, reported usage, and an upstream
+    refusal surfacing as an `*anthropic.Error` carrying the upstream's status.
+  - **Vendor behavior:** a `search_result` replay, `count_tokens`, cache usage fields;
+    for MiniMax its `tool_choice` values and whether the CN key works on the
+    international host. Results land in docs/HISTORY.md.
+  - Zhipu and Moonshot join when keys exist. Until then their profiles are checked
+    against fake upstreams only, and Zhipu's whole support matrix stays unconfirmed.
 - **Acceptance:** Claude Code with `ANTHROPIC_BASE_URL` at the gateway; slice 5's `ant`
   session through the brain.
 - Every slice: `make verify` (the coverage gate takes in the new packages), the
@@ -363,7 +375,8 @@ writes.
 ## Open questions, settled by evidence in the slice that meets them
 
 1. `count_tokens` against an upstream without it — refuse, or estimate? Slice 2, once the
-   live tier shows which vendors serve it and whether Claude Code depends on it.
+   live tier shows whether DeepSeek serves it (MiniMax documents it for M3 and later) and
+   whether Claude Code depends on it.
 2. Whether `anthropic-beta` goes upstream by default: DeepSeek documents it as ignored,
    the others say nothing. Slice 2, live tier.
 3. Which v1 vendors serve OpenAI-shaped embeddings — none of the four is confirmed yet.
