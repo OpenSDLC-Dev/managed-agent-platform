@@ -45,11 +45,26 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // reports for the exec is the command itself, not a shell wrapping it. That is
 // what lets Exec judge the deadline from outside by watching one pid: there is
 // no separate wrapper pid for the command to kill in order to look finished
-// while it keeps running (it cannot kill itself and continue). `set -m` makes
-// the command a process-group leader, so the watchdog's `kill -9 -"$self"`
-// takes its children with it — a process group, not a tree, so a child that
-// calls setsid still escapes and outlives the deadline (Exec's own bound, and
-// the container's eventual teardown, are what bound that).
+// while it keeps running (it cannot kill itself and continue). That process
+// leads a process group of its own — Docker's runtime starts every exec as the
+// leader of a session (measured: its pid, group and session agree, with `set
+// -m` or without) — so the watchdog's `kill -9 -"$self"` takes the command's
+// children with it. A process group, not a tree: a child that calls setsid
+// still escapes and outlives the deadline (Exec's own bound, and the
+// container's eventual teardown, are what bound that), and so does every job of
+// a shell with job control on, which forks each into a group of its own.
+//
+// So the command's shell must start with job control off, and the `set -m`
+// that gives the backgrounded watchdog a group of its own (below) is undone by
+// `set +m` before the `exec` (#866). An image that sets SHELLOPTS — to
+// anything, even nothing — has bash export it and keep it in step with the
+// shell's options: `set -m` added monitor to it, the command's `bash -c` read
+// monitor back, and the group kill took that shell and missed its children. An
+// image that names monitor there itself starts this shell with job control on,
+// and `set +m` takes that out too; the rest of the image's SHELLOPTS still
+// reaches the command. Job control the command's own shell turns on once it has
+// started — its BASH_ENV file, or the command running `set -m` — is the
+// command's own, as a setsid is.
 //
 // The watchdog is best effort by construction, and the sandbox never trusts it.
 // It is a process inside the container, where the command can find and kill it:
@@ -107,9 +122,9 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // on would end the watchdog at the first command that fails (#860): a `mkdir`
 // the tenant made fail, and the runaway is never killed — the deadline is still
 // called from outside, but the command runs on. So the watchdog's `sleep` and
-// `mkdir` carry `|| :`, and nothing touches a shell option: the command's own
-// `bash -c` sources the same file and gets the image's options as before. The
-// rest cannot be ended that way — `set -m`, an assignment, conditions and an `||`
+// `mkdir` carry `|| :`, and errexit is left as the file set it: the command's
+// own `bash -c` sources the same file and gets it as before. The rest cannot be
+// ended that way — `set -m` and `set +m`, an assignment, conditions and an `||`
 // errexit ignores, a backgrounded subshell, and `exec`, whose failure ends the
 // shell whatever its options — and the exec's exit code is the command's own,
 // read from the daemon.
@@ -130,6 +145,7 @@ if [ "$2" != "0" ]; then
     fi
   ) >/dev/null 2>&1 &
 fi
+set +m
 exec /bin/bash -c "$1"
 `
 

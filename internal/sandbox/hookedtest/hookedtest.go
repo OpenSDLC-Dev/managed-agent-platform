@@ -49,10 +49,11 @@ func Backends(t *testing.T) []Backend {
 	return BackendsFor(t, sandboxtest.BannerHook)
 }
 
-// BackendsFor is Backends with hook as the image's BASH_ENV file.
-func BackendsFor(t *testing.T, hook string) []Backend {
+// BackendsFor is Backends with hook as the image's BASH_ENV file, and env
+// (Image) as more of its environment.
+func BackendsFor(t *testing.T, hook string, env ...string) []Backend {
 	t.Helper()
-	image := Image(t, hook)
+	image := Image(t, hook, env...)
 	dp, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("hooked sandboxes require Docker: %v", err)
@@ -64,9 +65,10 @@ func BackendsFor(t *testing.T, hook string) []Backend {
 	return []Backend{{Name: "docker", Provider: dp, Image: image}, {Name: "k8s", Provider: kp, Image: image}}
 }
 
-// Image builds an image whose `ENV BASH_ENV` file is hook, on the base the
-// backends' contract tests run, makes it visible to the Kubernetes cluster the
-// tests run against, and removes it from both when the test is done.
+// Image builds an image whose `ENV BASH_ENV` file is hook, and which sets each
+// NAME=value of env with an `ENV` of its own, on the base the backends'
+// contract tests run, makes it visible to the Kubernetes cluster the tests run
+// against, and removes it from both when the test is done.
 //
 // Each call builds an image of its own: the same Dockerfile would build the
 // same image ID in every package that asks at once, sharing layers through the
@@ -75,9 +77,9 @@ func BackendsFor(t *testing.T, hook string) []Backend {
 // label carrying a nonce makes the ID this call's alone, its layers still
 // shared, so the removal when the test ends takes this call's image and nothing
 // another package runs.
-func Image(t *testing.T, hook string) string {
+func Image(t *testing.T, hook string, env ...string) string {
 	t.Helper()
-	image := DockerImage(t, hook)
+	image := DockerImage(t, hook, env...)
 	if l := sandboxtest.LoadIntoKind(t, sandboxtest.KubeContext(t), image, "--host", docker.DaemonHost()); l != nil {
 		loads.Store(image, l)
 		t.Cleanup(func() { l.Remove(t) })
@@ -116,14 +118,18 @@ func KindMissing(t *testing.T, image string) (missing []string, loaded bool) {
 
 // DockerImage is Image on the Docker daemon alone, for a test of the Docker
 // backend that has no cluster to show it to.
-func DockerImage(t *testing.T, hook string) string {
+func DockerImage(t *testing.T, hook string, env ...string) string {
 	t.Helper()
 	var nonce [8]byte
 	_, _ = rand.Read(nonce[:])
-	return dockertest.ImageFrom(t, "hooked", "FROM "+baseImage+"\n"+
-		"LABEL map.hooked.build="+hex.EncodeToString(nonce[:])+"\n"+
-		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(hook))+" | base64 -d > /etc/map-hook.sh\n"+
-		"ENV BASH_ENV=/etc/map-hook.sh\n", "--host", docker.DaemonHost())
+	dockerfile := "FROM " + baseImage + "\n" +
+		"LABEL map.hooked.build=" + hex.EncodeToString(nonce[:]) + "\n" +
+		"RUN echo " + base64.StdEncoding.EncodeToString([]byte(hook)) + " | base64 -d > /etc/map-hook.sh\n" +
+		"ENV BASH_ENV=/etc/map-hook.sh\n"
+	for _, e := range env {
+		dockerfile += "ENV " + e + "\n"
+	}
+	return dockertest.ImageFrom(t, "hooked", dockerfile, "--host", docker.DaemonHost())
 }
 
 // Provision provisions a sandbox from the hooked image on b, with h as its

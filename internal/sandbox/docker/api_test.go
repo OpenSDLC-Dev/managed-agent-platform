@@ -950,7 +950,14 @@ func TestExecWrapperWritesOnlyTheWatchdogsMark(t *testing.T) {
 		t.Errorf("mkdir appears %d times; the mark is the wrapper's one write", n)
 	}
 	if !strings.Contains(execWrapper, "set -m") {
-		t.Error("the wrapper must enable job control so the deadline kills the command's process group")
+		t.Error("the wrapper must enable job control so its watchdog runs in a process group of its own")
+	}
+	// ...and turn it off again before the exec: an image that sets SHELLOPTS
+	// exports the shell's options, so a `set -m` still on reaches the command's
+	// own bash as monitor, and its jobs leave the group the deadline kills (#866).
+	on, off := strings.Index(execWrapper, "set -m"), strings.LastIndex(execWrapper, "set +m")
+	if run := strings.Index(execWrapper, `exec /bin/bash -c "$1"`); off < on || run < off {
+		t.Errorf("the wrapper must run `set +m` after `set -m` and before the exec (#866):\n%s", execWrapper)
 	}
 	// The command must BECOME the exec (exec /bin/bash -c "$1"), not run as a
 	// child of a wrapper shell. Otherwise the pid Exec watches is a wrapper the
