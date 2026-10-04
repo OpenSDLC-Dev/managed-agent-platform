@@ -439,7 +439,10 @@ func TestK8sExecUnderAnErrexitStartup(t *testing.T) {
 				{"a SIGKILL the command sent itself", "kill -9 $$", 30 * time.Second, 0, 137, false},
 				{"an overrun the probe cannot see, then a clean exit", blindTheProbe, 3 * time.Second, 30 * time.Second, 0, true},
 				{"an overrun the probe cannot see, then a failing exit", blindTheProbe + "exit 3\n", 3 * time.Second, 30 * time.Second, 3, true},
-				{"a disarmed watchdog and a command that runs on", disarmTheWatchdog + "sleep 987321", time.Second, 2 * time.Second, 137, true},
+				// 3s, as blindTheProbe's rows: the command must find and kill
+				// its watchdog before the watchdog fires, which 1s does not
+				// leave room for on a loaded node.
+				{"a disarmed watchdog and a command that runs on", disarmTheWatchdog + "sleep 987321", 3 * time.Second, 2 * time.Second, 137, true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					if tc.grace > 0 {
@@ -461,5 +464,36 @@ func TestK8sExecUnderAnErrexitStartup(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// An image whose startup prints more than the output cap — 1.2 MB of "y\n" in
+// every shell — pushes each exec's exit record out of its output, and Exec
+// answers with an error, not with the kill's 137 for every command that a
+// lost record would read as (readExitRecord; docs/self-hosted-security.md,
+// the 1 MiB room).
+func TestK8sExecUnderAFloodingStartupIsAnError(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
+	}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+		SessionID:  domain.NewID("sesn"),
+		Image:      hookedtest.Image(t, "yes | head -c 1200000\n"),
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	for _, command := range []string{"exit 0", "exit 7"} {
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: command, Timeout: 30 * time.Second}); err == nil {
+			t.Errorf("%s under a flooding startup = exit %d, timed out %v; want an error", command, res.ExitCode, res.TimedOut)
+		}
 	}
 }

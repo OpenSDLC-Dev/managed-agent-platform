@@ -193,9 +193,9 @@ a command past its deadline
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the
-output — on Kubernetes every exec then fails, its exit record lost, and a
-read fails once the file and the banner together pass the read's cap and
-room. Not every script is framed. A bulk write's reports — the member it
+output — on Kubernetes every exec then fails with an error, its exit record
+pushed out, and a read fails once the file and the banner together pass the
+read's cap and room. Not every script is framed. A bulk write's reports — the member it
 failed on, a directory it could not make, what its shed left behind — are
 marker lines, each printed on a line of its own and the last one read, which
 a banner around them does not displace. What a few scripts print is relayed,

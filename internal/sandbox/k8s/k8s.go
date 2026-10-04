@@ -1327,12 +1327,12 @@ func (pd *pod) classifyTimeout(timeout time.Duration, code int, watchdogFired bo
 // long the command ran (0 when the line carries no record of it).
 func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Duration, error) {
 	f := sandbox.NewFrame("exit")
-	out, _, _, err := pd.client.execOutput(ctx, pd.name, containerName,
+	out, cut, _, err := pd.client.execOutput(ctx, pd.name, containerName,
 		[]string{"/bin/bash", "-c", f.Wrap(exitScript), "map-exit", state})
 	if err != nil {
 		return 0, false, 0, err
 	}
-	return readExitRecord(f, out)
+	return readExitRecord(f, out, cut)
 }
 
 // readExitRecord reads exitScript's answer from inside its frame (f), so what
@@ -1346,7 +1346,11 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Dura
 // reached it, or when it ends partway through the begin line, which was on its
 // way when the stream was lost (Frame.CutInBegin). Anything else with no begin
 // line is output that is not the script's, which is no record to parse: an
-// error, as an unparseable line is.
+// error, as an unparseable line is. So is a stream the cap cut (truncated)
+// before any begin line, whatever its tail: a startup that printed past the
+// cap pushed the record out, which is no loss in transit, and reading it as
+// no record would answer every command with the kill's 137; it fails the exec
+// instead (docs/self-hosted-security.md, the 1 MiB room).
 //
 // A banner that ends its line and then nothing reads as no record too. The one
 // startup that would print that for every exec — one that exits, or execs, so
@@ -1356,9 +1360,13 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Dura
 // gone and the exec is refused before any record is read (measured on both
 // backends: Docker reports the container not running, Kubernetes the
 // container not found).
-func readExitRecord(f sandbox.Frame, out string) (int, bool, time.Duration, error) {
+func readExitRecord(f sandbox.Frame, out string, truncated bool) (int, bool, time.Duration, error) {
 	line, framed, _ := f.Cut(out, true)
-	if !framed && strings.TrimSpace(out) != "" && !f.CutInBegin(out) {
+	switch {
+	case framed:
+	case truncated:
+		return 0, false, 0, errors.New("k8s: the exit record did not reach the output: the sandbox printed past the output cap before it")
+	case strings.TrimSpace(out) != "" && !f.CutInBegin(out):
 		return 0, false, 0, errors.New("k8s: the exit record did not reach the output: no begin line")
 	}
 	return parseExit(line)

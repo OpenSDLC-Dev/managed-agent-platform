@@ -1955,7 +1955,7 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 		}
 		f := sandbox.NewFrame("exit")
 		out, _ := run(t, f, "/bin/bash", exitScript, state)
-		code, killed, ran, err := readExitRecord(f, out)
+		code, killed, ran, err := readExitRecord(f, out, false)
 		if err != nil || code != 7 || !killed || ran != 2500*time.Millisecond {
 			t.Errorf("readExitRecord = %d, %v, %s, %v; want 7, true, 2.5s", code, killed, ran, err)
 		}
@@ -2004,7 +2004,8 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 // stream with no begin line is a lost answer — no record, the kill's code, as
 // an empty stream always was — when nothing else reached it, or when it ends
 // partway through the begin line, after a banner or not; and one with
-// something else and no begin line is no record to parse.
+// something else and no begin line, or that the cap cut before any begin line
+// whatever it ends in, is no record to parse.
 func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 	f := sandbox.NewFrame("exit")
 	begin, end := f.Lines()
@@ -2031,9 +2032,14 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 		{"cut on the begin line's own newline, after a banner", "welcome 0 1.0 2.0" + begin[:1], sigkillExit, false, 0, false},
 		{"something, but no begin line", "welcome 0 1.0 2.0", 0, false, 0, true},
 		{"something, and another frame's begin line cut short", "welcome 0 1.0 2.0" + other, 0, false, 0, true},
+		// A startup that floods past the cap pushes the record out: an error,
+		// though its tail ends in a newline, as a lost begin line's would.
+		{"a flood the cap cut before any begin line", strings.Repeat("y\n", 1000), 0, false, 0, true},
+		{"a record the cap cut after its begin line", "flood " + begin + "K 0 1.0", 0, true, 0, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			code, killed, ran, err := readExitRecord(f, c.out)
+			truncated := strings.HasPrefix(c.name, "a flood the cap cut") || strings.HasPrefix(c.name, "a record the cap cut")
+			code, killed, ran, err := readExitRecord(f, c.out, truncated)
 			if (err != nil) != c.fails || !c.fails && (code != c.code || killed != c.killed || ran != c.ran) {
 				t.Errorf("readExitRecord(%q) = %d, %v, %s, %v; want %d, %v, %s, failing %v", c.out, code, killed, ran, err, c.code, c.killed, c.ran, c.fails)
 			}
