@@ -32,8 +32,14 @@ Scope decisions settled with the user on 2026-10-04:
 3. **v1 upstreams are the four vendors' official cloud APIs.** Gemini, Vertex (#236) and
    self-hosted engines (vLLM, SGLang, …) follow in later plans, with bifrost as the
    reference (Later upstreams says for what).
-4. **Governance serves internal applications:** API keys, per-key usage and cost,
-   per-key RPM/TPM limits. No budgets, billing, teams or tenants.
+4. **Governance serves internal applications, on the platform's own API keys.** A caller
+   authenticates with a key the console already issues (`sk-map-api01-`, #378), as one
+   Anthropic key serves both the Messages API and Managed Agents; the gateway adds
+   per-key usage and cost and per-key RPM/TPM limits. Usage holds metadata only — never
+   prompt or response content — kept 90 days by default (configurable), with daily
+   rollups kept indefinitely. No budgets, billing, teams or tenants. One credential
+   carrying both management and inference rights is the price of not having two; a
+   scope narrowing a key to inference waits for someone who needs it.
 5. **Inbound surfaces:** Anthropic Messages in full — `POST /v1/messages` (streamed and
    not), `POST /v1/messages/count_tokens`, `GET /v1/models` and `GET /v1/models/{id}` —
    and, on the OpenAI side, Chat Completions, Embeddings, Models and Responses, the last
@@ -52,9 +58,11 @@ Scope decisions settled with the user on 2026-10-04:
    into the system prompt; the `web_search` description carries the date). That plan
    gates slice 5 (the brain cutover), not the gateway.
 
-Out of scope: semantic caching, an MCP gateway, guardrails, budgets and billing, teams
-and tenants, stored Responses state, audio/image/video generation, batch and files APIs
-on the gateway, injecting `cache_control` breakpoints, and a `GET /v1/models` on the
+Out of scope: Claude Code as a client (Anthropic does not support routing it to
+non-Claude models), logging request or response content, semantic caching, an MCP
+gateway, guardrails, budgets and billing, teams and tenants, stored Responses state,
+audio/image/video generation, batch and files APIs on the gateway, injecting
+`cache_control` breakpoints, and a `GET /v1/models` on the
 control plane — create-time model validation stays as docs/DIVERGENCES.md's
 `model`-at-create entry describes.
 
@@ -124,20 +132,16 @@ Apache-2.0):
   virtual keys with limits, and later its Gemini/Vertex converters. No code is copied;
   if a later converter ever is, NOTICE and THIRD_PARTY_LICENSES carry it.
 
-**Anthropic's gateway docs.** The
+**Anthropic's gateway docs.** Claude Code is out of scope, but its
 [gateway compatibility guide](https://code.claude.com/docs/en/llm-gateway-protocol) is
-the contract a gateway owes Claude Code, and this gateway's Anthropic surface follows it:
-forward `anthropic-version` and `anthropic-beta` "verbatim; don't allowlist individual
-values", and pass `anthropic-*` headers and body fields through as open lists; stream
-without buffering, keep `ping` events (Claude Code aborts a stream silent for five
-minutes by default) and deliver each event sequence whole; forward the `system` array
-unchanged, since its first block is a positional attribution block, and error bodies
-unmodified, since Claude Code's recovery "matches on the upstream's error wording";
-answer `retry-after` in integer seconds. Token counting is optional — "when they're
-absent, Claude Code falls back to a character-based estimate". Model discovery calls
-`GET /v1/models?limit=1000` with a 3-second timeout, follows no redirect, and keeps only
-ids containing `claude` or `anthropic`. Requests carry `x-claude-code-session-id`, which
-a gateway may consume for attribution.
+the most precise public statement of what an Anthropic-format gateway owes a client, and
+this gateway keeps its client-neutral rules: forward `anthropic-version` and
+`anthropic-beta` "verbatim; don't allowlist individual values", and pass `anthropic-*`
+headers and body fields through as open lists; stream without buffering, keep `ping`
+events and deliver each event sequence whole; forward error bodies unmodified, since a
+client's recovery can match on the upstream's wording; answer `retry-after` in integer
+seconds. Token counting is optional there — "when they're absent, Claude Code falls back
+to a character-based estimate".
 [Claude apps gateway](https://code.claude.com/docs/en/claude-apps-gateway), Anthropic's
 own self-hosted gateway inside the `claude` binary, translates Anthropic Messages for
 Claude upstreams only (Amazon Bedrock, Claude Platform on AWS, Google Cloud, Microsoft
@@ -162,9 +166,11 @@ only: the brain's `Provider` interface is too narrow for a gateway (a single sys
 string; no sampling parameters, `tool_choice`, signatures or streamed tool input). The
 Anthropic ↔ Chat Completions conversion in `internal/provider/openai` moves to
 `convert`, which both then use. It also imports `internal/secrets`,
-`internal/identity` and `internal/telemetry`, and never `internal/domain`,
-`internal/events` or `internal/api`: the gateway knows nothing of agents or sessions
-beyond an opaque session-id header, which is what keeps it usable without the platform.
+`internal/identity`, `internal/telemetry`, and the platform's key check — `authenticate`
+moves out of `internal/api` into a package both servers use, so a revoked or expired key
+stops at the same instant on both — and never `internal/domain`, `internal/events` or
+`internal/api`: beyond the `api_keys` table and an opaque session-id header, the gateway
+knows nothing of the platform.
 
 ### Two request paths
 
@@ -198,14 +204,13 @@ A profile is declarative data plus at most a few Go hooks, compiled in: `deepsee
 conformant endpoint (the later engine profiles join these). It names the request path
 per protocol, the CN and international hosts, the auth header, content-block edits,
 field strips, the usage mapping, and whether `count_tokens` exists — where it does not,
-that alias's `count_tokens` answers `404 not_found_error` and the client estimates, as
-the compatibility guide says Claude Code does.
+that alias's `count_tokens` answers `404 not_found_error` and a client falls back to
+estimating, as the compatibility guide describes.
 
 The edit policy, which keeps a profile from quietly changing what a caller asked for:
 
 - **Every edit is deterministic and leaves `system` alone,** so an upstream sees one
-  stable prefix across a conversation's requests — what preserved thinking checks, and
-  what keeps Claude Code's attribution block first.
+  stable prefix across a conversation's requests — what preserved thinking checks.
 - **Pass through** by default; the upstream's own error reaches the caller, redacted.
   What the docs leave uncertain (MiniMax's two `tool_choice` pages; every Zhipu field)
   passes through until evidence says otherwise — the live tier, for a vendor it has a
@@ -221,12 +226,17 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
 
 ### Configuration model
 
-Postgres schema `modelgateway`, with its own embedded migrations and its own
-`schema_migrations` (CLAUDE.md's immutability rule applies); `DATABASE_URL` may name the
-platform's database or another. Ids carry gateway-local prefixes (`gwprov_`, `gwcred_`,
-`gwdep_`, `gwkey_`), deliberately outside `internal/domain`'s wire list. Every table
-reserves `org_id`, `workspace_id` and `project_id` with single-tenant defaults, as the
-platform's own do (`internal/store/migrations/0001_init.sql`, design principle 5).
+Two layers of credentials, never mixed: a caller presents a platform API key and names a
+model — an alias — and the gateway resolves the alias to a deployment and calls that
+deployment's provider with the provider's own credential, which no caller ever sees.
+
+Postgres schema `modelgateway` in the platform's database (`DATABASE_URL`, whose
+`api_keys` the gateway reads), with its own embedded migrations and its own
+`schema_migrations` (CLAUDE.md's immutability rule applies). Ids carry gateway-local
+prefixes (`gwprov_`, `gwcred_`, `gwdep_`), deliberately outside `internal/domain`'s wire
+list. Every table reserves `org_id`, `workspace_id` and `project_id` with single-tenant
+defaults, as the platform's own do (`internal/store/migrations/0001_init.sql`, design
+principle 5).
 
 - **provider** — profile, name, endpoint per protocol (a profile host or a custom one),
   extra headers, stall timeout, enabled.
@@ -243,12 +253,16 @@ platform's own do (`internal/store/migrations/0001_init.sql`, design principle 5
   `[{deployment, priority, weight}]`. Exact match first, then an optional `*` alias. A
   `claude-*` alias is only a name, which is how clients that hard-code Claude names
   reach a vendor model.
-- **api_key** — name, SHA-256 of the secret (shown once), prefix `sk-map-gw01-`
-  (siblings: `sk-map-api01-`, `sk-map-env01-`), optional alias allow-list, RPM and TPM
-  limits, expiry, revocation.
-- **usage** — one row per request: key, alias, deployment, credential, session id,
+- **key_policy** — per platform API key (`api_keys.id`): an optional alias allow-list,
+  RPM and TPM limits. A key with no row has no limits and every alias. Issuance, status
+  and expiry stay the platform's (`internal/store/migrations/0024_api_keys_lifecycle.sql`).
+- **usage** — one row per request: key id, alias, deployment, credential, session id,
   inbound protocol, status, the four token counts, cost at the prices in force, latency,
-  time to first token.
+  time to first token. Metadata only. Kept 90 days by default
+  (`MODELGATEWAY_USAGE_RETENTION`) and deleted by a sweep any replica may run under an
+  advisory lock.
+- **usage_daily** — rollups per day, key, alias and deployment, kept indefinitely; the
+  console's cost reports read these.
 - **rate_window** — one-minute windows per key: requests and tokens.
 
 Every admin write commits a `NOTIFY modelgateway_config`; each replica reloads its
@@ -259,11 +273,10 @@ request path reads only the snapshot.
 
 - Resolve the alias; in the highest-priority group with a healthy target, choose a
   deployment by weight, then a credential by weight.
-- **Affinity.** A request carrying a session id — `X-MAP-Session-ID` from the brain,
-  `x-claude-code-session-id` from Claude Code, also the usage row's — chooses by
-  rendezvous hashing over
-  the group, so a session stays on one deployment while it is healthy: thinking blocks
-  are bound to the backend that produced them.
+- **Affinity.** A request carrying `X-MAP-Session-ID` (the brain sends it; the usage row
+  records it) chooses by rendezvous hashing over the group, so a session stays on one
+  deployment while it is healthy: thinking blocks are bound to the backend that produced
+  them.
 - **Retry and fallback happen before the first byte only.** A connect error, 429, 5xx
   or overload moves to the next credential, then the next group, within a bounded
   attempt count and jittered exponential backoff. After the first byte a failure is the
@@ -280,29 +293,30 @@ request path reads only the snapshot.
 
 ### Auth, admin API and `/v1/models`
 
-- **Inference** takes a gateway key in `x-api-key` or `Authorization: Bearer` (Anthropic
-  SDKs send the first; OpenAI SDKs and `ANTHROPIC_AUTH_TOKEN` the second). Both, and
-  every `X-MAP-*` header, are stripped before the upstream call.
+- **Inference** takes a platform API key in `x-api-key` or `Authorization: Bearer`
+  (Anthropic SDKs send the first, OpenAI SDKs the second), checked by the control plane's
+  own rule: one indexed lookup per request, `status = 'active'` and unexpired against
+  the database clock (`internal/api/auth.go` `authenticate`). Both headers, and every
+  `X-MAP-*` header, are stripped before the upstream call.
 - **The admin API** lives under `/admin/v1/`: providers, credentials, deployments,
-  aliases, keys, usage queries, and the profiles (read-only). No reference surface
-  corresponds to it, so it is ours to shape. It accepts an admin key
-  (`MODELGATEWAY_ADMIN_KEY`) or, with identity configured from the same `IDENTITY_*`
-  settings the control plane reads, the operator's own token: `viewer` and `developer`
-  read, `admin` writes.
+  aliases, key policies, usage queries, and the profiles (read-only). No reference
+  surface corresponds to it, so it is ours to shape. It takes what the control plane's
+  `/api/` lane takes: a platform API key, or, with identity configured from the same
+  `IDENTITY_*` settings, the operator's own token — `viewer` and `developer` read,
+  `admin` writes.
 - **`/v1/models`** is one path with two shapes. The root answers in Anthropic's shape
   when the request carries `anthropic-version` — which every Anthropic SDK sends and no
   OpenAI SDK does — and in OpenAI's otherwise; `/anthropic/v1/…` and `/openai/v1/…`
-  prefixes give every inbound route an explicit choice. Anthropic-shape entries add the
-  alias's optional `description`, which Claude Code's picker shows. Its discovery keeps
-  only ids containing `claude` or `anthropic`, so an alias meant for the picker needs one
-  in its name; any other alias is reached by naming it in Claude Code's model settings.
+  prefixes give every inbound route an explicit choice. A key with an alias allow-list
+  sees only those aliases.
 
 ### Console
 
 managed-agent-console gains a Models section — providers with profile presets and
-write-only keys, deployments and aliases, gateway keys (the secret shown once), usage —
-through its server-side proxy to `/admin/v1/`, the way it reaches the control plane
-today (`MODEL_GATEWAY_BASE_URL`; the admin key only where no identity is configured).
+write-only vendor keys, deployments and aliases, usage and cost — and per-key limits and
+alias allow-lists on its existing API keys page, through its server-side proxy to
+`/admin/v1/` (`MODEL_GATEWAY_BASE_URL`), attaching the credential it already sends the
+control plane.
 The agent and dream editors' model field becomes a choice of aliases. That work is
 planned in the console repository; this plan owns the admin API contract it consumes,
 frozen by slice 2.
@@ -310,14 +324,17 @@ frozen by slice 2.
 ### Brain integration
 
 - One route: `{"model": "*", "protocol": "anthropic", "base_url": <gateway>,
-  "api_key": <gateway key>}`, no `upstream_model`, so the agent's model string reaches
-  the gateway as the alias.
+  "api_key": <platform API key>}`, no `upstream_model`, so the agent's model string
+  reaches the gateway as the alias.
 - `internal/provider` injects `traceparent` (`telemetry.Inject`) on both adapters'
   requests — it sends none today — and the brain sends `X-MAP-Session-ID` for affinity
   and per-session cost.
 - compose and Helm run the gateway — Helm with two replicas and a PodDisruptionBudget by
-  default, since every agent turn now depends on it — and seed the brain's gateway key
-  from a Secret.
+  default, since every agent turn now depends on it. The brain's platform API key comes
+  from one Secret that both the brain and the control plane read: the control plane
+  registers it in `api_keys` under the name `brain` exactly as it registers
+  `CONTROLPLANE_API_KEY` as `bootstrap` (`api.EnsureAPIKey`, `cmd/controlplane/main.go`),
+  and the brain sends it.
 
 ### Telemetry, errors, security
 
@@ -342,12 +359,14 @@ frozen by slice 2.
    wire, where `agent.thinking` stays `{id, processed_at, type}` (checked against
    anthropic-sdk-go v1.70.1 — betasessionevent.go BetaManagedAgentsAgentThinkingEvent)
    — replayed within the tool-use turn, and requests built append-only. Gates slice 5.
-1. **Store and catalogue:** schema and migrations, the admin API (providers,
-   credentials, deployments, aliases, keys) under both auth modes, the snapshot with
-   notify-driven reload, the four profiles' data.
+1. **Store and catalogue:** schema and migrations, the platform key check moved to a
+   shared package, the admin API (providers, credentials, deployments, aliases, key
+   policies) under both auth modes, the snapshot with notify-driven reload, the four
+   profiles' data.
 2. **Anthropic inference:** `/v1/messages` streamed and not, `count_tokens`,
    `/v1/models`, the passthrough relay, profile edits, routing with retry, fallback and
-   affinity, the stall guard, usage rows, limits, telemetry; compose and Helm; the live
+   affinity, the stall guard, usage rows with their retention sweep and daily rollups,
+   limits, telemetry; compose and Helm; the live
    tier on MiniMax (CN) and DeepSeek through the official Anthropic SDK. Freezes the
    admin API for the console.
 3. **Console** (the console repository's own plan): the Models section and the editors'
@@ -407,12 +426,15 @@ where a vendor bills cache writes.
   behavior — a refused `search_result`, `: keep-alive` comments, cache usage in the
   vendor's shape — all run through one shared suite, as `providertest` does for the
   brain's adapters.
-- **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests.
+- **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests;
+  the retention sweep against rows either side of the cutoff, its rollups intact; a key
+  archived or expired mid-run refused on its next request, by both servers alike.
 - **Clients:** the official Anthropic and OpenAI Go SDKs drive the gateway in-process —
   streaming, tool loops with thinking, errors.
 - **Live tier — MiniMax (CN) and DeepSeek, the keys the user has, driven through the
   official Anthropic SDK** (anthropic-sdk-go at the `go.mod` pin, pointed at a running
-  gateway with `option.WithBaseURL` and a gateway key, as any SDK caller would be).
+  gateway with `option.WithBaseURL` and a platform API key, as any SDK caller would
+  be).
   `RUN_LIVE_MODELGATEWAY` names the vendors consented to (`deepseek,minimax`), so the
   fail-rather-than-skip contract holds per vendor: a named vendor with missing
   configuration fails, an unnamed one never runs. `.env` supplies `DEEPSEEK_API_KEY`, and
@@ -429,13 +451,7 @@ where a vendor bills cache writes.
     international host. Results land in docs/HISTORY.md.
   - Zhipu and Moonshot join when keys exist. Until then their profiles are checked
     against fake upstreams only, and Zhipu's whole support matrix stays unconfirmed.
-- **Acceptance:** Claude Code with `ANTHROPIC_BASE_URL` at the gateway, checked against
-  the compatibility guide — streaming without stalls, `anthropic-beta` round trips,
-  model discovery, recovery from a rejected capability. Claude Code sends any alias it
-  does not recognize adaptive thinking, effort and context management; whatever a
-  vendor rejects is recorded with the client setting that avoids it
-  (`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` covers context management). Then slice 5's
-  `ant` sessions through the brain.
+- **Acceptance:** slice 5's `ant` sessions through the brain.
 - Every slice: `make verify` (the coverage gate takes in the new packages), the
   verifier, both reviews and green CI, per CLAUDE.md.
 
@@ -447,8 +463,8 @@ where a vendor bills cache writes.
 - docs/REFERENCE_PROJECTS.md: bifrost as a design reference — ideas only, never a wire
   source (slice 2); `openai-go` (slice 4).
 - docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens`
-  answering 404 where an upstream has none; the `description` on `/v1/models` entries;
-  stateless Responses; each profile edit with its vendor evidence.
+  answering 404 where an upstream has none; stateless Responses; each profile edit with
+  its vendor evidence.
 
 ## Open questions, settled by evidence in the slice that meets them
 
