@@ -106,11 +106,20 @@ its [text generation guide](https://platform.minimax.cn/docs/guides/text-generat
 details M3.1-Flash-Preview's forced thinking and effort levels.
 Probed live on 2026-10-04, in tool loops of up to four requests: `deepseek-flash` and
 `deepseek-v4-pro` (both endpoints), and on MiniMax CN `MiniMax-M2.7`,
-`MiniMax-M3.1-Flash-Preview` and `MiniMax-M3` with adaptive thinking, return signed
-thinking and answer 200 to a tool continuation without it, with it, and (where tried)
-with its text edited. So for those models and cases the documented requirement is not
-enforced — the documented DeepSeek 400 did not reproduce — while Zhipu and Moonshot
-are untested; the gateway and the brain follow the documentation regardless.
+`MiniMax-M3.1-Flash-Preview` and `MiniMax-M3` with adaptive thinking, all return signed
+thinking. DeepSeek's documented 400 holds where a request's tool ids are not its own:
+on its Anthropic endpoint, both models refuse a request ending in tool results whose
+`tool_use` turn carries no thinking and an id DeepSeek did not issue — `` The
+`content[].thinking` in the thinking mode must be passed back to the API. `` — and
+answer the same request with DeepSeek's own ids (`call_00_…`) 200, the reasoning
+restored server-side; the first probes kept those ids, and so missed the rule. Neither
+a made-up signature nor none is refused, and a loop followed by a later user message
+is not checked. The brain sends event ids as tool ids, so without replay every DeepSeek
+tool loop it drives is refused at its second request (plan 60). MiniMax answered a tool
+continuation 200 without its thinking, with it, and with its text edited, under its own
+ids and under foreign ones (`MiniMax-M2.7` both ways, `MiniMax-M3.1-Flash-Preview`
+through the brain's event ids). Zhipu and Moonshot are untested; the gateway and the
+brain follow the documentation regardless.
 
 **Vendors.** Each publishes an Anthropic-compatible endpoint beside its
 OpenAI-compatible one. The CN and international sites are separate consoles issuing
@@ -430,11 +439,15 @@ request path reads only the snapshot.
   provenance a history still holds, and replicas race to write it. So was rendezvous
   hashing, which after a fallback would send a recovered first choice the fallback
   model's thinking. **Backstop, best effort:** a 400 whose message names a thinking
-  block or its signature — other than Anthropic's "cannot be modified", which a removal
-  cannot cure, and one naming only a reasoning configuration parameter — puts the
-  inbound request in strip mode: every thinking block is removed, an emptied assistant
-  message going as above, and the attempt is made again. Removing all thinking is valid
-  (Ground truth, Thinking). That is bifrost's fail-soft strip, with two differences:
+  block or its signature — other than one naming only a reasoning configuration
+  parameter, and DeepSeek's "must be passed back", which asks for thinking the request
+  lacks and a removal cannot supply — puts the inbound request in strip mode: every
+  thinking block is removed, an emptied assistant message going as above, and the
+  attempt is made again. Removing all thinking is valid (Ground truth, Thinking). That
+  is bifrost's fail-soft strip, with three differences: Anthropic's "cannot be
+  modified" enters strip mode here, where bifrost excludes it as a refusal the removal
+  repeats — the Claude 5-generation rule is that removing every block stays valid, and
+  when the removal does not cure it the cost is the one attempt strip mode allows;
   strip mode is entered once per inbound request and holds for every attempt after it,
   the fallbacks included, so no attempt can re-send what was stripped or strip twice;
   and whichever attempt answers in strip mode wraps the first thinking block of its
@@ -453,14 +466,19 @@ request path reads only the snapshot.
   or overload moves to the next credential, then the next group, within a bounded
   attempt count and jittered exponential backoff. After the first byte a failure is the
   caller's (`event: error` on a stream). A fallback to another deployment carries only
-  that deployment's thinking, by the rule above. An embedding alias, with its one
+  that deployment's thinking, by the rule above — so a fallback taken in the middle of
+  a tool loop sends the loop without its thinking, which DeepSeek refuses under
+  foreign ids (Ground truth, Thinking), and that attempt fails like any other. An embedding alias, with its one
   deployment, retries across credentials only.
 - **Stall.** `provider.StallGuard` per provider, for #121's reasons unchanged.
 - **Limits.** Admission increments the key's request count for the current minute in one
   upsert and refuses over the limit with 429 and `retry-after` in integer seconds. TPM is
   a soft limit on completed usage: a response's tokens count in the minute it ends, and a
   request is admitted while the current minute's count is under the limit, so requests
-  already in flight can overshoot it by their own size — RPM is what bounds that.
+  already in flight can overshoot it by their own size — RPM is what bounds that. A
+  caller that disconnects does not end the upstream response: the gateway reads it to
+  the end under the stall guard and records its usage, so abandoned streams cannot
+  spend tokens TPM and the ledger never see, and no count has to be estimated.
   Per-replica in-memory buckets were rejected: under an autoscaler the effective limit
   would be a function of the replica count.
 
@@ -533,7 +551,13 @@ frozen by slice 2.
 - Credentials are encrypted at rest, write-only, and decrypted per request into the
   outbound header alone. Provider hosts are admin-configured, so — like the brain's
   providers and web backends today — they dial with an ordinary client, not
-  `internal/dialguard`: admin rights are the vouching.
+  `internal/dialguard`: admin rights are the vouching. That client follows no redirect,
+  as the web backends' do (`internal/webtool/tavily/tavily.go`): a 3xx fails the
+  attempt, so a credential header reaches only the configured host. An endpoint may be
+  `http`, as the vault's credential endpoints may (`internal/api/vaultcredauth.go`
+  validateEndpointURL): an in-cluster model server often serves no TLS, and refusing
+  it would refuse the deployment this platform is for. The console marks such a
+  provider, whose key crosses the network in clear.
 
 ## Slices
 
@@ -610,7 +634,8 @@ where a vendor bills cache writes.
 - **Upstream contract suite:** one fake server per profile reproducing its documented
   behavior — a refused `search_result`, `: keep-alive` comments, cache usage in the
   vendor's shape, a batch-cap 400 in the vendor's own words, a connection closed
-  between requests — all run through one shared suite, as `providertest` does for the
+  between requests, a redirect the attempt fails on without the credential reaching
+  its target — all run through one shared suite, as `providertest` does for the
   brain's adapters. Thinking provenance runs against two fakes behind one alias that
   enforce what Anthropic's API does: each signs a block over the request ahead of it
   and refuses a block whose prefix or signer differs. A tool loop whose first
@@ -627,11 +652,15 @@ where a vendor bills cache writes.
   after which the conversation continues with no further refusal; a strip-mode attempt
   that fails before its first byte falls back still in strip mode, and a second
   refusal earns no second retry; a strip-mode answer without thinking pays the retry
-  again on the next request and no more; a refusal naming no thinking earns no retry;
+  again on the next request and no more; a refusal naming no thinking earns no retry,
+  and neither does DeepSeek's "must be passed back", while Anthropic's "cannot be
+  modified" does;
   and requests of one session id with no thinking keep one deployment and credential
   while the eligible candidates, weights and priorities are unchanged, move when health
   changes them, and yield to a newer block's producer.
-- **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests;
+- **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests,
+  and a stream whose caller disconnects still read to its end, its usage recorded and
+  counted against TPM;
   the retention sweep against rows either side of the cutoff, its rollups intact; a key
   archived or expired mid-run refused on its next request, by both servers alike; a key
   without a grant refused inference, including one an application issued itself under
