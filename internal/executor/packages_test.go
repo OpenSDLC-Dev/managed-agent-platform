@@ -494,6 +494,60 @@ func TestARefusedListIsOneEventHoweverManyToolCallsFollow(t *testing.T) {
 	}
 }
 
+// TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally: the backstop
+// measures the install command as Exec is handed it, the platform's script
+// preamble (sandbox.Script) included. A list whose bare command fits the limit
+// by fewer bytes than the preamble takes is past it once the preamble is on —
+// Exec would refuse it before it ran, a fault the item reclaim-loops on — so
+// it is the terminal invalid refusal instead, before any probe.
+func TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally(t *testing.T) {
+	var pip packageManager
+	for _, m := range packageManagers {
+		if m.name == "pip" {
+			pip = m
+		}
+	}
+	// Enough names to come within a few bytes of the limit, then the last one
+	// stretched until the bare command lands in the window the preamble
+	// closes: over the limit with it, not without.
+	var entries []string
+	for len(pip.command(entries, "")) < sandbox.MaxCommandBytes-200 {
+		entries = append(entries, fmt.Sprintf("pkg%04d-%s", len(entries), strings.Repeat("x", 90)))
+	}
+	entries = append(entries, "last")
+	for n := 0; ; n++ {
+		entries[len(entries)-1] = "last" + strings.Repeat("y", n)
+		bare := len(pip.command(entries, ""))
+		if bare > sandbox.MaxCommandBytes {
+			t.Fatalf("test setup: no name length puts the bare command in the window (it jumped to %d)", bare)
+		}
+		if bare > sandbox.MaxCommandBytes-len(sandbox.ScriptPreamble) {
+			break
+		}
+	}
+
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"pip": entries})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	if got := installCmds(sb); len(got) != 0 {
+		t.Fatalf("install commands = %d, want none — refused before exec", len(got))
+	}
+	errs := h.packageErrors(t)
+	if len(errs) != 1 || errs[0]["reason"] != packageReasonInvalid || errs[0]["manager"] != "pip" {
+		t.Fatalf("package errors = %+v, want one invalid refusal on pip", errs)
+	}
+	if rs, _ := errs[0]["retry_status"].(map[string]any); rs["type"] != "exhausted" {
+		t.Errorf("retry_status = %+v, want exhausted", rs)
+	}
+	// The pass committed rather than faulting: the item is not left to reclaim.
+	if n := len(h.types(t, "agent.tool_result")); n != 1 {
+		t.Errorf("tool results = %d, want 1: a terminal refusal commits the turn", n)
+	}
+}
+
 // TestTheProbeRefusesASandboxThatCannotInstall is decision 7: every manager
 // writes under /usr or /var, so a non-root or read-only sandbox is refused once
 // — with no manager on the event, because the fault is the sandbox's — rather

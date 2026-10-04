@@ -700,12 +700,15 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		// entry bytes, while `go` emits one `go install` per entry (far more
 		// than the entry's own bytes), and a row stored before that cap existed
 		// never passed it. This is the backstop, refused terminally here,
-		// before the probe, exactly like an invalid entry.
+		// before the probe, exactly like an invalid entry — and it measures
+		// the command as Exec is handed it, the platform's script preamble
+		// (sandbox.Script) included, or a list within those bytes of the
+		// limit would pass here and fault there.
 		credsDir := ""
 		if len(stripped.creds) > 0 {
 			credsDir = packagesCredsDir()
 		}
-		cmd := m.command(stripped.entries, credsDir)
+		cmd := sandbox.Script(m.command(stripped.entries, credsDir))
 		if len(cmd) > sandbox.MaxCommandBytes {
 			failed++
 			recordPackageInstalled(ctx, m.name, packageOutcomeInvalid)
@@ -786,7 +789,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		}
 		progress()
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
-			Command: sandbox.Script(cmd),
+			Command: cmd,
 			Timeout: e.cfg.PackageInstallTimeout,
 		})
 		removeCreds()
