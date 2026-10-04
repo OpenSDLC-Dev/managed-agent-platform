@@ -59,6 +59,13 @@ type fakeSandbox struct {
 	// hold a materializer to one batched call carrying a skill's whole tree,
 	// rather than one write per file (#206).
 	bulkSizes []int
+	// bulkFailOn, if set, fails the next WriteFiles carrying a member whose
+	// path ends in it, before any member lands — a batch whose delivery
+	// failed — and is cleared, so the batches after it land.
+	bulkFailOn string
+	// readErrOn, if set, fails every ReadFile of a path ending in it with an
+	// error that is not ErrFileNotExist: a file there that cannot be read.
+	readErrOn string
 	// cmds records every Exec command, so a test can read the script a tool
 	// handed the sandbox.
 	cmds []string
@@ -148,6 +155,9 @@ func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
+	if f.readErrOn != "" && strings.HasSuffix(path, f.readErrOn) {
+		return nil, fmt.Errorf("fake: read %s: permission denied", path)
+	}
 	data, ok := f.files[path]
 	if !ok {
 		return nil, sandbox.ErrFileNotExist
@@ -218,6 +228,12 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 // landed, and a member whose target is a directory fails at that member.
 func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
 	f.bulkSizes = append(f.bulkSizes, len(files))
+	for _, w := range files {
+		if f.bulkFailOn != "" && strings.HasSuffix(w.Path, f.bulkFailOn) {
+			f.bulkFailOn = ""
+			return fmt.Errorf("fake: bulk write of %s failed", w.Path)
+		}
+	}
 	dirs := map[string]bool{}
 	for p := range f.files {
 		for d := path.Dir(p); d != "/" && d != "."; d = path.Dir(d) {

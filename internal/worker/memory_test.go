@@ -536,6 +536,181 @@ func TestAStoreWhoseListingLostItsFrameLandsNextRun(t *testing.T) {
 	}
 }
 
+// TestAnUnmarkedEmptyStoreIsLandedByTheRunsSync (#867): a materialize that
+// failed leaves its store in the run's sync, and a sync that finds the
+// directory still empty with no marker lands it, the marker with the pulls,
+// rather than filling it pull-only with files no marker vouches for, which
+// would hold the store untrusted and pull-only for the sandbox's life. Here the
+// marker's own write fails; the next run's edit is pushed.
+func TestAnUnmarkedEmptyStoreIsLandedByTheRunsSync(t *testing.T) {
+	sb := &fakeSandbox{bulkFailOn: "/" + memsync.MarkerName}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token)
+	if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Fatalf("marker = %q after the run's sync, want the store landed with it", got)
+	}
+	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+		t.Errorf("notes.md = %q, want hello", got)
+	}
+	h.runWith(t, token, writeUse(memMount+"/edit.md", "the agent's"))
+	if got, ok := h.memoryContent(t, memStoreID, "/edit.md"); !ok || got != "the agent's" {
+		t.Errorf("an edit in the landed store = %q, %v; want it pushed, the directory trusted", got, ok)
+	}
+}
+
+// TestAnAgentWriteIntoAFailedLandingIsPushed (#867): materialize claims a
+// fresh directory with its marker before the store's listing, so a listing
+// that fails still leaves a directory the platform vouches for. A file the
+// agent writes there in the same run is pushed by the run's sync, and the
+// store's memories are pulled beside it.
+func TestAnAgentWriteIntoAFailedLandingIsPushed(t *testing.T) {
+	var failed atomic.Bool
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/memories") &&
+				r.URL.Query().Get("view") == "full" && failed.CompareAndSwap(false, true) {
+				w.Header().Set("x-should-retry", "false")
+				http.Error(w, `{"type":"error","error":{"type":"api_error","message":"unavailable"}}`, http.StatusServiceUnavailable)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	sb := &fakeSandbox{}
+	h := newHarnessWrapped(t, sb, wrap)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	h.runWith(t, h.sessionsToken(t), writeUse(memMount+"/mine.md", "the agent's"))
+	if !failed.Load() {
+		t.Fatal("test bug: the store's listing never failed")
+	}
+	if got, ok := h.memoryContent(t, memStoreID, "/mine.md"); !ok || got != "the agent's" {
+		t.Errorf("the agent's file in the store = %q, %v; want it pushed", got, ok)
+	}
+	if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Errorf("marker = %q, want the claim", got)
+	}
+	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+		t.Errorf("notes.md = %q, want it pulled by the run's sync", got)
+	}
+}
+
+// TestAClaimNeverMeetsAnEarlierBaseline (#867): the claim's marker lands with
+// an empty baseline, so a landing that fails after it never leaves the marker
+// beside the baseline of an earlier landing — whose memories, missing from the
+// directory, the next sync would trust the marker and delete from the store.
+// The mount is gone but its baseline stayed; the next landing's listing fails
+// after the claim, and the run's sync sends no deletion: it pulls the store
+// back, and pushes what the agent wrote meanwhile.
+func TestAClaimNeverMeetsAnEarlierBaseline(t *testing.T) {
+	for name, paths := range map[string][]string{
+		"one-file store":                     {"/notes.md"},
+		"larger store with an agent's write": {"/a.md", "/b.md", "/notes.md"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var armed, failed atomic.Bool
+			var deletes atomic.Int32
+			wrap := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/memories/") {
+						deletes.Add(1)
+					}
+					if armed.Load() && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/memories") &&
+						r.URL.Query().Get("view") == "full" && failed.CompareAndSwap(false, true) {
+						w.Header().Set("x-should-retry", "false")
+						http.Error(w, `{"type":"error","error":{"type":"api_error","message":"unavailable"}}`, http.StatusServiceUnavailable)
+						return
+					}
+					next.ServeHTTP(w, r)
+				})
+			}
+			sb := &fakeSandbox{}
+			h := newHarnessWrapped(t, sb, wrap)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			for _, p := range paths {
+				h.seedMemory(t, memStoreID, p, "body of "+p)
+			}
+			h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+			token := h.sessionsToken(t)
+			h.runWith(t, token)
+			if len(h.baseline(t, memStoreID).Synced) != len(paths) {
+				t.Fatalf("test bug: the first landing's baseline = %+v", h.baseline(t, memStoreID))
+			}
+			for p := range sb.files {
+				if strings.HasPrefix(p, memMount+"/") {
+					delete(sb.files, p)
+				}
+			}
+			armed.Store(true)
+			use := writeUse("out.txt", "x")
+			if len(paths) > 1 {
+				use = writeUse(memMount+"/mine.md", "the agent's")
+			}
+			h.runWith(t, token, use)
+			if !failed.Load() {
+				t.Fatal("test bug: the second landing's listing never failed")
+			}
+			if n := deletes.Load(); n != 0 {
+				t.Errorf("%d deletions sent; a sync after a failed landing deleted from the store", n)
+			}
+			for _, p := range paths {
+				if _, ok := h.memoryContent(t, memStoreID, p); !ok {
+					t.Errorf("%s was deleted from the store", p)
+				}
+				if got := sb.files[memMount+p]; got != "body of "+p {
+					t.Errorf("%s = %q in the directory, want it pulled back", p, got)
+				}
+			}
+			if len(paths) > 1 {
+				if got, ok := h.memoryContent(t, memStoreID, "/mine.md"); !ok || got != "the agent's" {
+					t.Errorf("the agent's file in the store = %q, %v; want it pushed", got, ok)
+				}
+			}
+		})
+	}
+}
+
+// TestASyncLandsOnlyADirectoryWithNoMarkerAtAll (#867): the landing a sync
+// gives an empty directory is for one whose marker is absent. One whose
+// marker names another store, or whose marker cannot be read, stays what
+// decision 12 makes it: pulled into, never restamped, never pushed from.
+func TestASyncLandsOnlyADirectoryWithNoMarkerAtAll(t *testing.T) {
+	altered := "version 1\n" + domain.NewID(domain.PrefixMemoryStore).String()
+	for name, arm := range map[string]func(*fakeSandbox){
+		"altered marker":    func(sb *fakeSandbox) { sb.files[memMount+"/"+memsync.MarkerName] = altered },
+		"unreadable marker": func(sb *fakeSandbox) { sb.readErrOn = "/" + memsync.MarkerName },
+	} {
+		t.Run(name, func(t *testing.T) {
+			sb := &fakeSandbox{files: map[string]string{}}
+			h := newHarness(t, sb)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			h.seedMemory(t, memStoreID, "/notes.md", "hello")
+			h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+			arm(sb)
+			marker, hadMarker := sb.files[memMount+"/"+memsync.MarkerName]
+			mem := newMemoryStores(h.client, h.sessionsToken(t), h.sid.String(), sb,
+				[]memoryRef{{Type: "memory_store", MemoryStoreID: memStoreID, Access: "read_write", MountPath: memMount}})
+			mem.sync(context.Background(), func() {})
+			if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+				t.Errorf("notes.md = %q; want it pulled, pull-only", got)
+			}
+			if got, ok := sb.files[memMount+"/"+memsync.MarkerName]; got != marker || ok != hadMarker {
+				t.Errorf("marker = %q (present %v), want it as it was: %q (present %v)", got, ok, marker, hadMarker)
+			}
+			sb.files[memMount+"/mine.md"] = "the agent's"
+			mem.sync(context.Background(), func() {})
+			if _, ok := h.memoryContent(t, memStoreID, "/mine.md"); ok {
+				t.Error("a file was pushed from a directory whose marker does not vouch for it")
+			}
+		})
+	}
+}
+
 // TestMemoryStoreRefusalsOverTheWire: the occupancy 409 on a create removes
 // the file the store's memory is in the way of; the 2,000 cap's 400 is the
 // store's state, refused but not remembered (so a retry lands once room is

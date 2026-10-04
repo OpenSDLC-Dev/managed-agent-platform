@@ -44,12 +44,16 @@ type Action struct {
 // marker excluded), the baseline the last sync left, the store's heads, and
 // whether this sync may write to the store at all. PullOnly is a read_only
 // attachment, an archived store, or a directory whose marker is missing or
-// altered (decision 12).
+// altered (decision 12). Unmarked is a directory with no marker file at all
+// — not an altered marker, nor one that could not be read, which stay
+// pull-only — and the caller folds it into PullOnly too; Plan reads it apart
+// only to rebuild an empty unmarked directory (below).
 type Input struct {
 	Local    map[string]string
 	Baseline Baseline
 	Remote   map[string]Head
 	PullOnly bool
+	Unmarked bool
 }
 
 // Result is the plan. Actions are in path order. Next is the baseline the
@@ -59,7 +63,9 @@ type Input struct {
 // and drops the rest. Skipped lists pushes withheld by a standing refusal;
 // their refusals are already carried in Next. Withheld counts the pushes
 // pull-only mode dropped — local edits that stay local, which a sync log
-// should say rather than report a quiet run. Rebuild is the wipe guard.
+// should say rather than report a quiet run. Rebuild is the wipe guard, and
+// the landing of an empty unmarked directory: the applier lands the marker
+// with the pulls.
 type Result struct {
 	Rebuild  bool
 	Actions  []Action
@@ -84,10 +90,16 @@ type Result struct {
 //
 // The wipe guard is the reference's own: an empty directory against a
 // baseline that remembered more than one file is a wiped mount, so everything
-// is pulled and nothing deleted.
+// is pulled and nothing deleted. So is the rebuild of an empty directory with
+// no marker file, whatever its baseline (the reference's syncStore; #867): that is
+// the fresh directory materialize lands, and a pull-only sync would fill it
+// with files no marker vouches for, holding the store untrusted and pull-only
+// for the sandbox's life. Its baseline is not read: one that remembered a
+// file would otherwise be kept as agreement with a file that is not there,
+// which the next sync, trusting the marker, would push as a deletion.
 func Plan(in Input) Result {
 	res := Result{Next: Baseline{Synced: map[string]string{}, Refused: map[string]string{}}}
-	if len(in.Local) == 0 && len(in.Baseline.Synced) > 1 {
+	if len(in.Local) == 0 && (len(in.Baseline.Synced) > 1 || in.Unmarked) {
 		res.Rebuild = true
 		for _, path := range sortedKeys(nil, nil, in.Remote) {
 			head := in.Remote[path]

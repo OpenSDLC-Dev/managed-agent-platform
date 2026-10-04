@@ -273,7 +273,7 @@ rules in `internal/memsync` decide: the tree is hashed in the sandbox, the plan 
 a `self_hosted` one — (a push is a compare-and-set on the head's
 digest and appends a `session_actor` version; the store wins a both-sides change; an
 emptied directory against a baseline of several files is re-downloaded, never read as
-deletions), and the settlement is written back; a listing that fails, or holds more
+deletions, and an empty one with no marker file is landed, marker and all), and the settlement is written back; a listing that fails, or holds more
 changed files than a store can, skips the store rather than reading as deletions. A `read_only` or archived store, or a
 directory whose marker was altered, is pulled from and never pushed to, with one exception
 on `self_hosted` below. The file tools
