@@ -360,12 +360,15 @@ const disarmTheWatchdog = `
 // blindTheProbe is a command that disarms its watchdog, points the pid file the
 // liveness probe reads at a process that has already exited, and then runs 5s:
 // TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee says why each step.
-const blindTheProbe = `
+const blindTheProbe = blind + "  sleep 5\n"
+
+// blind is blindTheProbe's staging alone, saying "blinded" on stdout when it
+// worked.
+const blind = `
   state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)` + disarmTheWatchdog + `
   true & gone=$!
   wait "$gone"
   [ -n "$state" ] && [ -f "$state.pid" ] && echo "$gone" > "$state.pid" && echo blinded
-  sleep 5
 `
 
 // A command that disarms its watchdog, overruns its deadline and then exits clean
@@ -406,6 +409,55 @@ func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 	}
 	if !res.TimedOut {
 		t.Errorf("a command that ran 5s against a 3s deadline and exited while the probe was blind was not a timeout: %+v", res)
+	}
+}
+
+// A SIGKILL the watchdog did not deliver is the deadline's when it lands past
+// the deadline, even where the pre-deadline probe cannot see the command alive
+// (#838): #832's late probe, at the probe's other instant. On a loaded cluster
+// that probe answers a round trip after it asks, past a kill it was sent to
+// see. Nothing marks a kill the watchdog did not make: the tenant killed the
+// watchdog, and the node's OOM killer, say, killed the command.
+//
+// So the row blinds the probe, as TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee
+// does, and the command SIGKILLs itself, standing in for the node, 0.25s past
+// its 3s deadline. That is inside the 0.5s the overrun rule waits out, so
+// only the wrapper's record from the watchdog's launch can call it a timeout.
+// Its staging runs after the watchdog's launch, since disarming waits for the
+// watchdog, so the record comes to the 3.25s less only the wrapper's step from
+// that launch to its reading.
+//
+// The second row is the line's other side. A SIGKILL a second before the
+// deadline is the command's own, as the shared contract says
+// (ExecSelfInflictedKillIsNotATimeout), with the probe blind and the record
+// still there to read.
+func TestK8sSigkillTheWatchdogDidNotDeliver(t *testing.T) {
+	sb := liveSandbox(t)
+	k8s.SetKillGraceForTest(sb, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for _, tc := range []struct {
+		name, after string
+		timedOut    bool
+	}{
+		{"past the deadline", "3.25", true},
+		{"a second before the deadline", "2", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := sb.Exec(ctx, sandbox.ExecRequest{
+				Command: blind + "  sleep " + tc.after + "\n  kill -9 $$\n", Timeout: 3 * time.Second,
+			})
+			if err != nil {
+				t.Fatalf("exec: %v", err)
+			}
+			if !strings.Contains(res.Stdout, "disarmed") || !strings.Contains(res.Stdout, "blinded") {
+				t.Fatalf("the command could not disarm its watchdog and blind the probe, so this row proves nothing: %+v", res)
+			}
+			if res.ExitCode != 137 || res.TimedOut != tc.timedOut {
+				t.Errorf("a SIGKILL %ss into a 3s deadline: exit %d, timed out %v; want 137, %v: %+v",
+					tc.after, res.ExitCode, res.TimedOut, tc.timedOut, res)
+			}
+		})
 	}
 }
 

@@ -1230,11 +1230,11 @@ func BenchmarkReadStdout(b *testing.B) {
 	}
 }
 
-// classifier is a pod handle with Exec's default slop and nothing else: all
-// classifyTimeout reads off its receiver.
-var classifier = &pod{overrunSlop: defaultOverrunSlop}
+// classifier is a pod handle with Exec's default slop and probe lead and
+// nothing else: all classifyTimeout reads off its receiver.
+var classifier = &pod{overrunSlop: defaultOverrunSlop, probeLead: defaultProbeLead}
 
-// classifyTimeout is where #95, #110 and #832 were lost: a timeout the call
+// classifyTimeout is where #95, #110, #832 and #838 were lost: a timeout the call
 // reported as none, because the only evidence for it came from a probe that had
 // raced an apiserver round trip and lost. Pinning the decision here costs no
 // clock and no cluster, which is the point — on a live cluster the losing case is
@@ -1244,15 +1244,20 @@ func TestClassifyTimeout(t *testing.T) {
 		other = 7
 		sec   = time.Second
 		slop  = defaultOverrunSlop
+		lead  = defaultProbeLead
 		ms    = time.Millisecond
 	)
+	// launch and watchdog are the wrapper's record of a run, counted from the
+	// command's launch or from its watchdog's.
+	launch := func(d time.Duration) runRecord { return runRecord{sinceLaunch: d} }
+	watchdog := func(d time.Duration) runRecord { return runRecord{sinceWatchdog: d} }
 	cases := []struct {
 		name          string
 		untimed       bool
 		timeout       time.Duration // the 1s most rows use when 0
 		code          int
 		watchdogFired bool
-		ran           time.Duration
+		rec           runRecord
 		v             verdict
 		want          bool
 	}{
@@ -1261,7 +1266,8 @@ func TestClassifyTimeout(t *testing.T) {
 		// able to call itself timed out by planting one and exiting 137, nor by
 		// writing a run time as long as it likes.
 		{name: "NoDeadlineIgnoresAPlantedMark", untimed: true, code: sigkillExit, watchdogFired: true, want: false},
-		{name: "NoDeadlineIgnoresALongRun", untimed: true, code: sigkillExit, ran: time.Hour, want: false},
+		{name: "NoDeadlineIgnoresALongRun", untimed: true, code: sigkillExit, rec: launch(time.Hour), want: false},
+		{name: "NoDeadlineIgnoresALongRunSinceItsWatchdog", untimed: true, code: sigkillExit, rec: watchdog(time.Hour), want: false},
 		// The regression. The watchdog says it fired and the exit code agrees a
 		// SIGKILL landed; no probe needs to have caught the command alive.
 		{name: "WatchdogFiredAndProbeMissedIt", code: sigkillExit, watchdogFired: true, want: true},
@@ -1295,19 +1301,39 @@ func TestClassifyTimeout(t *testing.T) {
 		// #832: the wrapper's record answers the overrun probe's question when the
 		// probe answered too late to. Strictly longer than the deadline plus the
 		// slop, whatever the exit code, and the probe's own "gone" changes nothing.
-		{name: "RecordJustUnderTheOverrun", ran: sec + slop - ms},
-		{name: "RecordAtTheOverrun", ran: sec + slop},
-		{name: "RecordJustOverTheOverrun", ran: sec + slop + ms, want: true},
-		{name: "RecordOverranWithItsOwnCode", code: other, ran: 2 * sec, want: true},
-		// The record answers the overrun question and no other: a SIGKILL that
-		// ended a run reaching the deadline, unmarked and unseen by the
-		// pre-deadline probe, stays the command's own (#838).
-		{name: "RecordIsNotAskedAboutAKill", code: sigkillExit, ran: sec + 10*ms},
+		{name: "RecordJustUnderTheOverrun", rec: launch(sec + slop - ms)},
+		{name: "RecordAtTheOverrun", rec: launch(sec + slop)},
+		{name: "RecordJustOverTheOverrun", rec: launch(sec + slop + ms), want: true},
+		{name: "RecordOverranWithItsOwnCode", code: other, rec: launch(2 * sec), want: true},
+		// The run since the watchdog's launch is no overrun's witness: it starts
+		// after any hold-up of the wrapper past the command's launch, so an
+		// overrun could hide in the hold.
+		{name: "RecordSinceTheWatchdogIsNotAskedAboutAnOverrun", code: other, rec: watchdog(2 * sec)},
+
+		// #838: the wrapper's record answers the pre-deadline probe's question
+		// when the probe answered too late to. A SIGKILL that ended a run
+		// strictly longer than the deadline less the probe's lead, counted from
+		// the watchdog's launch, is the deadline's, marked or not; one at or
+		// under that line is the command's own, as it is to the probe.
+		{name: "SigkillJustUnderTheLead", code: sigkillExit, rec: watchdog(sec - lead - ms)},
+		{name: "SigkillAtTheLead", code: sigkillExit, rec: watchdog(sec - lead)},
+		{name: "SigkillJustPastTheLead", code: sigkillExit, rec: watchdog(sec - lead + ms), want: true},
+		{name: "SigkillPastTheDeadline", code: sigkillExit, rec: watchdog(sec + 250*ms), want: true},
+		// It answers the kill question only: a run past that line that ended
+		// in the command's own code is the command's own exit.
+		{name: "RecordSinceTheWatchdogNeedsASigkill", code: other, rec: watchdog(sec + 250*ms)},
+		// And it counts from the watchdog's launch, not the command's: a run
+		// that reaches the line only from the earlier origin was killed before
+		// the watchdog had been running that long.
+		{name: "SigkillCountsFromTheWatchdogNotTheLaunch", code: sigkillExit,
+			rec: runRecord{sinceLaunch: sec + 10*ms, sinceWatchdog: sec - lead - 10*ms}},
 
 		// The deadline the record is read against is the watchdog's, rounded up to
 		// whole seconds, not the caller's fraction: 1.2s is a 2s watchdog.
-		{name: "FractionalTimeoutRanPastTheRequestNotTheDeadline", timeout: 1200 * ms, ran: 1200*ms + slop + ms},
-		{name: "FractionalTimeoutRanPastTheRoundedDeadline", timeout: 1200 * ms, ran: 2*sec + slop + ms, want: true},
+		{name: "FractionalTimeoutRanPastTheRequestNotTheDeadline", timeout: 1200 * ms, rec: launch(1200*ms + slop + ms)},
+		{name: "FractionalTimeoutRanPastTheRoundedDeadline", timeout: 1200 * ms, rec: launch(2*sec + slop + ms), want: true},
+		{name: "FractionalTimeoutKilledPastTheRequestNotTheDeadline", timeout: 1200 * ms, code: sigkillExit, rec: watchdog(1200*ms + ms)},
+		{name: "FractionalTimeoutKilledPastTheRoundedDeadlinesLead", timeout: 1200 * ms, code: sigkillExit, rec: watchdog(2*sec - lead + ms), want: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1318,9 +1344,9 @@ func TestClassifyTimeout(t *testing.T) {
 			if c.untimed {
 				timeout = 0
 			}
-			if got := classifier.classifyTimeout(timeout, c.code, c.watchdogFired, c.ran, c.v); got != c.want {
-				t.Errorf("classifyTimeout(%s, %d, %v, %s, %+v) = %v, want %v",
-					timeout, c.code, c.watchdogFired, c.ran, c.v, got, c.want)
+			if got := classifier.classifyTimeout(timeout, c.code, c.watchdogFired, c.rec, c.v); got != c.want {
+				t.Errorf("classifyTimeout(%s, %d, %v, %+v, %+v) = %v, want %v",
+					timeout, c.code, c.watchdogFired, c.rec, c.v, got, c.want)
 			}
 		})
 	}
@@ -1330,12 +1356,13 @@ func TestClassifyTimeout(t *testing.T) {
 // stay compatible: the wrapper's mark rides on the exit line, so "the wrapper
 // recorded nothing" must still be the one and only empty case.
 func TestParseExitReadsTheWatchdogsMark(t *testing.T) {
+	const ms = time.Millisecond
 	cases := []struct {
 		name   string
 		out    string
 		code   int
 		killed bool
-		ran    time.Duration
+		rec    runRecord
 		fails  bool
 	}{
 		{name: "KilledByTheWatchdog", out: "K 137\n", code: sigkillExit, killed: true},
@@ -1351,42 +1378,52 @@ func TestParseExitReadsTheWatchdogsMark(t *testing.T) {
 		// the timeout, never the other way round.
 		{name: "GarbageCode", out: "K not-a-code\n", fails: true},
 
-		// How long the command ran (#832): the two /proc/uptime readings the
-		// wrapper took around it, after the code.
-		{name: "HowLongItRan", out: " 0 100.25 102.75\n", code: 0, ran: 2500 * time.Millisecond},
-		{name: "KilledAndTimed", out: "K 137 5.00 6.01\n", code: sigkillExit, killed: true, ran: 1010 * time.Millisecond},
-		// Anything short of two readable readings is no record at all, never a
-		// guess. That includes the stream losing its tail, which cuts the second
-		// reading short or drops it: a lost suffix can only remove the record, so
-		// it can never lengthen a command into a timeout.
+		// How long the command ran (#832, #838): the three /proc/uptime readings
+		// the wrapper took around it — at its launch, at its watchdog's, at its
+		// reap — after the code.
+		{name: "HowLongItRan", out: " 0 100.25 100.50 102.75\n", code: 0,
+			rec: runRecord{sinceLaunch: 2500 * ms, sinceWatchdog: 2250 * ms}},
+		{name: "KilledAndTimed", out: "K 137 5.00 5.01 6.01\n", code: sigkillExit, killed: true,
+			rec: runRecord{sinceLaunch: 1010 * ms, sinceWatchdog: time.Second}},
+		// Anything short of three readable readings, in order, is no record at
+		// all, never a guess. That includes the stream losing its tail, which
+		// cuts the reap's reading short or drops it: a lost suffix can only
+		// shorten the record or remove it, so it can never lengthen a command
+		// into a timeout.
 		{name: "OneReading", out: " 0 100.25\n", code: 0},
-		{name: "SecondReadingCutShort", out: " 0 100.25 10\n", code: 0},
-		{name: "UnreadableReading", out: " 0 x 102.75\n", code: 0},
-		{name: "NegativeReading", out: " 0 -5.00 102.75\n", code: 0},
-		{name: "ExtraField", out: " 0 100.25 102.75 9\n", code: 0},
+		{name: "TwoReadings", out: " 0 100.25 100.50\n", code: 0},
+		{name: "LastReadingCutShort", out: " 0 100.25 100.50 10\n", code: 0},
+		{name: "LastReadingCutToAShorterRun", out: " 0 100.25 100.50 102.7\n", code: 0,
+			rec: runRecord{sinceLaunch: 2450 * ms, sinceWatchdog: 2200 * ms}},
+		{name: "WatchdogReadingBeforeTheLaunchReading", out: " 0 100.50 100.25 102.75\n", code: 0},
+		{name: "UnreadableReading", out: " 0 x 100.50 102.75\n", code: 0},
+		{name: "UnreadableWatchdogReading", out: " 0 100.25 x 102.75\n", code: 0},
+		{name: "NegativeReading", out: " 0 -5.00 100.50 102.75\n", code: 0},
+		{name: "ExtraField", out: " 0 100.25 100.50 102.75 9\n", code: 0},
 		// A reading is decimal seconds and nothing else. Each of these would parse
 		// as a duration — or as a float — if the record took them at face value.
-		{name: "ReadingWithAUnit", out: " 0 1h0 102.75\n", code: 0},
-		{name: "ReadingInMinutes", out: " 0 100.25 5m\n", code: 0},
-		{name: "ReadingWithASign", out: " 0 +100.25 102.75\n", code: 0},
-		{name: "ReadingWithAnExponent", out: " 0 1e2 102.75\n", code: 0},
-		{name: "ReadingWithNoWholePart", out: " 0 .25 102.75\n", code: 0},
-		{name: "ReadingWithAnEmptyFraction", out: " 0 100. 102.75\n", code: 0},
-		{name: "ReadingWithTwoPoints", out: " 0 100.25 102.7.5\n", code: 0},
-		{name: "WholeSecondReadings", out: " 0 100 103\n", code: 0, ran: 3 * time.Second},
+		{name: "ReadingWithAUnit", out: " 0 1h0 100.50 102.75\n", code: 0},
+		{name: "ReadingInMinutes", out: " 0 100.25 100.50 5m\n", code: 0},
+		{name: "ReadingWithASign", out: " 0 100.25 +100.50 102.75\n", code: 0},
+		{name: "ReadingWithAnExponent", out: " 0 1e2 100.50 102.75\n", code: 0},
+		{name: "ReadingWithNoWholePart", out: " 0 .25 100.50 102.75\n", code: 0},
+		{name: "ReadingWithAnEmptyFraction", out: " 0 100.25 100. 102.75\n", code: 0},
+		{name: "ReadingWithTwoPoints", out: " 0 100.25 100.50 102.7.5\n", code: 0},
+		{name: "WholeSecondReadings", out: " 0 100 101 103\n", code: 0,
+			rec: runRecord{sinceLaunch: 3 * time.Second, sinceWatchdog: 2 * time.Second}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			code, killed, ran, err := parseExit(c.out)
+			code, killed, rec, err := parseExit(c.out)
 			if c.fails {
 				if err == nil {
-					t.Fatalf("parseExit(%q) = %d, %v, %s, nil; want an error", c.out, code, killed, ran)
+					t.Fatalf("parseExit(%q) = %d, %v, %+v, nil; want an error", c.out, code, killed, rec)
 				}
 				return
 			}
-			if err != nil || code != c.code || killed != c.killed || ran != c.ran {
-				t.Errorf("parseExit(%q) = %d, %v, %s, %v; want %d, %v, %s, nil",
-					c.out, code, killed, ran, err, c.code, c.killed, c.ran)
+			if err != nil || code != c.code || killed != c.killed || rec != c.rec {
+				t.Errorf("parseExit(%q) = %d, %v, %+v, %v; want %d, %v, %+v, nil",
+					c.out, code, killed, rec, err, c.code, c.killed, c.rec)
 			}
 		})
 	}
@@ -1477,16 +1514,21 @@ func wrapperMarks(t *testing.T, env, startupEnv []string) {
 	// parse and classification the provider uses, a punctual kill is a timeout
 	// with no probe involved at all.
 	t.Run("KilledOnItsDeadline", func(t *testing.T) {
-		code, killed, ran, err := parseExit(run(t, "killed", "sleep 30", 1))
+		code, killed, rec, err := parseExit(run(t, "killed", "sleep 30", 1))
 		if err != nil || code != sigkillExit || !killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
 		// The watchdog sleeps its whole deadline before it kills, and the record
 		// starts before the watchdog is launched, so the run is the deadline —
 		// never under it by more than the clock's hundredth of a second, and never
-		// past the slop, or a punctual kill would read as an overrun.
-		wantRan(t, ran, time.Second-uptimeTick, time.Second+defaultOverrunSlop)
-		if !classifier.classifyTimeout(time.Second, code, killed, ran, verdict{}) {
+		// past the slop, or a punctual kill would read as an overrun. The run
+		// since the watchdog's launch starts later still, so it is never the
+		// longer of the two.
+		wantRan(t, rec.sinceLaunch, time.Second-uptimeTick, time.Second+defaultOverrunSlop)
+		if rec.sinceWatchdog > rec.sinceLaunch {
+			t.Errorf("recorded %+v: the run since the watchdog's launch is longer than the run since the command's", rec)
+		}
+		if !classifier.classifyTimeout(time.Second, code, killed, rec, verdict{}) {
 			t.Error("a command the watchdog killed on its deadline did not classify as a timeout")
 		}
 	})
@@ -1495,12 +1537,12 @@ func wrapperMarks(t *testing.T, env, startupEnv []string) {
 	// stands. Its watchdog is still asleep when it exits, so this also pins that
 	// the wrapper never waits for the watchdog to notice.
 	t.Run("FinishedInsideItsDeadline", func(t *testing.T) {
-		code, killed, ran, err := parseExit(run(t, "clean", "exit 7", 5))
+		code, killed, rec, err := parseExit(run(t, "clean", "exit 7", 5))
 		if err != nil || code != 7 || killed {
 			t.Fatalf("parseExit = %d, %v, %v; want 7, false, nil", code, killed, err)
 		}
-		wantRan(t, ran, 0, 5*time.Second)
-		if classifier.classifyTimeout(5*time.Second, code, killed, ran, verdict{}) {
+		wantRan(t, rec.sinceLaunch, 0, 5*time.Second)
+		if classifier.classifyTimeout(5*time.Second, code, killed, rec, verdict{}) {
 			t.Error("a command that finished inside its deadline classified as a timeout")
 		}
 	})
@@ -1508,12 +1550,48 @@ func wrapperMarks(t *testing.T, env, startupEnv []string) {
 	// A command that SIGKILLs itself exits 137 without the watchdog firing, so
 	// the mark is what keeps 137 from meaning "timeout" on its own.
 	t.Run("SelfInflictedKillLeavesNoMark", func(t *testing.T) {
-		code, killed, ran, err := parseExit(run(t, "selfkill", "kill -9 $$", 30))
+		code, killed, rec, err := parseExit(run(t, "selfkill", "kill -9 $$", 30))
 		if err != nil || code != sigkillExit || killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, false, nil", code, killed, err, sigkillExit)
 		}
-		if classifier.classifyTimeout(30*time.Second, code, killed, ran, verdict{}) {
+		if classifier.classifyTimeout(30*time.Second, code, killed, rec, verdict{}) {
 			t.Error("a self-inflicted SIGKILL classified as a timeout")
+		}
+	})
+
+	// #838: a SIGKILL the watchdog did not deliver — the command disarmed it,
+	// and the kill came from elsewhere (here the command itself, on a node the
+	// OOM killer) — past the deadline, but inside the slop the overrun rule
+	// waits out. It leaves no mark, and verdict{} is a pre-deadline probe that
+	// answered too late to see the command alive. The wrapper's record since
+	// the watchdog's launch is what still calls it the deadline's — where the
+	// host has the clock that record is read from; where it does not, there is
+	// no record and no timeout, never one made up. The disarming waits for the
+	// watchdog, so the 1.2s runs from after its launch: the record falls under
+	// the line only if the wrapper stalls a quarter of a second between the
+	// watchdog's launch and its very next step.
+	t.Run("SigkillPastTheDeadlineTheWatchdogDidNotDeliver", func(t *testing.T) {
+		code, killed, rec, err := parseExit(run(t, "late", disarmWatchdog+"sleep 1.2\nkill -9 $$\n", 1))
+		if err != nil || code != sigkillExit || killed {
+			t.Fatalf("parseExit = %d, %v, %v; want %d, false, nil (3: the command never found its watchdog to disarm)",
+				code, killed, err, sigkillExit)
+		}
+		if got, want := classifier.classifyTimeout(time.Second, code, killed, rec, verdict{}), hostRecordsRuns(); got != want {
+			t.Errorf("a SIGKILL 0.2s past a 1s deadline that the watchdog did not deliver (recorded %+v): timed out %v, want %v", rec, got, want)
+		}
+	})
+
+	// The other side of the same line: a SIGKILL that lands before the
+	// deadline less the probe's lead is the command's own, record or none —
+	// the line the pre-deadline probe has always drawn, and the shared
+	// contract's (ExecSelfInflictedKillIsNotATimeout).
+	t.Run("SigkillBeforeTheDeadlinesLeadIsTheCommandsOwn", func(t *testing.T) {
+		code, killed, rec, err := parseExit(run(t, "early", "sleep 0.6\nkill -9 $$\n", 1))
+		if err != nil || code != sigkillExit || killed {
+			t.Fatalf("parseExit = %d, %v, %v; want %d, false, nil", code, killed, err, sigkillExit)
+		}
+		if classifier.classifyTimeout(time.Second, code, killed, rec, verdict{}) {
+			t.Errorf("a SIGKILL 0.4s before a 1s deadline (recorded %+v) classified as a timeout", rec)
 		}
 	})
 
@@ -1604,15 +1682,38 @@ func wrapperMarks(t *testing.T, env, startupEnv []string) {
 		if err != nil || code != sigkillExit || !killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
-		if !classifier.classifyTimeout(time.Second, code, killed, 0, verdict{}) {
+		if !classifier.classifyTimeout(time.Second, code, killed, runRecord{}, verdict{}) {
 			t.Error("a watchdog kill whose wrapper was sabotaged did not classify as a timeout")
 		}
 	})
 }
 
+// disarmWatchdog is a command's opening that kills its watchdog — the
+// wrapper's other child — once it exists, or exits 3 if it never does. Linux
+// lists a process's children in /proc; macOS, which has no /proc, through
+// pgrep.
+const disarmWatchdog = `w=
+for ((i = 0; i < 200; i++)); do
+  for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null || pgrep -P $PPID); do
+    [ "$p" != "$$" ] && w=$p
+  done
+  [ -n "$w" ] && break
+  sleep 0.01
+done
+[ -n "$w" ] || exit 3
+kill -9 "$w" || exit 3
+`
+
 // uptimeTick is /proc/uptime's resolution: two readings of it can lose up to
 // this much of the time between them.
 const uptimeTick = 10 * time.Millisecond
+
+// hostRecordsRuns reports whether this host has the clock the wrapper records
+// a run by: a pod always has /proc/uptime, and a macOS host does not.
+func hostRecordsRuns() bool {
+	_, err := os.Stat("/proc/uptime")
+	return err == nil
+}
 
 // wantRan checks a run time the wrapper recorded on the host's shell. Its clock
 // is /proc/uptime, which a pod always has and a macOS host does not; there the
@@ -1631,11 +1732,12 @@ func wantRan(t *testing.T, ran, atLeast, under time.Duration) {
 	}
 }
 
-// What the wrapper records of a run (#832; classifyTimeout argues its weight),
-// pinned on the host's shell like the mark. Both bounds matter: one too short
-// hides an overrun, one too long reports a timeout that never happened.
+// What the wrapper records of a run (#832, #838; classifyTimeout argues its
+// weight), pinned on the host's shell like the mark. Both bounds matter: one
+// too short hides a timeout, one too long reports a timeout that never
+// happened.
 //
-// The command's environment plants both reading names, as a tenant's Spec.Env
+// The command's environment plants every reading name, as a tenant's Spec.Env
 // could. A reading that failed must not fall back on them — on a host without
 // /proc/uptime that would record 899s — and the wrapper's own readings must not
 // reach the command.
@@ -1645,53 +1747,66 @@ func TestExecWrapperRecordsHowLongTheCommandRan(t *testing.T) {
 		env = os.Environ()
 	}
 	state := t.TempDir() + "/state"
-	wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", `echo "$t0 $t1"; sleep 0.3; exit 7`, "30", state)
-	wrapper.Env = append(append([]string{}, env...), "t0=100.00", "t1=999.00")
+	wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", `echo "$t0 $tw $t1"; sleep 0.3; exit 7`, "30", state)
+	wrapper.Env = append(append([]string{}, env...), "t0=100.00", "tw=100.00", "t1=999.00")
 	stdout, err := wrapper.Output()
 	if err != nil {
 		t.Fatalf("run execWrapper: %v", err)
 	}
-	if got := strings.TrimSpace(string(stdout)); got != "100.00 999.00" {
-		t.Errorf("the command saw t0 t1 = %q, want the %q its environment carried — the wrapper's readings leaked into it", got, "100.00 999.00")
+	if got, want := strings.TrimSpace(string(stdout)), "100.00 100.00 999.00"; got != want {
+		t.Errorf("the command saw t0 tw t1 = %q, want the %q its environment carried — the wrapper's readings leaked into it", got, want)
 	}
 	out, err := exec.Command("/bin/bash", "-c", exitScript, "map-exit", state).Output()
 	if err != nil {
 		t.Fatalf("run exitScript: %v", err)
 	}
-	code, killed, ran, err := parseExit(string(out))
+	code, killed, rec, err := parseExit(string(out))
 	if err != nil || code != 7 || killed {
-		t.Fatalf("parseExit(%q) = %d, %v, %s, %v; want 7, false", out, code, killed, ran, err)
+		t.Fatalf("parseExit(%q) = %d, %v, %+v, %v; want 7, false", out, code, killed, rec, err)
 	}
-	// At least half the 300ms the command slept: the record misses the gap
+	// At least half the 300ms the command slept: each record misses the gap
 	// between the command's launch and its first reading, which is microseconds
 	// unless the wrapper is descheduled right then — half the sleep would take a
 	// host stalled that long. Under a second: what the record adds beyond the
 	// sleep is a reap, single-digit milliseconds on an idle host, so 700ms of
 	// headroom is load, not slack for a record that counts something it should
 	// not.
-	wantRan(t, ran, 150*time.Millisecond, time.Second)
+	wantRan(t, rec.sinceLaunch, 150*time.Millisecond, time.Second)
+	wantRan(t, rec.sinceWatchdog, 150*time.Millisecond, time.Second)
 }
 
-// The record's first reading is taken right after the command's launch: after
-// it, so nothing the wrapper sets reaches the command, and before anything else
-// the wrapper does, so what it misses of the command's run is the launch gap
-// alone (classifyTimeout states what each side of that bounds).
+// Each record's first reading is taken where its question needs it
+// (classifyTimeout states what each place bounds).
 //
-// Behaviourally: a wrapper held up after the launch does not shrink the record.
-// A FIFO planted at the pid file holds the wrapper at its first blocking step —
-// writing the pid — for half a second of the command's one-second run; a record
-// that started after that write would come to half a second, one that starts at
-// the launch keeps the whole run. (The command outlives the hold on purpose: its
-// exit would interrupt the blocked write, which macOS's bash 3.2 then abandons
-// rather than retries.) The step before the reading — the launch itself — is
-// the fork no host test can stretch, so the script's own order is asserted too.
-func TestExecWrapperStartsTheRecordAtTheCommandsLaunch(t *testing.T) {
+// The overrun's, right after the command's launch: after it, so nothing the
+// wrapper sets reaches the command, and before anything else the wrapper does,
+// so what it misses of the command's run is the launch gap alone. Behaviourally,
+// a wrapper held up after the launch does not shrink it. A FIFO planted at the
+// pid file holds the wrapper at its first blocking step — writing the pid — for
+// half a second of the command's one-second run; a record that started after
+// that write would come to half a second, one that starts at the launch keeps
+// the whole run. (The command outlives the hold on purpose: its exit would
+// interrupt the blocked write, which macOS's bash 3.2 then abandons rather than
+// retries.)
+//
+// The kill's, right after the watchdog's launch, which that same hold delays:
+// so the hold comes out of it, and it counts no time before the watchdog could
+// have been counting too. The steps between each launch and its reading are a
+// fork and a builtin no host test can stretch, so the script's own order is
+// asserted too.
+func TestExecWrapperStartsEachRecordAtItsLaunch(t *testing.T) {
 	launch := strings.Index(execWrapper, `setsid /bin/bash -c "$1"`)
 	reading := strings.Index(execWrapper, "read -r t0 ")
 	watchdog := strings.Index(execWrapper, ") >/dev/null 2>&1 3>&- &")
+	watchdogReading := strings.Index(execWrapper, "read -r tw ")
+	reap := strings.Index(execWrapper, `wait "$cmd"`)
 	if launch < 0 || reading < 0 || watchdog < 0 || !(launch < reading && reading < watchdog) {
 		t.Errorf("execWrapper takes its first reading at %d; want it after the command's launch (%d) and before the watchdog's (%d)",
 			reading, launch, watchdog)
+	}
+	if watchdogReading < 0 || reap < 0 || !(watchdog < watchdogReading && watchdogReading < reap) {
+		t.Errorf("execWrapper takes its watchdog's reading at %d; want it after the watchdog's launch (%d) and before the reap (%d)",
+			watchdogReading, watchdog, reap)
 	}
 
 	env := setsidEnv(t)
@@ -1736,11 +1851,12 @@ func TestExecWrapperStartsTheRecordAtTheCommandsLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run exitScript: %v", err)
 	}
-	code, killed, ran, err := parseExit(string(out))
+	code, killed, rec, err := parseExit(string(out))
 	if err != nil || code != 0 || killed {
-		t.Fatalf("parseExit(%q) = %d, %v, %s, %v; want 0, false", out, code, killed, ran, err)
+		t.Fatalf("parseExit(%q) = %d, %v, %+v, %v; want 0, false", out, code, killed, rec, err)
 	}
-	wantRan(t, ran, time.Second-held/2, 2*time.Second)
+	wantRan(t, rec.sinceLaunch, time.Second-held/2, 2*time.Second)
+	wantRan(t, rec.sinceWatchdog, 0, time.Second-held/2)
 }
 
 // The watchdog must not still be holding the exec's stderr when the command has
@@ -1949,7 +2065,7 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 
 	t.Run("exit record", func(t *testing.T) {
 		state := dir + "/exit"
-		if err := os.WriteFile(state+".exit", []byte("7 10.00 12.50\n"), 0o644); err != nil {
+		if err := os.WriteFile(state+".exit", []byte("7 10.00 10.50 12.50\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Mkdir(state+".killed", 0o755); err != nil {
@@ -1957,9 +2073,9 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 		}
 		f := sandbox.NewFrame("exit")
 		out, _ := run(t, f, "/bin/bash", exitScript, state)
-		code, killed, ran, err := readExitRecord(f, out, false, 0)
-		if err != nil || code != 7 || !killed || ran != 2500*time.Millisecond {
-			t.Errorf("readExitRecord = %d, %v, %s, %v; want 7, true, 2.5s", code, killed, ran, err)
+		code, killed, rec, err := readExitRecord(f, out, false, 0)
+		if want := (runRecord{sinceLaunch: 2500 * time.Millisecond, sinceWatchdog: 2 * time.Second}); err != nil || code != 7 || !killed || rec != want {
+			t.Errorf("readExitRecord = %d, %v, %+v, %v; want 7, true, %+v", code, killed, rec, err, want)
 		}
 		// What the frame keeps out: read whole, the banner is the record's
 		// first field.
@@ -2019,6 +2135,8 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 	if strings.HasPrefix(begin, other) {
 		other = "\nmap-exit-begin-0"
 	}
+	// whole is the record `1.0 1.5 2.0` makes.
+	whole := runRecord{sinceLaunch: time.Second, sinceWatchdog: 500 * time.Millisecond}
 	for _, c := range []struct {
 		name, out string
 		truncated bool
@@ -2026,50 +2144,50 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 		exit   int
 		code   int
 		killed bool
-		ran    time.Duration
+		rec    runRecord
 		fails  bool
 		// startup is a failure the cap made: a *sandbox.StartupOutputError
 		// whose command had run.
 		startup bool
 	}{
-		{"whole, banner and trap around it", "welcome 3 " + begin + "K 0 1.0 2.0\n" + end + "exit 9", false, 0, 0, true, time.Second, false, false},
-		{"end line lost", begin + "K 0 1.0 2.0\n", false, 0, 0, true, time.Second, false, false},
-		{"end line half lost", begin + " 5 1.0 2.0\n" + end[:6], false, 0, 5, false, time.Second, false, false},
-		{"the record's tail lost", begin + " 5 1.0", false, 0, 5, false, 0, false, false},
-		{"nothing after the begin line", begin, false, 0, sigkillExit, false, 0, false, false},
+		{"whole, banner and trap around it", "welcome 3 " + begin + "K 0 1.0 1.5 2.0\n" + end + "exit 9", false, 0, 0, true, whole, false, false},
+		{"end line lost", begin + "K 0 1.0 1.5 2.0\n", false, 0, 0, true, whole, false, false},
+		{"end line half lost", begin + " 5 1.0 1.5 2.0\n" + end[:6], false, 0, 5, false, whole, false, false},
+		{"the record's tail lost", begin + " 5 1.0 1.5", false, 0, 5, false, runRecord{}, false, false},
+		{"nothing after the begin line", begin, false, 0, sigkillExit, false, runRecord{}, false, false},
 		// A reader the stream lost, framed or not, killed on its way out.
-		{"the record whole, the reader killed", begin + "K 0 1.0 2.0\n", false, 137, 0, true, time.Second, false, false},
-		{"nothing at all", "", false, 0, sigkillExit, false, 0, false, false},
-		{"cut inside the begin line", begin[:9], false, 0, sigkillExit, false, 0, false, false},
-		{"cut inside the begin line, after a banner", "welcome 0 1.0 2.0" + begin[:len(begin)-1], false, 0, sigkillExit, false, 0, false, false},
-		{"cut two bytes into the begin line, after a banner", "welcome 0 1.0 2.0" + begin[:2], false, 0, sigkillExit, false, 0, false, false},
-		{"something, but no begin line", "welcome 0 1.0 2.0", false, 0, 0, false, 0, true, false},
-		{"something, and another frame's begin line cut short", "welcome 0 1.0 2.0" + other, false, 0, 0, false, 0, true, false},
+		{"the record whole, the reader killed", begin + "K 0 1.0 1.5 2.0\n", false, 137, 0, true, whole, false, false},
+		{"nothing at all", "", false, 0, sigkillExit, false, runRecord{}, false, false},
+		{"cut inside the begin line", begin[:9], false, 0, sigkillExit, false, runRecord{}, false, false},
+		{"cut inside the begin line, after a banner", "welcome 0 1.0 1.5 2.0" + begin[:len(begin)-1], false, 0, sigkillExit, false, runRecord{}, false, false},
+		{"cut two bytes into the begin line, after a banner", "welcome 0 1.0 1.5 2.0" + begin[:2], false, 0, sigkillExit, false, runRecord{}, false, false},
+		{"something, but no begin line", "welcome 0 1.0 1.5 2.0", false, 0, 0, false, runRecord{}, true, false},
+		{"something, and another frame's begin line cut short", "welcome 0 1.0 1.5 2.0" + other, false, 0, 0, false, runRecord{}, true, false},
 		// A banner that ended its line, then nothing: a newline alone is no
 		// part of a begin line, and the stream is the banner's.
-		{"a banner, its line ended, then nothing", "welcome 0 1.0 2.0\n", false, 0, 0, false, 0, true, false},
+		{"a banner, its line ended, then nothing", "welcome 0 1.0 1.5 2.0\n", false, 0, 0, false, runRecord{}, true, false},
 		// A reader that exited non-zero with no frame — a startup that failed
 		// under errexit before the script began — is no record, whatever it
 		// printed: not the kill's 137 for a command that may have exited 7.
-		{"a banner, then the reader exits 1", "welcome\n", false, 1, 0, false, 0, true, false},
-		{"nothing, the reader exits 1", "", false, 1, 0, false, 0, true, false},
-		{"partway into the begin line, the reader exits 1", "welcome" + begin[:9], false, 1, 0, false, 0, true, false},
+		{"a banner, then the reader exits 1", "welcome\n", false, 1, 0, false, runRecord{}, true, false},
+		{"nothing, the reader exits 1", "", false, 1, 0, false, runRecord{}, true, false},
+		{"partway into the begin line, the reader exits 1", "welcome" + begin[:9], false, 1, 0, false, runRecord{}, true, false},
 		// A startup that floods past the cap pushes the record out: the
 		// startup's failure, though its tail ends in a newline, as a lost
 		// begin line's would.
-		{"a flood the cap cut before any begin line", strings.Repeat("y\n", 1000), true, 0, 0, false, 0, true, true},
+		{"a flood the cap cut before any begin line", strings.Repeat("y\n", 1000), true, 0, 0, false, runRecord{}, true, true},
 		// One the cap cut after the begin line may have cut a number: a
 		// deadline's kill, K 137, kept as K 13 is no exit 13.
-		{"a record the cap cut inside its code", "flood " + begin + "K 13", true, 0, 0, false, 0, true, true},
-		{"a record the cap cut before its end line", "flood " + begin + "K 137 12.3 15.9\n", true, 0, 0, false, 0, true, true},
-		{"a record the cap cut inside its end line", "flood " + begin + "K 137 12.3 15.9\n" + end[:len(end)/2], true, 0, 0, false, 0, true, true},
+		{"a record the cap cut inside its code", "flood " + begin + "K 13", true, 0, 0, false, runRecord{}, true, true},
+		{"a record the cap cut before its end line", "flood " + begin + "K 137 12.3 12.4 15.9\n", true, 0, 0, false, runRecord{}, true, true},
+		{"a record the cap cut inside its end line", "flood " + begin + "K 137 12.3 12.4 15.9\n" + end[:len(end)/2], true, 0, 0, false, runRecord{}, true, true},
 		// One the cap cut only past its end line is whole: an EXIT trap's flood.
-		{"a record the cap cut past its end line", begin + "K 137 12.3 15.9\n" + end + "exit flood", true, 0, sigkillExit, true, 3600 * time.Millisecond, false, false},
+		{"a record the cap cut past its end line", begin + "K 137 12.3 12.4 15.9\n" + end + "exit flood", true, 0, sigkillExit, true, runRecord{sinceLaunch: 3600 * time.Millisecond, sinceWatchdog: 3500 * time.Millisecond}, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			code, killed, ran, err := readExitRecord(f, c.out, c.truncated, c.exit)
-			if (err != nil) != c.fails || !c.fails && (code != c.code || killed != c.killed || ran != c.ran) {
-				t.Errorf("readExitRecord(%q) = %d, %v, %s, %v; want %d, %v, %s, failing %v", c.out, code, killed, ran, err, c.code, c.killed, c.ran, c.fails)
+			code, killed, rec, err := readExitRecord(f, c.out, c.truncated, c.exit)
+			if (err != nil) != c.fails || !c.fails && (code != c.code || killed != c.killed || rec != c.rec) {
+				t.Errorf("readExitRecord(%q) = %d, %v, %+v, %v; want %d, %v, %+v, failing %v", c.out, code, killed, rec, err, c.code, c.killed, c.rec, c.fails)
 			}
 			var startup *sandbox.StartupOutputError
 			if got := errors.As(err, &startup) && startup.Ran; got != c.startup {
