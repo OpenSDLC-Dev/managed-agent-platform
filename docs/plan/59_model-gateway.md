@@ -101,8 +101,9 @@ error" ([thinking mode](https://api-docs.deepseek.com/guides/thinking_mode)). Ki
 must be preserved unchanged
 ([Anthropic API](https://platform.minimax.io/docs/api-reference/text-anthropic-api));
 its per-model defaults — M2.x always thinks, M3.1-Flash-Preview refuses `disabled`
-with a 400, `MiniMax-M3` thinks only when sent `{"type": "adaptive"}` — are in that page
-and its [text generation guide](https://platform.minimax.cn/docs/guides/text-generation).
+with a 400, `MiniMax-M3` thinks only when sent `{"type": "adaptive"}` — are on that page;
+its [text generation guide](https://platform.minimax.cn/docs/guides/text-generation)
+details M3.1-Flash-Preview's forced thinking and effort levels.
 Probed live on 2026-10-04, in tool loops of up to four requests: `deepseek-flash` and
 `deepseek-v4-pro` (both endpoints), and on MiniMax CN `MiniMax-M2.7`,
 `MiniMax-M3.1-Flash-Preview` and `MiniMax-M3` with adaptive thinking, return signed
@@ -245,12 +246,14 @@ Anthropic Messages is the **pivot**: every conversion goes through it, and nothi
 converts when protocols match.
 
 - **Passthrough** — the inbound and upstream protocols match. The body is decoded only
-  as far as its top-level keys and the content blocks a profile touches; `model` becomes
-  the deployment's upstream id, the profile's edits apply, and everything else, unknown
+  as far as its top-level keys and the content blocks a profile or thinking provenance
+  (Routing below) touches; provenance filtering runs first, then `model` becomes the
+  deployment's upstream id and the profile's edits apply, and everything else, unknown
   fields included, goes out equal as JSON; `anthropic-*` headers go with it verbatim.
-  The response relays event by event as it arrives — no buffering, `ping` events and
-  keep-alive comments kept, each sequence whole — rewriting only `message.model` (back
-  to the alias the caller sent) and the usage fields the profile normalizes. A
+  `count_tokens` is filtered as its `/v1/messages` twin would be. The response relays
+  event by event as it arrives — no buffering, `ping` events and keep-alive comments
+  kept, each sequence whole — rewriting only `message.model` (back to the alias the
+  caller sent), the usage fields the profile normalizes, and the thinking wrappers. A
   conversion path whose upstream sends no pings emits its own during silent gaps. A
   provider configures both of its vendor's endpoints
   and selection prefers the one matching the inbound protocol, so Anthropic and Chat
@@ -313,9 +316,12 @@ deployment, alias) reserve `org_id`, `workspace_id` and `project_id` with single
 defaults, as the platform's top-level resource tables do
 (`internal/store/migrations/0001_init.sql`, design principle 5).
 
-- **provider** — profile (fixed at creation), name, endpoint per protocol (a profile
-  host or a custom one), extra headers, stall timeout, enabled. No header or endpoint
-  carries a secret: a
+- **provider** — one vendor account at one endpoint: profile and endpoint per protocol
+  (a profile host or a custom one), both fixed at creation; name, extra headers, stall
+  timeout, enabled. Its credentials are keys of that one account — a key of another
+  account is another provider, which the console says where a key is added, since no
+  vendor exposes which account a key belongs to. No header or endpoint carries a
+  secret: a
   header name the redactor treats as a credential (`internal/provider/redact.go`), an
   endpoint with userinfo, and one with a query string are refused; a secret is a
   credential.
@@ -328,10 +334,10 @@ defaults, as the platform's top-level resource tables do
   the `ModelInfo` fields `/v1/models` answers from); prices per million tokens for
   input, output, cache write and cache read, entered by the operator — no remote price
   sync, so an air-gapped install works. A deployment's provider and upstream model id
-  never change — thinking provenance (Routing below) and an embedding index both key on
-  the deployment, so a different model or account is a new deployment — and the
-  endpoints of a provider an `embedding` deployment uses cannot be edited, since that
-  too would change the vectors behind an unchanged alias. Credentials rotate freely.
+  never change, so a deployment id names one model at one endpoint on one account —
+  what thinking provenance (Routing below) and an embedding index both key on; moving
+  to another endpoint, account or model is a new provider or deployment. Credentials
+  rotate freely within their account.
 - **alias** — the model name a caller sends: a display name and targets
   `[{deployment, priority, weight}]`. Exact match first, then an optional `*` alias. A
   `claude-*` alias is only a name, which is how clients that hard-code Claude names
@@ -368,26 +374,36 @@ request path reads only the snapshot.
   deployment by weight, then a credential by weight.
 - **Thinking provenance.** Every thinking block's `signature` and every
   `redacted_thinking` block's `data` the gateway returns is wrapped as
-  `mapgw1.<deployment id>.<the upstream's value>`, in a stream's `signature_delta` and
-  block starts as in a whole response. Both fields are opaque to a client, which
-  stores and returns them verbatim, so the wrapper rides along unseen. On a request
-  the gateway reads the wrappers in the history: among the alias's healthy targets,
-  the deployment that produced the newest block is chosen first, and whichever
-  deployment answers receives exactly its own blocks, unwrapped — every other thinking
-  block (another deployment's, an unwrapped one, one naming a deployment that no longer
-  exists) is removed. Anthropic's prefix rule holds by construction: each block was
-  produced under a request that carried only its own deployment's blocks, so the
-  request it returns in is the one it was produced under, and a fallback costs the
-  earlier model's reasoning, never a 400. It needs no state, no session id and no sweep,
-  holds per conversation (each of a session's threads carries its own history) and
-  across replicas and restarts, and leaves no session stranded when a deployment is
-  retired. A per-session record of the last answering deployment was considered and
-  rejected: a session's threads share one id, a sweep forgets provenance a history
-  still holds, and replicas race to write it; so was rendezvous hashing on the session
-  id. The wrapper is a routing hint, not a credential: a caller that forges one names a
-  deployment its own key may already reach, and only its own request fails. An
-  OpenAI-shaped caller's `reasoning_content` carries no signature to wrap and has no
-  provenance; it goes upstream as sent.
+  `mapgw1.<deployment id>.<the upstream's value>`, exactly once per block: a whole
+  response's field is prefixed, and in a stream the first non-empty fragment of each
+  block index — on its start or its first `signature_delta` — is prefixed and the rest
+  pass unchanged, so a client that concatenates the fragments, as the SDK does,
+  assembles the same value either way. Both fields are opaque to a client, which
+  stores and returns them verbatim, so the wrapper rides along unseen. On a request the
+  gateway reads the wrappers in the history: among the alias's healthy targets, the
+  deployment that produced the newest block is chosen first, and whichever deployment
+  answers receives exactly its own blocks, unwrapped — every other thinking block
+  (another deployment's, an unwrapped one, one naming a deployment that no longer
+  exists) is removed, and an assistant message left empty by the removal goes with
+  it. That message held only thinking, so no tool call loses its result; the two user
+  turns it separated are joined into one, as the Messages API itself combines
+  consecutive same-role turns.
+  What this guarantees is that the gateway never makes a valid history invalid: for a
+  caller that returns its history append-only and unedited, with the wrappers it was
+  given, each deployment receives every one of its blocks under the prefix it produced
+  it under — each was produced under a request carrying only that deployment's blocks,
+  after the same deterministic removals — so a fallback costs the earlier model's
+  reasoning, never a 400. A caller that edits its history, or forges a wrapper, gets the
+  upstream's own answer to what it sent; the wrapper is a routing hint, not a
+  credential, and a forged one can only name a deployment the key may already reach.
+  The scheme needs no state, no session id and no sweep, holds per conversation (each
+  of a session's threads carries its own history) and across replicas and restarts, and
+  leaves no session stranded when a deployment is retired. A per-session record of the
+  last answering deployment was considered and rejected: a session's threads share one
+  id, a sweep forgets provenance a history still holds, and replicas race to write it;
+  so was rendezvous hashing on the session id. An OpenAI-shaped caller's
+  `reasoning_content` carries no signature to wrap and has no provenance; it goes
+  upstream as sent.
 - **Retry and fallback happen before the first byte only.** A connect error, 429, 5xx
   or overload moves to the next credential, then the next group, within a bounded
   attempt count and jittered exponential backoff. After the first byte a failure is the
@@ -430,10 +446,12 @@ request path reads only the snapshot.
 ### Console
 
 managed-agent-console gains a Models section — providers with profile presets and
-write-only vendor keys, deployments and aliases, usage and cost — and per-key limits and
-alias allow-lists on its existing API keys page, through its server-side proxy to
-`/admin/v1/` (`MODEL_GATEWAY_BASE_URL`), attaching the credential it already sends the
-control plane.
+write-only vendor keys, deployments and aliases, usage and cost — and, on its existing
+API keys page, a model grant per key: granting writes the key's policy (alias
+allow-list, RPM and TPM limits), revoking deletes it, and the page shows which active
+keys may call models, since an active key without a grant may not. It reaches
+`/admin/v1/` through its server-side proxy (`MODEL_GATEWAY_BASE_URL`), attaching the
+credential it already sends the control plane.
 The agent and dream editors' model field becomes a choice of aliases. That work is
 planned in the console repository; this plan owns the admin API contract it consumes,
 frozen by slice 2.
@@ -448,7 +466,7 @@ frozen by slice 2.
   per-session cost.
 - compose and Helm run the gateway — Helm with two replicas and a PodDisruptionBudget by
   default, since every agent turn now depends on it. The brain's platform API key comes
-  from one Secret that both the brain and the control plane read: the control plane
+  from one Secret that the brain, the control plane and the gateway read: the control plane
   registers it in `api_keys` under the name `brain` exactly as it registers
   `CONTROLPLANE_API_KEY` as `bootstrap` (`api.EnsureAPIKey`, `cmd/controlplane/main.go`),
   the gateway knows it by that value (Configuration, `key_policy`), and the brain sends
@@ -489,8 +507,8 @@ frozen by slice 2.
    daily rollups, limits, telemetry; compose and Helm; the live
    tier on MiniMax (CN) and DeepSeek through the official Anthropic SDK. Freezes the
    admin API for the console.
-3. **Console** (the console repository's own plan): the Models section and the editors'
-   alias choice.
+3. **Console** (the console repository's own plan): the Models section, model grants on
+   the API keys page, and the editors' alias choice.
 4. **OpenAI surfaces:** Chat Completions passthrough, Embeddings (text and multimodal)
    and Rerank passthrough with the `gitee` profile, Models in OpenAI's shape,
    Anthropic ↔ Chat Completions conversion for OpenAI-only credentials (the conversion
@@ -548,15 +566,22 @@ where a vendor bills cache writes.
   behavior — a refused `search_result`, `: keep-alive` comments, cache usage in the
   vendor's shape, a batch-cap 400 in the vendor's own words, a connection closed
   between requests — all run through one shared suite, as `providertest` does for the
-  brain's adapters. Thinking provenance runs against two fakes behind one alias: a tool
-  loop whose first deployment fails mid-loop reaches the second with none of the
-  first's blocks and stays there after the first recovers (the second produced the
-  newest block); when the second fails in turn, the first gets back only its own
-  blocks; and an unwrapped block, or one whose wrapper names a deployment outside the
-  alias or no longer configured, never reaches an upstream.
+  brain's adapters. Thinking provenance runs against two fakes behind one alias that
+  enforce what Anthropic's API does: each signs a block over the request ahead of it
+  and refuses a block whose prefix or signer differs. A tool loop whose first
+  deployment fails mid-loop reaches the second with none of the first's blocks and
+  stays there after the first recovers (the second produced the newest block); when the
+  second fails in turn, the first gets back only its own blocks, each under its own
+  prefix; a thinking-only reply stripped on fallback leaves no empty assistant message;
+  a stream whose signature arrives in several fragments, after an empty start,
+  assembles the same wrapped value as the whole response; and an unwrapped block, or
+  one whose wrapper names a deployment outside the alias or no longer configured, never
+  reaches an upstream.
 - **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests;
   the retention sweep against rows either side of the cutoff, its rollups intact; a key
-  archived or expired mid-run refused on its next request, by both servers alike.
+  archived or expired mid-run refused on its next request, by both servers alike; a key
+  without a grant refused inference, including one an application issued itself under
+  the name `bootstrap`, and refused the admin API.
 - **Clients:** the official Anthropic and OpenAI Go SDKs drive the gateway in-process —
   streaming, tool loops with thinking, errors. dikw-core's request bodies are replayed
   as fixtures, not left to a Go SDK's defaults: `encoding_format: "base64"` (its
@@ -608,8 +633,9 @@ where a vendor bills cache writes.
 - docs/REFERENCE_PROJECTS.md: bifrost as a design reference — ideas only, never a wire
   source (slice 2); `openai-go` (slice 4).
 - docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens`
-  answering 404 where an upstream has none; stateless Responses; each profile edit with
-  its vendor evidence.
+  answering 404 where an upstream has none; stateless Responses; thinking signatures
+  and redacted data returned wrapped, and history thinking filtered by provenance;
+  each profile edit with its vendor evidence.
 
 ## Open questions, settled by evidence in the slice that meets them
 
