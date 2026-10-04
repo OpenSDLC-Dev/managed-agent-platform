@@ -194,7 +194,7 @@ func keptMounts(ctx context.Context, sb sandbox.Sandbox, marker []byte, mounts [
 	// reports before the probe rather than the pair counting as one silent
 	// step (#383).
 	progress()
-	for i, p := range sandbox.ProbeEach(ctx, sb, mountPaths(held)...) {
+	for i, p := range sandbox.ProbeEach(ctx, sb, progress, mountPaths(held)...) {
 		if p == sandbox.Absent {
 			land = append(land, held[i])
 			continue

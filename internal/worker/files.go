@@ -182,7 +182,7 @@ func keptMounts(ctx context.Context, sb sandbox.Sandbox, marker []byte, mounts [
 	// pass returns without entering the write loop — the executor's rule, so
 	// the pair is not one silent step (#383).
 	progress()
-	for i, p := range sandbox.ProbeEach(ctx, sb, mountPaths(held)...) {
+	for i, p := range sandbox.ProbeEach(ctx, sb, progress, mountPaths(held)...) {
 		if p == sandbox.Absent {
 			land = append(land, held[i])
 			continue

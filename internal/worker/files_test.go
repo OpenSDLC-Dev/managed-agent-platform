@@ -400,8 +400,9 @@ func TestSetupFilesRemovedMountIsForgotten(t *testing.T) {
 // TestSetupFilesReportsProgressBeforeItsProbe is the executor's #383 rule over
 // the wire: a pass reports once per mount it lands and once at its boundary;
 // an unchanged pass, which returns without landing, reports its marker read
-// before the probe exec; and a marker recording none of the set asks no probe,
-// so it reports nothing for one.
+// before the probe and each probe batch after it (sandbox.ProbeEach); and a
+// marker recording none of the set asks no probe, so it reports nothing for
+// one.
 func TestSetupFilesReportsProgressBeforeItsProbe(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
@@ -420,8 +421,8 @@ func TestSetupFilesReportsProgressBeforeItsProbe(t *testing.T) {
 	if got := pass(); got != 2 {
 		t.Errorf("first pass reports = %d, want 2 (the mount, then the boundary)", got)
 	}
-	if got := pass(); got != 1 {
-		t.Errorf("unchanged pass reports = %d, want 1 (the marker read, before the probe)", got)
+	if got := pass(); got != 2 {
+		t.Errorf("unchanged pass reports = %d, want 2 (the marker read, then the probe's one batch)", got)
 	}
 	sb.files["/workspace/"+filesSentinelName] = "[]"
 	if got := pass(); got != 2 {

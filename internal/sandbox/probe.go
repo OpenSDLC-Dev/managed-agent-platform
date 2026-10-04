@@ -96,7 +96,12 @@ const probeEachLabel = "presence"
 // timeout, an exit other than 0, a line that is no index of the batch's. That
 // is no answer about the batch's paths, and a caller must not take it for
 // Absent (#860).
-func ProbeEach(ctx context.Context, sb Sandbox, paths ...string) []Presence {
+//
+// batched, when not nil, is called after each batch, answered or not: a set
+// that takes many execs on a slow sandbox reports progress between them, so a
+// caller's stall guard (the executor's lease keeper) does not take a probe
+// still working for a stalled one.
+func ProbeEach(ctx context.Context, sb Sandbox, batched func(), paths ...string) []Presence {
 	answer := make([]Presence, len(paths))
 	room := MaxCommandBytes - len(NewFrame(probeEachLabel).Wrap(""))
 	var script strings.Builder
@@ -105,6 +110,9 @@ func ProbeEach(ctx context.Context, sb Sandbox, paths ...string) []Presence {
 		test := "test -e '" + strings.ReplaceAll(p, "'", `'\''`) + "' || echo " + strconv.Itoa(i) + "\n"
 		if script.Len() > 0 && script.Len()+len(test) > room {
 			probeEachBatch(ctx, sb, script.String(), from, answer[from:i])
+			if batched != nil {
+				batched()
+			}
 			script.Reset()
 			from = i
 		}
@@ -112,6 +120,9 @@ func ProbeEach(ctx context.Context, sb Sandbox, paths ...string) []Presence {
 	}
 	if script.Len() > 0 {
 		probeEachBatch(ctx, sb, script.String(), from, answer[from:])
+		if batched != nil {
+			batched()
+		}
 	}
 	return answer
 }

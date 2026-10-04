@@ -183,12 +183,12 @@ func TestProbeEachListsWhatIsNotThere(t *testing.T) {
 		execs++
 		return run(t, "bash", req.Command, ""), nil
 	}}
-	got := sandbox.ProbeEach(context.Background(), sb, paths...)
+	got := sandbox.ProbeEach(context.Background(), sb, nil, paths...)
 	want := []sandbox.Presence{sandbox.Present, sandbox.Absent, sandbox.Present, sandbox.Absent, sandbox.Present, sandbox.Present, sandbox.Absent}
 	if !slices.Equal(got, want) || execs != 1 {
 		t.Errorf("ProbeEach = %v in %d execs, want %v in one", got, execs, want)
 	}
-	if got := sandbox.ProbeEach(context.Background(), sb); len(got) != 0 || execs != 1 {
+	if got := sandbox.ProbeEach(context.Background(), sb, nil); len(got) != 0 || execs != 1 {
 		t.Errorf("ProbeEach of nothing = %v after %d execs, want nothing asked", got, execs)
 	}
 }
@@ -232,7 +232,7 @@ func TestProbeEachTakesAnUnreadableAnswerForNone(t *testing.T) {
 		{"an index past the batch", sandbox.ExecResult{Stdout: "2\n"}, true, nil, none},
 		{"no newline after the last", sandbox.ExecResult{Stdout: "1"}, true, nil, none},
 	} {
-		if got := sandbox.ProbeEach(context.Background(), answer(c.res, c.framed, c.err), "/w/a", "/w/b"); !slices.Equal(got, c.want) {
+		if got := sandbox.ProbeEach(context.Background(), answer(c.res, c.framed, c.err), nil, "/w/a", "/w/b"); !slices.Equal(got, c.want) {
 			t.Errorf("%s: ProbeEach = %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -265,7 +265,8 @@ func TestProbeEachBoundsItsExecs(t *testing.T) {
 		}
 		return sandboxtest.Framed(f, res), nil
 	}}
-	got := sandbox.ProbeEach(context.Background(), sb, paths...)
+	batches := 0
+	got := sandbox.ProbeEach(context.Background(), sb, func() { batches++ }, paths...)
 	if len(cmds) > 44 {
 		t.Errorf("ProbeEach asked %d paths in %d execs, want at most 44", len(paths), len(cmds))
 	}
@@ -275,6 +276,11 @@ func TestProbeEachBoundsItsExecs(t *testing.T) {
 	}
 	if asked != len(paths) {
 		t.Fatalf("the batches asked after %d paths, want all %d", asked, len(paths))
+	}
+	// Progress after every batch, the unanswered one too: a slow sandbox's
+	// probe must not read as a stall to the caller's lease keeper.
+	if batches != len(cmds) {
+		t.Errorf("batched was called %d times over %d batches, want once after each", batches, len(cmds))
 	}
 	unanswered := strings.Count(cmds[1], "test -e ")
 	var counts [3]int

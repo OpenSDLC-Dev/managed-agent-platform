@@ -1385,14 +1385,15 @@ func TestMaterializationReportsProgressPerItem(t *testing.T) {
 	// one exec that tests every mount. It returns without entering the write
 	// loop, so the read has to report before the exec rather than the two
 	// counting as one silent step — a session with hundreds of mounts spends the
-	// whole probe there (#383).
+	// whole probe there (#383). Each probe batch reports after it too, so a
+	// set that takes many execs on a slow sandbox never reads as a stall.
 	h.seedFile(t, "file_probe", "mounted")
 	mounted := []fileRef{{Type: "file", FileID: "file_probe", MountPath: "/mnt/session/uploads/probe"}}
 	h.exec.materializeFiles(ctx, sb, h.sid, mounted, count)
 	reports = 0
 	h.exec.materializeFiles(ctx, sb, h.sid, mounted, count)
-	if reports != 1 {
-		t.Errorf("unchanged-mount reports = %d, want 1 (the marker read, before the presence exec)", reports)
+	if reports != 2 {
+		t.Errorf("unchanged-mount reports = %d, want 2 (the marker read before the presence exec, then its one batch)", reports)
 	}
 }
 
