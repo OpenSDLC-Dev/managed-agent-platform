@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 ---
 
 # Model gateway: a standalone, Anthropic-native model service (plan 59)
