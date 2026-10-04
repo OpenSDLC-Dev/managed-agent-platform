@@ -39,6 +39,7 @@ import (
 	"math"
 	mrand "math/rand/v2"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -83,27 +84,44 @@ type handler struct {
 	client    *http.Client
 	draw      func() float64
 
-	mu     sync.Mutex
-	opened map[string][]byte // credential keys, by credential id
+	mu         sync.Mutex
+	opened     map[string]openedKey // by credential id
+	prunedFrom *catalog.Snapshot    // the snapshot opened was last pruned against
+}
+
+type openedKey struct {
+	providerID string
+	key        []byte
 }
 
 // open returns a credential's key, opening it once: under openbao or gcpkms
 // every Decrypt is a round trip to the key service, which a model call should
 // not wait on, nor pay for, each time. A credential's sealed value never
-// changes — a new key is a new credential — so its id names the key for good.
+// changes — a new key is a new credential — so its id names the key for good,
+// until a snapshot no longer holds it: each new snapshot prunes the keys of
+// the credentials it lost, so a deleted credential's key does not outlive it.
 func (h *handler) open(ctx context.Context, c store.Credential) ([]byte, error) {
+	snap := h.cfg.Catalog.Snapshot()
 	h.mu.Lock()
-	key, ok := h.opened[c.ID]
+	if snap != h.prunedFrom {
+		for id, k := range h.opened {
+			if !slices.ContainsFunc(snap.Credentials(k.providerID), func(c store.Credential) bool { return c.ID == id }) {
+				delete(h.opened, id)
+			}
+		}
+		h.prunedFrom = snap
+	}
+	k, ok := h.opened[c.ID]
 	h.mu.Unlock()
 	if ok {
-		return key, nil
+		return k.key, nil
 	}
 	key, err := h.cfg.Cipher.Decrypt(ctx, c.Ciphertext, c.KeyID)
 	if err != nil {
 		return nil, err
 	}
 	h.mu.Lock()
-	h.opened[c.ID] = key
+	h.opened[c.ID] = openedKey{providerID: c.ProviderID, key: key}
 	h.mu.Unlock()
 	return key, nil
 }
@@ -127,7 +145,7 @@ func New(cfg Config) (http.Handler, error) {
 		cfg.Backoff = DefaultBackoff
 	}
 	h := &handler{cfg: cfg, bootstrap: sha256.Sum256([]byte(cfg.BootstrapKey)), client: cfg.Client,
-		draw: func() float64 { return 1 - mrand.Float64() }, opened: map[string][]byte{}}
+		draw: func() float64 { return 1 - mrand.Float64() }, opened: map[string]openedKey{}}
 	if h.client == nil {
 		h.client = upstream.NewClient()
 	}

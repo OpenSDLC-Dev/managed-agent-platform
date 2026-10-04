@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -37,8 +39,12 @@ const overloadedEvent = "event: error\ndata: {\"type\":\"error\",\"error\":{\"ty
 func TestAStreamThatOpensWithAnErrorFallsBack(t *testing.T) {
 	e := newEnv(t)
 	primary := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
-		if c.Model == "odd" {
+		switch c.Model {
+		case "odd":
 			sse(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"vendor_busy\",\"message\":\"busy\"}}\n\n")
+			return
+		case "conflict":
+			sse(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"conflict_error\",\"message\":\"conflict\"}}\n\n")
 			return
 		}
 		sse(w, ": ping\n\n", "event: ping\ndata: {\"type\":\"ping\"}\n\n", overloadedEvent)
@@ -53,6 +59,7 @@ func TestAStreamThatOpensWithAnErrorFallsBack(t *testing.T) {
 	e.alias("fast", target(e.deployment(pp, "m"), 0), target(e.deployment(bp, "m"), 1))
 	e.alias("alone", target(e.deployment(pp, "m"), 0))
 	e.alias("odd", target(e.deployment(pp, "odd"), 0))
+	e.alias("conflict", target(e.deployment(pp, "conflict"), 0))
 	key := e.key(everyAlias)
 	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 1 })
 
@@ -77,6 +84,11 @@ func TestAStreamThatOpensWithAnErrorFallsBack(t *testing.T) {
 	resp, b = e.do("POST", "/v1/messages", `{"model":"odd","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
 	if typ, _, _ := errorOf(t, b); resp.StatusCode != 500 || typ != "vendor_busy" {
 		t.Errorf("unknown type: %d %s", resp.StatusCode, b)
+	}
+	// A type the SDK's enum lacks but Anthropic's errors page lists.
+	resp, b = e.do("POST", "/v1/messages", `{"model":"conflict","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+	if typ, _, _ := errorOf(t, b); resp.StatusCode != 409 || typ != "conflict_error" {
+		t.Errorf("conflict: %d %s", resp.StatusCode, b)
 	}
 }
 
@@ -222,6 +234,54 @@ func TestACredentialIsOpenedOnce(t *testing.T) {
 	if n := counting.opened.Load(); n != 1 {
 		t.Errorf("opened %d times", n)
 	}
+}
+
+// A deleted credential's opened key is dropped once a snapshot no longer
+// holds the credential, and every other opened key is kept.
+func TestADeletedCredentialsKeyIsDropped(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, message("ok"))
+	p := e.provider(up.URL)
+	a := e.credential(p, "sk-first-key-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	q := e.provider(up.URL, func(p *store.Provider) { p.Name = "other" })
+	c := e.credential(q, "sk-other-key-1", 1)
+	e.alias("other", target(e.deployment(q, "m"), 0))
+	key := e.key(everyAlias)
+	var cat *catalog.Catalog
+	e.start(func(c *modelgateway.Config) { cat = c.Catalog })
+	ctx, cancel := context.WithCancel(e.ctx)
+	ran := make(chan struct{})
+	go func() { defer close(ran); cat.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-ran })
+	ask := func(alias string) string {
+		before := len(up.recorded())
+		if resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
+			t.Fatalf("%d %s", resp.StatusCode, b)
+		}
+		return up.recorded()[before].Key
+	}
+	ask("fast")
+	ask("other")
+	if got, want := modelgateway.OpenedKeys(e.handler), sorted(a.ID, c.ID); !slices.Equal(got, want) {
+		t.Fatalf("opened %v, want %v", got, want)
+	}
+	b := e.credential(p, "sk-second-key-1", 1)
+	e.must(e.s.DeleteCredential(e.ctx, p.ID, a.ID))
+	for deadline := time.Now().Add(10 * time.Second); ask("fast") != "sk-second-key-1"; {
+		if time.Now().After(deadline) {
+			t.Fatal("the deletion never reached the snapshot")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got, want := modelgateway.OpenedKeys(e.handler), sorted(b.ID, c.ID); !slices.Equal(got, want) {
+		t.Errorf("opened %v, want %v", got, want)
+	}
+}
+
+func sorted(s ...string) []string {
+	slices.Sort(s)
+	return s
 }
 
 // The write bound a response leaves on its connection is lifted, by net/http,

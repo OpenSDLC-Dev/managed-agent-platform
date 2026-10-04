@@ -33,13 +33,14 @@ const bootstrap = "sk-map-bootstrap-test-key"
 // env is a gateway over a real database and cipher, with its configuration
 // written through the store before start.
 type env struct {
-	t      *testing.T
-	ctx    context.Context
-	pool   *pgxpool.Pool
-	s      *store.Store
-	cipher secrets.Cipher
-	url    string
-	keys   int
+	t       *testing.T
+	ctx     context.Context
+	pool    *pgxpool.Pool
+	s       *store.Store
+	cipher  secrets.Cipher
+	url     string
+	keys    int
+	handler http.Handler
 }
 
 func newEnv(t *testing.T) *env {
@@ -137,6 +138,7 @@ func (e *env) start(mod ...func(*modelgateway.Config)) {
 	}
 	h, err := modelgateway.New(cfg)
 	e.must(err)
+	e.handler = h
 	srv := httptest.NewServer(h)
 	e.t.Cleanup(srv.Close)
 	e.url = srv.URL

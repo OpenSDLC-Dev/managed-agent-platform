@@ -1,6 +1,24 @@
 package modelgateway
 
-import "time"
+import (
+	"net/http"
+	"slices"
+	"time"
+)
+
+// OpenedKeys returns the ids of the credentials whose keys the handler holds
+// opened, in order.
+func OpenedKeys(h http.Handler) []string {
+	g := h.(*handler)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ids := make([]string, 0, len(g.opened))
+	for id := range g.opened {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
 
 // SetWriteStall shortens the bound on a write to the caller for one test, and
 // returns its restore.

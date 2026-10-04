@@ -216,12 +216,13 @@ func refusedCredential(ctx context.Context, at catalog.Attempt, refusal string, 
 }
 
 // errorStatus is the HTTP status an Anthropic error type answers with
-// (Anthropic's errors page), for a stream that opens with an error event
-// (streamError); the account refusals are refusedCredential's, and an unknown
-// type is a server error.
+// (platform.claude.com/docs/en/api/errors, read 2026-10-05), for a stream that
+// opens with an error event (streamError); the account refusals are
+// refusedCredential's, and an unknown type is a server error.
 var errorStatus = map[string]int{
 	"invalid_request_error": http.StatusBadRequest,
 	"not_found_error":       http.StatusNotFound,
+	"conflict_error":        http.StatusConflict,
 	"request_too_large":     http.StatusRequestEntityTooLarge,
 	"rate_limit_error":      http.StatusTooManyRequests,
 	"api_error":             http.StatusInternalServerError,
