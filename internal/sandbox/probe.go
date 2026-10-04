@@ -121,12 +121,15 @@ func ProbeEach(ctx context.Context, sb Sandbox, paths ...string) []Presence {
 // line each; it leaves answer PresenceUnknown where it cannot read them.
 func probeEachBatch(ctx context.Context, sb Sandbox, script string, from int, answer []Presence) {
 	res, framed, err := ExecFramed(ctx, sb, probeEachLabel, ExecRequest{Command: script})
-	if err != nil || !framed || res.StdoutTruncated || res.TimedOut || res.ExitCode != 0 {
+	if err != nil || !framed || res.TimedOut || res.ExitCode != 0 {
 		return
 	}
+	// echo ends every line it prints, so output that does not end in a
+	// newline is no whole answer — a stdout the output cap cut short among
+	// it, whose last newline Cut takes for the start of the end line.
 	lines := strings.Split(res.Stdout, "\n")
 	if lines[len(lines)-1] != "" {
-		return // echo ends every line it prints
+		return
 	}
 	absent := make([]bool, len(answer))
 	for _, line := range lines[:len(lines)-1] {
