@@ -279,24 +279,34 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
-	// The claim (#867): the marker lands alone, before the listing and the
-	// batch that can fail, so a landing that fails after it leaves a
-	// directory the platform vouches for rather than an empty one with no
-	// marker — which a file the agent writes there would turn into a
-	// directory holding files no marker vouches for, untrusted and pull-only
-	// for the sandbox's life, every edit withheld. Its store stays in the
-	// run's sync, which lands the store against the missing baseline: the
-	// store's memories pulled, what the agent wrote pushed, the store winning
-	// a path both hold. The listing is also this half's only word on whether
-	// the store exists, so it cannot come first the way the executor's row
-	// read does; a 404 withdraws the claim instead.
+	// The claim (#867): the marker lands before the listing and the batch
+	// that can fail, so a landing that fails after it leaves a directory the
+	// platform vouches for rather than an empty one with no marker — which a
+	// file the agent writes there would turn into a directory holding files
+	// no marker vouches for, untrusted and pull-only for the sandbox's life,
+	// every edit withheld. Its store stays in the run's sync, which lands the
+	// store against an empty baseline: the store's memories pulled, what the
+	// agent wrote pushed, the store winning a path both hold. The listing is
+	// also this half's only word on whether the store exists, so it cannot
+	// come first the way the executor's row read does; a 404 withdraws the
+	// claim instead.
 	//
-	// What remains is a directory the claim never reached: the claim's own
-	// write failing, or a listing that did not answer. A sync that finds it
-	// still empty lands it, marker and all (memsync.Plan's Unmarked), but a
-	// file the agent writes there first leaves it untrusted for the sandbox's
-	// life.
-	if err := m.sb.WriteFiles(ctx, []sandbox.FileWrite{{Path: marker, Data: want}}); err != nil {
+	// An empty baseline lands with the marker, and before it — a batch lands
+	// in order and stops at its first failure — so the marker never sits
+	// beside the baseline of an earlier landing (a mount removed, its baseline
+	// left in .sync): trusting the marker, the next sync would read that
+	// baseline's memories, absent from the directory, as the agent's
+	// deletions and delete them from the store.
+	//
+	// A directory the claim never reached — the claim's own write failing, a
+	// listing that did not answer, among others — is not covered: a sync that
+	// finds it still empty lands it, marker and all (memsync.Plan's
+	// Unmarked), but a file the agent writes there first leaves it untrusted
+	// for the sandbox's life.
+	if err := m.sb.WriteFiles(ctx, []sandbox.FileWrite{
+		{Path: baselinePath(ref.MemoryStoreID), Data: memsync.Baseline{}.Encode()},
+		{Path: marker, Data: want},
+	}); err != nil {
 		return memoryOutcomeFailed, err
 	}
 	// One batch for the whole store, bounded by the store's own caps (2,000
@@ -310,11 +320,13 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	})
 	if isStatus(err, 404) {
 		// The store is gone, or this session no longer attaches it: the
-		// miss the brain's block hedges. The claim's marker is withdrawn
-		// (the directory it made stays, empty); a withdrawal that fails
-		// leaves it, which a sync of a store the routes do not know never
-		// acts on.
-		for _, cmd := range memsync.RemoveCommands(ref.MountPath, []string{"/" + memsync.MarkerName}) {
+		// miss the brain's block hedges. The claim's marker and baseline are
+		// withdrawn (the directory it made stays, empty); a withdrawal that
+		// fails leaves them, which a sync of a store the routes do not know
+		// never acts on.
+		withdraw := append(memsync.RemoveCommands(ref.MountPath, []string{"/" + memsync.MarkerName}),
+			memsync.RemoveCommands(memorySyncDir, []string{"/" + ref.MemoryStoreID})...)
+		for _, cmd := range withdraw {
 			if res, rerr := sandbox.ExecScript(ctx, m.sb, sandbox.ExecRequest{Command: cmd}); rerr != nil || res.ExitCode != 0 {
 				slog.WarnContext(ctx, "memory store's marker not withdrawn after a 404",
 					"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "err", rerr, "exit", res.ExitCode)

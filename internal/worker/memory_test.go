@@ -600,6 +600,81 @@ func TestAnAgentWriteIntoAFailedLandingIsPushed(t *testing.T) {
 	}
 }
 
+// TestAClaimNeverMeetsAnEarlierBaseline (#867): the claim's marker lands with
+// an empty baseline, so a landing that fails after it never leaves the marker
+// beside the baseline of an earlier landing — whose memories, missing from the
+// directory, the next sync would trust the marker and delete from the store.
+// The mount is gone but its baseline stayed; the next landing's listing fails
+// after the claim, and the run's sync sends no deletion: it pulls the store
+// back, and pushes what the agent wrote meanwhile.
+func TestAClaimNeverMeetsAnEarlierBaseline(t *testing.T) {
+	for name, paths := range map[string][]string{
+		"one-file store":                     {"/notes.md"},
+		"larger store with an agent's write": {"/a.md", "/b.md", "/notes.md"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var armed, failed atomic.Bool
+			var deletes atomic.Int32
+			wrap := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/memories/") {
+						deletes.Add(1)
+					}
+					if armed.Load() && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/memories") &&
+						r.URL.Query().Get("view") == "full" && failed.CompareAndSwap(false, true) {
+						w.Header().Set("x-should-retry", "false")
+						http.Error(w, `{"type":"error","error":{"type":"api_error","message":"unavailable"}}`, http.StatusServiceUnavailable)
+						return
+					}
+					next.ServeHTTP(w, r)
+				})
+			}
+			sb := &fakeSandbox{}
+			h := newHarnessWrapped(t, sb, wrap)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			for _, p := range paths {
+				h.seedMemory(t, memStoreID, p, "body of "+p)
+			}
+			h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+			token := h.sessionsToken(t)
+			h.runWith(t, token)
+			if len(h.baseline(t, memStoreID).Synced) != len(paths) {
+				t.Fatalf("test bug: the first landing's baseline = %+v", h.baseline(t, memStoreID))
+			}
+			for p := range sb.files {
+				if strings.HasPrefix(p, memMount+"/") {
+					delete(sb.files, p)
+				}
+			}
+			armed.Store(true)
+			use := writeUse("out.txt", "x")
+			if len(paths) > 1 {
+				use = writeUse(memMount+"/mine.md", "the agent's")
+			}
+			h.runWith(t, token, use)
+			if !failed.Load() {
+				t.Fatal("test bug: the second landing's listing never failed")
+			}
+			if n := deletes.Load(); n != 0 {
+				t.Errorf("%d deletions sent; a sync after a failed landing deleted from the store", n)
+			}
+			for _, p := range paths {
+				if _, ok := h.memoryContent(t, memStoreID, p); !ok {
+					t.Errorf("%s was deleted from the store", p)
+				}
+				if got := sb.files[memMount+p]; got != "body of "+p {
+					t.Errorf("%s = %q in the directory, want it pulled back", p, got)
+				}
+			}
+			if len(paths) > 1 {
+				if got, ok := h.memoryContent(t, memStoreID, "/mine.md"); !ok || got != "the agent's" {
+					t.Errorf("the agent's file in the store = %q, %v; want it pushed", got, ok)
+				}
+			}
+		})
+	}
+}
+
 // TestMemoryStoreRefusalsOverTheWire: the occupancy 409 on a create removes
 // the file the store's memory is in the way of; the 2,000 cap's 400 is the
 // store's state, refused but not remembered (so a retry lands once room is

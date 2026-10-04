@@ -167,8 +167,8 @@ func materialized(t *testing.T, access string) (*harness, *fakeSandbox) {
 }
 
 // TestMaterializesMemoryStore: the store's memories land at the mount with the
-// marker and a baseline that names them — the marker first, alone (the claim,
-// #867), then the memories and the baseline in one batch; a second run finds
+// marker and a baseline that names them — the claim first (an empty baseline
+// and the marker, #867), then the memories and the baseline in one batch; a second run finds
 // the marker and lands nothing again.
 func TestMaterializesMemoryStore(t *testing.T) {
 	h, sb := materialized(t, "read_write")
@@ -185,9 +185,10 @@ func TestMaterializesMemoryStore(t *testing.T) {
 	if b.Synced["/notes.md"] != sha256hex([]byte("hello")) || b.Synced["/a/b.md"] != sha256hex([]byte("deep")) || len(b.Synced) != 2 {
 		t.Errorf("baseline = %+v", b)
 	}
-	// The marker alone, then two memories and the baseline in one batch.
-	if !slices.Equal(sb.bulkSizes, []int{1, 3}) {
-		t.Errorf("batches = %v, want the claim and then one of three members", sb.bulkSizes)
+	// The claim (an empty baseline, then the marker), then two memories and
+	// the baseline in one batch.
+	if !slices.Equal(sb.bulkSizes, []int{2, 3}) {
+		t.Errorf("batches = %v, want the claim's two and then one of three members", sb.bulkSizes)
 	}
 	// Every memory file is 0666 (decision 10); the marker and the baseline
 	// take the default.
@@ -764,6 +765,69 @@ func TestAnAgentWriteIntoAFailedLandingIsPushed(t *testing.T) {
 	}
 	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
 		t.Errorf("notes.md = %q, want it pulled by the run's sync", got)
+	}
+}
+
+// TestAClaimNeverMeetsAnEarlierBaseline (#867): the claim's marker lands with
+// an empty baseline, so a landing that fails after it never leaves the marker
+// beside the baseline of an earlier landing — whose memories, missing from the
+// directory, the next sync would trust the marker and delete from the store.
+// The mount is gone but its baseline stayed; the next landing fails after the
+// claim, and the run's sync deletes nothing: it pulls the store back, and
+// pushes what the agent wrote meanwhile.
+func TestAClaimNeverMeetsAnEarlierBaseline(t *testing.T) {
+	for name, paths := range map[string][]string{
+		"one-file store":                     {"/notes.md"},
+		"larger store with an agent's write": {"/a.md", "/b.md", "/notes.md"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			for _, p := range paths {
+				h.seedMemory(t, memStoreID, p, "body of "+p)
+			}
+			h.refMemory(t, memStoreID, memMount, "read_write")
+			h.step(t)
+			if len(baselineOf(t, sb, memStoreID).Synced) != len(paths) {
+				t.Fatalf("test bug: the first landing's baseline = %+v", baselineOf(t, sb, memStoreID))
+			}
+			for p := range sb.files {
+				if strings.HasPrefix(p, memMount+"/") {
+					delete(sb.files, p)
+				}
+			}
+			sb.bulkFailOn = "/notes.md"
+			use := writeUse("out.txt", "x")
+			if len(paths) > 1 {
+				use = writeUse(memMount+"/mine.md", "the agent's")
+			}
+			h.suspend(t, use)
+			if _, err := h.exec.step(context.Background()); err != nil {
+				t.Fatalf("step: %v", err)
+			}
+			for _, p := range paths {
+				if _, ok := h.memoryContent(t, memStoreID, p); !ok {
+					t.Errorf("%s was deleted from the store", p)
+				}
+				if got := sb.files[memMount+p]; got != "body of "+p {
+					t.Errorf("%s = %q in the directory, want it pulled back", p, got)
+				}
+			}
+			var deleted int
+			if err := h.pool.QueryRow(context.Background(),
+				`SELECT count(*) FROM memory_versions WHERE memory_store_id = $1 AND operation = 'deleted'`, memStoreID).Scan(&deleted); err != nil {
+				t.Fatal(err)
+			}
+			if deleted != 0 {
+				t.Errorf("%d deleted versions; a sync after a failed landing deleted from the store", deleted)
+			}
+			if len(paths) > 1 {
+				if got, ok := h.memoryContent(t, memStoreID, "/mine.md"); !ok || got != "the agent's" {
+					t.Errorf("the agent's file in the store = %q, %v; want it pushed", got, ok)
+				}
+			}
+		})
 	}
 }
 

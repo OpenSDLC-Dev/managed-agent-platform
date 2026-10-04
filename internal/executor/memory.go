@@ -219,22 +219,32 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, sid
 	if err != nil {
 		return memoryOutcomeFailed, err
 	}
-	// The claim (#867): the marker lands alone, before the read and the batch
-	// that can fail, so a landing that fails after it leaves a directory the
+	// The claim (#867): the marker lands before the read and the batch that
+	// can fail, so a landing that fails after it leaves a directory the
 	// platform vouches for rather than an empty one with no marker — which a
 	// file the agent writes there would turn into a directory holding files no
 	// marker vouches for, untrusted and pull-only for the sandbox's life, every
 	// edit withheld. Its store stays in the run's syncs, and the next sync lands
-	// the store against the missing baseline: the store's memories pulled, what
+	// the store against an empty baseline: the store's memories pulled, what
 	// the agent wrote pushed, the store winning a path both hold. The row read
 	// above comes first so a store that is gone gets no directory.
 	//
-	// What remains is a directory the claim never reached: this row read or
-	// the claim's own write failing, or a listing that did not answer. A sync
-	// that finds it still empty lands it, marker and all (memsync.Plan's
-	// Unmarked), but a file the agent writes there first leaves it untrusted
-	// for the sandbox's life.
-	if err := sb.WriteFiles(ctx, []sandbox.FileWrite{{Path: marker, Data: want}}); err != nil {
+	// An empty baseline lands with the marker, and before it — a batch lands
+	// in order and stops at its first failure — so the marker never sits
+	// beside the baseline of an earlier landing (a mount removed, its baseline
+	// left in .sync): trusting the marker, the next sync would read that
+	// baseline's memories, absent from the directory, as the agent's deletions
+	// and delete them from the store.
+	//
+	// A directory the claim never reached — the row read above or the claim's
+	// own write failing, a listing that did not answer, among others — is not
+	// covered: a sync that finds it still empty lands it, marker and all
+	// (memsync.Plan's Unmarked), but a file the agent writes there first leaves
+	// it untrusted for the sandbox's life.
+	if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+		{Path: baselinePath(m.MemoryStoreID), Data: memsync.Baseline{}.Encode()},
+		{Path: marker, Data: want},
+	}); err != nil {
 		return memoryOutcomeFailed, err
 	}
 	rows, err := e.pool.Query(ctx,
