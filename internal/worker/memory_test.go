@@ -675,6 +675,42 @@ func TestAClaimNeverMeetsAnEarlierBaseline(t *testing.T) {
 	}
 }
 
+// TestASyncLandsOnlyADirectoryWithNoMarkerAtAll (#867): the landing a sync
+// gives an empty directory is for one whose marker is absent. One whose
+// marker names another store, or whose marker cannot be read, stays what
+// decision 12 makes it: pulled into, never restamped, never pushed from.
+func TestASyncLandsOnlyADirectoryWithNoMarkerAtAll(t *testing.T) {
+	altered := "version 1\n" + domain.NewID(domain.PrefixMemoryStore).String()
+	for name, arm := range map[string]func(*fakeSandbox){
+		"altered marker":    func(sb *fakeSandbox) { sb.files[memMount+"/"+memsync.MarkerName] = altered },
+		"unreadable marker": func(sb *fakeSandbox) { sb.readErrOn = "/" + memsync.MarkerName },
+	} {
+		t.Run(name, func(t *testing.T) {
+			sb := &fakeSandbox{files: map[string]string{}}
+			h := newHarness(t, sb)
+			h.seedMemoryStore(t, memStoreID, "Notes")
+			h.seedMemory(t, memStoreID, "/notes.md", "hello")
+			h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+			arm(sb)
+			marker, hadMarker := sb.files[memMount+"/"+memsync.MarkerName]
+			mem := newMemoryStores(h.client, h.sessionsToken(t), h.sid.String(), sb,
+				[]memoryRef{{Type: "memory_store", MemoryStoreID: memStoreID, Access: "read_write", MountPath: memMount}})
+			mem.sync(context.Background(), func() {})
+			if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+				t.Errorf("notes.md = %q; want it pulled, pull-only", got)
+			}
+			if got, ok := sb.files[memMount+"/"+memsync.MarkerName]; got != marker || ok != hadMarker {
+				t.Errorf("marker = %q (present %v), want it as it was: %q (present %v)", got, ok, marker, hadMarker)
+			}
+			sb.files[memMount+"/mine.md"] = "the agent's"
+			mem.sync(context.Background(), func() {})
+			if _, ok := h.memoryContent(t, memStoreID, "/mine.md"); ok {
+				t.Error("a file was pushed from a directory whose marker does not vouch for it")
+			}
+		})
+	}
+}
+
 // TestMemoryStoreRefusalsOverTheWire: the occupancy 409 on a create removes
 // the file the store's memory is in the way of; the 2,000 cap's 400 is the
 // store's state, refused but not remembered (so a retry lands once room is

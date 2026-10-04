@@ -44,9 +44,10 @@ type Action struct {
 // marker excluded), the baseline the last sync left, the store's heads, and
 // whether this sync may write to the store at all. PullOnly is a read_only
 // attachment, an archived store, or a directory whose marker is missing or
-// altered (decision 12). Unmarked is that last one alone, which the caller
-// folds into PullOnly too; Plan reads it apart only to rebuild an empty
-// unmarked directory (below).
+// altered (decision 12). Unmarked is a directory with no marker file at all
+// — not an altered marker, nor one that could not be read, which stay
+// pull-only — and the caller folds it into PullOnly too; Plan reads it apart
+// only to rebuild an empty unmarked directory (below).
 type Input struct {
 	Local    map[string]string
 	Baseline Baseline
@@ -90,7 +91,7 @@ type Result struct {
 // The wipe guard is the reference's own: an empty directory against a
 // baseline that remembered more than one file is a wiped mount, so everything
 // is pulled and nothing deleted. So is the rebuild of an empty directory with
-// no marker, whatever its baseline (the reference's syncStore; #867): that is
+// no marker file, whatever its baseline (the reference's syncStore; #867): that is
 // the fresh directory materialize lands, and a pull-only sync would fill it
 // with files no marker vouches for, holding the store untrusted and pull-only
 // for the sandbox's life. Its baseline is not read: one that remembered a

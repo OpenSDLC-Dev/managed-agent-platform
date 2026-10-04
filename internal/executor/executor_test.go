@@ -80,6 +80,9 @@ type fakeSandbox struct {
 	// path ends in it, before any member lands — a batch whose delivery
 	// failed — and is cleared, so the batches after it land.
 	bulkFailOn string
+	// readErrOn, if set, fails every ReadFile of a path ending in it with an
+	// error that is not ErrFileNotExist: a file there that cannot be read.
+	readErrOn string
 	// execStdout, if set, is returned verbatim as the harvest listing script's
 	// stdout — a test forging what an agent-writable sandbox could emit; and
 	// execTruncated marks that listing as overflowing the exec output cap.
@@ -287,6 +290,9 @@ func hashTreeMount(cmd string) (string, bool) {
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 	if f.readErr != nil {
 		return nil, f.readErr
+	}
+	if f.readErrOn != "" && strings.HasSuffix(path, f.readErrOn) {
+		return nil, fmt.Errorf("fake: read %s: permission denied", path)
 	}
 	data, ok := f.files[path]
 	if !ok {

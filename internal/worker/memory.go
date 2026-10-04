@@ -349,8 +349,13 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 type storeSync struct {
 	ref      memoryRef
 	markerOK bool
-	local    map[string]string
-	baseline memsync.Baseline
+	// markerAbsent is a marker read that found no file at all — not one
+	// that names another store, nor one that could not be read: only an
+	// empty directory with no marker is the fresh case a sync lands
+	// (memsync.Plan's Unmarked); the others stay pull-only (decision 12).
+	markerAbsent bool
+	local        map[string]string
+	baseline     memsync.Baseline
 	// raw is the baseline file as read, so a sync that changed nothing can
 	// tell it has nothing to write back.
 	raw []byte
@@ -562,6 +567,7 @@ func (m *memoryStores) readStore(ctx context.Context, st *storeSync, progress fu
 	mount, id := st.ref.MountPath, st.ref.MemoryStoreID
 	marker, err := m.sb.ReadFile(ctx, path.Join(mount, memsync.MarkerName))
 	st.markerOK = err == nil && bytes.Equal(marker, memsync.MarkerBytes(id))
+	st.markerAbsent = errors.Is(err, sandbox.ErrFileNotExist)
 
 	// Framed, so what an image's startup prints around the listing is no
 	// record of it (#860); one that did not reach the output whole skips the
@@ -686,14 +692,14 @@ func (m *memoryStores) settleStore(ctx context.Context, st *storeSync, progress 
 	plan := memsync.Plan(memsync.Input{
 		Local: st.local, Baseline: st.baseline, Remote: remote,
 		PullOnly: st.ref.Access == "read_only" || !st.markerOK,
-		Unmarked: !st.markerOK,
+		Unmarked: st.markerAbsent,
 	})
 	st.next = plan.Next
 	st.counts.refused += len(plan.Skipped)
 	st.counts.withheld = plan.Withheld
 	st.restamp = plan.Rebuild
 	switch {
-	case plan.Rebuild && !st.markerOK:
+	case plan.Rebuild && st.markerAbsent:
 		slog.WarnContext(ctx, "memory store directory is empty and has no marker; landed from the store, marker and all",
 			"session_id", m.sessionID, "memory_store_id", id)
 	case plan.Rebuild:

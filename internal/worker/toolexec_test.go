@@ -63,6 +63,9 @@ type fakeSandbox struct {
 	// path ends in it, before any member lands — a batch whose delivery
 	// failed — and is cleared, so the batches after it land.
 	bulkFailOn string
+	// readErrOn, if set, fails every ReadFile of a path ending in it with an
+	// error that is not ErrFileNotExist: a file there that cannot be read.
+	readErrOn string
 	// cmds records every Exec command, so a test can read the script a tool
 	// handed the sandbox.
 	cmds []string
@@ -151,6 +154,9 @@ func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 	if f.readErr != nil {
 		return nil, f.readErr
+	}
+	if f.readErrOn != "" && strings.HasSuffix(path, f.readErrOn) {
+		return nil, fmt.Errorf("fake: read %s: permission denied", path)
 	}
 	data, ok := f.files[path]
 	if !ok {
