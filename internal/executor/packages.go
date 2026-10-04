@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -700,17 +701,22 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		// entry bytes, while `go` emits one `go install` per entry (far more
 		// than the entry's own bytes), and a row stored before that cap existed
 		// never passed it. This is the backstop, refused terminally here,
-		// before the probe, exactly like an invalid entry.
+		// before the probe, exactly like an invalid entry — and it measures
+		// the command as Exec is handed it (sandbox.CheckScript, the bound
+		// sandbox.ExecScript applies), the platform's script preamble
+		// included, or a list within those bytes of the limit would pass
+		// here and fault there.
 		credsDir := ""
 		if len(stripped.creds) > 0 {
 			credsDir = packagesCredsDir()
 		}
 		cmd := m.command(stripped.entries, credsDir)
-		if len(cmd) > sandbox.MaxCommandBytes {
+		var tooLong *sandbox.CommandTooLongError
+		if errors.As(sandbox.CheckScript(cmd), &tooLong) {
 			failed++
 			recordPackageInstalled(ctx, m.name, packageOutcomeInvalid)
 			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
-				fmt.Sprintf("the assembled install command is %d bytes, over the %d-byte exec-argument limit", len(cmd), sandbox.MaxCommandBytes),
+				fmt.Sprintf("the assembled install command is %d bytes, over the %d-byte exec-argument limit", tooLong.Bytes, sandbox.MaxCommandBytes),
 				published, true, changed)
 			continue
 		}
@@ -720,6 +726,17 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			probed = true
 			progress()
 			reason, err := probeSandboxForPackages(ctx, sb, e.cfg.PackageInstallTimeout)
+			var startup *sandbox.StartupOutputError
+			if errors.As(err, &startup) {
+				// The image's startup prints past the output cap in every
+				// shell, so no install on it could report how it went: none
+				// is attempted. Not a fault, which would reclaim-loop the item
+				// on a sandbox every retry meets the same way; the session
+				// runs on, and its tools' own errors name the image.
+				slog.WarnContext(ctx, "the sandbox's startup output pushed the package-install probe's answer out; installing nothing",
+					"session_id", sid, "err", err)
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -756,7 +773,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			// single step inside one silent interval, which is the reclaim loop
 			// #383 is about. progress() first, for the same reason.
 			progress()
-			_, _ = sb.Exec(ctx, sandbox.ExecRequest{
+			_, _ = sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{
 				Command: "rm -rf " + shellQuote(credsDir),
 				Timeout: packagesCredsRemoveTimeout,
 			})
@@ -785,18 +802,28 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			}
 		}
 		progress()
-		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+		res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{
 			Command: cmd,
 			Timeout: e.cfg.PackageInstallTimeout,
 		})
 		removeCreds()
-		if err != nil {
+		var reason, message string
+		var startup *sandbox.StartupOutputError
+		switch {
+		case errors.As(err, &startup):
+			// The install ran, and how it went was pushed out of the output
+			// by the image's startup: a failed attempt the client reads, not
+			// a fault, whose reclaim would run the install again and meet
+			// the same.
+			reason, message = packageReasonFailed, startup.Error()
+		case err != nil:
 			return err
+		default:
+			reason, message = packageFailureReason(res), packageMessage(res.Stdout)
 		}
 		ran++
 		rec.Digest = digest
 		rec.Attempts++
-		reason := packageFailureReason(res)
 		rec.Installed = reason == ""
 		if reason == "" {
 			recordPackageInstalled(ctx, m.name, packageOutcomeOK)
@@ -809,7 +836,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			recordPackageInstalled(ctx, m.name, reason)
 			slog.WarnContext(ctx, "packages not installed",
 				"session_id", sid, "manager", m.name, "reason", reason, "attempts", rec.Attempts)
-			e.emitPackageInstallError(ctx, sid, m.name, reason, packageMessage(res.Stdout),
+			e.emitPackageInstallError(ctx, sid, m.name, reason, message,
 				published, rec.Attempts >= packageInstallAttempts, changed)
 		}
 		recs[m.name] = rec
@@ -874,17 +901,25 @@ func packageMessage(out string) string {
 var anySchemeUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/?#]+@`)
 
 // probeSandboxForPackages answers decision 7's question, returning the reason the pass
-// must be refused or "" to proceed. An answer the probe cannot have produced —
-// a shell so broken it printed something else — proceeds with a log line
+// must be refused or "" to proceed. The probe is framed (sandbox.ExecFramed),
+// so what an image's startup prints around its answer — a BASH_ENV file's
+// banner, an EXIT trap's words — is not read as one (#860). An answer the
+// probe cannot have produced — a shell so broken it printed something else,
+// or no answer that reached the output whole — proceeds with a log line
 // rather than inventing a reason for the wire: the install's own failure is
 // then the honest diagnosis.
 func probeSandboxForPackages(ctx context.Context, sb sandbox.Sandbox, timeout time.Duration) (string, error) {
 	// Bounded by the same budget as an install: the probe is trivial, but a
 	// container whose shell wedges answering it must not hang provisioning on the
 	// outer lease alone (review).
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: packagesProbeCommand, Timeout: timeout})
+	res, framed, err := sandbox.ExecFramed(ctx, sb, "packages", sandbox.ExecRequest{Command: packagesProbeCommand, Timeout: timeout})
 	if err != nil {
 		return "", err
+	}
+	if !framed {
+		slog.WarnContext(ctx, "the package-install probe's answer did not reach the output whole; installing anyway",
+			"exit_code", res.ExitCode, "timed_out", res.TimedOut)
+		return "", nil
 	}
 	switch answer := strings.TrimSpace(res.Stdout); answer {
 	case packageReasonNotRoot, packageReasonReadOnly:

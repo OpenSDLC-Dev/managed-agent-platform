@@ -32,6 +32,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
 
 // These unit tests cover the branches a real cluster cannot easily stage —
@@ -899,33 +900,58 @@ func teeRecordingEnv(t *testing.T, record string) []string {
 	return env
 }
 
-// readScript's marker is what makes a short exec stdout stream visible, so its
-// contract is pinned here rather than left to the live cluster: no cluster can be
-// told to lose bytes, but everything else — that the marker goes out on success
-// and only on success, and that the classification exits still fire ahead of it —
+// hookedEnv is env (nil inheriting this process's) with BASH_ENV naming a file
+// that holds sandboxtest.BannerHook, as the hooked image's sets it.
+func hookedEnv(t *testing.T, env []string) []string {
+	t.Helper()
+	if env == nil {
+		env = os.Environ()
+	}
+	hook := t.TempDir() + "/hook.sh"
+	if err := os.WriteFile(hook, []byte(sandboxtest.BannerHook), 0o644); err != nil {
+		t.Fatalf("stage the hook: %v", err)
+	}
+	return append(append([]string{}, env...), "BASH_ENV="+hook)
+}
+
+// readScript's frame is what makes a short exec stdout stream visible, and
+// what keeps an image's startup output out of the file, so its contract is
+// pinned here rather than left to the live cluster: no cluster can be told to
+// lose bytes, but everything else — that the file's bytes go out inside the
+// frame on success and none go out otherwise, that the classification exits
+// still fire, and that a startup file's banner and EXIT trap stay outside —
 // is observable from the host's shell, on any machine, in milliseconds.
 //
-// This runs the script through the host's /bin/bash rather than the sandbox
-// image, as the write-side test does. It pins what the script does with its
-// arguments; that the image carries a userland able to run it is the live
-// contract test's job.
-func TestReadScriptMarksWhatItSent(t *testing.T) {
-	const marker = "0123456789abcdef"
-	env := gnuStatEnv(t)
+// This runs the exec ReadFile makes (readArgv) through the host's /bin/bash
+// rather than the sandbox image, with sandboxtest.BannerHook as its BASH_ENV file, as the
+// write-side test does. It pins what the script does with its arguments; that
+// the image carries a userland able to run it is the live contract test's job.
+func TestReadScriptFramesWhatItSent(t *testing.T) {
+	env := hookedEnv(t, gnuStatEnv(t))
 	dir := t.TempDir()
 	run := func(t *testing.T, path string, cap int) (int, []byte) {
 		t.Helper()
+		f := sandbox.NewFrame("read")
 		var out bytes.Buffer
-		cmd := exec.Command("/bin/bash", "-c", readScript, "map-read", path, strconv.Itoa(cap), marker)
+		argv := readArgv(f, path, int64(cap))
+		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Env, cmd.Stdout = env, &out
+		code := 0
 		if err := cmd.Run(); err != nil {
 			var ee *exec.ExitError
 			if !errors.As(err, &ee) {
 				t.Fatalf("run readScript: %v", err)
 			}
-			return ee.ExitCode(), out.Bytes()
+			code = ee.ExitCode()
 		}
-		return 0, out.Bytes()
+		if !bytes.HasPrefix(out.Bytes(), []byte("welcome to the image ")) || !bytes.HasSuffix(out.Bytes(), []byte("exit banner ")) {
+			t.Fatalf("stdout %q; want the hook's banner before the frame and its trap's words after it", out.Bytes())
+		}
+		got, framed, short := f.CutBytes(out.Bytes(), false)
+		if !framed || short {
+			t.Fatalf("stdout %q is not framed whole", out.Bytes())
+		}
+		return code, got
 	}
 	stage := func(t *testing.T, name string, b []byte) string {
 		t.Helper()
@@ -937,12 +963,11 @@ func TestReadScriptMarksWhatItSent(t *testing.T) {
 	}
 
 	// The bytes come back intact — including ones no shell round-trip would
-	// survive — with the marker behind them.
+	// survive — and nothing of the banner around them.
 	t.Run("FullDelivery", func(t *testing.T) {
 		payload := []byte{0x00, 0x01, 0xff, 0xfe, 'h', 'i', 0x00}
-		code, out := run(t, stage(t, "blob.bin", payload), sandbox.MaxFileBytes)
-		if want := append(append([]byte{}, payload...), marker...); code != 0 || !bytes.Equal(out, want) {
-			t.Errorf("exit %d, stdout %v; want 0 and %v", code, out, want)
+		if code, out := run(t, stage(t, "blob.bin", payload), sandbox.MaxFileBytes); code != 0 || !bytes.Equal(out, payload) {
+			t.Errorf("exit %d, file %v; want 0 and %v", code, out, payload)
 		}
 	})
 
@@ -953,25 +978,23 @@ func TestReadScriptMarksWhatItSent(t *testing.T) {
 		for i := range payload {
 			payload[i] = byte(i)
 		}
-		code, out := run(t, stage(t, "large.bin", payload), sandbox.MaxFileBytes)
-		if want := append(append([]byte{}, payload...), marker...); code != 0 || !bytes.Equal(out, want) {
-			t.Errorf("exit %d, %d bytes; want 0 and %d matching", code, len(out), len(want))
+		if code, out := run(t, stage(t, "large.bin", payload), sandbox.MaxFileBytes); code != 0 || !bytes.Equal(out, payload) {
+			t.Errorf("exit %d, %d bytes; want 0 and %d matching", code, len(out), len(payload))
 		}
 	})
 
-	// Reading no bytes is a legitimate read of an empty file, so it is marked like
-	// any other — that is what keeps it distinguishable from a stream that
+	// Reading no bytes is a legitimate read of an empty file, framed like any
+	// other — that is what keeps it distinguishable from a stream that
 	// delivered nothing at all.
-	t.Run("EmptyFileIsMarked", func(t *testing.T) {
-		code, out := run(t, stage(t, "empty", nil), sandbox.MaxFileBytes)
-		if code != 0 || string(out) != marker {
-			t.Errorf("exit %d, stdout %q; want 0 and the marker alone", code, out)
+	t.Run("EmptyFileIsFramed", func(t *testing.T) {
+		if code, out := run(t, stage(t, "empty", nil), sandbox.MaxFileBytes); code != 0 || len(out) != 0 {
+			t.Errorf("exit %d, file %q; want 0 and nothing", code, out)
 		}
 	})
 
-	// A read that cannot happen keeps its own failure code and emits no marker, so
+	// A read that cannot happen keeps its own failure code and sends no bytes, so
 	// an unreadable file cannot arrive as a successful read of fewer bytes.
-	t.Run("UnreadableFileIsNotMarked", func(t *testing.T) {
+	t.Run("UnreadableFileSendsNothing", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root ignores the read bit, so this proves nothing")
 		}
@@ -985,7 +1008,7 @@ func TestReadScriptMarksWhatItSent(t *testing.T) {
 	})
 
 	// The classification gates still run ahead of the cat, so none of them can
-	// arrive as a marked read of zero bytes.
+	// arrive as a read of zero bytes.
 	t.Run("ClassifiesBeforeCatting", func(t *testing.T) {
 		gate := stage(t, "gate.bin", []byte("seven!!"))
 		if err := os.Symlink(gate, dir+"/link"); err != nil {
@@ -1036,15 +1059,17 @@ func TestReadScriptMarksWhatItSent(t *testing.T) {
 
 // readStdout is where a short read is caught, and no cluster can stage one — a
 // stream cannot be told to lose bytes. Its branches are pinned against streams
-// fed byte-for-byte into the buffer ReadFile actually uses, so the cap arithmetic
-// is exercised rather than asserted: the marker rides in the same buffer as the
-// content, which puts the largest legal file and the first oversize one one
-// marker-length apart.
-func TestReadStdoutRequiresTheMarker(t *testing.T) {
-	const marker = "0123456789abcdef"
+// fed byte-for-byte into the buffer ReadFile actually uses, so the cap
+// arithmetic is exercised rather than asserted: the frame and what an image's
+// startup prints around it ride in the same buffer as the content, in the room
+// beside the cap (readRoom).
+func TestReadStdoutRequiresTheFrame(t *testing.T) {
+	f := sandbox.NewFrame("read")
+	b, e := f.Lines()
+	begin, end := []byte(b), []byte(e)
 	// The buffer ReadFile hands the exec, filled the way the stream fills it.
 	recv := func(chunks ...[]byte) *cappedBuffer {
-		out := &cappedBuffer{limit: sandbox.MaxFileBytes + len(marker)}
+		out := &cappedBuffer{limit: sandbox.MaxFileBytes + readRoom}
 		for _, c := range chunks {
 			for len(c) > 0 {
 				n := min(len(c), 32768)
@@ -1054,46 +1079,50 @@ func TestReadStdoutRequiresTheMarker(t *testing.T) {
 		}
 		return out
 	}
-	mark := []byte(marker)
+	read := func(out *cappedBuffer) ([]byte, error) { return readStdout("/w/f", f, sandbox.MaxFileBytes, out) }
 	body := func(n int) []byte { return bytes.Repeat([]byte{'x'}, n) }
 
-	// Bytes then marker is a complete read, and only the file's bytes come back.
+	// Bytes inside the frame are a complete read, and only the file's bytes come
+	// back — not the banner an image's startup printed before the frame, nor
+	// what its EXIT trap printed after.
 	t.Run("WholeFile", func(t *testing.T) {
 		want := []byte{0x00, 0x01, 0xff, 0xfe, 'h', 'i', 0x00}
-		got, err := readStdout("/w/f", marker, recv(want, mark))
-		if err != nil || !bytes.Equal(got, want) {
-			t.Errorf("readStdout = %v, %v; want %v", got, err, want)
+		for _, around := range [][2]string{{"", ""}, {"welcome to the image ", "exit banner "}} {
+			got, err := read(recv([]byte(around[0]), begin, want, end, []byte(around[1])))
+			if err != nil || !bytes.Equal(got, want) {
+				t.Errorf("readStdout = %v, %v; want %v", got, err, want)
+			}
 		}
 	})
 
-	// An empty file is a file, which is why the marker goes out unconditionally on
-	// success: an empty read is not evidence of a lost stream.
+	// An empty file is a file, which is why the frame goes out unconditionally
+	// on success: an empty read is not evidence of a lost stream.
 	t.Run("EmptyFileIsNotShort", func(t *testing.T) {
-		got, err := readStdout("/w/f", marker, recv(mark))
+		got, err := read(recv(begin, end))
 		if err != nil || len(got) != 0 {
 			t.Errorf("readStdout = %q, %v; want an empty read", got, err)
 		}
 	})
 
-	// Only the tail is stripped, so a file whose own bytes contain the marker
-	// still round-trips whole.
-	t.Run("ContentContainingTheMarker", func(t *testing.T) {
-		want := append(append([]byte{}, mark...), body(10)...)
-		got, err := readStdout("/w/f", marker, recv(want, mark))
+	// A file whose own bytes hold the end line's constant part still
+	// round-trips whole: only this read's nonce ends it.
+	t.Run("ContentHoldingAnEndLineOfItsOwn", func(t *testing.T) {
+		want := append(append([]byte("\nmap-read-end-0123456789abcdef\n"), body(10)...), '\n')
+		got, err := read(recv(begin, want, end))
 		if err != nil || !bytes.Equal(got, want) {
 			t.Errorf("readStdout = %d bytes, %v; want %d", len(got), err, len(want))
 		}
 	})
 
 	// The #105 signature: the exec exited 0 and stdout stopped early. Each of
-	// these is, without the marker, indistinguishable from a shorter file.
+	// these is, without the end line, indistinguishable from a shorter file.
 	t.Run("NothingArrived", func(t *testing.T) {
-		if got, err := readStdout("/w/f", marker, recv()); err == nil {
+		if got, err := read(recv()); err == nil {
 			t.Errorf("an empty stream read back as %d bytes", len(got))
 		}
 	})
 	t.Run("TailLost", func(t *testing.T) {
-		got, err := readStdout("/w/f", marker, recv(body(100)))
+		got, err := read(recv(begin, body(100)))
 		if err == nil {
 			t.Fatalf("a stream that lost its tail read back as %d bytes", len(got))
 		}
@@ -1101,42 +1130,104 @@ func TestReadStdoutRequiresTheMarker(t *testing.T) {
 			t.Errorf("err = %v, want a short read rather than a size fault", err)
 		}
 	})
-	t.Run("MarkerCutInHalf", func(t *testing.T) {
-		if _, err := readStdout("/w/f", marker, recv(body(100), mark[:len(mark)/2])); err == nil {
-			t.Error("a half-delivered marker read back as a whole file")
+	t.Run("EndLineCutInHalf", func(t *testing.T) {
+		if _, err := read(recv(begin, body(100), end[:len(end)/2])); err == nil {
+			t.Error("a half-delivered end line read back as a whole file")
 		}
 	})
 
-	// A file at exactly the cap is the largest legal read, and the buffer carries
-	// the marker on top of the cap so it still fits. Sizing the buffer as if the
-	// marker came out of the file's budget fails here — the case that would make
-	// the guard worse than the hazard.
+	// A file at exactly the cap is the largest legal read, with the banner and
+	// the trap's words beside it in the room.
 	t.Run("AtTheCapIsNotTooLarge", func(t *testing.T) {
-		got, err := readStdout("/w/f", marker, recv(body(sandbox.MaxFileBytes), mark))
+		got, err := read(recv([]byte("welcome to the image "), begin, body(sandbox.MaxFileBytes), end, []byte("exit banner ")))
 		if err != nil || len(got) != sandbox.MaxFileBytes {
 			t.Errorf("readStdout = %d bytes, %v; want %d and no error", len(got), err, sandbox.MaxFileBytes)
 		}
 	})
 
-	// One byte past it is a size fault, not a short read: the file grew after
-	// readScript's gate, and the cap dropped the marker along with the excess, so
-	// only the order of the two checks decides which answer the caller gets.
+	// One byte past it is a size fault: the file grew after readScript's gate.
+	// It is one whether the room took the excess whole, or the cap cut it with
+	// the end line.
 	t.Run("PastTheCapIsTooLarge", func(t *testing.T) {
-		if _, err := readStdout("/w/f", marker, recv(body(sandbox.MaxFileBytes+1), mark)); !errors.Is(err, sandbox.ErrFileTooLarge) {
-			t.Errorf("err = %v, want ErrFileTooLarge", err)
+		for _, stream := range [][][]byte{
+			{begin, body(sandbox.MaxFileBytes + 1), end},
+			{begin, body(sandbox.MaxFileBytes + readRoom), end},
+		} {
+			if _, err := read(recv(stream...)); !errors.Is(err, sandbox.ErrFileTooLarge) {
+				t.Errorf("err = %v, want ErrFileTooLarge", err)
+			}
 		}
 	})
 
-	// The returned slice must not lend its spare capacity back over the marker.
+	// A startup that prints past the room before the script does leaves no
+	// begin line, or cuts a file no larger than the cap: neither is a size
+	// fault the file made, nor a file, but the startup's, which every read on
+	// that image meets again (sandbox.StartupOutputError).
+	t.Run("ABannerPastTheRoomIsNeitherAFileNorTooLarge", func(t *testing.T) {
+		for _, stream := range [][][]byte{
+			{body(sandbox.MaxFileBytes + readRoom), begin, body(10), end},
+			{body(readRoom + 10), begin, body(sandbox.MaxFileBytes), end},
+		} {
+			var startup *sandbox.StartupOutputError
+			if got, err := read(recv(stream...)); !errors.As(err, &startup) || startup.Ran {
+				t.Errorf("readStdout = %d bytes, %v; want a StartupOutputError of a read, which runs nothing", len(got), err)
+			}
+		}
+	})
+
+	// A flood an EXIT trap prints after the end line is no part of the file,
+	// however far past the room it runs.
+	t.Run("ATrapFloodAfterTheEndLine", func(t *testing.T) {
+		got, err := read(recv(begin, body(4), end, body(2*readRoom)))
+		if err != nil || !bytes.Equal(got, body(4)) {
+			t.Errorf("readStdout = %q, %v; want the file alone", got, err)
+		}
+	})
+
+	// A file that holds this read's own end line, more than the room away from
+	// either end of the stream, is read whole: the lines are looked for near
+	// the stream's ends (readRoom), where the frame puts them.
+	t.Run("ContentHoldingThisReadsEndLine", func(t *testing.T) {
+		want := append(append(append([]byte{}, body(readRoom+10)...), end...), body(readRoom+10)...)
+		got, err := read(recv([]byte("welcome to the image "), begin, want, end, []byte("exit banner ")))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("readStdout = %d bytes, %v; want the %d-byte file whole", len(got), err, len(want))
+		}
+	})
+
+	// The returned slice must not lend its spare capacity back over the end line.
 	t.Run("ReturnedSliceIsClipped", func(t *testing.T) {
-		got, err := readStdout("/w/f", marker, recv(body(4), mark))
+		got, err := read(recv(begin, body(4), end))
 		if err != nil {
 			t.Fatalf("readStdout: %v", err)
 		}
 		if cap(got) != len(got) {
-			t.Errorf("cap %d, len %d: appending would write over the marker", cap(got), len(got))
+			t.Errorf("cap %d, len %d: appending would write over the end line", cap(got), len(got))
 		}
 	})
+}
+
+// BenchmarkReadStdout reads a file at the read cap and one at the harvest's
+// 50 MB cap out of their buffers, banner and trap around them: the frame's
+// lines are looked for within readRoom of the stream's ends, so the cost does
+// not grow with the file (measured on an M-series laptop: 6.3 ms and 69 ms
+// when the whole buffer was searched, about 2 ms for both since).
+func BenchmarkReadStdout(b *testing.B) {
+	for _, size := range []int{sandbox.MaxFileBytes, 50 << 20} {
+		f := sandbox.NewFrame("read")
+		begin, end := f.Lines()
+		out := &cappedBuffer{limit: size + readRoom}
+		_, _ = out.Write([]byte("welcome to the image " + begin))
+		_, _ = out.Write(bytes.Repeat([]byte("abcdefghij\n"), size/11+1)[:size])
+		_, _ = out.Write([]byte(end + "exit banner "))
+		b.Run(strconv.Itoa(size>>20)+"MiB", func(b *testing.B) {
+			for b.Loop() {
+				if _, err := readStdout("/f", f, int64(size), out); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
 
 // classifier is a pod handle with Exec's default slop and nothing else: all
@@ -1339,6 +1430,26 @@ func setsidEnv(t *testing.T) []string {
 // contract test's job.
 func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	env := setsidEnv(t)
+	// An image's startup that turns errexit on, as well as printing, runs in
+	// the wrapper's own shell and the command's: every row holds under it as
+	// under none, a command's own exit code and a watchdog blocked from its
+	// mark included (#860). It is the wrapper's BASH_ENV only — exitScript runs
+	// framed in a pod, and bare here.
+	hook := t.TempDir() + "/hook.sh"
+	if err := os.WriteFile(hook, []byte("set -e\n"+sandboxtest.BannerHook), 0o644); err != nil {
+		t.Fatalf("stage the hook: %v", err)
+	}
+	for _, startup := range []struct {
+		name string
+		env  []string
+	}{{"NoStartup", nil}, {"ErrexitStartup", []string{"BASH_ENV=" + hook}}} {
+		t.Run(startup.name, func(t *testing.T) { wrapperMarks(t, env, startup.env) })
+	}
+}
+
+// wrapperMarks is TestExecWrapperMarksTheWatchdogsKill's rows, with startupEnv
+// added to the wrapper's environment.
+func wrapperMarks(t *testing.T, env, startupEnv []string) {
 	dir := t.TempDir()
 	// Both scripts run, the way the provider runs them: the wrapper records the
 	// exec's state and exitScript is the one that reads the mark back out.
@@ -1350,7 +1461,7 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		if base == nil {
 			base = os.Environ()
 		}
-		wrapper.Env = append(append([]string{}, base...), extraEnv...)
+		wrapper.Env = append(append(append([]string{}, base...), startupEnv...), extraEnv...)
 		if err := wrapper.Run(); err != nil {
 			t.Fatalf("run execWrapper: %v", err)
 		}
@@ -1783,6 +1894,213 @@ func TestExitScriptReportsAndClearsTheWatchdogsMark(t *testing.T) {
 			t.Errorf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
 	})
+}
+
+// The provider's probes run as framed scripts (sandbox.Frame) and read their
+// answers from between the lines, so an image's BASH_ENV file — printing on
+// both streams without ending its lines, leaving the directory, and setting an
+// EXIT trap that prints after the script — answers none of them (#860). Before
+// the frame its banner was read as the exit record's first field, which failed
+// every exec on the image, and as the liveness verdict, which read every
+// command as dead; and the refused write's reason carried it. Each runs here
+// through the host's shell with sandboxtest.BannerHook as its BASH_ENV file, framed as the
+// provider frames it; the live hooked test (internal/sandbox/hookedtest) runs
+// them in a pod.
+func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
+	env := hookedEnv(t, gnuStatEnv(t))
+	dir := t.TempDir()
+	run := func(t *testing.T, f sandbox.Frame, shell, script string, args ...string) (string, int) {
+		t.Helper()
+		cmd := exec.Command(shell, append([]string{"-c", f.Wrap(script), "map-test"}, args...)...)
+		cmd.Env = env
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		code := 0
+		if err := cmd.Run(); err != nil {
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("run %s: %v", shell, err)
+			}
+			code = ee.ExitCode()
+		}
+		if shell == "/bin/bash" && (!strings.HasPrefix(out.String(), "welcome to the image ") || !strings.HasSuffix(out.String(), "exit banner ")) {
+			t.Fatalf("stdout %q; want the hook's banner before the frame and its trap's words after it", out.String())
+		}
+		return out.String(), code
+	}
+
+	t.Run("liveness", func(t *testing.T) {
+		gone := exec.Command("true")
+		if err := gone.Run(); err != nil {
+			t.Fatal(err)
+		}
+		for pid, want := range map[int]bool{os.Getpid(): true, gone.Process.Pid: false} {
+			state := dir + "/alive-" + strconv.Itoa(pid)
+			if err := os.WriteFile(state+".pid", []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f := sandbox.NewFrame("alive")
+			out, code := run(t, f, "/bin/bash", aliveScript, state)
+			if alive, err := aliveVerdict(f, out, false); code != 0 || err != nil || alive != want {
+				t.Errorf("pid %d: alive = %v, %v (exit %d); want %v", pid, alive, err, code, want)
+			}
+		}
+	})
+
+	t.Run("exit record", func(t *testing.T) {
+		state := dir + "/exit"
+		if err := os.WriteFile(state+".exit", []byte("7 10.00 12.50\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(state+".killed", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		f := sandbox.NewFrame("exit")
+		out, _ := run(t, f, "/bin/bash", exitScript, state)
+		code, killed, ran, err := readExitRecord(f, out, false, 0)
+		if err != nil || code != 7 || !killed || ran != 2500*time.Millisecond {
+			t.Errorf("readExitRecord = %d, %v, %s, %v; want 7, true, 2.5s", code, killed, ran, err)
+		}
+		// What the frame keeps out: read whole, the banner is the record's
+		// first field.
+		if _, _, _, err := parseExit(out); err == nil {
+			t.Errorf("parseExit read %q, banner and all, as a record", out)
+		}
+	})
+
+	t.Run("export probe", func(t *testing.T) {
+		if err := os.Mkdir(dir+"/present", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for root, want := range map[string]string{dir + "/present": "P", dir + "/absent/deeper": "M"} {
+			for _, shell := range []string{"sh", "/bin/bash"} {
+				f := sandbox.NewFrame("export")
+				out, _ := run(t, f, shell, exportProbe, root)
+				if answer, framed, short := f.Cut(out, false); !framed || short || strings.TrimSpace(answer) != want {
+					t.Errorf("%s: probe %s = %q, %v, %v; want %s", shell, root, answer, framed, short, want)
+				}
+			}
+		}
+	})
+
+	t.Run("write refusal reason", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores the write bit, so the create is not refused")
+		}
+		locked := dir + "/locked"
+		if err := os.Mkdir(locked, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		f := sandbox.NewFrame("write")
+		path := locked + "/f"
+		out, code := run(t, f, "/bin/bash", writeScript, path, locked, "0", gopath.Join(locked, sandbox.TempName()))
+		reason, framed, _ := f.Cut(out, false)
+		if code != sandbox.ExitPathNotWritable || !framed || reason != "Permission denied" {
+			t.Errorf("exit %d, reason %q (framed %v); want %d and the strerror alone", code, reason, framed, sandbox.ExitPathNotWritable)
+		}
+	})
+}
+
+// readExitRecord reads what reached the output of exitScript's frame: a record
+// whose end line a lost stream dropped reads as far as it got; a stream with
+// no begin line is a lost answer — no record, the kill's code, as an empty
+// stream always was — when nothing else reached it, or when it ends partway
+// through the begin line, past its newline, after a banner or not; one with
+// something else and no begin line — a banner's ended line among it — or of a
+// reader that exited non-zero with no frame is no record to parse; and one the
+// cap cut before the record's end line — before its begin line, whatever it
+// ends in, or inside the record, where it may have cut a number — is the
+// startup's failure, not a record.
+func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
+	f := sandbox.NewFrame("exit")
+	begin, end := f.Lines()
+	// Another frame's begin line: this one's but for the nonce's first digit.
+	other := "\nmap-exit-begin-1"
+	if strings.HasPrefix(begin, other) {
+		other = "\nmap-exit-begin-0"
+	}
+	for _, c := range []struct {
+		name, out string
+		truncated bool
+		// exit is the reader's own exit status.
+		exit   int
+		code   int
+		killed bool
+		ran    time.Duration
+		fails  bool
+		// startup is a failure the cap made: a *sandbox.StartupOutputError
+		// whose command had run.
+		startup bool
+	}{
+		{"whole, banner and trap around it", "welcome 3 " + begin + "K 0 1.0 2.0\n" + end + "exit 9", false, 0, 0, true, time.Second, false, false},
+		{"end line lost", begin + "K 0 1.0 2.0\n", false, 0, 0, true, time.Second, false, false},
+		{"end line half lost", begin + " 5 1.0 2.0\n" + end[:6], false, 0, 5, false, time.Second, false, false},
+		{"the record's tail lost", begin + " 5 1.0", false, 0, 5, false, 0, false, false},
+		{"nothing after the begin line", begin, false, 0, sigkillExit, false, 0, false, false},
+		// A reader the stream lost, framed or not, killed on its way out.
+		{"the record whole, the reader killed", begin + "K 0 1.0 2.0\n", false, 137, 0, true, time.Second, false, false},
+		{"nothing at all", "", false, 0, sigkillExit, false, 0, false, false},
+		{"cut inside the begin line", begin[:9], false, 0, sigkillExit, false, 0, false, false},
+		{"cut inside the begin line, after a banner", "welcome 0 1.0 2.0" + begin[:len(begin)-1], false, 0, sigkillExit, false, 0, false, false},
+		{"cut two bytes into the begin line, after a banner", "welcome 0 1.0 2.0" + begin[:2], false, 0, sigkillExit, false, 0, false, false},
+		{"something, but no begin line", "welcome 0 1.0 2.0", false, 0, 0, false, 0, true, false},
+		{"something, and another frame's begin line cut short", "welcome 0 1.0 2.0" + other, false, 0, 0, false, 0, true, false},
+		// A banner that ended its line, then nothing: a newline alone is no
+		// part of a begin line, and the stream is the banner's.
+		{"a banner, its line ended, then nothing", "welcome 0 1.0 2.0\n", false, 0, 0, false, 0, true, false},
+		// A reader that exited non-zero with no frame — a startup that failed
+		// under errexit before the script began — is no record, whatever it
+		// printed: not the kill's 137 for a command that may have exited 7.
+		{"a banner, then the reader exits 1", "welcome\n", false, 1, 0, false, 0, true, false},
+		{"nothing, the reader exits 1", "", false, 1, 0, false, 0, true, false},
+		{"partway into the begin line, the reader exits 1", "welcome" + begin[:9], false, 1, 0, false, 0, true, false},
+		// A startup that floods past the cap pushes the record out: the
+		// startup's failure, though its tail ends in a newline, as a lost
+		// begin line's would.
+		{"a flood the cap cut before any begin line", strings.Repeat("y\n", 1000), true, 0, 0, false, 0, true, true},
+		// One the cap cut after the begin line may have cut a number: a
+		// deadline's kill, K 137, kept as K 13 is no exit 13.
+		{"a record the cap cut inside its code", "flood " + begin + "K 13", true, 0, 0, false, 0, true, true},
+		{"a record the cap cut before its end line", "flood " + begin + "K 137 12.3 15.9\n", true, 0, 0, false, 0, true, true},
+		{"a record the cap cut inside its end line", "flood " + begin + "K 137 12.3 15.9\n" + end[:len(end)/2], true, 0, 0, false, 0, true, true},
+		// One the cap cut only past its end line is whole: an EXIT trap's flood.
+		{"a record the cap cut past its end line", begin + "K 137 12.3 15.9\n" + end + "exit flood", true, 0, sigkillExit, true, 3600 * time.Millisecond, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, killed, ran, err := readExitRecord(f, c.out, c.truncated, c.exit)
+			if (err != nil) != c.fails || !c.fails && (code != c.code || killed != c.killed || ran != c.ran) {
+				t.Errorf("readExitRecord(%q) = %d, %v, %s, %v; want %d, %v, %s, failing %v", c.out, code, killed, ran, err, c.code, c.killed, c.ran, c.fails)
+			}
+			var startup *sandbox.StartupOutputError
+			if got := errors.As(err, &startup) && startup.Ran; got != c.startup {
+				t.Errorf("readExitRecord(%q) = %v; a StartupOutputError of a command that ran: %v, want %v", c.out, err, got, c.startup)
+			}
+		})
+	}
+}
+
+// aliveVerdict is the liveness probe's answer only when it reached the output
+// whole: a verdict the stream or the cap cut short, or none, is an error,
+// which the probe's callers read as still running.
+func TestAliveVerdictNeedsTheWholeFrame(t *testing.T) {
+	f := sandbox.NewFrame("alive")
+	begin, end := f.Lines()
+	for _, c := range []struct {
+		out       string
+		truncated bool
+		alive     bool
+		fails     bool
+	}{
+		{"D " + begin + "A\n" + end + "D", false, true, false},
+		{"A " + begin + "D\n" + end + "A", false, false, false},
+		{begin + "A\n", false, false, true},
+		{begin + "A", true, false, true},
+		{"A", false, false, true},
+	} {
+		if alive, err := aliveVerdict(f, c.out, c.truncated); (err != nil) != c.fails || alive != c.alive {
+			t.Errorf("aliveVerdict(%q, %v) = %v, %v; want %v, failing %v", c.out, c.truncated, alive, err, c.alive, c.fails)
+		}
+	}
 }
 
 func TestDestroySurfacesError(t *testing.T) {
@@ -2345,7 +2663,7 @@ func TestTheRefusedBulkScriptAnswersInTheSingleWritesTerms(t *testing.T) {
 	if len(argvs) != 1 {
 		t.Fatalf("the pod was asked %d times, want once", len(argvs))
 	}
-	want := []string{"/bin/bash", "-c", bulkRefusedScript, "map-bulk-write", b.Manifest, b.DirList}
+	want := []string{"/bin/bash", "-c", sandbox.Script(bulkRefusedScript), "map-bulk-write", b.Manifest, b.DirList}
 	if !slices.Equal(argvs[0], want) {
 		t.Fatalf("the pod was asked to run %q, want the refused script over the batch's bookkeeping", argvs[0])
 	}

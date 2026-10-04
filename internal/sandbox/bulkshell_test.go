@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
 
 // The two shared bulk shells are what both backends' batches actually run, so
@@ -46,12 +47,15 @@ func bulkShell(t *testing.T, shell, fn, manifest, dirList string) (int, string) 
 
 // bulkShellOut is bulkShell with the pass's stdout as well — the stream the two
 // sheds name what they could not remove on, which only the rows about that
-// naming care about.
-func bulkShellOut(t *testing.T, shell, fn, manifest, dirList string) (int, string, string) {
+// naming care about — and env added to this process's environment.
+func bulkShellOut(t *testing.T, shell, fn, manifest, dirList string, env ...string) (int, string, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command("/bin/bash", "-c",
 		"umask 077\n"+shell+"\n"+fn+" \"$1\" \"$2\"", "map-bulk-test", manifest, dirList)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -243,6 +247,68 @@ func TestBulkRenameShellRefusesAnUndeliveredMember(t *testing.T) {
 		}
 	}
 	assertNoTemps(t, dir)
+}
+
+// The bulk shells' marker lines share their streams with an image's startup
+// output, and each is printed after a newline of its own, so a banner that did
+// not end its line cannot take one into its own line (#860). Run with
+// sandboxtest.BannerHook as the BASH_ENV file — its banner first on both
+// streams, its trap's words last — a refused member is still the one named,
+// as a directory target and as a member the delivery lost, and a shed that
+// lost its list still says so.
+func TestBulkMarkersSurviveABannerThatDidNotEndItsLine(t *testing.T) {
+	hook := filepath.Join(t.TempDir(), "hook.sh")
+	if err := os.WriteFile(hook, []byte(sandboxtest.BannerHook), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := "BASH_ENV=" + hook
+	for _, tc := range []struct {
+		name   string
+		absent map[string]bool
+		stage  func(t *testing.T, dir string)
+		want   error
+	}{
+		{"a directory target", nil, func(t *testing.T, dir string) {
+			if err := os.Mkdir(dir+"/b.txt", 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, sandbox.ErrIsDirectory},
+		{"a member the delivery lost", map[string]bool{"b.txt": true}, func(*testing.T, string) {}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.stage(t, dir)
+			members := map[string]string{"a.txt": "AAA", "b.txt": "BBB", "c.txt": "CCC"}
+			manifest, dirList := stageBatch(t, dir, members, tc.absent)
+			code, stdout, stderr := bulkShellOut(t, sandbox.BulkRenameShell, "__map_bulk_rename", manifest, dirList, env)
+			if !strings.HasPrefix(stderr, "stderr banner ") || !strings.HasPrefix(stdout, "welcome to the image ") {
+				t.Fatalf("stdout %q, stderr %q: the hook did not run", stdout, stderr)
+			}
+			b, err := sandbox.NewBulkWrite(dir, []sandbox.FileWrite{{Path: dir + "/a.txt"}, {Path: dir + "/b.txt"}, {Path: dir + "/c.txt"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = b.Fault("docker", code, stderr)
+			if err == nil || !strings.Contains(err.Error(), dir+"/b.txt") || (tc.want != nil && !errors.Is(err, tc.want)) {
+				t.Errorf("Fault = %v; want member 1, %s, named (stderr %q)", err, dir+"/b.txt", stderr)
+			}
+		})
+	}
+	t.Run("a shed that lost its list", func(t *testing.T) {
+		dir := t.TempDir()
+		manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+		if err := os.Remove(manifest); err != nil {
+			t.Fatal(err)
+		}
+		_, stdout, _ := bulkShellOut(t, sandbox.BulkRenameShell, "__map_bulk_rename", manifest, dirList, env)
+		b, err := sandbox.NewBulkWrite(dir, []sandbox.FileWrite{{Path: dir + "/a.txt"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !b.LostItsList(stdout) {
+			t.Errorf("LostItsList(%q) = false", stdout)
+		}
+	})
 }
 
 // A manifest that is not there, or that is empty, is not an empty batch — it is a

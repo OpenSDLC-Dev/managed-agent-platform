@@ -77,31 +77,42 @@ import "time"
 // cannot abort the wrapper even under a POSIX-mode bash. Each reading is cleared
 // first: a read that fails then leaves it empty, and the line carries no record,
 // rather than whatever value the environment happened to give the name.
+//
+// The wrapper is `bash -c`, so an image's BASH_ENV file runs in its shell first,
+// and one that turns errexit on would end the wrapper at the first command that
+// fails (#860): `wait` on a command that exits 7, and the wrapper dies before
+// the exit line, so the 7 reads as a SIGKILL nobody sent; a failed reading, the
+// pid file, or the watchdog's sleep or `mkdir` the same way, the last of which
+// leaves a runaway unkilled. So each command whose failure the wrapper means to
+// survive says so — `|| :`, or `wait`'s status taken in an `||` — and none of
+// it touches a shell option: the command's own `bash -c` sources the same file
+// and gets the image's options as before. The wrapper's own exit status is
+// never read; the exit line is the record.
 const execWrapper = `
 exec 3>&2 2>/dev/null
 setsid /bin/bash -c "$1" 2>&3 3>&- &
 cmd=$!
 t0=
-read -r t0 _ </proc/uptime
-echo "$cmd" > "$3.pid"
+read -r t0 _ </proc/uptime || :
+echo "$cmd" > "$3.pid" || :
 if [ "$2" != "0" ]; then
   (
     n=0
     while [ "$n" -lt "$2" ]; do
       kill -0 "$cmd" 2>/dev/null || exit 0
-      sleep 1
+      sleep 1 || :
       n=$((n + 1))
     done
     if kill -0 "$cmd" 2>/dev/null; then
-      mkdir "$3.killed" 2>/dev/null
+      mkdir "$3.killed" 2>/dev/null || :
       kill -9 -"$cmd" 2>/dev/null
     fi
   ) >/dev/null 2>&1 3>&- &
 fi
-wait "$cmd"
-c=$?
+c=0
+wait "$cmd" || c=$?
 t1=
-read -r t1 _ </proc/uptime
+read -r t1 _ </proc/uptime || :
 echo "$c $t0 $t1" > "$3.exit"
 `
 
@@ -132,17 +143,18 @@ if [ -z "$p" ] || kill -0 "$p" 2>/dev/null; then echo A; else echo D; fi
 // calls this), so the cleanup cannot race a probe, and it keeps /tmp from
 // accumulating three entries per command over a session's thousands of execs.
 //
-// The mark is printed *first* because it is the most load-bearing and this
-// stream is unframed: client-go stops copying stdout at its first error, so
-// what a lost stream drops is always a suffix. Losing the code leaves a
-// synthesized SIGKILL and a mark that still says the deadline caused it; losing
-// the mark instead would put a real timeout back on the probe race #95 was filed
-// for. Reading the mark here rather than in the wrapper is what lets it survive
-// the wrapper's own sabotage: a command that kills its parent before the exit
-// code is recorded leaves the mark, and the timeout still shows. The run time
-// rides last, the cheapest to lose: the probes still stand without it, and a
-// reading cut short is only ever a smaller number, so a lost suffix can drop the
-// record but never lengthen it.
+// The mark is printed *first* because it is the most load-bearing and what
+// this stream can lose is its tail: client-go stops copying stdout at its
+// first error, so what a lost stream drops is always a suffix — the frame's
+// end line first (readExitRecord reads what arrived after the begin line).
+// Losing the code leaves a synthesized SIGKILL and a mark that still says the
+// deadline caused it; losing the mark instead would put a real timeout back on
+// the probe race #95 was filed for. Reading the mark here rather than in the
+// wrapper is what lets it survive the wrapper's own sabotage: a command that
+// kills its parent before the exit code is recorded leaves the mark, and the
+// timeout still shows. The run time rides last, the cheapest to lose: the
+// probes still stand without it, and a reading cut short is only ever a
+// smaller number, so a lost suffix can drop the record but never lengthen it.
 //
 // `rm -rf` on the mark, because the tenant chooses what type of thing sits at
 // that path; `rm -f` would leave a directory or a planted FIFO behind forever.

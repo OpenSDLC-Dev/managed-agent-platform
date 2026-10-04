@@ -89,13 +89,30 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 	// it is there.
 	marker := filesSentinel(mounts)
 	if sentinelUsable {
+		// A marker that could not be read — the agent made it unreadable, an
+		// image's startup pushed it out — is a set this pass cannot match,
+		// exactly as a marker naming another set is: the whole current set
+		// lands and the marker is rewritten from what did. Probing instead
+		// and keeping what is there would keep a path's bytes under whatever
+		// file the set now names there, with nothing to say which.
 		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil && bytes.Equal(prev, marker) {
 			// The probe is two sandbox round trips — this read, then one exec
 			// that tests every mount — and the skip returns without ever
 			// entering the write loop, so the read reports before the exec
 			// rather than the pair counting as one silent step (#383).
 			progress()
-			if e.mountsPresent(ctx, sb, mounts) {
+			switch sandbox.ProbePaths(ctx, sb, mountPaths(mounts)...) {
+			case sandbox.Present:
+				span.SetAttributes(attribute.Bool("files.unchanged", true))
+				return
+			case sandbox.PresenceUnknown:
+				// The marker says this set landed, and a probe that did not
+				// answer — an image's startup pushing it out of the output,
+				// a failed exec — cannot say a mount has gone since. Re-
+				// streaming every mount on that would overwrite the agent's
+				// edits on every pass (#860), so what is there stays.
+				slog.WarnContext(ctx, "file mounts not probed; keeping what the sandbox holds",
+					"session_id", sid, "files", len(mounts))
 				span.SetAttributes(attribute.Bool("files.unchanged", true))
 				return
 			}
@@ -181,19 +198,13 @@ func (e *Executor) materializeFile(ctx context.Context, sb sandbox.Sandbox, m fi
 	return sb.WriteFileStream(ctx, m.MountPath, rc, size)
 }
 
-// mountsPresent reports whether every mount path still exists in the sandbox,
-// in one exec (test -e chained with &&). A missing sandbox or a failed exec
-// reads as "not present", so the caller re-materializes rather than skipping.
-func (e *Executor) mountsPresent(ctx context.Context, sb sandbox.Sandbox, mounts []fileRef) bool {
-	var cmd strings.Builder
-	for _, m := range mounts {
-		cmd.WriteString("test -e ")
-		cmd.WriteString(shellQuote(m.MountPath))
-		cmd.WriteString(" && ")
+// mountPaths is the mounts' paths, for the presence probe (sandbox.ProbePaths).
+func mountPaths(mounts []fileRef) []string {
+	paths := make([]string, len(mounts))
+	for i, m := range mounts {
+		paths[i] = m.MountPath
 	}
-	cmd.WriteString("true")
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: cmd.String()})
-	return err == nil && res.ExitCode == 0
+	return paths
 }
 
 // filesSentinel is the marker's content: the mounted set as sorted

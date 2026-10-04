@@ -392,7 +392,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if !res.TimedOut {
 			t.Fatalf("result = %+v after %s, want TimedOut", res, time.Since(start))
 		}
-		if n := countProcesses(t, sb, "sleep 987654"); n != 0 {
+		if n := CountProcesses(t, sb, "sleep 987654"); n != 0 {
 			t.Errorf("%d descendant(s) of the killed command survived the deadline", n)
 		}
 	})
@@ -405,7 +405,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		before := countProcesses(t, sb, "sleep ")
+		before := CountProcesses(t, sb, "sleep ")
 		const runs = 3
 		for range runs {
 			res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: `echo hi`, Timeout: time.Minute})
@@ -423,7 +423,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		// to drain rather than racing the poll.
 		var after int
 		for range 30 {
-			if after = countProcesses(t, sb, "sleep "); after <= before {
+			if after = CountProcesses(t, sb, "sleep "); after <= before {
 				return
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -528,7 +528,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 				// The invariant, and it is one-sided: a timeout may leave the
 				// marker running (an orphan the container reaps), but a live
 				// marker with no timeout is a command that hid its overrun.
-				if !res.TimedOut && countProcesses(t, sb, tc.marker) > 0 {
+				if !res.TimedOut && CountProcesses(t, sb, tc.marker) > 0 {
 					t.Errorf("a command outran its deadline but was reported finished: %+v", res)
 				}
 				// Where the command provably survived its own sabotage to run
@@ -2209,15 +2209,25 @@ func assertNoWriteResidue(t *testing.T, sb sandbox.Sandbox, dirs ...string) {
 	}
 }
 
-// countProcesses counts live processes in the sandbox whose command line starts
-// with prefix. It reads /proc directly: a minimal image has no ps.
-func countProcesses(t *testing.T, sb sandbox.Sandbox, prefix string) int {
+// CountProcesses counts the sandbox's live processes whose command line
+// starts with prefix. It reads /proc directly: a minimal image has no ps. The
+// answer is read past BannerHook's words, which a plain image never prints,
+// so it counts the same on a hooked image (internal/sandbox/hookedtest).
+//
+// A count that hangs fails the test after 30s. The bound is the call's
+// context, not the exec's Timeout: a Timeout arms the backend's deadline
+// watchdog, whose `sleep` outlives the count by up to a poll — exactly the
+// machinery ExecLeavesNoDeadlineMachineryBehind counts, which then found the
+// previous counts' watchdogs (6 of them) and failed.
+func CountProcesses(t *testing.T, sb sandbox.Sandbox, prefix string) int {
 	t.Helper()
-	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: `
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: `
 		n=0
 		for p in /proc/[0-9]*; do
 		  [ -r "$p/cmdline" ] || continue
-		  case "$(tr '\0' ' ' < "$p/cmdline")" in
+		  case "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)" in
 		    "` + prefix + `"*) n=$((n+1)) ;;
 		  esac
 		done
@@ -2228,7 +2238,7 @@ func countProcesses(t *testing.T, sb sandbox.Sandbox, prefix string) int {
 	if res.ExitCode != 0 {
 		t.Fatalf("count processes: exit %d: %s", res.ExitCode, res.Stderr)
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(res.Stdout))
+	n, err := strconv.Atoi(strings.TrimSpace(Unbanner(res.Stdout)))
 	if err != nil {
 		t.Fatalf("count processes: %q: %v", res.Stdout, err)
 	}

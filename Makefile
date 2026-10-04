@@ -84,10 +84,11 @@ third-party-licenses:
 	go run ./tools/thirdpartylicenses
 
 # Coverage denominator: logic packages only. internal/pgtest, internal/dockertest,
-# internal/sandbox/sandboxtest, internal/modeltest, internal/blob/blobtest,
-# internal/blob/gcs/gcstest, internal/provider/providertest, internal/secrets/secretstest,
-# internal/secrets/gcpkms/gcpkmstest, internal/webtool/webtooltest and
-# internal/identity/identitytest and internal/mcp/mcptest are test support —
+# internal/sandbox/sandboxtest, internal/sandbox/hookedtest, internal/modeltest,
+# internal/blob/blobtest, internal/blob/gcs/gcstest, internal/provider/providertest,
+# internal/secrets/secretstest, internal/secrets/gcpkms/gcpkmstest,
+# internal/webtool/webtooltest and internal/identity/identitytest and
+# internal/mcp/mcptest are test support —
 # packages solely because a test in another package must import them. What is
 # uncovered in them are the branches no unit test can reach: the ones that fire
 # when a suite fails, when a live tier is misconfigured, or only under the
@@ -110,7 +111,7 @@ third-party-licenses:
 # the growth, and reaping a fixture whose owner died, are #499.
 test: ripgrep
 	@set -euo pipefail; \
-	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest)$$' | paste -sd, -)"; \
+	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|hookedtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest)$$' | paste -sd, -)"; \
 	set -x; \
 	go test -count=1 -timeout 30m -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 

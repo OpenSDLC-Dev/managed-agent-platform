@@ -131,6 +131,9 @@ type PathNotWritableError struct {
 }
 
 func (e *PathNotWritableError) Error() string {
+	if e.Reason == "" {
+		return e.Path + ": " + ErrNotWritable.Error()
+	}
 	return e.Path + ": " + ErrNotWritable.Error() + ": " + e.Reason
 }
 
@@ -397,6 +400,72 @@ func CheckCommand(command string) error {
 	return nil
 }
 
+// ScriptPreamble opens every script the platform itself runs in a sandbox's
+// shell. That shell is `bash -c`, so an image's BASH_ENV file runs in it first
+// and can leave errexit on, which the platform's scripts are not written for:
+// a `chmod` or an `rm` they let fail on purpose, a status they read after the
+// command that set it, would end the script there instead — a bulk write at its
+// first `chmod` as a non-root user, a shed before it reports what it left, a
+// rename refusing a directory with the `rm`'s exit and not its own (#860). So
+// it turns errexit off, and touches nothing else. A script framed by Frame.Open
+// has it already. It is the platform's scripts' alone: the model's commands do
+// not run through it — though in the bash tool's own shell they run without
+// the image's errexit too, that shell turning it off before it restores its
+// option snapshot (internal/sandbox/shell's template), while the image's
+// nounset and pipefail carry there, and a `set -e` the model runs there
+// carries from call to call. A bash the model starts itself (`bash -c`, a
+// `#!/bin/bash` script) reads the startup file again, and runs under the
+// image's errexit.
+const ScriptPreamble = "set +e\n"
+
+// Script is script as the platform runs it in a sandbox's shell, its preamble
+// first (ScriptPreamble).
+func Script(script string) string { return ScriptPreamble + script }
+
+// CheckScript is CheckCommand of script as the platform runs it (Script): the
+// bound measured on the command Exec is handed, preamble and all, for a caller
+// that must know before it runs anything — the package-install pass refuses
+// a list past it terminally, before its probe.
+func CheckScript(script string) error { return CheckCommand(Script(script)) }
+
+// ExecScript runs req's command in sb as a script of the platform's own
+// (Script) — ExecFramed's counterpart for a script whose answer is its exit
+// code, not its output — refusing one past the bound (CheckScript) before
+// anything runs, as Exec would. Every platform script a sandbox runs goes
+// through it or ExecFramed, so neither the preamble nor its bytes can be left
+// out of one.
+func ExecScript(ctx context.Context, sb Sandbox, req ExecRequest) (ExecResult, error) {
+	req.Command = Script(req.Command)
+	if err := CheckCommand(req.Command); err != nil {
+		return ExecResult{}, err
+	}
+	return sb.Exec(ctx, req)
+}
+
+// StartupOutputError is a backend's failure to read back what one of its own
+// scripts answered because the sandbox printed past the output cap
+// (MaxOutputBytes) ahead of it: an image's startup file — `ENV BASH_ENV`,
+// which every shell the sandbox starts runs first — printing that much
+// (#860). What names the answer that was lost. Ran says the call's command
+// had already run when it was — an Exec whose exit record was pushed out — so
+// running the call again runs the command again.
+//
+// The image prints the same in every shell, so a retry meets the same: the
+// toolset answers it as a tool error, never a backend fault, which the
+// executor would leave to a reclaim that re-runs the command, forever.
+type StartupOutputError struct {
+	What string
+	Ran  bool
+}
+
+func (e *StartupOutputError) Error() string {
+	s := fmt.Sprintf("sandbox: %s did not reach the output: the sandbox printed past the %d-byte output cap ahead of it, as an image's startup file printing in every shell does", e.What, MaxOutputBytes)
+	if e.Ran {
+		s += "; the command had run"
+	}
+	return s
+}
+
 // ExecResult is a finished command. TimedOut means the command itself outlived
 // its deadline: the sandbox stopped it, or stopped waiting for it, or caught it
 // still running past the deadline and exiting later on its own terms. TimedOut
@@ -452,8 +521,8 @@ type Sandbox interface {
 	// harvest moves files up to its own per-file cap out of the sandbox — so
 	// the ceiling is the caller's to name per read. The docker backend
 	// streams the bytes through; the k8s backend buffers up to maxBytes
-	// internally, because its exec transport frames stdout with a trailing
-	// marker that can only be verified once the stream has ended.
+	// internally, because its exec transport frames stdout (Frame), and the
+	// frame's end line can only be verified once the stream has ended.
 	ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error)
 	// WriteFile writes data, creating parent directories and overwriting any
 	// existing file.

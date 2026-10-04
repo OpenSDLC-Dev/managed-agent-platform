@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
@@ -603,6 +604,76 @@ func TestHarvestTruncatedListingDegradesToSortedPrefix(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
 		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
+	}
+}
+
+// A listing whose output never carried its frame (sandbox.ExecFramed) — a
+// shell that died before the script began — is no listing, whatever it holds:
+// the harvest faults as one whose listing exited non-zero does, leaving the
+// item for reclaim and publishing nothing from words that may be a banner's.
+func TestHarvestUnframedListingFaults(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{outputsDir + "/a.txt": "alpha"}, unframed: true}
+	h := newHarness(t, sb)
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	var faulted error
+	h.exec.onFault = func(_ *queue.Item, err error) { faulted = err }
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	if faulted == nil || !strings.Contains(faulted.Error(), "did not reach the output whole") {
+		t.Fatalf("fault = %v; want the unframed listing's", faulted)
+	}
+	if rows := h.fileRows(t); len(rows) != 0 {
+		t.Errorf("rows = %+v, want none published from an unframed listing", rows)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 1 {
+		t.Errorf("outputs_harvest live = %d, want 1 (left for reclaim)", got)
+	}
+}
+
+// A listing an image's startup pushed out of the output, printing past the
+// cap in every shell — on Kubernetes a sandbox.StartupOutputError, the exec's
+// exit record pushed out with it; on Docker a stdout the cap cut before any
+// begin line — no reclaim would read either: the harvest settles as one that
+// read no sandbox. The previous snapshot stays, grading chains, and the item
+// completes rather than reclaim-looping (#860).
+func TestHarvestAListingAStartupFloodPushedOutSettles(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		sb   *fakeSandbox
+	}{
+		{"kubernetes", &fakeSandbox{execErr: &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}, execErrOn: "globstar"}},
+		{"docker", &fakeSandbox{unframed: true, execTruncated: true, execStdout: strings.Repeat("y\n", 1000)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.sb.files = map[string]string{outputsDir + "/a.txt": "alpha"}
+			h := newHarness(t, c.sb)
+			prev := domain.NewID(domain.PrefixFile)
+			if _, err := h.pool.Exec(context.Background(),
+				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+				 VALUES ($1, 'earlier.txt', 'text/plain', 2, true, 'session', $2)`,
+				prev.String(), h.sid.String()); err != nil {
+				t.Fatal(err)
+			}
+			h.seedOutcome(t, domain.OutcomeResultEvaluating)
+			var faulted error
+			h.exec.onFault = func(_ *queue.Item, err error) { faulted = err }
+			h.enqueueHarvest(t)
+			h.stepOnce(t)
+
+			if faulted != nil {
+				t.Fatalf("fault = %v, want none", faulted)
+			}
+			if rows := h.fileRows(t); len(rows) != 1 || rows[0].id != prev.String() {
+				t.Errorf("rows = %+v, want only the previous snapshot", rows)
+			}
+			if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+				t.Errorf("model_turn live = %d, want 1 (grading chained)", got)
+			}
+			if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+				t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
+			}
+		})
 	}
 }
 

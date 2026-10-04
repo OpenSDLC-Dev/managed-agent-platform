@@ -2,20 +2,20 @@ package k8s_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"k8s.io/client-go/tools/clientcmd"
-
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/k8s"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
@@ -184,8 +184,26 @@ func TestK8sLimitedNetworkingFailsClosedWhenFlushNoOps(t *testing.T) {
 // listener the gate sidecar can reach from a pod.
 func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 	image := sandboxtest.BuildGateImage(t)
-	kubeCtx := clusterContext(t)
-	loadGateImage(t, kubeCtx, image)
+	kubeCtx := sandboxtest.KubeContext(t)
+	// On kind, the pods run this run's own image of the gate: the suite's
+	// shared tag with a nonce label on top, its layers shared through the
+	// build cache, its ID — and so the digest the import record `kind load`
+	// leaves is named for — this run's alone. Removing it when the test is
+	// done takes its tag and its record and nothing another run or package
+	// is running pods from; loading the shared tag instead left a dated
+	// record on the nodes that no later run could tell from one a concurrent
+	// run still needed, so none removed it. A context that is not kind's
+	// must share the daemon's image store or have the image loaded by hand —
+	// MAP_K8S_HOST_ADDR fixes only how pods address the stub controlplane,
+	// not image distribution.
+	if strings.HasPrefix(kubeCtx, "kind-") {
+		var load [8]byte
+		_, _ = rand.Read(load[:])
+		image = dockertest.ImageFrom(t, "gate", "FROM "+image+"\nLABEL map.gate.load="+hex.EncodeToString(load[:])+"\n")
+		if l := sandboxtest.LoadIntoKind(t, kubeCtx, image); l != nil {
+			t.Cleanup(func() { l.Remove(t) })
+		}
+	}
 	stub := sandboxtest.StartGateStubAt(t, k8sHostAddr(t, kubeCtx))
 	return sandboxtest.GateFixture{
 		Spec: &sandbox.GateSpec{
@@ -197,48 +215,6 @@ func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 		DeniedHost:  "denied.invalid",
 		Placeholder: stub.Placeholder,
 		Secret:      stub.Secret,
-	}
-}
-
-// clusterContext resolves the kube context the tests run against —
-// MAP_K8S_CONTEXT when set (local), otherwise the kubeconfig's current context
-// (CI, where the kind-action sets it).
-func clusterContext(t *testing.T) string {
-	t.Helper()
-	if ctx := os.Getenv("MAP_K8S_CONTEXT"); ctx != "" {
-		return ctx
-	}
-	cfg, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
-	if err != nil {
-		t.Fatalf("load kubeconfig for the gate fixture: %v", err)
-	}
-	return cfg.CurrentContext
-}
-
-// loadGateImage sideloads the locally-built gate image into a kind cluster —
-// kind's containerd cannot see the host daemon's images. `docker save
-// --platform` keeps the archive single-platform (a multi-arch manifest breaks
-// `kind load` on darwin; an older docker without the flag falls back to a
-// plain save). Non-kind contexts (Docker Desktop) share the daemon's image
-// store, so there is nothing to load.
-func loadGateImage(t *testing.T, kubeCtx, image string) {
-	t.Helper()
-	cluster, ok := strings.CutPrefix(kubeCtx, "kind-")
-	if !ok {
-		// Not kind: assume the cluster shares the local daemon's image store
-		// (docker-desktop does). Other clusters (minikube, k3d, remote) must have
-		// the image loaded by hand before the run — MAP_K8S_HOST_ADDR fixes only
-		// how pods address the stub controlplane, not image distribution.
-		return
-	}
-	tar := filepath.Join(t.TempDir(), "gate.tar")
-	if out, err := exec.Command("docker", "save", "--platform", "linux/"+runtime.GOARCH, "-o", tar, image).CombinedOutput(); err != nil {
-		if out2, err2 := exec.Command("docker", "save", "-o", tar, image).CombinedOutput(); err2 != nil {
-			t.Fatalf("docker save %s: %v\n%s\nfallback: %v\n%s", image, err, out, err2, out2)
-		}
-	}
-	if out, err := exec.Command("kind", "load", "image-archive", tar, "--name", cluster).CombinedOutput(); err != nil {
-		t.Fatalf("kind load image-archive: %v\n%s", err, out)
 	}
 }
 
@@ -368,6 +344,30 @@ func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 	}
 }
 
+// disarmTheWatchdog kills the command's watchdog — the wrapper's other child —
+// waiting, briefly and boundedly, for it to exist first, and says "disarmed"
+// on stdout when it did, so a row that needs it disarmed can tell.
+const disarmTheWatchdog = `
+  w=
+  for i in $(seq 100); do
+    for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do [ "$p" != "$$" ] && w=$p; done
+    [ -n "$w" ] && break
+    sleep 0.01
+  done
+  [ -n "$w" ] && kill -9 "$w" 2>/dev/null && echo disarmed
+`
+
+// blindTheProbe is a command that disarms its watchdog, points the pid file the
+// liveness probe reads at a process that has already exited, and then runs 5s:
+// TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee says why each step.
+const blindTheProbe = `
+  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)` + disarmTheWatchdog + `
+  true & gone=$!
+  wait "$gone"
+  [ -n "$state" ] && [ -f "$state.pid" ] && echo "$gone" > "$state.pid" && echo blinded
+  sleep 5
+`
+
 // A command that disarms its watchdog, overruns its deadline and then exits clean
 // is a timeout even where the overrun probe cannot see it: the #832 flake, where
 // the probe answered too late, and classifyTimeout argues what still sees it.
@@ -389,20 +389,6 @@ func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	const blindTheProbe = `
-	  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)
-	  w=
-	  for i in $(seq 100); do
-	    for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do [ "$p" != "$$" ] && w=$p; done
-	    [ -n "$w" ] && break
-	    sleep 0.01
-	  done
-	  [ -n "$w" ] && kill -9 "$w" 2>/dev/null && echo disarmed
-	  true & gone=$!
-	  wait "$gone"
-	  [ -n "$state" ] && [ -f "$state.pid" ] && echo "$gone" > "$state.pid" && echo blinded
-	  sleep 5
-	`
 	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: blindTheProbe, Timeout: 3 * time.Second})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
@@ -420,5 +406,112 @@ func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 	}
 	if !res.TimedOut {
 		t.Errorf("a command that ran 5s against a 3s deadline and exited while the probe was blind was not a timeout: %+v", res)
+	}
+}
+
+// An image whose startup file turns errexit on (and prints, as
+// sandboxtest.BannerHook does) runs it in the exec wrapper's own shell, which
+// it used to end at the first command that failed (#860): `wait` on a command
+// that exits 7, and the wrapper died before recording it, so the 7 read as a
+// SIGKILL nobody sent. On that image as on the plain one, a command's own exit
+// stands; a timeout is still the watchdog's 137, and a SIGKILL the command
+// sent itself is still 137 and no timeout; and the overrun rules hold — a
+// command that disarms its watchdog and blinds the probe is a timeout by the
+// wrapper's record of its run (#832), whatever it exits with, and one that
+// disarms it and runs on is a timeout by the probes (#95, #110).
+func TestK8sExecUnderAnErrexitStartup(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
+	}
+	for _, image := range []struct{ name, image string }{
+		{"plain", testImage},
+		{"errexit startup", hookedtest.Image(t, "set -e\n"+sandboxtest.BannerHook)},
+	} {
+		t.Run(image.name, func(t *testing.T) {
+			sb, err := provider.Provision(context.Background(), sandbox.Spec{
+				SessionID:  domain.NewID("sesn"),
+				Image:      image.image,
+				Networking: domain.Networking{Type: domain.NetUnrestricted},
+			})
+			if err != nil {
+				t.Fatalf("provision: %v", err)
+			}
+			t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			for _, tc := range []struct {
+				name, command string
+				timeout       time.Duration
+				grace         time.Duration
+				code          int
+				timedOut      bool
+			}{
+				{"a failing command's own exit", "exit 7", 30 * time.Second, 0, 7, false},
+				{"a command killed on its deadline", "sleep 300", time.Second, 0, 137, true},
+				{"a SIGKILL the command sent itself", "kill -9 $$", 30 * time.Second, 0, 137, false},
+				{"an overrun the probe cannot see, then a clean exit", blindTheProbe, 3 * time.Second, 30 * time.Second, 0, true},
+				{"an overrun the probe cannot see, then a failing exit", blindTheProbe + "exit 3\n", 3 * time.Second, 30 * time.Second, 3, true},
+				// 3s, as blindTheProbe's rows: the command must find and kill
+				// its watchdog before the watchdog fires, which 1s does not
+				// leave room for on a loaded node.
+				{"a disarmed watchdog and a command that runs on", disarmTheWatchdog + "sleep 987321", 3 * time.Second, 2 * time.Second, 137, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if tc.grace > 0 {
+						k8s.SetKillGraceForTest(sb, tc.grace)
+					}
+					res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: tc.command, Timeout: tc.timeout})
+					if err != nil {
+						t.Fatalf("exec: %v", err)
+					}
+					if res.ExitCode != tc.code || res.TimedOut != tc.timedOut {
+						t.Errorf("exit %d, timed out %v; want %d, %v: %+v", res.ExitCode, res.TimedOut, tc.code, tc.timedOut, res)
+					}
+					if strings.Contains(tc.command, disarmTheWatchdog) && !strings.Contains(res.Stdout, "disarmed") {
+						t.Errorf("the command never found its watchdog to kill, so this row proves nothing: %+v", res)
+					}
+					if strings.HasPrefix(tc.command, blindTheProbe) && !strings.Contains(res.Stdout, "blinded") {
+						t.Errorf("the command could not blind the probe, so this row proves nothing: %+v", res)
+					}
+				})
+			}
+		})
+	}
+}
+
+// An image whose startup prints more than the output cap — 1.2 MB of "y\n" in
+// every shell — pushes each exec's exit record out of its output, and Exec
+// answers with the startup's error, which says the command ran — not with the
+// kill's 137 for every command that a lost record would read as
+// (readExitRecord; docs/self-hosted-security.md, the 1 MiB room).
+func TestK8sExecUnderAFloodingStartupIsAnError(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
+	}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+		SessionID:  domain.NewID("sesn"),
+		Image:      hookedtest.Image(t, "yes | head -c 1200000\n"),
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	for _, command := range []string{"exit 0", "exit 7"} {
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: command, Timeout: 30 * time.Second})
+		var startup *sandbox.StartupOutputError
+		if !errors.As(err, &startup) || !startup.Ran {
+			t.Errorf("%s under a flooding startup = exit %d, timed out %v, %v; want a StartupOutputError of a command that ran", command, res.ExitCode, res.TimedOut, err)
+		}
 	}
 }

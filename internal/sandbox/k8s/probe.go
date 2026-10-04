@@ -2,10 +2,13 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
 // verdict is what Exec's liveness probes saw of a command's life, at the two
@@ -120,14 +123,32 @@ func (pd *pod) aliveOrTimedOut(ctx context.Context, state string) bool {
 // always exits 0 with its verdict, so a non-zero exit is the probe itself killed
 // or unable to run — an error, never a "dead" reading a command could arrange by
 // killing the probe process before it prints its answer.
+//
+// The verdict is read from inside the script's frame (sandbox.Frame), so what
+// an image's startup prints around it — a BASH_ENV file's banner, an EXIT
+// trap's words — is not taken for it (#860). A verdict that did not reach the
+// output whole is an error too, which the callers read as still running, for
+// the reason they read any probe that failed so: hiding an overrun is worse
+// than mislabelling one.
 func (pd *pod) probeAlive(ctx context.Context, state string) (bool, error) {
-	out, code, err := pd.client.execOutput(ctx, pd.name, containerName,
-		[]string{"/bin/bash", "-c", aliveScript, "map-alive", state})
+	f := sandbox.NewFrame("alive")
+	out, cut, code, err := pd.client.execOutput(ctx, pd.name, containerName,
+		[]string{"/bin/bash", "-c", f.Wrap(aliveScript), "map-alive", state})
 	if err != nil {
 		return false, err
 	}
 	if code != 0 {
 		return false, fmt.Errorf("k8s: liveness probe exited %d", code)
 	}
-	return strings.TrimSpace(out) == "A", nil
+	return aliveVerdict(f, out, cut)
+}
+
+// aliveVerdict reads aliveScript's verdict from inside its frame (f): alive
+// when it is A, and an error when it did not reach the output whole.
+func aliveVerdict(f sandbox.Frame, out string, truncated bool) (bool, error) {
+	verdict, framed, short := f.Cut(out, truncated)
+	if !framed || short {
+		return false, errors.New("k8s: the liveness probe's verdict did not reach the output whole")
+	}
+	return strings.TrimSpace(verdict) == "A", nil
 }

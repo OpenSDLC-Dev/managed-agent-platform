@@ -174,14 +174,30 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	// other is a command of the platform's own, which a retry would only run
 	// again unchanged: so not a fault, which the executor leaves to a
 	// reclaim, but a tool error that says whose it is.
+	//
+	// Nor is an answer the sandbox's own startup pushed out of the output
+	// (sandbox.StartupOutputError): the image prints past the cap in every
+	// shell, so a reclaim would meet the same — and, for a command that had
+	// already run, run it again each time. The model is told the command ran,
+	// so it does not take a lost exit status for one that never started.
 	var model *inputTooLong
 	var tooLong *sandbox.CommandTooLongError
+	var startup *sandbox.StartupOutputError
 	switch {
 	case errors.As(err, &model):
 		return failf("%s: %v; shorten them", name, model)
 	case errors.As(err, &tooLong):
 		return failf("%s: a command of the platform's own came to %d bytes, over the %d bytes one exec argument can carry: "+
 			"a fault in the platform, not in this call's input", name, tooLong.Bytes, sandbox.MaxCommandBytes)
+	case errors.As(err, &startup):
+		ran := ""
+		if startup.Ran {
+			ran = " The command ran, but whether it succeeded is unknown."
+		}
+		return failf("%s: %s did not reach the output: the sandbox image's startup file (BASH_ENV) prints so much in every shell "+
+			"that it fills the %d-byte output cap ahead of what the platform reads back.%s "+
+			"A fault in the image, not in this call: running it again meets the same.",
+			name, startup.What, sandbox.MaxOutputBytes, ran)
 	}
 	if err != nil {
 		return Result{}, err

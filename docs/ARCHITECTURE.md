@@ -479,10 +479,14 @@ Test-support packages are excluded from the coverage denominator and production
 code must never import them: `pgtest/`, `dockertest/`, `modeltest/`, and the
 per-seam pairs — `sandbox/sandboxtest/`, `blob/blobtest/`, `blob/gcs/gcstest/`,
 `provider/providertest/`, `secrets/secretstest/`, `secrets/gcpkms/gcpkmstest/`,
-`webtool/webtooltest/`, `identity/identitytest/`, `mcp/mcptest/`. Two rules run
+`webtool/webtooltest/`, `identity/identitytest/`, `mcp/mcptest/` — plus
+`sandbox/hookedtest/`, which provisions sandboxes from an image whose startup
+file prints, on both backends, for the suites that hold a platform script to
+its frame (#860). Two rules run
 through them, each over its own half of the list. The ones that start a
-container — `pgtest`, `dockertest`, `sandboxtest`, `blobtest`, `gcstest`,
-`secretstest` — treat a missing Docker daemon as a hard failure rather than a
+container — `pgtest`, `dockertest`, `sandboxtest`, `hookedtest`, `blobtest`,
+`gcstest`, `secretstest` — treat a missing Docker daemon (and `hookedtest` a
+missing Kubernetes cluster) as a hard failure rather than a
 skip, because a skipped contract test hollows out the coverage gate silently.
 They drive it through the `docker` CLI rather than its HTTP API, so the binary is
 a requirement of theirs too, and of the suites that use them — but not of a suite

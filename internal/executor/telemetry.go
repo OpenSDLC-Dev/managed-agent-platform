@@ -74,6 +74,9 @@ const (
 	repoOutcomeTooLarge  = "too_large"
 	repoOutcomeTimeout   = "timeout"
 	repoOutcomeInternal  = "internal"
+	// unprobed: neither presence probe answered, twice, so the pass neither
+	// cloned nor kept a checkout it could see — the next pass asks again.
+	repoOutcomeUnprobed = "unprobed"
 
 	// The memory outcomes: landed, already there with its marker intact, a
 	// store row that is gone, a write that failed, and a directory with files
@@ -198,7 +201,8 @@ func recordFilesMaterializeDuration(ctx context.Context, d time.Duration) {
 }
 
 // recordRepoMaterialized counts one repository mount's outcome — ok, the
-// probe's unchanged skip, or one of the clone-failure reasons.
+// probe's unchanged skip, a probe that did not answer (unprobed), or one of
+// the clone-failure reasons.
 func recordRepoMaterialized(ctx context.Context, outcome string) {
 	counter, err := otel.GetMeterProvider().Meter(meterName).Int64Counter(
 		MetricReposMaterialized,
