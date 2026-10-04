@@ -82,7 +82,9 @@ Deferred past v1 — **seams reserved, not implemented**, each tracked as an iss
 
 ## Development
 
-Requires **Go 1.26+** and Docker: the storage and API contract tests start
+Requires **Go 1.26+** (the `go` command fetches the exact release `go.mod`'s
+`toolchain` line pins, the one CI and the release images build with, unless
+`GOTOOLCHAIN=local`) and Docker: the storage and API contract tests start
 their own disposable Postgres containers, and the sandbox, shell, toolset, and
 executor tests start a disposable `debian:stable-slim` container (the toolset's
 search tests start a `postgres:16-alpine` one too, and one built from

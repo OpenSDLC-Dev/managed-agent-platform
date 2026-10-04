@@ -1180,7 +1180,10 @@ jobs:
       # still: a released changelog said every checkout in the repository had
       # gained it while one already had not, and #472 then added two more that
       # had not either (#558). That is what a rule kept by memory looks like.
-      - name: every workflow pins its actions and drops its checkout credential
+      # The same target holds the Go toolchain pin: every setup-go step installs
+      # go.mod's `toolchain` release, and every Go image names it by digest, so
+      # CI tests the Go the release images are built with.
+      - name: every workflow pins its actions and drops its checkout credential, and one Go is pinned throughout
         run: make pins-test
       # And the shape that makes a guard lie rather than lapse: under `pipefail`
       # a pipeline reports the rightmost non-zero status, and a reading end that
