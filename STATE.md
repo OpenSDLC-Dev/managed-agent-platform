@@ -4,8 +4,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+**Cutting v0.5.0** ([docs/RELEASING.md](./docs/RELEASING.md)). Review of the cut found the
+migration notes it would ship stale and incomplete. A folded section is frozen, so the
+fragments are corrected on `main` first and the cut is made again from there.
 
 ## Tasks
 
-None.
+- [x] Fragments corrected — #643's entry no longer quotes a retry time true only before 0045,
+      and one entry states what upgrading from v0.4.0 runs in one transaction
+- [ ] Release PR — the cut, from `main` with those fragments
+- [ ] Tag the squash-merge commit `v0.5.0` and push it — `release.yml` publishes the versioned
+      images, the chart and the worker binaries
+- [ ] `make changelog-archive VERSION=0.5.0`, in the next docs PR once the release run is green
