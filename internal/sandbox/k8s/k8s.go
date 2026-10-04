@@ -1297,11 +1297,14 @@ func watchdogDeadline(timeout time.Duration) time.Duration {
 //     wrapper held up between them only shortens it.
 //
 // Both start after Exec's own clock does, so each adds only a timeout an
-// instantly answered probe would also have given, with one bounded exception:
-// a wrapper that stalls between the reap and its last reading, for longer than
-// it took from Exec's start to that record's first reading, over-reports by no
-// more than the stall, plus /proc/uptime's hundredth of a second — a cost paid
-// in the direction of the label, which #832 took for the overrun first.
+// instantly answered probe would also have given, with two bounded exceptions,
+// both paid in the direction of the label and both taken by #832 for the
+// overrun first. A wrapper that stalls between the reap and its last reading,
+// for longer than it took from Exec's start to that record's first reading,
+// over-reports by no more than the stall, plus /proc/uptime's hundredth of a
+// second. And /proc/uptime is CLOCK_BOOTTIME, which counts time the node spends
+// suspended, where Exec's deadline (Go's monotonic clock) does not: a node
+// suspended mid-command over-reports by the suspension.
 //
 // That is all the kill's record claims, and it is not a new definition of the
 // deadline's kill. It does not say the kill came after the watchdog would
