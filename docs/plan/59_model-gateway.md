@@ -431,7 +431,12 @@ request path reads only the snapshot.
   — earns one more attempt with every thinking block removed, an emptied assistant
   message going as above: bifrost's fail-soft strip, so a history that breaks the
   premises still gets an answer, at the cost of one call and its reasoning. Removing all
-  thinking is valid (Ground truth, Thinking). An OpenAI-shaped caller's
+  thinking is valid (Ground truth, Thinking). What that retry produces is wrapped
+  `mapgw1r.` rather than `mapgw1.` — a reset mark — and every later request removes
+  each thinking block older than the newest reset block before the rule above applies:
+  the reset block was produced with no thinking ahead of it, and without the mark the
+  next request would send its deployment's older blocks back in front of it, earning
+  the same 400 and the same retry on every turn after. An OpenAI-shaped caller's
   `reasoning_content` carries no signature to wrap and has no provenance; it goes
   upstream as sent.
 - **Retry and fallback happen before the first byte only.** A connect error, 429, 5xx
@@ -607,7 +612,9 @@ where a vendor bills cache writes.
   assembles the same wrapped value as the whole response; an unwrapped block, or one
   whose wrapper names a deployment outside the alias or no longer configured, never
   reaches an upstream; an edited block the fake refuses earns one retry without
-  thinking, which answers, while a refusal naming no thinking earns none; and requests
+  thinking, which answers and wraps its blocks with the reset mark, after which the
+  conversation continues with no further refusal, while a refusal naming no thinking
+  earns no retry; and requests
   of one session id with no thinking land on one deployment while it is healthy.
 - **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests;
   the retention sweep against rows either side of the cutoff, its rollups intact; a key
