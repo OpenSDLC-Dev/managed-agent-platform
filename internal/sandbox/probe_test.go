@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -40,6 +41,79 @@ func TestProbePathsAnswersOnlyWhatTheExecSaid(t *testing.T) {
 	}
 	if want := sandbox.Script(`test -e '/w/a' && test -e '/w/it'\''s' && true`); got != want {
 		t.Errorf("command = %q, want %q", got, want)
+	}
+}
+
+// A set whose probe is too long for one exec — 130 mounts of 1 KB paths —
+// is asked in batches, each within the bound, rather than refused unasked:
+// any batch that says Absent is the answer, and a batch that ran and did not
+// answer makes it unknown only where none said Absent. A path past the bound
+// alone, refused before anything ran, asked nothing, and reads as Absent.
+func TestProbePathsBatchesASetTooLongForOneExec(t *testing.T) {
+	var paths []string
+	for i := range 130 {
+		paths = append(paths, fmt.Sprintf("/mnt/session/uploads/%03d/%s", i, strings.Repeat("p", 1000)))
+	}
+	missing := paths[117]
+	run := func(answer func(cmd string) (sandbox.ExecResult, error)) (sandbox.Presence, []string) {
+		var cmds []string
+		sb := execOnly{exec: func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+			if err := sandbox.CheckCommand(req.Command); err != nil {
+				return sandbox.ExecResult{}, err
+			}
+			cmds = append(cmds, req.Command)
+			return answer(req.Command)
+		}}
+		return sandbox.ProbePaths(context.Background(), sb, paths...), cmds
+	}
+
+	got, cmds := run(func(string) (sandbox.ExecResult, error) { return sandbox.ExecResult{}, nil })
+	if got != sandbox.Present || len(cmds) < 2 {
+		t.Fatalf("all present = %v in %d execs, want Present in more than one", got, len(cmds))
+	}
+	asked := 0
+	for _, cmd := range cmds {
+		asked += strings.Count(cmd, "test -e ")
+	}
+	if asked != len(paths) {
+		t.Errorf("the batches asked after %d paths, want all %d", asked, len(paths))
+	}
+	absentIn := func(cmd string) (sandbox.ExecResult, error) {
+		if strings.Contains(cmd, missing) {
+			return sandbox.ExecResult{ExitCode: 1}, nil
+		}
+		return sandbox.ExecResult{}, nil
+	}
+	if got, _ := run(absentIn); got != sandbox.Absent {
+		t.Errorf("one path absent = %v, want Absent", got)
+	}
+	flood := &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	if got, _ := run(func(cmd string) (sandbox.ExecResult, error) {
+		if !strings.Contains(cmd, missing) {
+			return sandbox.ExecResult{}, flood
+		}
+		return absentIn(cmd)
+	}); got != sandbox.Absent {
+		t.Errorf("one batch absent, the others unanswered = %v, want Absent", got)
+	}
+	if got, _ := run(func(cmd string) (sandbox.ExecResult, error) {
+		if strings.Contains(cmd, missing) {
+			return sandbox.ExecResult{}, flood
+		}
+		return sandbox.ExecResult{}, nil
+	}); got != sandbox.PresenceUnknown {
+		t.Errorf("one batch unanswered, the others present = %v, want PresenceUnknown", got)
+	}
+
+	huge := "/" + strings.Repeat("h", sandbox.MaxCommandBytes)
+	sb := execOnly{exec: func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+		if err := sandbox.CheckCommand(req.Command); err != nil {
+			return sandbox.ExecResult{}, err
+		}
+		return sandbox.ExecResult{}, nil
+	}}
+	if got := sandbox.ProbePaths(context.Background(), sb, "/w/a", huge); got != sandbox.Absent {
+		t.Errorf("a path past the bound alone = %v, want Absent: refused unasked", got)
 	}
 }
 

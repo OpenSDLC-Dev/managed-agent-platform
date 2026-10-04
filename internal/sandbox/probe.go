@@ -21,21 +21,54 @@ const (
 	Absent
 )
 
-// ProbePaths asks whether every path exists in sb, in one exec of `test -e`
-// on each (ExecScript): Present when the exec exits 0, Absent when it exits 1,
-// and PresenceUnknown for anything else — an exec error, the answer an
-// image's startup pushed out of the output (*StartupOutputError) among them,
-// a timeout, any other exit — which is no answer about the paths.
+// ProbePaths asks whether every path exists in sb, `test -e` on each in
+// scripted execs (ExecScript), as few as the bound on one command allows
+// (MaxCommandBytes) — so a set too long for one exec is still asked, batch by
+// batch, rather than refused unasked. Absent when any batch exits 1; Present
+// when every batch exits 0; and PresenceUnknown when no batch said Absent and
+// one that ran did not answer — an exec error, the answer an image's startup
+// pushed out of the output (*StartupOutputError) among them, a timeout, any
+// other exit — which is no answer about the paths. A batch the platform
+// refused as too long before it ran (one path past the bound alone) asked the
+// sandbox nothing either way, and reads as Absent, as before #860: the caller
+// then redoes the work, as it would for a path not there.
 func ProbePaths(ctx context.Context, sb Sandbox, paths ...string) Presence {
-	var cmd strings.Builder
-	for _, p := range paths {
-		cmd.WriteString("test -e '")
-		cmd.WriteString(strings.ReplaceAll(p, "'", `'\''`))
-		cmd.WriteString("' && ")
+	answer := Present
+	for _, batch := range probeBatches(paths) {
+		switch probeBatch(ctx, sb, batch) {
+		case Absent:
+			return Absent
+		case PresenceUnknown:
+			answer = PresenceUnknown
+		}
 	}
-	cmd.WriteString("true")
-	res, err := ExecScript(ctx, sb, ExecRequest{Command: cmd.String()})
+	return answer
+}
+
+// probeBatches splits paths into `test -e` commands each within the bound one
+// exec carries once scripted (CheckScript): a path past it alone is a batch of
+// its own, which ExecScript refuses.
+func probeBatches(paths []string) []string {
+	const tail = "true"
+	var batches []string
+	var cur strings.Builder
+	for _, p := range paths {
+		test := "test -e '" + strings.ReplaceAll(p, "'", `'\''`) + "' && "
+		if cur.Len() > 0 && len(ScriptPreamble)+cur.Len()+len(test)+len(tail) > MaxCommandBytes {
+			batches = append(batches, cur.String()+tail)
+			cur.Reset()
+		}
+		cur.WriteString(test)
+	}
+	return append(batches, cur.String()+tail)
+}
+
+func probeBatch(ctx context.Context, sb Sandbox, cmd string) Presence {
+	res, err := ExecScript(ctx, sb, ExecRequest{Command: cmd})
+	var tooLong *CommandTooLongError
 	switch {
+	case errors.As(err, &tooLong):
+		return Absent
 	case err != nil, res.TimedOut:
 		return PresenceUnknown
 	case res.ExitCode == 0:

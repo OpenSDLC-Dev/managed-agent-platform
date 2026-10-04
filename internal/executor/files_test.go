@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
@@ -260,6 +263,69 @@ func TestFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
 				t.Errorf("mount = %q after a probe that did not answer, want the agent's edit kept", sb.files[mount])
 			}
 		})
+	}
+}
+
+// TestFilesUnreadableSentinelStillLandsANewMount: the sentinel is only a
+// shortcut. One the sandbox cannot read — the agent chmod 000s it, and the
+// read's cat exits 1 — is no record either way, so the current set's paths
+// are probed instead: a mount added since is absent, and the set lands. An
+// unreadable marker that ended the pass kept a new mount out for good.
+func TestFilesUnreadableSentinelStillLandsANewMount(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	a := "/mnt/session/uploads/file_a"
+	b := "/mnt/session/uploads/file_b"
+	h.seedFile(t, "file_a", "aaa")
+	h.seedFile(t, "file_b", "bbb")
+	h.refFiles(t, [2]string{"file_a", a})
+	h.suspend(t, writeUse("t1.txt", "x"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("first step: %v", err)
+	}
+
+	sb.readErr = errors.New("k8s: read /workspace/.files_materialized: exit 1: cat: Permission denied")
+	h.refFiles(t, [2]string{"file_a", a}, [2]string{"file_b", b})
+	h.suspend(t, writeUse("t2.txt", "y"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("second step: %v", err)
+	}
+	if sb.files[b] != "bbb" {
+		t.Errorf("new mount = %q behind an unreadable sentinel, want it landed", sb.files[b])
+	}
+}
+
+// TestFilesRematerializeAMountDeletedFromASetTooLongForOneProbe: 130 mounts
+// of 1 KB paths make a presence probe past the bound on one exec. Refused
+// unasked, it read as unknown and kept a deleted mount out for good; the
+// probe is asked in batches (sandbox.ProbePaths), and the deleted mount is
+// absent and lands again.
+func TestFilesRematerializeAMountDeletedFromASetTooLongForOneProbe(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	var mounts [][2]string
+	for i := range 130 {
+		id := fmt.Sprintf("file_big%03d", i)
+		h.seedFile(t, id, id)
+		mounts = append(mounts, [2]string{id, fmt.Sprintf("/mnt/session/uploads/%03d/%s", i, strings.Repeat("p", 1000))})
+	}
+	h.refFiles(t, mounts...)
+	h.suspend(t, writeUse("a.txt", "x"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("first step: %v", err)
+	}
+	gone := mounts[117][1]
+	if sb.files[gone] != "file_big117" {
+		t.Fatalf("first materialization of %s = %q", gone, sb.files[gone])
+	}
+
+	delete(sb.files, gone)
+	h.suspend(t, writeUse("b.txt", "y"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("second step: %v", err)
+	}
+	if sb.files[gone] != "file_big117" {
+		t.Errorf("deleted mount = %q, want it re-materialized", sb.files[gone])
 	}
 }
 
