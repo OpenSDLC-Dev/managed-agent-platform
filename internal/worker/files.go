@@ -33,7 +33,7 @@ type fileRef struct {
 
 // filesSentinelName marks a sandbox whose file mounts are already materialized —
 // the executor's twin, so re-provisioning a live BYOC session skips restreaming
-// an unchanged, still-present set. The format matches the executor's by
+// the unchanged mounts it still holds. The format matches the executor's by
 // construction; the two never share a sandbox (a session runs on cloud OR
 // self_hosted), so the sentinels never meet.
 const filesSentinelName = ".files_materialized"
@@ -84,41 +84,41 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 	// agent wrote — would wedge the mount) nor written (which would clobber the
 	// file). Such a session re-materializes every pass — correct, just unoptimized.
 	sentinelUsable := !mountAtPath(mounts, sentinelPath)
-	// Skip only when the marker names exactly this mounted set AND every mount is
-	// still present (a shell test, never a read-back — a mount can be 500 MB), the
-	// executor's rule.
-	marker := filesSentinel(mounts)
+	// The executor's rule: the marker records each mount a pass landed, under
+	// the file it landed, and a pass lands only the mounts it cannot keep —
+	// any the marker does not record under the file the set names there now,
+	// and any it does that are gone. The rest are the agent's to have edited,
+	// and stay.
+	land, kept := mounts, []fileRef(nil)
 	if sentinelUsable {
 		// A marker that could not be read — the agent made it unreadable, an
-		// image's startup pushed it out — is a set this pass cannot match,
-		// exactly as a marker naming another set is: the whole current set
-		// lands and the marker is rewritten from what did. Probing instead
-		// and keeping what is there would keep a path's bytes under whatever
-		// file the set now names there, with nothing to say which.
-		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil && bytes.Equal(prev, marker) {
-			// The marker read and the presence exec are two round trips, and the
-			// skip returns without entering the write loop — the executor's
-			// rule, so the pair is not one silent step (#383).
-			progress()
-			switch sandbox.ProbePaths(ctx, sb, mountPaths(mounts)...) {
-			case sandbox.Present:
-				span.SetAttributes(attribute.Bool("files.unchanged", true))
-				return nil
-			case sandbox.PresenceUnknown:
-				// The executor's rule: the marker says this set landed, and
-				// a probe that did not answer cannot say a mount has gone, so
-				// what is there stays rather than being re-streamed over the
+		// image's startup pushed it out — or that does not parse records no
+		// mount: the whole current set lands and the marker is rewritten
+		// from what did. Probing instead and keeping what is there would keep
+		// a path's bytes under whatever file the set now names there, with
+		// nothing to say which.
+		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil {
+			var unknown int
+			land, kept, unknown = keptMounts(ctx, sb, prev, mounts, progress)
+			if unknown > 0 {
+				// The executor's rule: the marker says these landed, and a
+				// probe that did not answer cannot say one has gone, so what
+				// is there stays rather than being re-streamed over the
 				// agent's edits on every pass (#860).
 				slog.WarnContext(ctx, "file mounts not probed; keeping what the sandbox holds",
-					"session_id", sessionID, "files", len(mounts))
+					"session_id", sessionID, "files", unknown)
+			}
+			// The executor's rule: a mount removed from the set is forgotten
+			// here, so one added back at its path lands again.
+			if len(land) == 0 && bytes.Equal(prev, filesSentinel(kept)) {
 				span.SetAttributes(attribute.Bool("files.unchanged", true))
 				return nil
 			}
 		}
 	}
 
-	landed := make([]fileRef, 0, len(mounts))
-	for _, m := range mounts {
+	landed := make([]fileRef, 0, len(land))
+	for _, m := range land {
 		// Per mount, at the top of the iteration — the executor's rule
 		// (internal/executor/files.go): a tolerated miss continues, and one
 		// mount can be 500 MB, so a per-pass report would make a legitimately
@@ -139,15 +139,60 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 	// each well inside the budget and together need not be (#383).
 	progress()
 	span.SetAttributes(attribute.Int("files.materialized", len(landed)))
-	// The sentinel records only what landed, so a partial pass (a dangling mount)
-	// leaves a marker that never equals the full set and the next pass re-runs.
+	// The sentinel records what the sandbox holds — what was kept and what
+	// landed — so a mount that did not land is tried again next pass, alone.
 	if !sentinelUsable {
 		slog.WarnContext(ctx, "files sentinel skipped: a mount occupies the sentinel path",
 			"session_id", sessionID, "sentinel_path", sentinelPath)
-	} else if err := sb.WriteFile(ctx, sentinelPath, filesSentinel(landed)); err != nil {
+	} else if err := sb.WriteFile(ctx, sentinelPath, filesSentinel(append(kept, landed...))); err != nil {
 		slog.WarnContext(ctx, "files sentinel not written", "session_id", sessionID, "err", err)
 	}
 	return nil
+}
+
+// keptMounts is the executor's keptMounts (internal/executor/files.go): it
+// splits mounts by marker into those this pass lands and those it keeps —
+// recorded under the file the set names at their path now and not found gone
+// by one probe of them all (sandbox.ProbeEach), or not answered for — with
+// how many of the kept the probe could not answer for. A marker that does
+// not parse records nothing, and every mount lands.
+func keptMounts(ctx context.Context, sb sandbox.Sandbox, marker []byte, mounts []fileRef, progress func()) (land, kept []fileRef, unknown int) {
+	var recorded []fileRef
+	if json.Unmarshal(marker, &recorded) != nil {
+		return mounts, nil, 0
+	}
+	landedAs := make(map[string]string, len(recorded))
+	for _, r := range recorded {
+		landedAs[r.MountPath] = r.FileID
+	}
+	// held is the mounts the marker records under their file — never one at
+	// a path it does not record, since every mount names a file.
+	var held []fileRef
+	for _, m := range mounts {
+		if landedAs[m.MountPath] == m.FileID {
+			held = append(held, m)
+		} else {
+			land = append(land, m)
+		}
+	}
+	if len(held) == 0 {
+		return land, nil, 0
+	}
+	// The marker read and the probe are two round trips, and the unchanged
+	// pass returns without entering the write loop — the executor's rule, so
+	// the pair is not one silent step (#383).
+	progress()
+	for i, p := range sandbox.ProbeEach(ctx, sb, mountPaths(held)...) {
+		if p == sandbox.Absent {
+			land = append(land, held[i])
+			continue
+		}
+		if p == sandbox.PresenceUnknown {
+			unknown++
+		}
+		kept = append(kept, held[i])
+	}
+	return land, kept, unknown
 }
 
 // maxSpoolBytes bounds the temp file a length-less download is spooled to. It
@@ -249,7 +294,7 @@ func skipFile(ctx context.Context, sessionID string, m fileRef, err error) {
 		"session_id", sessionID, "file_id", m.FileID, "mount_path", m.MountPath, "err", err)
 }
 
-// mountPaths is the mounts' paths, for the presence probe (sandbox.ProbePaths).
+// mountPaths is the mounts' paths, for the presence probe (sandbox.ProbeEach).
 func mountPaths(mounts []fileRef) []string {
 	paths := make([]string, len(mounts))
 	for i, m := range mounts {

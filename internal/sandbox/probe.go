@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 )
 
@@ -77,6 +78,69 @@ func probeBatch(ctx context.Context, sb Sandbox, cmd string) Presence {
 		return Absent
 	default:
 		return PresenceUnknown
+	}
+}
+
+// probeEachLabel names ProbeEach's frame in what the sandbox printed.
+const probeEachLabel = "presence"
+
+// ProbeEach asks which of paths exist in sb, answering each path's Presence in
+// paths' order. One framed exec (ExecFramed) tests as many of them as the
+// bound on one command allows (MaxCommandBytes) and lists, by index, the ones
+// not there — so a set is asked in as many execs as its tests' bytes fill
+// commands, as ProbePaths's are, never one per path (5,000 paths of 1 KB take
+// 44). A path is Absent where its batch listed it, Present where its batch
+// answered without it, and PresenceUnknown where its batch's answer could not
+// be read: an exec error (the answer an image's startup pushed out,
+// *StartupOutputError, among them), output the frame did not carry whole, a
+// timeout, an exit other than 0, a line that is no index of the batch's. That
+// is no answer about the batch's paths, and a caller must not take it for
+// Absent (#860).
+func ProbeEach(ctx context.Context, sb Sandbox, paths ...string) []Presence {
+	answer := make([]Presence, len(paths))
+	room := MaxCommandBytes - len(NewFrame(probeEachLabel).Wrap(""))
+	var script strings.Builder
+	from := 0
+	for i, p := range paths {
+		test := "test -e '" + strings.ReplaceAll(p, "'", `'\''`) + "' || echo " + strconv.Itoa(i) + "\n"
+		if script.Len() > 0 && script.Len()+len(test) > room {
+			probeEachBatch(ctx, sb, script.String(), from, answer[from:i])
+			script.Reset()
+			from = i
+		}
+		script.WriteString(test)
+	}
+	if script.Len() > 0 {
+		probeEachBatch(ctx, sb, script.String(), from, answer[from:])
+	}
+	return answer
+}
+
+// probeEachBatch runs one batch of ProbeEach's tests, those of the paths from
+// index from on, and sets answer — theirs — from the indices it listed, a
+// line each; it leaves answer PresenceUnknown where it cannot read them.
+func probeEachBatch(ctx context.Context, sb Sandbox, script string, from int, answer []Presence) {
+	res, framed, err := ExecFramed(ctx, sb, probeEachLabel, ExecRequest{Command: script})
+	if err != nil || !framed || res.StdoutTruncated || res.TimedOut || res.ExitCode != 0 {
+		return
+	}
+	lines := strings.Split(res.Stdout, "\n")
+	if lines[len(lines)-1] != "" {
+		return // echo ends every line it prints
+	}
+	absent := make([]bool, len(answer))
+	for _, line := range lines[:len(lines)-1] {
+		i, err := strconv.Atoi(line)
+		if err != nil || i < from || i >= from+len(answer) {
+			return
+		}
+		absent[i-from] = true
+	}
+	for i := range answer {
+		answer[i] = Present
+		if absent[i] {
+			answer[i] = Absent
+		}
 	}
 }
 

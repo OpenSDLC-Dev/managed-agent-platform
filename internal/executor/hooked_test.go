@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -18,8 +19,10 @@ import (
 // Docker and on Kubernetes: the memory store lands (its tree listing of an
 // empty directory read as empty, not as the banner) and syncs both ways
 // across two runs (the listing parsed, the marker and baseline read), the
-// outputs harvest publishes exactly the deliverables, and the packages probe
-// reads a read-only root as one rather than as an answer it does not know.
+// file mounts' probe lists the one mount the agent moved away and that one
+// alone lands again, the outputs harvest publishes exactly the deliverables,
+// and the packages probe reads a read-only root as one rather than as an
+// answer it does not know.
 func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
 	for _, b := range hookedtest.Backends(t) {
 		t.Run(b.Name, func(t *testing.T) {
@@ -40,13 +43,26 @@ func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
 			h.seedMemoryStore(t, memStoreID, "Notes")
 			h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
 			h.refMemory(t, memStoreID, memMount, "read_write")
+			mountA, mountB := "/mnt/session/uploads/a.csv", "/mnt/session/uploads/b.csv"
+			h.seedFile(t, "file_hooka", "a's bytes")
+			h.seedFile(t, "file_hookb", "b's bytes")
+			// Beside the store, not in place of it, as refFiles would write
+			// resources[].
+			mounts, _ := json.Marshal([]map[string]string{
+				{"type": "file", "file_id": "file_hooka", "mount_path": mountA},
+				{"type": "file", "file_id": "file_hookb", "mount_path": mountB},
+			})
+			if _, err := h.pool.Exec(ctx, `UPDATE sessions SET resources = resources || $2::jsonb WHERE id = $1`, h.sid.String(), mounts); err != nil {
+				t.Fatalf("add the file mounts: %v", err)
+			}
 			bash := func(command string) string {
 				use, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": command}})
 				return string(use)
 			}
 
 			h.suspend(t, bash("mkdir -p /mnt/session/outputs/sub "+memMount+"/log && printf a > /mnt/session/outputs/a.txt"+
-				" && printf b > /mnt/session/outputs/sub/b.txt && printf hello > "+memMount+"/log/b.md"))
+				" && printf b > /mnt/session/outputs/sub/b.txt && printf hello > "+memMount+"/log/b.md"+
+				" && mv "+mountA+" /tmp/a.csv && printf edited > "+mountB))
 			h.stepOnce(t)
 			sb, err := b.Provider.Attach(ctx, h.sid)
 			if err != nil {
@@ -67,17 +83,24 @@ func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
 			}
 
 			// The second run's sync reads the baseline the first wrote, and
-			// pushes an edit against it.
+			// pushes an edit against it; its files pass probes the mounts the
+			// marker records, and lands the one the agent moved away alone.
 			h.suspend(t, bash("printf edited > "+memMount+"/facts/a.md"))
 			h.stepOnce(t)
 			if got, ok := h.memoryContent(t, memStoreID, "/facts/a.md"); !ok || got != "edited" {
 				t.Errorf("edited memory = %q, %v; want edited", got, ok)
 			}
+			for mount, want := range map[string]string{mountA: "a's bytes", mountB: "edited"} {
+				if got, err := sb.ReadFile(ctx, mount); err != nil || string(got) != want {
+					t.Errorf("%s = %q, %v; want %q", mount, got, err, want)
+				}
+			}
 
 			h.seedOutcome(t, domain.OutcomeResultEvaluating)
 			h.enqueueHarvest(t)
 			h.stepOnce(t)
-			rows := h.fileRows(t)
+			// The session's own rows: the uploads mounted above are not.
+			rows := slices.DeleteFunc(h.fileRows(t), func(r fileRow) bool { return r.scopeType != "session" })
 			if len(rows) != 2 || rows[0].filename != "a.txt" || rows[1].filename != "sub/b.txt" {
 				t.Errorf("harvested %+v; want a.txt and sub/b.txt", rows)
 			}

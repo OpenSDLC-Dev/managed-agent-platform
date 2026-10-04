@@ -241,11 +241,18 @@ func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		}
 		return sandbox.ExecResult{}, nil
 	}
-	// Reflect real file presence for the executor's mountsPresent probe
-	// (`test -e '<p1>' && test -e '<p2>' && true`), so a deleted mount actually
-	// reports absent and forces re-materialization — an always-true Exec would
-	// make the `&& mountsPresent` skip-guard untestable. The exact shape match
-	// keeps ordinary tool commands on the unconditional exit-0 path.
+	// Reflect real file presence for the file mounts' probe (sandbox.ProbeEach),
+	// so a deleted mount is listed absent and lands again — an Exec that
+	// listed nothing would make every mount look kept.
+	if res, ok := sandboxtest.AnswerProbeEach(req.Command, func(p string) bool {
+		_, ok := f.files[p]
+		return ok
+	}); ok {
+		return res, nil
+	}
+	// And for the repository probe (sandbox.ProbePaths: `test -e '<p1>' &&
+	// test -e '<p2>' && true`). The exact shape match keeps ordinary tool
+	// commands on the unconditional exit-0 path.
 	if strings.HasPrefix(req.Command, "test -e ") && strings.HasSuffix(req.Command, "&& true") {
 		for _, tok := range strings.Split(req.Command, " && ") {
 			if tok == "true" {
