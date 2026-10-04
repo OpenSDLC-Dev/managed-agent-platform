@@ -102,7 +102,7 @@ Two invariants the compiler will not catch for you:
 
 ## Development
 
-> The Go version is `go.mod`'s. Docker is available; `psql` is **not** — reach Postgres through the container.
+> The Go version is `go.mod`'s `toolchain` line, one patch release: every setup-go step in CI installs it, and the Dockerfile's `golang` image names it by tag and digest. A bump edits that line and the Dockerfile's `FROM`, plus the prose quoting that image (AGENTS.md, the gate-image comments in the Makefile and registry.yml, deploy/gcp/README.md), using the top-level digest `docker buildx imagetools inspect` prints for the new tag; `make pins-test` names any reference still on the old release. Docker is available; `psql` is **not** — reach Postgres through the container.
 
 The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm`, `terraform` and `compose` jobs — chart lint/render, the GCP staging Terraform's credential-free checks plus the deploy-side scripts CI runs rather than reads, and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
 
@@ -117,7 +117,7 @@ make cd-outcome-test     # ...and the CD failure notifier's classifier, which `w
 make parked-test         # ...and the parked-cluster label rule `deploy.yml` and `staging-parked.yml` share
 make retry-test          # ...and the retry wrapper both notifiers copy, lifted out of the workflow YAML and run
 make identifiers-test    # ...and the documentation, for the four shapes an operator's coordinates take (#356's rule)
-make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires, and every `actions/checkout` for the `persist-credentials: false` beside it
+make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires, every `actions/checkout` for the `persist-credentials: false` beside it, and every setup-go step and Go image reference for go.mod's `toolchain` release (images by digest too)
 make pipes-test          # ...and every pipeline in them, for a reading end that can exit 0 before EOF: under `pipefail` a `grep -q` that has matched carries the writer's SIGPIPE to 141 and the step reports a miss
 make tf-corpus-check     # ...and terraform's own `fmt` exit on every fixture of the shared .tf corpus (tools/tfcorpus) that both hand-written readers are pinned to (#762)
 make sdk-bump-report     # (outside the gate) what an SDK pin bump moved under: anchors gone at the pin, `absent at` anchors back at it, line spans the sources contradict, stamps behind it, and what went unchecked; fails while a transition awaits a disposition (plan 51)

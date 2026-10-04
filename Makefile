@@ -183,12 +183,14 @@ changelog-archive:
 # which only GitHub can answer. NOT part of `verify`: the gate is
 # credential-free by design and downloads only build and test input — the
 # modules go.sum pins and the ripgrep `make ripgrep` checks against its
-# sha256, both fixed by digest, and the container images its suites run, some
-# by a tag that moves (debian:stable-slim, postgres:16-alpine, bash:3.2 for
-# glob's refusal of a bash without globstar, busybox for the Kubernetes
-# backend's net-setup init container, and golang:1.26-bookworm for the gate
-# image it builds, whose build also runs apt-get), so those can change
-# between runs — while this check's answer is live state elsewhere, which a
+# sha256, both fixed by digest, and the container images its suites run: the
+# Go the gate image they build starts from, by digest too,
+# golang:1.26.8-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d,
+# and the rest by a tag that moves (debian:stable-slim, postgres:16-alpine,
+# bash:3.2 for glob's refusal of a bash without globstar, busybox for the
+# Kubernetes backend's net-setup init container), plus the Debian packages
+# that gate build installs with apt-get, so those can change between runs —
+# while this check's answer is live state elsewhere, which a
 # gate cannot be made to fail on honestly. .github/workflows/registry.yml
 # runs this daily and on every PR that touches the registry; GITHUB_TOKEN is
 # optional (the repository is public) and only raises the API rate limit.
@@ -369,7 +371,10 @@ identifiers-test:
 # It holds the companion clause too — every `actions/checkout` drops the job's
 # credential — which lapsed further still: three call sites never carried it
 # while a released changelog said every one did (#558). That clause's own prose
-# lives in the script's docstring, since Dependabot has no half in it.
+# lives in the script's docstring, since Dependabot has no half in it. And the
+# Go toolchain: go.mod's `toolchain` line is the patch release every setup-go
+# step installs, and every Go image reference in the tree must carry that
+# release in its tag and a digest — so CI tests the Go the release images ship.
 pins-test:
 	python3 .github/scripts/pins_test.py
 
