@@ -1347,6 +1347,15 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Dura
 // way when the stream was lost (Frame.CutInBegin). Anything else with no begin
 // line is output that is not the script's, which is no record to parse: an
 // error, as an unparseable line is.
+//
+// A banner that ends its line and then nothing reads as no record too. The one
+// startup that would print that for every exec — one that exits, or execs, so
+// that no script ever begins, every command reading as the kill's 137 — never
+// gets an exec this far: the same file runs in the pod's keepalive, the
+// `/bin/bash -c` its container runs, and ends that too, so the container is
+// gone and the exec is refused before any record is read (measured on both
+// backends: Docker reports the container not running, Kubernetes the
+// container not found).
 func readExitRecord(f sandbox.Frame, out string) (int, bool, time.Duration, error) {
 	line, framed, _ := f.Cut(out, true)
 	if !framed && strings.TrimSpace(out) != "" && !f.CutInBegin(out) {

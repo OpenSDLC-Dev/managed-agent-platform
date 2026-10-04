@@ -328,11 +328,10 @@ func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 	}
 }
 
-// blindTheProbe is a command that disarms its watchdog, points the pid file the
-// liveness probe reads at a process that has already exited, and then runs 5s:
-// TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee says why each step.
-const blindTheProbe = `
-  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)
+// disarmTheWatchdog kills the command's watchdog — the wrapper's other child —
+// waiting, briefly and boundedly, for it to exist first, and says "disarmed"
+// on stdout when it did, so a row that needs it disarmed can tell.
+const disarmTheWatchdog = `
   w=
   for i in $(seq 100); do
     for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do [ "$p" != "$$" ] && w=$p; done
@@ -340,6 +339,13 @@ const blindTheProbe = `
     sleep 0.01
   done
   [ -n "$w" ] && kill -9 "$w" 2>/dev/null && echo disarmed
+`
+
+// blindTheProbe is a command that disarms its watchdog, points the pid file the
+// liveness probe reads at a process that has already exited, and then runs 5s:
+// TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee says why each step.
+const blindTheProbe = `
+  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)` + disarmTheWatchdog + `
   true & gone=$!
   wait "$gone"
   [ -n "$state" ] && [ -f "$state.pid" ] && echo "$gone" > "$state.pid" && echo blinded
@@ -405,11 +411,6 @@ func TestK8sExecUnderAnErrexitStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
 	}
-	const killWatchdog = `
-	  for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do
-	    [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null
-	  done
-	`
 	for _, image := range []struct{ name, image string }{
 		{"plain", testImage},
 		{"errexit startup", hookedtest.Image(t, "set -e\n"+sandboxtest.BannerHook)},
@@ -438,7 +439,7 @@ func TestK8sExecUnderAnErrexitStartup(t *testing.T) {
 				{"a SIGKILL the command sent itself", "kill -9 $$", 30 * time.Second, 0, 137, false},
 				{"an overrun the probe cannot see, then a clean exit", blindTheProbe, 3 * time.Second, 30 * time.Second, 0, true},
 				{"an overrun the probe cannot see, then a failing exit", blindTheProbe + "exit 3\n", 3 * time.Second, 30 * time.Second, 3, true},
-				{"a disarmed watchdog and a command that runs on", killWatchdog + "sleep 987321", time.Second, 2 * time.Second, 137, true},
+				{"a disarmed watchdog and a command that runs on", disarmTheWatchdog + "sleep 987321", time.Second, 2 * time.Second, 137, true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					if tc.grace > 0 {
@@ -451,10 +452,11 @@ func TestK8sExecUnderAnErrexitStartup(t *testing.T) {
 					if res.ExitCode != tc.code || res.TimedOut != tc.timedOut {
 						t.Errorf("exit %d, timed out %v; want %d, %v: %+v", res.ExitCode, res.TimedOut, tc.code, tc.timedOut, res)
 					}
-					if tc.command == blindTheProbe || strings.HasPrefix(tc.command, blindTheProbe) {
-						if !strings.Contains(res.Stdout, "disarmed") || !strings.Contains(res.Stdout, "blinded") {
-							t.Errorf("the command could not disarm its watchdog or blind the probe, so this row proves nothing: %+v", res)
-						}
+					if strings.Contains(tc.command, disarmTheWatchdog) && !strings.Contains(res.Stdout, "disarmed") {
+						t.Errorf("the command never found its watchdog to kill, so this row proves nothing: %+v", res)
+					}
+					if strings.HasPrefix(tc.command, blindTheProbe) && !strings.Contains(res.Stdout, "blinded") {
+						t.Errorf("the command could not blind the probe, so this row proves nothing: %+v", res)
 					}
 				})
 			}

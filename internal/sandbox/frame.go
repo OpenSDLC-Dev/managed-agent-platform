@@ -167,14 +167,16 @@ func (f Frame) CutBytes(b []byte, truncated bool) (text []byte, framed, short bo
 // CutBytesWithin is CutBytes for a stream whose output outside the frame is
 // expected within room bytes on each side, and whose bytes between the lines
 // can be tens of megabytes — a file read's, whose buffer keeps that room
-// beside the file. The begin line is looked for in the stream's first room
-// bytes and the end line in its last room bytes, so the file between them is
-// not scanned for either: the last begin line there, and the first end line
-// there. Only a stream with neither there — a startup that printed more than
-// room before the frame, or a trap more after it — is searched whole, as
-// CutBytes searches it. Beyond reading 50 MB in a few milliseconds rather than
-// tens of them, it reads a file that holds the frame's own lines by chance,
-// which CutBytes would cut at them, as the file it is.
+// beside the file. The begin line is the last one in the stream's first room
+// bytes, and the end line the first one in its last room bytes, so the file
+// between them is not scanned for either. Each falls back on its own: a begin
+// line not in the first room bytes — a startup that printed more than room
+// before the frame — is the last one anywhere in the stream, as CutBytes reads
+// it; an end line not in the last room bytes — a trap that printed more than
+// room after it — is the first one after the begin line, as CutBytes reads it.
+// Beyond reading 50 MB in a few milliseconds rather than tens of them, it
+// reads a file that holds the frame's own lines by chance, which CutBytes
+// would cut at them, as the file it is — where both lines are near the ends.
 func (f Frame) CutBytesWithin(b []byte, truncated bool, room int) (text []byte, framed, short bool) {
 	return cutFrame(f, b, truncated, room)
 }
@@ -183,7 +185,9 @@ func (f Frame) CutBytesWithin(b []byte, truncated bool, room int) (text []byte, 
 // a stream that lost its tail while the begin line was on its way, which
 // carries none of the script's output and no sign that anything else ended it.
 // A stream ending in a newline is one, the begin line starting with its own;
-// one ending in the whole begin line is not.
+// one ending in the whole begin line is not. That a banner ending its line,
+// and then nothing, reads so too is safe where it is used (the k8s exit
+// record, readExitRecord says why).
 func (f Frame) CutInBegin(s string) bool {
 	begin, _ := f.Lines()
 	if strings.HasSuffix(s, begin) {
