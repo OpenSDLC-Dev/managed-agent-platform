@@ -407,9 +407,12 @@ func CheckCommand(command string) error {
 // command that set it, would end the script there instead — a bulk write at its
 // first `chmod` as a non-root user, a shed before it reports what it left, a
 // rename refusing a directory with the `rm`'s exit and not its own (#860). So
-// it turns errexit off, and touches nothing else. It is the platform's scripts'
-// and never the model's commands', which keep the options the image gives them.
-// A script framed by Frame.Open has it already.
+// it turns errexit off, and touches nothing else. A script framed by Frame.Open
+// has it already. It is the platform's scripts' alone: the model's commands do
+// not run through it — though they do not get the image's errexit either, the
+// bash tool's own shell turning it off before it restores its option snapshot
+// (internal/sandbox/shell's template), while the image's nounset and pipefail
+// reach them, and a `set -e` the model runs carries from call to call.
 const ScriptPreamble = "set +e\n"
 
 // Script is script as the platform runs it in a sandbox's shell, its preamble

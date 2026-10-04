@@ -175,7 +175,11 @@ BusyBox its listing of a store that holds files fails. What the image's
 environment sets for a shell — an `ENV BASH_ENV` startup file, exported
 functions, `SHELLOPTS` — applies to every script that runs in the sandbox,
 the model's commands and the platform's own alike, so an image whose `PATH`
-or options come from that file works for both. What the startup file
+or options come from that file works for both — errexit (`set -e`) aside:
+the platform's scripts turn it off as they start, and the `bash` tool's shell
+turns it off before the model's first command, so the image's errexit
+reaches no command the model runs, while its `nounset` and `pipefail` do (a
+`set -e` the model runs itself carries from call to call). What the startup file
 *prints* does not corrupt the scripts whose answers the platform parses:
 `glob` and `grep`, the outputs harvest's listing, the memory sync's tree
 hash, the package-install probe, Docker's refused-write reasons and, on
