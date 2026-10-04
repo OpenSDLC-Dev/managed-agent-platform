@@ -217,13 +217,10 @@ func TestRepoIdempotenceAndTamper(t *testing.T) {
 	}
 }
 
-// TestRepoUnansweredProbeKeepsTheCheckout: a presence probe that does not
-// answer — its answer an image's startup pushed out of the output
-// (sandbox.StartupOutputError) — says nothing of whether the checkout has
-// gone. Taken for "gone", it re-cloned on every pass, and the clone's rm -rf
-// of the mount took the agent's work with it (#860); the checkout stays.
-func TestRepoUnansweredProbeKeepsTheCheckout(t *testing.T) {
-	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+// floodingRepoHarness is dockerRepoHarness over a provider whose sandboxes'
+// presence probes can be made not to answer (floodingProvider).
+func floodingRepoHarness(t *testing.T) (*harness, *docker.Provider, *floodingProvider) {
+	t.Helper()
 	provider, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("this test requires Docker: %v", err)
@@ -236,6 +233,30 @@ func TestRepoUnansweredProbeKeepsTheCheckout(t *testing.T) {
 			_ = sb.Destroy(context.Background())
 		}
 	})
+	return h, provider, flooding
+}
+
+// cloneErrors is the session's repository clone errors.
+func (h *harness) cloneErrors(t *testing.T) int {
+	t.Helper()
+	n := 0
+	for _, ev := range h.types(t, "session.error") {
+		if strings.Contains(string(ev.Body), repoCloneErrorType) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRepoUnansweredProbeKeepsTheCheckout: a presence probe that does not
+// answer — neither the probe exec, its answer an image's startup pushed out of
+// the output (sandbox.StartupOutputError), nor the stat after it, twice —
+// says nothing of whether the checkout has gone. Taken for "gone", it
+// re-cloned on every pass, and the clone's rm -rf of the mount took the
+// agent's work with it (#860); the checkout stays, and no clone error is said.
+func TestRepoUnansweredProbeKeepsTheCheckout(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, provider, flooding := floodingRepoHarness(t)
 	h.seedRepoResource(t, "sesrsc_flood", fx.url(), repoMount, "ghp_fixture", nil)
 
 	h.runPass(t)
@@ -249,7 +270,8 @@ func TestRepoUnansweredProbeKeepsTheCheckout(t *testing.T) {
 		t.Fatalf("write the agent's file: %v", err)
 	}
 
-	flooding.probe.Store(true)
+	flooding.failExec.Store(1000)
+	flooding.failStat.Store(1000)
 	h.runPass(t)
 	if got := fx.clones.Load(); got != after {
 		t.Errorf("clones = %d, want %d — a probe that did not answer re-cloned", got, after)
@@ -257,14 +279,61 @@ func TestRepoUnansweredProbeKeepsTheCheckout(t *testing.T) {
 	if got := readSandboxFile(t, sb, repoMount+"/agent.txt"); got != "mine\n" {
 		t.Errorf("agent.txt = %q, want the agent's work kept", got)
 	}
+	if n := h.cloneErrors(t); n != 0 {
+		t.Errorf("clone errors = %d, want none: an unanswered probe says nothing is missing", n)
+	}
 }
 
-// floodingProvider hands out its sandboxes with their presence probe's
-// answer pushed out of the output, as an image's startup that prints past
-// the cap does on Kubernetes (sandbox.StartupOutputError), once probe is set.
+// TestRepoProbeAsksAgainBeforeItSkips: a probe that does not answer once —
+// a transient exec failure, a lost exit stream (#105) — on a sandbox never
+// cloned into is asked again, and the repository lands in the same pass.
+// Asked once and left unanswered, it would have started the agent's run with
+// the repository silently missing.
+func TestRepoProbeAsksAgainBeforeItSkips(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, provider, flooding := floodingRepoHarness(t)
+	h.seedRepoResource(t, "sesrsc_retry", fx.url(), repoMount, "ghp_fixture", nil)
+
+	flooding.failExec.Store(1)
+	flooding.failStat.Store(1)
+	h.runPass(t)
+	if got := fx.clones.Load(); got != 1 {
+		t.Fatalf("clones = %d, want 1: the retry answers absent", got)
+	}
+	readSandboxFile(t, adopt(t, provider, h), repoMount+"/README.md")
+}
+
+// TestRepoUnansweredOnAFreshSandboxClonesNextPass: a sandbox that answers
+// neither probe, twice, gets no clone and no clone error that pass — nothing
+// says the repository is missing — and the next pass, asked again, clones.
+func TestRepoUnansweredOnAFreshSandboxClonesNextPass(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, provider, flooding := floodingRepoHarness(t)
+	h.seedRepoResource(t, "sesrsc_next", fx.url(), repoMount, "ghp_fixture", nil)
+
+	flooding.failExec.Store(2)
+	flooding.failStat.Store(2)
+	h.runPass(t)
+	if got := fx.clones.Load(); got != 0 {
+		t.Fatalf("clones = %d, want 0: no probe answered", got)
+	}
+	if n := h.cloneErrors(t); n != 0 {
+		t.Errorf("clone errors = %d, want none", n)
+	}
+	h.runPass(t)
+	if got := fx.clones.Load(); got != 1 {
+		t.Errorf("clones = %d, want 1 on the next pass", got)
+	}
+	readSandboxFile(t, adopt(t, provider, h), repoMount+"/README.md")
+}
+
+// floodingProvider hands out its sandboxes with the next failExec presence
+// execs answering an image's startup flood (sandbox.StartupOutputError), as
+// one that prints past the cap does on Kubernetes, and the next failStat
+// stats of a .git (sandbox.StatPresence) failing as a transient exec does.
 type floodingProvider struct {
 	sandbox.Provider
-	probe atomic.Bool
+	failExec, failStat atomic.Int32
 }
 
 func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -272,20 +341,27 @@ func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sa
 	if err != nil {
 		return nil, err
 	}
-	return &floodingSandbox{Sandbox: sb, probe: &p.probe}, nil
+	return &floodingSandbox{Sandbox: sb, p: p}, nil
 }
 
 type floodingSandbox struct {
 	sandbox.Sandbox
-	probe *atomic.Bool
+	p *floodingProvider
 }
 
 func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if s.probe.Load() && strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"test -e ") {
+	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"test -e ") && s.p.failExec.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
 	return s.Sandbox.Exec(ctx, req)
+}
+
+func (s *floodingSandbox) ReadFileStream(ctx context.Context, p string, maxBytes int64) (io.ReadCloser, int64, error) {
+	if maxBytes == 0 && strings.HasSuffix(p, "/.git") && s.p.failStat.Add(-1) >= 0 {
+		return nil, 0, errors.New("k8s: read: exec stream lost")
+	}
+	return s.Sandbox.ReadFileStream(ctx, p, maxBytes)
 }
 
 // TestRepoMetacharMountPath is m-metachar-mount 🔍: a mount path carrying a

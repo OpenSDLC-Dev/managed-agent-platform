@@ -80,6 +80,31 @@ func probeBatch(ctx context.Context, sb Sandbox, cmd string) Presence {
 	}
 }
 
+// StatPresence asks whether path exists in sb through the file API rather
+// than a probe exec: a read of it capped at no bytes at all
+// (ReadFileStream), whose refusal says what is there — a directory, no
+// regular file, or one too large for that cap is Present; nothing there, or a
+// parent no directory, Absent — and PresenceUnknown for any other failure. On
+// Kubernetes that answer is the read exec's own exit status, which no output
+// an image's startup prints displaces; on Docker it is the daemon's archive
+// endpoint, which starts tarring a directory it is asked for (measured: about
+// 1.3 s for a 383 MB .git before the stream closes), so a caller asks
+// ProbePaths first and this only where that did not answer.
+func StatPresence(ctx context.Context, sb Sandbox, path string) Presence {
+	rc, _, err := sb.ReadFileStream(ctx, path, 0)
+	switch {
+	case err == nil:
+		rc.Close()
+		return Present
+	case errors.Is(err, ErrFileNotExist), errors.Is(err, ErrNotDirectory):
+		return Absent
+	case errors.Is(err, ErrIsDirectory), errors.Is(err, ErrNotRegularFile), errors.Is(err, ErrFileTooLarge):
+		return Present
+	default:
+		return PresenceUnknown
+	}
+}
+
 // ReadAnswered reports whether err, from reading a path in a sandbox
 // (ReadFile, ReadFileStream), answers anything about that path: nil, the
 // bytes, or one of the path sentinels — not there, a directory or no regular

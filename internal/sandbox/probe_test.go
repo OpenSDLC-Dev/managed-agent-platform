@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -114,6 +115,46 @@ func TestProbePathsBatchesASetTooLongForOneExec(t *testing.T) {
 	}}
 	if got := sandbox.ProbePaths(context.Background(), sb, "/w/a", huge); got != sandbox.Absent {
 		t.Errorf("a path past the bound alone = %v, want Absent: refused unasked", got)
+	}
+}
+
+// statOnly is a sandbox whose ReadFileStream alone is answered.
+type statOnly struct {
+	sandbox.Sandbox
+	err error
+}
+
+func (s statOnly) ReadFileStream(_ context.Context, _ string, maxBytes int64) (io.ReadCloser, int64, error) {
+	if maxBytes != 0 {
+		return nil, 0, fmt.Errorf("stat read a cap of %d bytes, want 0", maxBytes)
+	}
+	if s.err != nil {
+		return nil, 0, s.err
+	}
+	return io.NopCloser(strings.NewReader("")), 0, nil
+}
+
+// StatPresence reads a path capped at no bytes, and takes the read's refusal
+// for what is there: a directory, no regular file, a file past the cap —
+// present; nothing there, or a parent no directory — absent; anything else,
+// the startup's flood among it, no answer.
+func TestStatPresenceReadsTheRefusal(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want sandbox.Presence
+	}{
+		{nil, sandbox.Present},
+		{fmt.Errorf("/w/.git: %w", sandbox.ErrIsDirectory), sandbox.Present},
+		{fmt.Errorf("/w/.git: %w", sandbox.ErrFileTooLarge), sandbox.Present},
+		{sandbox.ErrNotRegularFile, sandbox.Present},
+		{fmt.Errorf("/w/.git: %w", sandbox.ErrFileNotExist), sandbox.Absent},
+		{sandbox.ErrNotDirectory, sandbox.Absent},
+		{&sandbox.StartupOutputError{What: "the read of /w/.git"}, sandbox.PresenceUnknown},
+		{errors.New("exec: stream lost"), sandbox.PresenceUnknown},
+	} {
+		if got := sandbox.StatPresence(context.Background(), statOnly{err: c.err}, "/w/.git"); got != c.want {
+			t.Errorf("StatPresence over %v = %v, want %v", c.err, got, c.want)
+		}
 	}
 }
 

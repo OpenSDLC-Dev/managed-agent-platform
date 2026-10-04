@@ -293,6 +293,54 @@ func TestFilesUnderAStartupFloodRealSandbox(t *testing.T) {
 	}
 }
 
+// TestReposUnderAStartupFloodRealSandbox clones a repository into a real
+// Kubernetes pod whose image's startup prints 1.2 MB in every shell. The
+// presence exec's answer and the extraction's exit status are both pushed out
+// of the output (sandbox.StartupOutputError), and each is read instead from
+// the file API's stat, whose answer is the read exec's own exit status: the
+// first pass clones, with no clone error, and the next keeps the checkout and
+// the agent's file in it rather than re-cloning over them (#860).
+func TestReposUnderAStartupFloodRealSandbox(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{Context: os.Getenv("MAP_K8S_CONTEXT"), Namespace: os.Getenv("MAP_K8S_NAMESPACE")})
+	if err != nil {
+		t.Fatalf("integration test requires a Kubernetes cluster: %v", err)
+	}
+	fx := newGitFixture(t, map[string]string{"README.md": "flooded\n"})
+	image := hookedtest.Image(t, "yes | head -c 1200000\n")
+	h := newHarnessWith(t, provider, Config{Image: image})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+	h.seedRepoResource(t, "sesrsc_flood", fx.url(), repoMount, "ghp_fixture", nil)
+	h.runPass(t)
+	if got := fx.clones.Load(); got != 1 {
+		t.Fatalf("clones = %d, want 1", got)
+	}
+	if n := h.cloneErrors(t); n != 0 {
+		t.Errorf("clone errors = %d, want none: the extraction landed", n)
+	}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+	if err != nil {
+		t.Fatalf("adopt the sandbox: %v", err)
+	}
+	if got, err := sb.ReadFile(context.Background(), repoMount+"/README.md"); err != nil || string(got) != "flooded\n" {
+		t.Fatalf("README.md = %q, %v; want the checkout", got, err)
+	}
+	if err := sb.WriteFile(context.Background(), repoMount+"/agent.txt", []byte("mine")); err != nil {
+		t.Fatalf("write the agent's file: %v", err)
+	}
+	h.runPass(t)
+	if got := fx.clones.Load(); got != 1 {
+		t.Errorf("clones = %d, want 1: the second pass re-cloned", got)
+	}
+	if got, err := sb.ReadFile(context.Background(), repoMount+"/agent.txt"); err != nil || string(got) != "mine" {
+		t.Errorf("agent.txt = %q, %v; want the agent's file kept", got, err)
+	}
+}
+
 // TestHarvestTruncatedListingRealSandbox drives the truncation degradation
 // through the real stack: enough real files that the listing script's output
 // overflows the exec cap in a real Docker container (Truncated set by the
