@@ -176,12 +176,29 @@ func TestSetupFilesUnreadableSentinelStillLandsANewMount(t *testing.T) {
 }
 
 // TestSetupFilesUnreadableSentinelRelandsTheSet is the executor's rule over
-// the wire: behind a marker that cannot be read, a reassigned mount holds the
-// file the set now names there — with a sibling deleted or not — and the
-// marker names that set.
+// the wire: behind a marker that cannot be read, or does not parse, the whole
+// set lands — a reassigned mount holds the file the set now names there, a
+// sibling lands again whether deleted or edited — and the marker names that
+// set.
 func TestSetupFilesUnreadableSentinelRelandsTheSet(t *testing.T) {
-	for _, deleteA := range []bool{true, false} {
-		t.Run(fmt.Sprintf("a deleted %v", deleteA), func(t *testing.T) {
+	unreadable := func(sb *fakeSandbox, _ string) {
+		sb.readErr = errors.New("k8s: read /workspace/.files_materialized: exit 1: cat: Permission denied")
+	}
+	// A marker whose first entry decodes and whose second does not: the
+	// decoded one is no record either.
+	unparsed := func(sb *fakeSandbox, idA string) {
+		sb.files["/workspace/"+filesSentinelName] = `[{"file_id":"` + idA + `","mount_path":"/workspace/uploads/a"},{"file_id":7}]`
+	}
+	for _, c := range []struct {
+		name    string
+		deleteA bool
+		marker  func(sb *fakeSandbox, idA string)
+	}{
+		{"a deleted, the marker unreadable", true, unreadable},
+		{"a edited, the marker unreadable", false, unreadable},
+		{"a edited, the marker unparsed", false, unparsed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
 			sb := &fakeSandbox{}
 			h := newHarness(t, sb)
 			a, b := "/workspace/uploads/a", "/workspace/uploads/b"
@@ -195,11 +212,13 @@ func TestSetupFilesUnreadableSentinelRelandsTheSet(t *testing.T) {
 				t.Fatalf("run: %v", err)
 			}
 
-			if deleteA {
+			if c.deleteA {
 				delete(sb.files, a)
+			} else {
+				sb.files[a] = "the agent's edit"
 			}
 			h.refFileMounts(t, [2]string{idA, a}, [2]string{idC, b})
-			sb.readErr = errors.New("k8s: read /workspace/.files_materialized: exit 1: cat: Permission denied")
+			c.marker(sb, idA)
 			h.suspend(t, writeUse("out2.txt", "again"))
 			if err := h.run(); err != nil {
 				t.Fatalf("second run: %v", err)
@@ -212,6 +231,244 @@ func TestSetupFilesUnreadableSentinelRelandsTheSet(t *testing.T) {
 				t.Errorf("marker = %s, want %s", got, want)
 			}
 		})
+	}
+}
+
+// TestSetupFilesRelandOnlyTheMountThatIsGone is the executor's rule over the
+// wire: the agent moves a.csv away and edits b.csv, and a.csv alone lands
+// again — b.csv keeps the edit, on that pass and the next.
+func TestSetupFilesRelandOnlyTheMountThatIsGone(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	a, b := "/workspace/uploads/a.csv", "/workspace/uploads/b.csv"
+	idA, idB := domain.NewID("file").String(), domain.NewID("file").String()
+	h.seedFile(t, idA, "a.csv", "text/csv", "a's bytes")
+	h.seedFile(t, idB, "b.csv", "text/csv", "b's bytes")
+	h.refFileMounts(t, [2]string{idA, a}, [2]string{idB, b})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	if err := h.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	delete(sb.files, a)
+	sb.files[b] = "the agent's edit"
+	for i, use := range []string{writeUse("out2.txt", "again"), writeUse("out3.txt", "thrice")} {
+		h.suspend(t, use)
+		if err := h.run(); err != nil {
+			t.Fatalf("run %d: %v", i+2, err)
+		}
+		if sb.files[a] != "a's bytes" || sb.files[b] != "the agent's edit" {
+			t.Errorf("run %d: a, b = %q, %q; want a landed again and b as the agent left it", i+2, sb.files[a], sb.files[b])
+		}
+	}
+	want := filesSentinel([]fileRef{{FileID: idA, MountPath: a}, {FileID: idB, MountPath: b}})
+	if got := sb.files["/workspace/"+filesSentinelName]; got != string(want) {
+		t.Errorf("marker = %s, want %s", got, want)
+	}
+}
+
+// TestSetupFilesFailedMountDoesNotRelandTheOthers is the executor's rule over
+// the wire: a pass that cannot land one mount — its file deleted or expired
+// (the content lane answers 404), or a fault writing it — records the others
+// alone, and the next pass keeps them, the agent's edit with them, and tries
+// the failed one again.
+func TestSetupFilesFailedMountDoesNotRelandTheOthers(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// fail makes g's mount fail on the first pass, and says what it holds
+		// after the second.
+		fail func(t *testing.T, h *harness, sb *fakeSandbox, idG string) (after string, landsAfter bool)
+	}{
+		{"its file deleted", func(*testing.T, *harness, *fakeSandbox, string) (string, bool) { return "", false }},
+		{"its file expired", func(t *testing.T, h *harness, _ *fakeSandbox, idG string) (string, bool) {
+			h.seedFile(t, idG, "g", "text/plain", "g's bytes")
+			if _, err := h.pool.Exec(context.Background(),
+				`UPDATE files SET expires_at = now() - interval '1 second' WHERE id = $1`, idG); err != nil {
+				t.Fatal(err)
+			}
+			return "", false
+		}},
+		{"a fault writing it", func(t *testing.T, h *harness, sb *fakeSandbox, idG string) (string, bool) {
+			h.seedFile(t, idG, "g", "text/plain", "g's bytes")
+			sb.failPath = "/workspace/uploads/g"
+			return "g's bytes", true
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			a, g := "/workspace/uploads/a", "/workspace/uploads/g"
+			idA, idG := domain.NewID("file").String(), domain.NewID("file").String()
+			h.seedFile(t, idA, "a", "text/plain", "a's bytes")
+			after, landsAfter := c.fail(t, h, sb, idG)
+			h.refFileMounts(t, [2]string{idA, a}, [2]string{idG, g})
+			h.suspend(t, writeUse("out.txt", "hello"))
+			if err := h.run(); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if _, ok := sb.files[g]; ok || sb.files[a] != "a's bytes" {
+				t.Fatalf("first pass: a = %q, g landed %v; want a alone", sb.files[a], ok)
+			}
+			want := filesSentinel([]fileRef{{FileID: idA, MountPath: a}})
+			if got := sb.files["/workspace/"+filesSentinelName]; got != string(want) {
+				t.Errorf("first marker = %s, want %s", got, want)
+			}
+
+			sb.failPath = ""
+			sb.files[a] = "the agent's edit"
+			h.suspend(t, writeUse("out2.txt", "again"))
+			if err := h.run(); err != nil {
+				t.Fatalf("second run: %v", err)
+			}
+			if sb.files[a] != "the agent's edit" {
+				t.Errorf("a = %q after a pass that failed g, want the agent's edit kept", sb.files[a])
+			}
+			if got, ok := sb.files[g]; ok != landsAfter || got != after {
+				t.Errorf("g = %q (landed %v), want %q (landed %v)", got, ok, after, landsAfter)
+			}
+		})
+	}
+}
+
+// TestSetupFilesReassignedMountRelandsAlone is the executor's rule over the
+// wire: b reassigned from file B to file C lands C's bytes, while a — the
+// marker recording it under the file the set still names there — keeps the
+// agent's edit.
+func TestSetupFilesReassignedMountRelandsAlone(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	a, b := "/workspace/uploads/a", "/workspace/uploads/b"
+	idA, idB, idC := domain.NewID("file").String(), domain.NewID("file").String(), domain.NewID("file").String()
+	h.seedFile(t, idA, "a", "text/plain", "A's bytes")
+	h.seedFile(t, idB, "b", "text/plain", "B's bytes")
+	h.seedFile(t, idC, "c", "text/plain", "C's bytes")
+	h.refFileMounts(t, [2]string{idA, a}, [2]string{idB, b})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	if err := h.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	sb.files[a] = "the agent's edit"
+	h.refFileMounts(t, [2]string{idA, a}, [2]string{idC, b})
+	h.suspend(t, writeUse("out2.txt", "again"))
+	if err := h.run(); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if sb.files[a] != "the agent's edit" || sb.files[b] != "C's bytes" {
+		t.Errorf("a, b = %q, %q; want the agent's edit and C's bytes", sb.files[a], sb.files[b])
+	}
+	want := filesSentinel([]fileRef{{FileID: idA, MountPath: a}, {FileID: idC, MountPath: b}})
+	if got := sb.files["/workspace/"+filesSentinelName]; got != string(want) {
+		t.Errorf("marker = %s, want %s", got, want)
+	}
+}
+
+// TestSetupFilesRemovedMountIsForgotten is the executor's rule over the wire:
+// a mount removed from the set is forgotten by the next pass, so when it is
+// mounted again over a file the agent wrote at its path, its file's bytes
+// land there; the mount kept throughout keeps the agent's edit.
+func TestSetupFilesRemovedMountIsForgotten(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	a, b := "/workspace/uploads/a", "/workspace/uploads/b"
+	idA, idB := domain.NewID("file").String(), domain.NewID("file").String()
+	h.seedFile(t, idA, "a", "text/plain", "A's bytes")
+	h.seedFile(t, idB, "b", "text/plain", "B's bytes")
+	h.refFileMounts(t, [2]string{idA, a}, [2]string{idB, b})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	if err := h.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	sb.files[a] = "the agent's edit"
+	h.refFileMounts(t, [2]string{idA, a})
+	h.suspend(t, writeUse("out2.txt", "again"))
+	if err := h.run(); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	sb.files[b] = "the agent's own file"
+	h.refFileMounts(t, [2]string{idA, a}, [2]string{idB, b})
+	h.suspend(t, writeUse("out3.txt", "thrice"))
+	if err := h.run(); err != nil {
+		t.Fatalf("third run: %v", err)
+	}
+	if sb.files[a] != "the agent's edit" || sb.files[b] != "B's bytes" {
+		t.Errorf("a, b = %q, %q; want the agent's edit and B's bytes", sb.files[a], sb.files[b])
+	}
+}
+
+// TestSetupFilesReportsProgressBeforeItsProbe is the executor's #383 rule over
+// the wire: a pass reports once per mount it lands and once at its boundary;
+// an unchanged pass, which returns without landing, reports its marker read
+// before the probe and each probe batch after it (sandbox.ProbeEach); and a
+// marker recording none of the set asks no probe, so it reports nothing for
+// one.
+func TestSetupFilesReportsProgressBeforeItsProbe(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	id := domain.NewID("file").String()
+	h.seedFile(t, id, "a", "text/plain", "a's bytes")
+	h.refFileMounts(t, [2]string{id, "/workspace/uploads/a"})
+	reports := 0
+	pass := func() int {
+		t.Helper()
+		reports = 0
+		if err := SetupFiles(context.Background(), h.client, h.sid.String(), sb, "", func() { reports++ }); err != nil {
+			t.Fatalf("SetupFiles: %v", err)
+		}
+		return reports
+	}
+	if got := pass(); got != 2 {
+		t.Errorf("first pass reports = %d, want 2 (the mount, then the boundary)", got)
+	}
+	if got := pass(); got != 2 {
+		t.Errorf("unchanged pass reports = %d, want 2 (the marker read, then the probe's one batch)", got)
+	}
+	sb.files["/workspace/"+filesSentinelName] = "[]"
+	if got := pass(); got != 2 {
+		t.Errorf("pass over a marker recording nothing reports = %d, want 2 (no probe, the mount, the boundary)", got)
+	}
+}
+
+// TestSetupFilesProbeOfAnOversizedSetIsBounded is the executor's rule over the
+// wire: 130 mounts of 1 KB paths, every one gone, are asked in two probe
+// execs — as few as the bound on one command allows — and all land again.
+func TestSetupFilesProbeOfAnOversizedSetIsBounded(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	var mounts [][2]string
+	for i := range 130 {
+		id := domain.NewID("file").String()
+		h.seedFile(t, id, "big", "text/plain", id)
+		mounts = append(mounts, [2]string{id, fmt.Sprintf("/workspace/uploads/%03d/%s", i, strings.Repeat("p", 1000))})
+	}
+	h.refFileMounts(t, mounts...)
+	h.suspend(t, writeUse("out.txt", "hello"))
+	if err := h.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	for _, m := range mounts {
+		delete(sb.files, m[1])
+	}
+	sb.cmds = nil
+	h.suspend(t, writeUse("out2.txt", "again"))
+	if err := h.run(); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	probes := 0
+	for _, cmd := range sb.cmds {
+		if strings.HasPrefix(cmd, "test -e '/workspace/uploads/") {
+			probes++
+		}
+	}
+	if probes == 0 || probes > 2 {
+		t.Errorf("the probe took %d execs for 130 mounts, want at most 2", probes)
+	}
+	for _, m := range mounts {
+		if sb.files[m[1]] != m[0] {
+			t.Fatalf("%s = %q, want it landed again", m[1], sb.files[m[1]])
+		}
 	}
 }
 

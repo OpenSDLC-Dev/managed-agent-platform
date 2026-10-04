@@ -90,6 +90,11 @@ func (f *fakeSandbox) ID() string { return "fake" }
 // recorded, hooked and answered bare — and frames the answer as the script's
 // run would have printed it, unless unframed says the frame never arrived.
 func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// The bound every backend applies before it runs anything: a command past
+	// it is refused, an error the caller must not reach.
+	if err := sandbox.CheckCommand(req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
 	// A platform script opens with the preamble every one carries
 	// (sandbox.Script), which the fake answers past — once it has checked
 	// it is there.
@@ -128,22 +133,14 @@ func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 	if res, ok := f.memoryExec(req.Command); ok {
 		return res, nil
 	}
-	// Reflect real file presence for SetupFiles's mountsPresent probe
-	// (`test -e '<p>' && … && true`), so a deleted mount reports absent and forces
-	// re-materialization. The exact shape match keeps ordinary tool commands on
-	// the unconditional exit-0 path.
-	if strings.HasPrefix(req.Command, "test -e ") && strings.HasSuffix(req.Command, "&& true") {
-		for _, tok := range strings.Split(req.Command, " && ") {
-			if tok == "true" {
-				continue
-			}
-			p := strings.TrimPrefix(tok, "test -e ")
-			p = strings.TrimSuffix(strings.TrimPrefix(p, "'"), "'")
-			p = strings.ReplaceAll(p, `'\''`, "'") // reverse shellQuote
-			if _, ok := f.files[p]; !ok {
-				return sandbox.ExecResult{ExitCode: 1}, nil
-			}
-		}
+	// Reflect real file presence for SetupFiles's probe (sandbox.ProbeEach), so
+	// a deleted mount is listed absent and lands again — an Exec that listed
+	// nothing would make every mount look kept.
+	if res, ok := sandboxtest.AnswerProbeEach(req.Command, func(p string) bool {
+		_, ok := f.files[p]
+		return ok
+	}); ok {
+		return res, nil
 	}
 	return sandbox.ExecResult{}, nil
 }
