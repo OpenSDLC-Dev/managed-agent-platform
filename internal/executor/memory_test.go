@@ -167,8 +167,9 @@ func materialized(t *testing.T, access string) (*harness, *fakeSandbox) {
 }
 
 // TestMaterializesMemoryStore: the store's memories land at the mount with the
-// marker and a baseline that names them, in one batch; a second run finds the
-// marker and lands nothing again.
+// marker and a baseline that names them — the marker first, alone (the claim,
+// #867), then the memories and the baseline in one batch; a second run finds
+// the marker and lands nothing again.
 func TestMaterializesMemoryStore(t *testing.T) {
 	h, sb := materialized(t, "read_write")
 	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
@@ -184,9 +185,9 @@ func TestMaterializesMemoryStore(t *testing.T) {
 	if b.Synced["/notes.md"] != sha256hex([]byte("hello")) || b.Synced["/a/b.md"] != sha256hex([]byte("deep")) || len(b.Synced) != 2 {
 		t.Errorf("baseline = %+v", b)
 	}
-	// Two memories, the marker, the baseline: one batch.
-	if !slices.Contains(sb.bulkSizes, 4) {
-		t.Errorf("batches = %v, want one of four members", sb.bulkSizes)
+	// The marker alone, then two memories and the baseline in one batch.
+	if !slices.Equal(sb.bulkSizes, []int{1, 3}) {
+		t.Errorf("batches = %v, want the claim and then one of three members", sb.bulkSizes)
 	}
 	// Every memory file is 0666 (decision 10); the marker and the baseline
 	// take the default.
@@ -619,8 +620,8 @@ func TestMemorySyncCapRefusesTheCreate(t *testing.T) {
 	}
 	h.refMemory(t, memStoreID, memMount, "read_write")
 	h.step(t)
-	if !slices.Contains(sb.bulkSizes, memsync.MaxMemoriesPerStore+2) {
-		t.Fatalf("batches = %v, want the full store in one", sb.bulkSizes)
+	if !slices.Contains(sb.bulkSizes, memsync.MaxMemoriesPerStore+1) {
+		t.Fatalf("batches = %v, want the full store and its baseline in one", sb.bulkSizes)
 	}
 	sb.files[memMount+"/one-more.md"] = "over the cap"
 	h.step(t)
@@ -710,6 +711,83 @@ func TestAStoreWhoseListingLostItsFrameLandsNextRun(t *testing.T) {
 	h.step(t)
 	if got, ok := h.memoryContent(t, memStoreID, "/edit.md"); !ok || got != "the agent's" {
 		t.Errorf("an edit in the landed store = %q, %v; want it pushed, the directory trusted", got, ok)
+	}
+}
+
+// TestAnUnmarkedEmptyStoreIsLandedByTheRunsSync (#867): a materialization
+// that failed leaves its store in the run's syncs, and a sync that finds the
+// directory still empty with no marker lands it, the marker with the pulls,
+// rather than filling it pull-only with files no marker vouches for, which
+// would hold the store untrusted and pull-only for the sandbox's life. Here the
+// marker's own write fails, so the materialization leaves no marker; the next
+// run's edit is pushed.
+func TestAnUnmarkedEmptyStoreIsLandedByTheRunsSync(t *testing.T) {
+	sb := &fakeSandbox{bulkFailOn: "/" + memsync.MarkerName}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, memStoreID, memMount, "read_write")
+	h.step(t)
+	if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Fatalf("marker = %q after the run's sync, want the store landed with it", got)
+	}
+	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+		t.Errorf("notes.md = %q, want hello", got)
+	}
+	sb.files[memMount+"/edit.md"] = "the agent's"
+	h.step(t)
+	if got, ok := h.memoryContent(t, memStoreID, "/edit.md"); !ok || got != "the agent's" {
+		t.Errorf("an edit in the landed store = %q, %v; want it pushed, the directory trusted", got, ok)
+	}
+}
+
+// TestAnAgentWriteIntoAFailedLandingIsPushed (#867): materialization claims
+// a fresh directory with its marker before anything that can fail, so a
+// landing that fails after the claim still leaves a directory the platform
+// vouches for. A file the agent writes there in the same run is pushed by the
+// run's sync, and the store's memories are pulled beside it.
+func TestAnAgentWriteIntoAFailedLandingIsPushed(t *testing.T) {
+	sb := &fakeSandbox{bulkFailOn: "/notes.md"}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, memStoreID, memMount, "read_write")
+	h.suspend(t, writeUse(memMount+"/mine.md", "the agent's"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got, ok := h.memoryContent(t, memStoreID, "/mine.md"); !ok || got != "the agent's" {
+		t.Errorf("the agent's file in the store = %q, %v; want it pushed", got, ok)
+	}
+	if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Errorf("marker = %q, want the claim", got)
+	}
+	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+		t.Errorf("notes.md = %q, want it pulled by the run's sync", got)
+	}
+}
+
+// TestReaperLandsAStoreItFindsUnlanded (#867): the reaper's sync of a store
+// whose directory never landed lands it, marker and all, so a reap that then
+// aborts leaves a sandbox whose store is trusted rather than filled with files
+// no marker vouches for.
+func TestReaperLandsAStoreItFindsUnlanded(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, memStoreID, memMount, "read_write")
+	setStatus(t, h, "terminated")
+	h.prov.owned = []domain.ID{h.sid}
+	h.prov.markRunning(h.sid)
+	if err := h.exec.reapPass(context.Background()); err != nil {
+		t.Fatalf("reap pass: %v", err)
+	}
+	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+		t.Fatalf("notes.md = %q; the reaper did not sync the store", got)
+	}
+	if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Errorf("marker = %q; the reaper filled a directory no marker vouches for", got)
 	}
 }
 

@@ -190,6 +190,38 @@ func TestPlanWipeGuard(t *testing.T) {
 	}
 }
 
+// An empty directory without its marker is the fresh case materialize lands
+// (#867): rebuilt whatever its baseline says — everything pulled, nothing
+// remembered — so the applier lands the marker with the pulls rather than
+// filling the directory with files no marker vouches for. A remembered file
+// is pulled back, not kept as agreed, which a later sync would read as a
+// local deletion. An unmarked directory that holds files is not the fresh
+// case: it stays pull-only.
+func TestPlanRebuildsAnEmptyUnmarkedDirectory(t *testing.T) {
+	remote := map[string]memsync.Head{"/a": {ID: "mem_a", SHA: "a"}, "/b": {ID: "mem_b", SHA: "b"}}
+	for name, base := range map[string]map[string]string{"no baseline": nil, "one remembered file": {"/a": "a"}} {
+		res := memsync.Plan(memsync.Input{
+			Local:    map[string]string{},
+			Baseline: memsync.Baseline{Synced: base},
+			Remote:   remote, PullOnly: true, Unmarked: true,
+		})
+		want := []memsync.Action{
+			{Kind: memsync.Pull, Path: "/a", ID: "mem_a", RemoteSHA: "a"},
+			{Kind: memsync.Pull, Path: "/b", ID: "mem_b", RemoteSHA: "b"},
+		}
+		if !res.Rebuild || !reflect.DeepEqual(res.Actions, want) || len(res.Next.Synced) != 0 {
+			t.Errorf("%s: rebuild %v, actions %+v, next %+v; want a rebuild pulling both", name, res.Rebuild, res.Actions, res.Next)
+		}
+	}
+	res := memsync.Plan(memsync.Input{
+		Local:  map[string]string{"/mine": "m"},
+		Remote: remote, PullOnly: true, Unmarked: true,
+	})
+	if res.Rebuild || res.Withheld != 1 {
+		t.Errorf("an unmarked directory with a file: rebuild %v, withheld %d; want pull-only", res.Rebuild, res.Withheld)
+	}
+}
+
 // Actions come out in path order whatever order the maps iterate, so a run's
 // settle and its telemetry are reproducible; a path the store would refuse is
 // never pushed and is remembered as refused; and nil maps are inputs too.

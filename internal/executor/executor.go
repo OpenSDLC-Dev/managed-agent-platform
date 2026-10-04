@@ -593,8 +593,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// changes since the last run land now, and what a faulted run wrote
 	// goes up — so a store's change reaches a session at its next run.
 	// A store whose directory's listing did not answer is left out of this
-	// run's syncs, which would fill an unmarked directory with files nothing
-	// vouches for (materializeMemory); the tools still see its mount.
+	// run's syncs (materializeMemory); the tools still see its mount.
 	existing, unanswered := e.materializeMemory(ctx, sb, item.SessionID, sess.memories, progress)
 	synced := withoutStores(sess.memories, unanswered)
 	if existing > 0 {

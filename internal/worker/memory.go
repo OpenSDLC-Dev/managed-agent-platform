@@ -120,9 +120,11 @@ type memoryStores struct {
 	mounts    []memoryRef
 	// unanswered names the stores whose directory's listing did not answer
 	// at materialize (errListingUnanswered), which this run's syncs leave
-	// alone: a pull-only sync into a directory that has no marker yet would
-	// fill it with files nothing vouches for, untrusted for the sandbox's
-	// life. The next run's materialize asks again.
+	// alone; the next run's materialize asks again. Since #867 a sync no
+	// longer fills an empty unmarked directory without its marker, so this
+	// is no longer what keeps one trusted (#860 added it as that); it stays
+	// because a listing that just failed to answer is no ground for a sync
+	// either.
 	unanswered map[string]bool
 }
 
@@ -191,12 +193,13 @@ func (m *memoryStores) listMemories(ctx context.Context, storeID string, view sd
 // the tools run — the executor's materializeMemory over the wire. A store
 // whose marker holds the expected bytes is left alone (the sync reconciles
 // it); one whose directory holds files but no trusted marker is left alone
-// too and synced pull-only (decision 12); a fresh directory gets the store's
-// memories, the marker, and a baseline that says they agree. A store the
-// routes no longer know is a logged, counted miss; a failed write is logged
-// and tolerated, never fatal to the run. It answers how many stores the
-// sandbox already held, for the caller to reconcile before the tools read
-// them.
+// too and synced pull-only (decision 12); a fresh directory gets the marker
+// first (the claim, materializeStore), then the store's memories and a
+// baseline that says they agree. A store the routes no longer know is a
+// logged, counted miss; a failed write is logged and tolerated, never fatal
+// to the run, and its store stays in the run's sync, which lands it. It
+// answers how many stores the sandbox already held, for the caller to
+// reconcile before the tools read them.
 func (m *memoryStores) materialize(ctx context.Context, progress func()) (existing int) {
 	if m == nil {
 		return 0
@@ -276,10 +279,30 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
+	// The claim (#867): the marker lands alone, before the listing and the
+	// batch that can fail, so a landing that fails after it leaves a
+	// directory the platform vouches for rather than an empty one with no
+	// marker — which a file the agent writes there would turn into a
+	// directory holding files no marker vouches for, untrusted and pull-only
+	// for the sandbox's life, every edit withheld. Its store stays in the
+	// run's sync, which lands the store against the missing baseline: the
+	// store's memories pulled, what the agent wrote pushed, the store winning
+	// a path both hold. The listing is also this half's only word on whether
+	// the store exists, so it cannot come first the way the executor's row
+	// read does; a 404 withdraws the claim instead.
+	//
+	// What remains is a directory the claim never reached: the claim's own
+	// write failing, or a listing that did not answer. A sync that finds it
+	// still empty lands it, marker and all (memsync.Plan's Unmarked), but a
+	// file the agent writes there first leaves it untrusted for the sandbox's
+	// life.
+	if err := m.sb.WriteFiles(ctx, []sandbox.FileWrite{{Path: marker, Data: want}}); err != nil {
+		return memoryOutcomeFailed, err
+	}
 	// One batch for the whole store, bounded by the store's own caps (2,000
-	// memories of 100 kB): the members, the marker, and the baseline saying
-	// the directory and the store agree on every one of them.
-	writes := []sandbox.FileWrite{{Path: marker, Data: want}}
+	// memories of 100 kB): the members, and the baseline saying the directory
+	// and the store agree on every one of them.
+	var writes []sandbox.FileWrite
 	baseline := memsync.Baseline{Synced: map[string]string{}}
 	err = m.listMemories(ctx, ref.MemoryStoreID, sdk.BetaManagedAgentsMemoryViewFull, progress, func(mem sdk.BetaManagedAgentsMemory) {
 		writes = append(writes, sandbox.FileWrite{Path: ref.MountPath + mem.Path, Data: []byte(mem.Content), Mode: memoryFileMode})
@@ -287,7 +310,16 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	})
 	if isStatus(err, 404) {
 		// The store is gone, or this session no longer attaches it: the
-		// miss the brain's block hedges.
+		// miss the brain's block hedges. The claim's marker is withdrawn
+		// (the directory it made stays, empty); a withdrawal that fails
+		// leaves it, which a sync of a store the routes do not know never
+		// acts on.
+		for _, cmd := range memsync.RemoveCommands(ref.MountPath, []string{"/" + memsync.MarkerName}) {
+			if res, rerr := sandbox.ExecScript(ctx, m.sb, sandbox.ExecRequest{Command: cmd}); rerr != nil || res.ExitCode != 0 {
+				slog.WarnContext(ctx, "memory store's marker not withdrawn after a 404",
+					"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "err", rerr, "exit", res.ExitCode)
+			}
+		}
 		return memoryOutcomeNotFound, err
 	}
 	if err != nil {
@@ -642,12 +674,17 @@ func (m *memoryStores) settleStore(ctx context.Context, st *storeSync, progress 
 	plan := memsync.Plan(memsync.Input{
 		Local: st.local, Baseline: st.baseline, Remote: remote,
 		PullOnly: st.ref.Access == "read_only" || !st.markerOK,
+		Unmarked: !st.markerOK,
 	})
 	st.next = plan.Next
 	st.counts.refused += len(plan.Skipped)
 	st.counts.withheld = plan.Withheld
 	st.restamp = plan.Rebuild
-	if plan.Rebuild {
+	switch {
+	case plan.Rebuild && !st.markerOK:
+		slog.WarnContext(ctx, "memory store directory is empty and has no marker; landed from the store, marker and all",
+			"session_id", m.sessionID, "memory_store_id", id)
+	case plan.Rebuild:
 		slog.WarnContext(ctx, "memory store directory is empty against a baseline of several files; rebuilt, nothing deleted",
 			"session_id", m.sessionID, "memory_store_id", id, "baseline_files", len(st.baseline.Synced))
 	}

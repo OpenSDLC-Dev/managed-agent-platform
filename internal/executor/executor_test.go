@@ -76,6 +76,10 @@ type fakeSandbox struct {
 	// hold a materializer to one batched call carrying a skill's whole tree,
 	// rather than one write per file (#206).
 	bulkSizes []int
+	// bulkFailOn, if set, fails the next WriteFiles carrying a member whose
+	// path ends in it, before any member lands — a batch whose delivery
+	// failed — and is cleared, so the batches after it land.
+	bulkFailOn string
 	// execStdout, if set, is returned verbatim as the harvest listing script's
 	// stdout — a test forging what an agent-writable sandbox could emit; and
 	// execTruncated marks that listing as overflowing the exec output cap.
@@ -364,6 +368,12 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 // fails at that member.
 func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
 	f.bulkSizes = append(f.bulkSizes, len(files))
+	for _, w := range files {
+		if f.bulkFailOn != "" && strings.HasSuffix(w.Path, f.bulkFailOn) {
+			f.bulkFailOn = ""
+			return fmt.Errorf("fake: bulk write of %s failed", w.Path)
+		}
+	}
 	if f.modes == nil {
 		f.modes = map[string]fs.FileMode{}
 	}
