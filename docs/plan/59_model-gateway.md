@@ -195,10 +195,27 @@ Apache-2.0):
   memory (`plugins/governance/store.go`).
 - It reads an inbound `traceparent` but `InjectTraceContext`
   (`framework/tracing/propagation.go:187`) has no caller, so none goes upstream.
+- Session affinity (`core/sessionaffinity.go`) binds a session id, per virtual key, user
+  and requested model, to the route and the key that last served it, in a key-value
+  store with a one-hour default TTL (`core/schemas/kvstore.go:16`): the first served
+  request binds, a fallback that serves rebinds, a binding that fails is dropped. It
+  exists so "a conversation keeps hitting the same provider prompt cache"
+  (`docs/providers/request-options.mdx`), at two levels, provider and key; it does not
+  track which model produced a thinking block.
+- A replayed signature that an upstream refuses is healed after the fact
+  (`core/encryptedreasoning.go`): a 400 whose message names a reasoning token earns one
+  retry with every signed thinking and `redacted_thinking` block removed from every
+  turn (`shouldStripReasoningAfterClientError`, `stripRawAnthropicChatThinking`). Its
+  comments record the measurement behind removing whole blocks — against the live API
+  on claude-sonnet-4-5, claude-haiku-4-5 and claude-opus-5 a history replays 200
+  untouched, 400 with its signatures blanked, and 200 with the blocks removed, on every
+  turn including the latest with a tool call in it — and they leave an assistant turn
+  that removal would empty untouched, so a redacted-only turn fails again.
 - Ideas taken here: weighted key selection, retry with jittered backoff before the first
   byte, ordered fallbacks, per-provider request paths, a model catalogue with prices,
-  virtual keys with limits, and later its Gemini/Vertex converters. No code is copied;
-  if a later converter ever is, NOTICE and THIRD_PARTY_LICENSES carry it.
+  virtual keys with limits, session stickiness for cache locality, the fail-soft
+  thinking strip as a backstop, and later its Gemini/Vertex converters. No code is
+  copied; if a later converter ever is, NOTICE and THIRD_PARTY_LICENSES carry it.
 
 **Anthropic's gateway docs.** Claude Code is out of scope, but its
 [gateway compatibility guide](https://code.claude.com/docs/en/llm-gateway-protocol) is
@@ -316,8 +333,8 @@ deployment, alias) reserve `org_id`, `workspace_id` and `project_id` with single
 defaults, as the platform's top-level resource tables do
 (`internal/store/migrations/0001_init.sql`, design principle 5).
 
-- **provider** — one vendor account at one endpoint: profile and endpoint per protocol
-  (a profile host or a custom one), both fixed at creation; name, extra headers, stall
+- **provider** — one vendor account behind fixed endpoints: profile and an endpoint per
+  protocol (a profile host or a custom one), all fixed at creation; name, extra headers, stall
   timeout, enabled. Its credentials are keys of that one account — a key of another
   account is another provider, which the console says where a key is added, since no
   vendor exposes which account a key belongs to. No header or endpoint carries a
@@ -334,7 +351,8 @@ defaults, as the platform's top-level resource tables do
   the `ModelInfo` fields `/v1/models` answers from); prices per million tokens for
   input, output, cache write and cache read, entered by the operator — no remote price
   sync, so an air-gapped install works. A deployment's provider and upstream model id
-  never change, so a deployment id names one model at one endpoint on one account —
+  never change, so a deployment id names one model on one account behind its provider's
+  fixed endpoints —
   what thinking provenance (Routing below) and an embedding index both key on; moving
   to another endpoint, account or model is a new provider or deployment. Credentials
   rotate freely within their account.
@@ -371,7 +389,12 @@ request path reads only the snapshot.
 ### Routing, retries, limits
 
 - Resolve the alias; in the highest-priority group with a healthy target, choose a
-  deployment by weight, then a credential by weight.
+  deployment by weight, then a credential by weight. A request carrying
+  `X-MAP-Session-ID` chooses its credential, and its deployment when there is no
+  thinking provenance to follow (below), by weighted rendezvous hashing on the session
+  id instead, so a conversation's requests keep reaching one upstream prompt cache —
+  bifrost's two levels of session stickiness, without its state. It is an optimization
+  only: nothing correct depends on it.
 - **Thinking provenance.** Every thinking block's `signature` and every
   `redacted_thinking` block's `data` the gateway returns is wrapped as
   `mapgw1.<deployment id>.<the upstream's value>`, exactly once per block: a whole
@@ -399,9 +422,16 @@ request path reads only the snapshot.
   The scheme needs no state, no session id and no sweep, holds per conversation (each
   of a session's threads carries its own history) and across replicas and restarts, and
   leaves no session stranded when a deployment is retired. A per-session record of the
-  last answering deployment was considered and rejected: a session's threads share one
-  id, a sweep forgets provenance a history still holds, and replicas race to write it;
-  so was rendezvous hashing on the session id. An OpenAI-shaped caller's
+  last answering deployment — bifrost's session affinity (Ground truth) — was
+  considered and rejected as provenance: a session's threads share one id, a TTL forgets
+  provenance a history still holds, and replicas race to write it. So was rendezvous
+  hashing, which after a fallback would send a recovered first choice the fallback
+  model's thinking. **Backstop:** a 400 whose message names a thinking block or its
+  signature — other than Anthropic's "cannot be modified", which a removal cannot cure
+  — earns one more attempt with every thinking block removed, an emptied assistant
+  message going as above: bifrost's fail-soft strip, so a history that breaks the
+  premises still gets an answer, at the cost of one call and its reasoning. Removing all
+  thinking is valid (Ground truth, Thinking). An OpenAI-shaped caller's
   `reasoning_content` carries no signature to wrap and has no provenance; it goes
   upstream as sent.
 - **Retry and fallback happen before the first byte only.** A connect error, 429, 5xx
@@ -463,7 +493,7 @@ frozen by slice 2.
   reaches the gateway as the alias.
 - `internal/provider` injects `traceparent` (`telemetry.Inject`) on both adapters'
   requests — it sends none today — and the brain sends `X-MAP-Session-ID` for
-  per-session cost.
+  per-session cost and cache locality.
 - compose and Helm run the gateway — Helm with two replicas and a PodDisruptionBudget by
   default, since every agent turn now depends on it. The brain's platform API key comes
   from one Secret that the brain, the control plane and the gateway read: the control plane
@@ -574,9 +604,11 @@ where a vendor bills cache writes.
   second fails in turn, the first gets back only its own blocks, each under its own
   prefix; a thinking-only reply stripped on fallback leaves no empty assistant message;
   a stream whose signature arrives in several fragments, after an empty start,
-  assembles the same wrapped value as the whole response; and an unwrapped block, or
-  one whose wrapper names a deployment outside the alias or no longer configured, never
-  reaches an upstream.
+  assembles the same wrapped value as the whole response; an unwrapped block, or one
+  whose wrapper names a deployment outside the alias or no longer configured, never
+  reaches an upstream; an edited block the fake refuses earns one retry without
+  thinking, which answers, while a refusal naming no thinking earns none; and requests
+  of one session id with no thinking land on one deployment while it is healthy.
 - **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests;
   the retention sweep against rows either side of the cutoff, its rollups intact; a key
   archived or expired mid-run refused on its next request, by both servers alike; a key
@@ -634,7 +666,8 @@ where a vendor bills cache writes.
   source (slice 2); `openai-go` (slice 4).
 - docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens`
   answering 404 where an upstream has none; stateless Responses; thinking signatures
-  and redacted data returned wrapped, and history thinking filtered by provenance;
+  and redacted data returned wrapped, history thinking filtered by provenance, and all
+  of it removed for one retry after a signature refusal;
   each profile edit with its vendor evidence.
 
 ## Open questions, settled by evidence in the slice that meets them
