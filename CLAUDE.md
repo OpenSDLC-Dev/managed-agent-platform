@@ -84,6 +84,9 @@ internal/
   queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
   identity/   # the human-auth boundary: OIDC / trusted-proxy JWT verifier, claim→role
               #   mapping, bounded JWKS cache (go-jose; no vendor SDK)
+  apikey/     # the platform API key check, shared by the control plane and the model gateway
+  modelgateway/ # the model gateway (plan 59): vendor profiles, its schema's queries, the
+              #   config snapshot and the /admin/v1/ API — no binary serves it before slice 2
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
   store/      # Postgres schema/migrations, reserved multi-tenant columns
 deploy/{helm,compose,gcp}

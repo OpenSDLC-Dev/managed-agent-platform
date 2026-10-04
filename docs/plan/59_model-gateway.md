@@ -1,5 +1,5 @@
 ---
-status: approved
+status: in-progress
 ---
 
 # Model gateway: a standalone, Anthropic-native model service (plan 59)
@@ -489,7 +489,7 @@ request path reads only the snapshot.
 - **Inference** takes a platform API key in `x-api-key` or `Authorization: Bearer`
   (Anthropic SDKs send the first, OpenAI SDKs the second), checked by the control plane's
   own rule: one indexed lookup per request, `status = 'active'` and unexpired against
-  the database clock (`internal/api/auth.go` `authenticate`). Both headers, and every
+  the database clock (`internal/apikey` `Authenticate`). Both headers, and every
   `X-MAP-*` header, are stripped before the upstream call.
 - **The admin API** lives under `/admin/v1/`: providers, credentials, deployments,
   aliases, key policies, usage queries, and the profiles (read-only). No reference

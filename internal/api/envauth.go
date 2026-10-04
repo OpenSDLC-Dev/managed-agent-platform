@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
@@ -40,7 +41,7 @@ func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key str
 		   FROM environment_keys k
 		   JOIN environments e ON e.id = k.environment_id
 		  WHERE k.key_hash = $1`,
-		hashKey(key)).Scan(&envID, &k, &revoked, &expired)
+		apikey.Hash(key)).Scan(&envID, &k, &revoked, &expired)
 	switch {
 	case err == pgx.ErrNoRows:
 		return "", "", false, nil

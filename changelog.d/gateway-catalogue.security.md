@@ -1,0 +1,1 @@
+- **A repeated identity-aware proxy assertion is refused** — with `IDENTITY_MODE=trusted_proxy`, a request carrying the assertion header twice was verified on its first copy; it now carries no human credential, as a repeated `x-api-key` already carried none, since which copy the proxy set cannot be told from the request.

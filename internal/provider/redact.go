@@ -34,7 +34,7 @@ func NewRedactor(cfg Config) Redactor {
 	r.add(cfg.APIKey)
 	r.addBaseURLSecrets(cfg.BaseURL)
 	for name, value := range cfg.Headers {
-		if isCredentialName(name) {
+		if IsCredentialName(name) {
 			r.add(value)
 		}
 	}
@@ -82,7 +82,7 @@ func (r *Redactor) addBaseURLSecrets(baseURL string) {
 		// Some gateways take the key as a query parameter instead; a transport
 		// error quotes the whole URL, query included.
 		for name, values := range u.Query() {
-			if isCredentialName(name) {
+			if IsCredentialName(name) {
 				for _, value := range values {
 					r.add(value)
 				}
@@ -150,7 +150,7 @@ func (r *Redactor) add(secret string) {
 	}
 }
 
-// isCredentialName reports whether a configured header or query parameter of
+// IsCredentialName reports whether a configured header or query parameter of
 // this name carries a credential. Only those values join the secret set,
 // because Headers also carries routing metadata: redacting
 // "x-gateway-route: llm-pool-7" out of "no capacity in pool llm-pool-7" would
@@ -163,7 +163,10 @@ func (r *Redactor) add(secret string) {
 // cost of masking an "idempotency-key" that was never secret. Over-redaction
 // costs a diagnostic and is noticed; under-redaction writes a credential into
 // an append-only log and is not.
-func isCredentialName(name string) bool {
+//
+// The model gateway refuses a provider header of such a name outright
+// (internal/modelgateway/admin): a secret there belongs in a credential.
+func IsCredentialName(name string) bool {
 	// Underscores so a query parameter ("api_key", "access_token") is judged by
 	// the same rules as the header spelling.
 	n := strings.ReplaceAll(strings.ToLower(name), "_", "-")

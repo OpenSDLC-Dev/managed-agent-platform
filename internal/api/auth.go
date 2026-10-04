@@ -2,24 +2,16 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// hashKey derives the stored form of an API key. Only this hash ever touches
-// the database.
-func hashKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
-}
 
 // IssuedKeyPrefix marks a management key this platform minted, beside plan 30's
 // `sk-map-env01-` for worker credentials. It is public by construction: it is the
@@ -95,7 +87,7 @@ func partialKeyHint(key string) string {
 // that index and marks them env-var-managed. A key issued over the console
 // records its issuer and is deliberately outside the one-live rule (plan 32).
 func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) error {
-	hash := hashKey(key)
+	hash := apikey.Hash(key)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -154,27 +146,6 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 	return tx.Commit(ctx)
 }
 
-// authenticate resolves an x-api-key value to the key's row ID, or "" if the key
-// is unknown, not active, or past its expiry.
-//
-// Expiry is evaluated here rather than swept: a key whose expires_at has passed
-// stops authenticating the moment it passes, with no background job to be down.
-// The comparison is against the database's clock, the same one that stamped
-// created_at, so a control-plane replica with a skewed clock cannot extend or
-// shorten a credential's life.
-func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (string, error) {
-	var id string
-	err := pool.QueryRow(ctx,
-		`SELECT id FROM api_keys
-		 WHERE key_hash = $1 AND status = 'active'
-		   AND (expires_at IS NULL OR expires_at > now())`,
-		hashKey(key)).Scan(&id)
-	if err == pgx.ErrNoRows {
-		return "", nil
-	}
-	return id, err
-}
-
 // requireAPIKey is the management-auth middleware: every /v1 route needs a
 // valid, unrevoked x-api-key. The authenticated key's ID is stored in the
 // request context as the audit principal (sessions.created_by).
@@ -198,7 +169,7 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, noRetry(errAuth("x-api-key header is required")))
 			return
 		}
-		principal, err := authenticate(r.Context(), pool, key)
+		principal, err := apikey.Authenticate(r.Context(), pool, key)
 		if err != nil {
 			writeError(w, r, err)
 			return
@@ -214,7 +185,7 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 
 // principalFrom is the audit answer to "who made this request" — the value
 // sessions.created_by records. It resolves either lane's principal: the api key's
-// row id on the machine lane — `authenticate` returns `id`, and the comment here
+// row id on the machine lane — `apikey.Authenticate` returns `id`, and the comment here
 // said "name" until plan 32 gave the console a resource that renders the value as
 // an actor and made the difference visible — and the human's `principal_` id on
 // the identity lane (plan 31 slice 2, #56).

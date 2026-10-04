@@ -28,28 +28,6 @@ func identityFrom(ctx context.Context) (identityPrincipal, bool) {
 	return p, ok
 }
 
-// identityCredential returns the credential this deployment's mode expects, and
-// whether it was present at all.
-//
-// The two modes never fall back to each other, and the asymmetry is deliberate.
-// In oidc mode the credential is a Bearer with a JWT silhouette; a Bearer that
-// is not JWT-shaped is left alone, because on the dual-auth paths that is how an
-// environment key arrives. In trusted_proxy mode Bearer is ignored ENTIRELY and
-// only the configured assertion header counts: the proxy is the only party that
-// can set that header on a request reaching us, so accepting a Bearer as well
-// would accept a credential the proxy never vouched for.
-func identityCredential(r *http.Request, v *identity.Verifier) (token string, ok bool) {
-	if v.Mode() == identity.ModeTrustedProxy {
-		token = r.Header.Get(v.AssertionHeader())
-		return token, token != ""
-	}
-	token, hasBearer := bearerToken(r)
-	if !hasBearer || !identity.LooksLikeJWT(token) {
-		return "", false
-	}
-	return token, true
-}
-
 // requireIdentity verifies the human credential, provisions the principal, and
 // puts it on the context.
 //
@@ -60,7 +38,7 @@ func identityCredential(r *http.Request, v *identity.Verifier) (token string, ok
 // and reporting an outage as an auth failure sends an operator hunting the IdP.
 func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := identityCredential(r, v)
+		token, ok := v.Credential(r)
 		if !ok {
 			writeError(w, r, errAuth("missing credential"))
 			return

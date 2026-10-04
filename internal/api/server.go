@@ -445,7 +445,7 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux)
 // would let a stale worker Bearer beside a proxy's assertion refuse a human the
 // proxy vouched for. In oidc mode the two cannot meet in one header: a human's
 // credential is a JWT-shaped Bearer, and an environment key, which has no dots,
-// never is (identityCredential), so it reaches the answer below. That is the
+// never is (identity.Verifier.Credential), so it reaches the answer below. That is the
 // reverse of dualAuth's order, where the environment lane admits, and a
 // worker's key is that route's machine credential.
 //
@@ -474,7 +474,7 @@ func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http
 			return
 		}
 		if human != nil {
-			if _, ok := identityCredential(r, v); ok {
+			if _, ok := v.Credential(r); ok {
 				human.ServeHTTP(w, r)
 				return
 			}
@@ -508,7 +508,7 @@ func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http
 // reissue those keys, and the list shows them by their empty name and absent
 // expiry.
 //
-// In trusted_proxy mode Bearer is never a human credential (identityCredential
+// In trusted_proxy mode Bearer is never a human credential (identity.Verifier.Credential
 // reads only the assertion header), so this branch stays exactly what it was and
 // the assertion is consulted afterwards, inside the management arm: on these
 // routes a worker's Bearer, the machine credential that admits here, resolves

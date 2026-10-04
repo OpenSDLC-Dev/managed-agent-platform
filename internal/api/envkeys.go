@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -100,7 +101,7 @@ func issueEnvironmentKey(ctx context.Context, db execer, environmentID, name str
 	if _, err := db.Exec(ctx,
 		`INSERT INTO environment_keys (id, environment_id, name, key_hash, expires_at)
 		 VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))`,
-		domain.NewID(domain.PrefixEnvironmentKey).String(), environmentID, name, hashKey(key),
+		domain.NewID(domain.PrefixEnvironmentKey).String(), environmentID, name, apikey.Hash(key),
 		EnvironmentKeyTTL.Seconds()); err != nil {
 		return "", err
 	}

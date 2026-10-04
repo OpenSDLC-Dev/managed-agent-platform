@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -135,7 +136,7 @@ func IssueManagementKey(ctx context.Context, pool *pgxpool.Pool, name string, ex
 		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint, created_by, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING `+managementKeyColumns,
-		domain.NewID(domain.PrefixAPIKey).String(), name, hashKey(key), partialKeyHint(key),
+		domain.NewID(domain.PrefixAPIKey).String(), name, apikey.Hash(key), partialKeyHint(key),
 		createdBy, expiresAt)
 	k, err := scanManagementKey(row)
 	if err != nil {

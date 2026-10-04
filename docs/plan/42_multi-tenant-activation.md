@@ -548,10 +548,10 @@ item 5, which gates slice 6) at §7.6, and the archived-workspace refusal (item 
 
 ### 4.4 Platform as-is
 
-- **No tenant reaches any request context.** `authenticate` runs `SELECT id FROM api_keys WHERE
+- **No tenant reaches any request context.** `apikey.Authenticate` runs `SELECT id FROM api_keys WHERE
   key_hash = $1 AND status = 'active' AND (expires_at IS NULL OR expires_at > now())` and
-  returns only the row id (`internal/api/auth.go:165` the func, `:167-171` the statement);
-  `authenticateEnvironmentKey` returns only `environment_id` (`internal/api/envauth.go:18`,
+  returns only the row id (`internal/apikey/apikey.go:36` the func, `:38-42` the statement);
+  `authenticateEnvironmentKey` returns only `environment_id` (`internal/api/envauth.go:19`,
   statement `:21-24`). The api package has exactly six context keys and none carries a tenant
   (`internal/api/errors.go:114` the type, `:117-122` the constants).
 - **The identity lane has no tenant source at all.** `identity.Identity` has five fields —
@@ -798,7 +798,7 @@ query that already runs:
 
 | Lane | Source | Change |
 |---|---|---|
-| Management `x-api-key` | the `api_keys` row | `internal/api/auth.go:167-171` selects the triple beside `id` |
+| Management `x-api-key` | the `api_keys` row | `internal/apikey/apikey.go:38-42` selects the triple beside `id` |
 | Environment key (Bearer) | the **`environments`** row | `internal/api/envauth.go:21-24` gains `JOIN environments` |
 | Work token `wtk_` | the `sessions` row | `internal/worktoken/worktoken.go:102-112` already joins it |
 | Gate token `gtk_` | the `sessions` row | `internal/gatetoken/gatetoken.go:103-107` already joins it |
@@ -935,9 +935,9 @@ plan exists to refuse. A worker polling its own environment is unaffected whethe
 header or omits it.
 
 Both response headers are stamped **inside each credential resolver** — `requireAPIKey`
-(`internal/api/auth.go:181`), `resolveEnvironmentKey` (`envauth.go:44`), `requireWorkToken`
+(`internal/api/auth.go:152`), `resolveEnvironmentKey` (`envauth.go:44`), `requireWorkToken`
 (`worktokenauth.go:103`), `requireGateToken` (`gateauth.go:21`) and `requireIdentity`
-(`identitylane.go:61`) — immediately after the scope resolves and before the handler or an
+(`identitylane.go:39`) — immediately after the scope resolves and before the handler or an
 authenticated rejection writes, so both are present on a 200 and on an authenticated 4xx and
 absent on a pre-auth 401. The environment lane is stamped at the **shared resolver**, not at
 `requireEnvironmentKey` (`envauth.go:67`), because a second middleware calls the same function:
@@ -987,9 +987,9 @@ Two carve-outs live inside the predicate itself:
   (`0007:32-45`, and `:30-31` says why: "Scope columns are inherited from the parent skill
   row"), so the three version routes take a *parent* check instead (§7.5).
 - **Credential authentication:** by hash, where the scope is *derived*. Filtering on it would
-  be circular. Five statements, not four: `internal/api/auth.go:167-171` (`authenticate`),
+  be circular. Five statements, not four: `internal/apikey/apikey.go:38-42` (`apikey.Authenticate`),
   `internal/api/envauth.go:21-24`, `internal/worktoken/worktoken.go:102-112`,
-  `internal/gatetoken/gatetoken.go:103-107`, and `internal/api/auth.go:115-117` —
+  `internal/gatetoken/gatetoken.go:103-107`, and `internal/api/auth.go:107-109` —
   `EnsureAPIKey`'s adoption probe, `SELECT created_by, status FROM api_keys WHERE key_hash =
   $1`, which sits twelve lines above the archive-by-name §7.5 does fix. This class is why the
   guard is a scanner with an exemption list and not a grep.
@@ -1185,7 +1185,7 @@ scope predicate has exactly that shape. So `internal/api/scopematrix_test.go`:
      handler earlier in the request path, or a helper this function never calls. Those are
      rule-(d) exemptions naming their resolver, never (b) admissions. In the current tree they
      are exactly the five cross-file
-     resolutions (`internal/api/workapi.go:515`, `internal/api/envkeys.go:121`, `:132` and
+     resolutions (`internal/api/workapi.go:515`, `internal/api/envkeys.go:122`, `:132` and
      `:163`, and `internal/api/threadstate.go:38`), all on the exemption list below;
    - **(b′)** a read in a package with **no request scope** — `internal/brain`,
      `internal/executor` and `internal/vaultresolve` — constrained either **by the scoped
@@ -1304,7 +1304,7 @@ and `internal/executor/checkpoint.go:205-210`; the **five cross-file parent reso
 rule (b)'s same-function check cannot admit, each naming where its parent *is* resolved:
 `internal/api/workapi.go:515` (`SELECT session_id, kind FROM work_items WHERE id = $1 AND
 environment_id = $2` — that environment id is the env-key choke point's own, §6.1);
-`internal/api/envkeys.go:121`, `:132` and `:163`, whose environment is gated by
+`internal/api/envkeys.go:122`, `:132` and `:163`, whose environment is gated by
 `consoleEnvironment` (`internal/api/consoleapi.go:227`, statement `:234`, which slice 4 gives
 the predicate — §7.4); and `internal/api/threadstate.go:38`, whose session is the one
 `sendSessionEvents` (`internal/api/events.go:43`) locked at `:77-81` in the same transaction.
@@ -1327,8 +1327,8 @@ the nineteen plus what the not-yet-landed slices still owe.
 
 **The guard's own TDD comes first.** Before any statement is fixed, the guard runs against the
 *current* tree and must report the leaks §4.4 and §7.5 enumerate — the four worker-lane skill
-routes, `ListManagementKeys` with no `WHERE` at all (`internal/api/apikeys.go:190` the func,
-`:195` the statement), the five unscoped inserts. Without that, the first thing it ever does is
+routes, `ListManagementKeys` with no `WHERE` at all (`internal/api/apikeys.go:191` the func,
+`:196` the statement), the five unscoped inserts. Without that, the first thing it ever does is
 pass, and nobody learns whether it detects the failure mode it was built for. Synthetic
 fixtures prove the matcher; the current tree proves the coverage.
 
@@ -1429,7 +1429,7 @@ Three of them, none reachable by a predicate sweep.
 `UNIQUE` (`0001_init.sql:145`) and the boot upsert is
 `INSERT INTO api_keys … ON CONFLICT (key_hash) DO UPDATE SET status = 'active', name =
 EXCLUDED.name, partial_key_hint = EXCLUDED.partial_key_hint, created_by = NULL, expires_at =
-NULL` (`internal/api/auth.go:146-151`, with the adoption argument at `:104-112` and `:135-145`).
+NULL` (`internal/api/auth.go:138-143`, with the adoption argument at `:96-104` and `:127-137`).
 After tenancy, workspace B's operator configuring a value that already exists as workspace A's
 key takes the `ON CONFLICT (key_hash)` arm, which cannot fail: it rebinds name, status and
 expiry and leaves `workspace_id` untouched, so a B-configured bootstrap key authenticates into
@@ -1448,11 +1448,11 @@ test asserts both.
 
 **The bootstrap marker must reach the request, and it is writable.** Slice 6's authority rule
 distinguishes the env-var-managed key by `created_by IS NULL` — the same predicate `0024:77-78`
-keys its one-live index on. But `authenticate` returns only the row id today, so slice 1's
+keys its one-live index on. But `apikey.Authenticate` returns only the row id today, so slice 1's
 "selects the triple beside `id`" must **also select `created_by`** and put a boolean
 `bootstrapKey` on the context beside the scope; nothing else can reach it. And the marker is
 not immutable: `EnsureAPIKey`'s adoption path sets `created_by = NULL` on any previously
-console-issued key whose value is configured (the clause at `auth.go:150`), so "a console-issued key cannot
+console-issued key whose value is configured (the clause at `auth.go:142`), so "a console-issued key cannot
 administer workspaces" is enforced by a column `CONTROLPLANE_API_KEY` can clear. That is
 stated as the bound it is — whoever can set that variable already has deployment access — not
 papered over, and it is why slice 6 pairs the marker with an SSO `admin` rather than resting on
@@ -1460,7 +1460,7 @@ it alone.
 
 **`EnsureAPIKey`'s archive-by-name needs the predicate.** `UPDATE api_keys SET status =
 'archived' WHERE name = $1 AND key_hash <> $2 AND status = 'active' AND created_by IS NULL`
-(`auth.go:129-132`) — without a workspace term, a bootstrap rotation in one workspace archives
+(`auth.go:121-124`) — without a workspace term, a bootstrap rotation in one workspace archives
 another's key of the same name. **This one lands in slice 5, not slice 1**, because its test
 cannot be written before then: the fixture needs two live env-var-managed keys of the same name
 in different workspaces, and `0024:77-78`'s `api_keys_one_live_unissued` is keyed on `name`
@@ -1739,10 +1739,10 @@ a newly created resource would be invisible to its own creator.
 
 **Changes.** The remaining `internal/api` inserts into scoped tables: `agents.go:159`,
 `environments.go:420`, `sessions.go:732`, `deployments.go:300`, `memorystores.go:129`,
-`vaults.go:82`, `files.go:129`, `skills.go:298`, `apikeys.go:135` — `IssueManagementKey`
+`vaults.go:82`, `files.go:129`, `skills.go:298`, `apikeys.go:136` — `IssueManagementKey`
 (`:101`), reached only from the console route, so the *issuer's* scope and the `{workspace}`
 segment's are the same value until slice 6 lets them differ (§7.6). ·
-`envkeys.go:93` and `principals.go:37-44` deliberately leave their columns at the defaults, with
+`envkeys.go:94` and `principals.go:37-44` deliberately leave their columns at the defaults, with
 a comment each so the omission reads as deliberate (§6.1, §6.2). · `skillsimport.go:102-104` is
 exempted, not changed. · The `workspace_fk` migration: the normalizing UPDATEs, then the
 nine composite foreign keys of §6.4, with the lock name, the lock cost and the exclusion reasons
@@ -1942,9 +1942,9 @@ they *contrast* against skills' globality — `internal/api/files.go:339` and
 `internal/api/server.go:598`.
 
 **Changes — the key surface.** `ListManagementKeys` has no `WHERE` at all
-(`internal/api/apikeys.go:190`, statement `:195`) and gains the predicate. **Two statements the
+(`internal/api/apikeys.go:191`, statement `:196`) and gains the predicate. **Two statements the
 inherited sizing misses entirely are cross-tenant *writes* or reads by bare id**:
-`updateManagementKey` (`internal/api/apikeys.go:157`, statement `:159-161`, `UPDATE api_keys SET
+`updateManagementKey` (`internal/api/apikeys.go:158`, statement `:160-162`, `UPDATE api_keys SET
 status = coalesce($2, status), name = coalesce($3, name) WHERE id = $1`) and the **console
 patch**'s locked read (`internal/api/consoleapikeys.go:265`,
 `FROM api_keys WHERE id = $1 FOR UPDATE`, inside `updateAPIKey` at `:216` — there is no console
@@ -1993,7 +1993,7 @@ are enumerated here rather than left to slice 4's bulk:
   predicate. The **branch structure at `:344-352` is unchanged** — it is a Go-side lane test
   with no SQL in it — and the environment-key arm's `fileMountedInEnvironment` isolation
   (`:344-348`, `:385`) is left exactly as it is.
-- `internal/api/auth.go:129-132`, `EnsureAPIKey`'s archive-by-name (§6.8).
+- `internal/api/auth.go:121-124`, `EnsureAPIKey`'s archive-by-name (§6.8).
 - Guard target: every non-test file under `internal/`. `vault_credentials` needs no rule of its
   own — it is one of §6.5's eleven unscoped children and rule (g) has covered it since slice 2;
   what happens here is that `internal/api`'s twelve statements on it come **off the exemption
@@ -2089,7 +2089,7 @@ of comparing to `reservedWorkspace` (`:34`), which is deleted — **and the call
 constrains that resolution only for a credential without the administration capability**: a
 console-issued key may address its own workspace and no other, while the bootstrap key and an
 SSO admin may address any registered one. That is the difference between a capability and a
-wider resource scope, and it is what makes `apikeys.go:135` stamp the **path's** workspace here
+wider resource scope, and it is what makes `apikeys.go:136` stamp the **path's** workspace here
 rather than the issuer's (§7.3). · **The bootstrap order, stated because nothing else in the
 plan can mint workspace B's first credential.** The bootstrap key's *resource* scope is
 `default`, so it cannot be the answer by scope; it is the answer by capability: (1) the

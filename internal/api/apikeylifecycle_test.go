@@ -254,7 +254,7 @@ func TestEnsureAPIKeyRecordsAMaskedHint(t *testing.T) {
 // an inherited created_by leaves the row outside api_keys_one_live_unissued, so
 // the next rotation's archive skips it and the name carries two live credentials
 // (#72, reopened); an inherited expires_at lets a control plane boot reporting
-// success over a bootstrap key that authenticate() already refuses.
+// success over a bootstrap key that apikey.Authenticate already refuses.
 func TestEnsureAPIKeyAdoptsAnIssuedRowAsEnvManaged(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
