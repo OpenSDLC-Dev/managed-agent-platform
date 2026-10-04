@@ -475,7 +475,9 @@ func withModel(b []byte, alias string) []byte {
 // to say so, and an unfinished event before it is dropped rather than merged
 // into it. Once message_stop or the upstream's own error event has passed, the
 // stream has said all it will and the relay ends: an upstream that holds its
-// connection open after that holds nothing of the gateway's.
+// connection open after that holds nothing of the gateway's. Ending there
+// resets the stream on an HTTP/2 connection, which a TLS upstream negotiates,
+// and gives up an HTTP/1.1 one rather than returning it to the pool.
 func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, alias, rid string, guard *provider.StallGuard, red provider.Redactor) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

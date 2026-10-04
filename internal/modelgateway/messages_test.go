@@ -637,18 +637,21 @@ func TestACallerLeavingDoesNotEndTheUpstreamAnswer(t *testing.T) {
 	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
+		// The answer is whole when every event went out to a gateway still
+		// listening. Nothing is checked after the last: the gateway's relay
+		// ends at message_stop and closes the connection.
 		all := events(c.Model, "slow")
 		for i, ev := range all {
 			if i > 0 {
 				time.Sleep(60 * time.Millisecond)
 			}
-			if _, err := io.WriteString(w, ev); err != nil {
+			if _, err := io.WriteString(w, ev); err != nil || r.Context().Err() != nil {
 				finished <- false
 				return
 			}
 			w.(http.Flusher).Flush()
 		}
-		finished <- r.Context().Err() == nil
+		finished <- true
 	})
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
