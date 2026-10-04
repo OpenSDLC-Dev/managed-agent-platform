@@ -4,10 +4,14 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** v0.5.0 is out ([docs/RELEASING.md](./docs/RELEASING.md)): the release PR (#875), the
-tag on its squash merge, a green `release.yml` run, and `§ [0.5.0]` moved to
-[docs/changelog/0.5.0.md](./docs/changelog/0.5.0.md).
+**Cutting v0.5.1** ([docs/RELEASING.md](./docs/RELEASING.md)). Every fragment it folds is a
+`Fixed` entry, so the policy makes the bump a patch; the platform version, the chart `version`
+and its `appVersion` move together.
 
 ## Tasks
 
-None.
+- [x] Release PR — section assembled byte-for-byte from every pending fragment, Chart.yaml at
+      0.5.1, both READMEs' version, and no citation the cut would have left dangling
+- [ ] Tag the squash-merge commit `v0.5.1` and push it — `release.yml` publishes the versioned
+      images, the chart and the worker binaries
+- [ ] `make changelog-archive VERSION=0.5.1`, in the next docs PR once the release run is green
