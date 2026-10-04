@@ -201,6 +201,57 @@ func TestHarvestRealSandbox(t *testing.T) {
 	}
 }
 
+// TestHarvestUnderAStartupFloodRealSandbox runs a grading harvest on a real
+// sandbox of each backend whose image's startup file prints 1.2 MB in every
+// shell, past the output cap: the listing is pushed out — on Kubernetes with
+// the exec's exit record, on Docker as a stdout the cap cut before any begin
+// line — and the harvest settles as one that read no sandbox, grading chained
+// and the item completed, rather than faulting into a reclaim that meets the
+// same, forever (#860).
+func TestHarvestUnderAStartupFloodRealSandbox(t *testing.T) {
+	image := hookedtest.Image(t, "yes | head -c 1200000\n")
+	dp, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
+	kp, err := k8s.New(k8s.Config{Context: os.Getenv("MAP_K8S_CONTEXT"), Namespace: os.Getenv("MAP_K8S_NAMESPACE")})
+	if err != nil {
+		t.Fatalf("integration test requires a Kubernetes cluster: %v", err)
+	}
+	for _, b := range []struct {
+		name     string
+		provider sandbox.Provider
+	}{{"docker", dp}, {"k8s", kp}} {
+		t.Run(b.name, func(t *testing.T) {
+			h := newHarnessWith(t, b.provider, Config{Image: image})
+			t.Cleanup(func() {
+				sb, err := b.provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+				if err == nil {
+					_ = sb.Destroy(context.Background())
+				}
+			})
+			var faults []error
+			h.exec.onFault = func(_ *queue.Item, err error) { faults = append(faults, err) }
+			h.seedOutcome(t, domain.OutcomeResultEvaluating)
+			h.enqueueHarvest(t)
+			h.stepOnce(t)
+
+			if len(faults) != 0 {
+				t.Fatalf("faults = %v, want none", faults)
+			}
+			if rows := h.fileRows(t); len(rows) != 0 {
+				t.Errorf("rows = %+v, want none", rows)
+			}
+			if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+				t.Errorf("model_turn live = %d, want 1 (grading chained)", got)
+			}
+			if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+				t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
+			}
+		})
+	}
+}
+
 // TestHarvestTruncatedListingRealSandbox drives the truncation degradation
 // through the real stack: enough real files that the listing script's output
 // overflows the exec cap in a real Docker container (Truncated set by the
