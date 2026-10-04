@@ -39,9 +39,10 @@ Scope decisions settled with the user on 2026-10-04:
    Anthropic key serves both the Messages API and Managed Agents; the gateway adds
    per-key usage and cost and per-key RPM/TPM limits. Usage holds metadata only — never
    prompt or response content — kept 90 days by default (configurable), with daily
-   rollups kept indefinitely. No budgets, billing, teams or tenants. One credential
-   carrying both management and inference rights is the price of not having two; a
-   scope narrowing a key to inference waits for someone who needs it.
+   rollups kept indefinitely. No budgets, billing, teams or tenants. A platform key
+   keeps the full control-plane authority it has today (`internal/api/identitylane.go`
+   lets a machine key past every role check); the gateway's admin API does not extend
+   it, so an application cannot lift its own limits (Auth below).
 5. **Inbound surfaces:** Anthropic Messages in full — `POST /v1/messages` (streamed and
    not), `POST /v1/messages/count_tokens`, `GET /v1/models` and `GET /v1/models/{id}` —
    and, on the OpenAI side, Chat Completions, Embeddings, Models and Responses, the last
@@ -52,14 +53,14 @@ Scope decisions settled with the user on 2026-10-04:
    that runs no gateway.
 7. **Models are configured in managed-agent-console**, against the gateway's own admin
    API.
-8. **Thinking persistence and replay is a separate plan, done first (#67).** DeepSeek's
-   models think by default ("Thinking mode is enabled by default"), MiniMax M2.x and
-   GLM-5.3 cannot turn thinking off, and Claude 5-generation models think by default
-   too. A thinking model needs its thinking blocks back within a
-   tool-use turn — DeepSeek answers 400 without them — but the brain stores no thinking
-   content and does not build its requests append-only (`system.message` text is folded
-   into the system prompt; the `web_search` description carries the date). That plan
-   gates slice 5 (the brain cutover), not the gateway.
+8. **Thinking persistence and replay is a separate plan, done first (#67).** Every v1
+   vendor's models think by default (DeepSeek: "Thinking mode is enabled by default";
+   MiniMax-M3.1-Flash-Preview answers `thinking: disabled` with a 400), and so does every
+   Claude 5-generation
+   model. Each vendor documents that thinking goes back within a tool-use turn, but
+   the brain stores no thinking content, and Anthropic's API checks a returned block
+   against the `system`, `tools` and messages before it. That plan gates slice 5 (the
+   brain cutover), not the gateway.
 9. **Embeddings and rerank are shaped by dikw-core** (OpenDIKW's knowledge-base engine):
    the gateway serves its three calls unchanged, so dikw-core moves onto the gateway by
    configuration alone — `embedding_base_url`, `assets.multimodal.base_url` and
@@ -93,7 +94,14 @@ error" ([thinking mode](https://api-docs.deepseek.com/guides/thinking_mode)). Ki
 "pass the thinking block from the response (including `signature`) back unchanged"
 ([messages](https://platform.kimi.ai/docs/api/messages.md)). MiniMax: thinking blocks
 must be preserved unchanged
-([Anthropic API](https://platform.minimax.io/docs/api-reference/text-anthropic-api)).
+([Anthropic API](https://platform.minimax.io/docs/api-reference/text-anthropic-api));
+its current models, thinking depth through `output_config.effort`, and M3.1-Flash-Preview's
+400 for disabled thinking are in its
+[text generation guide](https://platform.minimax.cn/docs/guides/text-generation).
+Probed live: DeepSeek (`deepseek-v4-pro` and `deepseek-flash`, both endpoints) and
+MiniMax CN (`MiniMax-M2.7`) return signed thinking unasked and answer 200 to a tool
+continuation without it, with it, and with its text edited — the documented 400 did
+not reproduce, so only Anthropic's API enforces replay today.
 
 **Vendors.** Each publishes an Anthropic-compatible endpoint beside its
 OpenAI-compatible one. The CN and international sites are separate consoles issuing
@@ -209,7 +217,7 @@ configuration or an unreachable dependency.
 `cmd/gateway`: `cmd/gate` is the egress sidecar, and the two must not be confusable.)
 Packages live under `internal/modelgateway/` — `catalog` (configuration snapshot, alias
 resolution, target selection, reload), `profile`, `upstream` (passthrough and streaming
-relay per protocol), `convert`, `store` (schema, migrations, queries), `admin` — with
+relay per protocol), `convert`, `store` (queries over the `modelgateway` schema), `admin` — with
 the HTTP surfaces at the root.
 
 It imports `internal/provider` for `StallGuard`, `Redactor` and `SearchResultText`
@@ -287,16 +295,21 @@ Two layers of credentials, never mixed: a caller presents a platform API key and
 model — an alias — and the gateway resolves the alias to a deployment and calls that
 deployment's provider with the provider's own credential, which no caller ever sees.
 
-Postgres schema `modelgateway` in the platform's database (`DATABASE_URL`, whose
-`api_keys` the gateway reads), with its own embedded migrations and its own
-`schema_migrations` (CLAUDE.md's immutability rule applies). Ids carry gateway-local
-prefixes (`gwprov_`, `gwcred_`, `gwdep_`), deliberately outside `internal/domain`'s wire
-list. Every table reserves `org_id`, `workspace_id` and `project_id` with single-tenant
-defaults, as the platform's own do (`internal/store/migrations/0001_init.sql`, design
-principle 5).
+A Postgres schema, `modelgateway`, in the platform's database (`DATABASE_URL`, whose
+`api_keys` the gateway reads), created by ordinary numbered migrations under
+`internal/store/migrations/`: every binary runs the platform's migrations when it opens
+the database, the gateway with them, so there is one ledger and CLAUDE.md's migration
+rules hold unchanged. Ids carry gateway-local prefixes (`gwprov_`, `gwcred_`, `gwdep_`),
+deliberately outside `internal/domain`'s wire list. The top-level tables (provider,
+deployment, alias) reserve `org_id`, `workspace_id` and `project_id` with single-tenant
+defaults, as the platform's top-level resource tables do
+(`internal/store/migrations/0001_init.sql`, design principle 5).
 
 - **provider** — profile, name, endpoint per protocol (a profile host or a custom one),
-  extra headers, stall timeout, enabled.
+  extra headers, stall timeout, enabled. No header or endpoint carries a secret: a
+  header name the redactor treats as a credential (`internal/provider/redact.go`), an
+  endpoint with userinfo, and one with a query string are refused; a secret is a
+  credential.
 - **credential** — a provider's key, as ciphertext and key id from `internal/secrets`
   (the vault credentials' backend selection); `kind` (`api_key`, the only v1 value);
   last four characters for display; the protocols it may be used on; weight; enabled.
@@ -306,7 +319,8 @@ principle 5).
   the `ModelInfo` fields `/v1/models` answers from); prices per million tokens for
   input, output, cache write and cache read, entered by the operator — no remote price
   sync, so an air-gapped install works. An `embedding` deployment's upstream model id
-  cannot be edited.
+  cannot be edited, nor can the endpoints of a provider an `embedding` deployment uses:
+  either would change the vectors behind an unchanged alias. Credentials rotate freely.
 - **alias** — the model name a caller sends: a display name and targets
   `[{deployment, priority, weight}]`. Exact match first, then an optional `*` alias. A
   `claude-*` alias is only a name, which is how clients that hard-code Claude names
@@ -324,9 +338,11 @@ principle 5).
   answer, records no tokens and no cost. Metadata only. Kept 90 days by default
   (`MODELGATEWAY_USAGE_RETENTION`) and deleted by a sweep any replica may run under an
   advisory lock.
-- **usage_daily** — rollups per day, key, alias and deployment, kept indefinitely; the
-  console's cost reports read these.
+- **usage_daily** — rollups per day, key, matched alias (Telemetry below) and
+  deployment, kept indefinitely; the console's cost reports read these.
 - **rate_window** — one-minute windows per key: requests and tokens.
+- **session_affinity** — per session id and alias, the deployment that last answered;
+  swept 30 days after its last use.
 
 Every admin write commits a `NOTIFY modelgateway_config`; each replica reloads its
 snapshot on the notification and on a periodic tick, so a missed notification heals. The
@@ -337,23 +353,32 @@ request path reads only the snapshot.
 - Resolve the alias; in the highest-priority group with a healthy target, choose a
   deployment by weight, then a credential by weight.
 - **Affinity.** A request carrying `X-MAP-Session-ID` (the brain sends it; the usage row
-  records it) chooses by rendezvous hashing over the group, so a session stays on one
-  deployment while it is healthy: thinking blocks are bound to the backend that produced
-  them.
+  records it) goes to the deployment `session_affinity` holds for its session and alias
+  while that deployment is healthy, and the deployment that answers becomes the record:
+  thinking blocks are bound to the model that produced them. Rendezvous hashing was
+  rejected for being stateless: after a fallback, a recovered first choice would take
+  the session back with the fallback model's thinking in its history.
 - **Retry and fallback happen before the first byte only.** A connect error, 429, 5xx
   or overload moves to the next credential, then the next group, within a bounded
   attempt count and jittered exponential backoff. After the first byte a failure is the
   caller's (`event: error` on a stream). A request whose history carries thinking blocks
-  falls back only to a deployment of the same upstream model; otherwise the error
-  surfaces rather than one model's thinking being replayed to another. An embedding
-  alias, with its one deployment, retries across credentials only.
+  falls back only to a deployment of the same upstream model as its session's record —
+  or, without a session id, as its first choice — and otherwise the error surfaces
+  rather than one model's thinking being replayed to another. Two consequences are the
+  operator's: a caller that replays thinking without a session id, through an alias
+  whose targets mix upstream models, can reach a second model on a later request; and
+  since the brain drops a session's earlier thinking only when the agent's model string
+  changes (#67's plan), retiring an upstream model's last deployment strands the
+  sessions recorded on it until their agents move to another model. An embedding alias,
+  with its one deployment, retries across credentials only.
 - **Stall.** `provider.StallGuard` per provider, for #121's reasons unchanged.
 - **Limits.** Admission increments the key's request count for the current minute in one
-  upsert and refuses over the limit with 429 and `retry-after` in integer seconds; tokens
-  are added when the
-  response ends, so TPM admits against tokens already spent, never against an output not
-  yet known. Per-replica in-memory buckets were rejected: under an autoscaler the
-  effective limit would be a function of the replica count.
+  upsert and refuses over the limit with 429 and `retry-after` in integer seconds. TPM is
+  a soft limit on completed usage: a response's tokens count in the minute it ends, and a
+  request is admitted while the current minute's count is under the limit, so requests
+  already in flight can overshoot it by their own size — RPM is what bounds that.
+  Per-replica in-memory buckets were rejected: under an autoscaler the effective limit
+  would be a function of the replica count.
 
 ### Auth, admin API and `/v1/models`
 
@@ -364,10 +389,13 @@ request path reads only the snapshot.
   `X-MAP-*` header, are stripped before the upstream call.
 - **The admin API** lives under `/admin/v1/`: providers, credentials, deployments,
   aliases, key policies, usage queries, and the profiles (read-only). No reference
-  surface corresponds to it, so it is ours to shape. It takes what the control plane's
-  `/api/` lane takes: a platform API key, or, with identity configured from the same
-  `IDENTITY_*` settings, the operator's own token — `viewer` and `developer` read,
-  `admin` writes.
+  surface corresponds to it, so it is ours to shape. It takes the operator's own token,
+  with identity configured from the same `IDENTITY_*` settings the control plane reads
+  (`viewer` and `developer` read, `admin` writes), or the bootstrap key
+  (`CONTROLPLANE_API_KEY`, the `api_keys` row named `bootstrap`), which is what a
+  deployment without identity configures its console with. Every other platform key —
+  the console-issued keys applications hold, the brain's — is refused there: a key that
+  could edit key policies could lift its own limits.
 - **`/v1/models`** is one path with two shapes. The root answers in Anthropic's shape
   when the request carries `anthropic-version` — which every Anthropic SDK sends and no
   OpenAI SDK does — and in OpenAI's otherwise; `/anthropic/v1/…` and `/openai/v1/…`
@@ -404,11 +432,12 @@ frozen by slice 2.
 ### Telemetry, errors, security
 
 - A server span per request continues the caller's `traceparent`; a client span per
-  upstream attempt. `gen_ai.request.model` is the alias — operator-defined, so the
-  cardinality #88 worried about stays bounded here — and `gen_ai.response.model` the
-  upstream id. `traceparent` goes upstream only where a provider opts in.
-- Metrics: requests, latency, time to first token, tokens and cost, by alias,
-  deployment and key.
+  upstream attempt. `gen_ai.request.model` is the name the caller sent and
+  `gen_ai.response.model` the upstream id — span attributes, where cardinality costs
+  nothing. `traceparent` goes upstream only where a provider opts in.
+- Metrics: requests, latency, time to first token, tokens and cost, by matched alias,
+  deployment and key. The matched alias is the configured one, `*` for a wildcard match,
+  so a caller choosing names cannot grow a metric (#88's concern).
 - Errors answer in the inbound protocol's envelope (Anthropic
   `{"type":"error","error":{…}}`, OpenAI `{"error":{…}}`). A passthrough upstream error
   keeps its status and body after `provider.Redactor` has removed the credential the
@@ -423,7 +452,8 @@ frozen by slice 2.
 0. **Dependency, a separate plan (#67):** thinking persisted internally — never on the
    wire, where `agent.thinking` stays `{id, processed_at, type}` (checked against
    anthropic-sdk-go v1.70.1 — betasessionevent.go BetaManagedAgentsAgentThinkingEvent)
-   — replayed within the tool-use turn, and requests built append-only. Gates slice 5.
+   — and sent back only to the model that produced it, while the request's `system` and
+   `tools` are those it was produced under. Gates slice 5.
 1. **Store and catalogue:** schema and migrations, the platform key check moved to a
    shared package, the admin API (providers, credentials, deployments, aliases, key
    policies) under both auth modes, the snapshot with notify-driven reload, the four
@@ -511,9 +541,11 @@ where a vendor bills cache writes.
   named vendor with missing configuration fails, an unnamed one never runs. `.env`
   supplies `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY` beside
   `MINIMAX_BASE_URL=https://api.minimax.cn/anthropic`, and `GITEE_API_KEY`.
-  - **Model list:** `Models.List`, `Models.ListAutoPaging` over more aliases than one
-    page, and `Models.Get` return every configured alias, each with every `ModelInfo`
-    field the SDK marks required present (`respjson.Field.Valid`).
+  - **Model list:** `Models.List` and `Models.ListAutoPaging` over more aliases than one
+    page return every `chat` alias the key may use and no other, and `Models.Get`
+    answers each of them and refuses an alias the key may not use or that is not
+    `chat` — every returned entry with every `ModelInfo` field the SDK marks required
+    present (`respjson.Field.Valid`).
   - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with
     `Message.Accumulate`) on an alias routed to each vendor: text, a tool-use round trip
     that sends the thinking blocks back unchanged, reported usage, and an upstream
