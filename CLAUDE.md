@@ -21,7 +21,7 @@ The v1 design plan is [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01
 
 ## Core architecture — decouple brain / hands / session
 
-An agent is three independently-swappable pieces (a pattern we take from the reference): the **session** — an append-only event log in Postgres, the single source of truth; the **brain/harness** — the stateless, horizontally-scalable loop that calls the model and routes tool calls (a crashed brain loses nothing: any fresh brain replays the log and continues); and the **sandbox ("hands")** — a disposable per-session container that runs tools ("cattle not pets": a dying container is one tool-call error, not a lost session). Four server `cmd/` binaries — `controlplane` · `brain` · `executor` · `worker`; a fifth, `cmd/gate`, is the plan-12 egress sidecar (not a server — a per-session forward proxy).
+An agent is three independently-swappable pieces (a pattern we take from the reference): the **session** — an append-only event log in Postgres, the single source of truth; the **brain/harness** — the stateless, horizontally-scalable loop that calls the model and routes tool calls (a crashed brain loses nothing: any fresh brain replays the log and continues); and the **sandbox ("hands")** — a disposable per-session container that runs tools ("cattle not pets": a dying container is one tool-call error, not a lost session). Five server `cmd/` binaries — `controlplane` · `brain` · `executor` · `worker` · `modelgateway` (plan 59's model gateway, which no agent traffic reaches before its slice 5); `cmd/gate` is the plan-12 egress sidecar (not a server — a per-session forward proxy).
 
 **Execution is fully async through the event log + work queue.** The brain runs no agent tool in-process — it emits `agent.tool_use`, an executor pulls the work, runs it in a sandbox, posts the result event, and the brain wakes and continues. (The six *delegation* tools are the exception that proves the rule: they touch no sandbox, so the settlement answers them in the transaction that commits the turn calling them.) Platform-managed `cloud` and customer BYOC `self_hosted` are the **same pull protocol at two deployment points**.
 
@@ -53,7 +53,7 @@ Six read-only local reference sources serve as ground truth and design reference
 ## Repo layout
 
 ```
-cmd/{controlplane,brain,executor,worker}   # the four server binaries
+cmd/{controlplane,brain,executor,worker,modelgateway}   # the five server binaries
 cmd/gate                                   # per-session egress sidecar (plan 12)
 internal/
   domain/     # Anthropic-native types — the source of truth; no adk/genai here
@@ -85,8 +85,8 @@ internal/
   identity/   # the human-auth boundary: OIDC / trusted-proxy JWT verifier, claim→role
               #   mapping, bounded JWKS cache (go-jose; no vendor SDK)
   apikey/     # the platform API key check, shared by the control plane and the model gateway
-  modelgateway/ # the model gateway (plan 59): vendor profiles, its schema's queries, the
-              #   config snapshot and the /admin/v1/ API — no binary serves it before slice 2
+  modelgateway/ # the model gateway (plan 59): Anthropic inference and routing, the upstream
+              #   relay, vendor profiles, its schema's queries, the config snapshot, /admin/v1/
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
   store/      # Postgres schema/migrations, reserved multi-tenant columns
 deploy/{helm,compose,gcp}

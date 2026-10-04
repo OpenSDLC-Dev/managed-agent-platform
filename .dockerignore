@@ -35,4 +35,10 @@ coverage.out
 /controlplane
 /executor
 /gate
+/kmsrole
+/modelgateway
+/registrycheck
+/ripgrepfetch
+/sdkref
+/thirdpartylicenses
 /worker

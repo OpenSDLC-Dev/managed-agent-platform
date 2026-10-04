@@ -56,11 +56,14 @@
 // direction.
 //
 // It assumes cmd/<name> runs as the service account labelled <name>. That is
-// true of the three workloads and not of the other two: cmd/gate is a sidecar in
-// the executor's pod and shares the executor's identity, and cmd/worker is
-// customer-hosted with no GCP identity at all. Neither reaches the cipher today,
-// so the assumption costs nothing; the day one does, this guard reports it
-// ungranted and the mapping has to be taught here.
+// true of the three workloads and not of the other three: cmd/gate is a sidecar
+// in the executor's pod and shares the executor's identity, cmd/worker is
+// customer-hosted with no GCP identity at all, and cmd/modelgateway runs nowhere
+// on GCP yet. The first two do not reach the cipher, so the assumption costs
+// them nothing; the day one does, this guard reports it ungranted and the
+// mapping has to be taught here. modelgateway does reach it, and is taught:
+// `unhosted` names it, and the entry stops holding the moment anything starts
+// deploying the binary (unhosted's own comment says how that is detected).
 //
 // # What it refuses
 //
@@ -87,8 +90,9 @@
 // assigns no `crypto_key_id`, `member` or `role` at all, one that assigns the
 // same attribute twice (the two would disagree and this guard would report on
 // whichever it kept), and any .tf construct its reader cannot read (see hcl.go).
-// It also refuses when grants appear in more than one Terraform root, when it
-// found no grant at all, and when no binary reaches the cipher — the last two
+// It also refuses an `unhosted` entry that has gone stale, when grants appear in
+// more than one Terraform root, when it found no grant at all, and when no
+// binary it holds to a grant reaches the cipher — the last two
 // would let it print ok over nothing, which is how a checker's bug becomes the
 // input it never reads.
 //
@@ -239,6 +243,68 @@ type Report struct {
 	Findings []Finding
 }
 
+// unhosted names the cmd/ binaries that run under no GCP identity, each with
+// the reason. Such a binary is held to no grant, there being no identity to
+// grant one to, and its entry is refused the moment it goes stale: any mention
+// of it in the Terraform — a grant on the cipher names it too — or in the Helm
+// chart GCP deploys means it is being given an identity, and the entry would
+// then hide exactly the narrowed grant this guard exists to report. A mention
+// is the name anywhere, in any case and with any `-` or `_` inside it
+// (`modelgateway_sa`, `model-gateway`, `modelGateway`), so a near-spelling
+// cannot slip past; it refuses too much rather than too little. A mention in
+// prose is not one: a .md file, unless it sits under a templates/ directory,
+// which Helm renders whatever the extension. A dot-directory is skipped, as
+// readGrants skips it.
+var unhosted = map[string]string{
+	"modelgateway": "nothing deploys it to GCP before plan 59 slice 2d",
+}
+
+// stillUnhosted refuses an unhosted entry that has gone stale.
+func stillUnhosted(root, tfDir, binary string) error {
+	why := unhosted[binary]
+	chart := filepath.Join(root, "deploy", "helm")
+	if _, err := os.Stat(chart); err != nil {
+		return fmt.Errorf("%s is listed as unhosted (%s), and the chart that would deploy it cannot be read to confirm it does not: %w", binary, why, err)
+	}
+	fold := strings.NewReplacer("-", "", "_", "")
+	for _, tree := range []struct {
+		dir  string
+		read func(string) bool
+	}{
+		{tfDir, func(p string) bool { return strings.HasSuffix(p, ".tf") }},
+		{chart, func(p string) bool {
+			return !strings.HasSuffix(p, ".md") || strings.Contains(filepath.ToSlash(p), "/templates/")
+		}},
+	} {
+		err := filepath.WalkDir(tree.dir, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if p != tree.dir && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !tree.read(p) {
+				return nil
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			if strings.Contains(strings.ToLower(fold.Replace(string(b))), binary) {
+				return fmt.Errorf("%s is listed as unhosted (%s), yet %s names it — it is being given an identity, so grant that identity the cipher and remove %s from unhosted", binary, why, p, binary)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Check derives both halves and applies the rule. root is the repository root
 // (it holds go.mod, cmd/ and the packages they import); tfDir is the directory
 // whose .tf files carry the grants, read recursively. They are separate
@@ -264,6 +330,12 @@ func Check(root, tfDir string) (Report, error) {
 
 	reaches := false
 	for i := range rows {
+		if _, off := unhosted[rows[i].Binary]; off {
+			if err := stillUnhosted(root, tfDir, rows[i].Binary); err != nil {
+				return Report{}, err
+			}
+			continue
+		}
 		if g, ok := grants[rows[i].Binary]; ok {
 			rows[i].Grant = &g
 		}
@@ -272,12 +344,12 @@ func Check(root, tfDir string) (Report, error) {
 		}
 	}
 	if !reaches {
-		return Report{}, fmt.Errorf("no binary under %s reaches a cipher Encrypt or Decrypt — the scan found nothing to hold the grants to, so its ok would mean nothing", filepath.Join(root, "cmd"))
+		return Report{}, fmt.Errorf("no binary under %s that this guard holds to a grant reaches a cipher Encrypt or Decrypt — the scan found nothing to hold the grants to, so its ok would mean nothing", filepath.Join(root, "cmd"))
 	}
 
 	var findings []Finding
 	for _, r := range rows {
-		if !r.Needs.any() {
+		if _, off := unhosted[r.Binary]; off || !r.Needs.any() {
 			continue
 		}
 		if r.Grant == nil {

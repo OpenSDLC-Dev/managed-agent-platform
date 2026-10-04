@@ -25,7 +25,9 @@ func main() {
 	}
 	for _, row := range r.Rows {
 		role := "(no grant)"
-		if row.Grant != nil {
+		if why, off := unhosted[row.Binary]; off {
+			role = "(no GCP identity: " + why + ")"
+		} else if row.Grant != nil {
 			role = row.Grant.Role
 		}
 		fmt.Printf("%-13s calls %-19s granted %s\n", row.Binary, row.Needs, role)
