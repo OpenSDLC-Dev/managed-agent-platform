@@ -283,6 +283,8 @@ func TestProviders(t *testing.T) {
 		"scheme":               {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "ftp://x.example"}}, "http"},
 		"relative":             {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "/v1"}}, "http"},
 		"no host":              {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "https://:443"}}, "http"},
+		"port out of range":    {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "http://model.svc:99999"}}, "port"},
+		"port zero":            {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "http://model.svc:0/v1"}}, "port"},
 		"credential header":    {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"X-Upstream-Token": "s"}}, "X-Upstream-Token"},
 		"authorization header": {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"Authorization": "Bearer s"}}, "Authorization"},
 		"bad header name":      {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"X Route": "a"}}, "X Route"},

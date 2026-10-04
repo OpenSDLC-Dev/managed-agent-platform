@@ -2,6 +2,7 @@ package admin
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -71,6 +72,13 @@ func checkEndpoint(proto, raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" {
 		return "", invalid("endpoints.%s must be an absolute http or https URL", proto)
+	}
+	// url.Parse checks a port is digits, not that it is one: an endpoint is
+	// fixed at creation, so a typo it accepts outlives every dial it fails.
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return "", invalid("endpoints.%s has port %s; a port is 1 to 65535", proto, port)
+		}
 	}
 	switch {
 	case u.User != nil:
