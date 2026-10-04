@@ -195,30 +195,37 @@ THE GO TOOLCHAIN, the third pin, and the one that reaches past the workflows.
 CI and the release images used to build with different Go: every setup-go step
 read go.mod's `go 1.26.0` and installed exactly that, while the Dockerfile built
 on a floating minor tag and shipped whatever patch release was newest that day.
-So the stdlib fixes that shipped were never the ones CI tested, and no release
-build could be reproduced. go.mod's `toolchain go1.X.Y` line is now the one place
-the patch release is chosen, and this rung holds every other copy to it:
+So the stdlib fixes that shipped were never the ones CI tested, and the Go a
+release compiled with depended on the day it was built. go.mod's `toolchain
+go1.X.Y` line is now the one place the patch release is chosen, and this rung
+holds every other copy to it:
 
   - go.mod carries exactly one `toolchain` line, naming a full release -- not a
-    minor version, which floats like a tag, and not a release candidate;
+    minor version, which floats like a tag, and not a release candidate -- in
+    the one spelling setup-go reads (see TOOLCHAIN), which is narrower than Go's;
   - every `actions/setup-go` step reads `go-version-file: go.mod` and names no
-    `go-version`, which setup-go would prefer. setup-go (v6 on) installs the
-    `toolchain` line's release over the `go` line's, unless GOTOOLCHAIN is
-    already `local` when the step runs -- so no workflow may set GOTOOLCHAIN
-    outside a comment. setup-go exports `local` itself afterwards, which is
-    what keeps the `go` commands after it on the Go it installed;
-  - every reference to the official Go image anywhere in the working tree -- a
-    Dockerfile `FROM`, a YAML `image:`, a script, a sentence quoting one --
-    has that release as its tag's version and carries an `@sha256:` digest.
-    The digest is what makes the build reproducible; the tag is the half a
-    reader and this rung can compare with go.mod.
+    `go-version`, its key quoted or not, which setup-go would prefer. setup-go
+    (v6 on) installs the `toolchain` line's release over the `go` line's,
+    unless GOTOOLCHAIN is already `local` when the step runs -- so no workflow
+    may set GOTOOLCHAIN outside a comment. setup-go exports `local` itself
+    afterwards, which keeps the `go` commands after it on the Go it installed;
+  - every tagged reference to the official Go image anywhere in the working
+    tree -- a Dockerfile `FROM`, a YAML `image:`, a command in a `run:` step,
+    recipe or script, a sentence quoting one -- has that release as its tag's
+    version and carries an `@sha256:` digest. The digest fixes the image the
+    Go build starts from -- the toolchain only, since the runtime stages still
+    start from floating `debian:stable-slim` and install unversioned apt
+    packages; the tag is the half a reader and this rung can compare with
+    go.mod.
 
 So a bump changes go.mod's line, and this rung then names every reference still
 on the old release. What it cannot see: whether a digest IS its tag (the network
 again -- the digest to pin is the top-level one `docker buildx imagetools
-inspect` prints); Go from any image but the official one; a second setup-go step
-in one job, which reads the `go` line because the first exported `local`; and a
-job running `go` with no setup-go at all, on the runner's own Go. Exempt are the
+inspect` prints); Go from any image but the official one; the image named bare
+in a command (`docker run golang …`), where the word cannot be told from prose,
+though a tagged one is held anywhere; a second setup-go step in one job, which
+reads the `go` line because the first exported `local`; and a job running `go`
+with no setup-go at all, on the runner's own Go. Exempt are the
 four paths that record what WAS true, which a bump must not rewrite --
 CHANGELOG.md, changelog.d/, docs/changelog/ and docs/HISTORY.md -- and this file,
 whose fixtures are wrong on purpose.
@@ -343,16 +350,28 @@ ROOT = WORKFLOWS.parents[1]
 SETUP_GO = "actions/setup-go"
 SETUP_GO_FILE = "go.mod"
 
-# Any input of a step, with its key. Keys are compared lowercased, because the
-# runner reads `Go-Version:` as the same input as `go-version:`.
-NAMED_INPUT = re.compile(r"^[ \t]*(?P<key>[\w.-]+)[ \t]*:[ \t]*(?P<value>.*?)[ \t]*$")
+# Any input of a step, with its key -- plain, single- or double-quoted, all one
+# key to YAML. Keys are compared lowercased, because the runner reads
+# `Go-Version:` as the same input as `go-version:`. A setup-go input line this
+# cannot read stops the run: it could be the `go-version` setup-go prefers.
+NAMED_INPUT = re.compile(
+    r"^[ \t]*(?P<quote>[\"']?)(?P<key>[\w.-]+)(?P=quote)[ \t]*:[ \t]*(?P<value>.*?)[ \t]*$"
+)
 
 # go.mod's `toolchain` directive, strict and loose for USES_KEY's reason: a line
-# trying to be the directive in a shape the strict one cannot read -- `go1.26`,
-# a release candidate, `default` -- is refused by name rather than read as
-# absent. A full release only, because a pin that names a minor version is a
-# floating tag again.
-TOOLCHAIN = re.compile(r"^toolchain[ \t]+go(?P<version>\d+\.\d+\.\d+)[ \t]*(?://.*)?$")
+# trying to be the directive in a shape the strict one cannot read is refused by
+# name rather than read as absent. The strict one is setup-go's own pattern
+# (installer.ts, parseGoVersionFile, at the pinned v7.0.0):
+#
+#     /^toolchain go(1\.\d+(?:\.\d+|rc\d+)?)/m
+#
+# -- one literal space, at the start of a line -- narrowed to a full release and
+# anchored at the end. Go itself also reads a tab, two spaces or an indent
+# there; setup-go does not, falls back to the `go` line, and exports
+# GOTOOLCHAIN=local, so CI would run the `go` line's release while this rung
+# compared images with the toolchain's. A minor version or a release candidate
+# is refused too: neither names one patch release, which is the whole pin.
+TOOLCHAIN = re.compile(r"^toolchain go(?P<version>1\.\d+\.\d+)(?:[ \t]+(?://.*)?)?$")
 TOOLCHAIN_CANDIDATE = re.compile(r"^[ \t]*toolchain\b")
 
 # A reference to the official Go image, anywhere in a line. The lookbehind keeps
@@ -369,7 +388,10 @@ DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 # The image with no tag and no digest at all, which pulls `latest` -- only where
 # an image name stands (a Dockerfile `FROM`, a YAML `image:`), since a bare
-# `golang` anywhere else is a word.
+# `golang` anywhere else is a word. So a bare one in a COMMAND (`docker run
+# golang go build`, a `run:` step, a recipe, a script) is NOT caught: there the
+# word cannot be told from prose. A TAGGED one is caught wherever it stands,
+# commands included, by GOLANG_IMAGE.
 BARE_GOLANG = re.compile(
     r"^[ \t]*(?:-[ \t]+)?(?:FROM[ \t]+(?:--\S+[ \t]+)*|image:[ \t]*[\"']?)"
     r"(?:docker\.io/)?(?:library/)?golang(?:[\"']?[ \t]|[\"']?$)",
@@ -834,8 +856,14 @@ def setup_go_violation(name, lines, body, ref):
     inputs = {}
     for n in input_lines(lines, body, block, end, ref.column) if block is not None else []:
         m = NAMED_INPUT.match(split_comment(lines[n])[0])
-        if m:
-            inputs[m.group("key").lower()] = m.group("value").strip("\"'")
+        if not m:
+            raise SystemExit(
+                f"{name}:{n + 1}: this setup-go input is in a shape this guard"
+                " cannot read, and it could be the `go-version` setup-go prefers"
+                " to go.mod. Write it as `key: value`, or teach NAMED_INPUT the"
+                " new shape."
+            )
+        inputs[m.group("key").lower()] = m.group("value").strip("\"'")
     if "go-version" in inputs:
         return ("`actions/setup-go` names a `go-version` of its own, which it"
                 " prefers to any file — a second copy of the Go version, and one"
@@ -884,8 +912,10 @@ def toolchain_version(text):
         m = TOOLCHAIN.match(line)
         if not m:
             raise SystemExit(
-                f"go.mod:{n + 1}: `{line.strip()}` names no full Go release, so"
-                " nothing can be held to it. Write `toolchain go1.X.Y`."
+                f"go.mod:{n + 1}: `{line}` is not one full Go release in the one"
+                " spelling setup-go reads -- `toolchain go1.X.Y`, one space, at"
+                " the start of the line. setup-go would fall back to the `go`"
+                " line, and nothing here could be held to it."
             )
         found.append(m.group("version"))
     if len(found) != 1:
@@ -921,7 +951,8 @@ def image_findings(version, text):
                            " another")
             if digest is None:
                 why.append("carries no `@sha256:` digest, so the tag can be"
-                           " re-pushed under it and the build cannot be reproduced")
+                           " re-pushed under it and the Go image a build starts"
+                           " from changes")
             elif not DIGEST.match(digest):
                 why.append("carries a digest that is not `sha256:` and 64 lowercase"
                            " hex")
@@ -968,6 +999,7 @@ def go_pin_selftest():
     toolchain_ok = [
         ("the directive", "module m\n\ngo 1.26.0\n\ntoolchain go1.26.8\n", "1.26.8"),
         ("the directive with a comment", "go 1.26.0\ntoolchain go1.26.8 // pinned\n", "1.26.8"),
+        ("the directive with trailing space", "go 1.26.0\ntoolchain go1.26.8 \n", "1.26.8"),
     ]
     toolchain_refused = [
         ("no directive at all, so setup-go reads the `go` line", "module m\n\ngo 1.26.0\n"),
@@ -975,6 +1007,15 @@ def go_pin_selftest():
         ("a release candidate", "go 1.26.0\ntoolchain go1.27rc1\n"),
         ("the keyword Go treats as no pin", "go 1.26.0\ntoolchain default\n"),
         ("two directives", "toolchain go1.26.8\ntoolchain go1.26.7\n"),
+        # Valid to Go, and NOT read by setup-go, whose pattern is
+        # /^toolchain go(1\.\d+(?:\.\d+|rc\d+)?)/m -- one literal space, at the
+        # start of the line. Missing it, setup-go falls back to the `go` line
+        # and exports GOTOOLCHAIN=local, so CI runs the `go` line's release.
+        ("two spaces, which setup-go does not read", "go 1.26.0\ntoolchain  go1.26.8\n"),
+        ("a tab, which setup-go does not read", "go 1.26.0\ntoolchain\tgo1.26.8\n"),
+        ("an indented directive, which setup-go does not read", "go 1.26.0\n toolchain go1.26.8\n"),
+        ("a release with junk after it", "go 1.26.0\ntoolchain go1.26.8x\n"),
+        ("a major version setup-go does not read", "go 1.26.0\ntoolchain go2.0.0\n"),
     ]
     must_flag = [
         ("the floating tag the Dockerfile used to build on",
@@ -999,6 +1040,17 @@ def go_pin_selftest():
         ("no tag at all, in a Dockerfile", "FROM golang AS build\n"),
         ("no tag at all, in compose", "    image: golang\n"),
         ("a floating tag quoted in prose", "the gate builds on `golang:1.26-bookworm`.\n"),
+        # In a command rather than a FROM: a workflow `run:`, a Makefile
+        # recipe, a script. Any tagged reference is held to the pin wherever
+        # it stands.
+        ("a floating tag in a docker run",
+         'docker run --rm -v "$PWD":/src -w /src golang:1.26 go build ./...\n'),
+        ("the right tag with no digest, in a recipe",
+         "\tdocker run --rm golang:1.26.8-bookworm go vet ./...\n"),
+        ("a floating tag in a workflow run step",
+         "      - run: docker run --rm golang:1.26 go build ./...\n"),
+        ("a floating tag in a variable",
+         "GO_IMAGE ?= golang:1.26-bookworm\n"),
     ]
     must_pass = [
         ("the pin itself",
@@ -1013,6 +1065,12 @@ def go_pin_selftest():
         ("another registry's image of the same name", "FROM ghcr.io/acme/golang:1.20\n"),
         ("the word", 'searchUse("golang")\n'),
         ("the word and a colon", "golang: the language\n"),
+        ("the pin in a docker run", f"docker run --rm golang:1.26.8-bookworm@{digest} go version\n"),
+        # A blind spot kept on purpose, so widening BARE_GOLANG past image
+        # positions is a decision rather than an accident: in a command the
+        # bare word is indistinguishable from prose. See BARE_GOLANG.
+        ("a bare image name in a command, deliberately not caught",
+         "docker run --rm golang go version\n"),
     ]
 
     failures = []
@@ -1147,6 +1205,15 @@ def selftest():
         ("the same, spelled in another case, which the runner reads as one input",
          f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
          "          Go-Version: 1.26.8\n"),
+        # The same key quoted, which is the same key to YAML: setup-go then
+        # prefers the version it names, and a scan reading only plain keys
+        # walks past it. Unquoted is the row two above.
+        ("the version key double-quoted, beside go.mod",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
+         '          "go-version": 1.26.0\n'),
+        ("the version key single-quoted, beside go.mod",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
+         "          'go-version': 1.26.0\n"),
         ("a job that sets GOTOOLCHAIN, so setup-go reads the `go` line instead",
          "    env:\n      GOTOOLCHAIN: local\n    steps:\n"
          f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"),
@@ -1216,6 +1283,8 @@ def selftest():
         ("the same with another input beside it, keyed form, quoted",
          step + f"        uses: {setup_go}\n        with:\n          cache: false\n"
          "          go-version-file: 'go.mod'\n"),
+        ("the file key quoted, which is the same input",
+         f"      - uses: {setup_go}\n        with:\n          \"go-version-file\": go.mod\n"),
         ("GOTOOLCHAIN in a comment, which sets nothing",
          "      # setup-go exports GOTOOLCHAIN=local itself.\n"
          f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"),
@@ -1342,6 +1411,9 @@ def selftest():
          '        name: "1\n'
          "        with:\n"
          '          persist-credentials: false"\n'),
+        ("a setup-go input this scan cannot read, which could be the version",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
+         "          ? go-version\n          : 1.26.0\n"),
         ("a key this scan cannot read, carrying a value it therefore cannot see",
          f"      - uses: {pin}\n        with:\n          ssh-key:\n"
          '            a b: "1\n'

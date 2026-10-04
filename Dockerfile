@@ -11,8 +11,10 @@
 # `buildx --platform` run must not execute the whole Go toolchain under QEMU
 # emulation.
 # The Go here is go.mod's `toolchain` line, the release CI's setup-go installs,
-# pinned by tag and multi-arch index digest so a release build is reproducible
-# and ships the patch release CI tested. A bump moves both in one change, and
+# pinned by tag and multi-arch index digest so every release compiles with the
+# patch release CI tested. That fixes the Go build toolchain only: the runtime
+# stages below still start from the floating debian:stable-slim and install
+# unversioned apt packages. A bump moves go.mod and this line together, and
 # `make pins-test` fails while they disagree; the digest is the top-level one
 # `docker buildx imagetools inspect` prints for the new tag.
 FROM --platform=$BUILDPLATFORM golang:1.26.8-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS modules
