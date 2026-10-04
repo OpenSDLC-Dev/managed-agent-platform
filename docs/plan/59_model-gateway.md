@@ -27,8 +27,8 @@ Scope decisions settled with the user on 2026-10-04:
    where the platform already has both. Evidence under Ground truth.
 2. **This repository, a new binary**, with its own image, released with the platform.
 3. **v1 upstreams are the four vendors' official cloud APIs.** Gemini, Vertex (#236) and
-   self-hosted engines (vLLM, SGLang, …) follow in later plans, with bifrost's
-   converters as the design reference.
+   self-hosted engines (vLLM, SGLang, …) follow in later plans, with bifrost as the
+   reference (Later upstreams says for what).
 4. **Governance serves internal applications:** API keys, per-key usage and cost,
    per-key RPM/TPM limits. No budgets, billing, teams or tenants.
 5. **Inbound surfaces:** Anthropic Messages in full — `POST /v1/messages` (streamed and
@@ -196,8 +196,9 @@ platform's database or another. Ids carry gateway-local prefixes (`gwprov_`, `gw
 - **provider** — profile, name, endpoint per protocol (a profile host or a custom one),
   extra headers, stall timeout, enabled.
 - **credential** — a provider's key, as ciphertext and key id from `internal/secrets`
-  (the vault credentials' backend selection); last four characters for display; the
-  protocols it may be used on; weight; enabled. Write-only through the API.
+  (the vault credentials' backend selection); `kind` (`api_key`, the only v1 value);
+  last four characters for display; the protocols it may be used on; weight; enabled.
+  Write-only through the API.
 - **deployment** — a provider's upstream model id; kind (`chat` | `embedding`);
   capabilities (tools, thinking, vision, `max_input_tokens`, `max_tokens` — the
   `ModelInfo` fields `/v1/models` answers from); prices per million tokens for input,
@@ -322,9 +323,39 @@ frozen by slice 2.
    `previous_response_id`, `conversation` and the retrieve and delete routes answer with
    a refusal that says why.
 
-Later, each in its own plan: Gemini and Vertex (#236) upstreams and self-hosted engine
-profiles; stored Responses state; `cache_control` injection where a vendor bills cache
-writes.
+## Later upstreams, with bifrost as the reference
+
+Each follows in its own plan. What bifrost (at `3b31be003`) is the reference for, and
+what v1 reserves so they arrive without reshaping it:
+
+- **vLLM, then SGLang, Ollama and LMDeploy.** Each serves `/v1/messages`, so each is a
+  profile on the passthrough path, not a new protocol — what bifrost's vLLM provider
+  does when `use_anthropic_endpoints` is set (`core/providers/vllm/vllm.go:183`). The
+  profile also records the engine's minimum version and the tool-call and reasoning
+  parsers each model needs, since an engine started without them returns neither tool
+  calls nor thinking.
+- **Gemini.** A third upstream protocol (`generateContent` / `streamGenerateContent`)
+  and an Anthropic ↔ Gemini direction in `convert`. `core/providers/gemini` is the
+  reference: its converters, `count_tokens`, embeddings, and its tests for reasoning
+  replay and thinking levels.
+- **Vertex (#236).** One Google credential in front of three shapes
+  (`core/providers/vertex/utils.go:417-440`): Gemini models in Gemini's shape; Claude
+  under `publishers/anthropic` through `:rawPredict` / `:streamRawPredict`, in
+  Anthropic's shape, so passthrough again; and partner MaaS models under
+  `/endpoints/openapi/*` in OpenAI's shape — bifrost's test configuration reaches Kimi
+  and MiniMax this way.
+- **Test cases.** bifrost's `tests/e2e/api/HARNESS_COVERAGE_BACKLOG.md`, a per-provider
+  feature inventory drawn from each vendor's docs, seeds each later upstream's
+  fake-upstream fixtures and live-tier rows.
+- **Not from bifrost: Zhipu and Moonshot.** bifrost has no provider for either; its only
+  Kimi and MiniMax traces are Vertex- and Bedrock-hosted model ids in its tests. Their
+  profiles rest on vendor docs until keys exist.
+- **What v1 reserves:** the upstream protocol is an open set (`anthropic`, `openai`,
+  later `gemini`), and a credential's `kind` holds only `api_key` until Vertex's
+  service-account credential arrives.
+
+Also later, each in its own plan: stored Responses state, and `cache_control` injection
+where a vendor bills cache writes.
 
 ## Verification
 
