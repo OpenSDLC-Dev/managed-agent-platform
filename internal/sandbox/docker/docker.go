@@ -2027,22 +2027,20 @@ func (c *container) mkdirAll(ctx context.Context, dir string) error {
 		return fmt.Errorf("%s: %w", dir, sandbox.ErrNotDirectory)
 	case 1:
 		// mkdir failed for a reason that is not a blocking file — a read-only
-		// root, a root-owned parent, a full disk. The exit says so, as the k8s
-		// write script's mkdir branch says it with its exit 20 (plan 23, #306),
-		// and mkdir's own stderr names why: its strerror tail is the reason the
-		// classified refusal carries. A message that did not reach the output
-		// whole, or that names nothing, leaves the refusal without one, as the
-		// k8s script's does.
-		reason := ""
+		// root, a root-owned parent, a full disk — as the k8s write script's
+		// mkdir branch reports with its exit 20 (plan 23, #306), and mkdir's
+		// own stderr names why: its strerror tail is the reason the classified
+		// refusal carries. Only a script whose frame arrived said so, though:
+		// exit 1 is also what a shell that died before the script began — an
+		// image's startup gone wrong — leaves, which is the sandbox's fault and
+		// not the path's, so output with no frame keeps the raw error.
 		if framed {
-			reason = strerrorTail(res.Stderr)
+			return &sandbox.PathNotWritableError{Path: dir, Reason: strerrorTail(res.Stderr)}
 		}
-		return &sandbox.PathNotWritableError{Path: dir, Reason: reason}
-	default:
-		// The script exits 0, 1 or the path fault's code; anything else is the
-		// shell's own end — killed, or never started — and keeps the raw error.
-		return fmt.Errorf("docker: mkdir -p %s: exit %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
+	// The script exits 0, 1 or the path fault's code; anything else is the
+	// shell's own end — killed, or never started — and keeps the raw error.
+	return fmt.Errorf("docker: mkdir -p %s: exit %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
 }
 
 // strerrorTail extracts the shell's strerror text — what follows the last

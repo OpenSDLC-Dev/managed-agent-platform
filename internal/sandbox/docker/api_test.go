@@ -1413,10 +1413,12 @@ func TestWriteFileStreamClassifiesAnUnmakeableParent(t *testing.T) {
 }
 
 // A probe whose output never carried its frame — a shell that died first, a
-// startup that filled the output cap — said nothing the platform reads: the
-// mkdir's exit and the writability probe's still classify the write as one the
-// path refuses, with no reason, as the k8s write script's exit does, and never
-// a reason taken from a banner.
+// startup that filled the output cap — said nothing the platform reads, and
+// never a reason taken from a banner. The mkdir's exit 1 is no refusal then:
+// a shell that died before the script left it too, so the raw error stands.
+// The writability probe's exit is its own code, which still classifies the
+// write as one the path refuses, with no reason, as the k8s write script's
+// exit does.
 func TestWriteProbesReadNoReasonOutsideTheirFrame(t *testing.T) {
 	var execN int
 	kinds := map[string]string{}
@@ -1467,12 +1469,11 @@ func TestWriteProbesReadNoReasonOutsideTheirFrame(t *testing.T) {
 		}
 	})
 	c := p.attach("abc", "/workspace", "", false)
-	var pnw *sandbox.PathNotWritableError
-	if err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1); !errors.As(err, &pnw) ||
-		pnw.Path != "/newtop" || pnw.Reason != "" {
-		t.Errorf("mkdir's unframed refusal = %v; want ErrNotWritable for /newtop with no reason", err)
+	if err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1); errors.Is(err, sandbox.ErrNotWritable) ||
+		err == nil || !strings.Contains(err.Error(), "mkdir -p /newtop: exit 1") {
+		t.Errorf("mkdir's unframed refusal = %v; want the raw error, unclassified", err)
 	}
-	pnw = nil
+	var pnw *sandbox.PathNotWritableError
 	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); !errors.As(err, &pnw) || pnw.Reason != "" {
 		t.Errorf("the probe's unframed refusal = %v; want ErrNotWritable with no reason", err)
 	}
