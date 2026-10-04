@@ -9,21 +9,31 @@
 // costs at most one tick of staleness. And Run reloads each time it
 // subscribes, so whatever changed while it was not listening — before the
 // first subscription, or across a reconnect — is read then.
+//
+// The subscription holds a connection of its own, dialled from the pool's
+// configuration rather than taken from the pool: a pooled connection would
+// count against the pool's limit while it waits, so on a small pool a reload
+// could wait forever for the connection the listener holds, and a connection
+// left subscribed must never go back to a pool that would hand it out.
 package catalog
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Snapshot is one consistent reading of the configuration. It is never
-// modified after it is built.
+// modified after it is built, and everything it returns shares its storage
+// with the snapshot every request reads: a caller copies a map or a slice
+// before it changes one.
 type Snapshot struct {
 	providers   map[string]store.Provider
 	credentials map[string][]store.Credential // by provider id
@@ -96,15 +106,19 @@ func (s *Snapshot) KeyPolicy(apiKeyID string) (store.KeyPolicy, bool) {
 // Catalog holds the current Snapshot.
 type Catalog struct {
 	store   *store.Store
-	pool    *pgxpool.Pool
+	conn    *pgx.ConnConfig // the subscription's, the pool's own settings
 	tick    time.Duration
 	current atomic.Pointer[Snapshot]
 }
 
 // New loads the configuration once, so the catalog is ready to serve before
 // Run starts; tick is the periodic reload's interval.
-func New(ctx context.Context, s *store.Store, pool *pgxpool.Pool, tick time.Duration) (*Catalog, error) {
-	c := &Catalog{store: s, pool: pool, tick: tick}
+func New(ctx context.Context, pool *pgxpool.Pool, tick time.Duration) (*Catalog, error) {
+	if tick <= 0 {
+		return nil, fmt.Errorf("modelgateway catalog: the reload interval must be positive, not %s", tick)
+	}
+	s := store.New(pool)
+	c := &Catalog{store: s, conn: pool.Config().ConnConfig.Copy(), tick: tick}
 	cfg, err := s.Load(ctx)
 	if err != nil {
 		return nil, err
@@ -135,20 +149,26 @@ func (c *Catalog) Run(ctx context.Context) {
 	}
 }
 
-// listen subscribes on one connection and reloads on each notification and
-// each tick, returning when the connection fails or ctx ends. The connection
-// is closed rather than returned to the pool, which must never hand out a
-// connection still subscribed.
+// dialTimeout bounds dialling the subscription's connection.
+const dialTimeout = 10 * time.Second
+
+// listen subscribes on a connection of its own and reloads on each
+// notification and each tick, returning when the connection fails or ctx
+// ends.
 func (c *Catalog) listen(ctx context.Context) error {
-	conn, err := c.pool.Acquire(ctx)
+	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	conn, err := pgx.ConnectConfig(dctx, c.conn)
+	cancel()
 	if err != nil {
 		return err
 	}
 	defer func() {
+		// Under a deadline rather than context.Background(), which pgconn
+		// answers by watching nothing, so a dead peer cannot hold Run's
+		// shutdown on the Terminate flush.
 		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = conn.Conn().Close(cctx)
+		_ = conn.Close(cctx)
 		cancel()
-		conn.Release()
 	}()
 	if _, err := conn.Exec(ctx, "LISTEN "+store.NotifyChannel); err != nil {
 		return err
@@ -156,7 +176,7 @@ func (c *Catalog) listen(ctx context.Context) error {
 	c.reload(ctx)
 	for {
 		wctx, cancel := context.WithTimeout(ctx, c.tick)
-		_, err := conn.Conn().WaitForNotification(wctx)
+		_, err := conn.WaitForNotification(wctx)
 		cancel()
 		switch {
 		case ctx.Err() != nil:

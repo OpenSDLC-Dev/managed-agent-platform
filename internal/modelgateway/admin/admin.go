@@ -38,14 +38,17 @@
 //	GET    /admin/v1/aliases                            list
 //	GET    /admin/v1/aliases/{name...}                  one (a name may hold a slash)
 //	POST   /admin/v1/aliases/{name...}                  update
-//	DELETE /admin/v1/aliases/{name...}                  delete
+//	DELETE /admin/v1/aliases/{name...}                  delete (off every key policy first)
 //	GET    /admin/v1/key_policies                       list
 //	GET    /admin/v1/key_policies/{api_key_id}          one
 //	POST   /admin/v1/key_policies/{api_key_id}          create or replace
 //	DELETE /admin/v1/key_policies/{api_key_id}          revoke
 //
-// An update names only the fields it changes, and naming a field fixed at
-// creation is refused rather than ignored. A list answers {"data": [...]},
+// An update names only the fields it changes, as null only where null means
+// what it means at creation (a provider's headers and stall timeout, a
+// credential's protocols), and naming a field fixed at creation is refused
+// rather than ignored. A key policy is the exception: it is written whole, so
+// its body names every field. A list answers {"data": [...]},
 // unpaginated: a configuration is tens of rows, not thousands. Errors answer
 // in the platform's envelope, {"type":"error","error":{"type","message"}}.
 package admin
@@ -160,15 +163,21 @@ func (h *handler) route(path string, eps ...endpoint) {
 
 type roleKey struct{}
 
-// ServeHTTP authenticates before routing, so an unauthenticated caller learns
-// nothing about which paths exist.
+// ServeHTTP authenticates before routing, and refuses a token that maps to
+// no role before routing too: every route needs the viewer role at least, so
+// a caller who can call nothing learns nothing about which paths exist.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	role, err := h.authenticate(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	h.mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), roleKey{}, role)))
+	ctx := context.WithValue(r.Context(), roleKey{}, role)
+	if err := requireRole(ctx, identity.RoleViewer); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	h.mux.ServeHTTP(w, r.WithContext(ctx))
 }
 
 func (h *handler) authenticate(r *http.Request) (identity.Role, error) {
@@ -189,6 +198,14 @@ func (h *handler) authenticate(r *http.Request) (identity.Role, error) {
 		if tok, ok := v.Credential(r); ok {
 			id, err := v.Verify(r.Context(), tok)
 			if err != nil {
+				// As the control plane's identity lane: the caller is told
+				// only that the token failed, the operator's log which check.
+				var reason string
+				var ie *identity.Error
+				if errors.As(err, &ie) {
+					reason = ie.Reason()
+				}
+				slog.InfoContext(r.Context(), "modelgateway admin: operator token rejected", "reason", reason)
 				return "", unauthenticated("invalid operator token")
 			}
 			return id.Role, nil
@@ -289,8 +306,10 @@ func strict(b []byte, dst any) error {
 	if err := dec.Decode(dst); err != nil {
 		return invalid("Failed to parse request body as JSON: %s", strings.TrimPrefix(err.Error(), "json: "))
 	}
-	if dec.More() {
-		return invalid("Failed to parse request body as JSON: data after the object")
+	// Token rather than More, which reports only another element of an
+	// enclosing value and so passes a stray closing delimiter.
+	if _, err := dec.Token(); err != io.EOF {
+		return invalid("Failed to parse request body as JSON: data after the value")
 	}
 	return nil
 }
@@ -341,8 +360,21 @@ func decodePatch(r *http.Request, fixed fixedFields, mutable []string) (patch, e
 	return p, nil
 }
 
-// field decodes the named field into dst when the patch names it.
+// field decodes the named field into dst when the patch names it. A null is
+// refused: decoded, it would be the zero value — a provider disabled, a name
+// emptied — where a caller meant at most "unchanged".
 func (p patch) field(name string, dst any) (bool, error) {
+	raw, ok := p[name]
+	if ok && string(bytes.TrimSpace(raw)) == "null" {
+		return true, invalid("%s: null is not a value of this field; leave the field out to keep it", name)
+	}
+	return p.nullable(name, dst)
+}
+
+// nullable is field for a field whose null means what it means at creation:
+// a provider's headers none, its stall timeout the default, a credential's
+// protocols every one its provider has an endpoint for.
+func (p patch) nullable(name string, dst any) (bool, error) {
 	raw, ok := p[name]
 	if !ok {
 		return false, nil

@@ -249,11 +249,15 @@ func (v *Verifier) AssertionHeader() string { return v.header }
 // ignored ENTIRELY and only the configured assertion header counts: the proxy
 // is the only party that can set that header on a request reaching us, so
 // accepting a Bearer as well would accept a credential the proxy never vouched
-// for.
+// for. A repeated assertion is no credential at all: which copy the proxy set
+// cannot be told from the request, and a duplicate credential is ambiguous.
 func (v *Verifier) Credential(r *http.Request) (token string, ok bool) {
 	if v.mode == ModeTrustedProxy {
-		token = r.Header.Get(v.header)
-		return token, token != ""
+		values := r.Header.Values(v.header)
+		if len(values) != 1 || values[0] == "" {
+			return "", false
+		}
+		return values[0], true
 	}
 	token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !hasBearer || !LooksLikeJWT(token) {

@@ -1984,4 +1984,11 @@ func TestCredential(t *testing.T) {
 			t.Errorf("%s: Credential = %q, %t; want %q, %t", tc.name, token, ok, tc.wantToken, tc.wantOK)
 		}
 	}
+	// A repeated assertion is ambiguous, and an ambiguous credential is none.
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Add(verifierXIAPHeader, jwt)
+	r.Header.Add(verifierXIAPHeader, "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ5In0.c2ln")
+	if token, ok := proxy.Credential(r); ok || token != "" {
+		t.Errorf("repeated assertion: Credential = %q, %t; want none", token, ok)
+	}
 }

@@ -8,8 +8,9 @@
 // names only protocols its provider has an endpoint for; an alias's targets
 // share one kind, which is the alias's from creation on; an embedding alias
 // keeps the one deployment it was created with; a key policy names only
-// aliases that exist. The rows those checks read are locked FOR SHARE, so a
-// concurrent delete cannot slip between the check and the write.
+// aliases that exist, and an alias a policy names cannot be deleted. The rows
+// those checks read are locked, so a concurrent write cannot slip between the
+// check and the write.
 //
 // An update takes a function that edits a copy of the locked row; only the
 // fields the plan lets change are written back, whatever the function did to
@@ -182,6 +183,12 @@ func (s *Store) write(ctx context.Context, fn func(pgx.Tx) error) error {
 		_, err := tx.Exec(ctx, `SELECT pg_notify($1, '')`, NotifyChannel)
 		return err
 	})
+}
+
+// read runs fn in a read-only repeatable-read transaction: one snapshot for
+// a read that takes more than one statement.
+func (s *Store) read(ctx context.Context, fn func(pgx.Tx) error) error {
+	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, fn)
 }
 
 // idEncoding is the platform's id alphabet (internal/domain's idAlphabet,

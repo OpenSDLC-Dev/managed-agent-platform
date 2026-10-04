@@ -171,14 +171,14 @@ func (h *handler) updateProvider(r *http.Request) (any, error) {
 			return nil, err
 		}
 	}
-	hasHeaders, err := req.field("headers", &headers)
+	hasHeaders, err := req.nullable("headers", &headers)
 	if err != nil {
 		return nil, err
 	}
 	if err := checkHeaders(headers); err != nil {
 		return nil, err
 	}
-	hasStall, err := req.field("stall_timeout_ms", &stallMS)
+	hasStall, err := req.nullable("stall_timeout_ms", &stallMS)
 	if err != nil {
 		return nil, err
 	}
@@ -251,13 +251,7 @@ func lastFour(key string) string {
 	return string(r[len(r)-4:])
 }
 
-// checkProtocols refuses an explicitly empty list as the key-policy grant
-// does: left out or null, a credential serves every protocol its provider
-// has an endpoint for, so an empty list cannot mean that too.
 func checkProtocols(ps []profile.Protocol) error {
-	if ps != nil && len(ps) == 0 {
-		return invalid("protocols: an empty list names no protocol; leave it out for every protocol the provider has an endpoint for")
-	}
 	for i, p := range ps {
 		if p != profile.Anthropic && p != profile.OpenAI {
 			return invalid("protocols: unknown protocol %q; the protocols are anthropic and openai", p)
@@ -349,7 +343,7 @@ func (h *handler) updateCredential(r *http.Request) (any, error) {
 		weight  int
 		enabled bool
 	)
-	hasProtos, err := req.field("protocols", &protos)
+	hasProtos, err := req.nullable("protocols", &protos)
 	if err != nil {
 		return nil, err
 	}

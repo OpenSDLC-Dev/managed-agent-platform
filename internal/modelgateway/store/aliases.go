@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -113,9 +114,16 @@ func (s *Store) CreateAlias(ctx context.Context, a Alias) (Alias, error) {
 	return out, err
 }
 
-// GetAlias reads one alias with its targets.
+// GetAlias reads one alias with its targets, in one snapshot so the two
+// never come from different versions of the alias.
 func (s *Store) GetAlias(ctx context.Context, name string) (Alias, error) {
-	return getAlias(ctx, s.pool, name, "")
+	var out Alias
+	err := s.read(ctx, func(tx pgx.Tx) error {
+		var err error
+		out, err = getAlias(ctx, tx, name, "")
+		return err
+	})
+	return out, err
 }
 
 func getAlias(ctx context.Context, q querier, name, lock string) (Alias, error) {
@@ -154,9 +162,15 @@ func loadTargets(ctx context.Context, q querier, where string, args ...any) (map
 	return out, rows.Err()
 }
 
-// ListAliases reads every alias with its targets, by name.
+// ListAliases reads every alias with its targets, by name, in one snapshot.
 func (s *Store) ListAliases(ctx context.Context) ([]Alias, error) {
-	return listAliases(ctx, s.pool)
+	var out []Alias
+	err := s.read(ctx, func(tx pgx.Tx) error {
+		var err error
+		out, err = listAliases(ctx, tx)
+		return err
+	})
+	return out, err
 }
 
 func listAliases(ctx context.Context, q querier) ([]Alias, error) {
@@ -225,17 +239,29 @@ func (s *Store) UpdateAlias(ctx context.Context, name string, fn func(*Alias) er
 	return out, err
 }
 
-// DeleteAlias removes an alias and its targets. A key policy naming it keeps
-// the name, which then grants nothing.
+// DeleteAlias removes an alias and its targets. An alias a key policy grants
+// is a conflict: the grant would outlive it and pass to the next alias of its
+// name. The alias is locked first, so a grant PutKeyPolicy is writing either
+// commits before the check sees it or finds the alias gone.
 func (s *Store) DeleteAlias(ctx context.Context, name string) error {
 	return s.write(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `DELETE FROM modelgateway.aliases WHERE name = $1`, name)
+		var found string
+		err := tx.QueryRow(ctx, `SELECT name FROM modelgateway.aliases WHERE name = $1 FOR UPDATE`, name).Scan(&found)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return aliasNotFound(name)
+		}
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return aliasNotFound(name)
+		keys, err := collectStrings(ctx, tx,
+			`SELECT api_key_id FROM modelgateway.key_policies WHERE $1 = ANY(aliases) ORDER BY api_key_id`, name)
+		if err != nil {
+			return err
 		}
-		return nil
+		if len(keys) > 0 {
+			return fail(ErrConflict, "alias %q is granted to api keys (%s); remove it from their policies first", name, strings.Join(keys, ", "))
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM modelgateway.aliases WHERE name = $1`, name)
+		return err
 	})
 }

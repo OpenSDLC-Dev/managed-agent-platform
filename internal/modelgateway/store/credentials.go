@@ -40,9 +40,13 @@ func lockProvider(ctx context.Context, tx pgx.Tx, id string) (Provider, error) {
 }
 
 // credentialProtocols is want, or every protocol p has an endpoint for when
-// want is empty, refusing a protocol p has none for.
+// want is nil, refusing a protocol p has none for. An empty, non-nil want is
+// refused rather than read as nil: it cannot mean both "none" and "all".
 func credentialProtocols(p Provider, want []profile.Protocol) ([]profile.Protocol, error) {
-	if len(want) == 0 {
+	if want != nil && len(want) == 0 {
+		return nil, fail(ErrInvalid, "protocols: an empty list names no protocol; leave it out for every protocol the provider has an endpoint for")
+	}
+	if want == nil {
 		for proto := range p.Endpoints {
 			want = append(want, proto)
 		}

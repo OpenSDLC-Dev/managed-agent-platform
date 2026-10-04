@@ -164,6 +164,9 @@ func TestCredentials(t *testing.T) {
 	wantErr(t, err, store.ErrInvalid, "openai")
 	_, err = s.CreateCredential(ctx, store.Credential{ProviderID: "gwprov_missing", Ciphertext: []byte{1}, KeyID: "k", Weight: 1})
 	wantErr(t, err, store.ErrNotFound, "gwprov_missing")
+	_, err = s.CreateCredential(ctx, store.Credential{ProviderID: p.ID, Ciphertext: []byte{1}, KeyID: "k", Weight: 1,
+		Protocols: []profile.Protocol{}})
+	wantErr(t, err, store.ErrInvalid, "empty")
 
 	up, err := s.UpdateCredential(ctx, p.ID, c.ID, func(c *store.Credential) error {
 		c.Weight, c.Enabled, c.Ciphertext = 5, false, []byte("ignored")
@@ -367,6 +370,29 @@ func TestKeyPolicies(t *testing.T) {
 	}
 	if err := s.DeleteKeyPolicy(ctx, "key_app"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("second delete: %v", err)
+	}
+}
+
+// An alias a key policy grants cannot be deleted: the grant would outlive it
+// and pass to the next alias of its name.
+func TestDeleteAliasRespectsGrants(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	mkKey(t, pool, "key_app")
+	p := mkProvider(t, s, both())
+	d := mkDeployment(t, s, p.ID, store.KindChat)
+	if _, err := s.CreateAlias(ctx, store.Alias{Name: "fast", Targets: []store.Target{{DeploymentID: d.ID, Weight: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutKeyPolicy(ctx, store.KeyPolicy{APIKeyID: "key_app", Aliases: []string{"fast"}}); err != nil {
+		t.Fatal(err)
+	}
+	wantErr(t, s.DeleteAlias(ctx, "fast"), store.ErrConflict, "key_app")
+	if _, err := s.PutKeyPolicy(ctx, store.KeyPolicy{APIKeyID: "key_app"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteAlias(ctx, "fast"); err != nil {
+		t.Fatalf("an alias no grant names: %v", err)
 	}
 }
 

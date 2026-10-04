@@ -47,13 +47,29 @@ func checkToken(field, s string, max int) error {
 	return nil
 }
 
+// checkAliasName is checkToken for an alias name, which may hold slashes
+// ("Qwen/Qwen3-Coder") but no segment the router would rewrite: an empty one,
+// "." or "..", which ServeMux answers by redirecting to another path — a
+// DELETE of "x/../y" sent to "y".
+func checkAliasName(s string) error {
+	if err := checkToken("name", s, maxNameLen); err != nil {
+		return err
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return invalid("name %q has an empty, \".\" or \"..\" path segment", s)
+		}
+	}
+	return nil
+}
+
 // checkEndpoint returns a base URL without its trailing slash, refusing one
 // that could carry a secret: userinfo, a query or a fragment. A secret is a
 // credential. http is allowed: an in-cluster model server often serves no TLS,
 // and the console marks such a provider.
 func checkEndpoint(proto, raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" {
 		return "", invalid("endpoints.%s must be an absolute http or https URL", proto)
 	}
 	switch {

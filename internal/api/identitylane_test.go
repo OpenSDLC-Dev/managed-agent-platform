@@ -765,8 +765,8 @@ func TestDualAuthDiscriminatesByCredentialShape(t *testing.T) {
 }
 
 // TestTrustedProxyModeReadsOnlyItsHeader pins mode B's discipline: the assertion
-// header is the credential, a Bearer is never one, and the machine lanes still
-// resolve first.
+// header is the credential, once, a Bearer is never one, and the machine lanes
+// still resolve first.
 func TestTrustedProxyModeReadsOnlyItsHeader(t *testing.T) {
 	const header = "x-goog-iap-jwt-assertion"
 	s := newLaneServerWith(t, func(c *identity.Config) {
@@ -788,6 +788,22 @@ func TestTrustedProxyModeReadsOnlyItsHeader(t *testing.T) {
 	// the proxy never vouched for.
 	if status, errType := laneStatus(t, s.bearer(http.MethodGet, path, admin, nil)); status != http.StatusUnauthorized {
 		t.Errorf("Bearer in trusted_proxy mode: status %d, error %q, want 401", status, errType)
+	}
+
+	// A repeated assertion is no credential: which copy the proxy set cannot be
+	// told from the request.
+	req, err := http.NewRequest(http.MethodGet, s.url+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add(header, admin)
+	req.Header.Add(header, admin)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, errType := laneStatus(t, res); status != http.StatusUnauthorized {
+		t.Errorf("repeated assertion header: status %d, error %q, want 401", status, errType)
 	}
 
 	// A management key beside the assertion still wins.

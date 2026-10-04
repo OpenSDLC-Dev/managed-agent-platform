@@ -108,7 +108,7 @@ func (s *Store) DeleteKeyPolicy(ctx context.Context, apiKeyID string) error {
 // sees half of a write.
 func (s *Store) Load(ctx context.Context) (Config, error) {
 	var cfg Config
-	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+	err := s.read(ctx, func(tx pgx.Tx) error {
 		var err error
 		if cfg.Providers, err = listProviders(ctx, tx); err != nil {
 			return err

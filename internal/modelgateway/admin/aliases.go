@@ -77,7 +77,7 @@ func (h *handler) createAlias(r *http.Request) (any, error) {
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	if err := checkToken("name", req.Name, maxNameLen); err != nil {
+	if err := checkAliasName(req.Name); err != nil {
 		return nil, err
 	}
 	if err := checkOptionalName("display_name", req.DisplayName); err != nil {

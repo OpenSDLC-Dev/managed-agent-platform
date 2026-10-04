@@ -236,6 +236,8 @@ func TestAuthByRole(t *testing.T) {
 	}
 	e.ok(e.do("POST", "/admin/v1/providers", body, bearer(e.token("admins"))), "admin writes")
 	e.refused(e.do("GET", "/admin/v1/providers", nil, bearer(e.token("strangers"))), http.StatusForbidden, "permission_error", "role")
+	e.refused(e.do("GET", "/admin/v1/nothing", nil, bearer(e.token("strangers"))), http.StatusForbidden, "permission_error", "role")
+	e.refused(e.do("PUT", "/admin/v1/providers", nil, bearer(e.token("strangers"))), http.StatusForbidden, "permission_error", "role")
 	if r := e.do("GET", "/admin/v1/providers", nil, bearer("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln")); r.status != http.StatusUnauthorized {
 		t.Errorf("forged token: %d %s", r.status, r.raw)
 	}
@@ -280,6 +282,7 @@ func TestProviders(t *testing.T) {
 		"fragment":             {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "https://x.example/#f"}}, "fragment"},
 		"scheme":               {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "ftp://x.example"}}, "http"},
 		"relative":             {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "/v1"}}, "http"},
+		"no host":              {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "https://:443"}}, "http"},
 		"credential header":    {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"X-Upstream-Token": "s"}}, "X-Upstream-Token"},
 		"authorization header": {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"Authorization": "Bearer s"}}, "Authorization"},
 		"bad header name":      {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"X Route": "a"}}, "X Route"},
@@ -294,6 +297,8 @@ func TestProviders(t *testing.T) {
 		})
 	}
 	e.refused(e.admin("POST", "/admin/v1/providers", "{"), http.StatusBadRequest, "invalid_request_error", "JSON")
+	e.refused(e.admin("POST", "/admin/v1/providers", `{"name":"p","profile":"deepseek","endpoints":{"openai":"https://api.deepseek.com"}}}`),
+		http.StatusBadRequest, "invalid_request_error", "after")
 	e.ok(e.admin("POST", "/admin/v1/providers", map[string]any{
 		"name": "in-cluster", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "http://vllm.models.svc:8000"},
 	}), "an http endpoint")
@@ -307,6 +312,9 @@ func TestProviders(t *testing.T) {
 	e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"headers": map[string]string{"Cookie": "s"}}), http.StatusBadRequest, "invalid_request_error", "Cookie")
 	e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"name": ""}), http.StatusBadRequest, "invalid_request_error", "name")
 	e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"colour": "red"}), http.StatusBadRequest, "invalid_request_error", "colour")
+	for _, field := range []string{"enabled", "name"} {
+		e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{field: nil}), http.StatusBadRequest, "invalid_request_error", "null")
+	}
 	e.refused(e.admin("POST", "/admin/v1/providers/gwprov_missing", map[string]any{"name": "x"}), http.StatusNotFound, "not_found_error", "gwprov_missing")
 	if got := e.ok(e.admin("GET", "/admin/v1/providers/"+id, nil), "get"); got["name"] != "renamed" {
 		t.Errorf("get = %v", got)
@@ -367,6 +375,9 @@ func TestCredentials(t *testing.T) {
 		t.Fatalf("updated = %v", up)
 	}
 	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials/"+cid, map[string]any{"key": "sk-new"}), http.StatusBadRequest, "invalid_request_error", "rotate")
+	for _, field := range []string{"enabled", "weight"} {
+		e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials/"+cid, map[string]any{field: nil}), http.StatusBadRequest, "invalid_request_error", "null")
+	}
 	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials/"+cid, map[string]any{"protocols": []string{}}),
 		http.StatusBadRequest, "invalid_request_error", "empty")
 	if n := len(e.admin("GET", "/admin/v1/providers/"+pid+"/credentials", nil).list()); n != 2 {
@@ -414,6 +425,9 @@ func TestDeployments(t *testing.T) {
 	for _, field := range []string{"provider_id", "upstream_model", "kind"} {
 		e.refused(e.admin("POST", "/admin/v1/deployments/"+id, map[string]any{field: "x"}), http.StatusBadRequest, "invalid_request_error", "fixed")
 	}
+	for _, field := range []string{"enabled", "display_name", "capabilities", "prices"} {
+		e.refused(e.admin("POST", "/admin/v1/deployments/"+id, map[string]any{field: nil}), http.StatusBadRequest, "invalid_request_error", "null")
+	}
 	e.ok(e.admin("POST", "/admin/v1/aliases", map[string]any{"name": "fast", "targets": []map[string]any{{"deployment_id": id}}}), "alias")
 	e.refused(e.admin("DELETE", "/admin/v1/deployments/"+id, nil), http.StatusConflict, "invalid_request_error", "fast")
 	if n := len(e.admin("GET", "/admin/v1/deployments", nil).list()); n != 1 {
@@ -442,13 +456,18 @@ func TestAliases(t *testing.T) {
 		status   int
 		contains string
 	}{
-		"duplicate":    {map[string]any{"name": "Qwen/Qwen3-Coder", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusConflict, "already exists"},
-		"mixed kinds":  {map[string]any{"name": "m", "targets": []map[string]any{{"deployment_id": chat1}, {"deployment_id": emb}}}, http.StatusBadRequest, "kind"},
-		"no targets":   {map[string]any{"name": "m"}, http.StatusBadRequest, "target"},
-		"blank name":   {map[string]any{"name": "has space", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusBadRequest, "name"},
-		"ghost":        {map[string]any{"name": "m", "targets": []map[string]any{{"deployment_id": "gwdep_missing"}}}, http.StatusBadRequest, "gwdep_missing"},
-		"weight zero":  {map[string]any{"name": "m", "targets": []map[string]any{{"deployment_id": chat1, "weight": 0}}}, http.StatusBadRequest, "weight"},
-		"priority neg": {map[string]any{"name": "m", "targets": []map[string]any{{"deployment_id": chat1, "priority": -1}}}, http.StatusBadRequest, "priority"},
+		"duplicate":      {map[string]any{"name": "Qwen/Qwen3-Coder", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusConflict, "already exists"},
+		"mixed kinds":    {map[string]any{"name": "m", "targets": []map[string]any{{"deployment_id": chat1}, {"deployment_id": emb}}}, http.StatusBadRequest, "kind"},
+		"no targets":     {map[string]any{"name": "m"}, http.StatusBadRequest, "target"},
+		"blank name":     {map[string]any{"name": "has space", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusBadRequest, "name"},
+		"empty segment":  {map[string]any{"name": "a//b", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusBadRequest, "segment"},
+		"dot segments":   {map[string]any{"name": "x/../y", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusBadRequest, "segment"},
+		"leading slash":  {map[string]any{"name": "/lead", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusBadRequest, "segment"},
+		"trailing slash": {map[string]any{"name": "trail/", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusBadRequest, "segment"},
+		"just dots":      {map[string]any{"name": "..", "targets": []map[string]any{{"deployment_id": chat1}}}, http.StatusBadRequest, "segment"},
+		"ghost":          {map[string]any{"name": "m", "targets": []map[string]any{{"deployment_id": "gwdep_missing"}}}, http.StatusBadRequest, "gwdep_missing"},
+		"weight zero":    {map[string]any{"name": "m", "targets": []map[string]any{{"deployment_id": chat1, "weight": 0}}}, http.StatusBadRequest, "weight"},
+		"priority neg":   {map[string]any{"name": "m", "targets": []map[string]any{{"deployment_id": chat1, "priority": -1}}}, http.StatusBadRequest, "priority"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e.refused(e.admin("POST", "/admin/v1/aliases", tc.body), tc.status, "invalid_request_error", tc.contains)
@@ -463,6 +482,7 @@ func TestAliases(t *testing.T) {
 		t.Fatalf("updated = %v", up)
 	}
 	e.refused(e.admin("POST", "/admin/v1/aliases/Qwen/Qwen3-Coder", map[string]any{"kind": "embedding"}), http.StatusBadRequest, "invalid_request_error", "fixed")
+	e.refused(e.admin("POST", "/admin/v1/aliases/Qwen/Qwen3-Coder", map[string]any{"targets": nil}), http.StatusBadRequest, "invalid_request_error", "null")
 	e.refused(e.admin("POST", "/admin/v1/aliases/Qwen/Qwen3-Coder", map[string]any{"name": "other"}), http.StatusBadRequest, "invalid_request_error", "fixed")
 	if n := len(e.admin("GET", "/admin/v1/aliases", nil).list()); n != 3 {
 		t.Errorf("list has %d aliases", n)
@@ -480,28 +500,40 @@ func TestKeyPolicies(t *testing.T) {
 	}
 	pid := e.provider("deepseek", deepseekBoth)
 	e.ok(e.admin("POST", "/admin/v1/aliases", map[string]any{"name": "fast", "targets": []map[string]any{{"deployment_id": e.deployment(pid, "chat")}}}), "alias")
-	kp := e.ok(e.admin("POST", "/admin/v1/key_policies/key_app", map[string]any{"aliases": []string{"fast"}, "rpm": 60, "tpm": 100000}), "put")
+	put := func(body map[string]any) reply { return e.admin("POST", "/admin/v1/key_policies/key_app", body) }
+	kp := e.ok(put(map[string]any{"aliases": []string{"fast"}, "rpm": 60, "tpm": 100000}), "put")
 	if kp["type"] != "key_policy" || kp["api_key_id"] != "key_app" || kp["rpm"] != 60.0 || len(kp["aliases"].([]any)) != 1 {
 		t.Fatalf("put = %v", kp)
 	}
-	all := e.ok(e.admin("POST", "/admin/v1/key_policies/key_app", map[string]any{}), "replace")
+	// A grant is written whole, so a body that leaves a field out would
+	// widen it silently: every field is named, null being every alias or no
+	// limit.
+	e.refused(put(map[string]any{"rpm": 120}), http.StatusBadRequest, "invalid_request_error", "aliases")
+	e.refused(put(map[string]any{"aliases": []string{"fast"}, "rpm": 120}), http.StatusBadRequest, "invalid_request_error", "tpm")
+	if got := e.ok(e.admin("GET", "/admin/v1/key_policies/key_app", nil), "get"); got["tpm"] != 100000.0 {
+		t.Fatalf("a refused write changed the grant: %v", got)
+	}
+	all := e.ok(put(map[string]any{"aliases": nil, "rpm": nil, "tpm": nil}), "replace")
 	if all["aliases"] != nil || all["rpm"] != nil || all["tpm"] != nil {
 		t.Fatalf("replaced = %v", all)
 	}
-	e.refused(e.admin("POST", "/admin/v1/key_policies/key_missing", map[string]any{}), http.StatusNotFound, "not_found_error", "key_missing")
-	e.refused(e.admin("POST", "/admin/v1/key_policies/key_app", map[string]any{"aliases": []string{}}), http.StatusBadRequest, "invalid_request_error", "DELETE")
-	e.refused(e.admin("POST", "/admin/v1/key_policies/key_app", map[string]any{"aliases": []string{"typo"}}), http.StatusBadRequest, "invalid_request_error", "typo")
-	e.refused(e.admin("POST", "/admin/v1/key_policies/key_app", map[string]any{"aliases": []string{"fast", "fast"}}), http.StatusBadRequest, "invalid_request_error", "twice")
-	e.refused(e.admin("POST", "/admin/v1/key_policies/key_app", map[string]any{"rpm": 0}), http.StatusBadRequest, "invalid_request_error", "rpm")
-	e.refused(e.admin("POST", "/admin/v1/key_policies/key_app", map[string]any{"tpm": -5}), http.StatusBadRequest, "invalid_request_error", "tpm")
-	if got := e.ok(e.admin("GET", "/admin/v1/key_policies/key_app", nil), "get"); got["api_key_id"] != "key_app" {
-		t.Errorf("get = %v", got)
+	whole := func(aliases any, rpm, tpm any) map[string]any {
+		return map[string]any{"aliases": aliases, "rpm": rpm, "tpm": tpm}
 	}
+	e.refused(e.admin("POST", "/admin/v1/key_policies/key_missing", whole(nil, nil, nil)), http.StatusNotFound, "not_found_error", "key_missing")
+	e.refused(put(whole([]string{}, nil, nil)), http.StatusBadRequest, "invalid_request_error", "DELETE")
+	e.refused(put(whole([]string{"typo"}, nil, nil)), http.StatusBadRequest, "invalid_request_error", "typo")
+	e.refused(put(whole([]string{"fast", "fast"}, nil, nil)), http.StatusBadRequest, "invalid_request_error", "twice")
+	e.refused(put(whole(nil, 0, nil)), http.StatusBadRequest, "invalid_request_error", "rpm")
+	e.refused(put(whole(nil, nil, -5)), http.StatusBadRequest, "invalid_request_error", "tpm")
 	if n := len(e.admin("GET", "/admin/v1/key_policies", nil).list()); n != 1 {
 		t.Errorf("list has %d policies", n)
 	}
+	e.ok(put(whole([]string{"fast"}, nil, nil)), "grant fast")
+	e.refused(e.admin("DELETE", "/admin/v1/aliases/fast", nil), http.StatusConflict, "invalid_request_error", "key_app")
 	e.ok(e.admin("DELETE", "/admin/v1/key_policies/key_app", nil), "delete")
 	e.refused(e.admin("GET", "/admin/v1/key_policies/key_app", nil), http.StatusNotFound, "not_found_error", "key_app")
+	e.ok(e.admin("DELETE", "/admin/v1/aliases/fast", nil), "an alias no grant names")
 }
 
 // Paths and methods the API does not serve answer in its error envelope.
@@ -527,5 +559,51 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 		if _, err := admin.New(cfg); err == nil {
 			t.Errorf("%s: New accepted it", name)
 		}
+	}
+}
+
+// Behind an identity-aware proxy the assertion header is the operator's
+// credential, a Bearer never is, and a repeated assertion is none.
+func TestAuthBehindAProxy(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	cipher, _ := local.New(local.Config{KeyID: "k", Key: bytes.Repeat([]byte{3}, 32)})
+	idp := identitytest.NewIdP(t)
+	clock := identitytest.NewClock(time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
+	const header = "X-Goog-Iap-Jwt-Assertion"
+	v, err := identity.New(context.Background(), identity.Config{
+		Mode: identity.ModeTrustedProxy, AssertionHeader: header, Issuer: idp.Issuer(), Audience: audience,
+		JWKSURL: idp.JWKSURL(), RoleMap: map[string]identity.Role{"admins": identity.RoleAdmin},
+		HTTPClient: idp.Client(), Now: clock.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := admin.New(admin.Config{Store: store.New(pool), Cipher: cipher, Verifier: v, BootstrapKey: bootstrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	claims := idp.Claims(audience, clock.Now())
+	claims["roles"] = []any{"admins"}
+	tok := idp.Mint(t, claims)
+	get := func(set func(http.Header)) int {
+		req, _ := http.NewRequest("GET", srv.URL+"/admin/v1/providers", nil)
+		set(req.Header)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := get(func(h http.Header) { h.Set(header, tok) }); got != http.StatusOK {
+		t.Errorf("assertion header: %d, want 200", got)
+	}
+	if got := get(func(h http.Header) { h.Set("Authorization", "Bearer "+tok) }); got != http.StatusUnauthorized {
+		t.Errorf("the same token as a Bearer: %d, want 401", got)
+	}
+	if got := get(func(h http.Header) { h.Add(header, tok); h.Add(header, tok) }); got != http.StatusUnauthorized {
+		t.Errorf("a repeated assertion: %d, want 401", got)
 	}
 }

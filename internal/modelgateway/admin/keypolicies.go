@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"slices"
 	"time"
@@ -23,16 +24,33 @@ func viewKeyPolicy(k store.KeyPolicy) keyPolicyView {
 		CreatedAt: k.CreatedAt, UpdatedAt: k.UpdatedAt}
 }
 
-// putKeyPolicy writes a key's grant whole: aliases absent or null grants
-// every alias, and rpm or tpm absent or null sets no limit.
+// putKeyPolicy writes a key's grant whole: aliases null grants every alias,
+// and rpm or tpm null sets no limit. Because the write is whole, each field
+// must be named: a body that left one out, as an update elsewhere may, would
+// widen the grant without saying so.
 func (h *handler) putKeyPolicy(r *http.Request) (any, error) {
+	b, err := readBody(r)
+	if err != nil {
+		return nil, err
+	}
 	var req struct {
 		Aliases []string `json:"aliases"`
 		RPM     *int32   `json:"rpm"`
 		TPM     *int64   `json:"tpm"`
 	}
-	if err := decode(r, &req); err != nil {
+	if err := strict(b, &req); err != nil {
 		return nil, err
+	}
+	var named patch
+	if err := json.Unmarshal(b, &named); err != nil {
+		return nil, invalid("Failed to parse request body as JSON: %s", err)
+	}
+	for _, f := range []struct{ name, null string }{
+		{"aliases", "every alias"}, {"rpm", "no limit"}, {"tpm", "no limit"},
+	} {
+		if _, ok := named[f.name]; !ok {
+			return nil, invalid("%s is required: a grant is written whole, so name each field (null for %s)", f.name, f.null)
+		}
 	}
 	if req.Aliases != nil && len(req.Aliases) == 0 {
 		return nil, invalid("an empty aliases list grants nothing; DELETE the policy to revoke the grant")
