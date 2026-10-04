@@ -122,7 +122,9 @@ Each new guard was broken on its own, and its test failed:
 
 After the Claude review's fixes the full `make verify` gate passed on the branch: build, cross-build, vet, format check and 67 test packages, with 90.91% total statement coverage. Review results and CI are recorded in the pull request.
 
-The verifier's re-run passed with three notes. One was fixed: header names alike but for case could digest in either order. A test that failed first now pins that.
+The verifier's re-run passed with three notes. One was fixed: header names alike but for case could digest in either order. That first fix fixed only the digest's order. Codex's bot review on the pull request showed that the adapters, which apply headers from a map, could still send either value under an unchanged Route. The registry now refuses such a route, and a test that failed first pins that.
+
+CodeRabbit's review on the pull request found the docs calling the guard Anthropic's own rule. It is this platform's policy, stricter than the API's: the API drops a block the requested model cannot read, and its prefix check is configurable through `thinking.block_binding.prefix_mismatch_behavior`. The plan, docs/ARCHITECTURE.md and docs/DIVERGENCES.md now say so, and DIVERGENCES states that a turn keeps thinking only when it also commits text or a tool call.
 
 ---
 

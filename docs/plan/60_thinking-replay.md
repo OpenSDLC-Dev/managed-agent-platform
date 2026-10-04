@@ -15,8 +15,8 @@ nothing (`internal/brain/replay.go`). That was safe while no model thought unask
 (#67). It no longer is: every model the platform now targets thinks by default, so
 each tool-use continuation the brain sends drops the reasoning that led to the call.
 After this plan the brain keeps each committed turn's signed thinking internally and
-sends it back on later requests, under a guard that, by Anthropic's rule, never turns
-a changed prompt into a rejected one (DeepSeek's rule is another; decision 5). Plan 59
+sends it back on later requests, under a guard of its own that never turns a changed
+prompt into a request Anthropic's API refuses (DeepSeek's rule is another; decision 5). Plan 59
 (the model gateway) waits on this for its brain cutover.
 
 ## Ground truth (verified 2026-10-04)
@@ -31,10 +31,14 @@ a changed prompt into a rejected one (DeepSeek's rule is another; decision 5). P
   `signature_delta`. From Claude Fable 5.1 the API checks each returned block
   against everything sent before it — the top-level `system`, the `tools`, every
   earlier message — and a changed prefix is a 400 by default on accounts created on
-  or after 2026-08-31; dropping thinking blocks from the start of the history, from
+  or after 2026-08-31, and on older ones when the request sets
+  `thinking.block_binding.prefix_mismatch_behavior`, whose other value, `"drop_block"`,
+  drops the failing block and every thinking block after it instead (re-read
+  2026-10-05); dropping thinking blocks from the start of the history, from
   its end, or all of them stays valid, while removing one from the middle and keeping
-  later ones does not; an undecryptable signature is always a 400; a block the
-  current model cannot read is dropped without error
+  later ones does not; an undecryptable signature is always a 400; each model reads
+  its own blocks and a fixed set of other models', and a block the current model
+  cannot read is dropped without error
   ([preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking)).
 - **DeepSeek and MiniMax**, probed live in tool loops of up to four requests:
   `deepseek-flash` and `deepseek-v4-pro` (both of DeepSeek's endpoints, with and
@@ -94,7 +98,8 @@ a changed prompt into a rejected one (DeepSeek's rule is another; decision 5). P
    recommendation, and the API, not the brain, decides which earlier blocks a model
    keeps. Blocks render ahead of the turn's text and tool calls, where the response
    had them (decision 3).
-5. **The guard: same model, same prefix — the API's own rule, checked first.** Each
+5. **The guard: same model, same prefix — this platform's policy, stricter than the
+   API's.** Each
    stored block records the upstream model id its request was sent to and a SHA-256
    over everything the model read before the block: the route the request went over
    (`provider.Descriptor.Route`, a digest of the protocol, the base URL, the key and
@@ -125,7 +130,11 @@ a changed prompt into a rejected one (DeepSeek's rule is another; decision 5). P
    rather than per request (a digest of `system` and `tools` alone was the first
    draft) makes the check exact instead of an argument about which renderings can
    change after the fact; it costs one SHA-256 pass over each request, on both
-   sides. The guard is Anthropic's rule, and DeepSeek's is another: it checks no
+   sides. Leaving the prefix check to the API instead, with `"drop_block"` on every
+   request, would hold only where the endpoint is Anthropic's, and since it drops
+   every thinking block after the first failing one, a stale block left in the history
+   would cost every block produced after it, on every request. The guard is built to
+   Anthropic's rule, and DeepSeek's is another: it checks no
    prefix, but refuses a tool continuation whose loop lost its thinking under foreign
    ids (Ground truth). So a prefix change in the middle of a DeepSeek tool loop — the
    same rare events — costs that one request: its retries meet the same 400, the turn

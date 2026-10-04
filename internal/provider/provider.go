@@ -227,6 +227,17 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 		if route.Config.FlattenSearchResults && route.Config.Protocol != "anthropic" {
 			return nil, fmt.Errorf("route %q: flatten_search_results is only valid on protocol: anthropic routes", route.Model)
 		}
+		// Names that differ only in case are one HTTP header, and an adapter
+		// applies its headers from a map: which value went out would change
+		// between provider instances while the route's Route did not.
+		seen := make(map[string]bool, len(route.Config.Headers))
+		for k := range route.Config.Headers {
+			name := strings.ToLower(k)
+			if seen[name] {
+				return nil, fmt.Errorf("route %q sets header %q more than once, in different cases", route.Model, name)
+			}
+			seen[name] = true
+		}
 		// The registry owns its config copies: Headers is a reference
 		// type, and sharing it with the caller's Route slice would let a
 		// later mutation reach every constructed provider.
@@ -275,7 +286,9 @@ func (r *Registry) Describe(model string) (Descriptor, bool) {
 
 // routeDigest is Descriptor.Route. What it covers is digested rather than
 // said: a Descriptor is what may be said out loud, and the key, a header or a
-// URL may carry what may not. Header names compare as HTTP compares them.
+// URL may carry what may not. Header names compare as HTTP compares them, and
+// NewRegistry refuses two alike but for case, so lower-cased they sort into
+// one order.
 func routeDigest(cfg Config) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%q %q %q %t", cfg.Protocol, cfg.BaseURL, cfg.APIKey, cfg.FlattenSearchResults)
@@ -284,10 +297,7 @@ func routeDigest(cfg Config) string {
 		names = append(names, k)
 	}
 	sort.Slice(names, func(i, j int) bool {
-		if a, b := strings.ToLower(names[i]), strings.ToLower(names[j]); a != b {
-			return a < b
-		}
-		return names[i] < names[j] // one order for names alike but for case
+		return strings.ToLower(names[i]) < strings.ToLower(names[j])
 	})
 	for _, k := range names {
 		fmt.Fprintf(h, " %q %q", strings.ToLower(k), cfg.Headers[k])

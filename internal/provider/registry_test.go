@@ -282,20 +282,15 @@ func TestDescribeRouteIdentifiesEndpointAndRendering(t *testing.T) {
 	}
 }
 
-// Header names that differ only in case still digest in one order, so one
-// route gives one Route in every process, whatever order a map yields them.
-func TestDescribeRouteIsStableAcrossHeaderCase(t *testing.T) {
-	reg, err := provider.NewRegistry([]provider.Route{
+// A route may not set one HTTP header twice under names that differ only in
+// case: an adapter applies its headers from a map, so which value went out
+// would change between provider instances while the route's Route did not.
+func TestNewRegistryRefusesHeaderNamesAlikeButForCase(t *testing.T) {
+	_, err := provider.NewRegistry([]provider.Route{
 		{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw", Model: "m",
-			Headers: map[string]string{"X-Route": "1", "x-route": "2", "X-ROUTE": "3"}}},
+			Headers: map[string]string{"X-Account": "a", "x-account": "b"}}},
 	}, factories)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, _ := reg.Describe("m")
-	for range 200 {
-		if d, _ := reg.Describe("m"); d.Route != first.Route {
-			t.Fatalf("Route changed between calls: %q, then %q", first.Route, d.Route)
-		}
+	if err == nil || !strings.Contains(err.Error(), `"x-account"`) {
+		t.Fatalf("err = %v, want the duplicated header refused by name", err)
 	}
 }
