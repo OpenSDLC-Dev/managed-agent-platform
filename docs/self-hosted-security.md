@@ -176,10 +176,13 @@ environment sets for a shell — an `ENV BASH_ENV` startup file, exported
 functions, `SHELLOPTS` — applies to every script that runs in the sandbox,
 the model's commands and the platform's own alike, so an image whose `PATH`
 or options come from that file works for both — errexit (`set -e`) aside:
-the platform's scripts turn it off as they start, and the `bash` tool's shell
-turns it off before the model's first command, so the image's errexit
-reaches no command the model runs, while its `nounset` and `pipefail` do (a
-`set -e` the model runs itself carries from call to call). What the startup file
+the platform's scripts turn it off as they start, and the `bash` tool's own
+shell turns it off before the model's first command, so what the model runs
+in that shell runs without the image's errexit, while its `nounset` and
+`pipefail` carry (and a `set -e` the model runs there carries from call to
+call). A bash the model starts itself — `bash -c`, a `#!/bin/bash` script —
+reads the startup file again, as every non-interactive bash does, and runs
+under the image's errexit. What the startup file
 *prints* does not corrupt the scripts whose answers the platform parses:
 `glob` and `grep`, the outputs harvest's listing, the memory sync's tree
 hash, the package-install probe, Docker's refused-write reasons and, on
@@ -197,9 +200,12 @@ a command past its deadline
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the
-output — on Kubernetes every exec then fails with an error, its exit record
-pushed out, and a read fails once the file and the banner together pass the
-read's cap and room. Not every script is framed. A bulk write's reports — the member it
+output — on Kubernetes every exec then fails, its exit record pushed out,
+and so does a read once the file and the banner together pass the read's
+cap and room. Each tool answers such a call with an error naming the image
+(and saying, of a command, that it ran), never a fault a retry would meet
+again, and the package-install pass, its probe's answer pushed out, installs
+nothing. Not every script is framed. A bulk write's reports — the member it
 failed on, a directory it could not make, what its shed left behind — are
 marker lines, each printed on a line of its own and the last one read, which
 a banner around them does not displace. What a few scripts print is relayed,

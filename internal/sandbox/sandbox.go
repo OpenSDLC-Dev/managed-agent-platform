@@ -409,10 +409,13 @@ func CheckCommand(command string) error {
 // rename refusing a directory with the `rm`'s exit and not its own (#860). So
 // it turns errexit off, and touches nothing else. A script framed by Frame.Open
 // has it already. It is the platform's scripts' alone: the model's commands do
-// not run through it — though they do not get the image's errexit either, the
-// bash tool's own shell turning it off before it restores its option snapshot
-// (internal/sandbox/shell's template), while the image's nounset and pipefail
-// reach them, and a `set -e` the model runs carries from call to call.
+// not run through it — though in the bash tool's own shell they run without
+// the image's errexit too, that shell turning it off before it restores its
+// option snapshot (internal/sandbox/shell's template), while the image's
+// nounset and pipefail carry there, and a `set -e` the model runs there
+// carries from call to call. A bash the model starts itself (`bash -c`, a
+// `#!/bin/bash` script) reads the startup file again, and runs under the
+// image's errexit.
 const ScriptPreamble = "set +e\n"
 
 // Script is script as the platform runs it in a sandbox's shell, its preamble
