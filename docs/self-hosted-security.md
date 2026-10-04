@@ -185,7 +185,8 @@ answer between a begin and an end line carrying a nonce of its own, and only
 what lies between them is read. A banner on either stream, ending its line or
 not, and what an `EXIT` trap prints after the script fall outside; the
 scripts name every path whole, so a `cd` in the file moves none of them; and
-errexit (`set -e`) in the file does not end one before its end line
+errexit (`set -e`) in the file ends neither one before its end line nor the
+Kubernetes exec wrapper before it records a command's exit code
 ([#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860)).
 Not every script is framed. A bulk write's reports — the member it failed on,
 a directory it could not make, what its shed left behind — are marker lines,
