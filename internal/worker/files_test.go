@@ -397,6 +397,38 @@ func TestSetupFilesRemovedMountIsForgotten(t *testing.T) {
 	}
 }
 
+// TestSetupFilesReportsProgressBeforeItsProbe is the executor's #383 rule over
+// the wire: a pass reports once per mount it lands and once at its boundary;
+// an unchanged pass, which returns without landing, reports its marker read
+// before the probe exec; and a marker recording none of the set asks no probe,
+// so it reports nothing for one.
+func TestSetupFilesReportsProgressBeforeItsProbe(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	id := domain.NewID("file").String()
+	h.seedFile(t, id, "a", "text/plain", "a's bytes")
+	h.refFileMounts(t, [2]string{id, "/workspace/uploads/a"})
+	reports := 0
+	pass := func() int {
+		t.Helper()
+		reports = 0
+		if err := SetupFiles(context.Background(), h.client, h.sid.String(), sb, "", func() { reports++ }); err != nil {
+			t.Fatalf("SetupFiles: %v", err)
+		}
+		return reports
+	}
+	if got := pass(); got != 2 {
+		t.Errorf("first pass reports = %d, want 2 (the mount, then the boundary)", got)
+	}
+	if got := pass(); got != 1 {
+		t.Errorf("unchanged pass reports = %d, want 1 (the marker read, before the probe)", got)
+	}
+	sb.files["/workspace/"+filesSentinelName] = "[]"
+	if got := pass(); got != 2 {
+		t.Errorf("pass over a marker recording nothing reports = %d, want 2 (no probe, the mount, the boundary)", got)
+	}
+}
+
 // TestSetupFilesProbeOfAnOversizedSetIsBounded is the executor's rule over the
 // wire: 130 mounts of 1 KB paths, every one gone, are asked in two probe
 // execs — as few as the bound on one command allows — and all land again.
