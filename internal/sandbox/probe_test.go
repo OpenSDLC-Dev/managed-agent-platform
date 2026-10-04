@@ -118,6 +118,43 @@ func TestProbePathsBatchesASetTooLongForOneExec(t *testing.T) {
 	}
 }
 
+// AbsentPaths halves a set ProbePaths answered Absent down to the paths that
+// are gone, in fewer execs than one a path twice over, and reports none from
+// a half that answers Present or nothing: what no probe could see is left be.
+func TestAbsentPathsFindsTheGoneByHalving(t *testing.T) {
+	var paths []string
+	for _, c := range "abcdefgh" {
+		paths = append(paths, "/w/"+string(c))
+	}
+	run := func(unanswered string) ([]string, int) {
+		execs := 0
+		sb := execOnly{exec: func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+			execs++
+			if unanswered != "" && strings.Contains(req.Command, "'"+unanswered+"'") {
+				return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "x", Ran: true}
+			}
+			for _, p := range []string{"/w/c", "/w/f"} {
+				if strings.Contains(req.Command, "'"+p+"'") {
+					return sandbox.ExecResult{ExitCode: 1}, nil
+				}
+			}
+			return sandbox.ExecResult{}, nil
+		}}
+		return sandbox.AbsentPaths(context.Background(), sb, paths...), execs
+	}
+	got, execs := run("")
+	if strings.Join(got, " ") != "/w/c /w/f" {
+		t.Errorf("AbsentPaths = %v, want /w/c and /w/f", got)
+	}
+	if execs >= 2*len(paths) {
+		t.Errorf("AbsentPaths took %d execs for %d paths", execs, len(paths))
+	}
+	// /w/f shares its halves with /w/h, whose probe does not answer.
+	if got, _ := run("/w/h"); strings.Join(got, " ") != "/w/c" {
+		t.Errorf("AbsentPaths beside an unanswered half = %v, want /w/c alone", got)
+	}
+}
+
 // statOnly is a sandbox whose ReadFileStream alone is answered.
 type statOnly struct {
 	sandbox.Sandbox

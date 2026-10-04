@@ -329,6 +329,36 @@ func TestFilesRematerializeAMountDeletedFromASetTooLongForOneProbe(t *testing.T)
 	}
 }
 
+// TestFilesRelandOnlyTheMountThatIsGone: the agent moves a.csv away and edits
+// b.csv. The marker still names the set, the probe finds a mount gone, and
+// only that one lands again: b.csv keeps the agent's edit, where re-streaming
+// the set overwrote every mount the agent had changed.
+func TestFilesRelandOnlyTheMountThatIsGone(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	a, b := "/mnt/session/uploads/a.csv", "/mnt/session/uploads/b.csv"
+	h.seedFile(t, "file_a", "a as uploaded")
+	h.seedFile(t, "file_b", "b as uploaded")
+	h.refFiles(t, [2]string{"file_a", a}, [2]string{"file_b", b})
+	h.suspend(t, writeUse("t1.txt", "x"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("first step: %v", err)
+	}
+
+	delete(sb.files, a)
+	sb.files[b] = "b as the agent left it"
+	h.suspend(t, writeUse("t2.txt", "y"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("second step: %v", err)
+	}
+	if sb.files[a] != "a as uploaded" {
+		t.Errorf("a.csv = %q, want it landed again", sb.files[a])
+	}
+	if sb.files[b] != "b as the agent left it" {
+		t.Errorf("b.csv = %q, want the agent's edit kept", sb.files[b])
+	}
+}
+
 // TestFilesRematerializeWhenSetChanges: adding a mount to a live session
 // re-materializes and the new mount lands. The added path is absent, so the
 // presence probe alone would force this pass; the same-path reassignment case

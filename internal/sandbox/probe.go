@@ -80,6 +80,26 @@ func probeBatch(ctx context.Context, sb Sandbox, cmd string) Presence {
 	}
 }
 
+// AbsentPaths is which of paths — a set ProbePaths answered Absent — are not
+// there, found by halving: each half is probed, one that answers Absent is
+// halved again until its absent paths stand alone, and one that answers
+// Present, or not at all, holds none to report — what is there, or what no
+// probe could see, is left be. A caller redoing the work of a set re-does
+// that of these alone, rather than overwriting the rest (#860).
+func AbsentPaths(ctx context.Context, sb Sandbox, paths ...string) []string {
+	if len(paths) <= 1 {
+		return paths
+	}
+	mid := len(paths) / 2
+	var absent []string
+	for _, half := range [][]string{paths[:mid], paths[mid:]} {
+		if ProbePaths(ctx, sb, half...) == Absent {
+			absent = append(absent, AbsentPaths(ctx, sb, half...)...)
+		}
+	}
+	return absent
+}
+
 // StatPresence asks whether path exists in sb through the file API rather
 // than a probe exec: a read of it capped at no bytes at all
 // (ReadFileStream), whose refusal says what is there — a directory, no

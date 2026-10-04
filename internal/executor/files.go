@@ -88,14 +88,17 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 	// a shell test, never ReadFile: a 500 MB mount cannot be read back to check
 	// it is there.
 	marker := filesSentinel(mounts)
+	// only, when set, is the mounts this pass lands — those of the set the
+	// marker names that are gone — and keep the marker as it is unless it was
+	// unread: the rest are the agent's to have edited, and stay.
+	var only map[string]bool
+	rewrite := true
 	if sentinelUsable {
 		prev, err := sb.ReadFile(ctx, sentinelPath)
 		// A marker that could not be read — the startup's output pushed it
 		// out, or the agent made it unreadable — is no record either way,
 		// and the marker is only a shortcut: the current set's paths are
-		// probed as they would be behind a matching one. Absent lands the set
-		// (a new mount among it); a probe that cannot answer either keeps
-		// what is there.
+		// probed as they would be behind a matching one.
 		unread := !sandbox.ReadAnswered(err)
 		if unread {
 			slog.WarnContext(ctx, "files sentinel not read; probing the mounts instead",
@@ -112,21 +115,35 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 				span.SetAttributes(attribute.Bool("files.unchanged", true))
 				return
 			case sandbox.PresenceUnknown:
-				// The marker says this set landed (or could not be read),
-				// and a probe that did not answer — an image's startup pushing it out of the output,
-				// a failed exec — cannot say a mount has gone since. Re-
-				// streaming every mount on that would overwrite the agent's
-				// edits on every pass (#860), so what is there stays.
+				// A probe that did not answer — an image's startup pushing it
+				// out of the output, a failed exec — cannot say a mount has
+				// gone. Re-streaming every mount on that would overwrite the
+				// agent's edits on every pass (#860), so what is there stays.
 				slog.WarnContext(ctx, "file mounts not probed; keeping what the sandbox holds",
 					"session_id", sid, "files", len(mounts))
 				span.SetAttributes(attribute.Bool("files.unchanged", true))
 				return
 			}
+			// Some mount is gone: those alone land again, never the set — the
+			// agent may have edited every other one (moved a.csv away, edited
+			// b.csv: b.csv stays as the agent left it).
+			only = map[string]bool{}
+			for _, p := range sandbox.AbsentPaths(ctx, sb, mountPaths(mounts)...) {
+				only[p] = true
+			}
+			rewrite = unread
 		}
 	}
 
 	landed := make([]fileRef, 0, len(mounts))
+	kept := 0
 	for _, m := range mounts {
+		if only != nil && !only[m.MountPath] {
+			// Still there, and kept: it counts as landed for the marker.
+			landed = append(landed, m)
+			kept++
+			continue
+		}
 		// Reported at the top of the iteration, not the bottom: every tolerated
 		// miss below continues, and the run has moved either way — a mount that
 		// took its time and one that was skipped both leave the pass advancing
@@ -153,15 +170,20 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 	// the sentinel write behind it — a 500 MB mount and a slow sandbox write are
 	// each well inside the budget and together need not be (#383).
 	progress()
-	span.SetAttributes(attribute.Int("files.materialized", len(landed)))
+	span.SetAttributes(attribute.Int("files.materialized", len(landed)-kept))
 	// The sentinel records only what landed: a partial pass (a dangling mount)
 	// leaves a marker that never equals the full set, so the next pass re-runs —
 	// the skills-registry behavior, carried over.
 	if !sentinelUsable {
 		slog.WarnContext(ctx, "files sentinel skipped: a mount occupies the sentinel path",
 			"session_id", sid, "sentinel_path", sentinelPath)
-	} else if err := sb.WriteFile(ctx, sentinelPath, filesSentinel(landed)); err != nil {
-		slog.WarnContext(ctx, "files sentinel not written", "session_id", sid, "err", err)
+	} else if rewrite {
+		// (Not rewritten where it already names this set: a mount that did
+		// not land again is gone from the sandbox, which the next pass's
+		// probe finds.)
+		if err := sb.WriteFile(ctx, sentinelPath, filesSentinel(landed)); err != nil {
+			slog.WarnContext(ctx, "files sentinel not written", "session_id", sid, "err", err)
+		}
 	}
 }
 

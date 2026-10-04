@@ -176,6 +176,36 @@ func TestSetupFilesUnreadableSentinelStillLandsANewMount(t *testing.T) {
 	}
 }
 
+// TestSetupFilesRelandOnlyTheMountThatIsGone is the executor's rule over the
+// wire: of a set the marker names, only the mount that is gone lands again,
+// and the agent's edit to its sibling stays.
+func TestSetupFilesRelandOnlyTheMountThatIsGone(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	a, b := "/workspace/uploads/a.csv", "/workspace/uploads/b.csv"
+	idA, idB := domain.NewID("file").String(), domain.NewID("file").String()
+	h.seedFile(t, idA, "a.csv", "text/csv", "a as uploaded")
+	h.seedFile(t, idB, "b.csv", "text/csv", "b as uploaded")
+	h.refFileMounts(t, [2]string{idA, a}, [2]string{idB, b})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	if err := h.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	delete(sb.files, a)
+	sb.files[b] = "b as the agent left it"
+	h.suspend(t, writeUse("out2.txt", "again"))
+	if err := h.run(); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if got := sb.files[a]; got != "a as uploaded" {
+		t.Errorf("a.csv = %q, want it landed again", got)
+	}
+	if got := sb.files[b]; got != "b as the agent left it" {
+		t.Errorf("b.csv = %q, want the agent's edit kept", got)
+	}
+}
+
 // unlengthed answers with chunked framing: it drops the Content-Length the
 // control plane set and commits the header before the body, which is what makes
 // the server frame the rest in chunks. A client then reads ContentLength -1 —
