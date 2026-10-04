@@ -185,17 +185,25 @@ answer between a begin and an end line carrying a nonce of its own, and only
 what lies between them is read. A banner on either stream, ending its line or
 not, and what an `EXIT` trap prints after the script fall outside; the
 scripts name every path whole, so a `cd` in the file moves none of them; and
-errexit (`set -e`) in the file ends neither one before its end line, nor the
-Kubernetes exec wrapper before it records a command's exit code, nor either
-backend's watchdog before it kills a command past its deadline
+errexit (`set -e`) in the file ends none of the platform's own scripts, each
+of which turns it off as it starts, nor the Kubernetes exec wrapper before it
+records a command's exit code, nor either backend's watchdog before it kills
+a command past its deadline
 ([#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860)).
-Not every script is framed. A bulk write's reports — the member it failed on,
-a directory it could not make, what its shed left behind — are marker lines,
-each printed on a line of its own and the last one read, which a banner
-around them does not displace. The output of the package install and of the
-`grep` tool's ripgrep install is relayed, not parsed — the former as the
-session error's message, the latter in the tool error when the install
-fails — banner and all, and the `bash` tool's output is the model's own
+The room for what the file prints is 1 MiB a stream around each script: the
+cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
+the file. A file that prints more pushes the scripts' answers out of the
+output — on Kubernetes every exec then fails, its exit record lost, and a
+read fails once the file and the banner together pass the read's cap and
+room. Not every script is framed. A bulk write's reports — the member it
+failed on, a directory it could not make, what its shed left behind — are
+marker lines, each printed on a line of its own and the last one read, which
+a banner around them does not displace. What a few scripts print is relayed,
+not parsed, banner and all: the package install's output, as the session
+error's message; the `grep` tool's ripgrep install's, in its tool error when
+the install fails; the stderr of a checkpoint's restore and of a repository's
+extraction, in the error each fails with; and the memory sync's removals', in
+the warning when they fail. The `bash` tool's output is the model's own
 command's, which the startup file reaches as it reaches any command.
 What the file *changes* still applies — a function an image exports under
 the name of a command the scripts call answers for that command — and one
