@@ -37,35 +37,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	code := pgtest.Main(m)
-	// The backstop for a fake sandbox no harness checks (newHarnessWith): an
-	// unscripted platform exec anywhere in the package fails the run.
-	if cmds := unscriptedExecs.all(); len(cmds) > 0 {
-		fmt.Fprintf(os.Stderr, "FAIL: %d platform execs without the script preamble (sandbox.Script): %q\n", len(cmds), cmds)
-		code = 1
-	}
-	os.Exit(code)
-}
-
-// unscriptedExecs is every exec a fakeSandbox refused for want of the
-// platform's script preamble, across the package (TestMain).
-var unscriptedExecs execLedger
-
-type execLedger struct {
-	mu   sync.Mutex
-	cmds []string
-}
-
-func (l *execLedger) add(cmd string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.cmds = append(l.cmds, cmd)
-}
-
-func (l *execLedger) all() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([]string(nil), l.cmds...)
+	// The backstop for a fake sandbox no harness reports: an unscripted
+	// platform exec anywhere in the package fails the run.
+	os.Exit(sandboxtest.Main(m, pgtest.Main))
 }
 
 // fakeSandbox is an in-memory sandbox. The executor tests drive read/write
@@ -150,7 +124,7 @@ type fakeSandbox struct {
 	// Exec refuses it, and newHarnessWith fails the test on it (TestMain the
 	// package, for a fake no harness holds), so a platform exec that lost its
 	// preamble fails here rather than under an image's errexit.
-	unscripted execLedger
+	unscripted sandboxtest.ExecLedger
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -167,10 +141,8 @@ func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbo
 	// A platform script opens with the preamble every one carries
 	// (sandbox.Script), which the fake answers past — once it has checked
 	// it is there.
-	if !sandboxtest.Scripted(req.Command) {
-		f.unscripted.add(req.Command)
-		unscriptedExecs.add(req.Command)
-		return sandbox.ExecResult{}, fmt.Errorf("fake sandbox: a platform exec without the script preamble (sandbox.Script): %q", req.Command)
+	if err := sandboxtest.RefuseUnscripted(&f.unscripted, req.Command); err != nil {
+		return sandbox.ExecResult{}, err
 	}
 	req.Command = strings.TrimPrefix(req.Command, sandbox.ScriptPreamble)
 	script, frame, framed := sandboxtest.Unwrap(req.Command)
@@ -631,9 +603,7 @@ func newHarnessWith(t *testing.T, provider sandbox.Provider, cfg Config) *harnes
 			if fp.sb == nil {
 				return
 			}
-			for _, cmd := range fp.sb.unscripted.all() {
-				t.Errorf("a platform exec without the script preamble (sandbox.Script): %q", cmd)
-			}
+			fp.sb.unscripted.Report(t)
 		})
 	}
 	pool := pgtest.NewPool(t)

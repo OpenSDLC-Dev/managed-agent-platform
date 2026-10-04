@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +15,14 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
+
+// The backstop for a fake no test reports itself: an exec any fake here
+// refused for want of the platform's script preamble fails the run
+// (sandboxtest.RefuseUnscripted).
+func TestMain(m *testing.M) { os.Exit(sandboxtest.Main(m, (*testing.M).Run)) }
 
 // fakeSandbox answers with whatever the test scripted, so the fault paths a real
 // daemon will not produce on demand can be pinned.
@@ -29,6 +36,10 @@ type fakeSandbox struct {
 	timeouts []time.Duration
 	reads    []string
 	writes   []string
+	// unscripted is every exec refused as a platform script without its
+	// preamble — neither sandbox.ExecScript's, nor a framed search's, nor the
+	// bash tool's (sandboxtest.Scripted).
+	unscripted sandboxtest.ExecLedger
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -36,6 +47,9 @@ func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	// A backend refuses a command too long to run before anything runs.
 	if err := sandbox.CheckCommand(req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
+	if err := sandboxtest.RefuseUnscripted(&f.unscripted, req.Command); err != nil {
 		return sandbox.ExecResult{}, err
 	}
 	f.commands = append(f.commands, req.Command)

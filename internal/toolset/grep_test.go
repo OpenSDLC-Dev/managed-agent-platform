@@ -1034,7 +1034,12 @@ type scripted struct {
 }
 
 func (s *scripted) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	_, _ = s.fakeSandbox.Exec(ctx, req)
+	// Recorded, and refused as the fake refuses a platform script without
+	// its preamble (sandboxtest.RefuseUnscripted): the install's prepare and
+	// install scripts are the platform's own.
+	if _, err := s.fakeSandbox.Exec(ctx, req); err != nil {
+		return sandbox.ExecResult{}, err
+	}
 	if len(s.results) == 0 {
 		return sandbox.ExecResult{}, sandbox.ErrNotFound
 	}
