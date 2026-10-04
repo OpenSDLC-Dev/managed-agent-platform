@@ -14,7 +14,8 @@ horizontally scalable server that speaks Anthropic Messages (the default) and th
 OpenAI-compatible APIs to two kinds of caller — the platform's brain and an enterprise's
 internal applications — routes each request to a configured upstream, and is configured
 from managed-agent-console. Its first upstreams are the official cloud APIs of DeepSeek,
-MiniMax, Zhipu (BigModel / Z.ai) and Moonshot (Kimi).
+MiniMax, Zhipu (BigModel / Z.ai) and Moonshot (Kimi), and Gitee AI for embeddings and
+rerank.
 
 Scope decisions settled with the user on 2026-10-04:
 
@@ -29,9 +30,10 @@ Scope decisions settled with the user on 2026-10-04:
    `command: /modelgateway` the way the four server binaries are, and released with the
    platform. A separate image waits for someone who deploys the gateway alone and needs
    it smaller.
-3. **v1 upstreams are the four vendors' official cloud APIs.** Gemini, Vertex (#236) and
-   self-hosted engines (vLLM, SGLang, …) follow in later plans, with bifrost as the
-   reference (Later upstreams says for what).
+3. **v1 upstreams are the four vendors' official cloud APIs, plus Gitee AI** for
+   embeddings and rerank — dikw-core's default vendor for both (decision 9). Gemini,
+   Vertex (#236) and self-hosted engines (vLLM, SGLang, …) follow in later plans, with
+   bifrost as the reference (Later upstreams says for what).
 4. **Governance serves internal applications, on the platform's own API keys.** A caller
    authenticates with a key the console already issues (`sk-map-api01-`, #378), as one
    Anthropic key serves both the Messages API and Managed Agents; the gateway adds
@@ -43,7 +45,8 @@ Scope decisions settled with the user on 2026-10-04:
 5. **Inbound surfaces:** Anthropic Messages in full — `POST /v1/messages` (streamed and
    not), `POST /v1/messages/count_tokens`, `GET /v1/models` and `GET /v1/models/{id}` —
    and, on the OpenAI side, Chat Completions, Embeddings, Models and Responses, the last
-   **stateless**: no response is stored and `previous_response_id` is refused.
+   **stateless**: no response is stored and `previous_response_id` is refused. Beside
+   them, `POST /v1/rerank` in the Jina/Cohere shape, which has no OpenAI counterpart.
 6. **All agent model traffic goes through the gateway.** The brain keeps one route,
    `*` → the gateway; the static routes file stays the configuration of a deployment
    that runs no gateway.
@@ -57,6 +60,10 @@ Scope decisions settled with the user on 2026-10-04:
    content and does not build its requests append-only (`system.message` text is folded
    into the system prompt; the `web_search` description carries the date). That plan
    gates slice 5 (the brain cutover), not the gateway.
+9. **Embeddings and rerank are shaped by dikw-core** (OpenDIKW's knowledge-base engine):
+   the gateway serves its three calls unchanged, so dikw-core moves onto the gateway by
+   configuration alone — `embedding_base_url`, `assets.multimodal.base_url` and
+   `rerank_base_url` at the gateway, a platform API key behind its key variables.
 
 Out of scope: Claude Code as a client (Anthropic does not support routing it to
 non-Claude models), logging request or response content, semantic caching, an MCP
@@ -97,7 +104,7 @@ international host is the live tier's to show. OpenAI hosts are listed where doc
 | Vendor | Anthropic endpoint, CN · international | OpenAI endpoint | Field-support table |
 |---|---|---|---|
 | DeepSeek | `https://api.deepseek.com/anthropic` (one host) | `https://api.deepseek.com` | [published](https://api-docs.deepseek.com/guides/anthropic_api) |
-| MiniMax | `https://api.minimax.cn/anthropic` · `https://api.minimax.io/anthropic` | `https://api.minimax.io/v1` | [CN](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api), [international](https://platform.minimax.io/docs/api-reference/text-anthropic-api); two pages disagree on `tool_choice` |
+| MiniMax | `https://api.minimax.cn/anthropic` · `https://api.minimax.io/anthropic` | `https://api.minimax.cn/v1` · `https://api.minimax.io/v1` | [CN](https://platform.minimax.cn/docs/api-reference/text-anthropic-api), [international](https://platform.minimax.io/docs/api-reference/text-anthropic-api); two pages disagree on `tool_choice` |
 | Zhipu (BigModel · Z.ai) | `https://open.bigmodel.cn/api/anthropic` · `https://api.z.ai/api/anthropic` | `https://open.bigmodel.cn/api/paas/v4` · `https://api.z.ai/api/paas/v4` | **none** |
 | Moonshot | `https://api.moonshot.cn/anthropic` · `https://api.moonshot.ai/anthropic` | `https://api.moonshot.ai/v1` | [published](https://platform.kimi.ai/docs/api/messages.md) |
 
@@ -112,6 +119,50 @@ blocks (DeepSeek: `search_result`, `document`, `redacted_thinking`; MiniMax:
 which work on the OpenAI protocol only. The self-hosted engines serve `/v1/messages`
 too (vLLM from 0.11.1, SGLang from 0.5.9, Ollama from 0.14, LMDeploy from 0.13), so the
 later engine profiles ride the same passthrough path.
+
+**Embeddings and rerank.** Of the four, only Zhipu's BigModel site serves either:
+`/api/paas/v4/embeddings`, OpenAI-shaped (`embedding-3` takes `dimensions` of 256, 512,
+1024 or 2048 and at most 64 inputs), and `/api/paas/v4/rerank`, returning
+`results[{index, relevance_score, document}]`
+([embeddings](https://docs.bigmodel.cn/api-reference/模型-api/文本嵌入),
+[rerank](https://docs.bigmodel.cn/api-reference/模型-api/文本重排序)). Z.ai, DeepSeek and
+Moonshot document neither; MiniMax keeps only a legacy embeddings page in a shape of its
+own (`texts` and `type` in, `vectors` out, on `api.minimax.chat`), which no profile
+adopts. Gitee AI serves both under `https://ai.gitee.com/v1`, per the OpenAPI spec it
+publishes at `/v1/yaml`: `/embeddings` OpenAI-shaped, with `dimensions` and the
+multimodal objects dikw-core sends (below), and `/rerank` with `top_n` defaulting to 3. Neither vendor
+says whether it accepts `encoding_format: "base64"` — Gitee's spec lists the field with
+a `float` default and no values, Zhipu's has no such field — but dikw-core's working
+Gitee setup sends it on every request, so Gitee at least accepts it.
+
+**dikw-core** ([OpenDIKW/dikw-core](https://github.com/OpenDIKW/dikw-core) at `ef219da`,
+v0.6.5), the embedding and rerank client of record:
+
+- Text embeddings go through the `openai` Python SDK (2.33.0 in its lock):
+  `embeddings.create(model, input=[…strings], dimensions=…)`, with `dimensions` on every
+  request (`src/dikw_core/providers/openai_compat.py:267`). The SDK adds
+  `encoding_format: "base64"` whenever the caller names none, and decodes a string
+  vector but keeps a float array as it is (`openai/resources/embeddings.py:111-133`),
+  so an upstream answering either way works. dikw-core reorders the result by
+  `data[].index` (`:327`) and treats `usage.prompt_tokens` as optional.
+- Multimodal embeddings post Gitee's own shape to the same `/embeddings` path:
+  `input` is a list of `{"text": …}` or `{"image": "data:<mime>;base64,…"}` objects,
+  and the response carries no `usage` (`src/dikw_core/providers/gitee_multimodal.py`).
+- Rerank posts `{model, query, documents, top_n}` to `/rerank` and reads
+  `results[{index, relevance_score}]` (`src/dikw_core/providers/rerank.py`).
+- It sizes its own batches. It observed Gitee refusing more than 25 inputs on both calls
+  with a 400 in Gitee's own words (`docs/providers.md`, gotcha 2), where Gitee's spec
+  allows 1000 embedding inputs and sets no rerank cap (above) — so the cap is the live
+  tier's to measure, and nothing in the gateway depends on it.
+- Gitee drops idle keep-alive connections in the middle of a batch, so dikw-core opens a
+  fresh connection per request (`src/dikw_core/providers/_http.py`).
+- An index's version is its dimension, normalization, distance and a revision its
+  operator bumps "when a vendor silently refreshes weights behind a stable model name"
+  (`src/dikw_core/config.py:108-117`), and a changed dimension means wiping the index
+  and ingesting again (`docs/providers.md`, gotcha 1). Vectors that change under an
+  unchanged name corrupt an index without an error.
+- Its LLM leg is `anthropic_compat`: the Anthropic Python SDK's `messages.stream`, with
+  `cache_control` on the system block, which the passthrough path serves as it is.
 
 **bifrost** ([maximhq/bifrost](https://github.com/maximhq/bifrost) at `3b31be003`,
 Apache-2.0):
@@ -187,25 +238,31 @@ converts when protocols match.
   conversion path whose upstream sends no pings emits its own during silent gaps. A
   provider configures both of its vendor's endpoints
   and selection prefers the one matching the inbound protocol, so Anthropic and Chat
-  Completions callers both pass through to all four v1 vendors.
+  Completions callers both pass through to all four chat vendors.
 - **Conversion** — the protocols differ. v1 needs two directions: Responses (inbound) ↔
   Anthropic (upstream), since no v1 vendor serves Responses — reasoning items'
   `encrypted_content` and summary map to the thinking block's `signature` and text, so a
   stateless caller's tool loop keeps its thinking — and Anthropic (inbound) ↔ Chat
   Completions (upstream), for a credential usable on the OpenAI protocol only. Chat
   Completions inbound to an Anthropic-only upstream has no v1 case and waits for one.
-- **Embeddings** have no Anthropic counterpart: OpenAI passthrough to deployments of
-  kind `embedding`.
+- **Embeddings and rerank** have no Anthropic counterpart: passthrough to deployments
+  of kind `embedding` (`/v1/embeddings`) and `rerank` (`/v1/rerank`). The body is read
+  for `model` alone — `input` may hold strings, token arrays or a vendor's multimodal
+  objects, and `encoding_format` and `dimensions` go upstream as sent — and the
+  response relays unchanged but for `model` where it has one, its vectors never
+  decoded, base64 or float. The gateway splits no batch: an upstream's cap answers with
+  the upstream's own 400, and a caller sizes its batches as it does today.
 
 ### Vendor profiles
 
 A profile is declarative data plus at most a few Go hooks, compiled in: `deepseek`,
-`minimax`, `zhipu`, `moonshot`, and `anthropic-generic` / `openai-generic` for any
-conformant endpoint (the later engine profiles join these). It names the request path
-per protocol, the CN and international hosts, the auth header, content-block edits,
-field strips, the usage mapping, and whether `count_tokens` exists — where it does not,
-that alias's `count_tokens` answers `404 not_found_error` and a client falls back to
-estimating, as the compatibility guide describes.
+`minimax`, `zhipu`, `moonshot`, `gitee`, and `anthropic-generic` / `openai-generic` for
+any conformant endpoint (the later engine profiles join these). It names the request
+path per protocol and per kind, the CN and international hosts, the auth header,
+content-block edits, field strips, the usage mapping, whether connections are reused
+(not for `gitee`, which drops idle ones mid-batch), and whether `count_tokens`
+exists — where it does not, that alias's `count_tokens` answers `404 not_found_error`
+and a client falls back to estimating, as the compatibility guide describes.
 
 The edit policy, which keeps a profile from quietly changing what a caller asked for:
 
@@ -244,21 +301,27 @@ principle 5).
   (the vault credentials' backend selection); `kind` (`api_key`, the only v1 value);
   last four characters for display; the protocols it may be used on; weight; enabled.
   Write-only through the API.
-- **deployment** — a provider's upstream model id; kind (`chat` | `embedding`);
-  capabilities (tools, thinking, vision, `max_input_tokens`, `max_tokens` — the
-  `ModelInfo` fields `/v1/models` answers from); prices per million tokens for input,
-  output, cache write and cache read, entered by the operator — no remote price sync,
-  so an air-gapped install works.
+- **deployment** — a provider's upstream model id; kind (`chat` | `embedding` |
+  `rerank`); capabilities (tools, thinking, vision, `max_input_tokens`, `max_tokens` —
+  the `ModelInfo` fields `/v1/models` answers from); prices per million tokens for
+  input, output, cache write and cache read, entered by the operator — no remote price
+  sync, so an air-gapped install works. An `embedding` deployment's upstream model id
+  cannot be edited.
 - **alias** — the model name a caller sends: a display name and targets
   `[{deployment, priority, weight}]`. Exact match first, then an optional `*` alias. A
   `claude-*` alias is only a name, which is how clients that hard-code Claude names
-  reach a vendor model.
+  reach a vendor model. An `embedding` alias has exactly one deployment, fixed when the
+  alias is created: an index built through it would mix two vector spaces without an
+  error (Ground truth, dikw-core), so a new embedding model is a new alias. Its
+  credentials still balance and rotate.
 - **key_policy** — per platform API key (`api_keys.id`): an optional alias allow-list,
   RPM and TPM limits. A key with no row has no limits and every alias. Issuance, status
   and expiry stay the platform's (`internal/store/migrations/0024_api_keys_lifecycle.sql`).
 - **usage** — one row per request: key id, alias, deployment, credential, session id,
-  inbound protocol, status, the four token counts, cost at the prices in force, latency,
-  time to first token. Metadata only. Kept 90 days by default
+  inbound protocol, status, the token counts the upstream reported (input, output,
+  cache write, cache read), cost at the prices in force, latency, time to first token.
+  No count is estimated: a response without `usage`, as Gitee's multimodal embeddings
+  answer, records no tokens and no cost. Metadata only. Kept 90 days by default
   (`MODELGATEWAY_USAGE_RETENTION`) and deleted by a sweep any replica may run under an
   advisory lock.
 - **usage_daily** — rollups per day, key, alias and deployment, kept indefinitely; the
@@ -282,7 +345,8 @@ request path reads only the snapshot.
   attempt count and jittered exponential backoff. After the first byte a failure is the
   caller's (`event: error` on a stream). A request whose history carries thinking blocks
   falls back only to a deployment of the same upstream model; otherwise the error
-  surfaces rather than one model's thinking being replayed to another.
+  surfaces rather than one model's thinking being replayed to another. An embedding
+  alias, with its one deployment, retries across credentials only.
 - **Stall.** `provider.StallGuard` per provider, for #121's reasons unchanged.
 - **Limits.** Admission increments the key's request count for the current minute in one
   upsert and refuses over the limit with 429 and `retry-after` in integer seconds; tokens
@@ -307,8 +371,9 @@ request path reads only the snapshot.
 - **`/v1/models`** is one path with two shapes. The root answers in Anthropic's shape
   when the request carries `anthropic-version` — which every Anthropic SDK sends and no
   OpenAI SDK does — and in OpenAI's otherwise; `/anthropic/v1/…` and `/openai/v1/…`
-  prefixes give every inbound route an explicit choice. A key with an alias allow-list
-  sees only those aliases.
+  prefixes give every inbound route an explicit choice. Anthropic's shape lists `chat`
+  aliases only, since an Anthropic client can call nothing else; OpenAI's lists every
+  kind. A key with an alias allow-list sees only those aliases.
 
 ### Console
 
@@ -362,7 +427,7 @@ frozen by slice 2.
 1. **Store and catalogue:** schema and migrations, the platform key check moved to a
    shared package, the admin API (providers, credentials, deployments, aliases, key
    policies) under both auth modes, the snapshot with notify-driven reload, the four
-   profiles' data.
+   chat vendors' profile data.
 2. **Anthropic inference:** `/v1/messages` streamed and not, `count_tokens`,
    `/v1/models`, the passthrough relay, profile edits, routing with retry, fallback and
    affinity, the stall guard, usage rows with their retention sweep and daily rollups,
@@ -371,10 +436,12 @@ frozen by slice 2.
    admin API for the console.
 3. **Console** (the console repository's own plan): the Models section and the editors'
    alias choice.
-4. **OpenAI surfaces:** Chat Completions and Embeddings passthrough, Models in OpenAI's
-   shape, Anthropic ↔ Chat Completions conversion for OpenAI-only credentials (the
-   conversion moving out of `internal/provider/openai`), `openai-go` into
-   docs/REFERENCE_PROJECTS.md.
+4. **OpenAI surfaces:** Chat Completions passthrough, Embeddings (text and multimodal)
+   and Rerank passthrough with the `gitee` profile, Models in OpenAI's shape,
+   Anthropic ↔ Chat Completions conversion for OpenAI-only credentials (the conversion
+   moving out of `internal/provider/openai`), `openai-go` into
+   docs/REFERENCE_PROJECTS.md; the live tier on Gitee AI. Acceptance: dikw-core through
+   the gateway.
 5. **Brain cutover:** the `traceparent` and session-id headers, the one-route default in
    compose and Helm with the seeded key; `flatten_search_results` stays accepted for the
    no-gateway mode. Acceptance: an `ant` session on MiniMax (CN) and one on DeepSeek
@@ -424,21 +491,26 @@ where a vendor bills cache writes.
   SDK cannot read fails; each edit's test is first run against the code without it.
 - **Upstream contract suite:** one fake server per profile reproducing its documented
   behavior — a refused `search_result`, `: keep-alive` comments, cache usage in the
-  vendor's shape — all run through one shared suite, as `providertest` does for the
+  vendor's shape, a batch-cap 400 in the vendor's own words, a connection closed
+  between requests — all run through one shared suite, as `providertest` does for the
   brain's adapters.
 - **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests;
   the retention sweep against rows either side of the cutoff, its rollups intact; a key
   archived or expired mid-run refused on its next request, by both servers alike.
 - **Clients:** the official Anthropic and OpenAI Go SDKs drive the gateway in-process —
-  streaming, tool loops with thinking, errors.
-- **Live tier — MiniMax (CN) and DeepSeek, the keys the user has, driven through the
-  official Anthropic SDK** (anthropic-sdk-go at the `go.mod` pin, pointed at a running
-  gateway with `option.WithBaseURL` and a platform API key, as any SDK caller would
-  be).
-  `RUN_LIVE_MODELGATEWAY` names the vendors consented to (`deepseek,minimax`), so the
-  fail-rather-than-skip contract holds per vendor: a named vendor with missing
-  configuration fails, an unnamed one never runs. `.env` supplies `DEEPSEEK_API_KEY`, and
-  `MINIMAX_API_KEY` beside `MINIMAX_BASE_URL=https://api.minimax.cn/anthropic`.
+  streaming, tool loops with thinking, errors. dikw-core's request bodies are replayed
+  as fixtures, not left to a Go SDK's defaults: `encoding_format: "base64"` (its
+  SDK's default) and `dimensions` on every embeddings request, Gitee's multimodal
+  objects, a rerank batch — the embeddings answered once with float vectors and once
+  with base64.
+- **Live tier — MiniMax (CN), DeepSeek and Gitee AI, the keys the user has.** Chat goes
+  through the official Anthropic SDK (anthropic-sdk-go at the `go.mod` pin, pointed at
+  a running gateway with `option.WithBaseURL` and a platform API key, as any SDK caller
+  would be). `RUN_LIVE_MODELGATEWAY` names the vendors consented to
+  (`deepseek,minimax,gitee`), so the fail-rather-than-skip contract holds per vendor: a
+  named vendor with missing configuration fails, an unnamed one never runs. `.env`
+  supplies `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY` beside
+  `MINIMAX_BASE_URL=https://api.minimax.cn/anthropic`, and `GITEE_API_KEY`.
   - **Model list:** `Models.List`, `Models.ListAutoPaging` over more aliases than one
     page, and `Models.Get` return every configured alias, each with every `ModelInfo`
     field the SDK marks required present (`respjson.Field.Valid`).
@@ -449,9 +521,20 @@ where a vendor bills cache writes.
   - **Vendor behavior:** a `search_result` replay, `count_tokens`, cache usage fields;
     for MiniMax its `tool_choice` values and whether the CN key works on the
     international host. Results land in docs/HISTORY.md.
+  - **Embeddings and rerank on Gitee** (slice 4), through openai-go for embeddings and
+    a plain HTTP client for rerank, which no SDK covers: text embeddings with
+    `dimensions`, asked as float and as base64, decoding to vectors of that length that
+    agree (and recording which encoding Gitee answers a base64 request in); a
+    multimodal text-and-image request; rerank scores mapped back by `index`; each
+    call's batch cap measured, the 400 past it relayed in Gitee's own words.
   - Zhipu and Moonshot join when keys exist. Until then their profiles are checked
     against fake upstreams only, and Zhipu's whole support matrix stays unconfirmed.
-- **Acceptance:** slice 5's `ant` sessions through the brain.
+- **Acceptance:** slice 4's dikw-core run — its embedding, multimodal and rerank base
+  URLs and its Anthropic leg's `llm_base_url` all at the gateway, a platform API key
+  behind each key variable — passing `dikw client serve-and-run --base <base> -- check`,
+  then an ingest whose sources include an image embedded through `assets.multimodal`,
+  and a retrieve with rerank; and slice 5's `ant` sessions through the brain.
+  Transcripts in docs/HISTORY.md.
 - Every slice: `make verify` (the coverage gate takes in the new packages), the
   verifier, both reviews and green CI, per CLAUDE.md.
 
@@ -468,5 +551,8 @@ where a vendor bills cache writes.
 
 ## Open questions, settled by evidence in the slice that meets them
 
-1. Which v1 vendors serve OpenAI-shaped embeddings — none of the four is confirmed yet.
-   Slice 4, before the route is built against them.
+1. Whether Zhipu accepts `encoding_format: "base64"`, the OpenAI Python SDK's default.
+   If it refuses it, either the edit policy gains a lossless case — ask for floats,
+   encode the answer as base64 — or the gateway refuses that value on Zhipu aliases with
+   an error that says why. Settled when a Zhipu key exists; until then Zhipu's
+   embeddings run against a fake upstream only.
