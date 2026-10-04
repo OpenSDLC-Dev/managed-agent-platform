@@ -122,6 +122,8 @@ Each new guard was broken on its own, and its test failed:
 
 After the Claude review's fixes the full `make verify` gate passed on the branch: build, cross-build, vet, format check and 67 test packages, with 90.91% total statement coverage. Review results and CI are recorded in the pull request.
 
+The verifier's re-run passed with three notes. One was fixed: header names alike but for case could digest in either order. A test that failed first now pins that.
+
 ---
 
 ## A graceful stop of acked work goes stopping (plan 58, #810) — archived 2026-09-26, delivered in one PR

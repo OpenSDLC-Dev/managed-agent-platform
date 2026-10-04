@@ -284,7 +284,10 @@ func routeDigest(cfg Config) string {
 		names = append(names, k)
 	}
 	sort.Slice(names, func(i, j int) bool {
-		return strings.ToLower(names[i]) < strings.ToLower(names[j])
+		if a, b := strings.ToLower(names[i]), strings.ToLower(names[j]); a != b {
+			return a < b
+		}
+		return names[i] < names[j] // one order for names alike but for case
 	})
 	for _, k := range names {
 		fmt.Fprintf(h, " %q %q", strings.ToLower(k), cfg.Headers[k])

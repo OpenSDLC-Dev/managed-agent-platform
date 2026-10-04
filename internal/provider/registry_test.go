@@ -281,3 +281,21 @@ func TestDescribeRouteIdentifiesEndpointAndRendering(t *testing.T) {
 		t.Errorf("Route names what it digests: %q, %q", route("a"), route("key"))
 	}
 }
+
+// Header names that differ only in case still digest in one order, so one
+// route gives one Route in every process, whatever order a map yields them.
+func TestDescribeRouteIsStableAcrossHeaderCase(t *testing.T) {
+	reg, err := provider.NewRegistry([]provider.Route{
+		{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw", Model: "m",
+			Headers: map[string]string{"X-Route": "1", "x-route": "2", "X-ROUTE": "3"}}},
+	}, factories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := reg.Describe("m")
+	for range 200 {
+		if d, _ := reg.Describe("m"); d.Route != first.Route {
+			t.Fatalf("Route changed between calls: %q, then %q", first.Route, d.Route)
+		}
+	}
+}
