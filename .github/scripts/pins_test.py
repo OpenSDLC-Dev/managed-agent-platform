@@ -207,8 +207,9 @@ holds every other copy to it:
     `go-version`, its key quoted or not, which setup-go would prefer. setup-go
     (v6 on) installs the `toolchain` line's release over the `go` line's,
     unless GOTOOLCHAIN is already `local` when the step runs -- so no workflow
-    may set GOTOOLCHAIN outside a comment. setup-go exports `local` itself
-    afterwards, which keeps the `go` commands after it on the Go it installed;
+    may set GOTOOLCHAIN at all, though reading it is fine. setup-go exports
+    `local` itself afterwards, which keeps the `go` commands after it on the
+    Go it installed;
   - every tagged reference to the official Go image anywhere in the working
     tree -- a Dockerfile `FROM`, a YAML `image:`, a command in a `run:` step,
     recipe or script, a sentence quoting one -- has that release as its tag's
@@ -397,6 +398,20 @@ BARE_GOLANG = re.compile(
     r"(?:docker\.io/)?(?:library/)?golang(?:[\"']?[ \t]|[\"']?$)",
     re.IGNORECASE,
 )
+
+# A workflow SETTING GOTOOLCHAIN, as against reading it, asking `go env` for
+# it, or writing about it. Two ways in. As a YAML env key, at any `env:` level,
+# quoted or in a flow mapping -- read from a line's code, never from a block
+# scalar's body, which is shell rather than YAML. And as a shell assignment
+# `GOTOOLCHAIN=…`: alone, after `export`, inline before a command, as `go env
+# -w`'s argument, or written into `$GITHUB_ENV` -- the lookbehind is what keeps
+# a read (`$GOTOOLCHAIN`) out, and a shell comment is stripped first. What
+# neither sees: a value built at run time (`export "$name=local"`), and a
+# `read` or `eval` that assigns it.
+GOTOOLCHAIN_KEY = re.compile(
+    r"(?:^[ \t]*(?:-[ \t]+)?|[{,][ \t]*)[\"']?GOTOOLCHAIN[\"']?[ \t]*:"
+)
+GOTOOLCHAIN_ASSIGNMENT = re.compile(r"(?<![\w$])GOTOOLCHAIN=")
 
 # What the image rung does not read. History records what WAS true, and a bump
 # must not rewrite it; this file's fixtures are wrong on purpose. A directory
@@ -875,6 +890,19 @@ def setup_go_violation(name, lines, body, ref):
     return None
 
 
+def sets_gotoolchain(lines, body, n):
+    """Does line `n` SET GOTOOLCHAIN? See GOTOOLCHAIN_KEY and GOTOOLCHAIN_ASSIGNMENT.
+
+    `split_comment` strips a trailing comment by YAML's rule outside a block
+    scalar and, inside one, by the shell's -- which is the same rule for `#`:
+    at the start of a word, never inside quotes.
+    """
+    code = split_comment(lines[n])[0]
+    if n in body:
+        return bool(GOTOOLCHAIN_ASSIGNMENT.search(code))
+    return bool(GOTOOLCHAIN_KEY.search(code) or GOTOOLCHAIN_ASSIGNMENT.search(code))
+
+
 def violations(name, lines):
     """One workflow's references, and every finding against them."""
     body = in_block_scalar(lines)
@@ -885,10 +913,8 @@ def violations(name, lines):
                     setup_go_violation(name, lines, body, ref)):
             if why is not None:
                 found.append((ref.line, why))
-    # Raw text inside a block scalar, the code half elsewhere: a comment
-    # mentioning the variable sets nothing, a shell line setting it does.
     for n in range(len(lines)):
-        if "GOTOOLCHAIN" in code_of(lines, body, n):
+        if sets_gotoolchain(lines, body, n):
             found.append((n + 1, "this sets GOTOOLCHAIN. Set to `local` before"
                           " setup-go runs, it makes setup-go install go.mod's `go`"
                           " line instead of its `toolchain` line; set to anything"
@@ -1084,9 +1110,10 @@ def go_pin_selftest():
     for label, text in toolchain_refused:
         try:
             got = toolchain_version(text)
-            failures.append(f"ACCEPTED {label}: read {got}, expected a refusal")
         except SystemExit:
-            pass
+            # Refused, which is what every row here must be: the pass condition.
+            continue
+        failures.append(f"ACCEPTED {label}: read {got}, expected a refusal")
     for label, text in must_flag:
         n, found = image_findings("1.26.8", text)
         if not n or not found:
@@ -1217,10 +1244,24 @@ def selftest():
         ("a job that sets GOTOOLCHAIN, so setup-go reads the `go` line instead",
          "    env:\n      GOTOOLCHAIN: local\n    steps:\n"
          f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"),
-        ("a command that swaps the Go setup-go installed",
-         "      - run: GOTOOLCHAIN=go1.27.0 make build\n"),
-        ("the same inside a block scalar",
+        ("a workflow-level env key",
+         "env:\n  GOTOOLCHAIN: local\njobs:\n"),
+        ("a step-level env key",
+         "      - run: make build\n        env:\n          GOTOOLCHAIN: local\n"),
+        ("an env key quoted, which is the same key",
+         "    env:\n      'GOTOOLCHAIN': local\n"),
+        ("an env key in a flow mapping",
+         "    env: {GOFLAGS: -mod=mod, GOTOOLCHAIN: local}\n"),
+        ("a shell assignment on its own line",
+         "      - run: |\n          GOTOOLCHAIN=local\n          make build\n"),
+        ("an assignment after export",
          "      - run: |\n          export GOTOOLCHAIN=auto\n"),
+        ("an assignment inline before a command",
+         "      - run: GOTOOLCHAIN=go1.27.0 make build\n"),
+        ("go env -w, which writes it to go's own env file",
+         "      - run: go env -w GOTOOLCHAIN=local\n"),
+        ("a write to $GITHUB_ENV, which sets it for every later step",
+         '      - run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"\n'),
     ]
     must_pass = [
         ("a pinned action, list-item form",
@@ -1285,6 +1326,17 @@ def selftest():
          "          go-version-file: 'go.mod'\n"),
         ("the file key quoted, which is the same input",
          f"      - uses: {setup_go}\n        with:\n          \"go-version-file\": go.mod\n"),
+        ("a read of GOTOOLCHAIN, which sets nothing",
+         '      - run: echo "$GOTOOLCHAIN"\n'),
+        ("a braced read compared in a test, which sets nothing",
+         '      - run: test "${GOTOOLCHAIN}" = local\n'),
+        ("go env asked for its value, which sets nothing",
+         "      - run: go env GOTOOLCHAIN\n"),
+        ("a shell comment inside a block scalar, which sets nothing",
+         "      - run: |\n          # GOTOOLCHAIN=local is setup-go's to export, not ours\n"
+         "          go version\n"),
+        ("a shell comment after a command, which sets nothing",
+         "      - run: go version # GOTOOLCHAIN=local comes from setup-go\n"),
         ("GOTOOLCHAIN in a comment, which sets nothing",
          "      # setup-go exports GOTOOLCHAIN=local itself.\n"
          f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"),
