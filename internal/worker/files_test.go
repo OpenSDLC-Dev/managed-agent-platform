@@ -149,8 +149,8 @@ func TestSetupFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
 }
 
 // TestSetupFilesUnreadableSentinelStillLandsANewMount is the executor's rule
-// over the wire: an unreadable sentinel is no record, so the current set is
-// probed, and a mount added since is absent and lands.
+// over the wire: an unreadable sentinel is no record, so it counts as a
+// changed set and the whole current set lands, the mount added since with it.
 func TestSetupFilesUnreadableSentinelStillLandsANewMount(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)

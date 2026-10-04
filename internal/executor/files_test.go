@@ -268,9 +268,10 @@ func TestFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
 
 // TestFilesUnreadableSentinelStillLandsANewMount: the sentinel is only a
 // shortcut. One the sandbox cannot read — the agent chmod 000s it, and the
-// read's cat exits 1 — is no record either way, so the current set's paths
-// are probed instead: a mount added since is absent, and the set lands. An
-// unreadable marker that ended the pass kept a new mount out for good.
+// read's cat exits 1 — is no record either way, so it counts as a changed
+// set: the whole current set lands, the mount added since with it, and the
+// marker is rewritten. An unreadable marker that ended the pass kept a new
+// mount out for good.
 func TestFilesUnreadableSentinelStillLandsANewMount(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
