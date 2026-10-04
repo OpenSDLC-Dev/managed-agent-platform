@@ -840,6 +840,26 @@ func TestSearchesThroughAnErrexitStartup(t *testing.T) {
 	fails(t, r, "glob", `{"pattern":"*","path":"ee/absent"}`, "no such directory")
 }
 
+// What the image contract says of the model's own commands under an image
+// whose startup sets -euo pipefail (docs/self-hosted-security.md): errexit
+// does not reach them, the bash tool's shell turning it off before the first
+// command, while nounset and pipefail do — and a `set -e` the model runs
+// itself carries to its next call.
+func TestTheBashToolUnderAnErrexitStartup(t *testing.T) {
+	r := runner(t, fromImage(hookedtest.DockerImage(t, "set -euo pipefail\n")))
+	if out := ok(t, r, "bash", `{"command":"false; echo after"}`); !strings.Contains(out, "after") {
+		t.Errorf("false; echo after = %q, want errexit off for the model's command", out)
+	}
+	if out := ok(t, r, "bash", `{"command":"set -o | grep -E '^(nounset|pipefail|errexit)' | tr -s ' \\t' ' '"}`); !strings.Contains(out, "nounset on") ||
+		!strings.Contains(out, "pipefail on") || !strings.Contains(out, "errexit off") {
+		t.Errorf("options = %q, want nounset and pipefail on, errexit off", out)
+	}
+	ok(t, r, "bash", `{"command":"set -e"}`)
+	if out := ok(t, r, "bash", `{"command":"set -o | grep '^errexit' | tr -s ' \\t' ' '"}`); !strings.Contains(out, "errexit on") {
+		t.Errorf("after the model's own set -e, errexit = %q, want on", out)
+	}
+}
+
 // floodHook is an image's BASH_ENV file whose EXIT trap prints past the
 // sandbox's output cap on both streams, after whatever the shell ran.
 const floodHook = `trap "head -c 1100000 /dev/zero | tr '\0' x; head -c 1100000 /dev/zero | tr '\0' y >&2" EXIT` + "\n"
