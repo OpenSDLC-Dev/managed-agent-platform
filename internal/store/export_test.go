@@ -17,3 +17,15 @@ func SetMigrateRetryForTest(attempts int, backoff time.Duration) (restore func()
 	migrateAttempts, migrateBackoff = attempts, backoff
 	return func() { migrateAttempts, migrateBackoff = prevAttempts, prevBackoff }
 }
+
+// MigrateLockID exposes the migrators' advisory lock, so a test can hold it
+// as another binary's migration run would.
+const MigrateLockID = migrateLockID
+
+// SetMigrateLockWaitForTest changes the lock_timeout every migration starts
+// with. Test binary only.
+func SetMigrateLockWaitForTest(d time.Duration) (restore func()) {
+	prev := migrateLockWait
+	migrateLockWait = d
+	return func() { migrateLockWait = prev }
+}
