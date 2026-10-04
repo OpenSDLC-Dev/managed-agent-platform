@@ -399,3 +399,136 @@ func withConnCount(ctx context.Context, n *atomic.Int32) context.Context {
 		}
 	}})
 }
+
+// The relay ends at the stream's terminal event: an upstream that holds its
+// connection open after message_stop, or after its own error event, does not
+// hold the caller's response.
+func TestTheRelayEndsAtTheTerminalEvent(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		all := events(c.Model, "done")
+		if c.Model == "failed" {
+			all = append(all[:2], overloadedEvent)
+		}
+		sse(w, all...)
+		select {
+		case <-time.After(3 * time.Second):
+		case <-r.Context().Done():
+		}
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("whole", target(e.deployment(p, "whole"), 0))
+	e.alias("failed", target(e.deployment(p, "failed"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	for _, alias := range []string{"whole", "failed"} {
+		start := time.Now()
+		_, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+		if took := time.Since(start); took > 1500*time.Millisecond || strings.Count(string(b), "event: error") > 1 {
+			t.Errorf("%s: answered after %v: %s", alias, took, b)
+		}
+	}
+}
+
+// A stream that opens with an error keeps the upstream's x-should-retry and
+// Retry-After, as an error response does.
+func TestAnOpeningStreamErrorKeepsItsRetryHeaders(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		if c.Model == "nudge" {
+			w.Header().Set("X-Should-Retry", "true")
+			sse(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"try again\"}}\n\n")
+			return
+		}
+		w.Header().Set("X-Should-Retry", "false")
+		w.Header().Set("Retry-After", "7")
+		sse(w, overloadedEvent)
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-a1", 1)
+	e.credential(p, "sk-upstream-b1", 1)
+	e.alias("stop", target(e.deployment(p, "stop"), 0))
+	e.alias("nudge", target(e.deployment(p, "nudge"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do("POST", "/v1/messages", `{"model":"stop","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+	if resp.StatusCode != 529 || len(up.recorded()) != 1 || resp.Header.Get("X-Should-Retry") != "false" || resp.Header.Get("Retry-After") != "7" {
+		t.Errorf("stop: %d after %d calls, headers %v: %s", resp.StatusCode, len(up.recorded()), resp.Header, b)
+	}
+	before := len(up.recorded())
+	if resp, _ := e.do("POST", "/v1/messages", `{"model":"nudge","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key}); resp.StatusCode != 400 || len(up.recorded())-before != 2 {
+		t.Errorf("nudge: %d after %d calls", resp.StatusCode, len(up.recorded())-before)
+	}
+}
+
+// An upstream's error, relayed, carries the gateway's request id — the one
+// the response's request-id header carries — not the upstream's.
+func TestARelayedErrorCarriesTheGatewaysRequestID(t *testing.T) {
+	e := newEnv(t)
+	const upstreamErr = `{"type":"error","error":{"type":"invalid_request_error","message":"bad"},"request_id":"req_upstream"}`
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		switch c.Model {
+		case "body":
+			writeBody(w, 400, upstreamErr)
+		case "opening":
+			sse(w, "event: error\ndata: "+upstreamErr+"\n\n")
+		default:
+			sse(w, append(events(c.Model, "x")[:2], "event: error\ndata: "+upstreamErr+"\n\n")...)
+		}
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	for _, m := range []string{"body", "opening", "midway"} {
+		e.alias(m, target(e.deployment(p, m), 0))
+	}
+	key := e.key(everyAlias)
+	e.start()
+	for _, alias := range []string{"body", "opening", "midway"} {
+		resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+		if alias == "midway" {
+			i := strings.Index(string(b), "event: error\ndata: ")
+			if i < 0 {
+				t.Fatalf("midway: no error event: %s", b)
+			}
+			b = []byte(strings.SplitN(string(b[i+len("event: error\ndata: "):]), "\n", 2)[0])
+		}
+		if typ, msg, rid := errorOf(t, b); rid != resp.Header.Get("request-id") || typ != "invalid_request_error" || msg != "bad" {
+			t.Errorf("%s: request_id %q, header %q: %s", alias, rid, resp.Header.Get("request-id"), b)
+		}
+	}
+}
+
+// An event the upstream cut off at the end of its stream is completed: the
+// error event that follows stays a block of its own, and a cut-off
+// message_stop still ends the answer.
+func TestACutOffEventIsCompleted(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		all := events(c.Model, "cut")
+		if c.Model == "stop" {
+			all[len(all)-1] = strings.TrimSuffix(all[len(all)-1], "\n\n")
+			sse(w, all...)
+			return
+		}
+		sse(w, append(all[:4], strings.TrimSuffix(all[4], "\n"))...)
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("delta", target(e.deployment(p, "delta"), 0))
+	e.alias("stop", target(e.deployment(p, "stop"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	_, b := e.do("POST", "/v1/messages", `{"model":"delta","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+	if got := string(b); !strings.Contains(got, "\"text\":\"cut\"}}\n\nevent: error\ndata: {") {
+		t.Errorf("delta: %s", got)
+	}
+	stream := e.client(key).Messages.NewStreaming(e.ctx, anthropic.MessageNewParams{Model: "stop", MaxTokens: 8, Messages: hello()})
+	var acc anthropic.Message
+	for stream.Next() {
+		_ = acc.Accumulate(stream.Current())
+	}
+	if err := stream.Err(); err != nil || acc.StopReason != "end_turn" {
+		t.Errorf("stop: %v, %v", acc.StopReason, err)
+	}
+}

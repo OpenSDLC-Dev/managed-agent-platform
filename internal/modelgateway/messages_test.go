@@ -467,6 +467,11 @@ func TestAnEscapedCredentialIsRedacted(t *testing.T) {
 		var stream bool
 		_ = json.Unmarshal(c.Body["stream"], &stream)
 		diag := `{"type":"error","error":{"type":"overloaded_error","message":"key ` + escaped + ` is overloaded"},"tried":["` + escaped + `",1.50]}`
+		if _, other := c.Body["other"]; other {
+			// Another vendor's error shape, not Anthropic's envelope.
+			writeBody(w, 400, `{"error":{"message":"key `+escaped+` is overloaded","code":429}}`)
+			return
+		}
 		if _, plain := c.Body["plain"]; plain {
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(400)
@@ -485,7 +490,7 @@ func TestAnEscapedCredentialIsRedacted(t *testing.T) {
 	e.alias("fast", target(e.deployment(p, "m"), 0))
 	key := e.key(everyAlias)
 	e.start()
-	for _, extra := range []string{`"stream":false`, `"stream":true`, `"plain":1`} {
+	for _, extra := range []string{`"stream":false`, `"stream":true`, `"other":1`, `"plain":1`} {
 		_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,`+extra+`,"messages":[]}`, map[string]string{"x-api-key": key})
 		if got := string(b); strings.Contains(got, "sk-up") || !strings.Contains(got, "is overloaded") {
 			t.Errorf("%s: %s", extra, got)

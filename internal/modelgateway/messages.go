@@ -232,8 +232,9 @@ var errorStatus = map[string]int{
 
 // streamError is a stream whose first event is an error: the upstream refused
 // before it began an answer, so this is the error response it would have sent
-// had its 200 not already gone, retried and relayed like one.
-func streamError(ctx context.Context, at catalog.Attempt, data []byte, red provider.Redactor) (*failure, bool) {
+// had its 200 not already gone, retried and relayed like one — its
+// x-should-retry and Retry-After included.
+func streamError(ctx context.Context, at catalog.Attempt, data []byte, header http.Header, rid string, red provider.Redactor) (*failure, bool) {
 	var ev struct {
 		Error struct {
 			Type string `json:"type"`
@@ -248,8 +249,9 @@ func streamError(ctx context.Context, at catalog.Attempt, data []byte, red provi
 	if !ok {
 		status = http.StatusInternalServerError
 	}
-	return &failure{status: status, header: http.Header{"Content-Type": {"application/json"}}, body: redactJSON(red, data)},
-		retryable(status, nil)
+	h := header.Clone()
+	h.Set("Content-Type", "application/json")
+	return &failure{status: status, header: h, body: errorJSON(ctx, red, data, rid)}, retryable(status, header)
 }
 
 // attempt makes one upstream call. It answers the caller and returns nil, or
@@ -311,7 +313,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			return &failure{status: s, typ: "api_error",
 				err: fmt.Errorf("upstream answered %d with an error body over the gateway's bound of %d bytes", s, maxResponseBody)}, retryable(s, resp.Header)
 		}
-		return &failure{status: s, header: resp.Header, body: redactJSON(red, b)}, retryable(s, resp.Header)
+		return &failure{status: s, header: resp.Header, body: errorJSON(ctx, red, b, requestID(r))}, retryable(s, resp.Header)
 	}
 	if c.stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		// The answer begins with the first event that is not a keep-alive (a
@@ -329,9 +331,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			case keepAlive && len(held)+len(e.Raw) <= maxHeld:
 				held = append(held, e.Raw...)
 			case e.Name == "error":
-				return streamError(ctx, at, e.Data, red)
+				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 			default:
-				relayStream(w, events, held, e, c.alias, requestID(r), guard, red)
+				relayStream(ctx, w, events, held, e, c.alias, requestID(r), guard, red)
 				return nil, false
 			}
 		}
@@ -388,14 +390,42 @@ func redactJSON(red provider.Redactor, b []byte) []byte {
 	if !json.Valid(b) {
 		return []byte(red.String(string(b)))
 	}
+	return encodeJSON(redactValue(red, decodeJSON(b)))
+}
+
+// errorJSON is an upstream's error, a body or an event's data, as the gateway
+// relays it: redacted, and, when it is Anthropic's error envelope, carrying
+// the gateway's request_id — the id of the request-id header the caller
+// reads, which Anthropic's errors page has the body's agree with. The
+// upstream's own id goes to the log.
+func errorJSON(ctx context.Context, red provider.Redactor, b []byte, rid string) []byte {
+	m, ok := decodeJSON(b).(map[string]any)
+	if !ok || m["type"] != "error" {
+		return redactJSON(red, b)
+	}
+	if up, _ := m["request_id"].(string); up != "" {
+		slog.InfoContext(ctx, "modelgateway: upstream error relayed under the gateway's request id",
+			"request_id", rid, "upstream_request_id", red.String(up))
+	}
+	m = redactValue(red, m).(map[string]any)
+	m["request_id"] = rid
+	return encodeJSON(m)
+}
+
+// decodeJSON decodes JSON keeping numbers as written; invalid JSON is nil.
+func decodeJSON(b []byte) any {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	_ = dec.Decode(&v)
+	return v
+}
+
+func encodeJSON(v any) []byte {
 	var out bytes.Buffer
 	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(redactValue(red, v))
+	_ = enc.Encode(v)
 	return bytes.TrimSuffix(out.Bytes(), []byte("\n"))
 }
 
@@ -434,15 +464,18 @@ func withModel(b []byte, alias string) []byte {
 
 // relayStream passes an upstream's events to the caller as each arrives —
 // the keep-alives held before the first, then the first, then the rest —
-// rewriting only message_start's message.model and removing the call's
-// credentials from an upstream error event. Comments and pings pass unchanged,
-// and each event goes out whole. When the caller stops reading — or reads too
-// slowly to take an event within writeStall — the stream is still read to its
-// end. When the upstream fails partway, or ends before message_stop, the
-// caller gets an error event, the only way left to say so, and an unfinished
-// event before it is dropped rather than merged into it; once message_stop or
-// the upstream's own error event has passed, the stream has said all it will.
-func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, alias, rid string, guard *provider.StallGuard, red provider.Redactor) {
+// rewriting only message_start's message.model and an upstream error event
+// (errorJSON). Comments and pings pass unchanged, and each event goes out
+// whole: one the upstream cut off at the end of its stream is completed, so
+// the caller dispatches it and nothing written after it merges in. When the
+// caller stops reading — or reads too slowly to take an event within
+// writeStall — the stream is still read. When the upstream fails partway, or
+// ends before message_stop, the caller gets an error event, the only way left
+// to say so, and an unfinished event before it is dropped rather than merged
+// into it. Once message_stop or the upstream's own error event has passed, the
+// stream has said all it will and the relay ends: an upstream that holds its
+// connection open after that holds nothing of the gateway's.
+func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, alias, rid string, guard *provider.StallGuard, red provider.Redactor) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	rc := bounded(w)
@@ -466,7 +499,7 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 		case e.Name == "message_start" && e.Data != nil:
 			send(e.WithData(messageStartWithModel(e.Data, alias)))
 		case e.Name == "error" && e.Data != nil:
-			send(e.WithData(redactJSON(red, e.Data)))
+			send(e.WithData(errorJSON(ctx, red, e.Data, rid)))
 		default:
 			send(e.Raw)
 		}
@@ -476,19 +509,20 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 		send(held)
 	}
 	relay(first)
-	for {
+	for !done {
 		e, err := events.Next()
 		if len(e.Raw) > 0 && (err == nil || errors.Is(err, io.EOF)) {
+			if err != nil {
+				e.Raw = terminated(e.Raw)
+			}
 			relay(e)
 		}
-		switch {
-		case err == nil:
+		if err == nil || done {
 			continue
-		case done:
-			return
-		case errors.Is(err, io.EOF):
+		}
+		if errors.Is(err, io.EOF) {
 			err = errors.New("the stream ended before message_stop")
-		default:
+		} else {
 			err = guard.Cause(err)
 		}
 		typ := "api_error"
@@ -500,6 +534,18 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 		send([]byte("event: error\ndata: " + string(msg) + "\n\n"))
 		return
 	}
+}
+
+// terminated completes an event the upstream cut off at the end of its
+// stream with the blank line that ends an event.
+func terminated(raw []byte) []byte {
+	switch {
+	case bytes.HasSuffix(raw, []byte("\n\n")), bytes.HasSuffix(raw, []byte("\r\n\r\n")):
+		return raw
+	case bytes.HasSuffix(raw, []byte("\n")):
+		return append(raw, '\n')
+	}
+	return append(raw, '\n', '\n')
 }
 
 // messageStartWithModel rewrites the model inside message_start's message.
