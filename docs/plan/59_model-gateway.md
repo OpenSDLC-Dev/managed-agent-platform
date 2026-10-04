@@ -78,14 +78,17 @@ must be preserved unchanged
 ([Anthropic API](https://platform.minimax.io/docs/api-reference/text-anthropic-api)).
 
 **Vendors.** Each publishes an Anthropic-compatible endpoint beside its
-OpenAI-compatible one (international hosts shown; the profiles carry the CN hosts too):
+OpenAI-compatible one. The CN and international sites are separate consoles issuing
+their own keys — the user's MiniMax account is on the CN site — so a profile carries
+both regions and a provider names one; whether a key crosses regions is the live tier's
+to show. OpenAI hosts are listed where documented; the live tier confirms the rest.
 
-| Vendor | Anthropic endpoint | OpenAI endpoint | Field-support table |
+| Vendor | Anthropic endpoint, CN · international | OpenAI endpoint | Field-support table |
 |---|---|---|---|
-| DeepSeek | `https://api.deepseek.com/anthropic` | `https://api.deepseek.com` | [published](https://api-docs.deepseek.com/guides/anthropic_api) |
-| MiniMax | `https://api.minimax.io/anthropic` | `https://api.minimax.io/v1` | [published](https://platform.minimax.io/docs/api-reference/text-anthropic-api); two pages disagree on `tool_choice` |
-| Zhipu (Z.ai; BigModel in CN) | `https://api.z.ai/api/anthropic` | `https://api.z.ai/api/paas/v4` | **none** |
-| Moonshot | `https://api.moonshot.ai/anthropic` | `https://api.moonshot.ai/v1` | [published](https://platform.kimi.ai/docs/api/messages.md) |
+| DeepSeek | `https://api.deepseek.com/anthropic` (one host) | `https://api.deepseek.com` | [published](https://api-docs.deepseek.com/guides/anthropic_api) |
+| MiniMax | `https://api.minimax.cn/anthropic` · `https://api.minimax.io/anthropic` | `https://api.minimax.io/v1` | [CN](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api), [international](https://platform.minimax.io/docs/api-reference/text-anthropic-api); two pages disagree on `tool_choice` |
+| Zhipu (BigModel · Z.ai) | `https://open.bigmodel.cn/api/anthropic` · `https://api.z.ai/api/anthropic` | `https://open.bigmodel.cn/api/paas/v4` · `https://api.z.ai/api/paas/v4` | **none** |
+| Moonshot | `https://api.moonshot.cn/anthropic` · `https://api.moonshot.ai/anthropic` | `https://api.moonshot.ai/v1` | [published](https://platform.kimi.ai/docs/api/messages.md) |
 
 The differences that shape the profiles: `tool_choice` coverage (Kimi has no `tool`
 type); sampling parameters (Kimi's schema has none, MiniMax errors outside [0,2]);
@@ -334,8 +337,10 @@ writes.
 - **Clients:** the official Anthropic and OpenAI Go SDKs drive the gateway in-process —
   streaming, tool loops with thinking, errors.
 - **Live tier:** `RUN_LIVE_MODELGATEWAY` gives consent; `.env` supplies
-  `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `ZHIPU_API_KEY` and `MOONSHOT_API_KEY`, and once
-  opted in a missing one fails. Per vendor: streamed text, a tool round trip carrying
+  `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, `ZHIPU_API_KEY` and `MOONSHOT_API_KEY`, each
+  beside the host of the region that issued it
+  (`MINIMAX_BASE_URL=https://api.minimax.cn/anthropic` for the user's CN account), and
+  once opted in a missing one fails. Per vendor: streamed text, a tool round trip carrying
   thinking, a `search_result` replay, `count_tokens`, usage and cache fields, an upstream
   4xx. Its results settle the uncertainties above — all of Zhipu, MiniMax's
   `tool_choice`, `count_tokens` on DeepSeek, Zhipu and Kimi — and land in
