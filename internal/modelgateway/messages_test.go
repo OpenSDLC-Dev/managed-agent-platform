@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -315,12 +316,15 @@ func TestAStreamThatDiesBeforeItsFirstByteIsRetried(t *testing.T) {
 }
 
 // After the first byte a failure is the caller's, as an error event.
+//
+// The event the upstream was partway through is dropped: sent unfinished, it
+// would merge with the error event into one malformed block.
 func TestAStreamThatDiesMidwayEndsInAnErrorEvent(t *testing.T) {
 	e := newEnv(t)
 	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
-		_, _ = io.WriteString(w, events(c.Model, "x")[0])
+		_, _ = io.WriteString(w, events(c.Model, "x")[0]+"event: content_block_start\ndata: {\"type\":\"content_bl")
 		w.(http.Flusher).Flush()
 		conn, buf, err := w.(http.Hijacker).Hijack()
 		if err == nil {
@@ -334,13 +338,252 @@ func TestAStreamThatDiesMidwayEndsInAnErrorEvent(t *testing.T) {
 	key := e.key(everyAlias)
 	e.start()
 
-	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
+	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
 	got := string(b)
-	if !strings.Contains(got, "event: message_start") || !strings.Contains(got, "event: error") || !strings.Contains(got, `"api_error"`) {
+	if !strings.Contains(got, "event: message_start") || strings.Contains(got, "content_bl") {
 		t.Errorf("stream: %s", got)
+	}
+	_, data, ok := strings.Cut(got, "\n\nevent: error\ndata: ")
+	var ev struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+	if !ok || json.Unmarshal([]byte(strings.TrimSuffix(data, "\n\n")), &ev) != nil || ev.Type != "error" || ev.Error.Type != "api_error" ||
+		ev.RequestID != resp.Header.Get("request-id") {
+		t.Errorf("error event: %q", data)
 	}
 	if len(up.recorded()) != 1 {
 		t.Error("a failure after the first byte was retried")
+	}
+}
+
+// Once message_stop has passed the answer is whole: an upstream that then
+// holds its connection until the stall guard trips ends the stream quietly.
+func TestAFailureAfterMessageStopIsNotReported(t *testing.T) {
+	e := newEnv(t)
+	release := make(chan struct{})
+	defer close(release)
+	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		streamText(w, c.Model, "done")
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	p := e.provider(up.URL, func(p *store.Provider) { p.StallTimeout = 150 * time.Millisecond })
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+
+	stream := e.client(key).Messages.NewStreaming(e.ctx, anthropic.MessageNewParams{Model: "fast", MaxTokens: 8, Messages: hello()})
+	var acc anthropic.Message
+	for stream.Next() {
+		_ = acc.Accumulate(stream.Current())
+	}
+	if err := stream.Err(); err != nil || acc.Content[0].Text != "done" {
+		t.Errorf("a whole answer ended in %v", err)
+	}
+}
+
+// A refusal whose body breaks off is still a refusal: its status, not the
+// broken read, says whether another attempt may cure it.
+func TestARefusalWhoseBodyBreaksIsNotRetried(t *testing.T) {
+	e := newEnv(t)
+	broken := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) { breakOff(w, 400) })
+	backup := newFake(t, message("never"))
+	p := e.provider(broken.URL)
+	e.credential(p, "sk-broken-1", 1)
+	bp := e.provider(backup.URL)
+	e.credential(bp, "sk-backup-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0), target(e.deployment(bp, "m"), 1))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
+	if typ, msg, _ := errorOf(t, b); resp.StatusCode != 400 || typ != "api_error" || !strings.Contains(msg, "broke off") {
+		t.Errorf("broken refusal: %d %s", resp.StatusCode, b)
+	}
+	if len(backup.recorded()) != 0 {
+		t.Error("a refusal was retried")
+	}
+}
+
+// An answer whose body has begun is being paid for: a break past that point is
+// the caller's 502, while one before any byte may still try elsewhere.
+func TestABrokenAnswerIsRetriedOnlyBeforeItsFirstByte(t *testing.T) {
+	e := newEnv(t)
+	begun := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) { breakOff(w, 200) })
+	empty := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close()
+		}
+	})
+	backup := newFake(t, message("from backup"))
+	bp := e.provider(backup.URL)
+	e.credential(bp, "sk-backup-1", 1)
+	pb := e.provider(begun.URL)
+	e.credential(pb, "sk-begun-1", 1)
+	pe := e.provider(empty.URL)
+	e.credential(pe, "sk-empty-1", 1)
+	e.alias("begun", target(e.deployment(pb, "m"), 0), target(e.deployment(bp, "m"), 1))
+	e.alias("empty", target(e.deployment(pe, "m"), 0), target(e.deployment(bp, "m"), 1))
+	key := e.key(everyAlias)
+	e.start()
+	if resp, b := e.do("POST", "/v1/messages", `{"model":"begun","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key}); resp.StatusCode != 502 || len(backup.recorded()) != 0 {
+		t.Errorf("begun: %d %s, backup called %d times", resp.StatusCode, b, len(backup.recorded()))
+	}
+	if resp, b := e.do("POST", "/v1/messages", `{"model":"empty","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 || !strings.Contains(string(b), "from backup") {
+		t.Errorf("empty: %d %s", resp.StatusCode, b)
+	}
+}
+
+// breakOff answers status, promises a longer body than it sends, and drops
+// the connection partway.
+func breakOff(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", "1000")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, `{"type":"error","err`)
+	w.(http.Flusher).Flush()
+	if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+		conn.Close()
+	}
+}
+
+// The credential is redacted from what the upstream decoded, so an escape the
+// upstream's encoder chose cannot carry it past the match — in an error body
+// or in an error event.
+func TestAnEscapedCredentialIsRedacted(t *testing.T) {
+	e := newEnv(t)
+	const secret = `sk-up/stream"key-9`
+	escaped := `sk-up\/stream\"key-9`
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		var stream bool
+		_ = json.Unmarshal(c.Body["stream"], &stream)
+		diag := `{"type":"error","error":{"type":"overloaded_error","message":"key ` + escaped + ` is overloaded"},"tried":["` + escaped + `",1.50]}`
+		if _, plain := c.Body["plain"]; plain {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(400)
+			_, _ = io.WriteString(w, "<p>key "+secret+" is overloaded</p>")
+			return
+		}
+		if !stream {
+			writeBody(w, 400, diag)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, events(c.Model, "x")[0]+"event: error\ndata: "+diag+"\n\n")
+	})
+	p := e.provider(up.URL)
+	e.credential(p, secret, 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	for _, extra := range []string{`"stream":false`, `"stream":true`, `"plain":1`} {
+		_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,`+extra+`,"messages":[]}`, map[string]string{"x-api-key": key})
+		if got := string(b); strings.Contains(got, "sk-up") || !strings.Contains(got, "is overloaded") {
+			t.Errorf("%s: %s", extra, got)
+		}
+	}
+}
+
+// An upstream body past the bound is answered by the gateway rather than
+// relayed truncated: an error keeps its status, an answer is a 502.
+func TestAnUpstreamBodyPastTheBoundIsNotRelayed(t *testing.T) {
+	defer modelgateway.SetMaxResponseBody(64)()
+	e := newEnv(t)
+	long := strings.Repeat("x", 100)
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		if c.Model == "refuses" {
+			writeBody(w, 400, `{"type":"error","error":{"type":"invalid_request_error","message":"`+long+`"}}`)
+			return
+		}
+		writeBody(w, 200, `{"type":"message","model":"m","content":[{"type":"text","text":"`+long+`"}]}`)
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("refuses", target(e.deployment(p, "refuses"), 0))
+	e.alias("answers", target(e.deployment(p, "answers"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	for alias, want := range map[string]int{"refuses": 400, "answers": 502} {
+		resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
+		if typ, msg, _ := errorOf(t, b); resp.StatusCode != want || typ != "api_error" || !strings.Contains(msg, "bound of 64 bytes") {
+			t.Errorf("%s: %d %s", alias, resp.StatusCode, b)
+		}
+	}
+}
+
+// A caller that stops reading but keeps its connection open is let go once a
+// write to it stalls, and the upstream answer is still read to its end.
+func TestACallerThatStopsReadingIsLetGo(t *testing.T) {
+	defer modelgateway.SetWriteStall(200 * time.Millisecond)()
+	e := newEnv(t)
+	finished := make(chan bool, 1)
+	chunk := "data: " + strings.Repeat("x", 512<<10) + "\n\n"
+	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		for range 32 {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				finished <- false
+				return
+			}
+			w.(http.Flusher).Flush()
+		}
+		finished <- r.Context().Err() == nil
+	})
+	p := e.provider(up.URL, func(p *store.Provider) { p.StallTimeout = 5 * time.Second })
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(e.url, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	body := `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`
+	fmt.Fprintf(conn, "POST /v1/messages HTTP/1.1\r\nHost: gw\r\nx-api-key: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", key, len(body), body)
+	select {
+	case ok := <-finished:
+		if !ok {
+			t.Error("the upstream answer was cut off behind a caller that stopped reading")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the upstream answer never finished")
+	}
+}
+
+// The write bound is per write: a caller that keeps reading is never cut off,
+// however long the stream runs past the bound.
+func TestTheWriteBoundDoesNotCutALongStream(t *testing.T) {
+	defer modelgateway.SetWriteStall(200 * time.Millisecond)()
+	e := newEnv(t)
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		for _, ev := range events(c.Model, "slow") {
+			_, _ = io.WriteString(w, ev)
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
+	if got := string(b); !strings.Contains(got, "event: message_stop") || strings.Contains(got, "event: error") {
+		t.Errorf("a long stream was cut: %s", got)
 	}
 }
 

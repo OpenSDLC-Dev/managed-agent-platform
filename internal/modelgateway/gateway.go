@@ -16,7 +16,8 @@
 // and calls a model only under the key policy an administrator wrote for the
 // key. The bootstrap key — the value the control plane registers as
 // "bootstrap" — needs no policy, being known by its configured value; a policy
-// written for it still applies.
+// written for it still applies, and like any key it calls nothing once its row
+// is archived or expired.
 //
 // The Anthropic path is a passthrough: the body is read only as far as its
 // top-level keys, model becomes the deployment's upstream id, and everything

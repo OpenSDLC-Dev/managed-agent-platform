@@ -36,6 +36,10 @@ func TestAuthentication(t *testing.T) {
 	granted := e.key(everyAlias)
 	narrow := e.key([]string{"slow"})
 	ungranted := e.key(noGrant)
+	// The control plane registers the bootstrap key's row; no policy names it.
+	if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_boot', 'bootstrap', $1)`, apikey.Hash(bootstrap)); err != nil {
+		t.Fatal(err)
+	}
 	e.start()
 	body := `{"model":"fast","max_tokens":8,"messages":[]}`
 	cases := []struct {
@@ -51,7 +55,7 @@ func TestAuthentication(t *testing.T) {
 		{"granted", map[string]string{"x-api-key": granted}, 200, ""},
 		{"as a Bearer", map[string]string{"Authorization": "Bearer " + granted}, 200, ""},
 		{"x-api-key wins", map[string]string{"x-api-key": granted, "Authorization": "Bearer sk-wrong"}, 200, ""},
-		{"bootstrap, no row", map[string]string{"x-api-key": bootstrap}, 200, ""},
+		{"bootstrap, no policy", map[string]string{"x-api-key": bootstrap}, 200, ""},
 	}
 	for _, c := range cases {
 		resp, b := e.do("POST", "/v1/messages", body, c.header)
@@ -121,6 +125,42 @@ func TestTheBootstrapKey(t *testing.T) {
 		resp, b := e.do("POST", "/v1/messages", `{"model":"`+c.model+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": c.key})
 		if resp.StatusCode != c.status {
 			t.Errorf("%s on %s: %d %s", c.key, c.model, resp.StatusCode, b)
+		}
+	}
+}
+
+// The bootstrap key authenticates by its row like any key, so the platform
+// retiring it — archived, or past an expiry — ends its calls here too, and its
+// value alone opens nothing.
+func TestARetiredBootstrapKeyCallsNothing(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, message("ok"))
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	e.start()
+	call := func() int {
+		resp, _ := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": bootstrap})
+		return resp.StatusCode
+	}
+	if s := call(); s != 401 {
+		t.Errorf("no row: %d", s)
+	}
+	if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_boot', 'bootstrap', $1)`, apikey.Hash(bootstrap)); err != nil {
+		t.Fatal(err)
+	}
+	if s := call(); s != 200 {
+		t.Errorf("active: %d", s)
+	}
+	for name, q := range map[string]string{
+		"archived": `UPDATE api_keys SET status = 'archived' WHERE id = 'key_boot'`,
+		"expired":  `UPDATE api_keys SET status = 'active', expires_at = now() - interval '1 hour' WHERE id = 'key_boot'`,
+	} {
+		if _, err := e.pool.Exec(e.ctx, q); err != nil {
+			t.Fatal(err)
+		}
+		if s := call(); s != 401 {
+			t.Errorf("%s: %d", name, s)
 		}
 	}
 }

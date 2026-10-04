@@ -1158,6 +1158,12 @@ func TestAnUnhostedBinaryTheChartRunsIsRefused(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "x.yaml names it") {
 		t.Fatalf("error = %v, want the chart's template named", err)
 	}
+	// Helm renders whatever sits in templates/, so a .md there is no prose.
+	root, dir = unhostedRoot(t, map[string]string{"templates/x.md": `command: ["/x"]`})
+	_, err = Check(root, dir)
+	if err == nil || !strings.Contains(err.Error(), "x.md names it") {
+		t.Fatalf("error = %v, want the .md template named", err)
+	}
 }
 
 // TestAnUnhostedBinaryWithNoChartToReadIsRefused: a chart that moved would

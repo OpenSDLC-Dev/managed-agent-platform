@@ -249,7 +249,8 @@ type Report struct {
 // of it in the Terraform — a grant on the cipher names it too — or in the Helm
 // chart GCP deploys means it is being given an identity, and the entry would
 // then hide exactly the narrowed grant this guard exists to report. A mention
-// in prose (a .md file) is not one.
+// in prose is not one: a .md file, unless it sits under a templates/ directory,
+// which Helm renders whatever the extension.
 var unhosted = map[string]string{
 	"modelgateway": "nothing deploys it to GCP before plan 59 slice 2d",
 }
@@ -267,7 +268,9 @@ func stillUnhosted(root, tfDir, binary string) error {
 		read func(string) bool
 	}{
 		{tfDir, func(p string) bool { return strings.HasSuffix(p, ".tf") }},
-		{chart, func(p string) bool { return !strings.HasSuffix(p, ".md") }},
+		{chart, func(p string) bool {
+			return !strings.HasSuffix(p, ".md") || strings.Contains(filepath.ToSlash(p), "/templates/")
+		}},
 	} {
 		err := filepath.WalkDir(tree.dir, func(p string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !tree.read(p) {

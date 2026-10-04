@@ -13,7 +13,7 @@ import (
 
 // caller is an authenticated request's key and the grant it carries.
 type caller struct {
-	keyID  string // its api_keys id; "" for a bootstrap key the database does not hold
+	keyID  string // its api_keys id
 	policy store.KeyPolicy
 }
 
@@ -25,7 +25,11 @@ func (c caller) may(alias string) bool {
 // authenticate checks the request's platform API key and finds its grant.
 // The key rides x-api-key, as an Anthropic SDK sends it, or a Bearer, as an
 // OpenAI SDK does; x-api-key wins when both are present. A repeated header is
-// refused as ambiguous, as the control plane refuses it.
+// refused as ambiguous, as the control plane refuses it. Every key, the
+// bootstrap key included, authenticates by the control plane's rule — an
+// active, unexpired row — so a key the platform has archived or let expire
+// calls nothing here either; the bootstrap key's value only spares it a
+// policy.
 func (h *handler) authenticate(r *http.Request) (caller, *apiError) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {
@@ -44,18 +48,15 @@ func (h *handler) authenticate(r *http.Request) (caller, *apiError) {
 	if err != nil {
 		return caller{}, internal(r, "api key lookup failed", err)
 	}
-	boot := h.isBootstrap(key)
-	if id == "" && !boot {
+	if id == "" {
 		return caller{}, unauthenticated("invalid x-api-key")
 	}
 	c := caller{keyID: id}
-	if id != "" {
-		if p, ok := h.cfg.Catalog.Snapshot().KeyPolicy(id); ok {
-			c.policy = p
-			return c, nil
-		}
+	if p, ok := h.cfg.Catalog.Snapshot().KeyPolicy(id); ok {
+		c.policy = p
+		return c, nil
 	}
-	if !boot {
+	if !h.isBootstrap(key) {
 		return caller{}, forbidden("this API key has no model grant; an administrator grants one in the console")
 	}
 	return c, nil

@@ -10,8 +10,9 @@
 //	                       holds the catalogue, and the platform's migrations
 //	                       run at start as every binary runs them
 //	CONTROLPLANE_API_KEY   the bootstrap key the control plane registers
-//	                       (required): it reaches the admin API, and calls any
-//	                       model unless a key policy written for it says less
+//	                       (required): it reaches the admin API, and while its
+//	                       row is active calls any model unless a key policy
+//	                       written for it says less
 //	SECRETS_BACKEND        the cipher sealing vendor credentials (required):
 //	                       "openbao", "local" or "gcpkms", with the variables
 //	                       cmd/controlplane documents for each
