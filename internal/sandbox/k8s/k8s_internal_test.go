@@ -1428,6 +1428,26 @@ func setsidEnv(t *testing.T) []string {
 // contract test's job.
 func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	env := setsidEnv(t)
+	// An image's startup that turns errexit on, as well as printing, runs in
+	// the wrapper's own shell and the command's: every row holds under it as
+	// under none, a command's own exit code and a watchdog blocked from its
+	// mark included (#860). It is the wrapper's BASH_ENV only — exitScript runs
+	// framed in a pod, and bare here.
+	hook := t.TempDir() + "/hook.sh"
+	if err := os.WriteFile(hook, []byte("set -e\n"+sandboxtest.BannerHook), 0o644); err != nil {
+		t.Fatalf("stage the hook: %v", err)
+	}
+	for _, startup := range []struct {
+		name string
+		env  []string
+	}{{"NoStartup", nil}, {"ErrexitStartup", []string{"BASH_ENV=" + hook}}} {
+		t.Run(startup.name, func(t *testing.T) { wrapperMarks(t, env, startup.env) })
+	}
+}
+
+// wrapperMarks is TestExecWrapperMarksTheWatchdogsKill's rows, with startupEnv
+// added to the wrapper's environment.
+func wrapperMarks(t *testing.T, env, startupEnv []string) {
 	dir := t.TempDir()
 	// Both scripts run, the way the provider runs them: the wrapper records the
 	// exec's state and exitScript is the one that reads the mark back out.
@@ -1439,7 +1459,7 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		if base == nil {
 			base = os.Environ()
 		}
-		wrapper.Env = append(append([]string{}, base...), extraEnv...)
+		wrapper.Env = append(append(append([]string{}, base...), startupEnv...), extraEnv...)
 		if err := wrapper.Run(); err != nil {
 			t.Fatalf("run execWrapper: %v", err)
 		}

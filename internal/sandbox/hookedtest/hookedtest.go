@@ -40,26 +40,12 @@ type Backend struct {
 	Image    string
 }
 
-// Backends builds the hooked image and returns the Docker backend and the
-// Kubernetes one (MAP_K8S_CONTEXT, else the kubeconfig's current context;
-// MAP_K8S_NAMESPACE), each able to run it.
-//
-// Each call builds an image of its own: the same Dockerfile would build the
-// same image ID in every package that asks at once, sharing layers through the
-// build cache, and removing one package's from a kind node takes the image ID,
-// every package's tag with it, out from under pods still running from it. A
-// label carrying a nonce makes the ID this call's alone, its layers still
-// shared, so the removal when the test ends takes this call's image and nothing
-// another package runs.
+// Backends builds the hooked image (Image, with sandboxtest.BannerHook) and
+// returns the Docker backend and the Kubernetes one (MAP_K8S_CONTEXT, else the
+// kubeconfig's current context; MAP_K8S_NAMESPACE), each able to run it.
 func Backends(t *testing.T) []Backend {
 	t.Helper()
-	var nonce [8]byte
-	_, _ = rand.Read(nonce[:])
-	host := []string{"--host", docker.DaemonHost()}
-	image := dockertest.ImageFrom(t, "hooked", "FROM "+baseImage+"\n"+
-		"LABEL map.hooked.build="+hex.EncodeToString(nonce[:])+"\n"+
-		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(sandboxtest.BannerHook))+" | base64 -d > /etc/map-hook.sh\n"+
-		"ENV BASH_ENV=/etc/map-hook.sh\n", host...)
+	image := Image(t, sandboxtest.BannerHook)
 	dp, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("hooked sandboxes require Docker: %v", err)
@@ -68,10 +54,33 @@ func Backends(t *testing.T) []Backend {
 	if err != nil {
 		t.Fatalf("hooked sandboxes require a Kubernetes cluster: %v", err)
 	}
+	return []Backend{{Name: "docker", Provider: dp, Image: image}, {Name: "k8s", Provider: kp, Image: image}}
+}
+
+// Image builds an image whose `ENV BASH_ENV` file is hook, on the base the
+// backends' contract tests run, makes it visible to the Kubernetes cluster the
+// tests run against, and removes it from both when the test is done.
+//
+// Each call builds an image of its own: the same Dockerfile would build the
+// same image ID in every package that asks at once, sharing layers through the
+// build cache, and removing one package's from a kind node takes the image ID,
+// every package's tag with it, out from under pods still running from it. A
+// label carrying a nonce makes the ID this call's alone, its layers still
+// shared, so the removal when the test ends takes this call's image and nothing
+// another package runs.
+func Image(t *testing.T, hook string) string {
+	t.Helper()
+	var nonce [8]byte
+	_, _ = rand.Read(nonce[:])
+	host := []string{"--host", docker.DaemonHost()}
+	image := dockertest.ImageFrom(t, "hooked", "FROM "+baseImage+"\n"+
+		"LABEL map.hooked.build="+hex.EncodeToString(nonce[:])+"\n"+
+		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(hook))+" | base64 -d > /etc/map-hook.sh\n"+
+		"ENV BASH_ENV=/etc/map-hook.sh\n", host...)
 	if cluster := sandboxtest.LoadIntoKind(t, sandboxtest.KubeContext(t), image, host...); cluster != "" {
 		t.Cleanup(func() { sandboxtest.RemoveFromKind(t, cluster, image, host...) })
 	}
-	return []Backend{{Name: "docker", Provider: dp, Image: image}, {Name: "k8s", Provider: kp, Image: image}}
+	return image
 }
 
 // Provision provisions a sandbox from the hooked image on b, with h as its

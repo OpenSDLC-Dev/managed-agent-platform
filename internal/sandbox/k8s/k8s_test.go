@@ -12,6 +12,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/k8s"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
@@ -327,6 +328,24 @@ func TestK8sTimedExecDoesNotWaitForItsWatchdog(t *testing.T) {
 	}
 }
 
+// blindTheProbe is a command that disarms its watchdog, points the pid file the
+// liveness probe reads at a process that has already exited, and then runs 5s:
+// TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee says why each step.
+const blindTheProbe = `
+  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)
+  w=
+  for i in $(seq 100); do
+    for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do [ "$p" != "$$" ] && w=$p; done
+    [ -n "$w" ] && break
+    sleep 0.01
+  done
+  [ -n "$w" ] && kill -9 "$w" 2>/dev/null && echo disarmed
+  true & gone=$!
+  wait "$gone"
+  [ -n "$state" ] && [ -f "$state.pid" ] && echo "$gone" > "$state.pid" && echo blinded
+  sleep 5
+`
+
 // A command that disarms its watchdog, overruns its deadline and then exits clean
 // is a timeout even where the overrun probe cannot see it: the #832 flake, where
 // the probe answered too late, and classifyTimeout argues what still sees it.
@@ -348,20 +367,6 @@ func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	const blindTheProbe = `
-	  state=$(tr '\0' '\n' < /proc/$PPID/cmdline 2>/dev/null | tail -n 1)
-	  w=
-	  for i in $(seq 100); do
-	    for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do [ "$p" != "$$" ] && w=$p; done
-	    [ -n "$w" ] && break
-	    sleep 0.01
-	  done
-	  [ -n "$w" ] && kill -9 "$w" 2>/dev/null && echo disarmed
-	  true & gone=$!
-	  wait "$gone"
-	  [ -n "$state" ] && [ -f "$state.pid" ] && echo "$gone" > "$state.pid" && echo blinded
-	  sleep 5
-	`
 	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: blindTheProbe, Timeout: 3 * time.Second})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
@@ -379,5 +384,80 @@ func TestK8sOverrunThenExitIsATimeoutTheProbeCannotSee(t *testing.T) {
 	}
 	if !res.TimedOut {
 		t.Errorf("a command that ran 5s against a 3s deadline and exited while the probe was blind was not a timeout: %+v", res)
+	}
+}
+
+// An image whose startup file turns errexit on (and prints, as
+// sandboxtest.BannerHook does) runs it in the exec wrapper's own shell, which
+// it used to end at the first command that failed (#860): `wait` on a command
+// that exits 7, and the wrapper died before recording it, so the 7 read as a
+// SIGKILL nobody sent. On that image as on the plain one, a command's own exit
+// stands; a timeout is still the watchdog's 137, and a SIGKILL the command
+// sent itself is still 137 and no timeout; and the overrun rules hold — a
+// command that disarms its watchdog and blinds the probe is a timeout by the
+// wrapper's record of its run (#832), whatever it exits with, and one that
+// disarms it and runs on is a timeout by the probes (#95, #110).
+func TestK8sExecUnderAnErrexitStartup(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
+	}
+	const killWatchdog = `
+	  for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do
+	    [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null
+	  done
+	`
+	for _, image := range []struct{ name, image string }{
+		{"plain", testImage},
+		{"errexit startup", hookedtest.Image(t, "set -e\n"+sandboxtest.BannerHook)},
+	} {
+		t.Run(image.name, func(t *testing.T) {
+			sb, err := provider.Provision(context.Background(), sandbox.Spec{
+				SessionID:  domain.NewID("sesn"),
+				Image:      image.image,
+				Networking: domain.Networking{Type: domain.NetUnrestricted},
+			})
+			if err != nil {
+				t.Fatalf("provision: %v", err)
+			}
+			t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			for _, tc := range []struct {
+				name, command string
+				timeout       time.Duration
+				grace         time.Duration
+				code          int
+				timedOut      bool
+			}{
+				{"a failing command's own exit", "exit 7", 30 * time.Second, 0, 7, false},
+				{"a command killed on its deadline", "sleep 300", time.Second, 0, 137, true},
+				{"a SIGKILL the command sent itself", "kill -9 $$", 30 * time.Second, 0, 137, false},
+				{"an overrun the probe cannot see, then a clean exit", blindTheProbe, 3 * time.Second, 30 * time.Second, 0, true},
+				{"an overrun the probe cannot see, then a failing exit", blindTheProbe + "exit 3\n", 3 * time.Second, 30 * time.Second, 3, true},
+				{"a disarmed watchdog and a command that runs on", killWatchdog + "sleep 987321", time.Second, 2 * time.Second, 137, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if tc.grace > 0 {
+						k8s.SetKillGraceForTest(sb, tc.grace)
+					}
+					res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: tc.command, Timeout: tc.timeout})
+					if err != nil {
+						t.Fatalf("exec: %v", err)
+					}
+					if res.ExitCode != tc.code || res.TimedOut != tc.timedOut {
+						t.Errorf("exit %d, timed out %v; want %d, %v: %+v", res.ExitCode, res.TimedOut, tc.code, tc.timedOut, res)
+					}
+					if tc.command == blindTheProbe || strings.HasPrefix(tc.command, blindTheProbe) {
+						if !strings.Contains(res.Stdout, "disarmed") || !strings.Contains(res.Stdout, "blinded") {
+							t.Errorf("the command could not disarm its watchdog or blind the probe, so this row proves nothing: %+v", res)
+						}
+					}
+				})
+			}
+		})
 	}
 }
