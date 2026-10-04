@@ -120,7 +120,7 @@ Each new guard was broken on its own, and its test failed:
 - a primary read without the thread filter failed the per-thread test;
 - a digest without the key and headers failed the route test.
 
-After those fixes the full `make verify` gate passed on the branch: build, cross-build, vet, format check and 67 test packages, with 90.92% total statement coverage. Review results and CI are recorded in the pull request.
+After the Claude review's fixes the full `make verify` gate passed on the branch: build, cross-build, vet, format check and 67 test packages, with 90.91% total statement coverage. Review results and CI are recorded in the pull request.
 
 ---
 
