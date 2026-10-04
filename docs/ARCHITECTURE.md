@@ -466,6 +466,15 @@ Layout order is by layer, as the repo is.
 | `dialguard/` | The SSRF floor under the dials **no operator vouched for** — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint, and inside the per-session gate every dial but one — a widening flag's (a declared MCP endpoint, a package registry `allow_package_managers` opened) and, since plan 45, an `unrestricted` session's, which reaches every host and has each resolved address judged underneath it. **Not a universal egress check**, and reading it as one misplaces three neighbours: a configured provider or web backend dials with its own ordinary client, the `github_repository` clone's host is pinned to the literal `github.com` by the create-time grammar rather than by an address check, and a host the gate admits from the operator's own `allowed_hosts` is dialled unfloored — listing it is the vouching. The package owns the dial itself (`dialguard.Dialer`): on these paths it resolves a name **once**, judges every address that came back before any connect, and dials those addresses — so nothing below a caller's decision can re-resolve the name into somewhere the floor never saw, and these five paths have one dialler between them rather than five copies of a hook. It does not change which answer a resolver gives, so a `search` list completing a relative name is still #601's open question rather than this package's. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
 | `identity/` | The human-authentication boundary: verify the credential a human presents and reduce it to a principal holding one of three roles — or `RoleNone`, the fourth value and a live denial, which is what an authenticated human whose claims mapped to nothing receives and what no route minimum accepts. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
 | `oauthrefresh/` | The RFC 6749 refresh grant, spelled once for the two places that perform it. |
+| `apikey/` | The platform API key check — the stored hash, looked up active and unexpired by the database's clock — shared by the control plane and the model gateway, so a revoked key stops on both at once. |
+
+### Model gateway (plan 59)
+
+No binary serves these yet: `cmd/modelgateway` arrives with plan 59's second slice.
+
+| Package | What it owns |
+|---|---|
+| `modelgateway/` | `profile/`, the compiled-in vendor profiles; `store/`, the queries over the `modelgateway` schema, holding the invariants that span rows and announcing every write on `modelgateway_config`; `catalog/`, the immutable configuration snapshot a replica reloads on that notification, on a tick, and on each resubscription; `admin/`, the `/admin/v1/` API, reached by the bootstrap key or an operator token and by no other platform key. |
 
 ### Storage and shared infrastructure
 

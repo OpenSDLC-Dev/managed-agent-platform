@@ -1947,3 +1947,41 @@ func TestLogsCarryNoCredentials(t *testing.T) {
 		}
 	}
 }
+
+// TestCredential pins which credential each mode reads from a request, the one
+// rule every server taking an operator token shares: oidc reads a JWT-shaped
+// Bearer and leaves any other Bearer alone; trusted_proxy reads only the
+// assertion header and ignores Bearer entirely.
+func TestCredential(t *testing.T) {
+	t.Parallel()
+	idp, clock := verifierXIdP(t)
+	idp.AddECKey(t)
+	oidc := verifierXNew(t, idp, clock, nil)
+	proxy := verifierXNew(t, idp, clock, func(cfg *identity.Config) {
+		cfg.Mode = identity.ModeTrustedProxy
+		cfg.AssertionHeader = verifierXIAPHeader
+	})
+	const jwt = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"
+	for _, tc := range []struct {
+		name      string
+		v         *identity.Verifier
+		headers   map[string]string
+		wantToken string
+		wantOK    bool
+	}{
+		{"oidc JWT bearer", oidc, map[string]string{"Authorization": "Bearer " + jwt}, jwt, true},
+		{"oidc opaque bearer", oidc, map[string]string{"Authorization": "Bearer sk-map-api01-x"}, "", false},
+		{"oidc no bearer", oidc, map[string]string{verifierXIAPHeader: jwt}, "", false},
+		{"proxy assertion", proxy, map[string]string{verifierXIAPHeader: jwt}, jwt, true},
+		{"proxy ignores bearer", proxy, map[string]string{"Authorization": "Bearer " + jwt}, "", false},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		for k, v := range tc.headers {
+			r.Header.Set(k, v)
+		}
+		token, ok := tc.v.Credential(r)
+		if token != tc.wantToken || ok != tc.wantOK {
+			t.Errorf("%s: Credential = %q, %t; want %q, %t", tc.name, token, ok, tc.wantToken, tc.wantOK)
+		}
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -236,6 +237,30 @@ func (v *Verifier) Mode() Mode { return v.mode }
 // AssertionHeader is the request header carrying the proxy's assertion in
 // trusted_proxy mode, and "" in oidc mode.
 func (v *Verifier) AssertionHeader() string { return v.header }
+
+// Credential returns the credential this verifier's mode expects on r, and
+// whether it was present at all — the one rule every server taking an
+// operator token reads it by.
+//
+// The two modes never fall back to each other, and the asymmetry is deliberate.
+// In oidc mode the credential is a Bearer with a JWT silhouette; a Bearer that
+// is not JWT-shaped is left alone, because on the control plane's dual-auth
+// paths that is how an environment key arrives. In trusted_proxy mode Bearer is
+// ignored ENTIRELY and only the configured assertion header counts: the proxy
+// is the only party that can set that header on a request reaching us, so
+// accepting a Bearer as well would accept a credential the proxy never vouched
+// for.
+func (v *Verifier) Credential(r *http.Request) (token string, ok bool) {
+	if v.mode == ModeTrustedProxy {
+		token = r.Header.Get(v.header)
+		return token, token != ""
+	}
+	token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !hasBearer || !LooksLikeJWT(token) {
+		return "", false
+	}
+	return token, true
+}
 
 // Verify authenticates one compact JWT and maps it to an Identity.
 //

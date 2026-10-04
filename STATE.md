@@ -4,10 +4,20 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** v0.5.1 is out ([docs/RELEASING.md](./docs/RELEASING.md)): the release PR (#879), the
-tag on its squash merge, a green `release.yml` run, and `§ [0.5.1]` moved to
-[docs/changelog/0.5.1.md](./docs/changelog/0.5.1.md).
+**Model gateway** ([plan 59](./docs/plan/59_model-gateway.md)): `cmd/modelgateway`, a
+standalone server speaking Anthropic Messages and the OpenAI-compatible APIs to the brain
+and to internal applications, configured from managed-agent-console. Five slices here;
+slice 3 is the console repository's own plan.
 
 ## Tasks
 
-None.
+- [x] Slice 1 — store and catalogue: the `modelgateway` schema (migration 0049), the
+      platform key check shared (`internal/apikey`), the admin API under both auth modes,
+      the notify-driven snapshot, the four chat vendors' profiles
+- [ ] Slice 2 — Anthropic inference, routing, usage and limits, `cmd/modelgateway` in
+      compose and Helm, the live tier on MiniMax (CN) and DeepSeek; freezes the admin API
+- [ ] Slice 4 — OpenAI surfaces, embeddings and rerank with the `gitee` profile; dikw-core
+      through the gateway
+- [ ] Slice 5 — brain cutover: one route through the gateway; `ant` sessions on MiniMax
+      and DeepSeek
+- [ ] Slice 6 — stateless Responses
