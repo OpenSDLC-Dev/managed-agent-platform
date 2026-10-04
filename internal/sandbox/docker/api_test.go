@@ -92,13 +92,21 @@ const fakeExecPid = 4242
 // every one of them onto the seconds string. Reading from the front is what makes
 // the next argument a compile-or-fail question rather than a set of assertions
 // that quietly begin describing the wrong thing.
-func wrapperCommand(cmd []string) string {
+//
+// Every exec these fakes read the command of is the platform's own — the write
+// path's scripts — so each must carry the platform's script preamble
+// (sandbox.Script) or open a frame (sandboxtest.Scripted): what a fake reads
+// is the script after it, and a command without it fails the test, where
+// stripping it silently would let a platform exec that lost it run under an
+// image's errexit unnoticed (#860).
+func wrapperCommand(t testing.TB, cmd []string) string {
 	const commandArg = 4
 	if len(cmd) <= commandArg {
 		return ""
 	}
-	// A platform script opens with the preamble every one carries
-	// (sandbox.Script); what a fake reads is the script after it.
+	if !sandboxtest.Scripted(cmd[commandArg]) {
+		t.Errorf("a platform exec without the script preamble (sandbox.Script): %q", cmd[commandArg])
+	}
 	return strings.TrimPrefix(cmd[commandArg], sandbox.ScriptPreamble)
 }
 
@@ -110,9 +118,9 @@ func wrapperCommand(cmd []string) string {
 // words after.
 func framedOutput(t *testing.T, cmd []string, stdout, stderr string) []byte {
 	t.Helper()
-	_, f, ok := sandboxtest.Unwrap(wrapperCommand(cmd))
+	_, f, ok := sandboxtest.Unwrap(wrapperCommand(t, cmd))
 	if !ok {
-		t.Fatalf("exec %q is not a framed script", wrapperCommand(cmd))
+		t.Fatalf("exec %q is not a framed script", wrapperCommand(t, cmd))
 	}
 	res := sandboxtest.Framed(f, sandbox.ExecResult{Stdout: stdout, Stderr: stderr})
 	return append(frame(streamStdout, "welcome to the image "+res.Stdout+"exit banner "),
@@ -1107,7 +1115,7 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 				t.Errorf("decode exec create: %v", err)
 			}
 			// The wrapper takes the command as an argument, not as script text.
-			commands = append(commands, wrapperCommand(body.Cmd))
+			commands = append(commands, wrapperCommand(t, body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -1176,7 +1184,7 @@ func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
-			commands = append(commands, wrapperCommand(body.Cmd))
+			commands = append(commands, wrapperCommand(t, body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -1246,7 +1254,7 @@ func TestCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
-			commands = append(commands, wrapperCommand(body.Cmd))
+			commands = append(commands, wrapperCommand(t, body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -1292,7 +1300,7 @@ func TestTheBatchesCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
-			commands = append(commands, wrapperCommand(body.Cmd))
+			commands = append(commands, wrapperCommand(t, body.Cmd))
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -1346,7 +1354,7 @@ func TestWriteFileClassifiesAnUnwritableParentWhenThePutFails(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			if strings.Contains(wrapperCommand(body.Cmd), ": > '/workspace/"+sandbox.TempPrefix) {
+			if strings.Contains(wrapperCommand(t, body.Cmd), ": > '/workspace/"+sandbox.TempPrefix) {
 				probes[id] = body.Cmd
 			}
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -1440,7 +1448,7 @@ func TestWriteProbesReadNoReasonOutsideTheirFrame(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			switch cmd := wrapperCommand(body.Cmd); {
+			switch cmd := wrapperCommand(t, body.Cmd); {
 			case strings.Contains(cmd, "mkdir -p '/newtop'"):
 				kinds[id] = "mkdir"
 			case strings.Contains(cmd, ": > '/workspace/"+sandbox.TempPrefix):
@@ -1509,7 +1517,7 @@ func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			switch cmd := wrapperCommand(body.Cmd); {
+			switch cmd := wrapperCommand(t, body.Cmd); {
 			case strings.Contains(cmd, "mv -f"):
 				kinds[id] = "rename"
 			case strings.Contains(cmd, ": > '/etc/"+sandbox.TempPrefix):
@@ -1594,7 +1602,7 @@ func TestARefusedRenameReclaimsItsTempThroughTheDaemon(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := wrapperCommand(body.Cmd)
+			cmd := wrapperCommand(t, body.Cmd)
 			commands = append(commands, cmd)
 			switch {
 			case strings.Contains(cmd, "mv -f"):
@@ -1687,7 +1695,7 @@ func TestARenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := wrapperCommand(body.Cmd)
+			cmd := wrapperCommand(t, body.Cmd)
 			commands = append(commands, cmd)
 			renames[id] = strings.Contains(cmd, "mv -f")
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -1778,7 +1786,7 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := wrapperCommand(body.Cmd)
+			cmd := wrapperCommand(t, body.Cmd)
 			commands = append(commands, cmd)
 			if strings.Contains(cmd, "__map_bulk_rename") {
 				kinds[id] = "rename"
@@ -1905,7 +1913,7 @@ func bulkDaemon(t *testing.T, readOnlyRoot bool, refuse func(dir string) (int, s
 			execN++
 			id := fmt.Sprintf("e%d", execN)
 			// The function a bulk exec calls is its command's last line.
-			lines := strings.Split(strings.TrimSpace(wrapperCommand(body.Cmd)), "\n")
+			lines := strings.Split(strings.TrimSpace(wrapperCommand(t, body.Cmd)), "\n")
 			kinds[id], _, _ = strings.Cut(lines[len(lines)-1], " ")
 			calls = append(calls, kinds[id])
 			mu.Unlock()
@@ -2354,7 +2362,7 @@ func TestABulkShedsBothWaysBeforeTheRenameCanRun(t *testing.T) {
 					}
 					execN++
 					id := fmt.Sprintf("e%d", execN)
-					cmd := wrapperCommand(body.Cmd)
+					cmd := wrapperCommand(t, body.Cmd)
 					commands = append(commands, cmd)
 					if strings.Contains(cmd, "__map_bulk_discard") {
 						kinds[id] = "discard"
@@ -2426,7 +2434,7 @@ func TestASuccessfulBulkStillEmptiesBookkeepingItCouldNotRemove(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			if strings.Contains(wrapperCommand(body.Cmd), "__map_bulk_rename") {
+			if strings.Contains(wrapperCommand(t, body.Cmd), "__map_bulk_rename") {
 				kinds[id] = "rename"
 			}
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -2489,7 +2497,7 @@ func TestABulkThatLostItsManifestEmptiesThePlatformsOwnList(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			if strings.Contains(wrapperCommand(body.Cmd), "__map_bulk_rename") {
+			if strings.Contains(wrapperCommand(t, body.Cmd), "__map_bulk_rename") {
 				kinds[id] = "rename"
 			}
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -2565,7 +2573,7 @@ func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			if strings.Contains(wrapperCommand(body.Cmd), "__map_bulk_rename") {
+			if strings.Contains(wrapperCommand(t, body.Cmd), "__map_bulk_rename") {
 				kinds[id] = "rename"
 			}
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -2631,7 +2639,7 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := wrapperCommand(body.Cmd)
+			cmd := wrapperCommand(t, body.Cmd)
 			commands = append(commands, cmd)
 			switch {
 			case strings.Contains(cmd, "__map_bulk_rename"):
@@ -2706,7 +2714,7 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := wrapperCommand(body.Cmd)
+			cmd := wrapperCommand(t, body.Cmd)
 			commands = append(commands, cmd)
 			renames[id] = strings.Contains(cmd, "mv -f")
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -2778,11 +2786,11 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode exec create: %v", err)
 			}
-			commands = append(commands, wrapperCommand(body.Cmd))
+			commands = append(commands, wrapperCommand(t, body.Cmd))
 			cmd = body.Cmd
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
-			if _, _, framed := sandboxtest.Unwrap(wrapperCommand(cmd)); framed {
+			if _, _, framed := sandboxtest.Unwrap(wrapperCommand(t, cmd)); framed {
 				w.Write(framedOutput(t, cmd, "", "mkdir: cannot create directory '/workspace/a': Read-only file system\n"))
 			}
 		case r.URL.Path == "/exec/e1/json":

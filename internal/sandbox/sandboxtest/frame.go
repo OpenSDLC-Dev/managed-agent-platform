@@ -68,3 +68,24 @@ func Framed(f sandbox.Frame, res sandbox.ExecResult) sandbox.ExecResult {
 	res.Stdout, res.Stderr = frame(res.Stdout, res.StdoutTruncated), frame(res.Stderr, res.StderrTruncated)
 	return res
 }
+
+// bashToolHeader opens the bash tool's checkpoint shell
+// (internal/sandbox/shell/template.sh), the one exec that runs the model's
+// command: it carries no preamble of the platform's, its own shell turning
+// errexit off where it needs to (Scripted; TestBashToolHeader).
+const bashToolHeader = "# checkpoint-shell template"
+
+// Scripted answers whether command — an exec a fake sandbox was handed — is
+// one the platform may run: a platform script carrying the preamble
+// (sandbox.Script), one a frame opens (sandbox.Frame.Open, as Wrap's and the
+// search tools' scripts are, whose head carries it too), or the bash tool's
+// checkpoint shell. A fake strips the preamble before it answers, so without
+// this check a platform exec that lost it would pass every unit test, and run
+// under an image's errexit (#860).
+func Scripted(command string) bool {
+	if strings.HasPrefix(command, sandbox.ScriptPreamble) || strings.HasPrefix(command, bashToolHeader) {
+		return true
+	}
+	m := wrapped.FindStringSubmatch(command)
+	return m != nil && strings.HasPrefix(command, sandbox.FrameOf(m[1], m[2]).Open())
+}

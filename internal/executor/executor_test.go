@@ -37,7 +37,35 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	os.Exit(pgtest.Main(m))
+	code := pgtest.Main(m)
+	// The backstop for a fake sandbox no harness checks (newHarnessWith): an
+	// unscripted platform exec anywhere in the package fails the run.
+	if cmds := unscriptedExecs.all(); len(cmds) > 0 {
+		fmt.Fprintf(os.Stderr, "FAIL: %d platform execs without the script preamble (sandbox.Script): %q\n", len(cmds), cmds)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+// unscriptedExecs is every exec a fakeSandbox refused for want of the
+// platform's script preamble, across the package (TestMain).
+var unscriptedExecs execLedger
+
+type execLedger struct {
+	mu   sync.Mutex
+	cmds []string
+}
+
+func (l *execLedger) add(cmd string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cmds = append(l.cmds, cmd)
+}
+
+func (l *execLedger) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.cmds...)
 }
 
 // fakeSandbox is an in-memory sandbox. The executor tests drive read/write
@@ -117,6 +145,12 @@ type fakeSandbox struct {
 	// unframedNext answers that many of the next framed scripts bare, and
 	// frames the rest: a listing that lost its frame once.
 	unframedNext int
+	// unscripted records every exec that was neither a platform script with
+	// its preamble, nor a framed one, nor the bash tool's (sandboxtest.Scripted):
+	// Exec refuses it, and newHarnessWith fails the test on it (TestMain the
+	// package, for a fake no harness holds), so a platform exec that lost its
+	// preamble fails here rather than under an image's errexit.
+	unscripted execLedger
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -131,7 +165,13 @@ func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbo
 		return sandbox.ExecResult{}, err
 	}
 	// A platform script opens with the preamble every one carries
-	// (sandbox.Script), which the fake answers past.
+	// (sandbox.Script), which the fake answers past — once it has checked
+	// it is there.
+	if !sandboxtest.Scripted(req.Command) {
+		f.unscripted.add(req.Command)
+		unscriptedExecs.add(req.Command)
+		return sandbox.ExecResult{}, fmt.Errorf("fake sandbox: a platform exec without the script preamble (sandbox.Script): %q", req.Command)
+	}
 	req.Command = strings.TrimPrefix(req.Command, sandbox.ScriptPreamble)
 	script, frame, framed := sandboxtest.Unwrap(req.Command)
 	if !framed {
@@ -586,6 +626,16 @@ func newHarness(t *testing.T, sb *fakeSandbox) *harness {
 // session to running, and wires an executor over the given provider and config.
 func newHarnessWith(t *testing.T, provider sandbox.Provider, cfg Config) *harness {
 	t.Helper()
+	if fp, ok := provider.(*fakeProvider); ok {
+		t.Cleanup(func() {
+			if fp.sb == nil {
+				return
+			}
+			for _, cmd := range fp.sb.unscripted.all() {
+				t.Errorf("a platform exec without the script preamble (sandbox.Script): %q", cmd)
+			}
+		})
+	}
 	pool := pgtest.NewPool(t)
 	// The executor is the cloud hands: it only claims tool_exec work for cloud
 	// environments (self_hosted work is served by a BYOC worker via Poll).

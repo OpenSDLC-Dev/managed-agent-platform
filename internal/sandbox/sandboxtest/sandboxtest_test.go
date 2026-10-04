@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
 // archiveIndex names the import record `kind load` leaves for an archive by
@@ -46,5 +49,33 @@ func TestArchiveIndex(t *testing.T) {
 	}
 	if _, err := archiveIndex(filepath.Join(t.TempDir(), "missing.tar")); err == nil {
 		t.Error("a missing archive read without an error")
+	}
+}
+
+// The bash tool's checkpoint shell opens with the header Scripted exempts it
+// by: renaming the one without the other would read every bash tool call as a
+// platform exec that lost its preamble.
+func TestBashToolHeader(t *testing.T) {
+	template, err := os.ReadFile(filepath.Join("..", "shell", "template.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !Scripted(string(template)) {
+		t.Errorf("the bash tool's template does not open with %q", bashToolHeader)
+	}
+	for _, c := range []struct {
+		command string
+		want    bool
+	}{
+		{sandbox.Script("rm -f -- x"), true},
+		{sandbox.NewFrame("probe").Wrap("echo ok"), true},
+		{sandbox.NewFrame("search").Open() + "close_frame 0\n", true},
+		{strings.Replace(sandbox.NewFrame("probe").Wrap("echo ok"), sandbox.ScriptPreamble, "", 1), false},
+		{"rm -f -- x", false},
+		{"# checkpoint-shell", false},
+	} {
+		if got := Scripted(c.command); got != c.want {
+			t.Errorf("Scripted(%q) = %v, want %v", c.command, got, c.want)
+		}
 	}
 }
