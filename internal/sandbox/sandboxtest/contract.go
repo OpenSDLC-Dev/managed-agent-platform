@@ -2213,9 +2213,17 @@ func assertNoWriteResidue(t *testing.T, sb sandbox.Sandbox, dirs ...string) {
 // starts with prefix. It reads /proc directly: a minimal image has no ps. The
 // answer is read past BannerHook's words, which a plain image never prints,
 // so it counts the same on a hooked image (internal/sandbox/hookedtest).
+//
+// A count that hangs fails the test after 30s. The bound is the call's
+// context, not the exec's Timeout: a Timeout arms the backend's deadline
+// watchdog, whose `sleep` outlives the count by up to a poll — exactly the
+// machinery ExecLeavesNoDeadlineMachineryBehind counts, which then found the
+// previous counts' watchdogs (6 of them) and failed.
 func CountProcesses(t *testing.T, sb sandbox.Sandbox, prefix string) int {
 	t.Helper()
-	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: `
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: `
 		n=0
 		for p in /proc/[0-9]*; do
 		  [ -r "$p/cmdline" ] || continue
@@ -2223,7 +2231,7 @@ func CountProcesses(t *testing.T, sb sandbox.Sandbox, prefix string) int {
 		    "` + prefix + `"*) n=$((n+1)) ;;
 		  esac
 		done
-		echo "$n"`, Timeout: 30 * time.Second})
+		echo "$n"`})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
