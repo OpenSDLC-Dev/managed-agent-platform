@@ -133,15 +133,17 @@ func TestFrameCutBytesWithinLooksNearTheEnds(t *testing.T) {
 // CutInBegin answers whether a stream ends partway into the begin line — the
 // stream lost while the line was on its way, after whatever banner came first —
 // and only that: a stream whose begin line arrived whole, or that ends on
-// anything else, does not.
+// anything else — a newline alone, the end of any line, among them — does not.
 func TestFrameCutInBegin(t *testing.T) {
 	f := sandbox.NewFrame("test")
 	begin, _ := f.Lines()
 	for s, want := range map[string]bool{
 		"":                          false,
 		"banner":                    false,
-		"banner\n":                  true,
-		"banner" + begin[:1]:        true,
+		"banner\n":                  false,
+		"\n":                        false,
+		"banner" + begin[:1]:        false,
+		"banner" + begin[:2]:        true,
 		"banner" + begin[:10]:       true,
 		begin[:len(begin)-1]:        true,
 		"banner" + begin:            false,

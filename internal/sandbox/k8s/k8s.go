@@ -1327,12 +1327,12 @@ func (pd *pod) classifyTimeout(timeout time.Duration, code int, watchdogFired bo
 // long the command ran (0 when the line carries no record of it).
 func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Duration, error) {
 	f := sandbox.NewFrame("exit")
-	out, cut, _, err := pd.client.execOutput(ctx, pd.name, containerName,
+	out, cut, code, err := pd.client.execOutput(ctx, pd.name, containerName,
 		[]string{"/bin/bash", "-c", f.Wrap(exitScript), "map-exit", state})
 	if err != nil {
 		return 0, false, 0, err
 	}
-	return readExitRecord(f, out, cut)
+	return readExitRecord(f, out, cut, code)
 }
 
 // readExitRecord reads exitScript's answer from inside its frame (f), so what
@@ -1356,25 +1356,34 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Dura
 // it, or when it ends partway through the begin line, which was on its way
 // when the stream was lost (Frame.CutInBegin). Anything else with no begin
 // line is output that is not the script's, which is no record to parse: an
-// error, as an unparseable line is.
-//
-// A banner that ends its line and then nothing reads as no record too. The one
-// startup that would print that for every exec — one that exits, or execs, so
-// that no script ever begins, every command reading as the kill's 137 — never
-// gets an exec this far: the same file runs in the pod's keepalive, the
-// `/bin/bash -c` its container runs, and ends that too, so the container is
-// gone and the exec is refused before any record is read (measured on both
-// backends: Docker reports the container not running, Kubernetes the
-// container not found).
-func readExitRecord(f sandbox.Frame, out string, truncated bool) (int, bool, time.Duration, error) {
+// error, as an unparseable line is. A banner that ends its line and then
+// nothing is such output — a newline alone is no part of a begin line — and
+// so is any stream of a reader that exited non-zero (code) with no frame: a
+// startup that failed under errexit before the script began, which reading as
+// no record would answer with the kill's 137 for a command that may have
+// exited 7, its state files left behind. Each is an error naming what reached
+// the output.
+func readExitRecord(f sandbox.Frame, out string, truncated bool, code int) (int, bool, time.Duration, error) {
 	line, framed, short := f.Cut(out, true)
 	switch {
 	case truncated && (!framed || short):
 		return 0, false, 0, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	case !framed && code != 0:
+		return 0, false, 0, fmt.Errorf("k8s: the exit record's reader exited %d before its frame began: %q", code, headOf(out))
 	case !framed && strings.TrimSpace(out) != "" && !f.CutInBegin(out):
-		return 0, false, 0, errors.New("k8s: the exit record did not reach the output: no begin line")
+		return 0, false, 0, fmt.Errorf("k8s: the exit record did not reach the output: no begin line: %q", headOf(out))
 	}
 	return parseExit(line)
+}
+
+// headOf is the start of what a reader printed, for an error that names it:
+// a banner's first words, not a flood's megabyte.
+func headOf(out string) string {
+	out = strings.TrimSpace(out)
+	if len(out) > 200 {
+		out = out[:200] + "…"
+	}
+	return out
 }
 
 // parseExit reads exitScript's output: killedMark if the watchdog fired, then

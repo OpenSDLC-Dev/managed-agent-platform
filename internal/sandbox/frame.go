@@ -184,16 +184,16 @@ func (f Frame) CutBytesWithin(b []byte, truncated bool, room int) (text []byte, 
 // CutInBegin reports whether s ends partway through the frame's begin line —
 // a stream that lost its tail while the begin line was on its way, which
 // carries none of the script's output and no sign that anything else ended it.
-// A stream ending in a newline is one, the begin line starting with its own;
-// one ending in the whole begin line is not. That a banner ending its line,
-// and then nothing, reads so too is safe where it is used (the k8s exit
-// record, readExitRecord says why).
+// The tail must hold some of the line past the newline it starts with: a
+// stream ending in a newline alone ends as every line does, a banner's that
+// was followed by nothing — the shell dying before the script began, which is
+// no loss in transit. One ending in the whole begin line is not either.
 func (f Frame) CutInBegin(s string) bool {
 	begin, _ := f.Lines()
 	if strings.HasSuffix(s, begin) {
 		return false
 	}
-	for k := min(len(begin)-1, len(s)); k > 0; k-- {
+	for k := min(len(begin)-1, len(s)); k > 1; k-- {
 		if strings.HasSuffix(s, begin[:k]) {
 			return true
 		}
