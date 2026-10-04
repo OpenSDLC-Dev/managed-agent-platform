@@ -16,8 +16,8 @@ import (
 // same weight: docker's liveness primitive is a cheap out-of-band daemon call,
 // while this one is a whole in-pod exec whose answer lands a round trip late. So
 // the watchdog's own mark is what classifies a punctual kill, and the wrapper's
-// record of how long the command ran stands beside the overrun answer; these
-// two instants are the reach around them. See classifyTimeout.
+// record of how long the command ran stands beside both answers; these two
+// instants are the reach around them. See classifyTimeout.
 type verdict struct {
 	// aliveAtDeadline: still running as the deadline arrived, so a SIGKILL that
 	// follows is the watchdog's and not the command's own.
