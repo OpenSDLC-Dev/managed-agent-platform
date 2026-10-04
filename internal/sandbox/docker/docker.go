@@ -1531,8 +1531,8 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		}
 		return err
 	}
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(sandbox.BulkRenameShell +
-		fmt.Sprintf("__map_bulk_rename %s %s", shellQuote(b.Manifest), shellQuote(b.DirList)))})
+	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.BulkRenameShell +
+		fmt.Sprintf("__map_bulk_rename %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
@@ -1617,8 +1617,8 @@ func (c *container) putExtraction(ctx context.Context, x sandbox.Extraction) err
 // or when the question could not be asked, and the caller keeps the daemon's own
 // error then, as WriteFile does.
 func (c *container) refusedBulk(ctx context.Context, b *sandbox.BulkWrite) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(sandbox.BulkRefusedShell +
-		fmt.Sprintf("__map_bulk_refused %s", shellQuote(b.Manifest)))})
+	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.BulkRefusedShell +
+		fmt.Sprintf("__map_bulk_refused %s", shellQuote(b.Manifest))})
 	if err != nil {
 		return nil
 	}
@@ -1629,8 +1629,8 @@ func (c *container) refusedBulk(ctx context.Context, b *sandbox.BulkWrite) error
 // where a path blocked by a non-directory is named, and a directory that cannot
 // be made is a PathNotWritableError, as the single write's mkdirAll makes it.
 func (c *container) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(sandbox.BulkPrepareShell +
-		fmt.Sprintf("__map_bulk_prepare %s", shellQuote(b.DirList)))})
+	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.BulkPrepareShell +
+		fmt.Sprintf("__map_bulk_prepare %s", shellQuote(b.DirList))})
 	if err != nil {
 		return c.wrap(err)
 	}
@@ -1660,8 +1660,8 @@ func (c *container) shedBulk(ctx context.Context, b *sandbox.BulkWrite) {
 func (c *container) discardBulk(ctx context.Context, b *sandbox.BulkWrite) string {
 	ctx, cancel := cleanup(ctx)
 	defer cancel()
-	res, _ := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(sandbox.BulkDiscardShell +
-		fmt.Sprintf("__map_bulk_discard %s %s", shellQuote(b.Manifest), shellQuote(b.DirList)))})
+	res, _ := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.BulkDiscardShell +
+		fmt.Sprintf("__map_bulk_discard %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
 	return res.Stdout
 }
 
@@ -1778,7 +1778,7 @@ func emptyingDeadline() time.Duration { return 6 * cleanupBudget }
 // the shared __map_preserve_mode carries them onto the temporary file first — the
 // k8s backend's write script calls the same function at the same point (#204).
 func (c *container) rename(ctx context.Context, tmp, path string) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(sandbox.PreserveModeShell + sandbox.UnreplaceableShell + fmt.Sprintf(
+	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.PreserveModeShell + sandbox.UnreplaceableShell + fmt.Sprintf(
 		"if [ -d %[2]s ]; then rm -f %[1]s; exit %[3]d; fi\n"+
 			"if __map_unreplaceable %[2]s; then rm -f %[1]s; exit %[5]d; fi\n"+
 			"__map_preserve_mode %[2]s %[1]s\n"+
@@ -1789,7 +1789,7 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 			// a reported success that wrote nothing where the caller asked.
 			"if [ -d %[2]s ]; then rm -f %[2]s/%[4]s; exit %[3]d; fi",
 		shellQuote(tmp), shellQuote(path), sandbox.ExitPathIsDirectory, gopath.Base(tmp),
-		sandbox.ExitPathNotReplaceable))})
+		sandbox.ExitPathNotReplaceable)})
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
@@ -1852,8 +1852,8 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 // probe that could not run itself returns: the caller has a real failure to report
 // already, and a guess about it would be worse than the daemon's own message.
 func (c *container) pathFault(ctx context.Context, path string) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(sandbox.PathFaultShell +
-		fmt.Sprintf("__map_path_fault %s\nexit 0", shellQuote(path)))})
+	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.PathFaultShell +
+		fmt.Sprintf("__map_path_fault %s\nexit 0", shellQuote(path))})
 	if err == nil && res.ExitCode == sandbox.ExitPathNotDirectory {
 		return sandbox.ErrNotDirectory
 	}
@@ -1869,9 +1869,9 @@ func (c *container) pathFault(ctx context.Context, path string) error {
 // on the PUT landing (#303). Nil is also what a probe that could not run itself
 // returns, for pathFault's reason.
 func (c *container) unreplaceable(ctx context.Context, path string) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(sandbox.UnreplaceableShell + fmt.Sprintf(
+	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.UnreplaceableShell + fmt.Sprintf(
 		"if [ -d %[1]s ]; then exit %[2]d; fi\nif __map_unreplaceable %[1]s; then exit %[3]d; fi\nexit 0",
-		shellQuote(path), sandbox.ExitPathIsDirectory, sandbox.ExitPathNotReplaceable))})
+		shellQuote(path), sandbox.ExitPathIsDirectory, sandbox.ExitPathNotReplaceable)})
 	if err != nil {
 		return nil
 	}
@@ -1950,7 +1950,7 @@ func cleanup(ctx context.Context) (context.Context, context.CancelFunc) {
 func (c *container) discard(ctx context.Context, tmp string) {
 	ctx, cancel := cleanup(ctx)
 	defer cancel()
-	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script("rm -f " + shellQuote(tmp))})
+	_, _ = sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: "rm -f " + shellQuote(tmp)})
 }
 
 // reclaim empties a temporary the sandbox user's own `rm -f` could not remove:

@@ -545,8 +545,8 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 	_, _ = rand.Read(nonce[:])
 	name := fmt.Sprintf("%s%d-%s", installPrefix, now.Unix(), hex.EncodeToString(nonce[:]))
 
-	res, err := r.Sandbox.Exec(ctx, sandbox.ExecRequest{
-		Command: sandbox.Script(fmt.Sprintf(prepareScript, singleQuote(ripgrepDir), singleQuote(name), now.Add(-staleInstall).Unix())),
+	res, err := sandbox.ExecScript(ctx, r.Sandbox, sandbox.ExecRequest{
+		Command: fmt.Sprintf(prepareScript, singleQuote(ripgrepDir), singleQuote(name), now.Add(-staleInstall).Unix()),
 		Timeout: installTimeout,
 	})
 	switch {
@@ -570,9 +570,9 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 		}
 		return nil, err
 	}
-	res, err = r.Sandbox.Exec(ctx, sandbox.ExecRequest{
-		Command: sandbox.Script(fmt.Sprintf(installScript, singleQuote(ripgrepDir), singleQuote(name), singleQuote(path.Base(ripgrepPath())),
-			singleQuote("ripgrep "+ripgrep.Pinned.Version+" "))),
+	res, err = sandbox.ExecScript(ctx, r.Sandbox, sandbox.ExecRequest{
+		Command: fmt.Sprintf(installScript, singleQuote(ripgrepDir), singleQuote(name), singleQuote(path.Base(ripgrepPath())),
+			singleQuote("ripgrep "+ripgrep.Pinned.Version+" ")),
 		Timeout: installTimeout,
 	})
 	switch {

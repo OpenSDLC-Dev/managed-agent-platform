@@ -413,8 +413,8 @@ func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.I
 		return fmt.Errorf("ship checkpoint: %w", err)
 	}
 	progress()
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{
-		Command: sandbox.Script("tar -xf " + restoreTarPath + " -C / && rm -f " + restoreTarPath),
+	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{
+		Command: "tar -xf " + restoreTarPath + " -C / && rm -f " + restoreTarPath,
 	})
 	if err != nil {
 		return fmt.Errorf("extract checkpoint: %w", err)

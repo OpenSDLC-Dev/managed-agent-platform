@@ -192,7 +192,7 @@ func (e *Executor) mountsPresent(ctx context.Context, sb sandbox.Sandbox, mounts
 		cmd.WriteString(" && ")
 	}
 	cmd.WriteString("true")
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(cmd.String())})
+	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: cmd.String()})
 	return err == nil && res.ExitCode == 0
 }
 
