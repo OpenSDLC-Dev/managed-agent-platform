@@ -206,13 +206,14 @@ and so does a read once the file and the banner together pass the read's
 cap and room: each tool answers such a call with an error naming the image
 (and saying, of a command, that it ran), never a fault a retry would meet
 again, and the package-install pass, its probe's answer pushed out,
-installs nothing. A file mount or repository the sandbox already holds is
-kept when its presence probe's answer is pushed out, not re-streamed or
-re-cloned over the agent's edits. Each memory store's sync is skipped,
-logged only, so what the agent writes under `/mnt/memory` in that run does
-not reach the store. On either backend the outputs harvest, its listing
-pushed out, settles without a new snapshot, as one that finds no sandbox
-does. Not every script is framed. A bulk write's reports — the member it
+installs nothing. A file mount the sandbox already holds is kept when its
+presence probe's answer is pushed out, not re-streamed over the agent's
+edits; a repository's presence, and whether its clone landed, are read from
+a stat whose answer is the read exec's own exit status, so it is cloned once
+and then kept. A memory store works in neither direction: its listing pushed
+out, it neither lands in the sandbox nor syncs back, logged only. On either
+backend the outputs harvest, its listing pushed out, settles without a new
+snapshot, as one that finds no sandbox does. Not every script is framed. A bulk write's reports — the member it
 failed on, a directory it could not make, what its shed left behind — are
 read from its own marker lines, each printed on a line of its own and the
 last one read, which a banner around them does not displace; a startup
