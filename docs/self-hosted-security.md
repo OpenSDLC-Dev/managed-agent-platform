@@ -206,14 +206,20 @@ and so does a read once the file and the banner together pass the read's
 cap and room: each tool answers such a call with an error naming the image
 (and saying, of a command, that it ran), never a fault a retry would meet
 again, and the package-install pass, its probe's answer pushed out,
-installs nothing. On either backend the outputs harvest, its listing pushed
-out, settles without a new snapshot, as one that finds no sandbox does.
-Not every script is framed. A bulk write's reports — the member it failed
-on, a directory it could not make, what its shed left behind — are read
-from its own marker lines, each printed on a line of its own and the last
-one read, which a banner around them does not displace; only a startup
+installs nothing. A file mount or repository the sandbox already holds is
+kept when its presence probe's answer is pushed out, not re-streamed or
+re-cloned over the agent's edits. Each memory store's sync is skipped,
+logged only, so what the agent writes under `/mnt/memory` in that run does
+not reach the store. On either backend the outputs harvest, its listing
+pushed out, settles without a new snapshot, as one that finds no sandbox
+does. Not every script is framed. A bulk write's reports — the member it
+failed on, a directory it could not make, what its shed left behind — are
+read from its own marker lines, each printed on a line of its own and the
+last one read, which a banner around them does not displace; a startup
 printing those exact lines, the platform's own markers verbatim, could,
-misreporting a write in its own sandbox. What a few scripts print is relayed,
+misreporting a write in its own sandbox. One printing past the cap pushes
+them out too: on Docker a shed's report of what it left is then empty, and
+a failed write's temporaries are not emptied. What a few scripts print is relayed,
 not parsed, banner and all: the package install's output, as the session
 error's message; the `grep` tool's ripgrep install's, in its tool error when
 the install fails; the stderr of a checkpoint's restore and of a repository's
