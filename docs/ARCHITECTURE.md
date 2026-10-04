@@ -441,6 +441,7 @@ Layout order is by layer, as the repo is.
 | `ripgrep/` | The static ripgrep the grep tool runs in the sandbox, written in the first time a sandbox greps: upstream's musl release archives for linux amd64 and arm64, pinned by URL and sha256 and embedded compressed. They are fetched (`make ripgrep`), never committed, and only a binary that can reach the toolset's `Runner` links them — the executor and the worker, darwin builds included. |
 | `sandbox/` | The "hands" boundary: a disposable per-session container, `docker/` and `k8s/` behind one interface with one contract suite (`sandboxtest/`), plus `shell/`, the persistent per-session bash built on the stateless primitives. |
 | `webtool/` | The `web_fetch` / `web_search` seam (`tavily/`, `jina/`). These run in the executor's process on both deployment modes — never in the sandbox, never on the worker, never through the egress gate. |
+| `givenurl/` | `web_fetch`'s provenance rule (#823): which URLs a session was given, read every way running text allows, and the per-session index of them that the event log's append writes in its own transaction, so a fetch is one indexed lookup however long the session (#836). A payload too costly to index, and a session the index lags — one older than it, or one an earlier build appended to — are read at the lookup instead. |
 | `mcp/` | The MCP client: a thin wrapper over the official go-sdk, whose types never reach the domain layer. Connections are per-work-item, so a crashed executor loses nothing a fresh one cannot rebuild. |
 
 ### Egress, credentials and identity
