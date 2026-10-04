@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -95,6 +96,16 @@ func (s *Snapshot) Alias(model string) (store.Alias, bool) {
 	}
 	a, ok := s.aliases["*"]
 	return a, ok
+}
+
+// Aliases returns every alias, ordered by name.
+func (s *Snapshot) Aliases() []store.Alias {
+	out := make([]store.Alias, 0, len(s.aliases))
+	for _, a := range s.aliases {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // KeyPolicy returns the grant of the platform API key with id.

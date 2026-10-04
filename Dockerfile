@@ -1,5 +1,5 @@
 # Multi-stage build for the platform's server binaries. One image carries all of
-# cmd/{controlplane,brain,executor,worker}; each compose service (and a Helm
+# cmd/{controlplane,brain,executor,worker,modelgateway}; each compose service (and a Helm
 # deployment) selects the binary it runs via the container command. Kept minimal
 # and static (CGO off) so the runtime image is small and needs no toolchain. The
 # binaries live at the filesystem root (/controlplane …) — that is the path the
@@ -88,26 +88,26 @@ COPY --from=ripgrep-sources /src/tools/ripgrepfetch/ tools/ripgrepfetch/
 RUN go run ./tools/ripgrepfetch
 COPY . .
 RUN go run ./tools/ripgrepfetch
-# Build the four server binaries into /out (named controlplane, brain,
-# executor, worker).
+# Build the five server binaries into /out (named controlplane, brain,
+# executor, worker, modelgateway).
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
-    -o /out/ ./cmd/controlplane ./cmd/brain ./cmd/executor ./cmd/worker
+    -o /out/ ./cmd/controlplane ./cmd/brain ./cmd/executor ./cmd/worker ./cmd/modelgateway
 
-# The default (last) stage is the server image carrying the four server binaries.
+# The default (last) stage is the server image carrying the five server binaries.
 FROM debian:stable-slim AS server
 # ca-certificates lets the binaries reach TLS model endpoints and OTLP collectors.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-# The four server binaries — the gate binary has its own image (above) and
+# The five server binaries — the gate binary has its own image (above) and
 # does not belong in the server image. NOTICE says what third-party
 # software the executor and worker embed (the ripgrep their grep tool runs),
 # THIRD_PARTY_LICENSES carries its license texts, and LICENSE is the
 # project's own, which NOTICE refers to.
-COPY --from=build /out/controlplane /out/brain /out/executor /out/worker /
+COPY --from=build /out/controlplane /out/brain /out/executor /out/worker /out/modelgateway /
 COPY LICENSE NOTICE THIRD_PARTY_LICENSES /
-# No default command: each service sets one of /controlplane|/brain|/executor|/worker.
+# No default command: each service sets one of /controlplane|/brain|/executor|/worker|/modelgateway.

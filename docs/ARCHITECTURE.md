@@ -52,7 +52,7 @@ server unchanged. An agent is three independently-swappable pieces:
 
 ## Process topology
 
-Four binaries under `cmd/`, each independently deployable and scalable; all state in
+Five binaries under `cmd/`, each independently deployable and scalable; all state in
 Postgres, all coordination through it:
 
 | Binary | Role |
@@ -61,6 +61,7 @@ Postgres, all coordination through it:
 | `brain` | The harness pool. Claims `model_turn` work, replays the session's event log to rebuild context, calls the model provider, writes the resulting events, enqueues tool work, suspends. |
 | `executor` | The built-in sandbox worker for platform-managed (`cloud`) environments. Claims `tool_exec` work, runs the tool inside the session's sandbox container, posts `agent.tool_result`. Also claims `web_exec` work — web_fetch/web_search, run in its own process with no sandbox, for **both** environment kinds — `outputs_harvest` work, the deliverables snapshot of `/mnt/session/outputs/` a cloud session takes when an outcome-grading cycle begins and when a brain settlement folds the session idle, and `mcp_exec` work — both halves of the MCP path, likewise in its own process with no sandbox and for **both** environment kinds: the discovery that fills `mcp_catalogs`, enqueued when a turn suspends for a declared server with no row, and the tool call itself, enqueued when the brain routes an `mcp__{server}__{tool}` the model asked for. |
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
+| `modelgateway` | The model gateway (plan 59): Anthropic Messages for the platform's API keys, routed to the vendor deployments its catalogue configures, beside the `/admin/v1/` API that configures it. No agent traffic reaches it yet — the brain moves onto it in plan 59's slice 5 — and compose and Helm do not run it yet. |
 
 Processes never talk to each other directly. The brain and the executors communicate
 through the control plane's event log and work queue, and where a poll would be too slow
@@ -470,11 +471,11 @@ Layout order is by layer, as the repo is.
 
 ### Model gateway (plan 59)
 
-No binary serves these yet: `cmd/modelgateway` arrives with plan 59's second slice.
+Served by `cmd/modelgateway`; nothing deploys it or sends it agent traffic yet.
 
 | Package | What it owns |
 |---|---|
-| `modelgateway/` | `profile/`, the compiled-in vendor profiles; `store/`, the queries over the `modelgateway` schema, holding the invariants that span rows and announcing every write on `modelgateway_config`; `catalog/`, the immutable configuration snapshot a replica reloads on that notification, on a tick, and on each resubscription; `admin/`, the `/admin/v1/` API, reached by the bootstrap key or an operator token and by no other platform key. |
+| `modelgateway/` | The inference surface: a platform API key checked by `apikey/` and held to its key policy, Anthropic Messages passed through to the routed upstream with only `model` changed, the answer relayed event by event, and every retry and fallback made before the caller's first byte. `catalog/` orders the attempts — priority groups, then weighted deployments and credentials, hashed on a session id when one is sent — over the immutable configuration snapshot a replica reloads on each notification, on a tick, and on each resubscription; `upstream/` is the redirect-refusing client and the event reader; `profile/`, the compiled-in vendor profiles; `store/`, the queries over the `modelgateway` schema, holding the invariants that span rows and announcing every write on `modelgateway_config`; `admin/`, the `/admin/v1/` API, reached by the bootstrap key or an operator token and by no other platform key. |
 
 ### Storage and shared infrastructure
 
@@ -516,8 +517,8 @@ fake OpenID provider) and need no daemon. And the ones gating a paid tier take
 consent from an environment variable, never from the presence of a configured
 `.env`; once given, missing configuration fails rather than skips.
 
-The four server binaries under `cmd/` — `controlplane`, `brain`, `executor`,
-`worker` — are thin glue: they map the environment to a config and call into the
+The five server binaries under `cmd/` — `controlplane`, `brain`, `executor`,
+`worker`, `modelgateway` — are thin glue: they map the environment to a config and call into the
 packages above. `cmd/gate` is not a server but the per-session egress sidecar,
 and holds the two OS-touching adapters `gaterun/` declares.
 
