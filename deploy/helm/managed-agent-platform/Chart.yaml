@@ -8,8 +8,8 @@ description: >-
   Wire-compatible with Anthropic Claude Managed Agents.
 type: application
 # version is the chart version; appVersion is the default image tag (see values.yaml).
-version: 0.5.0
-appVersion: "0.5.0"
+version: 0.5.1
+appVersion: "0.5.1"
 kubeVersion: ">=1.26.0-0"
 sources:
   - https://github.com/OpenSDLC-Dev/managed-agent-platform
