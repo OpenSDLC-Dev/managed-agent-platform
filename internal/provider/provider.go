@@ -9,6 +9,8 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -250,6 +252,11 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 type Descriptor struct {
 	Protocol string
 	Model    string
+	// Route tells routes apart by where a request goes and how the adapter
+	// renders it — the protocol, the base URL and flatten_search_results —
+	// digested so it names none of them. A model's thinking is bound to it
+	// (#67): a block produced over one route does not go back over another.
+	Route string
 }
 
 // Describe resolves a model string to its backend's Descriptor, reporting
@@ -260,7 +267,15 @@ func (r *Registry) Describe(model string) (Descriptor, bool) {
 	if !ok {
 		return Descriptor{}, false
 	}
-	return Descriptor{Protocol: cfg.Protocol, Model: cfg.Model}, true
+	return Descriptor{Protocol: cfg.Protocol, Model: cfg.Model, Route: routeDigest(cfg)}, true
+}
+
+// routeDigest is Descriptor.Route. The base URL is digested rather than said:
+// a Descriptor is what may be said out loud, and a URL may carry what may not.
+func routeDigest(cfg Config) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%q %q %t", cfg.Protocol, cfg.BaseURL, cfg.FlattenSearchResults)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // route resolves a model string to its config, applying the pass-through of the

@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -232,5 +233,40 @@ func TestRegistryValidation(t *testing.T) {
 		if _, err := provider.NewRegistry(tc.routes, factories); err == nil {
 			t.Errorf("%s: NewRegistry accepted an invalid route set", tc.name)
 		}
+	}
+}
+
+// A Descriptor's Route tells routes apart by where a request goes and how the
+// adapter renders it, without naming either: a model's thinking is bound to it
+// (#67).
+func TestDescribeRouteIdentifiesEndpointAndRendering(t *testing.T) {
+	reg, err := provider.NewRegistry([]provider.Route{
+		{Model: "a", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m"}},
+		{Model: "a-again", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m"}},
+		{Model: "b", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-b", Model: "m"}},
+		{Model: "flat", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m",
+			FlattenSearchResults: true}},
+	}, factories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := func(model string) string {
+		d, ok := reg.Describe(model)
+		if !ok || d.Route == "" {
+			t.Fatalf("Describe(%q) = %+v, %v; want a route", model, d, ok)
+		}
+		return d.Route
+	}
+	if route("a") != route("a-again") {
+		t.Error("one endpoint and rendering gave two routes")
+	}
+	if route("a") == route("b") {
+		t.Error("two endpoints gave one route")
+	}
+	if route("a") == route("flat") {
+		t.Error("flattening search results did not change the route")
+	}
+	if strings.Contains(route("a"), "gw-a") {
+		t.Errorf("Route %q names the endpoint", route("a"))
 	}
 }

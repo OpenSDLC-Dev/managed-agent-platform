@@ -15,8 +15,9 @@ nothing (`internal/brain/replay.go`). That was safe while no model thought unask
 (#67). It no longer is: every model the platform now targets thinks by default, so
 each tool-use continuation the brain sends drops the reasoning that led to the call.
 After this plan the brain keeps each committed turn's signed thinking internally and
-sends it back on later requests, under a guard that never turns a changed prompt into
-a rejected one. Plan 59 (the model gateway) waits on this for its brain cutover.
+sends it back on later requests, under a guard that, by Anthropic's rule, never turns
+a changed prompt into a rejected one (DeepSeek's rule is another; decision 5). Plan 59
+(the model gateway) waits on this for its brain cutover.
 
 ## Ground truth (verified 2026-10-04)
 
@@ -80,7 +81,9 @@ a rejected one. Plan 59 (the model gateway) waits on this for its brain cutover.
    stored is the run of thinking blocks a response opens with: each `thinking` block
    with a non-empty signature (an unsigned one is refused by an endpoint that
    checks) and each `redacted_thinking` block, up to the first text, tool call or
-   unsigned block. A block after that point would replay ahead of the text before it
+   unsigned block — or the first gap in the block indices, which is a block the
+   stream carried no chunk for and so one the brain cannot place. A block after that
+   point would replay ahead of the text before it
    — the log appends a turn's thinking as it streams and its text at settlement —
    and so under a prefix it was not produced under; dropping it instead is dropping
    from the end of the history, which stays valid, and every later block is produced
@@ -93,9 +96,14 @@ a rejected one. Plan 59 (the model gateway) waits on this for its brain cutover.
    had them (decision 3).
 5. **The guard: same model, same prefix — the API's own rule, checked first.** Each
    stored block records the upstream model id its request was sent to and a SHA-256
-   over everything the model read before the block: the request's `system`, its
+   over everything the model read before the block: the route the request went over
+   (`provider.Descriptor.Route`, a digest of the protocol, the base URL and
+   `flatten_search_results` — the endpoint decides whose signatures it reads, and the
+   adapter renders search results on the way out), the request's `system`, its
    `tools`, every content block of its messages with its role, and the blocks of its
-   own response ahead of it. Replay sends a block only when the model and the digest
+   own response ahead of it. A response to a request that shows the model an image
+   or document by URL keeps no thinking: the bytes behind a URL can change while the
+   request stays the same, and the digest cannot see them. Replay sends a block only when the model and the digest
    it computes at that point of the request it is building both match; an admitted
    block joins what later blocks are checked against, a refused one does not. A
    model switch would otherwise send one vendor's signature to another (a DeepSeek
@@ -137,12 +145,13 @@ a rejected one. Plan 59 (the model gateway) waits on this for its brain cutover.
   text for the block at `Index`, concatenated across deltas) and
   `KindRedactedThinking` (the opaque `Data` of a complete block at `Index`), with
   `Chunk.Signature` and `Chunk.Data`. The anthropic adapter maps `signature_delta`,
-  `redacted_thinking` starts, and a `thinking` start that already carries text or a
-  signature (an endpoint may send the block whole, as it may a tool input).
+  `redacted_thinking` starts, and a `thinking` or `text` start that already carries
+  its content (an endpoint may send a block whole, as it may a tool input).
+  `Registry.Describe` gains `Descriptor.Route`.
 - **Stream** (`internal/brain/stream.go`): a thinking block accumulates its text and
   signature verbatim until it closes; a redacted block opens and closes its event at
   once. `turnResult.thinking` holds `{eventID, prefix digest, block}` for each
-  storable block, the digest chained from the request the turn sent.
+  storable block, the digest chained from the route and the request the turn sent.
 - **Store** (`internal/store/migrations/0048_thinking_blocks.sql`, `internal/events`):
   `thinking_blocks(event_id PRIMARY KEY → events ON DELETE CASCADE, session_id, model,
   prefix_digest, block json, created_at)`. `json`, not `jsonb`: it keeps the bytes the
@@ -152,7 +161,7 @@ a rejected one. Plan 59 (the model gateway) waits on this for its brain cutover.
 - **Settlement** (`internal/brain`): `commitTurn` sets `opts.Thinking` when the turn
   committed text or a tool call; the tool, end-turn and delegated paths all append
   with it.
-- **Replay**: `buildRequest` takes the stored blocks and the request's model,
+- **Replay**: `buildRequest` takes the stored blocks and the request's model and route,
   renders each `agent.thinking` with a stored block as that block, and, once the
   final `system` is known (its `system.message` tail comes last), admits or removes
   each in one pass over the request in order.
@@ -160,8 +169,9 @@ a rejected one. Plan 59 (the model gateway) waits on this for its brain cutover.
 ## Verification
 
 - Adapter contract: a recorded stream with an empty `thinking_delta` then a
-  `signature_delta`, a summarized block, a `redacted_thinking` block and a whole
-  thinking start, each mapped to chunks.
+  `signature_delta`, a summarized block, a `redacted_thinking` block, and a whole
+  thinking start and text start, each mapped to chunks; a route's digest differs by
+  base URL and by `flatten_search_results` and names neither.
 - Stream and settlement: stored only on commit, only signed or redacted, only beside
   text or a tool call, on each of the three settlement paths (tool, end turn,
   delegated); a failed turn stores nothing, and a lost lease is a settlement whose
@@ -169,7 +179,9 @@ a rejected one. Plan 59 (the model gateway) waits on this for its brain cutover.
 - Replay: in-place order; a model mismatch, a tool set change and a reordered earlier
   message each drop the block, and a `system.message` drops exactly the blocks
   produced before it; the digest a turn stores equals the one the next build computes
-  for the same block; a non-leading block is never stored.
+  for the same block; a non-leading block is never stored, nor one after a gap in
+  the block indices or after URL media; a session whose route moves under the same
+  model id drops its blocks.
 - Store: `pgtest` — rows roll back with a failed settlement and go with their
   session.
 - Live tier (`RUN_LIVE_MODEL_TESTS`, `MODEL_*` pointed in turn at `deepseek-flash`,

@@ -94,8 +94,9 @@ they point at is a committed row the listener re-reads for itself.
    stores the response's leading signed `thinking` and `redacted_thinking` blocks in
    `thinking_blocks`, keyed by their content-free `agent.thinking` events, and replay
    sends each back only to the model id that produced it and only under the request
-   prefix it was produced under, so any brain replays them and a changed prompt drops
-   them rather than failing the request (plan 60).
+   prefix it was produced under, so any brain replays them and, by Anthropic's rule, a
+   changed prompt drops them rather than failing the request — DeepSeek refuses a tool
+   loop that lost its thinking (#883; plan 60).
 3. Tool calls commit as events with stable IDs. Custom calls and self-hosted
    sandbox calls wait on external results; ask-policy calls wait for authorization.
    A thread advertises these as idle/requires_action. The shared events-layer

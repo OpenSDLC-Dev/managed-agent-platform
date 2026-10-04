@@ -56,13 +56,13 @@ type redactedBlock struct {
 
 // streamTurn drives one provider stream, broadcasting message previews as
 // deltas arrive and appending each agent.thinking as its block closes. model is
-// the upstream model id req goes to, which every kept thinking block records.
-// The
-// lease keeper runs alongside; this function only distinguishes the two
+// the upstream model id req goes to, which every kept thinking block records,
+// and route the route it goes over (provider.Descriptor.Route). The lease
+// keeper runs alongside; this function only distinguishes the two
 // failure worlds — provider errors surface bare (they become the turn's
 // session.error), brain-side database failures wrap as infra (the turn is
 // abandoned to lease expiry, not reported as a model failure).
-func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provider.Provider, req provider.Request, model string) (*turnResult, error) {
+func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provider.Provider, req provider.Request, model, route string) (*turnResult, error) {
 	stream, err := p.Generate(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("model request: %w", err)
@@ -86,24 +86,33 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	// a block after text, a tool call or an unsigned block would replay ahead
 	// of what preceded it, under a prefix it was not produced under, so the run
 	// of kept blocks ends at the first of those (docs/plan/60_thinking-replay.md
-	// decision 3).
+	// decision 3). next is the block index the run continues at: a block the
+	// stream carried no chunk for still sits in the response, and the gap it
+	// leaves in the indices ends the run too.
 	leading := true
+	var next int64
 	// chain is the prefix the next kept block was produced under, built from
 	// the request on the first block kept.
 	var chain *prefixChain
-	keep := func(id domain.ID, block any) error {
+	keep := func(id domain.ID, index int64, block any) error {
+		if chain == nil {
+			if media, err := urlMedia(req); err != nil || media {
+				leading = false
+				return err
+			}
+			var err error
+			if chain, err = requestChain(route, req); err != nil {
+				return err
+			}
+		}
 		raw, err := json.Marshal(block)
 		if err != nil {
 			return err
 		}
-		if chain == nil {
-			if chain, err = requestChain(req); err != nil {
-				return err
-			}
-		}
 		turn.thinking = append(turn.thinking, events.ThinkingBlock{
 			EventID: id, Model: model, PrefixDigest: chain.sum(), Block: raw,
 		})
+		next = index + 1
 		return chain.add("assistant", raw)
 	}
 
@@ -129,9 +138,9 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		switch {
 		case !leading:
 		case data != "":
-			return keep(id, redactedBlock{Type: "redacted_thinking", Data: data})
+			return keep(id, thinkingIndex, redactedBlock{Type: "redacted_thinking", Data: data})
 		case sig != "":
-			return keep(id, thinkingBlock{Type: "thinking", Thinking: text, Signature: sig})
+			return keep(id, thinkingIndex, thinkingBlock{Type: "thinking", Thinking: text, Signature: sig})
 		default:
 			leading = false
 		}
@@ -146,6 +155,9 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			}
 		}
 		if thinkingPreview == nil {
+			if index != next {
+				leading = false
+			}
 			thinkingIndex = index
 			var err error
 			thinkingPreview, err = b.log.StartPreviewOn(ctx, sid, threadID, domain.EventAgentThinking)

@@ -423,7 +423,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		return req, 0, err
 	}
 	req.System += systemTail
-	if err := admitThinking(req.System, req.Tools, thinking.model, msgs); err != nil {
+	if err := admitThinking(thinking, req.System, req.Tools, msgs); err != nil {
 		return req, 0, err
 	}
 	for _, m := range msgs {

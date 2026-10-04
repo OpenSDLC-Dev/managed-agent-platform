@@ -430,7 +430,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return nil
 	}
 	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock,
-		replayThinking{model: desc.Model, blocks: kept})
+		replayThinking{model: desc.Model, route: desc.Route, blocks: kept})
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)
@@ -459,7 +459,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// The call to the model begins here, and its latency with it: the history
 	// read and the replay above ran after the span start and are ours.
 	span.ModelCalling()
-	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req, desc.Model)
+	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req, desc.Model, desc.Route)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
 	// settlement — and none of it belongs in a model-latency metric. The usage

@@ -241,6 +241,8 @@ func TestGenerateThinkingSignaturesAndRedactedBlocks(t *testing.T) {
 		`{"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`,
 		`{"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"done"}}`,
 		`{"type":"content_block_stop","index":3}`,
+		`{"type":"content_block_start","index":4,"content_block":{"type":"text","text":"sent whole"}}`,
+		`{"type":"content_block_stop","index":4}`,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}`,
 		`{"type":"message_stop"}`,
 	}}
@@ -258,6 +260,7 @@ func TestGenerateThinkingSignaturesAndRedactedBlocks(t *testing.T) {
 		{Kind: provider.KindThinkingDelta, Index: 2, Text: "all at once"},
 		{Kind: provider.KindThinkingSignature, Index: 2, Signature: "sig-whole"},
 		{Kind: provider.KindTextDelta, Index: 3, Text: "done"},
+		{Kind: provider.KindTextDelta, Index: 4, Text: "sent whole"},
 	}
 	if len(got) != len(want)+1 {
 		t.Fatalf("got %d chunks %+v, want %d then done", len(got), got, len(want))

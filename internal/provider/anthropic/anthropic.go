@@ -281,6 +281,13 @@ func (s *stream) Next() bool {
 					s.cur, s.pending = out[0], out[1:]
 					return true
 				}
+			case "text":
+				// Likewise a text block: text carried on its start would
+				// otherwise be lost, and the brain would not see the block.
+				if ev.ContentBlock.Text != "" {
+					s.cur = provider.Chunk{Kind: provider.KindTextDelta, Index: ev.Index, Text: ev.ContentBlock.Text}
+					return true
+				}
 			}
 			if ev.ContentBlock.Type == "tool_use" {
 				if s.inTool {

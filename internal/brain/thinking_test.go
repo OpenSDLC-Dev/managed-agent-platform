@@ -6,9 +6,13 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // Thinking replay (#67, docs/plan/60_thinking-replay.md). A model's thinking
@@ -133,8 +137,8 @@ func TestThinkingReplaysWithItsSignature(t *testing.T) {
 	h.wake(t, "what is <go> & co?")
 	h.runOnce(t)
 
-	// The wire event stays content-free (anthropic-sdk-go v1.70.1 —
-	// betasessionevent.go BetaManagedAgentsAgentThinkingEvent).
+	// The wire event stays content-free (checked against anthropic-sdk-go
+	// v1.70.1 — betasessionevent.go BetaManagedAgentsAgentThinkingEvent).
 	evs, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.thinking"}})
 	if err != nil || len(evs) != 1 {
 		t.Fatalf("agent.thinking events = %d (%v), want 1", len(evs), err)
@@ -289,6 +293,89 @@ func TestThinkingIsKeptOnlyWithACommittedAnswer(t *testing.T) {
 	})
 }
 
+// A block the brain never saw — one a stream carried no chunk for — still sits
+// between its neighbours in the response, so the run of kept blocks ends at
+// the gap in the block indices: the block after it was produced after content
+// the replay would not send ahead of it.
+func TestAnUnseenBlockEndsTheLeadingRun(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			thinkingChunk(0, "first"), signatureChunk(0, "s0"),
+			thinkingChunk(2, "after a gap"), signatureChunk(2, "s2"),
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
+			done("tool_use", 3),
+		},
+		{textChunk(0, "ok"), done("end_turn", 1)},
+	}, nil)
+	h.lookupAgent(t, "fixture-model", "s")
+	h.wake(t, "go")
+	h.runOnce(t)
+	if n := h.thinkingRows(t); n != 1 {
+		t.Fatalf("kept %d thinking blocks, want the one before the gap", n)
+	}
+	h.answerLookup(t, "ok")
+	h.runOnce(t)
+	got := h.assistantBlocks(t, 1)[0]
+	if want := []string{"thinking", "tool_use"}; !equalStrings(blockTypes(got), want) {
+		t.Fatalf("assistant blocks = %v, want %v", blockTypes(got), want)
+	}
+	if got[0]["signature"] != "s0" {
+		t.Errorf("replayed block = %v, want the first", got[0])
+	}
+}
+
+// wakeWith is wake with a user message of the given content blocks.
+func (h *harness) wakeWith(t *testing.T, content []map[string]any) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"content": content})
+	_, err := h.log.AppendTransition(context.Background(), h.sessionID,
+		[]events.NewEvent{{Type: domain.EventUserMessage, Payload: payload}},
+		[]events.ThreadTransition{{Status: domain.SessionRunning}},
+		events.AppendOptions{
+			Then: func(ctx context.Context, tx pgx.Tx) error {
+				_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
+				return err
+			},
+		})
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+}
+
+// A block produced after an image or document fetched by URL is not kept: the
+// bytes behind a URL can change while the request stays the same, and a block
+// replayed over changed bytes is one under another prefix. Inline media is
+// hashed with the request and keeps its blocks.
+func TestThinkingIsNotKeptAfterURLMedia(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source map[string]any
+		want   int
+	}{
+		{"url", map[string]any{"type": "url", "url": "https://example.com/latest.png"}, 0},
+		{"base64", map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{{
+				thinkingChunk(0, "look"), signatureChunk(0, "s"),
+				provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+					ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
+				done("tool_use", 3),
+			}}, nil)
+			h.lookupAgent(t, "fixture-model", "s")
+			h.wakeWith(t, []map[string]any{
+				{"type": "text", "text": "what is this?"},
+				{"type": "image", "source": tc.source},
+			})
+			h.runOnce(t)
+			if n := h.thinkingRows(t); n != tc.want {
+				t.Errorf("kept %d thinking blocks, want %d", n, tc.want)
+			}
+		})
+	}
+}
+
 // The delegated settlement keeps thinking too: a call the settlement answers
 // itself — here a name the model was not offered (#567) — commits through
 // commitDelegatedTurn, and the request it chains to carries the block.
@@ -314,6 +401,41 @@ func TestThinkingReplaysAfterADelegatedSettlement(t *testing.T) {
 	}
 	if want := []string{"thinking", "tool_use"}; !equalStrings(blockTypes(turns[0]), want) {
 		t.Fatalf("assistant blocks = %v, want %v", blockTypes(turns[0]), want)
+	}
+}
+
+// The route is part of every block's prefix, and the brain hands replay the
+// one the turn goes over: a session whose model moves to another endpoint
+// under the same model id loses its earlier thinking rather than sending a
+// signature to an endpoint that did not issue it.
+func TestThinkingDropsWhenTheRouteMoves(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			thinkingChunk(0, "first"), signatureChunk(0, "s"),
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
+			done("tool_use", 3),
+		},
+		{textChunk(0, "ok"), done("end_turn", 1)},
+	}, nil)
+	h.lookupAgent(t, "fixture-model", "s")
+	h.wake(t, "go")
+	h.runOnce(t)
+	if n := h.thinkingRows(t); n != 1 {
+		t.Fatalf("kept %d thinking blocks, want 1", n)
+	}
+
+	moved, err := provider.NewRegistry(
+		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake-elsewhere"}}},
+		map[string]provider.Factory{"fake": func(provider.Config) (provider.Provider, error) { return h.provider, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.registry, h.brain = moved, brain.New(h.pool, moved, nil, brain.Config{})
+	h.answerLookup(t, "ok")
+	h.runOnce(t)
+	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !equalStrings(got, []string{"tool_use"}) {
+		t.Errorf("assistant blocks after the route moved = %v, want the tool call alone", got)
 	}
 }
 

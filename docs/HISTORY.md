@@ -82,7 +82,23 @@ The same test, run against a replay that sends no stored block, found what the p
 
 So before this plan every DeepSeek tool loop the brain drove ended at its first tool result. The first probes had kept the vendor's ids. The guard's remaining gap is DeepSeek's, #883.
 
-The full `make verify` gate passed on the branch: build, cross-build, vet, format check and 67 test packages, with 90.91% total statement coverage. Review results and CI are recorded in the pull request.
+**Review hardening, in the same PR.** The verifier's first run failed the gate. A Go comment cited the SDK without `checked against`, and `tools/sdkref` reads only files the repository tracks, so the uncommitted test file had passed the implementer's own run. Codex (`gpt-6.1-sol`, `xhigh`) found four defects, all fixed:
+
+- **The digest did not cover the route.** It missed the endpoint and the adapter's `flatten_search_results` rendering, so a route change under the same model id admitted blocks bound elsewhere. `provider.Descriptor.Route`, a digest of the protocol, base URL and flag, now opens every chain.
+- **URL media could change under the digest.** An image or document fetched by URL can change its bytes while the digest stays the same, so a response to such a request now keeps no thinking.
+- **Unseen blocks could stay in the leading run.** Text sent whole on a block's start, which the adapter dropped, or an empty thinking block could leave a later block in the run. The adapter now forwards a text start, and the run ends at a gap in the block indices.
+- **Four documents overclaimed.** They said a changed prompt never fails a request, which DeepSeek's rule contradicts.
+
+Each new guard was then broken on its own, and its test failed:
+
+- dropping the route on both sides failed the route-move test;
+- a chain that skips the route failed both route tests;
+- a contiguity check that never fires failed the unseen-block test;
+- URL media that no longer blocks keeping failed the URL test.
+
+The verifier also had the changelog's Kimi and MiniMax claim trimmed to the two vendors the plan cites.
+
+GATE2
 
 ---
 
