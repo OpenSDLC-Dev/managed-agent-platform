@@ -131,6 +131,9 @@ type PathNotWritableError struct {
 }
 
 func (e *PathNotWritableError) Error() string {
+	if e.Reason == "" {
+		return e.Path + ": " + ErrNotWritable.Error()
+	}
 	return e.Path + ": " + ErrNotWritable.Error() + ": " + e.Reason
 }
 

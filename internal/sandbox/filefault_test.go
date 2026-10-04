@@ -218,3 +218,16 @@ func TestUnreplaceableShell(t *testing.T) {
 		})
 	}
 }
+
+// A refusal says why when the sandbox said, and ends where it has nothing more
+// to say: no dangling ": " for a reason that did not reach the platform.
+func TestPathNotWritableErrorReadsWholeWithOrWithoutAReason(t *testing.T) {
+	for err, want := range map[*sandbox.PathNotWritableError]string{
+		{Path: "/usr/a", Reason: "Read-only file system"}: "/usr/a: sandbox: target cannot be written: Read-only file system",
+		{Path: "/usr/a"}: "/usr/a: sandbox: target cannot be written",
+	} {
+		if got := err.Error(); got != want || !errors.Is(err, sandbox.ErrNotWritable) {
+			t.Errorf("Error() = %q, want %q (and ErrNotWritable)", got, want)
+		}
+	}
+}
