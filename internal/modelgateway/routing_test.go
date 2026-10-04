@@ -501,25 +501,34 @@ func TestARelayedErrorCarriesTheGatewaysRequestID(t *testing.T) {
 
 // An event the upstream cut off at the end of its stream is completed: the
 // error event that follows stays a block of its own, and a cut-off
-// message_stop still ends the answer.
+// message_stop still ends the answer. One whose data does not parse is
+// unfinished, and dropped.
 func TestACutOffEventIsCompleted(t *testing.T) {
 	e := newEnv(t)
 	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
 		all := events(c.Model, "cut")
-		if c.Model == "stop" {
+		switch c.Model {
+		case "stop":
 			all[len(all)-1] = strings.TrimSuffix(all[len(all)-1], "\n\n")
 			sse(w, all...)
-			return
+		case "torn":
+			sse(w, append(all[:4], "event: content_block_delta\ndata: {\"type\":\"content_bl")...)
+		default:
+			sse(w, append(all[:4], strings.TrimSuffix(all[4], "\n"))...)
 		}
-		sse(w, append(all[:4], strings.TrimSuffix(all[4], "\n"))...)
 	})
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("delta", target(e.deployment(p, "delta"), 0))
 	e.alias("stop", target(e.deployment(p, "stop"), 0))
+	e.alias("torn", target(e.deployment(p, "torn"), 0))
 	key := e.key(everyAlias)
 	e.start()
-	_, b := e.do("POST", "/v1/messages", `{"model":"delta","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+	_, b := e.do("POST", "/v1/messages", `{"model":"torn","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+	if got := string(b); strings.Contains(got, `"type":"content_bl`+"\n") || !strings.Contains(got, "\n\nevent: error\ndata: {") {
+		t.Errorf("torn: %s", got)
+	}
+	_, b = e.do("POST", "/v1/messages", `{"model":"delta","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
 	if got := string(b); !strings.Contains(got, "\"text\":\"cut\"}}\n\nevent: error\ndata: {") {
 		t.Errorf("delta: %s", got)
 	}

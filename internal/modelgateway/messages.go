@@ -466,8 +466,9 @@ func withModel(b []byte, alias string) []byte {
 // the keep-alives held before the first, then the first, then the rest —
 // rewriting only message_start's message.model and an upstream error event
 // (errorJSON). Comments and pings pass unchanged, and each event goes out
-// whole: one the upstream cut off at the end of its stream is completed, so
-// the caller dispatches it and nothing written after it merges in. When the
+// whole: one the upstream cut off at the end of its stream is completed when
+// its data parses, so the caller dispatches it and nothing written after it
+// merges in, and dropped when its data does not, being unfinished. When the
 // caller stops reading — or reads too slowly to take an event within
 // writeStall — the stream is still read. When the upstream fails partway, or
 // ends before message_stop, the caller gets an error event, the only way left
@@ -511,7 +512,8 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 	relay(first)
 	for !done {
 		e, err := events.Next()
-		if len(e.Raw) > 0 && (err == nil || errors.Is(err, io.EOF)) {
+		torn := errors.Is(err, io.EOF) && e.Data != nil && !json.Valid(e.Data)
+		if len(e.Raw) > 0 && (err == nil || errors.Is(err, io.EOF)) && !torn {
 			if err != nil {
 				e.Raw = terminated(e.Raw)
 			}
