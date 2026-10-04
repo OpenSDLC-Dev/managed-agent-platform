@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/givenurl"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
@@ -307,13 +308,13 @@ func (e *Executor) runWebTool(ctx context.Context, sid domain.ID, u toolUse) too
 		if e.webAllowed != nil && !e.webAllowed.Match(parsed.Hostname()) {
 			return fail(fmt.Sprintf("web_fetch: host %q is outside the operator's allowed domains (WEBTOOL_ALLOWED_DOMAINS)", parsed.Hostname()))
 		}
-		// The description's provenance rule (#823, webprovenance.go): a URL
+		// The description's provenance rule (#823, internal/givenurl): a URL
 		// the session was not given is refused before anything is fetched,
 		// and what is fetched is the given URL as it was written, never the
 		// model's spelling of it. A failed lookup refuses too: the rule is a
 		// guard, and an unchecked fetch is what it guards against.
-		given, err := e.webFetchSource(ctx, sid, target)
-		if errors.Is(err, errReadingBudget) {
+		given, err := givenurl.Source(ctx, e.pool, sid, target)
+		if errors.Is(err, givenurl.ErrReadingBudget) {
 			return fail("web_fetch: " + err.Error() + "; fetch a URL exactly as it was given, or find this page with web_search first")
 		}
 		if err != nil {

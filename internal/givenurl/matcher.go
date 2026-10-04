@@ -1,24 +1,10 @@
-package executor
-
-import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"net/url"
-	"strings"
-	"unicode"
-
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
-)
-
-// The web_fetch provenance rule (#823). The tool's description, the reference's
-// word for word, tells the model it "can only fetch EXACT URLs that have been
-// provided directly by the user or have been returned in results from the
-// web_search and web_fetch tools". This is where that holds: a model a prompt
-// injection has turned cannot build a URL of its own — one carrying a secret in
-// its query or fragment, say — and have the executor fetch it.
+// Package givenurl is web_fetch's provenance rule (#823). The tool's
+// description, the reference's word for word, tells the model it "can only
+// fetch EXACT URLs that have been provided directly by the user or have been
+// returned in results from the web_search and web_fetch tools". This is where
+// that holds: a model a prompt injection has turned cannot build a URL of its
+// own — one carrying a secret in its query or fragment, say — and have the
+// executor fetch it.
 //
 // The model's URL only chooses: what is fetched is the given URL itself, as it
 // was written in the session, so nothing the model adds — a fragment, a
@@ -45,6 +31,21 @@ import (
 // rather than stall the executor. What people wrote is read first, then
 // the newest results, so a page that spends the budget costs the URLs given
 // before it last.
+package givenurl
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+	"unicode"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
 
 // maxFetchURL is the longest URL web_fetch accepts. It bounds the window every
 // reading is read in, and no browser or reader takes a longer one.
@@ -57,15 +58,15 @@ const maxFetchURL = 8 << 10
 // because a parse costs its length and a request may be long.
 const readingBudget = 64 << 20
 
-// errReadingBudget is a lookup that spent readingBudget before deciding.
-var errReadingBudget = errors.New("the session holds too many URLs naming this host to check this one")
+// ErrReadingBudget is a lookup that spent readingBudget before deciding.
+var ErrReadingBudget = errors.New("the session holds too many URLs naming this host to check this one")
 
-// webFetchSource returns the given URL that raw, the URL web_fetch was asked
+// Source returns the given URL that raw, the URL web_fetch was asked
 // for, names in the session sid, exactly as it was written there, or "" when
 // none does. It reads the committed log: only the payloads that mention the
 // host or hold non-ASCII text (a host can be spelled there in a Unicode form
 // that folds to the request's), when the request's host is plain ASCII.
-func (e *Executor) webFetchSource(ctx context.Context, sid domain.ID, raw string) (string, error) {
+func Source(ctx context.Context, pool *pgxpool.Pool, sid domain.ID, raw string) (string, error) {
 	m, ok := newURLMatcher(raw)
 	if !ok {
 		return "", nil
@@ -81,7 +82,7 @@ func (e *Executor) webFetchSource(ctx context.Context, sid domain.ID, raw string
 	}
 	const narrow = `($2 = '' OR strpos(lower(%[1]s::text), lower($2)) > 0
 		       OR octet_length(%[1]s::text) <> char_length(%[1]s::text))`
-	rows, err := e.pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
 		SELECT payload FROM (
 		SELECT m.payload, 0 AS rank, m.seq FROM events m
 		 WHERE m.session_id = $1 AND m.type = ANY($3)
@@ -125,7 +126,7 @@ func (e *Executor) webFetchSource(ctx context.Context, sid domain.ID, raw string
 		return "", err
 	}
 	if m.found == "" && m.budget <= 0 {
-		return "", errReadingBudget
+		return "", ErrReadingBudget
 	}
 	return m.found, nil
 }
