@@ -101,6 +101,18 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // still make the `mkdir` fail and suppress its own mark — that only returns the
 // classification to where it stood before this existed, which is the direction
 // this trade is allowed to fail in.
+//
+// The wrapper is `bash -c`, so an image's BASH_ENV file runs in its shell first,
+// and the watchdog subshell inherits what that file sets. One that turns errexit
+// on would end the watchdog at the first command that fails (#860): a `mkdir`
+// the tenant made fail, and the runaway is never killed — the deadline is still
+// called from outside, but the command runs on. So the watchdog's `sleep` and
+// `mkdir` carry `|| :`, and nothing touches a shell option: the command's own
+// `bash -c` sources the same file and gets the image's options as before. The
+// rest cannot be ended that way — `set -m`, an assignment, conditions and an `||`
+// errexit ignores, a backgrounded subshell, and `exec`, whose failure ends the
+// shell whatever its options — and the exec's exit code is the command's own,
+// read from the daemon.
 const execWrapper = `
 set -m
 self=$$
@@ -109,11 +121,11 @@ if [ "$2" != "0" ]; then
     n=0
     while [ "$n" -lt "$2" ]; do
       kill -0 "$self" 2>/dev/null || exit 0
-      sleep 1
+      sleep 1 || :
       n=$((n + 1))
     done
     if kill -0 "$self" 2>/dev/null; then
-      mkdir "$3.killed" 2>/dev/null
+      mkdir "$3.killed" 2>/dev/null || :
       kill -9 -"$self" 2>/dev/null
     fi
   ) >/dev/null 2>&1 &

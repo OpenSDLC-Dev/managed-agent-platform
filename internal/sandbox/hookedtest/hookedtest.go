@@ -70,17 +70,24 @@ func Backends(t *testing.T) []Backend {
 // another package runs.
 func Image(t *testing.T, hook string) string {
 	t.Helper()
-	var nonce [8]byte
-	_, _ = rand.Read(nonce[:])
+	image := DockerImage(t, hook)
 	host := []string{"--host", docker.DaemonHost()}
-	image := dockertest.ImageFrom(t, "hooked", "FROM "+baseImage+"\n"+
-		"LABEL map.hooked.build="+hex.EncodeToString(nonce[:])+"\n"+
-		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(hook))+" | base64 -d > /etc/map-hook.sh\n"+
-		"ENV BASH_ENV=/etc/map-hook.sh\n", host...)
 	if cluster := sandboxtest.LoadIntoKind(t, sandboxtest.KubeContext(t), image, host...); cluster != "" {
 		t.Cleanup(func() { sandboxtest.RemoveFromKind(t, cluster, image, host...) })
 	}
 	return image
+}
+
+// DockerImage is Image on the Docker daemon alone, for a test of the Docker
+// backend that has no cluster to show it to.
+func DockerImage(t *testing.T, hook string) string {
+	t.Helper()
+	var nonce [8]byte
+	_, _ = rand.Read(nonce[:])
+	return dockertest.ImageFrom(t, "hooked", "FROM "+baseImage+"\n"+
+		"LABEL map.hooked.build="+hex.EncodeToString(nonce[:])+"\n"+
+		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(hook))+" | base64 -d > /etc/map-hook.sh\n"+
+		"ENV BASH_ENV=/etc/map-hook.sh\n", "--host", docker.DaemonHost())
 }
 
 // Provision provisions a sandbox from the hooked image on b, with h as its
