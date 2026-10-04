@@ -25,7 +25,10 @@ Scope decisions settled with the user on 2026-10-04:
    principle 1 rules out for the default path; open-source bifrost also cannot run
    several replicas on one Postgres and keeps SSO/RBAC in its closed enterprise edition,
    where the platform already has both. Evidence under Ground truth.
-2. **This repository, a new binary**, with its own image, released with the platform.
+2. **This repository, a new binary in the shared `server` image**, run as
+   `command: /modelgateway` the way the four server binaries are, and released with the
+   platform. A separate image waits for someone who deploys the gateway alone and needs
+   it smaller.
 3. **v1 upstreams are the four vendors' official cloud APIs.** Gemini, Vertex (#236) and
    self-hosted engines (vLLM, SGLang, …) follow in later plans, with bifrost as the
    reference (Later upstreams says for what).
@@ -121,6 +124,28 @@ Apache-2.0):
   virtual keys with limits, and later its Gemini/Vertex converters. No code is copied;
   if a later converter ever is, NOTICE and THIRD_PARTY_LICENSES carry it.
 
+**Anthropic's gateway docs.** The
+[gateway compatibility guide](https://code.claude.com/docs/en/llm-gateway-protocol) is
+the contract a gateway owes Claude Code, and this gateway's Anthropic surface follows it:
+forward `anthropic-version` and `anthropic-beta` "verbatim; don't allowlist individual
+values", and pass `anthropic-*` headers and body fields through as open lists; stream
+without buffering, keep `ping` events (Claude Code aborts a stream silent for five
+minutes by default) and deliver each event sequence whole; forward the `system` array
+unchanged, since its first block is a positional attribution block, and error bodies
+unmodified, since Claude Code's recovery "matches on the upstream's error wording";
+answer `retry-after` in integer seconds. Token counting is optional — "when they're
+absent, Claude Code falls back to a character-based estimate". Model discovery calls
+`GET /v1/models?limit=1000` with a 3-second timeout, follows no redirect, and keeps only
+ids containing `claude` or `anthropic`. Requests carry `x-claude-code-session-id`, which
+a gateway may consume for attribution.
+[Claude apps gateway](https://code.claude.com/docs/en/claude-apps-gateway), Anthropic's
+own self-hosted gateway inside the `claude` binary, translates Anthropic Messages for
+Claude upstreams only (Amazon Bedrock, Claude Platform on AWS, Google Cloud, Microsoft
+Foundry, the Anthropic API), so it cannot front the four vendors and is not a fourth
+approach. It does confirm two choices below: its rate-limit counters live in Postgres,
+and it runs its migrations at boot under a lock and refuses to start on a bad
+configuration or an unreachable dependency.
+
 ## Architecture
 
 ### Process and packages
@@ -149,9 +174,12 @@ converts when protocols match.
 - **Passthrough** — the inbound and upstream protocols match. The body is decoded only
   as far as its top-level keys and the content blocks a profile touches; `model` becomes
   the deployment's upstream id, the profile's edits apply, and everything else, unknown
-  fields included, goes out equal as JSON. The response relays event by event,
-  rewriting only `message.model` (back to the alias the caller sent) and the usage
-  fields the profile normalizes. A provider configures both of its vendor's endpoints
+  fields included, goes out equal as JSON; `anthropic-*` headers go with it verbatim.
+  The response relays event by event as it arrives — no buffering, `ping` events and
+  keep-alive comments kept, each sequence whole — rewriting only `message.model` (back
+  to the alias the caller sent) and the usage fields the profile normalizes. A
+  conversion path whose upstream sends no pings emits its own during silent gaps. A
+  provider configures both of its vendor's endpoints
   and selection prefers the one matching the inbound protocol, so Anthropic and Chat
   Completions callers both pass through to all four v1 vendors.
 - **Conversion** — the protocols differ. v1 needs two directions: Responses (inbound) ↔
@@ -169,10 +197,15 @@ A profile is declarative data plus at most a few Go hooks, compiled in: `deepsee
 `minimax`, `zhipu`, `moonshot`, and `anthropic-generic` / `openai-generic` for any
 conformant endpoint (the later engine profiles join these). It names the request path
 per protocol, the CN and international hosts, the auth header, content-block edits,
-field strips, the usage mapping, and whether `count_tokens` exists.
+field strips, the usage mapping, and whether `count_tokens` exists — where it does not,
+that alias's `count_tokens` answers `404 not_found_error` and the client estimates, as
+the compatibility guide says Claude Code does.
 
 The edit policy, which keeps a profile from quietly changing what a caller asked for:
 
+- **Every edit is deterministic and leaves `system` alone,** so an upstream sees one
+  stable prefix across a conversation's requests — what preserved thinking checks, and
+  what keeps Claude Code's attribution block first.
 - **Pass through** by default; the upstream's own error reaches the caller, redacted.
   What the docs leave uncertain (MiniMax's two `tool_choice` pages; every Zhipu field)
   passes through until evidence says otherwise — the live tier, for a vendor it has a
@@ -191,7 +224,9 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
 Postgres schema `modelgateway`, with its own embedded migrations and its own
 `schema_migrations` (CLAUDE.md's immutability rule applies); `DATABASE_URL` may name the
 platform's database or another. Ids carry gateway-local prefixes (`gwprov_`, `gwcred_`,
-`gwdep_`, `gwkey_`), deliberately outside `internal/domain`'s wire list.
+`gwdep_`, `gwkey_`), deliberately outside `internal/domain`'s wire list. Every table
+reserves `org_id`, `workspace_id` and `project_id` with single-tenant defaults, as the
+platform's own do (`internal/store/migrations/0001_init.sql`, design principle 5).
 
 - **provider** — profile, name, endpoint per protocol (a profile host or a custom one),
   extra headers, stall timeout, enabled.
@@ -224,7 +259,9 @@ request path reads only the snapshot.
 
 - Resolve the alias; in the highest-priority group with a healthy target, choose a
   deployment by weight, then a credential by weight.
-- **Affinity.** A request carrying `X-MAP-Session-ID` chooses by rendezvous hashing over
+- **Affinity.** A request carrying a session id — `X-MAP-Session-ID` from the brain,
+  `x-claude-code-session-id` from Claude Code, also the usage row's — chooses by
+  rendezvous hashing over
   the group, so a session stays on one deployment while it is healthy: thinking blocks
   are bound to the backend that produced them.
 - **Retry and fallback happen before the first byte only.** A connect error, 429, 5xx
@@ -235,7 +272,8 @@ request path reads only the snapshot.
   surfaces rather than one model's thinking being replayed to another.
 - **Stall.** `provider.StallGuard` per provider, for #121's reasons unchanged.
 - **Limits.** Admission increments the key's request count for the current minute in one
-  upsert and refuses over the limit with 429 and `retry-after`; tokens are added when the
+  upsert and refuses over the limit with 429 and `retry-after` in integer seconds; tokens
+  are added when the
   response ends, so TPM admits against tokens already spent, never against an output not
   yet known. Per-replica in-memory buckets were rejected: under an autoscaler the
   effective limit would be a function of the replica count.
@@ -254,7 +292,10 @@ request path reads only the snapshot.
 - **`/v1/models`** is one path with two shapes. The root answers in Anthropic's shape
   when the request carries `anthropic-version` — which every Anthropic SDK sends and no
   OpenAI SDK does — and in OpenAI's otherwise; `/anthropic/v1/…` and `/openai/v1/…`
-  prefixes give every inbound route an explicit choice.
+  prefixes give every inbound route an explicit choice. Anthropic-shape entries add the
+  alias's optional `description`, which Claude Code's picker shows. Its discovery keeps
+  only ids containing `claude` or `anthropic`, so an alias meant for the picker needs one
+  in its name; any other alias is reached by naming it in Claude Code's model settings.
 
 ### Console
 
@@ -388,8 +429,13 @@ where a vendor bills cache writes.
     international host. Results land in docs/HISTORY.md.
   - Zhipu and Moonshot join when keys exist. Until then their profiles are checked
     against fake upstreams only, and Zhipu's whole support matrix stays unconfirmed.
-- **Acceptance:** Claude Code with `ANTHROPIC_BASE_URL` at the gateway; slice 5's `ant`
-  session through the brain.
+- **Acceptance:** Claude Code with `ANTHROPIC_BASE_URL` at the gateway, checked against
+  the compatibility guide — streaming without stalls, `anthropic-beta` round trips,
+  model discovery, recovery from a rejected capability. Claude Code sends any alias it
+  does not recognize adaptive thinking, effort and context management; whatever a
+  vendor rejects is recorded with the client setting that avoids it
+  (`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` covers context management). Then slice 5's
+  `ant` sessions through the brain.
 - Every slice: `make verify` (the coverage gate takes in the new packages), the
   verifier, both reviews and green CI, per CLAUDE.md.
 
@@ -400,15 +446,11 @@ where a vendor bills cache writes.
 - README.md: the live tier and the compose service.
 - docs/REFERENCE_PROJECTS.md: bifrost as a design reference — ideas only, never a wire
   source (slice 2); `openai-go` (slice 4).
-- docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens` where
-  an upstream has none; stateless Responses; each profile edit with its vendor evidence.
+- docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens`
+  answering 404 where an upstream has none; the `description` on `/v1/models` entries;
+  stateless Responses; each profile edit with its vendor evidence.
 
 ## Open questions, settled by evidence in the slice that meets them
 
-1. `count_tokens` against an upstream without it — refuse, or estimate? Slice 2, once the
-   live tier shows whether DeepSeek serves it (MiniMax documents it for M3 and later) and
-   whether Claude Code depends on it.
-2. Whether `anthropic-beta` goes upstream by default: DeepSeek documents it as ignored,
-   the others say nothing. Slice 2, live tier.
-3. Which v1 vendors serve OpenAI-shaped embeddings — none of the four is confirmed yet.
+1. Which v1 vendors serve OpenAI-shaped embeddings — none of the four is confirmed yet.
    Slice 4, before the route is built against them.
