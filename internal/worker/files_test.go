@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -107,11 +108,10 @@ func TestSetupFilesOverTheWire(t *testing.T) {
 }
 
 // TestSetupFilesUnansweredProbeKeepsTheAgentsEdit is the executor's rule over
-// the wire: a probe that does not answer — the presence exec's answer, or the
-// sentinel read, an image's startup pushed out of the output
-// (sandbox.StartupOutputError) — says nothing of whether a mount has gone, so
-// the set the sentinel says landed is not re-streamed over the agent's edit
-// (#860).
+// the wire: a probe that does not answer — the presence exec's answer an
+// image's startup pushed out of the output (sandbox.StartupOutputError) —
+// says nothing of whether a mount has gone, so the set the sentinel says
+// landed is not re-streamed over the agent's edit (#860).
 func TestSetupFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
 	flood := &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	for _, c := range []struct {
@@ -119,7 +119,6 @@ func TestSetupFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
 		flood func(sb *fakeSandbox)
 	}{
 		{"the presence exec", func(sb *fakeSandbox) { sb.execErr = flood }},
-		{"the sentinel read", func(sb *fakeSandbox) { sb.readErr = flood }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sb := &fakeSandbox{}
@@ -173,6 +172,46 @@ func TestSetupFilesUnreadableSentinelStillLandsANewMount(t *testing.T) {
 	}
 	if got := sb.files[b]; got != "bbb" {
 		t.Errorf("new mount = %q behind an unreadable sentinel, want it landed", got)
+	}
+}
+
+// TestSetupFilesUnreadableSentinelRelandsTheSet is the executor's rule over
+// the wire: behind a marker that cannot be read, a reassigned mount holds the
+// file the set now names there — with a sibling deleted or not — and the
+// marker names that set.
+func TestSetupFilesUnreadableSentinelRelandsTheSet(t *testing.T) {
+	for _, deleteA := range []bool{true, false} {
+		t.Run(fmt.Sprintf("a deleted %v", deleteA), func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			a, b := "/workspace/uploads/a", "/workspace/uploads/b"
+			idA, idB, idC := domain.NewID("file").String(), domain.NewID("file").String(), domain.NewID("file").String()
+			h.seedFile(t, idA, "a", "text/plain", "A's bytes")
+			h.seedFile(t, idB, "b", "text/plain", "B's bytes")
+			h.seedFile(t, idC, "c", "text/plain", "C's bytes")
+			h.refFileMounts(t, [2]string{idA, a}, [2]string{idB, b})
+			h.suspend(t, writeUse("out.txt", "hello"))
+			if err := h.run(); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+
+			if deleteA {
+				delete(sb.files, a)
+			}
+			h.refFileMounts(t, [2]string{idA, a}, [2]string{idC, b})
+			sb.readErr = errors.New("k8s: read /workspace/.files_materialized: exit 1: cat: Permission denied")
+			h.suspend(t, writeUse("out2.txt", "again"))
+			if err := h.run(); err != nil {
+				t.Fatalf("second run: %v", err)
+			}
+			if sb.files[a] != "A's bytes" || sb.files[b] != "C's bytes" {
+				t.Errorf("a, b = %q, %q; want A's bytes and C's", sb.files[a], sb.files[b])
+			}
+			want := filesSentinel([]fileRef{{FileID: idA, MountPath: a}, {FileID: idC, MountPath: b}})
+			if got := sb.files["/workspace/"+filesSentinelName]; got != string(want) {
+				t.Errorf("marker = %s, want %s", got, want)
+			}
+		})
 	}
 }
 

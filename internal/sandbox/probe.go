@@ -104,15 +104,3 @@ func StatPresence(ctx context.Context, sb Sandbox, path string) Presence {
 		return PresenceUnknown
 	}
 }
-
-// ReadAnswered reports whether err, from reading a path in a sandbox
-// (ReadFile, ReadFileStream), answers anything about that path: nil, the
-// bytes, or one of the path sentinels — not there, a directory or no regular
-// file, a parent no directory, too large. Anything else — the answer an
-// image's startup pushed out (*StartupOutputError), a failed exec, a sandbox
-// gone — says nothing of it, which a caller deciding whether to redo work the
-// path records must not take for "not there" (#860).
-func ReadAnswered(err error) bool {
-	return err == nil || errors.Is(err, ErrFileNotExist) || errors.Is(err, ErrIsDirectory) ||
-		errors.Is(err, ErrNotRegularFile) || errors.Is(err, ErrNotDirectory) || errors.Is(err, ErrFileTooLarge)
-}

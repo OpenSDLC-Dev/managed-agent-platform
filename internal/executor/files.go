@@ -89,19 +89,13 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 	// it is there.
 	marker := filesSentinel(mounts)
 	if sentinelUsable {
-		prev, err := sb.ReadFile(ctx, sentinelPath)
-		// A marker that could not be read — the startup's output pushed it
-		// out, or the agent made it unreadable — is no record either way,
-		// and the marker is only a shortcut: the current set's paths are
-		// probed as they would be behind a matching one. Absent lands the set
-		// (a new mount among it); a probe that cannot answer either keeps
-		// what is there.
-		unread := !sandbox.ReadAnswered(err)
-		if unread {
-			slog.WarnContext(ctx, "files sentinel not read; probing the mounts instead",
-				"session_id", sid, "files", len(mounts), "err", err)
-		}
-		if unread || err == nil && bytes.Equal(prev, marker) {
+		// A marker that could not be read — the agent made it unreadable, an
+		// image's startup pushed it out — is a set this pass cannot match,
+		// exactly as a marker naming another set is: the whole current set
+		// lands and the marker is rewritten from what did. Probing instead
+		// and keeping what is there would keep a path's bytes under whatever
+		// file the set now names there, with nothing to say which.
+		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil && bytes.Equal(prev, marker) {
 			// The probe is two sandbox round trips — this read, then one exec
 			// that tests every mount — and the skip returns without ever
 			// entering the write loop, so the read reports before the exec
@@ -112,8 +106,8 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 				span.SetAttributes(attribute.Bool("files.unchanged", true))
 				return
 			case sandbox.PresenceUnknown:
-				// The marker says this set landed (or could not be read),
-				// and a probe that did not answer — an image's startup pushing it out of the output,
+				// The marker says this set landed, and a probe that did not
+				// answer — an image's startup pushing it out of the output,
 				// a failed exec — cannot say a mount has gone since. Re-
 				// streaming every mount on that would overwrite the agent's
 				// edits on every pass (#860), so what is there stays.

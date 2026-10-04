@@ -224,10 +224,11 @@ func TestFilesRematerializeAfterMountDeleted(t *testing.T) {
 
 // TestFilesUnansweredProbeKeepsTheAgentsEdit: a probe that does not answer —
 // the presence exec's answer an image's startup pushed out of the output
-// (sandbox.StartupOutputError), or a sentinel read that failed the same way —
-// says nothing of whether a mount has gone. Taken for "gone", it re-streamed
-// every mount over the agent's edits on every pass (#860); the set landed
-// once (the sentinel), so what is there stays.
+// (sandbox.StartupOutputError) — says nothing of whether a mount has gone.
+// Taken for "gone", it re-streamed every mount over the agent's edits on
+// every pass (#860); the set landed once (the sentinel), so what is there
+// stays. (A sentinel that could not be read is another matter: a set the
+// pass cannot match, TestFilesUnreadableSentinelRelandsTheSet.)
 func TestFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
 	flood := &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	for _, c := range []struct {
@@ -235,7 +236,6 @@ func TestFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
 		flood func(sb *fakeSandbox)
 	}{
 		{"the presence exec", func(sb *fakeSandbox) { sb.execErr, sb.execErrOn = flood, "test -e " }},
-		{"the sentinel read", func(sb *fakeSandbox) { sb.readErr = flood }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sb := &fakeSandbox{}
@@ -326,6 +326,46 @@ func TestFilesRematerializeAMountDeletedFromASetTooLongForOneProbe(t *testing.T)
 	}
 	if sb.files[gone] != "file_big117" {
 		t.Errorf("deleted mount = %q, want it re-materialized", sb.files[gone])
+	}
+}
+
+// TestFilesUnreadableSentinelRelandsTheSet: mounts A at a and B at b land;
+// then b is reassigned to file C — with a deleted, or with both still there —
+// and the marker cannot be read. An unread marker is a set the pass cannot
+// match, so the whole current set lands — b holds C's bytes, never B's kept
+// as though they were C's — and the marker is rewritten to name it.
+func TestFilesUnreadableSentinelRelandsTheSet(t *testing.T) {
+	for _, deleteA := range []bool{true, false} {
+		t.Run(fmt.Sprintf("a deleted %v", deleteA), func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			a, b := "/mnt/session/uploads/a", "/mnt/session/uploads/b"
+			h.seedFile(t, "file_A", "A's bytes")
+			h.seedFile(t, "file_B", "B's bytes")
+			h.seedFile(t, "file_C", "C's bytes")
+			h.refFiles(t, [2]string{"file_A", a}, [2]string{"file_B", b})
+			h.suspend(t, writeUse("t1.txt", "x"))
+			if _, err := h.exec.step(context.Background()); err != nil {
+				t.Fatalf("first step: %v", err)
+			}
+
+			if deleteA {
+				delete(sb.files, a)
+			}
+			h.refFiles(t, [2]string{"file_A", a}, [2]string{"file_C", b})
+			sb.readErr = errors.New("k8s: read /workspace/.files_materialized: exit 1: cat: Permission denied")
+			h.suspend(t, writeUse("t2.txt", "y"))
+			if _, err := h.exec.step(context.Background()); err != nil {
+				t.Fatalf("second step: %v", err)
+			}
+			if sb.files[a] != "A's bytes" || sb.files[b] != "C's bytes" {
+				t.Errorf("a, b = %q, %q; want A's bytes and C's", sb.files[a], sb.files[b])
+			}
+			want := filesSentinel([]fileRef{{FileID: "file_A", MountPath: a}, {FileID: "file_C", MountPath: b}})
+			if got := sb.files["/workspace/"+filesSentinelName]; got != string(want) {
+				t.Errorf("marker = %s, want %s", got, want)
+			}
+		})
 	}
 }
 

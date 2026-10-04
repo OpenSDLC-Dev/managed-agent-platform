@@ -157,19 +157,3 @@ func TestStatPresenceReadsTheRefusal(t *testing.T) {
 		}
 	}
 }
-
-// ReadAnswered tells a read's answer about a path — its bytes, or a path
-// sentinel — from an error that says nothing of it.
-func TestReadAnswered(t *testing.T) {
-	for _, err := range []error{nil, sandbox.ErrFileNotExist, sandbox.ErrIsDirectory, sandbox.ErrNotRegularFile,
-		sandbox.ErrNotDirectory, fmt.Errorf("/x: %w", sandbox.ErrFileTooLarge)} {
-		if !sandbox.ReadAnswered(err) {
-			t.Errorf("ReadAnswered(%v) = false, want true", err)
-		}
-	}
-	for _, err := range []error{&sandbox.StartupOutputError{What: "the read of /x"}, sandbox.ErrNotFound, errors.New("exec: connection reset")} {
-		if sandbox.ReadAnswered(err) {
-			t.Errorf("ReadAnswered(%v) = true, want false", err)
-		}
-	}
-}
