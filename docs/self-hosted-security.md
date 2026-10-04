@@ -183,7 +183,8 @@ in that shell runs without the image's errexit, while its `nounset` and
 call). A bash the model starts itself — `bash -c`, a `#!/bin/bash` script —
 reads the startup file again, as every non-interactive bash does, and runs
 under the image's errexit. What the startup file
-*prints* does not corrupt the scripts whose answers the platform parses:
+*prints* does not corrupt the scripts whose answers the platform parses —
+a bulk write's report aside, below:
 `glob` and `grep`, the outputs harvest's listing, the memory sync's tree
 hash, the package-install probe, Docker's refused-write reasons and, on
 Kubernetes, every file read, an exec's exit record and liveness probe, a
@@ -200,15 +201,19 @@ a command past its deadline
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the
-output — on Kubernetes every exec then fails, its exit record pushed out,
+output. On Kubernetes every exec then fails, its exit record pushed out,
 and so does a read once the file and the banner together pass the read's
-cap and room. Each tool answers such a call with an error naming the image
+cap and room: each tool answers such a call with an error naming the image
 (and saying, of a command, that it ran), never a fault a retry would meet
-again, and the package-install pass, its probe's answer pushed out, installs
-nothing. Not every script is framed. A bulk write's reports — the member it
-failed on, a directory it could not make, what its shed left behind — are
-marker lines, each printed on a line of its own and the last one read, which
-a banner around them does not displace. What a few scripts print is relayed,
+again, and the package-install pass, its probe's answer pushed out,
+installs nothing. On either backend the outputs harvest, its listing pushed
+out, settles without a new snapshot, as one that finds no sandbox does.
+Not every script is framed. A bulk write's reports — the member it failed
+on, a directory it could not make, what its shed left behind — are read
+from its own marker lines, each printed on a line of its own and the last
+one read, which a banner around them does not displace; only a startup
+printing those exact lines, the platform's own markers verbatim, could,
+misreporting a write in its own sandbox. What a few scripts print is relayed,
 not parsed, banner and all: the package install's output, as the session
 error's message; the `grep` tool's ripgrep install's, in its tool error when
 the install fails; the stderr of a checkpoint's restore and of a repository's
