@@ -31,27 +31,44 @@ const migrateLockID int64 = 7355608041991001
 // filename order, all inside one transaction: either the database reaches
 // the current schema or it is left untouched. (Consequence: a migration can
 // never use statements Postgres forbids inside a transaction block, e.g.
-// CREATE INDEX CONCURRENTLY — extend the migrator if that day comes.) A
-// transaction that meets a lock conflict is retried; see migrateAttempts.
+// CREATE INDEX CONCURRENTLY — extend the migrator if that day comes.) Each
+// migration's lock waits are bounded (migrateLockWait), and a transaction that
+// meets a lock conflict is retried; see migrateAttempts.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return migrate(ctx, pool, "")
 }
 
+// migrateLockWait is the lock_timeout every migration starts with (#872): a
+// lock request live traffic holds up, and every reader and writer of the table
+// queued behind it, waits at most this long before the run gives up and is
+// retried, in the migrations that set no bound of their own (0041, 0042, 0044)
+// too. One that sets its own keeps it; 0043, 0045, 0046 and 0047 set the same
+// 2s. 2s, above deadlock_timeout's 1s default, for 0043's reason: only a
+// waiter that has waited that long runs the deadlock check, which is what
+// cancels an autovacuum holding the table. It bounds lock waits only, never
+// the length of a migration's own work.
+//
 // migrateAttempts and migrateBackoff bound the retry of a migration
-// transaction that met a lock conflict: a deadlock (40P01), or a migration's
-// own lock_timeout running out (55P03). 0043, 0045, 0046 and 0047 each set
-// one to bound how long live traffic queues behind their lock requests. The
-// transaction has rolled back whole, so a retry starts from the same schema.
-// The wait before each retry doubles from migrateBackoff, 1+2+4+8 = 15 seconds
-// across five attempts, and each attempt can itself wait up to the 2s
-// lock_timeout for each table lock those four ask for: 0043's two, 0045's
-// one, 0046's three, taken before any of its work, and 0047's two, taken
-// first when it runs alone. After 0046 in the same run, 0047 can wait only for
-// the one on deleted_sessions, after 0046's work, files being held already.
-// So a conflict that outlasts all five fails the start after up to about 85
-// seconds, like any other migration error. Variables so a test can run the
-// schedule to exhaustion quickly (export_test.go).
+// transaction that met a lock conflict: a deadlock (40P01), or a lock_timeout
+// running out (55P03). The transaction has rolled back whole, so a retry
+// starts from the same schema. The wait before each retry doubles from
+// migrateBackoff, 1+2+4+8 = 15 seconds across five attempts, and each attempt
+// can itself wait up to 2s for each table lock its migrations ask for and the
+// run does not hold yet. A run of 0041-0047, an upgrade from the last release
+// before them, asks for ten: 0041's two on session_threads (its UPDATE's,
+// then its ALTER's), 0042's on deployment_runs and sessions, 0043's on
+// work_session_tokens, 0044's on memory_stores,
+// 0046's three, taken before any of its work, and 0047's on deleted_sessions;
+// 0043's sessions, 0045's session_threads and 0047's files are held already.
+// So a conflict that outlasts all five fails the start after about 115 seconds
+// of table-lock waits and backoff, like any other migration error — plus up to
+// 2s an attempt for each row 0041's or 0044's UPDATE finds another transaction
+// holding, plus the migrations' own work, which every attempt repeats up to
+// the lock it times out on (0046's index builds before 0047's lock, say):
+// lock_timeout bounds waiting for a lock, not a migration's run. Variables so
+// a test can run the schedule to exhaustion quickly (export_test.go).
 var (
+	migrateLockWait = 2 * time.Second
 	migrateAttempts = 5
 	migrateBackoff  = time.Second
 )
@@ -142,6 +159,16 @@ func migrateOnce(ctx context.Context, pool *pgxpool.Pool, through string) error 
 			sql, err := migrationsFS.ReadFile(name)
 			if err != nil {
 				return fmt.Errorf("store: read %s: %w", version, err)
+			}
+			// Laid before each migration rather than once a run: one that sets
+			// its own resets it TO DEFAULT, the connection's value, which bounds
+			// nothing unless configured. SET LOCAL, so it ends with the
+			// transaction instead of staying on a connection Open hands the
+			// application; and after the advisory lock, whose wait for another
+			// binary's run stays unbounded.
+			if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'",
+				migrateLockWait.Milliseconds())); err != nil {
+				return fmt.Errorf("store: bound %s's lock waits: %w", version, err)
 			}
 			if _, err := tx.Exec(ctx, string(sql)); err != nil {
 				return fmt.Errorf("store: apply %s: %w", version, err)

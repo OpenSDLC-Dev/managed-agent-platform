@@ -1427,6 +1427,201 @@ func TestMigrateGivesUpAfterItsAttempts(t *testing.T) {
 	}
 }
 
+// TestMigrateBoundsEveryMigrationsLockWait: a migration that sets no
+// lock_timeout of its own still gives up a lock it cannot have, and Migrate
+// retries it, instead of waiting on it — and queueing every later reader of
+// the table behind it — for as long as live traffic holds the table (#872).
+// 0041 and 0042 set none. 0044 sets none either, and runs after 0043, which
+// resets its own to the connection's default, unbounded here, so the bound
+// has to be laid again before each migration, not once per run. Each case
+// runs with the production bound.
+func TestMigrateBoundsEveryMigrationsLockWait(t *testing.T) {
+	for _, tc := range []struct {
+		name, from, through, hold string
+	}{
+		{"0041", "0040_primary_thread_unarchived.sql", "0041_primary_thread_unarchived_check.sql",
+			`LOCK TABLE session_threads IN ACCESS SHARE MODE`},
+		{"0042", "0041_primary_thread_unarchived_check.sql", "0042_deployment_runs_session_link.sql",
+			`LOCK TABLE deployment_runs IN ACCESS SHARE MODE`},
+		{"0044 after 0043", "0042_deployment_runs_session_link.sql", "0044_memory_stores_archived_updated_at.sql",
+			`LOCK TABLE memory_stores IN SHARE MODE`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			migrateBehindAHolder(t, tc.from, tc.through, tc.hold)
+		})
+	}
+}
+
+// migrateBehindAHolder migrates a fresh database through from, then has a
+// transaction take the lock hold names and runs the migrations after from
+// through through. The holder lets go only once Migrate has said it is
+// retrying, so a Migrate waiting on the holder instead fails the test.
+func migrateBehindAHolder(t *testing.T, from, through, hold string) {
+	t.Helper()
+	defer store.SetMigrateRetryForTest(5, 10*time.Millisecond)()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, from); err != nil {
+		t.Fatalf("migrate through %s: %v", from, err)
+	}
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(context.Background()) }()
+	if _, err := holder.Exec(ctx, hold); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags() // TestMigrateNamesTheDatabaseItChanges says why
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+
+	migrated := make(chan error, 1)
+	go func() { migrated <- store.MigrateThrough(ctx, pool, through) }()
+	for deadline := time.Now().Add(10 * time.Second); !strings.Contains(logs.String(), "retrying"); {
+		select {
+		case err := <-migrated:
+			t.Fatalf("Migrate returned %v before retrying the migration the held lock stopped; log: %s", err, logs.String())
+		case <-time.After(20 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-migrated // the goroutine reads the schedule the deferred restore writes
+			t.Fatalf("Migrate neither retried nor returned within 10s — it is waiting on the held lock; log: %s", logs.String())
+		}
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-migrated:
+		if err != nil {
+			t.Fatalf("Migrate after the holder let go = %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		cancel()
+		<-migrated
+		t.Fatal("Migrate did not finish within 30s of the holder letting go")
+	}
+	var applied bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, through).Scan(&applied); err != nil || !applied {
+		t.Errorf("%s applied = %v (%v), want true", through, applied, err)
+	}
+}
+
+// TestMigrateKeepsAMigrationsOwnLockTimeout: the default bound comes before a
+// migration's body, so a migration that sets its own keeps it (#872). 0043
+// sets 2s; with the default shortened far below that, a holder of 0043's
+// first table that lets go after half a second must not fail the only
+// attempt.
+func TestMigrateKeepsAMigrationsOwnLockTimeout(t *testing.T) {
+	defer store.SetMigrateRetryForTest(1, 10*time.Millisecond)()
+	defer store.SetMigrateLockWaitForTest(50 * time.Millisecond)()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := store.MigrateThrough(ctx, pool, "0042_deployment_runs_session_link.sql"); err != nil {
+		t.Fatalf("migrate through 0042: %v", err)
+	}
+	released := holdBriefly(t, pool, `LOCK TABLE work_session_tokens IN ACCESS SHARE MODE`)
+	if err := store.MigrateThrough(ctx, pool, "0043_work_session_tokens_unkeyed.sql"); err != nil {
+		t.Errorf("Migrate = %v; 0043's own 2s bound outlasts a half-second hold", err)
+	}
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMigrateWaitsOutAnotherMigrator: the bound is laid after the advisory
+// lock, so a binary starting while another migrates waits for it as long as
+// that run takes instead of giving up at the bound (#872). The holder keeps
+// the migration lock ten times the bound, and the one attempt must succeed.
+func TestMigrateWaitsOutAnotherMigrator(t *testing.T) {
+	defer store.SetMigrateRetryForTest(1, 10*time.Millisecond)()
+	defer store.SetMigrateLockWaitForTest(50 * time.Millisecond)()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	released := holdBriefly(t, pool, fmt.Sprintf(`SELECT pg_advisory_xact_lock(%d)`, store.MigrateLockID))
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Errorf("Migrate = %v; it must wait for another migrator however long that takes", err)
+	}
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMigrateLeavesThePoolsLockTimeoutAlone: the bound ends with the
+// migration transaction (#872). Open migrates on the pool it hands the
+// application, so a bound left on the connection would give every later
+// statement the migrator's lock_timeout.
+func TestMigrateLeavesThePoolsLockTimeoutAlone(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := pgxpool.ParseConfig(pgtest.FreshDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 1 // the connection Migrate used is the one asked afterwards
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var before, after string
+	if err := pool.QueryRow(ctx, `SHOW lock_timeout`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SHOW lock_timeout`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Errorf("lock_timeout after Migrate = %q, want the %q it was before", after, before)
+	}
+}
+
+// holdBriefly runs hold in a transaction of its own and rolls it back half a
+// second later, reporting the rollback's error on the channel it returns.
+func holdBriefly(t *testing.T, pool *pgxpool.Pool, hold string) <-chan error {
+	t.Helper()
+	ctx := context.Background()
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, hold); err != nil {
+		_ = holder.Rollback(ctx)
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		released <- holder.Rollback(ctx)
+	}()
+	return released
+}
+
 // syncBuffer is a bytes.Buffer safe for a log handler writing from one
 // goroutine while the test reads from another.
 type syncBuffer struct {
