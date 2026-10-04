@@ -445,7 +445,8 @@ helm install map deploy/helm/managed-agent-platform \
 ```
 
 **That build needs BuildKit, and `cloudbuild.yaml` now asks for it explicitly.** The
-Dockerfile's first line is `FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build`,
+Dockerfile's first `FROM` is
+`FROM --platform=$BUILDPLATFORM golang:1.26.8-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS modules`,
 and `BUILDPLATFORM` / `TARGETOS` / `TARGETARCH` are BuildKit-only variables. Under Cloud
 Build's classic builder they expand to the empty string and the daemon rejects the platform
 specifier outright — `failed to parse platform : "" is an invalid component of ""` — so

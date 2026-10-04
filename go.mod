@@ -2,6 +2,8 @@ module github.com/OpenSDLC-Dev/managed-agent-platform
 
 go 1.26.0
 
+toolchain go1.26.8
+
 require (
 	cloud.google.com/go/kms v1.33.0
 	cloud.google.com/go/storage v1.56.0

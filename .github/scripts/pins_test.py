@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Fail if a workflow runs an unpinned action, or keeps a credential it checked out with.
+"""Fail if a workflow runs an unpinned action, or keeps a credential it checked out with,
+or if CI and the release images could build with different Go.
 
 `.github/dependabot.yml` states the rule and the reason: the workflows pin every
 action to a commit SHA, because a retargeted `v4` runs attacker-chosen code in a
@@ -190,6 +191,45 @@ does not even refuse it. So: every geometry review has produced is refused bar
 that one, the residual is open, and what closes it is a real scanner or the next
 reviewer -- not another regex.
 
+THE GO TOOLCHAIN, the third pin, and the one that reaches past the workflows.
+CI and the release images used to build with different Go: every setup-go step
+read go.mod's `go 1.26.0` and installed exactly that, while the Dockerfile built
+on a floating minor tag and shipped whatever patch release was newest that day.
+So the stdlib fixes that shipped were never the ones CI tested, and the Go a
+release compiled with depended on the day it was built. go.mod's `toolchain
+go1.X.Y` line is now the one place the patch release is chosen, and this rung
+holds every other copy to it:
+
+  - go.mod carries exactly one `toolchain` line, naming a full release -- not a
+    minor version, which floats like a tag, and not a release candidate -- in
+    the one spelling setup-go reads (see TOOLCHAIN), which is narrower than Go's;
+  - every `actions/setup-go` step reads `go-version-file: go.mod` and names no
+    `go-version`, its key quoted or not, which setup-go would prefer. setup-go
+    (v6 on) installs the `toolchain` line's release over the `go` line's,
+    unless GOTOOLCHAIN is already `local` when the step runs -- so no workflow
+    may set GOTOOLCHAIN outside a comment. setup-go exports `local` itself
+    afterwards, which keeps the `go` commands after it on the Go it installed;
+  - every tagged reference to the official Go image anywhere in the working
+    tree -- a Dockerfile `FROM`, a YAML `image:`, a command in a `run:` step,
+    recipe or script, a sentence quoting one -- has that release as its tag's
+    version and carries an `@sha256:` digest. The digest fixes the image the
+    Go build starts from -- the toolchain only, since the runtime stages still
+    start from floating `debian:stable-slim` and install unversioned apt
+    packages; the tag is the half a reader and this rung can compare with
+    go.mod.
+
+So a bump changes go.mod's line, and this rung then names every reference still
+on the old release. What it cannot see: whether a digest IS its tag (the network
+again -- the digest to pin is the top-level one `docker buildx imagetools
+inspect` prints); Go from any image but the official one; the image named bare
+in a command (`docker run golang …`), where the word cannot be told from prose,
+though a tagged one is held anywhere; a second setup-go step in one job, which
+reads the `go` line because the first exported `local`; and a job running `go`
+with no setup-go at all, on the runner's own Go. Exempt are the
+four paths that record what WAS true, which a bump must not rewrite --
+CHANGELOG.md, changelog.d/, docs/changelog/ and docs/HISTORY.md -- and this file,
+whose fixtures are wrong on purpose.
+
 It self-tests before it scans, because a broken pattern and a clean repository
 print the same thing otherwise, and it refuses rather than skips: a line naming
 something that looks like an action, which this parser cannot place, stops the
@@ -301,6 +341,68 @@ LIST_ITEM = re.compile(r"^(?P<lead>[ \t]*-[ \t]+)")
 # and because a refusal names what to write instead.
 PERSIST_OK = "false"
 PERSIST_KEPT = "true"
+
+# The Go toolchain rung. See the docstring's GO TOOLCHAIN paragraphs.
+ROOT = WORKFLOWS.parents[1]
+
+# The second action whose inputs this guard reads, compared case-folded for
+# CHECKOUT's reason, and the one file it must read its Go from.
+SETUP_GO = "actions/setup-go"
+SETUP_GO_FILE = "go.mod"
+
+# Any input of a step, with its key -- plain, single- or double-quoted, all one
+# key to YAML. Keys are compared lowercased, because the runner reads
+# `Go-Version:` as the same input as `go-version:`. A setup-go input line this
+# cannot read stops the run: it could be the `go-version` setup-go prefers.
+NAMED_INPUT = re.compile(
+    r"^[ \t]*(?P<quote>[\"']?)(?P<key>[\w.-]+)(?P=quote)[ \t]*:[ \t]*(?P<value>.*?)[ \t]*$"
+)
+
+# go.mod's `toolchain` directive, strict and loose for USES_KEY's reason: a line
+# trying to be the directive in a shape the strict one cannot read is refused by
+# name rather than read as absent. The strict one is setup-go's own pattern
+# (installer.ts, parseGoVersionFile, at the pinned v7.0.0):
+#
+#     /^toolchain go(1\.\d+(?:\.\d+|rc\d+)?)/m
+#
+# -- one literal space, at the start of a line -- narrowed to a full release and
+# anchored at the end. Go itself also reads a tab, two spaces or an indent
+# there; setup-go does not, falls back to the `go` line, and exports
+# GOTOOLCHAIN=local, so CI would run the `go` line's release while this rung
+# compared images with the toolchain's. A minor version or a release candidate
+# is refused too: neither names one patch release, which is the whole pin.
+TOOLCHAIN = re.compile(r"^toolchain go(?P<version>1\.\d+\.\d+)(?:[ \t]+(?://.*)?)?$")
+TOOLCHAIN_CANDIDATE = re.compile(r"^[ \t]*toolchain\b")
+
+# A reference to the official Go image, anywhere in a line. The lookbehind keeps
+# module paths (`golang.org/x/…`, `google.golang.org/…`) and another registry's
+# image of the same name (`ghcr.io/acme/golang:…`) out; `docker.io/library/` is
+# the same image spelled long. `ref` runs to whitespace or to what closes a value
+# in YAML or prose. `golang:` with nothing after it is a word, not a reference.
+GOLANG_IMAGE = re.compile(
+    r"(?<![\w./-])(?:docker\.io/)?(?:library/)?golang(?P<ref>[:@][^\s\"'`()\[\]{},;]*)"
+)
+# Its two halves, read apart so a finding can name each that is wrong.
+GOLANG_REF = re.compile(r"^(?::(?P<tag>[^@]*))?(?:@(?P<digest>.*))?$")
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+# The image with no tag and no digest at all, which pulls `latest` -- only where
+# an image name stands (a Dockerfile `FROM`, a YAML `image:`), since a bare
+# `golang` anywhere else is a word. So a bare one in a COMMAND (`docker run
+# golang go build`, a `run:` step, a recipe, a script) is NOT caught: there the
+# word cannot be told from prose. A TAGGED one is caught wherever it stands,
+# commands included, by GOLANG_IMAGE.
+BARE_GOLANG = re.compile(
+    r"^[ \t]*(?:-[ \t]+)?(?:FROM[ \t]+(?:--\S+[ \t]+)*|image:[ \t]*[\"']?)"
+    r"(?:docker\.io/)?(?:library/)?golang(?:[\"']?[ \t]|[\"']?$)",
+    re.IGNORECASE,
+)
+
+# What the image rung does not read. History records what WAS true, and a bump
+# must not rewrite it; this file's fixtures are wrong on purpose. A directory
+# is written with its trailing `/`.
+GO_PIN_EXEMPT = ("CHANGELOG.md", "changelog.d/", "docs/changelog/", "docs/HISTORY.md",
+                 ".github/scripts/pins_test.py")
 
 
 class Reference:
@@ -735,21 +837,276 @@ def credential_violation(name, lines, body, ref):
     )
 
 
+def is_setup_go(ref):
+    """Is this reference the action whose Go version the toolchain rung reads?"""
+    m = REFERENCE.match(ref.value)
+    return bool(m) and m.group("action").lower() == SETUP_GO
+
+
+def setup_go_violation(name, lines, body, ref):
+    """Why this setup-go step would not install go.mod's toolchain, or None.
+
+    The step extent, `with:` block and input column are the checkout rung's,
+    and so are its refusals: a `with:` this scan cannot place stops the run.
+    """
+    if not is_setup_go(ref):
+        return None
+    start, end = step_extent(name, lines, body, ref)
+    block = with_block(name, lines, body, ref, start, end)
+    inputs = {}
+    for n in input_lines(lines, body, block, end, ref.column) if block is not None else []:
+        m = NAMED_INPUT.match(split_comment(lines[n])[0])
+        if not m:
+            raise SystemExit(
+                f"{name}:{n + 1}: this setup-go input is in a shape this guard"
+                " cannot read, and it could be the `go-version` setup-go prefers"
+                " to go.mod. Write it as `key: value`, or teach NAMED_INPUT the"
+                " new shape."
+            )
+        inputs[m.group("key").lower()] = m.group("value").strip("\"'")
+    if "go-version" in inputs:
+        return ("`actions/setup-go` names a `go-version` of its own, which it"
+                " prefers to any file — a second copy of the Go version, and one"
+                " go.mod's `toolchain` line no longer decides")
+    if inputs.get("go-version-file") != SETUP_GO_FILE:
+        return ("`actions/setup-go` does not read `go-version-file: go.mod`, so"
+                " this job's Go is not the `toolchain` release the release images"
+                " are built with")
+    return None
+
+
 def violations(name, lines):
     """One workflow's references, and every finding against them."""
     body = in_block_scalar(lines)
     refs = references(name, lines, body)
     found = []
     for ref in refs:
-        for why in (violation(ref), credential_violation(name, lines, body, ref)):
+        for why in (violation(ref), credential_violation(name, lines, body, ref),
+                    setup_go_violation(name, lines, body, ref)):
             if why is not None:
                 found.append((ref.line, why))
+    # Raw text inside a block scalar, the code half elsewhere: a comment
+    # mentioning the variable sets nothing, a shell line setting it does.
+    for n in range(len(lines)):
+        if "GOTOOLCHAIN" in code_of(lines, body, n):
+            found.append((n + 1, "this sets GOTOOLCHAIN. Set to `local` before"
+                          " setup-go runs, it makes setup-go install go.mod's `go`"
+                          " line instead of its `toolchain` line; set to anything"
+                          " after, it swaps out the Go setup-go installed. Either"
+                          " way CI stops testing the Go the release images build"
+                          " with"))
     return refs, found
 
 
 def scan(name, text):
     """One workflow's violations, as (line, why)."""
     return violations(name, text.splitlines())[1]
+
+
+def toolchain_version(text):
+    """go.mod's `toolchain` release (`1.26.8`), or a refusal saying why there is none."""
+    found = []
+    for n, line in enumerate(text.splitlines()):
+        if not TOOLCHAIN_CANDIDATE.match(line):
+            continue
+        m = TOOLCHAIN.match(line)
+        if not m:
+            raise SystemExit(
+                f"go.mod:{n + 1}: `{line}` is not one full Go release in the one"
+                " spelling setup-go reads -- `toolchain go1.X.Y`, one space, at"
+                " the start of the line. setup-go would fall back to the `go`"
+                " line, and nothing here could be held to it."
+            )
+        found.append(m.group("version"))
+    if len(found) != 1:
+        raise SystemExit(
+            f"go.mod names {len(found)} `toolchain` lines where it needs exactly"
+            " one: it is the one place the Go patch release CI and the release"
+            " images build with is chosen."
+        )
+    return found[0]
+
+
+def image_findings(version, text):
+    """The Go image references in one file's text, and (line, why) for each that slipped."""
+    refs, found = 0, []
+    for n, line in enumerate(text.splitlines()):
+        if BARE_GOLANG.match(line):
+            refs += 1
+            found.append((n + 1, "names the Go image with no tag and no digest, so"
+                          " it pulls whatever `latest` is that day"))
+        for m in GOLANG_IMAGE.finditer(line):
+            ref = m.group("ref").rstrip(".")
+            if ref == ":":
+                continue
+            refs += 1
+            parts = GOLANG_REF.match(ref)
+            tag, digest = parts.group("tag"), parts.group("digest")
+            why = []
+            if tag is None:
+                why.append("names no tag, so which Go it is cannot be read")
+            elif tag.split("-", 1)[0] != version:
+                why.append(f"is tagged `{tag}` where go.mod's `toolchain` line is"
+                           f" go{version}, so CI tests one Go and this names"
+                           " another")
+            if digest is None:
+                why.append("carries no `@sha256:` digest, so the tag can be"
+                           " re-pushed under it and the Go image a build starts"
+                           " from changes")
+            elif not DIGEST.match(digest):
+                why.append("carries a digest that is not `sha256:` and 64 lowercase"
+                           " hex")
+            if why:
+                found.append((n + 1, f"`golang{ref}` " + "; it ".join(why)))
+    return refs, found
+
+
+def exempt_from_go_pin(rel):
+    """Is this repository path one the image rung deliberately does not read?"""
+    return any(rel == e or (e.endswith("/") and rel.startswith(e)) for e in GO_PIN_EXEMPT)
+
+
+def go_pin_scan(version):
+    """Every Go image reference in the working tree, held to `version`.
+
+    The tree is what git tracks plus what it would track -- an untracked file is
+    work in progress, and a new Dockerfile is exactly what this must see before
+    it is added. A file holding a NUL byte is binary, as git itself judges it.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout
+    refs, files, found = 0, set(), []
+    for rel in sorted(set(p for p in listed.split("\0") if p)):
+        path = ROOT / rel
+        if exempt_from_go_pin(rel) or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if b"\0" in data:
+            continue
+        n, why = image_findings(version, data.decode("utf-8", "surrogateescape"))
+        if n:
+            refs += n
+            files.add(rel)
+        found.extend(f"{rel}:{line}: {reason}" for line, reason in why)
+    return refs, files, found
+
+
+def go_pin_selftest():
+    """The toolchain and image rows, which read go.mod and files rather than workflows."""
+    digest = "sha256:" + "a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d"
+    toolchain_ok = [
+        ("the directive", "module m\n\ngo 1.26.0\n\ntoolchain go1.26.8\n", "1.26.8"),
+        ("the directive with a comment", "go 1.26.0\ntoolchain go1.26.8 // pinned\n", "1.26.8"),
+        ("the directive with trailing space", "go 1.26.0\ntoolchain go1.26.8 \n", "1.26.8"),
+    ]
+    toolchain_refused = [
+        ("no directive at all, so setup-go reads the `go` line", "module m\n\ngo 1.26.0\n"),
+        ("a minor version, which floats like a tag", "go 1.26.0\ntoolchain go1.26\n"),
+        ("a release candidate", "go 1.26.0\ntoolchain go1.27rc1\n"),
+        ("the keyword Go treats as no pin", "go 1.26.0\ntoolchain default\n"),
+        ("two directives", "toolchain go1.26.8\ntoolchain go1.26.7\n"),
+        # Valid to Go, and NOT read by setup-go, whose pattern is
+        # /^toolchain go(1\.\d+(?:\.\d+|rc\d+)?)/m -- one literal space, at the
+        # start of the line. Missing it, setup-go falls back to the `go` line
+        # and exports GOTOOLCHAIN=local, so CI runs the `go` line's release.
+        ("two spaces, which setup-go does not read", "go 1.26.0\ntoolchain  go1.26.8\n"),
+        ("a tab, which setup-go does not read", "go 1.26.0\ntoolchain\tgo1.26.8\n"),
+        ("an indented directive, which setup-go does not read", "go 1.26.0\n toolchain go1.26.8\n"),
+        ("a release with junk after it", "go 1.26.0\ntoolchain go1.26.8x\n"),
+        ("a major version setup-go does not read", "go 1.26.0\ntoolchain go2.0.0\n"),
+    ]
+    must_flag = [
+        ("the floating tag the Dockerfile used to build on",
+         "FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS modules\n"),
+        ("the right tag with no digest",
+         "FROM golang:1.26.8-bookworm AS build\n"),
+        ("a digest under another patch release's tag",
+         f"FROM golang:1.26.7-bookworm@{digest} AS build\n"),
+        ("a newer patch release than go.mod's",
+         f"    image: golang:1.26.9-bookworm@{digest}\n"),
+        ("a release that merely starts with go.mod's",
+         f"FROM golang:1.26.80-bookworm@{digest}\n"),
+        ("a digest with no tag, whose Go cannot be read",
+         f"FROM golang@{digest}\n"),
+        ("a short digest", "FROM golang:1.26.8-bookworm@sha256:a688600c\n"),
+        ("an uppercase digest",
+         f"FROM golang:1.26.8-bookworm@sha256:{digest[7:].upper()}\n"),
+        ("the long spelling of the same image",
+         "FROM docker.io/library/golang:1.26-bookworm\n"),
+        ("a tag a variable fills in", "FROM golang:${GO_VERSION}-bookworm\n"),
+        ("latest, named", "FROM golang:latest\n"),
+        ("no tag at all, in a Dockerfile", "FROM golang AS build\n"),
+        ("no tag at all, in compose", "    image: golang\n"),
+        ("a floating tag quoted in prose", "the gate builds on `golang:1.26-bookworm`.\n"),
+        # In a command rather than a FROM: a workflow `run:`, a Makefile
+        # recipe, a script. Any tagged reference is held to the pin wherever
+        # it stands.
+        ("a floating tag in a docker run",
+         'docker run --rm -v "$PWD":/src -w /src golang:1.26 go build ./...\n'),
+        ("the right tag with no digest, in a recipe",
+         "\tdocker run --rm golang:1.26.8-bookworm go vet ./...\n"),
+        ("a floating tag in a workflow run step",
+         "      - run: docker run --rm golang:1.26 go build ./...\n"),
+        ("a floating tag in a variable",
+         "GO_IMAGE ?= golang:1.26-bookworm\n"),
+    ]
+    must_pass = [
+        ("the pin itself",
+         f"FROM --platform=$BUILDPLATFORM golang:1.26.8-bookworm@{digest} AS modules\n"),
+        ("the pin quoted in prose, closing a sentence",
+         f"which builds on `golang:1.26.8-bookworm@{digest}`.\n"),
+        ("the pin at a sentence's end, unquoted", f"from golang:1.26.8-bookworm@{digest}.\n"),
+        ("another variant of the same release", f"    image: golang:1.26.8-alpine@{digest}\n"),
+        ("the release with no variant", f"FROM golang:1.26.8@{digest}\n"),
+        ("module paths", "\tgolang.org/x/sync v0.1.0\n\tgoogle.golang.org/grpc v1.2.3\n"),
+        ("a proxy host", "proxy.golang.org, sum.golang.org\n"),
+        ("another registry's image of the same name", "FROM ghcr.io/acme/golang:1.20\n"),
+        ("the word", 'searchUse("golang")\n'),
+        ("the word and a colon", "golang: the language\n"),
+        ("the pin in a docker run", f"docker run --rm golang:1.26.8-bookworm@{digest} go version\n"),
+        # A blind spot kept on purpose, so widening BARE_GOLANG past image
+        # positions is a decision rather than an accident: in a command the
+        # bare word is indistinguishable from prose. See BARE_GOLANG.
+        ("a bare image name in a command, deliberately not caught",
+         "docker run --rm golang go version\n"),
+    ]
+
+    failures = []
+    for label, text, want in toolchain_ok:
+        try:
+            got = toolchain_version(text)
+            if got != want:
+                failures.append(f"MISREAD  {label}: read {got}, want {want}")
+        except SystemExit as e:
+            failures.append(f"REFUSED  {label}: expected {want}, got {e}")
+    for label, text in toolchain_refused:
+        try:
+            got = toolchain_version(text)
+            failures.append(f"ACCEPTED {label}: read {got}, expected a refusal")
+        except SystemExit:
+            pass
+    for label, text in must_flag:
+        n, found = image_findings("1.26.8", text)
+        if not n or not found:
+            failures.append(f"MISSED   {label}: {text.strip()}")
+    for label, text in must_pass:
+        _, found = image_findings("1.26.8", text)
+        if found:
+            failures.append(f"FLAGGED  {label}: {found}")
+    # Seeing what it passes, for the same reason as the workflow rungs: the pin
+    # must COUNT as a reference, or a pattern that matches nothing passes all.
+    n, _ = image_findings("1.26.8", must_pass[0][1])
+    if n != 1:
+        failures.append(f"COUNT    the pin itself read as {n} references")
+    for rel, want in (("CHANGELOG.md", True), ("docs/changelog/0.3.0.md", True),
+                      ("changelog.d/x.changed.md", True), ("docs/HISTORY.md", True),
+                      ("Dockerfile", False), ("docs/RELEASING.md", False),
+                      ("deploy/compose/docker-compose.yml", False)):
+        if exempt_from_go_pin(rel) != want:
+            failures.append(f"EXEMPT   {rel}: exempt is {not want}, want {want}")
+    return failures
 
 
 def selftest():
@@ -761,14 +1118,16 @@ def selftest():
     parser cannot place stops the run rather than leaving CI green over it.
     """
     step = "    steps:\n      - name: a step\n"
-    # Two real pins, so every row says which rung it is about. The input rung
-    # reads `actions/checkout` and nothing else, so a row about PIN shape names
-    # the other action: otherwise each would need a `with:` block it is not
-    # about, and a failure could not be attributed to one rung. Keep it that
-    # way -- swapping `other` back to checkout makes five rows fail for the
-    # wrong reason and teaches the next reader to distrust the suite.
+    # Three real pins, so every row says which rung it is about. The input
+    # rungs read `actions/checkout` and `actions/setup-go` and nothing else, so
+    # a row about PIN shape names a third action: otherwise each would need a
+    # `with:` block it is not about, and a failure could not be attributed to
+    # one rung. Keep it that way -- swapping `other` back to either of the two
+    # makes five rows fail for the wrong reason and teaches the next reader to
+    # distrust the suite.
     pin = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
-    other = "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0"
+    setup_go = "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0"
+    other = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
     must_flag = [
         ("a mutable major tag, list-item form",
          "      - uses: actions/checkout@v4\n"),
@@ -832,6 +1191,36 @@ def selftest():
          "          persist-credentials: false\n"),
         ("a spelling of the action that resolves to the same action",
          "      - uses: Actions/Checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
+        # The Go toolchain rung's workflow half. Every row is pinned and checks
+        # nothing out, so only that rung can fire on it.
+        ("a setup-go step that names no Go at all",
+         f"      - uses: {setup_go}\n"),
+        ("a setup-go step with a version of its own, a second copy of the pin",
+         f"      - uses: {setup_go}\n        with:\n          go-version: '1.26'\n"),
+        ("a setup-go step reading some other file",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.work\n"),
+        ("a setup-go step naming a version beside go.mod, which setup-go prefers",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
+         "          go-version: 1.26.8\n"),
+        ("the same, spelled in another case, which the runner reads as one input",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
+         "          Go-Version: 1.26.8\n"),
+        # The same key quoted, which is the same key to YAML: setup-go then
+        # prefers the version it names, and a scan reading only plain keys
+        # walks past it. Unquoted is the row two above.
+        ("the version key double-quoted, beside go.mod",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
+         '          "go-version": 1.26.0\n'),
+        ("the version key single-quoted, beside go.mod",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
+         "          'go-version': 1.26.0\n"),
+        ("a job that sets GOTOOLCHAIN, so setup-go reads the `go` line instead",
+         "    env:\n      GOTOOLCHAIN: local\n    steps:\n"
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"),
+        ("a command that swaps the Go setup-go installed",
+         "      - run: GOTOOLCHAIN=go1.27.0 make build\n"),
+        ("the same inside a block scalar",
+         "      - run: |\n          export GOTOOLCHAIN=auto\n"),
     ]
     must_pass = [
         ("a pinned action, list-item form",
@@ -839,7 +1228,7 @@ def selftest():
         ("a pinned action, keyed form",
          step + "        uses: anthropics/claude-code-action@fa2b2666b747000bf42767d1f332065b375e3c8f # v1.0.214\n"),
         ("a pinned action, quoted",
-         '      - uses: "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e" # v7.0.0\n'),
+         '      - uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" # v7.0.1\n'),
         ("a release comment with prose after it",
          f"      - uses: {other}, see #96\n"),
         ("a remote reusable workflow, which pins like an action",
@@ -885,10 +1274,20 @@ def selftest():
         ("the explanation above the step, where four workflows write it",
          "      # persist-credentials: false because nothing here pushes.\n"
          f"      - uses: {pin}\n        with:\n          persist-credentials: false\n"),
-        ("another action's `with:`, which this rung has no business in",
-         f"      - uses: {other}\n        with:\n          go-version-file: go.mod\n"),
+        ("another action's `with:`, which neither input rung has any business in",
+         f"      - uses: {other}\n        with:\n          path: coverage.out\n"),
         ("a quoted value, which is the same value",
          f"      - uses: {pin}\n        with:\n          persist-credentials: 'false'\n"),
+        ("a setup-go step reading go.mod, which is every one in this repository",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"),
+        ("the same with another input beside it, keyed form, quoted",
+         step + f"        uses: {setup_go}\n        with:\n          cache: false\n"
+         "          go-version-file: 'go.mod'\n"),
+        ("the file key quoted, which is the same input",
+         f"      - uses: {setup_go}\n        with:\n          \"go-version-file\": go.mod\n"),
+        ("GOTOOLCHAIN in a comment, which sets nothing",
+         "      # setup-go exports GOTOOLCHAIN=local itself.\n"
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"),
     ]
     # Shapes that must stop the run rather than pass or be counted. Each was a
     # way for a reference to go unchecked while the scan still printed `ok`.
@@ -1012,6 +1411,9 @@ def selftest():
          '        name: "1\n'
          "        with:\n"
          '          persist-credentials: false"\n'),
+        ("a setup-go input this scan cannot read, which could be the version",
+         f"      - uses: {setup_go}\n        with:\n          go-version-file: go.mod\n"
+         "          ? go-version\n          : 1.26.0\n"),
         ("a key this scan cannot read, carrying a value it therefore cannot see",
          f"      - uses: {pin}\n        with:\n          ssh-key:\n"
          '            a b: "1\n'
@@ -1055,7 +1457,12 @@ def selftest():
                  if is_checkout(r)]
     if len(checkouts) != 1:
         failures.append(f"COUNT    a single checkout step read as {len(checkouts)}")
-    return failures
+    lines = f"      - uses: {setup_go}\n".splitlines()
+    setups = [r for r in references("selftest.yml", lines, in_block_scalar(lines))
+              if is_setup_go(r)]
+    if len(setups) != 1:
+        failures.append(f"COUNT    a single setup-go step read as {len(setups)}")
+    return failures + go_pin_selftest()
 
 
 def workflows():
@@ -1104,12 +1511,13 @@ def main():
               "for the wrong reason")
         return 1
 
-    found, checked, checkouts = [], 0, 0
+    found, checked, checkouts, setups = [], 0, 0, 0
     for path in paths:
         lines = path.read_text(encoding="utf-8").splitlines()
         refs, why = violations(path.name, lines)
         checked += len(refs)
         checkouts += sum(1 for ref in refs if is_checkout(ref))
+        setups += sum(1 for ref in refs if is_setup_go(ref))
         found.extend(f"{path.name}:{line}: {reason}" for line, reason in why)
     if not checked:
         print(f"{len(paths)} workflows and not one `uses:` between them — this "
@@ -1119,10 +1527,24 @@ def main():
         print(f"{len(paths)} workflows and not one `actions/checkout` between "
               "them — the input rung read nothing and would print `ok` forever")
         return 1
+    if not setups:
+        print(f"{len(paths)} workflows and not one `actions/setup-go` between "
+              "them — the toolchain rung read nothing and would print `ok` forever")
+        return 1
+
+    version = toolchain_version((ROOT / "go.mod").read_text(encoding="utf-8"))
+    images, files, slipped = go_pin_scan(version)
+    found.extend(slipped)
+    # The release images are what this rung exists for, so a scan that found no
+    # Go image in the Dockerfile read something other than this repository.
+    if "Dockerfile" not in files:
+        print("no Go image reference in the Dockerfile — the image rung read "
+              "something other than the release build and would print `ok` forever")
+        return 1
     if found:
-        print("a workflow breaks one of the two rules this guard holds — an "
-              "action running from a ref that can be moved onto other code, or a "
-              "checkout leaving its credential behind:")
+        print("a pin this guard holds has slipped — an action running from a ref "
+              "that can be moved onto other code, a checkout leaving its credential "
+              f"behind, or a Go other than go.mod's `toolchain` go{version}:")
         for f in found:
             print(f"  {f}")
         return 1
@@ -1130,6 +1552,9 @@ def main():
     # fewer references still prints `ok`, and only these numbers say over what.
     print(f"ok: {checked} `uses:` across {len(paths)} workflows, every one pinned; "
           f"{checkouts} of them check out, every one dropping the credential")
+    print(f"ok: go.mod's toolchain is go{version}; {setups} setup-go steps read it, "
+          f"and {images} Go image references across {len(files)} files name it "
+          "by digest")
     return 0
 
 
