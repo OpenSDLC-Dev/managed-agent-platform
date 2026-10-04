@@ -39,6 +39,11 @@ const defaultAnthropicVersion = "2023-06-01"
 // is still read to its end.
 var writeStall = time.Minute
 
+// maxHeld bounds the keep-alives held back before a stream's answer begins:
+// past it the stream is committed to, so an upstream that pings and never
+// answers costs the gateway no more than this.
+const maxHeld = 64 << 10
+
 // bounded sets the write bound for what follows. It is not lifted when the
 // handler returns: the response's last bytes — all of a small one, which
 // net/http buffers to give it a Content-Length — are written after that, and
@@ -308,17 +313,19 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		return &failure{status: s, header: resp.Header, body: redactJSON(red, b)}, retryable(s, resp.Header)
 	}
 	if c.stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		// The answer begins with the first event that is not a keep-alive;
-		// until then the caller has seen nothing and the upstream may yet
-		// refuse, as an error event, which is answered like any refusal.
+		// The answer begins with the first event that is not a keep-alive (a
+		// comment or a ping); until then the caller has seen nothing and the
+		// upstream may yet refuse, as an error event, which is answered like
+		// any refusal. Keep-alives past maxHeld begin it anyway.
 		events := upstream.NewReader(resp.Body)
 		var held []byte
 		for {
 			e, err := events.Next()
+			keepAlive := e.Name == "ping" || e.Name == "" && e.Data == nil
 			switch {
 			case err != nil:
 				return noAnswer(guard, red, err)
-			case e.Name == "" && e.Data == nil:
+			case keepAlive && len(held)+len(e.Raw) <= maxHeld:
 				held = append(held, e.Raw...)
 			case e.Name == "error":
 				return streamError(ctx, at, e.Data, red)

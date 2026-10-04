@@ -41,7 +41,7 @@ func TestAStreamThatOpensWithAnErrorFallsBack(t *testing.T) {
 			sse(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"vendor_busy\",\"message\":\"busy\"}}\n\n")
 			return
 		}
-		sse(w, ": ping\n\n", overloadedEvent)
+		sse(w, ": ping\n\n", "event: ping\ndata: {\"type\":\"ping\"}\n\n", overloadedEvent)
 	})
 	backup := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
 		sse(w, append([]string{": warming\n\n"}, events(c.Model, "from backup")...)...)
@@ -77,6 +77,29 @@ func TestAStreamThatOpensWithAnErrorFallsBack(t *testing.T) {
 	resp, b = e.do("POST", "/v1/messages", `{"model":"odd","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
 	if typ, _, _ := errorOf(t, b); resp.StatusCode != 500 || typ != "vendor_busy" {
 		t.Errorf("unknown type: %d %s", resp.StatusCode, b)
+	}
+}
+
+// Keep-alives are held back only so far: past the bound the stream is
+// committed to, so an upstream that pings without answering costs bounded
+// memory, and a refusal after that reaches the caller as an error event.
+func TestHeldKeepAlivesAreBounded(t *testing.T) {
+	e := newEnv(t)
+	pad := ": " + strings.Repeat("x", 1000) + "\n\n"
+	primary := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
+		sse(w, strings.Repeat(pad, 70), overloadedEvent)
+	})
+	backup := newFake(t, message("from backup"))
+	pp := e.provider(primary.URL)
+	e.credential(pp, "sk-primary-1", 1)
+	bp := e.provider(backup.URL)
+	e.credential(bp, "sk-backup-1", 1)
+	e.alias("fast", target(e.deployment(pp, "m"), 0), target(e.deployment(bp, "m"), 1))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+	if got := string(b); resp.StatusCode != 200 || !strings.HasPrefix(got, pad) || !strings.Contains(got, "event: error") || !strings.Contains(got, "overloaded_error") || len(backup.recorded()) != 0 {
+		t.Errorf("%d, %d bytes, backup called %d times", resp.StatusCode, len(b), len(backup.recorded()))
 	}
 }
 
