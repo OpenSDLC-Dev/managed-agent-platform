@@ -139,7 +139,8 @@ func TestBackendScriptsAnswerThroughAnImageHook(t *testing.T) {
 // one package's image from a kind node — crictl removes an image by its ID,
 // every tag with it — would take the others' out from under their running
 // pods. A package that finished, its image removed from the daemon and the
-// nodes, leaves another package's image working on both backends.
+// nodes — its tag and its import record both — leaves another package's image
+// working on both backends.
 func TestHookedImagesOfParallelPackagesAreTheirOwn(t *testing.T) {
 	kept := hookedtest.Backends(t)
 	id := func(image string) string {
@@ -149,11 +150,22 @@ func TestHookedImagesOfParallelPackagesAreTheirOwn(t *testing.T) {
 		}
 		return strings.TrimSpace(string(out))
 	}
+	var finished string
 	t.Run("a package that finished", func(t *testing.T) {
-		if other := hookedtest.Backends(t)[0].Image; id(other) == id(kept[0].Image) {
-			t.Errorf("two builds made one image, %s", id(other))
+		finished = hookedtest.Backends(t)[0].Image
+		if id(finished) == id(kept[0].Image) {
+			t.Errorf("two builds made one image, %s", id(finished))
 		}
 	})
+	// What the finished package loaded onto the kind nodes is gone — its tag
+	// and the import record `kind load` leaves beside it — and what the
+	// running one loaded is all there.
+	if refs := hookedtest.KindRefs(t, finished); len(refs) > 0 {
+		t.Errorf("a finished package's image left %v on the kind nodes", refs)
+	}
+	if refs := hookedtest.KindRefs(t, kept[0].Image); refs != nil && len(refs) < 2 {
+		t.Errorf("a running package's image is held on the kind nodes as %v, want its tag and its import record", refs)
+	}
 	for _, b := range kept {
 		sb, _ := b.Provision(t, sandbox.Hardening{})
 		if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "echo ok", Timeout: 30 * time.Second}); err != nil ||

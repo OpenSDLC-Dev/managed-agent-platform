@@ -8,7 +8,7 @@
 //
 // A missing daemon or cluster is a hard failure, as it is for the backends'
 // own contract tests. On a kind cluster the image is loaded into its nodes and
-// removed from them afterwards (sandboxtest.LoadIntoKind, RemoveFromKind); a
+// removed from them afterwards (sandboxtest.LoadIntoKind, KindLoad.Remove); a
 // cluster that shares the Docker daemon's image store (Docker Desktop's) needs
 // neither.
 package hookedtest
@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
@@ -77,11 +78,26 @@ func BackendsFor(t *testing.T, hook string) []Backend {
 func Image(t *testing.T, hook string) string {
 	t.Helper()
 	image := DockerImage(t, hook)
-	host := []string{"--host", docker.DaemonHost()}
-	if cluster := sandboxtest.LoadIntoKind(t, sandboxtest.KubeContext(t), image, host...); cluster != "" {
-		t.Cleanup(func() { sandboxtest.RemoveFromKind(t, cluster, image, host...) })
+	if l := sandboxtest.LoadIntoKind(t, sandboxtest.KubeContext(t), image, "--host", docker.DaemonHost()); l != nil {
+		loads.Store(image, l)
+		t.Cleanup(func() { l.Remove(t) })
 	}
 	return image
+}
+
+// loads is the kind loads Image made, by image (KindRefs).
+var loads sync.Map
+
+// KindRefs is every image reference the kind cluster's nodes hold of an image
+// Image built — none once the test that built it is done — or nil where the
+// cluster is not kind's.
+func KindRefs(t *testing.T, image string) []string {
+	t.Helper()
+	l, ok := loads.Load(image)
+	if !ok {
+		return nil
+	}
+	return l.(*sandboxtest.KindLoad).Refs(t)
 }
 
 // DockerImage is Image on the Docker daemon alone, for a test of the Docker
