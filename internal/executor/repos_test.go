@@ -217,6 +217,77 @@ func TestRepoIdempotenceAndTamper(t *testing.T) {
 	}
 }
 
+// TestRepoUnansweredProbeKeepsTheCheckout: a presence probe that does not
+// answer — its answer an image's startup pushed out of the output
+// (sandbox.StartupOutputError) — says nothing of whether the checkout has
+// gone. Taken for "gone", it re-cloned on every pass, and the clone's rm -rf
+// of the mount took the agent's work with it (#860); the checkout stays.
+func TestRepoUnansweredProbeKeepsTheCheckout(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("this test requires Docker: %v", err)
+	}
+	flooding := &floodingProvider{Provider: provider}
+	h := newHarnessWith(t, flooding, Config{Image: testImage})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+	h.seedRepoResource(t, "sesrsc_flood", fx.url(), repoMount, "ghp_fixture", nil)
+
+	h.runPass(t)
+	after := fx.clones.Load()
+	if after == 0 {
+		t.Fatal("the first pass did not clone")
+	}
+	sb := adopt(t, provider, h)
+	if _, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+		Command: "echo mine > " + shellQuote(repoMount+"/agent.txt")}); err != nil {
+		t.Fatalf("write the agent's file: %v", err)
+	}
+
+	flooding.probe.Store(true)
+	h.runPass(t)
+	if got := fx.clones.Load(); got != after {
+		t.Errorf("clones = %d, want %d — a probe that did not answer re-cloned", got, after)
+	}
+	if got := readSandboxFile(t, sb, repoMount+"/agent.txt"); got != "mine\n" {
+		t.Errorf("agent.txt = %q, want the agent's work kept", got)
+	}
+}
+
+// floodingProvider hands out its sandboxes with their presence probe's
+// answer pushed out of the output, as an image's startup that prints past
+// the cap does on Kubernetes (sandbox.StartupOutputError), once probe is set.
+type floodingProvider struct {
+	sandbox.Provider
+	probe atomic.Bool
+}
+
+func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
+	sb, err := p.Provider.Provision(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return &floodingSandbox{Sandbox: sb, probe: &p.probe}, nil
+}
+
+type floodingSandbox struct {
+	sandbox.Sandbox
+	probe *atomic.Bool
+}
+
+func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if s.probe.Load() && strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"test -e ") {
+		_, _ = s.Sandbox.Exec(ctx, req)
+		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	}
+	return s.Sandbox.Exec(ctx, req)
+}
+
 // TestRepoMetacharMountPath is m-metachar-mount 🔍: a mount path carrying a
 // space and a single quote materializes at that literal path, and the shell
 // injection the same characters would allow does not happen.
@@ -762,7 +833,7 @@ func (s *sweepSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandb
 		return sandbox.ExecResult{}, err
 	}
 	s.mu.Lock()
-	s.cmds = append(s.cmds, req.Command)
+	s.cmds = append(s.cmds, strings.TrimPrefix(req.Command, sandbox.ScriptPreamble))
 	s.mu.Unlock()
 	return s.fakeSandbox.Exec(ctx, req)
 }

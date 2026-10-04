@@ -28,6 +28,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -36,7 +37,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	os.Exit(pgtest.Main(m))
+	// The backstop for a fake sandbox no harness reports: an unscripted
+	// platform exec anywhere in the package fails the run.
+	os.Exit(sandboxtest.Main(m, pgtest.Main))
 }
 
 // fakeSandbox is an in-memory sandbox. The executor tests drive read/write
@@ -109,10 +112,56 @@ type fakeSandbox struct {
 	// modes records the Mode each WriteFiles member asked for, by path — the
 	// fake lands no permission bits, so this is where a test reads them.
 	modes map[string]fs.FileMode
+	// unframed answers a framed platform script (sandbox.ExecFramed) bare, as
+	// a sandbox whose output never carried the script's frame — a shell that
+	// died first, or a startup that filled the output cap before it.
+	unframed bool
+	// unframedNext answers that many of the next framed scripts bare, and
+	// frames the rest: a listing that lost its frame once.
+	unframedNext int
+	// unscripted records every exec that was neither a platform script with
+	// its preamble, nor a framed one, nor the bash tool's (sandboxtest.Scripted):
+	// Exec refuses it, and newHarnessWith fails the test on it (TestMain the
+	// package, for a fake no harness holds), so a platform exec that lost its
+	// preamble fails here rather than under an image's errexit.
+	unscripted sandboxtest.ExecLedger
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
-func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+
+// Exec answers a framed platform script (sandbox.ExecFramed) as its script —
+// recorded, hooked and answered bare — and frames the answer as the script's
+// run would have printed it, unless unframed says the frame never arrived.
+func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// The bound every backend applies before it runs anything: a command past
+	// it is refused, an error the caller must not reach.
+	if err := sandbox.CheckCommand(req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
+	// A platform script opens with the preamble every one carries
+	// (sandbox.Script), which the fake answers past — once it has checked
+	// it is there.
+	if err := sandboxtest.RefuseUnscripted(&f.unscripted, req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
+	req.Command = strings.TrimPrefix(req.Command, sandbox.ScriptPreamble)
+	script, frame, framed := sandboxtest.Unwrap(req.Command)
+	if !framed {
+		return f.exec(ctx, req)
+	}
+	req.Command = script
+	res, err := f.exec(ctx, req)
+	if err != nil || f.unframed {
+		return res, err
+	}
+	if f.unframedNext > 0 {
+		f.unframedNext--
+		return res, nil
+	}
+	return sandboxtest.Framed(frame, res), nil
+}
+
+func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	f.cmds = append(f.cmds, req.Command)
 	f.execTimeouts = append(f.execTimeouts, req.Timeout)
 	if f.execErr != nil && (f.execErrOn == "" || strings.Contains(req.Command, f.execErrOn)) {
@@ -549,6 +598,14 @@ func newHarness(t *testing.T, sb *fakeSandbox) *harness {
 // session to running, and wires an executor over the given provider and config.
 func newHarnessWith(t *testing.T, provider sandbox.Provider, cfg Config) *harness {
 	t.Helper()
+	if fp, ok := provider.(*fakeProvider); ok {
+		t.Cleanup(func() {
+			if fp.sb == nil {
+				return
+			}
+			fp.sb.unscripted.Report(t)
+		})
+	}
 	pool := pgtest.NewPool(t)
 	// The executor is the cloud hands: it only claims tool_exec work for cloud
 	// environments (self_hosted work is served by a BYOC worker via Poll).
@@ -866,6 +923,45 @@ func TestReclaimReRunsOnlyUnanswered(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
 		t.Errorf("model_turn = %d, want 1", got)
+	}
+}
+
+// A bash command whose exit record the image's startup pushed out of the
+// output (sandbox.StartupOutputError) ran, and every retry meets the same: so
+// it is one tool error saying so, committed — not a fault, whose reclaim would
+// run the command again, forever.
+func TestAStartupFloodIsOneToolErrorNotAReclaim(t *testing.T) {
+	sb := &fakeSandbox{execErr: &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}}
+	h := newHarness(t, sb)
+	var faults int
+	h.exec.onFault = func(*queue.Item, error) { faults++ }
+	bash, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": "make deploy"}})
+	h.suspend(t, string(bash))
+	h.stepOnce(t)
+
+	if faults != 0 {
+		t.Errorf("faults = %d, want 0", faults)
+	}
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 1 {
+		t.Fatalf("tool results = %d, want 1", len(results))
+	}
+	var body struct {
+		IsError bool `json:"is_error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(results[0].Body, &body)
+	if !body.IsError || len(body.Content) == 0 || !strings.Contains(body.Content[0].Text, "startup file") ||
+		!strings.Contains(body.Content[0].Text, "The command ran") {
+		t.Errorf("tool result = %+v, want an error naming the image's startup and saying the command ran", body)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec live = %d, want 0: nothing left to reclaim", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn = %d, want 1: the model reads the error", got)
 	}
 }
 

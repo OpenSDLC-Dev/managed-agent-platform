@@ -471,6 +471,71 @@ func TestMemoryPullOnlyStores(t *testing.T) {
 	}
 }
 
+// TestMemoryUnframedListingVouchesForNothing: the tree listing is read only
+// from inside its frame (sandbox.ExecFramed), and one whose output never
+// carried the frame — a shell that died first, a startup that filled the
+// output cap — says nothing of the directory. The store is not landed over
+// it, as over a directory whose listing failed, under a warning that says why,
+// and the run's end does not sync it: what the agent wrote there is not
+// pushed. Once the listing answers again, the store lands.
+func TestMemoryUnframedListingVouchesForNothing(t *testing.T) {
+	warnings := captureWarnings(t)
+	sb := &fakeSandbox{unframed: true}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token, writeUse(memMount+"/log/b.md", "hello"))
+	if _, ok := sb.files[memMount+"/"+memsync.MarkerName]; ok {
+		t.Error("the store was landed over a directory whose listing never carried its frame")
+	}
+	if _, ok := h.memoryContent(t, memStoreID, "/log/b.md"); ok {
+		t.Error("a store whose listing never carried its frame was pushed to")
+	}
+	// Its log says the listing did not answer, not that the directory holds
+	// files, which nothing showed.
+	if w := warnings(); !strings.Contains(w, "listing did not answer") || strings.Contains(w, "holds files but no trusted marker") {
+		t.Errorf("warnings:\n%s\nwant the listing's own reason, and not the untrusted directory's", w)
+	}
+	sb.unframed = false
+	delete(sb.files, memMount+"/log/b.md")
+	h.runWith(t, token)
+	if got := sb.files[memMount+"/facts/a.md"]; got != "alpha" {
+		t.Errorf("landed memory = %q once the listing answered, want alpha", got)
+	}
+}
+
+// TestAStoreWhoseListingLostItsFrameLandsNextRun: a materialize whose listing
+// did not answer lands nothing and holds nothing, and the run's sync leaves
+// the store alone, so the directory is not filled with files no marker vouches
+// for. The next run lands it, trusted: an edit the agent makes is pushed.
+func TestAStoreWhoseListingLostItsFrameLandsNextRun(t *testing.T) {
+	sb := &fakeSandbox{unframedNext: 1}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token)
+	for _, p := range []string{memMount + "/" + memsync.MarkerName, memMount + "/notes.md", baselinePath(memStoreID)} {
+		if _, ok := sb.files[p]; ok {
+			t.Errorf("%s was written in the run whose listing did not answer", p)
+		}
+	}
+	h.runWith(t, token)
+	if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Fatalf("marker = %q after the next run, want the store landed", got)
+	}
+	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+		t.Errorf("notes.md = %q, want hello", got)
+	}
+	h.runWith(t, token, writeUse(memMount+"/edit.md", "the agent's"))
+	if got, ok := h.memoryContent(t, memStoreID, "/edit.md"); !ok || got != "the agent's" {
+		t.Errorf("an edit in the landed store = %q, %v; want it pushed, the directory trusted", got, ok)
+	}
+}
+
 // TestMemoryStoreRefusalsOverTheWire: the occupancy 409 on a create removes
 // the file the store's memory is in the way of; the 2,000 cap's 400 is the
 // store's state, refused but not remembered (so a retry lands once room is

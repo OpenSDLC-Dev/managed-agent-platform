@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,8 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/k8s"
 )
 
 // testImage matches the sandbox contract: /bin/bash at that path plus a POSIX
@@ -80,6 +83,64 @@ func TestClosedLoopRealSandbox(t *testing.T) {
 	}
 }
 
+// TestAStartupFloodIsOneToolErrorRealSandbox drives the bash tool through a
+// real Kubernetes pod whose image's startup file prints 1.2 MB in every shell,
+// past the output cap: the command runs, its exit record is pushed out of the
+// output (sandbox.StartupOutputError), and the item commits one tool error
+// saying so and schedules the model — no fault, so no reclaim to run the
+// command again, forever (#860). A missing cluster is a hard failure.
+func TestAStartupFloodIsOneToolErrorRealSandbox(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{Context: os.Getenv("MAP_K8S_CONTEXT"), Namespace: os.Getenv("MAP_K8S_NAMESPACE")})
+	if err != nil {
+		t.Fatalf("integration test requires a Kubernetes cluster: %v", err)
+	}
+	image := hookedtest.Image(t, "yes | head -c 1200000\n")
+	h := newHarnessWith(t, provider, Config{Image: image})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+	var faults []error
+	h.exec.onFault = func(_ *queue.Item, err error) { faults = append(faults, err) }
+	bash, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{"command": "echo ran > /tmp/ran"},
+	})
+	h.suspend(t, string(bash))
+
+	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
+		t.Fatalf("step = %v, %v; want one item worked", worked, err)
+	}
+	if len(faults) != 0 {
+		t.Fatalf("faults = %v, want none", faults)
+	}
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	var body struct {
+		IsError bool `json:"is_error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(results[0].Body, &body)
+	if !body.IsError || len(body.Content) == 0 || !strings.HasPrefix(body.Content[0].Text, "bash: the command's exit record did not reach the output") ||
+		!strings.Contains(body.Content[0].Text, "The command ran") {
+		t.Errorf("result = %+v, want the bash tool's error naming the image's startup", body)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec live = %d, want 0: nothing left to reclaim", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn = %d, want 1 (resume)", got)
+	}
+	if worked, err := h.exec.step(context.Background()); err != nil || worked {
+		t.Errorf("a second step = %v, %v; want no work", worked, err)
+	}
+}
+
 // TestHarvestRealSandbox is plan 21's Decision 8 verify line at the executor
 // level: a file the agent's bash tool writes under /mnt/session/outputs/ in a
 // real Docker container ends up in the files registry, its blob byte-identical
@@ -137,6 +198,98 @@ func TestHarvestRealSandbox(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
 		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
+	}
+}
+
+// TestHarvestUnderAStartupFloodRealSandbox runs a grading harvest on a real
+// sandbox of each backend whose image's startup file prints 1.2 MB in every
+// shell, past the output cap: the listing is pushed out — on Kubernetes with
+// the exec's exit record, on Docker as a stdout the cap cut before any begin
+// line — and the harvest settles as one that read no sandbox, grading chained
+// and the item completed, rather than faulting into a reclaim that meets the
+// same, forever (#860).
+func TestHarvestUnderAStartupFloodRealSandbox(t *testing.T) {
+	image := hookedtest.Image(t, "yes | head -c 1200000\n")
+	dp, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
+	kp, err := k8s.New(k8s.Config{Context: os.Getenv("MAP_K8S_CONTEXT"), Namespace: os.Getenv("MAP_K8S_NAMESPACE")})
+	if err != nil {
+		t.Fatalf("integration test requires a Kubernetes cluster: %v", err)
+	}
+	for _, b := range []struct {
+		name     string
+		provider sandbox.Provider
+	}{{"docker", dp}, {"k8s", kp}} {
+		t.Run(b.name, func(t *testing.T) {
+			h := newHarnessWith(t, b.provider, Config{Image: image})
+			t.Cleanup(func() {
+				sb, err := b.provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+				if err == nil {
+					_ = sb.Destroy(context.Background())
+				}
+			})
+			var faults []error
+			h.exec.onFault = func(_ *queue.Item, err error) { faults = append(faults, err) }
+			h.seedOutcome(t, domain.OutcomeResultEvaluating)
+			h.enqueueHarvest(t)
+			h.stepOnce(t)
+
+			if len(faults) != 0 {
+				t.Fatalf("faults = %v, want none", faults)
+			}
+			if rows := h.fileRows(t); len(rows) != 0 {
+				t.Errorf("rows = %+v, want none", rows)
+			}
+			if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+				t.Errorf("model_turn live = %d, want 1 (grading chained)", got)
+			}
+			if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+				t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
+			}
+		})
+	}
+}
+
+// TestFilesUnderAStartupFloodRealSandbox mounts a file into a real Kubernetes
+// pod whose image's startup prints 1.2 MB in every shell: the first pass lands
+// it (the sentinel says nothing has yet), and on the next, whose presence probe
+// the startup pushes out of the output (sandbox.StartupOutputError), the
+// agent's edit to the mount stays rather than being re-streamed over (#860).
+func TestFilesUnderAStartupFloodRealSandbox(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{Context: os.Getenv("MAP_K8S_CONTEXT"), Namespace: os.Getenv("MAP_K8S_NAMESPACE")})
+	if err != nil {
+		t.Fatalf("integration test requires a Kubernetes cluster: %v", err)
+	}
+	image := hookedtest.Image(t, "yes | head -c 1200000\n")
+	h := newHarnessWith(t, provider, Config{Image: image})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+	const mount = "/mnt/session/uploads/flood.txt"
+	h.seedFile(t, "file_flood", "as uploaded")
+	h.refFiles(t, [2]string{"file_flood", mount})
+	h.suspend(t, writeUse("a.txt", "x"))
+	h.stepOnce(t)
+
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+	if err != nil {
+		t.Fatalf("adopt the sandbox: %v", err)
+	}
+	if got, err := sb.ReadFile(context.Background(), mount); err != nil || string(got) != "as uploaded" {
+		t.Fatalf("first pass mount = %q, %v; want it landed", got, err)
+	}
+	if err := sb.WriteFile(context.Background(), mount, []byte("the agent's edit")); err != nil {
+		t.Fatalf("edit the mount: %v", err)
+	}
+	h.suspend(t, writeUse("b.txt", "y"))
+	h.stepOnce(t)
+	if got, err := sb.ReadFile(context.Background(), mount); err != nil || string(got) != "the agent's edit" {
+		t.Errorf("mount = %q, %v after a pass whose probe the startup pushed out; want the agent's edit kept", got, err)
 	}
 }
 

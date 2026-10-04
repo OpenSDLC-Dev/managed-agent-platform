@@ -494,6 +494,60 @@ func TestARefusedListIsOneEventHoweverManyToolCallsFollow(t *testing.T) {
 	}
 }
 
+// TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally: the backstop
+// measures the install command as Exec is handed it, the platform's script
+// preamble (sandbox.Script) included. A list whose bare command fits the limit
+// by fewer bytes than the preamble takes is past it once the preamble is on —
+// Exec would refuse it before it ran, a fault the item reclaim-loops on — so
+// it is the terminal invalid refusal instead, before any probe.
+func TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally(t *testing.T) {
+	var pip packageManager
+	for _, m := range packageManagers {
+		if m.name == "pip" {
+			pip = m
+		}
+	}
+	// Enough names to come within a few bytes of the limit, then the last one
+	// stretched until the bare command lands in the window the preamble
+	// closes: over the limit with it, not without.
+	var entries []string
+	for len(pip.command(entries, "")) < sandbox.MaxCommandBytes-200 {
+		entries = append(entries, fmt.Sprintf("pkg%04d-%s", len(entries), strings.Repeat("x", 90)))
+	}
+	entries = append(entries, "last")
+	for n := 0; ; n++ {
+		entries[len(entries)-1] = "last" + strings.Repeat("y", n)
+		bare := len(pip.command(entries, ""))
+		if bare > sandbox.MaxCommandBytes {
+			t.Fatalf("test setup: no name length puts the bare command in the window (it jumped to %d)", bare)
+		}
+		if bare > sandbox.MaxCommandBytes-len(sandbox.ScriptPreamble) {
+			break
+		}
+	}
+
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"pip": entries})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	if got := installCmds(sb); len(got) != 0 {
+		t.Fatalf("install commands = %d, want none — refused before exec", len(got))
+	}
+	errs := h.packageErrors(t)
+	if len(errs) != 1 || errs[0]["reason"] != packageReasonInvalid || errs[0]["manager"] != "pip" {
+		t.Fatalf("package errors = %+v, want one invalid refusal on pip", errs)
+	}
+	if rs, _ := errs[0]["retry_status"].(map[string]any); rs["type"] != "exhausted" {
+		t.Errorf("retry_status = %+v, want exhausted", rs)
+	}
+	// The pass committed rather than faulting: the item is not left to reclaim.
+	if n := len(h.types(t, "agent.tool_result")); n != 1 {
+		t.Errorf("tool results = %d, want 1: a terminal refusal commits the turn", n)
+	}
+}
+
 // TestTheProbeRefusesASandboxThatCannotInstall is decision 7: every manager
 // writes under /usr or /var, so a non-root or read-only sandbox is refused once
 // — with no manager on the event, because the fault is the sandbox's — rather
@@ -546,6 +600,25 @@ func TestAnUnrecognizedProbeAnswerInstallsAnyway(t *testing.T) {
 	}
 	if errs := h.packageErrors(t); len(errs) != 0 {
 		t.Errorf("package errors = %+v, want none: an unreadable probe is not a reason", errs)
+	}
+}
+
+// TestAnUnframedProbeAnswerInstallsAnyway: the probe reads only what its
+// script printed inside its frame (sandbox.ExecFramed), so an answer that
+// never carried the frame — here one that would have refused the pass — is
+// no answer, and the pass proceeds as it does past an unrecognized one.
+func TestAnUnframedProbeAnswerInstallsAnyway(t *testing.T) {
+	sb := &fakeSandbox{probeOut: packageReasonNotRoot, unframed: true}
+	h := newHarness(t, sb)
+	h.setPackages(t, map[string][]string{"apt": {"jq"}})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.stepOnce(t)
+
+	if n := len(installCmds(sb)); n != 1 {
+		t.Errorf("install commands = %d, want 1", n)
+	}
+	if errs := h.packageErrors(t); len(errs) != 0 {
+		t.Errorf("package errors = %+v, want none: an unframed probe is not a reason", errs)
 	}
 }
 
@@ -633,6 +706,57 @@ func TestABackendFaultDuringInstallFaultsTheItem(t *testing.T) {
 	if got := h.liveOf(t, queue.ToolExec); got != 1 {
 		t.Errorf("tool_exec live = %d, want 1 (still claimable after the lease lapses)", got)
 	}
+}
+
+// TestAStartupFloodIsNoInstallFault: an image whose startup prints past the
+// output cap in every shell pushes the answer out of every exec
+// (sandbox.StartupOutputError), and every retry meets the same — so it never
+// faults the pass, whose reclaim would run it, the install included, forever.
+// Pushed out of the probe, no install is attempted, and nothing is said on the
+// wire the tools' own errors do not already say; pushed out of an install that
+// ran, it is that manager's failed attempt. Either way the turn commits.
+func TestAStartupFloodIsNoInstallFault(t *testing.T) {
+	flood := &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	t.Run("out of the probe", func(t *testing.T) {
+		sb := &fakeSandbox{execErr: flood, execErrOn: "id -u"}
+		h := newHarness(t, sb)
+		h.setPackages(t, map[string][]string{"apt": {"jq"}})
+		h.suspend(t, writeUse("out.txt", "hello"))
+		h.stepOnce(t)
+		if n := probes(sb); n != 1 {
+			t.Errorf("probes = %d, want 1", n)
+		}
+		if got := installCmds(sb); len(got) != 0 {
+			t.Errorf("install commands = %v, want none on a sandbox no install can report from", got)
+		}
+		if errs := h.packageErrors(t); len(errs) != 0 {
+			t.Errorf("package errors = %+v, want none", errs)
+		}
+		if n := len(h.types(t, "agent.tool_result")); n != 1 {
+			t.Errorf("tool results = %d, want 1: the turn commits", n)
+		}
+	})
+	t.Run("out of an install", func(t *testing.T) {
+		sb := &fakeSandbox{execErr: flood, execErrOn: "apt-get"}
+		h := newHarness(t, sb)
+		h.setPackages(t, map[string][]string{"apt": {"jq"}})
+		h.suspend(t, writeUse("out.txt", "hello"))
+		h.stepOnce(t)
+		if got := installCmds(sb); len(got) != 1 {
+			t.Errorf("install commands = %d, want 1", len(got))
+		}
+		errs := h.packageErrors(t)
+		if len(errs) != 1 || errs[0]["reason"] != packageReasonFailed || errs[0]["manager"] != "apt" ||
+			!strings.Contains(fmt.Sprint(errs[0]["message"]), "output cap") {
+			t.Fatalf("package errors = %+v, want one failed attempt on apt naming the output cap", errs)
+		}
+		if rs, _ := errs[0]["retry_status"].(map[string]any); rs["type"] != "retrying" {
+			t.Errorf("retry_status = %+v, want retrying: an attempt, counted as any failed one is", rs)
+		}
+		if n := len(h.types(t, "agent.tool_result")); n != 1 {
+			t.Errorf("tool results = %d, want 1: the turn commits", n)
+		}
+	})
 }
 
 // TestAnEmptyPackagesConfigRunsNothing: every stored cloud config carries all

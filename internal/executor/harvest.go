@@ -145,6 +145,15 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 		e.discardStaged(ctx, files)
 		return fmt.Errorf("lease keeper: %w", kerr)
 	}
+	if errors.Is(runErr, errOutputsUnreadable) {
+		// A sandbox whose outputs no listing can reach settles as one with
+		// none to walk: the previous snapshot stays, a grading cycle chains
+		// its turn, and the item completes, where a fault would reclaim it
+		// to list again, meet the same, and wedge the session (#860).
+		slog.WarnContext(ctx, "executor: the sandbox's startup output pushed the outputs listing out; harvest skipped",
+			"session", item.SessionID, "err", runErr)
+		return e.settleHarvest(ctx, item, nil, false)
+	}
 	if runErr != nil {
 		return runErr
 	}
@@ -154,6 +163,12 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 	// decision 6).
 	return e.settleHarvest(ctx, item, files, walk)
 }
+
+// errOutputsUnreadable is a listing of the outputs tree the sandbox's own
+// startup pushed out of the output — an image's startup file printing past
+// the output cap in every shell (sandbox.StartupOutputError) — which no
+// retry reads, so processHarvest settles it as a pass that read no sandbox.
+var errOutputsUnreadable = errors.New("the sandbox's startup output filled the output cap ahead of the listing")
 
 // harvestSandbox obtains the sandbox this harvest reads, and reports whether
 // there is one to walk (docs/plan/38 decision 8). A grading harvest provisions;
@@ -209,18 +224,38 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sb sand
 		}
 	}()
 
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: harvestListScript})
-	if err != nil {
+	// Framed (sandbox.ExecFramed), so what an image's startup prints around
+	// the listing — a BASH_ENV file's banner, an EXIT trap's words — is no
+	// path of it (#860).
+	res, framed, err := sandbox.ExecFramed(ctx, sb, "harvest", sandbox.ExecRequest{Command: harvestListScript})
+	var startup *sandbox.StartupOutputError
+	switch {
+	case errors.As(err, &startup), err == nil && !framed && res.StdoutTruncated:
+		// The image's startup prints past the output cap in every shell,
+		// pushing the listing out — on Kubernetes with the exec's exit
+		// record, on Docker as a stdout the cap cut before any begin line.
+		// Every reclaim would meet the same (errOutputsUnreadable).
+		return nil, fmt.Errorf("list outputs: %w", errOutputsUnreadable)
+	case err != nil:
 		return nil, fmt.Errorf("list outputs: %w", err)
 	}
 	progress()
+	// A listing that did not reach the output whole — no begin line, or no
+	// end line on a stdout the cap did not cut — is no listing at all, and
+	// faults the harvest as one that exited non-zero does: the reclaim
+	// retries it, and the previous snapshot stays until a whole one commits.
+	if !framed {
+		return nil, fmt.Errorf("list outputs: the listing did not reach the output whole (exit %d): %s",
+			res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("list outputs: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	listing := res.Stdout
 	if res.StdoutTruncated {
-		// The exec cap cut the listing — stdout; a cut stderr leaves it
-		// whole. The glob emits paths sorted, so its complete entries are
+		// The exec cap cut the listing — stdout, before its end line; a cut
+		// stderr, or a cap that cut only past the end line, leaves it whole.
+		// The glob emits paths sorted, so its complete entries are
 		// the tree's lexicographic prefix — what greedy admission takes
 		// first anyway. Keep them and drop the trailing mid-path fragment:
 		// the tree is static during grading, so a fault here would repeat

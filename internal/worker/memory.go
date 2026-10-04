@@ -118,6 +118,12 @@ type memoryStores struct {
 	sessionID string
 	sb        sandbox.Sandbox
 	mounts    []memoryRef
+	// unanswered names the stores whose directory's listing did not answer
+	// at materialize (errListingUnanswered), which this run's syncs leave
+	// alone: a pull-only sync into a directory that has no marker yet would
+	// fill it with files nothing vouches for, untrusted for the sandbox's
+	// life. The next run's materialize asks again.
+	unanswered map[string]bool
 }
 
 func newMemoryStores(client sdk.Client, token, sessionID string, sb sandbox.Sandbox, mounts []memoryRef) *memoryStores {
@@ -209,6 +215,13 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 		outcome, err := m.materializeStore(ctx, ref, progress)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
+		case errors.Is(err, errListingUnanswered):
+			if m.unanswered == nil {
+				m.unanswered = map[string]bool{}
+			}
+			m.unanswered[ref.MemoryStoreID] = true
+			slog.WarnContext(ctx, "memory store not materialized: its directory's listing did not answer; not synced this run, and asked again the next",
+				"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "mount_path", ref.MountPath, "err", err)
 		case err != nil:
 			slog.WarnContext(ctx, "memory store not materialized",
 				"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "mount_path", ref.MountPath,
@@ -233,6 +246,11 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 	return existing
 }
 
+// errListingUnanswered is a store directory's listing that did not reach the
+// output whole (sandbox.Frame): a shell that died before it, a startup that
+// filled the output cap. It says nothing of the directory (unanswered).
+var errListingUnanswered = errors.New("its listing did not reach the output whole")
+
 // materializeStore lands one store, answering with its outcome.
 func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, progress func()) (string, error) {
 	marker := path.Join(ref.MountPath, memsync.MarkerName)
@@ -243,13 +261,18 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	if prev, err := m.sb.ReadFile(ctx, marker); err == nil && bytes.Equal(prev, want) {
 		return memoryOutcomeUnchanged, nil
 	}
-	res, err := m.sb.Exec(ctx, sandbox.ExecRequest{Command: memsync.HashTreeCommand(ref.MountPath)})
+	res, framed, err := sandbox.ExecFramed(ctx, m.sb, "memsync", sandbox.ExecRequest{Command: memsync.HashTreeCommand(ref.MountPath)})
 	if err != nil {
 		return memoryOutcomeFailed, err
 	}
 	// A listing with anything in it — or one too long to capture, or one
 	// that failed — is a directory nothing vouches for. An absent directory
 	// lists nothing and exits 0, which is the fresh case.
+	if !framed {
+		// A listing that did not answer says nothing of the directory: not
+		// landed, not held, and not synced this run (unanswered).
+		return memoryOutcomeFailed, fmt.Errorf("%w (exit %d)", errListingUnanswered, res.ExitCode)
+	}
 	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
 	}
@@ -338,6 +361,9 @@ func (m *memoryStores) sync(ctx context.Context, progress func()) {
 	var total memorySyncCounts
 	for _, ref := range m.mounts {
 		progress()
+		if m.unanswered[ref.MemoryStoreID] {
+			continue
+		}
 		st := &storeSync{ref: ref}
 		if err := m.readStore(ctx, st, progress); err != nil {
 			slog.WarnContext(ctx, "memory store not synced: its directory could not be read",
@@ -493,9 +519,15 @@ func (m *memoryStores) readStore(ctx context.Context, st *storeSync, progress fu
 	marker, err := m.sb.ReadFile(ctx, path.Join(mount, memsync.MarkerName))
 	st.markerOK = err == nil && bytes.Equal(marker, memsync.MarkerBytes(id))
 
-	res, err := m.sb.Exec(ctx, sandbox.ExecRequest{Command: memsync.HashTreeCommand(mount)})
+	// Framed, so what an image's startup prints around the listing is no
+	// record of it (#860); one that did not reach the output whole skips the
+	// store's sync, as one that failed does.
+	res, framed, err := sandbox.ExecFramed(ctx, m.sb, "memsync", sandbox.ExecRequest{Command: memsync.HashTreeCommand(mount)})
 	if err != nil {
 		return err
+	}
+	if !framed {
+		return fmt.Errorf("the listing did not reach the output whole (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	if res.Truncated() {
 		return errors.New("the listing overflows the exec output cap")
@@ -866,7 +898,7 @@ func refusalKind(err error) string {
 func (m *memoryStores) applyStore(ctx context.Context, st *storeSync) {
 	id := st.ref.MemoryStoreID
 	for _, cmd := range memsync.RemoveCommands(st.ref.MountPath, st.removals) {
-		res, err := m.sb.Exec(ctx, sandbox.ExecRequest{Command: cmd})
+		res, err := sandbox.ExecScript(ctx, m.sb, sandbox.ExecRequest{Command: cmd})
 		if err != nil || res.ExitCode != 0 {
 			slog.WarnContext(ctx, "memory deletions not applied; the baseline is kept for the next sync",
 				"session_id", m.sessionID, "memory_store_id", id, "err", err, "exit", res.ExitCode, "stderr", strings.TrimSpace(res.Stderr))

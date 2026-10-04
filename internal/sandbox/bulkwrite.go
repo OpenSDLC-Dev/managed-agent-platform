@@ -360,6 +360,11 @@ func (b *BulkWrite) Refusal(backend string, code int, stderr string) error {
 // on, by index. A marker and an index rather than the path itself because an
 // image's own noise shares that stream: a line nothing else writes, holding a
 // number that indexes what this side already has, cannot be confused with it.
+// Every marker line in the bulk shells — this one, bulkUnwritableMarker's and
+// the shed's report — is printed after a newline of its own, as
+// bulkLeftBeginMarker's says why: a banner an image's startup printed without
+// ending its line would otherwise take the marker into its own line, and the
+// member's path would be lost (#860).
 const bulkFailMarker = "map-bulk-fail "
 
 // blamed resolves the marker in stderr back to the member's path, falling back
@@ -505,15 +510,15 @@ const bulkLeftNoListMarker = "map-bulk-left-nolist"
 const bulkLeftShell = `
 __map_bulk_left() {
   printf '\n` + bulkLeftBeginMarker + `\n'
-  [ "${#__tmps[@]}" -eq 0 ] && printf '` + bulkLeftNoListMarker + `\n'
+  [ "${#__tmps[@]}" -eq 0 ] && printf '\n` + bulkLeftNoListMarker + `\n'
   __i=0
   while [ "$__i" -lt "${#__tmps[@]}" ]; do
     __l=${__tmps[$__i]}
-    if [ -f "$__l" ] && [ ! -h "$__l" ]; then printf '` + bulkLeftMarker + `%d\n' "$__i"; fi
+    if [ -f "$__l" ] && [ ! -h "$__l" ]; then printf '\n` + bulkLeftMarker + `%d\n' "$__i"; fi
     __i=$((__i+1))
   done
-  if [ -f "$1" ] && [ ! -h "$1" ]; then printf '` + bulkLeftMarker + `m\n'; fi
-  if [ -f "$2" ] && [ ! -h "$2" ]; then printf '` + bulkLeftMarker + `d\n'; fi
+  if [ -f "$1" ] && [ ! -h "$1" ]; then printf '\n` + bulkLeftMarker + `m\n'; fi
+  if [ -f "$2" ] && [ ! -h "$2" ]; then printf '\n` + bulkLeftMarker + `d\n'; fi
 }
 `
 
@@ -698,7 +703,7 @@ __map_bulk_rename() {
     [ "${#__tmps[@]}" -eq 0 ] || rm -f -- "${__tmps[@]}"
     rm -f "$1" "$2"
     __map_bulk_left "$1" "$2"
-    printf 'map-bulk-fail %d\n' "$__bad" >&2
+    printf '\nmap-bulk-fail %d\n' "$__bad" >&2
     return 17
   fi
   __i=0
@@ -722,7 +727,7 @@ __map_bulk_rename() {
   done
   rm -f "$1" "$2"
   __map_bulk_left "$1" "$2"
-  [ "$__code" -eq 0 ] || printf 'map-bulk-fail %d\n' "$__bad" >&2
+  [ "$__code" -eq 0 ] || printf '\nmap-bulk-fail %d\n' "$__bad" >&2
   return "$__code"
 }
 `

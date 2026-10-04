@@ -174,13 +174,65 @@ error, and the memory sync hashes a store with GNU `sha256sum -z`, so on
 BusyBox its listing of a store that holds files fails. What the image's
 environment sets for a shell — an `ENV BASH_ENV` startup file, exported
 functions, `SHELLOPTS` — applies to every script that runs in the sandbox,
-the model's commands and the platform's own alike. `glob` and `grep` read
-their answers from between a begin and an end line their own scripts print,
-so what a startup file prints around them is not taken for one. Whether the
-platform's own scripts should run without the startup file at all — the
-others, whose output it can still corrupt, and these two, whose behaviour it
-can still change — is
-[#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860).
+the model's commands and the platform's own alike, so an image whose `PATH`
+or options come from that file works for both — errexit (`set -e`) aside:
+the platform's scripts turn it off as they start, and the `bash` tool's own
+shell turns it off before the model's first command, so what the model runs
+in that shell runs without the image's errexit, while its `nounset` and
+`pipefail` carry (and a `set -e` the model runs there carries from call to
+call). A bash the model starts itself — `bash -c`, a `#!/bin/bash` script —
+reads the startup file again, as every non-interactive bash does, and runs
+under the image's errexit. What the startup file
+*prints* does not corrupt the scripts whose answers the platform parses —
+a bulk write's report aside, below:
+`glob` and `grep`, the outputs harvest's listing, the memory sync's tree
+hash, the package-install probe, Docker's refused-write reasons and, on
+Kubernetes, every file read, an exec's exit record and liveness probe, a
+refused write's reason and the checkpoint's root probe each print their
+answer between a begin and an end line carrying a nonce of its own, and only
+what lies between them is read. A banner on either stream, ending its line or
+not, and what an `EXIT` trap prints after the script fall outside; the
+scripts name every path whole, so a `cd` in the file moves none of them; and
+errexit (`set -e`) in the file ends none of the platform's own scripts, each
+of which turns it off as it starts, nor the Kubernetes exec wrapper before it
+records a command's exit code, nor either backend's watchdog before it kills
+a command past its deadline
+([#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860)).
+The room for what the file prints is 1 MiB a stream around each script: the
+cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
+the file. A file that prints more pushes the scripts' answers out of the
+output. On Kubernetes every exec then fails, its exit record pushed out,
+and so does a read once the file and the banner together pass the read's
+cap and room: each tool answers such a call with an error naming the image
+(and saying, of a command, that it ran), never a fault a retry would meet
+again, and the package-install pass, its probe's answer pushed out,
+installs nothing. A file mount or repository the sandbox already holds is
+kept when its presence probe's answer is pushed out, not re-streamed or
+re-cloned over the agent's edits. Each memory store's sync is skipped,
+logged only, so what the agent writes under `/mnt/memory` in that run does
+not reach the store. On either backend the outputs harvest, its listing
+pushed out, settles without a new snapshot, as one that finds no sandbox
+does. Not every script is framed. A bulk write's reports — the member it
+failed on, a directory it could not make, what its shed left behind — are
+read from its own marker lines, each printed on a line of its own and the
+last one read, which a banner around them does not displace; a startup
+printing those exact lines, the platform's own markers verbatim, could,
+misreporting a write in its own sandbox. One printing past the cap pushes
+them out too: on Docker a shed's report of what it left is then empty, and
+a failed write's temporaries are not emptied. What a few scripts print is relayed,
+not parsed, banner and all: the package install's output, as the session
+error's message; the `grep` tool's ripgrep install's, in its tool error when
+the install fails; the stderr of a checkpoint's restore and of a repository's
+extraction, in the error each fails with; and the memory sync's removals', in
+the warning when they fail. The `bash` tool's output is the model's own
+command's, which the startup file reaches as it reaches any command.
+What the file *changes* still applies — a function an image exports under
+the name of a command the scripts call answers for that command — and one
+channel prints inside the frame, where no line can keep it out: a library an
+`ENV LD_PRELOAD` or `/etc/ld.so.preload` names, printing from its constructor
+in every process it loads into, the scripts' children included. The image
+must do neither: a script either reaches can fail, and on Kubernetes a file
+read takes a child's banner in with the file's bytes.
 The **Kubernetes** backend needs more,
 and needs it hard: `setsid` for its exec wrapper, `tee`/`wc` for the write
 path's delivered-byte count, a `stat` accepting `-c` (GNU or BusyBox), on which

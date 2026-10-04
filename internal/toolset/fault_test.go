@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +15,14 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
+
+// The backstop for a fake no test reports itself: an exec any fake here
+// refused for want of the platform's script preamble fails the run
+// (sandboxtest.RefuseUnscripted).
+func TestMain(m *testing.M) { os.Exit(sandboxtest.Main(m, (*testing.M).Run)) }
 
 // fakeSandbox answers with whatever the test scripted, so the fault paths a real
 // daemon will not produce on demand can be pinned.
@@ -29,6 +36,10 @@ type fakeSandbox struct {
 	timeouts []time.Duration
 	reads    []string
 	writes   []string
+	// unscripted is every exec refused as a platform script without its
+	// preamble — neither sandbox.ExecScript's, nor a framed search's, nor the
+	// bash tool's (sandboxtest.Scripted).
+	unscripted sandboxtest.ExecLedger
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -36,6 +47,9 @@ func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	// A backend refuses a command too long to run before anything runs.
 	if err := sandbox.CheckCommand(req.Command); err != nil {
+		return sandbox.ExecResult{}, err
+	}
+	if err := sandboxtest.RefuseUnscripted(&f.unscripted, req.Command); err != nil {
 		return sandbox.ExecResult{}, err
 	}
 	f.commands = append(f.commands, req.Command)
@@ -142,6 +156,44 @@ func TestBackendFaultIsNotAToolError(t *testing.T) {
 			_, err := run(t, tc.sb, tc.tool, tc.input)
 			if !errors.Is(err, boom) {
 				t.Fatalf("err = %v, want the backend fault", err)
+			}
+		})
+	}
+}
+
+// An answer the image's startup pushed out of the output
+// (sandbox.StartupOutputError) is no backend fault, for any tool: every shell
+// on that image prints the same, so a reclaim would meet it again and re-run
+// a command that had already run. It is a tool error naming the image, and
+// telling the model when the command ran.
+func TestAStartupFloodIsAToolErrorForEveryTool(t *testing.T) {
+	ran := &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	read := fmt.Errorf("probe: %w", &sandbox.StartupOutputError{What: "the read of /workspace/a.txt"})
+	cases := []struct {
+		name  string
+		sb    *fakeSandbox
+		tool  string
+		input string
+		ran   bool
+	}{
+		{"bash", &fakeSandbox{execErr: ran}, "bash", `{"command":"echo hi"}`, true},
+		{"glob", &fakeSandbox{execErr: ran}, "glob", `{"pattern":"*.go"}`, true},
+		{"grep", &fakeSandbox{execErr: ran}, "grep", `{"pattern":"x"}`, true},
+		{"read", &fakeSandbox{readErr: read}, "read", `{"file_path":"a.txt"}`, false},
+		{"edit", &fakeSandbox{readErr: read}, "edit", `{"file_path":"a.txt","old_string":"a","new_string":"b"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := run(t, tc.sb, tc.tool, tc.input)
+			if err != nil {
+				t.Fatalf("err = %v, want a tool result", err)
+			}
+			if !res.IsError || !strings.HasPrefix(res.Content, tc.tool+": ") || !strings.Contains(res.Content, "startup file (BASH_ENV)") ||
+				!strings.Contains(res.Content, "output cap") {
+				t.Errorf("result = %+v, want an error result naming the image's startup and the output cap", res)
+			}
+			if got := strings.Contains(res.Content, "The command ran"); got != tc.ran {
+				t.Errorf("result = %q; says the command ran: %v, want %v", res.Content, got, tc.ran)
 			}
 		})
 	}
