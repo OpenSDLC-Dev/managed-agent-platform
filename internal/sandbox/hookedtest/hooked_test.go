@@ -160,10 +160,12 @@ func TestHookedImagesOfParallelPackagesAreTheirOwn(t *testing.T) {
 	// What the finished package loaded onto the kind nodes is gone — its tag
 	// and the import record `kind load` leaves beside it — and what the
 	// running one loaded is all there.
-	if refs := hookedtest.KindRefs(t, finished); len(refs) > 0 {
+	if refs, _ := hookedtest.KindRefs(t, finished); len(refs) > 0 {
 		t.Errorf("a finished package's image left %v on the kind nodes", refs)
 	}
-	if refs := hookedtest.KindRefs(t, kept[0].Image); refs != nil && len(refs) < 2 {
+	if refs, loaded := hookedtest.KindRefs(t, kept[0].Image); !loaded {
+		t.Logf("%s is not a kind cluster: no node records to check", sandboxtest.KubeContext(t))
+	} else if len(refs) < 2 {
 		t.Errorf("a running package's image is held on the kind nodes as %v, want its tag and its import record", refs)
 	}
 	for _, b := range kept {
@@ -234,8 +236,10 @@ func TestPlatformScriptsUnderAnErrexitStartupAsNonRoot(t *testing.T) {
 			// nothing is left.
 			big := bytes.Repeat([]byte("P"), 4096)
 			err := sb.WriteFiles(ctx, []sandbox.FileWrite{{Path: "/workspace/ee-a.txt", Data: big}, {Path: "/workspace/ee-b.txt", Data: big}})
-			lines := strings.Split(sh("[ -w /workspace ] && echo writable; find /workspace -maxdepth 1 -name '"+sandbox.TempPrefix+"*' -printf '%s %f\\n'"), "\n")
-			if lines[0] == "writable" {
+			// No line at all is a workdir the sandbox user cannot write with
+			// no temporary left in it.
+			lines := strings.FieldsFunc(sh("[ -w /workspace ] && echo writable; find /workspace -maxdepth 1 -name '"+sandbox.TempPrefix+"*' -printf '%s %f\\n'"), func(r rune) bool { return r == '\n' })
+			if len(lines) > 0 && lines[0] == "writable" {
 				if err != nil || len(lines) != 1 {
 					t.Errorf("a batch into a workdir the sandbox user can write: err = %v, left %q", err, lines[1:])
 				}

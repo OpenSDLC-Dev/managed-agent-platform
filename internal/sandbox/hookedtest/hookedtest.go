@@ -89,15 +89,17 @@ func Image(t *testing.T, hook string) string {
 var loads sync.Map
 
 // KindRefs is every image reference the kind cluster's nodes hold of an image
-// Image built — none once the test that built it is done — or nil where the
-// cluster is not kind's.
-func KindRefs(t *testing.T, image string) []string {
+// Image built — none once the test that built it is done — and whether Image
+// loaded it onto a kind cluster at all: false where the cluster is not kind's,
+// so that a check of what is held can tell "nothing to look at" from "nothing
+// found".
+func KindRefs(t *testing.T, image string) (refs []string, loaded bool) {
 	t.Helper()
 	l, ok := loads.Load(image)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	return l.(*sandboxtest.KindLoad).Refs(t)
+	return l.(*sandboxtest.KindLoad).Refs(t), true
 }
 
 // DockerImage is Image on the Docker daemon alone, for a test of the Docker

@@ -2223,7 +2223,7 @@ func CountProcesses(t *testing.T, sb sandbox.Sandbox, prefix string) int {
 		    "` + prefix + `"*) n=$((n+1)) ;;
 		  esac
 		done
-		echo "$n"`})
+		echo "$n"`, Timeout: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}

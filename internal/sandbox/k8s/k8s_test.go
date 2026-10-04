@@ -182,12 +182,17 @@ func TestK8sLimitedNetworkingFailsClosedWhenFlushNoOps(t *testing.T) {
 func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 	image := sandboxtest.BuildGateImage(t)
 	kubeCtx := sandboxtest.KubeContext(t)
-	// Not removed afterwards: the gate image is the suite's one shared tag,
-	// rebuilt and reloaded by every run. A context that is not kind's must share
-	// the daemon's image store or have the image loaded by hand —
-	// MAP_K8S_HOST_ADDR fixes only how pods address the stub controlplane, not
-	// image distribution.
-	sandboxtest.LoadIntoKind(t, kubeCtx, image)
+	// Its tag is not removed afterwards: the gate image is the suite's one
+	// shared tag, rebuilt and reloaded by every run, which another package's
+	// pods may be running from. The dated import record each load leaves
+	// beside it is, at once — the tag is what a pod's image names — so the
+	// runs do not pile one up on the nodes per day. A context that is not
+	// kind's must share the daemon's image store or have the image loaded by
+	// hand — MAP_K8S_HOST_ADDR fixes only how pods address the stub
+	// controlplane, not image distribution.
+	if l := sandboxtest.LoadIntoKind(t, kubeCtx, image); l != nil {
+		l.RemoveImport(t)
+	}
 	stub := sandboxtest.StartGateStubAt(t, k8sHostAddr(t, kubeCtx))
 	return sandboxtest.GateFixture{
 		Spec: &sandbox.GateSpec{
