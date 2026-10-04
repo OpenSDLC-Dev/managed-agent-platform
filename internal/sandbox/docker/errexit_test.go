@@ -2,7 +2,6 @@ package docker_test
 
 import (
 	"context"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -81,7 +80,7 @@ func TestDockerExecUnderAnErrexitStartup(t *testing.T) {
 					// count waits out the reaping rather than racing it.
 					var n int
 					for range 50 {
-						if n = runningMarkers(t, sb, tc.marker); n == 0 {
+						if n = sandboxtest.CountProcesses(t, sb, tc.marker); n == 0 {
 							return
 						}
 						time.Sleep(100 * time.Millisecond)
@@ -91,28 +90,4 @@ func TestDockerExecUnderAnErrexitStartup(t *testing.T) {
 			}
 		})
 	}
-}
-
-// runningMarkers counts the sandbox's processes whose command line starts with
-// marker, read from /proc as sandboxtest's countProcesses does, with the hooked
-// image's banner taken out of the answer.
-func runningMarkers(t *testing.T, sb sandbox.Sandbox, marker string) int {
-	t.Helper()
-	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Timeout: 30 * time.Second, Command: `
-		n=0
-		for p in /proc/[0-9]*; do
-		  [ -r "$p/cmdline" ] || continue
-		  case "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)" in
-		    "` + marker + `"*) n=$((n+1)) ;;
-		  esac
-		done
-		echo "$n"`})
-	if err != nil || res.ExitCode != 0 {
-		t.Fatalf("count processes: %+v, %v", res, err)
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(sandboxtest.Unbanner(res.Stdout)))
-	if err != nil {
-		t.Fatalf("count processes: %q: %v", res.Stdout, err)
-	}
-	return n
 }

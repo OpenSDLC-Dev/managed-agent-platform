@@ -2,7 +2,6 @@ package toolset_test
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/ripgrep"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/k8s"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -737,14 +737,6 @@ func TestGrepAnswersBesideAnUnreadableFile(t *testing.T) {
 	fails(t, r, "grep", `{"pattern":"needle","path":"ex2/b.txt","head_limit":1}`, denied)
 }
 
-// hookedImage builds an image whose `ENV BASH_ENV` file is hook.
-func hookedImage(t *testing.T, name, hook string) string {
-	t.Helper()
-	return dockertest.ImageFrom(t, name, "FROM debian:stable-slim\n"+
-		"RUN echo "+base64.StdEncoding.EncodeToString([]byte(hook))+" | base64 -d > /etc/map-banner.sh\n"+
-		"ENV BASH_ENV=/etc/map-banner.sh\n", "--host", docker.DaemonHost())
-}
-
 // An image whose bash runs sandboxtest.BannerHook — an `ENV BASH_ENV` file
 // that prints on both streams without ending either line, with spaces in what
 // it prints, leaves the directory the exec started in, and sets an EXIT trap
@@ -756,7 +748,7 @@ func hookedImage(t *testing.T, name, hook string) string {
 // banner reaches the bash tool's output, as it reaches every command on that
 // image.
 func TestSearchesThroughAnImageBanner(t *testing.T) {
-	r := runner(t, fromImage(hookedImage(t, "search-banner", sandboxtest.BannerHook)))
+	r := runner(t, fromImage(hookedtest.DockerImage(t, sandboxtest.BannerHook)))
 	ok(t, r, "write", `{"file_path":"be/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"be/b.txt","content":"needle\n"}`)
 	if out := ok(t, r, "bash", `{"command":"echo hi"}`); !strings.Contains(out, "welcome to the image") {
@@ -814,7 +806,7 @@ func TestSearchesThroughAnImageBanner(t *testing.T) {
 // exit 1, or an empty page — is "no matches" rather than a shell that ended
 // before it could close the frame, and a failure is still the tool's message.
 func TestSearchesThroughAnErrexitStartup(t *testing.T) {
-	r := runner(t, fromImage(hookedImage(t, "search-errexit", "set -e\n"+sandboxtest.BannerHook)))
+	r := runner(t, fromImage(hookedtest.DockerImage(t, "set -e\n"+sandboxtest.BannerHook)))
 	ok(t, r, "write", `{"file_path":"ee/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"ee/b.txt","content":"needle\n"}`)
 	for tool, answers := range map[string]map[string]string{
@@ -856,7 +848,7 @@ const floodHook = `trap "head -c 1100000 /dev/zero | tr '\0' x; head -c 1100000 
 // search's script has printed its end line before the flood begins: the cap
 // cut nothing the search said, and no answer or failure says it did.
 func TestASearchCutOnlyPastItsEndLineSaysNothingOfTheCap(t *testing.T) {
-	r := runner(t, fromImage(hookedImage(t, "search-flood", floodHook)))
+	r := runner(t, fromImage(hookedtest.DockerImage(t, floodHook)))
 	ok(t, r, "write", `{"file_path":"fl/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"fl/b.txt","content":"needle\n"}`)
 	for in, want := range map[string]string{
