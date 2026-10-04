@@ -1706,19 +1706,6 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	}); err != nil {
 		return nil, err
 	}
-	// This delete takes the session's files itself, its copies with its
-	// outputs and before it enqueues a key (EnqueueObjectDeletes says why that
-	// order), so it says so before the tombstone: migration 0046's trigger on
-	// deleted_sessions takes the same rows for a previous build's delete, which
-	// cannot reach the copies and would lock the rest out of id order, and
-	// leaves them to a transaction that has said it will. The trigger is that
-	// build's alone, to go with the guard (#856), which is why this keeps a
-	// statement of its own rather than leaning on it; said late, the trigger
-	// would take the rows instead, unnoticed
-	// (TestSessionDeleteAllowsCopyDeletesBeforeItsTombstone).
-	if err := store.AllowFileCopyDeletes(ctx, tx); err != nil {
-		return nil, err
-	}
 	// The tombstone rides the deleting transaction, written while the row can
 	// still be joined: it is the affirmative evidence the reaper's deleted
 	// tier runs on — a missing row alone also describes a sandbox that was
@@ -1767,9 +1754,8 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// settle — a copy is scoped to the session without being produced by it —
 	// so that is ours, INFERRED (docs/DIVERGENCES.md); deleting one never takes
 	// its upload's bytes, which the reference count keeps while the upload
-	// lives, and only a transaction that allows it can delete a copy at all
-	// (AllowFileCopyDeletes, above). files.scope_id is polymorphic and so
-	// carries no foreign key, which is why this is by hand rather than a
+	// lives. files.scope_id is polymorphic and so carries no foreign key,
+	// which is why this is by hand rather than a
 	// cascade — the checkpoint row above is deleted for the same reason (#266). Since 0036 the schema does
 	// hold half of that "exactly" — the two scope columns are present together
 	// or not at all — but not the half this clause turns on: nothing pins the

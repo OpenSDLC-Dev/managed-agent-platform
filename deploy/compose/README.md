@@ -301,16 +301,17 @@ knowing before you drop volumes mid-debugging with a token open in a terminal.
 
 ## SQL by hand
 
-SQL you run against the bundled Postgres's `files` tables meets three rules of migration
-0046 (#578), which the platform's own transactions follow: a `DELETE FROM files` skips
-session file copies unless its transaction first sets `map.copy_delete`; unless the same
-setting came first, a hand-written `deleted_sessions` tombstone deletes that session's
-files through a trigger and enqueues their keys; and `pending_object_deletes` drops a
-`files/` key another `files` row still names, so a copy's key, which is its upload's, is
-dropped while the upload remains, and refuses a `files/` key outright under
-`REPEATABLE READ` or `SERIALIZABLE`. The
+SQL you run against the bundled Postgres's `files` tables meets one rule of migration 0046
+(#578), which the platform's own transactions follow: `pending_object_deletes` drops a
+`files/` key another `files` row still names, so a session file copy's key, which is its
+upload's, is dropped while the upload remains, and refuses a `files/` key outright under
+`REPEATABLE READ` or `SERIALIZABLE`. A `DELETE FROM files` takes a copy like any other row,
+and a hand-written `deleted_sessions` tombstone leaves the session's files alone: to take
+them with a session you delete by hand, delete its session-scoped `files` rows and enqueue
+the keys they return in the same `READ COMMITTED` transaction, as the platform's session
+delete does. The
 [Helm chart's Database section](../helm/managed-agent-platform/README.md#database) spells
-them out.
+the rule out.
 
 ## Teardown
 
