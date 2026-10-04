@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,8 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/k8s"
 )
 
 // testImage matches the sandbox contract: /bin/bash at that path plus a POSIX
@@ -77,6 +80,64 @@ func TestClosedLoopRealSandbox(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.ToolExec); got != 0 {
 		t.Errorf("tool_exec live = %d, want 0 (completed)", got)
+	}
+}
+
+// TestAStartupFloodIsOneToolErrorRealSandbox drives the bash tool through a
+// real Kubernetes pod whose image's startup file prints 1.2 MB in every shell,
+// past the output cap: the command runs, its exit record is pushed out of the
+// output (sandbox.StartupOutputError), and the item commits one tool error
+// saying so and schedules the model — no fault, so no reclaim to run the
+// command again, forever (#860). A missing cluster is a hard failure.
+func TestAStartupFloodIsOneToolErrorRealSandbox(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{Context: os.Getenv("MAP_K8S_CONTEXT"), Namespace: os.Getenv("MAP_K8S_NAMESPACE")})
+	if err != nil {
+		t.Fatalf("integration test requires a Kubernetes cluster: %v", err)
+	}
+	image := hookedtest.Image(t, "yes | head -c 1200000\n")
+	h := newHarnessWith(t, provider, Config{Image: image})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+	var faults []error
+	h.exec.onFault = func(_ *queue.Item, err error) { faults = append(faults, err) }
+	bash, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{"command": "echo ran > /tmp/ran"},
+	})
+	h.suspend(t, string(bash))
+
+	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
+		t.Fatalf("step = %v, %v; want one item worked", worked, err)
+	}
+	if len(faults) != 0 {
+		t.Fatalf("faults = %v, want none", faults)
+	}
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	var body struct {
+		IsError bool `json:"is_error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(results[0].Body, &body)
+	if !body.IsError || len(body.Content) == 0 || !strings.HasPrefix(body.Content[0].Text, "bash: the command's exit record did not reach the output") ||
+		!strings.Contains(body.Content[0].Text, "The command ran") {
+		t.Errorf("result = %+v, want the bash tool's error naming the image's startup", body)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec live = %d, want 0: nothing left to reclaim", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn = %d, want 1 (resume)", got)
+	}
+	if worked, err := h.exec.step(context.Background()); err != nil || worked {
+		t.Errorf("a second step = %v, %v; want no work", worked, err)
 	}
 }
 

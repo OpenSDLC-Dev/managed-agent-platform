@@ -1161,14 +1161,16 @@ func TestReadStdoutRequiresTheFrame(t *testing.T) {
 
 	// A startup that prints past the room before the script does leaves no
 	// begin line, or cuts a file no larger than the cap: neither is a size
-	// fault the file made, nor a file.
+	// fault the file made, nor a file, but the startup's, which every read on
+	// that image meets again (sandbox.StartupOutputError).
 	t.Run("ABannerPastTheRoomIsNeitherAFileNorTooLarge", func(t *testing.T) {
 		for _, stream := range [][][]byte{
 			{body(sandbox.MaxFileBytes + readRoom), begin, body(10), end},
 			{body(readRoom + 10), begin, body(sandbox.MaxFileBytes), end},
 		} {
-			if got, err := read(recv(stream...)); err == nil || errors.Is(err, sandbox.ErrFileTooLarge) {
-				t.Errorf("readStdout = %d bytes, %v; want an error that is not ErrFileTooLarge", len(got), err)
+			var startup *sandbox.StartupOutputError
+			if got, err := read(recv(stream...)); !errors.As(err, &startup) || startup.Ran {
+				t.Errorf("readStdout = %d bytes, %v; want a StartupOutputError of a read, which runs nothing", len(got), err)
 			}
 		}
 	})
@@ -2000,12 +2002,13 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 }
 
 // readExitRecord reads what reached the output of exitScript's frame: a record
-// whose end line was lost reads as far as it got, as a cut stream does; a
-// stream with no begin line is a lost answer — no record, the kill's code, as
-// an empty stream always was — when nothing else reached it, or when it ends
-// partway through the begin line, after a banner or not; and one with
-// something else and no begin line, or that the cap cut before any begin line
-// whatever it ends in, is no record to parse.
+// whose end line a lost stream dropped reads as far as it got; a stream with
+// no begin line is a lost answer — no record, the kill's code, as an empty
+// stream always was — when nothing else reached it, or when it ends partway
+// through the begin line, after a banner or not; one with something else and
+// no begin line is no record to parse; and one the cap cut before the record's
+// end line — before its begin line, whatever it ends in, or inside the record,
+// where it may have cut a number — is the startup's failure, not a record.
 func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 	f := sandbox.NewFrame("exit")
 	begin, end := f.Lines()
@@ -2016,32 +2019,46 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 	}
 	for _, c := range []struct {
 		name, out string
+		truncated bool
 		code      int
 		killed    bool
 		ran       time.Duration
 		fails     bool
+		// startup is a failure the cap made: a *sandbox.StartupOutputError
+		// whose command had run.
+		startup bool
 	}{
-		{"whole, banner and trap around it", "welcome 3 " + begin + "K 0 1.0 2.0\n" + end + "exit 9", 0, true, time.Second, false},
-		{"end line lost", begin + "K 0 1.0 2.0\n", 0, true, time.Second, false},
-		{"end line half lost", begin + " 5 1.0 2.0\n" + end[:6], 5, false, time.Second, false},
-		{"the record's tail lost", begin + " 5 1.0", 5, false, 0, false},
-		{"nothing after the begin line", begin, sigkillExit, false, 0, false},
-		{"nothing at all", "", sigkillExit, false, 0, false},
-		{"cut inside the begin line", begin[:9], sigkillExit, false, 0, false},
-		{"cut inside the begin line, after a banner", "welcome 0 1.0 2.0" + begin[:len(begin)-1], sigkillExit, false, 0, false},
-		{"cut on the begin line's own newline, after a banner", "welcome 0 1.0 2.0" + begin[:1], sigkillExit, false, 0, false},
-		{"something, but no begin line", "welcome 0 1.0 2.0", 0, false, 0, true},
-		{"something, and another frame's begin line cut short", "welcome 0 1.0 2.0" + other, 0, false, 0, true},
-		// A startup that floods past the cap pushes the record out: an error,
-		// though its tail ends in a newline, as a lost begin line's would.
-		{"a flood the cap cut before any begin line", strings.Repeat("y\n", 1000), 0, false, 0, true},
-		{"a record the cap cut after its begin line", "flood " + begin + "K 0 1.0", 0, true, 0, false},
+		{"whole, banner and trap around it", "welcome 3 " + begin + "K 0 1.0 2.0\n" + end + "exit 9", false, 0, true, time.Second, false, false},
+		{"end line lost", begin + "K 0 1.0 2.0\n", false, 0, true, time.Second, false, false},
+		{"end line half lost", begin + " 5 1.0 2.0\n" + end[:6], false, 5, false, time.Second, false, false},
+		{"the record's tail lost", begin + " 5 1.0", false, 5, false, 0, false, false},
+		{"nothing after the begin line", begin, false, sigkillExit, false, 0, false, false},
+		{"nothing at all", "", false, sigkillExit, false, 0, false, false},
+		{"cut inside the begin line", begin[:9], false, sigkillExit, false, 0, false, false},
+		{"cut inside the begin line, after a banner", "welcome 0 1.0 2.0" + begin[:len(begin)-1], false, sigkillExit, false, 0, false, false},
+		{"cut on the begin line's own newline, after a banner", "welcome 0 1.0 2.0" + begin[:1], false, sigkillExit, false, 0, false, false},
+		{"something, but no begin line", "welcome 0 1.0 2.0", false, 0, false, 0, true, false},
+		{"something, and another frame's begin line cut short", "welcome 0 1.0 2.0" + other, false, 0, false, 0, true, false},
+		// A startup that floods past the cap pushes the record out: the
+		// startup's failure, though its tail ends in a newline, as a lost
+		// begin line's would.
+		{"a flood the cap cut before any begin line", strings.Repeat("y\n", 1000), true, 0, false, 0, true, true},
+		// One the cap cut after the begin line may have cut a number: a
+		// deadline's kill, K 137, kept as K 13 is no exit 13.
+		{"a record the cap cut inside its code", "flood " + begin + "K 13", true, 0, false, 0, true, true},
+		{"a record the cap cut before its end line", "flood " + begin + "K 137 12.3 15.9\n", true, 0, false, 0, true, true},
+		{"a record the cap cut inside its end line", "flood " + begin + "K 137 12.3 15.9\n" + end[:len(end)/2], true, 0, false, 0, true, true},
+		// One the cap cut only past its end line is whole: an EXIT trap's flood.
+		{"a record the cap cut past its end line", begin + "K 137 12.3 15.9\n" + end + "exit flood", true, sigkillExit, true, 3600 * time.Millisecond, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			truncated := strings.HasPrefix(c.name, "a flood the cap cut") || strings.HasPrefix(c.name, "a record the cap cut")
-			code, killed, ran, err := readExitRecord(f, c.out, truncated)
+			code, killed, ran, err := readExitRecord(f, c.out, c.truncated)
 			if (err != nil) != c.fails || !c.fails && (code != c.code || killed != c.killed || ran != c.ran) {
 				t.Errorf("readExitRecord(%q) = %d, %v, %s, %v; want %d, %v, %s, failing %v", c.out, code, killed, ran, err, c.code, c.killed, c.ran, c.fails)
+			}
+			var startup *sandbox.StartupOutputError
+			if got := errors.As(err, &startup) && startup.Ran; got != c.startup {
+				t.Errorf("readExitRecord(%q) = %v; a StartupOutputError of a command that ran: %v, want %v", c.out, err, got, c.startup)
 			}
 		})
 	}

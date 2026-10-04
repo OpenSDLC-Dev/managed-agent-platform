@@ -92,6 +92,8 @@ type fakeSandbox struct {
 	// execHook, when set and returning non-nil, answers an Exec in place of
 	// the defaults below.
 	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
+	// execErr, when set, is the error every Exec answers with.
+	execErr error
 	// unframed answers a framed platform script (sandbox.ExecFramed) bare, as
 	// a sandbox whose output never carried the script's frame — a shell that
 	// died first, or a startup that filled the output cap before it.
@@ -140,6 +142,9 @@ func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbo
 
 func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	f.cmds = append(f.cmds, req.Command)
+	if f.execErr != nil {
+		return sandbox.ExecResult{}, f.execErr
+	}
 	if f.execHook != nil {
 		if res := f.execHook(req); res != nil {
 			return *res, nil
@@ -541,6 +546,31 @@ func TestRunsToolAndControlPlaneResumes(t *testing.T) {
 	}
 	if sb.files["/workspace/out.txt"] != "hello" {
 		t.Errorf("sandbox file = %q, want the tool to have written it", sb.files["/workspace/out.txt"])
+	}
+	if got := h.liveModelTurns(t); got != 1 {
+		t.Errorf("model_turn items = %d, want 1 (the completed set resumes)", got)
+	}
+}
+
+// A bash command whose exit record the image's startup pushed out of the
+// output (sandbox.StartupOutputError) ran, and every retry meets the same: the
+// worker posts one tool error saying so and the set resumes — no fault, whose
+// retry would run the command again.
+func TestAStartupFloodIsOneToolErrorNotAFault(t *testing.T) {
+	sb := &fakeSandbox{execErr: &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}}
+	h := newHarness(t, sb)
+	bash, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": "make deploy"}})
+	h.suspend(t, string(bash))
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunSessionTools: %v, want no fault", err)
+	}
+	results := h.results(t)
+	if len(results) != 1 || !results[0].IsError {
+		t.Fatalf("user.tool_result = %+v, want one error", results)
+	}
+	if got, _ := results[0].Content[0]["text"].(string); !strings.Contains(got, "startup file") || !strings.Contains(got, "The command ran") {
+		t.Errorf("result content = %q, want it to name the image's startup and say the command ran", got)
 	}
 	if got := h.liveModelTurns(t); got != 1 {
 		t.Errorf("model_turn items = %d, want 1 (the completed set resumes)", got)

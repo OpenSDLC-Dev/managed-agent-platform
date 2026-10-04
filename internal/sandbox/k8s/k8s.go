@@ -1338,19 +1338,25 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Dura
 // readExitRecord reads exitScript's answer from inside its frame (f), so what
 // an image's startup prints around it — a BASH_ENV file's banner, an EXIT
 // trap's words — is not parsed as part of it (#860); before the frame such a
-// banner made every exec on that image fail here. What a lost stream drops is
-// a suffix (exitScript), so an answer whose end line never arrived is read as
-// far as it got, as a stream the cap cut is, and parseExit makes of it what it
-// makes of any record cut short. A stream with no begin line is the same loss
-// one step earlier — no record, as an empty stream always was — when nothing
-// reached it, or when it ends partway through the begin line, which was on its
-// way when the stream was lost (Frame.CutInBegin). Anything else with no begin
+// banner made every exec on that image fail here.
+//
+// What the cap cut (truncated) is no record: one it cut before the begin line
+// was pushed out whole, and one it cut after it, before the end line, may be
+// cut inside a number — `K 137 12.3 15.9` kept as `K 13`, a killed command
+// read as exiting 13 on time — so it is not read at all, as aliveVerdict does
+// not read a verdict cut short. Both mean a startup printed close to the cap
+// ahead of the script, which no retry changes: a *sandbox.StartupOutputError,
+// whose command had run.
+//
+// What a lost stream drops, short of the cap, is a suffix of whole writes
+// (exitScript prints its record in one), so an answer whose end line never
+// arrived is read as far as it got, and parseExit makes of it what it makes of
+// any record cut short. A stream with no begin line is the same loss one step
+// earlier — no record, as an empty stream always was — when nothing reached
+// it, or when it ends partway through the begin line, which was on its way
+// when the stream was lost (Frame.CutInBegin). Anything else with no begin
 // line is output that is not the script's, which is no record to parse: an
-// error, as an unparseable line is. So is a stream the cap cut (truncated)
-// before any begin line, whatever its tail: a startup that printed past the
-// cap pushed the record out, which is no loss in transit, and reading it as
-// no record would answer every command with the kill's 137; it fails the exec
-// instead (docs/self-hosted-security.md, the 1 MiB room).
+// error, as an unparseable line is.
 //
 // A banner that ends its line and then nothing reads as no record too. The one
 // startup that would print that for every exec — one that exits, or execs, so
@@ -1361,12 +1367,11 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, time.Dura
 // backends: Docker reports the container not running, Kubernetes the
 // container not found).
 func readExitRecord(f sandbox.Frame, out string, truncated bool) (int, bool, time.Duration, error) {
-	line, framed, _ := f.Cut(out, true)
+	line, framed, short := f.Cut(out, true)
 	switch {
-	case framed:
-	case truncated:
-		return 0, false, 0, errors.New("k8s: the exit record did not reach the output: the sandbox printed past the output cap before it")
-	case strings.TrimSpace(out) != "" && !f.CutInBegin(out):
+	case truncated && (!framed || short):
+		return 0, false, 0, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	case !framed && strings.TrimSpace(out) != "" && !f.CutInBegin(out):
 		return 0, false, 0, errors.New("k8s: the exit record did not reach the output: no begin line")
 	}
 	return parseExit(line)
@@ -1518,18 +1523,19 @@ func readArgv(f sandbox.Frame, path string, maxBytes int64) []string {
 // (the room beside the cap took them) or the cap cut them. A stream the cap
 // cut short that still holds no more than the cap lost its end to what printed
 // ahead of the script, not to the file, and says so rather than guessing at a
-// size.
+// size. Both of the startup's are a *sandbox.StartupOutputError, which every
+// read on that image meets again.
 func readStdout(path string, f sandbox.Frame, maxBytes int64, out *cappedBuffer) ([]byte, error) {
 	b, framed, short := f.CutBytesWithin(out.Bytes(), out.truncated, readRoom)
 	switch {
 	case !framed && out.truncated:
-		return nil, fmt.Errorf("k8s: read %s: the sandbox printed past the read's room before the file's bytes", path)
+		return nil, &sandbox.StartupOutputError{What: "the read of " + path}
 	case !framed:
 		return nil, fmt.Errorf("k8s: read %s: short read (exec stdout ended before the pod finished sending)", path)
 	case int64(len(b)) > maxBytes:
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
 	case short:
-		return nil, fmt.Errorf("k8s: read %s: the sandbox printed past the read's room before the file's end", path)
+		return nil, &sandbox.StartupOutputError{What: "the end of the read of " + path}
 	default:
 		// Clipped, so a caller that appends cannot write over the end line.
 		return b[:len(b):len(b)], nil

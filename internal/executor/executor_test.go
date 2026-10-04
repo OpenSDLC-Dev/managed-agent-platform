@@ -956,6 +956,45 @@ func TestReclaimReRunsOnlyUnanswered(t *testing.T) {
 	}
 }
 
+// A bash command whose exit record the image's startup pushed out of the
+// output (sandbox.StartupOutputError) ran, and every retry meets the same: so
+// it is one tool error saying so, committed — not a fault, whose reclaim would
+// run the command again, forever.
+func TestAStartupFloodIsOneToolErrorNotAReclaim(t *testing.T) {
+	sb := &fakeSandbox{execErr: &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}}
+	h := newHarness(t, sb)
+	var faults int
+	h.exec.onFault = func(*queue.Item, error) { faults++ }
+	bash, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": "make deploy"}})
+	h.suspend(t, string(bash))
+	h.stepOnce(t)
+
+	if faults != 0 {
+		t.Errorf("faults = %d, want 0", faults)
+	}
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 1 {
+		t.Fatalf("tool results = %d, want 1", len(results))
+	}
+	var body struct {
+		IsError bool `json:"is_error"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	_ = json.Unmarshal(results[0].Body, &body)
+	if !body.IsError || len(body.Content) == 0 || !strings.Contains(body.Content[0].Text, "startup file") ||
+		!strings.Contains(body.Content[0].Text, "The command ran") {
+		t.Errorf("tool result = %+v, want an error naming the image's startup and saying the command ran", body)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec live = %d, want 0: nothing left to reclaim", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn = %d, want 1: the model reads the error", got)
+	}
+}
+
 func TestProvisionFaultLeavesItemForReclaim(t *testing.T) {
 	h := newHarness(t, nil)
 	h.prov.provisionErr = errors.New("docker daemon unreachable")

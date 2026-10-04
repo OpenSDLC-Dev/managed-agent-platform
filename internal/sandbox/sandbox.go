@@ -419,6 +419,50 @@ const ScriptPreamble = "set +e\n"
 // first (ScriptPreamble).
 func Script(script string) string { return ScriptPreamble + script }
 
+// CheckScript is CheckCommand of script as the platform runs it (Script): the
+// bound measured on the command Exec is handed, preamble and all, for a caller
+// that must know before it runs anything — the package-install pass refuses
+// a list past it terminally, before its probe.
+func CheckScript(script string) error { return CheckCommand(Script(script)) }
+
+// ExecScript runs req's command in sb as a script of the platform's own
+// (Script) — ExecFramed's counterpart for a script whose answer is its exit
+// code, not its output — refusing one past the bound (CheckScript) before
+// anything runs, as Exec would. Every platform script a sandbox runs goes
+// through it or ExecFramed, so neither the preamble nor its bytes can be left
+// out of one.
+func ExecScript(ctx context.Context, sb Sandbox, req ExecRequest) (ExecResult, error) {
+	req.Command = Script(req.Command)
+	if err := CheckCommand(req.Command); err != nil {
+		return ExecResult{}, err
+	}
+	return sb.Exec(ctx, req)
+}
+
+// StartupOutputError is a backend's failure to read back what one of its own
+// scripts answered because the sandbox printed past the output cap
+// (MaxOutputBytes) ahead of it: an image's startup file — `ENV BASH_ENV`,
+// which every shell the sandbox starts runs first — printing that much
+// (#860). What names the answer that was lost. Ran says the call's command
+// had already run when it was — an Exec whose exit record was pushed out — so
+// running the call again runs the command again.
+//
+// The image prints the same in every shell, so a retry meets the same: the
+// toolset answers it as a tool error, never a backend fault, which the
+// executor would leave to a reclaim that re-runs the command, forever.
+type StartupOutputError struct {
+	What string
+	Ran  bool
+}
+
+func (e *StartupOutputError) Error() string {
+	s := fmt.Sprintf("sandbox: %s did not reach the output: the sandbox printed past the %d-byte output cap ahead of it, as an image's startup file printing in every shell does", e.What, MaxOutputBytes)
+	if e.Ran {
+		s += "; the command had run"
+	}
+	return s
+}
+
 // ExecResult is a finished command. TimedOut means the command itself outlived
 // its deadline: the sandbox stopped it, or stopped waiting for it, or caught it
 // still running past the deadline and exiting later on its own terms. TimedOut

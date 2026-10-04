@@ -474,9 +474,9 @@ func TestK8sExecUnderAnErrexitStartup(t *testing.T) {
 
 // An image whose startup prints more than the output cap — 1.2 MB of "y\n" in
 // every shell — pushes each exec's exit record out of its output, and Exec
-// answers with an error, not with the kill's 137 for every command that a
-// lost record would read as (readExitRecord; docs/self-hosted-security.md,
-// the 1 MiB room).
+// answers with the startup's error, which says the command ran — not with the
+// kill's 137 for every command that a lost record would read as
+// (readExitRecord; docs/self-hosted-security.md, the 1 MiB room).
 func TestK8sExecUnderAFloodingStartupIsAnError(t *testing.T) {
 	provider, err := k8s.New(k8s.Config{
 		Context:   os.Getenv("MAP_K8S_CONTEXT"),
@@ -497,8 +497,10 @@ func TestK8sExecUnderAFloodingStartupIsAnError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	for _, command := range []string{"exit 0", "exit 7"} {
-		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: command, Timeout: 30 * time.Second}); err == nil {
-			t.Errorf("%s under a flooding startup = exit %d, timed out %v; want an error", command, res.ExitCode, res.TimedOut)
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: command, Timeout: 30 * time.Second})
+		var startup *sandbox.StartupOutputError
+		if !errors.As(err, &startup) || !startup.Ran {
+			t.Errorf("%s under a flooding startup = exit %d, timed out %v, %v; want a StartupOutputError of a command that ran", command, res.ExitCode, res.TimedOut, err)
 		}
 	}
 }
