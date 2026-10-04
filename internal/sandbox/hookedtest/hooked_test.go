@@ -256,3 +256,58 @@ func TestPlatformScriptsUnderAnErrexitStartupAsNonRoot(t *testing.T) {
 		})
 	}
 }
+
+// An image that sets SHELLOPTS — to anything, even nothing — has bash export
+// it, and keep the exported value in step with the shell's options (#866). The
+// Docker exec wrapper turns job control on (`set -m`) for its watchdog, so the
+// command's own shell, exec'd from the wrapper, started with job control too,
+// and such a shell forks each of its jobs into a process group of its own: the
+// watchdog's group kill took the command's shell and missed its child, and the
+// deadline was reported on work that ran on. An image that names monitor in
+// SHELLOPTS itself turns job control on in both backends' wrappers, and on
+// Kubernetes the runaway then read as a command that exited 0, its deadline
+// neither enforced nor reported. On both images and both backends a runaway
+// past its deadline is a timeout and its child dies with it; and the image's
+// other options still reach the command, only job control taken out of them.
+func TestADeadlineKillsTheCommandsChildrenUnderAnImagesShellopts(t *testing.T) {
+	for _, image := range []struct{ name, shellopts, flag string }{
+		{"empty", "", ""},
+		{"monitor and notify", "monitor:notify", "b"},
+	} {
+		for _, b := range hookedtest.BackendsFor(t, "", "SHELLOPTS="+image.shellopts) {
+			t.Run(image.name+"/"+b.Name, func(t *testing.T) {
+				ctx := context.Background()
+				sb, _ := b.Provision(t, sandbox.Hardening{})
+				res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: `echo "$-"`, Timeout: 30 * time.Second})
+				if err != nil || res.ExitCode != 0 {
+					t.Fatalf(`echo "$-" = %+v, %v`, res, err)
+				}
+				flags := strings.TrimSpace(res.Stdout)
+				if strings.Contains(flags, "m") {
+					t.Errorf("the command's shell runs with job control on: flags %q", flags)
+				}
+				if !strings.Contains(flags, image.flag) {
+					t.Errorf("the command's shell runs with flags %q, without the image's %q", flags, image.flag)
+				}
+
+				res, err = sb.Exec(ctx, sandbox.ExecRequest{Command: "sleep 986601; :", Timeout: time.Second})
+				if err != nil {
+					t.Fatalf("exec: %v", err)
+				}
+				if res.ExitCode != 137 || !res.TimedOut {
+					t.Errorf("a runaway past its deadline = %+v; want a timeout, and the kill's 137", res)
+				}
+				// The kill lands at the deadline; the count waits out the
+				// reaping rather than racing it.
+				var n int
+				for range 50 {
+					if n = sandboxtest.CountProcesses(t, sb, "sleep 986601"); n == 0 {
+						return
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				t.Errorf("%d child(ren) of the command outlived its deadline: its shell was killed, its work was not", n)
+			})
+		}
+	}
+}

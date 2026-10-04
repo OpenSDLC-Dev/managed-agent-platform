@@ -32,6 +32,17 @@ import "time"
 // wrapper leaves: the pid it guards, the exit code it records, and whether the
 // watchdog reports having fired.
 //
+// All of that rests on the wrapper running without job control, which it turns
+// off first (`set +m`) for an image whose SHELLOPTS names monitor (#866): bash
+// reads that variable as it starts, and exports it. With job control on, the
+// wrapper would launch the command as a job, in a group of its own, which
+// setsid — refused a new session as a group leader — forks out of: `$!` would
+// name a parent that exits 0 at once, the exit line would record that 0, and
+// nothing would watch the command. And the command's own shell, reading monitor
+// back, would fork each of its jobs out of the group the watchdog kills.
+// Turned off here, monitor leaves the exported value too; the rest of the
+// image's SHELLOPTS still reaches the command.
+//
 // That last piece — the watchdog marking `$3.killed` between its final `kill -0`
 // and its `kill -9` — is what makes a punctual kill classifiable at all here
 // (#95, #110); why the mark rather than a probe, and why it is safe to weigh
@@ -65,12 +76,14 @@ import "time"
 // watchdog still asleep in `sleep 1` must not pin it open and delay every timed
 // command's return by up to a poll interval.
 //
-// How long the command ran rides on the exit line, after the code, as two
+// How long the command ran rides on the exit line, after the code, as three
 // readings of /proc/uptime (classifyTimeout says why, and what each reading's
-// place bounds, #832): one taken just after the command is launched — after, so
-// nothing the wrapper sets can reach the command's environment, and before
-// anything else the wrapper does, so the record misses only that launch gap of
-// the command's run — and one once the command is reaped.
+// place bounds, #832, #838): one taken just after the command is launched —
+// after, so nothing the wrapper sets can reach the command's environment, and
+// before anything else the wrapper does, so the record misses only that launch
+// gap of the command's run — one just after the watchdog is launched, and one
+// once the command is reaped. The middle one is taken at the same step when
+// there is no watchdog, so the line has one shape.
 // /proc/uptime because every pod has it — it is the kernel's, not the image's —
 // and its clock does not step the way the wall clock can. `read` because it is a
 // builtin, so a reading forks nothing, and a regular one, so a missing file
@@ -85,10 +98,11 @@ import "time"
 // pid file, or the watchdog's sleep or `mkdir` the same way, the last of which
 // leaves a runaway unkilled. So each command whose failure the wrapper means to
 // survive says so — `|| :`, or `wait`'s status taken in an `||` — and none of
-// it touches a shell option: the command's own `bash -c` sources the same file
-// and gets the image's options as before. The wrapper's own exit status is
-// never read; the exit line is the record.
+// it touches errexit: the command's own `bash -c` sources the same file and
+// gets it as before. The wrapper's own exit status is never read; the exit
+// line is the record.
 const execWrapper = `
+set +m
 exec 3>&2 2>/dev/null
 setsid /bin/bash -c "$1" 2>&3 3>&- &
 cmd=$!
@@ -109,11 +123,13 @@ if [ "$2" != "0" ]; then
     fi
   ) >/dev/null 2>&1 3>&- &
 fi
+tw=
+read -r tw _ </proc/uptime || :
 c=0
 wait "$cmd" || c=$?
 t1=
 read -r t1 _ </proc/uptime || :
-echo "$c $t0 $t1" > "$3.exit"
+echo "$c $t0 $tw $t1" > "$3.exit"
 `
 
 // aliveScript answers whether the command pid recorded in $1.pid is still alive.
@@ -152,9 +168,10 @@ if [ -z "$p" ] || kill -0 "$p" 2>/dev/null; then echo A; else echo D; fi
 // the probe race #95 was filed for. Reading the mark here rather than in the
 // wrapper is what lets it survive the wrapper's own sabotage: a command that
 // kills its parent before the exit code is recorded leaves the mark, and the
-// timeout still shows. The run time rides last, the cheapest to lose: the
-// probes still stand without it, and a reading cut short is only ever a
-// smaller number, so a lost suffix can drop the record but never lengthen it.
+// timeout still shows. The run time rides last, the cheapest to lose, and the
+// reap's reading last of all: the probes still stand without it, and a
+// reading cut short is only ever a smaller number, so a lost suffix can drop
+// the record but never lengthen it.
 //
 // `rm -rf` on the mark, because the tenant chooses what type of thing sits at
 // that path; `rm -f` would leave a directory or a planted FIFO behind forever.
@@ -189,6 +206,7 @@ const (
 	// command is still alive — before, not at, since a command the watchdog has
 	// already killed looks like one never there. It is a lead on Exec's own clock
 	// only, which is why it is not what classifies a punctual timeout here; see
-	// classifyTimeout.
+	// classifyTimeout. The wrapper's record of a run a SIGKILL ended is held to
+	// the same lead, so that it and the probe ask one question.
 	defaultProbeLead = 50 * time.Millisecond
 )

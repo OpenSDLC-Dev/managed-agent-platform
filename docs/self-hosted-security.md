@@ -182,7 +182,14 @@ in that shell runs without the image's errexit, while its `nounset` and
 `pipefail` carry (and a `set -e` the model runs there carries from call to
 call). A bash the model starts itself — `bash -c`, a `#!/bin/bash` script —
 reads the startup file again, as every non-interactive bash does, and runs
-under the image's errexit. What the startup file
+under the image's errexit. Job control (`monitor`) is the other exception: a
+command's deadline is enforced by killing its process group, and a shell with
+job control forks each of its jobs into a group of its own, so both backends'
+exec wrappers turn it off before the command starts, whatever `SHELLOPTS`
+says, and the rest of `SHELLOPTS` carries
+([#866](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/866)).
+A startup file or command that turns it back on (`set -m`) takes its jobs out
+of that kill's reach, as a `setsid` does. What the startup file
 *prints* does not corrupt the scripts whose answers the platform parses —
 a bulk write's report aside, below:
 `glob` and `grep`, the outputs harvest's listing, the memory sync's tree
