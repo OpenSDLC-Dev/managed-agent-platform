@@ -102,6 +102,18 @@ func KindRefs(t *testing.T, image string) (refs []string, loaded bool) {
 	return l.(*sandboxtest.KindLoad).Refs(t), true
 }
 
+// KindMissing is what of an image Image built a kind node does not hold
+// (sandboxtest.KindLoad.Missing) — its tag, and its import record where the
+// archive named one — with loaded as KindRefs has it.
+func KindMissing(t *testing.T, image string) (missing []string, loaded bool) {
+	t.Helper()
+	l, ok := loads.Load(image)
+	if !ok {
+		return nil, false
+	}
+	return l.(*sandboxtest.KindLoad).Missing(t), true
+}
+
 // DockerImage is Image on the Docker daemon alone, for a test of the Docker
 // backend that has no cluster to show it to.
 func DockerImage(t *testing.T, hook string) string {

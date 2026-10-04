@@ -163,10 +163,10 @@ func TestHookedImagesOfParallelPackagesAreTheirOwn(t *testing.T) {
 	if refs, _ := hookedtest.KindRefs(t, finished); len(refs) > 0 {
 		t.Errorf("a finished package's image left %v on the kind nodes", refs)
 	}
-	if refs, loaded := hookedtest.KindRefs(t, kept[0].Image); !loaded {
+	if missing, loaded := hookedtest.KindMissing(t, kept[0].Image); !loaded {
 		t.Logf("%s is not a kind cluster: no node records to check", sandboxtest.KubeContext(t))
-	} else if len(refs) < 2 {
-		t.Errorf("a running package's image is held on the kind nodes as %v, want its tag and its import record", refs)
+	} else if len(missing) > 0 {
+		t.Errorf("a running package's image is missing %v on the kind nodes, want its tag and its import record held", missing)
 	}
 	for _, b := range kept {
 		sb, _ := b.Provision(t, sandbox.Hardening{})

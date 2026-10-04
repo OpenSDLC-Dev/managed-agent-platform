@@ -2,6 +2,8 @@ package k8s_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
@@ -182,16 +185,24 @@ func TestK8sLimitedNetworkingFailsClosedWhenFlushNoOps(t *testing.T) {
 func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 	image := sandboxtest.BuildGateImage(t)
 	kubeCtx := sandboxtest.KubeContext(t)
-	// Its tag is not removed afterwards: the gate image is the suite's one
-	// shared tag, rebuilt and reloaded by every run, which another package's
-	// pods may be running from. The dated import record each load leaves
-	// beside it is, at once — the tag is what a pod's image names — so the
-	// runs do not pile one up on the nodes per day. A context that is not
-	// kind's must share the daemon's image store or have the image loaded by
-	// hand — MAP_K8S_HOST_ADDR fixes only how pods address the stub
-	// controlplane, not image distribution.
-	if l := sandboxtest.LoadIntoKind(t, kubeCtx, image); l != nil {
-		l.RemoveImport(t)
+	// On kind, the pods run this run's own image of the gate: the suite's
+	// shared tag with a nonce label on top, its layers shared through the
+	// build cache, its ID — and so the digest the import record `kind load`
+	// leaves is named for — this run's alone. Removing it when the test is
+	// done takes its tag and its record and nothing another run or package
+	// is running pods from; loading the shared tag instead left a dated
+	// record on the nodes that no later run could tell from one a concurrent
+	// run still needed, so none removed it. A context that is not kind's
+	// must share the daemon's image store or have the image loaded by hand —
+	// MAP_K8S_HOST_ADDR fixes only how pods address the stub controlplane,
+	// not image distribution.
+	if strings.HasPrefix(kubeCtx, "kind-") {
+		var load [8]byte
+		_, _ = rand.Read(load[:])
+		image = dockertest.ImageFrom(t, "gate", "FROM "+image+"\nLABEL map.gate.load="+hex.EncodeToString(load[:])+"\n")
+		if l := sandboxtest.LoadIntoKind(t, kubeCtx, image); l != nil {
+			t.Cleanup(func() { l.Remove(t) })
+		}
 	}
 	stub := sandboxtest.StartGateStubAt(t, k8sHostAddr(t, kubeCtx))
 	return sandboxtest.GateFixture{

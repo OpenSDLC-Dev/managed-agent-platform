@@ -36,20 +36,20 @@ func KubeContext(t testing.TB) string {
 // KindLoad is an image LoadIntoKind put on a kind cluster's nodes: under its
 // tag, and under the record `kind load` leaves beside it,
 // `import-<date>@sha256:<digest>`, named for the archive's own index.json,
-// which removing the tag leaves behind (Remove, RemoveImport).
+// which removing the tag leaves behind (Remove). Every image loaded is the
+// loading test's own — built for it, a nonce label making its ID, and so its
+// index's digest, its alone (hookedtest.Image, the Kubernetes gate fixture) —
+// so nothing another load holds shares either name, and Remove can take both.
 //
 // containerd is the record of what a node holds, and what Refs reads. The
-// kubelet's CRI view (`crictl images`) caches an image row of its own for the
-// import record, which containerd removing the record does not clear: the row
-// stays, naming the record's digest, until containerd restarts — which no
-// test does. Remove says so of such a row rather than fail on it.
+// kubelet's CRI view (`crictl images --digests`) caches an image row of its
+// own for the import record, which containerd removing the record does not
+// clear: the row stays, naming the record's digest, until containerd restarts
+// — which no test does. Refs, and so Remove, say so of such a row rather than
+// fail on it.
 type KindLoad struct {
 	cluster, ref, index string
 	docker              []string
-	// held is the import records of the same index the nodes held before the
-	// load, by node: an earlier load of the same image (the gate fixture's)
-	// left them, and RemoveImport leaves them to whoever made them.
-	held map[string]map[string]bool
 }
 
 // LoadIntoKind makes a locally built image visible to a kind cluster's nodes,
@@ -88,23 +88,13 @@ func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLo
 	if !strings.Contains(ref, "/") {
 		ref = "docker.io/library/" + ref
 	}
-	l := &KindLoad{cluster: cluster, ref: ref, index: index, docker: docker, held: map[string]map[string]bool{}}
 	if index == "" {
 		t.Logf("the archive of %s has no index.json (Docker before 25): the import record kind leaves for it cannot be named, and stays on the nodes", image)
-	} else {
-		for _, node := range l.nodes(t) {
-			l.held[node] = map[string]bool{}
-			for _, r := range l.containerdRefs(t, node) {
-				if strings.HasSuffix(r, "@"+index) {
-					l.held[node][r] = true
-				}
-			}
-		}
 	}
 	if out, err := exec.Command("kind", "load", "image-archive", archive, "--name", cluster).CombinedOutput(); err != nil {
 		t.Fatalf("kind load image-archive: %v\n%s", err, out)
 	}
-	return l
+	return &KindLoad{cluster: cluster, ref: ref, index: index, docker: docker}
 }
 
 // archiveIndex is the digest of a saved image archive's index.json, which is
@@ -135,48 +125,60 @@ func archiveIndex(path string) (string, error) {
 	}
 }
 
-// names reports whether a containerd reference is one of the load's.
+// names reports whether an image reference is one of the load's: its tag, or
+// its import record — by digest, so the CRI view's normalized name of the
+// record (docker.io/library/import-…) is one too.
 func (l *KindLoad) names(ref string) bool {
 	return ref == l.ref || l.index != "" && strings.HasSuffix(ref, "@"+l.index)
 }
 
 // Refs is every image reference the cluster's nodes' containerd holds of the
-// load: its tag and its import record — not an earlier load's (KindLoad.held)
-// — each as "node: reference". After Remove it is empty. A row the CRI view still lists of the load that
-// containerd no longer holds is not one (KindLoad), and is reported instead.
+// load — its tag and its import record — each as "node: reference". After
+// Remove it is empty. A row the CRI view still lists of the load that
+// containerd no longer holds is no reference (KindLoad), and is reported.
 func (l *KindLoad) Refs(t testing.TB) []string {
 	t.Helper()
-	refs := []string{}
+	return l.refsOn(t, l.nodes(t))
+}
+
+// Missing is what of the load a node of the cluster does not hold, each as
+// "node: what": its tag, and its import record where the archive named one
+// (LoadIntoKind) — none while the load is in place.
+func (l *KindLoad) Missing(t testing.TB) []string {
+	t.Helper()
+	var missing []string
 	for _, node := range l.nodes(t) {
-		holds := map[string]bool{}
+		tag, record := false, false
 		for _, ref := range l.containerdRefs(t, node) {
-			if l.names(ref) {
-				holds[ref] = true
-				if !l.held[node][ref] {
-					refs = append(refs, node+": "+ref)
-				}
+			switch {
+			case ref == l.ref:
+				tag = true
+			case l.names(ref):
+				record = true
 			}
 		}
-		for _, ref := range l.criRefs(t, node) {
-			if !holds[ref] {
-				t.Logf("kind node %s's CRI view lists %s, which its containerd no longer holds: the kubelet's cache keeps the row until containerd restarts", node, ref)
-			}
+		if !tag {
+			missing = append(missing, node+": "+l.ref)
+		}
+		if l.index != "" && !record {
+			missing = append(missing, node+": the import record @"+l.index)
 		}
 	}
-	return refs
+	return missing
 }
 
 // Remove takes the load off every node of the kind cluster: its tag, with
 // crictl, which removes an image by its ID, every tag of it with it — so the
-// caller must own the whole image, one built for this test alone, never one
-// another package may be running pods from — and its import record
-// (RemoveImport). A pod's container can outlive its pod's deletion for a
-// moment and holds the image while it does, so each node is asked a few
-// times. It fails the test if containerd still holds anything of the load,
-// and says so of the CRI view's leftover row (KindLoad).
+// caller must own the whole image (KindLoad), never one another package may
+// be running pods from — and then, with ctr, whatever containerd still holds
+// under the load's names, its import record above all. A pod's container can
+// outlive its pod's deletion for a moment and holds the image while it does,
+// so each node is asked a few times. It fails the test if containerd still
+// holds anything of the load, and says so of the CRI view's leftover row.
 func (l *KindLoad) Remove(t testing.TB) {
 	t.Helper()
-	for _, node := range l.nodes(t) {
+	nodes := l.nodes(t)
+	for _, node := range nodes {
 		var out []byte
 		var err error
 		for range 10 {
@@ -188,47 +190,45 @@ func (l *KindLoad) Remove(t testing.TB) {
 		if err != nil {
 			t.Errorf("remove %s from kind node %s: %v\n%s", l.ref, node, err, out)
 		}
+		for _, ref := range l.containerdRefs(t, node) {
+			if !l.names(ref) {
+				continue
+			}
+			if out, err := l.on(node, "ctr", "-n", "k8s.io", "images", "rm", ref); err != nil {
+				t.Errorf("remove %s from kind node %s: %v\n%s", ref, node, err, out)
+			}
+		}
 	}
-	l.RemoveImport(t)
-	if left := l.Refs(t); len(left) > 0 {
+	if left := l.refsOn(t, nodes); len(left) > 0 {
 		t.Errorf("the kind nodes still hold %v of %s", left, l.ref)
 	}
 }
 
-// RemoveImport takes only the import record this load left off the nodes,
-// leaving its tag — for an image other loads share, as the gate fixture's is,
-// whose tag may be holding another test's pods while this one's record would
-// otherwise stay on the node for good. A record of the same image an earlier
-// load left (on another day, under another date) is that load's, and stays.
-// The CRI view keeps a row for the record until containerd restarts
-// (KindLoad), which it reports.
-func (l *KindLoad) RemoveImport(t testing.TB) {
+// refsOn is Refs over nodes: one containerd listing and one CRI listing a
+// node, the CRI view's leftover rows reported (KindLoad).
+func (l *KindLoad) refsOn(t testing.TB, nodes []string) []string {
 	t.Helper()
-	if l.index == "" {
-		return
-	}
-	for _, node := range l.nodes(t) {
-		for _, ref := range l.containerdRefs(t, node) {
-			if strings.HasSuffix(ref, "@"+l.index) && !l.held[node][ref] {
-				if out, err := l.on(node, "ctr", "-n", "k8s.io", "images", "rm", ref); err != nil {
-					t.Errorf("remove %s from kind node %s: %v\n%s", ref, node, err, out)
-				}
-			}
-		}
+	refs := []string{}
+	for _, node := range nodes {
 		holds := map[string]bool{}
 		for _, ref := range l.containerdRefs(t, node) {
-			holds[ref] = true
+			if l.names(ref) {
+				holds[ref] = true
+				refs = append(refs, node+": "+ref)
+			}
 		}
 		for _, ref := range l.criRefs(t, node) {
-			if strings.HasSuffix(ref, "@"+l.index) && !holds[ref] {
-				t.Logf("kind node %s's CRI view still lists %s, %s's import record, which containerd no longer holds: the kubelet's cache keeps the row until containerd restarts", node, ref, l.ref)
+			if !holds[ref] {
+				t.Logf("kind node %s's CRI view lists %s, which its containerd no longer holds: the kubelet's cache keeps the row until containerd restarts", node, ref)
 			}
 		}
 	}
+	return refs
 }
 
 // criRefs is every reference the node's CRI view (`crictl images --digests`)
-// lists of the load: its tag, and its import record by digest.
+// lists of the load (names), each as containerd names it: the import record
+// bare, where the CRI view normalizes it to docker.io/library/import-….
 func (l *KindLoad) criRefs(t testing.TB, node string) []string {
 	t.Helper()
 	out, err := l.on(node, "crictl", "images", "--digests", "-o", "json")
@@ -247,14 +247,13 @@ func (l *KindLoad) criRefs(t testing.TB, node string) []string {
 	var refs []string
 	for _, im := range view.Images {
 		for _, ref := range append(im.RepoTags, im.RepoDigests...) {
-			switch {
-			case ref == l.ref:
-				refs = append(refs, ref)
-			case l.index != "" && strings.HasSuffix(ref, "@"+l.index):
-				// The CRI view normalizes the record's name, which containerd
-				// keeps bare: docker.io/library/import-… is import-….
-				refs = append(refs, strings.TrimPrefix(ref, "docker.io/library/"))
+			if !l.names(ref) {
+				continue
 			}
+			if ref != l.ref {
+				ref = strings.TrimPrefix(ref, "docker.io/library/")
+			}
+			refs = append(refs, ref)
 		}
 	}
 	return refs
