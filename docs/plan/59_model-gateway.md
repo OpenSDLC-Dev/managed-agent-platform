@@ -115,10 +115,10 @@ answer the same request with DeepSeek's own ids (`call_00_…`) 200, the reasoni
 restored server-side; the first probes kept those ids, and so missed the rule. Neither
 a made-up signature nor none is refused, and a loop followed by a later user message
 is not checked. The brain sends event ids as tool ids, so without replay every DeepSeek
-tool loop it drives is refused at its second request (plan 60). MiniMax answered a tool
-continuation 200 without its thinking, with it, and with its text edited, under its own
-ids and under foreign ones (`MiniMax-M2.7` both ways, `MiniMax-M3.1-Flash-Preview`
-through the brain's event ids). Zhipu and Moonshot are untested; the gateway and the
+tool loop it drives is refused at its second request (#67). MiniMax answered a tool
+continuation 200 without its thinking, with it, and with its text edited under its own
+ids, and without its thinking under foreign ones (`MiniMax-M2.7` directly,
+`MiniMax-M3.1-Flash-Preview` through the brain's event ids). Zhipu and Moonshot are untested; the gateway and the
 brain follow the documentation regardless.
 
 **Vendors.** Each publishes an Anthropic-compatible endpoint beside its
@@ -444,10 +444,12 @@ request path reads only the snapshot.
   lacks and a removal cannot supply — puts the inbound request in strip mode: every
   thinking block is removed, an emptied assistant message going as above, and the
   attempt is made again. Removing all thinking is valid (Ground truth, Thinking). That
-  is bifrost's fail-soft strip, with three differences: Anthropic's "cannot be
+  is bifrost's fail-soft strip, with four differences: Anthropic's "cannot be
   modified" enters strip mode here, where bifrost excludes it as a refusal the removal
   repeats — the Claude 5-generation rule is that removing every block stays valid, and
   when the removal does not cure it the cost is the one attempt strip mode allows;
+  DeepSeek's "must be passed back" does not, where bifrost's matcher, which only
+  excludes the other two, would strip and retry;
   strip mode is entered once per inbound request and holds for every attempt after it,
   the fallbacks included, so no attempt can re-send what was stripped or strip twice;
   and whichever attempt answers in strip mode wraps the first thinking block of its
