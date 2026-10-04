@@ -1,135 +1,30 @@
-// Package givenurl is web_fetch's provenance rule (#823). The tool's
-// description, the reference's word for word, tells the model it "can only
-// fetch EXACT URLs that have been provided directly by the user or have been
-// returned in results from the web_search and web_fetch tools". This is where
-// that holds: a model a prompt injection has turned cannot build a URL of its
-// own — one carrying a secret in its query or fragment, say — and have the
-// executor fetch it.
-//
-// The model's URL only chooses: what is fetched is the given URL itself, as it
-// was written in the session, so nothing the model adds — a fragment, a
-// spelling Go would re-encode into the same form — reaches the reader.
-//
-// A URL is given when it appears in what a person wrote into the session — a
-// user.message, a user.define_outcome, a user.tool_confirmation (its
-// deny_message) or an operator's system.message, on any thread — in a
-// web_search or web_fetch result that is not an error, or as the input of a
-// web_fetch call a person allowed by confirmation. An agent's message to
-// another thread is an agent.thread_message_received, so a coordinator cannot
-// launder a URL through a child; other tools' results, client-side tool results
-// included, are not counted. Every string in those payloads is read (a text
-// block, a document's URL source, a search hit's source, title and snippet, a
-// fetched page's text), and a URL in one is read every way running text allows
-// (urlMatcher). Two URLs are the same when normalizeFetchURL says so.
-//
-// The reading is bounded, because the text is not ours: a fetched page can hold
-// 100 KiB of URLs run together, and reading each occurrence to the end of such
-// a run, cut at every punctuation mark, is quadratic. urlMatcher reads an
-// occurrence's authority a fixed number of ways and what follows only within
-// the window a match can fit in, goes no further for another host, and charges
-// what it scans and parses to readingBudget: a lookup past it refuses the fetch
-// rather than stall the executor. What people wrote is read first, then
-// the newest results, so a page that spends the budget costs the URLs given
-// before it last.
 package givenurl
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"strings"
 	"unicode"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // maxFetchURL is the longest URL web_fetch accepts. It bounds the window every
 // reading is read in, and no browser or reader takes a longer one.
 const maxFetchURL = 8 << 10
 
-// readingBudget is the most one lookup spends, in bytes parsed: a parse costs
-// its length, a scan an eighth of what it scans, and a plain tail's string
-// comparison a sixteenth of its length. A session past it — in practice a page
+// readingBudget is the most one lookup spends reading the payloads the index
+// left unindexed (indexBudget), in bytes parsed: a parse costs its length, a
+// scan an eighth of what it scans, and a plain tail's string comparison a
+// sixteenth of its length. A lookup past it — in practice one that meets pages
 // built to exhaust it — refuses the fetch. Counted in bytes, not parses,
 // because a parse costs its length and a request may be long.
 const readingBudget = 64 << 20
 
 // ErrReadingBudget is a lookup that spent readingBudget before deciding.
 var ErrReadingBudget = errors.New("the session holds too many URLs naming this host to check this one")
-
-// Source returns the given URL that raw, the URL web_fetch was asked
-// for, names in the session sid, exactly as it was written there, or "" when
-// none does. It reads the committed log: only the payloads that mention the
-// host or hold non-ASCII text (a host can be spelled there in a Unicode form
-// that folds to the request's), when the request's host is plain ASCII.
-func Source(ctx context.Context, pool *pgxpool.Pool, sid domain.ID, raw string) (string, error) {
-	m, ok := newURLMatcher(raw)
-	if !ok {
-		return "", nil
-	}
-	// The prefilter only narrows, so it is skipped wherever a payload could
-	// spell the host differently from the request: a Unicode name or its
-	// A-label, a percent-escape. An empty key matches every row.
-	key := ""
-	if u, err := url.Parse(m.raw); err == nil {
-		if h := u.Hostname(); isPlainASCIIHost(h) && !strings.Contains(strings.ToLower(h), "xn--") {
-			key = h
-		}
-	}
-	const narrow = `($2 = '' OR strpos(lower(%[1]s::text), lower($2)) > 0
-		       OR octet_length(%[1]s::text) <> char_length(%[1]s::text))`
-	rows, err := pool.Query(ctx, `
-		SELECT payload FROM (
-		SELECT m.payload, 0 AS rank, m.seq FROM events m
-		 WHERE m.session_id = $1 AND m.type = ANY($3)
-		   AND `+fmt.Sprintf(narrow, "m.payload")+`
-		UNION ALL
-		SELECT u.payload->'input', 0, u.seq FROM events u
-		 WHERE u.session_id = $1 AND u.type = $5 AND u.payload->>'name' = 'web_fetch'
-		   AND EXISTS (SELECT 1 FROM events c
-		                WHERE c.session_id = u.session_id AND c.type = $6
-		                  AND c.payload->>'tool_use_id' = u.id AND c.payload->>'result' = 'allow')
-		UNION ALL
-		SELECT r.payload, 1, r.seq FROM events r
-		  JOIN events u ON u.session_id = r.session_id AND u.id = r.payload->>'tool_use_id'
-		 WHERE r.session_id = $1 AND r.type = $4
-		   AND u.type = $5 AND u.payload->>'name' IN ('web_search', 'web_fetch')
-		   AND NOT COALESCE((r.payload->>'is_error')::boolean, false)
-		   AND `+fmt.Sprintf(narrow, "r.payload")+`
-		) given ORDER BY rank, seq DESC`,
-		sid.String(), key,
-		[]string{string(domain.EventUserMessage), string(domain.EventUserDefineOutcome),
-			string(domain.EventUserToolConfirm), string(domain.EventSystemMessage)},
-		string(domain.EventAgentToolResult), string(domain.EventAgentToolUse), string(domain.EventUserToolConfirm))
-	if err != nil {
-		return "", fmt.Errorf("read the session's given URLs: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
-			return "", fmt.Errorf("read the session's given URLs: %w", err)
-		}
-		var v any
-		if err := json.Unmarshal(payload, &v); err != nil {
-			return "", fmt.Errorf("decode a payload naming the host: %w", err)
-		}
-		if m.walk(v) {
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-	if m.found == "" && m.budget <= 0 {
-		return "", ErrReadingBudget
-	}
-	return m.found, nil
-}
 
 // urlMatcher looks through text for a reading of a URL that normalizes to
 // want: the given URL a request names. found is the first such reading, or one
@@ -167,6 +62,20 @@ func newURLMatcher(raw string) (*urlMatcher, bool) {
 		return nil, false
 	}
 	host, _ := canonicalHostPort(u)
+	w := windowsOf(want)
+	return &urlMatcher{raw: raw, want: want, host: host, head: want[:w.head], tail: want[w.head:],
+		authMax: w.authMax, tailMin: w.tailMin, tailMax: w.tailMax,
+		budget: readingBudget}, true
+}
+
+// windows are what a request's normalized form want decides of how a match
+// is read: where want's authority ends (head), the longest authority a match
+// can be spelled with, and the fewest and most bytes of what follows it.
+// newURLMatcher and the index (readings) both take them from here, so the two
+// read every occurrence alike.
+type windows struct{ head, authMax, tailMin, tailMax int }
+
+func windowsOf(want string) windows {
 	rest := want[strings.Index(want, "://")+len("://"):]
 	auth := len(rest)
 	if i := strings.IndexByte(rest, '/'); i >= 0 {
@@ -174,13 +83,12 @@ func newURLMatcher(raw string) (*urlMatcher, bool) {
 	}
 	head := len(want) - len(rest) + auth
 	tail := len(want) - head
-	return &urlMatcher{raw: raw, want: want, host: host, head: want[:head], tail: want[head:],
-		authMax: 3*auth + 64, tailMin: max(0, (tail-16)/3), tailMax: 3*tail + 64,
-		budget: readingBudget}, true
+	return windows{head: head, authMax: 3*auth + 64, tailMin: max(0, (tail-16)/3), tailMax: 3*tail + 64}
 }
 
-// walk reads every string in the decoded JSON value v. It reports true when the
-// search is over: an exact match found, or the budget spent.
+// walk reads every string in the decoded JSON value v, an object's members in
+// key order, the order the index records them in (readings). It reports true
+// when the search is over: an exact match found, or the budget spent.
 func (m *urlMatcher) walk(v any) bool {
 	switch v := v.(type) {
 	case string:
@@ -192,8 +100,8 @@ func (m *urlMatcher) walk(v any) bool {
 			}
 		}
 	case map[string]any:
-		for _, x := range v {
-			if m.walk(x) {
+		for _, k := range slices.Sorted(maps.Keys(v)) {
+			if m.walk(v[k]) {
 				return true
 			}
 		}
@@ -236,9 +144,7 @@ func (m *urlMatcher) occurrence(s string) bool {
 	if limit := start + m.authMax + m.tailMax; len(run) > limit {
 		run, whole = run[:limit], false
 	}
-	if end := strings.IndexFunc(run, func(r rune) bool {
-		return unicode.IsSpace(r) || r < ' ' || strings.ContainsRune("<>\"`", r)
-	}); end >= 0 {
+	if end := strings.IndexFunc(run, endsRun); end >= 0 {
 		run, whole = run[:end], true
 	}
 	m.budget -= len(run)/8 + 1
@@ -297,6 +203,12 @@ func (m *urlMatcher) occurrence(s string) bool {
 		}
 	}
 	return whole && len(run)-authEnd >= m.tailMin && m.tryTail(run, authEnd, len(run))
+}
+
+// endsRun reports whether r ends a URL's run: whitespace, a control character,
+// or a character no URL carries unescaped.
+func endsRun(r rune) bool {
+	return unicode.IsSpace(r) || r < ' ' || strings.ContainsRune("<>\"`", r)
 }
 
 // isHostByte reports whether c can appear in an authority: userinfo, a host
@@ -441,17 +353,6 @@ func canonicalHostPort(u *url.URL) (string, bool) {
 		host += ":" + port
 	}
 	return host, true
-}
-
-// isPlainASCIIHost reports whether h is spelled in ASCII with no escape, so its
-// lowercase form is how any ASCII payload naming it spells it.
-func isPlainASCIIHost(h string) bool {
-	for i := range len(h) {
-		if h[i] > unicode.MaxASCII || h[i] == '%' {
-			return false
-		}
-	}
-	return h != ""
 }
 
 // hasPrefixFold is strings.HasPrefix ignoring ASCII case.

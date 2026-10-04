@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/givenurl"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -239,6 +240,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1`, sessionID.String()).Scan(&seq); err != nil {
 		return nil, err
 	}
+	prevSeq := seq
 	// Under the lock, on this process's clock (the option's comment).
 	var consumedAt time.Time
 	if opts.Consume {
@@ -341,6 +343,16 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			out[i].CreatedAt = createdAt.UTC()
 		}
 		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		// The URLs these events give web_fetch (#823) are indexed with them,
+		// under the same lock, so a lookup sees them exactly when it sees the
+		// events (#836).
+		types := make([]domain.EventType, len(evs))
+		for i, ev := range evs {
+			types[i] = ev.Type
+		}
+		if err := givenurl.IndexAppended(ctx, tx, sessionID, prevSeq, seq, types); err != nil {
 			return nil, err
 		}
 	}
