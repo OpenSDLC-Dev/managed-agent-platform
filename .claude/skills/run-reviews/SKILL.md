@@ -37,17 +37,17 @@ otherwise, and the code-review workflow's `agent()` calls omit `model`, so:
    replays cached results from the old model, which defeats the re-run.
 4. Confirm from the run's agent metadata (or the transcripts under
    `~/.claude/projects/<project>/<session>/subagents/workflows/<runId>/`) that agents ran
-   on `claude-opus-5`. The alias is what makes step 2 short, and the only thing that can
-   go wrong with it: if it resolved to an older Opus, put the exact model id in the
-   `model` field instead and re-run.
+   on the current Opus (`claude-opus-5-5` as of 2026-10-04). The alias is what makes step
+   2 short, and the only thing that can go wrong with it: if it resolved to an older Opus,
+   put the exact model id in the `model` field instead and re-run.
 
 ## Codex reviewer
 
 Preferred invocation — the `task` subcommand (it sandboxes read-only when `--write` is
-omitted), inheriting the strongest effort from the user's config:
+omitted), with the model and the effort both pinned (user decision, 2026-10-04):
 
 ```
-node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-5.6-sol \
+node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-6.1-sol --effort xhigh \
   "<read-only review prompt: name the diff range and the invariants to attack>"
 ```
 
@@ -56,20 +56,25 @@ Run it as a background Bash task (backgrounding comes from the Bash task, not a 
 read the task's output log for the verdict when it completes; `/codex:review` itself is
 user-invocable only (`disable-model-invocation`).
 
-- **Effort:** omitting `--effort` inherits `model_reasoning_effort` from
-  `~/.codex/config.toml` (currently `ultra`, the strongest — it exists only as a config
-  value; `--effort ultra` is rejected — the flag accepts only
-  `none`/`minimal`/`low`/`medium`/`high`/`xhigh`). Pin
-  `--effort xhigh` when the effort must not drift with the user's config. Never edit
-  `~/.codex/config.toml`.
-- **Model:** `gpt-5.6-sol` is the strongest usable model on `codex-cli 0.144.4` and the
-  config default — verified real, not a silent fallback (an invented name is rejected with
-  HTTP 400; this one runs clean with no fallback-metadata warning). `gpt-5.5` is the
-  fallback if it regresses; `gpt-5.3-codex-spark` (`spark`) works but is weaker. Re-check
-  all three when the CLI is upgraded.
-- **Plain `review` subcommand:** pin the model explicitly
-  (`review "--scope branch --base main --model gpt-5.6-sol"`); it passes `--model` but
-  never `--effort`, so effort silently follows the config.
+- **Effort:** always pass `--effort xhigh`. Omitting it inherits `model_reasoning_effort`
+  from `~/.codex/config.toml`, which drifts with the user's own use of Codex: it read
+  `ultra` when this skill was written and `low` on 2026-10-04, so a pass that inherits it
+  runs at whatever the config says that day. The companion's flag
+  accepts only `none`/`minimal`/`low`/`medium`/`high`/`xhigh`; the models also list `max`
+  and `ultra`, reachable only through the config. Never edit `~/.codex/config.toml`.
+- **Model:** `gpt-6.1-sol` ("Latest workhorse model for coding and everyday work") on
+  `codex-cli 0.160.0`, verified 2026-10-04 to run clean at `xhigh` with no
+  fallback-metadata warning. The server refuses a model the account cannot use rather than
+  substituting one: on `codex-cli 0.155.1` the same name failed with HTTP 400 `The
+  'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account`, so a
+  pass that errors is not a clean verdict. Fallbacks, both verified at `xhigh` the same
+  day: `gpt-6-astra` ("Frontier intelligence for the most demanding work"), then
+  `gpt-5.6-sol`. The CLI's model list, with each model's description and effort levels,
+  is `~/.codex/models_cache.json`; re-check the pin against it when the CLI is upgraded.
+- **Plain `review` subcommand:** it passes `--model` but never `--effort`, so its effort
+  silently follows the config — use `task` instead. If `review` must be used, pin the
+  model at least (`review "--scope branch --base main --model gpt-6.1-sol"`) and say in
+  the PR that its effort was the config's.
 - **Stall mode:** the `task` subcommand can hang on its internal "wait" collaboration tool
   and never emit a verdict. Watch the log for the `Turn completed` marker, cap the wait at
   ~12 minutes, and do not let a stalled Codex pass block a PR the verifier and the Claude
