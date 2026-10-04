@@ -353,6 +353,8 @@ func TestCredentials(t *testing.T) {
 	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials", map[string]any{"key": key, "protocols": []string{"openai"}}),
 		http.StatusBadRequest, "invalid_request_error", "openai")
 	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials", map[string]any{"key": "has space"}), http.StatusBadRequest, "invalid_request_error", "key")
+	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials", map[string]any{"key": key, "protocols": []string{}}),
+		http.StatusBadRequest, "invalid_request_error", "empty")
 	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials", map[string]any{}), http.StatusBadRequest, "invalid_request_error", "key")
 	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials", map[string]any{"key": key, "weight": 0}), http.StatusBadRequest, "invalid_request_error", "weight")
 	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials", map[string]any{"key": key, "protocols": []string{"anthropic", "anthropic"}}),
@@ -365,6 +367,8 @@ func TestCredentials(t *testing.T) {
 		t.Fatalf("updated = %v", up)
 	}
 	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials/"+cid, map[string]any{"key": "sk-new"}), http.StatusBadRequest, "invalid_request_error", "rotate")
+	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials/"+cid, map[string]any{"protocols": []string{}}),
+		http.StatusBadRequest, "invalid_request_error", "empty")
 	if n := len(e.admin("GET", "/admin/v1/providers/"+pid+"/credentials", nil).list()); n != 2 {
 		t.Errorf("list has %d credentials, want 2", n)
 	}
