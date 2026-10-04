@@ -405,6 +405,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// is then exactly what the start consumed, however late before it an input
 	// landed. Nothing assembled above reads it.
 	history, err := b.requestHistory(kctx, sid, item.ThreadID, span.StartSeq())
+	var kept map[domain.ID]events.ThinkingBlock
+	if err == nil {
+		// What earlier turns kept of their thinking, sent back by replay where
+		// it is still valid (#67).
+		kept, err = b.log.ThinkingBlocks(kctx, sid)
+	}
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)
@@ -423,7 +429,8 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 			"session_id", sid.String(), "error", err)
 		return nil
 	}
-	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
+	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock,
+		replayThinking{model: desc.Model, blocks: kept})
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)
@@ -452,7 +459,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// The call to the model begins here, and its latency with it: the history
 	// read and the replay above ran after the span start and are ours.
 	span.ModelCalling()
-	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req)
+	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req, desc.Model)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
 	// settlement — and none of it belongs in a model-latency metric. The usage
@@ -921,6 +928,11 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	opts := events.AppendOptions{
 		ThreadID: item.ThreadID,
 		AddUsage: &usage,
+	}
+	// A turn's thinking is kept only beside an answer: a reply of thinking
+	// alone is no assistant turn the Messages API accepts back (#67).
+	if len(turn.text) > 0 || len(turn.toolUses) > 0 {
+		opts.Thinking = turn.thinking
 	}
 
 	// A turn that called tools suspends on them, whatever stop reason came

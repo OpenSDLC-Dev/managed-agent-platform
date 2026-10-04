@@ -84,6 +84,15 @@ const (
 	KindTextDelta ChunkKind = "text_delta"
 	// KindThinkingDelta appends thinking text to the block at Index.
 	KindThinkingDelta ChunkKind = "thinking_delta"
+	// KindThinkingSignature appends Signature to the thinking block at Index.
+	// The signature is what lets a block go back to the model on a later request
+	// (#67): an endpoint that checks refuses a thinking block without one, and on
+	// a model that omits thinking text it is the only part of the block that
+	// carries the reasoning.
+	KindThinkingSignature ChunkKind = "thinking_signature"
+	// KindRedactedThinking is one complete redacted_thinking block at Index, its
+	// opaque payload in Data. Like a signed block, it goes back verbatim.
+	KindRedactedThinking ChunkKind = "redacted_thinking"
 	// KindToolUse is one complete tool invocation (input fully accumulated).
 	KindToolUse ChunkKind = "tool_use"
 	// KindDone closes the turn with stop reason and usage.
@@ -92,9 +101,11 @@ const (
 
 // Chunk is one streaming increment.
 type Chunk struct {
-	Kind  ChunkKind
-	Index int64  // content block index (text/thinking deltas)
-	Text  string // text/thinking fragment
+	Kind      ChunkKind
+	Index     int64  // content block index (text/thinking deltas)
+	Text      string // text/thinking fragment
+	Signature string // KindThinkingSignature only
+	Data      string // KindRedactedThinking only
 
 	ToolUse *ToolUse // KindToolUse only
 

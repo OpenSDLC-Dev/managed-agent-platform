@@ -36,7 +36,7 @@ func TestBuildRequestAnswersToolUsesInCallOrder(t *testing.T) {
 		ev(7, domain.EventSessionThreadStatusRunning, `{}`),
 		ev(8, domain.EventAgentToolResult, `{"tool_use_id":"`+first.ID.String()+`","content":[{"type":"text","text":"denied"}],"is_error":true}`),
 	}
-	req, _, err := buildRequest("", nil, history, "", "", "", "")
+	req, _, err := buildRequest("", nil, history, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,8 @@
 //
 // The tiers, and what each costs:
 //
-//	RUN_LIVE_MODEL_TESTS=1  one real turn against the configured endpoint (cents)
+//	RUN_LIVE_MODEL_TESTS=1  one real turn against the configured endpoint, and on an
+//	                        anthropic one a tool loop of up to four requests (cents)
 //	RUN_EVALS=1             the end-to-end eval suite (minutes, dollars)
 //
 // Two variables rather than one because their costs differ by an order of

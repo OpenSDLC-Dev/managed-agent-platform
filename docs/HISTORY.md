@@ -49,6 +49,43 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Thinking persistence and replay (plan 60, #67) — archived 2026-10-04, delivered in one PR
+
+The brain tests were written first. Run against the unchanged brain, six of the seven failed: the replayed turn came back `[tool_use]` without its thinking, a thinking block and a redacted one produced a single `agent.thinking` event between them, and the two tests that count kept blocks found no `thinking_blocks` relation. The model-switch test passed, since an unchanged brain sends no thinking to drop; the mutation below is what proves it. Then each guard was broken on its own, and the test that pins it failed each time:
+
+- skipping the model check failed the model-switch test;
+- skipping the digest check failed the `system.message` test, and later the tool-set and reorder tests;
+- hashing a block's raw bytes, not its canonical form, failed four tests through the `<`, `>` and `&` fixtures;
+- letting text not end the kept run failed the leading-run test;
+- keeping thinking beside no answer failed the committed-answer test;
+- dropping `Thinking` on the delegated settlement failed the delegated-path test;
+- a `jsonb` column failed the verbatim round trip, refused with SQLSTATE 22P05 on the `\u0000` escape.
+
+The live tier ran on 2026-10-04 behind a local proxy that kept every request body. Both DeepSeek models ran on `https://api.deepseek.com/anthropic`, both MiniMax models on `https://api.minimax.cn/anthropic`:
+
+| Model | Requests | Blocks kept | Note |
+| --- | --- | --- | --- |
+| `deepseek-flash` | 3 | 3 | |
+| `deepseek-v4-pro` | 3 | 3 | |
+| `MiniMax-M3.1-Flash-Preview` | 3 | 1 | 2 on an earlier run |
+| `MiniMax-M3` | 3 | 0 | thought in none; the brain sends no `thinking` field |
+
+Every kept block went out as stored in every later body, and every request was answered.
+
+The same test, run against a replay that sends no stored block, found what the plan's first probes had missed: DeepSeek refused the loop's second request — 400, `` The `content[].thinking` in the thinking mode must be passed back to the API. `` Bisected by hand against `deepseek-flash`, the refusal follows the tool ids:
+
+- **Ids decide it.** Of the refused body's one-change variants, only turning thinking off made it pass; streaming, the system prompt and the tool result's form changed nothing. Under DeepSeek's own `call_00_…` ids a continuation without its thinking answered 200, and under a foreign id the same continuation was refused.
+- **Signatures are not checked.** A made-up signature, or none, was accepted.
+- **A user message lifts it.** A user message after the loop, beside the tool result or after it, was accepted.
+- **Both models.** `deepseek-v4-pro` behaved the same.
+- **MiniMax does not enforce.** `MiniMax-M2.7` accepted foreign ids. `MiniMax-M3.1-Flash-Preview` answered the replay-less loop in full, and only the body check failed it.
+
+So before this plan every DeepSeek tool loop the brain drove ended at its first tool result. The first probes had kept the vendor's ids. The guard's remaining gap is DeepSeek's, #883.
+
+The full `make verify` gate passed on the branch: build, cross-build, vet, format check and 67 test packages, with 90.91% total statement coverage. Review results and CI are recorded in the pull request.
+
+---
+
 ## A graceful stop of acked work goes stopping (plan 58, #810) — archived 2026-09-26, delivered in one PR
 
 The recordings reversed #25's rule that only `active` work may enter `stopping`. A graceful

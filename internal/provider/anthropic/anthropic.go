@@ -188,6 +188,10 @@ type stream struct {
 	guard  *provider.StallGuard
 	cur    provider.Chunk
 	err    error
+	// pending holds chunks one wire event produced beyond the first: a thinking
+	// block an endpoint sends whole on its start yields its text and its
+	// signature.
+	pending []provider.Chunk
 
 	// tool_use accumulation for the currently open block
 	toolIndex int64
@@ -231,6 +235,10 @@ func (s *stream) Close() error {
 }
 
 func (s *stream) Next() bool {
+	if len(s.pending) > 0 {
+		s.cur, s.pending = s.pending[0], s.pending[1:]
+		return true
+	}
 	if s.err != nil || s.done {
 		return false
 	}
@@ -253,6 +261,27 @@ func (s *stream) Next() bool {
 			}
 
 		case "content_block_start":
+			switch ev.ContentBlock.Type {
+			case "redacted_thinking":
+				// No delta follows: the whole opaque payload is on the start.
+				s.cur = provider.Chunk{Kind: provider.KindRedactedThinking, Index: ev.Index, Data: ev.ContentBlock.Data}
+				return true
+			case "thinking":
+				// The official protocol starts a thinking block empty and streams
+				// it, but an endpoint may send the block whole here, as it may a
+				// tool input; dropping either part would lose the block.
+				var out []provider.Chunk
+				if ev.ContentBlock.Thinking != "" {
+					out = append(out, provider.Chunk{Kind: provider.KindThinkingDelta, Index: ev.Index, Text: ev.ContentBlock.Thinking})
+				}
+				if ev.ContentBlock.Signature != "" {
+					out = append(out, provider.Chunk{Kind: provider.KindThinkingSignature, Index: ev.Index, Signature: ev.ContentBlock.Signature})
+				}
+				if len(out) > 0 {
+					s.cur, s.pending = out[0], out[1:]
+					return true
+				}
+			}
 			if ev.ContentBlock.Type == "tool_use" {
 				if s.inTool {
 					// Losing the still-open tool call silently would make
@@ -286,6 +315,9 @@ func (s *stream) Next() bool {
 				return true
 			case "thinking_delta":
 				s.cur = provider.Chunk{Kind: provider.KindThinkingDelta, Index: ev.Index, Text: ev.Delta.Thinking}
+				return true
+			case "signature_delta":
+				s.cur = provider.Chunk{Kind: provider.KindThinkingSignature, Index: ev.Index, Signature: ev.Delta.Signature}
 				return true
 			case "input_json_delta":
 				if s.inTool && ev.Index == s.toolIndex {

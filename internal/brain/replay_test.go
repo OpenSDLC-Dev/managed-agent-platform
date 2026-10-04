@@ -63,7 +63,7 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 		t.Fatalf("tools = %v, want %v", got, want)
 	}
 
-	req, watermark, err := buildRequest(agent.System, tools, history, "", "", "", "")
+	req, watermark, err := buildRequest(agent.System, tools, history, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestBuildRequestCustomToolResultID(t *testing.T) {
 	req, _, err := buildRequest(agent.System, nil, []domain.Event{
 		ev(1, domain.EventAgentCustomToolUse, `{"name":"x","input":{}}`),
 		ev(2, domain.EventUserCustomToolRes, `{"custom_tool_use_id":"sevt_abc","is_error":true}`),
-	}, "", "", "", "")
+	}, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestBuildRequestEmptyToolInputDefaults(t *testing.T) {
 	for _, payload := range []string{`{"name":"noop"}`, `{"name":"noop","input":null}`} {
 		req, _, err := buildRequest(agent.System, nil, []domain.Event{
 			ev(1, domain.EventAgentToolUse, payload),
-		}, "", "", "", "")
+		}, "", "", "", "", replayThinking{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -175,7 +175,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 		ev(1, domain.EventUserToolResult, `not json`),
 	}
 	for _, bad := range cases {
-		if _, _, err := buildRequest(agent.System, nil, []domain.Event{bad}, "", "", "", ""); err == nil {
+		if _, _, err := buildRequest(agent.System, nil, []domain.Event{bad}, "", "", "", "", replayThinking{}); err == nil {
 			t.Errorf("%s with body %q accepted", bad.Type, bad.Body)
 		}
 	}
@@ -185,7 +185,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 	skilled := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"}}
 	req, _, err := buildRequest(skilled.System, nil, []domain.Event{
 		ev(1, domain.EventSystemMessage, `{"content":[{"type":"text","text":"steer"}]}`),
-	}, "SKILLS", "", "", "")
+	}, "SKILLS", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 	}
 	// With no agent system prompt the block leads, still before runtime text.
 	bare := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err = buildRequest(bare.System, nil, nil, "SKILLS", "", "", "")
+	req, _, err = buildRequest(bare.System, nil, nil, "SKILLS", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"}}
 	req, _, err := buildRequest(agent.System, nil, []domain.Event{
 		ev(1, domain.EventSystemMessage, `{"content":[{"type":"text","text":"steer"}]}`),
-	}, "SKILLS", "FILES", "", "")
+	}, "SKILLS", "FILES", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 	}
 	// The files block leads when there is no agent prompt and no skills block.
 	bare := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err = buildRequest(bare.System, nil, nil, "", "FILES", "", "")
+	req, _, err = buildRequest(bare.System, nil, nil, "", "FILES", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 			`{"description":"Build a DCF model","rubric":{"type":"text","content":"# Rubric"},"max_iterations":3,"outcome_id":"outc_1"}`),
 		ev(2, domain.EventSessionStatusRunning, `{}`),
 	}
-	req, watermark, err := buildRequest(agent.System, nil, history, "", "", "", "")
+	req, watermark, err := buildRequest(agent.System, nil, history, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 	// grader from the acceptance snapshot (slice 3), not the conversation.
 	history[0] = ev(1, domain.EventUserDefineOutcome,
 		`{"description":"Build it","rubric":{"type":"file","file_id":"file_1"},"max_iterations":3,"outcome_id":"outc_2"}`)
-	req, _, err = buildRequest(agent.System, nil, history, "", "", "", "")
+	req, _, err = buildRequest(agent.System, nil, history, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatalf("buildRequest (file rubric): %v", err)
 	}
@@ -346,7 +346,7 @@ func TestBuildRequestReplaysAMidRequestInputAfterTheReply(t *testing.T) {
 		ev(4, domain.EventAgentMessage, `{"content":[{"type":"text","text":"first answer"}]}`),
 		ev(5, domain.EventSpanModelRequestEnd, `{"model_request_start_id":"`+start.ID.String()+`"}`),
 	}
-	req, watermark, err := buildRequest("", nil, history, "", "", "", "")
+	req, watermark, err := buildRequest("", nil, history, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestBuildRequestReplaysAMessagePostedDuringGradingAfterTheVerdict(t *testin
 		ev(7, domain.EventSpanOutcomeEvalEnd, `{"outcome_id":"outc_1","outcome_evaluation_start_id":"`+
 			grading.ID.String()+`","result":"needs_revision","explanation":"missing the totals"}`),
 	}
-	req, _, err := buildRequest("", nil, history, "", "", "", "")
+	req, _, err := buildRequest("", nil, history, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestBuildRequestRendersATerminalVerdictOnlyOnTheLastCycle(t *testing.T) {
 				ev(6, domain.EventSpanOutcomeEvalEnd, `{"outcome_id":"outc_1","outcome_evaluation_start_id":"`+
 					grading.ID.String()+`","iteration":0,"result":"`+tc.result+`","explanation":"the grader's reasons"}`),
 			}
-			req, _, err := buildRequest("", nil, history, "", "", "", "")
+			req, _, err := buildRequest("", nil, history, "", "", "", "", replayThinking{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -521,7 +521,7 @@ func TestBuildRequestDropsTheStopInstructionWhenInputSharesTheVerdictsTurn(t *te
 					seq++
 				}
 			}
-			req, _, err := buildRequest("", nil, history, "", "", "", "")
+			req, _, err := buildRequest("", nil, history, "", "", "", "", replayThinking{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -562,7 +562,7 @@ func TestBuildRequestReplaysInputsHeldPastAnAsyncResult(t *testing.T) {
 		ev(6, domain.EventUserMessage, `{"content":"three"}`),
 		ev(7, domain.EventUserCustomToolRes, `{"custom_tool_use_id":"`+call.ID.String()+`","content":[{"type":"text","text":"decided"}]}`),
 	}
-	req, watermark, err := buildRequest("", nil, history, "", "", "", "")
+	req, watermark, err := buildRequest("", nil, history, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
