@@ -89,7 +89,16 @@ they point at is a committed row the listener re-reads for itself.
    the inputs the request consumes and, on the primary, flips a pending outcome to
    `running`, the request being the first to read its `user.define_outcome`; the brain
    reads the history only after that commit, bounded by the start, so the request is
-   exactly what the start consumed.
+   exactly what the start consumed. Thinking is the one model output kept beside the
+   log rather than in it: the settlement that commits a turn's text or tool calls also
+   stores the response's leading signed `thinking` and `redacted_thinking` blocks in
+   `thinking_blocks`, keyed by their content-free `agent.thinking` events, and replay
+   sends each back only to the model id that produced it and only under the request
+   prefix it was produced under. Any brain replays them. The guard is this platform's,
+   stricter than the API's own binding: a changed prompt drops the blocks rather than
+   sending one an Anthropic endpoint refuses, though DeepSeek refuses a tool loop that
+   lost its thinking (#883; plan 60). A request that fails while blocks are there to
+   replay drops them all, so a refused block cannot fail every turn after.
 3. Tool calls commit as events with stable IDs. Custom calls and self-hosted
    sandbox calls wait on external results; ask-policy calls wait for authorization.
    A thread advertises these as idle/requires_action. The shared events-layer
@@ -425,7 +434,7 @@ Layout order is by layer, as the repo is.
 |---|---|
 | `domain/` | The Anthropic-native types every other package speaks — ids and their wire prefixes, the event taxonomy, session, agent, environment, outcome. Stdlib only: no adk-go, no genai, no provider SDK, because the wire schema is authoritative here. |
 | `api/` | The control plane's whole HTTP surface, and the dispatcher deciding which of four credentials reaches which route. Five surfaces share one `ServeMux`; auth runs before the router, never inside it. |
-| `events/` | The append-only session event log — the single source of truth — plus per-session `seq` allocation, list queries, the Postgres LISTEN/NOTIFY broker behind SSE, the ephemeral preview frames, and the `span.*` events emitted from the same instrumentation point as the OTel spans. |
+| `events/` | The append-only session event log — the single source of truth — plus per-session `seq` allocation, list queries, the Postgres LISTEN/NOTIFY broker behind SSE, the ephemeral preview frames, the `span.*` events emitted from the same instrumentation point as the OTel spans, and the thinking blocks a settlement keeps for replay beside the log (plan 60). |
 | `unknownkey/` | Which key a refusal of unknown keys names — the least in byte order, so a body carrying several names the same one every time — for the three packages that refuse them, `api`, `toolset` and `events`, which cannot import one another for it. Stdlib only, and not `domain/`, which holds the Anthropic-native types alone. |
 
 ### Execution chain
@@ -761,7 +770,7 @@ a scripted model standing in for the real one — runs in the merge gate like an
 suite; the live variant (`TestLiveDefineOutcomesAcceptance`) points the same harness at
 a running compose stack and a real model, consented by its own tier variable
 `RUN_LIVE_ACCEPTANCE_TESTS` (whole sessions cost an order of magnitude more than the
-`RUN_LIVE_MODEL_TESTS` single-turn smoke, which therefore must not buy them) with the
+`RUN_LIVE_MODEL_TESTS` smoke of a turn and a four-request tool loop, which therefore must not buy them) with the
 `ACCEPTANCE_*` variables naming the stack's key, model, and base URL.
 
 One more check sits on that same in-gate / out-of-gate seam, over documentation rather

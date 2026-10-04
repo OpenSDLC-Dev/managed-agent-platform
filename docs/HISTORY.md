@@ -49,6 +49,85 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Thinking persistence and replay (plan 60, #67) — archived 2026-10-04, delivered in one PR
+
+The brain tests were written first. Run against the unchanged brain, six of the seven failed: the replayed turn came back `[tool_use]` without its thinking, a thinking block and a redacted one produced a single `agent.thinking` event between them, and the two tests that count kept blocks found no `thinking_blocks` relation. The model-switch test passed, since an unchanged brain sends no thinking to drop; the mutation below is what proves it. Then each guard was broken on its own, and the test that pins it failed each time:
+
+- skipping the model check failed the model-switch test;
+- skipping the digest check failed the `system.message` test, and later the tool-set and reorder tests;
+- hashing a block's raw bytes, not its canonical form, failed four tests through the `<`, `>` and `&` fixtures;
+- letting text not end the kept run failed the leading-run test;
+- keeping thinking beside no answer failed the committed-answer test;
+- dropping `Thinking` on the delegated settlement failed the delegated-path test;
+- a `jsonb` column failed the verbatim round trip, refused with SQLSTATE 22P05 on the `\u0000` escape.
+
+The live tier ran on 2026-10-04 behind a local proxy that kept every request body. Both DeepSeek models ran on `https://api.deepseek.com/anthropic`, both MiniMax models on `https://api.minimax.cn/anthropic`:
+
+| Model | Requests | Blocks kept | Note |
+| --- | --- | --- | --- |
+| `deepseek-flash` | 3 | 3 | |
+| `deepseek-v4-pro` | 3 | 3 | |
+| `MiniMax-M3.1-Flash-Preview` | 3 | 1 | 2 on an earlier run |
+| `MiniMax-M3` | 3 | 0 | thought in none; the brain sends no `thinking` field |
+
+Every kept block went out as stored in every later body, and every request was answered.
+
+The same test, run against a replay that sends no stored block, found what the plan's first probes had missed: DeepSeek refused the loop's second request — 400, `` The `content[].thinking` in the thinking mode must be passed back to the API. `` Bisected by hand against `deepseek-flash`, the refusal follows the tool ids:
+
+- **Ids decide it.** Of the refused body's one-change variants, only turning thinking off made it pass; streaming, the system prompt and the tool result's form changed nothing. Under DeepSeek's own `call_00_…` ids a continuation without its thinking answered 200, and under a foreign id the same continuation was refused.
+- **Signatures are not checked.** A made-up signature, or none, was accepted.
+- **A user message lifts it.** A user message after the loop, beside the tool result or after it, was accepted.
+- **Both models.** `deepseek-v4-pro` behaved the same.
+- **MiniMax does not enforce.** `MiniMax-M2.7` accepted foreign ids. `MiniMax-M3.1-Flash-Preview` answered the replay-less loop in full, and only the body check failed it.
+
+So before this plan every DeepSeek tool loop the brain drove ended at its first tool result. The first probes had kept the vendor's ids. The guard's remaining gap is DeepSeek's, #883.
+
+**Review hardening, in the same PR.** The verifier's first run failed the gate. A Go comment cited the SDK without `checked against`, and `tools/sdkref` reads only files the repository tracks, so the uncommitted test file had passed the implementer's own run. Codex (`gpt-6.1-sol`, `xhigh`) found four defects, all fixed:
+
+- **The digest did not cover the route.** It missed the endpoint and the adapter's `flatten_search_results` rendering, so a route change under the same model id admitted blocks bound elsewhere. `provider.Descriptor.Route`, a digest of the protocol, base URL and flag, now opens every chain.
+- **URL media could change under the digest.** An image or document fetched by URL can change its bytes while the digest stays the same, so a response to such a request now keeps no thinking.
+- **Unseen blocks could stay in the leading run.** Text sent whole on a block's start, which the adapter dropped, or an empty thinking block could leave a later block in the run. The adapter now forwards a text start, and the run ends at a gap in the block indices.
+- **Four documents overclaimed.** They said a changed prompt never fails a request, which DeepSeek's rule contradicts.
+
+Each new guard was then broken on its own, and its test failed:
+
+- dropping the route on both sides failed the route-move test;
+- a chain that skips the route failed both route tests;
+- a contiguity check that never fires failed the unseen-block test;
+- URL media that no longer blocks keeping failed the URL test.
+
+The verifier also had the changelog's Kimi and MiniMax claim trimmed to the two vendors the plan cites.
+
+The Claude review (`/code-review`, Opus 5.5) then found twelve issues. Nine were fixed:
+
+- **A refused block wedged the session.** An endpoint that refuses a kept block — the guard cannot see a key rotated or an account switched behind an unchanged route — would refuse it on every turn after, where without replay the session would have kept working. A request that fails while the session has blocks to replay now drops them all.
+- **The route digest missed the key and the headers.** A gateway may route by either, so both are now in the digest.
+- **The live test mishandled two cases.** Its failure branch could panic before reporting, and an SDK retry added a request body and skewed the per-turn count. It now reads the answered attempt of each turn.
+- **Replay hashed when it had nothing to check.** It hashed the whole history on turns with no kept block, and now skips that.
+- **A turn loaded every thread's blocks.** It now loads only its own thread's.
+- **A new event count went unregistered.** A redacted block now yields an `agent.thinking` event, and docs/DIVERGENCES.md records that as an inference.
+- **Two code-level fixes:** a test helper that duplicated `slices.Equal` was removed, and `streamTurn` now takes the `provider.Descriptor` rather than two adjacent strings.
+
+Three were declined:
+
+- Deriving the stream's digest from the replay side's chain would hash the request as built rather than as sent.
+- The plan number was right once plan 59 merged (#882).
+- The separate model column records which model produced a block, which #883 may key on.
+
+Each new guard was broken on its own, and its test failed:
+
+- a failed request that keeps its blocks failed the failed-request test;
+- a primary read without the thread filter failed the per-thread test;
+- a digest without the key and headers failed the route test.
+
+After the Claude review's fixes the full `make verify` gate passed on the branch: build, cross-build, vet, format check and 67 test packages, with 90.91% total statement coverage. Review results and CI are recorded in the pull request.
+
+The verifier's re-run passed with three notes. One was fixed: header names alike but for case could digest in either order. That first fix fixed only the digest's order. Codex's bot review on the pull request showed that the adapters, which apply headers from a map, could still send either value under an unchanged Route. The registry now refuses such a route, and a test that failed first pins that.
+
+CodeRabbit's review on the pull request found the docs calling the guard Anthropic's own rule. It is this platform's policy, stricter than the API's: the API drops a block the requested model cannot read, and its prefix check is configurable through `thinking.block_binding.prefix_mismatch_behavior`. The plan, docs/ARCHITECTURE.md and docs/DIVERGENCES.md now say so, and DIVERGENCES states that a turn keeps thinking only when it also commits text or a tool call.
+
+---
+
 ## A graceful stop of acked work goes stopping (plan 58, #810) — archived 2026-09-26, delivered in one PR
 
 The recordings reversed #25's rule that only `active` work may enter `stopping`. A graceful

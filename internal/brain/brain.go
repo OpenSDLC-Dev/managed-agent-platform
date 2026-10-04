@@ -405,6 +405,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// is then exactly what the start consumed, however late before it an input
 	// landed. Nothing assembled above reads it.
 	history, err := b.requestHistory(kctx, sid, item.ThreadID, span.StartSeq())
+	var kept map[domain.ID]events.ThinkingBlock
+	if err == nil {
+		// What earlier turns kept of their thinking, sent back by replay where
+		// it is still valid (#67).
+		kept, err = b.log.ThinkingBlocks(kctx, sid, item.ThreadID)
+	}
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)
@@ -423,7 +429,8 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 			"session_id", sid.String(), "error", err)
 		return nil
 	}
-	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock)
+	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock,
+		replayThinking{model: desc.Model, route: desc.Route, blocks: kept})
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)
@@ -452,7 +459,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// The call to the model begins here, and its latency with it: the history
 	// read and the replay above ran after the span start and are ours.
 	span.ModelCalling()
-	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req)
+	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req, desc)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
 	// settlement — and none of it belongs in a model-latency metric. The usage
@@ -477,6 +484,19 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		if errors.As(streamErr, &ie) {
 			span.Finish(sctx, true, streamErr)
 			return streamErr
+		}
+		if len(kept) > 0 {
+			// A request with thinking to replay failed. An endpoint that
+			// refuses a kept block — a signature it cannot read, from an
+			// account the route's settings no longer reach — refuses it on
+			// every turn after, and the guard cannot see why, so the session
+			// forgets what it kept and the next turn goes without (#67). A
+			// failure for any other reason costs earlier reasoning, nothing
+			// more: dropping thinking is always valid by Anthropic's rule.
+			if err := b.log.DropThinking(sctx, sid); err != nil {
+				slog.WarnContext(sctx, "brain: kept thinking not dropped after a failed request",
+					"session_id", sid.String(), "error", err)
+			}
 		}
 		return b.failTurn(sctx, sid, item, span, watermark, streamErr.Error(), envKind)
 	}
@@ -921,6 +941,11 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	opts := events.AppendOptions{
 		ThreadID: item.ThreadID,
 		AddUsage: &usage,
+	}
+	// A turn's thinking is kept only beside an answer: a reply of thinking
+	// alone is no assistant turn the Messages API accepts back (#67).
+	if len(turn.text) > 0 || len(turn.toolUses) > 0 {
+		opts.Thinking = turn.thinking
 	}
 
 	// A turn that called tools suspends on them, whatever stop reason came

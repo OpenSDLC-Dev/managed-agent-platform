@@ -38,9 +38,12 @@ import (
 //   - session.*/span.*/user.interrupt/user.tool_confirmation → not
 //     conversation material; skipped
 //
-// agent.thinking replays as nothing: the wire event carries no content, so
-// thinking is never reconstructed (and v1 never requests extended thinking).
-func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock, memoryBlock string) (provider.Request, int64, error) {
+// agent.thinking carries no content on the wire. One whose block a settlement
+// kept (thinking.blocks) replays as that block, in its assistant turn ahead of
+// the text and tool calls it led to, when admitThinking finds it still valid:
+// sent to the model that produced it, under the prefix it was produced under
+// (#67, docs/plan/60_thinking-replay.md). Any other replays as nothing.
+func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock, memoryBlock string, thinking replayThinking) (provider.Request, int64, error) {
 	req := provider.Request{System: system, Tools: tools}
 	// Startup metadata blocks sit after the agent's own system prompt and before
 	// any runtime system.message text (systemTail), which is appended at the end:
@@ -68,10 +71,12 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 	// the calls ran.
 	var (
 		role       string
-		results    []toolAnswer      // tool_result blocks of the open user turn
-		blocks     []json.RawMessage // other blocks of the open turn
-		uses       []string          // tool_use ids of the open assistant turn
-		answering  map[string]int    // the last assistant turn's, by position
+		results    []toolAnswer                 // tool_result blocks of the open user turn
+		blocks     []json.RawMessage            // other blocks of the open turn
+		kept       map[int]events.ThinkingBlock // blocks[i] that are kept thinking
+		msgs       []replayMessage
+		uses       []string       // tool_use ids of the open assistant turn
+		answering  map[string]int // the last assistant turn's, by position
 		systemTail string
 		budgets    = map[string]int64{} // max_iterations by outcome_id, from each definition
 		acks       []ackBlock           // acknowledgment prompts of the open user turn
@@ -100,18 +105,16 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		for _, r := range results {
 			content = append(content, r.block)
 		}
-		raw, err := json.Marshal(append(content, blocks...))
-		if err != nil {
-			return err
-		}
-		req.Messages = append(req.Messages, provider.Message{Role: role, Content: raw})
+		// Kept thinking is assistant content, which has no results to sort
+		// ahead of it, so its indices into blocks hold in content.
+		msgs = append(msgs, replayMessage{role: role, blocks: append(content, blocks...), thinking: kept})
 		if role == "assistant" {
 			answering = make(map[string]int, len(uses))
 			for i, id := range uses {
 				answering[id] = i
 			}
 		}
-		role, results, blocks, uses, acks = "", nil, nil, nil, nil
+		role, results, blocks, kept, uses, acks = "", nil, nil, nil, nil, nil
 		return nil
 	}
 	// clientInput marks the open turn's acknowledgment prompts as followed by
@@ -332,6 +335,20 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				systemTail += blk.Text
 			}
 
+		case domain.EventAgentThinking:
+			tb, ok := thinking.blocks[ev.ID]
+			if !ok {
+				break
+			}
+			if err := turn("assistant"); err != nil {
+				return req, 0, err
+			}
+			if kept == nil {
+				kept = map[int]events.ThinkingBlock{}
+			}
+			kept[len(blocks)] = tb
+			blocks = append(blocks, tb.Block)
+
 		case domain.EventAgentMessage:
 			var p struct {
 				Content json.RawMessage `json:"content"`
@@ -406,6 +423,16 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		return req, 0, err
 	}
 	req.System += systemTail
+	if err := admitThinking(thinking, req.System, req.Tools, msgs); err != nil {
+		return req, 0, err
+	}
+	for _, m := range msgs {
+		raw, err := json.Marshal(m.blocks)
+		if err != nil {
+			return req, 0, err
+		}
+		req.Messages = append(req.Messages, provider.Message{Role: m.role, Content: raw})
+	}
 	return req, watermark, nil
 }
 

@@ -9,8 +9,12 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -84,6 +88,15 @@ const (
 	KindTextDelta ChunkKind = "text_delta"
 	// KindThinkingDelta appends thinking text to the block at Index.
 	KindThinkingDelta ChunkKind = "thinking_delta"
+	// KindThinkingSignature appends Signature to the thinking block at Index.
+	// The signature is what lets a block go back to the model on a later request
+	// (#67): an endpoint that checks refuses a thinking block without one, and on
+	// a model that omits thinking text it is the only part of the block that
+	// carries the reasoning.
+	KindThinkingSignature ChunkKind = "thinking_signature"
+	// KindRedactedThinking is one complete redacted_thinking block at Index, its
+	// opaque payload in Data. Like a signed block, it goes back verbatim.
+	KindRedactedThinking ChunkKind = "redacted_thinking"
 	// KindToolUse is one complete tool invocation (input fully accumulated).
 	KindToolUse ChunkKind = "tool_use"
 	// KindDone closes the turn with stop reason and usage.
@@ -92,9 +105,11 @@ const (
 
 // Chunk is one streaming increment.
 type Chunk struct {
-	Kind  ChunkKind
-	Index int64  // content block index (text/thinking deltas)
-	Text  string // text/thinking fragment
+	Kind      ChunkKind
+	Index     int64  // content block index (text/thinking deltas)
+	Text      string // text/thinking fragment
+	Signature string // KindThinkingSignature only
+	Data      string // KindRedactedThinking only
 
 	ToolUse *ToolUse // KindToolUse only
 
@@ -212,6 +227,17 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 		if route.Config.FlattenSearchResults && route.Config.Protocol != "anthropic" {
 			return nil, fmt.Errorf("route %q: flatten_search_results is only valid on protocol: anthropic routes", route.Model)
 		}
+		// Names that differ only in case are one HTTP header, and an adapter
+		// applies its headers from a map: which value went out would change
+		// between provider instances while the route's Route did not.
+		seen := make(map[string]bool, len(route.Config.Headers))
+		for k := range route.Config.Headers {
+			name := strings.ToLower(k)
+			if seen[name] {
+				return nil, fmt.Errorf("route %q sets header %q more than once, in different cases", route.Model, name)
+			}
+			seen[name] = true
+		}
 		// The registry owns its config copies: Headers is a reference
 		// type, and sharing it with the caller's Route slice would let a
 		// later mutation reach every constructed provider.
@@ -239,6 +265,12 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 type Descriptor struct {
 	Protocol string
 	Model    string
+	// Route tells routes apart by where a request goes and how the adapter
+	// renders it — the protocol, the base URL, the headers and key a gateway
+	// may route by, and flatten_search_results — digested so it names none of
+	// them. A model's thinking is bound to it (#67): a block produced over one
+	// route does not go back over another.
+	Route string
 }
 
 // Describe resolves a model string to its backend's Descriptor, reporting
@@ -249,7 +281,28 @@ func (r *Registry) Describe(model string) (Descriptor, bool) {
 	if !ok {
 		return Descriptor{}, false
 	}
-	return Descriptor{Protocol: cfg.Protocol, Model: cfg.Model}, true
+	return Descriptor{Protocol: cfg.Protocol, Model: cfg.Model, Route: routeDigest(cfg)}, true
+}
+
+// routeDigest is Descriptor.Route. What it covers is digested rather than
+// said: a Descriptor is what may be said out loud, and the key, a header or a
+// URL may carry what may not. Header names compare as HTTP compares them, and
+// NewRegistry refuses two alike but for case, so lower-cased they sort into
+// one order.
+func routeDigest(cfg Config) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%q %q %q %t", cfg.Protocol, cfg.BaseURL, cfg.APIKey, cfg.FlattenSearchResults)
+	names := make([]string, 0, len(cfg.Headers))
+	for k := range cfg.Headers {
+		names = append(names, k)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return strings.ToLower(names[i]) < strings.ToLower(names[j])
+	})
+	for _, k := range names {
+		fmt.Fprintf(h, " %q %q", strings.ToLower(k), cfg.Headers[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // route resolves a model string to its config, applying the pass-through of the

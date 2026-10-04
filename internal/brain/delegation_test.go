@@ -309,7 +309,7 @@ func TestReplayRendersAReceivedMessage(t *testing.T) {
 			// sthr_0 is this session's primary thread.
 			e := ev(1, domain.EventAgentThreadMessageReceived, tc.body)
 			e.SessionID = "sesn_0"
-			req, _, err := buildRequest("", nil, []domain.Event{e}, "", "", "", "")
+			req, _, err := buildRequest("", nil, []domain.Event{e}, "", "", "", "", replayThinking{})
 			if err != nil {
 				t.Fatalf("buildRequest: %v", err)
 			}
@@ -335,7 +335,7 @@ func TestReplaySkipsASentMessage(t *testing.T) {
 			`{"content":[{"type":"text","text":"go and look"}],"to_session_thread_id":"sthr_1","to_agent_name":"researcher"}`),
 		ev(2, domain.EventAgentThreadMessageReceived,
 			`{"content":[{"type":"text","text":"done"}],"from_session_thread_id":"sthr_1","from_agent_name":"researcher"}`),
-	}, "", "", "", "")
+	}, "", "", "", "", replayThinking{})
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}

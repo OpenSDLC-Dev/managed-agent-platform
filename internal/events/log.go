@@ -156,6 +156,10 @@ type AppendOptions struct {
 	// same row lock (the AddUsage pattern): the projection changes atomically
 	// with the events that change it, so log and resource can never disagree.
 	MutateOutcomes func([]domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error)
+	// Thinking keeps the settled turn's thinking blocks for replay (#67), written
+	// by this transaction after the batch, so a turn that does not commit keeps
+	// none. Each names an agent.thinking event appended earlier in the turn.
+	Thinking []ThinkingBlock
 	// Then runs inside the same transaction after the insert (work enqueue,
 	// counters). An error aborts the whole append.
 	Then func(ctx context.Context, tx pgx.Tx) error
@@ -343,6 +347,9 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
+	}
+	if err := insertThinking(ctx, tx, sessionID, opts.Thinking); err != nil {
+		return nil, err
 	}
 
 	// The session delegation bound's reset (#447): somebody outside the session

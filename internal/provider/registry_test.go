@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -232,5 +233,64 @@ func TestRegistryValidation(t *testing.T) {
 		if _, err := provider.NewRegistry(tc.routes, factories); err == nil {
 			t.Errorf("%s: NewRegistry accepted an invalid route set", tc.name)
 		}
+	}
+}
+
+// A Descriptor's Route tells routes apart by where a request goes — the
+// endpoint, and the headers and key a gateway routes by — and how the adapter
+// renders it, without naming any of them: a model's thinking is bound to it
+// (#67).
+func TestDescribeRouteIdentifiesEndpointAndRendering(t *testing.T) {
+	reg, err := provider.NewRegistry([]provider.Route{
+		{Model: "a", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m"}},
+		{Model: "a-again", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m"}},
+		{Model: "b", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-b", Model: "m"}},
+		{Model: "flat", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m",
+			FlattenSearchResults: true}},
+		{Model: "hdr", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m",
+			Headers: map[string]string{"x-gateway-provider": "other"}}},
+		{Model: "key", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m",
+			APIKey: "sk-other-account"}},
+	}, factories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := func(model string) string {
+		d, ok := reg.Describe(model)
+		if !ok || d.Route == "" {
+			t.Fatalf("Describe(%q) = %+v, %v; want a route", model, d, ok)
+		}
+		return d.Route
+	}
+	if route("a") != route("a-again") {
+		t.Error("one endpoint and rendering gave two routes")
+	}
+	if route("a") == route("b") {
+		t.Error("two endpoints gave one route")
+	}
+	if route("a") == route("flat") {
+		t.Error("flattening search results did not change the route")
+	}
+	if route("a") == route("hdr") {
+		t.Error("a gateway routing header did not change the route")
+	}
+	if route("a") == route("key") {
+		t.Error("another key did not change the route")
+	}
+	if strings.Contains(route("a"), "gw-a") || strings.Contains(route("key"), "sk-other") {
+		t.Errorf("Route names what it digests: %q, %q", route("a"), route("key"))
+	}
+}
+
+// A route may not set one HTTP header twice under names that differ only in
+// case: an adapter applies its headers from a map, so which value went out
+// would change between provider instances while the route's Route did not.
+func TestNewRegistryRefusesHeaderNamesAlikeButForCase(t *testing.T) {
+	_, err := provider.NewRegistry([]provider.Route{
+		{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw", Model: "m",
+			Headers: map[string]string{"X-Account": "a", "x-account": "b"}}},
+	}, factories)
+	if err == nil || !strings.Contains(err.Error(), `"x-account"`) {
+		t.Fatalf("err = %v, want the duplicated header refused by name", err)
 	}
 }

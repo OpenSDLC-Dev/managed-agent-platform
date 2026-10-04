@@ -220,6 +220,62 @@ func TestGenerateFullTurn(t *testing.T) {
 	}
 }
 
+// TestGenerateThinkingSignaturesAndRedactedBlocks pins the three shapes a
+// thinking block reaches the adapter in (#67): the omitted display Claude 5
+// models default to — an empty thinking_delta, then the signature — a
+// redacted_thinking block, which carries its whole opaque payload on its start
+// and streams no delta, and a thinking block an endpoint sends whole on its
+// start, as some send a tool input. Each must reach the brain with its
+// signature or data, since a block replayed without them is refused.
+func TestGenerateThinkingSignaturesAndRedactedBlocks(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_t","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-omitted"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED=="}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":"all at once","signature":"sig-whole"}}`,
+		`{"type":"content_block_stop","index":2}`,
+		`{"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"done"}}`,
+		`{"type":"content_block_stop","index":3}`,
+		`{"type":"content_block_start","index":4,"content_block":{"type":"text","text":"sent whole"}}`,
+		`{"type":"content_block_stop","index":4}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}`,
+		`{"type":"message_stop"}`,
+	}}
+	stream, err := start(t, f).Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	got := collect(t, stream)
+	want := []provider.Chunk{
+		{Kind: provider.KindThinkingDelta, Index: 0, Text: ""},
+		{Kind: provider.KindThinkingSignature, Index: 0, Signature: "sig-omitted"},
+		{Kind: provider.KindRedactedThinking, Index: 1, Data: "ENCRYPTED=="},
+		{Kind: provider.KindThinkingDelta, Index: 2, Text: "all at once"},
+		{Kind: provider.KindThinkingSignature, Index: 2, Signature: "sig-whole"},
+		{Kind: provider.KindTextDelta, Index: 3, Text: "done"},
+		{Kind: provider.KindTextDelta, Index: 4, Text: "sent whole"},
+	}
+	if len(got) != len(want)+1 {
+		t.Fatalf("got %d chunks %+v, want %d then done", len(got), got, len(want))
+	}
+	for i, w := range want {
+		g := got[i]
+		if g.Kind != w.Kind || g.Index != w.Index || g.Text != w.Text || g.Signature != w.Signature || g.Data != w.Data {
+			t.Errorf("chunk %d = %+v, want %+v", i, g, w)
+		}
+	}
+	if done := got[len(got)-1]; done.Kind != provider.KindDone || done.StopReason != "end_turn" {
+		t.Errorf("last chunk = %+v, want done/end_turn", done)
+	}
+}
+
 func TestGenerateEmptyToolInputAndStringContent(t *testing.T) {
 	f := &fakeServer{sse: []string{
 		`{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,

@@ -124,7 +124,7 @@ itself when its credentials rot is not a safety net.
 |---|---|---|
 | Unit & contract | — | logic, wire shapes, scripted provider streams |
 | Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
-| Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn against your endpoint, through the adapter whose protocol it speaks (the other adapter's test skips) |
+| Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn against your endpoint, through the adapter whose protocol it speaks (the other adapter's test skips); on an `anthropic` endpoint, also a brain tool loop of up to four requests that checks thinking replay, against the test Postgres |
 | Live web backends | `RUN_LIVE_WEB_TESTS=1` | one real Tavily search and one real Jina Reader fetch through the web-tool adapters (`TAVILY_API_KEY` / `JINA_API_KEY`) |
 | Live MCP server | `RUN_LIVE_MCP_TESTS=1` | one handshake and one listing against a third-party MCP server (`MCP_LIVE_SERVER_URL`, optional `MCP_LIVE_SERVER_TOKEN`) through the guarded production client. Every other MCP test speaks to a fixture built from the same go-sdk the client is, so both ends agree even where that understanding is wrong; this is the only tier a real implementation can contradict |
 | Live package install | `RUN_LIVE_PACKAGE_TESTS=1` | one real `apt-get install` of `jq` into a `debian:stable-slim` sandbox through the executor's package-install pass, then a `bash` tool call proving it answers — the only tier that reaches a public package mirror (`deb.debian.org`), which is why the same seam's default-tier row stubs `apt-get` instead |

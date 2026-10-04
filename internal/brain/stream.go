@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -34,15 +35,33 @@ type turnResult struct {
 	// measurement. Zero for a turn that streamed no content (a straight-to-tool
 	// call, an empty stream): there is no first token, so none is recorded.
 	firstTokenAt time.Time
+	// thinking is the response's leading run of signed thinking and redacted
+	// blocks, each with the prefix digest it was produced under, which the
+	// settlement keeps for replay when the turn commits an answer (#67).
+	thinking []events.ThinkingBlock
+}
+
+// thinkingBlock and redactedBlock are the content blocks a kept thinking block
+// is sent back as, in the Messages API's shape.
+type thinkingBlock struct {
+	Type      string `json:"type"`
+	Thinking  string `json:"thinking"`
+	Signature string `json:"signature"`
+}
+
+type redactedBlock struct {
+	Type string `json:"type"`
+	Data string `json:"data"`
 }
 
 // streamTurn drives one provider stream, broadcasting message previews as
-// deltas arrive and appending each agent.thinking as its block closes. The
-// lease keeper runs alongside; this function only distinguishes the two
+// deltas arrive and appending each agent.thinking as its block closes. desc is
+// the backend req goes to: every kept thinking block records its model and is
+// hashed under its route. The lease keeper runs alongside; this function only distinguishes the two
 // failure worlds — provider errors surface bare (they become the turn's
 // session.error), brain-side database failures wrap as infra (the turn is
 // abandoned to lease expiry, not reported as a model failure).
-func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provider.Provider, req provider.Request) (*turnResult, error) {
+func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provider.Provider, req provider.Request, desc provider.Descriptor) (*turnResult, error) {
 	stream, err := p.Generate(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("model request: %w", err)
@@ -57,19 +76,93 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	// content array", not the provider's block numbering.
 	entry := map[int64]int{}
 
+	// The open thinking block's text and signature, kept verbatim — a
+	// signature covers the text as the model sent it — or, for a redacted
+	// block, its payload.
+	var thinkText, thinkSig strings.Builder
+	var redacted string
+	// leading stays true while the response has produced only kept thinking:
+	// a block after text, a tool call or an unsigned block would replay ahead
+	// of what preceded it, under a prefix it was not produced under, so the run
+	// of kept blocks ends at the first of those (docs/plan/60_thinking-replay.md
+	// decision 3). next is the block index the run continues at: a block the
+	// stream carried no chunk for still sits in the response, and the gap it
+	// leaves in the indices ends the run too.
+	leading := true
+	var next int64
+	// chain is the prefix the next kept block was produced under, built from
+	// the request on the first block kept.
+	var chain *prefixChain
+	keep := func(id domain.ID, index int64, block any) error {
+		if chain == nil {
+			if media, err := urlMedia(req); err != nil || media {
+				leading = false
+				return err
+			}
+			var err error
+			if chain, err = requestChain(desc.Route, req); err != nil {
+				return err
+			}
+		}
+		raw, err := json.Marshal(block)
+		if err != nil {
+			return err
+		}
+		turn.thinking = append(turn.thinking, events.ThinkingBlock{
+			EventID: id, Model: desc.Model, PrefixDigest: chain.sum(), Block: raw,
+		})
+		next = index + 1
+		return chain.add("assistant", raw)
+	}
+
 	closeThinking := func() error {
 		if thinkingPreview == nil {
 			return nil
 		}
+		id := thinkingPreview.EventID()
 		// The buffered event carries the preview's reserved id — that id
 		// match is what concludes the start-only preview client-side. On
 		// the turn's thread, where the preview went (plan 35 decision 2).
 		_, err := b.log.Append(ctx, sid, []events.NewEvent{
-			{ID: thinkingPreview.EventID(), Type: domain.EventAgentThinking, ThreadID: threadID},
+			{ID: id, Type: domain.EventAgentThinking, ThreadID: threadID},
 		})
 		thinkingPreview = nil
+		text, sig, data := thinkText.String(), thinkSig.String(), redacted
+		thinkText.Reset()
+		thinkSig.Reset()
+		redacted = ""
 		if err != nil {
 			return infra("close thinking: %w", err)
+		}
+		switch {
+		case !leading:
+		case data != "":
+			return keep(id, thinkingIndex, redactedBlock{Type: "redacted_thinking", Data: data})
+		case sig != "":
+			return keep(id, thinkingIndex, thinkingBlock{Type: "thinking", Thinking: text, Signature: sig})
+		default:
+			leading = false
+		}
+		return nil
+	}
+	// openThinking makes the block at index the open thinking event: a chunk on
+	// a new provider block index closes the previous block's event first.
+	openThinking := func(index int64) error {
+		if thinkingPreview != nil && index != thinkingIndex {
+			if err := closeThinking(); err != nil {
+				return err
+			}
+		}
+		if thinkingPreview == nil {
+			if index != next {
+				leading = false
+			}
+			thinkingIndex = index
+			var err error
+			thinkingPreview, err = b.log.StartPreviewOn(ctx, sid, threadID, domain.EventAgentThinking)
+			if err != nil {
+				return infra("thinking preview: %w", err)
+			}
 		}
 		return nil
 	}
@@ -86,25 +179,36 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 				turn.firstTokenAt = time.Now()
 			}
 			// The preview is start-only (agent.thinking carries no content);
-			// one event per thinking block — a delta on a new provider block
-			// index closes the previous block's event and opens the next.
-			if thinkingPreview != nil && c.Index != thinkingIndex {
-				if err := closeThinking(); err != nil {
-					return nil, err
-				}
+			// one event per thinking block.
+			if err := openThinking(c.Index); err != nil {
+				return nil, err
 			}
-			if thinkingPreview == nil {
-				thinkingIndex = c.Index
-				thinkingPreview, err = b.log.StartPreviewOn(ctx, sid, threadID, domain.EventAgentThinking)
-				if err != nil {
-					return nil, infra("thinking preview: %w", err)
-				}
+			thinkText.WriteString(c.Text)
+
+		case provider.KindThinkingSignature:
+			if err := openThinking(c.Index); err != nil {
+				return nil, err
+			}
+			thinkSig.WriteString(c.Signature)
+
+		case provider.KindRedactedThinking:
+			// A redacted block arrives whole: its event opens and closes at once.
+			if err := closeThinking(); err != nil {
+				return nil, err
+			}
+			if err := openThinking(c.Index); err != nil {
+				return nil, err
+			}
+			redacted = c.Data
+			if err := closeThinking(); err != nil {
+				return nil, err
 			}
 
 		case provider.KindTextDelta:
 			if err := closeThinking(); err != nil {
 				return nil, err
 			}
+			leading = false
 			// The model is a NUL producer like any other (#228): Postgres
 			// jsonb cannot store `\u0000`, so one NUL in a delta would fault
 			// the buffered agent.message append and reclaim-loop the turn.
@@ -147,6 +251,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			if err := closeThinking(); err != nil {
 				return nil, err
 			}
+			leading = false
 			// The event we are about to durably emit must carry a JSON
 			// object: the log is append-only, and a tool_use block whose
 			// input is `"oops"` or a truncated `{` would either abort every
