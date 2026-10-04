@@ -592,8 +592,13 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// already held is reconciled before the tools read it — the store's
 	// changes since the last run land now, and what a faulted run wrote
 	// goes up — so a store's change reaches a session at its next run.
-	if existing := e.materializeMemory(ctx, sb, item.SessionID, sess.memories, progress); existing > 0 {
-		if err := e.syncMemoryNow(ctx, sb, item.SessionID, sess.memories, progress); err != nil {
+	// A store whose directory's listing did not answer is left out of this
+	// run's syncs, which would fill an unmarked directory with files nothing
+	// vouches for (materializeMemory); the tools still see its mount.
+	existing, unanswered := e.materializeMemory(ctx, sb, item.SessionID, sess.memories, progress)
+	synced := withoutStores(sess.memories, unanswered)
+	if existing > 0 {
+		if err := e.syncMemoryNow(ctx, sb, item.SessionID, synced, progress); err != nil {
 			slog.WarnContext(ctx, "memory stores not refreshed before the run; the run's end retries",
 				"session_id", item.SessionID, "err", err)
 		}
@@ -620,7 +625,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// nothing here should wait on, and the next run, or the reaper, syncs it.
 	var ms *memorySync
 	if faultErr == nil {
-		ms = e.readMemory(ctx, sb, item.SessionID, sess.memories, progress)
+		ms = e.readMemory(ctx, sb, item.SessionID, synced, progress)
 	}
 	return results, ms, faultErr, nil
 }

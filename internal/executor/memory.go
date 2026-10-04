@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -109,10 +110,17 @@ func (e *Executor) archivedStores(ctx context.Context, mounts []memoryRef) (map[
 // logged, counted miss the brain's block hedges; a failed write is logged and
 // tolerated, never fatal to the run. It answers how many stores the sandbox
 // already held, for the caller to reconcile before the tools read them.
-func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []memoryRef, progress func()) (existing int) {
+//
+// unanswered names the stores whose directory's listing did not answer
+// (errListingUnanswered): nothing is known of such a directory, so it is
+// neither held nor landed, and the caller leaves it out of this run's syncs —
+// a pull-only sync into a directory that has no marker yet would fill it with
+// the store's files and nothing to vouch for them, an untrusted directory for
+// the sandbox's life — so the next run's materialization asks again.
+func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []memoryRef, progress func()) (existing int, unanswered map[string]bool) {
 	mounts := memoryMounts(refs)
 	if len(mounts) == 0 {
-		return 0
+		return 0, nil
 	}
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "memory_materialize")
 	defer span.End()
@@ -128,11 +136,12 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 		outcome, err := e.materializeStore(ctx, sb, sid, m)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
-		case outcome == memoryOutcomeUntrusted && err != nil:
-			// Held as an untrusted directory is (below), but not for its
-			// files: its listing did not answer (materializeStore).
-			existing++
-			slog.WarnContext(ctx, "memory store directory not re-materialized: its listing did not answer; pull-only this run, and asked again the next",
+		case errors.Is(err, errListingUnanswered):
+			if unanswered == nil {
+				unanswered = map[string]bool{}
+			}
+			unanswered[m.MemoryStoreID] = true
+			slog.WarnContext(ctx, "memory store not materialized: its directory's listing did not answer; not synced this run, and asked again the next",
 				"session_id", sid, "memory_store_id", m.MemoryStoreID, "mount_path", m.MountPath, "err", err)
 		case err != nil:
 			slog.WarnContext(ctx, "memory store not materialized",
@@ -155,7 +164,20 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 	}
 	progress()
 	span.SetAttributes(attribute.Int("memory.materialized", landed))
-	return existing
+	return existing, unanswered
+}
+
+// errListingUnanswered is a store directory's listing that did not reach the
+// output whole (sandbox.Frame): a shell that died before it, a startup that
+// filled the output cap. It says nothing of the directory (materializeMemory).
+var errListingUnanswered = errors.New("its listing did not reach the output whole")
+
+// withoutStores is refs less the stores named in skip.
+func withoutStores(refs []memoryRef, skip map[string]bool) []memoryRef {
+	if len(skip) == 0 {
+		return refs
+	}
+	return slices.DeleteFunc(slices.Clone(refs), func(r memoryRef) bool { return skip[r.MemoryStoreID] })
 }
 
 // materializeStore lands one store, answering with its outcome.
@@ -172,16 +194,15 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, sid
 	if err != nil {
 		return memoryOutcomeFailed, err
 	}
-	// A listing with anything in it — or one too long to capture, one that
-	// failed, or one that did not reach the output whole (sandbox.Frame) — is
-	// a directory nothing vouches for: files with no marker, files the
-	// listing could not read, or a path that is no longer the directory. An
-	// absent directory lists nothing and exits 0, which is the fresh case.
+	// A listing with anything in it — or one too long to capture, or one
+	// that failed — is a directory nothing vouches for: files with no marker,
+	// files the listing could not read, or a path that is no longer the
+	// directory. An absent directory lists nothing and exits 0, which is the
+	// fresh case.
 	if !framed {
-		// A listing that did not answer says nothing of the directory: it is
-		// held as an untrusted one is, under a reason of its own, and the next
-		// run asks again.
-		return memoryOutcomeUntrusted, fmt.Errorf("its listing did not reach the output whole (exit %d)", res.ExitCode)
+		// A listing that did not answer says nothing of the directory: not
+		// landed, not held, and not synced this run (materializeMemory).
+		return memoryOutcomeFailed, fmt.Errorf("%w (exit %d)", errListingUnanswered, res.ExitCode)
 	}
 	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil

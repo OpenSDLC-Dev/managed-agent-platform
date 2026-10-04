@@ -118,6 +118,12 @@ type memoryStores struct {
 	sessionID string
 	sb        sandbox.Sandbox
 	mounts    []memoryRef
+	// unanswered names the stores whose directory's listing did not answer
+	// at materialize (errListingUnanswered), which this run's syncs leave
+	// alone: a pull-only sync into a directory that has no marker yet would
+	// fill it with files nothing vouches for, untrusted for the sandbox's
+	// life. The next run's materialize asks again.
+	unanswered map[string]bool
 }
 
 func newMemoryStores(client sdk.Client, token, sessionID string, sb sandbox.Sandbox, mounts []memoryRef) *memoryStores {
@@ -209,11 +215,12 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 		outcome, err := m.materializeStore(ctx, ref, progress)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
-		case outcome == memoryOutcomeUntrusted && err != nil:
-			// Held as an untrusted directory is (below), but not for its
-			// files: its listing did not answer (materializeStore).
-			existing++
-			slog.WarnContext(ctx, "memory store directory not re-materialized: its listing did not answer; pull-only this run, and asked again the next",
+		case errors.Is(err, errListingUnanswered):
+			if m.unanswered == nil {
+				m.unanswered = map[string]bool{}
+			}
+			m.unanswered[ref.MemoryStoreID] = true
+			slog.WarnContext(ctx, "memory store not materialized: its directory's listing did not answer; not synced this run, and asked again the next",
 				"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "mount_path", ref.MountPath, "err", err)
 		case err != nil:
 			slog.WarnContext(ctx, "memory store not materialized",
@@ -239,6 +246,11 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 	return existing
 }
 
+// errListingUnanswered is a store directory's listing that did not reach the
+// output whole (sandbox.Frame): a shell that died before it, a startup that
+// filled the output cap. It says nothing of the directory (unanswered).
+var errListingUnanswered = errors.New("its listing did not reach the output whole")
+
 // materializeStore lands one store, answering with its outcome.
 func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, progress func()) (string, error) {
 	marker := path.Join(ref.MountPath, memsync.MarkerName)
@@ -253,15 +265,13 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	if err != nil {
 		return memoryOutcomeFailed, err
 	}
-	// A listing with anything in it — or one too long to capture, one that
-	// failed, or one that did not reach the output whole (sandbox.Frame) — is
-	// a directory nothing vouches for. An absent directory lists nothing and
-	// exits 0, which is the fresh case.
+	// A listing with anything in it — or one too long to capture, or one
+	// that failed — is a directory nothing vouches for. An absent directory
+	// lists nothing and exits 0, which is the fresh case.
 	if !framed {
-		// A listing that did not answer says nothing of the directory: it is
-		// held as an untrusted one is, under a reason of its own, and the next
-		// run asks again.
-		return memoryOutcomeUntrusted, fmt.Errorf("its listing did not reach the output whole (exit %d)", res.ExitCode)
+		// A listing that did not answer says nothing of the directory: not
+		// landed, not held, and not synced this run (unanswered).
+		return memoryOutcomeFailed, fmt.Errorf("%w (exit %d)", errListingUnanswered, res.ExitCode)
 	}
 	if len(res.Stdout) > 0 || res.Truncated() || res.ExitCode != 0 {
 		return memoryOutcomeUntrusted, nil
@@ -351,6 +361,9 @@ func (m *memoryStores) sync(ctx context.Context, progress func()) {
 	var total memorySyncCounts
 	for _, ref := range m.mounts {
 		progress()
+		if m.unanswered[ref.MemoryStoreID] {
+			continue
+		}
 		st := &storeSync{ref: ref}
 		if err := m.readStore(ctx, st, progress); err != nil {
 			slog.WarnContext(ctx, "memory store not synced: its directory could not be read",

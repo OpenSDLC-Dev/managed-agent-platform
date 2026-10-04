@@ -495,7 +495,7 @@ func TestMemoryUnframedListingVouchesForNothing(t *testing.T) {
 	}
 	// Its log says the listing did not answer, not that the directory holds
 	// files, which nothing showed.
-	if w := warnings(); !strings.Contains(w, "its listing did not answer") || strings.Contains(w, "holds files but no trusted marker") {
+	if w := warnings(); !strings.Contains(w, "listing did not answer") || strings.Contains(w, "holds files but no trusted marker") {
 		t.Errorf("warnings:\n%s\nwant the listing's own reason, and not the untrusted directory's", w)
 	}
 	sb.unframed = false
@@ -503,6 +503,36 @@ func TestMemoryUnframedListingVouchesForNothing(t *testing.T) {
 	h.runWith(t, token)
 	if got := sb.files[memMount+"/facts/a.md"]; got != "alpha" {
 		t.Errorf("landed memory = %q once the listing answered, want alpha", got)
+	}
+}
+
+// TestAStoreWhoseListingLostItsFrameLandsNextRun: a materialize whose listing
+// did not answer lands nothing and holds nothing, and the run's sync leaves
+// the store alone, so the directory is not filled with files no marker vouches
+// for. The next run lands it, trusted: an edit the agent makes is pushed.
+func TestAStoreWhoseListingLostItsFrameLandsNextRun(t *testing.T) {
+	sb := &fakeSandbox{unframedNext: 1}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token)
+	for _, p := range []string{memMount + "/" + memsync.MarkerName, memMount + "/notes.md", baselinePath(memStoreID)} {
+		if _, ok := sb.files[p]; ok {
+			t.Errorf("%s was written in the run whose listing did not answer", p)
+		}
+	}
+	h.runWith(t, token)
+	if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Fatalf("marker = %q after the next run, want the store landed", got)
+	}
+	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+		t.Errorf("notes.md = %q, want hello", got)
+	}
+	h.runWith(t, token, writeUse(memMount+"/edit.md", "the agent's"))
+	if got, ok := h.memoryContent(t, memStoreID, "/edit.md"); !ok || got != "the agent's" {
+		t.Errorf("an edit in the landed store = %q, %v; want it pushed, the directory trusted", got, ok)
 	}
 }
 

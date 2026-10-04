@@ -65,6 +65,9 @@ type fakeSandbox struct {
 	// a sandbox whose output never carried the script's frame — a shell that
 	// died first, or a startup that filled the output cap before it.
 	unframed bool
+	// unframedNext answers that many of the next framed scripts bare, and
+	// frames the rest: a listing that lost its frame once.
+	unframedNext int
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -84,6 +87,10 @@ func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbo
 	res, err := f.exec(ctx, req)
 	if err != nil || f.unframed {
 		return res, err
+	}
+	if f.unframedNext > 0 {
+		f.unframedNext--
+		return res, nil
 	}
 	return sandboxtest.Framed(frame, res), nil
 }

@@ -680,6 +680,39 @@ func TestMemorySyncSkipsAnUnreliableListing(t *testing.T) {
 	}
 }
 
+// TestAStoreWhoseListingLostItsFrameLandsNextRun: a materialization whose
+// listing did not answer (sandbox.Frame) knows nothing of the directory, so it
+// lands nothing and holds nothing, and the run's syncs leave the store alone
+// — a pull-only sync into a directory with no marker yet would fill it with
+// files nothing vouches for, untrusted for the sandbox's life. The next run's
+// listing answers, and the store lands, trusted: an edit the agent makes is
+// pushed.
+func TestAStoreWhoseListingLostItsFrameLandsNextRun(t *testing.T) {
+	sb := &fakeSandbox{unframedNext: 1}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, memStoreID, memMount, "read_write")
+	h.step(t)
+	for _, p := range []string{memMount + "/.anthropic-memory-store", memMount + "/notes.md", baselinePath(memStoreID)} {
+		if _, ok := sb.files[p]; ok {
+			t.Errorf("%s was written in the run whose listing did not answer", p)
+		}
+	}
+	h.step(t)
+	if got := sb.files[memMount+"/"+memsync.MarkerName]; got != string(memsync.MarkerBytes(memStoreID)) {
+		t.Fatalf("marker = %q after the next run, want the store landed", got)
+	}
+	if got := sb.files[memMount+"/notes.md"]; got != "hello" {
+		t.Errorf("notes.md = %q, want hello", got)
+	}
+	sb.files[memMount+"/edit.md"] = "the agent's"
+	h.step(t)
+	if got, ok := h.memoryContent(t, memStoreID, "/edit.md"); !ok || got != "the agent's" {
+		t.Errorf("an edit in the landed store = %q, %v; want it pushed, the directory trusted", got, ok)
+	}
+}
+
 // TestMemoryStoreMissingOrUntrusted: a store whose row is gone materializes
 // nothing (the brain's block hedges it); a directory that holds files but no
 // marker is left as found and never pushed from; a store deleted after the
@@ -742,7 +775,7 @@ func TestMemoryStoreMissingOrUntrusted(t *testing.T) {
 			if sb.unframed {
 				var said, misread bool
 				for _, r := range logged() {
-					said = said || strings.Contains(r.message, "its listing did not answer")
+					said = said || strings.Contains(r.message, "listing did not answer")
 					misread = misread || strings.Contains(r.message, "holds files but no trusted marker")
 				}
 				if !said || misread {
