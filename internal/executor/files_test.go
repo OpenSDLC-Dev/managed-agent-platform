@@ -219,6 +219,50 @@ func TestFilesRematerializeAfterMountDeleted(t *testing.T) {
 	}
 }
 
+// TestFilesUnansweredProbeKeepsTheAgentsEdit: a probe that does not answer —
+// the presence exec's answer an image's startup pushed out of the output
+// (sandbox.StartupOutputError), or a sentinel read that failed the same way —
+// says nothing of whether a mount has gone. Taken for "gone", it re-streamed
+// every mount over the agent's edits on every pass (#860); the set landed
+// once (the sentinel), so what is there stays.
+func TestFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
+	flood := &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	for _, c := range []struct {
+		name  string
+		flood func(sb *fakeSandbox)
+	}{
+		{"the presence exec", func(sb *fakeSandbox) { sb.execErr, sb.execErrOn = flood, "test -e " }},
+		{"the sentinel read", func(sb *fakeSandbox) { sb.readErr = flood }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			mount := "/mnt/session/uploads/file_edit"
+			h.seedFile(t, "file_edit", "as uploaded")
+			h.refFiles(t, [2]string{"file_edit", mount})
+
+			h.suspend(t, writeUse("a.txt", "x"))
+			if _, err := h.exec.step(context.Background()); err != nil {
+				t.Fatalf("first step: %v", err)
+			}
+			if sb.files[mount] != "as uploaded" {
+				t.Fatalf("first materialization = %q", sb.files[mount])
+			}
+
+			// The agent edits the mount, and the image's startup floods.
+			sb.files[mount] = "the agent's edit"
+			c.flood(sb)
+			h.suspend(t, writeUse("b.txt", "y"))
+			if _, err := h.exec.step(context.Background()); err != nil {
+				t.Fatalf("second step: %v", err)
+			}
+			if sb.files[mount] != "the agent's edit" {
+				t.Errorf("mount = %q after a probe that did not answer, want the agent's edit kept", sb.files[mount])
+			}
+		})
+	}
+}
+
 // TestFilesRematerializeWhenSetChanges: adding a mount to a live session
 // re-materializes and the new mount lands. The added path is absent, so the
 // presence probe alone would force this pass; the same-path reassignment case

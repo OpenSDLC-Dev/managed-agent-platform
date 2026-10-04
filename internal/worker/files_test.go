@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
 // seedFile plants a file server-side as an upload would: a downloadable=false row
@@ -101,6 +102,49 @@ func TestSetupFilesOverTheWire(t *testing.T) {
 	}
 	if got := sb.files[mount]; got != "quarterly numbers" {
 		t.Errorf("deleted mount not restored: %q", got)
+	}
+}
+
+// TestSetupFilesUnansweredProbeKeepsTheAgentsEdit is the executor's rule over
+// the wire: a probe that does not answer — the presence exec's answer, or the
+// sentinel read, an image's startup pushed out of the output
+// (sandbox.StartupOutputError) — says nothing of whether a mount has gone, so
+// the set the sentinel says landed is not re-streamed over the agent's edit
+// (#860).
+func TestSetupFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
+	flood := &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	for _, c := range []struct {
+		name  string
+		flood func(sb *fakeSandbox)
+	}{
+		{"the presence exec", func(sb *fakeSandbox) { sb.execErr = flood }},
+		{"the sentinel read", func(sb *fakeSandbox) { sb.readErr = flood }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			mount := "/workspace/uploads/report.txt"
+			fileID := domain.NewID("file").String()
+			h.seedFile(t, fileID, "report.txt", "text/plain", "as uploaded")
+			h.refFileMounts(t, [2]string{fileID, mount})
+			h.suspend(t, writeUse("out.txt", "hello"))
+			if err := h.run(); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := sb.files[mount]; got != "as uploaded" {
+				t.Fatalf("mounted file = %q", got)
+			}
+
+			sb.files[mount] = "the agent's edit"
+			c.flood(sb)
+			h.suspend(t, writeUse("out2.txt", "again"))
+			if err := h.run(); err != nil {
+				t.Fatalf("second run: %v", err)
+			}
+			if got := sb.files[mount]; got != "the agent's edit" {
+				t.Errorf("mount = %q after a probe that did not answer, want the agent's edit kept", got)
+			}
+		})
 	}
 }
 

@@ -252,6 +252,47 @@ func TestHarvestUnderAStartupFloodRealSandbox(t *testing.T) {
 	}
 }
 
+// TestFilesUnderAStartupFloodRealSandbox mounts a file into a real Kubernetes
+// pod whose image's startup prints 1.2 MB in every shell: the first pass lands
+// it (the sentinel says nothing has yet), and on the next, whose presence probe
+// the startup pushes out of the output (sandbox.StartupOutputError), the
+// agent's edit to the mount stays rather than being re-streamed over (#860).
+func TestFilesUnderAStartupFloodRealSandbox(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{Context: os.Getenv("MAP_K8S_CONTEXT"), Namespace: os.Getenv("MAP_K8S_NAMESPACE")})
+	if err != nil {
+		t.Fatalf("integration test requires a Kubernetes cluster: %v", err)
+	}
+	image := hookedtest.Image(t, "yes | head -c 1200000\n")
+	h := newHarnessWith(t, provider, Config{Image: image})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+	const mount = "/mnt/session/uploads/flood.txt"
+	h.seedFile(t, "file_flood", "as uploaded")
+	h.refFiles(t, [2]string{"file_flood", mount})
+	h.suspend(t, writeUse("a.txt", "x"))
+	h.stepOnce(t)
+
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: image})
+	if err != nil {
+		t.Fatalf("adopt the sandbox: %v", err)
+	}
+	if got, err := sb.ReadFile(context.Background(), mount); err != nil || string(got) != "as uploaded" {
+		t.Fatalf("first pass mount = %q, %v; want it landed", got, err)
+	}
+	if err := sb.WriteFile(context.Background(), mount, []byte("the agent's edit")); err != nil {
+		t.Fatalf("edit the mount: %v", err)
+	}
+	h.suspend(t, writeUse("b.txt", "y"))
+	h.stepOnce(t)
+	if got, err := sb.ReadFile(context.Background(), mount); err != nil || string(got) != "the agent's edit" {
+		t.Errorf("mount = %q, %v after a pass whose probe the startup pushed out; want the agent's edit kept", got, err)
+	}
+}
+
 // TestHarvestTruncatedListingRealSandbox drives the truncation degradation
 // through the real stack: enough real files that the listing script's output
 // overflows the exec cap in a real Docker container (Truncated set by the

@@ -65,8 +65,10 @@ type fakeSandbox struct {
 	// execHook, when set and returning non-nil, answers an Exec in place of
 	// the defaults below.
 	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
-	// execErr, when set, is the error every Exec answers with.
+	// execErr, when set, is the error every Exec answers with, and readErr
+	// every ReadFile.
 	execErr error
+	readErr error
 	// unframed answers a framed platform script (sandbox.ExecFramed) bare, as
 	// a sandbox whose output never carried the script's frame — a shell that
 	// died first, or a startup that filled the output cap before it.
@@ -146,6 +148,9 @@ func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 	return sandbox.ExecResult{}, nil
 }
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
 	data, ok := f.files[path]
 	if !ok {
 		return nil, sandbox.ErrFileNotExist

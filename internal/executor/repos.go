@@ -53,7 +53,8 @@ var errRepoNoCredential = errors.New("repository credential row missing")
 // materializeRepos clones each mounted repository into the sandbox before the
 // tools run, between skills and files so a file mount may deliberately overlay
 // into a checkout (plan 25 decision 5). Idempotence is the probe alone — a repo
-// materializes iff `<mount>/.git` is absent — deliberately without a sentinel:
+// materializes iff the probe answers that `<mount>/.git` is absent, and one
+// that does not answer keeps what is there (#860) — deliberately without a sentinel:
 // the mounted set is fixed at create, so a marker would have no drift to
 // detect, and plan 24 strips agent-writable markers from checkpoints at
 // capture, which would make a restored workspace re-clone over the agent's own
@@ -95,10 +96,23 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		// RepoCloneTimeout, so a per-pass report would let a wholly healthy pass
 		// sit silent for far longer than any stall budget (#383).
 		progress()
-		if e.repoPresent(ctx, sb, m) {
+		switch repoPresence(ctx, sb, m) {
+		case sandbox.Present:
 			unchanged++
 			recordRepoMaterialized(ctx, repoOutcomeUnchanged)
 			slog.InfoContext(ctx, "repository already present, skipping clone",
+				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath)
+			continue
+		case sandbox.PresenceUnknown:
+			// A probe that did not answer — an image's startup pushing it out
+			// of the output, a failed exec — is no sign the checkout is gone,
+			// and a clone replaces the mount whole (extractRepo's rm -rf), the
+			// agent's work in it with it: on such an image, on every pass
+			// (#860). Nothing records that this sandbox was never cloned into
+			// (no sentinel, above), so what is there stays.
+			unchanged++
+			recordRepoMaterialized(ctx, repoOutcomeUnchanged)
+			slog.WarnContext(ctx, "repository presence not probed; keeping what the sandbox holds",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath)
 			continue
 		}
@@ -329,15 +343,12 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath string)
 	return nil
 }
 
-// repoPresent is the idempotence probe: a repository is materialized iff its
-// mount carries a .git. A missing sandbox or a failed exec reads as "absent",
-// so the caller re-clones rather than skipping — the files precedent, and the
-// safe direction (stage-and-rename means a present .git always names a
-// complete tree).
-func (e *Executor) repoPresent(ctx context.Context, sb sandbox.Sandbox, m repoRef) bool {
-	cmd := "test -e " + shellQuote(path.Join(path.Clean(m.MountPath), ".git")) + " && true"
-	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: cmd})
-	return err == nil && res.ExitCode == 0
+// repoPresence is the idempotence probe: a repository is materialized iff its
+// mount carries a .git (stage-and-rename means a present .git always names a
+// complete tree). A probe that did not answer is neither (sandbox.ProbePaths):
+// read as absent, it re-cloned over the agent's checkout.
+func repoPresence(ctx context.Context, sb sandbox.Sandbox, m repoRef) sandbox.Presence {
+	return sandbox.ProbePaths(ctx, sb, path.Join(path.Clean(m.MountPath), ".git"))
 }
 
 // repoToken decrypts the resource's sealed authorization token. The row is
