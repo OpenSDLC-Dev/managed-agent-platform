@@ -203,14 +203,17 @@ Apache-2.0):
   (`docs/providers/request-options.mdx`), at two levels, provider and key; it does not
   track which model produced a thinking block.
 - A replayed signature that an upstream refuses is healed after the fact
-  (`core/encryptedreasoning.go`): a 400 whose message names a reasoning token earns one
-  retry with every signed thinking and `redacted_thinking` block removed from every
-  turn (`shouldStripReasoningAfterClientError`, `stripRawAnthropicChatThinking`). Its
-  comments record the measurement behind removing whole blocks — against the live API
-  on claude-sonnet-4-5, claude-haiku-4-5 and claude-opus-5 a history replays 200
-  untouched, 400 with its signatures blanked, and 200 with the blocks removed, on every
-  turn including the latest with a tool call in it — and they leave an assistant turn
-  that removal would empty untouched, so a redacted-only turn fails again.
+  (`core/encryptedreasoning.go`): a 400 whose message names a reasoning token — not
+  Anthropic's "cannot be modified", and not one naming only a reasoning configuration
+  parameter (`shouldStripReasoningAfterClientError`) — earns one retry with every signed
+  thinking and `redacted_thinking` block removed from every turn
+  (`stripRawAnthropicChatThinking`), and only if that removal changed the request
+  (`core/bifrost.go:7043`). Its comments record the measurement behind removing whole
+  blocks — against the live API on claude-sonnet-4-5, claude-haiku-4-5 and
+  claude-opus-5 a history replays 200 untouched, 400 with its signatures blanked, and
+  200 with the blocks removed, on every turn including the latest with a tool call in
+  it — and it leaves untouched any assistant message that removal would empty, so a
+  history whose only signed content sits in such a message earns no retry at all.
 - Ideas taken here: weighted key selection, retry with jittered backoff before the first
   byte, ordered fallbacks, per-provider request paths, a model catalogue with prices,
   virtual keys with limits, session stickiness for cache locality, the fail-soft
@@ -334,8 +337,8 @@ defaults, as the platform's top-level resource tables do
 (`internal/store/migrations/0001_init.sql`, design principle 5).
 
 - **provider** — one vendor account behind fixed endpoints: profile and an endpoint per
-  protocol (a profile host or a custom one), all fixed at creation; name, extra headers, stall
-  timeout, enabled. Its credentials are keys of that one account — a key of another
+  protocol (a profile host or a custom one), all fixed at creation; name, extra
+  headers, stall timeout, enabled. Its credentials are keys of that one account — a key of another
   account is another provider, which the console says where a key is added, since no
   vendor exposes which account a key belongs to. No header or endpoint carries a
   secret: a
@@ -426,17 +429,24 @@ request path reads only the snapshot.
   considered and rejected as provenance: a session's threads share one id, a TTL forgets
   provenance a history still holds, and replicas race to write it. So was rendezvous
   hashing, which after a fallback would send a recovered first choice the fallback
-  model's thinking. **Backstop:** a 400 whose message names a thinking block or its
-  signature — other than Anthropic's "cannot be modified", which a removal cannot cure
-  — earns one more attempt with every thinking block removed, an emptied assistant
-  message going as above: bifrost's fail-soft strip, so a history that breaks the
-  premises still gets an answer, at the cost of one call and its reasoning. Removing all
-  thinking is valid (Ground truth, Thinking). What that retry produces is wrapped
-  `mapgw1r.` rather than `mapgw1.` — a reset mark — and every later request removes
-  each thinking block older than the newest reset block before the rule above applies:
-  the reset block was produced with no thinking ahead of it, and without the mark the
-  next request would send its deployment's older blocks back in front of it, earning
-  the same 400 and the same retry on every turn after. An OpenAI-shaped caller's
+  model's thinking. **Backstop, best effort:** a 400 whose message names a thinking
+  block or its signature — other than Anthropic's "cannot be modified", which a removal
+  cannot cure, and one naming only a reasoning configuration parameter — puts the
+  inbound request in strip mode: every thinking block is removed, an emptied assistant
+  message going as above, and the attempt is made again. Removing all thinking is valid
+  (Ground truth, Thinking). That is bifrost's fail-soft strip, with two differences:
+  strip mode is entered once per inbound request and holds for every attempt after it,
+  the fallbacks included, so no attempt can re-send what was stripped or strip twice;
+  and whichever attempt answers in strip mode wraps the first thinking block of its
+  response `mapgw1r.` rather than `mapgw1.` — a reset mark. Every later request
+  removes each thinking block that precedes the newest reset-marked block before the
+  provenance rule applies, so the response that block opened keeps all its blocks and
+  nothing older returns ahead of it: it was produced with no thinking before it, and
+  sending older blocks back in front of it would earn the same 400 on every turn
+  after. The recovery holds only while the caller returns that block; a strip-mode
+  answer with no thinking has nothing to carry the mark, and then each later request
+  on that history pays the refusal and one retry again — bounded, never a loop within
+  a request. An OpenAI-shaped caller's
   `reasoning_content` carries no signature to wrap and has no provenance; it goes
   upstream as sent.
 - **Retry and fallback happen before the first byte only.** A connect error, 429, 5xx
@@ -612,10 +622,15 @@ where a vendor bills cache writes.
   assembles the same wrapped value as the whole response; an unwrapped block, or one
   whose wrapper names a deployment outside the alias or no longer configured, never
   reaches an upstream; an edited block the fake refuses earns one retry without
-  thinking, which answers and wraps its blocks with the reset mark, after which the
-  conversation continues with no further refusal, while a refusal naming no thinking
-  earns no retry; and requests
-  of one session id with no thinking land on one deployment while it is healthy.
+  thinking, which answers with its first thinking block reset-marked — a response of
+  two thinking blocks and two parallel tool calls keeps all four on the next request —
+  after which the conversation continues with no further refusal; a strip-mode attempt
+  that fails before its first byte falls back still in strip mode, and a second
+  refusal earns no second retry; a strip-mode answer without thinking pays the retry
+  again on the next request and no more; a refusal naming no thinking earns no retry;
+  and requests of one session id with no thinking keep one deployment and credential
+  while the eligible candidates, weights and priorities are unchanged, move when health
+  changes them, and yield to a newer block's producer.
 - **Store:** `pgtest`; reload under concurrent writes; limits under concurrent requests;
   the retention sweep against rows either side of the cutoff, its rollups intact; a key
   archived or expired mid-run refused on its next request, by both servers alike; a key
@@ -673,8 +688,10 @@ where a vendor bills cache writes.
   source (slice 2); `openai-go` (slice 4).
 - docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens`
   answering 404 where an upstream has none; stateless Responses; thinking signatures
-  and redacted data returned wrapped, history thinking filtered by provenance, and all
-  of it removed for one retry after a signature refusal;
+  and redacted data returned wrapped in two forms (`mapgw1.`, and `mapgw1r.` on the
+  first thinking block of a strip-mode answer), history thinking filtered by
+  provenance, all of it removed for the attempts after a signature refusal, and every
+  block ahead of the newest reset mark removed on later requests;
   each profile edit with its vendor evidence.
 
 ## Open questions, settled by evidence in the slice that meets them
