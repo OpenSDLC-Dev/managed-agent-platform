@@ -718,7 +718,7 @@ func (e *Executor) applyMemory(ctx context.Context, ms *memorySync) {
 		}
 		removed := true
 		for _, cmd := range memsync.RemoveCommands(st.ref.MountPath, st.removals) {
-			res, err := ms.sb.Exec(ctx, sandbox.ExecRequest{Command: cmd})
+			res, err := ms.sb.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(cmd)})
 			if err != nil || res.ExitCode != 0 {
 				slog.WarnContext(ctx, "memory deletions not applied; the baseline is kept for the next sync",
 					"session_id", ms.sid, "memory_store_id", id, "err", err, "exit", res.ExitCode, "stderr", strings.TrimSpace(res.Stderr))

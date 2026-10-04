@@ -244,7 +244,7 @@ func mountsPresent(ctx context.Context, sb sandbox.Sandbox, mounts []fileRef) bo
 		cmd.WriteString(" && ")
 	}
 	cmd.WriteString("true")
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: cmd.String()})
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(cmd.String())})
 	return err == nil && res.ExitCode == 0
 }
 

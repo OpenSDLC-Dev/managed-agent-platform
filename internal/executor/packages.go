@@ -757,7 +757,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			// #383 is about. progress() first, for the same reason.
 			progress()
 			_, _ = sb.Exec(ctx, sandbox.ExecRequest{
-				Command: "rm -rf " + shellQuote(credsDir),
+				Command: sandbox.Script("rm -rf " + shellQuote(credsDir)),
 				Timeout: packagesCredsRemoveTimeout,
 			})
 		}
@@ -786,7 +786,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		}
 		progress()
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
-			Command: cmd,
+			Command: sandbox.Script(cmd),
 			Timeout: e.cfg.PackageInstallTimeout,
 		})
 		removeCreds()

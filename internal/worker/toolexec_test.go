@@ -73,6 +73,9 @@ func (f *fakeSandbox) ID() string { return "fake" }
 // recorded, hooked and answered bare — and frames the answer as the script's
 // run would have printed it, unless unframed says the frame never arrived.
 func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// A platform script opens with the preamble every one carries
+	// (sandbox.Script), which the fake answers past.
+	req.Command = strings.TrimPrefix(req.Command, sandbox.ScriptPreamble)
 	script, frame, framed := sandboxtest.Unwrap(req.Command)
 	if !framed {
 		return f.exec(ctx, req)

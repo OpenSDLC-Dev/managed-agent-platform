@@ -1754,10 +1754,12 @@ func (pd *pod) deliverBulk(ctx context.Context, b *sandbox.BulkWrite) (int, stri
 // argv — never the batch itself, which would not fit: Linux caps one execve
 // argument at 128 KiB and a ten-thousand-member batch's manifest is far past it,
 // which is why it travels in the archive as a file instead. Only the write script
-// reads stdin; the others are given none.
+// reads stdin; the others are given none. Each opens with the platform's script
+// preamble (sandbox.Script), so an image's errexit cannot end one at an `rm` or
+// a `chmod` it lets fail on purpose.
 func (pd *pod) bulkExec(ctx context.Context, script string, b *sandbox.BulkWrite, stdin io.Reader) (int, string, error) {
 	stderr := &cappedBuffer{limit: sandbox.MaxOutputBytes}
-	argv := []string{"/bin/bash", "-c", script, "map-bulk-write", b.Manifest, b.DirList}
+	argv := []string{"/bin/bash", "-c", sandbox.Script(script), "map-bulk-write", b.Manifest, b.DirList}
 	res, err := pd.client.exec(ctx, pd.name, containerName, argv, stdin, io.Discard, stderr)
 	if err != nil {
 		return 0, "", pd.execErr(ctx, err)

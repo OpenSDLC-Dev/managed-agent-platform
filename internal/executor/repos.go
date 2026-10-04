@@ -210,7 +210,7 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 		sweep, stop := context.WithTimeout(context.WithoutCancel(ctx), repoSweepTimeout)
 		defer stop()
 		if _, err := sb.Exec(sweep, sandbox.ExecRequest{
-			Command: "rm -rf " + shellQuote(sandboxTar) + " " + shellQuote(stagingPath(m.MountPath)),
+			Command: sandbox.Script("rm -rf " + shellQuote(sandboxTar) + " " + shellQuote(stagingPath(m.MountPath))),
 		}); err != nil {
 			slog.WarnContext(ctx, "the cancelled clone's sandbox staging was not swept",
 				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "err", err)
@@ -318,7 +318,7 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath string)
 		" && mv " + q(staging) + " " + q(clean),
 		"; rc=$?; rm -rf " + q(staging) + " " + q(tarPath) + "; exit $rc",
 	}, "")
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: cmd})
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(cmd)})
 	if err != nil {
 		return err
 	}
@@ -336,7 +336,7 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath string)
 // complete tree).
 func (e *Executor) repoPresent(ctx context.Context, sb sandbox.Sandbox, m repoRef) bool {
 	cmd := "test -e " + shellQuote(path.Join(path.Clean(m.MountPath), ".git")) + " && true"
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: cmd})
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(cmd)})
 	return err == nil && res.ExitCode == 0
 }
 

@@ -162,3 +162,81 @@ func TestHookedImagesOfParallelPackagesAreTheirOwn(t *testing.T) {
 		}
 	}
 }
+
+// The platform's own scripts open with a preamble that turns errexit back off
+// (sandbox.Script), because an image's startup file can turn it on in their
+// shell and they are not written for it (#860): they let an `rm` or a `chmod`
+// fail on purpose and read a status after it. As a uid the image did not
+// choose, under a read-only root — where those failures are real on Docker,
+// the daemon landing every temporary root-owned — and on an image whose
+// startup sets -e: a batch lands; a single write and a batch member onto a
+// directory are refused as directories, whatever the `rm` of the temporary
+// said; and a batch refused at its renames is shed and emptied (#316), the
+// shed's report reaching the backend. Without the preamble, on Docker, the
+// batch dies at its first `chmod`, both refusals read as the `rm`'s exit, and
+// the shed dies before it reports, its payloads left.
+func TestPlatformScriptsUnderAnErrexitStartupAsNonRoot(t *testing.T) {
+	for _, b := range hookedtest.BackendsFor(t, "set -e\n"+sandboxtest.BannerHook) {
+		t.Run(b.Name, func(t *testing.T) {
+			ctx := context.Background()
+			uid := int64(65534)
+			sb, _ := b.Provision(t, sandbox.Hardening{RunAsUser: &uid, ReadOnlyRootfs: true})
+			sh := func(command string) string {
+				t.Helper()
+				res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: command, Timeout: 30 * time.Second})
+				if err != nil || res.ExitCode != 0 {
+					t.Fatalf("%s = %+v, %v", command, res, err)
+				}
+				return strings.TrimSpace(sandboxtest.Unbanner(res.Stdout))
+			}
+
+			batch := []sandbox.FileWrite{
+				{Path: "/tmp/ee/skills/pack/SKILL.md", Data: []byte("# skill")},
+				{Path: "/tmp/ee/memory/todo.md", Data: []byte("rw"), Mode: 0o666},
+			}
+			if err := sb.WriteFiles(ctx, batch); err != nil {
+				t.Errorf("a batch as uid %d: %v", uid, err)
+			} else {
+				for _, f := range batch {
+					if got := sh("cat " + f.Path); got != string(f.Data) {
+						t.Errorf("cat %s = %q, want %q", f.Path, got, f.Data)
+					}
+				}
+			}
+
+			// Directories in the sticky /tmp: a temporary the daemon landed
+			// root-owned beside one is not the sandbox user's to remove there.
+			sh("mkdir /tmp/ee-dir-single /tmp/ee-dir-batch")
+			if err := sb.WriteFile(ctx, "/tmp/ee-dir-single", []byte("x")); !errors.Is(err, sandbox.ErrIsDirectory) {
+				t.Errorf("a write onto a directory = %v, want ErrIsDirectory", err)
+			}
+			if err := sb.WriteFiles(ctx, []sandbox.FileWrite{{Path: "/tmp/ee-dir-batch", Data: []byte("x")}}); !errors.Is(err, sandbox.ErrIsDirectory) ||
+				!strings.Contains(err.Error(), "/tmp/ee-dir-batch") {
+				t.Errorf("a batch onto a directory = %v, want ErrIsDirectory naming /tmp/ee-dir-batch", err)
+			}
+
+			// A batch into the workdir, which on Docker is root-owned here: its
+			// renames are refused, and the shed's report has the daemon empty
+			// what the sandbox user could not remove. Where the sandbox user can
+			// write the workdir (Kubernetes' emptyDir) the batch lands, and
+			// nothing is left.
+			big := bytes.Repeat([]byte("P"), 4096)
+			err := sb.WriteFiles(ctx, []sandbox.FileWrite{{Path: "/workspace/ee-a.txt", Data: big}, {Path: "/workspace/ee-b.txt", Data: big}})
+			lines := strings.Split(sh("[ -w /workspace ] && echo writable; find /workspace -maxdepth 1 -name '"+sandbox.TempPrefix+"*' -printf '%s %f\\n'"), "\n")
+			if lines[0] == "writable" {
+				if err != nil || len(lines) != 1 {
+					t.Errorf("a batch into a workdir the sandbox user can write: err = %v, left %q", err, lines[1:])
+				}
+				return
+			}
+			if err == nil {
+				t.Error("a batch renamed into a workdir the sandbox user cannot write reported success")
+			}
+			for _, line := range lines {
+				if !strings.HasPrefix(line, "0 ") {
+					t.Errorf("temporary %q in the workdir still holds a payload, want it emptied", line)
+				}
+			}
+		})
+	}
+}

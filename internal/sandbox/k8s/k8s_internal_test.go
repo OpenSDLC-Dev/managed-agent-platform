@@ -2625,7 +2625,7 @@ func TestTheRefusedBulkScriptAnswersInTheSingleWritesTerms(t *testing.T) {
 	if len(argvs) != 1 {
 		t.Fatalf("the pod was asked %d times, want once", len(argvs))
 	}
-	want := []string{"/bin/bash", "-c", bulkRefusedScript, "map-bulk-write", b.Manifest, b.DirList}
+	want := []string{"/bin/bash", "-c", sandbox.Script(bulkRefusedScript), "map-bulk-write", b.Manifest, b.DirList}
 	if !slices.Equal(argvs[0], want) {
 		t.Fatalf("the pod was asked to run %q, want the refused script over the batch's bookkeeping", argvs[0])
 	}

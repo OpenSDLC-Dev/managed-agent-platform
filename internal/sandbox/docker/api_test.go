@@ -97,7 +97,9 @@ func wrapperCommand(cmd []string) string {
 	if len(cmd) <= commandArg {
 		return ""
 	}
-	return cmd[commandArg]
+	// A platform script opens with the preamble every one carries
+	// (sandbox.Script); what a fake reads is the script after it.
+	return strings.TrimPrefix(cmd[commandArg], sandbox.ScriptPreamble)
 }
 
 // framedOutput is what the daemon's attach stream carries for a framed

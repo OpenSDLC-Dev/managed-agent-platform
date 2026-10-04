@@ -397,6 +397,22 @@ func CheckCommand(command string) error {
 	return nil
 }
 
+// ScriptPreamble opens every script the platform itself runs in a sandbox's
+// shell. That shell is `bash -c`, so an image's BASH_ENV file runs in it first
+// and can leave errexit on, which the platform's scripts are not written for:
+// a `chmod` or an `rm` they let fail on purpose, a status they read after the
+// command that set it, would end the script there instead — a bulk write at its
+// first `chmod` as a non-root user, a shed before it reports what it left, a
+// rename refusing a directory with the `rm`'s exit and not its own (#860). So
+// it turns errexit off, and touches nothing else. It is the platform's scripts'
+// and never the model's commands', which keep the options the image gives them.
+// A script framed by Frame.Open has it already.
+const ScriptPreamble = "set +e\n"
+
+// Script is script as the platform runs it in a sandbox's shell, its preamble
+// first (ScriptPreamble).
+func Script(script string) string { return ScriptPreamble + script }
+
 // ExecResult is a finished command. TimedOut means the command itself outlived
 // its deadline: the sandbox stopped it, or stopped waiting for it, or caught it
 // still running past the deadline and exiting later on its own terms. TimedOut

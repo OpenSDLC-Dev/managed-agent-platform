@@ -85,7 +85,7 @@ func (f Frame) Lines() (begin, end string) {
 
 // Open is what a framed script begins with: close_frame, which prints the end
 // line on both streams and exits with its argument — the one way the script
-// may exit — then `set +e`, and then the begin line on both. Each line is
+// may exit — then ScriptPreamble, and then the begin line on both. Each line is
 // printed after a newline of its own, so it is a line however what came before
 // it ended. It is POSIX shell, so a script `sh -c` runs can open with it too.
 //
@@ -93,13 +93,13 @@ func (f Frame) Lines() (begin, end string) {
 // among them would end it at the first command that fails — rg finding no
 // match — before it reached close_frame, so the frame would never close. A
 // script that routes every exit through close_frame itself is written for the
-// shell's defaults, so Open turns errexit off. A script that cannot route each
-// of its exits through close_frame takes Wrap instead.
+// shell's defaults, so Open turns errexit off, as every platform script does
+// (ScriptPreamble). A script that cannot route each of its exits through
+// close_frame takes Wrap instead.
 func (f Frame) Open() string {
-	return fmt.Sprintf(`close_frame() { printf '\n%%s\n' '%[2]s'; printf '\n%%s\n' '%[2]s' >&2; exit "$1"; }
-set +e
-printf '\n%%s\n' '%[1]s'; printf '\n%%s\n' '%[1]s' >&2
-`, f.begin, f.end)
+	return fmt.Sprintf(`close_frame() { printf '\n%%s\n' '%[1]s'; printf '\n%%s\n' '%[1]s' >&2; exit "$1"; }
+`, f.end) + ScriptPreamble + fmt.Sprintf(`printf '\n%%s\n' '%[1]s'; printf '\n%%s\n' '%[1]s' >&2
+`, f.begin)
 }
 
 // wrapClose is what Wrap puts after the script: the subshell's end, and the

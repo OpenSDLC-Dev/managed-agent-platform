@@ -45,7 +45,13 @@ type Backend struct {
 // kubeconfig's current context; MAP_K8S_NAMESPACE), each able to run it.
 func Backends(t *testing.T) []Backend {
 	t.Helper()
-	image := Image(t, sandboxtest.BannerHook)
+	return BackendsFor(t, sandboxtest.BannerHook)
+}
+
+// BackendsFor is Backends with hook as the image's BASH_ENV file.
+func BackendsFor(t *testing.T, hook string) []Backend {
+	t.Helper()
+	image := Image(t, hook)
 	dp, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("hooked sandboxes require Docker: %v", err)

@@ -762,7 +762,7 @@ func (s *sweepSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandb
 		return sandbox.ExecResult{}, err
 	}
 	s.mu.Lock()
-	s.cmds = append(s.cmds, req.Command)
+	s.cmds = append(s.cmds, strings.TrimPrefix(req.Command, sandbox.ScriptPreamble))
 	s.mu.Unlock()
 	return s.fakeSandbox.Exec(ctx, req)
 }

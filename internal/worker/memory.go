@@ -885,7 +885,7 @@ func refusalKind(err error) string {
 func (m *memoryStores) applyStore(ctx context.Context, st *storeSync) {
 	id := st.ref.MemoryStoreID
 	for _, cmd := range memsync.RemoveCommands(st.ref.MountPath, st.removals) {
-		res, err := m.sb.Exec(ctx, sandbox.ExecRequest{Command: cmd})
+		res, err := m.sb.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(cmd)})
 		if err != nil || res.ExitCode != 0 {
 			slog.WarnContext(ctx, "memory deletions not applied; the baseline is kept for the next sync",
 				"session_id", m.sessionID, "memory_store_id", id, "err", err, "exit", res.ExitCode, "stderr", strings.TrimSpace(res.Stderr))
