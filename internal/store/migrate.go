@@ -60,9 +60,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 // work_session_tokens, 0044's on memory_stores,
 // 0046's three, taken before any of its work, and 0047's on deleted_sessions;
 // 0043's sessions, 0045's session_threads and 0047's files are held already.
-// So a conflict that outlasts all five fails the start after up to about 115
-// seconds, like any other migration error, plus up to 2s an attempt for each
-// row 0041's or 0044's UPDATE finds another transaction holding. Variables so
+// So a conflict that outlasts all five fails the start after about 115 seconds
+// of table-lock waits and backoff, like any other migration error — plus up to
+// 2s an attempt for each row 0041's or 0044's UPDATE finds another transaction
+// holding, plus the migrations' own work, which every attempt repeats up to
+// the lock it times out on (0046's index builds before 0047's lock, say):
+// lock_timeout bounds waiting for a lock, not a migration's run. Variables so
 // a test can run the schedule to exhaustion quickly (export_test.go).
 var (
 	migrateLockWait = 2 * time.Second
