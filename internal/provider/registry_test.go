@@ -236,8 +236,9 @@ func TestRegistryValidation(t *testing.T) {
 	}
 }
 
-// A Descriptor's Route tells routes apart by where a request goes and how the
-// adapter renders it, without naming either: a model's thinking is bound to it
+// A Descriptor's Route tells routes apart by where a request goes — the
+// endpoint, and the headers and key a gateway routes by — and how the adapter
+// renders it, without naming any of them: a model's thinking is bound to it
 // (#67).
 func TestDescribeRouteIdentifiesEndpointAndRendering(t *testing.T) {
 	reg, err := provider.NewRegistry([]provider.Route{
@@ -246,6 +247,10 @@ func TestDescribeRouteIdentifiesEndpointAndRendering(t *testing.T) {
 		{Model: "b", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-b", Model: "m"}},
 		{Model: "flat", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m",
 			FlattenSearchResults: true}},
+		{Model: "hdr", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m",
+			Headers: map[string]string{"x-gateway-provider": "other"}}},
+		{Model: "key", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw-a", Model: "m",
+			APIKey: "sk-other-account"}},
 	}, factories)
 	if err != nil {
 		t.Fatal(err)
@@ -266,7 +271,13 @@ func TestDescribeRouteIdentifiesEndpointAndRendering(t *testing.T) {
 	if route("a") == route("flat") {
 		t.Error("flattening search results did not change the route")
 	}
-	if strings.Contains(route("a"), "gw-a") {
-		t.Errorf("Route %q names the endpoint", route("a"))
+	if route("a") == route("hdr") {
+		t.Error("a gateway routing header did not change the route")
+	}
+	if route("a") == route("key") {
+		t.Error("another key did not change the route")
+	}
+	if strings.Contains(route("a"), "gw-a") || strings.Contains(route("key"), "sk-other") {
+		t.Errorf("Route names what it digests: %q, %q", route("a"), route("key"))
 	}
 }

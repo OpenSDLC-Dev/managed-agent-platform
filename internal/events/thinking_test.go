@@ -42,7 +42,7 @@ func TestThinkingBlocksRoundTripVerbatim(t *testing.T) {
 		}}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	got, err := log.ThinkingBlocks(context.Background(), sid)
+	got, err := log.ThinkingBlocks(context.Background(), sid, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestThinkingBlocksRollBackWithTheirAppend(t *testing.T) {
 	if err == nil {
 		t.Fatal("append succeeded, want the Then error")
 	}
-	got, err := log.ThinkingBlocks(context.Background(), sid)
+	got, err := log.ThinkingBlocks(context.Background(), sid, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,5 +104,75 @@ func TestThinkingBlocksGoWithTheirSession(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("%d blocks outlived their session", n)
+	}
+}
+
+// A turn reads only its own thread's blocks: a child thread's reasoning is
+// never replayed on the primary's turns, nor loaded for them.
+func TestThinkingBlocksAreReadPerThread(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newThreadedSession(t, pool)
+	child := pgtest.NewChildThread(t, pool, sid)
+	ctx := context.Background()
+	evs, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventAgentThinking},
+		{Type: domain.EventAgentThinking, ThreadID: child},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := json.RawMessage(`{"type":"thinking","thinking":"x","signature":"s"}`)
+	if _, err := log.AppendWith(ctx, sid,
+		[]events.NewEvent{{Type: domain.EventAgentMessage, Payload: text("answer")}},
+		events.AppendOptions{Thinking: []events.ThinkingBlock{
+			{EventID: evs[0].ID, Model: "m", PrefixDigest: "d", Block: block},
+			{EventID: evs[1].ID, Model: "m", PrefixDigest: "d", Block: block},
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		thread domain.ID
+		want   domain.ID
+	}{{"primary", "", evs[0].ID}, {"child", child, evs[1].ID}} {
+		got, err := log.ThinkingBlocks(ctx, sid, tc.thread)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := got[tc.want]; len(got) != 1 || !ok {
+			t.Errorf("%s: blocks = %v, want only %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+// DropThinking forgets a session's kept blocks, and only that session's.
+func TestDropThinkingForgetsOneSession(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	ctx := context.Background()
+	keep := func(sid domain.ID) {
+		id := appendThinkingEvent(t, log, sid)
+		if _, err := log.AppendWith(ctx, sid,
+			[]events.NewEvent{{Type: domain.EventAgentMessage, Payload: text("answer")}},
+			events.AppendOptions{Thinking: []events.ThinkingBlock{{EventID: id, Model: "m", PrefixDigest: "d",
+				Block: json.RawMessage(`{"type":"redacted_thinking","data":"x"}`)}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dropped, other := newSession(t, pool), newSession(t, pool)
+	keep(dropped)
+	keep(other)
+	if err := log.DropThinking(ctx, dropped); err != nil {
+		t.Fatal(err)
+	}
+	for sid, want := range map[domain.ID]int{dropped: 0, other: 1} {
+		got, err := log.ThinkingBlocks(ctx, sid, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != want {
+			t.Errorf("session %s keeps %d blocks, want %d", sid, len(got), want)
+		}
 	}
 }

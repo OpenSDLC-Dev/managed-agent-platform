@@ -96,7 +96,8 @@ they point at is a committed row the listener re-reads for itself.
    sends each back only to the model id that produced it and only under the request
    prefix it was produced under, so any brain replays them and, by Anthropic's rule, a
    changed prompt drops them rather than failing the request — DeepSeek refuses a tool
-   loop that lost its thinking (#883; plan 60).
+   loop that lost its thinking (#883; plan 60). A request that fails while blocks are
+   there to replay drops them all, so a refused block cannot fail every turn after.
 3. Tool calls commit as events with stable IDs. Custom calls and self-hosted
    sandbox calls wait on external results; ask-policy calls wait for authorization.
    A thread advertises these as idle/requires_action. The shared events-layer

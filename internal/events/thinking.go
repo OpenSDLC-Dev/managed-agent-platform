@@ -46,13 +46,22 @@ func insertThinking(ctx context.Context, tx pgx.Tx, sessionID domain.ID, blocks 
 	return err
 }
 
-// ThinkingBlocks returns a session's kept thinking blocks by event id, for
-// replay. Block is read as text: the json column keeps the bytes it was given
-// and text returns them unchanged.
-func (l *Log) ThinkingBlocks(ctx context.Context, sessionID domain.ID) (map[domain.ID]ThinkingBlock, error) {
-	rows, err := l.pool.Query(ctx,
-		`SELECT event_id, model, prefix_digest, block::text FROM thinking_blocks WHERE session_id = $1`,
-		sessionID.String())
+// ThinkingBlocks returns one thread's kept thinking blocks by event id, for
+// its replay — the primary's when threadID is empty, as ScopeThread reads.
+// Block is read as text: the json column keeps the bytes it was given and text
+// returns them unchanged.
+func (l *Log) ThinkingBlocks(ctx context.Context, sessionID, threadID domain.ID) (map[domain.ID]ThinkingBlock, error) {
+	q := `SELECT t.event_id, t.model, t.prefix_digest, t.block::text
+	        FROM thinking_blocks t JOIN events e ON e.id = t.event_id
+	       WHERE t.session_id = $1 AND `
+	args := []any{sessionID.String()}
+	if threadID == "" {
+		q += `e.thread_id IS NULL`
+	} else {
+		q += `e.thread_id = $2`
+		args = append(args, threadID.String())
+	}
+	rows, err := l.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -71,4 +80,13 @@ func (l *Log) ThinkingBlocks(ctx context.Context, sessionID domain.ID) (map[doma
 		out[b.EventID] = b
 	}
 	return out, rows.Err()
+}
+
+// DropThinking forgets every block a session kept. The brain calls it when a
+// model request fails with blocks to replay: an endpoint that refuses a kept
+// block refuses it on every turn after, and nothing else would stop sending
+// it (#67).
+func (l *Log) DropThinking(ctx context.Context, sessionID domain.ID) error {
+	_, err := l.pool.Exec(ctx, `DELETE FROM thinking_blocks WHERE session_id = $1`, sessionID.String())
+	return err
 }

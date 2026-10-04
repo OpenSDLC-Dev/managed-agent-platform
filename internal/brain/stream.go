@@ -55,14 +55,13 @@ type redactedBlock struct {
 }
 
 // streamTurn drives one provider stream, broadcasting message previews as
-// deltas arrive and appending each agent.thinking as its block closes. model is
-// the upstream model id req goes to, which every kept thinking block records,
-// and route the route it goes over (provider.Descriptor.Route). The lease
-// keeper runs alongside; this function only distinguishes the two
+// deltas arrive and appending each agent.thinking as its block closes. desc is
+// the backend req goes to: every kept thinking block records its model and is
+// hashed under its route. The lease keeper runs alongside; this function only distinguishes the two
 // failure worlds — provider errors surface bare (they become the turn's
 // session.error), brain-side database failures wrap as infra (the turn is
 // abandoned to lease expiry, not reported as a model failure).
-func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provider.Provider, req provider.Request, model, route string) (*turnResult, error) {
+func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provider.Provider, req provider.Request, desc provider.Descriptor) (*turnResult, error) {
 	stream, err := p.Generate(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("model request: %w", err)
@@ -101,7 +100,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 				return err
 			}
 			var err error
-			if chain, err = requestChain(route, req); err != nil {
+			if chain, err = requestChain(desc.Route, req); err != nil {
 				return err
 			}
 		}
@@ -110,7 +109,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			return err
 		}
 		turn.thinking = append(turn.thinking, events.ThinkingBlock{
-			EventID: id, Model: model, PrefixDigest: chain.sum(), Block: raw,
+			EventID: id, Model: desc.Model, PrefixDigest: chain.sum(), Block: raw,
 		})
 		next = index + 1
 		return chain.add("assistant", raw)

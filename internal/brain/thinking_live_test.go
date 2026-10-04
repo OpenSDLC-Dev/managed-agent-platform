@@ -101,16 +101,34 @@ func TestLiveThinkingReplay(t *testing.T) {
 	answers := []string{"18C, light rain, wind 30 km/h", "24C, sunny, light breeze", "unchanged"}
 	h.wake(t, "Should I hold a picnic in Paris today or tomorrow? Check today's weather first, "+
 		"then tomorrow's forecast, then decide.")
+	recorded := func() (int, []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(bodies) == 0 {
+			return 0, nil
+		}
+		return len(bodies), bodies[len(bodies)-1]
+	}
+	// sent holds, per turn, the last body the proxy saw: the attempt that was
+	// answered, after any the client retried.
 	var keptBefore []int
+	var sent [][]byte
 	for turn := 0; turn < 4; turn++ {
 		keptBefore = append(keptBefore, h.thinkingRows(t))
+		before, _ := recorded()
 		h.runOnce(t)
-		if errs, err := h.log.List(context.Background(), sid, events.ListQuery{Types: []string{"session.error"}}); err != nil || len(errs) != 0 {
-			mu.Lock()
-			last := bodies[len(bodies)-1] // a body carries no credential: that is a header
-			mu.Unlock()
-			t.Fatalf("turn %d: the request failed (%v): %s\nrequest body: %s", turn+1, err, errs[0].Body, last)
+		n, last := recorded() // a body carries no credential: that is a header
+		errs, err := h.log.List(context.Background(), sid, events.ListQuery{Types: []string{"session.error"}})
+		if err != nil {
+			t.Fatal(err)
 		}
+		if len(errs) != 0 {
+			t.Fatalf("turn %d: the request failed: %s\nlast request body: %s", turn+1, errs[0].Body, last)
+		}
+		if n == before {
+			t.Fatalf("turn %d sent no request", turn+1)
+		}
+		sent = append(sent, last)
 		tools := h.countType(t, "agent.custom_tool_use")
 		results := h.countType(t, "user.custom_tool_result")
 		if tools == results {
@@ -119,7 +137,7 @@ func TestLiveThinkingReplay(t *testing.T) {
 		h.answerLookup(t, answers[min(results, len(answers)-1)])
 	}
 
-	kept, err := h.log.ThinkingBlocks(context.Background(), sid)
+	kept, err := h.log.ThinkingBlocks(context.Background(), sid, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,10 +149,7 @@ func TestLiveThinkingReplay(t *testing.T) {
 		}
 		stored = append(stored, m)
 	}
-	if len(bodies) != len(keptBefore) {
-		t.Fatalf("%d request bodies for %d turns", len(bodies), len(keptBefore))
-	}
-	for i, body := range bodies {
+	for i, body := range sent {
 		var req struct {
 			Messages []struct {
 				Role    string           `json:"role"`
@@ -164,11 +179,11 @@ func TestLiveThinkingReplay(t *testing.T) {
 		return
 	}
 	if len(kept) == 0 {
-		t.Logf("%s returned no thinking in %d requests: the loop ran, but there was nothing to replay", cfg.Model, len(bodies))
+		t.Logf("%s returned no thinking in %d requests: the loop ran, but there was nothing to replay", cfg.Model, len(sent))
 		return
 	}
 	t.Logf("%s: %d requests, %d thinking blocks kept, each sent as stored in every later request body, every request answered",
-		cfg.Model, len(bodies), len(kept))
+		cfg.Model, len(sent), len(kept))
 }
 
 func containsBlock(stored []map[string]any, b map[string]any) bool {

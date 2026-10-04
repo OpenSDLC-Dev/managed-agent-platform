@@ -13,6 +13,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -253,9 +255,10 @@ type Descriptor struct {
 	Protocol string
 	Model    string
 	// Route tells routes apart by where a request goes and how the adapter
-	// renders it — the protocol, the base URL and flatten_search_results —
-	// digested so it names none of them. A model's thinking is bound to it
-	// (#67): a block produced over one route does not go back over another.
+	// renders it — the protocol, the base URL, the headers and key a gateway
+	// may route by, and flatten_search_results — digested so it names none of
+	// them. A model's thinking is bound to it (#67): a block produced over one
+	// route does not go back over another.
 	Route string
 }
 
@@ -270,11 +273,22 @@ func (r *Registry) Describe(model string) (Descriptor, bool) {
 	return Descriptor{Protocol: cfg.Protocol, Model: cfg.Model, Route: routeDigest(cfg)}, true
 }
 
-// routeDigest is Descriptor.Route. The base URL is digested rather than said:
-// a Descriptor is what may be said out loud, and a URL may carry what may not.
+// routeDigest is Descriptor.Route. What it covers is digested rather than
+// said: a Descriptor is what may be said out loud, and the key, a header or a
+// URL may carry what may not. Header names compare as HTTP compares them.
 func routeDigest(cfg Config) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%q %q %t", cfg.Protocol, cfg.BaseURL, cfg.FlattenSearchResults)
+	fmt.Fprintf(h, "%q %q %q %t", cfg.Protocol, cfg.BaseURL, cfg.APIKey, cfg.FlattenSearchResults)
+	names := make([]string, 0, len(cfg.Headers))
+	for k := range cfg.Headers {
+		names = append(names, k)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return strings.ToLower(names[i]) < strings.ToLower(names[j])
+	})
+	for _, k := range names {
+		fmt.Fprintf(h, " %q %q", strings.ToLower(k), cfg.Headers[k])
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

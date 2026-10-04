@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -104,18 +105,6 @@ func (h *harness) thinkingRows(t *testing.T) int {
 	return n
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // The core round trip: a thinking block and its signature come back on the
 // next request, ahead of the tool call they led to, byte-for-byte what the
 // model sent. The fixtures carry <, > and & on every lane the digest reads —
@@ -162,7 +151,7 @@ func TestThinkingReplaysWithItsSignature(t *testing.T) {
 		t.Fatalf("resumed request has %d assistant messages, want 1", len(turns))
 	}
 	got := turns[0]
-	if want := []string{"thinking", "tool_use"}; !equalStrings(blockTypes(got), want) {
+	if want := []string{"thinking", "tool_use"}; !slices.Equal(blockTypes(got), want) {
 		t.Fatalf("assistant blocks = %v, want %v", blockTypes(got), want)
 	}
 	if got[0]["thinking"] != "the user wants <go> & co; call lookup" || got[0]["signature"] != "sig-part-1+part-2" {
@@ -194,7 +183,7 @@ func TestOmittedAndRedactedThinkingReplay(t *testing.T) {
 	h.runOnce(t)
 
 	got := h.assistantBlocks(t, 1)[0]
-	if want := []string{"thinking", "redacted_thinking", "tool_use"}; !equalStrings(blockTypes(got), want) {
+	if want := []string{"thinking", "redacted_thinking", "tool_use"}; !slices.Equal(blockTypes(got), want) {
 		t.Fatalf("assistant blocks = %v, want %v", blockTypes(got), want)
 	}
 	if got[0]["thinking"] != "" || got[0]["signature"] != "sig-omitted" {
@@ -218,7 +207,7 @@ func TestThinkingReplaysAfterAnEndTurn(t *testing.T) {
 	h.runOnce(t)
 
 	got := h.assistantBlocks(t, 1)[0]
-	if want := []string{"thinking", "text"}; !equalStrings(blockTypes(got), want) {
+	if want := []string{"thinking", "text"}; !slices.Equal(blockTypes(got), want) {
 		t.Fatalf("assistant blocks = %v, want %v", blockTypes(got), want)
 	}
 }
@@ -317,7 +306,7 @@ func TestAnUnseenBlockEndsTheLeadingRun(t *testing.T) {
 	h.answerLookup(t, "ok")
 	h.runOnce(t)
 	got := h.assistantBlocks(t, 1)[0]
-	if want := []string{"thinking", "tool_use"}; !equalStrings(blockTypes(got), want) {
+	if want := []string{"thinking", "tool_use"}; !slices.Equal(blockTypes(got), want) {
 		t.Fatalf("assistant blocks = %v, want %v", blockTypes(got), want)
 	}
 	if got[0]["signature"] != "s0" {
@@ -399,7 +388,7 @@ func TestThinkingReplaysAfterADelegatedSettlement(t *testing.T) {
 	if len(turns) != 1 {
 		t.Fatalf("chained request has %d assistant messages, want 1", len(turns))
 	}
-	if want := []string{"thinking", "tool_use"}; !equalStrings(blockTypes(turns[0]), want) {
+	if want := []string{"thinking", "tool_use"}; !slices.Equal(blockTypes(turns[0]), want) {
 		t.Fatalf("assistant blocks = %v, want %v", blockTypes(turns[0]), want)
 	}
 }
@@ -434,8 +423,40 @@ func TestThinkingDropsWhenTheRouteMoves(t *testing.T) {
 	h.registry, h.brain = moved, brain.New(h.pool, moved, nil, brain.Config{})
 	h.answerLookup(t, "ok")
 	h.runOnce(t)
-	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !equalStrings(got, []string{"tool_use"}) {
+	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !slices.Equal(got, []string{"tool_use"}) {
 		t.Errorf("assistant blocks after the route moved = %v, want the tool call alone", got)
+	}
+}
+
+// A request that fails with thinking to replay makes the session forget what
+// it kept: an endpoint that refuses a kept block would refuse it on every turn
+// after, and the session would never recover.
+func TestAFailedRequestForgetsTheSessionsThinking(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			thinkingChunk(0, "first"), signatureChunk(0, "s"),
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
+			done("tool_use", 3),
+		},
+		{},
+		{textChunk(0, "ok"), done("end_turn", 1)},
+	}, []error{nil, errors.New("400 Bad Request: invalid signature in thinking block")})
+	h.lookupAgent(t, "fixture-model", "s")
+	h.wake(t, "go")
+	h.runOnce(t)
+	h.answerLookup(t, "ok")
+	h.runOnce(t)
+	if n := h.countType(t, "session.error"); n != 1 {
+		t.Fatalf("session.error events = %d, want the refused request's", n)
+	}
+	if n := h.thinkingRows(t); n != 0 {
+		t.Fatalf("kept %d thinking blocks after the refusal, want none", n)
+	}
+	h.wake(t, "try again")
+	h.runOnce(t)
+	if got := blockTypes(h.assistantBlocks(t, 2)[0]); !slices.Equal(got, []string{"tool_use"}) {
+		t.Errorf("assistant blocks after the refusal = %v, want the tool call alone", got)
 	}
 }
 
@@ -456,7 +477,7 @@ func TestThinkingDropsWhenTheModelChanges(t *testing.T) {
 	h.lookupAgent(t, "model-b", "s")
 	h.answerLookup(t, "ok")
 	h.runOnce(t)
-	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !equalStrings(got, []string{"tool_use"}) {
+	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !slices.Equal(got, []string{"tool_use"}) {
 		t.Errorf("assistant blocks after a model change = %v, want the tool call alone", got)
 	}
 }
@@ -485,7 +506,7 @@ func TestThinkingDropsExactlyTheBlocksBeforeAPrefixChange(t *testing.T) {
 	}
 	h.answerLookup(t, "one")
 	h.runOnce(t)
-	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !equalStrings(got, []string{"tool_use"}) {
+	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !slices.Equal(got, []string{"tool_use"}) {
 		t.Errorf("after the system.message the first block still went back: %v", got)
 	}
 	h.answerLookup(t, "two")
@@ -494,10 +515,10 @@ func TestThinkingDropsExactlyTheBlocksBeforeAPrefixChange(t *testing.T) {
 	if len(turns) != 2 {
 		t.Fatalf("third request has %d assistant messages, want 2", len(turns))
 	}
-	if got := blockTypes(turns[0]); !equalStrings(got, []string{"tool_use"}) {
+	if got := blockTypes(turns[0]); !slices.Equal(got, []string{"tool_use"}) {
 		t.Errorf("first turn = %v, want its thinking still dropped", got)
 	}
-	if got := blockTypes(turns[1]); !equalStrings(got, []string{"thinking", "tool_use"}) {
+	if got := blockTypes(turns[1]); !slices.Equal(got, []string{"thinking", "tool_use"}) {
 		t.Errorf("second turn = %v, want its thinking kept", got)
 	}
 }

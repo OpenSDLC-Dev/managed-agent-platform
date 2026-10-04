@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"hash"
+	"slices"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -113,6 +114,9 @@ type replayMessage struct {
 // against and a removed one does not, so a removal drops exactly the blocks
 // produced before the change: each one produced since was produced without it.
 func admitThinking(t replayThinking, system string, tools []json.RawMessage, msgs []replayMessage) error {
+	if !slices.ContainsFunc(msgs, func(m replayMessage) bool { return len(m.thinking) > 0 }) {
+		return nil // nothing to admit, so no prefix to hash
+	}
 	chain, err := newPrefixChain(t.route, system, tools)
 	if err != nil {
 		return err

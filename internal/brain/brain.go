@@ -409,7 +409,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if err == nil {
 		// What earlier turns kept of their thinking, sent back by replay where
 		// it is still valid (#67).
-		kept, err = b.log.ThinkingBlocks(kctx, sid)
+		kept, err = b.log.ThinkingBlocks(kctx, sid, item.ThreadID)
 	}
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
@@ -459,7 +459,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// The call to the model begins here, and its latency with it: the history
 	// read and the replay above ran after the span start and are ours.
 	span.ModelCalling()
-	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req, desc.Model, desc.Route)
+	turn, streamErr := b.streamTurn(kctx, sid, item.ThreadID, p, req, desc)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
 	// settlement — and none of it belongs in a model-latency metric. The usage
@@ -484,6 +484,19 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		if errors.As(streamErr, &ie) {
 			span.Finish(sctx, true, streamErr)
 			return streamErr
+		}
+		if len(kept) > 0 {
+			// A request with thinking to replay failed. An endpoint that
+			// refuses a kept block — a signature it cannot read, from an
+			// account the route's settings no longer reach — refuses it on
+			// every turn after, and the guard cannot see why, so the session
+			// forgets what it kept and the next turn goes without (#67). A
+			// failure for any other reason costs earlier reasoning, nothing
+			// more: dropping thinking is always valid by Anthropic's rule.
+			if err := b.log.DropThinking(sctx, sid); err != nil {
+				slog.WarnContext(sctx, "brain: kept thinking not dropped after a failed request",
+					"session_id", sid.String(), "error", err)
+			}
 		}
 		return b.failTurn(sctx, sid, item, span, watermark, streamErr.Error(), envKind)
 	}

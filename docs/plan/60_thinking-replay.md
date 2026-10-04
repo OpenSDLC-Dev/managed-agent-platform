@@ -97,13 +97,19 @@ a changed prompt into a rejected one (DeepSeek's rule is another; decision 5). P
 5. **The guard: same model, same prefix — the API's own rule, checked first.** Each
    stored block records the upstream model id its request was sent to and a SHA-256
    over everything the model read before the block: the route the request went over
-   (`provider.Descriptor.Route`, a digest of the protocol, the base URL and
-   `flatten_search_results` — the endpoint decides whose signatures it reads, and the
-   adapter renders search results on the way out), the request's `system`, its
+   (`provider.Descriptor.Route`, a digest of the protocol, the base URL, the key and
+   headers a gateway may route by, and `flatten_search_results` — the endpoint
+   decides whose signatures it reads, and the adapter renders search results on the
+   way out), the request's `system`, its
    `tools`, every content block of its messages with its role, and the blocks of its
    own response ahead of it. A response to a request that shows the model an image
    or document by URL keeps no thinking: the bytes behind a URL can change while the
-   request stays the same, and the digest cannot see them. Replay sends a block only when the model and the digest
+   request stays the same, and the digest cannot see them. And because no digest sees
+   everything that decides whether an endpoint can read a signature — a vendor's key
+   rotation, an account switched behind an unchanged route — a model request that
+   fails while the session has blocks to replay drops all of them: a refused block
+   would otherwise be refused on every turn after, where without replay the session
+   would have kept working. Replay sends a block only when the model and the digest
    it computes at that point of the request it is building both match; an admitted
    block joins what later blocks are checked against, a refused one does not. A
    model switch would otherwise send one vendor's signature to another (a DeepSeek
@@ -157,7 +163,8 @@ a changed prompt into a rejected one (DeepSeek's rule is another; decision 5). P
   prefix_digest, block json, created_at)`. `json`, not `jsonb`: it keeps the bytes the
   brain wrote, which are the bytes a signature covers, and accepts the `\u0000`
   escape that `jsonb` refuses. `AppendOptions.Thinking` is written by the append's
-  own transaction; `Log.ThinkingBlocks` reads a session's rows for replay.
+  own transaction; `Log.ThinkingBlocks` reads one thread's rows for its replay, and
+  `Log.DropThinking` forgets a session's.
 - **Settlement** (`internal/brain`): `commitTurn` sets `opts.Thinking` when the turn
   committed text or a tool call; the tool, end-turn and delegated paths all append
   with it.
@@ -181,7 +188,8 @@ a changed prompt into a rejected one (DeepSeek's rule is another; decision 5). P
   produced before it; the digest a turn stores equals the one the next build computes
   for the same block; a non-leading block is never stored, nor one after a gap in
   the block indices or after URL media; a session whose route moves under the same
-  model id drops its blocks.
+  model id, key or gateway header drops its blocks; a failed request drops every
+  kept block; a turn reads only its own thread's blocks.
 - Store: `pgtest` — rows roll back with a failed settlement and go with their
   session.
 - Live tier (`RUN_LIVE_MODEL_TESTS`, `MODEL_*` pointed in turn at `deepseek-flash`,

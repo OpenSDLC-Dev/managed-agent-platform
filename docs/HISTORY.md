@@ -98,7 +98,29 @@ Each new guard was then broken on its own, and its test failed:
 
 The verifier also had the changelog's Kimi and MiniMax claim trimmed to the two vendors the plan cites.
 
-GATE2
+The Claude review (`/code-review`, Opus 5.5) then found twelve issues. Nine were fixed:
+
+- **A refused block wedged the session.** An endpoint that refuses a kept block — the guard cannot see a key rotated or an account switched behind an unchanged route — would refuse it on every turn after, where without replay the session would have kept working. A request that fails while the session has blocks to replay now drops them all.
+- **The route digest missed the key and the headers.** A gateway may route by either, so both are now in the digest.
+- **The live test mishandled two cases.** Its failure branch could panic before reporting, and an SDK retry added a request body and skewed the per-turn count. It now reads the answered attempt of each turn.
+- **Replay hashed when it had nothing to check.** It hashed the whole history on turns with no kept block, and now skips that.
+- **A turn loaded every thread's blocks.** It now loads only its own thread's.
+- **A new event count went unregistered.** A redacted block now yields an `agent.thinking` event, and docs/DIVERGENCES.md records that as an inference.
+- **Two code-level fixes:** a test helper that duplicated `slices.Equal` was removed, and `streamTurn` now takes the `provider.Descriptor` rather than two adjacent strings.
+
+Three were declined:
+
+- Deriving the stream's digest from the replay side's chain would hash the request as built rather than as sent.
+- The plan number was right once plan 59 merged (#882).
+- The separate model column records which model produced a block, which #883 may key on.
+
+Each new guard was broken on its own, and its test failed:
+
+- a failed request that keeps its blocks failed the failed-request test;
+- a primary read without the thread filter failed the per-thread test;
+- a digest without the key and headers failed the route test.
+
+After those fixes the full `make verify` gate passed on the branch: build, cross-build, vet, format check and 67 test packages, with 90.92% total statement coverage. Review results and CI are recorded in the pull request.
 
 ---
 
