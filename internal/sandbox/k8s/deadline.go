@@ -32,6 +32,17 @@ import "time"
 // wrapper leaves: the pid it guards, the exit code it records, and whether the
 // watchdog reports having fired.
 //
+// All of that rests on the wrapper running without job control, which it turns
+// off first (`set +m`) for an image whose SHELLOPTS names monitor (#866): bash
+// reads that variable as it starts, and exports it. With job control on, the
+// wrapper would launch the command as a job, in a group of its own, which
+// setsid — refused a new session as a group leader — forks out of: `$!` would
+// name a parent that exits 0 at once, the exit line would record that 0, and
+// nothing would watch the command. And the command's own shell, reading monitor
+// back, would fork each of its jobs out of the group the watchdog kills.
+// Turned off here, monitor leaves the exported value too; the rest of the
+// image's SHELLOPTS still reaches the command.
+//
 // That last piece — the watchdog marking `$3.killed` between its final `kill -0`
 // and its `kill -9` — is what makes a punctual kill classifiable at all here
 // (#95, #110); why the mark rather than a probe, and why it is safe to weigh
@@ -85,10 +96,11 @@ import "time"
 // pid file, or the watchdog's sleep or `mkdir` the same way, the last of which
 // leaves a runaway unkilled. So each command whose failure the wrapper means to
 // survive says so — `|| :`, or `wait`'s status taken in an `||` — and none of
-// it touches a shell option: the command's own `bash -c` sources the same file
-// and gets the image's options as before. The wrapper's own exit status is
-// never read; the exit line is the record.
+// it touches errexit: the command's own `bash -c` sources the same file and
+// gets it as before. The wrapper's own exit status is never read; the exit
+// line is the record.
 const execWrapper = `
+set +m
 exec 3>&2 2>/dev/null
 setsid /bin/bash -c "$1" 2>&3 3>&- &
 cmd=$!

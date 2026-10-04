@@ -950,7 +950,7 @@ func TestExecWrapperWritesOnlyTheWatchdogsMark(t *testing.T) {
 		t.Errorf("mkdir appears %d times; the mark is the wrapper's one write", n)
 	}
 	if !strings.Contains(execWrapper, "set -m") {
-		t.Error("the wrapper must enable job control so the deadline kills the command's process group")
+		t.Error("the wrapper must enable job control so its watchdog runs in a process group of its own")
 	}
 	// The command must BECOME the exec (exec /bin/bash -c "$1"), not run as a
 	// child of a wrapper shell. Otherwise the pid Exec watches is a wrapper the
