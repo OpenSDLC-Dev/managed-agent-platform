@@ -90,14 +90,18 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 	marker := filesSentinel(mounts)
 	if sentinelUsable {
 		prev, err := sb.ReadFile(ctx, sentinelPath)
-		if !sandbox.ReadAnswered(err) {
-			// A marker that could not be read says neither that the set
-			// landed nor that it did not: what is there stays, as below.
-			slog.WarnContext(ctx, "files sentinel not read; keeping what the sandbox holds",
+		// A marker that could not be read — the startup's output pushed it
+		// out, or the agent made it unreadable — is no record either way,
+		// and the marker is only a shortcut: the current set's paths are
+		// probed as they would be behind a matching one. Absent lands the set
+		// (a new mount among it); a probe that cannot answer either keeps
+		// what is there.
+		unread := !sandbox.ReadAnswered(err)
+		if unread {
+			slog.WarnContext(ctx, "files sentinel not read; probing the mounts instead",
 				"session_id", sid, "files", len(mounts), "err", err)
-			return
 		}
-		if err == nil && bytes.Equal(prev, marker) {
+		if unread || err == nil && bytes.Equal(prev, marker) {
 			// The probe is two sandbox round trips — this read, then one exec
 			// that tests every mount — and the skip returns without ever
 			// entering the write loop, so the read reports before the exec
@@ -108,8 +112,8 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 				span.SetAttributes(attribute.Bool("files.unchanged", true))
 				return
 			case sandbox.PresenceUnknown:
-				// The marker says this set landed, and a probe that did not
-				// answer — an image's startup pushing it out of the output,
+				// The marker says this set landed (or could not be read),
+				// and a probe that did not answer — an image's startup pushing it out of the output,
 				// a failed exec — cannot say a mount has gone since. Re-
 				// streaming every mount on that would overwrite the agent's
 				// edits on every pass (#860), so what is there stays.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -145,6 +146,33 @@ func TestSetupFilesUnansweredProbeKeepsTheAgentsEdit(t *testing.T) {
 				t.Errorf("mount = %q after a probe that did not answer, want the agent's edit kept", got)
 			}
 		})
+	}
+}
+
+// TestSetupFilesUnreadableSentinelStillLandsANewMount is the executor's rule
+// over the wire: an unreadable sentinel is no record, so the current set is
+// probed, and a mount added since is absent and lands.
+func TestSetupFilesUnreadableSentinelStillLandsANewMount(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	a, b := "/workspace/uploads/a.txt", "/workspace/uploads/b.txt"
+	idA, idB := domain.NewID("file").String(), domain.NewID("file").String()
+	h.seedFile(t, idA, "a.txt", "text/plain", "aaa")
+	h.seedFile(t, idB, "b.txt", "text/plain", "bbb")
+	h.refFileMounts(t, [2]string{idA, a})
+	h.suspend(t, writeUse("out.txt", "hello"))
+	if err := h.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	sb.readErr = errors.New("k8s: read /workspace/.files_materialized: exit 1: cat: Permission denied")
+	h.refFileMounts(t, [2]string{idA, a}, [2]string{idB, b})
+	h.suspend(t, writeUse("out2.txt", "again"))
+	if err := h.run(); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if got := sb.files[b]; got != "bbb" {
+		t.Errorf("new mount = %q behind an unreadable sentinel, want it landed", got)
 	}
 }
 

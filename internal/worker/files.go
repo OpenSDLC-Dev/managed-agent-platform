@@ -90,14 +90,18 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 	marker := filesSentinel(mounts)
 	if sentinelUsable {
 		prev, err := sb.ReadFile(ctx, sentinelPath)
-		if !sandbox.ReadAnswered(err) {
-			// A marker that could not be read says neither that the set
-			// landed nor that it did not: what is there stays, as below.
-			slog.WarnContext(ctx, "files sentinel not read; keeping what the sandbox holds",
+		// A marker that could not be read — the startup's output pushed it
+		// out, or the agent made it unreadable — is no record either way,
+		// and the marker is only a shortcut: the current set's paths are
+		// probed as they would be behind a matching one. Absent lands the set
+		// (a new mount among it); a probe that cannot answer either keeps
+		// what is there.
+		unread := !sandbox.ReadAnswered(err)
+		if unread {
+			slog.WarnContext(ctx, "files sentinel not read; probing the mounts instead",
 				"session_id", sessionID, "files", len(mounts), "err", err)
-			return nil
 		}
-		if err == nil && bytes.Equal(prev, marker) {
+		if unread || err == nil && bytes.Equal(prev, marker) {
 			// The marker read and the presence exec are two round trips, and the
 			// skip returns without entering the write loop — the executor's
 			// rule, so the pair is not one silent step (#383).
@@ -107,8 +111,8 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 				span.SetAttributes(attribute.Bool("files.unchanged", true))
 				return nil
 			case sandbox.PresenceUnknown:
-				// The executor's rule: the marker says this set landed, and a
-				// probe that did not answer cannot say a mount has gone, so
+				// The executor's rule: the marker says this set landed (or
+				// could not be read), and a probe that did not answer cannot say a mount has gone, so
 				// what is there stays rather than being re-streamed over the
 				// agent's edits on every pass (#860).
 				slog.WarnContext(ctx, "file mounts not probed; keeping what the sandbox holds",
