@@ -1,7 +1,6 @@
 package modelgateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -40,12 +39,15 @@ const defaultAnthropicVersion = "2023-06-01"
 // is still read to its end.
 var writeStall = time.Minute
 
-// bounded sets the write bound for what follows and returns its reset, so a
-// kept-alive connection's next request starts unbounded.
-func bounded(w http.ResponseWriter) (*http.ResponseController, func()) {
+// bounded sets the write bound for what follows. It is not lifted when the
+// handler returns: the response's last bytes — all of a small one, which
+// net/http buffers to give it a Content-Length — are written after that, and
+// net/http clears the bound itself once they are, before the connection's next
+// request (server.go's serve loop, after finishRequest).
+func bounded(w http.ResponseWriter) *http.ResponseController {
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Now().Add(writeStall))
-	return rc, func() { _ = rc.SetWriteDeadline(time.Time{}) }
+	return rc
 }
 
 // messages serves /v1/messages and its count_tokens twin.
@@ -89,9 +91,6 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 			fmt.Sprintf("model %s has no enabled upstream on the Anthropic protocol", model)})
 		return
 	}
-	if len(attempts) > h.cfg.MaxAttempts {
-		attempts = attempts[:h.cfg.MaxAttempts]
-	}
 	call := call{
 		top:    top,
 		alias:  model,
@@ -99,11 +98,23 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		stream: path == "/v1/messages" && string(bytes.TrimSpace(top["stream"])) == "true",
 		header: forwarded(r.Header),
 	}
+	// MaxAttempts bounds the calls to each deployment rather than to the
+	// alias, so a deployment with many credentials cannot spend the budget a
+	// fallback deployment needed. A caller that leaves ends the retries, and
+	// is still written the last failure: net/http also reads a caller that
+	// only half-closed its connection as gone, and that caller is reading.
 	var last *failure
-	for i, at := range attempts {
-		if i > 0 && !h.backoff(r.Context(), i) {
-			return // the caller left before its answer began
+	tried := map[string]int{}
+	n := 0
+	for _, at := range attempts {
+		if tried[at.Deployment.ID] == h.cfg.MaxAttempts {
+			continue
 		}
+		tried[at.Deployment.ID]++
+		if n > 0 && !h.backoff(r.Context(), n) {
+			break
+		}
+		n++
 		f, retry := h.attempt(w, r, call, at)
 		if f == nil {
 			return
@@ -159,26 +170,86 @@ func (f *failure) write(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, &apiError{f.status, f.typ, f.err.Error()})
 		return
 	}
-	for _, k := range []string{"Content-Type", "Retry-After"} {
+	for _, k := range []string{"Content-Type", "Retry-After", "X-Should-Retry"} {
 		if v := f.header.Get(k); v != "" {
 			w.Header().Set(k, v)
 		}
 	}
-	_, reset := bounded(w)
-	defer reset()
+	bounded(w)
 	w.WriteHeader(f.status)
 	_, _ = w.Write(f.body)
 }
 
-// retryable reports the statuses another attempt may cure: a rate limit, an
-// overload, or a server error.
-func retryable(status int) bool {
-	return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+// retryable reports whether another attempt may cure an upstream's error, by
+// the rule Anthropic's SDK applies to its own retries (checked against
+// anthropic-sdk-go v1.70.1 — internal/requestconfig/requestconfig.go
+// shouldRetry): the upstream's x-should-retry when it sends one, and
+// otherwise a timeout, a conflict, a rate limit, an overload or a server
+// error.
+func retryable(status int, h http.Header) bool {
+	switch h.Get("X-Should-Retry") {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	return status == http.StatusRequestTimeout || status == http.StatusConflict ||
+		status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+}
+
+// refusedCredential is a vendor refusing the gateway's own account: a revoked
+// key, one without access to the model, or an empty balance (DeepSeek's 402).
+// It is not the caller's to read as its own authentication failing, and
+// another credential may serve, so it is a retryable 502 whose detail goes to
+// the log.
+// The refusal is named by its HTTP status or, in a stream, its error type.
+func refusedCredential(ctx context.Context, at catalog.Attempt, refusal string, detail []byte, red provider.Redactor) (*failure, bool) {
+	slog.WarnContext(ctx, "modelgateway: upstream refused a credential", "credential", at.Credential.ID,
+		"deployment", at.Deployment.ID, "refusal", refusal, "detail", red.String(string(detail)))
+	return &failure{status: http.StatusBadGateway, typ: "api_error",
+		err: fmt.Errorf("upstream refused the gateway's credential (%s)", refusal)}, true
+}
+
+// errorStatus is the HTTP status an Anthropic error type answers with
+// (Anthropic's errors page), for a stream that opens with an error event
+// (streamError); the account refusals are refusedCredential's, and an unknown
+// type is a server error.
+var errorStatus = map[string]int{
+	"invalid_request_error": http.StatusBadRequest,
+	"not_found_error":       http.StatusNotFound,
+	"request_too_large":     http.StatusRequestEntityTooLarge,
+	"rate_limit_error":      http.StatusTooManyRequests,
+	"api_error":             http.StatusInternalServerError,
+	"timeout_error":         http.StatusGatewayTimeout,
+	"overloaded_error":      529,
+}
+
+// streamError is a stream whose first event is an error: the upstream refused
+// before it began an answer, so this is the error response it would have sent
+// had its 200 not already gone, retried and relayed like one.
+func streamError(ctx context.Context, at catalog.Attempt, data []byte, red provider.Redactor) (*failure, bool) {
+	var ev struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(data, &ev)
+	switch ev.Error.Type {
+	case "authentication_error", "permission_error", "billing_error":
+		return refusedCredential(ctx, at, ev.Error.Type, data, red)
+	}
+	status, ok := errorStatus[ev.Error.Type]
+	if !ok {
+		status = http.StatusInternalServerError
+	}
+	return &failure{status: status, header: http.Header{"Content-Type": {"application/json"}}, body: redactJSON(red, data)},
+		retryable(status, nil)
 }
 
 // attempt makes one upstream call. It answers the caller and returns nil, or
 // returns the failure and whether another attempt may cure it. Nothing is
-// written to the caller before the upstream's first byte, so every failure it
+// written to the caller until the upstream's answer has begun — a whole body,
+// or a stream's first event that is not an error — so every failure it
 // returns leaves the caller's response untouched.
 //
 // The call runs under a context the caller's cancellation does not reach,
@@ -186,14 +257,15 @@ func retryable(status int) bool {
 // does not end an upstream answer it has started paying for, which is read to
 // its end.
 func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt) (*failure, bool) {
-	key, err := h.cfg.Cipher.Decrypt(r.Context(), at.Credential.Ciphertext, at.Credential.KeyID)
+	ctx := context.WithoutCancel(r.Context())
+	key, err := h.open(ctx, at.Credential)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "modelgateway: credential could not be opened", "credential", at.Credential.ID, "error", err)
+		slog.ErrorContext(ctx, "modelgateway: credential could not be opened", "credential", at.Credential.ID, "error", err)
 		return &failure{status: http.StatusInternalServerError, typ: "api_error", err: errors.New("internal error")}, true
 	}
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
 	body := upstreamBody(c.top, at.Deployment.UpstreamModel)
-	ctx, guard := provider.NewStallGuard(context.WithoutCancel(r.Context()), at.Provider.StallTimeout)
+	ctx, guard := provider.NewStallGuard(ctx, at.Provider.StallTimeout)
 	defer guard.Stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, at.Endpoint+c.path, bytes.NewReader(body))
 	if err != nil {
@@ -210,7 +282,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return noAnswer(guard, red, err), true
+		return noAnswer(guard, red, err)
 	}
 	resp.Body = provider.ProgressBody(ctx, resp.Body)
 	defer resp.Body.Close()
@@ -218,6 +290,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	case s >= 300 && s < 400:
 		return &failure{status: http.StatusBadGateway, typ: "api_error",
 			err: fmt.Errorf("upstream answered a redirect (%d), which the gateway does not follow", s)}, true
+	case s == http.StatusUnauthorized, s == http.StatusPaymentRequired, s == http.StatusForbidden:
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return refusedCredential(ctx, at, fmt.Sprintf("HTTP %d", s), detail, red)
 	case s >= 400:
 		// Whether another attempt may cure it is the status's to say, whatever
 		// becomes of the body: a refusal whose body broke off is a refusal.
@@ -225,20 +300,33 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		switch {
 		case err != nil:
 			return &failure{status: s, typ: "api_error",
-				err: fmt.Errorf("upstream answered %d and its body broke off: %w", s, red.Error(guard.Cause(err)))}, retryable(s)
+				err: fmt.Errorf("upstream answered %d and its body broke off: %w", s, red.Error(guard.Cause(err)))}, retryable(s, resp.Header)
 		case len(b) > maxResponseBody:
 			return &failure{status: s, typ: "api_error",
-				err: fmt.Errorf("upstream answered %d with an error body over the gateway's bound of %d bytes", s, maxResponseBody)}, retryable(s)
+				err: fmt.Errorf("upstream answered %d with an error body over the gateway's bound of %d bytes", s, maxResponseBody)}, retryable(s, resp.Header)
 		}
-		return &failure{status: s, header: resp.Header, body: redactJSON(red, b)}, retryable(s)
+		return &failure{status: s, header: resp.Header, body: redactJSON(red, b)}, retryable(s, resp.Header)
 	}
 	if c.stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		br := bufio.NewReader(resp.Body)
-		if _, err := br.Peek(1); err != nil {
-			return noAnswer(guard, red, err), true
+		// The answer begins with the first event that is not a keep-alive;
+		// until then the caller has seen nothing and the upstream may yet
+		// refuse, as an error event, which is answered like any refusal.
+		events := upstream.NewReader(resp.Body)
+		var held []byte
+		for {
+			e, err := events.Next()
+			switch {
+			case err != nil:
+				return noAnswer(guard, red, err)
+			case e.Name == "" && e.Data == nil:
+				held = append(held, e.Raw...)
+			case e.Name == "error":
+				return streamError(ctx, at, e.Data, red)
+			default:
+				relayStream(w, events, held, e, c.alias, requestID(r), guard, red)
+				return nil, false
+			}
 		}
-		relayStream(w, br, c.alias, requestID(r), guard, red)
-		return nil, false
 	}
 	// Once the answer's body has begun the upstream is generating — and
 	// charging — for it, so a break past that point is the caller's 502, not
@@ -246,26 +334,28 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	b, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxResponseBody)+1))
 	switch {
 	case err != nil:
-		return noAnswer(guard, red, err), len(b) == 0
+		f, retry := noAnswer(guard, red, err)
+		return f, retry && len(b) == 0
 	case len(b) > maxResponseBody:
 		return &failure{status: http.StatusBadGateway, typ: "api_error",
 			err: fmt.Errorf("upstream answer exceeds the gateway's bound of %d bytes", maxResponseBody)}, false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, reset := bounded(w)
-	defer reset()
+	bounded(w)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(withModel(b, c.alias))
 	return nil, false
 }
 
 // noAnswer is an attempt whose upstream gave no usable answer: a stall, or a
-// transport error.
-func noAnswer(guard *provider.StallGuard, red provider.Redactor, err error) *failure {
+// transport error. A transport error may be retried; a stall may not, since
+// an upstream that has gone quiet may still be generating — and charging for
+// — the answer it owes, as a whole answer is silent until it is done.
+func noAnswer(guard *provider.StallGuard, red provider.Redactor, err error) (*failure, bool) {
 	if err = guard.Cause(err); errors.Is(err, provider.ErrStalled) {
-		return &failure{status: http.StatusGatewayTimeout, typ: "timeout_error", err: fmt.Errorf("upstream sent nothing: %w", err)}
+		return &failure{status: http.StatusGatewayTimeout, typ: "timeout_error", err: fmt.Errorf("upstream sent nothing: %w", err)}, false
 	}
-	return &failure{status: http.StatusBadGateway, typ: "api_error", err: fmt.Errorf("upstream request failed: %w", red.Error(err))}
+	return &failure{status: http.StatusBadGateway, typ: "api_error", err: fmt.Errorf("upstream request failed: %w", red.Error(err))}, true
 }
 
 // upstreamBody is the caller's body with model set to the deployment's
@@ -334,22 +424,22 @@ func withModel(b []byte, alias string) []byte {
 	return out
 }
 
-// relayStream passes an upstream's events to the caller as each arrives,
+// relayStream passes an upstream's events to the caller as each arrives —
+// the keep-alives held before the first, then the first, then the rest —
 // rewriting only message_start's message.model and removing the call's
 // credentials from an upstream error event. Comments and pings pass unchanged,
 // and each event goes out whole. When the caller stops reading — or reads too
 // slowly to take an event within writeStall — the stream is still read to its
-// end. When the upstream fails partway, the caller gets an error event, the
-// only way left to say so, and the unfinished event before it is dropped
-// rather than merged into it; once message_stop has passed, the answer is
-// whole and a failure after it is nobody's business.
-func relayStream(w http.ResponseWriter, br *bufio.Reader, alias, rid string, guard *provider.StallGuard, red provider.Redactor) {
+// end. When the upstream fails partway, or ends before message_stop, the
+// caller gets an error event, the only way left to say so, and an unfinished
+// event before it is dropped rather than merged into it; once message_stop or
+// the upstream's own error event has passed, the stream has said all it will.
+func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, alias, rid string, guard *provider.StallGuard, red provider.Redactor) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	rc, reset := bounded(w)
-	defer reset()
+	rc := bounded(w)
 	w.WriteHeader(http.StatusOK)
-	gone, stopped := false, false
+	gone, done := false, false
 	send := func(b []byte) {
 		if gone {
 			return
@@ -363,34 +453,44 @@ func relayStream(w http.ResponseWriter, br *bufio.Reader, alias, rid string, gua
 			gone = true
 		}
 	}
-	events := upstream.NewReader(br)
+	relay := func(e upstream.Event) {
+		switch {
+		case e.Name == "message_start" && e.Data != nil:
+			send(e.WithData(messageStartWithModel(e.Data, alias)))
+		case e.Name == "error" && e.Data != nil:
+			send(e.WithData(redactJSON(red, e.Data)))
+		default:
+			send(e.Raw)
+		}
+		done = done || e.Name == "message_stop" || e.Name == "error"
+	}
+	if len(held) > 0 {
+		send(held)
+	}
+	relay(first)
 	for {
 		e, err := events.Next()
 		if len(e.Raw) > 0 && (err == nil || errors.Is(err, io.EOF)) {
-			switch {
-			case e.Name == "message_start" && e.Data != nil:
-				send(e.WithData(messageStartWithModel(e.Data, alias)))
-			case e.Name == "error" && e.Data != nil:
-				send(e.WithData(redactJSON(red, e.Data)))
-			default:
-				send(e.Raw)
-			}
-			stopped = stopped || e.Name == "message_stop"
+			relay(e)
 		}
 		switch {
-		case errors.Is(err, io.EOF), err != nil && stopped:
+		case err == nil:
+			continue
+		case done:
 			return
-		case err != nil:
+		case errors.Is(err, io.EOF):
+			err = errors.New("the stream ended before message_stop")
+		default:
 			err = guard.Cause(err)
-			typ := "api_error"
-			if errors.Is(err, provider.ErrStalled) {
-				typ = "timeout_error"
-			}
-			msg, _ := json.Marshal(map[string]any{"type": "error", "request_id": rid,
-				"error": map[string]string{"type": typ, "message": "upstream stream failed: " + red.Error(err).Error()}})
-			send([]byte("event: error\ndata: " + string(msg) + "\n\n"))
-			return
 		}
+		typ := "api_error"
+		if errors.Is(err, provider.ErrStalled) {
+			typ = "timeout_error"
+		}
+		msg, _ := json.Marshal(map[string]any{"type": "error", "request_id": rid,
+			"error": map[string]string{"type": typ, "message": "upstream stream failed: " + red.Error(err).Error()}})
+		send([]byte("event: error\ndata: " + string(msg) + "\n\n"))
+		return
 	}
 }
 

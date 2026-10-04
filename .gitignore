@@ -66,7 +66,12 @@ model-providers.json
 /controlplane
 /executor
 /gate
+/kmsrole
+/modelgateway
+/registrycheck
+/ripgrepfetch
 /sdkref
+/thirdpartylicenses
 /worker
 # A literal `%SystemDrive%` directory: a reviewer's sandboxed Windows shell left
 # the variable unexpanded and wrote its icon cache under it at the repo root,

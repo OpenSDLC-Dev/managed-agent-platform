@@ -19,7 +19,8 @@ slice 3 is the console repository's own plan.
         passed through, `/v1/models`, routing with retry and fallback, the stall guard
   - [ ] 2b — thinking provenance and the strip-mode backstop; the profiles' auth header
         and edits (2a sends every upstream `x-api-key`)
-  - [ ] 2c — usage rows, retention and rollups; RPM and TPM limits; telemetry
+  - [ ] 2c — usage rows, retention and rollups; RPM and TPM limits; telemetry, carrying
+        the caller's trace context through the gateway
   - [ ] 2d — compose and Helm, and a GCP identity granted the cipher (ending its
         `unhosted` entry in `tools/kmsrole`); the live tier on MiniMax (CN) and DeepSeek
 - [ ] Slice 4 — OpenAI surfaces, embeddings and rerank with the `gitee` profile; dikw-core

@@ -1,7 +1,8 @@
 # Builds the images this platform deploys, from one Dockerfile.
 #
-# The server stage carries all four binaries (controlplane, brain, executor,
-# worker) and each Deployment picks one with its container command — but the
+# The server stage carries all five server binaries (controlplane, brain,
+# executor, worker, modelgateway; nothing deploys the last before plan 59 slice
+# 2d) and each Deployment picks one with its container command — but the
 # chart composes an image reference as `registry/repository/COMPONENT:tag`
 # (templates/_helpers.tpl, "map.image"), so it looks for three per-component
 # names. They are three tags on ONE build here, so all three resolve to the same

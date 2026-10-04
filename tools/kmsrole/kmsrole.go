@@ -249,8 +249,12 @@ type Report struct {
 // of it in the Terraform — a grant on the cipher names it too — or in the Helm
 // chart GCP deploys means it is being given an identity, and the entry would
 // then hide exactly the narrowed grant this guard exists to report. A mention
-// in prose is not one: a .md file, unless it sits under a templates/ directory,
-// which Helm renders whatever the extension.
+// is the name anywhere, in any case and with any `-` or `_` inside it
+// (`modelgateway_sa`, `model-gateway`, `modelGateway`), so a near-spelling
+// cannot slip past; it refuses too much rather than too little. A mention in
+// prose is not one: a .md file, unless it sits under a templates/ directory,
+// which Helm renders whatever the extension. A dot-directory is skipped, as
+// readGrants skips it.
 var unhosted = map[string]string{
 	"modelgateway": "nothing deploys it to GCP before plan 59 slice 2d",
 }
@@ -262,7 +266,7 @@ func stillUnhosted(root, tfDir, binary string) error {
 	if _, err := os.Stat(chart); err != nil {
 		return fmt.Errorf("%s is listed as unhosted (%s), and the chart that would deploy it cannot be read to confirm it does not: %w", binary, why, err)
 	}
-	word := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(binary) + `\b`)
+	fold := strings.NewReplacer("-", "", "_", "")
 	for _, tree := range []struct {
 		dir  string
 		read func(string) bool
@@ -273,14 +277,23 @@ func stillUnhosted(root, tfDir, binary string) error {
 		}},
 	} {
 		err := filepath.WalkDir(tree.dir, func(p string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !tree.read(p) {
+			if err != nil {
 				return err
+			}
+			if d.IsDir() {
+				if p != tree.dir && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !tree.read(p) {
+				return nil
 			}
 			b, err := os.ReadFile(p)
 			if err != nil {
 				return err
 			}
-			if word.Match(b) {
+			if strings.Contains(strings.ToLower(fold.Replace(string(b))), binary) {
 				return fmt.Errorf("%s is listed as unhosted (%s), yet %s names it — it is being given an identity, so grant that identity the cipher and remove %s from unhosted", binary, why, p, binary)
 			}
 			return nil

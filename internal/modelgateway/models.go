@@ -146,11 +146,11 @@ func (h *handler) listModels(w http.ResponseWriter, r *http.Request, c caller) {
 
 func (h *handler) getModel(w http.ResponseWriter, r *http.Request, c caller, id string) {
 	snap := h.cfg.Catalog.Snapshot()
-	for _, a := range snap.Aliases() {
-		if a.Name == id && listable(c, a) {
-			writeJSON(w, http.StatusOK, describe(snap, a))
-			return
-		}
+	// Alias answers a name it does not hold with the wildcard, which listable
+	// refuses, so only the exact name is found.
+	if a, ok := snap.Alias(id); ok && listable(c, a) {
+		writeJSON(w, http.StatusOK, describe(snap, a))
+		return
 	}
 	writeError(w, r, notFound("model: %s", id))
 }

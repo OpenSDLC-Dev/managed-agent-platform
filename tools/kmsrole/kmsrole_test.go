@@ -1119,11 +1119,27 @@ func TestAnUnhostedBinaryNamedInTheTerraformIsRefused(t *testing.T) {
 	if _, ok := unhosted["modelgateway"]; !ok {
 		t.Skip("modelgateway is hosted now")
 	}
-	dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM, "sa.tf": `resource "google_service_account" "modelgateway" {
-  account_id = "map-modelgateway"
+	// Any spelling of the name counts: a near-miss is the hole.
+	for _, label := range []string{"modelgateway", "modelgateway_sa", "model_gateway", "modelGateway", "model-gateway"} {
+		dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM, "sa.tf": `resource "google_service_account" "` + label + `" {
+  account_id = "map-gw"
 }
 `})
-	wantRefusal(t, dir, "sa.tf names it")
+		wantRefusal(t, dir, "sa.tf names it")
+	}
+}
+
+// TestAnUnhostedBinaryInADotDirectoryIsNotAMention: a dot-directory is
+// skipped, as readGrants skips it — `.terraform/` is a download cache, not this
+// repository's configuration.
+func TestAnUnhostedBinaryInADotDirectoryIsNotAMention(t *testing.T) {
+	if _, ok := unhosted["modelgateway"]; !ok {
+		t.Skip("modelgateway is hosted now")
+	}
+	dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM, "environment/.terraform/modules/m/main.tf": `# modelgateway`})
+	if r := mustCheck(t, dir); len(r.Findings) != 0 {
+		t.Fatalf("findings: %v", r.Findings)
+	}
 }
 
 // unhostedRoot is a module whose x and y both reach the cipher, with y granted

@@ -22,8 +22,9 @@
 //	                       whatever its notifications say, a Go duration
 //	                       (default "30s"): a missed notification costs at
 //	                       most this
-//	MODELGATEWAY_MAX_ATTEMPTS  upstream calls one request may make before its
-//	                       answer begins (default 3)
+//	MODELGATEWAY_MAX_ATTEMPTS  upstream calls one request may make to each
+//	                       deployment before it falls back to the next, all
+//	                       before its answer begins (default 3)
 //	OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_INSECURE  as the other binaries
 package main
 

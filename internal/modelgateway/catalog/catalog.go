@@ -40,6 +40,7 @@ type Snapshot struct {
 	credentials map[string][]store.Credential // by provider id
 	deployments map[string]store.Deployment
 	aliases     map[string]store.Alias
+	byName      []store.Alias // aliases, ordered by name
 	policies    map[string]store.KeyPolicy
 }
 
@@ -62,7 +63,9 @@ func newSnapshot(cfg store.Config) *Snapshot {
 	}
 	for _, a := range cfg.Aliases {
 		s.aliases[a.Name] = a
+		s.byName = append(s.byName, a)
 	}
+	sort.Slice(s.byName, func(i, j int) bool { return s.byName[i].Name < s.byName[j].Name })
 	for _, k := range cfg.KeyPolicies {
 		s.policies[k.APIKeyID] = k
 	}
@@ -99,14 +102,7 @@ func (s *Snapshot) Alias(model string) (store.Alias, bool) {
 }
 
 // Aliases returns every alias, ordered by name.
-func (s *Snapshot) Aliases() []store.Alias {
-	out := make([]store.Alias, 0, len(s.aliases))
-	for _, a := range s.aliases {
-		out = append(out, a)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
-}
+func (s *Snapshot) Aliases() []store.Alias { return s.byName }
 
 // KeyPolicy returns the grant of the platform API key with id.
 func (s *Snapshot) KeyPolicy(apiKeyID string) (store.KeyPolicy, bool) {

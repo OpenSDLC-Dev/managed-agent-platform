@@ -464,9 +464,15 @@ request path reads only the snapshot.
   a request. An OpenAI-shaped caller's
   `reasoning_content` carries no signature to wrap and has no provenance; it goes
   upstream as sent.
-- **Retry and fallback happen before the first byte only.** A connect error, 429, 5xx
-  or overload moves to the next credential, then the next group, within a bounded
-  attempt count and jittered exponential backoff. After the first byte a failure is the
+- **Retry and fallback happen before the first byte only.** A connect error, 408, 409,
+  429, 5xx or overload — or whatever the upstream's own `x-should-retry` says, as
+  Anthropic's SDKs read it — moves to the
+  next credential, then the next group, within a bounded attempt count per deployment
+  and jittered exponential backoff; so does a vendor refusing the credential itself
+  (401, 402, 403), answered 502 when nothing serves. A stall does not: the quiet
+  upstream may still be generating, and charging for, the answer. A stream's answer
+  begins at its first event that is not a keep-alive, so one that opens with an error
+  event is retried like an error response. After the first byte a failure is the
   caller's (`event: error` on a stream). A fallback to another deployment carries only
   that deployment's thinking, by the rule above — so a fallback taken in the middle of
   a tool loop sends the loop without its thinking, which DeepSeek refuses under

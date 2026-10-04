@@ -40,10 +40,12 @@ import (
 	mrand "math/rand/v2"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/upstream"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 )
@@ -58,16 +60,17 @@ type Config struct {
 
 	// Client calls upstreams; nil takes upstream.NewClient.
 	Client *http.Client
-	// MaxAttempts bounds the upstream calls one request may make; zero takes
-	// DefaultMaxAttempts.
+	// MaxAttempts bounds the calls one request makes to each deployment
+	// before it falls back to the next; zero takes DefaultMaxAttempts.
 	MaxAttempts int
 	// Backoff is the first retry's ceiling, doubling per attempt up to
 	// MaxBackoff; zero takes DefaultBackoff.
 	Backoff time.Duration
 }
 
-// The retry defaults: three attempts, a first wait of at most 200ms, and no
-// wait longer than two seconds, all before the caller has seen a byte.
+// The retry defaults: three attempts per deployment, a first wait of at most
+// 200ms, and no wait longer than two seconds, all before the caller has seen
+// a byte.
 const (
 	DefaultMaxAttempts = 3
 	DefaultBackoff     = 200 * time.Millisecond
@@ -79,6 +82,30 @@ type handler struct {
 	bootstrap [32]byte
 	client    *http.Client
 	draw      func() float64
+
+	mu     sync.Mutex
+	opened map[string][]byte // credential keys, by credential id
+}
+
+// open returns a credential's key, opening it once: under openbao or gcpkms
+// every Decrypt is a round trip to the key service, which a model call should
+// not wait on, nor pay for, each time. A credential's sealed value never
+// changes — a new key is a new credential — so its id names the key for good.
+func (h *handler) open(ctx context.Context, c store.Credential) ([]byte, error) {
+	h.mu.Lock()
+	key, ok := h.opened[c.ID]
+	h.mu.Unlock()
+	if ok {
+		return key, nil
+	}
+	key, err := h.cfg.Cipher.Decrypt(ctx, c.Ciphertext, c.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	h.opened[c.ID] = key
+	h.mu.Unlock()
+	return key, nil
 }
 
 // New returns the gateway's handler.
@@ -100,7 +127,7 @@ func New(cfg Config) (http.Handler, error) {
 		cfg.Backoff = DefaultBackoff
 	}
 	h := &handler{cfg: cfg, bootstrap: sha256.Sum256([]byte(cfg.BootstrapKey)), client: cfg.Client,
-		draw: func() float64 { return 1 - mrand.Float64() }}
+		draw: func() float64 { return 1 - mrand.Float64() }, opened: map[string][]byte{}}
 	if h.client == nil {
 		h.client = upstream.NewClient()
 	}

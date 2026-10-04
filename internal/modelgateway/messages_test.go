@@ -587,6 +587,8 @@ func TestTheWriteBoundDoesNotCutALongStream(t *testing.T) {
 	}
 }
 
+// A stall is not retried, though another credential is there: the upstream
+// that went quiet may still be generating, and charging for, its answer.
 func TestAStalledUpstreamIsATimeout(t *testing.T) {
 	e := newEnv(t)
 	release := make(chan struct{})
@@ -607,13 +609,14 @@ func TestAStalledUpstreamIsATimeout(t *testing.T) {
 	})
 	p := e.provider(silent.URL, func(p *store.Provider) { p.StallTimeout = 150 * time.Millisecond })
 	e.credential(p, "sk-upstream-1", 1)
+	e.credential(p, "sk-upstream-2", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
 	key := e.key(everyAlias)
-	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 1 })
+	e.start()
 
 	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
-	if typ, _, _ := errorOf(t, b); resp.StatusCode != 504 || typ != "timeout_error" {
-		t.Errorf("before headers: %d %s", resp.StatusCode, b)
+	if typ, _, _ := errorOf(t, b); resp.StatusCode != 504 || typ != "timeout_error" || len(silent.recorded()) != 1 {
+		t.Errorf("before headers: %d %s after %d calls", resp.StatusCode, b, len(silent.recorded()))
 	}
 	_, b = e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
 	if got := string(b); !strings.Contains(got, "event: error") || !strings.Contains(got, "timeout_error") {
