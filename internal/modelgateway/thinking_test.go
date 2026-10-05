@@ -43,7 +43,9 @@ type reply struct {
 	redacted bool // a redacted_thinking block first
 	thinking int  // thinking blocks
 	unsigned bool // whose signatures are empty
-	tools    int  // tool calls after them
+	// unsignedFirst leaves only the first thinking block's signature empty.
+	unsignedFirst bool
+	tools         int // tool calls after them
 }
 
 func newSigner(t *testing.T, name string) *signer {
@@ -177,7 +179,7 @@ func (s *signer) answer(w http.ResponseWriter, c fakeCall, prefix []string) {
 	for k := range r.thinking {
 		text := fmt.Sprintf("%s thought %d at %d", s.name, k, len(prefix))
 		sig := ""
-		if !r.unsigned {
+		if !r.unsigned && (!r.unsignedFirst || k > 0) {
 			sig = s.sign(prefix, before, text)
 		}
 		add(map[string]any{"type": "thinking", "thinking": text, "signature": sig})
@@ -404,13 +406,14 @@ func TestAThinkingOnlyReplyLeavesNoEmptyMessage(t *testing.T) {
 		t.Fatalf("b was sent %s, want %s", got, want)
 	}
 
-	// A turn with no content contributes none to the join.
+	// A turn whose content is neither a string nor an array joins nothing:
+	// both go as sent, for the upstream to answer.
 	body = fmt.Sprintf(`{"model":"m","max_tokens":64,"messages":[
 		{"role":"user","content":"hello"},
 		{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"mapgw1.%s.a.x"}]},
-		{"role":"user","content":null}]}`, da.ID)
+		{"role":"user","content":{"type":"text","text":"kept"}}]}`, da.ID)
 	e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key})
-	if got, want := canonJSON(b.last().Body["messages"]), canonJSON([]byte(`[{"role":"user","content":[{"type":"text","text":"hello"}]}]`)); got != want {
+	if got, want := canonJSON(b.last().Body["messages"]), canonJSON([]byte(`[{"role":"user","content":"hello"},{"role":"user","content":{"type":"text","text":"kept"}}]`)); got != want {
 		t.Fatalf("b was sent %s, want %s", got, want)
 	}
 }
@@ -427,7 +430,7 @@ func TestACallerGoneIsNotRetriedWithoutThinking(t *testing.T) {
 	cl := e.client(key)
 	h := next(hello(), talk(t, cl, hello()))
 
-	arrived := make(chan struct{})
+	arrived, release := make(chan struct{}), make(chan struct{})
 	refused := false
 	a.set(reply{thinking: 1, tools: 1}, func(w http.ResponseWriter, _ fakeCall) bool {
 		if refused {
@@ -435,7 +438,7 @@ func TestACallerGoneIsNotRetriedWithoutThinking(t *testing.T) {
 		}
 		refused = true
 		close(arrived)
-		time.Sleep(200 * time.Millisecond)
+		<-release
 		writeBody(w, 400, invalidRequest("messages.1.content.0: Invalid `signature` in `thinking` block"))
 		return true
 	})
@@ -448,6 +451,8 @@ func TestACallerGoneIsNotRetriedWithoutThinking(t *testing.T) {
 	<-arrived
 	cancel()
 	<-done
+	time.Sleep(200 * time.Millisecond) // the gateway sees its caller's connection close
+	close(release)
 	time.Sleep(500 * time.Millisecond)
 	if n := len(a.recorded()); n != 2 {
 		t.Fatalf("%d calls after the caller left, want 2", n)
@@ -456,8 +461,8 @@ func TestACallerGoneIsNotRetriedWithoutThinking(t *testing.T) {
 
 // A streamed answer whose signature arrives in fragments after an empty start
 // assembles, as the SDK accumulates it, the same wrapped values as the whole
-// answer — a redacted block's data included, and a block with no signature at
-// all still names its producer.
+// answer, a redacted block's data included; a block with no signature has
+// nothing to wrap and comes back as it came, either way.
 func TestAStreamedAnswerWrapsAsTheWholeAnswerDoes(t *testing.T) {
 	e := newEnv(t)
 	a := newSigner(t, "a")
@@ -485,12 +490,9 @@ func TestAStreamedAnswerWrapsAsTheWholeAnswerDoes(t *testing.T) {
 			t.Fatalf("stream assembled %q, whole answer %q", got, want)
 		}
 		for _, v := range want {
-			if !strings.HasPrefix(v, "mapgw1."+da.ID+".") {
-				t.Fatalf("value %q is not wrapped", v)
+			if r.unsigned && v != "" || !r.unsigned && !strings.HasPrefix(v, "mapgw1."+da.ID+".") {
+				t.Fatalf("value %q came back from a reply with unsigned=%v", v, r.unsigned)
 			}
-		}
-		if r.unsigned && want[0] != "mapgw1."+da.ID+"." {
-			t.Fatalf("an unsigned block returned %q", want[0])
 		}
 	}
 
@@ -616,6 +618,111 @@ func TestForeignThinkingNeverReachesAnUpstream(t *testing.T) {
 	}
 	if len(c.recorded()) != 0 {
 		t.Fatal("a deployment outside the alias was called")
+	}
+
+	// A type spelled with an escape is the same type, though the bytes never
+	// say "thinking".
+	body := fmt.Sprintf(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"redacted_\u0074hinking","data":"mapgw1.%s.c.x"},{"type":"text","text":"one"}]},
+		{"role":"user","content":"next"}]}`, dc.ID)
+	if resp, out := e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, out)
+	}
+	var msgs []struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	_ = json.Unmarshal(a.last().Body["messages"], &msgs)
+	if len(msgs) != 3 || len(msgs[1].Content) != 1 {
+		t.Fatalf("an escaped redacted block reached the upstream: %s", a.last().Body["messages"])
+	}
+}
+
+// The retry strip mode makes is an attempt like any other, held to the
+// deployment's budget: with two attempts per deployment, a refusal and its
+// stripped retry leave none for the deployment's second credential.
+func TestStripModeStaysWithinTheBudget(t *testing.T) {
+	e := newEnv(t)
+	a := newSigner(t, "a")
+	p := e.provider(a.URL)
+	e.credential(p, "sk-a-key1", 1)
+	e.credential(p, "sk-a-key2", 1)
+	e.alias("m", target(e.deployment(p, "a-model"), 0))
+	key := e.key(everyAlias)
+	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 2 })
+	cl := e.client(key)
+	h := next(hello(), talk(t, cl, hello()))
+
+	a.set(reply{thinking: 1, tools: 1}, func(w http.ResponseWriter, c fakeCall) bool {
+		if len(thinkingIn(c)) > 0 {
+			writeBody(w, 400, invalidRequest("messages.1.content.0: Invalid `signature` in `thinking` block"))
+		} else {
+			writeBody(w, 503, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+		}
+		return true
+	})
+	n := len(a.recorded())
+	_, err := cl.Messages.New(context.Background(), params(h))
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 503 || len(a.recorded())-n != 2 {
+		t.Fatalf("%d calls, error %v; want 2 and the stripped attempt's 503", len(a.recorded())-n, err)
+	}
+}
+
+// Only a signature fragment of an open block is wrapped: one whose type is
+// spelled with an escape is, and one that names no block index is not.
+func TestASignatureFragmentIsReadByItsValue(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		sse(w, fmt.Sprintf("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", c.Model),
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"zz\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_\\u0064elta\",\"signature\":\"s1\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	})
+	p := e.provider(f.URL)
+	e.credential(p, "sk-frag-key1", 1)
+	d := e.deployment(p, "up")
+	e.alias("m", target(d, 0))
+	key := e.key(everyAlias)
+	e.start()
+
+	resp, raw := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`,
+		map[string]string{"x-api-key": key})
+	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"signature":"zz"`) || !strings.Contains(string(raw), `"signature":"mapgw1.`+d.ID+`.s1"`) {
+		t.Fatalf("status %d: %s", resp.StatusCode, raw)
+	}
+}
+
+// A strip-mode answer's reset mark goes to the first block it wraps: an
+// unsigned block ahead of it, which names no producer, takes nothing, whole
+// or streamed.
+func TestTheResetMarkGoesToTheFirstWrappedBlock(t *testing.T) {
+	e := newEnv(t)
+	a := newSigner(t, "a")
+	da := e.signedBy(a)
+	e.alias("m", target(da, 0))
+	key := e.key(everyAlias)
+	e.start()
+	cl := e.client(key)
+
+	h := edited(next(hello(), talk(t, cl, hello())), 1)
+	a.set(reply{thinking: 2, unsignedFirst: true, tools: 1}, nil)
+	whole := talk(t, cl, h)
+	stream := cl.Messages.NewStreaming(context.Background(), params(h))
+	var acc anthropic.Message
+	for stream.Next() {
+		if err := acc.Accumulate(stream.Current()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []*anthropic.Message{whole, &acc} {
+		if got := provenance(m); len(got) != 2 || got[0] != "" || !strings.HasPrefix(got[1], "mapgw1r."+da.ID+".a.") {
+			t.Fatalf("a strip-mode answer came back as %q", got)
+		}
 	}
 }
 
@@ -765,6 +872,7 @@ func TestOnlyAThinkingRefusalEarnsTheRetry(t *testing.T) {
 		{h, 400, "messages.1.content.0: Invalid `signature` in `thinking` block", 2},
 		{h, 400, "messages.1.content.0: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response.", 2},
 		{h, 400, "The `content[].thinking` in the thinking mode must be passed back to the API.", 1},
+		{h, 400, "messages.1.content.0.type: Expected `thinking` or `redacted_thinking`, but found `tool_use`. When `thinking` is enabled, a final `assistant` message must start with a thinking block (preceeding the lastmost set of `tool_use` and `tool_result` blocks). We recommend you include thinking blocks from previous turns. To avoid this requirement, disable `thinking`.", 1},
 		{h, 400, "max_tokens: Field required", 1},
 		{h, 400, "thinking.budget_tokens: Input should be greater than or equal to 1024", 1},
 		{h, 500, "messages.1.content.0: Invalid `signature` in `thinking` block", 1},
@@ -841,6 +949,20 @@ func TestThinkingRefusal(t *testing.T) {
 		{invalidRequest("prompt is too long"), false},
 		{`{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: too large"},"echo":"a thinking block, signed"}`, false},
 		{`{"message":"max_tokens: too large","echo":"a thinking block, signed"}`, false},
+		{`{"type":"error","error":{"type":"invalid_request_error"},"request":{"messages":"a thinking block, signed"}}`, false},
+		{`{"detail":"max_tokens too large","input":"a thinking block, signed"}`, false},
+		// Anthropic's own wordings (platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting).
+		{invalidRequest("messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\"."), true},
+		{invalidRequest("messages.1.content.0.type: Expected `thinking` or `redacted_thinking`, but found `tool_use`. When `thinking` is enabled, a final `assistant` message must start with a thinking block (preceeding the lastmost set of `tool_use` and `tool_result` blocks). We recommend you include thinking blocks from previous turns. To avoid this requirement, disable `thinking`."), false},
+		{invalidRequest("To turn thinking off on this model, send \"thinking\": {\"type\": \"between_tools\"} instead of {\"type\": \"disabled\"}. The model does not think before responding. The short updates it writes between tool calls come back as thinking blocks."), false},
+		{invalidRequest("messages.3: output_config.effort 'low' differs from the 'high' in effect before it; effort cannot change when thinking is disabled on this model. Use effort 'high', or enable thinking."), false},
+		{invalidRequest("\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."), false},
+		{invalidRequest("adaptive thinking is not supported on this model"), false},
+		{invalidRequest("messages.1.content.0: the `thinking` block is empty"), true},
+		// Refusals that mention thinking or a signature but no block of the request.
+		{invalidRequest("2 validation errors: messages.0.content: Field required; thinking.budget_tokens: too small"), false},
+		{invalidRequest("invalid request signature"), false},
+		{invalidRequest("messages.3.content.0.text: invalid value \"I was thinking...\""), false},
 	} {
 		if got := modelgateway.ThinkingRefusal([]byte(tc.body)); got != tc.want {
 			t.Errorf("ThinkingRefusal(%s) = %v, want %v", tc.body, got, tc.want)

@@ -116,12 +116,13 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 	// An upstream refusing the thinking its request carried puts the request
 	// in strip mode — once, for the attempt it refused and every attempt
 	// after, so nothing stripped is sent again — and that attempt is made
-	// again at once, outside the budget, unless the caller has left.
+	// again, as a retry like any other.
 	var last *failure
 	tried := map[string]int{}
 	n := 0
 	strip := false
-	for _, at := range attempts {
+	for i := 0; i < len(attempts); i++ {
+		at := attempts[i]
 		if tried[at.Deployment.ID] == h.cfg.MaxAttempts {
 			continue
 		}
@@ -131,14 +132,16 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		}
 		n++
 		f, retry := h.attempt(w, r, call, at, strip)
-		if f != nil && !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID) && r.Context().Err() == nil {
-			slog.InfoContext(r.Context(), "modelgateway: upstream refused the request's thinking; retrying without it",
-				"alias", a.Name, "deployment", at.Deployment.ID, "credential", at.Credential.ID)
-			strip = true
-			f, retry = h.attempt(w, r, call, at, strip)
-		}
 		if f == nil {
 			return
+		}
+		last = f
+		if !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID) {
+			slog.InfoContext(r.Context(), "modelgateway: upstream refused the request's thinking; retrying without it",
+				"alias", a.Name, "deployment", at.Deployment.ID, "credential", at.Credential.ID, "refusal", errorMessage(f.body))
+			strip = true
+			i--
+			continue
 		}
 		if !retry {
 			f.write(w, r)
@@ -146,7 +149,6 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		}
 		slog.InfoContext(r.Context(), "modelgateway: attempt failed", "alias", a.Name,
 			"deployment", at.Deployment.ID, "credential", at.Credential.ID, "status", f.status, "error", f.err)
-		last = f
 	}
 	last.write(w, r)
 }
@@ -503,10 +505,9 @@ func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
 // relayStream passes an upstream's events to the caller as each arrives —
 // the keep-alives held before the first, then the first, then the rest —
 // rewriting only message_start's message (answerJSON), an upstream error
-// event (errorJSON) and a thinking block's wrapper: on its start, on its
-// first signature fragment, or, for a block that had none, in a
-// signature_delta sent ahead of its stop. Comments and pings pass unchanged,
-// and each event goes out
+// event (errorJSON) and a thinking block's wrapper, on its start or its first
+// non-empty signature fragment. Comments and pings pass unchanged, and each
+// event goes out
 // whole: one the upstream cut off at the end of its stream is completed when
 // its data parses, so the caller dispatches it and nothing written after it
 // merges in, and dropped when its data does not, being unfinished. When the
@@ -553,10 +554,6 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		case e.Name == "content_block_delta":
 			if d := wrap.delta(e.Data); d != nil {
 				out = e.WithData(d)
-			}
-		case e.Name == "content_block_stop":
-			if d := wrap.stop(e.Data); d != nil {
-				send(d)
 			}
 		}
 		send(out)

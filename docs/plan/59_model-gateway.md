@@ -413,7 +413,10 @@ request path reads only the snapshot.
   response's field is prefixed, and in a stream the first non-empty fragment of each
   block index — on its start or its first `signature_delta` — is prefixed and the rest
   pass unchanged, so a client that concatenates the fragments, as the SDK does,
-  assembles the same value either way. Both fields are opaque to a client, which
+  assembles the same value either way. A block whose value is empty — an unsigned
+  thinking block — has nothing to wrap: it names no producer and goes back to no
+  upstream, as the brain keeps no unsigned block either (plan 60). Both fields are
+  opaque to a client, which
   stores and returns them verbatim, so the wrapper rides along unseen. On a request the
   gateway reads the wrappers in the history: among the alias's healthy targets, the
   deployment that produced the newest block is chosen first, and whichever deployment
@@ -440,20 +443,22 @@ request path reads only the snapshot.
   hashing, which after a fallback would send a recovered first choice the fallback
   model's thinking. **Backstop, best effort:** a 400 whose message names a thinking
   block or its signature — other than one naming only a reasoning configuration
-  parameter, and DeepSeek's "must be passed back", which asks for thinking the request
-  lacks and a removal cannot supply — puts the inbound request in strip mode: every
+  parameter, and DeepSeek's "must be passed back" or Anthropic's "must start with a
+  thinking block", which ask for thinking the request lacks and a removal cannot
+  supply — puts the inbound request in strip mode: every
   thinking block is removed, an emptied assistant message going as above, and the
   attempt is made again. Removing all thinking is valid (Ground truth, Thinking). That
   is bifrost's fail-soft strip, with four differences: Anthropic's "cannot be
   modified" enters strip mode here, where bifrost excludes it as a refusal the removal
   repeats — the Claude 5-generation rule is that removing every block stays valid, and
   when the removal does not cure it the cost is the one attempt strip mode allows;
-  DeepSeek's "must be passed back" does not, where bifrost's matcher, which only
-  excludes the other two, would strip and retry;
+  DeepSeek's "must be passed back" and Anthropic's "must start with a thinking block"
+  do not, where bifrost's matcher, which only excludes the other two, would strip and
+  retry;
   strip mode is entered once per inbound request and holds for every attempt after it,
   the fallbacks included, so no attempt can re-send what was stripped or strip twice;
   and whichever attempt answers in strip mode wraps the first thinking block of its
-  response `mapgw1r.` rather than `mapgw1.` — a reset mark. Every later request
+  response that has a value to wrap `mapgw1r.` rather than `mapgw1.` — a reset mark. Every later request
   removes each thinking block that precedes the newest reset-marked block before the
   provenance rule applies, so the response that block opened keeps all its blocks and
   nothing older returns ahead of it: it was produced with no thinking before it, and
@@ -661,8 +666,8 @@ where a vendor bills cache writes.
   that fails before its first byte falls back still in strip mode, and a second
   refusal earns no second retry; a strip-mode answer without thinking pays the retry
   again on the next request and no more; a refusal naming no thinking earns no retry,
-  and neither does DeepSeek's "must be passed back", while Anthropic's "cannot be
-  modified" does;
+  and neither does DeepSeek's "must be passed back" nor Anthropic's "must start with
+  a thinking block", while Anthropic's "cannot be modified" does;
   and requests of one session id with no thinking keep one deployment and credential
   while the eligible candidates, weights and priorities are unchanged, move when health
   changes them, and yield to a newer block's producer.
@@ -726,7 +731,7 @@ where a vendor bills cache writes.
 - docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens`
   answering 404 where an upstream has none; stateless Responses; thinking signatures
   and redacted data returned wrapped in two forms (`mapgw1.`, and `mapgw1r.` on the
-  first thinking block of a strip-mode answer), history thinking filtered by
+  first wrapped block of a strip-mode answer), history thinking filtered by
   provenance, all of it removed for the attempts after a signature refusal, and every
   block ahead of the newest reset mark removed on later requests;
   each profile edit with its vendor evidence.
