@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
@@ -401,6 +402,55 @@ func TestAThinkingOnlyReplyLeavesNoEmptyMessage(t *testing.T) {
 	}
 	if got, want := canonJSON(b.last().Body["messages"]), canonJSON([]byte(`[{"role":"user","content":"hello"},{"role":"user","content":[{"type":"text","text":"hi"},{"type":"text","text":"again"}]}]`)); got != want {
 		t.Fatalf("b was sent %s, want %s", got, want)
+	}
+
+	// A turn with no content contributes none to the join.
+	body = fmt.Sprintf(`{"model":"m","max_tokens":64,"messages":[
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"mapgw1.%s.a.x"}]},
+		{"role":"user","content":null}]}`, da.ID)
+	e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key})
+	if got, want := canonJSON(b.last().Body["messages"]), canonJSON([]byte(`[{"role":"user","content":[{"type":"text","text":"hello"}]}]`)); got != want {
+		t.Fatalf("b was sent %s, want %s", got, want)
+	}
+}
+
+// A caller that has left by the time its attempt's thinking is refused is
+// not retried without it: the retry, like any other, is not made for a
+// caller gone, which is still written the refusal.
+func TestACallerGoneIsNotRetriedWithoutThinking(t *testing.T) {
+	e := newEnv(t)
+	a := newSigner(t, "a")
+	e.alias("m", target(e.signedBy(a), 0))
+	key := e.key(everyAlias)
+	e.start()
+	cl := e.client(key)
+	h := next(hello(), talk(t, cl, hello()))
+
+	arrived := make(chan struct{})
+	refused := false
+	a.set(reply{thinking: 1, tools: 1}, func(w http.ResponseWriter, _ fakeCall) bool {
+		if refused {
+			return false
+		}
+		refused = true
+		close(arrived)
+		time.Sleep(200 * time.Millisecond)
+		writeBody(w, 400, invalidRequest("messages.1.content.0: Invalid `signature` in `thinking` block"))
+		return true
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_, _ = cl.Messages.New(ctx, params(h))
+		close(done)
+	}()
+	<-arrived
+	cancel()
+	<-done
+	time.Sleep(500 * time.Millisecond)
+	if n := len(a.recorded()); n != 2 {
+		t.Fatalf("%d calls after the caller left, want 2", n)
 	}
 }
 

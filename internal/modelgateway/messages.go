@@ -116,7 +116,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 	// An upstream refusing the thinking its request carried puts the request
 	// in strip mode — once, for the attempt it refused and every attempt
 	// after, so nothing stripped is sent again — and that attempt is made
-	// again at once, outside the budget.
+	// again at once, outside the budget, unless the caller has left.
 	var last *failure
 	tried := map[string]int{}
 	n := 0
@@ -131,7 +131,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		}
 		n++
 		f, retry := h.attempt(w, r, call, at, strip)
-		if f != nil && !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID) {
+		if f != nil && !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID) && r.Context().Err() == nil {
 			slog.InfoContext(r.Context(), "modelgateway: upstream refused the request's thinking; retrying without it",
 				"alias", a.Name, "deployment", at.Deployment.ID, "credential", at.Credential.ID)
 			strip = true

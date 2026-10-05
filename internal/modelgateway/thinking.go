@@ -251,7 +251,7 @@ func joined(a, b json.RawMessage) json.RawMessage {
 
 func contentBlocks(c json.RawMessage) []json.RawMessage {
 	var s string
-	if json.Unmarshal(c, &s) == nil {
+	if bytes.HasPrefix(bytes.TrimSpace(c), []byte(`"`)) && json.Unmarshal(c, &s) == nil {
 		b, _ := json.Marshal(map[string]string{"type": "text", "text": s})
 		return []json.RawMessage{b}
 	}
