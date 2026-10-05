@@ -577,9 +577,10 @@ func TestTheNewestReachableProducerIsPreferred(t *testing.T) {
 	wantPrefixes(t, thinkingIn(a.last()), "a.")
 }
 
-// A block the gateway did not wrap, or whose wrapper names a deployment
-// outside the alias or one no longer configured, reaches no upstream, on
-// count_tokens as on messages; the messages it was in keep the rest.
+// A block the gateway did not wrap, whose wrapper names a deployment outside
+// the alias or one no longer configured, or whose wrapper is malformed,
+// reaches no upstream, on count_tokens as on messages; the messages it was
+// in keep the rest.
 func TestForeignThinkingNeverReachesAnUpstream(t *testing.T) {
 	e := newEnv(t)
 	a, c := newSigner(t, "a"), newSigner(t, "c")
@@ -594,7 +595,8 @@ func TestForeignThinkingNeverReachesAnUpstream(t *testing.T) {
 		anthropic.NewAssistantMessage(anthropic.NewThinkingBlock("raw.sig", "unwrapped"), anthropic.NewTextBlock("one")),
 		anthropic.NewUserMessage(anthropic.NewTextBlock("next")),
 		anthropic.NewAssistantMessage(anthropic.NewThinkingBlock("mapgw1."+dc.ID+".c.x", "outside"),
-			anthropic.NewRedactedThinkingBlock("mapgw1.gwdep_gone.y"), anthropic.NewTextBlock("two")),
+			anthropic.NewRedactedThinkingBlock("mapgw1.gwdep_gone.y"), anthropic.NewThinkingBlock("mapgw1."+da.ID, "malformed"),
+			anthropic.NewTextBlock("two")),
 		anthropic.NewUserMessage(anthropic.NewTextBlock("last")),
 	}
 	talk(t, cl, h)

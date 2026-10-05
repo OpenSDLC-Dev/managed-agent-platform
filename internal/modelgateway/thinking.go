@@ -37,7 +37,10 @@ func unwrap(v string) (dep, value string, reset, ok bool) {
 		}
 	}
 	dep, value, ok = strings.Cut(rest, ".")
-	return dep, value, reset, ok && dep != ""
+	if !ok || dep == "" {
+		return "", "", false, false
+	}
+	return dep, value, reset, true
 }
 
 // thinkingField names the field that carries a block's provenance, or "" for
