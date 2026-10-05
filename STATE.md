@@ -17,12 +17,12 @@ slice 3 is the console repository's own plan.
 - [ ] Slice 2 — Anthropic inference, in five PRs; freezes the admin API
   - [x] 2a — `cmd/modelgateway`: `/v1/messages` (streamed and not) and `count_tokens`
         passed through, `/v1/models`, routing with retry and fallback, the stall guard
-  - [x] 2b — thinking provenance and the strip-mode backstop
+  - [x] 2b — thinking provenance, the strip-mode backstop, the live tier's round trip
   - [ ] 2c — the profiles' auth header and edits (2a sends every upstream `x-api-key`)
   - [ ] 2d — usage rows, retention and rollups; RPM and TPM limits; telemetry, carrying
         the caller's trace context through the gateway
   - [ ] 2e — compose and Helm, and a GCP identity granted the cipher (ending its
-        `unhosted` entry in `tools/kmsrole`); the live tier on MiniMax (CN) and DeepSeek
+        `unhosted` entry in `tools/kmsrole`); the rest of the live tier (model list, vendor behavior)
 - [ ] Slice 4 — OpenAI surfaces, embeddings and rerank with the `gitee` profile; dikw-core
       through the gateway
 - [ ] Slice 5 — brain cutover: one route through the gateway; `ant` sessions on MiniMax
