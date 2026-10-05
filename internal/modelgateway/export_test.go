@@ -20,6 +20,9 @@ func OpenedKeys(h http.Handler) []string {
 	return ids
 }
 
+// ThinkingRefusal is thinkingRefusal.
+func ThinkingRefusal(body []byte) bool { return thinkingRefusal(body) }
+
 // SetWriteStall shortens the bound on a write to the caller for one test, and
 // returns its restore.
 func SetWriteStall(d time.Duration) func() {

@@ -98,19 +98,29 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 	}
 	call := call{
 		top:    top,
+		hist:   parseHistory(top["messages"]),
 		alias:  model,
 		path:   path,
 		stream: path == "/v1/messages" && string(bytes.TrimSpace(top["stream"])) == "true",
 		header: forwarded(r.Header),
+	}
+	if dep := call.hist.producer(attempts); dep != "" {
+		attempts = preferring(attempts, dep)
 	}
 	// MaxAttempts bounds the calls to each deployment rather than to the
 	// alias, so a deployment with many credentials cannot spend the budget a
 	// fallback deployment needed. A caller that leaves ends the retries, and
 	// is still written the last failure: net/http also reads a caller that
 	// only half-closed its connection as gone, and that caller is reading.
+	//
+	// An upstream refusing the thinking its request carried puts the request
+	// in strip mode — once, for the attempt it refused and every attempt
+	// after, so nothing stripped is sent again — and that attempt is made
+	// again at once, outside the budget.
 	var last *failure
 	tried := map[string]int{}
 	n := 0
+	strip := false
 	for _, at := range attempts {
 		if tried[at.Deployment.ID] == h.cfg.MaxAttempts {
 			continue
@@ -120,7 +130,13 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 			break
 		}
 		n++
-		f, retry := h.attempt(w, r, call, at)
+		f, retry := h.attempt(w, r, call, at, strip)
+		if f != nil && !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID) {
+			slog.InfoContext(r.Context(), "modelgateway: upstream refused the request's thinking; retrying without it",
+				"alias", a.Name, "deployment", at.Deployment.ID, "credential", at.Credential.ID)
+			strip = true
+			f, retry = h.attempt(w, r, call, at, strip)
+		}
 		if f == nil {
 			return
 		}
@@ -138,7 +154,8 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 // call is what every attempt of one request sends.
 type call struct {
 	top    map[string]json.RawMessage
-	alias  string // the model name the caller sent, which the answer carries back
+	hist   *history // its messages' thinking, nil when there is none
+	alias  string   // the model name the caller sent, which the answer carries back
 	path   string
 	stream bool
 	header http.Header // the caller's headers that go upstream
@@ -168,6 +185,12 @@ type failure struct {
 	body   []byte      // an upstream's body, its credential removed
 	typ    string      // for a failure with no upstream body
 	err    error
+}
+
+// refusesThinking reports whether the failure is an upstream's 400 refusing
+// the thinking in the request (thinkingRefusal).
+func (f *failure) refusesThinking() bool {
+	return f.status == http.StatusBadRequest && thinkingRefusal(f.body)
 }
 
 func (f *failure) write(w http.ResponseWriter, r *http.Request) {
@@ -254,7 +277,8 @@ func streamError(ctx context.Context, at catalog.Attempt, data []byte, header ht
 	return &failure{status: status, header: h, body: errorJSON(ctx, red, data, rid)}, retryable(status, header)
 }
 
-// attempt makes one upstream call. It answers the caller and returns nil, or
+// attempt makes one upstream call, in strip mode or not. It answers the
+// caller and returns nil, or
 // returns the failure and whether another attempt may cure it. Nothing is
 // written to the caller until the upstream's answer has begun — a whole body,
 // or a stream's first event that is not an error — so every failure it
@@ -264,7 +288,7 @@ func streamError(ctx context.Context, at catalog.Attempt, data []byte, header ht
 // bounded by the provider's stall guard instead: a caller that disconnects
 // does not end an upstream answer it has started paying for, which is read to
 // its end.
-func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt) (*failure, bool) {
+func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt, strip bool) (*failure, bool) {
 	ctx := context.WithoutCancel(r.Context())
 	key, err := h.open(ctx, at.Credential)
 	if err != nil {
@@ -272,7 +296,8 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		return &failure{status: http.StatusInternalServerError, typ: "api_error", err: errors.New("internal error")}, true
 	}
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
-	body := upstreamBody(c.top, at.Deployment.UpstreamModel)
+	body := upstreamBody(c, at.Deployment, strip)
+	wrap := newWrapping(at.Deployment.ID, strip)
 	ctx, guard := provider.NewStallGuard(ctx, at.Provider.StallTimeout)
 	defer guard.Stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, at.Endpoint+c.path, bytes.NewReader(body))
@@ -333,7 +358,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			case e.Name == "error":
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 			default:
-				relayStream(ctx, w, events, held, e, c.alias, requestID(r), guard, red)
+				relayStream(ctx, w, events, held, e, c.alias, wrap, requestID(r), guard, red)
 				return nil, false
 			}
 		}
@@ -353,7 +378,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	w.Header().Set("Content-Type", "application/json")
 	bounded(w)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(withModel(b, c.alias))
+	_, _ = w.Write(answerJSON(b, c.alias, wrap))
 	return nil, false
 }
 
@@ -368,15 +393,20 @@ func noAnswer(guard *provider.StallGuard, red provider.Redactor, err error) (*fa
 	return &failure{status: http.StatusBadGateway, typ: "api_error", err: fmt.Errorf("upstream request failed: %w", red.Error(err))}, true
 }
 
-// upstreamBody is the caller's body with model set to the deployment's
-// upstream id; every other top-level value goes out as the caller sent it.
-// The values were decoded from JSON, so encoding them again cannot fail.
-func upstreamBody(top map[string]json.RawMessage, model string) []byte {
-	out := make(map[string]json.RawMessage, len(top))
-	for k, v := range top {
+// upstreamBody is the caller's body for one deployment: its messages'
+// thinking filtered by provenance (history.messagesFor), then model set to
+// the deployment's upstream id; every other top-level value goes out as the
+// caller sent it. The values were decoded from JSON, so encoding them again
+// cannot fail.
+func upstreamBody(c call, d store.Deployment, strip bool) []byte {
+	out := make(map[string]json.RawMessage, len(c.top))
+	for k, v := range c.top {
 		out[k] = v
 	}
-	out["model"], _ = json.Marshal(model)
+	if c.hist != nil {
+		out["messages"] = c.hist.messagesFor(d.ID, strip)
+	}
+	out["model"], _ = json.Marshal(d.UpstreamModel)
 	b, _ := json.Marshal(out)
 	return b
 }
@@ -447,25 +477,36 @@ func redactValue(red provider.Redactor, v any) any {
 	return v
 }
 
-// withModel sets a JSON object's model to the name the caller sent. Anything
-// that is not an object with a model field passes unchanged.
-func withModel(b []byte, alias string) []byte {
+// answerJSON is a whole answer as the caller gets it: its model the name the
+// caller sent, and its thinking blocks wrapped. Anything that is not an
+// object with a model or thinking passes unchanged.
+func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(b, &obj) != nil {
 		return b
 	}
-	if _, ok := obj["model"]; !ok {
+	_, model := obj["model"]
+	content := wrap.content(obj["content"])
+	if !model && content == nil {
 		return b
 	}
-	obj["model"], _ = json.Marshal(alias)
+	if model {
+		obj["model"], _ = json.Marshal(alias)
+	}
+	if content != nil {
+		obj["content"] = content
+	}
 	out, _ := json.Marshal(obj)
 	return out
 }
 
 // relayStream passes an upstream's events to the caller as each arrives —
 // the keep-alives held before the first, then the first, then the rest —
-// rewriting only message_start's message.model and an upstream error event
-// (errorJSON). Comments and pings pass unchanged, and each event goes out
+// rewriting only message_start's message (answerJSON), an upstream error
+// event (errorJSON) and a thinking block's wrapper: on its start, on its
+// first signature fragment, or, for a block that had none, in a
+// signature_delta sent ahead of its stop. Comments and pings pass unchanged,
+// and each event goes out
 // whole: one the upstream cut off at the end of its stream is completed when
 // its data parses, so the caller dispatches it and nothing written after it
 // merges in, and dropped when its data does not, being unfinished. When the
@@ -478,7 +519,7 @@ func withModel(b []byte, alias string) []byte {
 // connection open after that holds nothing of the gateway's. Ending there
 // resets the stream on an HTTP/2 connection, which a TLS upstream negotiates,
 // and gives up an HTTP/1.1 one rather than returning it to the pool.
-func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, alias, rid string, guard *provider.StallGuard, red provider.Redactor) {
+func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, alias string, wrap *wrapping, rid string, guard *provider.StallGuard, red provider.Redactor) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	rc := bounded(w)
@@ -498,14 +539,27 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		}
 	}
 	relay := func(e upstream.Event) {
+		out := e.Raw
 		switch {
-		case e.Name == "message_start" && e.Data != nil:
-			send(e.WithData(messageStartWithModel(e.Data, alias)))
-		case e.Name == "error" && e.Data != nil:
-			send(e.WithData(errorJSON(ctx, red, e.Data, rid)))
-		default:
-			send(e.Raw)
+		case e.Data == nil:
+		case e.Name == "message_start":
+			out = e.WithData(messageStart(e.Data, alias, wrap))
+		case e.Name == "error":
+			out = e.WithData(errorJSON(ctx, red, e.Data, rid))
+		case e.Name == "content_block_start":
+			if d := wrap.start(e.Data); d != nil {
+				out = e.WithData(d)
+			}
+		case e.Name == "content_block_delta":
+			if d := wrap.delta(e.Data); d != nil {
+				out = e.WithData(d)
+			}
+		case e.Name == "content_block_stop":
+			if d := wrap.stop(e.Data); d != nil {
+				send(d)
+			}
 		}
+		send(out)
 		done = done || e.Name == "message_stop" || e.Name == "error"
 	}
 	if len(held) > 0 {
@@ -552,13 +606,13 @@ func terminated(raw []byte) []byte {
 	return append(raw, '\n', '\n')
 }
 
-// messageStartWithModel rewrites the model inside message_start's message.
-func messageStartWithModel(data []byte, alias string) []byte {
+// messageStart rewrites message_start's message as answerJSON does.
+func messageStart(data []byte, alias string, wrap *wrapping) []byte {
 	var ev map[string]json.RawMessage
 	if json.Unmarshal(data, &ev) != nil || ev["message"] == nil {
 		return data
 	}
-	ev["message"] = withModel(ev["message"], alias)
+	ev["message"] = answerJSON(ev["message"], alias, wrap)
 	out, _ := json.Marshal(ev)
 	return out
 }
