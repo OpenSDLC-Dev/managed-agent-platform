@@ -310,7 +310,9 @@ path per protocol and per kind, the CN and international hosts, the auth header,
 content-block edits, field strips, the usage mapping, whether connections are reused
 (not for `gitee`, which drops idle ones mid-batch), and whether `count_tokens`
 exists — where it does not, that alias's `count_tokens` answers `404 not_found_error`
-and a client falls back to estimating, as the compatibility guide describes.
+and a client falls back to estimating, as the compatibility guide describes. No v1
+profile records its absence: DeepSeek and MiniMax answer it (probed 2026-10-07), and
+Zhipu and Moonshot, which do not document it, answer for themselves.
 
 The edit policy, which keeps a profile from quietly changing what a caller asked for:
 
@@ -327,7 +329,12 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
 - **Refuse** at the gateway only where a vendor documents that it silently ignores a
   field whose absence changes the result (DeepSeek ignores `disable_parallel_tool_use`),
   decided per field in the slice, citing the evidence in the profile. Nothing is
-  downgraded silently, as plan 53 decided for effort.
+  downgraded silently, as plan 53 decided for effort. Slice 2 reads "changes the
+  result" as a bound on the answer a caller's code may rely on — DeepSeek's
+  `disable_parallel_tool_use`, MiniMax's `stop_sequences` — and passes through what
+  a vendor ignores among sampling knobs, context shaping and server-side features;
+  a request such a field bars from a deployment goes to the alias's others, and is
+  refused only when none is left.
 
 ### Configuration model
 

@@ -11,7 +11,15 @@
 // docs, and Kimi's platform docs (platform.kimi.ai, api/messages). A host here
 // is a base URL: the Anthropic SDKs append /v1/messages to one, the OpenAI
 // SDKs /chat/completions.
+//
+// A profile also says what the gateway changes on its way to the vendor's
+// Anthropic endpoint, under the plan's edit policy: pass through by default,
+// edit only what the platform's own traffic needs, refuse only what the
+// vendor documents it ignores where the result depends on it. Each edit
+// cites its evidence where it is set.
 package profile
+
+import "encoding/json"
 
 // Protocol is an upstream wire protocol.
 type Protocol string
@@ -38,12 +46,26 @@ type Host struct {
 	BaseURL  string   `json:"base_url"`
 }
 
-// Profile is one vendor's data.
+// Profile is one vendor's data. What the gateway changes on the way to the
+// vendor is its own business, outside the admin API's view of a profile.
 type Profile struct {
 	Name        string     `json:"name"`
 	DisplayName string     `json:"display_name"`
 	Protocols   []Protocol `json:"protocols"`
 	Hosts       []Host     `json:"hosts"`
+
+	// BearerAuth sends the provider's key to its Anthropic endpoint as
+	// Authorization: Bearer rather than x-api-key, Anthropic's own header.
+	BearerAuth bool `json:"-"`
+	// FlattenSearchResults sends each search_result block in a tool_result
+	// as text, for a vendor that refuses the block: the brain's
+	// flatten_search_results (internal/provider/anthropic) behind the
+	// gateway.
+	FlattenSearchResults bool `json:"-"`
+	// Ignores names what in a request the vendor documents it ignores
+	// although the answer depends on it, or "" for nothing; no deployment
+	// on the profile serves such a request.
+	Ignores func(request map[string]json.RawMessage) string `json:"-"`
 }
 
 // Supports reports whether a provider of this profile may have an endpoint on
@@ -60,30 +82,74 @@ func (p Profile) Supports(proto Protocol) bool {
 var both = []Protocol{Anthropic, OpenAI}
 
 var profiles = []Profile{
+	// DeepSeek's Anthropic API guide lists x-api-key alone among the headers,
+	// "Fully Supported". The endpoint refuses a search_result block with a
+	// 422, ``unknown variant `search_result` `` (probed 2026-10-07).
 	{Name: "deepseek", DisplayName: "DeepSeek", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, BaseURL: "https://api.deepseek.com/anthropic"},
 		{Protocol: OpenAI, BaseURL: "https://api.deepseek.com"},
-	}},
+	}, FlattenSearchResults: true, Ignores: deepseekIgnores},
+	// MiniMax's Anthropic API reference takes either header and says
+	// "Authorization: Bearer <API_KEY> is recommended". It refuses a
+	// search_result block in a tool_result with a 400, "invalid tool_result
+	// content (2013)" (#565; probed 2026-10-07).
 	{Name: "minimax", DisplayName: "MiniMax", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://api.minimax.cn/anthropic"},
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.minimax.io/anthropic"},
 		{Protocol: OpenAI, Region: RegionCN, BaseURL: "https://api.minimax.cn/v1"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.minimax.io/v1"},
-	}},
+	}, BearerAuth: true, FlattenSearchResults: true, Ignores: minimaxIgnores},
+	// BigModel's Claude API compatibility guide sends the key as x-api-key.
 	{Name: "zhipu", DisplayName: "Zhipu (BigModel · Z.ai)", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/anthropic"},
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.z.ai/api/anthropic"},
 		{Protocol: OpenAI, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/paas/v4"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.z.ai/api/paas/v4"},
 	}},
-	// Kimi documents its OpenAI-compatible host on the international site only.
+	// Kimi documents its OpenAI-compatible host on the international site
+	// only, and a Bearer token as the one way to send a key: its Claude Code
+	// guide says to remove ANTHROPIC_API_KEY, which sends x-api-key.
 	{Name: "moonshot", DisplayName: "Moonshot (Kimi)", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://api.moonshot.cn/anthropic"},
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.moonshot.ai/anthropic"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.moonshot.ai/v1"},
-	}},
+	}, BearerAuth: true},
 	{Name: "anthropic-generic", DisplayName: "Any Anthropic Messages endpoint", Protocols: []Protocol{Anthropic}},
 	{Name: "openai-generic", DisplayName: "Any OpenAI-compatible endpoint", Protocols: []Protocol{OpenAI}},
+}
+
+// The Ignores hooks refuse only what bounds the answer itself, which a
+// caller's code may rely on. A vendor's documented ignoring of a sampling
+// knob (top_k), of what shapes the context rather than the answer
+// (context_management, cache_control), or of a server-side feature the
+// model then answers without (mcp_servers, container) passes through, as
+// does DeepSeek's of tool_result's is_error: a failed tool's result says so
+// in its text, the brain's included. Fields are read by their exact keys,
+// as the vendors read them.
+//
+// deepseekIgnores: DeepSeek's Anthropic API guide has tool_choice auto, any
+// and tool "Supported (disable_parallel_tool_use is ignored)", and a model
+// free to call tools in parallel may answer with several calls where the
+// caller allowed one.
+func deepseekIgnores(req map[string]json.RawMessage) string {
+	var choice map[string]json.RawMessage
+	var ban bool
+	if json.Unmarshal(req["tool_choice"], &choice) == nil &&
+		json.Unmarshal(choice["disable_parallel_tool_use"], &ban) == nil && ban {
+		return "tool_choice.disable_parallel_tool_use"
+	}
+	return ""
+}
+
+// minimaxIgnores: MiniMax's Anthropic API reference has stop_sequences
+// "This parameter will be ignored", so an answer runs past the sequence the
+// caller stops at.
+func minimaxIgnores(req map[string]json.RawMessage) string {
+	var stops []json.RawMessage
+	if json.Unmarshal(req["stop_sequences"], &stops) == nil && len(stops) > 0 {
+		return "stop_sequences"
+	}
+	return ""
 }
 
 // All returns every profile, as copies the caller may keep and change.

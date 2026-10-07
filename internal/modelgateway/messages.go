@@ -96,6 +96,11 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 			fmt.Sprintf("model %s has no enabled upstream on the Anthropic protocol", model)})
 		return
 	}
+	attempts, ignored := honoring(attempts, top)
+	if len(attempts) == 0 {
+		writeError(w, r, invalid("%s: every upstream of model %s ignores it", ignored, model))
+		return
+	}
 	call := call{
 		top:    top,
 		hist:   parseHistory(top["messages"]),
@@ -299,7 +304,8 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		return &failure{status: http.StatusInternalServerError, typ: "api_error", err: errors.New("internal error")}, true
 	}
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
-	body := upstreamBody(c, at.Deployment, strip)
+	prof, _ := profile.Lookup(at.Provider.Profile)
+	body := upstreamBody(c, at.Deployment, prof, strip)
 	wrap := newWrapping(at.Deployment.ID, strip)
 	ctx, guard := provider.NewStallGuard(ctx, at.Provider.StallTimeout)
 	defer guard.Stop()
@@ -314,7 +320,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", string(key))
+	if prof.BearerAuth {
+		req.Header.Set("Authorization", "Bearer "+string(key))
+	} else {
+		req.Header.Set("x-api-key", string(key))
+	}
 
 	resp, err := h.client.Do(req)
 	if err != nil {
@@ -397,17 +407,20 @@ func noAnswer(guard *provider.StallGuard, red provider.Redactor, err error) (*fa
 }
 
 // upstreamBody is the caller's body for one deployment: its messages'
-// thinking filtered by provenance (history.messagesFor), then model set to
-// the deployment's upstream id; every other top-level value goes out as the
-// caller sent it. The values were decoded from JSON, so encoding them again
+// thinking filtered by provenance (history.messagesFor), then the profile's
+// edits, then model set to the deployment's upstream id; every other
+// top-level value goes out as the caller sent it. The values were decoded from JSON, so encoding them again
 // cannot fail.
-func upstreamBody(c call, d store.Deployment, strip bool) []byte {
+func upstreamBody(c call, d store.Deployment, prof profile.Profile, strip bool) []byte {
 	out := make(map[string]json.RawMessage, len(c.top))
 	for k, v := range c.top {
 		out[k] = v
 	}
 	if c.hist != nil {
 		out["messages"] = c.hist.messagesFor(d.ID, strip)
+	}
+	if m, ok := out["messages"]; ok && prof.FlattenSearchResults {
+		out["messages"] = flattenSearchResults(m)
 	}
 	out["model"], _ = json.Marshal(d.UpstreamModel)
 	b, _ := json.Marshal(out)
