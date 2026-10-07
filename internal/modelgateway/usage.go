@@ -31,13 +31,17 @@ const recordTimeout = 10 * time.Second
 // recorded all the same. The write follows the answer's last byte but comes
 // before net/http ends the response, so a caller waits on it the time one
 // insert takes; in return a replica shutting down records every request it
-// served before it stops. What net/http writes after the handler returns —
-// a small answer it buffered, the end of a chunked one — gets a write bound
-// of its own, so a slow write here cannot spend the bound the answer was
-// given. A failed write is the operator's to see in the log, never the
-// caller's.
+// served before it stops. The write bound is lifted while the ledger is
+// written — nothing goes to the caller then, and an HTTP/2 stream whose
+// bound fires is reset and takes no new one — and what net/http writes
+// after the handler returns, a small answer it buffered or the end of a
+// chunked one, gets a bound of its own after it, so a slow write here
+// cannot spend the bound the answer was given. A failed write is the
+// operator's to see in the log, never the caller's.
 func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias, model, path string, start time.Time, out *outcome) {
-	defer func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(writeStall)) }()
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+	defer func() { _ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load()))) }()
 	u := store.Usage{
 		RequestID: requestID(r), APIKeyID: c.keyID, Model: model, Alias: alias,
 		SessionID: r.Header.Get(SessionHeader), Protocol: "anthropic", Endpoint: endpoints[path],

@@ -33,9 +33,8 @@ func EscapesName(b []byte) bool { return escapesName(b) }
 // SetWriteStall shortens the bound on a write to the caller for one test, and
 // returns its restore.
 func SetWriteStall(d time.Duration) func() {
-	old := writeStall
-	writeStall = d
-	return func() { writeStall = old }
+	old := writeStall.Swap(int64(d))
+	return func() { writeStall.Store(old) }
 }
 
 // SetMaxResponseBody lowers the bound on an upstream's body for one test, and

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
@@ -40,8 +41,14 @@ const defaultAnthropicVersion = "2023-06-01"
 // writeStall bounds each write to the caller. A caller that stops reading but
 // keeps its connection open would otherwise hold the handler for as long as it
 // liked; past the bound the caller is treated as gone, and an upstream stream
-// is still read to its end.
-var writeStall = time.Minute
+// is still read to its end. It
+// is read atomically: a test shortens it while a handler an earlier test
+// started may still be finishing.
+var writeStall = func() *atomic.Int64 {
+	var d atomic.Int64
+	d.Store(int64(time.Minute))
+	return &d
+}()
 
 // maxHeld bounds the keep-alives held back before a stream's answer begins:
 // past it the stream is committed to, so an upstream that pings and never
@@ -55,7 +62,7 @@ const maxHeld = 64 << 10
 // request (server.go's serve loop, after finishRequest).
 func bounded(w http.ResponseWriter) *http.ResponseController {
 	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Now().Add(writeStall))
+	_ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load())))
 	return rc
 }
 
@@ -594,7 +601,7 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		if gone {
 			return
 		}
-		_ = rc.SetWriteDeadline(time.Now().Add(writeStall))
+		_ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load())))
 		if _, err := w.Write(b); err != nil {
 			gone = true
 			return

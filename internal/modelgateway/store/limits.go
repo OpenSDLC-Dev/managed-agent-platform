@@ -1,6 +1,9 @@
 package store
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Admission is a limited key's answer for one request.
 type Admission struct {
@@ -22,10 +25,11 @@ type Admission struct {
 // its end from the moment the decision is made, so an upsert that waited on
 // another's lock does not promise a window already over. Which limit
 // refused is the only one set, or, with both, read once more after the
-// refusal: the upsert decided on the row as it found it after any wait,
-// which the statement's own snapshot may predate.
+// refusal, from the same window: the upsert decided on the row as it found
+// it after any wait, which the statement's own snapshot may predate.
 func (s *Store) Admit(ctx context.Context, apiKeyID string, rpm *int32, tpm *int64) (Admission, error) {
 	var a Admission
+	var minute time.Time
 	err := s.pool.QueryRow(ctx, `
 		WITH up AS (
 		  INSERT INTO modelgateway.rate_windows AS w (api_key_id, minute, requests)
@@ -34,9 +38,9 @@ func (s *Store) Admit(ctx context.Context, apiKeyID string, rpm *int32, tpm *int
 		    WHERE ($2::integer IS NULL OR w.requests < $2) AND ($3::bigint IS NULL OR w.tokens < $3)
 		  RETURNING 1
 		)
-		SELECT EXISTS (SELECT 1 FROM up),
+		SELECT EXISTS (SELECT 1 FROM up), date_trunc('minute', now()),
 		       greatest(1, ceil(extract(epoch FROM date_trunc('minute', now()) + interval '1 minute' - clock_timestamp())))::integer`,
-		apiKeyID, rpm, tpm).Scan(&a.Admitted, &a.RetryAfter)
+		apiKeyID, rpm, tpm).Scan(&a.Admitted, &minute, &a.RetryAfter)
 	switch {
 	case err != nil:
 		return Admission{}, err
@@ -46,7 +50,7 @@ func (s *Store) Admit(ctx context.Context, apiKeyID string, rpm *int32, tpm *int
 	default:
 		var tokens int64
 		err = s.pool.QueryRow(ctx, `SELECT coalesce(max(tokens), 0) FROM modelgateway.rate_windows
-			WHERE api_key_id = $1 AND minute = date_trunc('minute', now())`, apiKeyID).Scan(&tokens)
+			WHERE api_key_id = $1 AND minute = $2`, apiKeyID, minute).Scan(&tokens)
 		if err != nil {
 			return Admission{}, err
 		}
