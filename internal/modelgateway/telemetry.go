@@ -239,9 +239,10 @@ func observe(ctx context.Context, u store.Usage, at *catalog.Attempt, cost *floa
 	if t := u.Tokens; t != nil {
 		// The conventions' input tokens include the cached ones, which
 		// Anthropic's input_tokens does not.
-		span.SetAttributes(semconv.GenAIUsageInputTokens(int(t.Input+t.CacheWrite+t.CacheRead)),
-			semconv.GenAIUsageOutputTokens(int(t.Output)),
-			semconv.GenAIUsageCacheCreationInputTokens(int(t.CacheWrite)), semconv.GenAIUsageCacheReadInputTokens(int(t.CacheRead)))
+		// The keys take int64, which a count past 2^31 needs on a 32-bit build.
+		span.SetAttributes(semconv.GenAIUsageInputTokensKey.Int64(t.Input+t.CacheWrite+t.CacheRead),
+			semconv.GenAIUsageOutputTokensKey.Int64(t.Output),
+			semconv.GenAIUsageCacheCreationInputTokensKey.Int64(t.CacheWrite), semconv.GenAIUsageCacheReadInputTokensKey.Int64(t.CacheRead))
 	}
 
 	meter := otel.GetMeterProvider().Meter(instrumentation)
