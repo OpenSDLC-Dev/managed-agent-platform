@@ -1084,8 +1084,12 @@ jobs:
           # without ever blocking one.
           echo "$dep" | grep '^  replicas: 2$' > /dev/null \
             || { echo "the gateway does not default to two replicas" >&2; exit 1; }
-          on --show-only templates/modelgateway-pdb.yaml | grep '^  maxUnavailable: 1$' > /dev/null \
+          pdb="$(on --show-only templates/modelgateway-pdb.yaml)"
+          echo "$pdb" | grep '^  maxUnavailable: 1$' > /dev/null \
             || { echo "the gateway's PodDisruptionBudget is not maxUnavailable: 1" >&2; exit 1; }
+          # A pod that is not Ready must not hold the budget and block a drain.
+          echo "$pdb" | grep '^  unhealthyPodEvictionPolicy: AlwaysAllow$' > /dev/null \
+            || { echo "the gateway's PodDisruptionBudget lets an unready pod block a drain" >&2; exit 1; }
           # The bootstrap key, the DSN and the cipher, each from the Secret key
           # the Secret writes: an env entry naming an absent key would arrive
           # unset and the gateway would refuse to start.

@@ -692,7 +692,7 @@ last two lines of it — the build and the install — against **one** staging e
 | creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
 | setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
-| build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
+| build and push the five images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **A failed deploy opens an issue**, because it used to notify nobody: `ci` failing blocks a
 merge and is impossible to miss, while `deploy` runs after it and reports to whoever thinks
@@ -984,7 +984,7 @@ So the workflow builds on the runner and pushes to Artifact Registry. That needs
 permission the deploy identity already holds — `roles/artifactregistry.writer` — and no
 bucket, no staging upload and no Cloud Build API. `cloudbuild.yaml` remains the **manual**
 path's build definition; keep the two saying the same thing, which is why the workflow writes
-its four tags out rather than inferring them.
+its five tags out rather than inferring them.
 
 **Three IAM grants live outside Terraform, and each blocks a different path when it is
 missing.** All were made by hand and are recorded here because nothing in the repository

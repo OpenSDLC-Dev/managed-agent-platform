@@ -234,7 +234,8 @@ executor:
 modelgateway:
   enabled: false
   # -- Stateless replicas share one database; with two, the PodDisruptionBudget
-  # the chart renders keeps one serving through a node drain.
+  # the chart renders keeps one serving through a node drain, and lets a pod that
+  # is not Ready go.
   replicas: 2
   # -- GKE Workload Identity, as the control plane's: the gateway seals a vendor
   # key on write and opens it to call the vendor, so under gcpKMS its identity

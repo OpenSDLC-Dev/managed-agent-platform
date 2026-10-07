@@ -3,6 +3,11 @@
 maxUnavailable rather than minAvailable: at the default two replicas both keep
 one gateway serving through a node drain, but at one replica a minAvailable of 1
 would block every drain, where a maxUnavailable of 1 lets it through.
+
+AlwaysAllow, because a pod that is not Ready serves nothing worth protecting: a
+crash-looping gateway (a revoked KMS grant, say) would otherwise hold its budget
+at zero and block the drain that might cure it. Kubernetes honours the field
+from 1.27, where it went beta and on by default; 1.26 drops it.
 */}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -13,6 +18,7 @@ metadata:
     app.kubernetes.io/component: modelgateway
 spec:
   maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       {{- include "map.selectorLabels" (dict "ctx" . "component" "modelgateway") | nindent 6 }}

@@ -103,6 +103,11 @@ keys, so anyone who can supply a model string (creating an agent, or a session w
 callers — see the `brain.modelProviders` comment in `values.yaml` and
 [#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88).
 
+Upgrade with your values file, or `--reset-then-reuse-values` (Helm ≥ 3.14), rather
+than `--reuse-values`: that flag keeps the installed chart's defaults instead of the
+new chart's, so a release adding a values section — `casdoor` in v0.3.0,
+`modelgateway` after v0.5.1 — fails the render on the section it never saw.
+
 ## The executor and the Kubernetes sandbox
 
 The executor is wired to the **k8s** sandbox backend (`SANDBOX_BACKEND=k8s`). It launches,
@@ -116,8 +121,9 @@ The chart grants its ServiceAccount a namespaced Role with exactly the pod lifec
 Off by default. Enabled, it runs `cmd/modelgateway`
 ([plan 59](../../../docs/plan/59_model-gateway.md)) as `modelgateway.replicas` pods
 (default two) behind a ClusterIP Service on port 8090, with a PodDisruptionBudget of
-`maxUnavailable: 1`: a node drain keeps one pod serving at two replicas and is never
-blocked at one. It reads `database-url` and `controlplane-api-key` from the release's
+`maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow`: a node drain keeps
+one pod serving at two replicas, and neither one replica nor a pod that is not Ready
+blocks it (the second from Kubernetes 1.27). It reads `database-url` and `controlplane-api-key` from the release's
 Secret, takes `identity.*` so the console's operator sign-in reaches its admin API, and
 seals vendor keys with the release's credential cipher — so it needs one. A chart-managed
 Secret that resolves none fails the render; with `existingSecret` the chart cannot see

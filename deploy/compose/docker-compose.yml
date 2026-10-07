@@ -203,7 +203,7 @@ services:
   # The model gateway (docs/plan/59_model-gateway.md): Anthropic Messages on
   # :8090 for the platform's API keys, routed to the vendor deployments its
   # catalogue holds, and the /admin/v1/ API that configures the catalogue. It
-  # serves nothing until a deployment is configured, and the brain does not route
+  # routes nothing until a deployment is configured, and the brain does not route
   # through it.
   modelgateway:
     <<: *app
