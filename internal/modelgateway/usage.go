@@ -129,9 +129,9 @@ var usageCounts = []struct {
 	{"cache_read_input_tokens", func(t *store.Tokens) *int64 { return &t.CacheRead }},
 }
 
-// maxCount bounds a count the ledger reads: 2^32 tokens is over a thousand
-// times any context window, so a count above it is a broken upstream's, read
-// as nothing. Under it, a day's rollup reaches bigint's bound only past two
+// maxCount bounds a count the ledger reads: 2^32 tokens is some four hundred
+// times the largest context window offered (10M tokens), so a count above
+// it is a broken upstream's, read as nothing. Under it, a day's rollup reaches bigint's bound only past two
 // billion such answers in one day for one key, alias and deployment, where
 // one overflow would fail every later write to that day.
 const maxCount = 1 << 32
@@ -185,8 +185,8 @@ func member(b []byte, path ...string) json.RawMessage {
 
 // errorTypeOf is the type an Anthropic error envelope, a body or an event's
 // data, names, or the type Anthropic gives status when it names none — or
-// names one carrying a NUL, which no Anthropic type has and the ledger
-// could not record as an error.
+// names one carrying a NUL, which no Anthropic type has (and a lone one
+// would leave the ledger no error to record).
 func errorTypeOf(b []byte, status int) string {
 	var typ string
 	if json.Unmarshal(member(b, "error", "type"), &typ) == nil && typ != "" && !strings.ContainsRune(typ, 0) {
