@@ -27,6 +27,9 @@ func Backoff(h http.Handler, ctx context.Context, n int) bool { return h.(*handl
 // ThinkingRefusal is thinkingRefusal.
 func ThinkingRefusal(body []byte) bool { return thinkingRefusal(body) }
 
+// EscapesName is escapesName.
+func EscapesName(b []byte) bool { return escapesName(b) }
+
 // SetWriteStall shortens the bound on a write to the caller for one test, and
 // returns its restore.
 func SetWriteStall(d time.Duration) func() {

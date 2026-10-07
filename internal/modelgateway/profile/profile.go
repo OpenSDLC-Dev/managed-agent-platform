@@ -19,7 +19,10 @@
 // cites its evidence where it is set.
 package profile
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"regexp"
+)
 
 // Protocol is an upstream wire protocol.
 type Protocol string
@@ -58,14 +61,13 @@ type Profile struct {
 	// Authorization: Bearer rather than x-api-key, Anthropic's own header.
 	BearerAuth bool `json:"-"`
 	// FlattenSearchResults sends each search_result block in a tool_result
-	// as text, for a vendor that refuses the block: the brain's
-	// flatten_search_results (internal/provider/anthropic) behind the
-	// gateway.
+	// as text, for a vendor that refuses the block, in the rendering the
+	// brain's flatten_search_results uses (internal/provider/anthropic).
 	FlattenSearchResults bool `json:"-"`
-	// Ignores names what in a request the vendor documents it ignores
-	// although the answer depends on it, or "" for nothing; no deployment
-	// on the profile serves such a request.
-	Ignores func(request map[string]json.RawMessage) string `json:"-"`
+	// Ignores names what in a request to model, a deployment's upstream
+	// model id, the vendor documents it ignores although the answer depends
+	// on it, or "" for nothing; no such deployment serves the request.
+	Ignores func(model string, request map[string]json.RawMessage) string `json:"-"`
 }
 
 // Supports reports whether a provider of this profile may have an endpoint on
@@ -131,7 +133,7 @@ var profiles = []Profile{
 // and tool "Supported (disable_parallel_tool_use is ignored)", and a model
 // free to call tools in parallel may answer with several calls where the
 // caller allowed one.
-func deepseekIgnores(req map[string]json.RawMessage) string {
+func deepseekIgnores(_ string, req map[string]json.RawMessage) string {
 	var choice map[string]json.RawMessage
 	var ban bool
 	if json.Unmarshal(req["tool_choice"], &choice) == nil &&
@@ -142,15 +144,28 @@ func deepseekIgnores(req map[string]json.RawMessage) string {
 }
 
 // minimaxIgnores: MiniMax's Anthropic SDK guide (text-anthropic-api) has
-// stop_sequences "This parameter will be ignored", so an answer runs past the sequence the
-// caller stops at.
-func minimaxIgnores(req map[string]json.RawMessage) string {
+// stop_sequences "This parameter will be ignored", so an answer runs past
+// the sequence the caller stops at; and for its M2.x models thinking
+// disabled is "Accepted but ignored; thinking remains on", so an answer
+// spends the caller's max_tokens on thinking it turned off. MiniMax-M3
+// honors disabled, and M3.1-Flash-Preview refuses it with a 400 of its own.
+func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 	var stops []json.RawMessage
 	if json.Unmarshal(req["stop_sequences"], &stops) == nil && len(stops) > 0 {
 		return "stop_sequences"
 	}
+	var thinking map[string]json.RawMessage
+	var typ string
+	if minimaxM2.MatchString(model) && json.Unmarshal(req["thinking"], &thinking) == nil &&
+		json.Unmarshal(thinking["type"], &typ) == nil && typ == "disabled" {
+		return "thinking.type"
+	}
 	return ""
 }
+
+// minimaxM2 matches MiniMax's M2.x model ids, MiniMax-M2 and MiniMax-M2.7
+// alike, in any case.
+var minimaxM2 = regexp.MustCompile(`(?i)^minimax-m2([.-]|$)`)
 
 // All returns every profile, as copies the caller may keep and change.
 func All() []Profile {

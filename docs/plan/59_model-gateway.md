@@ -331,10 +331,12 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
   decided per field in the slice, citing the evidence in the profile. Nothing is
   downgraded silently, as plan 53 decided for effort. Slice 2 reads "changes the
   result" as a bound on the answer a caller's code may rely on — DeepSeek's
-  `disable_parallel_tool_use`, MiniMax's `stop_sequences` — and passes through what
+  `disable_parallel_tool_use`, MiniMax's `stop_sequences`, and thinking disabled on
+  MiniMax's M2.x models, which think regardless — and passes through what
   a vendor ignores among sampling knobs, context shaping and server-side features;
   a request such a field bars from a deployment goes to the alias's others, and is
-  refused only when none is left.
+  refused only when none is left — but never a count, which the field leaves
+  unchanged.
 
 ### Configuration model
 

@@ -12,13 +12,13 @@ import (
 
 // honoring keeps the attempts whose vendor does not ignore anything the
 // request asks for (profile.Profile.Ignores), and names each field the ones
-// it dropped ignore, once and in order, for the refusal when it keeps none.
+// it dropped ignore, once and sorted, for the refusal when it keeps none.
 func honoring(attempts []catalog.Attempt, req map[string]json.RawMessage) ([]catalog.Attempt, []string) {
 	var ignored []string
 	kept := attempts[:0:0]
 	for _, at := range attempts {
 		if p, _ := profile.Lookup(at.Provider.Profile); p.Ignores != nil {
-			if field := p.Ignores(req); field != "" {
+			if field := p.Ignores(at.Deployment.UpstreamModel, req); field != "" {
 				if !slices.Contains(ignored, field) {
 					ignored = append(ignored, field)
 				}
@@ -27,18 +27,19 @@ func honoring(attempts []catalog.Attempt, req map[string]json.RawMessage) ([]cat
 		}
 		kept = append(kept, at)
 	}
+	slices.Sort(ignored)
 	return kept, ignored
 }
 
 // flattenSearchResults renders each search_result block in a tool_result's
-// content as a text block, through provider.SearchResultText, as the brain's
-// flatten_search_results does (internal/provider/anthropic). Keys are read
-// exactly, as thinking provenance reads them; a block it cannot render goes
-// as sent, for the upstream to judge, and so does everything else. The
-// rendering is deterministic, so every request of a conversation sends the
-// upstream the same prefix.
+// content as a text block through provider.SearchResultText, the rendering
+// the brain's flatten_search_results uses (internal/provider/anthropic).
+// Keys are read exactly, as thinking provenance reads them; a block it
+// cannot render goes as sent, for the upstream to judge, and so does
+// everything else. The rendering is deterministic, so every request of a
+// conversation sends the upstream the same prefix.
 func flattenSearchResults(msgs json.RawMessage) json.RawMessage {
-	if !bytes.Contains(msgs, []byte("search_result")) && !bytes.Contains(msgs, []byte(`\u`)) {
+	if !bytes.Contains(msgs, []byte("search_result")) && !escapesName(msgs) {
 		return msgs
 	}
 	out, _ := eachObject(msgs, func(msg map[string]json.RawMessage) bool {
@@ -68,8 +69,8 @@ func inPlace(obj map[string]json.RawMessage, key string, fn func(json.RawMessage
 // title, the source and the inner text blocks are read by their exact keys
 // and handed to the renderer in one canonical form, so neither a key
 // differing only in case nor the keys' order changes what is rendered. A
-// block whose fields are not the strings and text blocks the wire has goes
-// as sent.
+// block with a title or source that is not a string, or an inner block that
+// is not text, goes as sent; a null field counts as absent.
 func flattenSearchResult(block map[string]json.RawMessage) bool {
 	var title, source string
 	var inner []map[string]json.RawMessage
@@ -90,8 +91,8 @@ func flattenSearchResult(block map[string]json.RawMessage) bool {
 		}
 		texts[i] = map[string]string{"type": "text", "text": text}
 	}
-	src, _ := json.Marshal(source)
-	content, _ := json.Marshal(texts)
+	src := encodeJSON(source)
+	content := encodeJSON(texts)
 	rendered, err := provider.SearchResultText(title, src, content)
 	if err != nil {
 		return false
@@ -99,7 +100,7 @@ func flattenSearchResult(block map[string]json.RawMessage) bool {
 	cache, cached := block["cache_control"]
 	clear(block)
 	block["type"] = json.RawMessage(`"text"`)
-	block["text"], _ = json.Marshal(rendered)
+	block["text"] = encodeJSON(rendered)
 	if cached {
 		block["cache_control"] = cache
 	}
@@ -128,12 +129,12 @@ func eachObject(raw json.RawMessage, fn func(map[string]json.RawMessage) bool) (
 		if json.Unmarshal(item, &obj) != nil || !fn(obj) {
 			continue
 		}
-		items[i], _ = json.Marshal(obj)
+		items[i] = encodeJSON(obj)
 		changed = true
 	}
 	if !changed {
 		return raw, false
 	}
-	out, _ := json.Marshal(items)
+	out := encodeJSON(items)
 	return out, true
 }

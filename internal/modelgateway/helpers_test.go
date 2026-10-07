@@ -203,6 +203,7 @@ type fakeCall struct {
 	Model  string
 	Header http.Header
 	Body   map[string]json.RawMessage
+	Raw    []byte // the body as received
 }
 
 func newFake(t *testing.T, answer func(w http.ResponseWriter, r *http.Request, c fakeCall)) *fake {
@@ -210,7 +211,7 @@ func newFake(t *testing.T, answer func(w http.ResponseWriter, r *http.Request, c
 	f := &fake{answer: answer}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		c := fakeCall{Path: r.URL.Path, Key: r.Header.Get("x-api-key"), Header: r.Header.Clone()}
+		c := fakeCall{Path: r.URL.Path, Key: r.Header.Get("x-api-key"), Header: r.Header.Clone(), Raw: b}
 		_ = json.Unmarshal(b, &c.Body)
 		_ = json.Unmarshal(c.Body["model"], &c.Model)
 		f.mu.Lock()
