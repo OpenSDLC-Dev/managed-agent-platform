@@ -1,7 +1,7 @@
 # Local development stack (docker compose)
 
-Brings up the platform's three server processes — **controlplane**, **brain**,
-**executor** — against a bundled Postgres, a bundled MinIO (the PGSTY Silo
+Brings up the platform's four server processes — **controlplane**, **brain**,
+**executor**, **modelgateway** — against a bundled Postgres, a bundled MinIO (the PGSTY Silo
 fork, #799; S3-compatible object storage where the controlplane stores skill archives — the `/v1/skills`
 registry, docs/plan/06_skills.md), and a bundled OpenBao (the transit cipher
 that encrypts vault credential material, docs/plan/12_vaults-credentials.md),
@@ -27,6 +27,7 @@ docker compose up --build
 
 - Control plane API: `http://localhost:8080` (bound to loopback by default; see below).
 - Drive it with the real CLI: `ANTHROPIC_API_KEY=<CONTROLPLANE_API_KEY> ant --base-url http://localhost:8080 beta:agents list` (management commands ignore `ANTHROPIC_BASE_URL`; only the worker/auth subcommands honor it).
+- Model gateway: `http://localhost:8090`, on the same loopback bind. Its `/admin/v1/` API takes `CONTROLPLANE_API_KEY`, and it routes nothing until a deployment is configured there ([plan 59](../../docs/plan/59_model-gateway.md)); the brain does not go through it.
 
 The stack comes up out of the box — the brain loads the committed
 `model-providers.example.json` and idles (its placeholder endpoint isn't real, so
@@ -67,11 +68,11 @@ container and migrate its database
 The project name scopes the containers, the network, the volumes and the `:local`
 image tags. What it does not scope is **host ports**, and it does not pick a
 different `.env` — two stacks run from the same directory read the same one. The
-published API port is the one you will hit, and it says so at once, so pass the
-override in the shell rather than the file:
+published API ports are the ones you will hit, and they say so at once, so pass the
+overrides in the shell rather than the file:
 
 ```sh
-CONTROLPLANE_PORT=8081 docker compose -p mapsecond up --build
+CONTROLPLANE_PORT=8081 MODELGATEWAY_PORT=8091 docker compose -p mapsecond up --build
 ```
 
 Under `--profile iam` the same goes for `IDP_PORT`. The `observability` profile's

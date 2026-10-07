@@ -248,8 +248,8 @@ release-tag-check:
 	fi; \
 	git merge-base --is-ancestor HEAD origin/main || { echo "the tagged commit is not on origin/main" >&2; exit 1; }
 
-# One server build pushed under the three component names the Helm chart
-# composes ({registry}/{repository}/{component}:{tag} — same digest, three
+# One server build pushed under the four component names the Helm chart
+# composes ({registry}/{repository}/{component}:{tag} — same digest, four
 # names), plus the gate from its own Dockerfile target. Deliberately no
 # `latest` tag: the chart derives its default tag from appVersion, and a
 # mutable alias only invites drift.
@@ -261,7 +261,8 @@ release-images:
 	docker buildx build $$mode --build-arg VERSION="$(VERSION)" --target server \
 		-t "$(RELEASE_IMAGE_NS)/controlplane:$(VERSION)" \
 		-t "$(RELEASE_IMAGE_NS)/brain:$(VERSION)" \
-		-t "$(RELEASE_IMAGE_NS)/executor:$(VERSION)" .; \
+		-t "$(RELEASE_IMAGE_NS)/executor:$(VERSION)" \
+		-t "$(RELEASE_IMAGE_NS)/modelgateway:$(VERSION)" .; \
 	docker buildx build $$mode --build-arg VERSION="$(VERSION)" --target gate \
 		-t "$(RELEASE_IMAGE_NS)/gate:$(VERSION)" .
 

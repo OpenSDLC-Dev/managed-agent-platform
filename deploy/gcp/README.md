@@ -18,7 +18,7 @@ identically?"**
 | | `foundation/` | `environment/` |
 | --- | --- | --- |
 | Lifecycle | created once, **never destroyed** | created and destroyed freely |
-| Holds | KMS key ring + crypto key, the three service accounts, the two database Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
+| Holds | KMS key ring + crypto key, the four service accounts, the two database Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
 | Idle cost | cents a month | a running cluster and database |
 | `terraform destroy` | not supported — `prevent_destroy` **and** `deletion_policy = "PREVENT"` | `make gcp-env-destroy` |
 
@@ -795,6 +795,11 @@ exists here precisely because nothing in the repository would otherwise record i
 deploy identity is created with it. They are named here so that setting up a fresh deployment
 is a list to work through rather than a guess, since the workflow's guard refuses to run
 until all eleven exist.
+
+The model gateway's account (`F modelgateway_service_account`) has no variable, because
+`staging-values.yaml` leaves `modelgateway.enabled` off and CD neither annotates nor reads
+back a ServiceAccount the chart does not render. Enabling it there takes a twelfth variable,
+added to the guard, the `--set-string` list and the read-back beside the other three.
 
 Three names are deliberately **not** variables — `K8S_NAMESPACE`, `K8S_SECRET` and
 `HELM_RELEASE` stay literals in the workflow, because they name the *chart's* own objects

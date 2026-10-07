@@ -69,7 +69,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish images — multi-arch, three component names + the gate
+      - name: Publish images — multi-arch, four component names + the gate
         run: make release-images PUSH=1 VERSION="$VERSION"
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Publish the Helm chart (OCI)

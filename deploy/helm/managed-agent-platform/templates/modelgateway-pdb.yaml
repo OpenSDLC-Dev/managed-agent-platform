@@ -1,0 +1,19 @@
+{{- if .Values.modelgateway.enabled }}
+{{/*
+maxUnavailable rather than minAvailable: at the default two replicas both keep
+one gateway serving through a node drain, but at one replica a minAvailable of 1
+would block every drain, where a maxUnavailable of 1 lets it through.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "map.fullname" . }}-modelgateway
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: modelgateway
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "modelgateway") | nindent 6 }}
+{{- end }}

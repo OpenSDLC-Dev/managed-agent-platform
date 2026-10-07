@@ -363,10 +363,11 @@ jobs:
 
       # Submitted from the repository ROOT with `.` as the context, because the
       # Dockerfile builds the whole Go module. `cloudbuild.yaml` turns that one
-      # context into four images: controlplane/brain/executor are three tags on a
-      # single build — the chart composes `registry/repository/COMPONENT:tag`, so
-      # it looks for three names, and three tags on one build means they cannot
-      # drift — plus `--target gate` for the egress sidecar.
+      # context into five images: controlplane/brain/executor/modelgateway are
+      # four tags on a single build — the chart composes
+      # `registry/repository/COMPONENT:tag`, so it looks for one name per
+      # component, and four tags on one build means they cannot drift — plus
+      # `--target gate` for the egress sidecar.
       #
       # `_TAG` is the full commit SHA, and it is derived ONCE: the same value
       # becomes `image.tag` and the `gate:` reference below. Deriving it twice is
@@ -405,12 +406,15 @@ jobs:
           # the push would then fail as an anonymous pull of a private registry.
           gcloud auth configure-docker "${ARTIFACT_REGISTRY%%/*}" --quiet
 
-          # One build, three tags — so controlplane, brain and executor resolve
-          # to a single digest and cannot drift apart between components.
+          # One build, four tags — so controlplane, brain, executor and
+          # modelgateway resolve to a single digest and cannot drift apart
+          # between components. The chart deploys the gateway only when
+          # modelgateway.enabled is set; the tag costs nothing until then.
           docker build \
             -t "$ARTIFACT_REGISTRY/controlplane:$GITHUB_SHA" \
             -t "$ARTIFACT_REGISTRY/brain:$GITHUB_SHA" \
             -t "$ARTIFACT_REGISTRY/executor:$GITHUB_SHA" \
+            -t "$ARTIFACT_REGISTRY/modelgateway:$GITHUB_SHA" \
             .
           # The gate is a separate image: the per-session egress sidecar needs
           # iptables and a dedicated UID that do not belong in the server image.
@@ -420,7 +424,7 @@ jobs:
             -t "$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
             .
 
-          for component in controlplane brain executor gate; do
+          for component in controlplane brain executor modelgateway gate; do
             docker push "$ARTIFACT_REGISTRY/$component:$GITHUB_SHA"
           done
 

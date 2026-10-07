@@ -237,8 +237,8 @@ network in cleartext, on the near side of the encryption. `ssl_mode = ENCRYPTED_
 not your application's connection to the proxy. Google recommends colocation for exactly
 this reason.
 
-The chart templates it, off by default. `cloudSQLProxy.enabled` adds the sidecar to all
-three deployments at once — one switch rather than three, because they read a single
+The chart templates it, off by default. `cloudSQLProxy.enabled` adds the sidecar to every
+deployment at once — one switch rather than one each, because they read a single
 `database-url` Secret key and a DSN cannot name a loopback socket for some pods and the
 instance's address for the others:
 
@@ -276,7 +276,7 @@ anyway, by pinging the database before it serves and exiting when that fails: th
 crash-loop and `--atomic` rolls back. The cost is diagnosis, not a bad release.
 
 `cloudSQLProxy.connectionTest=true` moves that check into the proxy, so the error names the
-instance instead of appearing as three application containers that cannot reach Postgres. It
+instance instead of appearing as application containers that cannot reach Postgres. It
 matters most while the proxy is enabled but the DSN does **not** route through it yet, where
 nothing exercises the proxy at all. It is a boolean — pass it with `--set`, not
 `--set-string` (#493).
@@ -290,7 +290,7 @@ were still local.
 this cluster can reach the private-IP instance *directly* — `make gcp-db-init` does exactly
 that, with `PGSSLMODE=require`, no sidecar and no Google identity at all. So a `database-url`
 of `postgres://USER:PW@$(terraform output -raw sql_private_ip):5432/DB?sslmode=require` works
-for all three components with no IAM whatsoever. The trade is real and worth naming: `require`
+for every component with no IAM whatsoever. The trade is real and worth naming: `require`
 encrypts but does not verify the server's certificate, which is what the proxy adds along with
 IAM-based authorization. Prefer the proxy where you can; take this path when you want to skip
 the proxy's own setup. It does **not** skip per-component identity — see below.
@@ -311,6 +311,11 @@ itself, and the brain reads the bucket (rubric snapshots and deliverables), so i
 holds `roles/storage.objectViewer` there. Its own account rather than the control plane's
 remains the point: annotating the brain onto that account would be the shortcut, and it would
 hand the brain the KMS decrypt that account carries.
+
+The model gateway is off as `staging-values.yaml` writes it. With `modelgateway.enabled` it
+needs a fourth, `terraform output -json modelgateway_service_account_annotation`: an account
+holding the controlplane's KMS role — the gateway seals vendor keys and opens one on every
+model call — and `roles/cloudsql.client`, its own for the brain's reason.
 
 Miss the brain's annotation and nothing fails loudly. Its blob reads are written to degrade —
 a deliverable that cannot be read is listed but not inlined, and an unreadable rubric snapshot

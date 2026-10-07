@@ -41,9 +41,10 @@ locals {
   controlplane_ksa = "${local.fullname}-controlplane"
   brain_ksa        = "${local.fullname}-brain"
   executor_ksa     = "${local.fullname}-executor"
+  modelgateway_ksa = "${local.fullname}-modelgateway"
 }
 
-# All three bindings depend on the CLUSTER, and the dependency has to be written out:
+# Every binding depends on the CLUSTER, and the dependency has to be written out:
 # the member string names the identity pool `PROJECT.svc.id.goog`, which is not a
 # project-level fact but is created by the first cluster configured with
 # `workload_identity_config`. Terraform sees no reference from these resources to
@@ -72,6 +73,14 @@ resource "google_service_account_iam_member" "executor_workload_identity" {
   service_account_id = data.google_service_account.executor.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${local.executor_ksa}]"
+
+  depends_on = [google_container_cluster.map]
+}
+
+resource "google_service_account_iam_member" "modelgateway_workload_identity" {
+  service_account_id = data.google_service_account.modelgateway.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${local.modelgateway_ksa}]"
 
   depends_on = [google_container_cluster.map]
 }
@@ -129,6 +138,18 @@ resource "google_kms_crypto_key_iam_member" "executor" {
   crypto_key_id = data.google_kms_crypto_key.cipher.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
   member        = "serviceAccount:${data.google_service_account.executor.email}"
+}
+
+# The model gateway seals a vendor key when the admin API writes one
+# (internal/modelgateway/admin) and opens it for every upstream call
+# (internal/modelgateway), so it needs both.
+# Encrypter alone would fail as quietly as the executor's would: the cipher's
+# startup probe only encrypts, so the pods go Ready, and every model call then
+# fails on the key it cannot open.
+resource "google_kms_crypto_key_iam_member" "modelgateway" {
+  crypto_key_id = data.google_kms_crypto_key.cipher.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:${data.google_service_account.modelgateway.email}"
 }
 
 # ---------------------------------------------------------------------------
@@ -234,11 +255,11 @@ resource "google_artifact_registry_repository_iam_member" "node_puller_mirror" {
 # this; mode-2 reaches the instance through the Cloud SQL Auth Proxy, which
 # authenticates as the pod's Google identity and needs roles/cloudsql.client.
 #
-# All three processes open the database, so all three get it. The grant is
+# Every process opens the database, so every identity gets it. The grant is
 # unconditional rather than following the chart's cloudSQLProxy switch, because
 # this configuration cannot see how the chart is installed and an IAM role
 # nobody exercises costs nothing: under the direct-connection path
-# (sslmode=require against the private IP) none of the three uses its Google
+# (sslmode=require against the private IP) none of them uses its Google
 # identity for the database at all.
 #
 # Project-scoped, and it is worth knowing that this reaches every Cloud SQL
@@ -267,6 +288,12 @@ resource "google_project_iam_member" "executor_sql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${data.google_service_account.executor.email}"
+}
+
+resource "google_project_iam_member" "modelgateway_sql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${data.google_service_account.modelgateway.email}"
 }
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,82 @@
+{{- if .Values.modelgateway.enabled }}
+{{- /* The gateway seals vendor keys with the release's credential cipher and
+       refuses to start without one, so a chart-managed Secret that resolves
+       none (secret.yaml's choice) fails here instead of crash-looping. An
+       existingSecret is the operator's to fill: the chart cannot see whether
+       it carries the secrets-* keys, and the gateway names the missing
+       variable at startup. */}}
+{{- if and (not .Values.existingSecret) (not (or .Values.openbao.enabled .Values.externalOpenBao.address .Values.localCipher.masterKey .Values.gcpKMS.keyName)) }}
+{{- fail "modelgateway.enabled needs a credential cipher — openbao.enabled, externalOpenBao.address, localCipher.masterKey or gcpKMS.keyName: the gateway seals vendor keys with it and does not start without one." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "map.fullname" . }}-modelgateway
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: modelgateway
+spec:
+  replicas: {{ .Values.modelgateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "modelgateway") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when the chart-managed Secret changes on upgrade, as the
+        # control plane's do. Inert when existingSecret is set.
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+      labels:
+        {{- include "map.labels" . | nindent 8 }}
+        app.kubernetes.io/component: modelgateway
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.modelgateway.terminationGracePeriodSeconds }}
+      serviceAccountName: {{ include "map.fullname" . }}-modelgateway
+      {{- include "map.imagePullSecrets" . | nindent 6 }}
+      {{- include "map.cloudSQLProxy" . | nindent 6 }}
+      containers:
+        - name: modelgateway
+          image: {{ include "map.image" (dict "ctx" . "component" "modelgateway") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/modelgateway"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.modelgateway.service.port }}
+          env:
+            - name: MODELGATEWAY_ADDR
+              value: ":{{ .Values.modelgateway.service.port }}"
+            - name: CONTROLPLANE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "map.secretName" . }}
+                  key: controlplane-api-key
+            {{- include "map.commonEnv" . | nindent 12 }}
+            {{- include "map.secretsEnv" . | nindent 12 }}
+            {{- include "map.identityEnv" . | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          {{- with .Values.modelgateway.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.modelgateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.modelgateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.modelgateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

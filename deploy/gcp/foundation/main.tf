@@ -124,17 +124,18 @@ resource "google_kms_crypto_key" "cipher" {
 }
 
 # ---------------------------------------------------------------------------
-# Identities. Three, one per workload process, because they need three
-# different privilege sets — see the grants in environment/iam.tf. A fourth,
-# `-storage`, held the GCS HMAC key and retired with #240: object storage is
-# now reached as the workloads themselves, through Workload Identity.
+# Identities. One per workload process, because each needs a different
+# privilege set — see the grants in environment/iam.tf. A `-storage` identity
+# held the GCS HMAC key and retired with #240: object storage is now reached as
+# the workloads themselves, through Workload Identity.
 # ---------------------------------------------------------------------------
 
 # The control plane encrypts on write and decrypts on read: mcp_oauth_validate
-# and the gate-config endpoint both call Decrypt. The executor decrypts too,
-# for its own reasons (its comment below), so those two share one key-level
-# role and the brain is the one identity that needs nothing from KMS.
-# The three identities. Each waits on the API enablement above: without that
+# and the gate-config endpoint both call Decrypt. The executor and the model
+# gateway decrypt too, for their own reasons (their comments below), so the
+# three share one key-level role and the brain is the one identity that needs
+# nothing from KMS.
+# The identities. Each waits on the API enablement above: without that
 # dependency Terraform is free to create a service account concurrently with
 # enabling iam.googleapis.com, and on a project where IAM was never enabled the
 # create reaches a disabled API and the FIRST apply fails. A retry then succeeds,
@@ -184,6 +185,23 @@ resource "google_service_account" "executor" {
 
   account_id      = "${var.name_prefix}-executor"
   display_name    = "managed-agent-platform executor"
+  deletion_policy = "PREVENT"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# The model gateway (docs/plan/59_model-gateway.md) seals a vendor key when the
+# admin API writes one and opens it on every upstream call, so it encrypts and
+# decrypts; it opens the database too. Its own identity rather than the control
+# plane's, whose grants it would otherwise inherit. Like the brain's, it can sit
+# unused: the chart deploys the gateway only when modelgateway.enabled is set.
+resource "google_service_account" "modelgateway" {
+  depends_on = [google_project_service.required]
+
+  account_id      = "${var.name_prefix}-modelgateway"
+  display_name    = "managed-agent-platform model gateway"
   deletion_policy = "PREVENT"
 
   lifecycle {

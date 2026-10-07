@@ -21,8 +21,9 @@ slice 3 is the console repository's own plan.
   - [x] 2c — the profiles' auth header and edits
   - [x] 2d — usage rows, retention and rollups, the admin usage reads; RPM and TPM limits
   - [x] 2e — telemetry, carrying the caller's trace context through the gateway
-  - [ ] 2f — compose and Helm, and a GCP identity granted the cipher (ending its
-        `unhosted` entry in `tools/kmsrole`); the rest of the live tier (model list, vendor behavior)
+  - [x] 2f — compose and Helm (`modelgateway.enabled`, off until slice 5), and a GCP identity
+        granted the cipher, awaiting an operator's `foundation/` and `environment/` apply
+  - [ ] 2g — the rest of the live tier (model list, vendor behavior)
 - [ ] Slice 4 — OpenAI surfaces, embeddings and rerank with the `gitee` profile; dikw-core
       through the gateway
 - [ ] Slice 5 — brain cutover: one route through the gateway; `ant` sessions on MiniMax

@@ -148,8 +148,8 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    `internal/ripgrep/assets/manifest.json`, fetches any that is missing or
    does not match and removes anything else there, so a release cannot build
    from anything else) pushed as
-   `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
-   (same digest, three names — the coordinates the Helm chart composes) plus
+   `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor,modelgateway}:X.Y.Z`
+   (same digest, four names — the coordinates the Helm chart composes) plus
    `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag. The
    server image carries LICENSE, NOTICE and THIRD_PARTY_LICENSES at its root.
 4. `make release-chart PUSH=1 VERSION=X.Y.Z` — the chart to

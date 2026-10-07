@@ -19,7 +19,7 @@ import (
 
 func repoRoot() string { return filepath.Join("..", "..") }
 
-// fixtureIAM mirrors deploy/gcp/environment/iam.tf's two grants.
+// fixtureIAM mirrors deploy/gcp/environment/iam.tf's three grants.
 const fixtureIAM = `resource "google_kms_crypto_key_iam_member" "controlplane" {
   crypto_key_id = data.google_kms_crypto_key.cipher.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -30,6 +30,12 @@ resource "google_kms_crypto_key_iam_member" "executor" {
   crypto_key_id = data.google_kms_crypto_key.cipher.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
   member        = "serviceAccount:${data.google_service_account.executor.email}"
+}
+
+resource "google_kms_crypto_key_iam_member" "modelgateway" {
+  crypto_key_id = data.google_kms_crypto_key.cipher.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:${data.google_service_account.modelgateway.email}"
 }
 `
 
@@ -520,7 +526,7 @@ resource "google_kms_crypto_key_iam_member" "executor_dec" {
   role          = "roles/cloudkms.cryptoKeyDecrypter"
   member        = "serviceAccount:${data.google_service_account.executor.email}"
 }
-`
+` + grantFor("modelgateway", "roles/cloudkms.cryptoKeyEncrypterDecrypter")
 	if r := mustCheck(t, tfTree(t, map[string]string{"iam.tf": split})); len(r.Findings) != 0 {
 		t.Fatalf("two narrow grants in one root did not union: %v", r.Findings)
 	}
@@ -1086,46 +1092,73 @@ func TestPermsArithmetic(t *testing.T) {
 // Binaries with no GCP identity.
 // ---------------------------------------------------------------------------
 
-// TestAnUnhostedBinaryIsHeldToNoGrant: modelgateway reaches the cipher and no
-// fixture grants it, which is a finding for any other binary.
-func TestAnUnhostedBinaryIsHeldToNoGrant(t *testing.T) {
-	if _, ok := unhosted["modelgateway"]; !ok {
-		t.Skip("modelgateway is hosted now; its grant is checked like any other")
+// unhostedGateway is a module whose gateway and y both reach the cipher, with
+// y granted and gateway unhosted, plus the Terraform files named. A
+// multi-letter name, unlike unhostedRoot's x, so near-spellings of it can be
+// written.
+func unhostedGateway(t *testing.T, tf map[string]string) (root, tfDir string) {
+	t.Helper()
+	old := unhosted
+	unhosted = map[string]string{"gateway": "a test's"}
+	t.Cleanup(func() { unhosted = old })
+	root = fakeRoot(t, map[string]string{
+		"cmd/gateway/main.go":      "package main\n\nfunc Decrypt() {}\n\nfunc main() { Decrypt() }\n",
+		"cmd/y/main.go":            "package main\n\nfunc Decrypt() {}\n\nfunc main() { Decrypt() }\n",
+		"deploy/helm/c/Chart.yaml": "name: c\n",
+	})
+	files := map[string]string{"iam.tf": grantFor("y", "roles/cloudkms.cryptoKeyEncrypterDecrypter")}
+	for name, body := range tf {
+		files[name] += body
 	}
-	r := mustCheck(t, tfTree(t, nil))
-	if f := findingFor(r, "modelgateway"); f != nil {
+	return root, tfTree(t, files)
+}
+
+// TestAnUnhostedBinaryIsHeldToNoGrant: gateway reaches the cipher and no
+// grant names it, which is a finding for any other binary.
+func TestAnUnhostedBinaryIsHeldToNoGrant(t *testing.T) {
+	root, dir := unhostedGateway(t, nil)
+	r, err := Check(root, dir)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if f := findingFor(r, "gateway"); f != nil {
 		t.Fatalf("an unhosted binary was held to a grant: %v", f)
 	}
+	seen := false
 	for _, row := range r.Rows {
-		if row.Binary == "modelgateway" && (!row.Needs.any() || row.Grant != nil) {
-			t.Fatalf("modelgateway's row: needs %s, grant %v", row.Needs, row.Grant)
+		if row.Binary == "gateway" {
+			seen = true
+			if !row.Needs.any() || row.Grant != nil {
+				t.Fatalf("gateway's row: needs %s, grant %v", row.Needs, row.Grant)
+			}
 		}
+	}
+	if !seen {
+		t.Fatal("no row for gateway")
 	}
 }
 
 // TestAGrantToAnUnhostedBinaryIsRefused: a grant means it has an identity, and
 // the entry would stop this guard checking that identity's grant ever again.
 func TestAGrantToAnUnhostedBinaryIsRefused(t *testing.T) {
-	if _, ok := unhosted["modelgateway"]; !ok {
-		t.Skip("modelgateway is hosted now")
+	root, dir := unhostedGateway(t, map[string]string{"iam.tf": grantFor("gateway", "roles/cloudkms.cryptoKeyEncrypter")})
+	if _, err := Check(root, dir); err == nil || !strings.Contains(err.Error(), "iam.tf names it") {
+		t.Fatalf("error = %v, want the grant's file named", err)
 	}
-	dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM + grantFor("modelgateway", "roles/cloudkms.cryptoKeyEncrypter")})
-	wantRefusal(t, dir, "iam.tf names it")
 }
 
 // TestAnUnhostedBinaryNamedInTheTerraformIsRefused is #748's own shape: the
 // identity arrives without the grant, and nothing else would say so.
 func TestAnUnhostedBinaryNamedInTheTerraformIsRefused(t *testing.T) {
-	if _, ok := unhosted["modelgateway"]; !ok {
-		t.Skip("modelgateway is hosted now")
-	}
 	// Any spelling of the name counts: a near-miss is the hole.
-	for _, label := range []string{"modelgateway", "modelgateway_sa", "model_gateway", "modelGateway", "model-gateway"} {
-		dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM, "sa.tf": `resource "google_service_account" "` + label + `" {
+	for _, label := range []string{"gateway", "gateway_sa", "gate_way", "gateWay", "gate-way"} {
+		root, dir := unhostedGateway(t, map[string]string{"sa.tf": `resource "google_service_account" "` + label + `" {
   account_id = "map-gw"
 }
 `})
-		wantRefusal(t, dir, "sa.tf names it")
+		if _, err := Check(root, dir); err == nil || !strings.Contains(err.Error(), "sa.tf names it") {
+			t.Fatalf("%s: error = %v, want sa.tf named", label, err)
+		}
 	}
 }
 
@@ -1133,12 +1166,9 @@ func TestAnUnhostedBinaryNamedInTheTerraformIsRefused(t *testing.T) {
 // skipped, as readGrants skips it — `.terraform/` is a download cache, not this
 // repository's configuration.
 func TestAnUnhostedBinaryInADotDirectoryIsNotAMention(t *testing.T) {
-	if _, ok := unhosted["modelgateway"]; !ok {
-		t.Skip("modelgateway is hosted now")
-	}
-	dir := tfTree(t, map[string]string{"iam.tf": fixtureIAM, "environment/.terraform/modules/m/main.tf": `# modelgateway`})
-	if r := mustCheck(t, dir); len(r.Findings) != 0 {
-		t.Fatalf("findings: %v", r.Findings)
+	root, dir := unhostedGateway(t, map[string]string{"environment/.terraform/modules/m/main.tf": `# gateway`})
+	if r, err := Check(root, dir); err != nil || len(r.Findings) != 0 {
+		t.Fatalf("Check: %v, findings: %v", err, r.Findings)
 	}
 }
 

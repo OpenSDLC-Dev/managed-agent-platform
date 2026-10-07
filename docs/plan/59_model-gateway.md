@@ -574,7 +574,10 @@ frozen by slice 2.
   requests — it sends none today — and the brain sends `X-MAP-Session-ID` for
   per-session cost and cache locality.
 - compose and Helm run the gateway — Helm with two replicas and a PodDisruptionBudget by
-  default, since every agent turn now depends on it. The brain's platform API key comes
+  default, since every agent turn now depends on it. Until the cutover nothing does, so
+  slice 2 ships the chart's gateway behind `modelgateway.enabled`, off: the chart still
+  installs without a credential cipher, which the gateway refuses to start without, and
+  turning it on by default makes a cipher part of every default install. The brain's platform API key comes
   from one Secret that the brain, the control plane and the gateway read: the control plane
   registers it in `api_keys` under the name `brain` exactly as it registers
   `CONTROLPLANE_API_KEY` as `bootstrap` (`api.EnsureAPIKey`, `cmd/controlplane/main.go`),
@@ -638,7 +641,8 @@ frozen by slice 2.
    docs/REFERENCE_PROJECTS.md; the live tier on Gitee AI. Acceptance: dikw-core through
    the gateway.
 5. **Brain cutover:** the `traceparent` and session-id headers, the one-route default in
-   compose and Helm with the seeded key; `flatten_search_results` stays accepted for the
+   compose and Helm with the seeded key, and the chart's `modelgateway.enabled` on by
+   default; `flatten_search_results` stays accepted for the
    no-gateway mode. Acceptance: an `ant` session on MiniMax (CN) and one on DeepSeek
    through brain → gateway, transcripts in docs/HISTORY.md. Waits on slice 0.
 6. **Responses, stateless:** `/v1/responses` streamed and not, converted to Anthropic;

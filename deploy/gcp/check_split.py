@@ -93,8 +93,9 @@ UNRECOVERABLE = {
 # Object storage authenticates as the workloads themselves now, so there is no
 # fourth identity and no downloaded credential to protect. Lowered deliberately,
 # which is exactly what the failure message below asks for — the number is a
-# claim about the foundation, not a high-water mark.
-MIN_PROTECTED = 7
+# claim about the foundation, not a high-water mark. Eight since plan 59 slice
+# 2f gave the model gateway its own service account.
+MIN_PROTECTED = 8
 
 ROOT = pathlib.Path(__file__).parent
 RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
