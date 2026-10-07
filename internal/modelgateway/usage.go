@@ -55,10 +55,12 @@ func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), recordTimeout)
 	defer cancel()
-	if err := h.cfg.Store.RecordUsage(ctx, u, c.policy.TPM != nil); err != nil {
+	cost, err := h.cfg.Store.RecordUsage(ctx, u, c.policy.TPM != nil)
+	if err != nil {
 		slog.ErrorContext(ctx, "modelgateway: usage could not be recorded", "request_id", u.RequestID,
 			"api_key_id", u.APIKeyID, "deployment", u.DeploymentID, "error", err)
 	}
+	observe(context.WithoutCancel(r.Context()), u, out.at, cost)
 }
 
 // maxLedgerText bounds the text a ledger row takes from a caller or an

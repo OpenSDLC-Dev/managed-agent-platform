@@ -158,9 +158,13 @@ func New(cfg Config) (http.Handler, error) {
 type requestIDKey struct{}
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, span := serverSpan(r)
+	sw := &statusWriter{ResponseWriter: w}
+	defer func() { endServerSpan(span, sw.status) }()
+	w = sw
 	rid := newRequestID()
 	w.Header().Set("request-id", rid)
-	r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, rid))
+	r = r.WithContext(context.WithValue(ctx, requestIDKey{}, rid))
 	if strings.HasPrefix(r.URL.Path, "/admin/") {
 		if h.cfg.Admin == nil {
 			writeError(w, r, notFound("no such path: %s", r.URL.Path))
@@ -243,6 +247,7 @@ func internal(r *http.Request, what string, err error) *apiError {
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, e *apiError) {
+	markError(r.Context(), e.typ)
 	writeJSON(w, e.status, map[string]any{
 		"type":       "error",
 		"error":      map[string]string{"type": e.typ, "message": e.msg},

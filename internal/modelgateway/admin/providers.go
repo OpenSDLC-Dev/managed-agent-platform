@@ -49,6 +49,7 @@ type providerView struct {
 	Endpoints      map[profile.Protocol]string `json:"endpoints"`
 	Headers        map[string]string           `json:"headers"`
 	StallTimeoutMS *int64                      `json:"stall_timeout_ms"`
+	PropagateTrace bool                        `json:"propagate_trace"`
 	Enabled        bool                        `json:"enabled"`
 	CreatedAt      time.Time                   `json:"created_at"`
 	UpdatedAt      time.Time                   `json:"updated_at"`
@@ -56,7 +57,7 @@ type providerView struct {
 
 func viewProvider(p store.Provider) providerView {
 	v := providerView{Type: "provider", ID: p.ID, Name: p.Name, Profile: p.Profile, Endpoints: p.Endpoints,
-		Headers: p.Headers, Enabled: p.Enabled, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+		Headers: p.Headers, PropagateTrace: p.PropagateTrace, Enabled: p.Enabled, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
 	if v.Headers == nil {
 		v.Headers = map[string]string{}
 	}
@@ -85,6 +86,7 @@ func (h *handler) createProvider(r *http.Request) (any, error) {
 		Endpoints      map[profile.Protocol]string `json:"endpoints"`
 		Headers        map[string]string           `json:"headers"`
 		StallTimeoutMS *int64                      `json:"stall_timeout_ms"`
+		PropagateTrace bool                        `json:"propagate_trace"`
 		Enabled        *bool                       `json:"enabled"`
 	}
 	if err := decode(r, &req); err != nil {
@@ -123,7 +125,7 @@ func (h *handler) createProvider(r *http.Request) (any, error) {
 	}
 	p, err := h.cfg.Store.CreateProvider(r.Context(), store.Provider{
 		Name: req.Name, Profile: prof.Name, Endpoints: endpoints, Headers: req.Headers,
-		StallTimeout: stall, Enabled: req.Enabled == nil || *req.Enabled,
+		StallTimeout: stall, PropagateTrace: req.PropagateTrace, Enabled: req.Enabled == nil || *req.Enabled,
 	})
 	if err != nil {
 		return nil, err
@@ -152,7 +154,7 @@ func (h *handler) getProvider(r *http.Request) (any, error) {
 }
 
 func (h *handler) updateProvider(r *http.Request) (any, error) {
-	req, err := decodePatch(r, atCreation("profile", "endpoints"), []string{"name", "headers", "stall_timeout_ms", "enabled"})
+	req, err := decodePatch(r, atCreation("profile", "endpoints"), []string{"name", "headers", "stall_timeout_ms", "propagate_trace", "enabled"})
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +162,7 @@ func (h *handler) updateProvider(r *http.Request) (any, error) {
 		name    string
 		headers map[string]string
 		stallMS *int64
+		trace   bool
 		enabled bool
 	)
 	hasName, err := req.field("name", &name)
@@ -186,6 +189,10 @@ func (h *handler) updateProvider(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	hasTrace, err := req.field("propagate_trace", &trace)
+	if err != nil {
+		return nil, err
+	}
 	hasEnabled, err := req.field("enabled", &enabled)
 	if err != nil {
 		return nil, err
@@ -199,6 +206,9 @@ func (h *handler) updateProvider(r *http.Request) (any, error) {
 		}
 		if hasStall {
 			p.StallTimeout = stall
+		}
+		if hasTrace {
+			p.PropagateTrace = trace
 		}
 		if hasEnabled {
 			p.Enabled = enabled
