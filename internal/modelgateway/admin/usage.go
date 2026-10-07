@@ -25,9 +25,10 @@ type dailyUsageView struct {
 	Cost             float64 `json:"cost"`
 }
 
-// usageView is one request in the ledger. A count the upstream did not
-// report, and a session, error or time to first token the request did not
-// have, are null.
+// usageView is one request in the ledger. The counts are null when the
+// upstream reported none — once it reports one, a count it leaves out is 0 —
+// and a session, error or time to first token the request did not have is
+// null.
 type usageView struct {
 	ID               int64     `json:"id"`
 	RequestID        string    `json:"request_id"`
@@ -67,10 +68,15 @@ const (
 	maxLimit     = 1000
 )
 
+// maxDailyRows bounds the rollups one daily read answers, some 10 MB of JSON:
+// a read that matches more is refused, to be narrowed, rather than cut short
+// or built whole in memory.
+var maxDailyRows = 50000
+
 // query returns the request's query, refusing a malformed one, a parameter
-// outside allowed or one given twice, as a body's unknown field is refused:
-// a pair that does not parse is not dropped, which would read as a filter
-// the caller did not ask to lift.
+// outside allowed, given twice or given empty, as a body's unknown field is
+// refused: a pair that does not parse or names no value is not dropped,
+// which would read as a filter the caller did not ask to lift.
 func query(r *http.Request, allowed ...string) (url.Values, error) {
 	q, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
@@ -82,6 +88,9 @@ func query(r *http.Request, allowed ...string) (url.Values, error) {
 		}
 		if len(vs) > 1 {
 			return nil, invalid("query parameter %q is given more than once", k)
+		}
+		if vs[0] == "" {
+			return nil, invalid("query parameter %q is empty", k)
 		}
 	}
 	return q, nil
@@ -125,9 +134,12 @@ func (h *handler) dailyUsage(r *http.Request) (any, error) {
 	case to.Sub(from) >= maxDays*24*time.Hour:
 		return nil, invalid("from and to span more than %d days", maxDays)
 	}
-	days, err := h.cfg.Store.ListDailyUsage(r.Context(), usageFilter(q), from, to)
+	days, more, err := h.cfg.Store.ListDailyUsage(r.Context(), usageFilter(q), from, to, maxDailyRows)
 	if err != nil {
 		return nil, err
+	}
+	if more {
+		return nil, invalid("more than %d rollups match; narrow the span, or filter by key, alias or deployment", maxDailyRows)
 	}
 	out := make([]dailyUsageView, 0, len(days))
 	for _, d := range days {

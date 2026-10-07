@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
@@ -127,11 +128,12 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		writeError(w, r, invalid("every upstream of model %s ignores one of %s", model, strings.Join(ignored, ", ")))
 		return
 	}
-	// A session id longer than any id needs would also be too long for the
-	// ledger's index, and a row that cannot be written would take its TPM
-	// count with it.
-	if len(r.Header.Get(SessionHeader)) > maxSessionID {
-		writeError(w, r, invalid("%s: at most %d bytes", SessionHeader, maxSessionID))
+	// A session id the ledger cannot hold — longer than its index takes, or
+	// not UTF-8, which net/http admits in a header and Postgres refuses in
+	// text — is refused before it is counted, rather than leave the request
+	// unrecorded.
+	if s := r.Header.Get(SessionHeader); len(s) > maxSessionID || !utf8.ValidString(s) {
+		writeError(w, r, invalid("%s: at most %d bytes of UTF-8", SessionHeader, maxSessionID))
 		return
 	}
 	// Only a request the key's limits admit counts, and is recorded: the
@@ -317,17 +319,12 @@ var errorStatus = map[string]int{
 // had its 200 not already gone, retried and relayed like one — its
 // x-should-retry and Retry-After included.
 func streamError(ctx context.Context, at catalog.Attempt, data []byte, header http.Header, rid string, red provider.Redactor) (*failure, bool) {
-	var ev struct {
-		Error struct {
-			Type string `json:"type"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(data, &ev)
-	switch ev.Error.Type {
+	typ := errorTypeOf(data, 0)
+	switch typ {
 	case "authentication_error", "permission_error", "billing_error":
-		return refusedCredential(ctx, at, ev.Error.Type, data, red)
+		return refusedCredential(ctx, at, typ, data, red)
 	}
-	status, ok := errorStatus[ev.Error.Type]
+	status, ok := errorStatus[typ]
 	if !ok {
 		status = http.StatusInternalServerError
 	}
@@ -414,11 +411,10 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		var held []byte
 		for {
 			e, err := events.Next()
-			keepAlive := e.Name == "ping" || e.Name == "" && e.Data == nil
 			switch {
 			case err != nil:
 				return noAnswer(guard, red, err)
-			case keepAlive && len(held)+len(e.Raw) <= maxHeld:
+			case keepAlive(e) && len(held)+len(e.Raw) <= maxHeld:
 				held = append(held, e.Raw...)
 			case e.Name == "error":
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
@@ -443,9 +439,10 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	w.Header().Set("Content-Type", "application/json")
 	bounded(w)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(answerJSON(b, c.alias, wrap))
+	body, usage := answerJSON(b, c.alias, wrap)
+	_, _ = w.Write(body)
 	c.out.status = resp.StatusCode
-	c.out.tokens = usageOf(nil, member(b, "usage")) // a count's answer has no usage: its input_tokens is the count
+	c.out.tokens = usageOf(nil, usage) // a count's answer has no usage: its input_tokens is the count
 	return nil, false
 }
 
@@ -549,16 +546,18 @@ func redactValue(red provider.Redactor, v any) any {
 
 // answerJSON is a whole answer as the caller gets it: its model the name the
 // caller sent, and its thinking blocks wrapped. Anything that is not an
-// object with a model or thinking passes unchanged.
-func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
+// object with a model or thinking passes unchanged. The answer's usage
+// object, read by its exact key, comes back beside it.
+func answerJSON(b []byte, alias string, wrap *wrapping) ([]byte, json.RawMessage) {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(b, &obj) != nil {
-		return b
+		return b, nil
 	}
+	usage := obj["usage"]
 	_, model := obj["model"]
 	content := wrap.content(obj["content"])
 	if !model && content == nil {
-		return b
+		return b, usage
 	}
 	if model {
 		obj["model"] = encodeJSON(alias)
@@ -566,9 +565,12 @@ func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
 	if content != nil {
 		obj["content"] = content
 	}
-	out := encodeJSON(obj)
-	return out
+	return encodeJSON(obj), usage
 }
+
+// keepAlive is an event that holds a stream open and says nothing: a
+// comment or a ping.
+func keepAlive(e upstream.Event) bool { return e.Name == "ping" || e.Name == "" && e.Data == nil }
 
 // relayStream passes an upstream's events to the caller as each arrives —
 // the keep-alives held before the first, then the first, then the rest —
@@ -579,9 +581,10 @@ func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
 // whole: one the upstream cut off at the end of its stream is completed when
 // its data parses, so the caller dispatches it and nothing written after it
 // merges in, and dropped when its data does not, being unfinished. The
-// usage message_start and message_delta report, and the error the caller is
-// given, go to c.out as they pass. When the
-// caller stops reading — or reads too slowly to take an event within
+// usage message_start and message_delta report, the error the caller is
+// given, and the time to the first event that is not a keep-alive — the
+// relay may begin on keep-alives past maxHeld — go to c.out as they pass.
+// When the caller stops reading — or reads too slowly to take an event within
 // writeStall — the stream is still read. When the upstream fails partway, or
 // ends before message_stop, the caller gets an error event, the only way left
 // to say so, and an unfinished event before it is dropped rather than merged
@@ -591,7 +594,7 @@ func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
 // resets the stream on an HTTP/2 connection, which a TLS upstream negotiates,
 // and gives up an HTTP/1.1 one rather than returning it to the pool.
 func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, c call, wrap *wrapping, rid string, guard *provider.StallGuard, red provider.Redactor) {
-	c.out.status, c.out.ttft = http.StatusOK, time.Since(c.start)
+	c.out.status = http.StatusOK
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	rc := bounded(w)
@@ -611,12 +614,16 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		}
 	}
 	relay := func(e upstream.Event) {
+		if c.out.ttft == 0 && !keepAlive(e) {
+			c.out.ttft = time.Since(c.start)
+		}
 		out := e.Raw
 		switch {
 		case e.Data == nil:
 		case e.Name == "message_start":
-			c.out.tokens = usageOf(nil, member(e.Data, "message", "usage"))
-			out = e.WithData(messageStart(e.Data, c.alias, wrap))
+			d, usage := messageStart(e.Data, c.alias, wrap)
+			c.out.tokens = usageOf(nil, usage)
+			out = e.WithData(d)
 		case e.Name == "message_delta":
 			c.out.tokens = usageOf(c.out.tokens, member(e.Data, "usage"))
 		case e.Name == "error":
@@ -679,13 +686,14 @@ func terminated(raw []byte) []byte {
 	return append(raw, '\n', '\n')
 }
 
-// messageStart rewrites message_start's message as answerJSON does.
-func messageStart(data []byte, alias string, wrap *wrapping) []byte {
+// messageStart rewrites message_start's message as answerJSON does, and
+// returns the message's usage beside it.
+func messageStart(data []byte, alias string, wrap *wrapping) ([]byte, json.RawMessage) {
 	var ev map[string]json.RawMessage
 	if json.Unmarshal(data, &ev) != nil || ev["message"] == nil {
-		return data
+		return data, nil
 	}
-	ev["message"] = answerJSON(ev["message"], alias, wrap)
-	out := encodeJSON(ev)
-	return out
+	var usage json.RawMessage
+	ev["message"], usage = answerJSON(ev["message"], alias, wrap)
+	return encodeJSON(ev), usage
 }

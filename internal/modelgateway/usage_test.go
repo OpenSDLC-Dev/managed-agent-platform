@@ -25,6 +25,17 @@ func (e *env) ledger() []store.Usage {
 	return rows
 }
 
+// clearOfAMinute waits out the database's current minute when less than
+// five seconds of it remain, so the admissions a test counts share one
+// window.
+func (e *env) clearOfAMinute() {
+	var left float64
+	e.must(e.pool.QueryRow(e.ctx, `SELECT extract(epoch FROM date_trunc('minute', now()) + interval '1 minute' - now())::float8`).Scan(&left))
+	if left < 5 {
+		time.Sleep(time.Duration(left*float64(time.Second)) + 100*time.Millisecond)
+	}
+}
+
 // limitedKey issues a key granted every alias under the limits given.
 func (e *env) limitedKey(rpm *int32, tpm *int64) string {
 	e.t.Helper()
@@ -98,6 +109,8 @@ func TestAStreamsUsageIsItsLastWord(t *testing.T) {
 		"float":    {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":4.5}`, &store.Tokens{Input: 7, Output: 1}},
 		"late":     {`"x"`, `{"output_tokens":4}`, &store.Tokens{Output: 4}},
 		"negative": {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":-3}`, &store.Tokens{Input: 7, Output: 1}},
+		"bound":    {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":1099511627776}`, &store.Tokens{Input: 7, Output: 1 << 40}},
+		"past":     {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":1099511627777}`, &store.Tokens{Input: 7, Output: 1}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
@@ -268,6 +281,7 @@ func TestALimitedKeyIsRefusedPastItsLimit(t *testing.T) {
 	_, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_boot', 'bootstrap', $1)`, apikey.Hash(bootstrap))
 	e.must(err)
 	e.start()
+	e.clearOfAMinute()
 	send := func(key, path, model string) (*http.Response, []byte) {
 		return e.do("POST", path, `{"model":"`+model+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
 	}
@@ -318,10 +332,10 @@ func TestALimitedKeyIsRefusedPastItsLimit(t *testing.T) {
 	}
 }
 
-// A session id longer than any id needs is refused before the key's limits
-// count it, since the ledger could not index it and a row that cannot be
-// written would take its TPM count with it; one at the bound is recorded.
-func TestALongSessionIDIsRefused(t *testing.T) {
+// A session id the ledger cannot hold — longer than its index takes, or not
+// UTF-8 — is refused before the key's limits count it, rather than leave the
+// request unrecorded; one at the bound is recorded.
+func TestASessionIDTheLedgerCannotHoldIsRefused(t *testing.T) {
 	e := newEnv(t)
 	up := newFake(t, message("ok"))
 	p := e.provider(up.URL)
@@ -331,9 +345,11 @@ func TestALongSessionIDIsRefused(t *testing.T) {
 	key := e.limitedKey(&rpm, nil)
 	e.start()
 	body := `{"model":"fast","max_tokens":8,"messages":[]}`
-	resp, b := e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key, "X-MAP-Session-ID": strings.Repeat("s", 257)})
-	if typ, msg, _ := errorOf(t, b); resp.StatusCode != 400 || typ != "invalid_request_error" || !strings.Contains(msg, "X-MAP-Session-ID") {
-		t.Errorf("%d %s", resp.StatusCode, b)
+	for _, id := range []string{strings.Repeat("s", 257), "sesn_\xff"} {
+		resp, b := e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key, "X-MAP-Session-ID": id})
+		if typ, msg, _ := errorOf(t, b); resp.StatusCode != 400 || typ != "invalid_request_error" || !strings.Contains(msg, "X-MAP-Session-ID") {
+			t.Errorf("%q: %d %s", id, resp.StatusCode, b)
+		}
 	}
 	if n := len(up.recorded()); n != 0 {
 		t.Errorf("the upstream was called %d times", n)
@@ -371,5 +387,75 @@ func TestASlowLedgerDoesNotCutTheAnswer(t *testing.T) {
 	}
 	if rows := e.ledger(); len(rows) != 1 {
 		t.Errorf("the ledger holds %d rows, want the one recorded once the lock went", len(rows))
+	}
+}
+
+// What the ledger takes from a caller or an upstream is made text Postgres
+// holds, where either as sent would fail the row: a model name the wildcard
+// admits is recorded without its NUL and cut to 256 bytes at a character's
+// start, and an upstream's error type without its NUL.
+func TestTheLedgerHoldsWhatItIsSent(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		if strings.Contains(string(c.Raw), "refuse") {
+			writeBody(w, 400, `{"type":"error","error":{"type":"bad\u0000type","message":"no"}}`)
+			return
+		}
+		message("ok")(w, r, c)
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("*", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	hdr := map[string]string{"x-api-key": key}
+	if resp, b := e.do("POST", "/v1/messages", `{"model":"x\u0000`+strings.Repeat("é", 200)+`","max_tokens":8,"messages":[]}`, hdr); resp.StatusCode != 200 {
+		t.Fatalf("a long name under the wildcard: %d %s", resp.StatusCode, b)
+	}
+	if resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"metadata":{"user_id":"refuse"},"messages":[]}`, hdr); resp.StatusCode != 400 {
+		t.Fatalf("a refusal: %d %s", resp.StatusCode, b)
+	}
+	rows := e.ledger()
+	if len(rows) != 2 {
+		t.Fatalf("%d rows, want both requests recorded", len(rows))
+	}
+	if want := "x" + strings.Repeat("é", 127); rows[1].Model != want {
+		t.Errorf("model %q (%d bytes), want %q", rows[1].Model, len(rows[1].Model), want)
+	}
+	if rows[0].ErrorType != "badtype" {
+		t.Errorf("error type %q, want badtype", rows[0].ErrorType)
+	}
+}
+
+// A stream's time to first token runs to its first event that is not a
+// keep-alive, even when keep-alives past what the gateway holds back began
+// the relay before it, and no further.
+func TestTimeToFirstTokenSkipsKeepAlives(t *testing.T) {
+	e := newEnv(t)
+	ping := "event: ping\ndata: {\"type\":\"ping\"}\n\n"
+	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, strings.Repeat(ping, 70<<10/len(ping)))
+		w.(http.Flusher).Flush()
+		time.Sleep(300 * time.Millisecond)
+		for i, ev := range events("m", "ok") {
+			_, _ = io.WriteString(w, ev)
+			w.(http.Flusher).Flush()
+			if i == 0 {
+				time.Sleep(300 * time.Millisecond)
+			}
+		}
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	if resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].TTFT < 300*time.Millisecond || rows[0].TTFT >= 600*time.Millisecond {
+		t.Errorf("the ledger holds %+v, want one row whose time to first token is between 300ms and 600ms", rows)
 	}
 }

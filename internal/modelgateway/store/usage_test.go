@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -71,7 +72,7 @@ func TestRecordUsageWritesTheLedgerAndItsDay(t *testing.T) {
 	}
 
 	today := time.Now().UTC()
-	days, err := s.ListDailyUsage(ctx, store.UsageFilter{APIKeyID: "key_a", DeploymentID: priced.ID}, today, today)
+	days, _, err := s.ListDailyUsage(ctx, store.UsageFilter{APIKeyID: "key_a", DeploymentID: priced.ID}, today, today, 100)
 	if err != nil || len(days) != 1 {
 		t.Fatalf("ListDailyUsage = %+v, %v", days, err)
 	}
@@ -80,10 +81,13 @@ func TestRecordUsageWritesTheLedgerAndItsDay(t *testing.T) {
 		d.Requests != 2 || d.Errors != 1 || d.Tokens != *ok.Tokens || !near(d.Cost, 0.0073) {
 		t.Errorf("the day's rollup is %+v", d)
 	}
-	if all, err := s.ListDailyUsage(ctx, store.UsageFilter{APIKeyID: "key_a"}, today.AddDate(0, 0, -1), today); err != nil || len(all) != 3 {
+	if all, more, err := s.ListDailyUsage(ctx, store.UsageFilter{APIKeyID: "key_a"}, today.AddDate(0, 0, -1), today, 3); err != nil || len(all) != 3 || more {
 		t.Errorf("the key's rollups are %+v, %v; want one per deployment", all, err)
 	}
-	if none, err := s.ListDailyUsage(ctx, store.UsageFilter{}, today.AddDate(0, 0, -3), today.AddDate(0, 0, -1)); err != nil || len(none) != 0 {
+	if cut, more, err := s.ListDailyUsage(ctx, store.UsageFilter{APIKeyID: "key_a"}, today.AddDate(0, 0, -1), today, 2); err != nil || len(cut) != 2 || !more {
+		t.Errorf("the three rollups read two at a time: %d rows, more %t, %v", len(cut), more, err)
+	}
+	if none, _, err := s.ListDailyUsage(ctx, store.UsageFilter{}, today.AddDate(0, 0, -3), today.AddDate(0, 0, -1), 100); err != nil || len(none) != 0 {
 		t.Errorf("earlier days hold %+v, %v", none, err)
 	}
 }
@@ -115,7 +119,7 @@ func TestADayIsAUTCDay(t *testing.T) {
 	if err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil), false); err != nil {
 		t.Fatal(err)
 	}
-	days, err := s.ListDailyUsage(ctx, store.UsageFilter{}, utc, utc)
+	days, _, err := s.ListDailyUsage(ctx, store.UsageFilter{}, utc, utc, 100)
 	if err != nil || len(days) != 1 || days[0].Day.Format(time.DateOnly) != utc.Format(time.DateOnly) {
 		t.Errorf("UTC's day holds %+v, %v; the database's is %s", days, err, local)
 	}
@@ -186,6 +190,21 @@ func window(t *testing.T, pool *pgxpool.Pool, key string) (requests, tokens int6
 	return requests, tokens
 }
 
+// clearOfAMinute waits out the database's current minute when less than
+// five seconds of it remain, so the admissions a test counts share one
+// window.
+func clearOfAMinute(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	var left float64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT extract(epoch FROM date_trunc('minute', now()) + interval '1 minute' - now())::float8`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left < 5 {
+		time.Sleep(time.Duration(left*float64(time.Second)) + 100*time.Millisecond)
+	}
+}
+
 // RPM admits a key's requests until the minute's count reaches it and does
 // not count the ones it refuses; TPM admits while the minute's completed
 // tokens — a cache read not among them — are under it. Each refusal says
@@ -194,6 +213,7 @@ func window(t *testing.T, pool *pgxpool.Pool, key string) (requests, tokens int6
 func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
+	clearOfAMinute(t, pool)
 	rpm, tpm := int32(2), int64(1000)
 
 	if _, err := pool.Exec(ctx, `INSERT INTO modelgateway.rate_windows (api_key_id, minute, requests, tokens)
@@ -327,4 +347,92 @@ func TestSweepUsage(t *testing.T) {
 	swept("a later sweep")
 	stop()
 	<-done
+}
+
+// A row the ledger refuses — here for a NUL, which Postgres text refuses —
+// still counts its tokens against the key's TPM: the window is written on
+// its own.
+func TestATokenCountOutlivesItsLedgerRow(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	clearOfAMinute(t, pool)
+	u := usage("key_n", "x", "dep_1", &store.Tokens{Input: 40, Output: 2, CacheRead: 9})
+	u.Model = "bad\x00name"
+	if err := s.RecordUsage(ctx, u, true); err == nil {
+		t.Fatal("the ledger took a NUL")
+	}
+	if _, tok := window(t, pool, "key_n"); tok != 42 {
+		t.Errorf("the window counted %d tokens, want 42", tok)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM modelgateway.usage WHERE api_key_id = 'key_n'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("%d ledger rows (%v), want none", n, err)
+	}
+}
+
+// A database an operator defaults to REPEATABLE READ refuses to update a row
+// another transaction updated since the statement began. Admission, a
+// window's tokens and a day's rollup each upsert a row other requests
+// update too, and each goes on after waiting out such an update.
+func TestTheLimitsAndTheLedgerAreReadCommitted(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	pgtest.DefaultRepeatableRead(t, pool)
+	clearOfAMinute(t, pool)
+	rpm := int32(100)
+	if _, err := s.Admit(ctx, "key_rr", &rpm, nil); err != nil {
+		t.Fatal(err)
+	}
+	record := func(tpmLimited bool) error {
+		return s.RecordUsage(ctx, usage("key_rr", "x", "dep_1", &store.Tokens{Input: 1}), tpmLimited)
+	}
+	if err := record(true); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, lock string
+		run        func() error
+	}{
+		{"admission", `UPDATE modelgateway.rate_windows SET requests = requests WHERE api_key_id = 'key_rr'`,
+			func() error { _, err := s.Admit(ctx, "key_rr", &rpm, nil); return err }},
+		{"window", `UPDATE modelgateway.rate_windows SET tokens = tokens WHERE api_key_id = 'key_rr'`,
+			func() error { return record(true) }},
+		{"rollup", `UPDATE modelgateway.usage_daily SET requests = requests WHERE api_key_id = 'key_rr'`,
+			func() error { return record(false) }},
+	} {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, c.lock); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- c.run() }()
+		awaitALockWait(t, pool)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Errorf("%s after a concurrent update: %v", c.name, err)
+		}
+	}
+}
+
+// awaitALockWait returns once a statement on pool's database waits on a lock.
+func awaitALockWait(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var n int
+		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no statement waited on the lock")
+		}
+	}
 }

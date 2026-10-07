@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
@@ -76,12 +77,21 @@ func TestDailyUsage(t *testing.T) {
 		"?api_key=key_a":                 "unknown query parameter",
 		"?alias=a&alias=b":               "more than once",
 		"?session_id=sesn_1":             "unknown query parameter",
+		"?api_key_id=":                   "is empty",
 	} {
 		e.refused(e.admin("GET", "/admin/v1/usage/daily"+q, nil), http.StatusBadRequest, "invalid_request_error", says)
 	}
 	if r := e.admin("GET", "/admin/v1/usage/daily?from=2025-01-02&to=2026-01-02", nil); r.status != http.StatusOK {
 		t.Errorf("a span of 366 days: %d %s", r.status, r.raw)
 	}
+	// More rollups than one read answers are refused, to be narrowed.
+	restore := admin.SetMaxDailyRows(5)
+	if n := len((reply{body: e.ok(e.admin("GET", "/admin/v1/usage/daily?from="+old, nil), "at the bound")}).list()); n != 5 {
+		t.Errorf("five rollups at a bound of five: %d rows", n)
+	}
+	admin.SetMaxDailyRows(4)
+	e.refused(e.admin("GET", "/admin/v1/usage/daily?from="+old, nil), http.StatusBadRequest, "invalid_request_error", "narrow")
+	restore()
 }
 
 // The ledger answers newest first, a page at a time, filtered by key,
@@ -147,6 +157,7 @@ func TestUsageRequests(t *testing.T) {
 		"?before=abc":     "row id",
 		"?from=x":         "unknown query parameter",
 		"?session_id=%ZZ": "does not parse",
+		"?session_id=":    "is empty",
 	} {
 		e.refused(e.admin("GET", "/admin/v1/usage/requests"+q, nil), http.StatusBadRequest, "invalid_request_error", says)
 	}

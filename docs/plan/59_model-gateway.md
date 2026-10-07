@@ -514,7 +514,8 @@ database holds them — goes to the database directly.
   refused request is not counted, nor is one the gateway refuses on its own before
   admission (an unknown model, a field every upstream ignores), and a `count_tokens`
   request counts like any other. TPM is
-  a soft limit on completed usage: a response's tokens count in the minute it ends, and a
+  a soft limit on completed usage: a response's tokens count in the minute it ends —
+  written apart from its ledger row, so a row the ledger refuses still counts — and a
   request is admitted while the current minute's count is under the limit, so requests
   already in flight can overshoot it by their own size — RPM is what bounds that. It
   counts input, cache-write and output tokens but not cache reads, as Anthropic's own

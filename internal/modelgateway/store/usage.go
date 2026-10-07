@@ -49,18 +49,38 @@ type Usage struct {
 	TTFT         time.Duration // zero when the answer was not streamed
 }
 
-// RecordUsage writes u to the ledger, adds it to its day's rollup and, when
-// the key's TPM is limited, adds its tokens to the current minute's window —
-// the minute the request ended, by the database's clock — all in one
-// statement. Cost is computed here, at the prices the deployment has now, a
+// readCommitted is the isolation the limits and the ledger name rather than
+// inherit: each upserts a row other requests update too, which a stricter
+// default an operator may set refuses to update once another has committed
+// since the statement began, where READ COMMITTED waits and goes on
+// (internal/store's BeginObjectDelete makes the same choice).
+var readCommitted = pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
+
+// exec runs one statement in a transaction of its own at readCommitted.
+func (s *Store) exec(ctx context.Context, sql string, args ...any) error {
+	return pgx.BeginTxFunc(ctx, s.pool, readCommitted, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, sql, args...)
+		return err
+	})
+}
+
+// RecordUsage writes u to the ledger and adds it to its day's rollup, in one
+// statement, and, when the key's TPM is limited, adds its tokens to the
+// current minute's window — the minute the request ended, by the database's
+// clock — in another, so a row the ledger refuses still counts against the
+// limit. Cost is computed here, at the prices the deployment has now, a
 // missing price costing nothing and missing tokens making no cost.
 func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) error {
-	var in, out, cw, cr, limited *int64
+	var in, out, cw, cr *int64
+	var windowErr error
 	if t := u.Tokens; t != nil {
 		in, out, cw, cr = &t.Input, &t.Output, &t.CacheWrite, &t.CacheRead
 		if tpmLimited {
-			n := t.limited()
-			limited = &n
+			windowErr = s.exec(ctx, `
+				INSERT INTO modelgateway.rate_windows AS w (api_key_id, minute, tokens)
+				VALUES ($1, date_trunc('minute', now()), $2)
+				ON CONFLICT (api_key_id, minute) DO UPDATE SET tokens = w.tokens + EXCLUDED.tokens`,
+				u.APIKeyID, t.limited())
 		}
 	}
 	var ttft *int64
@@ -68,7 +88,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) error
 		us := u.TTFT.Microseconds()
 		ttft = &us
 	}
-	_, err := s.pool.Exec(ctx, `
+	ledgerErr := s.exec(ctx, `
 		WITH u AS (
 		  INSERT INTO modelgateway.usage (request_id, api_key_id, model, alias, deployment_id, credential_id,
 		      session_id, protocol, endpoint, status, error_type, input_tokens, output_tokens,
@@ -81,27 +101,23 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) error
 		  FROM (VALUES (1)) one LEFT JOIN modelgateway.deployments d ON d.id = $5
 		  RETURNING created_at, api_key_id, alias, deployment_id, error_type,
 		            input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost
-		), daily AS (
-		  INSERT INTO modelgateway.usage_daily AS t (day, api_key_id, alias, deployment_id, requests, errors,
-		      input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost)
-		  SELECT (created_at AT TIME ZONE 'UTC')::date, api_key_id, alias, deployment_id, 1,
-		         (error_type IS NOT NULL)::integer, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
-		         coalesce(cache_write_tokens, 0), coalesce(cache_read_tokens, 0), coalesce(cost, 0)
-		  FROM u
-		  ON CONFLICT (day, api_key_id, alias, deployment_id) DO UPDATE SET
-		    requests = t.requests + 1, errors = t.errors + EXCLUDED.errors,
-		    input_tokens = t.input_tokens + EXCLUDED.input_tokens,
-		    output_tokens = t.output_tokens + EXCLUDED.output_tokens,
-		    cache_write_tokens = t.cache_write_tokens + EXCLUDED.cache_write_tokens,
-		    cache_read_tokens = t.cache_read_tokens + EXCLUDED.cache_read_tokens,
-		    cost = t.cost + EXCLUDED.cost
 		)
-		INSERT INTO modelgateway.rate_windows AS w (api_key_id, minute, tokens)
-		SELECT api_key_id, date_trunc('minute', created_at), $18::bigint FROM u WHERE $18::bigint IS NOT NULL
-		ON CONFLICT (api_key_id, minute) DO UPDATE SET tokens = w.tokens + EXCLUDED.tokens`,
+		INSERT INTO modelgateway.usage_daily AS t (day, api_key_id, alias, deployment_id, requests, errors,
+		    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost)
+		SELECT (created_at AT TIME ZONE 'UTC')::date, api_key_id, alias, deployment_id, 1,
+		       (error_type IS NOT NULL)::integer, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
+		       coalesce(cache_write_tokens, 0), coalesce(cache_read_tokens, 0), coalesce(cost, 0)
+		FROM u
+		ON CONFLICT (day, api_key_id, alias, deployment_id) DO UPDATE SET
+		  requests = t.requests + 1, errors = t.errors + EXCLUDED.errors,
+		  input_tokens = t.input_tokens + EXCLUDED.input_tokens,
+		  output_tokens = t.output_tokens + EXCLUDED.output_tokens,
+		  cache_write_tokens = t.cache_write_tokens + EXCLUDED.cache_write_tokens,
+		  cache_read_tokens = t.cache_read_tokens + EXCLUDED.cache_read_tokens,
+		  cost = t.cost + EXCLUDED.cost`,
 		u.RequestID, u.APIKeyID, u.Model, u.Alias, u.DeploymentID, u.CredentialID, u.SessionID, u.Protocol,
-		u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft, limited)
-	return err
+		u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft)
+	return errors.Join(windowErr, ledgerErr)
 }
 
 // UsageFilter narrows a usage read; an empty field matches every value.
@@ -192,18 +208,19 @@ type DailyUsage struct {
 }
 
 // ListDailyUsage reads the rollups of the UTC days from through to, both
-// included, in order of day, key, alias and deployment.
-func (s *Store) ListDailyUsage(ctx context.Context, f UsageFilter, from, to time.Time) ([]DailyUsage, error) {
+// included, in order of day, key, alias and deployment: up to limit rows,
+// and whether more match.
+func (s *Store) ListDailyUsage(ctx context.Context, f UsageFilter, from, to time.Time, limit int) ([]DailyUsage, bool, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT day, api_key_id, alias, deployment_id, requests, errors, input_tokens, output_tokens,
 		       cache_write_tokens, cache_read_tokens, cost::float8
 		FROM modelgateway.usage_daily
 		WHERE day BETWEEN $1::date AND $2::date AND ($3 = '' OR api_key_id = $3) AND ($4 = '' OR alias = $4)
 		  AND ($5 = '' OR deployment_id = $5)
-		ORDER BY day, api_key_id, alias, deployment_id`,
-		from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly), f.APIKeyID, f.Alias, f.DeploymentID)
+		ORDER BY day, api_key_id, alias, deployment_id LIMIT $6`,
+		from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly), f.APIKeyID, f.Alias, f.DeploymentID, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []DailyUsage
@@ -211,11 +228,17 @@ func (s *Store) ListDailyUsage(ctx context.Context, f UsageFilter, from, to time
 		var d DailyUsage
 		if err := rows.Scan(&d.Day, &d.APIKeyID, &d.Alias, &d.DeploymentID, &d.Requests, &d.Errors,
 			&d.Tokens.Input, &d.Tokens.Output, &d.Tokens.CacheWrite, &d.Tokens.CacheRead, &d.Cost); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
 }
 
 // sweepLock is the advisory lock a sweep holds, so replicas take turns

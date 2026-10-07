@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Admission is a limited key's answer for one request.
@@ -26,11 +28,13 @@ type Admission struct {
 // another's lock does not promise a window already over. Which limit
 // refused is the only one set, or, with both, read once more after the
 // refusal, from the same window: the upsert decided on the row as it found
-// it after any wait, which the statement's own snapshot may predate.
+// it after any wait, which the statement's own snapshot may predate. The
+// upsert runs at readCommitted, whatever the database's default.
 func (s *Store) Admit(ctx context.Context, apiKeyID string, rpm *int32, tpm *int64) (Admission, error) {
 	var a Admission
 	var minute time.Time
-	err := s.pool.QueryRow(ctx, `
+	err := pgx.BeginTxFunc(ctx, s.pool, readCommitted, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
 		WITH up AS (
 		  INSERT INTO modelgateway.rate_windows AS w (api_key_id, minute, requests)
 		  VALUES ($1, date_trunc('minute', now()), 1)
@@ -40,7 +44,8 @@ func (s *Store) Admit(ctx context.Context, apiKeyID string, rpm *int32, tpm *int
 		)
 		SELECT EXISTS (SELECT 1 FROM up), date_trunc('minute', now()),
 		       greatest(1, ceil(extract(epoch FROM date_trunc('minute', now()) + interval '1 minute' - clock_timestamp())))::integer`,
-		apiKeyID, rpm, tpm).Scan(&a.Admitted, &minute, &a.RetryAfter)
+			apiKeyID, rpm, tpm).Scan(&a.Admitted, &minute, &a.RetryAfter)
+	})
 	switch {
 	case err != nil:
 		return Admission{}, err
