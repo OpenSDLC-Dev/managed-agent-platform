@@ -51,11 +51,17 @@ func priced(v float64) *float64 { return &v }
 // matched, the deployment and credential that answered, the caller's session,
 // the route, the status, the tokens the upstream reported costed at the
 // deployment's prices, the latency, and for a stream the time its answer
-// began. A count reports no tokens. The row's request id is the one the
-// caller was given.
+// began. A count reports no tokens, even when its answer names a usage
+// beside the count. The row's request id is the one the caller was given.
 func TestTheLedgerRecordsEachAnsweredRequest(t *testing.T) {
 	e := newEnv(t)
-	up := newFake(t, message("ok"))
+	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		if c.Path == "/v1/messages/count_tokens" {
+			writeBody(w, 200, `{"input_tokens":42,"usage":{"input_tokens":42,"output_tokens":3}}`)
+			return
+		}
+		message("ok")(w, r, c)
+	})
 	p := e.provider(up.URL)
 	cred := e.credential(p, "sk-upstream-1", 1)
 	d := e.deployment(p, "m", func(d *store.Deployment) {

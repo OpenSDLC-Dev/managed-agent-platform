@@ -442,7 +442,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	body, usage := answerJSON(b, c.alias, wrap)
 	_, _ = w.Write(body)
 	c.out.status = resp.StatusCode
-	c.out.tokens = usageOf(nil, usage) // a count's answer has no usage: its input_tokens is the count
+	if c.path == "/v1/messages" { // a count's answer is a count, not usage, whatever else it names
+		c.out.tokens = usageOf(nil, usage)
+	}
 	return nil, false
 }
 
