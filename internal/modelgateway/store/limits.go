@@ -17,9 +17,15 @@ type Admission struct {
 // loop does not keep itself out of the next window. TPM is soft: a
 // response's tokens count in the minute it ends (RecordUsage), so requests
 // already in flight may overshoot it; RPM is what bounds those.
+//
+// The window is the minute the statement began in, and retry-after runs to
+// its end from the moment the decision is made, so an upsert that waited on
+// another's lock does not promise a window already over. Which limit
+// refused is the only one set, or, with both, read once more after the
+// refusal: the upsert decided on the row as it found it after any wait,
+// which the statement's own snapshot may predate.
 func (s *Store) Admit(ctx context.Context, apiKeyID string, rpm *int32, tpm *int64) (Admission, error) {
 	var a Admission
-	var tokens int64
 	err := s.pool.QueryRow(ctx, `
 		WITH up AS (
 		  INSERT INTO modelgateway.rate_windows AS w (api_key_id, minute, requests)
@@ -29,13 +35,22 @@ func (s *Store) Admit(ctx context.Context, apiKeyID string, rpm *int32, tpm *int
 		  RETURNING 1
 		)
 		SELECT EXISTS (SELECT 1 FROM up),
-		       coalesce((SELECT tokens FROM modelgateway.rate_windows
-		                 WHERE api_key_id = $1 AND minute = date_trunc('minute', now())), 0),
-		       greatest(1, ceil(extract(epoch FROM date_trunc('minute', now()) + interval '1 minute' - now())))::integer`,
-		apiKeyID, rpm, tpm).Scan(&a.Admitted, &tokens, &a.RetryAfter)
-	if err != nil {
+		       greatest(1, ceil(extract(epoch FROM date_trunc('minute', now()) + interval '1 minute' - clock_timestamp())))::integer`,
+		apiKeyID, rpm, tpm).Scan(&a.Admitted, &a.RetryAfter)
+	switch {
+	case err != nil:
 		return Admission{}, err
+	case a.Admitted || tpm == nil:
+	case rpm == nil:
+		a.Tokens = true
+	default:
+		var tokens int64
+		err = s.pool.QueryRow(ctx, `SELECT coalesce(max(tokens), 0) FROM modelgateway.rate_windows
+			WHERE api_key_id = $1 AND minute = date_trunc('minute', now())`, apiKeyID).Scan(&tokens)
+		if err != nil {
+			return Admission{}, err
+		}
+		a.Tokens = tokens >= *tpm
 	}
-	a.Tokens = !a.Admitted && tpm != nil && tokens >= *tpm
 	return a, nil
 }

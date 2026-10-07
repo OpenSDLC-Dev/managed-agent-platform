@@ -36,6 +36,8 @@ CREATE TABLE modelgateway.usage (
 );
 CREATE INDEX usage_created_idx ON modelgateway.usage (created_at);
 CREATE INDEX usage_key_idx ON modelgateway.usage (api_key_id, id);
+CREATE INDEX usage_alias_idx ON modelgateway.usage (alias, id);
+CREATE INDEX usage_deployment_idx ON modelgateway.usage (deployment_id, id);
 CREATE INDEX usage_session_idx ON modelgateway.usage (session_id, id) WHERE session_id IS NOT NULL;
 
 -- The ledger summed per UTC day, key, configured alias and deployment,

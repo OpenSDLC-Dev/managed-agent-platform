@@ -409,7 +409,9 @@ defaults, as the platform's top-level resource tables do
 
 Every admin write commits a `NOTIFY modelgateway_config`; each replica reloads its
 snapshot on the notification and on a periodic tick, so a missed notification heals. The
-request path reads only the snapshot.
+request path reads its configuration only from the snapshot; what it counts and records —
+a limited key's admission and the ledger row, costed at the deployment's prices as the
+database holds them — goes to the database directly.
 
 ### Routing, retries, limits
 

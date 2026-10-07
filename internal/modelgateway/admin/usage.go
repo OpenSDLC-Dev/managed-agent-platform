@@ -67,10 +67,15 @@ const (
 	maxLimit     = 1000
 )
 
-// query returns the request's query, refusing a parameter outside allowed or
-// one given twice, as a body's unknown field is refused.
+// query returns the request's query, refusing a malformed one, a parameter
+// outside allowed or one given twice, as a body's unknown field is refused:
+// a pair that does not parse is not dropped, which would read as a filter
+// the caller did not ask to lift.
 func query(r *http.Request, allowed ...string) (url.Values, error) {
-	q := r.URL.Query()
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, invalid("the query does not parse: %s", err)
+	}
 	for k, vs := range q {
 		if !slices.Contains(allowed, k) {
 			return nil, invalid("unknown query parameter %q", k)

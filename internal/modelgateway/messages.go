@@ -29,6 +29,10 @@ var maxResponseBody = 64 << 20
 // requests on one upstream (catalog.Snapshot.Plan). It never goes upstream.
 const SessionHeader = "X-MAP-Session-ID"
 
+// maxSessionID bounds a session id: the platform's are 31 bytes, and an
+// application's own is an id, not a document.
+const maxSessionID = 256
+
 // defaultAnthropicVersion is sent when a caller sends none; every Anthropic
 // SDK sends one.
 const defaultAnthropicVersion = "2023-06-01"
@@ -116,6 +120,13 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		writeError(w, r, invalid("every upstream of model %s ignores one of %s", model, strings.Join(ignored, ", ")))
 		return
 	}
+	// A session id longer than any id needs would also be too long for the
+	// ledger's index, and a row that cannot be written would take its TPM
+	// count with it.
+	if len(r.Header.Get(SessionHeader)) > maxSessionID {
+		writeError(w, r, invalid("%s: at most %d bytes", SessionHeader, maxSessionID))
+		return
+	}
 	// Only a request the key's limits admit counts, and is recorded: the
 	// refusals above are the gateway's own, made before any upstream was
 	// asked.
@@ -123,7 +134,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		return
 	}
 	out := &outcome{}
-	defer h.record(r, c, a.Name, model, path, start, out)
+	defer h.record(w, r, c, a.Name, model, path, start, out)
 	call := call{
 		top:    top,
 		hist:   parseHistory(top["messages"]),
@@ -597,7 +608,7 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		switch {
 		case e.Data == nil:
 		case e.Name == "message_start":
-			c.out.tokens = usageOf(c.out.tokens, member(e.Data, "message", "usage"))
+			c.out.tokens = usageOf(nil, member(e.Data, "message", "usage"))
 			out = e.WithData(messageStart(e.Data, c.alias, wrap))
 		case e.Name == "message_delta":
 			c.out.tokens = usageOf(c.out.tokens, member(e.Data, "usage"))

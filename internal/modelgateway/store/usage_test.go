@@ -229,6 +229,19 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 	if a, err := s.Admit(ctx, "key_t", nil, &tpm); err != nil || a.Admitted || !a.Tokens {
 		t.Errorf("at the limit: %+v, %v; want refused for tokens", a, err)
 	}
+	// With both limits set, the refusal names the one reached.
+	both, one := int32(5), int32(1)
+	if err := s.RecordUsage(ctx, usage("key_both", "x", "dep_1", &store.Tokens{Input: 1000}), true); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := s.Admit(ctx, "key_both", &both, &tpm); err != nil || a.Admitted || !a.Tokens {
+		t.Errorf("both limits, tokens reached: %+v, %v", a, err)
+	}
+	for i, want := range []bool{true, false} {
+		if a, err := s.Admit(ctx, "key_rpm", &one, &tpm); err != nil || a.Admitted != want || a.Tokens {
+			t.Errorf("both limits, request %d: %+v, %v; want admitted %t and never for tokens", i, a, err, want)
+		}
+	}
 	// A key whose TPM is not limited leaves the windows alone.
 	if err := s.RecordUsage(ctx, usage("key_u", "x", "dep_1", &store.Tokens{Input: 5}), false); err != nil {
 		t.Fatal(err)

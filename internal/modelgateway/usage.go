@@ -31,9 +31,13 @@ const recordTimeout = 10 * time.Second
 // recorded all the same. The write follows the answer's last byte but comes
 // before net/http ends the response, so a caller waits on it the time one
 // insert takes; in return a replica shutting down records every request it
-// served before it stops. A failed write is the operator's to see in the
-// log, never the caller's.
-func (h *handler) record(r *http.Request, c caller, alias, model, path string, start time.Time, out *outcome) {
+// served before it stops. What net/http writes after the handler returns —
+// a small answer it buffered, the end of a chunked one — gets a write bound
+// of its own, so a slow write here cannot spend the bound the answer was
+// given. A failed write is the operator's to see in the log, never the
+// caller's.
+func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias, model, path string, start time.Time, out *outcome) {
+	defer func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(writeStall)) }()
 	u := store.Usage{
 		RequestID: requestID(r), APIKeyID: c.keyID, Model: model, Alias: alias,
 		SessionID: r.Header.Get(SessionHeader), Protocol: "anthropic", Endpoint: endpoints[path],
@@ -101,11 +105,15 @@ var usageCounts = []struct {
 // usageOf lays the counts an Anthropic usage object names over prev, each
 // read by its exact key: a stream's message_delta counts are whole-message
 // totals that overwrite message_start's, and the ones it omits keep theirs,
-// as the SDK accumulates them (anthropic-sdk-go v1.70.1 — messageutil.go
-// Message.Accumulate). MiniMax's message_start reports zeros and its
-// message_delta every count; DeepSeek's report all of them in both (probed
-// 2026-10-07). A null, a count that is not a whole number, or a missing
-// usage counts as nothing, so the result is prev when no count is read.
+// as the SDK accumulates them (checked against anthropic-sdk-go v1.70.1 —
+// messageutil.go Message.Accumulate) — but for output_tokens, which the SDK
+// takes as zero
+// when a delta leaves it out or null, where the ledger keeps the count it
+// had rather than record a count no upstream reported. MiniMax's
+// message_start reports zeros and its message_delta every count; DeepSeek's
+// report all of them in both (probed 2026-10-07). A null, a count that is
+// not a whole number, or a missing usage counts as nothing, so the result is
+// prev when no count is read.
 func usageOf(prev *store.Tokens, raw json.RawMessage) *store.Tokens {
 	var u map[string]json.RawMessage
 	if json.Unmarshal(raw, &u) != nil {

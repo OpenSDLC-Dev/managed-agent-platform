@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -110,18 +113,36 @@ type UsageFilter struct {
 }
 
 // ListUsage reads the ledger newest first: up to limit rows older than the
-// row with id before (zero: from the newest), and whether more follow.
+// row with id before (zero: from the newest), and whether more follow. The
+// query names only the filters given, so each can use its index: a plan
+// written for every filter at once would serve none of them well.
 func (s *Store) ListUsage(ctx context.Context, f UsageFilter, before int64, limit int) ([]Usage, bool, error) {
+	where, args := []string{"true"}, []any{}
+	for _, c := range []struct {
+		cond string
+		arg  any
+		set  bool
+	}{
+		{"id < $%d", before, before > 0},
+		{"api_key_id = $%d", f.APIKeyID, f.APIKeyID != ""},
+		{"alias = $%d", f.Alias, f.Alias != ""},
+		{"deployment_id = $%d", f.DeploymentID, f.DeploymentID != ""},
+		{"session_id = $%d", f.SessionID, f.SessionID != ""},
+	} {
+		if c.set {
+			args = append(args, c.arg)
+			where = append(where, fmt.Sprintf(c.cond, len(args)))
+		}
+	}
+	args = append(args, limit+1)
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, request_id, created_at, api_key_id, model, alias, deployment_id, credential_id,
 		       coalesce(session_id, ''), protocol, endpoint, status, coalesce(error_type, ''),
 		       input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost::float8,
 		       latency_us, coalesce(ttft_us, 0)
 		FROM modelgateway.usage
-		WHERE ($1 = 0 OR id < $1) AND ($2 = '' OR api_key_id = $2) AND ($3 = '' OR alias = $3)
-		  AND ($4 = '' OR deployment_id = $4) AND ($5 = '' OR session_id = $5)
-		ORDER BY id DESC LIMIT $6`,
-		before, f.APIKeyID, f.Alias, f.DeploymentID, f.SessionID, limit+1)
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY id DESC LIMIT $`+strconv.Itoa(len(args)), args...)
 	if err != nil {
 		return nil, false, err
 	}

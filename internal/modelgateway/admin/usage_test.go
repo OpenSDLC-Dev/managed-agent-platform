@@ -140,12 +140,13 @@ func TestUsageRequests(t *testing.T) {
 		}
 	}
 	for q, says := range map[string]string{
-		"?limit=0":    "1 to 1000",
-		"?limit=1001": "1 to 1000",
-		"?limit=x":    "1 to 1000",
-		"?before=0":   "row id",
-		"?before=abc": "row id",
-		"?from=x":     "unknown query parameter",
+		"?limit=0":        "1 to 1000",
+		"?limit=1001":     "1 to 1000",
+		"?limit=x":        "1 to 1000",
+		"?before=0":       "row id",
+		"?before=abc":     "row id",
+		"?from=x":         "unknown query parameter",
+		"?session_id=%ZZ": "does not parse",
 	} {
 		e.refused(e.admin("GET", "/admin/v1/usage/requests"+q, nil), http.StatusBadRequest, "invalid_request_error", says)
 	}

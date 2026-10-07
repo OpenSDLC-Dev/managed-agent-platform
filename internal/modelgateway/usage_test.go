@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
@@ -314,5 +315,61 @@ func TestALimitedKeyIsRefusedPastItsLimit(t *testing.T) {
 	e.must(e.pool.QueryRow(e.ctx, `SELECT count(*) FROM modelgateway.rate_windows WHERE api_key_id NOT IN ('key_1', 'key_2')`).Scan(&windows))
 	if windows != 0 {
 		t.Errorf("unlimited keys wrote %d windows", windows)
+	}
+}
+
+// A session id longer than any id needs is refused before the key's limits
+// count it, since the ledger could not index it and a row that cannot be
+// written would take its TPM count with it; one at the bound is recorded.
+func TestALongSessionIDIsRefused(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, message("ok"))
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	rpm := int32(1)
+	key := e.limitedKey(&rpm, nil)
+	e.start()
+	body := `{"model":"fast","max_tokens":8,"messages":[]}`
+	resp, b := e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key, "X-MAP-Session-ID": strings.Repeat("s", 257)})
+	if typ, msg, _ := errorOf(t, b); resp.StatusCode != 400 || typ != "invalid_request_error" || !strings.Contains(msg, "X-MAP-Session-ID") {
+		t.Errorf("%d %s", resp.StatusCode, b)
+	}
+	if n := len(up.recorded()); n != 0 {
+		t.Errorf("the upstream was called %d times", n)
+	}
+	at := strings.Repeat("s", 256)
+	if resp, b := e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key, "X-MAP-Session-ID": at}); resp.StatusCode != 200 {
+		t.Fatalf("a session id at the bound: %d %s", resp.StatusCode, b)
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].SessionID != at {
+		t.Errorf("the ledger holds %+v", rows)
+	}
+}
+
+// A ledger write slower than the write bound costs the answer nothing: what
+// net/http writes once the handler returns gets a bound of its own.
+func TestASlowLedgerDoesNotCutTheAnswer(t *testing.T) {
+	defer modelgateway.SetWriteStall(300 * time.Millisecond)()
+	e := newEnv(t)
+	up := newFake(t, message("ok"))
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	tx, err := e.pool.Begin(e.ctx)
+	e.must(err)
+	_, err = tx.Exec(e.ctx, `LOCK TABLE modelgateway.usage IN ACCESS EXCLUSIVE MODE`)
+	e.must(err)
+	released := make(chan struct{})
+	go func() { defer close(released); time.Sleep(time.Second); _ = tx.Rollback(e.ctx) }()
+	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
+	<-released
+	if resp.StatusCode != 200 || !strings.Contains(string(b), `"ok"`) {
+		t.Errorf("%d %s", resp.StatusCode, b)
+	}
+	if rows := e.ledger(); len(rows) != 1 {
+		t.Errorf("the ledger holds %d rows, want the one recorded once the lock went", len(rows))
 	}
 }
