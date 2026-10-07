@@ -412,8 +412,17 @@ request path reads only the snapshot.
   `mapgw1.<deployment id>.<the upstream's value>`, exactly once per block: a whole
   response's field is prefixed, and in a stream the first non-empty fragment of each
   block index — on its start or its first `signature_delta` — is prefixed and the rest
-  pass unchanged, so a client that concatenates the fragments, as the SDK does,
-  assembles the same value either way. Both fields are opaque to a client, which
+  pass unchanged, so for blocks streamed one after another, as Anthropic streams
+  them, a client that concatenates the fragments, as the SDK does, assembles the
+  same value either way. A block whose value is empty — an unsigned
+  thinking block — has nothing to wrap: it names no producer and goes back to no
+  upstream, and no thinking block after it in the same response is wrapped either,
+  since its signature covers the block that will not go back with it — as the brain
+  ends its kept run at the first unsigned block (plan 60). In a stream, where a
+  signature arrives after its block starts, a thinking block that starts while the
+  one before it is still unsigned ends the wrapping the same way, as do an empty
+  `redacted_thinking` block and an empty start that names no index. Both fields are
+  opaque to a client, which
   stores and returns them verbatim, so the wrapper rides along unseen. On a request the
   gateway reads the wrappers in the history: among the alias's healthy targets, the
   deployment that produced the newest block is chosen first, and whichever deployment
@@ -440,26 +449,32 @@ request path reads only the snapshot.
   hashing, which after a fallback would send a recovered first choice the fallback
   model's thinking. **Backstop, best effort:** a 400 whose message names a thinking
   block or its signature — other than one naming only a reasoning configuration
-  parameter, and DeepSeek's "must be passed back", which asks for thinking the request
-  lacks and a removal cannot supply — puts the inbound request in strip mode: every
+  parameter, and DeepSeek's "must be passed back" or Anthropic's "must start with a
+  thinking block", which ask for thinking the request lacks and a removal cannot
+  supply — puts the inbound request in strip mode: every
   thinking block is removed, an emptied assistant message going as above, and the
-  attempt is made again. Removing all thinking is valid (Ground truth, Thinking). That
+  attempt is made again, as a retry like any other — at the same deployment within
+  its attempt budget, at the alias's next once that is spent — and after the
+  backoff, so never for a caller that has left. Removing all thinking is valid
+  (Ground truth, Thinking). That
   is bifrost's fail-soft strip, with four differences: Anthropic's "cannot be
   modified" enters strip mode here, where bifrost excludes it as a refusal the removal
   repeats — the Claude 5-generation rule is that removing every block stays valid, and
   when the removal does not cure it the cost is the one attempt strip mode allows;
-  DeepSeek's "must be passed back" does not, where bifrost's matcher, which only
-  excludes the other two, would strip and retry;
+  DeepSeek's "must be passed back" and Anthropic's "must start with a thinking block"
+  do not, where bifrost's matcher, which only excludes the other two, would strip and
+  retry;
   strip mode is entered once per inbound request and holds for every attempt after it,
   the fallbacks included, so no attempt can re-send what was stripped or strip twice;
   and whichever attempt answers in strip mode wraps the first thinking block of its
-  response `mapgw1r.` rather than `mapgw1.` — a reset mark. Every later request
+  response, when signed, `mapgw1r.` rather than `mapgw1.` — a reset mark. Every later request
   removes each thinking block that precedes the newest reset-marked block before the
   provenance rule applies, so the response that block opened keeps all its blocks and
   nothing older returns ahead of it: it was produced with no thinking before it, and
   sending older blocks back in front of it would earn the same 400 on every turn
   after. The recovery holds only while the caller returns that block; a strip-mode
-  answer with no thinking has nothing to carry the mark, and then each later request
+  answer with no thinking, or whose first thinking block is unsigned, has nothing to
+  carry the mark, and then each later request
   on that history pays the refusal and one retry again — bounded, never a loop within
   a request. An OpenAI-shaped caller's
   `reasoning_content` carries no signature to wrap and has no provenance; it goes
@@ -661,8 +676,8 @@ where a vendor bills cache writes.
   that fails before its first byte falls back still in strip mode, and a second
   refusal earns no second retry; a strip-mode answer without thinking pays the retry
   again on the next request and no more; a refusal naming no thinking earns no retry,
-  and neither does DeepSeek's "must be passed back", while Anthropic's "cannot be
-  modified" does;
+  and neither does DeepSeek's "must be passed back" nor Anthropic's "must start with
+  a thinking block", while Anthropic's "cannot be modified" does;
   and requests of one session id with no thinking keep one deployment and credential
   while the eligible candidates, weights and priorities are unchanged, move when health
   changes them, and yield to a newer block's producer.
@@ -692,6 +707,16 @@ where a vendor bills cache writes.
     answers each of them and refuses an alias the key may not use or that is not
     `chat` — every returned entry with every `ModelInfo` field the SDK marks required
     present (`respjson.Field.Valid`).
+  - **Provenance through the real vendors:** each model's provider points at a proxy
+    that forwards to the vendor and records both directions, since neither vendor
+    checks a signature and its 200 proves nothing. Every model expected to think
+    returns signed thinking; each value the gateway wraps, in block order up to the
+    first unsigned one, comes back around the vendor's own value and goes back, on
+    the continuation the SDK's `ToParam` makes, as exactly that value — a model that
+    returns no thinking, as MiniMax-M3.1-Flash-Preview did on 2026-10-07, has its
+    round trip checked without it; an alias whose first choice is down
+    falls back, and its continuation goes straight to its thinking's producer; a
+    conversation crossing from DeepSeek to MiniMax and back sends each only its own.
   - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with
     `Message.Accumulate`) on an alias routed to each vendor: text, a tool-use round trip
     that sends the thinking blocks back unchanged, reported usage, and an upstream
@@ -726,7 +751,7 @@ where a vendor bills cache writes.
 - docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens`
   answering 404 where an upstream has none; stateless Responses; thinking signatures
   and redacted data returned wrapped in two forms (`mapgw1.`, and `mapgw1r.` on the
-  first thinking block of a strip-mode answer), history thinking filtered by
+  first thinking block of a strip-mode answer, when signed), history thinking filtered by
   provenance, all of it removed for the attempts after a signature refusal, and every
   block ahead of the newest reset mark removed on later requests;
   each profile edit with its vendor evidence.

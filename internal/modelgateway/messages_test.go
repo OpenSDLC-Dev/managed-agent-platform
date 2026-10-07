@@ -818,6 +818,21 @@ func TestACallerLeavingDuringBackoffEndsTheRetries(t *testing.T) {
 	}
 }
 
+// A caller already gone ends the retries whatever the timer says: with a
+// backoff short enough that its timer has fired too, the wait still reports
+// the caller gone rather than leaving it to a select's choice.
+func TestABackoffForACallerGoneIsOver(t *testing.T) {
+	e := newEnv(t)
+	e.start(func(c *modelgateway.Config) { c.Backoff = time.Nanosecond })
+	ctx, cancel := context.WithCancel(e.ctx)
+	cancel()
+	for range 200 {
+		if modelgateway.Backoff(e.handler, ctx, 1) {
+			t.Fatal("a backoff for a caller gone let the retry go ahead")
+		}
+	}
+}
+
 // An answer that is not a JSON object passes as it came.
 func TestAnAnswerThatIsNotAnObjectPassesUnchanged(t *testing.T) {
 	e := newEnv(t)

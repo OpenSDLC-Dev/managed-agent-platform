@@ -273,6 +273,9 @@ func newRequestID() string {
 // retrying one failing upstream do not do it in step. It reports false when
 // ctx ends first.
 func (h *handler) backoff(ctx context.Context, n int) bool {
+	if ctx.Err() != nil {
+		return false // gone already, whichever of the two a select would pick
+	}
 	ceiling := min(float64(h.cfg.Backoff)*math.Pow(2, float64(n-1)), float64(MaxBackoff))
 	t := time.NewTimer(time.Duration(h.draw() * ceiling))
 	defer t.Stop()

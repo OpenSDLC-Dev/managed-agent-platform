@@ -1,6 +1,7 @@
 package modelgateway
 
 import (
+	"context"
 	"net/http"
 	"slices"
 	"time"
@@ -19,6 +20,12 @@ func OpenedKeys(h http.Handler) []string {
 	slices.Sort(ids)
 	return ids
 }
+
+// Backoff is the handler's wait before retry n.
+func Backoff(h http.Handler, ctx context.Context, n int) bool { return h.(*handler).backoff(ctx, n) }
+
+// ThinkingRefusal is thinkingRefusal.
+func ThinkingRefusal(body []byte) bool { return thinkingRefusal(body) }
 
 // SetWriteStall shortens the bound on a write to the caller for one test, and
 // returns its restore.
