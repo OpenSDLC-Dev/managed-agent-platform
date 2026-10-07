@@ -265,7 +265,7 @@ func TestProviders(t *testing.T) {
 		"headers": map[string]string{"X-Gateway-Route": "pool-7"}, "stall_timeout_ms": 90000,
 	}), "create")
 	id := created["id"].(string)
-	if created["type"] != "provider" || created["enabled"] != true || created["stall_timeout_ms"] != 90000.0 ||
+	if created["type"] != "provider" || created["enabled"] != true || created["stall_timeout_ms"] != 90000.0 || created["propagate_trace"] != false ||
 		created["endpoints"].(map[string]any)["anthropic"] != "https://api.deepseek.com/anthropic" {
 		t.Fatalf("created = %v", created)
 	}
@@ -301,12 +301,15 @@ func TestProviders(t *testing.T) {
 	e.refused(e.admin("POST", "/admin/v1/providers", "{"), http.StatusBadRequest, "invalid_request_error", "JSON")
 	e.refused(e.admin("POST", "/admin/v1/providers", `{"name":"p","profile":"deepseek","endpoints":{"openai":"https://api.deepseek.com"}}}`),
 		http.StatusBadRequest, "invalid_request_error", "after")
-	e.ok(e.admin("POST", "/admin/v1/providers", map[string]any{
+	if traced := e.ok(e.admin("POST", "/admin/v1/providers", map[string]any{
 		"name": "in-cluster", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "http://vllm.models.svc:8000"},
-	}), "an http endpoint")
+		"propagate_trace": true,
+	}), "an http endpoint"); traced["propagate_trace"] != true {
+		t.Errorf("created with propagate_trace = %v", traced["propagate_trace"])
+	}
 
-	up := e.ok(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"name": "renamed", "stall_timeout_ms": nil, "enabled": false, "headers": nil}), "update")
-	if up["name"] != "renamed" || up["stall_timeout_ms"] != nil || up["enabled"] != false || len(up["headers"].(map[string]any)) != 0 {
+	up := e.ok(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"name": "renamed", "stall_timeout_ms": nil, "enabled": false, "headers": nil, "propagate_trace": true}), "update")
+	if up["name"] != "renamed" || up["stall_timeout_ms"] != nil || up["enabled"] != false || len(up["headers"].(map[string]any)) != 0 || up["propagate_trace"] != true {
 		t.Fatalf("updated = %v", up)
 	}
 	e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"endpoints": deepseekBoth}), http.StatusBadRequest, "invalid_request_error", "fixed")
@@ -314,7 +317,7 @@ func TestProviders(t *testing.T) {
 	e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"headers": map[string]string{"Cookie": "s"}}), http.StatusBadRequest, "invalid_request_error", "Cookie")
 	e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"name": ""}), http.StatusBadRequest, "invalid_request_error", "name")
 	e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{"colour": "red"}), http.StatusBadRequest, "invalid_request_error", "colour")
-	for _, field := range []string{"enabled", "name"} {
+	for _, field := range []string{"enabled", "name", "propagate_trace"} {
 		e.refused(e.admin("POST", "/admin/v1/providers/"+id, map[string]any{field: nil}), http.StatusBadRequest, "invalid_request_error", "null")
 	}
 	e.refused(e.admin("POST", "/admin/v1/providers/gwprov_missing", map[string]any{"name": "x"}), http.StatusNotFound, "not_found_error", "gwprov_missing")

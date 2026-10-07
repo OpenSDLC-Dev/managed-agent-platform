@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const providerCols = `id, name, profile, anthropic_base_url, openai_base_url, headers, stall_timeout_ms, enabled, created_at, updated_at`
+const providerCols = `id, name, profile, anthropic_base_url, openai_base_url, headers, stall_timeout_ms, propagate_trace, enabled, created_at, updated_at`
 
 func scanProvider(row pgx.Row) (Provider, error) {
 	var (
@@ -19,7 +19,7 @@ func scanProvider(row pgx.Row) (Provider, error) {
 		anth, oai *string
 		stall     *int32
 	)
-	if err := row.Scan(&p.ID, &p.Name, &p.Profile, &anth, &oai, &p.Headers, &stall, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.Profile, &anth, &oai, &p.Headers, &stall, &p.PropagateTrace, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return Provider{}, err
 	}
 	p.Endpoints = map[profile.Protocol]string{}
@@ -73,10 +73,10 @@ func (s *Store) CreateProvider(ctx context.Context, p Provider) (Provider, error
 	err := s.write(ctx, func(tx pgx.Tx) error {
 		var err error
 		out, err = scanProvider(tx.QueryRow(ctx,
-			`INSERT INTO modelgateway.providers (id, name, profile, anthropic_base_url, openai_base_url, headers, stall_timeout_ms, enabled)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING `+providerCols,
+			`INSERT INTO modelgateway.providers (id, name, profile, anthropic_base_url, openai_base_url, headers, stall_timeout_ms, propagate_trace, enabled)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING `+providerCols,
 			newID("gwprov"), p.Name, p.Profile, endpoint(p, profile.Anthropic), endpoint(p, profile.OpenAI),
-			headersParam(p.Headers), stallParam(p.StallTimeout), p.Enabled))
+			headersParam(p.Headers), stallParam(p.StallTimeout), p.PropagateTrace, p.Enabled))
 		return err
 	})
 	return out, err
@@ -131,9 +131,10 @@ func (s *Store) UpdateProvider(ctx context.Context, id string, fn func(*Provider
 			return err
 		}
 		out, err = scanProvider(tx.QueryRow(ctx,
-			`UPDATE modelgateway.providers SET name = $2, headers = $3, stall_timeout_ms = $4, enabled = $5, updated_at = now()
+			`UPDATE modelgateway.providers SET name = $2, headers = $3, stall_timeout_ms = $4, propagate_trace = $5, enabled = $6,
+			   updated_at = now()
 			 WHERE id = $1 RETURNING `+providerCols,
-			id, next.Name, headersParam(next.Headers), stallParam(next.StallTimeout), next.Enabled))
+			id, next.Name, headersParam(next.Headers), stallParam(next.StallTimeout), next.PropagateTrace, next.Enabled))
 		return err
 	})
 	return out, err

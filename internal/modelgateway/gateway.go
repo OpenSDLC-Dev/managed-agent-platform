@@ -158,9 +158,11 @@ func New(cfg Config) (http.Handler, error) {
 type requestIDKey struct{}
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, span := serverSpan(r)
+	defer span.End()
 	rid := newRequestID()
 	w.Header().Set("request-id", rid)
-	r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, rid))
+	r = r.WithContext(context.WithValue(ctx, requestIDKey{}, rid))
 	if strings.HasPrefix(r.URL.Path, "/admin/") {
 		if h.cfg.Admin == nil {
 			writeError(w, r, notFound("no such path: %s", r.URL.Path))

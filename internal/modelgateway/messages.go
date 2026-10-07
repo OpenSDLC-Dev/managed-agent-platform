@@ -182,7 +182,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 			break
 		}
 		n++
-		f, retry := h.attempt(w, r, call, at, strip)
+		f, retry := h.tracedAttempt(w, r, call, at, strip)
 		if f == nil {
 			return
 		}
@@ -248,13 +248,18 @@ func (f *failure) refusesThinking() bool {
 	return f.status == http.StatusBadRequest && thinkingRefusal(f.body)
 }
 
+// errorType is the error the failure gives the caller.
+func (f *failure) errorType() string {
+	if f.body != nil {
+		return errorTypeOf(f.body, f.status)
+	}
+	return f.typ
+}
+
 // write answers the caller with the failure, and tells out what the caller
 // was given.
 func (f *failure) write(w http.ResponseWriter, r *http.Request, out *outcome) {
-	out.status, out.errType = f.status, f.typ
-	if f.body != nil {
-		out.errType = errorTypeOf(f.body, f.status)
-	}
+	out.status, out.errType = f.status, f.errorType()
 	if f.body == nil {
 		writeError(w, r, &apiError{f.status, f.typ, f.err.Error()})
 		return
@@ -368,6 +373,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	for k, v := range at.Provider.Headers {
 		req.Header.Set(k, v)
 	}
+	propagate(ctx, at.Provider, req.Header)
 	req.Header.Set("Content-Type", "application/json")
 	if prof.BearerAuth {
 		req.Header.Set("Authorization", "Bearer "+string(key))

@@ -20,7 +20,7 @@ slice 3 is the console repository's own plan.
   - [x] 2b — thinking provenance, the strip-mode backstop, the live tier's round trip
   - [x] 2c — the profiles' auth header and edits
   - [x] 2d — usage rows, retention and rollups, the admin usage reads; RPM and TPM limits
-  - [ ] 2e — telemetry, carrying the caller's trace context through the gateway
+  - [x] 2e — telemetry, carrying the caller's trace context through the gateway
   - [ ] 2f — compose and Helm, and a GCP identity granted the cipher (ending its
         `unhosted` entry in `tools/kmsrole`); the rest of the live tier (model list, vendor behavior)
 - [ ] Slice 4 — OpenAI surfaces, embeddings and rerank with the `gitee` profile; dikw-core

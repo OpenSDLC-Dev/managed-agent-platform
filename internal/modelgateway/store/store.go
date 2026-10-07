@@ -76,9 +76,12 @@ type Provider struct {
 	Endpoints    map[profile.Protocol]string // fixed at creation
 	Headers      map[string]string
 	StallTimeout time.Duration // zero: the gateway's default
-	Enabled      bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// PropagateTrace sends the provider W3C trace context, the gateway's
+	// span for each attempt; without it the provider learns no trace id.
+	PropagateTrace bool
+	Enabled        bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Credential is one key of a provider's account, sealed by internal/secrets.

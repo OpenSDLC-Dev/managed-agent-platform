@@ -75,7 +75,7 @@ func TestProviderLifecycle(t *testing.T) {
 	ctx := context.Background()
 	in := store.Provider{
 		Name: "deepseek prod", Profile: "deepseek", Endpoints: both(),
-		Headers: map[string]string{"X-Gateway-Route": "a"}, StallTimeout: 90 * time.Second, Enabled: true,
+		Headers: map[string]string{"X-Gateway-Route": "a"}, StallTimeout: 90 * time.Second, PropagateTrace: true, Enabled: true,
 	}
 	p, err := s.CreateProvider(ctx, in)
 	if err != nil {
@@ -88,21 +88,21 @@ func TestProviderLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != in.Name || got.Profile != in.Profile || got.StallTimeout != in.StallTimeout || !got.Enabled ||
+	if got.Name != in.Name || got.Profile != in.Profile || got.StallTimeout != in.StallTimeout || !got.PropagateTrace || !got.Enabled ||
 		got.Endpoints[profile.Anthropic] != in.Endpoints[profile.Anthropic] || got.Endpoints[profile.OpenAI] != in.Endpoints[profile.OpenAI] ||
 		got.Headers["X-Gateway-Route"] != "a" {
 		t.Fatalf("got %+v, want %+v", got, in)
 	}
 
 	up, err := s.UpdateProvider(ctx, p.ID, func(p *store.Provider) error {
-		p.Name, p.Headers, p.StallTimeout, p.Enabled = "renamed", nil, 0, false
+		p.Name, p.Headers, p.StallTimeout, p.PropagateTrace, p.Enabled = "renamed", nil, 0, false, false
 		p.Endpoints = map[profile.Protocol]string{profile.OpenAI: "https://elsewhere.example"}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if up.Name != "renamed" || len(up.Headers) != 0 || up.StallTimeout != 0 || up.Enabled ||
+	if up.Name != "renamed" || len(up.Headers) != 0 || up.StallTimeout != 0 || up.PropagateTrace || up.Enabled ||
 		up.Endpoints[profile.Anthropic] != in.Endpoints[profile.Anthropic] || !up.UpdatedAt.After(p.UpdatedAt) {
 		t.Fatalf("updated = %+v", up)
 	}

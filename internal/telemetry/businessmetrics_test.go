@@ -9,6 +9,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -44,6 +45,8 @@ func TestBusinessMetricsExportOverOTLP(t *testing.T) {
 		brain.MetricTimeToFirstToken,
 		toolset.MetricToolDuration,
 		"gen_ai.client.operation.duration",
+		modelgateway.MetricRequestDuration,
+		modelgateway.MetricTimeToFirstToken,
 	} {
 		h, err := m.Float64Histogram(name)
 		if err != nil {
@@ -61,6 +64,19 @@ func TestBusinessMetricsExportOverOTLP(t *testing.T) {
 		}
 		h.Record(ctx, 1)
 	}
+	// The model gateway's counters.
+	for _, name := range []string{modelgateway.MetricRequests, modelgateway.MetricTokens} {
+		c, err := m.Int64Counter(name)
+		if err != nil {
+			t.Fatalf("Int64Counter %q: %v", name, err)
+		}
+		c.Add(ctx, 1)
+	}
+	cost, err := m.Float64Counter(modelgateway.MetricCost)
+	if err != nil {
+		t.Fatalf("Float64Counter %q: %v", modelgateway.MetricCost, err)
+	}
+	cost.Add(ctx, 1)
 	// The two session-lifecycle metrics go through their real record helpers,
 	// which need no database.
 	events.RecordSessionStatus(ctx, domain.SessionIdle)
@@ -98,6 +114,11 @@ func TestBusinessMetricsExportOverOTLP(t *testing.T) {
 		queue.MetricQueueDepth,
 		queue.MetricQueuePending,
 		queue.MetricQueueWorkersPolling,
+		modelgateway.MetricRequests,
+		modelgateway.MetricRequestDuration,
+		modelgateway.MetricTimeToFirstToken,
+		modelgateway.MetricTokens,
+		modelgateway.MetricCost,
 	}
 	got := collector.metricNames()
 	for _, w := range want {
