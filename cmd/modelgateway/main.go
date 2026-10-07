@@ -25,6 +25,10 @@
 //	MODELGATEWAY_MAX_ATTEMPTS  upstream calls one request may make to each
 //	                       deployment before it falls back to the next, all
 //	                       before its answer begins (default 3)
+//	MODELGATEWAY_USAGE_RETENTION  how long the per-request ledger keeps a
+//	                       row, a Go duration (default "2160h", 90 days); a
+//	                       sweep on any replica deletes older rows each hour,
+//	                       and the daily rollups stay
 //	OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_INSECURE  as the other binaries
 package main
 
@@ -92,6 +96,14 @@ func run(ctx context.Context) error {
 		}
 		attempts = n
 	}
+	retention := 90 * 24 * time.Hour
+	if v := os.Getenv("MODELGATEWAY_USAGE_RETENTION"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("MODELGATEWAY_USAGE_RETENTION: %q is not a positive duration", v)
+		}
+		retention = d
+	}
 
 	// Every dependency is checked here, so a bad configuration or an
 	// unreachable dependency is a failed start rather than a failed request.
@@ -118,11 +130,12 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	adminAPI, err := admin.New(admin.Config{Store: mgstore.New(pool), Cipher: cipher, Verifier: verifier, BootstrapKey: bootKey})
+	st := mgstore.New(pool)
+	adminAPI, err := admin.New(admin.Config{Store: st, Cipher: cipher, Verifier: verifier, BootstrapKey: bootKey})
 	if err != nil {
 		return err
 	}
-	gateway, err := modelgateway.New(modelgateway.Config{Catalog: cat, Keys: pool, Cipher: cipher, BootstrapKey: bootKey,
+	gateway, err := modelgateway.New(modelgateway.Config{Catalog: cat, Store: st, Keys: pool, Cipher: cipher, BootstrapKey: bootKey,
 		Admin: adminAPI, MaxAttempts: attempts})
 	if err != nil {
 		return err
@@ -135,6 +148,10 @@ func run(ctx context.Context) error {
 	reloadDone := make(chan struct{})
 	go func() { defer close(reloadDone); cat.Run(reloadCtx) }()
 	defer func() { stopReload(); <-reloadDone }()
+	sweepCtx, stopSweep := context.WithCancel(ctx)
+	sweepDone := make(chan struct{})
+	go func() { defer close(sweepDone); st.RunRetention(sweepCtx, time.Hour, retention) }()
+	defer func() { stopSweep(); <-sweepDone }()
 
 	srv := &http.Server{
 		Addr:    addr,

@@ -747,10 +747,11 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 	e := newEnv(t)
 	e.start()
 	for name, cfg := range map[string]modelgateway.Config{
-		"no catalog":   {Keys: e.pool, Cipher: e.cipher, BootstrapKey: bootstrap},
-		"no database":  {Cipher: e.cipher, BootstrapKey: bootstrap},
-		"no cipher":    {Keys: e.pool, BootstrapKey: bootstrap},
-		"no bootstrap": {Keys: e.pool, Cipher: e.cipher},
+		"no catalog":   {Store: e.s, Keys: e.pool, Cipher: e.cipher, BootstrapKey: bootstrap},
+		"no store":     {Keys: e.pool, Cipher: e.cipher, BootstrapKey: bootstrap},
+		"no database":  {Store: e.s, Cipher: e.cipher, BootstrapKey: bootstrap},
+		"no cipher":    {Store: e.s, Keys: e.pool, BootstrapKey: bootstrap},
+		"no bootstrap": {Store: e.s, Keys: e.pool, Cipher: e.cipher},
 	} {
 		if name != "no catalog" {
 			cfg.Catalog = catalogFor(t, e)

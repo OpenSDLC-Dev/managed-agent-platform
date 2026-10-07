@@ -1,7 +1,8 @@
 // Package admin is the model gateway's admin API, under /admin/v1/
 // (docs/plan/59_model-gateway.md, "Auth, admin API and /v1/models"): the
 // providers and their credentials, the deployments, the aliases and the key
-// policies, and the compiled-in profiles read-only. No reference surface
+// policies, the usage ledger read-only, and the compiled-in profiles
+// read-only. No reference surface
 // corresponds to it, so its shape is the platform's own, and
 // managed-agent-console is its client.
 //
@@ -43,13 +44,16 @@
 //	GET    /admin/v1/key_policies/{api_key_id}          one
 //	POST   /admin/v1/key_policies/{api_key_id}          create or replace
 //	DELETE /admin/v1/key_policies/{api_key_id}          revoke
+//	GET    /admin/v1/usage/daily                        rollups per UTC day, key, alias and deployment
+//	GET    /admin/v1/usage/requests                     the ledger, a page at a time
 //
 // An update names only the fields it changes, as null only where null means
 // what it means at creation (a provider's headers and stall timeout, a
 // credential's protocols), and naming a field fixed at creation is refused
 // rather than ignored. A key policy is the exception: it is written whole, so
 // its body names every field. A list answers {"data": [...]},
-// unpaginated: a configuration is tens of rows, not thousands. Errors answer
+// unpaginated: a configuration is tens of rows, not thousands. The ledger is
+// the exception, millions of rows, read a page at a time. Errors answer
 // in the platform's envelope, {"type":"error","error":{"type","message"}}.
 package admin
 
@@ -120,6 +124,8 @@ func (h *handler) routes() {
 	h.route("/admin/v1/key_policies", ep("GET", read, h.listKeyPolicies))
 	h.route("/admin/v1/key_policies/{api_key_id}",
 		ep("GET", read, h.getKeyPolicy), ep("POST", write, h.putKeyPolicy), ep("DELETE", write, h.deleteKeyPolicy))
+	h.route("/admin/v1/usage/daily", ep("GET", read, h.dailyUsage))
+	h.route("/admin/v1/usage/requests", ep("GET", read, h.listUsage))
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, notFound("no such path: %s", r.URL.Path))
 	})

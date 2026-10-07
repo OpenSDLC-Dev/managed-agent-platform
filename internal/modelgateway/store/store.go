@@ -1,9 +1,11 @@
 // Package store is the model gateway's queries over the modelgateway schema
 // (migration 0049; docs/plan/59_model-gateway.md, "Configuration model").
 //
-// Every write runs in one transaction that ends with a notification on
-// NotifyChannel, so each replica's catalog reloads once the write is visible;
-// a write that fails commits neither. The invariants that span rows are held
+// Every configuration write runs in one transaction that ends with a
+// notification on NotifyChannel, so each replica's catalog reloads once the
+// write is visible; a write that fails commits neither. The ledger and the
+// rate windows (usage.go, limits.go) are not configuration, and announce
+// nothing. The invariants that span rows are held
 // here, inside that transaction, rather than by each caller: a credential
 // names only protocols its provider has an endpoint for; an alias's targets
 // share one kind, which is the alias's from creation on; an embedding alias
