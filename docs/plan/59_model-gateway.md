@@ -415,7 +415,12 @@ request path reads only the snapshot.
   pass unchanged, so a client that concatenates the fragments, as the SDK does,
   assembles the same value either way. A block whose value is empty — an unsigned
   thinking block — has nothing to wrap: it names no producer and goes back to no
-  upstream, as the brain keeps no unsigned block either (plan 60). Both fields are
+  upstream, and no thinking block after it in the same response is wrapped either,
+  since its signature covers the block that will not go back with it — as the brain
+  ends its kept run at the first unsigned block (plan 60). In a stream, where a
+  signature arrives after its block starts, a thinking block that starts while the
+  one before it is still unsigned ends the wrapping the same way, as does an empty
+  `redacted_thinking` block. Both fields are
   opaque to a client, which
   stores and returns them verbatim, so the wrapper rides along unseen. On a request the
   gateway reads the wrappers in the history: among the alias's healthy targets, the
@@ -447,7 +452,9 @@ request path reads only the snapshot.
   thinking block", which ask for thinking the request lacks and a removal cannot
   supply — puts the inbound request in strip mode: every
   thinking block is removed, an emptied assistant message going as above, and the
-  attempt is made again. Removing all thinking is valid (Ground truth, Thinking). That
+  attempt is made again, as a retry within the deployment's attempt budget and after
+  the backoff, so never for a caller that has left. Removing all thinking is valid
+  (Ground truth, Thinking). That
   is bifrost's fail-soft strip, with four differences: Anthropic's "cannot be
   modified" enters strip mode here, where bifrost excludes it as a refusal the removal
   repeats — the Claude 5-generation rule is that removing every block stays valid, and
@@ -458,13 +465,14 @@ request path reads only the snapshot.
   strip mode is entered once per inbound request and holds for every attempt after it,
   the fallbacks included, so no attempt can re-send what was stripped or strip twice;
   and whichever attempt answers in strip mode wraps the first thinking block of its
-  response that has a value to wrap `mapgw1r.` rather than `mapgw1.` — a reset mark. Every later request
+  response, when signed, `mapgw1r.` rather than `mapgw1.` — a reset mark. Every later request
   removes each thinking block that precedes the newest reset-marked block before the
   provenance rule applies, so the response that block opened keeps all its blocks and
   nothing older returns ahead of it: it was produced with no thinking before it, and
   sending older blocks back in front of it would earn the same 400 on every turn
   after. The recovery holds only while the caller returns that block; a strip-mode
-  answer with no thinking has nothing to carry the mark, and then each later request
+  answer with no thinking, or whose first thinking block is unsigned, has nothing to
+  carry the mark, and then each later request
   on that history pays the refusal and one retry again — bounded, never a loop within
   a request. An OpenAI-shaped caller's
   `reasoning_content` carries no signature to wrap and has no provenance; it goes
@@ -697,6 +705,13 @@ where a vendor bills cache writes.
     answers each of them and refuses an alias the key may not use or that is not
     `chat` — every returned entry with every `ModelInfo` field the SDK marks required
     present (`respjson.Field.Valid`).
+  - **Provenance through the real vendors:** each model's provider points at a proxy
+    that forwards to the vendor and records both directions, since neither vendor
+    checks a signature and its 200 proves nothing. Every model's thinking comes back
+    wrapped around the vendor's own value and goes back, on the continuation the
+    SDK's `ToParam` makes, as exactly that value; an alias whose first choice is down
+    falls back, and its continuation goes straight to its thinking's producer; a
+    conversation crossing from DeepSeek to MiniMax and back sends each only its own.
   - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with
     `Message.Accumulate`) on an alias routed to each vendor: text, a tool-use round trip
     that sends the thinking blocks back unchanged, reported usage, and an upstream
@@ -731,7 +746,7 @@ where a vendor bills cache writes.
 - docs/DIVERGENCES.md: `/v1/messages` echoing the alias as `model`; `count_tokens`
   answering 404 where an upstream has none; stateless Responses; thinking signatures
   and redacted data returned wrapped in two forms (`mapgw1.`, and `mapgw1r.` on the
-  first wrapped block of a strip-mode answer), history thinking filtered by
+  first thinking block of a strip-mode answer, when signed), history thinking filtered by
   provenance, all of it removed for the attempts after a signature refusal, and every
   block ahead of the newest reset mark removed on later requests;
   each profile edit with its vendor evidence.

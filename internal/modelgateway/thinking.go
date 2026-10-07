@@ -18,13 +18,15 @@ import (
 // a client, which returns them verbatim. Every removal is deterministic, so a
 // block returns to its producer under the prefix it was produced under. A
 // block whose value is empty has nothing to wrap: it names no producer and is
-// sent to no upstream, as the brain keeps no unsigned block either.
+// sent to no upstream, and neither is any thinking block after it in the same
+// answer, whose signature covers it — as the brain keeps no thinking past an
+// unsigned block either.
 //
 // Strip mode is the backstop for an upstream that refuses the history's
 // thinking anyway: the request goes once more with every thinking block
-// removed, and the answer's first wrapped block carries resetPrefix, so later
-// requests drop every thinking block ahead of it, as it was produced without
-// them.
+// removed, and the answer's first thinking block, when wrapped, carries
+// resetPrefix, so later requests drop every thinking block ahead of it, as it
+// was produced without them.
 const (
 	wrapPrefix  = "mapgw1."
 	resetPrefix = "mapgw1r."
@@ -49,23 +51,25 @@ func unwrap(v string) (dep, value string, reset, ok bool) {
 
 // provenanceOf reads a content block: for a thinking block, the field that
 // carries its provenance — a thinking block's signature, a redacted_thinking
-// block's data — and that field's value; for any other block, "". Only those
-// fields are decoded, so a large image or document is scanned, not copied.
+// block's data — and that field's value; for any other block, "". Fields are
+// read by their exact keys, as the upstream reads them: a struct would take
+// "Type" for "type", and a block the upstream reads as thinking would pass as
+// text.
 func provenanceOf(b json.RawMessage) (field, value string) {
-	var head struct {
-		Type      string          `json:"type"`
-		Signature json.RawMessage `json:"signature"`
-		Data      json.RawMessage `json:"data"`
+	var obj map[string]json.RawMessage
+	var typ string
+	if json.Unmarshal(b, &obj) != nil || json.Unmarshal(obj["type"], &typ) != nil {
+		return "", ""
 	}
-	_ = json.Unmarshal(b, &head)
-	switch head.Type {
+	switch typ {
 	case "thinking":
 		field = "signature"
-		_ = json.Unmarshal(head.Signature, &value)
 	case "redacted_thinking":
 		field = "data"
-		_ = json.Unmarshal(head.Data, &value)
+	default:
+		return "", ""
 	}
+	_ = json.Unmarshal(obj[field], &value)
 	return field, value
 }
 
@@ -107,16 +111,15 @@ func parseHistory(raw json.RawMessage) *history {
 	h := &history{msgs: make([]histMsg, len(msgs))}
 	found := false
 	for i, m := range msgs {
-		var head struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		}
-		if json.Unmarshal(m, &head) != nil {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(m, &obj) != nil {
 			return nil
 		}
-		h.msgs[i] = histMsg{raw: m, role: head.Role}
+		var role string
+		_ = json.Unmarshal(obj["role"], &role) // by its exact key, as provenanceOf reads a block
+		h.msgs[i] = histMsg{raw: m, role: role}
 		var content []json.RawMessage
-		if json.Unmarshal(head.Content, &content) != nil {
+		if json.Unmarshal(obj["content"], &content) != nil {
 			continue // a string, or something the upstream refuses itself
 		}
 		blocks := make([]histBlock, len(content))
@@ -129,7 +132,7 @@ func parseHistory(raw json.RawMessage) *history {
 			continue
 		}
 		found = true
-		_ = json.Unmarshal(m, &h.msgs[i].obj)
+		h.msgs[i].obj = obj
 		h.msgs[i].blocks = blocks
 	}
 	if !found {
@@ -380,34 +383,40 @@ var thinkingParams = []string{"thinking.type", "between_tools", "budget_tokens",
 var blockField = regexp.MustCompile(`content\.\d+\.(thinking|signature)\b`)
 
 // errorMessage is an error body's message: error.message in Anthropic's
-// envelope, a top-level message in others, the text of a body that is not
-// JSON, and "" for JSON that holds no message.
+// envelope, else a top-level message; the text of a body that is not JSON at
+// all; and "" for JSON that holds no message, whatever its shape — an error
+// field that is a string included.
 func errorMessage(body []byte) string {
-	var e struct {
-		Message string `json:"message"`
-		Error   struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(body, &e) != nil {
+	if !json.Valid(body) {
 		return string(body)
 	}
-	if e.Error.Message != "" {
-		return e.Error.Message
+	var top, inner map[string]json.RawMessage
+	var msg string
+	_ = json.Unmarshal(body, &top)
+	if json.Unmarshal(top["error"], &inner) == nil && json.Unmarshal(inner["message"], &msg) == nil && msg != "" {
+		return msg
 	}
-	return e.Message
+	msg = ""
+	_ = json.Unmarshal(top["message"], &msg)
+	return msg
 }
 
-// wrapping marks one answer's thinking blocks with their producer, the first
-// it wraps in a strip-mode answer with the reset mark.
+// wrapping marks one answer's thinking blocks with their producer, in block
+// order, the first in a strip-mode answer with the reset mark. A signature
+// covers the blocks ahead of it, so once a thinking block goes unwrapped —
+// an unsigned one, or in a stream one still unsigned when the next thinking
+// block starts, which Anthropic's sequential blocks make the same thing —
+// none after it is wrapped either: sent back without it, they would be
+// refused.
 type wrapping struct {
 	dep   string
-	reset bool         // the next value wrapped takes resetPrefix
-	open  map[int]bool // a streamed thinking block whose signature has not begun, by index
+	reset bool // the next value wrapped takes resetPrefix
+	ended bool // a thinking block went unwrapped, and so does every one after it
+	open  *int // the streamed thinking block whose signature has not begun
 }
 
 func newWrapping(dep string, strip bool) *wrapping {
-	return &wrapping{dep: dep, reset: strip, open: map[int]bool{}}
+	return &wrapping{dep: dep, reset: strip}
 }
 
 func (w *wrapping) wrap(v string) string {
@@ -427,7 +436,12 @@ func (w *wrapping) content(raw json.RawMessage) json.RawMessage {
 	}
 	changed := false
 	for i, b := range blocks {
-		if field, v := provenanceOf(b); field != "" && v != "" {
+		field, v := provenanceOf(b)
+		switch {
+		case field == "" || w.ended:
+		case v == "":
+			w.ended = true
+		default:
 			blocks[i] = withString(b, field, w.wrap(v))
 			changed = true
 		}
@@ -441,7 +455,10 @@ func (w *wrapping) content(raw json.RawMessage) json.RawMessage {
 
 // start wraps a streamed content_block_start's thinking value, or holds a
 // thinking block whose signature is still empty open for its first fragment.
-// It returns nil when the event is unchanged.
+// A thinking block that starts while one is open, an empty redacted block,
+// which no fragment fills, and an empty one that names no index, whose
+// fragments cannot be told apart, end the wrapping. It returns nil when the
+// event is unchanged.
 func (w *wrapping) start(data []byte) []byte {
 	var ev struct {
 		Index        *int            `json:"index"`
@@ -452,11 +469,16 @@ func (w *wrapping) start(data []byte) []byte {
 	}
 	field, v := provenanceOf(ev.ContentBlock)
 	switch {
-	case field == "":
+	case field == "" || w.ended:
+		return nil
+	case w.open != nil:
+		w.ended = true
 		return nil
 	case v == "":
 		if field == "signature" && ev.Index != nil {
-			w.open[*ev.Index] = true
+			w.open = ev.Index
+		} else {
+			w.ended = true
 		}
 		return nil
 	}
@@ -467,11 +489,11 @@ func (w *wrapping) start(data []byte) []byte {
 	return out
 }
 
-// delta wraps an open block's first non-empty signature fragment; the rest
+// delta wraps the open block's first non-empty signature fragment; the rest
 // pass unchanged, so the fragments concatenated, as the SDKs assemble them,
 // are the wrapped value. It returns nil when the event is unchanged.
 func (w *wrapping) delta(data []byte) []byte {
-	if len(w.open) == 0 {
+	if w.open == nil || w.ended {
 		return nil
 	}
 	var ev struct {
@@ -481,11 +503,11 @@ func (w *wrapping) delta(data []byte) []byte {
 			Signature string `json:"signature"`
 		} `json:"delta"`
 	}
-	if json.Unmarshal(data, &ev) != nil || ev.Index == nil || !w.open[*ev.Index] ||
+	if json.Unmarshal(data, &ev) != nil || ev.Index == nil || *ev.Index != *w.open ||
 		ev.Delta.Type != "signature_delta" || ev.Delta.Signature == "" {
 		return nil
 	}
-	delete(w.open, *ev.Index)
+	w.open = nil
 	var obj map[string]json.RawMessage
 	_ = json.Unmarshal(data, &obj)
 	obj["delta"] = withString(obj["delta"], "signature", w.wrap(ev.Delta.Signature))

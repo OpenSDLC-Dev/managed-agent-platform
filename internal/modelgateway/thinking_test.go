@@ -43,9 +43,10 @@ type reply struct {
 	redacted bool // a redacted_thinking block first
 	thinking int  // thinking blocks
 	unsigned bool // whose signatures are empty
-	// unsignedFirst leaves only the first thinking block's signature empty.
-	unsignedFirst bool
-	tools         int // tool calls after them
+	// unsignedAt is the one thinking block, counted from 1, whose signature
+	// is empty; 0 for none.
+	unsignedAt int
+	tools      int // tool calls after them
 }
 
 func newSigner(t *testing.T, name string) *signer {
@@ -179,7 +180,7 @@ func (s *signer) answer(w http.ResponseWriter, c fakeCall, prefix []string) {
 	for k := range r.thinking {
 		text := fmt.Sprintf("%s thought %d at %d", s.name, k, len(prefix))
 		sig := ""
-		if !r.unsigned && (!r.unsignedFirst || k > 0) {
+		if !r.unsigned && r.unsignedAt != k+1 {
 			sig = s.sign(prefix, before, text)
 		}
 		add(map[string]any{"type": "thinking", "thinking": text, "signature": sig})
@@ -416,6 +417,17 @@ func TestAThinkingOnlyReplyLeavesNoEmptyMessage(t *testing.T) {
 	if got, want := canonJSON(b.last().Body["messages"]), canonJSON([]byte(`[{"role":"user","content":"hello"},{"role":"user","content":{"type":"text","text":"kept"}}]`)); got != want {
 		t.Fatalf("b was sent %s, want %s", got, want)
 	}
+
+	// A role is read by its exact key, as the upstream reads it: "Role" does
+	// not keep a user turn from joining.
+	body = fmt.Sprintf(`{"model":"m","max_tokens":64,"messages":[
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"mapgw1.%s.a.x"}]},
+		{"role":"user","Role":"assistant","content":"next"}]}`, da.ID)
+	e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key})
+	if got, want := canonJSON(b.last().Body["messages"]), canonJSON([]byte(`[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":"next"}]}]`)); got != want {
+		t.Fatalf("b was sent %s, want %s", got, want)
+	}
 }
 
 // A caller that has left by the time its attempt's thinking is refused is
@@ -621,19 +633,23 @@ func TestForeignThinkingNeverReachesAnUpstream(t *testing.T) {
 	}
 
 	// A type spelled with an escape is the same type, though the bytes never
-	// say "thinking".
-	body := fmt.Sprintf(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"},
-		{"role":"assistant","content":[{"type":"redacted_\u0074hinking","data":"mapgw1.%s.c.x"},{"type":"text","text":"one"}]},
-		{"role":"user","content":"next"}]}`, dc.ID)
-	if resp, out := e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
-		t.Fatalf("status %d: %s", resp.StatusCode, out)
-	}
-	var msgs []struct {
-		Content []json.RawMessage `json:"content"`
-	}
-	_ = json.Unmarshal(a.last().Body["messages"], &msgs)
-	if len(msgs) != 3 || len(msgs[1].Content) != 1 {
-		t.Fatalf("an escaped redacted block reached the upstream: %s", a.last().Body["messages"])
+	// say "thinking"; and a type is read by its exact key, as the upstream
+	// reads it, so "Type" does not make a thinking block text.
+	for _, block := range []string{`{"type":"redacted_\u0074hinking","data":"mapgw1.%s.c.x"}`,
+		`{"type":"thinking","thinking":"t","signature":"mapgw1.%s.c.y","Type":"text"}`} {
+		body := fmt.Sprintf(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"},
+			{"role":"assistant","content":[`+block+`,{"type":"text","text":"one"}]},
+			{"role":"user","content":"next"}]}`, dc.ID)
+		if resp, out := e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
+			t.Fatalf("status %d: %s", resp.StatusCode, out)
+		}
+		var msgs []struct {
+			Content []json.RawMessage `json:"content"`
+		}
+		_ = json.Unmarshal(a.last().Body["messages"], &msgs)
+		if len(msgs) != 3 || len(msgs[1].Content) != 1 {
+			t.Fatalf("%s reached the upstream: %s", fmt.Sprintf(block, dc.ID), a.last().Body["messages"])
+		}
 	}
 }
 
@@ -668,36 +684,87 @@ func TestStripModeStaysWithinTheBudget(t *testing.T) {
 	}
 }
 
-// Only a signature fragment of an open block is wrapped: one whose type is
-// spelled with an escape is, and one that names no block index is not.
-func TestASignatureFragmentIsReadByItsValue(t *testing.T) {
+// A stream's signatures are wrapped in block order, as a whole answer's are:
+// only the open block's first fragment, read by its value — a type spelled
+// with an escape is a signature fragment, and one that names no index is
+// none — and nothing once a thinking block ahead has gone unwrapped.
+func TestAStreamWrapsInBlockOrder(t *testing.T) {
+	var events atomic.Pointer[[]string]
+	ev := func(name, data string) string { return "event: " + name + "\ndata: " + data + "\n\n" }
 	e := newEnv(t)
 	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
-		sse(w, fmt.Sprintf("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n", c.Model),
-			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
-			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"signature_delta\",\"signature\":\"zz\"}}\n\n",
-			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_\\u0064elta\",\"signature\":\"s1\"}}\n\n",
-			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		start := ev("message_start", fmt.Sprintf(`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":%q,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}`, c.Model))
+		sse(w, append(append([]string{start}, *events.Load()...), ev("message_stop", `{"type":"message_stop"}`))...)
 	})
 	p := e.provider(f.URL)
-	e.credential(p, "sk-frag-key1", 1)
+	e.credential(p, "sk-order-key1", 1)
 	d := e.deployment(p, "up")
 	e.alias("m", target(d, 0))
 	key := e.key(everyAlias)
 	e.start()
 
-	resp, raw := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`,
-		map[string]string{"x-api-key": key})
-	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"signature":"zz"`) || !strings.Contains(string(raw), `"signature":"mapgw1.`+d.ID+`.s1"`) {
-		t.Fatalf("status %d: %s", resp.StatusCode, raw)
+	thinking := `{"type":"thinking","thinking":"","signature":""}`
+	start := func(index, block string) string {
+		return ev("content_block_start", `{"type":"content_block_start"`+index+`,"content_block":`+block+`}`)
+	}
+	sig := func(index, typ, v string) string {
+		return ev("content_block_delta", `{"type":"content_block_delta"`+index+`,"delta":{"type":"`+typ+`","signature":"`+v+`"}}`)
+	}
+	stop := func(index string) string { return ev("content_block_stop", `{"type":"content_block_stop"`+index+`}`) }
+	i0, i1 := `,"index":0`, `,"index":1`
+	wrapped := func(v string) string { return "mapgw1." + d.ID + "." + v }
+	for _, tc := range []struct {
+		name   string
+		events []string
+		want   []string
+	}{
+		{"in order", []string{start(i0, thinking), sig(i0, "signature_delta", "s0"), stop(i0),
+			start(i1, `{"type":"redacted_thinking","data":"d1"}`), stop(i1)}, []string{wrapped("s0"), wrapped("d1")}},
+		{"an escaped type and a fragment with no index", []string{start(i0, thinking), sig("", "signature_delta", "zz"),
+			sig(i0, `signature_\u0064elta`, "s1"), stop(i0)}, []string{"zz", wrapped("s1")}},
+		{"a fragment of another block", []string{start(i0, thinking), sig(i1, "signature_delta", "x"),
+			sig(i0, "signature_delta", "s0"), stop(i0)}, []string{"x", wrapped("s0")}},
+		{"interleaved", []string{start(i0, thinking), start(i1, thinking), sig(i1, "signature_delta", "s1"),
+			sig(i0, "signature_delta", "s0")}, []string{"s1", "s0"}},
+		{"an unsigned block ahead", []string{start(i0, thinking), stop(i0), start(i1, thinking),
+			sig(i1, "signature_delta", "s1")}, []string{"s1"}},
+		{"an empty redacted block ahead", []string{start(i0, `{"type":"redacted_thinking","data":""}`), stop(i0),
+			start(i1, `{"type":"redacted_thinking","data":"d1"}`), stop(i1)}, []string{"d1"}},
+		{"an empty start with no index ahead", []string{start("", thinking), start(i1, thinking),
+			sig(i1, "signature_delta", "s1")}, []string{"s1"}},
+	} {
+		events.Store(&tc.events)
+		resp, raw := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`,
+			map[string]string{"x-api-key": key})
+		var got []string
+		for _, line := range strings.Split(string(raw), "\n") {
+			data, ok := strings.CutPrefix(line, "data: ")
+			if !ok {
+				continue
+			}
+			var ev struct {
+				ContentBlock struct{ Signature, Data string } `json:"content_block"`
+				Delta        struct{ Signature string }       `json:"delta"`
+			}
+			_ = json.Unmarshal([]byte(data), &ev)
+			for _, v := range []string{ev.ContentBlock.Signature, ev.ContentBlock.Data, ev.Delta.Signature} {
+				if v != "" {
+					got = append(got, v)
+				}
+			}
+		}
+		if resp.StatusCode != 200 || strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Errorf("%s: status %d, values %q, want %q", tc.name, resp.StatusCode, got, tc.want)
+		}
 	}
 }
 
-// A strip-mode answer's reset mark goes to the first block it wraps: an
-// unsigned block ahead of it, which names no producer, takes nothing, whole
-// or streamed.
-func TestTheResetMarkGoesToTheFirstWrappedBlock(t *testing.T) {
+// A thinking block after an unsigned one in the same answer goes unwrapped
+// too, whole or streamed: its signature covers the unsigned block, which no
+// upstream is sent back, so the next request sends only the block ahead of
+// it, and the conversation goes on with no refusal. A strip-mode answer whose
+// first thinking block is unsigned wraps nothing, so carries no reset mark.
+func TestAnUnsignedBlockEndsWhatAnAnswerWraps(t *testing.T) {
 	e := newEnv(t)
 	a := newSigner(t, "a")
 	da := e.signedBy(a)
@@ -705,22 +772,38 @@ func TestTheResetMarkGoesToTheFirstWrappedBlock(t *testing.T) {
 	key := e.key(everyAlias)
 	e.start()
 	cl := e.client(key)
-
-	h := edited(next(hello(), talk(t, cl, hello())), 1)
-	a.set(reply{thinking: 2, unsignedFirst: true, tools: 1}, nil)
-	whole := talk(t, cl, h)
-	stream := cl.Messages.NewStreaming(context.Background(), params(h))
-	var acc anthropic.Message
-	for stream.Next() {
-		if err := acc.Accumulate(stream.Current()); err != nil {
+	both := func(h []anthropic.MessageParam) []*anthropic.Message {
+		whole := talk(t, cl, h)
+		stream := cl.Messages.NewStreaming(context.Background(), params(h))
+		var acc anthropic.Message
+		for stream.Next() {
+			if err := acc.Accumulate(stream.Current()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := stream.Err(); err != nil {
 			t.Fatal(err)
 		}
+		return []*anthropic.Message{whole, &acc}
 	}
-	if err := stream.Err(); err != nil {
-		t.Fatal(err)
+
+	a.set(reply{thinking: 3, unsignedAt: 2, tools: 1}, nil)
+	for _, m := range both(hello()) {
+		got := provenance(m)
+		if len(got) != 3 || !strings.HasPrefix(got[0], "mapgw1."+da.ID+".a.") || got[1] != "" || !strings.HasPrefix(got[2], "a.") {
+			t.Fatalf("an answer came back as %q", got)
+		}
+		n := len(a.recorded())
+		talk(t, cl, next(hello(), m))
+		if calls, sent := len(a.recorded())-n, thinkingIn(a.last()); calls != 1 || strings.Join(sent, " ") != strings.TrimPrefix(got[0], "mapgw1."+da.ID+".") {
+			t.Fatalf("returning it took %d calls, sending %q", calls, sent)
+		}
 	}
-	for _, m := range []*anthropic.Message{whole, &acc} {
-		if got := provenance(m); len(got) != 2 || got[0] != "" || !strings.HasPrefix(got[1], "mapgw1r."+da.ID+".a.") {
+
+	h := edited(next(hello(), talk(t, cl, hello())), 1)
+	a.set(reply{thinking: 2, unsignedAt: 1, tools: 1}, nil)
+	for _, m := range both(h) {
+		if got := provenance(m); len(got) != 2 || got[0] != "" || !strings.HasPrefix(got[1], "a.") {
 			t.Fatalf("a strip-mode answer came back as %q", got)
 		}
 	}
@@ -951,6 +1034,8 @@ func TestThinkingRefusal(t *testing.T) {
 		{`{"message":"max_tokens: too large","echo":"a thinking block, signed"}`, false},
 		{`{"type":"error","error":{"type":"invalid_request_error"},"request":{"messages":"a thinking block, signed"}}`, false},
 		{`{"detail":"max_tokens too large","input":"a thinking block, signed"}`, false},
+		{`{"message":"max_tokens: too large","error":"bad request","echo":"a thinking block, signed"}`, false},
+		{`"invalid signature in thinking block"`, false},
 		// Anthropic's own wordings (platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting).
 		{invalidRequest("messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\"."), true},
 		{invalidRequest("messages.1.content.0.type: Expected `thinking` or `redacted_thinking`, but found `tool_use`. When `thinking` is enabled, a final `assistant` message must start with a thinking block (preceeding the lastmost set of `tool_use` and `tool_result` blocks). We recommend you include thinking blocks from previous turns. To avoid this requirement, disable `thinking`."), false},

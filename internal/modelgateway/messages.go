@@ -138,7 +138,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		last = f
 		if !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID) {
 			slog.InfoContext(r.Context(), "modelgateway: upstream refused the request's thinking; retrying without it",
-				"alias", a.Name, "deployment", at.Deployment.ID, "credential", at.Credential.ID, "refusal", errorMessage(f.body))
+				"alias", a.Name, "deployment", at.Deployment.ID, "credential", at.Credential.ID)
 			strip = true
 			i--
 			continue

@@ -278,13 +278,19 @@ type liveRoute struct {
 // whole and streamed: a thinking tool call whose signatures come back wrapped
 // around the vendor's own values, then the continuation a client makes by
 // returning the answer as the SDK gives it, which must send the vendor exactly
-// its values; and one refusal relayed with the vendor's status. With both
-// vendors named, a conversation crosses from DeepSeek to MiniMax and back, and
-// each is sent only its own thinking.
+// its values; and one refusal relayed with the vendor's status. An alias whose
+// first choice is down falls back to the first named vendor's first model,
+// and the continuation goes straight to the deployment that produced its
+// thinking. With both vendors named, a conversation crosses from DeepSeek to
+// MiniMax and back, and each is sent only its own thinking.
 func TestLiveThinkingRoundTrip(t *testing.T) {
 	vendors := namedVendors(t)
 	e := newEnv(t)
 	routes := map[string][]liveRoute{}
+	var fallback liveRoute
+	down := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
+		writeBody(w, 503, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+	})
 	for _, v := range vendors {
 		for _, model := range v.models {
 			rec := &recorder{}
@@ -293,6 +299,12 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 			d := e.deployment(p, model)
 			e.alias(model, target(d, 0))
 			routes[v.name] = append(routes[v.name], liveRoute{model, d.ID, rec})
+			if fallback.alias == "" {
+				dp := e.provider(down.URL, func(p *store.Provider) { p.Name = "down" })
+				e.credential(dp, "sk-down-key1", 1)
+				e.alias("fallback", target(e.deployment(dp, "down"), 0), target(d, 1))
+				fallback = liveRoute{"fallback", d.ID, rec}
+			}
 		}
 	}
 	key := e.key(everyAlias)
@@ -319,6 +331,13 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 		}
 	})
 
+	t.Run("fallback", func(t *testing.T) {
+		liveRoundTrip(t, cl, fallback, false)
+		if n := len(down.recorded()); n != 1 {
+			t.Errorf("the first choice was called %d times, want once: by the first turn, for its one credential, and never by the continuation", n)
+		}
+	})
+
 	if len(routes["deepseek"]) == 0 || len(routes["minimax"]) == 0 {
 		return
 	}
@@ -340,7 +359,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 		if sent := sentThinking(one(t, mm.rec, n).sent); len(sent) != 0 {
 			t.Errorf("MiniMax was sent DeepSeek's thinking: %q", sent)
 		}
-		h = append(h, m2.ToParam(), anthropic.NewUserMessage(anthropic.NewTextBlock("Thanks. Call get_time once more.")))
+		h = next(h, m2)
 		n = ds.rec.count()
 		if _, err := liveTurn(t, cl, ds.alias, h, false); err != nil {
 			t.Fatal(err)
