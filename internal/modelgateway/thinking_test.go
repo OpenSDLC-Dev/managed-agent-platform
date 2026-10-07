@@ -651,6 +651,16 @@ func TestForeignThinkingNeverReachesAnUpstream(t *testing.T) {
 			t.Fatalf("%s reached the upstream: %s", fmt.Sprintf(block, dc.ID), a.last().Body["messages"])
 		}
 	}
+
+	// A message that is not an object goes as sent, for the upstream to
+	// refuse, and the others are filtered all the same.
+	body := fmt.Sprintf(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"mapgw1.%s.c.z"},{"type":"text","text":"one"}]},
+		"oops"]}`, dc.ID)
+	e.do("POST", "/v1/messages", body, map[string]string{"x-api-key": key})
+	if sent := string(a.last().Body["messages"]); strings.Contains(sent, "mapgw1.") || !strings.Contains(sent, `"oops"`) {
+		t.Fatalf("a was sent %s", sent)
+	}
 }
 
 // The retry strip mode makes is an attempt like any other, held to the
@@ -732,6 +742,11 @@ func TestAStreamWrapsInBlockOrder(t *testing.T) {
 			start(i1, `{"type":"redacted_thinking","data":"d1"}`), stop(i1)}, []string{"d1"}},
 		{"an empty start with no index ahead", []string{start("", thinking), start(i1, thinking),
 			sig(i1, "signature_delta", "s1")}, []string{"s1"}},
+		{"a start read by its exact keys", []string{start(i0, thinking+`,"Content_Block":{"type":"text","text":""}`), stop(i0),
+			start(i1, thinking), sig(i1, "signature_delta", "s1")}, []string{"s1"}},
+		{"a delta read by its exact keys", []string{start(i0, thinking),
+			ev("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","Type":"signature_delta","signature":"zz"}}`),
+			sig(i0, "signature_delta", "s0")}, []string{"zz", wrapped("s0")}},
 	} {
 		events.Store(&tc.events)
 		resp, raw := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`,
@@ -1036,6 +1051,7 @@ func TestThinkingRefusal(t *testing.T) {
 		{`{"detail":"max_tokens too large","input":"a thinking block, signed"}`, false},
 		{`{"message":"max_tokens: too large","error":"bad request","echo":"a thinking block, signed"}`, false},
 		{`"invalid signature in thinking block"`, false},
+		{`{"error":"Invalid signature in thinking block"}`, true},
 		// Anthropic's own wordings (platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting).
 		{invalidRequest("messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\"."), true},
 		{invalidRequest("messages.1.content.0.type: Expected `thinking` or `redacted_thinking`, but found `tool_use`. When `thinking` is enabled, a final `assistant` message must start with a thinking block (preceeding the lastmost set of `tool_use` and `tool_result` blocks). We recommend you include thinking blocks from previous turns. To avoid this requirement, disable `thinking`."), false},

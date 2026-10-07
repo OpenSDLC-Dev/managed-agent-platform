@@ -54,8 +54,13 @@ func unwrap(v string) (dep, value string, reset, ok bool) {
 // block's data — and that field's value; for any other block, "". Fields are
 // read by their exact keys, as the upstream reads them: a struct would take
 // "Type" for "type", and a block the upstream reads as thinking would pass as
-// text.
+// text. A block whose bytes neither say "thinking" nor hold an escape cannot
+// be one, so it is not decoded: a large image or document is scanned, not
+// copied.
 func provenanceOf(b json.RawMessage) (field, value string) {
+	if !bytes.Contains(b, []byte("thinking")) && !bytes.Contains(b, []byte(`\u`)) {
+		return "", ""
+	}
 	var obj map[string]json.RawMessage
 	var typ string
 	if json.Unmarshal(b, &obj) != nil || json.Unmarshal(obj["type"], &typ) != nil {
@@ -97,7 +102,9 @@ type histBlock struct {
 
 // parseHistory reads a request's messages. It returns nil when provenance has
 // nothing to do — no thinking block anywhere — and when the messages are not
-// an array of objects, which the upstream answers itself. A block's type can
+// an array, which the upstream answers itself; a message that is not an object
+// goes as sent, for the upstream to refuse, and the others are filtered all
+// the same. A block's type can
 // name thinking only by those letters or through a \u escape, so messages
 // holding neither are not decoded at all.
 func parseHistory(raw json.RawMessage) *history {
@@ -111,13 +118,12 @@ func parseHistory(raw json.RawMessage) *history {
 	h := &history{msgs: make([]histMsg, len(msgs))}
 	found := false
 	for i, m := range msgs {
+		h.msgs[i] = histMsg{raw: m}
 		var obj map[string]json.RawMessage
 		if json.Unmarshal(m, &obj) != nil {
-			return nil
+			continue
 		}
-		var role string
-		_ = json.Unmarshal(obj["role"], &role) // by its exact key, as provenanceOf reads a block
-		h.msgs[i] = histMsg{raw: m, role: role}
+		_ = json.Unmarshal(obj["role"], &h.msgs[i].role) // by its exact key, as provenanceOf reads a block
 		var content []json.RawMessage
 		if json.Unmarshal(obj["content"], &content) != nil {
 			continue // a string, or something the upstream refuses itself
@@ -382,10 +388,10 @@ var thinkingParams = []string{"thinking.type", "between_tools", "budget_tokens",
 // blockField is a thinking field of one of the request's blocks, by its path.
 var blockField = regexp.MustCompile(`content\.\d+\.(thinking|signature)\b`)
 
-// errorMessage is an error body's message: error.message in Anthropic's
-// envelope, else a top-level message; the text of a body that is not JSON at
-// all; and "" for JSON that holds no message, whatever its shape — an error
-// field that is a string included.
+// errorMessage is an error body's message, each field read by its exact key:
+// error.message in Anthropic's envelope, or error itself where it is a
+// string, else a top-level message; the text of a body that is not JSON at
+// all; and "" for JSON that holds no message, whatever its shape.
 func errorMessage(body []byte) string {
 	if !json.Valid(body) {
 		return string(body)
@@ -393,11 +399,14 @@ func errorMessage(body []byte) string {
 	var top, inner map[string]json.RawMessage
 	var msg string
 	_ = json.Unmarshal(body, &top)
-	if json.Unmarshal(top["error"], &inner) == nil && json.Unmarshal(inner["message"], &msg) == nil && msg != "" {
-		return msg
+	if json.Unmarshal(top["error"], &inner) == nil {
+		_ = json.Unmarshal(inner["message"], &msg)
+	} else {
+		_ = json.Unmarshal(top["error"], &msg)
 	}
-	msg = ""
-	_ = json.Unmarshal(top["message"], &msg)
+	if msg == "" {
+		_ = json.Unmarshal(top["message"], &msg)
+	}
 	return msg
 }
 
@@ -457,17 +466,16 @@ func (w *wrapping) content(raw json.RawMessage) json.RawMessage {
 // thinking block whose signature is still empty open for its first fragment.
 // A thinking block that starts while one is open, an empty redacted block,
 // which no fragment fills, and an empty one that names no index, whose
-// fragments cannot be told apart, end the wrapping. It returns nil when the
-// event is unchanged.
+// fragments cannot be told apart, end the wrapping. Events are read by their
+// exact keys, as an SDK reads them. It returns nil when the event is
+// unchanged.
 func (w *wrapping) start(data []byte) []byte {
-	var ev struct {
-		Index        *int            `json:"index"`
-		ContentBlock json.RawMessage `json:"content_block"`
-	}
-	if json.Unmarshal(data, &ev) != nil {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(data, &obj) != nil {
 		return nil
 	}
-	field, v := provenanceOf(ev.ContentBlock)
+	index := eventIndex(obj)
+	field, v := provenanceOf(obj["content_block"])
 	switch {
 	case field == "" || w.ended:
 		return nil
@@ -475,42 +483,47 @@ func (w *wrapping) start(data []byte) []byte {
 		w.ended = true
 		return nil
 	case v == "":
-		if field == "signature" && ev.Index != nil {
-			w.open = ev.Index
+		if field == "signature" && index != nil {
+			w.open = index
 		} else {
 			w.ended = true
 		}
 		return nil
 	}
-	var obj map[string]json.RawMessage
-	_ = json.Unmarshal(data, &obj)
-	obj["content_block"] = withString(ev.ContentBlock, field, w.wrap(v))
+	obj["content_block"] = withString(obj["content_block"], field, w.wrap(v))
 	out, _ := json.Marshal(obj)
 	return out
 }
 
 // delta wraps the open block's first non-empty signature fragment; the rest
 // pass unchanged, so the fragments concatenated, as the SDKs assemble them,
-// are the wrapped value. It returns nil when the event is unchanged.
+// are the wrapped value. A signature fragment's bytes name its field, or
+// spell it through an escape, so any other delta — the stream of
+// thinking_deltas above all — is not decoded. It returns nil when the event
+// is unchanged.
 func (w *wrapping) delta(data []byte) []byte {
-	if w.open == nil || w.ended {
+	if w.open == nil || w.ended || !bytes.Contains(data, []byte("signature")) && !bytes.Contains(data, []byte(`\u`)) {
 		return nil
 	}
-	var ev struct {
-		Index *int `json:"index"`
-		Delta struct {
-			Type      string `json:"type"`
-			Signature string `json:"signature"`
-		} `json:"delta"`
+	var obj, d map[string]json.RawMessage
+	var typ, sig string
+	if json.Unmarshal(data, &obj) != nil || json.Unmarshal(obj["delta"], &d) != nil ||
+		json.Unmarshal(d["type"], &typ) != nil || typ != "signature_delta" ||
+		json.Unmarshal(d["signature"], &sig) != nil || sig == "" {
+		return nil
 	}
-	if json.Unmarshal(data, &ev) != nil || ev.Index == nil || *ev.Index != *w.open ||
-		ev.Delta.Type != "signature_delta" || ev.Delta.Signature == "" {
+	if i := eventIndex(obj); i == nil || *i != *w.open {
 		return nil
 	}
 	w.open = nil
-	var obj map[string]json.RawMessage
-	_ = json.Unmarshal(data, &obj)
-	obj["delta"] = withString(obj["delta"], "signature", w.wrap(ev.Delta.Signature))
+	obj["delta"] = withString(obj["delta"], "signature", w.wrap(sig))
 	out, _ := json.Marshal(obj)
 	return out
+}
+
+// eventIndex is a stream event's block index, or nil when it names none.
+func eventIndex(obj map[string]json.RawMessage) *int {
+	var i *int
+	_ = json.Unmarshal(obj["index"], &i)
+	return i
 }

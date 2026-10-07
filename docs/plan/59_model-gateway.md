@@ -412,15 +412,16 @@ request path reads only the snapshot.
   `mapgw1.<deployment id>.<the upstream's value>`, exactly once per block: a whole
   response's field is prefixed, and in a stream the first non-empty fragment of each
   block index — on its start or its first `signature_delta` — is prefixed and the rest
-  pass unchanged, so a client that concatenates the fragments, as the SDK does,
-  assembles the same value either way. A block whose value is empty — an unsigned
+  pass unchanged, so for blocks streamed one after another, as Anthropic streams
+  them, a client that concatenates the fragments, as the SDK does, assembles the
+  same value either way. A block whose value is empty — an unsigned
   thinking block — has nothing to wrap: it names no producer and goes back to no
   upstream, and no thinking block after it in the same response is wrapped either,
   since its signature covers the block that will not go back with it — as the brain
   ends its kept run at the first unsigned block (plan 60). In a stream, where a
   signature arrives after its block starts, a thinking block that starts while the
-  one before it is still unsigned ends the wrapping the same way, as does an empty
-  `redacted_thinking` block. Both fields are
+  one before it is still unsigned ends the wrapping the same way, as do an empty
+  `redacted_thinking` block and an empty start that names no index. Both fields are
   opaque to a client, which
   stores and returns them verbatim, so the wrapper rides along unseen. On a request the
   gateway reads the wrappers in the history: among the alias's healthy targets, the
@@ -707,9 +708,9 @@ where a vendor bills cache writes.
     present (`respjson.Field.Valid`).
   - **Provenance through the real vendors:** each model's provider points at a proxy
     that forwards to the vendor and records both directions, since neither vendor
-    checks a signature and its 200 proves nothing. Every model's thinking comes back
-    wrapped around the vendor's own value and goes back, on the continuation the
-    SDK's `ToParam` makes, as exactly that value; an alias whose first choice is down
+    checks a signature and its 200 proves nothing. Every model that thinks returns
+    signed thinking, which comes back wrapped around the vendor's own value and goes
+    back, on the continuation the SDK's `ToParam` makes, as exactly that value; an alias whose first choice is down
     falls back, and its continuation goes straight to its thinking's producer; a
     conversation crossing from DeepSeek to MiniMax and back sends each only its own.
   - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with

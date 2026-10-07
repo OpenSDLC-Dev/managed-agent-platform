@@ -37,20 +37,33 @@ import (
 const liveEnv = "RUN_LIVE_MODELGATEWAY"
 
 type liveVendor struct {
-	name    string // the profile, and the name RUN_LIVE_MODELGATEWAY uses
-	keyEnv  string
-	baseEnv string // configures the base URL where the vendor has more than one
-	base    string
-	models  []string
+	name     string // the profile, and the name RUN_LIVE_MODELGATEWAY uses
+	keyEnv   string
+	baseEnv  string // configures the base URL where the vendor has more than one
+	base     string
+	models   []string
+	thinking anthropic.ThinkingConfigParamUnion // what asks its models to think
+	quiet    []string                           // its models that return no thinking even so
 }
 
 var liveVendors = []liveVendor{
 	{name: "deepseek", keyEnv: "DEEPSEEK_API_KEY", base: "https://api.deepseek.com/anthropic",
-		models: []string{"deepseek-flash", "deepseek-v4-pro"}},
-	// A MiniMax key works on its own region's host only.
+		models: []string{"deepseek-flash", "deepseek-v4-pro"}, thinking: anthropic.ThinkingConfigParamOfEnabled(1024)},
+	// A MiniMax key works on its own region's host only, and MiniMax-M3
+	// thinks only when asked adaptively (the plan's ground truth).
 	{name: "minimax", keyEnv: "MINIMAX_API_KEY", baseEnv: "MINIMAX_BASE_URL",
-		models: []string{"MiniMax-M3", "MiniMax-M3.1-Flash-Preview"}},
+		models:   []string{"MiniMax-M3", "MiniMax-M3.1-Flash-Preview"},
+		thinking: anthropic.ThinkingConfigParamUnion{OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{}},
+		// It returned no thinking block to this tier's request on 2026-10-07,
+		// asked enabled or adaptive, called directly or through the gateway;
+		// its round trip is checked without one, and any it returns is
+		// checked like any other.
+		quiet: []string{"MiniMax-M3.1-Flash-Preview"}},
 }
+
+// liveKeys is the keys of the vendors consented to, which a failure's
+// message never prints.
+var liveKeys []string
 
 // namedVendors is the vendors consented to, each with its key and base URL.
 func namedVendors(t *testing.T) []liveVendor {
@@ -74,14 +87,17 @@ func namedVendors(t *testing.T) []liveVendor {
 			t.Fatalf("%s names %s, but %s or its base URL is not configured", liveEnv, v.name, v.keyEnv)
 		}
 		v.keyEnv = key // from here on, the key itself
+		liveKeys = append(liveKeys, key)
 		out = append(out, v)
 	}
 	return out
 }
 
 // liveSetting is key from the environment, or else from the repo-root .env,
-// read as internal/modeltest reads its own keys (webtooltest mirrors it the
-// same way, for the same reason: modeltest serves MODEL_* alone).
+// two directories up from the package directory go test runs in. The file
+// supplies only the settings this tier names, its values parsed as
+// internal/modeltest parses its own — modeltest serves MODEL_* alone, so this
+// tier reads its file itself, as webtooltest does.
 func liveSetting(key string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v
@@ -100,7 +116,8 @@ var liveDotEnv = sync.OnceValue(func() map[string]string {
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		k, v, ok := strings.Cut(line, "=")
-		if !ok || strings.HasPrefix(line, "#") {
+		k = strings.TrimSpace(k)
+		if !ok || strings.HasPrefix(line, "#") || !slices.ContainsFunc(liveVendors, func(lv liveVendor) bool { return k == lv.keyEnv || k == lv.baseEnv }) {
 			continue
 		}
 		v = strings.TrimSpace(v)
@@ -108,10 +125,10 @@ var liveDotEnv = sync.OnceValue(func() map[string]string {
 			if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
 				v = v[1 : 1+end]
 			}
-		} else if i := strings.Index(v, " #"); i >= 0 {
-			v = strings.TrimSpace(v[:i])
+		} else if i := strings.IndexFunc(v, func(r rune) bool { return r == '#' }); i > 0 && (v[i-1] == ' ' || v[i-1] == '\t') {
+			v = strings.TrimSpace(v[:i]) // a trailing comment; a '#' inside the value is kept
 		}
-		out[strings.TrimSpace(k)] = v
+		out[k] = v
 	}
 	return out
 })
@@ -205,24 +222,54 @@ type readCloser struct{ *bytes.Reader }
 func (readCloser) Close() error { return nil }
 
 // vendorThinking is the thinking values of an answer as the vendor sent it,
-// whole or streamed, assembled by the SDK's own types.
-func vendorThinking(raw []byte) []string {
+// whole or streamed, assembled by the SDK's own types, and whether a stream
+// interleaved its thinking blocks — a signature for one arriving after a
+// later one started — which the gateway leaves unwrapped by design and
+// expected does not model.
+func vendorThinking(raw []byte) (values []string, interleaved bool) {
 	var m anthropic.Message
 	if bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
 		_ = json.Unmarshal(raw, &m)
-		return provenance(&m)
+		return provenance(&m), false
 	}
+	last := int64(-1) // the thinking block that started last
 	for _, line := range strings.Split(string(raw), "\n") {
 		data, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
 		if !ok {
 			continue
 		}
 		var ev anthropic.MessageStreamEventUnion
-		if json.Unmarshal([]byte(strings.TrimSpace(data)), &ev) == nil {
-			_ = m.Accumulate(ev)
+		if json.Unmarshal([]byte(strings.TrimSpace(data)), &ev) != nil {
+			continue
 		}
+		switch {
+		case ev.Type == "content_block_start" && strings.Contains(ev.ContentBlock.Type, "thinking"):
+			last = ev.Index
+		case ev.Type == "content_block_delta" && ev.Delta.Type == "signature_delta" && ev.Index != last:
+			interleaved = true
+		}
+		_ = m.Accumulate(ev)
 	}
-	return provenance(&m)
+	return provenance(&m), interleaved
+}
+
+// expected is what the gateway must return for the thinking values the
+// vendor sent, and what a continuation must send the vendor back: each value
+// wrapped, in block order, until the first empty one, which — like every
+// value after it, whose signature covers it — comes back as the vendor sent
+// it and goes back to no upstream.
+func expected(vend []string, dep string) (returned, sentBack []string) {
+	ended := false
+	for _, v := range vend {
+		ended = ended || v == ""
+		if ended {
+			returned = append(returned, v)
+			continue
+		}
+		returned = append(returned, "mapgw1."+dep+"."+v)
+		sentBack = append(sentBack, v)
+	}
+	return returned, sentBack
 }
 
 // sentThinking is the thinking values a request carried.
@@ -236,14 +283,14 @@ func liveAsk() anthropic.MessageParam {
 	return anthropic.NewUserMessage(anthropic.NewTextBlock("What time is it now? Call the get_time tool first, then answer in one short sentence."))
 }
 
-// liveTurn sends history to alias, whole or streamed, with thinking on and
-// one tool offered.
-func liveTurn(t *testing.T, cl *anthropic.Client, alias string, history []anthropic.MessageParam, stream bool) (*anthropic.Message, error) {
+// liveTurn sends history to r's alias, whole or streamed, with thinking on as
+// its vendor takes it and one tool offered.
+func liveTurn(t *testing.T, cl *anthropic.Client, r liveRoute, history []anthropic.MessageParam, stream bool) (*anthropic.Message, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	p := anthropic.MessageNewParams{Model: anthropic.Model(alias), MaxTokens: 2048, Messages: history,
-		Thinking: anthropic.ThinkingConfigParamOfEnabled(1024),
+	p := anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Messages: history,
+		Thinking: r.thinking,
 		Tools: []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: "get_time",
 			Description: anthropic.String("Returns the current time."), InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}}}}}}
 	if !stream {
@@ -272,6 +319,8 @@ func one(t *testing.T, rec *recorder, n int) *exchange {
 type liveRoute struct {
 	alias, dep string
 	rec        *recorder
+	thinking   anthropic.ThinkingConfigParamUnion
+	thinks     bool // the model is expected to return signed thinking
 }
 
 // TestLiveThinkingRoundTrip runs, for every model of every named vendor,
@@ -298,12 +347,15 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 			e.credential(p, v.keyEnv, 1)
 			d := e.deployment(p, model)
 			e.alias(model, target(d, 0))
-			routes[v.name] = append(routes[v.name], liveRoute{model, d.ID, rec})
-			if fallback.alias == "" {
+			thinks := !slices.Contains(v.quiet, model)
+			routes[v.name] = append(routes[v.name], liveRoute{model, d.ID, rec, v.thinking, thinks})
+			// The fallback's continuation finds its way back by its thinking,
+			// so it falls back to a model that thinks.
+			if fallback.alias == "" && thinks {
 				dp := e.provider(down.URL, func(p *store.Provider) { p.Name = "down" })
 				e.credential(dp, "sk-down-key1", 1)
 				e.alias("fallback", target(e.deployment(dp, "down"), 0), target(d, 1))
-				fallback = liveRoute{"fallback", d.ID, rec}
+				fallback = liveRoute{"fallback", d.ID, rec, v.thinking, true}
 			}
 		}
 	}
@@ -344,24 +396,25 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 	t.Run("across vendors", func(t *testing.T) {
 		ds, mm := routes["deepseek"][0], routes["minimax"][0]
 		n := ds.rec.count()
-		m1, err := liveTurn(t, cl, ds.alias, []anthropic.MessageParam{liveAsk()}, false)
+		m1, err := liveTurn(t, cl, ds, []anthropic.MessageParam{liveAsk()}, false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_, raw := one(t, ds.rec, n).answer()
-		own := nonEmpty(vendorThinking(raw))
+		vend, _ := vendorThinking(raw)
+		_, own := expected(vend, ds.dep)
 		h := next([]anthropic.MessageParam{liveAsk()}, m1)
 		n = mm.rec.count()
-		m2, err := liveTurn(t, cl, mm.alias, h, false)
+		m2, err := liveTurn(t, cl, mm, h, false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if sent := sentThinking(one(t, mm.rec, n).sent); len(sent) != 0 {
-			t.Errorf("MiniMax was sent DeepSeek's thinking: %q", sent)
+			t.Errorf("MiniMax was sent DeepSeek's thinking: %q", abbreviate(sent))
 		}
 		h = next(h, m2)
 		n = ds.rec.count()
-		if _, err := liveTurn(t, cl, ds.alias, h, false); err != nil {
+		if _, err := liveTurn(t, cl, ds, h, false); err != nil {
 			t.Fatal(err)
 		}
 		if sent := sentThinking(one(t, ds.rec, n).sent); !slices.Equal(sent, own) {
@@ -374,18 +427,18 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool)
 	t.Helper()
 	mode := map[bool]string{false: "whole", true: "streamed"}[stream]
 	n := r.rec.count()
-	m, err := liveTurn(t, cl, r.alias, []anthropic.MessageParam{liveAsk()}, stream)
+	m, err := liveTurn(t, cl, r, []anthropic.MessageParam{liveAsk()}, stream)
 	if err != nil {
 		t.Fatalf("%s: %v", mode, err)
 	}
 	_, raw := one(t, r.rec, n).answer()
-	vend := vendorThinking(raw)
-	var want []string
-	for _, v := range vend {
-		if v != "" {
-			v = "mapgw1." + r.dep + "." + v
-		}
-		want = append(want, v)
+	vend, interleaved := vendorThinking(raw)
+	if interleaved {
+		t.Fatalf("%s: the vendor interleaved its thinking blocks, which the gateway leaves unwrapped by design and this tier does not model", mode)
+	}
+	want, back := expected(vend, r.dep)
+	if len(back) == 0 && r.thinks {
+		t.Fatalf("%s: the vendor returned no signed thinking (%q), so there is nothing to round-trip", mode, abbreviate(vend))
 	}
 	if got := provenance(m); !slices.Equal(got, want) || string(m.Model) != r.alias || m.Usage.OutputTokens == 0 {
 		t.Fatalf("%s: model %q, %d output tokens, thinking %q, want %q", mode, m.Model, m.Usage.OutputTokens, abbreviate(got), abbreviate(want))
@@ -394,23 +447,23 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool)
 		t.Fatalf("%s: the model answered without calling the tool (stop %q)", mode, m.StopReason)
 	}
 	n = r.rec.count()
-	if _, err := liveTurn(t, cl, r.alias, next([]anthropic.MessageParam{liveAsk()}, m), stream); err != nil {
+	if _, err := liveTurn(t, cl, r, next([]anthropic.MessageParam{liveAsk()}, m), stream); err != nil {
 		t.Fatalf("%s continuation: %v", mode, err)
 	}
-	if sent := sentThinking(one(t, r.rec, n).sent); !slices.Equal(sent, nonEmpty(vend)) {
-		t.Fatalf("%s continuation sent %q, want the vendor's own %q", mode, abbreviate(sent), abbreviate(nonEmpty(vend)))
+	if sent := sentThinking(one(t, r.rec, n).sent); !slices.Equal(sent, back) {
+		t.Fatalf("%s continuation sent %q, want the vendor's own %q", mode, abbreviate(sent), abbreviate(back))
 	}
-	t.Logf("%s: %d thinking block(s) round-tripped", mode, len(want))
+	t.Logf("%s: %d of %d thinking block(s) round-tripped", mode, len(back), len(want))
 }
 
-func nonEmpty(vs []string) []string {
-	return slices.DeleteFunc(slices.Clone(vs), func(v string) bool { return v == "" })
-}
-
-// abbreviate keeps a failure readable: signatures run to kilobytes.
+// abbreviate keeps a failure readable — signatures run to kilobytes — and
+// keyless: a vendor that echoed a key into a value prints it masked.
 func abbreviate(vs []string) []string {
 	out := make([]string, len(vs))
 	for i, v := range vs {
+		for _, k := range liveKeys {
+			v = strings.ReplaceAll(v, k, "***")
+		}
 		if len(v) > 48 {
 			v = fmt.Sprintf("%s…(%d)", v[:48], len(v))
 		}
