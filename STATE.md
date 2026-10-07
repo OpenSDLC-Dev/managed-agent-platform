@@ -14,14 +14,14 @@ slice 3 is the console repository's own plan.
 - [x] Slice 1 — store and catalogue: the `modelgateway` schema (migration 0049), the
       platform key check shared (`internal/apikey`), the admin API under both auth modes,
       the notify-driven snapshot, the four chat vendors' profiles
-- [ ] Slice 2 — Anthropic inference, in five PRs; freezes the admin API
+- [ ] Slice 2 — Anthropic inference, in six PRs; freezes the admin API
   - [x] 2a — `cmd/modelgateway`: `/v1/messages` (streamed and not) and `count_tokens`
         passed through, `/v1/models`, routing with retry and fallback, the stall guard
   - [x] 2b — thinking provenance, the strip-mode backstop, the live tier's round trip
   - [x] 2c — the profiles' auth header and edits
-  - [ ] 2d — usage rows, retention and rollups; RPM and TPM limits; telemetry, carrying
-        the caller's trace context through the gateway
-  - [ ] 2e — compose and Helm, and a GCP identity granted the cipher (ending its
+  - [x] 2d — usage rows, retention and rollups, the admin usage reads; RPM and TPM limits
+  - [ ] 2e — telemetry, carrying the caller's trace context through the gateway
+  - [ ] 2f — compose and Helm, and a GCP identity granted the cipher (ending its
         `unhosted` entry in `tools/kmsrole`); the rest of the live tier (model list, vendor behavior)
 - [ ] Slice 4 — OpenAI surfaces, embeddings and rerank with the `gitee` profile; dikw-core
       through the gateway

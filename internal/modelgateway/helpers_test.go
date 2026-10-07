@@ -132,7 +132,7 @@ func (e *env) start(mod ...func(*modelgateway.Config)) {
 	e.t.Helper()
 	cat, err := catalog.New(e.ctx, e.pool, time.Hour)
 	e.must(err)
-	cfg := modelgateway.Config{Catalog: cat, Keys: e.pool, Cipher: e.cipher, BootstrapKey: bootstrap, Backoff: time.Millisecond}
+	cfg := modelgateway.Config{Catalog: cat, Store: e.s, Keys: e.pool, Cipher: e.cipher, BootstrapKey: bootstrap, Backoff: time.Millisecond}
 	for _, m := range mod {
 		m(&cfg)
 	}

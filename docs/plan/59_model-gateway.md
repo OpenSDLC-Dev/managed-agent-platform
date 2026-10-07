@@ -392,16 +392,20 @@ defaults, as the platform's top-level resource tables do
   `internal/store/migrations/0024_api_keys_lifecycle.sql`): the bootstrap key and the
   brain's (Auth and Brain integration below); a row written for either still applies. Issuance, status and
   expiry stay the platform's.
-- **usage** — one row per request: key id, alias, deployment, credential, session id,
-  inbound protocol, status, the token counts the upstream reported (input, output,
+- **usage** — one row per request a key's limits admitted: request id, key id, the
+  model name sent and the alias it matched, the deployment and credential that answered
+  (or were tried last), session id, inbound protocol and route, the status and error
+  type the caller was given, the token counts the upstream reported (input, output,
   cache write, cache read), cost at the prices in force, latency, time to first token.
   No count is estimated: a response without `usage`, as Gitee's multimodal embeddings
-  answer, records no tokens and no cost. Metadata only. Kept 90 days by default
-  (`MODELGATEWAY_USAGE_RETENTION`) and deleted by a sweep any replica may run under an
-  advisory lock.
-- **usage_daily** — rollups per day, key, matched alias (Telemetry below) and
-  deployment, kept indefinitely; the console's cost reports read these.
-- **rate_window** — one-minute windows per key: requests and tokens.
+  answer, records no tokens and no cost, and a `count_tokens` answer is a count, not
+  usage. Metadata only. Kept 90 days by default (`MODELGATEWAY_USAGE_RETENTION`) and
+  deleted by a sweep any replica may run under an advisory lock.
+- **usage_daily** — rollups per UTC day, key, matched alias (Telemetry below) and
+  deployment, written by the statement that writes each usage row, so no job builds
+  them, and kept indefinitely; the console's cost reports read these.
+- **rate_windows** — one-minute windows per limited key: requests admitted and tokens
+  completed.
 
 Every admin write commits a `NOTIFY modelgateway_config`; each replica reloads its
 snapshot on the notification and on a periodic tick, so a missed notification heals. The
@@ -504,10 +508,15 @@ request path reads only the snapshot.
   deployment, retries across credentials only.
 - **Stall.** `provider.StallGuard` per provider, for #121's reasons unchanged.
 - **Limits.** Admission increments the key's request count for the current minute in one
-  upsert and refuses over the limit with 429 and `retry-after` in integer seconds. TPM is
+  upsert and refuses over the limit with 429 and `retry-after` in integer seconds; a
+  refused request is not counted, nor is one the gateway refuses on its own before
+  admission (an unknown model, a field every upstream ignores), and a `count_tokens`
+  request counts like any other. TPM is
   a soft limit on completed usage: a response's tokens count in the minute it ends, and a
   request is admitted while the current minute's count is under the limit, so requests
-  already in flight can overshoot it by their own size — RPM is what bounds that. A
+  already in flight can overshoot it by their own size — RPM is what bounds that. It
+  counts input, cache-write and output tokens but not cache reads, as Anthropic's own
+  limits count them (platform.claude.com/docs/en/api/rate-limits, "Cache-aware ITPM"). A
   caller that disconnects does not end the upstream response: the gateway reads it to
   the end under the stall guard and records its usage, so abandoned streams cannot
   spend tokens TPM and the ledger never see, and no count has to be estimated.

@@ -369,7 +369,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 				t.Run(r.alias, func(t *testing.T) {
 					t.Parallel()
 					for _, stream := range []bool{false, true} {
-						liveRoundTrip(t, cl, r, stream)
+						liveRoundTrip(t, cl, e.s, r, stream)
 					}
 					n := r.rec.count()
 					_, err := cl.Messages.New(context.Background(), anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 64})
@@ -384,7 +384,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 	})
 
 	t.Run("fallback", func(t *testing.T) {
-		liveRoundTrip(t, cl, fallback, false)
+		liveRoundTrip(t, cl, e.s, fallback, false)
 		if n := len(down.recorded()); n != 1 {
 			liveErrorf(t, "the first choice was called %d times, want once: by the first turn, for its one credential, and never by the continuation", n)
 		}
@@ -423,7 +423,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 	})
 }
 
-func liveRoundTrip(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool) {
+func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRoute, stream bool) {
 	t.Helper()
 	mode := map[bool]string{false: "whole", true: "streamed"}[stream]
 	n := r.rec.count()
@@ -445,6 +445,15 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool)
 	}
 	if m.StopReason != anthropic.StopReasonToolUse {
 		liveFatalf(t, "%s: the model answered without calling the tool (stop %q)", mode, m.StopReason)
+	}
+	// The ledger holds what the caller's SDK added up, written before the
+	// answer ended.
+	rows, _, err := s.ListUsage(context.Background(), store.UsageFilter{Alias: r.alias}, 0, 1)
+	sdk := store.Tokens{Input: m.Usage.InputTokens, Output: m.Usage.OutputTokens,
+		CacheWrite: m.Usage.CacheCreationInputTokens, CacheRead: m.Usage.CacheReadInputTokens}
+	if err != nil || len(rows) != 1 || rows[0].Tokens == nil || *rows[0].Tokens != sdk || rows[0].Status != 200 ||
+		rows[0].DeploymentID != r.dep || stream != (rows[0].TTFT > 0) {
+		liveFatalf(t, "%s: the ledger holds %+v (%v), want a 200 from %s with the SDK's %+v", mode, rows, err, r.dep, sdk)
 	}
 	n = r.rec.count()
 	if _, err := liveTurn(t, cl, r, next([]anthropic.MessageParam{liveAsk()}, m), stream); err != nil {

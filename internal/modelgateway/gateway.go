@@ -54,6 +54,7 @@ import (
 // Config is what the gateway serves from.
 type Config struct {
 	Catalog      *catalog.Catalog
+	Store        *store.Store   // the ledger and the rate windows
 	Keys         apikey.Querier // the platform database, whose api_keys a caller's key is checked against
 	Cipher       secrets.Cipher // opens the credentials the catalog holds sealed
 	BootstrapKey string         // CONTROLPLANE_API_KEY
@@ -131,6 +132,8 @@ func New(cfg Config) (http.Handler, error) {
 	switch {
 	case cfg.Catalog == nil:
 		return nil, errors.New("modelgateway: a catalog is required")
+	case cfg.Store == nil:
+		return nil, errors.New("modelgateway: a store is required for the ledger and the limits")
 	case cfg.Keys == nil:
 		return nil, errors.New("modelgateway: the platform database is required")
 	case cfg.Cipher == nil:

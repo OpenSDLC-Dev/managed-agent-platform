@@ -57,6 +57,7 @@ func bounded(w http.ResponseWriter) *http.ResponseController {
 
 // messages serves /v1/messages and its count_tokens twin.
 func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, path string) {
+	start := time.Now()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -115,6 +116,14 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		writeError(w, r, invalid("every upstream of model %s ignores one of %s", model, strings.Join(ignored, ", ")))
 		return
 	}
+	// Only a request the key's limits admit counts, and is recorded: the
+	// refusals above are the gateway's own, made before any upstream was
+	// asked.
+	if !h.admit(w, r, c) {
+		return
+	}
+	out := &outcome{}
+	defer h.record(r, c, a.Name, model, path, start, out)
 	call := call{
 		top:    top,
 		hist:   parseHistory(top["messages"]),
@@ -122,6 +131,8 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		path:   path,
 		stream: path == "/v1/messages" && string(bytes.TrimSpace(top["stream"])) == "true",
 		header: forwarded(r.Header),
+		start:  start,
+		out:    out,
 	}
 	if dep := call.hist.producer(attempts); dep != "" {
 		attempts = preferring(attempts, dep)
@@ -164,13 +175,13 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 			continue
 		}
 		if !retry {
-			f.write(w, r)
+			f.write(w, r, out)
 			return
 		}
 		slog.InfoContext(r.Context(), "modelgateway: attempt failed", "alias", a.Name,
 			"deployment", at.Deployment.ID, "credential", at.Credential.ID, "status", f.status, "error", f.err)
 	}
-	last.write(w, r)
+	last.write(w, r, out)
 }
 
 // call is what every attempt of one request sends.
@@ -181,6 +192,8 @@ type call struct {
 	path   string
 	stream bool
 	header http.Header // the caller's headers that go upstream
+	start  time.Time   // when the request arrived
+	out    *outcome    // what the ledger is told of it
 }
 
 // forwarded keeps the caller's anthropic-* headers, verbatim and as an open
@@ -215,7 +228,13 @@ func (f *failure) refusesThinking() bool {
 	return f.status == http.StatusBadRequest && thinkingRefusal(f.body)
 }
 
-func (f *failure) write(w http.ResponseWriter, r *http.Request) {
+// write answers the caller with the failure, and tells out what the caller
+// was given.
+func (f *failure) write(w http.ResponseWriter, r *http.Request, out *outcome) {
+	out.status, out.errType = f.status, f.typ
+	if f.body != nil {
+		out.errType = errorTypeOf(f.body, f.status)
+	}
 	if f.body == nil {
 		writeError(w, r, &apiError{f.status, f.typ, f.err.Error()})
 		return
@@ -311,6 +330,7 @@ func streamError(ctx context.Context, at catalog.Attempt, data []byte, header ht
 // does not end an upstream answer it has started paying for, which is read to
 // its end.
 func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt, strip bool) (*failure, bool) {
+	c.out.at = &at
 	ctx := context.WithoutCancel(r.Context())
 	key, err := h.open(ctx, at.Credential)
 	if err != nil {
@@ -385,7 +405,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			case e.Name == "error":
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 			default:
-				relayStream(ctx, w, events, held, e, c.alias, wrap, requestID(r), guard, red)
+				relayStream(ctx, w, events, held, e, c, wrap, requestID(r), guard, red)
 				return nil, false
 			}
 		}
@@ -406,6 +426,8 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	bounded(w)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(answerJSON(b, c.alias, wrap))
+	c.out.status = resp.StatusCode
+	c.out.tokens = usageOf(nil, member(b, "usage")) // a count's answer has no usage: its input_tokens is the count
 	return nil, false
 }
 
@@ -538,7 +560,9 @@ func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
 // event goes out
 // whole: one the upstream cut off at the end of its stream is completed when
 // its data parses, so the caller dispatches it and nothing written after it
-// merges in, and dropped when its data does not, being unfinished. When the
+// merges in, and dropped when its data does not, being unfinished. The
+// usage message_start and message_delta report, and the error the caller is
+// given, go to c.out as they pass. When the
 // caller stops reading — or reads too slowly to take an event within
 // writeStall — the stream is still read. When the upstream fails partway, or
 // ends before message_stop, the caller gets an error event, the only way left
@@ -548,7 +572,8 @@ func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
 // connection open after that holds nothing of the gateway's. Ending there
 // resets the stream on an HTTP/2 connection, which a TLS upstream negotiates,
 // and gives up an HTTP/1.1 one rather than returning it to the pool.
-func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, alias string, wrap *wrapping, rid string, guard *provider.StallGuard, red provider.Redactor) {
+func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, c call, wrap *wrapping, rid string, guard *provider.StallGuard, red provider.Redactor) {
+	c.out.status, c.out.ttft = http.StatusOK, time.Since(c.start)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	rc := bounded(w)
@@ -572,8 +597,12 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		switch {
 		case e.Data == nil:
 		case e.Name == "message_start":
-			out = e.WithData(messageStart(e.Data, alias, wrap))
+			c.out.tokens = usageOf(c.out.tokens, member(e.Data, "message", "usage"))
+			out = e.WithData(messageStart(e.Data, c.alias, wrap))
+		case e.Name == "message_delta":
+			c.out.tokens = usageOf(c.out.tokens, member(e.Data, "usage"))
 		case e.Name == "error":
+			c.out.errType = errorTypeOf(e.Data, 0)
 			out = e.WithData(errorJSON(ctx, red, e.Data, rid))
 		case e.Name == "content_block_start":
 			if d := wrap.start(e.Data); d != nil {
@@ -612,6 +641,7 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		if errors.Is(err, provider.ErrStalled) {
 			typ = "timeout_error"
 		}
+		c.out.errType = typ
 		msg := encodeJSON(map[string]any{"type": "error", "request_id": rid,
 			"error": map[string]string{"type": typ, "message": "upstream stream failed: " + red.Error(err).Error()}})
 		send([]byte("event: error\ndata: " + string(msg) + "\n\n"))
