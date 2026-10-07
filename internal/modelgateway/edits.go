@@ -70,7 +70,9 @@ func inPlace(obj map[string]json.RawMessage, key string, fn func(json.RawMessage
 // and handed to the renderer in one canonical form, so neither a key
 // differing only in case nor the keys' order changes what is rendered. A
 // block with a title or source that is not a string, or an inner block that
-// is not text, goes as sent; a null field counts as absent.
+// is not text, goes as sent. A null title, source or content counts as
+// absent, an inner text block's null text renders as an empty line, and a
+// null cache_control is kept as sent.
 func flattenSearchResult(block map[string]json.RawMessage) bool {
 	var title, source string
 	var inner []map[string]json.RawMessage

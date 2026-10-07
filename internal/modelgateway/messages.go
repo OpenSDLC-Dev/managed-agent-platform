@@ -103,8 +103,8 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 	switch {
 	case len(kept) > 0:
 		if len(kept) < len(attempts) {
-			slog.InfoContext(r.Context(), "modelgateway: deployments skipped for what their vendor ignores",
-				"alias", a.Name, "fields", strings.Join(ignored, ","), "skipped", len(attempts)-len(kept))
+			slog.InfoContext(r.Context(), "modelgateway: attempts skipped for what their vendor ignores",
+				"alias", a.Name, "fields", strings.Join(ignored, ","), "attempts", len(attempts)-len(kept))
 		}
 		attempts = kept
 	case path == "/v1/messages/count_tokens":
