@@ -2,6 +2,7 @@ package modelgateway_test
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/upstream"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -159,9 +161,12 @@ func TestARequestIsTracedAcrossItsAttempts(t *testing.T) {
 				t.Errorf("client span %d %s = %q, want %q", i, k, got, v)
 			}
 		}
-		if port, _ := attr(c.Attributes(), "server.port"); port == "" ||
-			!strings.HasSuffix(up.URL, ":"+port) && !strings.HasSuffix(down.URL, ":"+port) {
-			t.Errorf("client span %d server.port = %q", i, port)
+		host := down.URL
+		if i == len(clients)-1 {
+			host = up.URL
+		}
+		if port, _ := attr(c.Attributes(), "server.port"); port == "" || !strings.HasSuffix(host, ":"+port) {
+			t.Errorf("client span %d server.port = %q, want %s's", i, port, host)
 		}
 	}
 }
@@ -308,12 +313,15 @@ func TestAnAttemptsSpanHoldsWhatItsUpstreamAnswered(t *testing.T) {
 	dr, dg := e.deployment(pr, "refused"), e.deployment(pg, "unreachable")
 	e.alias("refused", target(dr, 0))
 	e.alias("unreachable", target(dg, 0))
-	portless := e.provider("http://127.0.0.1") // whatever answers on 80, the span names the port
+	portless := e.provider("http://127.0.0.1") // refused before dialing, by refusePortless
 	e.credential(portless, "sk-upstream-3", 1)
 	dp := e.deployment(portless, "portless")
 	e.alias("portless", target(dp, 0))
 	key := e.key(everyAlias)
-	e.start()
+	e.start(func(c *modelgateway.Config) {
+		c.Client = upstream.NewClient()
+		c.Client.Transport = refusePortless{c.Client.Transport}
+	})
 	for _, alias := range []string{"refused", "unreachable"} {
 		if resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"messages":[]}`,
 			map[string]string{"x-api-key": key}); resp.StatusCode < 500 {
@@ -400,12 +408,24 @@ func TestSpanNamesAreBoundedByRoute(t *testing.T) {
 		{"GET", "/anthropic/admin/v1/providers", "GET"},
 		{"GET", "/x-" + strings.Repeat("7", 12), "GET"},
 		{"BREW", "/v1/messages", "HTTP"},
+		{"post", "/v1/messages", "HTTP"},
 	} {
 		r := httptest.NewRequest(c.method, c.path, nil)
 		if got := modelgateway.SpanName(r); got != c.want {
 			t.Errorf("%s %s is named %q, want %q", c.method, c.path, got, c.want)
 		}
 	}
+}
+
+// refusePortless fails a request to an endpoint naming no port before it
+// dials, so a test can attempt one without depending on what listens on 80.
+type refusePortless struct{ http.RoundTripper }
+
+func (t refusePortless) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Port() == "" {
+		return nil, errors.New("refused before dialing")
+	}
+	return t.RoundTripper.RoundTrip(r)
 }
 
 // subSecond reports whether the named histogram has a bucket bound under a

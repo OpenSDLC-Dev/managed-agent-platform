@@ -419,8 +419,8 @@ func TestDeployments(t *testing.T) {
 		"bad kind":           {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "image"}, "image"},
 		"no model":           {map[string]any{"provider_id": pid, "kind": "chat"}, "upstream_model"},
 		"negative price":     {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "prices": map[string]any{"output": -1}}, "output"},
-		"price too high":     {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "prices": map[string]any{"input": 2e9}}, "input"},
-		"price too small":    {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "prices": map[string]any{"cache_read": 1e-12}}, "cache_read"},
+		"price too high":     {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "prices": map[string]any{"input": 2e15}}, "input"},
+		"price too small":    {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "prices": map[string]any{"cache_read": 1e-13}}, "cache_read"},
 		"negative limit":     {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "capabilities": map[string]any{"max_tokens": -1}}, "max_tokens"},
 		"unknown capability": {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "capabilities": map[string]any{"audio": true}}, "audio"},
 	} {
@@ -431,6 +431,11 @@ func TestDeployments(t *testing.T) {
 	up := e.ok(e.admin("POST", "/admin/v1/deployments/"+id, map[string]any{"display_name": "renamed", "prices": map[string]any{"input": 0.3}, "enabled": false}), "update")
 	if up["display_name"] != "renamed" || up["prices"].(map[string]any)["output"] != nil || up["enabled"] != false {
 		t.Fatalf("updated = %v", up)
+	}
+	priced := e.ok(e.admin("POST", "/admin/v1/deployments/"+id, map[string]any{"prices": map[string]any{"output": 1.6146e9, "cache_read": 1e-12}}),
+		"prices in a weak currency and a strong one")
+	if p := priced["prices"].(map[string]any); p["output"] != 1.6146e9 || p["cache_read"] != 1e-12 {
+		t.Errorf("prices read back as %v", p)
 	}
 	for _, field := range []string{"provider_id", "upstream_model", "kind"} {
 		e.refused(e.admin("POST", "/admin/v1/deployments/"+id, map[string]any{field: "x"}), http.StatusBadRequest, "invalid_request_error", "fixed")

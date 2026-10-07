@@ -55,13 +55,14 @@ func checkCapabilities(c store.Capabilities) error {
 	return nil
 }
 
-// The bounds on a nonzero price per million tokens. Any real price, in any
-// currency, lies between them, and within them every cost the ledger stores
-// reads back as a double precision number, since the gateway bounds a row's
-// token counts too.
+// The bounds on a nonzero price per million tokens, each orders of
+// magnitude past any real price in any currency (a $600 price in Iranian
+// rials is near 2e9). Within them every cost the ledger computes, and every
+// day's sum of them, reads back as a double precision number, since the
+// gateway bounds a row's token counts too.
 const (
-	minPrice = 1e-9
-	maxPrice = 1e9
+	minPrice = 1e-12
+	maxPrice = 1e15
 )
 
 // checkPrices returns prices in the store's shape, each 0 or within the

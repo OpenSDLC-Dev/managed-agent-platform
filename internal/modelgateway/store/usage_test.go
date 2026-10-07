@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -377,23 +378,27 @@ func TestATokenCountOutlivesItsLedgerRow(t *testing.T) {
 	}
 }
 
-// A cost no float64 holds, from a price the admin API would now refuse,
-// loses its caller the reading, never the ledger row.
+// A cost no float64 holds, or that is no number — from a price the admin
+// API refuses, written to the database some other way — loses its caller the
+// reading, never the ledger row.
 func TestAnUnreadableCostStillWritesItsRow(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
 	p := mkProvider(t, s, both())
-	d, err := s.CreateDeployment(ctx, store.Deployment{ProviderID: p.ID, UpstreamModel: "m", Kind: store.KindChat,
-		Enabled: true, Prices: store.Prices{Input: price(1e308)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cost, err := s.RecordUsage(ctx, usage("key_big", "x", d.ID, &store.Tokens{Input: 2_000_000}), false); err != nil || cost != nil {
-		t.Fatalf("RecordUsage = cost %v, %v; want the row written without a cost", cost, err)
-	}
-	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM modelgateway.usage WHERE api_key_id = 'key_big'`).Scan(&n); err != nil || n != 1 {
-		t.Errorf("%d ledger rows (%v), want 1", n, err)
+	for i, v := range []float64{1e308, math.NaN(), math.Inf(1)} {
+		d, err := s.CreateDeployment(ctx, store.Deployment{ProviderID: p.ID, UpstreamModel: fmt.Sprint("m", i), Kind: store.KindChat,
+			Enabled: true, Prices: store.Prices{Input: price(v)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := fmt.Sprint("key_big", i)
+		if cost, err := s.RecordUsage(ctx, usage(key, "x", d.ID, &store.Tokens{Input: 2_000_000}), false); err != nil || cost != nil {
+			t.Fatalf("price %v: RecordUsage = cost %v, %v; want the row written without a cost", v, cost, err)
+		}
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM modelgateway.usage WHERE api_key_id = $1`, key).Scan(&n); err != nil || n != 1 {
+			t.Errorf("price %v: %d ledger rows (%v), want 1", v, n, err)
+		}
 	}
 }
 

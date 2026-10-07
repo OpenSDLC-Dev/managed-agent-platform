@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -127,9 +128,11 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*flo
 		return nil, errors.Join(windowErr, ledgerErr)
 	}
 	// The cost is read as text and parsed once the row is committed: one no
-	// float64 holds loses the caller its reading, never the row.
+	// float64 holds, or that is no number (a price written to the database
+	// directly can be NaN or infinite), loses the caller its reading, never
+	// the row.
 	f, err := strconv.ParseFloat(*cost, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
 		return nil, windowErr
 	}
 	return &f, windowErr

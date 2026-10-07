@@ -372,8 +372,8 @@ defaults, as the platform's top-level resource tables do
   `rerank`); capabilities (tools, thinking, vision, `max_input_tokens`, `max_tokens` —
   the `ModelInfo` fields `/v1/models` answers from); prices per million tokens for
   input, output, cache write and cache read, entered by the operator — no remote price
-  sync, so an air-gapped install works — each 0 or between 1e-9 and 1e9, so every cost
-  the ledger stores reads back as a double. A deployment's provider and upstream model id
+  sync, so an air-gapped install works — each 0 or between 1e-12 and 1e15, so every
+  cost the ledger computes from one reads back as a double. A deployment's provider and upstream model id
   never change, so a deployment id names one model on one account behind its provider's
   fixed endpoints —
   what thinking provenance (Routing below) and an embedding index both key on; moving
