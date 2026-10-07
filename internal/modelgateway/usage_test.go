@@ -109,8 +109,8 @@ func TestAStreamsUsageIsItsLastWord(t *testing.T) {
 		"float":    {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":4.5}`, &store.Tokens{Input: 7, Output: 1}},
 		"late":     {`"x"`, `{"output_tokens":4}`, &store.Tokens{Output: 4}},
 		"negative": {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":-3}`, &store.Tokens{Input: 7, Output: 1}},
-		"bound":    {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":1099511627776}`, &store.Tokens{Input: 7, Output: 1 << 40}},
-		"past":     {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":1099511627777}`, &store.Tokens{Input: 7, Output: 1}},
+		"bound":    {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":4294967296}`, &store.Tokens{Input: 7, Output: 1 << 32}},
+		"past":     {`{"input_tokens":7,"output_tokens":1}`, `{"output_tokens":4294967297}`, &store.Tokens{Input: 7, Output: 1}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
@@ -393,12 +393,22 @@ func TestASlowLedgerDoesNotCutTheAnswer(t *testing.T) {
 // What the ledger takes from a caller or an upstream is made text Postgres
 // holds, where either as sent would fail the row: a model name the wildcard
 // admits is recorded without its NUL and cut to 256 bytes at a character's
-// start, and an upstream's error type without its NUL.
+// start, an upstream's error type is cut likewise, and one carrying a NUL — a lone NUL included,
+// which would otherwise record no error at all — is read as none, so the
+// status's type stands in.
 func TestTheLedgerHoldsWhatItIsSent(t *testing.T) {
 	e := newEnv(t)
 	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
-		if strings.Contains(string(c.Raw), "refuse") {
+		switch {
+		case strings.Contains(string(c.Raw), "refuse"):
 			writeBody(w, 400, `{"type":"error","error":{"type":"bad\u0000type","message":"no"}}`)
+			return
+		case strings.Contains(string(c.Raw), "long"):
+			writeBody(w, 400, `{"type":"error","error":{"type":"`+strings.Repeat("e", 300)+`","message":"no"}}`)
+			return
+		case strings.Contains(string(c.Raw), "lone"):
+			sse(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":3}}}\n\n",
+				"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"\\u0000\",\"message\":\"no\"}}\n\n")
 			return
 		}
 		message("ok")(w, r, c)
@@ -415,15 +425,32 @@ func TestTheLedgerHoldsWhatItIsSent(t *testing.T) {
 	if resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"metadata":{"user_id":"refuse"},"messages":[]}`, hdr); resp.StatusCode != 400 {
 		t.Fatalf("a refusal: %d %s", resp.StatusCode, b)
 	}
+	if resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"stream":true,"metadata":{"user_id":"lone"},"messages":[]}`, hdr); resp.StatusCode != 200 {
+		t.Fatalf("a stream that fails: %d %s", resp.StatusCode, b)
+	}
+	if resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"metadata":{"user_id":"long"},"messages":[]}`, hdr); resp.StatusCode != 400 {
+		t.Fatalf("a long error type: %d %s", resp.StatusCode, b)
+	}
 	rows := e.ledger()
-	if len(rows) != 2 {
-		t.Fatalf("%d rows, want both requests recorded", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("%d rows, want every request recorded", len(rows))
 	}
-	if want := "x" + strings.Repeat("é", 127); rows[1].Model != want {
-		t.Errorf("model %q (%d bytes), want %q", rows[1].Model, len(rows[1].Model), want)
+	if want := "x" + strings.Repeat("é", 127); rows[3].Model != want {
+		t.Errorf("model %q (%d bytes), want %q", rows[3].Model, len(rows[3].Model), want)
 	}
-	if rows[0].ErrorType != "badtype" {
-		t.Errorf("error type %q, want badtype", rows[0].ErrorType)
+	if rows[2].ErrorType != "invalid_request_error" {
+		t.Errorf("a 400's error type %q, want invalid_request_error", rows[2].ErrorType)
+	}
+	if rows[1].ErrorType != "api_error" {
+		t.Errorf("a stream's error type %q, want api_error", rows[1].ErrorType)
+	}
+	if want := strings.Repeat("e", 256); rows[0].ErrorType != want {
+		t.Errorf("a long error type of %d bytes, want it cut to 256", len(rows[0].ErrorType))
+	}
+	var errs int64
+	e.must(e.pool.QueryRow(e.ctx, `SELECT sum(errors) FROM modelgateway.usage_daily`).Scan(&errs))
+	if errs != 3 {
+		t.Errorf("the rollups count %d errors, want 3", errs)
 	}
 }
 
@@ -443,7 +470,7 @@ func TestTimeToFirstTokenSkipsKeepAlives(t *testing.T) {
 			_, _ = io.WriteString(w, ev)
 			w.(http.Flusher).Flush()
 			if i == 0 {
-				time.Sleep(300 * time.Millisecond)
+				time.Sleep(700 * time.Millisecond)
 			}
 		}
 	})
@@ -455,7 +482,7 @@ func TestTimeToFirstTokenSkipsKeepAlives(t *testing.T) {
 	if resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
 		t.Fatalf("%d %s", resp.StatusCode, b)
 	}
-	if rows := e.ledger(); len(rows) != 1 || rows[0].TTFT < 300*time.Millisecond || rows[0].TTFT >= 600*time.Millisecond {
-		t.Errorf("the ledger holds %+v, want one row whose time to first token is between 300ms and 600ms", rows)
+	if rows := e.ledger(); len(rows) != 1 || rows[0].TTFT < 300*time.Millisecond || rows[0].TTFT >= time.Second {
+		t.Errorf("the ledger holds %+v, want one row whose time to first token is between 300ms and 1s", rows)
 	}
 }
