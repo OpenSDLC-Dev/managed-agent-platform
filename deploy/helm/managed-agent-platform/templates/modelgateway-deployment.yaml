@@ -36,8 +36,10 @@ spec:
     spec:
       terminationGracePeriodSeconds: {{ .Values.modelgateway.terminationGracePeriodSeconds }}
       serviceAccountName: {{ include "map.fullname" . }}-modelgateway
-      # A soft spread: the replicas prefer different nodes, so losing one node
-      # does not take every gateway, while a one-node cluster still runs them.
+      # A soft spread: the scheduler prefers to put the replicas on different
+      # nodes, so losing one need not take every gateway, and never refuses to
+      # schedule one, so a one-node cluster (or a nodeSelector naming one node)
+      # still runs them all.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

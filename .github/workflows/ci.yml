@@ -1086,8 +1086,8 @@ jobs:
               || { echo "the enabled gateway's $tpl template renders no t-managed-agent-platform-modelgateway" >&2; exit 1; }
           done
           dep="$(on --show-only templates/modelgateway-deployment.yaml)"
-          # Two stateless replicas, and a budget that keeps one through a drain
-          # without ever blocking one.
+          # Two stateless replicas, and a budget that lets a drain evict one
+          # Ready pod at a time and never pins a lone replica.
           echo "$dep" | grep '^  replicas: 2$' > /dev/null \
             || { echo "the gateway does not default to two replicas" >&2; exit 1; }
           pdb="$(on --show-only templates/modelgateway-pdb.yaml)"
@@ -1103,9 +1103,22 @@ jobs:
             echo "$dep" | grep -A4 "name: ${pair%%:*}$" | grep "key: ${pair#*:}$" > /dev/null \
               || { echo "the gateway does not read ${pair%%:*} from the ${pair#*:} Secret key" >&2; exit 1; }
           done
-          # The replicas prefer different nodes, softly.
-          echo "$dep" | grep -A2 'topologyKey: kubernetes.io/hostname$' | grep 'whenUnsatisfiable: ScheduleAnyway$' > /dev/null \
-            || { echo "the gateway's replicas are not spread softly across nodes" >&2; exit 1; }
+          # The replicas prefer different nodes, softly, and the constraint
+          # counts the gateway's own pods: the whole block, selector included.
+          spread="$(echo "$dep" | awk '/^      topologySpreadConstraints:$/ { on = 1; next } on && /^      [^ ]/ { on = 0 } on && !/^ *$/')"
+          # printf, not a multi-line literal: this block's own indentation is
+          # stripped from every line, a quoted string's continuation lines too.
+          want="$(printf '%s\n' \
+            '        - maxSkew: 1' \
+            '          topologyKey: kubernetes.io/hostname' \
+            '          whenUnsatisfiable: ScheduleAnyway' \
+            '          labelSelector:' \
+            '            matchLabels:' \
+            '              app.kubernetes.io/name: managed-agent-platform' \
+            '              app.kubernetes.io/instance: t' \
+            '              app.kubernetes.io/component: modelgateway')"
+          [ "$spread" = "$want" ] \
+            || { echo "the gateway's spread is not the soft per-node one over its own pods:" >&2; echo "$spread" >&2; exit 1; }
           sa="$(echo "$dep" | awk '$1 == "serviceAccountName:" && !seen { print $2; seen = 1 }')"
           [ "$sa" = t-managed-agent-platform-modelgateway ] \
             || { echo "the gateway runs as '${sa:-<none>}', want its own ServiceAccount" >&2; exit 1; }

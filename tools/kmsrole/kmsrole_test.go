@@ -93,7 +93,7 @@ func rewrite(t *testing.T, old, new string) string {
 const executorHeader = `resource "google_kms_crypto_key_iam_member" "executor" {`
 
 // executorKey is the executor grant's first two lines, the shortest anchor
-// unique to that block — both blocks assign the same key and the same role.
+// unique to that block — every block assigns the same key and the same role.
 const executorKey = executorHeader + "\n  crypto_key_id = data.google_kms_crypto_key.cipher.id"
 
 func mustCheck(t *testing.T, tfDir string) Report {

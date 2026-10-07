@@ -335,7 +335,7 @@ externalDatabase:
   url: ""
 
 # -- Cloud SQL Auth Proxy as a sidecar in the controlplane, brain and executor
-# pods: Google's documented way for a GKE workload to reach a private-IP Cloud
+# pods, and the model gateway's when enabled: Google's documented way for a GKE workload to reach a private-IP Cloud
 # SQL instance. Off by default — it is GCP-only, and mode 2 also runs without it
 # (docs/deploy-gcp.md, "Connecting to a private-IP instance", #269).
 #
@@ -367,7 +367,7 @@ externalDatabase:
 #
 # The IAM half is not expressible here. Each pod's ServiceAccount must be
 # annotated onto a Google service account holding `roles/cloudsql.client` — see
-# the three serviceAccount.annotations blocks, and deploy/gcp/, which creates
+# each component's serviceAccount.annotations block, and deploy/gcp/, which creates
 # those accounts and their Workload Identity bindings.
 cloudSQLProxy:
   enabled: false

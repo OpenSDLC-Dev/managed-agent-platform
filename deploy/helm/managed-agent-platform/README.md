@@ -120,11 +120,11 @@ The chart grants its ServiceAccount a namespaced Role with exactly the pod lifec
 
 Off by default. Enabled, it runs `cmd/modelgateway`
 ([plan 59](../../../docs/plan/59_model-gateway.md)) as `modelgateway.replicas` pods
-(default two, spread across nodes where the cluster has them) behind a ClusterIP
-Service on port 8090, with a PodDisruptionBudget of
-`maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow`: a node drain keeps
-one pod serving at two replicas, and neither one replica nor a pod that is not Ready
-blocks it (the second from Kubernetes 1.27). It reads `database-url` and `controlplane-api-key` from the release's
+(default two, which the scheduler prefers to place on different nodes) behind a
+ClusterIP Service on port 8090, with a PodDisruptionBudget of
+`maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow`: a drain evicts one
+Ready pod at a time, waiting for its replacement before the next, never pins a lone
+replica, and evicts a pod that is not Ready regardless (from Kubernetes 1.27). It reads `database-url` and `controlplane-api-key` from the release's
 Secret, takes `identity.*` so the console's operator sign-in reaches its admin API, and
 seals vendor keys with the release's credential cipher — so it needs one. A chart-managed
 Secret that resolves none fails the render; with `existingSecret` the chart cannot see
@@ -234,7 +234,7 @@ it.
 What catches it is the **application**, once `database-url` names the proxy's loopback
 socket: the platform pings the database before serving and exits non-zero when that fails, so
 the pods crash-loop, never go Ready, and `helm upgrade --wait --atomic` rolls the release
-back. A wrong instance does not deploy green. What it does is deploy *confusingly* — three
+back. A wrong instance does not deploy green. What it does is deploy *confusingly* —
 application containers unable to reach Postgres, and the work of tracing that back to a proxy
 pointed at an instance that does not exist.
 

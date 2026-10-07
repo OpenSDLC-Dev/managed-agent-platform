@@ -47,7 +47,7 @@ A third reason retired with #240, and it is worth recording why rather than dele
 silently: **deleting a service account deletes its HMAC keys**, so the identity holding the
 GCS HMAC pair could not live in the disposable half without stranding a once-readable secret
 in Secret Manager — valid-looking, and dead. Object storage is now reached by the workloads
-themselves through Workload Identity, so there is no HMAC key, no fourth identity, and
+themselves through Workload Identity, so there is no HMAC key, no identity holding one, and
 nothing for a rebuild to carry forward. The two reasons above are untouched.
 
 **No secret value is in either configuration.** Terraform holds names, IAM bindings and
@@ -995,7 +995,7 @@ would otherwise say they exist:
 | --- | --- | --- |
 | `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
 | the `mapCdRbacWriter` custom role, below | the project | the chart renders a namespaced `Role` and `RoleBinding` for the executor, and `roles/container.developer` carries only `get`/`list` on RBAC resources — so `helm upgrade` is refused the moment either object's rendered content changes. **This role is half the remedy**: an in-cluster basis Role, also below, answers a second gate that Cloud IAM does not reach |
-| `roles/cloudsql.viewer` | the project | `deploy.yml` asks the Cloud SQL Admin API for the instance's connection name rather than composing it, which needs `cloudsql.instances.get`. The three *workload* identities' `roles/cloudsql.client` (`environment/iam.tf`) does not cover the deployer, which is not in this repository's Terraform at all. Without it the deploy fails at the resolve step — early, before the image build, but on every push |
+| `roles/cloudsql.viewer` | the project | `deploy.yml` asks the Cloud SQL Admin API for the instance's connection name rather than composing it, which needs `cloudsql.instances.get`. The *workload* identities' `roles/cloudsql.client` (`environment/iam.tf`) does not cover the deployer, which is not in this repository's Terraform at all. Without it the deploy fails at the resolve step — early, before the image build, but on every push |
 
 The third is what the Cloud SQL Auth Proxy cutover added, and it is read-only:
 
