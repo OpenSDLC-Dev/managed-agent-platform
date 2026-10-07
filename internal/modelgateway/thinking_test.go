@@ -742,6 +742,8 @@ func TestAStreamWrapsInBlockOrder(t *testing.T) {
 			start(i1, `{"type":"redacted_thinking","data":"d1"}`), stop(i1)}, []string{"d1"}},
 		{"an empty start with no index ahead", []string{start("", thinking), start(i1, thinking),
 			sig(i1, "signature_delta", "s1")}, []string{"s1"}},
+		{"an index that is not an integer", []string{start(i0, `{"type":"thinking","thinking":"","signature":"a"}`),
+			start(`,"index":1.0`, thinking), sig(i0, "signature_delta", "b")}, []string{wrapped("a"), "b"}},
 		{"a start read by its exact keys", []string{start(i0, thinking+`,"Content_Block":{"type":"text","text":""}`), stop(i0),
 			start(i1, thinking), sig(i1, "signature_delta", "s1")}, []string{"s1"}},
 		{"a delta read by its exact keys", []string{start(i0, thinking),

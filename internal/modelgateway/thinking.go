@@ -521,9 +521,13 @@ func (w *wrapping) delta(data []byte) []byte {
 	return out
 }
 
-// eventIndex is a stream event's block index, or nil when it names none.
+// eventIndex is a stream event's block index, or nil when it names none or
+// names it as anything but an integer. The error decides it: the decoder
+// may allocate the pointer before it fails, which would read as index 0.
 func eventIndex(obj map[string]json.RawMessage) *int {
 	var i *int
-	_ = json.Unmarshal(obj["index"], &i)
+	if json.Unmarshal(obj["index"], &i) != nil {
+		return nil
+	}
 	return i
 }

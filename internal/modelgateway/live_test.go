@@ -376,7 +376,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 					status, _ := one(t, r.rec, n).answer()
 					var apiErr *anthropic.Error
 					if !errors.As(err, &apiErr) || apiErr.StatusCode != status || status < 400 || status >= 500 {
-						t.Errorf("a request with no messages: error %v, the vendor's status %d", err, status)
+						liveErrorf(t, "a request with no messages: error %v, the vendor's status %d", err, status)
 					}
 				})
 			}
@@ -386,7 +386,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 	t.Run("fallback", func(t *testing.T) {
 		liveRoundTrip(t, cl, fallback, false)
 		if n := len(down.recorded()); n != 1 {
-			t.Errorf("the first choice was called %d times, want once: by the first turn, for its one credential, and never by the continuation", n)
+			liveErrorf(t, "the first choice was called %d times, want once: by the first turn, for its one credential, and never by the continuation", n)
 		}
 	})
 
@@ -398,7 +398,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 		n := ds.rec.count()
 		m1, err := liveTurn(t, cl, ds, []anthropic.MessageParam{liveAsk()}, false)
 		if err != nil {
-			t.Fatal(err)
+			liveFatalf(t, "%v", err)
 		}
 		_, raw := one(t, ds.rec, n).answer()
 		vend, _ := vendorThinking(raw)
@@ -407,18 +407,18 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 		n = mm.rec.count()
 		m2, err := liveTurn(t, cl, mm, h, false)
 		if err != nil {
-			t.Fatal(err)
+			liveFatalf(t, "%v", err)
 		}
 		if sent := sentThinking(one(t, mm.rec, n).sent); len(sent) != 0 {
-			t.Errorf("MiniMax was sent DeepSeek's thinking: %q", abbreviate(sent))
+			liveErrorf(t, "MiniMax was sent DeepSeek's thinking: %q", abbreviate(sent))
 		}
 		h = next(h, m2)
 		n = ds.rec.count()
 		if _, err := liveTurn(t, cl, ds, h, false); err != nil {
-			t.Fatal(err)
+			liveFatalf(t, "%v", err)
 		}
 		if sent := sentThinking(one(t, ds.rec, n).sent); !slices.Equal(sent, own) {
-			t.Errorf("back at DeepSeek, sent %d values, want its own %d", len(sent), len(own))
+			liveErrorf(t, "back at DeepSeek, sent %d values, want its own %d", len(sent), len(own))
 		}
 	})
 }
@@ -429,41 +429,58 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool)
 	n := r.rec.count()
 	m, err := liveTurn(t, cl, r, []anthropic.MessageParam{liveAsk()}, stream)
 	if err != nil {
-		t.Fatalf("%s: %v", mode, err)
+		liveFatalf(t, "%s: %v", mode, err)
 	}
 	_, raw := one(t, r.rec, n).answer()
 	vend, interleaved := vendorThinking(raw)
 	if interleaved {
-		t.Fatalf("%s: the vendor interleaved its thinking blocks, which the gateway leaves unwrapped by design and this tier does not model", mode)
+		liveFatalf(t, "%s: the vendor interleaved its thinking blocks, which this tier's oracle does not model", mode)
 	}
 	want, back := expected(vend, r.dep)
 	if len(back) == 0 && r.thinks {
-		t.Fatalf("%s: the vendor returned no signed thinking (%q), so there is nothing to round-trip", mode, abbreviate(vend))
+		liveFatalf(t, "%s: the vendor returned no signed thinking (%q), so there is nothing to round-trip", mode, abbreviate(vend))
 	}
 	if got := provenance(m); !slices.Equal(got, want) || string(m.Model) != r.alias || m.Usage.OutputTokens == 0 {
-		t.Fatalf("%s: model %q, %d output tokens, thinking %q, want %q", mode, m.Model, m.Usage.OutputTokens, abbreviate(got), abbreviate(want))
+		liveFatalf(t, "%s: model %q, %d output tokens, thinking %q, want %q", mode, m.Model, m.Usage.OutputTokens, abbreviate(got), abbreviate(want))
 	}
 	if m.StopReason != anthropic.StopReasonToolUse {
-		t.Fatalf("%s: the model answered without calling the tool (stop %q)", mode, m.StopReason)
+		liveFatalf(t, "%s: the model answered without calling the tool (stop %q)", mode, m.StopReason)
 	}
 	n = r.rec.count()
 	if _, err := liveTurn(t, cl, r, next([]anthropic.MessageParam{liveAsk()}, m), stream); err != nil {
-		t.Fatalf("%s continuation: %v", mode, err)
+		liveFatalf(t, "%s continuation: %v", mode, err)
 	}
 	if sent := sentThinking(one(t, r.rec, n).sent); !slices.Equal(sent, back) {
-		t.Fatalf("%s continuation sent %q, want the vendor's own %q", mode, abbreviate(sent), abbreviate(back))
+		liveFatalf(t, "%s continuation sent %q, want the vendor's own %q", mode, abbreviate(sent), abbreviate(back))
 	}
 	t.Logf("%s: %d of %d thinking block(s) round-tripped", mode, len(back), len(want))
 }
 
-// abbreviate keeps a failure readable — signatures run to kilobytes — and
-// keyless: a vendor that echoed a key into a value prints it masked.
+// liveFatalf and liveErrorf fail with a message that prints no key: a
+// vendor's output can echo one anywhere — a value, a stop reason, an error.
+func liveFatalf(t *testing.T, format string, args ...any) {
+	t.Helper()
+	t.Fatal(masked(fmt.Sprintf(format, args...)))
+}
+
+func liveErrorf(t *testing.T, format string, args ...any) {
+	t.Helper()
+	t.Error(masked(fmt.Sprintf(format, args...)))
+}
+
+func masked(s string) string {
+	for _, k := range liveKeys {
+		s = strings.ReplaceAll(s, k, "***")
+	}
+	return s
+}
+
+// abbreviate keeps a failure readable: signatures run to kilobytes. Each
+// value is masked before it is cut, so a cut cannot leave part of a key.
 func abbreviate(vs []string) []string {
 	out := make([]string, len(vs))
 	for i, v := range vs {
-		for _, k := range liveKeys {
-			v = strings.ReplaceAll(v, k, "***")
-		}
+		v = masked(v)
 		if len(v) > 48 {
 			v = fmt.Sprintf("%s…(%d)", v[:48], len(v))
 		}

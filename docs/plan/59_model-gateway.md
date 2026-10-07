@@ -708,9 +708,12 @@ where a vendor bills cache writes.
     present (`respjson.Field.Valid`).
   - **Provenance through the real vendors:** each model's provider points at a proxy
     that forwards to the vendor and records both directions, since neither vendor
-    checks a signature and its 200 proves nothing. Every model that thinks returns
-    signed thinking, which comes back wrapped around the vendor's own value and goes
-    back, on the continuation the SDK's `ToParam` makes, as exactly that value; an alias whose first choice is down
+    checks a signature and its 200 proves nothing. Every model expected to think
+    returns signed thinking; each value the gateway wraps, in block order up to the
+    first unsigned one, comes back around the vendor's own value and goes back, on
+    the continuation the SDK's `ToParam` makes, as exactly that value — a model that
+    returns no thinking, as MiniMax-M3.1-Flash-Preview did on 2026-10-07, has its
+    round trip checked without it; an alias whose first choice is down
     falls back, and its continuation goes straight to its thinking's producer; a
     conversation crossing from DeepSeek to MiniMax and back sends each only its own.
   - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with
