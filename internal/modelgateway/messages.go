@@ -116,7 +116,8 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 	// An upstream refusing the thinking its request carried puts the request
 	// in strip mode — once, for the attempt it refused and every attempt
 	// after, so nothing stripped is sent again — and that attempt is made
-	// again, as a retry like any other.
+	// again, as a retry like any other: at the same deployment while its
+	// budget lasts, and at the next one once it is spent.
 	var last *failure
 	tried := map[string]int{}
 	n := 0

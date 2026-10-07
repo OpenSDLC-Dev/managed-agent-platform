@@ -694,6 +694,35 @@ func TestStripModeStaysWithinTheBudget(t *testing.T) {
 	}
 }
 
+// A refusal on a deployment with no attempt left falls back, stripped, as
+// any retry does once its deployment's budget is spent. Relaying the refusal
+// instead would strand the conversation: every later request on that history
+// is tried first at the refusing deployment, its thinking's producer.
+func TestAStripModeRetryWithNoBudgetLeftFallsBack(t *testing.T) {
+	e := newEnv(t)
+	a, b := newSigner(t, "a"), newSigner(t, "b")
+	da, db := e.signedBy(a), e.signedBy(b)
+	e.alias("m", target(da, 0), target(db, 1))
+	key := e.key(everyAlias)
+	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 1 })
+	cl := e.client(key)
+
+	h := edited(next(hello(), talk(t, cl, hello())), 1)
+	na, nb := len(a.recorded()), len(b.recorded())
+	m := talk(t, cl, h)
+	if len(a.recorded())-na != 1 || len(b.recorded())-nb != 1 || len(thinkingIn(b.last())) != 0 {
+		t.Fatalf("the refusal took %d calls to a and %d to b, which was sent %q",
+			len(a.recorded())-na, len(b.recorded())-nb, thinkingIn(b.last()))
+	}
+	wantPrefixes(t, provenance(m), "mapgw1r."+db.ID+".b.")
+
+	na, nb = len(a.recorded()), len(b.recorded())
+	talk(t, cl, next(h, m))
+	if len(a.recorded())-na != 0 || len(b.recorded())-nb != 1 {
+		t.Fatalf("the next request took %d calls to a and %d to b", len(a.recorded())-na, len(b.recorded())-nb)
+	}
+}
+
 // A stream's signatures are wrapped in block order, as a whole answer's are:
 // only the open block's first fragment, read by its value — a type spelled
 // with an escape is a signature fragment, and one that names no index is

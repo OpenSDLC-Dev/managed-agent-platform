@@ -453,8 +453,9 @@ request path reads only the snapshot.
   thinking block", which ask for thinking the request lacks and a removal cannot
   supply — puts the inbound request in strip mode: every
   thinking block is removed, an emptied assistant message going as above, and the
-  attempt is made again, as a retry within the deployment's attempt budget and after
-  the backoff, so never for a caller that has left. Removing all thinking is valid
+  attempt is made again, as a retry like any other — at the same deployment within
+  its attempt budget, at the alias's next once that is spent — and after the
+  backoff, so never for a caller that has left. Removing all thinking is valid
   (Ground truth, Thinking). That
   is bifrost's fail-soft strip, with four differences: Anthropic's "cannot be
   modified" enters strip mode here, where bifrost excludes it as a refusal the removal
