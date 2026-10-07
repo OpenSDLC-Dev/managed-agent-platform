@@ -96,6 +96,25 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 			fmt.Sprintf("model %s has no enabled upstream on the Anthropic protocol", model)})
 		return
 	}
+	// A deployment whose vendor would ignore what the request asks for is
+	// skipped; a count is made all the same where every one would, since
+	// what a vendor ignores leaves the count unchanged.
+	kept, ignored := honoring(attempts, top)
+	switch {
+	case len(kept) > 0:
+		if len(kept) < len(attempts) {
+			slog.InfoContext(r.Context(), "modelgateway: attempts skipped for what their vendor ignores",
+				"alias", a.Name, "fields", strings.Join(ignored, ","), "attempts", len(attempts)-len(kept))
+		}
+		attempts = kept
+	case path == "/v1/messages/count_tokens":
+	case len(ignored) == 1:
+		writeError(w, r, invalid("%s: every upstream of model %s ignores it", ignored[0], model))
+		return
+	default:
+		writeError(w, r, invalid("every upstream of model %s ignores one of %s", model, strings.Join(ignored, ", ")))
+		return
+	}
 	call := call{
 		top:    top,
 		hist:   parseHistory(top["messages"]),
@@ -299,7 +318,8 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		return &failure{status: http.StatusInternalServerError, typ: "api_error", err: errors.New("internal error")}, true
 	}
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
-	body := upstreamBody(c, at.Deployment, strip)
+	prof, _ := profile.Lookup(at.Provider.Profile)
+	body := upstreamBody(c, at.Deployment, prof, strip)
 	wrap := newWrapping(at.Deployment.ID, strip)
 	ctx, guard := provider.NewStallGuard(ctx, at.Provider.StallTimeout)
 	defer guard.Stop()
@@ -314,7 +334,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", string(key))
+	if prof.BearerAuth {
+		req.Header.Set("Authorization", "Bearer "+string(key))
+	} else {
+		req.Header.Set("x-api-key", string(key))
+	}
 
 	resp, err := h.client.Do(req)
 	if err != nil {
@@ -397,11 +421,11 @@ func noAnswer(guard *provider.StallGuard, red provider.Redactor, err error) (*fa
 }
 
 // upstreamBody is the caller's body for one deployment: its messages'
-// thinking filtered by provenance (history.messagesFor), then model set to
-// the deployment's upstream id; every other top-level value goes out as the
-// caller sent it. The values were decoded from JSON, so encoding them again
-// cannot fail.
-func upstreamBody(c call, d store.Deployment, strip bool) []byte {
+// thinking filtered by provenance (history.messagesFor), then the profile's
+// edits, then model set to the deployment's upstream id; every other
+// top-level value goes out as the caller sent it. The values were decoded
+// from JSON, so encoding them again cannot fail.
+func upstreamBody(c call, d store.Deployment, prof profile.Profile, strip bool) []byte {
 	out := make(map[string]json.RawMessage, len(c.top))
 	for k, v := range c.top {
 		out[k] = v
@@ -409,8 +433,11 @@ func upstreamBody(c call, d store.Deployment, strip bool) []byte {
 	if c.hist != nil {
 		out["messages"] = c.hist.messagesFor(d.ID, strip)
 	}
-	out["model"], _ = json.Marshal(d.UpstreamModel)
-	b, _ := json.Marshal(out)
+	if m, ok := out["messages"]; ok && prof.FlattenSearchResults {
+		out["messages"] = flattenSearchResults(m)
+	}
+	out["model"] = encodeJSON(d.UpstreamModel)
+	b := encodeJSON(out)
 	return b
 }
 
@@ -494,12 +521,12 @@ func answerJSON(b []byte, alias string, wrap *wrapping) []byte {
 		return b
 	}
 	if model {
-		obj["model"], _ = json.Marshal(alias)
+		obj["model"] = encodeJSON(alias)
 	}
 	if content != nil {
 		obj["content"] = content
 	}
-	out, _ := json.Marshal(obj)
+	out := encodeJSON(obj)
 	return out
 }
 
@@ -585,7 +612,7 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		if errors.Is(err, provider.ErrStalled) {
 			typ = "timeout_error"
 		}
-		msg, _ := json.Marshal(map[string]any{"type": "error", "request_id": rid,
+		msg := encodeJSON(map[string]any{"type": "error", "request_id": rid,
 			"error": map[string]string{"type": typ, "message": "upstream stream failed: " + red.Error(err).Error()}})
 		send([]byte("event: error\ndata: " + string(msg) + "\n\n"))
 		return
@@ -611,6 +638,6 @@ func messageStart(data []byte, alias string, wrap *wrapping) []byte {
 		return data
 	}
 	ev["message"] = answerJSON(ev["message"], alias, wrap)
-	out, _ := json.Marshal(ev)
+	out := encodeJSON(ev)
 	return out
 }

@@ -49,16 +49,38 @@ func unwrap(v string) (dep, value string, reset, ok bool) {
 	return dep, value, reset, true
 }
 
+// escapesName reports whether b holds a JSON escape of an ASCII letter or
+// an underscore: the one way a key or a type name reaches a decoder without
+// its plain bytes. Testing for any escape would pass nearly every body, since
+// Go's encoder, the SDK's among them, writes <, > and & as \u003c, \u003e
+// and \u0026.
+func escapesName(b []byte) bool {
+	for {
+		i := bytes.Index(b, []byte(`\u00`))
+		if i < 0 || i+5 >= len(b) {
+			return false
+		}
+		if c := b[i+4]; '4' <= c && c <= '7' && isHex(b[i+5]) {
+			return true
+		}
+		b = b[i+4:]
+	}
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
 // provenanceOf reads a content block: for a thinking block, the field that
 // carries its provenance — a thinking block's signature, a redacted_thinking
 // block's data — and that field's value; for any other block, "". Fields are
 // read by their exact keys, as the upstream reads them: a struct would take
 // "Type" for "type", and a block the upstream reads as thinking would pass as
-// text. A block whose bytes neither say "thinking" nor hold an escape cannot
-// be one, so it is not decoded: a large image or document is scanned, not
-// copied.
+// text. A block whose bytes neither say "thinking" nor escape a letter
+// cannot be one, so it is not decoded: a large image or document is scanned,
+// not copied.
 func provenanceOf(b json.RawMessage) (field, value string) {
-	if !bytes.Contains(b, []byte("thinking")) && !bytes.Contains(b, []byte(`\u`)) {
+	if !bytes.Contains(b, []byte("thinking")) && !escapesName(b) {
 		return "", ""
 	}
 	var obj map[string]json.RawMessage
@@ -104,11 +126,11 @@ type histBlock struct {
 // nothing to do — no thinking block anywhere — and when the messages are not
 // an array, which the upstream answers itself; a message that is not an object
 // goes as sent, for the upstream to refuse, and the others are filtered all
-// the same. A block's type can
-// name thinking only by those letters or through a \u escape, so messages
-// holding neither are not decoded at all.
+// the same. A block's type can name thinking only by those letters or by
+// escaping one (escapesName), so messages holding neither are not decoded at
+// all.
 func parseHistory(raw json.RawMessage) *history {
-	if !bytes.Contains(raw, []byte("thinking")) && !bytes.Contains(raw, []byte(`\u`)) {
+	if !bytes.Contains(raw, []byte("thinking")) && !escapesName(raw) {
 		return nil
 	}
 	var msgs []json.RawMessage
@@ -245,8 +267,8 @@ func (h *history) messagesFor(dep string, strip bool) json.RawMessage {
 			for k, v := range m.obj {
 				obj[k] = v
 			}
-			obj["content"], _ = json.Marshal(kept)
-			raw, _ = json.Marshal(obj)
+			obj["content"] = encodeJSON(kept)
+			raw = encodeJSON(obj)
 		}
 		n := len(out)
 		if !(emptied && n > 0 && m.role == "user" && out[n-1].role == "user" && out[n-1].join(raw)) {
@@ -258,7 +280,7 @@ func (h *history) messagesFor(dep string, strip bool) json.RawMessage {
 	for i, o := range out {
 		raws[i] = o.encode()
 	}
-	b, _ := json.Marshal(raws)
+	b := encodeJSON(raws)
 	return b
 }
 
@@ -302,8 +324,8 @@ func (o outMsg) encode() json.RawMessage {
 	if o.obj == nil {
 		return o.raw
 	}
-	o.obj["content"], _ = json.Marshal(o.blocks)
-	out, _ := json.Marshal(o.obj)
+	o.obj["content"] = encodeJSON(o.blocks)
+	out := encodeJSON(o.obj)
 	return out
 }
 
@@ -313,7 +335,7 @@ func contentBlocks(c json.RawMessage) ([]json.RawMessage, bool) {
 	c = bytes.TrimSpace(c)
 	var s string
 	if bytes.HasPrefix(c, []byte(`"`)) && json.Unmarshal(c, &s) == nil {
-		b, _ := json.Marshal(map[string]string{"type": "text", "text": s})
+		b := encodeJSON(map[string]string{"type": "text", "text": s})
 		return []json.RawMessage{b}, true
 	}
 	var bs []json.RawMessage
@@ -329,8 +351,8 @@ func withString(raw json.RawMessage, field, value string) json.RawMessage {
 	if json.Unmarshal(raw, &obj) != nil || obj == nil {
 		return raw
 	}
-	obj[field], _ = json.Marshal(value)
-	out, _ := json.Marshal(obj)
+	obj[field] = encodeJSON(value)
+	out := encodeJSON(obj)
 	return out
 }
 
@@ -458,7 +480,7 @@ func (w *wrapping) content(raw json.RawMessage) json.RawMessage {
 	if !changed {
 		return nil
 	}
-	out, _ := json.Marshal(blocks)
+	out := encodeJSON(blocks)
 	return out
 }
 
@@ -491,7 +513,7 @@ func (w *wrapping) start(data []byte) []byte {
 		return nil
 	}
 	obj["content_block"] = withString(obj["content_block"], field, w.wrap(v))
-	out, _ := json.Marshal(obj)
+	out := encodeJSON(obj)
 	return out
 }
 
@@ -502,7 +524,7 @@ func (w *wrapping) start(data []byte) []byte {
 // thinking_deltas above all — is not decoded. It returns nil when the event
 // is unchanged.
 func (w *wrapping) delta(data []byte) []byte {
-	if w.open == nil || w.ended || !bytes.Contains(data, []byte("signature")) && !bytes.Contains(data, []byte(`\u`)) {
+	if w.open == nil || w.ended || !bytes.Contains(data, []byte("signature")) && !escapesName(data) {
 		return nil
 	}
 	var obj, d map[string]json.RawMessage
@@ -517,7 +539,7 @@ func (w *wrapping) delta(data []byte) []byte {
 	}
 	w.open = nil
 	obj["delta"] = withString(obj["delta"], "signature", w.wrap(sig))
-	out, _ := json.Marshal(obj)
+	out := encodeJSON(obj)
 	return out
 }
 

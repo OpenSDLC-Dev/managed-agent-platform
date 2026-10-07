@@ -1056,6 +1056,20 @@ func TestASessionYieldsToTheNewestProducer(t *testing.T) {
 	}
 }
 
+// Only an escape that can spell a letter or an underscore can hide a key or
+// a type name; the ones Go's encoder writes for <, > and & cannot.
+func TestEscapesName(t *testing.T) {
+	for in, want := range map[string]bool{
+		`"\u0074hinking"`: true, `"search\u005fresult"`: true, `"\u005F"`: true, `"\u0041"`: true,
+		`"\u007a"`: true, `"\u007A"`: true, `"a \u003c b \u0026 c \u003e"`: false, `"\u0080"`: false,
+		`"\u00"`: false, `"\u007"`: false, `"thinking"`: false, ``: false,
+	} {
+		if got := modelgateway.EscapesName([]byte(in)); got != want {
+			t.Errorf("EscapesName(%s) = %t, want %t", in, got, want)
+		}
+	}
+}
+
 func TestThinkingRefusal(t *testing.T) {
 	for _, tc := range []struct {
 		body string
