@@ -103,9 +103,10 @@ destroyed is not the same as applied once: the configuration is idempotent, and 
 it is how anything is ever *added* to it. That matters for an existing
 deployment upgrading past
 [#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269), which adds the
-brain's Google service account — `environment/` reads it by name through a data source, so
-running `make gcp-env-apply` without re-applying the foundation first fails on the lookup
-rather than creating it. That split is what makes a rebuild safe, and the reason is not tidiness: a KMS key
+brain's Google service account, or past plan 59 slice 2f, which adds the model gateway's —
+`environment/` reads each by name through a data source, so `make gcp-env-apply`, and
+`make gcp-env-destroy` too, fails on the lookup until the foundation is re-applied, rather
+than creating it. That split is what makes a rebuild safe, and the reason is not tidiness: a KMS key
 ring cannot be deleted in GCP at all, and destroying the key schedules every version for
 destruction while the name stays taken — so a configuration that owned it could not be
 re-applied, and the vault ciphertext encrypted under it would be gone.
@@ -258,8 +259,8 @@ to check against: a DSN through the sidecar can legitimately say `127.0.0.1`, `l
 
 It renders as a **native sidecar** (an `initContainer` with
 `restartPolicy: Always`) with a startup probe on the proxy's own `/startup`, which is what
-makes it ready before the process that dials it: all three open the database as they start,
-so an ordinary container would let them race it. Four things fail the render rather than
+makes it ready before the process that dials it: each process opens the database as it
+starts, so an ordinary container would let them race it. Four things fail the render rather than
 deploying a pod that never becomes ready: a cluster older than Kubernetes 1.29 (which
 predates native sidecars), a missing `instanceConnectionName`, one whose *shape* is wrong,
 and the bundled Postgres left enabled alongside it.

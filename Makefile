@@ -314,11 +314,11 @@ release-binaries: ripgrep
 # ---------------------------------------------------------------------------
 
 # shellcheck has no opinion on the ORDER in which a redirect and the command
-# filling it take effect. Nor does anything else here: the compose job starts
-# postgres, minio, the control plane and the brain and never openbao, and the
+# filling it take effect. Nor does anything else here: the compose job's stack
+# runs the compose init script only on a fresh volume, its first boot, and the
 # helm job renders the chart's init script without executing a line of it — so
-# the two scripts that decide whether a self-hosted stack can encrypt anything
-# were the part of this repo nothing ran. #439 was the bill: a failed init left
+# the rest of the two scripts that decide whether a self-hosted stack can
+# encrypt anything was the part of this repo nothing ran. #439 was the bill: a failed init left
 # a 0-byte init.json that the recovery branch read as a good one, leaving a
 # vault whose root token existed nowhere and a stack repairable only by
 # destroying its volumes. This RUNS both scripts against a fake `bao` — no

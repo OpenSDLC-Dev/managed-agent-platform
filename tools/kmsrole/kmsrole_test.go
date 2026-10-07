@@ -107,7 +107,12 @@ func mustCheck(t *testing.T, tfDir string) Report {
 
 func wantRefusal(t *testing.T, tfDir, contains string) {
 	t.Helper()
-	r, err := Check(repoRoot(), tfDir)
+	wantRefusalAt(t, repoRoot(), tfDir, contains)
+}
+
+func wantRefusalAt(t *testing.T, root, tfDir, contains string) {
+	t.Helper()
+	r, err := Check(root, tfDir)
 	if err == nil {
 		t.Fatalf("expected a refusal, got %d finding(s) and no error: %v", len(r.Findings), r.Findings)
 	}
@@ -1092,31 +1097,37 @@ func TestPermsArithmetic(t *testing.T) {
 // Binaries with no GCP identity.
 // ---------------------------------------------------------------------------
 
-// unhostedGateway is a module whose gateway and y both reach the cipher, with
-// y granted and gateway unhosted, plus the Terraform files named. A
-// multi-letter name, unlike unhostedRoot's x, so near-spellings of it can be
-// written.
-func unhostedGateway(t *testing.T, tf map[string]string) (root, tfDir string) {
+// unhostedRoot is a module whose binary and y both reach the cipher, with y
+// granted and binary unhosted, a chart holding the named files (nil is no chart
+// at all), and the named Terraform files beside y's grant.
+func unhostedRoot(t *testing.T, binary string, chart, tf map[string]string) (root, tfDir string) {
 	t.Helper()
 	old := unhosted
-	unhosted = map[string]string{"gateway": "a test's"}
+	unhosted = map[string]string{binary: "a test's"}
 	t.Cleanup(func() { unhosted = old })
-	root = fakeRoot(t, map[string]string{
-		"cmd/gateway/main.go":      "package main\n\nfunc Decrypt() {}\n\nfunc main() { Decrypt() }\n",
-		"cmd/y/main.go":            "package main\n\nfunc Decrypt() {}\n\nfunc main() { Decrypt() }\n",
-		"deploy/helm/c/Chart.yaml": "name: c\n",
-	})
-	files := map[string]string{"iam.tf": grantFor("y", "roles/cloudkms.cryptoKeyEncrypterDecrypter")}
-	for name, body := range tf {
-		files[name] += body
+	files := map[string]string{
+		"cmd/" + binary + "/main.go": "package main\n\nfunc Decrypt() {}\n\nfunc main() { Decrypt() }\n",
+		"cmd/y/main.go":              "package main\n\nfunc Decrypt() {}\n\nfunc main() { Decrypt() }\n",
 	}
-	return root, tfTree(t, files)
+	for name, body := range chart {
+		files["deploy/helm/c/"+name] = body
+	}
+	tfFiles := map[string]string{"iam.tf": grantFor("y", "roles/cloudkms.cryptoKeyEncrypterDecrypter")}
+	for name, body := range tf {
+		tfFiles[name] += body
+	}
+	return fakeRoot(t, files), tfTree(t, tfFiles)
 }
+
+// noGateway is a chart that runs neither binary, for the cases about the
+// Terraform. The name has more than one letter, unlike x, so near-spellings of
+// it can be written.
+var noGateway = map[string]string{"Chart.yaml": "name: c\n"}
 
 // TestAnUnhostedBinaryIsHeldToNoGrant: gateway reaches the cipher and no
 // grant names it, which is a finding for any other binary.
 func TestAnUnhostedBinaryIsHeldToNoGrant(t *testing.T) {
-	root, dir := unhostedGateway(t, nil)
+	root, dir := unhostedRoot(t, "gateway", noGateway, nil)
 	r, err := Check(root, dir)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -1141,10 +1152,8 @@ func TestAnUnhostedBinaryIsHeldToNoGrant(t *testing.T) {
 // TestAGrantToAnUnhostedBinaryIsRefused: a grant means it has an identity, and
 // the entry would stop this guard checking that identity's grant ever again.
 func TestAGrantToAnUnhostedBinaryIsRefused(t *testing.T) {
-	root, dir := unhostedGateway(t, map[string]string{"iam.tf": grantFor("gateway", "roles/cloudkms.cryptoKeyEncrypter")})
-	if _, err := Check(root, dir); err == nil || !strings.Contains(err.Error(), "iam.tf names it") {
-		t.Fatalf("error = %v, want the grant's file named", err)
-	}
+	root, dir := unhostedRoot(t, "gateway", noGateway, map[string]string{"iam.tf": grantFor("gateway", "roles/cloudkms.cryptoKeyEncrypter")})
+	wantRefusalAt(t, root, dir, "iam.tf names it")
 }
 
 // TestAnUnhostedBinaryNamedInTheTerraformIsRefused is #748's own shape: the
@@ -1152,13 +1161,13 @@ func TestAGrantToAnUnhostedBinaryIsRefused(t *testing.T) {
 func TestAnUnhostedBinaryNamedInTheTerraformIsRefused(t *testing.T) {
 	// Any spelling of the name counts: a near-miss is the hole.
 	for _, label := range []string{"gateway", "gateway_sa", "gate_way", "gateWay", "gate-way"} {
-		root, dir := unhostedGateway(t, map[string]string{"sa.tf": `resource "google_service_account" "` + label + `" {
+		t.Run(label, func(t *testing.T) {
+			root, dir := unhostedRoot(t, "gateway", noGateway, map[string]string{"sa.tf": `resource "google_service_account" "` + label + `" {
   account_id = "map-gw"
 }
 `})
-		if _, err := Check(root, dir); err == nil || !strings.Contains(err.Error(), "sa.tf names it") {
-			t.Fatalf("%s: error = %v, want sa.tf named", label, err)
-		}
+			wantRefusalAt(t, root, dir, "sa.tf names it")
+		})
 	}
 }
 
@@ -1166,27 +1175,10 @@ func TestAnUnhostedBinaryNamedInTheTerraformIsRefused(t *testing.T) {
 // skipped, as readGrants skips it — `.terraform/` is a download cache, not this
 // repository's configuration.
 func TestAnUnhostedBinaryInADotDirectoryIsNotAMention(t *testing.T) {
-	root, dir := unhostedGateway(t, map[string]string{"environment/.terraform/modules/m/main.tf": `# gateway`})
+	root, dir := unhostedRoot(t, "gateway", noGateway, map[string]string{"environment/.terraform/modules/m/main.tf": `# gateway`})
 	if r, err := Check(root, dir); err != nil || len(r.Findings) != 0 {
 		t.Fatalf("Check: %v, findings: %v", err, r.Findings)
 	}
-}
-
-// unhostedRoot is a module whose x and y both reach the cipher, with y granted
-// and x unhosted, and a chart holding the named templates.
-func unhostedRoot(t *testing.T, chart map[string]string) (root, tfDir string) {
-	t.Helper()
-	old := unhosted
-	unhosted = map[string]string{"x": "a test's"}
-	t.Cleanup(func() { unhosted = old })
-	files := map[string]string{
-		"cmd/x/main.go": "package main\n\nfunc Decrypt() {}\n\nfunc main() { Decrypt() }\n",
-		"cmd/y/main.go": "package main\n\nfunc Decrypt() {}\n\nfunc main() { Decrypt() }\n",
-	}
-	for name, body := range chart {
-		files["deploy/helm/c/"+name] = body
-	}
-	return fakeRoot(t, files), tfTree(t, map[string]string{"iam.tf": grantFor("y", "roles/cloudkms.cryptoKeyEncrypterDecrypter")})
 }
 
 // TestAnUnhostedBinaryTheChartRunsIsRefused: GCP deploys the chart, so a
@@ -1194,32 +1186,23 @@ func unhostedRoot(t *testing.T, chart map[string]string) (root, tfDir string) {
 func TestAnUnhostedBinaryTheChartRunsIsRefused(t *testing.T) {
 	// The control: the same tree with the chart running only y passes, so the
 	// refusal below is the template's doing.
-	root, dir := unhostedRoot(t, map[string]string{"templates/y.yaml": `command: ["/y"]`, "README.md": "x is not deployed yet"})
+	root, dir := unhostedRoot(t, "x", map[string]string{"templates/y.yaml": `command: ["/y"]`, "README.md": "x is not deployed yet"}, nil)
 	r, err := Check(root, dir)
 	if err != nil || len(r.Findings) != 0 {
 		t.Fatalf("control: %v %v", err, r.Findings)
 	}
-	root, dir = unhostedRoot(t, map[string]string{"templates/x.yaml": `command: ["/x"]`})
-	_, err = Check(root, dir)
-	if err == nil || !strings.Contains(err.Error(), "x.yaml names it") {
-		t.Fatalf("error = %v, want the chart's template named", err)
-	}
+	root, dir = unhostedRoot(t, "x", map[string]string{"templates/x.yaml": `command: ["/x"]`}, nil)
+	wantRefusalAt(t, root, dir, "x.yaml names it")
 	// Helm renders whatever sits in templates/, so a .md there is no prose.
-	root, dir = unhostedRoot(t, map[string]string{"templates/x.md": `command: ["/x"]`})
-	_, err = Check(root, dir)
-	if err == nil || !strings.Contains(err.Error(), "x.md names it") {
-		t.Fatalf("error = %v, want the .md template named", err)
-	}
+	root, dir = unhostedRoot(t, "x", map[string]string{"templates/x.md": `command: ["/x"]`}, nil)
+	wantRefusalAt(t, root, dir, "x.md names it")
 }
 
 // TestAnUnhostedBinaryWithNoChartToReadIsRefused: a chart that moved would
 // otherwise confirm, by being absent, that nothing deploys the binary.
 func TestAnUnhostedBinaryWithNoChartToReadIsRefused(t *testing.T) {
-	root, dir := unhostedRoot(t, nil)
-	_, err := Check(root, dir)
-	if err == nil || !strings.Contains(err.Error(), "cannot be read") {
-		t.Fatalf("error = %v, want the missing chart refused", err)
-	}
+	root, dir := unhostedRoot(t, "x", nil, nil)
+	wantRefusalAt(t, root, dir, "cannot be read")
 }
 
 // TestOnlyAnUnhostedBinaryReachingTheCipherIsRefused: the floor counts the

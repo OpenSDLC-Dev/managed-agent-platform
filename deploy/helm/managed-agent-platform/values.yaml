@@ -1,6 +1,6 @@
 # Default values for managed-agent-platform.
 # The chart deploys the three platform processes — controlplane, brain, executor —
-# plus an optional in-cluster Postgres. The BYOC worker is NOT part of this chart:
+# plus an optional model gateway and an optional in-cluster Postgres. The BYOC worker is NOT part of this chart:
 # it runs on the customer's own compute, outside the platform's cluster.
 
 # -- Container images. Each process is pulled as a separate image at

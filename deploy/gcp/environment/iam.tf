@@ -6,7 +6,8 @@
 # Workload Identity. Two halves, and the annotation alone is not enough: the
 # Kubernetes ServiceAccount must be annotated (chart:
 # controlplane.serviceAccount.annotations / brain.serviceAccount.annotations /
-# executor.serviceAccount.annotations) AND the Google service account must
+# executor.serviceAccount.annotations / modelgateway.serviceAccount.annotations)
+# AND the Google service account must
 # permit that KSA to impersonate it. This is the second half.
 #
 # The member string names one exact KSA in one exact namespace. It is bound by

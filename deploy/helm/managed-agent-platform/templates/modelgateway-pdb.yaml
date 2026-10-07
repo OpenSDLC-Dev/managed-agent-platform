@@ -1,4 +1,4 @@
-{{- if .Values.modelgateway.enabled }}
+{{- if (.Values.modelgateway | default dict).enabled }}
 {{/*
 maxUnavailable rather than minAvailable: at the default two replicas both keep
 one gateway serving through a node drain, but at one replica a minAvailable of 1

@@ -1,11 +1,15 @@
-{{- if .Values.modelgateway.enabled }}
+{{- /* A default dict rather than .Values.modelgateway.enabled, here and in
+       the other modelgateway templates and NOTES.txt: a release upgraded with
+       --reuse-values from a chart without the section has none, and reading a
+       field of the nil would fail the whole render with the gateway off. Not
+       dig, which Helm 4 refuses on .Values. */}}
+{{- if (.Values.modelgateway | default dict).enabled }}
 {{- /* The gateway seals vendor keys with the release's credential cipher and
        refuses to start without one, so a chart-managed Secret that resolves
-       none (secret.yaml's choice) fails here instead of crash-looping. An
-       existingSecret is the operator's to fill: the chart cannot see whether
-       it carries the secrets-* keys, and the gateway names the missing
-       variable at startup. */}}
-{{- if and (not .Values.existingSecret) (not (or .Values.openbao.enabled .Values.externalOpenBao.address .Values.localCipher.masterKey .Values.gcpKMS.keyName)) }}
+       none fails here instead of crash-looping. An existingSecret is the
+       operator's to fill: the chart cannot see whether it carries the
+       secrets-* keys, and the gateway names the missing variable at startup. */}}
+{{- if and (not .Values.existingSecret) (not (include "map.secretsBackend" .)) }}
 {{- fail "modelgateway.enabled needs a credential cipher — openbao.enabled, externalOpenBao.address, localCipher.masterKey or gcpKMS.keyName: the gateway seals vendor keys with it and does not start without one." }}
 {{- end }}
 apiVersion: apps/v1
@@ -32,6 +36,15 @@ spec:
     spec:
       terminationGracePeriodSeconds: {{ .Values.modelgateway.terminationGracePeriodSeconds }}
       serviceAccountName: {{ include "map.fullname" . }}-modelgateway
+      # A soft spread: the replicas prefer different nodes, so losing one node
+      # does not take every gateway, while a one-node cluster still runs them.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "map.selectorLabels" (dict "ctx" . "component" "modelgateway") | nindent 14 }}
       {{- include "map.imagePullSecrets" . | nindent 6 }}
       {{- include "map.cloudSQLProxy" . | nindent 6 }}
       containers:

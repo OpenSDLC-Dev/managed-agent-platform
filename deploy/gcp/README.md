@@ -485,6 +485,7 @@ terraform output -raw  kms_key_name                              # gcpKMS.keyNam
 terraform output -json controlplane_service_account_annotation   # controlplane.serviceAccount.annotations
 terraform output -json brain_service_account_annotation          # brain.serviceAccount.annotations
 terraform output -json executor_service_account_annotation       # executor.serviceAccount.annotations
+terraform output -json modelgateway_service_account_annotation   # modelgateway.serviceAccount.annotations, with modelgateway.enabled
 terraform output -raw  blob_backend                              # BLOB_BACKEND
 terraform output -raw  blob_bucket                               # BLOB_BUCKET
 terraform output -raw  sql_instance_connection_name              # cloudSQLProxy.instanceConnectionName
@@ -1518,6 +1519,7 @@ terraform import google_kms_crypto_key.cipher              "$P/locations/$L/keyR
 terraform import google_service_account.controlplane       "$P/serviceAccounts/map-controlplane@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.brain              "$P/serviceAccounts/map-brain@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
+terraform import google_service_account.modelgateway       "$P/serviceAccounts/map-modelgateway@your-project.iam.gserviceaccount.com"
 terraform import google_secret_manager_secret.db_password       "$P/secrets/map-db-password"
 terraform import google_secret_manager_secret.db_admin_password "$P/secrets/map-db-admin-password"
 # The state bucket (#478). Missing it is the worst case in this list, because a

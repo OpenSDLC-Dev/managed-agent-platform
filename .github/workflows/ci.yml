@@ -1070,9 +1070,15 @@ jobs:
       - name: the model gateway renders only when enabled, and only with a cipher
         run: |
           set -euo pipefail
-          # Off by default: the default render names it nowhere.
-          helm template t "$CHART" -f "$VALUES" | grep modelgateway > /dev/null \
+          # Off by default: the default render names it nowhere. Captured first,
+          # so a render that fails fails here rather than reading as absent.
+          default="$(helm template t "$CHART" -f "$VALUES")"
+          echo "$default" | grep modelgateway > /dev/null \
             && { echo "the default render names the model gateway" >&2; exit 1; }
+          # A release upgraded with --reuse-values from a chart without the
+          # section has none, and the gateway's templates must not fail on that.
+          helm template t "$CHART" -f "$VALUES" --set modelgateway=null > /dev/null \
+            || { echo "a values tree without the modelgateway section fails the render" >&2; exit 1; }
           on() { helm template t "$CHART" -f "$VALUES" --set modelgateway.enabled=true "$@"; }
           for tpl in deployment service serviceaccount pdb; do
             on --show-only "templates/modelgateway-$tpl.yaml" \
@@ -1097,6 +1103,9 @@ jobs:
             echo "$dep" | grep -A4 "name: ${pair%%:*}$" | grep "key: ${pair#*:}$" > /dev/null \
               || { echo "the gateway does not read ${pair%%:*} from the ${pair#*:} Secret key" >&2; exit 1; }
           done
+          # The replicas prefer different nodes, softly.
+          echo "$dep" | grep -A2 'topologyKey: kubernetes.io/hostname$' | grep 'whenUnsatisfiable: ScheduleAnyway$' > /dev/null \
+            || { echo "the gateway's replicas are not spread softly across nodes" >&2; exit 1; }
           sa="$(echo "$dep" | awk '$1 == "serviceAccountName:" && !seen { print $2; seen = 1 }')"
           [ "$sa" = t-managed-agent-platform-modelgateway ] \
             || { echo "the gateway runs as '${sa:-<none>}', want its own ServiceAccount" >&2; exit 1; }
@@ -1418,9 +1427,10 @@ jobs:
           [ "$defnet" = "managed-agent-platform_default" ] \
             || { echo "the default project's network is '$defnet' — an existing stack's volumes would be orphaned" >&2; exit 1; }
           echo "ok: the default project is unchanged"
-      # The stack below never starts openbao and the helm job only renders the
-      # chart's copy, so without this nothing here runs either init script; the
-      # Makefile recipe argues it, and #439 is what it cost. No Docker, so it is
+      # The stack below runs the compose init script on a fresh volume only and
+      # the helm job only renders the chart's copy, so without this nothing here
+      # runs either script's other paths; the Makefile recipe argues it, and #439
+      # is what it cost. No Docker, so it is
       # cheap and it fails before the image build.
       - name: the openbao bootstrap scripts behave
         working-directory: .

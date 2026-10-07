@@ -155,7 +155,7 @@ resource "google_service_account" "controlplane" {
 
 # The brain is the identity that exists for ONE reason and would be wrong to
 # fold into another: it holds no cipher and calls KMS never, but it opens the
-# database like the other two, so under the Cloud SQL Auth Proxy topology it
+# database like the others, so under the Cloud SQL Auth Proxy topology it
 # needs roles/cloudsql.client and nothing else (#269). Annotating the brain's
 # Kubernetes ServiceAccount onto the control plane's account would be the
 # shortcut, and it would hand the brain that account's KMS decrypt.

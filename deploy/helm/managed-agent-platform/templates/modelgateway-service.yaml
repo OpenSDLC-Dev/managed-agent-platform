@@ -1,4 +1,4 @@
-{{- if .Values.modelgateway.enabled }}
+{{- if (.Values.modelgateway | default dict).enabled }}
 apiVersion: v1
 kind: Service
 metadata:

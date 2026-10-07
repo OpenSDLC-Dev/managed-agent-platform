@@ -130,6 +130,23 @@ cipher, so its Deployment refuses to render without one.
 {{- end -}}
 
 {{/*
+The credential cipher the release resolves — "openbao", "local", "gcpkms", or
+empty for none — in the order secret.yaml validates the options and refuses two
+at once. secret.yaml writes it as the secrets-backend key, and the model
+gateway's Deployment refuses a release with none, so the two cannot disagree on
+what counts as a cipher.
+*/}}
+{{- define "map.secretsBackend" -}}
+{{- if or .Values.openbao.enabled .Values.externalOpenBao.address -}}
+openbao
+{{- else if .Values.localCipher.masterKey -}}
+local
+{{- else if .Values.gcpKMS.keyName -}}
+gcpkms
+{{- end -}}
+{{- end -}}
+
+{{/*
 The IDENTITY_* env entries for the control plane — the human-auth lane
 (docs/plan/31_console-sso-rbac.md, #56) — and the model gateway, whose admin API
 accepts the same operator credential the console sends the control plane.
