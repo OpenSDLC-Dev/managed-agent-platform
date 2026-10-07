@@ -89,7 +89,7 @@ var profiles = []Profile{
 		{Protocol: Anthropic, BaseURL: "https://api.deepseek.com/anthropic"},
 		{Protocol: OpenAI, BaseURL: "https://api.deepseek.com"},
 	}, FlattenSearchResults: true, Ignores: deepseekIgnores},
-	// MiniMax's Anthropic API reference takes either header and says
+	// MiniMax's Messages API reference takes either header and says
 	// "Authorization: Bearer <API_KEY> is recommended". It refuses a
 	// search_result block in a tool_result with a 400, "invalid tool_result
 	// content (2013)" (#565; probed 2026-10-07).
@@ -141,8 +141,8 @@ func deepseekIgnores(req map[string]json.RawMessage) string {
 	return ""
 }
 
-// minimaxIgnores: MiniMax's Anthropic API reference has stop_sequences
-// "This parameter will be ignored", so an answer runs past the sequence the
+// minimaxIgnores: MiniMax's Anthropic SDK guide (text-anthropic-api) has
+// stop_sequences "This parameter will be ignored", so an answer runs past the sequence the
 // caller stops at.
 func minimaxIgnores(req map[string]json.RawMessage) string {
 	var stops []json.RawMessage

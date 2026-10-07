@@ -97,8 +97,13 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		return
 	}
 	attempts, ignored := honoring(attempts, top)
-	if len(attempts) == 0 {
-		writeError(w, r, invalid("%s: every upstream of model %s ignores it", ignored, model))
+	switch {
+	case len(attempts) > 0:
+	case len(ignored) == 1:
+		writeError(w, r, invalid("%s: every upstream of model %s ignores it", ignored[0], model))
+		return
+	default:
+		writeError(w, r, invalid("every upstream of model %s ignores one of %s", model, strings.Join(ignored, ", ")))
 		return
 	}
 	call := call{

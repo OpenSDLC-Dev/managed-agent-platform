@@ -30,8 +30,9 @@ func decoded(t *testing.T, raw []byte) any {
 // A vendor that refuses search_result blocks — DeepSeek's and MiniMax's
 // Anthropic endpoints both do, in a tool_result and at the top level alike
 // (probed 2026-10-07) — is sent each one in a tool_result as text, rendered
-// as the brain's flatten_search_results renders it. Every other block and
-// field goes as sent — a block whose type key differs only in case, and a
+// as the brain's flatten_search_results renders it, from its fields'
+// exact keys and keeping its cache_control. Every other block and field
+// goes as sent — a block whose type key differs only in case, and a
 // search_result the rendering cannot read, included — and a vendor that
 // takes the block gets it untouched; a count_tokens request is edited as
 // its /v1/messages twin.
@@ -40,7 +41,8 @@ func TestASearchResultReachesARefusingVendorAsText(t *testing.T) {
 		{"role":"user","content":[{"type":"search_result","source":"https://example.com/top","title":"Top","content":[{"type":"text","text":"kept"}]}]},
 		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"search","input":{}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":false,"content":[
-			{"type":"search_result","source":"https://example.com/paris","title":"Paris","content":[{"type":"text","text":"Paris is the capital."}],"citations":{"enabled":true}},
+			{"type":"search_result","source":"https://example.com/paris","title":"Paris","content":[{"type":"text","text":"Paris is the capital."}],"citations":{"enabled":true},"cache_control":{"type":"ephemeral"}},
+			{"type":"search_result","Source":"https://example.com/other","source":"https://example.com/k","title":"K","content":[{"type":"text","text":"original","Text":"replacement"},{"type":"text","Type":"image","text":"typed"}]},
 			{"type":"text","text":"note"},
 			{"type":"text","text":"x","Type":"search_result"},
 			{"type":"search_result","source":"https://example.com/i","title":"I","content":[{"type":"image","source":{"type":"url","url":"https://example.com/i.png"}}]},
@@ -50,7 +52,8 @@ func TestASearchResultReachesARefusingVendorAsText(t *testing.T) {
 		{"role":"user","content":[{"type":"search_result","source":"https://example.com/top","title":"Top","content":[{"type":"text","text":"kept"}]}]},
 		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"search","input":{}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":false,"content":[
-			{"type":"text","text":"Paris (https://example.com/paris)\nParis is the capital.\n"},
+			{"type":"text","text":"Paris (https://example.com/paris)\nParis is the capital.\n","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"K (https://example.com/k)\noriginal\ntyped\n"},
 			{"type":"text","text":"note"},
 			{"type":"text","text":"x","Type":"search_result"},
 			{"type":"search_result","source":"https://example.com/i","title":"I","content":[{"type":"image","source":{"type":"url","url":"https://example.com/i.png"}}]},
@@ -158,9 +161,10 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 		t.Run(tc.prof, func(t *testing.T) {
 			e := newEnv(t)
 			vendor, other := newFake(t, message("vendor")), newFake(t, message("other"))
-			d := e.deployment(onProfile(e, tc.prof, vendor.URL), "up")
+			p := onProfile(e, tc.prof, vendor.URL)
+			d := e.deployment(p, "up")
 			e.alias("mixed", target(d, 0), target(e.deployment(onProfile(e, "anthropic-generic", other.URL), "other-model"), 1))
-			e.alias("alone", target(d, 0))
+			e.alias("alone", target(d, 0), target(e.deployment(p, "up2"), 1))
 			key := e.key(everyAlias)
 			e.start()
 
@@ -175,7 +179,8 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 			}
 			for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
 				s, b, nv, _ := try(path, "alone", tc.set)
-				if s != 400 || nv != 0 || !strings.Contains(b, `"invalid_request_error"`) || !strings.Contains(b, tc.field) {
+				if want := tc.field + ": every upstream of model alone ignores it"; s != 400 || nv != 0 ||
+					!strings.Contains(b, `"invalid_request_error"`) || !strings.Contains(b, want) {
 					t.Errorf("%s alone: %d %s, %d calls", path, s, b, nv)
 				}
 			}
@@ -185,5 +190,19 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	// Deployments each dropped for a field of its own: the refusal names
+	// both, and says no more of either than is true.
+	e := newEnv(t)
+	mm, ds := newFake(t, message("minimax")), newFake(t, message("deepseek"))
+	e.alias("both", target(e.deployment(onProfile(e, "minimax", mm.URL), "m"), 0), target(e.deployment(onProfile(e, "deepseek", ds.URL), "d"), 1))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do("POST", "/v1/messages", `{"model":"both","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stop_sequences":["END"],`+
+		cases[0].set+`}`, map[string]string{"x-api-key": key})
+	if want := "every upstream of model both ignores one of stop_sequences, tool_choice.disable_parallel_tool_use"; resp.StatusCode != 400 ||
+		!strings.Contains(string(b), want) || len(mm.recorded())+len(ds.recorded()) != 0 {
+		t.Errorf("both: %d %s, want %q", resp.StatusCode, b, want)
 	}
 }

@@ -3,6 +3,7 @@ package modelgateway
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
@@ -10,16 +11,16 @@ import (
 )
 
 // honoring keeps the attempts whose vendor does not ignore anything the
-// request asks for (profile.Profile.Ignores), and names what the first one
-// it dropped ignores, for the refusal when it keeps none.
-func honoring(attempts []catalog.Attempt, req map[string]json.RawMessage) ([]catalog.Attempt, string) {
-	var ignored string
+// request asks for (profile.Profile.Ignores), and names each field the ones
+// it dropped ignore, once and in order, for the refusal when it keeps none.
+func honoring(attempts []catalog.Attempt, req map[string]json.RawMessage) ([]catalog.Attempt, []string) {
+	var ignored []string
 	kept := attempts[:0:0]
 	for _, at := range attempts {
 		if p, _ := profile.Lookup(at.Provider.Profile); p.Ignores != nil {
 			if field := p.Ignores(req); field != "" {
-				if ignored == "" {
-					ignored = field
+				if !slices.Contains(ignored, field) {
+					ignored = append(ignored, field)
 				}
 				continue
 			}
@@ -62,21 +63,46 @@ func inPlace(obj map[string]json.RawMessage, key string, fn func(json.RawMessage
 }
 
 // flattenSearchResult turns a search_result block into the text block
-// SearchResultText renders, in place.
+// SearchResultText renders, in place, keeping its cache_control, which a
+// text block takes too; its citations config has no text-block form. The
+// title, the source and the inner text blocks are read by their exact keys
+// and handed to the renderer in one canonical form, so neither a key
+// differing only in case nor the keys' order changes what is rendered. A
+// block whose fields are not the strings and text blocks the wire has goes
+// as sent.
 func flattenSearchResult(block map[string]json.RawMessage) bool {
-	var title string
+	var title, source string
+	var inner []map[string]json.RawMessage
 	if t, ok := block["title"]; ok && json.Unmarshal(t, &title) != nil {
 		return false
 	}
-	text, err := provider.SearchResultText(title, block["source"], block["content"])
+	if s, ok := block["source"]; ok && json.Unmarshal(s, &source) != nil {
+		return false
+	}
+	if c, ok := block["content"]; ok && json.Unmarshal(c, &inner) != nil {
+		return false
+	}
+	texts := make([]map[string]string, len(inner))
+	for i, b := range inner {
+		var typ, text string
+		if json.Unmarshal(b["type"], &typ) != nil || typ != "text" || json.Unmarshal(b["text"], &text) != nil {
+			return false
+		}
+		texts[i] = map[string]string{"type": "text", "text": text}
+	}
+	src, _ := json.Marshal(source)
+	content, _ := json.Marshal(texts)
+	rendered, err := provider.SearchResultText(title, src, content)
 	if err != nil {
 		return false
 	}
-	for k := range block {
-		delete(block, k)
-	}
+	cache, cached := block["cache_control"]
+	clear(block)
 	block["type"] = json.RawMessage(`"text"`)
-	block["text"], _ = json.Marshal(text)
+	block["text"], _ = json.Marshal(rendered)
+	if cached {
+		block["cache_control"] = cache
+	}
 	return true
 }
 
