@@ -385,6 +385,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	if err != nil {
 		return noAnswer(guard, red, err)
 	}
+	answered(ctx, resp.StatusCode)
 	resp.Body = provider.ProgressBody(ctx, resp.Body)
 	defer resp.Body.Close()
 	switch s := resp.StatusCode; {

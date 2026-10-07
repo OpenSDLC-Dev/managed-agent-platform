@@ -62,10 +62,52 @@ func serverSpan(r *http.Request) (context.Context, trace.Span) {
 		trace.WithSpanKind(trace.SpanKindServer))
 }
 
+// statusWriter remembers the status a response was given, for the request's
+// span: every response the gateway and its admin API write sets one with
+// WriteHeader. Unwrap keeps http.ResponseController reaching the connection
+// beneath.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// endServerSpan ends the request's span with the status it was answered
+// with, every request's — refused, admitted, the admin API's — and marks a
+// 5xx an error: the server's failure, where a 4xx is the caller's.
+func endServerSpan(span trace.Span, status int) {
+	if status != 0 {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(status))
+		if status >= 500 {
+			span.SetStatus(codes.Error, http.StatusText(status))
+		}
+	}
+	span.End()
+}
+
+// markError names on the request's span the error the gateway answers with.
+func markError(ctx context.Context, typ string) {
+	trace.SpanFromContext(ctx).SetAttributes(semconv.ErrorTypeKey.String(typ))
+}
+
+// answered marks an attempt's span with the status its upstream answered,
+// so a refusal the gateway reports as another status, a 401 as a 502, keeps
+// the upstream's own; an attempt that got no answer has none.
+func answered(ctx context.Context, status int) {
+	trace.SpanFromContext(ctx).SetAttributes(semconv.HTTPResponseStatusCode(status))
+}
+
 // tracedAttempt makes one attempt under a client span of its own, a child of
 // the request's: the upstream model, the provider's profile and host, the
-// deployment and credential, and the status and error the attempt ended
-// with. The span covers a stream to its end, since the attempt relays it.
+// deployment and credential, the status the upstream answered (answered),
+// and the error the attempt ended with. The span covers a stream to its end,
+// since the attempt relays it.
 func (h *handler) tracedAttempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt, strip bool) (*failure, bool) {
 	op := operations[endpoints[c.path]]
 	attrs := []attribute.KeyValue{
@@ -85,11 +127,10 @@ func (h *handler) tracedAttempt(w http.ResponseWriter, r *http.Request, c call, 
 		trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 	defer span.End()
 	f, retry := h.attempt(w, r.WithContext(ctx), c, at, strip)
-	status, errType := c.out.status, c.out.errType
+	errType := c.out.errType
 	if f != nil {
-		status, errType = f.status, f.errorType()
+		errType = f.errorType()
 	}
-	span.SetAttributes(semconv.HTTPResponseStatusCode(status))
 	if errType != "" {
 		span.SetAttributes(semconv.ErrorTypeKey.String(errType))
 		span.SetStatus(codes.Error, errType)
@@ -97,9 +138,15 @@ func (h *handler) tracedAttempt(w http.ResponseWriter, r *http.Request, c call, 
 	return f, retry
 }
 
-// propagate sends the attempt's trace context upstream, to a provider that
-// opted in: an in-cluster model server traced by the same collector, say.
+// propagate gives the upstream request the attempt's trace context when the
+// provider opted in — an in-cluster model server traced by the same
+// collector, say — and none otherwise: the W3C headers are the gateway's to
+// set, so a provider's configured headers cannot send them either. With no
+// tracer installed the gateway records no span, and the caller's context
+// passes on as it came.
 func propagate(ctx context.Context, p store.Provider, h http.Header) {
+	h.Del("traceparent")
+	h.Del("tracestate")
 	if !p.PropagateTrace {
 		return
 	}
@@ -110,12 +157,23 @@ func propagate(ctx context.Context, p store.Provider, h http.Header) {
 	}
 }
 
+// errorClass is the error type a metric is labeled with: one errorStatus
+// names, and "_OTHER" for any other an upstream does, which could otherwise
+// grow the metric without bound; spans and the ledger keep the type as
+// given. (An upstream's account refusals reach no ledger row by name:
+// refusedCredential answers them as an api_error.)
+func errorClass(typ string) string {
+	if _, known := errorStatus[typ]; known {
+		return typ
+	}
+	return "_OTHER"
+}
+
 // observe reports a finished request to its server span and to the
-// gateway's metrics, from the usage its ledger row is written from. Its cost
-// is at the snapshot's prices, which the ledger's — the database's when the
-// row is written — follow within a reload. A telemetry failure drops the
-// reading, never the request.
-func observe(ctx context.Context, u store.Usage, at *catalog.Attempt) {
+// gateway's metrics, from the usage its ledger row was written with, cost
+// being the row's, nil when it has none or was not written. A telemetry
+// failure drops the reading, never the request.
+func observe(ctx context.Context, u store.Usage, at *catalog.Attempt, cost *float64) {
 	span := trace.SpanFromContext(ctx)
 	dims := []attribute.KeyValue{attribute.String(attrAlias, u.Alias), attribute.String(attrKey, u.APIKeyID),
 		attribute.String(attrEndpoint, u.Endpoint)}
@@ -125,16 +183,16 @@ func observe(ctx context.Context, u store.Usage, at *catalog.Attempt) {
 	}
 	outcome := []attribute.KeyValue{semconv.HTTPResponseStatusCode(u.Status)}
 	if u.ErrorType != "" {
-		outcome = append(outcome, semconv.ErrorTypeKey.String(u.ErrorType))
-		// A server span's error is the server's: a 4xx is the caller's, but a
-		// stream that failed after its 200 is not.
-		if u.Status < 400 || u.Status >= 500 {
+		outcome = append(outcome, semconv.ErrorTypeKey.String(errorClass(u.ErrorType)))
+		span.SetAttributes(semconv.ErrorTypeKey.String(u.ErrorType))
+		// A stream that failed after its 200 is the server's failure too;
+		// endServerSpan marks a 5xx.
+		if u.Status < 400 {
 			span.SetStatus(codes.Error, u.ErrorType)
 		}
 	}
 	span.SetAttributes(semconv.GenAIOperationNameKey.String(operations[u.Endpoint]), semconv.GenAIRequestModel(u.Model))
 	span.SetAttributes(dims...)
-	span.SetAttributes(outcome...)
 	if t := u.Tokens; t != nil {
 		span.SetAttributes(semconv.GenAIUsageInputTokens(int(t.Input)), semconv.GenAIUsageOutputTokens(int(t.Output)),
 			semconv.GenAIUsageCacheCreationInputTokens(int(t.CacheWrite)), semconv.GenAIUsageCacheReadInputTokens(int(t.CacheRead)))
@@ -157,7 +215,7 @@ func observe(ctx context.Context, u store.Usage, at *catalog.Attempt) {
 		}
 	}
 	t := u.Tokens
-	if t == nil || at == nil {
+	if t == nil {
 		return
 	}
 	if c, err := meter.Int64Counter(MetricTokens, metric.WithUnit("{token}"),
@@ -169,21 +227,11 @@ func observe(ctx context.Context, u store.Usage, at *catalog.Attempt) {
 			c.Add(ctx, k.n, metric.WithAttributes(append(append([]attribute.KeyValue{}, dims...), attribute.String(attrTokenType, k.typ))...))
 		}
 	}
+	if cost == nil {
+		return
+	}
 	if c, err := meter.Float64Counter(MetricCost, metric.WithUnit("{cost}"),
-		metric.WithDescription("The tokens' cost at the deployment's prices, in the currency those are entered in.")); err == nil {
-		c.Add(ctx, costOf(*t, at.Deployment.Prices), metric.WithAttributes(dims...))
+		metric.WithDescription("The tokens' cost as the ledger wrote it, at the deployment's prices, in the currency those are entered in.")); err == nil {
+		c.Add(ctx, *cost, metric.WithAttributes(dims...))
 	}
-}
-
-// costOf is the tokens' cost at prices per million, a missing price costing
-// nothing, as the ledger computes it.
-func costOf(t store.Tokens, p store.Prices) float64 {
-	price := func(v *float64) float64 {
-		if v == nil {
-			return 0
-		}
-		return *v
-	}
-	return (price(p.Input)*float64(t.Input) + price(p.Output)*float64(t.Output) +
-		price(p.CacheWrite)*float64(t.CacheWrite) + price(p.CacheRead)*float64(t.CacheRead)) / 1e6
 }

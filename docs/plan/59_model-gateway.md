@@ -586,11 +586,14 @@ frozen by slice 2.
   upstream attempt. `gen_ai.request.model` is the name the caller sent and
   `gen_ai.response.model` the upstream id — span attributes, where cardinality costs
   nothing. `traceparent` goes upstream only where a provider opts in
-  (`propagate_trace`), and then the attempt's own span context, never the caller's as
-  sent.
+  (`propagate_trace`): the attempt's span context, or, with no tracer installed and so
+  no span recorded, the caller's as it came. A provider's configured headers cannot send
+  W3C trace context.
 - Metrics: requests, latency, time to first token, tokens and cost, by matched alias,
   deployment and key — `modelgateway.requests`, `.request.duration`,
-  `.time_to_first_token`, `.tokens` by kind and `.cost`, recorded with the ledger row.
+  `.time_to_first_token`, `.tokens` by kind and `.cost` (the ledger row's), recorded with
+  the ledger row. An error type no Anthropic status maps is `_OTHER` there, kept as
+  given on the span and in the ledger.
   The matched alias is the configured one, `*` for a wildcard match, so a caller
   choosing names cannot grow a metric (#88's concern).
 - Errors answer in the inbound protocol's envelope (Anthropic

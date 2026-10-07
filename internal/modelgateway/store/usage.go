@@ -69,8 +69,9 @@ func (s *Store) exec(ctx context.Context, sql string, args ...any) error {
 // current minute's window — the minute the request ended, by the database's
 // clock — in another, so a row the ledger refuses still counts against the
 // limit. Cost is computed here, at the prices the deployment has now, a
-// missing price costing nothing and missing tokens making no cost.
-func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) error {
+// missing price costing nothing and missing tokens making no cost; it is
+// returned, nil when the row has none or was not written.
+func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*float64, error) {
 	var in, out, cw, cr *int64
 	var windowErr error
 	if t := u.Tokens; t != nil {
@@ -88,7 +89,9 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) error
 		us := u.TTFT.Microseconds()
 		ttft = &us
 	}
-	ledgerErr := s.exec(ctx, `
+	var cost *float64
+	ledgerErr := pgx.BeginTxFunc(ctx, s.pool, readCommitted, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
 		WITH u AS (
 		  INSERT INTO modelgateway.usage (request_id, api_key_id, model, alias, deployment_id, credential_id,
 		      session_id, protocol, endpoint, status, error_type, input_tokens, output_tokens,
@@ -114,10 +117,15 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) error
 		  output_tokens = t.output_tokens + EXCLUDED.output_tokens,
 		  cache_write_tokens = t.cache_write_tokens + EXCLUDED.cache_write_tokens,
 		  cache_read_tokens = t.cache_read_tokens + EXCLUDED.cache_read_tokens,
-		  cost = t.cost + EXCLUDED.cost`,
-		u.RequestID, u.APIKeyID, u.Model, u.Alias, u.DeploymentID, u.CredentialID, u.SessionID, u.Protocol,
-		u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft)
-	return errors.Join(windowErr, ledgerErr)
+		  cost = t.cost + EXCLUDED.cost
+		RETURNING (SELECT cost::float8 FROM u)`,
+			u.RequestID, u.APIKeyID, u.Model, u.Alias, u.DeploymentID, u.CredentialID, u.SessionID, u.Protocol,
+			u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft).Scan(&cost)
+	})
+	if ledgerErr != nil {
+		cost = nil
+	}
+	return cost, errors.Join(windowErr, ledgerErr)
 }
 
 // UsageFilter narrows a usage read; an empty field matches every value.

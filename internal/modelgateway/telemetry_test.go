@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // observed installs a recording tracer provider and a manual-reader meter
@@ -156,14 +158,18 @@ func TestARequestIsTracedAcrossItsAttempts(t *testing.T) {
 	}
 }
 
-// The gateway sends traceparent upstream only to a provider that opts in,
-// and then its own, for the attempt's span — never the caller's as sent.
+// The gateway sends trace context upstream only to a provider that opts in,
+// and then its own, for the attempt's span, with the caller's tracestate —
+// never the caller's traceparent as sent, and never what a provider's
+// configured headers name.
 func TestTraceContextGoesUpstreamOnlyWhereAProviderOptsIn(t *testing.T) {
 	rec, _ := observed(t)
 	e := newEnv(t)
 	plain, traced := newFake(t, message("ok")), newFake(t, message("ok"))
-	pp := e.provider(plain.URL)
-	pt := e.provider(traced.URL, func(p *store.Provider) { p.PropagateTrace = true })
+	forged := map[string]string{"traceparent": "00-" + strings.Repeat("ab", 16) + "-" + strings.Repeat("cd", 8) + "-01",
+		"tracestate": "vendor=forged"}
+	pp := e.provider(plain.URL, func(p *store.Provider) { p.Headers = forged })
+	pt := e.provider(traced.URL, func(p *store.Provider) { p.PropagateTrace, p.Headers = true, forged })
 	e.credential(pp, "sk-upstream-1", 1)
 	e.credential(pt, "sk-upstream-2", 1)
 	e.alias("plain", target(e.deployment(pp, "m"), 0))
@@ -173,12 +179,17 @@ func TestTraceContextGoesUpstreamOnlyWhereAProviderOptsIn(t *testing.T) {
 	e.start()
 	for _, alias := range []string{"plain", "traced"} {
 		if resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"messages":[]}`,
-			map[string]string{"x-api-key": key, "traceparent": traceparent}); resp.StatusCode != 200 {
+			map[string]string{"x-api-key": key, "traceparent": traceparent, "tracestate": "caller=1"}); resp.StatusCode != 200 {
 			t.Fatalf("%s: %d %s", alias, resp.StatusCode, b)
 		}
 	}
-	if h := plain.recorded()[0].Header.Get("traceparent"); h != "" {
-		t.Errorf("a provider that did not opt in was sent traceparent %q", h)
+	for _, h := range []string{"traceparent", "tracestate"} {
+		if got := plain.recorded()[0].Header.Get(h); got != "" {
+			t.Errorf("a provider that did not opt in was sent %s %q", h, got)
+		}
+	}
+	if got := traced.recorded()[0].Header.Get("tracestate"); got != "caller=1" {
+		t.Errorf("the opted-in provider was sent tracestate %q, want the caller's", got)
 	}
 	var attempt trace.SpanContext
 	for _, c := range ended(t, rec, trace.SpanKindClient, 2) {
@@ -189,6 +200,120 @@ func TestTraceContextGoesUpstreamOnlyWhereAProviderOptsIn(t *testing.T) {
 	want := "00-" + callerTrace + "-" + attempt.SpanID().String() + "-01"
 	if got := traced.recorded()[0].Header.Get("traceparent"); got != want || !attempt.IsValid() {
 		t.Errorf("the opted-in provider was sent traceparent %q, want %q", got, want)
+	}
+}
+
+// With no tracer installed the gateway records no span, so a provider that
+// opted in is sent the caller's trace context as it came, and one that did
+// not is sent none.
+func TestWithNoTracerTheCallersContextPassesAsItCame(t *testing.T) {
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tracenoop.NewTracerProvider())
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+	e := newEnv(t)
+	plain, traced := newFake(t, message("ok")), newFake(t, message("ok"))
+	pp := e.provider(plain.URL)
+	pt := e.provider(traced.URL, func(p *store.Provider) { p.PropagateTrace = true })
+	e.credential(pp, "sk-upstream-1", 1)
+	e.credential(pt, "sk-upstream-2", 1)
+	e.alias("plain", target(e.deployment(pp, "m"), 0))
+	e.alias("traced", target(e.deployment(pt, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	for _, alias := range []string{"plain", "traced"} {
+		if resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"messages":[]}`,
+			map[string]string{"x-api-key": key, "traceparent": traceparent}); resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %s", alias, resp.StatusCode, b)
+		}
+	}
+	if got := plain.recorded()[0].Header.Get("traceparent"); got != "" {
+		t.Errorf("a provider that did not opt in was sent traceparent %q", got)
+	}
+	if got := traced.recorded()[0].Header.Get("traceparent"); got != traceparent {
+		t.Errorf("the opted-in provider was sent traceparent %q, want the caller's %q", got, traceparent)
+	}
+}
+
+// Every request's span holds the status it was answered with — refused
+// before admission, unservable, the models list — and is an error only where
+// the gateway failed it.
+func TestEveryAnswerReachesItsSpan(t *testing.T) {
+	rec, _ := observed(t)
+	e := newEnv(t)
+	idle := e.provider("http://127.0.0.1:1") // no credential, so nothing to attempt
+	e.alias("idle", target(e.deployment(idle, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	e.do("POST", "/v1/messages", `{"model":"idle","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": "sk-wrong"})
+	e.do("POST", "/v1/messages", `{"model":"idle","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
+	e.do("GET", "/v1/models", "", map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
+	want := map[string]struct {
+		errType string
+		failed  bool
+	}{"401": {"authentication_error", false}, "503": {"api_error", true}, "200": {"", false}}
+	spans := ended(t, rec, trace.SpanKindServer, 3)
+	if len(spans) != 3 {
+		t.Fatalf("%d server spans, want 3", len(spans))
+	}
+	for _, s := range spans {
+		status, _ := attr(s.Attributes(), "http.response.status_code")
+		w, ok := want[status]
+		if !ok {
+			t.Errorf("a server span holds status %q", status)
+			continue
+		}
+		delete(want, status)
+		if got, _ := attr(s.Attributes(), "error.type"); got != w.errType {
+			t.Errorf("the %s's span names error %q, want %q", status, got, w.errType)
+		}
+		if (s.Status().Code == codes.Error) != w.failed {
+			t.Errorf("the %s's span is %v", status, s.Status())
+		}
+	}
+}
+
+// An attempt's span holds the status its upstream answered, where the
+// gateway answers the caller with another — a refused key's 401 is the
+// caller's server error — and none where no answer came.
+func TestAnAttemptsSpanHoldsWhatItsUpstreamAnswered(t *testing.T) {
+	rec, _ := observed(t)
+	e := newEnv(t)
+	refusing := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
+		writeBody(w, 401, `{"type":"error","error":{"type":"authentication_error","message":"bad key"}}`)
+	})
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+	pr, pg := e.provider(refusing.URL), e.provider(gone.URL)
+	e.credential(pr, "sk-upstream-1", 1)
+	e.credential(pg, "sk-upstream-2", 1)
+	dr, dg := e.deployment(pr, "refused"), e.deployment(pg, "unreachable")
+	e.alias("refused", target(dr, 0))
+	e.alias("unreachable", target(dg, 0))
+	key := e.key(everyAlias)
+	e.start()
+	for _, alias := range []string{"refused", "unreachable"} {
+		if resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"messages":[]}`,
+			map[string]string{"x-api-key": key}); resp.StatusCode < 500 {
+			t.Fatalf("%s: %d %s, want a server error", alias, resp.StatusCode, b)
+		}
+	}
+	seen := map[string]bool{}
+	for _, c := range ended(t, rec, trace.SpanKindClient, 2) {
+		dep, _ := attr(c.Attributes(), "modelgateway.deployment.id")
+		status, has := attr(c.Attributes(), "http.response.status_code")
+		seen[dep] = true
+		switch {
+		case dep == dr.ID && status != "401":
+			t.Errorf("the refused attempt's span holds status %q, want the upstream's 401", status)
+		case dep == dg.ID && has:
+			t.Errorf("the unanswered attempt's span holds status %q", status)
+		}
+		if c.Status().Code != codes.Error {
+			t.Errorf("the %s attempt's span is %v", dep, c.Status())
+		}
+	}
+	if !seen[dr.ID] || !seen[dg.ID] {
+		t.Errorf("client spans for %v, want both deployments", seen)
 	}
 }
 
@@ -235,8 +360,11 @@ func metricSum(rm metricdata.ResourceMetrics, name string, match map[string]stri
 
 // The metrics count what the ledger records, by matched alias, deployment and
 // key: each request by route, status and error, its latency, a stream's time
-// to first token, and the tokens and their cost. A request's span is an error
-// when the gateway failed it, not when the caller's request was refused.
+// to first token, and the tokens and the ledger's cost of them — at the
+// database's prices, here edited since the snapshot loaded. An error type
+// outside Anthropic's own is _OTHER there, as given in the ledger and on the
+// span. A request's span is an error when the gateway failed it, a stream
+// failing after its 200 included, not when the caller's request was refused.
 func TestTheMetricsCountWhatTheLedgerRecords(t *testing.T) {
 	rec, collect := observed(t)
 	e := newEnv(t)
@@ -244,6 +372,10 @@ func TestTheMetricsCountWhatTheLedgerRecords(t *testing.T) {
 		switch {
 		case strings.Contains(string(c.Raw), "refuse"):
 			writeBody(w, 400, `{"type":"error","error":{"type":"invalid_request_error","message":"no"}}`)
+		case strings.Contains(string(c.Raw), "odd"):
+			writeBody(w, 400, `{"type":"error","error":{"type":"vendor_specific_error","message":"no"}}`)
+		case strings.Contains(string(c.Raw), "midstream"):
+			sse(w, events(c.Model, "x")[0], overloadedEvent)
 		case strings.Contains(string(c.Raw), "cached"):
 			writeBody(w, 200, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn",`+
 				`"usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":7,"cache_read_input_tokens":11}}`)
@@ -265,6 +397,12 @@ func TestTheMetricsCountWhatTheLedgerRecords(t *testing.T) {
 	e.alias("broken", target(e.deployment(pd, "m"), 0))
 	key := e.key(everyAlias)
 	e.start()
+	if _, err := e.s.UpdateDeployment(e.ctx, d.ID, func(d *store.Deployment) error {
+		d.Prices = store.Prices{Input: priced(6), Output: priced(30), CacheWrite: priced(7.5), CacheRead: priced(0.6)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	hdr := map[string]string{"x-api-key": key}
 	e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, hdr)
 	e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, hdr)
@@ -272,15 +410,26 @@ func TestTheMetricsCountWhatTheLedgerRecords(t *testing.T) {
 	e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"metadata":{"user_id":"refuse"},"messages":[]}`, hdr)
 	e.do("POST", "/v1/messages", `{"model":"any-name-at-all","max_tokens":8,"metadata":{"user_id":"cached"},"messages":[]}`, hdr)
 	e.do("POST", "/v1/messages", `{"model":"broken","max_tokens":8,"messages":[]}`, hdr)
+	e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"metadata":{"user_id":"odd"},"messages":[]}`, hdr)
+	e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"metadata":{"user_id":"midstream"},"messages":[]}`, hdr)
 	rows := e.ledger()
-	if len(rows) != 6 {
-		t.Fatalf("%d ledger rows, want 6", len(rows))
+	if len(rows) != 8 {
+		t.Fatalf("%d ledger rows, want 8", len(rows))
 	}
-	for _, s := range ended(t, rec, trace.SpanKindServer, 6) {
+	if rows[1].ErrorType != "vendor_specific_error" {
+		t.Errorf("the ledger holds error %q, want the upstream's as given", rows[1].ErrorType)
+	}
+	var odd bool
+	for _, s := range ended(t, rec, trace.SpanKindServer, 8) {
 		status, _ := attr(s.Attributes(), "http.response.status_code")
-		if want := status == "500"; (s.Status().Code == codes.Error) != want {
-			t.Errorf("the span of a request answered %s is %v", status, s.Status())
+		typ, _ := attr(s.Attributes(), "error.type")
+		odd = odd || typ == "vendor_specific_error"
+		if want := status == "500" || typ == "overloaded_error"; (s.Status().Code == codes.Error) != want {
+			t.Errorf("the span of a request answered %s with error %q is %v", status, typ, s.Status())
 		}
+	}
+	if !odd {
+		t.Error("no span names the upstream's error type as given")
 	}
 	rm := collect()
 
@@ -299,22 +448,25 @@ func TestTheMetricsCountWhatTheLedgerRecords(t *testing.T) {
 		match map[string]string
 		want  float64
 	}{
-		{with("modelgateway.endpoint", "messages", "http.response.status_code", "200"), 2},
+		{with("modelgateway.endpoint", "messages", "http.response.status_code", "200"), 3},
 		{with("modelgateway.endpoint", "count_tokens", "http.response.status_code", "200"), 1},
 		{with("http.response.status_code", "400", "error.type", "invalid_request_error"), 1},
 		{map[string]string{"modelgateway.alias": "*"}, 1},
 		{map[string]string{"modelgateway.alias": "broken", "http.response.status_code": "500", "error.type": "api_error"}, 1},
-		{map[string]string{}, 6},
+		{with("http.response.status_code", "400", "error.type", "_OTHER"), 1},
+		{map[string]string{"error.type": "vendor_specific_error"}, 0},
+		{with("http.response.status_code", "200", "error.type", "overloaded_error"), 1},
+		{map[string]string{}, 8},
 	} {
 		if got, _ := metricSum(rm, modelgateway.MetricRequests, c.match); got != c.want {
 			t.Errorf("%s %v = %v, want %v", modelgateway.MetricRequests, c.match, got, c.want)
 		}
 	}
-	if _, n := metricSum(rm, modelgateway.MetricRequestDuration, map[string]string{}); n != 6 {
-		t.Errorf("%s holds %d readings, want 6", modelgateway.MetricRequestDuration, n)
+	if _, n := metricSum(rm, modelgateway.MetricRequestDuration, map[string]string{}); n != 8 {
+		t.Errorf("%s holds %d readings, want 8", modelgateway.MetricRequestDuration, n)
 	}
-	if _, n := metricSum(rm, modelgateway.MetricTimeToFirstToken, with("modelgateway.endpoint", "messages")); n != 1 {
-		t.Errorf("%s holds %d readings, want the stream's one", modelgateway.MetricTimeToFirstToken, n)
+	if _, n := metricSum(rm, modelgateway.MetricTimeToFirstToken, with("modelgateway.endpoint", "messages")); n != 2 {
+		t.Errorf("%s holds %d readings, want the two streams'", modelgateway.MetricTimeToFirstToken, n)
 	}
 	var want store.Tokens
 	var cost float64

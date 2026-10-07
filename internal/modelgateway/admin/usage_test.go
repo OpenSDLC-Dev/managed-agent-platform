@@ -13,7 +13,7 @@ import (
 
 func (e *env) record(u store.Usage) {
 	e.t.Helper()
-	if err := e.store.RecordUsage(context.Background(), u, false); err != nil {
+	if _, err := e.store.RecordUsage(context.Background(), u, false); err != nil {
 		e.t.Fatal(err)
 	}
 }

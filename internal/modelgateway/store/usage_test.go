@@ -44,13 +44,20 @@ func TestRecordUsageWritesTheLedgerAndItsDay(t *testing.T) {
 	ok.SessionID, ok.TTFT, ok.Model = "sesn_1", 300*time.Millisecond, "claude-sonnet"
 	refused := usage("key_a", "chat", priced.ID, nil)
 	refused.Status, refused.ErrorType = 529, "overloaded_error"
+	var costs []*float64
 	for _, u := range []store.Usage{ok, refused,
 		usage("key_a", "chat", partly.ID, &store.Tokens{Input: 1000, Output: 100}),
 		usage("key_a", "chat", "dep_gone", &store.Tokens{Input: 1000, Output: 100}),
 		usage("key_b", "chat", priced.ID, nil)} {
-		if err := s.RecordUsage(ctx, u, false); err != nil {
+		cost, err := s.RecordUsage(ctx, u, false)
+		if err != nil {
 			t.Fatal(err)
 		}
+		costs = append(costs, cost)
+	}
+	if costs[0] == nil || !near(*costs[0], 0.0073) || costs[1] != nil || costs[2] == nil || !near(*costs[2], 0.001) ||
+		costs[3] == nil || *costs[3] != 0 || costs[4] != nil {
+		t.Errorf("RecordUsage returned costs %v, want each row's", costs)
 	}
 
 	rows, more, err := s.ListUsage(ctx, store.UsageFilter{APIKeyID: "key_a"}, 0, 10)
@@ -116,7 +123,7 @@ func TestADayIsAUTCDay(t *testing.T) {
 	if local == utc.Format(time.DateOnly) {
 		t.Fatalf("%s shares UTC's date", zone)
 	}
-	if err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil), false); err != nil {
+	if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil), false); err != nil {
 		t.Fatal(err)
 	}
 	days, _, err := s.ListDailyUsage(ctx, store.UsageFilter{}, utc, utc, 100)
@@ -136,7 +143,7 @@ func TestListUsagePagesAndFilters(t *testing.T) {
 		usage("key_a", "x", "dep_2", nil), usage("key_b", "y", "dep_1", nil),
 	} {
 		u.SessionID = []string{"s1", "s2", "s1", "", "s2"}[i]
-		if err := s.RecordUsage(ctx, u, false); err != nil {
+		if _, err := s.RecordUsage(ctx, u, false); err != nil {
 			t.Fatal(err)
 		}
 		all = append(all, u)
@@ -234,7 +241,7 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 		t.Fatalf("the first request: %+v, %v", a, err)
 	}
 	u := usage("key_t", "x", "dep_1", &store.Tokens{Input: 600, Output: 300, CacheWrite: 50, CacheRead: 50000})
-	if err := s.RecordUsage(ctx, u, true); err != nil {
+	if _, err := s.RecordUsage(ctx, u, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, tok := window(t, pool, "key_t"); tok != 950 {
@@ -243,7 +250,7 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 	if a, err := s.Admit(ctx, "key_t", nil, &tpm); err != nil || !a.Admitted {
 		t.Errorf("under the limit: %+v, %v", a, err)
 	}
-	if err := s.RecordUsage(ctx, usage("key_t", "x", "dep_1", &store.Tokens{Input: 50}), true); err != nil {
+	if _, err := s.RecordUsage(ctx, usage("key_t", "x", "dep_1", &store.Tokens{Input: 50}), true); err != nil {
 		t.Fatal(err)
 	}
 	if a, err := s.Admit(ctx, "key_t", nil, &tpm); err != nil || a.Admitted || !a.Tokens {
@@ -251,7 +258,7 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 	}
 	// With both limits set, the refusal names the one reached.
 	both, one := int32(5), int32(1)
-	if err := s.RecordUsage(ctx, usage("key_both", "x", "dep_1", &store.Tokens{Input: 1000}), true); err != nil {
+	if _, err := s.RecordUsage(ctx, usage("key_both", "x", "dep_1", &store.Tokens{Input: 1000}), true); err != nil {
 		t.Fatal(err)
 	}
 	if a, err := s.Admit(ctx, "key_both", &both, &tpm); err != nil || a.Admitted || !a.Tokens {
@@ -263,7 +270,7 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 		}
 	}
 	// A key whose TPM is not limited leaves the windows alone.
-	if err := s.RecordUsage(ctx, usage("key_u", "x", "dep_1", &store.Tokens{Input: 5}), false); err != nil {
+	if _, err := s.RecordUsage(ctx, usage("key_u", "x", "dep_1", &store.Tokens{Input: 5}), false); err != nil {
 		t.Fatal(err)
 	}
 	if r, tok := window(t, pool, "key_u"); r != 0 || tok != 0 {
@@ -280,7 +287,7 @@ func TestSweepUsage(t *testing.T) {
 	ctx := context.Background()
 	defer store.SetSweepBatch(2)()
 	for range 7 {
-		if err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", &store.Tokens{Input: 1}), true); err != nil {
+		if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", &store.Tokens{Input: 1}), true); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -341,7 +348,7 @@ func TestSweepUsage(t *testing.T) {
 		}
 	}
 	swept("the first sweep")
-	if err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil), false); err != nil {
+	if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil), false); err != nil {
 		t.Fatal(err)
 	}
 	swept("a later sweep")
@@ -358,8 +365,8 @@ func TestATokenCountOutlivesItsLedgerRow(t *testing.T) {
 	clearOfAMinute(t, pool)
 	u := usage("key_n", "x", "dep_1", &store.Tokens{Input: 40, Output: 2, CacheRead: 9})
 	u.Model = "bad\x00name"
-	if err := s.RecordUsage(ctx, u, true); err == nil {
-		t.Fatal("the ledger took a NUL")
+	if cost, err := s.RecordUsage(ctx, u, true); err == nil || cost != nil {
+		t.Fatalf("the ledger took a NUL: cost %v, %v", cost, err)
 	}
 	if _, tok := window(t, pool, "key_n"); tok != 42 {
 		t.Errorf("the window counted %d tokens, want 42", tok)
@@ -384,7 +391,8 @@ func TestTheLimitsAndTheLedgerAreReadCommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := func(tpmLimited bool) error {
-		return s.RecordUsage(ctx, usage("key_rr", "x", "dep_1", &store.Tokens{Input: 1}), tpmLimited)
+		_, err := s.RecordUsage(ctx, usage("key_rr", "x", "dep_1", &store.Tokens{Input: 1}), tpmLimited)
+		return err
 	}
 	if err := record(true); err != nil {
 		t.Fatal(err)

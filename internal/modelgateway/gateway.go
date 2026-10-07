@@ -159,7 +159,9 @@ type requestIDKey struct{}
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, span := serverSpan(r)
-	defer span.End()
+	sw := &statusWriter{ResponseWriter: w}
+	defer func() { endServerSpan(span, sw.status) }()
+	w = sw
 	rid := newRequestID()
 	w.Header().Set("request-id", rid)
 	r = r.WithContext(context.WithValue(ctx, requestIDKey{}, rid))
@@ -245,6 +247,7 @@ func internal(r *http.Request, what string, err error) *apiError {
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, e *apiError) {
+	markError(r.Context(), e.typ)
 	writeJSON(w, e.status, map[string]any{
 		"type":       "error",
 		"error":      map[string]string{"type": e.typ, "message": e.msg},
