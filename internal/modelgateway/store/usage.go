@@ -70,7 +70,8 @@ func (s *Store) exec(ctx context.Context, sql string, args ...any) error {
 // clock — in another, so a row the ledger refuses still counts against the
 // limit. Cost is computed here, at the prices the deployment has now, a
 // missing price costing nothing and missing tokens making no cost; it is
-// returned, nil when the row has none or was not written.
+// returned, nil when the row has none, was not written, or holds one no
+// float64 can.
 func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*float64, error) {
 	var in, out, cw, cr *int64
 	var windowErr error
@@ -89,7 +90,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*flo
 		us := u.TTFT.Microseconds()
 		ttft = &us
 	}
-	var cost *float64
+	var cost *string
 	ledgerErr := pgx.BeginTxFunc(ctx, s.pool, readCommitted, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 		WITH u AS (
@@ -118,14 +119,20 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*flo
 		  cache_write_tokens = t.cache_write_tokens + EXCLUDED.cache_write_tokens,
 		  cache_read_tokens = t.cache_read_tokens + EXCLUDED.cache_read_tokens,
 		  cost = t.cost + EXCLUDED.cost
-		RETURNING (SELECT cost::float8 FROM u)`,
+		RETURNING (SELECT cost::text FROM u)`,
 			u.RequestID, u.APIKeyID, u.Model, u.Alias, u.DeploymentID, u.CredentialID, u.SessionID, u.Protocol,
 			u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft).Scan(&cost)
 	})
-	if ledgerErr != nil {
-		cost = nil
+	if ledgerErr != nil || cost == nil {
+		return nil, errors.Join(windowErr, ledgerErr)
 	}
-	return cost, errors.Join(windowErr, ledgerErr)
+	// The cost is read as text and parsed once the row is committed: one no
+	// float64 holds loses the caller its reading, never the row.
+	f, err := strconv.ParseFloat(*cost, 64)
+	if err != nil {
+		return nil, windowErr
+	}
+	return &f, windowErr
 }
 
 // UsageFilter narrows a usage read; an empty field matches every value.

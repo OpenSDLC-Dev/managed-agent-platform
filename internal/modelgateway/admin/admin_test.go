@@ -288,6 +288,8 @@ func TestProviders(t *testing.T) {
 		"credential header":    {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"X-Upstream-Token": "s"}}, "X-Upstream-Token"},
 		"authorization header": {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"Authorization": "Bearer s"}}, "Authorization"},
 		"bad header name":      {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"X Route": "a"}}, "X Route"},
+		"tracestate header":    {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"Tracestate": "v=1"}}, "Tracestate"},
+		"traceparent header":   {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"traceparent": "00-x"}}, "traceparent"},
 		"header line break":    {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"X-Route": "a\r\nX-Evil: b"}}, "X-Route"},
 		"headers alike":        {map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth, "headers": map[string]string{"X-Route": "a", "x-route": "b"}}, "x-route"},
 		"no name":              {map[string]any{"profile": "deepseek", "endpoints": deepseekBoth}, "name"},
@@ -401,11 +403,12 @@ func TestDeployments(t *testing.T) {
 	d := e.ok(e.admin("POST", "/admin/v1/deployments", map[string]any{
 		"provider_id": pid, "upstream_model": "deepseek-v4-pro", "kind": "chat", "display_name": "V4 Pro",
 		"capabilities": map[string]any{"tools": true, "thinking": true, "max_input_tokens": 128000},
-		"prices":       map[string]any{"input": 0.28, "output": 1.1},
+		"prices":       map[string]any{"input": 0.28, "output": 1.1, "cache_write": 0},
 	}), "create")
 	id := d["id"].(string)
 	if d["type"] != "deployment" || d["capabilities"].(map[string]any)["thinking"] != true ||
-		d["prices"].(map[string]any)["input"] != 0.28 || d["prices"].(map[string]any)["cache_read"] != nil {
+		d["prices"].(map[string]any)["input"] != 0.28 || d["prices"].(map[string]any)["cache_read"] != nil ||
+		d["prices"].(map[string]any)["cache_write"] != 0.0 {
 		t.Fatalf("created = %v", d)
 	}
 	for name, tc := range map[string]struct {
@@ -416,6 +419,8 @@ func TestDeployments(t *testing.T) {
 		"bad kind":           {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "image"}, "image"},
 		"no model":           {map[string]any{"provider_id": pid, "kind": "chat"}, "upstream_model"},
 		"negative price":     {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "prices": map[string]any{"output": -1}}, "output"},
+		"price too high":     {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "prices": map[string]any{"input": 2e9}}, "input"},
+		"price too small":    {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "prices": map[string]any{"cache_read": 1e-12}}, "cache_read"},
 		"negative limit":     {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "capabilities": map[string]any{"max_tokens": -1}}, "max_tokens"},
 		"unknown capability": {map[string]any{"provider_id": pid, "upstream_model": "m", "kind": "chat", "capabilities": map[string]any{"audio": true}}, "audio"},
 	} {

@@ -726,7 +726,7 @@ after its commit so a rollback cannot double-count), and `deployment.tick.durati
 signal that one sweep has outgrown its 30-second interval. The model gateway continues
 a caller's `traceparent` in a server span per request, opens a client span per upstream
 attempt, and records `modelgateway.requests`, `.request.duration`,
-`.time_to_first_token`, `.tokens` by kind and `.cost` with each ledger row, by matched
+`.time_to_first_token`, `.tokens` by kind and `.cost` from each ledger row's usage, by matched
 alias, deployment and key (`internal/modelgateway/telemetry.go`); a provider is sent
 trace context only when it opts in. Queue `depth`/`pending`/`workers_polling` are OTLP
 observable gauges (`internal/queue/metrics.go`) sampling the same work-stats view the API

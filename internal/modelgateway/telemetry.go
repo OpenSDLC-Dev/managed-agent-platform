@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
@@ -27,15 +28,27 @@ const instrumentation = "github.com/OpenSDLC-Dev/managed-agent-platform/internal
 // it matched — the configured one, "*" for a wildcard match, so a caller
 // choosing names cannot grow a metric — and count the four kinds of token
 // the ledger does, where gen_ai.token.type has only input and output. They
-// are recorded with the ledger row (observe), so the two cannot drift. The
-// names are exported so the telemetry contract test can assert they reach an
-// OTLP collector.
+// are recorded from the usage each ledger row is written from, once its
+// write returns (observe): a row the ledger refuses still counts, without a
+// cost. The names are exported so the telemetry contract test can assert
+// they reach an OTLP collector.
 const (
 	MetricRequests         = "modelgateway.requests"
 	MetricRequestDuration  = "modelgateway.request.duration"
 	MetricTimeToFirstToken = "modelgateway.time_to_first_token"
 	MetricTokens           = "modelgateway.tokens"
 	MetricCost             = "modelgateway.cost"
+)
+
+// The histograms' bucket bounds, in seconds, where the SDK's defaults are
+// for milliseconds: a request's, doubling from 10ms to past ten minutes for
+// the long streams the gateway relays, and a first token's, finer below a
+// second.
+var (
+	durationBounds = []float64{0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96,
+		81.92, 163.84, 327.68, 655.36}
+	ttftBounds = []float64{0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10,
+		20, 40, 80}
 )
 
 // The gateway's own attribute keys, beside the conventions' where one
@@ -58,8 +71,30 @@ var operations = map[string]string{"messages": "chat", "count_tokens": "count_to
 func serverSpan(r *http.Request) (context.Context, trace.Span) {
 	ctx := telemetry.Extract(r.Context(), map[string]string{
 		"traceparent": r.Header.Get("traceparent"), "tracestate": r.Header.Get("tracestate")})
-	return otel.GetTracerProvider().Tracer(instrumentation).Start(ctx, r.Method+" "+r.URL.Path,
+	return otel.GetTracerProvider().Tracer(instrumentation).Start(ctx, spanName(r),
 		trace.WithSpanKind(trace.SpanKindServer))
+}
+
+// spanName is a request span's name, before the request is authenticated:
+// its method and route where the gateway serves one, the method alone
+// otherwise, and "HTTP" for a method HTTP does not define (OTel's HTTP
+// conventions), so no caller can grow the set of span names.
+func spanName(r *http.Request) string {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+	default:
+		return "HTTP"
+	}
+	switch path := strings.TrimPrefix(r.URL.Path, "/anthropic"); {
+	case path == "/v1/messages", path == "/v1/messages/count_tokens", path == "/v1/models":
+		return r.Method + " " + path
+	case strings.HasPrefix(path, "/v1/models/"):
+		return r.Method + " /v1/models/{model_id}"
+	case strings.HasPrefix(r.URL.Path, "/admin/"):
+		return r.Method + " /admin"
+	}
+	return r.Method
 }
 
 // statusWriter remembers the status a response was given, for the request's
@@ -119,7 +154,11 @@ func (h *handler) tracedAttempt(w http.ResponseWriter, r *http.Request, c call, 
 	}
 	if u, err := url.Parse(at.Endpoint); err == nil {
 		attrs = append(attrs, semconv.ServerAddress(u.Hostname()))
-		if p, err := strconv.Atoi(u.Port()); err == nil {
+		port := u.Port()
+		if port == "" {
+			port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+		}
+		if p, err := strconv.Atoi(port); err == nil {
 			attrs = append(attrs, semconv.ServerPort(p))
 		}
 	}
@@ -171,15 +210,19 @@ func errorClass(typ string) string {
 
 // observe reports a finished request to its server span and to the
 // gateway's metrics, from the usage its ledger row was written with, cost
-// being the row's, nil when it has none or was not written. A telemetry
-// failure drops the reading, never the request.
+// being the row's: nil when it has none, was not written, or holds one no
+// float64 can. A telemetry failure drops the reading, never the request.
 func observe(ctx context.Context, u store.Usage, at *catalog.Attempt, cost *float64) {
 	span := trace.SpanFromContext(ctx)
 	dims := []attribute.KeyValue{attribute.String(attrAlias, u.Alias), attribute.String(attrKey, u.APIKeyID),
 		attribute.String(attrEndpoint, u.Endpoint)}
 	if at != nil {
 		dims = append(dims, attribute.String(attrDeployment, at.Deployment.ID))
-		span.SetAttributes(semconv.GenAIResponseModel(at.Deployment.UpstreamModel))
+		// at is the attempt that answered or, where none did, the last one
+		// made: a model is named as the response's only for an answer.
+		if u.Status < 400 {
+			span.SetAttributes(semconv.GenAIResponseModel(at.Deployment.UpstreamModel))
+		}
 	}
 	outcome := []attribute.KeyValue{semconv.HTTPResponseStatusCode(u.Status)}
 	if u.ErrorType != "" {
@@ -194,7 +237,10 @@ func observe(ctx context.Context, u store.Usage, at *catalog.Attempt, cost *floa
 	span.SetAttributes(semconv.GenAIOperationNameKey.String(operations[u.Endpoint]), semconv.GenAIRequestModel(u.Model))
 	span.SetAttributes(dims...)
 	if t := u.Tokens; t != nil {
-		span.SetAttributes(semconv.GenAIUsageInputTokens(int(t.Input)), semconv.GenAIUsageOutputTokens(int(t.Output)),
+		// The conventions' input tokens include the cached ones, which
+		// Anthropic's input_tokens does not.
+		span.SetAttributes(semconv.GenAIUsageInputTokens(int(t.Input+t.CacheWrite+t.CacheRead)),
+			semconv.GenAIUsageOutputTokens(int(t.Output)),
 			semconv.GenAIUsageCacheCreationInputTokens(int(t.CacheWrite)), semconv.GenAIUsageCacheReadInputTokens(int(t.CacheRead)))
 	}
 
@@ -205,12 +251,14 @@ func observe(ctx context.Context, u store.Usage, at *catalog.Attempt, cost *floa
 		c.Add(ctx, 1, served)
 	}
 	if hist, err := meter.Float64Histogram(MetricRequestDuration, metric.WithUnit("s"),
-		metric.WithDescription("From a request's arrival to its last byte.")); err == nil {
+		metric.WithDescription("From a request's arrival to its last byte."),
+		metric.WithExplicitBucketBoundaries(durationBounds...)); err == nil {
 		hist.Record(ctx, u.Latency.Seconds(), served)
 	}
 	if u.TTFT > 0 {
 		if hist, err := meter.Float64Histogram(MetricTimeToFirstToken, metric.WithUnit("s"),
-			metric.WithDescription("From a stream's arrival to its first event that is not a keep-alive.")); err == nil {
+			metric.WithDescription("From a stream's arrival to its first event that is not a keep-alive."),
+			metric.WithExplicitBucketBoundaries(ttftBounds...)); err == nil {
 			hist.Record(ctx, u.TTFT.Seconds(), metric.WithAttributes(dims...))
 		}
 	}

@@ -55,12 +55,25 @@ func checkCapabilities(c store.Capabilities) error {
 	return nil
 }
 
-// checkPrices returns prices in the store's shape; JSON carries no NaN or
-// infinity, so non-negative is the whole rule.
+// The bounds on a nonzero price per million tokens. Any real price, in any
+// currency, lies between them, and within them every cost the ledger stores
+// reads back as a double precision number, since the gateway bounds a row's
+// token counts too.
+const (
+	minPrice = 1e-9
+	maxPrice = 1e9
+)
+
+// checkPrices returns prices in the store's shape, each 0 or within the
+// bounds; JSON carries no NaN or infinity.
 func checkPrices(p pricesJSON) (store.Prices, error) {
 	for name, v := range map[string]*float64{"input": p.Input, "output": p.Output, "cache_write": p.CacheWrite, "cache_read": p.CacheRead} {
-		if v != nil && *v < 0 {
+		switch {
+		case v == nil || *v == 0:
+		case *v < 0:
 			return store.Prices{}, invalid("prices.%s must not be negative", name)
+		case *v < minPrice || *v > maxPrice:
+			return store.Prices{}, invalid("prices.%s must be 0 or between %g and %g", name, minPrice, maxPrice)
 		}
 	}
 	return store.Prices{Input: p.Input, Output: p.Output, CacheWrite: p.CacheWrite, CacheRead: p.CacheRead}, nil

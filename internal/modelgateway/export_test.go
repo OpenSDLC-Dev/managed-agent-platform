@@ -44,3 +44,6 @@ func SetMaxResponseBody(n int) func() {
 	maxResponseBody = n
 	return func() { maxResponseBody = old }
 }
+
+// SpanName is spanName.
+func SpanName(r *http.Request) string { return spanName(r) }

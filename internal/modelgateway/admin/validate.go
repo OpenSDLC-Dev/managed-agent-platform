@@ -93,8 +93,9 @@ func checkEndpoint(proto, raw string) (string, error) {
 
 // checkHeaders refuses a header the redactor treats as a credential (a secret
 // belongs in a credential), a name that is not an HTTP token, a value that
-// could split the header, and two names alike but for case, which are one
-// HTTP header whose value would depend on map order.
+// could split the header, a W3C trace context header (the gateway's to set,
+// where a provider opts in with propagate_trace), and two names alike but for
+// case, which are one HTTP header whose value would depend on map order.
 func checkHeaders(h map[string]string) error {
 	seen := make(map[string]bool, len(h))
 	for name, value := range h {
@@ -108,6 +109,9 @@ func checkHeaders(h map[string]string) error {
 			return invalid("header %q has a value with a line break or NUL", name)
 		}
 		lower := strings.ToLower(name)
+		if lower == "traceparent" || lower == "tracestate" {
+			return invalid("header %q is the gateway's to set; propagate_trace sends trace context", name)
+		}
 		if seen[lower] {
 			return invalid("header %q is set more than once, in different cases", lower)
 		}

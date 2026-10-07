@@ -372,7 +372,8 @@ defaults, as the platform's top-level resource tables do
   `rerank`); capabilities (tools, thinking, vision, `max_input_tokens`, `max_tokens` —
   the `ModelInfo` fields `/v1/models` answers from); prices per million tokens for
   input, output, cache write and cache read, entered by the operator — no remote price
-  sync, so an air-gapped install works. A deployment's provider and upstream model id
+  sync, so an air-gapped install works — each 0 or between 1e-9 and 1e9, so every cost
+  the ledger stores reads back as a double. A deployment's provider and upstream model id
   never change, so a deployment id names one model on one account behind its provider's
   fixed endpoints —
   what thinking provenance (Routing below) and an embedding index both key on; moving
@@ -587,13 +588,13 @@ frozen by slice 2.
   `gen_ai.response.model` the upstream id — span attributes, where cardinality costs
   nothing. `traceparent` goes upstream only where a provider opts in
   (`propagate_trace`): the attempt's span context, or, with no tracer installed and so
-  no span recorded, the caller's as it came. A provider's configured headers cannot send
-  W3C trace context.
+  no span recorded, the caller's as it came. A provider's headers cannot send W3C trace
+  context: the admin API refuses them.
 - Metrics: requests, latency, time to first token, tokens and cost, by matched alias,
   deployment and key — `modelgateway.requests`, `.request.duration`,
-  `.time_to_first_token`, `.tokens` by kind and `.cost` (the ledger row's), recorded with
-  the ledger row. An error type no Anthropic status maps is `_OTHER` there, kept as
-  given on the span and in the ledger.
+  `.time_to_first_token`, `.tokens` by kind and `.cost` (the ledger row's), recorded from
+  the usage the ledger row is written from. An error type no Anthropic status maps is
+  `_OTHER` there; the span and the ledger keep the type itself.
   The matched alias is the configured one, `*` for a wildcard match, so a caller
   choosing names cannot grow a metric (#88's concern).
 - Errors answer in the inbound protocol's envelope (Anthropic

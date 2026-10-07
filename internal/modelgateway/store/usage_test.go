@@ -377,6 +377,26 @@ func TestATokenCountOutlivesItsLedgerRow(t *testing.T) {
 	}
 }
 
+// A cost no float64 holds, from a price the admin API would now refuse,
+// loses its caller the reading, never the ledger row.
+func TestAnUnreadableCostStillWritesItsRow(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	p := mkProvider(t, s, both())
+	d, err := s.CreateDeployment(ctx, store.Deployment{ProviderID: p.ID, UpstreamModel: "m", Kind: store.KindChat,
+		Enabled: true, Prices: store.Prices{Input: price(1e308)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost, err := s.RecordUsage(ctx, usage("key_big", "x", d.ID, &store.Tokens{Input: 2_000_000}), false); err != nil || cost != nil {
+		t.Fatalf("RecordUsage = cost %v, %v; want the row written without a cost", cost, err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM modelgateway.usage WHERE api_key_id = 'key_big'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("%d ledger rows (%v), want 1", n, err)
+	}
+}
+
 // A database an operator defaults to REPEATABLE READ refuses to update a row
 // another transaction updated since the statement began. Admission, a
 // window's tokens and a day's rollup each upsert a row other requests
