@@ -48,6 +48,21 @@ func TestReaderSplitsEvents(t *testing.T) {
 	}
 }
 
+// A data line with nothing on it is data still, which a client dispatches;
+// a block of comments alone has none.
+func TestReaderKeepsAnEmptyDataLine(t *testing.T) {
+	r := upstream.NewReader(strings.NewReader("data:\n\n: keep-alive\n\ndata:"))
+	for i, data := range []bool{true, false, true} {
+		e, err := r.Next()
+		if err != nil && !errors.Is(err, io.EOF) {
+			t.Fatalf("event %d: %v", i, err)
+		}
+		if (e.Data != nil) != data || len(e.Data) != 0 {
+			t.Errorf("event %d: data %q, nil %v", i, e.Data, e.Data == nil)
+		}
+	}
+}
+
 func TestReaderKeepsALongLineWhole(t *testing.T) {
 	long := strings.Repeat("x", 200_000)
 	r := upstream.NewReader(strings.NewReader("event: big\ndata: " + long + "\n\n"))

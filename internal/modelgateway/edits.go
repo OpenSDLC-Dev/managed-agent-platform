@@ -11,14 +11,20 @@ import (
 )
 
 // honoring keeps the attempts whose vendor does not ignore anything the
-// request asks for (profile.Profile.Ignores), and names each field the ones
-// it dropped ignore, once and sorted, for the refusal when it keeps none.
-func honoring(attempts []catalog.Attempt, req map[string]json.RawMessage) ([]catalog.Attempt, []string) {
+// request, on proto, asks for (profile.Profile.Ignores and ChatIgnores), and
+// names each field the ones it dropped ignore, once and sorted, for the
+// refusal when it keeps none.
+func honoring(attempts []catalog.Attempt, req map[string]json.RawMessage, proto profile.Protocol) ([]catalog.Attempt, []string) {
 	var ignored []string
 	kept := attempts[:0:0]
 	for _, at := range attempts {
-		if p, _ := profile.Lookup(at.Provider.Profile); p.Ignores != nil {
-			if field := p.Ignores(at.Deployment.UpstreamModel, req); field != "" {
+		p, _ := profile.Lookup(at.Provider.Profile)
+		ignores := p.Ignores
+		if proto == profile.OpenAI {
+			ignores = p.ChatIgnores
+		}
+		if ignores != nil {
+			if field := ignores(at.Deployment.UpstreamModel, req); field != "" {
 				if !slices.Contains(ignored, field) {
 					ignored = append(ignored, field)
 				}

@@ -6528,3 +6528,137 @@ twenty-four mutants:
   - a vendor's error relayed as a 502;
   - text deltas dropped from a stream, and a whole answer's text emptied;
 - one sending `auto` where the check expects `none`.
+
+## Model gateway Chat Completions (plan 59 slice 4a) — acceptance record, 2026-10-08
+
+Probes sent directly to each vendor's OpenAI endpoint — `https://api.deepseek.com` and
+`https://api.minimax.cn/v1` — decided what the passthrough does, and
+`RUN_LIVE_MODELGATEWAY=deepseek,minimax` then drove it with openai-go v3.73.0 to
+`deepseek-flash`, `deepseek-v4-pro`, `MiniMax-M3` and `MiniMax-M3.1-Flash-Preview`, each
+behind a proxy recording both directions.
+
+- **Model ids** are the same as on each vendor's Anthropic endpoint. MiniMax's `/models`
+  omits M3.1-Flash-Preview, which answers all the same.
+- **Stream usage.** DeepSeek reports a stream's usage unasked, on its last content
+  chunk, before `[DONE]`. MiniMax reports it only for `stream_options.include_usage`, in
+  a chunk of its own whose `choices` is empty, every other chunk carrying `"usage":
+  null`. So the gateway asks every stream for its usage, and withholds that chunk from a
+  caller that did not ask.
+- **Stream end.** MiniMax-M3's streams never send `[DONE]`, M3.1-Flash-Preview's do, and
+  DeepSeek's do. So a stream that closes once every choice has finished has ended
+  normally.
+- **Cache accounting.** Both vendors count cached tokens inside `prompt_tokens` and
+  report them as `prompt_tokens_details.cached_tokens`; DeepSeek also as
+  `prompt_cache_hit_tokens`, beside `prompt_cache_miss_tokens`. The ledger takes input
+  as the prompt less the cached tokens, as the Messages API counts it.
+- **Thinking.** DeepSeek and M3.1-Flash-Preview return `reasoning_content`; MiniMax-M3
+  writes its thinking inline in `content`, as `<think>…</think>`. A tool loop continued
+  once with `reasoning_content` sent back, and once with it dropped, was answered both
+  times by each of the four models.
+- **Errors.** DeepSeek answers in OpenAI's envelope; MiniMax in Anthropic's even here,
+  `{"type":"error","error":{"type":"bad_request_error",…,"http_code":"400"}}`. The
+  gateway relays either as sent, redacted.
+- **What each vendor ignores.** Asked for the time in UTC and Tokyo with
+  `parallel_tool_calls: false`, all four models called the tool twice in each of 12
+  answers. MiniMax counted past `stop: [" 5"]` in all 6 asks, and answered a fun-fact
+  question without calling the tool in all 12 asks forcing it, with `tool_choice`
+  `required` or naming the function, and in all 6 with `allowed_tools` in `required`
+  mode; its `auto` (6 of 6) and `none` (6 of 6) were honored. Both vendors refuse a
+  custom tool with an error of their own, MiniMax a 400 and DeepSeek a 422, and
+  DeepSeek refuses `allowed_tools` too. DeepSeek honored `stop`, and honored `required`
+  and a named function with thinking disabled (12 of 12), refusing both with its own
+  400 otherwise, "Thinking mode does not support this tool_choice". On MiniMax's
+  Anthropic endpoint,
+  `tool_choice.disable_parallel_tool_use` was ignored as well: 6 answers, two calls
+  each. The gateway now refuses `parallel_tool_calls: false` for both vendors,
+  MiniMax's `stop` and forced `tool_choice`, and MiniMax's `disable_parallel_tool_use`
+  on the Messages routes.
+
+The tier's first run failed on the ledger checks of streamed answers: openai-go stops
+reading at `[DONE]`, before the gateway writes the row, so the check now waits for it.
+The whole live tier then passed, its 24 Anthropic tests and the 23 new ones, and the
+Chat Completions tests passed again after their aliases were renamed apart from the
+model ids, so that the gateway's rewrite of `model` shows. Mutation testing caught:
+- all 60 mutants of the default tier, across the routes and envelope, the upstream
+  request, the stream relay, the usage reading, the refusals, the model list and the
+  span names. Two survived at first, both an error in Anthropic's envelope where
+  OpenAI's belongs, until the tests pinned the envelope's exact fields;
+- all 5 against the live checks: the usage not asked of a stream, the usage chunk
+  never withheld, a chunk's model not rewritten, and MiniMax's `stop` and DeepSeek's
+  `parallel_tool_calls` refusals dropped. The chunk's model survived at first, while
+  each live alias shared its model's id.
+
+Review found nineteen defects, each fixed with a test that failed on the earlier code:
+- The gateway took a request for a stream only when `stream` was exactly `true`. A
+  value a lenient upstream reads as true, or a key `"Stream"`, which a case-insensitive
+  decoder such as Go's reads as `stream`, could have an upstream stream an answer the
+  gateway relayed as a whole one, its usage unread by the ledger and the TPM limit.
+  Both are refused now, on both protocols (the background security review).
+- An error chunk whose data did not parse passed unredacted, and an event named
+  `error` was not read as an error (Codex). The first fix redacted such data as text,
+  which Codex's next pass showed misses a credential JSON-escaped inside it, and left
+  an unnamed one and an empty named one unread; data that is not a JSON object is now
+  replaced by the gateway's own error, which ends the stream.
+- A chat stream whose only chunk the upstream cut off at its end was taken for no
+  answer, and the next deployment was asked (Codex).
+- A chat stream opening with an event named `error` was retried, as a Messages
+  stream's would be, where the same error unnamed was relayed (Codex). The Claude
+  review then pointed out that plan 59 retries every stream that opens with an error,
+  so both are retried now, as is one whose data is not a JSON object.
+- The `[DONE]` exception for a last event cut off at the end of a stream applied to
+  Messages streams too (Codex).
+- With `n` above one, the first choice to finish ended the wait for the rest, so a
+  stream closed while another choice was still going passed as whole (the Claude
+  review, as are the four below).
+- A stall or reset after every choice had finished was reported as a failure.
+- `stream_options` that was not an object, or a key such as `ſtream_options` or
+  `include_uſage`, which sorts after the gateway's own and which Go's decoder reads in
+  its place, could leave a stream's usage unreported, as the stream flag could.
+- MiniMax's `allowed_tools` in `required` mode, which openai-go can send, was not
+  refused; a probe then found MiniMax ignoring it in all 6 asks.
+- Routes under the other protocol's prefix, which answer 404, were given route span
+  names.
+- A chat stream opening with a ping that carried data held it as a keep-alive and
+  relayed it unread and unredacted, where an OpenAI client reads any event's data as a
+  chunk (Codex's pass over that round, as are the three below).
+- An empty data line was read as no data at all, so it passed as a keep-alive, where
+  an OpenAI client fails on it.
+- A choice whose `index` was missing, null or no whole number counted as choice 0, so
+  with `n` above one an unfinished choice could pass as finished.
+- A choice that went on after its finish still counted as finished.
+- That fix read an empty field written with a space inside, `[ ]` or `{ }`, as more of
+  the answer, reopening a finished choice (Codex's pass over that round, as is the one
+  below).
+- Once the reader kept an empty data line as data, an empty `message_start` reset the
+  usage its stream had reported, so the ledger undercounted; an empty event changes no
+  count again, while an empty error event is still recorded as an error.
+- Decoding a delta's fields to test them for emptiness read a number past a float64's
+  range as null, which openai-go reads as content, so a finished choice stayed closed
+  (Codex's last pass).
+- A Messages error event with no data line at all ended a stream that had begun
+  without being recorded as an error, where an empty data line was recorded (the
+  verifier; it predates this slice).
+- A stream opening with an error in MiniMax's envelope, whose `bad_request_error` the
+  gateway does not know, was taken for a retryable 500, where its `error.http_code`
+  states a 400; such a body's stated status is now its answer (the Codex reviewer on
+  the pull request).
+
+The Claude review's other suggestions were declined: listing in OpenAI's shape only the
+aliases the OpenAI route can serve now (plan 59 lists by grant and kind on both
+shapes, and slice 4b serves the embedding kind); moving every protocol branch of the
+attempt behind the stream interface (to be weighed when slice 4c adds a third shape);
+decoding each chunk once (not measured as a cost); and reusing `answerJSON` for chat
+answers, which would read a top-level `content` array as thinking blocks.
+
+Sixty-one mutants against those fixes were caught, five only once a test pinned the
+guard: a Messages stream cut off on its first event still falls back; a stream that
+began no choice has not finished; the Messages route passes `stream_options` through;
+a dataless event opening a chat stream is no error; and a usage chunk with no
+`choices` at all is withheld like any other, the stream ending after it.
+
+The live tier passed twice on the code of each of the last three review rounds but
+once, when the Chat Completions refusal check failed on a race in the test, not in the
+gateway, which had refused as it should: the check counted upstream calls on the
+recorder the model's own subtests use beside it, and one of their calls fell in its
+window. Each vendor's refusals now have a route of their own, and on the final code the
+whole live tier passed twice more, its 47 tests each time.

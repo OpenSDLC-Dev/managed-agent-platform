@@ -201,8 +201,9 @@ func TestEachProfileSendsTheKeyAsItsVendorDocuments(t *testing.T) {
 }
 
 // A vendor that ignores something bounding the answer — DeepSeek tool_choice's
-// disable_parallel_tool_use and its type any, MiniMax stop_sequences and its
-// tool_choice types any and tool, and thinking disabled on MiniMax's M2.x — is
+// disable_parallel_tool_use and its type any, MiniMax stop_sequences, its
+// tool_choice types any and tool and its disable_parallel_tool_use, and
+// thinking disabled on MiniMax's M2.x — is
 // never sent a request that sets it:
 // another of the model's deployments serves it, and where there is none the
 // gateway refuses it, naming the field. A count is routed alike, but made
@@ -223,6 +224,8 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 			[]string{tools + `,"tool_choice":{"type":"auto"}`, tools + `,"tool_choice":{"type":"none"}`, tools + `,"tool_choice":{"Type":"tool","name":"t"}`}},
 		{"minimax", "MiniMax-M3", "tool_choice.type", tools + `,"tool_choice":{"type":"any"}`,
 			[]string{tools + `,"tool_choice":{"type":"auto"}`, tools + `,"tool_choice":{"Type":"any"}`}},
+		{"minimax", "MiniMax-M3.1-Flash-Preview", "tool_choice.disable_parallel_tool_use", tools + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`,
+			[]string{tools + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":false}`, tools + `,"tool_choice":{"type":"auto","Disable_Parallel_Tool_Use":true}`}},
 		{"minimax", "MiniMax-M2.7", "thinking.type", `"thinking":{"type":"disabled"}`,
 			[]string{`"thinking":{"type":"adaptive"}`, `"thinking":{"Type":"disabled"}`, `"Thinking":{"type":"disabled"}`}},
 	}

@@ -859,3 +859,48 @@ func TestAnAnswerThatIsNotAnObjectPassesUnchanged(t *testing.T) {
 		t.Errorf("stream: %s", b)
 	}
 }
+
+// A Messages stream's last event cut off at the end of its stream with data
+// that is no JSON is unfinished — [DONE], which ends a Chat Completions
+// stream, included — so the stream ends with an error event, not at the
+// message_stop it names.
+func TestAMessagesStreamsTornLastEventIsAnError(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		all := events(c.Model, "done")
+		sse(w, append(all[:len(all)-1], "event: message_stop\ndata: [DONE]")...)
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("m", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	_, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+	if !strings.Contains(string(b), "the stream ended before message_stop") || strings.Contains(string(b), "event: message_stop") {
+		t.Errorf("%s", b)
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].ErrorType != "api_error" {
+		t.Errorf("ledger: %+v", rows)
+	}
+}
+
+// A Messages stream that ends on its first event, cut off before its blank
+// line, has answered nothing the caller could use: the alias's next
+// deployment is asked, as for any stream that ends before it begins.
+func TestAMessagesStreamCutOffOnItsFirstEventFallsBack(t *testing.T) {
+	e := newEnv(t)
+	cut := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		sse(w, strings.TrimSuffix(events(c.Model, "lost")[0], "\n"))
+	})
+	next := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) { sse(w, events(c.Model, "found")...) })
+	pc, pn := e.provider(cut.URL), e.provider(next.URL)
+	e.credential(pc, "sk-upstream-1", 1)
+	e.credential(pn, "sk-upstream-2", 1)
+	e.alias("m", target(e.deployment(pc, "m"), 0), target(e.deployment(pn, "m"), 1))
+	key := e.key(everyAlias)
+	e.start()
+	_, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
+	if !strings.Contains(string(b), "found") || strings.Contains(string(b), "event: error") || len(next.recorded()) != 1 {
+		t.Errorf("%d calls to the next deployment: %s", len(next.recorded()), b)
+	}
+}

@@ -54,3 +54,6 @@ func SetMaxResponseBody(n int) func() {
 
 // SpanName is spanName.
 func SpanName(r *http.Request) string { return spanName(r) }
+
+// ChatUsageOf is chatUsageOf.
+func ChatUsageOf(raw []byte) *store.Tokens { return chatUsageOf(raw) }

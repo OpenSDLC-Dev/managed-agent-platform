@@ -47,7 +47,8 @@ func TestAStreamThatOpensWithAnErrorFallsBack(t *testing.T) {
 			sse(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"conflict_error\",\"message\":\"conflict\"}}\n\n")
 			return
 		}
-		sse(w, ": ping\n\n", "event: ping\ndata: {\"type\":\"ping\"}\n\n", overloadedEvent)
+		// An empty data line holds a Messages stream open, as a comment does.
+		sse(w, ": ping\n\n", "data:\n\n", "event: ping\ndata: {\"type\":\"ping\"}\n\n", overloadedEvent)
 	})
 	backup := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
 		sse(w, append([]string{": warming\n\n"}, events(c.Model, "from backup")...)...)

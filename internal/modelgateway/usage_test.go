@@ -141,6 +141,46 @@ func TestAStreamsUsageIsItsLastWord(t *testing.T) {
 	}
 }
 
+// An event whose data line is empty says nothing, so it changes no count —
+// but an error event says there was one, so it is recorded as one, with an
+// empty data line or none.
+func TestAStreamsEmptyEventChangesNoCount(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"content\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\n\n", c.Model)
+		_, _ = io.WriteString(w, "event: message_start\ndata:\n\nevent: message_delta\ndata:\n\n")
+		switch c.Model {
+		case "failing":
+			_, _ = io.WriteString(w, "event: error\ndata:\n\n")
+			return
+		case "dataless":
+			_, _ = io.WriteString(w, "event: error\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
+		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	e.alias("failing", target(e.deployment(p, "failing"), 0))
+	e.alias("dataless", target(e.deployment(p, "dataless"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
+	if got := e.ledger()[0]; got.Tokens == nil || *got.Tokens != (store.Tokens{Input: 100, Output: 1}) || got.ErrorType != "" {
+		t.Errorf("ledger %+v, tokens %+v", got, got.Tokens)
+	}
+	for _, m := range []string{"failing", "dataless"} {
+		e.do("POST", "/v1/messages", `{"model":"`+m+`","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
+		if got := e.ledger()[0]; got.ErrorType == "" || got.Tokens == nil || got.Tokens.Input != 100 {
+			t.Errorf("%s: an empty error event left %+v, tokens %+v", m, got, got.Tokens)
+		}
+	}
+}
+
 // A request that fails is recorded with what its caller was given — the
 // upstream's status and error type, or the type its status stands for when
 // its body names none, or the gateway's own — at the last deployment tried.

@@ -1,14 +1,17 @@
 // Package modelgateway is the model gateway's HTTP surface
-// (docs/plan/59_model-gateway.md): Anthropic Messages for a platform API key,
-// routed to the deployments an alias names, beside the admin API it mounts
-// under /admin/v1/.
+// (docs/plan/59_model-gateway.md): Anthropic Messages and OpenAI's Chat
+// Completions for a platform API key, routed to the deployments an alias
+// names, beside the admin API it mounts under /admin/v1/.
 //
-// Inference routes, each also under an /anthropic prefix:
+// Inference routes, the Anthropic ones also under an /anthropic prefix and
+// the OpenAI ones under /openai:
 //
 //	POST /v1/messages               streamed and not
 //	POST /v1/messages/count_tokens
-//	GET  /v1/models                 Anthropic's shape, for a request that
-//	                                carries anthropic-version or the prefix
+//	POST /v1/chat/completions       OpenAI's; streamed and not
+//	GET  /v1/models                 Anthropic's shape for a request that
+//	                                carries anthropic-version or the prefix,
+//	                                OpenAI's otherwise
 //	GET  /v1/models/{id}
 //
 // A request authenticates with a platform API key in x-api-key or as a
@@ -19,12 +22,14 @@
 // written for it still applies, and like any key it calls nothing once its row
 // is archived or expired.
 //
-// The Anthropic path is a passthrough: the body is read only as far as its
-// top-level keys, model becomes the deployment's upstream id, and everything
-// else goes upstream as sent, anthropic-* headers included. The answer comes
-// back event by event as it arrives, with message.model rewritten to the name
-// the caller sent. Errors answer in Anthropic's envelope; an upstream's own
-// error keeps its status and body, the call's credential removed from it.
+// Each inference path is a passthrough to an upstream speaking its protocol:
+// the body is read only as far as its top-level keys, model becomes the
+// deployment's upstream id, and everything else goes upstream as sent —
+// anthropic-* headers included on the Anthropic path, no caller header on
+// the OpenAI one (chat.go). The answer comes back event by event as it
+// arrives, with its model rewritten to the name the caller sent. Errors
+// answer in the route's protocol's envelope; an upstream's own error keeps
+// its status and body, the call's credential removed from it.
 package modelgateway
 
 import (
@@ -181,10 +186,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Admin.ServeHTTP(w, r)
 		return
 	}
-	path, prefixed := r.URL.Path, false
-	if p, ok := strings.CutPrefix(path, "/anthropic"); ok && strings.HasPrefix(p, "/v1/") {
-		path, prefixed = p, true
+	path, prefix := r.URL.Path, ""
+	for _, p := range []string{"/anthropic", "/openai"} {
+		if rest, ok := strings.CutPrefix(path, p); ok && strings.HasPrefix(rest, "/v1/") {
+			path, prefix = rest, p
+			break
+		}
 	}
+	// Each route answers in its protocol's shape, errors included: the
+	// prefix names the protocol, Chat Completions is OpenAI's, and the
+	// models root is Anthropic's for a request carrying anthropic-version,
+	// which every Anthropic SDK sends and no OpenAI SDK does.
+	models := path == "/v1/models" || strings.HasPrefix(path, "/v1/models/")
+	openAI := prefix == "/openai" || prefix == "" && (path == "/v1/chat/completions" || models && r.Header.Get("anthropic-version") == "")
+	r = r.WithContext(context.WithValue(r.Context(), openAIKey{}, openAI))
 	// Authenticate before routing, so an unauthenticated caller learns
 	// nothing about which paths exist.
 	c, err := h.authenticate(r)
@@ -193,35 +208,43 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case path == "/v1/messages", path == "/v1/messages/count_tokens":
+	case !openAI && (path == "/v1/messages" || path == "/v1/messages/count_tokens"), openAI && path == "/v1/chat/completions":
 		if r.Method != http.MethodPost {
 			writeError(w, r, notAllowed(r.Method, "POST"))
 			return
 		}
-		h.messages(w, r, c, path)
-	case path == "/v1/models" || strings.HasPrefix(path, "/v1/models/"):
+		h.inference(w, r, c, path)
+	case models:
 		if r.Method != http.MethodGet {
 			writeError(w, r, notAllowed(r.Method, "GET"))
 			return
 		}
-		// The root's other shape is OpenAI's, which this gateway does not
-		// serve yet: a caller that names neither gets no Anthropic list it
-		// did not ask for.
-		if !prefixed && r.Header.Get("anthropic-version") == "" {
-			writeError(w, r, notFound("no such path: %s; an Anthropic client sends anthropic-version, or use /anthropic%s", r.URL.Path, r.URL.Path))
-			return
-		}
-		if id, ok := strings.CutPrefix(path, "/v1/models/"); ok {
+		id, one := strings.CutPrefix(path, "/v1/models/")
+		switch {
+		case openAI && one:
+			h.getOpenAIModel(w, r, c, id)
+		case openAI:
+			h.listOpenAIModels(w, r, c)
+		case one:
 			h.getModel(w, r, c, id)
-			return
+		default:
+			h.listModels(w, r, c)
 		}
-		h.listModels(w, r, c)
 	default:
 		writeError(w, r, notFound("no such path: %s", r.URL.Path))
 	}
 }
 
-// apiError is an answer in Anthropic's error envelope.
+type openAIKey struct{}
+
+// openAI reports whether r is answered in OpenAI's shapes.
+func openAI(r *http.Request) bool {
+	v, _ := r.Context().Value(openAIKey{}).(bool)
+	return v
+}
+
+// apiError is an error the gateway answers itself, in the envelope of the
+// request's protocol (writeError).
 type apiError struct {
 	status int
 	typ    string
@@ -254,8 +277,17 @@ func internal(r *http.Request, what string, err error) *apiError {
 	return &apiError{http.StatusInternalServerError, "api_error", "internal error"}
 }
 
+// writeError answers e in Anthropic's error envelope, or in OpenAI's —
+// {"error": {message, type, param, code}}, whose four fields openai-go's
+// Error requires — on an OpenAI route. Both keep Anthropic's error types,
+// which name the failure in either. The request id is in the request-id
+// header either way.
 func writeError(w http.ResponseWriter, r *http.Request, e *apiError) {
 	markError(r.Context(), e.typ)
+	if openAI(r) {
+		writeJSON(w, e.status, map[string]any{"error": map[string]any{"message": e.msg, "type": e.typ, "param": nil, "code": nil}})
+		return
+	}
 	writeJSON(w, e.status, map[string]any{
 		"type":       "error",
 		"error":      map[string]string{"type": e.typ, "message": e.msg},
