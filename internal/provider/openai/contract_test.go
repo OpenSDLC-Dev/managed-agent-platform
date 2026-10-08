@@ -26,6 +26,16 @@ func TestSharedContract(t *testing.T) {
 		Hang:      startHangingOpenAI,
 		Wedge:     startWedgedOpenAI,
 		Keepalive: startKeepaliveOpenAI,
+		Headers: func(t *testing.T, route map[string]string) (provider.Provider, func() http.Header) {
+			f := &fakeServer{t: t, sse: renderOpenAITurn(providertest.Script{Text: "ok"})}
+			srv := httptest.NewServer(http.HandlerFunc(f.handler))
+			t.Cleanup(srv.Close)
+			p, err := openai.New(provider.Config{Protocol: "openai", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey, Headers: route})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			return p, func() http.Header { return f.gotHead }
+		},
 	})
 }
 

@@ -13,6 +13,11 @@
 //	                       (required): it reaches the admin API, and while its
 //	                       row is active calls any model unless a key policy
 //	                       written for it says less
+//	BRAIN_API_KEY          the brain's platform key, which the control plane
+//	                       registers as "brain" (optional): while its row is
+//	                       active it calls any model unless a key policy
+//	                       written for it says less, and it never reaches the
+//	                       admin API. It must differ from CONTROLPLANE_API_KEY
 //	SECRETS_BACKEND        the cipher sealing vendor credentials (required):
 //	                       "openbao", "local" or "gcpkms", with the variables
 //	                       cmd/controlplane documents for each
@@ -136,7 +141,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	gateway, err := modelgateway.New(modelgateway.Config{Catalog: cat, Store: st, Keys: pool, Cipher: cipher, BootstrapKey: bootKey,
-		Admin: adminAPI, MaxAttempts: attempts})
+		BrainKey: os.Getenv("BRAIN_API_KEY"), Admin: adminAPI, MaxAttempts: attempts})
 	if err != nil {
 		return err
 	}

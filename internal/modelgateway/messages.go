@@ -38,7 +38,8 @@ var (
 
 // SessionHeader carries the caller's session id, which keeps a session's
 // requests on one upstream (catalog.Snapshot.Plan). It never goes upstream.
-const SessionHeader = "X-MAP-Session-ID"
+// It is the header the brain's provider adapters send.
+const SessionHeader = provider.SessionHeader
 
 // maxSessionID bounds a session id: the platform's are 31 bytes, and an
 // application's own is an id, not a document.

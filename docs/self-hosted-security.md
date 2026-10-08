@@ -31,7 +31,7 @@ deliberate divergences from the reference are in
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Sandbox placement** | On **Kubernetes**, puts your `nodeSelector` and `tolerations` on every sandbox pod (`SANDBOX_K8S_NODE_SELECTOR` / `SANDBOX_K8S_TOLERATIONS`; the chart's `sandboxPlacement`), and refuses a malformed one at startup | Building the node pool, labelling and tainting it, and keeping the platform's own workloads off it |
 | **Environment-key lifecycle** | Server-generated secrets, hash-only storage, one key per host with a one-year expiry, individual revocation, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
-| **Management-key lifecycle** | Server-generated secrets, hash-only storage, a masked hint as the only surviving trace; a reversible `inactive` and a permanent `archived`; an expiry the caller sets and the database's clock enforces, derived and never stored; rotation-by-restart for `CONTROLPLANE_API_KEY` | Choosing an expiry at all (absent means never), one key per consumer, rotation cadence, and configuring SSO if "which human issued this" must have an answer |
+| **Management-key lifecycle** | Server-generated secrets, hash-only storage, a masked hint as the only surviving trace; a reversible `inactive` and a permanent `archived`; an expiry the caller sets and the database's clock enforces, derived and never stored; rotation-by-restart for `CONTROLPLANE_API_KEY` and `BRAIN_API_KEY` | Choosing an expiry at all (absent means never), one key per consumer, rotation cadence, and configuring SSO if "which human issued this" must have an answer |
 | **Model / tool credentials** | Never enter the sandbox; redacted from error events | Securing the brain's provider config and any egress-time secrets |
 | **Auth transport** | Hashes `x-api-key` and environment keys at rest; scopes each | Terminating TLS; keeping keys off logs and out of images |
 | **Single-tenant daemon trust** | The `ours` label guards *accidents*, not a hostile co-tenant | Treating the Docker daemon / cluster as a single trust domain |
@@ -1262,6 +1262,15 @@ it: rotation is by *value*, so putting a previously-archived value back into the
 variable revives that row at the next boot. If the value had been issued from the
 console, the adoption is logged with a warning naming its previous status; if it
 was env-var-managed all along, it is not, having never left that lane.
+
+`BRAIN_API_KEY`, the key the brain calls the model gateway with, takes the same lane
+under the name `brain`, with one addition: a boot with the variable unset archives the
+env-var-managed `brain` key, so removing the variable retires the credential rather
+than leaving it live with nobody holding it on purpose. It is a platform key like any
+other row, so it authenticates the management API too — no wider than the database
+credential the brain already holds, but worth holding as closely as the bootstrap
+key. The control plane and the gateway both refuse to start when it equals
+`CONTROLPLANE_API_KEY`, since one value cannot be registered under two names.
 
 Console-**issued** keys are the other writer. The platform generates the secret —
 256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in

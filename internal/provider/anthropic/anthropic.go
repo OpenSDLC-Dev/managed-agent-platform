@@ -165,8 +165,12 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 	// The guard bounds the whole call, the wait for response headers included:
 	// cancelling the context the SDK was handed also stops it retrying, which a
 	// timeout inside its HTTP client would not.
+	var call []option.RequestOption
+	for k, v := range provider.CallHeaders(ctx, req) {
+		call = append(call, option.WithHeader(k, v))
+	}
 	gctx, guard := provider.NewStallGuard(ctx, p.stall)
-	events := p.client.Messages.NewStreaming(gctx, params)
+	events := p.client.Messages.NewStreaming(gctx, params, call...)
 	if err := events.Err(); err != nil {
 		err = guard.Cause(p.redact.Error(err))
 		guard.Stop()

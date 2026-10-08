@@ -34,9 +34,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -91,6 +94,12 @@ type Backend struct {
 	// that a loaded machine has to lose seven in a row before this reads as a
 	// stall — the margin is the difference between a contract test and a flake.
 	Keepalive func(t *testing.T, stall time.Duration) provider.Provider
+
+	// Headers stages an upstream that plays a one-word turn and records the
+	// headers of the request it receives. It returns a provider wired to it
+	// with route as its Config.Headers, and a func that returns the recorded
+	// headers once a turn has run.
+	Headers func(t *testing.T, route map[string]string) (provider.Provider, func() http.Header)
 }
 
 // Run exercises the provider.Provider contract against one backend.
@@ -443,6 +452,54 @@ func Run(t *testing.T, b Backend) {
 		}
 		if elapsed > 5*time.Second {
 			t.Errorf("Close blocked %s on a hung upstream — it must not drain a stream that never completed", elapsed)
+		}
+	})
+
+	// Every call carries the caller's W3C trace context and the session it
+	// belongs to beside the route's own headers, which the model gateway
+	// continues its trace from and keys per-session cost and cache locality on
+	// (docs/plan/59_model-gateway.md). A call with neither sends neither.
+	t.Run("CallHeaders", func(t *testing.T) {
+		sc := trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID:    trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
+			SpanID:     trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7},
+			TraceFlags: trace.FlagsSampled,
+		})
+		state, err := trace.ParseTraceState("vendor=7")
+		if err != nil {
+			t.Fatal(err)
+		}
+		traced := trace.ContextWithSpanContext(context.Background(), sc.WithTraceState(state))
+		const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+		for name, c := range map[string]struct {
+			ctx                context.Context
+			session            string
+			trace, state, sess string
+		}{
+			"traced, in a session": {traced, "sesn_call", traceparent, "vendor=7", "sesn_call"},
+			"neither":              {context.Background(), "", "", "", ""},
+			"session, no trace":    {context.Background(), "sesn_call", "", "", "sesn_call"},
+			"trace, no session":    {traced, "", traceparent, "vendor=7", ""},
+		} {
+			t.Run(name, func(t *testing.T) {
+				p, sent := b.Headers(t, map[string]string{"x-route": "pool-7"})
+				r := req()
+				r.SessionID = c.session
+				stream, err := p.Generate(c.ctx, r)
+				if err != nil {
+					t.Fatalf("Generate: %v", err)
+				}
+				defer stream.Close()
+				if _, err := drain(stream); err != nil {
+					t.Fatalf("stream error: %v", err)
+				}
+				h := sent()
+				for header, want := range map[string]string{"traceparent": c.trace, "tracestate": c.state, provider.SessionHeader: c.sess, "x-route": "pool-7"} {
+					if got := h.Values(header); want == "" && len(got) != 0 || want != "" && (len(got) != 1 || got[0] != want) {
+						t.Errorf("%s = %q, want %q", header, got, want)
+					}
+				}
+			})
 		}
 	})
 }

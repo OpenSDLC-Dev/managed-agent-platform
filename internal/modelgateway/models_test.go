@@ -129,6 +129,53 @@ func TestTheBootstrapKey(t *testing.T) {
 	}
 }
 
+// The brain's key is the bootstrap key's twin on the inference routes: known
+// by its configured value, it needs no policy, but one written for it
+// applies, and it authenticates by its row. With no brain key configured the
+// same value is an ordinary key without a grant.
+func TestTheBrainKey(t *testing.T) {
+	const brain = "sk-map-brain-test-key"
+	e := newEnv(t)
+	up := newFake(t, message("ok"))
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	d := e.deployment(p, "m")
+	e.alias("fast", target(d, 0))
+	e.alias("slow", target(d, 0))
+	call := func(model string) int {
+		resp, _ := e.do("POST", "/v1/messages", `{"model":"`+model+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": brain})
+		return resp.StatusCode
+	}
+	e.start(func(c *modelgateway.Config) { c.BrainKey = brain })
+	if s := call("fast"); s != 401 {
+		t.Errorf("no row: %d", s)
+	}
+	if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_brain', 'brain', $1)`, apikey.Hash(brain)); err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range []string{"fast", "slow"} {
+		if s := call(model); s != 200 {
+			t.Errorf("no policy, %s: %d", model, s)
+		}
+	}
+
+	e.start()
+	if s := call("fast"); s != 403 {
+		t.Errorf("no brain key configured: %d", s)
+	}
+
+	if _, err := e.s.PutKeyPolicy(e.ctx, store.KeyPolicy{APIKeyID: "key_brain", Aliases: []string{"slow"}}); err != nil {
+		t.Fatal(err)
+	}
+	e.start(func(c *modelgateway.Config) { c.BrainKey = brain })
+	if s := call("slow"); s != 200 {
+		t.Errorf("policy, slow: %d", s)
+	}
+	if s := call("fast"); s != 403 {
+		t.Errorf("policy, fast: %d", s)
+	}
+}
+
 // The bootstrap key authenticates by its row like any key, so the platform
 // retiring it — archived, or past an expiry — ends its calls here too, and its
 // value alone opens nothing.

@@ -26,9 +26,9 @@ func (c caller) may(alias string) bool {
 // The key rides x-api-key, as an Anthropic SDK sends it, or a Bearer, as an
 // OpenAI SDK does; x-api-key wins when both are present. A repeated header is
 // refused as ambiguous, as the control plane refuses it. Every key, the
-// bootstrap key included, authenticates by the control plane's rule — an
-// active, unexpired row — so a key the platform has archived or let expire
-// calls nothing here either; the bootstrap key's value only spares it a
+// bootstrap and brain keys included, authenticates by the control plane's
+// rule — an active, unexpired row — so a key the platform has archived or let
+// expire calls nothing here either; those two keys' values only spare them a
 // policy.
 func (h *handler) authenticate(r *http.Request) (caller, *apiError) {
 	keys := r.Header.Values("x-api-key")
@@ -56,15 +56,20 @@ func (h *handler) authenticate(r *http.Request) (caller, *apiError) {
 		c.policy = p
 		return c, nil
 	}
-	if !h.isBootstrap(key) {
+	if !h.knownByValue(key) {
 		return caller{}, forbidden("this API key has no model grant; an administrator grants one in the console")
 	}
 	return c, nil
 }
 
-// isBootstrap compares digests, so the comparison is constant-time in the
-// key's length as well as its bytes.
-func (h *handler) isBootstrap(key string) bool {
+// knownByValue reports whether key is the bootstrap key or the brain's. It
+// compares digests, so each comparison is constant-time in the key's length
+// as well as its bytes.
+func (h *handler) knownByValue(key string) bool {
 	sum := sha256.Sum256([]byte(key))
-	return subtle.ConstantTimeCompare(sum[:], h.bootstrap[:]) == 1
+	known := 0
+	for _, k := range h.known {
+		known |= subtle.ConstantTimeCompare(sum[:], k[:])
+	}
+	return known == 1
 }

@@ -996,6 +996,9 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 		"no database":  {Store: e.s, Cipher: e.cipher, BootstrapKey: bootstrap},
 		"no cipher":    {Store: e.s, Keys: e.pool, BootstrapKey: bootstrap},
 		"no bootstrap": {Store: e.s, Keys: e.pool, Cipher: e.cipher},
+		// The control plane registers each by its value, so one value under
+		// two names would move its row from one name to the other.
+		"brain key is the bootstrap key": {Store: e.s, Keys: e.pool, Cipher: e.cipher, BootstrapKey: bootstrap, BrainKey: bootstrap},
 	} {
 		if name != "no catalog" {
 			cfg.Catalog = catalogFor(t, e)

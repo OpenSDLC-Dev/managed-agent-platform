@@ -146,6 +146,16 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 	return tx.Commit(ctx)
 }
 
+// RetireAPIKey archives every live env-var-managed key under name — the rows
+// EnsureAPIKey writes — so a key whose variable is no longer set stops working
+// at the next boot instead of outliving its configuration. A key issued over
+// the console under the same name records its issuer and is left alone.
+func RetireAPIKey(ctx context.Context, pool *pgxpool.Pool, name string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE api_keys SET status = 'archived' WHERE name = $1 AND status = 'active' AND created_by IS NULL`, name)
+	return err
+}
+
 // requireAPIKey is the management-auth middleware: every /v1 route needs a
 // valid, unrevoked x-api-key. The authenticated key's ID is stored in the
 // request context as the audit principal (sessions.created_by).
