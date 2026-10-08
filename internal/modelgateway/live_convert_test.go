@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -74,7 +73,7 @@ func TestLiveConversion(t *testing.T) {
 					_, raw := x.answer()
 					want := vendorConverted(raw, stream)
 					if m.Model != r.alias || summary(*m) != want.text || m.StopReason != want.stop || m.Usage.InputTokens != want.usage.Input ||
-						m.Usage.OutputTokens != want.usage.Output || m.Usage.CacheReadInputTokens != want.usage.CacheRead ||
+						m.Usage.OutputTokens != want.usage.Output || m.Usage.CacheReadInputTokens != want.usage.CacheRead || m.Usage.CacheCreationInputTokens != want.usage.CacheWrite ||
 						!strings.Contains(strings.ToLower(textOf(m)), "jupiter") {
 						liveFatalf(t, "the gateway answered %s %s %+v; the vendor sent %s", masked(summary(*m)), m.StopReason, m.Usage, masked(string(raw)))
 					}
@@ -147,62 +146,120 @@ type converted struct {
 }
 
 // vendorConverted reads a recorded Chat Completions answer, whole or
-// streamed, and converts it as the gateway must have.
+// streamed, by its own lights rather than the conversion's: its reasoning,
+// its text (the content, then a refusal), its tool calls, its finish and its
+// usage, as the blocks, stop reason and counts the gateway must make of
+// them. It expects the order a vendor answers in, reasoning before text.
 func vendorConverted(raw []byte, stream bool) converted {
-	var b []byte
+	type call struct{ name, args string }
+	var (
+		reasoning, content, refusal, finish string
+		calls                               []call
+		at                                  = map[int64]int{}
+		usage                               json.RawMessage
+	)
+	read := func(obj map[string]json.RawMessage, key string) {
+		var choices []struct {
+			Message      map[string]json.RawMessage `json:"message"`
+			Delta        map[string]json.RawMessage `json:"delta"`
+			FinishReason *string                    `json:"finish_reason"`
+		}
+		_ = json.Unmarshal(obj["choices"], &choices)
+		if u := obj["usage"]; len(u) > 0 && string(u) != "null" {
+			usage = u
+		}
+		if len(choices) == 0 {
+			return
+		}
+		m := map[string]map[string]json.RawMessage{"message": choices[0].Message, "delta": choices[0].Delta}[key]
+		for field, into := range map[string]*string{"reasoning_content": &reasoning, "content": &content, "refusal": &refusal} {
+			var s string
+			_ = json.Unmarshal(m[field], &s)
+			*into += s
+		}
+		var tcs []struct {
+			Index    int64 `json:"index"`
+			Function struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function"`
+		}
+		_ = json.Unmarshal(m["tool_calls"], &tcs)
+		for _, tc := range tcs {
+			i, ok := at[tc.Index]
+			if !ok {
+				i, at[tc.Index] = len(calls), len(calls)
+				calls = append(calls, call{})
+			}
+			if calls[i].name == "" {
+				calls[i].name = tc.Function.Name
+			}
+			calls[i].args += tc.Function.Arguments
+		}
+		if choices[0].FinishReason != nil {
+			finish = *choices[0].FinishReason
+		}
+	}
 	if stream {
-		s := convert.NewStream("", "", func() string { return "sig" })
-		var events []byte
-		var usage json.RawMessage
 		for _, line := range strings.Split(string(raw), "\n") {
 			data, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
-			if !ok || strings.TrimSpace(data) == "[DONE]" {
-				continue
-			}
 			var obj map[string]json.RawMessage
-			if json.Unmarshal([]byte(data), &obj) == nil && len(obj["usage"]) > 0 && string(obj["usage"]) != "null" {
-				usage = obj["usage"]
-			}
-			out, _ := s.Chunk([]byte(strings.TrimSpace(data)))
-			events = append(events, out...)
-		}
-		events = append(events, s.End()...)
-		var m anthropic.Message
-		for _, ev := range strings.Split(strings.TrimSuffix(string(events), "\n\n"), "\n\n") {
-			if _, data, ok := strings.Cut(ev, "\ndata: "); ok {
-				var u anthropic.MessageStreamEventUnion
-				if json.Unmarshal([]byte(data), &u) == nil {
-					_ = m.Accumulate(u)
-				}
+			if ok && json.Unmarshal([]byte(strings.TrimSpace(data)), &obj) == nil {
+				read(obj, "delta")
 			}
 		}
-		return converted{summary(m), m.StopReason, chatTokens(usage)}
+	} else {
+		var obj map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &obj)
+		read(obj, "message")
 	}
-	var obj map[string]json.RawMessage
-	_ = json.Unmarshal(raw, &obj)
-	u := chatTokens(obj["usage"])
-	b, _ = convert.Answer(raw, "", "", &convert.Usage{Input: u.Input, Output: u.Output, CacheRead: u.CacheRead}, func() string { return "sig" })
-	var m anthropic.Message
-	_ = json.Unmarshal(b, &m)
-	return converted{summary(m), m.StopReason, u}
+	var parts []string
+	if reasoning != "" {
+		parts = append(parts, "thinking("+reasoning+")")
+	}
+	if text := content + refusal; text != "" {
+		parts = append(parts, "text("+text+")")
+	}
+	for _, c := range calls {
+		args := strings.TrimSpace(c.args)
+		if args == "" {
+			args = "{}"
+		}
+		parts = append(parts, "tool_use("+c.name+" "+args+")")
+	}
+	stop := anthropic.StopReason(map[string]string{"length": "max_tokens", "content_filter": "refusal", "tool_calls": "tool_use"}[finish])
+	switch {
+	case finish == "length":
+	case refusal != "":
+		stop = "refusal"
+	case len(calls) > 0 && stop != "refusal":
+		stop = "tool_use"
+	case stop == "":
+		stop = "end_turn"
+	}
+	return converted{strings.Join(parts, " "), stop, chatTokens(usage)}
 }
 
-// chatTokens reads a Chat Completions usage in the ledger's meaning.
+// chatTokens reads a Chat Completions usage in the ledger's meaning: the
+// cache reads and writes, both inside prompt_tokens, counted apart.
 func chatTokens(raw json.RawMessage) store.Tokens {
 	var u struct {
 		Prompt     int64 `json:"prompt_tokens"`
 		Completion int64 `json:"completion_tokens"`
 		Details    struct {
-			Cached int64 `json:"cached_tokens"`
+			Cached  *int64 `json:"cached_tokens"`
+			Written int64  `json:"cache_write_tokens"`
 		} `json:"prompt_tokens_details"`
-		Hit *int64 `json:"prompt_cache_hit_tokens"`
+		Hit int64 `json:"prompt_cache_hit_tokens"`
 	}
 	_ = json.Unmarshal(raw, &u)
-	cached := u.Details.Cached
-	if cached == 0 && u.Hit != nil {
-		cached = *u.Hit
+	cached := u.Hit
+	if u.Details.Cached != nil {
+		cached = *u.Details.Cached
 	}
-	return store.Tokens{Input: u.Prompt - cached, Output: u.Completion, CacheRead: cached}
+	cached = min(cached, u.Prompt)
+	written := min(u.Details.Written, u.Prompt-cached)
+	return store.Tokens{Input: u.Prompt - cached - written, Output: u.Completion, CacheWrite: written, CacheRead: cached}
 }
 
 // summary is an answer's blocks as one comparable line, its signatures
