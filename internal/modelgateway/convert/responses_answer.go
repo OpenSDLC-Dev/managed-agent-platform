@@ -79,17 +79,27 @@ func usageCounts(into map[string]int64, raw json.RawMessage) {
 		return
 	}
 	for _, k := range []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"} {
-		var n int64
-		if json.Unmarshal(obj[k], &n) == nil && !null(obj[k]) {
+		if n, ok := count(obj[k]); ok {
 			into[k] = n
 		}
 	}
 	var details map[string]json.RawMessage
-	var n int64
-	if json.Unmarshal(obj["output_tokens_details"], &details) == nil &&
-		json.Unmarshal(details["thinking_tokens"], &n) == nil && !null(details["thinking_tokens"]) {
-		into["thinking_tokens"] = n
+	if json.Unmarshal(obj["output_tokens_details"], &details) == nil {
+		if n, ok := count(details["thinking_tokens"]); ok {
+			into["thinking_tokens"] = n
+		}
 	}
+}
+
+// count reads a usage count as the gateway's ledger does (countOf in
+// internal/modelgateway): a whole number from zero to 2^32, not null, so a
+// Response reports no count its ledger row leaves out.
+func count(v json.RawMessage) (int64, bool) {
+	var n int64
+	if null(v) || json.Unmarshal(v, &n) != nil || n < 0 || n > 1<<32 {
+		return 0, false
+	}
+	return n, true
 }
 
 // ResponsesAnswer converts a whole Messages answer to a Response. Each
@@ -99,7 +109,8 @@ func usageCounts(into map[string]int64, raw json.RawMessage) {
 // signature — null when there is none — a redacted_thinking block a
 // reasoning item with no summary whose encrypted_content is its data, and a
 // tool_use block a function_call whose call_id is the block's id. The stop
-// reason is the status (responseStatus). It fails on a block with no
+// reason is the status (responseStatus), and the last item's when it is
+// incomplete, as the answer stopped in it. It fails on a block with no
 // Responses counterpart, which only a server tool, never asked for, makes.
 func ResponsesAnswer(b []byte, m ResponseMeta) ([]byte, error) {
 	var msg map[string]json.RawMessage
@@ -122,6 +133,9 @@ func ResponsesAnswer(b []byte, m ResponseMeta) ([]byte, error) {
 	usage := map[string]int64{}
 	usageCounts(usage, msg["usage"])
 	status, incomplete := responseStatus(stop)
+	if status == "incomplete" && len(output) > 0 {
+		output[len(output)-1].(map[string]any)["status"] = status // the item it stopped in
+	}
 	return encode(m.response(status, output, responseUsage(usage), incomplete, nil)), nil
 }
 
@@ -142,12 +156,12 @@ func responseItem(m ResponseMeta, n int, blk map[string]json.RawMessage) (map[st
 		id, _ := text(blk, "id")
 		name, _ := text(blk, "name")
 		args := "{}"
-		if !null(blk["input"]) {
-			args = string(compact(blk["input"]))
+		if in := blk["input"]; !null(in) {
+			args, _ = arguments(in) // a value of the parsed answer, which compacts
 		}
 		return callItem(m.itemID("fc", n), "completed", id, name, args), nil
 	default:
-		return nil, fmt.Errorf("content[%d]: a %q block has no Responses counterpart", n, typ)
+		return nil, fmt.Errorf(`content[%d]: a "%s" block has no Responses counterpart`, n, typ)
 	}
 }
 

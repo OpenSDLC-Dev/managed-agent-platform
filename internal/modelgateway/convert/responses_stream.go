@@ -16,10 +16,12 @@ import (
 // with its output_text part's added, deltas, done and part done between,
 // thinking with its one summary part's, tool_use with its arguments'
 // deltas and done — and response.completed or response.incomplete last,
-// carrying the whole Response. Every event carries the next sequence_number from zero, and
-// each is framed with an event line naming its type. No data carries a
-// top-level error key, which openai-go reads as the stream failing: a
-// failure is response.failed, its error inside the response.
+// carrying the whole Response. Every event carries the next
+// sequence_number from zero, and each is framed with an event line naming
+// its type. No data carries a top-level error key, which openai-go reads
+// as the stream failing: a failure is response.failed, its error inside
+// the response. What it holds for the Response is bounded, as a whole
+// answer is: past the bound the stream fails.
 type ResponsesStream struct {
 	m      ResponseMeta
 	seq    int64
@@ -29,6 +31,10 @@ type ResponsesStream struct {
 	stop   string
 	begun  bool
 	done   bool
+	limit  int            // the bytes of content it may hold for the Response
+	size   int            // the bytes it holds
+	held   map[string]any // the item last finished, done once the stream says how it ended
+	heldN  int
 }
 
 // item is an open block.
@@ -44,9 +50,10 @@ type item struct {
 	name  string
 }
 
-// NewResponsesStream converts a stream whose Response m describes.
-func NewResponsesStream(m ResponseMeta) *ResponsesStream {
-	return &ResponsesStream{m: m, open: map[int64]*item{}, usage: map[string]int64{}}
+// NewResponsesStream converts a stream whose Response m describes, holding
+// at most limit bytes of its content for the Response.
+func NewResponsesStream(m ResponseMeta, limit int) *ResponsesStream {
+	return &ResponsesStream{m: m, open: map[int64]*item{}, usage: map[string]int64{}, limit: limit}
 }
 
 // Done reports whether the stream has sent its last event.
@@ -55,8 +62,8 @@ func (s *ResponsesStream) Done() bool { return s.done }
 // Event is the events one Messages event becomes, none once the stream is
 // done. It fails on an event it cannot carry: a block with no Responses
 // counterpart, which only a server tool, never asked for, makes, or a delta
-// or stop for a block not open. An error event ends the stream as
-// response.failed (Failure).
+// or stop for a block not open, and content past its bound. An error
+// event ends the stream as response.failed (Failure).
 func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 	if s.done {
 		return nil, nil
@@ -74,6 +81,7 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 		s.begin(&out)
 	case "content_block_start":
 		s.begin(&out)
+		s.release(&out, "completed")
 		if err := s.start(&out, obj); err != nil {
 			return nil, err
 		}
@@ -92,6 +100,8 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 			s.stop = stop
 		}
 		usageCounts(s.usage, obj["usage"])
+		status, _ := responseStatus(s.stop)
+		s.release(&out, status)
 	case "message_stop":
 		// A block still open has content the caller was streamed and the
 		// Response would leave out.
@@ -100,6 +110,7 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 		}
 		s.begin(&out)
 		status, incomplete := responseStatus(s.stop)
+		s.release(&out, status)
 		s.emit(&out, "response."+status, map[string]any{"response": s.m.response(status, s.items(), responseUsage(s.usage), incomplete, nil)})
 		s.done = true
 	case "error":
@@ -109,7 +120,16 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 		msg, _ := text(e, "message")
 		return s.Failure(typ, msg), nil
 	}
+	if s.size > s.limit {
+		return nil, fmt.Errorf("the answer passes the gateway's bound of %d bytes", s.limit)
+	}
 	return out.Bytes(), nil
+}
+
+// keep adds v to b, held for the Response, counting it against the bound.
+func (s *ResponsesStream) keep(b *strings.Builder, v string) {
+	b.WriteString(v)
+	s.size += len(v)
 }
 
 // Failure is the event ending the stream as failed, for an error of the
@@ -121,6 +141,7 @@ func (s *ResponsesStream) Failure(typ, msg string) []byte {
 	}
 	var out bytes.Buffer
 	s.begin(&out)
+	s.release(&out, "completed")
 	code := "server_error"
 	switch typ {
 	case "rate_limit_error":
@@ -174,7 +195,7 @@ func (s *ResponsesStream) start(out *bytes.Buffer, obj map[string]json.RawMessag
 		s.emit(out, "response.output_item.added", with(at, "item", messageItem(it.id, "in_progress", []any{})))
 		s.emit(out, "response.content_part.added", with(at, "item_id", it.id, "content_index", 0, "part", outputText("")))
 		if t, _ := text(blk, "text"); t != "" {
-			it.text.WriteString(t)
+			s.keep(&it.text, t)
 			s.emit(out, "response.output_text.delta", with(at, "item_id", it.id, "content_index", 0, "delta", t, "logprobs", []any{}))
 		}
 	case "thinking":
@@ -182,26 +203,29 @@ func (s *ResponsesStream) start(out *bytes.Buffer, obj map[string]json.RawMessag
 		s.emit(out, "response.output_item.added", with(at, "item", reasoningItem(it.id, "in_progress", []any{}, "")))
 		s.emit(out, "response.reasoning_summary_part.added", with(at, "item_id", it.id, "summary_index", 0, "part", summaryText("")))
 		if t, _ := text(blk, "thinking"); t != "" {
-			it.text.WriteString(t)
+			s.keep(&it.text, t)
 			s.emit(out, "response.reasoning_summary_text.delta", with(at, "item_id", it.id, "summary_index", 0, "delta", t))
 		}
 		sig, _ := text(blk, "signature")
-		it.sig.WriteString(sig)
+		s.keep(&it.sig, sig)
 	case "redacted_thinking":
 		it.id = s.m.itemID("rs", it.n)
 		data, _ := text(blk, "data")
-		it.sig.WriteString(data)
+		s.keep(&it.sig, data)
 		s.emit(out, "response.output_item.added", with(at, "item", reasoningItem(it.id, "in_progress", []any{}, data)))
 	case "tool_use":
 		it.id = s.m.itemID("fc", it.n)
 		it.call, _ = text(blk, "id")
 		it.name, _ = text(blk, "name")
-		if in := blk["input"]; !null(in) && !bytes.Equal(compact(in), []byte("{}")) {
-			it.input = string(compact(in))
+		if in := blk["input"]; !null(in) {
+			if args, _ := arguments(in); args != "{}" { // a parsed event's value, which compacts
+				it.input = args
+				s.size += len(args)
+			}
 		}
 		s.emit(out, "response.output_item.added", with(at, "item", callItem(it.id, "in_progress", it.call, it.name, "")))
 	default:
-		return fmt.Errorf("a %q block has no Responses counterpart", typ)
+		return fmt.Errorf(`a "%s" block has no Responses counterpart`, typ)
 	}
 	s.open[index] = it
 	s.output = append(s.output, nil)
@@ -217,22 +241,22 @@ func (s *ResponsesStream) delta(out *bytes.Buffer, obj map[string]json.RawMessag
 	switch typ, _ := text(d, "type"); {
 	case typ == "text_delta" && it.typ == "text":
 		t, _ := text(d, "text")
-		it.text.WriteString(t)
+		s.keep(&it.text, t)
 		s.emit(out, "response.output_text.delta", with(at, "content_index", 0, "delta", t, "logprobs", []any{}))
 	case typ == "thinking_delta" && it.typ == "thinking":
 		t, _ := text(d, "thinking")
-		it.text.WriteString(t)
+		s.keep(&it.text, t)
 		s.emit(out, "response.reasoning_summary_text.delta", with(at, "summary_index", 0, "delta", t))
 	case typ == "signature_delta" && it.typ == "thinking":
 		sig, _ := text(d, "signature")
-		it.sig.WriteString(sig)
+		s.keep(&it.sig, sig)
 	case typ == "input_json_delta" && it.typ == "tool_use":
 		t, _ := text(d, "partial_json")
-		it.args.WriteString(t)
+		s.keep(&it.args, t)
 		s.emit(out, "response.function_call_arguments.delta", with(at, "delta", t))
 	case typ == "citations_delta":
 	default:
-		return fmt.Errorf("a %q delta for a %s block has no Responses counterpart", typ, it.typ)
+		return fmt.Errorf(`a "%s" delta for a %s block has no Responses counterpart`, typ, it.typ)
 	}
 	return nil
 }
@@ -269,12 +293,26 @@ func (s *ResponsesStream) finish(out *bytes.Buffer, obj map[string]json.RawMessa
 		s.emit(out, "response.function_call_arguments.done", with(at, "item_id", it.id, "arguments", args))
 		done = callItem(it.id, "completed", it.call, it.name, args)
 	}
-	s.emit(out, "response.output_item.done", with(at, "item", done))
+	s.release(out, "completed")
+	s.held, s.heldN = done, it.n
 	s.output[it.n] = done
 	var index int64
 	_ = json.Unmarshal(obj["index"], &index)
 	delete(s.open, index)
 	return nil
+}
+
+// release sends the done event of the item last finished, marked status:
+// a block's stop precedes the stop reason that says whether the answer
+// ended in it, incomplete, so its done waits for the next block or the
+// answer's end.
+func (s *ResponsesStream) release(out *bytes.Buffer, status string) {
+	if s.held == nil {
+		return
+	}
+	s.held["status"] = status
+	s.emit(out, "response.output_item.done", map[string]any{"output_index": s.heldN, "item": s.held})
+	s.held = nil
 }
 
 // block is the open block an event names, and the object at key in it.
@@ -309,14 +347,4 @@ func with(base map[string]any, kv ...any) map[string]any {
 		m[kv[i].(string)] = kv[i+1]
 	}
 	return m
-}
-
-// compact is raw JSON with its insignificant space removed; raw that does
-// not parse is returned as it is.
-func compact(raw json.RawMessage) []byte {
-	var b bytes.Buffer
-	if json.Compact(&b, raw) != nil {
-		return raw
-	}
-	return b.Bytes()
 }

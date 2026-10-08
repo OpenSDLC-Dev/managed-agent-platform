@@ -290,8 +290,11 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 	}
 	attempts := snap.Plan(a, proto, r.Header.Get(SessionHeader), h.draw)
 	if len(attempts) == 0 {
-		writeError(w, r, &apiError{http.StatusServiceUnavailable, "api_error",
-			fmt.Sprintf("model %s has no enabled upstream on the %s protocol", model, protocolNames[proto])})
+		msg := fmt.Sprintf("model %s has no enabled upstream on the %s protocol", model, protocolNames[proto])
+		if resp != nil { // served on either protocol (catalog.Snapshot.Plan)
+			msg = fmt.Sprintf("model %s has no enabled upstream", model)
+		}
+		writeError(w, r, &apiError{http.StatusServiceUnavailable, "api_error", msg})
 		return
 	}
 	// An attempt on another protocol converts the request (convert): a
@@ -475,14 +478,8 @@ type call struct {
 func (c call) fail(w http.ResponseWriter, r *http.Request, f *failure) {
 	if c.resp != nil && f.body != nil {
 		f.body = openAIError(f.body)
-		h := http.Header{}
-		for _, k := range []string{"Retry-After", "X-Should-Retry"} {
-			if v := f.header.Get(k); v != "" {
-				h.Set(k, v)
-			}
-		}
-		h.Set("Content-Type", "application/json")
-		f.header = h
+		f.header = f.header.Clone()
+		f.header.Set("Content-Type", "application/json")
 	}
 	f.write(w, r, c.out)
 }
@@ -752,7 +749,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			p = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
 		}
 		if c.resp != nil {
-			p = &responsesStream{inner: p, s: convert.NewResponsesStream(*c.resp), c: c, red: red}
+			p = &responsesStream{inner: p, s: convert.NewResponsesStream(*c.resp, maxResponseBody), c: c, red: red}
 		}
 		var held []byte
 		for {

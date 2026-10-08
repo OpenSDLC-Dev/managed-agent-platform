@@ -7244,3 +7244,36 @@ arriving with a block still open ended the stream completed, the open block's st
 content left out of the Response — it now fails. The changelog said `none` turns thinking
 off, which holds only where the upstream has a thinking toggle. Three mutants over the
 fixes are caught, 39 in all.
+
+A third Codex pass found two more, each fixed with a test that failed on the code before
+it. A credential holding a quote or a backslash, which credentials may, still reached the
+caller through a conversion failure: the block's type was Go-quoted into the message, so
+`"` became `\"` and the literal match missed it; the type is now written as sent. And a
+stream held everything it converted for its last event without bound, so an upstream
+streaming faster than its stall budget could grow the gateway's memory past what a whole
+answer may take; the stream now fails past that bound, 64 MiB. Ten mutants over both are
+caught, 49 in all.
+
+`/code-review`, its agents on Opus, found fifteen: ten fixed, each with a test that failed on
+the code before it, and five declined. Fixed: a request offering no tools still sent a
+`tool_choice` — for `parallel_tool_calls: false`, or `none` or `auto` — which DeepSeek's and
+MiniMax's profiles refuse as ignored, failing a toolless request on every alias of theirs;
+an input with no user or assistant item encoded `messages` as null; calls a client records
+beside their outputs split into turns, the last losing the thinking Messages requires of it,
+and now rejoin their turn when their ids name one Response, as the gateway's do; the item an
+incomplete Response stopped in was marked completed, a cut-off call's partial arguments
+looking runnable; an event the gateway's rewriting grew past the 16 MiB bound on one event
+went missing from the stream; a usage count the ledger rejects reached the caller;
+parameters stating no type reached Messages, which requires one; two ways of compacting a
+tool input became one; `call.fail` lost a second header whitelist; and the 503 for a model
+with no upstream named the Anthropic protocol to a Responses caller, while `input_tokens`
+and `compact` were refused as stored state. Declined: an effort sent without checking the
+deployment can think, as the platform leaves effort's capability to the endpoint (plan 53's
+entry in docs/DIVERGENCES.md) and OpenAI itself refuses an effort its model cannot take; one
+surface adapter in place of the `c.resp` branches, and handing parsed events to the stream
+converter instead of re-reading SSE, design changes past this slice; one helper for OpenAI's
+four-key error envelope, whose other two builders predate the branch; and moving the error
+envelope's conversion into convert, where `convertedError`, its precedent, does not live.
+Twenty-three mutants over the fixes are caught, 72 in all; a twenty-fourth survived as an
+equivalent — a turn of nothing but tool results can only be a user turn — and the redundant
+role check it removed went.

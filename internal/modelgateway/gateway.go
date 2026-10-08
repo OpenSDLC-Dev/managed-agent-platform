@@ -240,6 +240,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.inference(w, r, c, path)
+	case stored && (path == "/v1/responses/input_tokens" || path == "/v1/responses/compact"):
+		writeError(w, r, notFound("%s: not supported by the gateway's Responses API, which serves POST /v1/responses alone", r.URL.Path))
 	case stored:
 		writeError(w, r, notFound("%s: the gateway's Responses API is stateless — it stores no response, and serves POST /v1/responses alone", r.URL.Path))
 	case models:

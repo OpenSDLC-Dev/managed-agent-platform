@@ -15,6 +15,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/upstream"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
 )
@@ -298,13 +299,21 @@ func TestAResponsesRequestIsRefusedInItsOwnWords(t *testing.T) {
 	e.alias("fast", target(e.deployment(p, "up-model"), 0))
 	chat := newFake(t, chatAnswer("x", deepseekStyle))
 	e.alias("chat", target(e.deployment(onOpenAI(e, "deepseek", chat.URL), "deepseek-flash"), 0))
+	e.alias("idle", target(e.deployment(p, "off", func(d *store.Deployment) { d.Enabled = false }), 0))
 	key := e.key(everyAlias)
 	e.start()
 	cl := e.oaClient(key, "/v1")
 
+	// A Responses request is served on either protocol, so a model with no
+	// upstream has none on any.
+	_, err := cl.Responses.New(context.Background(), respParams("idle"))
+	if a := oaError(t, err); a.StatusCode != 503 || a.Message != "model idle has no enabled upstream" {
+		t.Errorf("no upstream: %d %s", a.StatusCode, a.Message)
+	}
+
 	stateful := respParams("fast")
 	stateful.PreviousResponseID = openai.String("resp_1")
-	_, err := cl.Responses.New(context.Background(), stateful)
+	_, err = cl.Responses.New(context.Background(), stateful)
 	if a := oaError(t, err); a.StatusCode != 400 || a.Type != "invalid_request_error" || !strings.HasPrefix(a.Message, "previous_response_id: the gateway stores no response") {
 		t.Errorf("previous_response_id: %d %s %s", a.StatusCode, a.Type, a.Message)
 	}
@@ -327,6 +336,7 @@ func TestAResponsesRequestIsRefusedInItsOwnWords(t *testing.T) {
 	}
 	serial := respParams("chat")
 	serial.ParallelToolCalls = openai.Bool(false)
+	serial.Tools = []responses.ToolUnionParam{{OfFunction: &responses.FunctionToolParam{Name: "get_time"}}}
 	_, err = cl.Responses.New(context.Background(), serial)
 	if a := oaError(t, err); a.StatusCode != 400 || a.Message != "parallel_tool_calls: every upstream of model chat ignores it" {
 		t.Errorf("a vendor's refusal: %d %s", a.StatusCode, a.Message)
@@ -334,13 +344,23 @@ func TestAResponsesRequestIsRefusedInItsOwnWords(t *testing.T) {
 	if n := len(chat.recorded()); n != 0 {
 		t.Errorf("the refused request reached the upstream %d times", n)
 	}
-	for _, path := range []string{"/v1/responses/resp_1", "/v1/responses/resp_1/input_items", "/openai/v1/responses/input_tokens"} {
-		resp, b := e.do(http.MethodGet, path, "", map[string]string{"Authorization": "Bearer " + key})
+	// Offering no tools, it asks nothing a vendor could ignore.
+	serial.Tools = nil
+	if _, err := cl.Responses.New(context.Background(), serial); err != nil {
+		t.Errorf("parallel_tool_calls false, no tools: %v", err)
+	}
+	for path, want := range map[string]string{
+		"/v1/responses/resp_1":              "stateless",
+		"/v1/responses/resp_1/input_items":  "stateless",
+		"/openai/v1/responses/input_tokens": "/openai/v1/responses/input_tokens: not supported by the gateway's Responses API",
+		"/v1/responses/compact":             "/v1/responses/compact: not supported by the gateway's Responses API",
+	} {
+		resp, b := e.do(http.MethodPost, path, "{}", map[string]string{"Authorization": "Bearer " + key})
 		var env struct {
 			Error struct{ Message, Type string } `json:"error"`
 		}
 		_ = json.Unmarshal(b, &env)
-		if resp.StatusCode != 404 || env.Error.Type != "not_found_error" || !strings.Contains(env.Error.Message, "stateless") {
+		if resp.StatusCode != 404 || env.Error.Type != "not_found_error" || !strings.Contains(env.Error.Message, want) {
 			t.Errorf("%s: %d %s", path, resp.StatusCode, b)
 		}
 	}
@@ -366,6 +386,98 @@ func TestAnUnconvertibleResponsesAnswerIsA502(t *testing.T) {
 	want := `{"error":{"code":null,"message":"upstream answer could not be converted: content[0]: a \"[redacted]\" block has no Responses counterpart","param":null,"type":"api_error"}}`
 	if resp.StatusCode != http.StatusBadGateway || strings.TrimSpace(string(b)) != want || len(f.recorded()) != 1 {
 		t.Errorf("%d %s after %d calls, want 502 %s", resp.StatusCode, b, len(f.recorded()), want)
+	}
+}
+
+// A credential an escape would disguise — a quote in it — is redacted from a
+// conversion failure that names a block the upstream sent, whole and
+// streamed: the block's type is written as sent, not Go-quoted.
+func TestAQuotedCredentialIsRedactedFromAResponsesFailure(t *testing.T) {
+	const secret = `sk-up/stream"key-9`
+	typ, _ := json.Marshal(secret)
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		var stream bool
+		_ = json.Unmarshal(c.Body["stream"], &stream)
+		if !stream {
+			writeBody(w, 200, fmt.Sprintf(`{"id":"msg_1","type":"message","role":"assistant","model":%q,"content":[{"type":%s}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":2}}`, c.Model, typ))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		last := fmt.Sprintf("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":%s}}\n\n", typ)
+		if strings.Contains(string(c.Raw), "a delta") {
+			last = fmt.Sprintf("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":%s}}\n\n", typ)
+		}
+		for _, s := range append(events(c.Model, "half")[:5:5], last) {
+			_, _ = io.WriteString(w, s)
+		}
+	})
+	p := e.provider(f.URL)
+	e.credential(p, secret, 1)
+	e.alias("fast", target(e.deployment(p, "up-model"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	for _, c := range []struct {
+		name, body string
+	}{
+		{"whole", `{"model":"fast","input":"hi"}`},
+		{"a block", `{"model":"fast","input":"hi","stream":true}`},
+		{"a delta", `{"model":"fast","input":"a delta","stream":true}`},
+	} {
+		_, b := e.do(http.MethodPost, "/v1/responses", c.body, map[string]string{"Authorization": "Bearer " + key})
+		if strings.Contains(string(b), "key-9") || !strings.Contains(string(b), `[redacted]`) {
+			t.Errorf("%s: %s", c.name, b)
+		}
+	}
+}
+
+// An event the upstream sent within the bound on one event, which the
+// gateway's rewriting then grows past it — a signature, wrapped — fails the
+// stream rather than going missing from it.
+func TestAResponsesEventGrownPastTheBoundFails(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		const head, tail = "event: content_block_delta\ndata: " +
+			`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"`, "\"}}\n\n"
+		sig := strings.Repeat("s", upstream.MaxEvent-8-len(head)-len(tail))
+		start := events(c.Model, "")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		for _, s := range []string{start[0],
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+			head + sig + tail, start[5], start[6], start[7]} {
+			_, _ = io.WriteString(w, s)
+		}
+	})
+	p := e.provider(f.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "up-model"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	types, _, last := streamResponse(t, e.oaClient(key, "/v1"), respParams("fast"))
+	if last.Type != "response.failed" || last.Response.Error.Message != "upstream stream could not be converted: "+upstream.ErrEventTooLarge.Error() {
+		t.Errorf("stream %v %+v", types, last.Response.Error)
+	}
+}
+
+// A stream whose content passes the gateway's bound on a whole answer fails
+// at the event that passes it, the upstream read on for its usage.
+func TestAResponsesStreamIsBounded(t *testing.T) {
+	defer modelgateway.SetMaxResponseBody(3)()
+	e := newEnv(t)
+	f := newFake(t, message("half"))
+	p := e.provider(f.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "up-model"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	types, text, last := streamResponse(t, e.oaClient(key, "/v1"), respParams("fast"))
+	if text != "" || last.Type != "response.failed" || last.Response.Error.Message != "upstream stream could not be converted: the answer passes the gateway's bound of 3 bytes" {
+		t.Errorf("stream %v %q %+v", types, text, last.Response.Error)
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].Tokens == nil || rows[0].Tokens.Output != 2 {
+		t.Errorf("ledger %+v", rows)
 	}
 }
 

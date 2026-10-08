@@ -78,13 +78,60 @@ func TestResponsesRequestDefaults(t *testing.T) {
 	}
 }
 
-func TestResponsesRequestToolChoiceAndEffort(t *testing.T) {
+// A tool choice, and the parallel calls a model may make, are asked for of a
+// request offering tools. One offering none asks nothing of none or auto,
+// nor of parallel_tool_calls, as nothing can be called; a call it requires
+// stays, for the upstream to refuse.
+func TestResponsesRequestToolChoice(t *testing.T) {
+	const tools = `"tools":[{"type":"function","name":"f"}],`
+	const tool = `"tools":[{"name":"f","input_schema":{"type":"object","properties":{}}}],`
 	for in, want := range map[string]string{
-		`"tool_choice":"none"`:                                                            `"tool_choice":{"type":"none"}`,
-		`"tool_choice":"auto"`:                                                            `"tool_choice":{"type":"auto"}`,
-		`"tool_choice":{"type":"function","name":"f"}`:                                    `"tool_choice":{"type":"tool","name":"f"}`,
-		`"parallel_tool_calls":false`:                                                     `"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`,
-		`"parallel_tool_calls":false,"tool_choice":"none"`:                                `"tool_choice":{"type":"none"}`,
+		tools + `"tool_choice":"none"`:                             tool + `"tool_choice":{"type":"none"}`,
+		tools + `"tool_choice":"auto"`:                             tool + `"tool_choice":{"type":"auto"}`,
+		tools + `"tool_choice":{"type":"function","name":"f"}`:     tool + `"tool_choice":{"type":"tool","name":"f"}`,
+		tools + `"parallel_tool_calls":false`:                      tool + `"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`,
+		tools + `"parallel_tool_calls":false,"tool_choice":"none"`: tool + `"tool_choice":{"type":"none"}`,
+		`"tool_choice":"none"`:                                     ``,
+		`"tool_choice":"auto","parallel_tool_calls":false`:         ``,
+		`"parallel_tool_calls":false`:                              ``,
+		`"tools":[],"parallel_tool_calls":false`:                   ``,
+		`"tool_choice":"required","parallel_tool_calls":false`:     `"tool_choice":{"type":"any"}`,
+		`"tool_choice":{"type":"function","name":"f"}`:             `"tool_choice":{"type":"tool","name":"f"}`,
+	} {
+		check(t, in, want)
+	}
+}
+
+// A function's parameters are its input_schema, an object schema: one that
+// states no type, which OpenAI takes and Messages does not, is given it.
+func TestResponsesRequestToolParameters(t *testing.T) {
+	for in, want := range map[string]string{
+		`"tools":[{"type":"function","name":"f","parameters":{}}]`:                                     `"tools":[{"name":"f","input_schema":{"type":"object"}}]`,
+		`"tools":[{"type":"function","name":"f","parameters":{"properties":{"a":{"type":"string"}}}}]`: `"tools":[{"name":"f","input_schema":{"type":"object","properties":{"a":{"type":"string"}}}}]`,
+		`"tools":[{"type":"function","name":"f","parameters":{"type":"object","required":[]}}]`:        `"tools":[{"name":"f","input_schema":{"type":"object","required":[]}}]`,
+		`"tools":[{"type":"function","name":"f","parameters":{"type":"array"}}]`:                       `"tools":[{"name":"f","input_schema":{"type":"array"}}]`,
+	} {
+		check(t, in, want)
+	}
+}
+
+// check converts a request whose input is "hi" and whose other fields are
+// in, and wants the Messages request whose fields besides model and messages
+// are want.
+func check(t *testing.T, in, want string) {
+	t.Helper()
+	got, _ := responsesRequest(t, `{"model":"m","input":"hi",`+strings.TrimSuffix(in, ",")+`}`)
+	w := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]`
+	if want != "" {
+		w += "," + strings.TrimSuffix(want, ",")
+	}
+	if !reflect.DeepEqual(got, decoded(t, w+"}")) {
+		t.Errorf("%s: got %v, want %s}", in, got, w)
+	}
+}
+
+func TestResponsesRequestEffort(t *testing.T) {
+	for in, want := range map[string]string{
 		`"reasoning":{"effort":"none"}`:                                                   `"thinking":{"type":"disabled"}`,
 		`"reasoning":{"effort":"xhigh"}`:                                                  `"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}`,
 		`"reasoning":{"effort":null,"summary":"detailed"}`:                                ``,
@@ -208,6 +255,53 @@ func TestResponsesRequestToolOutputList(t *testing.T) {
 	}
 }
 
+// An input with no user or assistant item is no messages, an array still,
+// for the upstream to refuse by the field the caller wrote.
+func TestResponsesRequestNoMessages(t *testing.T) {
+	for _, in := range []string{`[]`, `[{"role":"developer","content":"x"}]`} {
+		got, _ := responsesRequest(t, `{"model":"m","input":`+in+`}`)
+		if m, ok := got["messages"].([]any); !ok || len(m) != 0 {
+			t.Errorf("%s: messages %#v", in, got["messages"])
+		}
+	}
+}
+
+// Calls a client records each beside its output join the turn they came
+// from when their ids name one Response, as the gateway's ids do, so the
+// turn keeps the thinking it began with; calls whose ids name different
+// Responses, or no id at all, are turns of their own.
+func TestResponsesRequestInterleavedCalls(t *testing.T) {
+	call := func(id, callID string) string {
+		if id != "" {
+			id = `"id":"` + id + `",`
+		}
+		return `{"type":"function_call",` + id + `"call_id":"` + callID + `","name":"f","arguments":"{}"},` +
+			`{"type":"function_call_output","call_id":"` + callID + `","output":"` + callID + `"}`
+	}
+	got, _ := responsesRequest(t, `{"model":"m","input":[
+		{"type":"reasoning","id":"rs_abc_0","summary":[{"type":"summary_text","text":"hmm"}],"encrypted_content":"mapgw1.sig"},
+		`+call("fc_abc_1", "t1")+`,`+call("fc_abc_2", "t2")+`,`+call("fc_def_0", "t3")+`,`+call("", "t4")+`,`+call("", "t5")+`,
+		{"role":"user","content":"and"},`+call("fc_ghi_0", "t6")+`,{"role":"user","content":"then"},`+call("fc_ghi_1", "t7")+`,
+		`+call("call_x_a", "t8")+`,`+call("call_x_b", "t9")+`]}`)
+	use := func(id string) string { return `{"type":"tool_use","id":"` + id + `","name":"f","input":{}}` }
+	result := func(id string) string {
+		return `{"type":"tool_result","tool_use_id":"` + id + `","content":"` + id + `"}`
+	}
+	want := decoded(t, `[
+		{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"mapgw1.sig"},`+use("t1")+`,`+use("t2")+`]},
+		{"role":"user","content":[`+result("t1")+`,`+result("t2")+`]},
+		{"role":"assistant","content":[`+use("t3")+`]},{"role":"user","content":[`+result("t3")+`]},
+		{"role":"assistant","content":[`+use("t4")+`]},{"role":"user","content":[`+result("t4")+`]},
+		{"role":"assistant","content":[`+use("t5")+`]},{"role":"user","content":[`+result("t5")+`,{"type":"text","text":"and"}]},
+		{"role":"assistant","content":[`+use("t6")+`]},{"role":"user","content":[`+result("t6")+`,{"type":"text","text":"then"}]},
+		{"role":"assistant","content":[`+use("t7")+`]},{"role":"user","content":[`+result("t7")+`]},
+		{"role":"assistant","content":[`+use("t8")+`]},{"role":"user","content":[`+result("t8")+`]},
+		{"role":"assistant","content":[`+use("t9")+`]},{"role":"user","content":[`+result("t9")+`]}]`)
+	if !reflect.DeepEqual(got["messages"], want) {
+		t.Errorf("got  %v\nwant %v", got["messages"], want)
+	}
+}
+
 var meta = convert.ResponseMeta{ID: "resp_abc", Model: "alias", CreatedAt: 1700000000,
 	Echo: map[string]json.RawMessage{"instructions": json.RawMessage("null"), "metadata": json.RawMessage("{}"),
 		"tools": json.RawMessage("[]"), "tool_choice": json.RawMessage(`"auto"`), "parallel_tool_calls": json.RawMessage("true"),
@@ -296,19 +390,37 @@ func TestResponsesReasoningTokens(t *testing.T) {
 	}
 }
 
+// A count the ledger would not read — below zero, or past 2^32 — is not
+// reported to the caller either.
+func TestResponsesUsageBounds(t *testing.T) {
+	r, _ := answer(t, `{"content":[],"stop_reason":"end_turn","usage":{"input_tokens":-5,"output_tokens":4294967297,
+		"cache_read_input_tokens":3,"output_tokens_details":{"thinking_tokens":-1}}}`)
+	if u := r.Usage; u.InputTokens != 3 || u.OutputTokens != 0 || u.OutputTokensDetails.ReasoningTokens != 0 || u.TotalTokens != 3 {
+		t.Errorf("usage %+v", u)
+	}
+}
+
 func TestResponsesAnswerStatus(t *testing.T) {
 	for stop, want := range map[string][2]string{
 		"end_turn": {"completed", ""}, "stop_sequence": {"completed", ""}, "tool_use": {"completed", ""},
 		"max_tokens": {"incomplete", "max_output_tokens"}, "model_context_window_exceeded": {"incomplete", "max_output_tokens"},
 		"refusal": {"incomplete", "content_filter"},
 	} {
-		r, _ := answer(t, `{"content":[{"type":"text","text":"x"}],"stop_reason":"`+stop+`","usage":{"input_tokens":1,"output_tokens":1}}`)
+		r, _ := answer(t, `{"content":[{"type":"text","text":"x"},{"type":"tool_use","id":"t","name":"f","input":{}}],"stop_reason":"`+stop+`","usage":{"input_tokens":1,"output_tokens":1}}`)
 		if string(r.Status) != want[0] || r.IncompleteDetails.Reason != want[1] {
 			t.Errorf("%s: status %s, incomplete %q", stop, r.Status, r.IncompleteDetails.Reason)
+		}
+		// The item the answer stopped in is as unfinished as the answer.
+		if r.Output[0].Status != "completed" || string(r.Output[1].Status) != want[0] {
+			t.Errorf("%s: item statuses %s, %s", stop, r.Output[0].Status, r.Output[1].Status)
 		}
 	}
 	if _, err := convert.ResponsesAnswer([]byte(`{"content":[{"type":"server_tool_use","id":"s"}]}`), meta); err == nil {
 		t.Error("a server tool's block converted")
+	}
+	// A tool_use with no input calls with no arguments: an object, not null.
+	if r, _ := answer(t, `{"content":[{"type":"tool_use","id":"t","name":"f","input":null}],"stop_reason":"tool_use","usage":{}}`); r.Output[0].Arguments.OfString != "{}" {
+		t.Errorf("arguments %q", r.Output[0].Arguments.OfString)
 	}
 }
 
@@ -344,7 +456,7 @@ func TestResponsesRoundTrip(t *testing.T) {
 // the conversion.
 func respStream(t *testing.T, events ...string) []byte {
 	t.Helper()
-	s := convert.NewResponsesStream(meta)
+	s := convert.NewResponsesStream(meta, 1<<20)
 	var out bytes.Buffer
 	for _, e := range events {
 		name, data, _ := strings.Cut(e, " ")
@@ -476,6 +588,35 @@ func TestResponsesStreamToolInputAtStart(t *testing.T) {
 	}
 }
 
+// What a stream holds for its Response is bounded: the content of every
+// kind it keeps — text, thinking, a signature, arguments, a tool's opening
+// input — counts, and the event that passes the bound fails.
+func TestResponsesStreamBound(t *testing.T) {
+	start := `{"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}`
+	for _, c := range []struct{ name, block, delta string }{
+		{"text", `{"type":"text","text":"abcd"}`, `{"type":"text_delta","text":"efghi"}`},
+		{"thinking", `{"type":"thinking","thinking":"abcd","signature":""}`, `{"type":"thinking_delta","thinking":"efghi"}`},
+		{"signature", `{"type":"thinking","thinking":"","signature":"abcd"}`, `{"type":"signature_delta","signature":"efghi"}`},
+		{"arguments", `{"type":"tool_use","id":"t","name":"f","input":{"a":1}}`, `{"type":"input_json_delta","partial_json":"efghi"}`},
+		{"redacted", `{"type":"redacted_thinking","data":"abcdefghi"}`, ``},
+	} {
+		s := convert.NewResponsesStream(meta, 8)
+		if _, err := s.Event("message_start", []byte(start)); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.Event("content_block_start", []byte(`{"type":"content_block_start","index":0,"content_block":`+c.block+`}`))
+		if c.delta != "" {
+			if err != nil {
+				t.Fatalf("%s: under the bound: %v", c.name, err)
+			}
+			_, err = s.Event("content_block_delta", []byte(`{"type":"content_block_delta","index":0,"delta":`+c.delta+`}`))
+		}
+		if err == nil || err.Error() != "the answer passes the gateway's bound of 8 bytes" {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+}
+
 func TestResponsesStreamEnds(t *testing.T) {
 	start := `message_start {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}`
 	events := respEvents(t, respStream(t, start,
@@ -484,8 +625,15 @@ func TestResponsesStreamEnds(t *testing.T) {
 		`message_delta {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":4}}`,
 		`message_stop {"type":"message_stop"}`))
 	if last := events[len(events)-1]; last.Type != "response.incomplete" || last.Response.IncompleteDetails.Reason != "max_output_tokens" ||
-		last.Response.OutputText() != "cut" {
+		last.Response.OutputText() != "cut" || last.Response.Output[0].Status != "incomplete" {
 		t.Errorf("last event %s %+v", last.Type, last.Response)
+	}
+	// The item the stream stopped in is done as incomplete, which its block's
+	// stop, before the stop reason arrives, cannot yet say.
+	for _, e := range events {
+		if e.Type == "response.output_item.done" && e.Item.Status != "incomplete" {
+			t.Errorf("done item status %q", e.Item.Status)
+		}
 	}
 	events = respEvents(t, respStream(t, start,
 		`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
@@ -496,18 +644,35 @@ func TestResponsesStreamEnds(t *testing.T) {
 		last.Response.Error.Message != "busy" || len(last.Response.Output) != 0 {
 		t.Errorf("last event %s %+v", last.Type, last.Response)
 	}
-	s := convert.NewResponsesStream(meta)
+	// An item finished before the failure is done, completed, before it.
+	events = respEvents(t, respStream(t, start,
+		`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"whole"}}`,
+		`content_block_stop {"type":"content_block_stop","index":0}`,
+		`error {"type":"error","error":{"type":"overloaded_error","message":"busy"}}`))
+	if done := events[len(events)-2]; done.Type != "response.output_item.done" || done.Item.Status != "completed" ||
+		events[len(events)-1].Response.OutputText() != "whole" {
+		t.Errorf("events %+v", events)
+	}
+	// A stream that names no stop reason ends its last item completed.
+	events = respEvents(t, respStream(t, start,
+		`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"whole"}}`,
+		`content_block_stop {"type":"content_block_stop","index":0}`,
+		`message_stop {"type":"message_stop"}`))
+	if done := events[len(events)-2]; done.Type != "response.output_item.done" || done.Item.Status != "completed" {
+		t.Errorf("events %+v", events)
+	}
+	s := convert.NewResponsesStream(meta, 1<<20)
 	events = respEvents(t, s.Failure("rate_limit_error", "slow down"))
 	if len(events) != 3 || events[2].Response.Error.Code != "rate_limit_exceeded" || s.Failure("x", "y") != nil {
 		t.Errorf("failure before any event: %+v", events)
 	}
-	if _, err := convert.NewResponsesStream(meta).Event("content_block_start",
+	if _, err := convert.NewResponsesStream(meta, 1<<20).Event("content_block_start",
 		[]byte(`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s"}}`)); err == nil {
 		t.Error("a server tool's block converted")
 	}
 	// A stream stopping with a block still open has lost that block's
 	// content, which the caller was streamed: it does not end completed.
-	s = convert.NewResponsesStream(meta)
+	s = convert.NewResponsesStream(meta, 1<<20)
 	for _, ev := range []string{start,
 		`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 		`content_block_delta {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`,

@@ -171,13 +171,20 @@ func (p *responsesStream) event(e upstream.Event) ([]byte, bool) {
 	return p.convert(out), last
 }
 
-// convert is b, the inner protocol's events, as Responses events.
+// convert is b, the inner protocol's events, as Responses events. An
+// event it cannot read — one the inner protocol's rewriting grew past the
+// bound on one event — fails the stream, as one it cannot convert does.
 func (p *responsesStream) convert(b []byte) []byte {
 	var out bytes.Buffer
 	events := upstream.NewReader(bytes.NewReader(b))
 	for !p.failed {
 		e, err := events.Next()
-		if e.Name != "" && (err == nil || errors.Is(err, io.EOF)) {
+		if err != nil && !errors.Is(err, io.EOF) {
+			p.failed, p.c.out.errType = true, "api_error"
+			out.Write(p.s.Failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", err)))
+			break
+		}
+		if e.Name != "" {
 			b, cerr := p.s.Event(e.Name, e.Data)
 			if cerr != nil {
 				p.failed, p.c.out.errType = true, "api_error"

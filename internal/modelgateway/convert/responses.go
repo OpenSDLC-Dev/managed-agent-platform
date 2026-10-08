@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -33,7 +34,9 @@ type Responses struct {
 //     system and developer message in turn, a blank line apart (system);
 //     max_output_tokens (max_tokens); temperature; top_p; stream; tools,
 //     function tools alone; tool_choice and parallel_tool_calls false
-//     (tool_choice's disable_parallel_tool_use); reasoning.effort none
+//     (tool_choice's disable_parallel_tool_use), of a request offering
+//     tools — one offering none drops both, but for a tool_choice that
+//     requires a call, which its upstream refuses; reasoning.effort none
 //     (thinking disabled), and any other (adaptive thinking, the effort its
 //     output_config.effort, minimal as low) — asked for an effort, a
 //     reasoning model reasons, and MiniMax-M3 thinks only when sent
@@ -200,7 +203,13 @@ func ResponsesRequest(top map[string]json.RawMessage) (Responses, error) {
 		out["system"] = encode(strings.Join(system, "\n\n"))
 	}
 	out["messages"] = encode(msgs)
-	if !parallel {
+	// A request offering no tools asks nothing of none or auto, nor of
+	// parallel calls; a call it requires stays, for the upstream to refuse.
+	_, offered := out["tools"]
+	if !offered && (choice["type"] == "none" || choice["type"] == "auto") {
+		choice = nil
+	}
+	if !parallel && offered {
 		if choice == nil {
 			choice = map[string]any{"type": "auto"}
 		}
@@ -219,7 +228,8 @@ func ResponsesRequest(top map[string]json.RawMessage) (Responses, error) {
 
 // responsesTools is tools as Messages tools: each a function tool, flat as
 // the Responses API has it, its parameters the input_schema (an object
-// schema with no properties when it has none) and strict carried when true.
+// schema with no properties when it has none, and typed object when it
+// states no type) and strict carried when true.
 // A built-in tool, and a field FunctionToolParam names but Messages has no
 // use for, are refused.
 func responsesTools(raw json.RawMessage) ([]map[string]any, error) {
@@ -248,6 +258,12 @@ func responsesTools(raw json.RawMessage) ([]map[string]any, error) {
 				}
 				tool[k] = d
 			case k == "parameters":
+				// Messages requires an object schema to say so; OpenAI does not.
+				var schema map[string]json.RawMessage
+				if json.Unmarshal(v, &schema) == nil && schema != nil && schema["type"] == nil {
+					schema["type"] = json.RawMessage(`"object"`)
+					v = encode(schema)
+				}
 				tool["input_schema"] = v
 			case k == "strict":
 				var strict bool
@@ -371,11 +387,28 @@ func responsesFormat(raw json.RawMessage) (map[string]any, error) {
 }
 
 // turn is a Messages message as input builds it; results counts the
-// tool_result blocks that lead a user turn's content, as Messages requires.
+// tool_result blocks that lead a user turn's content, as Messages requires,
+// and from is the Response an assistant turn's latest item names by its id
+// (responseOf).
 type turn struct {
 	Role    string `json:"role"`
 	Content []any  `json:"content"`
 	results int
+	from    string
+}
+
+// responseOf is the Response an output item's id names, as the gateway
+// writes one (ResponseMeta.itemID): what lies between the type's prefix
+// and the item's index; "" for an id of any other form.
+func responseOf(id string) string {
+	i, j := strings.IndexByte(id, '_'), strings.LastIndexByte(id, '_')
+	if i < 0 || j <= i+1 {
+		return ""
+	}
+	if _, err := strconv.Atoi(id[j+1:]); err != nil {
+		return ""
+	}
+	return id[i+1 : j]
 }
 
 // responsesInput is input as Messages' system texts and messages. A string
@@ -385,6 +418,14 @@ type turn struct {
 // message's text, a reasoning item's thinking block and a function_call's
 // tool_use. A system or developer message is system text, as Messages takes
 // none among its messages.
+//
+// A client may record each call beside its output, where a Response lists
+// a turn's calls together: a function_call whose id names the Response the
+// assistant turn before a user turn of nothing but tool results came from
+// joins that turn, its output that user turn, so the turn keeps the
+// thinking it began with, which Messages requires of a tool loop's last
+// one. A call whose id names another Response, or that has no id the
+// gateway wrote, is a turn of its own.
 //
 // A reasoning item is one the gateway answered, read back: its
 // encrypted_content is the thinking block's signature when the item has a
@@ -402,12 +443,13 @@ func responsesInput(raw json.RawMessage) ([]string, []*turn, error) {
 		return nil, nil, fmt.Errorf("input: must be a string or an array of objects")
 	}
 	var system []string
-	var msgs []*turn
-	add := func(role string, block any, result bool) {
+	msgs := []*turn{}
+	add := func(role string, block any, result bool, from string) {
 		if len(msgs) == 0 || msgs[len(msgs)-1].Role != role {
 			msgs = append(msgs, &turn{Role: role})
 		}
 		t := msgs[len(msgs)-1]
+		t.from = from
 		if result {
 			t.Content = slices.Insert(t.Content, t.results, block)
 			t.results++
@@ -417,6 +459,7 @@ func responsesInput(raw json.RawMessage) ([]string, []*turn, error) {
 	}
 	for i, it := range items {
 		typ, _ := text(it, "type")
+		id, _ := text(it, "id")
 		if _, ok := it["role"]; ok && typ == "" {
 			typ = "message"
 		}
@@ -432,27 +475,34 @@ func responsesInput(raw json.RawMessage) ([]string, []*turn, error) {
 					system = append(system, b["text"].(string))
 					continue
 				}
-				add(role, b, false)
+				add(role, b, false, responseOf(id))
 			}
 		case "function_call":
 			b, err := toolUse(it)
 			if err != nil {
 				return nil, nil, fmt.Errorf("input[%d]%w", i, err)
 			}
-			add("assistant", b, false)
+			// The last turn nothing but tool results — a user turn — and the
+			// one before it from the call's Response.
+			if n := len(msgs); n >= 2 && responseOf(id) != "" && msgs[n-2].from == responseOf(id) &&
+				msgs[n-1].results == len(msgs[n-1].Content) {
+				msgs[n-2].Content = append(msgs[n-2].Content, b)
+				continue
+			}
+			add("assistant", b, false, responseOf(id))
 		case "function_call_output":
 			b, err := toolResult(it)
 			if err != nil {
 				return nil, nil, fmt.Errorf("input[%d]%w", i, err)
 			}
-			add("user", b, true)
+			add("user", b, true, "")
 		case "reasoning":
 			b, err := thinkingBlock(it)
 			if err != nil {
 				return nil, nil, fmt.Errorf("input[%d]%w", i, err)
 			}
 			if b != nil {
-				add("assistant", b, false)
+				add("assistant", b, false, responseOf(id))
 			}
 		case "item_reference":
 			return nil, nil, fmt.Errorf("input[%d]: an item_reference names a stored item, and the gateway stores none", i)
@@ -467,7 +517,9 @@ func textBlock(s string) map[string]any { return map[string]any{"type": "text", 
 
 // messageBlocks is a message's content as Messages blocks, an empty text
 // left out, as Messages refuses one: text for every role, and an image in a
-// user message. A system or developer message takes text alone.
+// user message. A system or developer message takes text alone. A part's
+// fields a block has no place for — an image's detail, an output_text's
+// annotations and logprobs — are dropped.
 func messageBlocks(it map[string]json.RawMessage, role string) ([]map[string]any, error) {
 	switch role {
 	case "user", "assistant", "system", "developer":
