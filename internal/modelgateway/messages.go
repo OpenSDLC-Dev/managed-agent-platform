@@ -96,6 +96,11 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		writeError(w, r, invalid("model: Field required"))
 		return
 	}
+	streams, bad := streamFlag(top)
+	if bad != nil && path != "/v1/messages/count_tokens" {
+		writeError(w, r, bad)
+		return
+	}
 	snap := h.cfg.Catalog.Snapshot()
 	a, ok := snap.Alias(model)
 	switch {
@@ -155,7 +160,7 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		top:    top,
 		alias:  model,
 		path:   path,
-		stream: path != "/v1/messages/count_tokens" && string(bytes.TrimSpace(top["stream"])) == "true",
+		stream: path != "/v1/messages/count_tokens" && streams,
 		start:  start,
 		out:    out,
 	}
@@ -218,6 +223,28 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 }
 
 // protocolNames names each protocol for a caller.
+// streamFlag is a request's stream. Whether the answer streams decides how
+// it is relayed and its usage read, so the flag must mean to every upstream
+// what it means to the gateway: a value that is not a boolean, which a
+// lenient decoder may read as true, and a key that differs from stream only
+// in case, which a case-insensitive decoder such as Go's reads as stream,
+// are refused — either could have an upstream stream an answer the gateway
+// relays as a whole one, whose usage it cannot read. null is false.
+func streamFlag(top map[string]json.RawMessage) (bool, *apiError) {
+	for k := range top {
+		if k != "stream" && strings.EqualFold(k, "stream") {
+			return false, invalid("%s: the field is stream, spelled in lower case", k)
+		}
+	}
+	switch string(bytes.TrimSpace(top["stream"])) {
+	case "true":
+		return true, nil
+	case "", "false", "null":
+		return false, nil
+	}
+	return false, invalid("stream: must be a boolean")
+}
+
 var protocolNames = map[profile.Protocol]string{profile.Anthropic: "Anthropic", profile.OpenAI: "OpenAI"}
 
 // call is what every attempt of one request sends.
@@ -440,20 +467,30 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		// upstream may yet refuse, as an error event, which is answered like
 		// any refusal. Keep-alives past maxHeld begin it anyway.
 		events := upstream.NewReader(resp.Body)
+		var p streamProto = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
+		if c.proto == profile.OpenAI {
+			p = &chatStream{c: c, red: red, withhold: !c.usage}
+		}
 		var held []byte
 		for {
 			e, err := events.Next()
+			// A Chat Completions stream may close on its last chunk without
+			// the blank line that ends it, its first chunk included: one
+			// whole there begins the answer, as it would later on. A
+			// Messages stream cut off so before message_stop is no answer.
+			cut := errors.Is(err, io.EOF) && c.proto == profile.OpenAI && e.Data != nil && p.complete(e.Data)
 			switch {
-			case err != nil:
+			case err != nil && !cut:
 				return noAnswer(guard, red, err)
 			case keepAlive(e) && len(held)+len(e.Raw) <= maxHeld:
 				held = append(held, e.Raw...)
-			case e.Name == "error":
+			case e.Name == "error" && c.proto == profile.Anthropic:
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 			default:
-				var p streamProto = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
-				if c.proto == profile.OpenAI {
-					p = &chatStream{c: c, red: red, withhold: !c.usage}
+				// A Chat Completions stream that opens with an error is
+				// relayed as it is (chatStream).
+				if cut {
+					e.Raw = terminated(e.Raw)
 				}
 				relayStream(ctx, w, events, held, e, c, p, guard, red)
 				return nil, false
@@ -671,7 +708,7 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 	relay(first)
 	for !done {
 		e, err := events.Next()
-		torn := errors.Is(err, io.EOF) && e.Data != nil && !json.Valid(e.Data) && !isDone(e.Data)
+		torn := errors.Is(err, io.EOF) && e.Data != nil && !p.complete(e.Data)
 		if len(e.Raw) > 0 && (err == nil || errors.Is(err, io.EOF)) && !torn {
 			if err != nil {
 				e.Raw = terminated(e.Raw)
@@ -708,6 +745,9 @@ type streamProto interface {
 	// ended is why an upstream ending its stream now has ended it too soon,
 	// or "" when it has said all it will.
 	ended() string
+	// complete reports whether an event's data, cut off at the end of the
+	// stream, is whole.
+	complete(data []byte) bool
 	// failure is the event telling the caller the stream failed.
 	failure(typ, msg string) []byte
 }
@@ -752,6 +792,8 @@ func (s *messagesStream) event(e upstream.Event) ([]byte, bool) {
 
 func (s *messagesStream) ended() string { return "the stream ended before message_stop" }
 
+func (s *messagesStream) complete(data []byte) bool { return json.Valid(data) }
+
 func (s *messagesStream) failure(typ, msg string) []byte {
 	b := encodeJSON(map[string]any{"type": "error", "request_id": s.rid, "error": map[string]string{"type": typ, "message": msg}})
 	return []byte("event: error\ndata: " + string(b) + "\n\n")
@@ -763,9 +805,12 @@ func (s *messagesStream) failure(typ, msg string) []byte {
 // its usage (chatBody), and withholds the chunk carrying it — choices empty,
 // usage set, as OpenAI documents stream_options.include_usage — from a
 // caller that did not ask, which may not expect a chunk without choices.
-// The stream has said all it will at [DONE] or an error; an upstream may
-// also end it after its finish without [DONE], as MiniMax-M3 does (probed
-// 2026-10-08), which is no failure.
+// The stream has said all it will at [DONE] or an error — data carrying
+// error, as openai-go reads one, or an event named error whatever its data
+// — which reaches the caller with the call's credentials removed, as does
+// data that is no JSON object, an upstream's diagnostic perhaps. An
+// upstream may also end the stream after its finish without [DONE], as
+// MiniMax-M3 does (probed 2026-10-08), which is no failure.
 type chatStream struct {
 	c        call
 	red      provider.Redactor
@@ -781,12 +826,13 @@ func (s *chatStream) event(e upstream.Event) ([]byte, bool) {
 		return e.Raw, true
 	}
 	var obj map[string]json.RawMessage
-	if json.Unmarshal(e.Data, &obj) != nil || obj == nil {
-		return e.Raw, false
-	}
-	if _, ok := obj["error"]; ok {
+	_ = json.Unmarshal(e.Data, &obj)
+	if _, ok := obj["error"]; ok || e.Name == "error" {
 		s.c.out.errType = errorTypeOf(e.Data, 0)
 		return e.WithData(redactJSON(s.red, e.Data)), true
+	}
+	if obj == nil {
+		return e.WithData(redactJSON(s.red, e.Data)), false
 	}
 	usage := obj["usage"]
 	if t := chatUsageOf(usage); t != nil {
@@ -816,6 +862,8 @@ func (s *chatStream) ended() string {
 	}
 	return "the stream ended before its finish"
 }
+
+func (s *chatStream) complete(data []byte) bool { return json.Valid(data) || isDone(data) }
 
 func (s *chatStream) failure(typ, msg string) []byte {
 	b := encodeJSON(map[string]any{"error": map[string]any{"message": msg, "type": typ, "param": nil, "code": nil}})

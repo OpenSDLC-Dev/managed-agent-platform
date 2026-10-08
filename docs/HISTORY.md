@@ -6583,3 +6583,21 @@ model ids, so that the gateway's rewrite of `model` shows. Mutation testing caug
   never withheld, a chunk's model not rewritten, and MiniMax's `stop` and DeepSeek's
   `parallel_tool_calls` refusals dropped. The chunk's model survived at first, while
   each live alias shared its model's id.
+
+Review then found five defects, each fixed with a test that failed on the earlier code:
+- The gateway took a request for a stream only when `stream` was exactly `true`. A
+  value a lenient upstream reads as true, or a key `"Stream"`, which a case-insensitive
+  decoder such as Go's reads as `stream`, could have an upstream stream an answer the
+  gateway relayed as a whole one, its usage unread by the ledger and the TPM limit.
+  Both are refused now, on both protocols (the background security review).
+- An error chunk whose data did not parse passed unredacted, and an event named
+  `error` was not read as an error (Codex).
+- A chat stream whose only chunk the upstream cut off at its end was taken for no
+  answer, and the next deployment was asked (Codex).
+- A chat stream opening with an event named `error` was retried, as a Messages
+  stream's would be, where the same error unnamed was relayed (Codex).
+- The `[DONE]` exception for a last event cut off at the end of a stream applied to
+  Messages streams too (Codex).
+
+Twelve mutants against those fixes were caught, one only once a test pinned that a
+Messages stream cut off on its first event still falls back.

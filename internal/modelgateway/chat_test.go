@@ -662,3 +662,125 @@ func openAIEnvelope(b []byte) (typ, msg string, ok bool) {
 	}
 	return typ, msg, true
 }
+
+// A request's stream decides how its answer is relayed and its usage read,
+// so a flag an upstream could read otherwise than the gateway does — a value
+// that is not a boolean, or a key that differs from stream only in case,
+// which Go's decoder reads as stream — is refused before any upstream is
+// asked, on either protocol; null and false ask for a whole answer, and a
+// count, which never streams, is not refused.
+func TestAStreamFlagTheGatewayCannotReadIsRefused(t *testing.T) {
+	e := newEnv(t)
+	oa := newFake(t, chatAnswer("Jupiter", deepseekStyle))
+	an := newFake(t, message("Jupiter"))
+	e.alias("chat", target(e.deployment(onOpenAI(e, "openai-generic", oa.URL), "up"), 0))
+	p := e.provider(an.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("msgs", target(e.deployment(p, "up"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	for _, rt := range []struct {
+		path, model string
+		hdr         map[string]string
+	}{
+		{"/v1/chat/completions", "chat", map[string]string{"Authorization": "Bearer " + key}},
+		{"/v1/messages", "msgs", map[string]string{"x-api-key": key}},
+	} {
+		for _, set := range []string{`"stream":1`, `"stream":"true"`, `"stream":{}`, `"Stream":true`, `"STREAM":false`, `"ſtream":true`} {
+			resp, b := e.do("POST", rt.path, fmt.Sprintf(`{"model":%q,"max_tokens":8,"messages":[],%s}`, rt.model, set), rt.hdr)
+			if resp.StatusCode != 400 || !strings.Contains(string(b), "invalid_request_error") || !strings.Contains(strings.ToLower(string(b)), "stream") {
+				t.Errorf("%s %s: %d %s", rt.path, set, resp.StatusCode, b)
+			}
+		}
+		for _, set := range []string{`"stream":null`, `"stream":false`} {
+			if resp, b := e.do("POST", rt.path, fmt.Sprintf(`{"model":%q,"max_tokens":8,"messages":[],%s}`, rt.model, set), rt.hdr); resp.StatusCode != 200 ||
+				!strings.Contains(string(b), "Jupiter") || strings.Contains(string(b), "data:") {
+				t.Errorf("%s %s: %d %s", rt.path, set, resp.StatusCode, b)
+			}
+		}
+	}
+	if resp, b := e.do("POST", "/v1/messages/count_tokens", `{"model":"msgs","messages":[],"stream":1}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
+		t.Errorf("count_tokens: %d %s", resp.StatusCode, b)
+	}
+	if n, m := len(oa.recorded()), len(an.recorded()); n != 2 || m != 3 {
+		t.Errorf("%d and %d upstream calls, want the 2 whole chat answers and the 2 whole messages and a count", n, m)
+	}
+}
+
+// An upstream's error in a chat stream is read as one whether or not its
+// data parses, and whatever the event is named: the call's credential is
+// removed and the stream ends there. Data that is no JSON object passes with
+// the credential removed, and the stream goes on.
+func TestAChatStreamsMalformedErrorIsStillRedacted(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		sse(w, chunk(c.Model, "Jup", "", ""), "data: oops sk-openai-generic-key1\n\n",
+			"event: error\ndata: {\"error\":{\"message\":\"bad sk-openai-generic-key1\",\"type\":\"server_error\"}\n\n", chunk(c.Model, "iter", "stop", ""))
+	})
+	e.alias("m", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), "up"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do("POST", "/v1/chat/completions", `{"model":"m","stream":true,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
+	lines := dataLines(b)
+	if resp.StatusCode != 200 || len(lines) != 3 || !strings.HasPrefix(lines[1], "oops ") || !strings.Contains(lines[2], "server_error") ||
+		strings.Contains(string(b), "sk-openai-generic-key1") {
+		t.Fatalf("%d %q", resp.StatusCode, b)
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].ErrorType != "api_error" {
+		t.Errorf("ledger: %+v", rows)
+	}
+}
+
+// A chat stream may close on its last chunk without the blank line that
+// ends it, and when that chunk is its first event it is still the answer,
+// counted in the ledger, rather than the reason for another paid attempt.
+func TestAChatStreamsOnlyChunkCutOffAtTheEndIsTheAnswer(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		sse(w, strings.TrimSuffix(chunk(c.Model, "Jupiter", "stop", chatUsage), "\n"))
+	})
+	next := newFake(t, chatAnswer("Saturn", deepseekStyle))
+	e.alias("m", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), "up"), 0),
+		target(e.deployment(onOpenAI(e, "openai-generic", next.URL), "up"), 1))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do("POST", "/v1/chat/completions", `{"model":"m","stream":true,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
+	if lines := dataLines(b); resp.StatusCode != 200 || len(lines) != 1 || !strings.Contains(lines[0], "Jupiter") || !strings.HasSuffix(string(b), "\n\n") {
+		t.Fatalf("%d %q", resp.StatusCode, b)
+	}
+	if len(next.recorded()) != 0 {
+		t.Errorf("the fallback was asked too")
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].Tokens == nil || *rows[0].Tokens != (store.Tokens{Input: 6, Output: 3, CacheRead: 4}) {
+		t.Errorf("ledger: %+v", rows)
+	}
+}
+
+// A chat stream that opens with an error, named or not, is relayed as it
+// is: the caller's answer, not a refusal to fall back from.
+func TestAChatStreamOpeningWithAnErrorIsRelayed(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		name := ""
+		if c.Model == "named" {
+			name = "event: error\n"
+		}
+		sse(w, name+`data: {"error":{"message":"busy","type":"server_error","param":null,"code":null}}`+"\n\n")
+	})
+	next := newFake(t, chatAnswer("Saturn", deepseekStyle))
+	for _, m := range []string{"named", "bare"} {
+		e.alias(m, target(e.deployment(onOpenAI(e, "openai-generic", f.URL), m), 0),
+			target(e.deployment(onOpenAI(e, "openai-generic", next.URL), "up"), 1))
+	}
+	key := e.key(everyAlias)
+	e.start()
+	for _, m := range []string{"named", "bare"} {
+		resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`","stream":true,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
+		if lines := dataLines(b); resp.StatusCode != 200 || len(lines) != 1 || !strings.Contains(lines[0], "busy") {
+			t.Errorf("%s: %d %q", m, resp.StatusCode, b)
+		}
+	}
+	if len(next.recorded()) != 0 {
+		t.Errorf("the fallback was asked")
+	}
+}

@@ -287,7 +287,9 @@ converts when protocols match.
   asked for its usage (`stream_options.include_usage`, the caller's other options kept),
   which the ledger and the TPM limit count and MiniMax reports only when asked (probed
   2026-10-08); the chunk carrying it — no choices, usage set — is withheld from a caller
-  that did not ask. Such a stream has ended at `[DONE]`, or when the upstream closes it
+  that did not ask. On both protocols `stream` must be a boolean, spelled exactly: the
+  gateway relays and counts the answer by it, so a value or a key's case that an
+  upstream might read as asking for a stream is refused. Such a stream has ended at `[DONE]`, or when the upstream closes it
   after a choice's finish, as MiniMax-M3 does, sending no `[DONE]`; closed before
   either, it ends with an error chunk in OpenAI's envelope. A
   conversion path whose upstream sends no pings emits its own during silent gaps. A
