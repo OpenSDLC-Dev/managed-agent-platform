@@ -21,11 +21,10 @@ import (
 //     to text, which the model then answers from;
 //   - the cache usage fields come back as the vendor reported them, a
 //     repeated prompt reading from the cache;
-//   - tool_choice auto and none pass through, none honored by a model asked to
-//     call the tool, while a choice forcing a tool call that the vendor
-//     ignores (any on both, tool on MiniMax) is refused with no upstream call,
-//     and DeepSeek's tool is honored with thinking disabled and refused by
-//     DeepSeek with it on;
+//   - tool_choice auto and none reach the vendor exactly as asked, while a
+//     choice forcing a tool call that the vendor ignores (any on both, tool on
+//     MiniMax) is refused with no upstream call, and DeepSeek's tool is honored
+//     with thinking disabled and refused by DeepSeek with it on;
 //   - MiniMax's CN key on its international host is a credential the vendor
 //     refuses, which the gateway answers as its own failure.
 func TestLiveVendorBehavior(t *testing.T) {
@@ -128,14 +127,11 @@ func TestLiveVendorBehavior(t *testing.T) {
 						liveFatalf(t, "call %d: %v", i, err)
 					}
 					_, raw := one(t, r.rec, n).answer()
-					var up anthropic.Message
-					_ = json.Unmarshal(raw, &up)
+					up, _ := vendorAnswer(raw)
 					u, v := m.Usage, up.Usage
 					if !v.JSON.CacheCreationInputTokens.Valid() || !v.JSON.CacheReadInputTokens.Valid() ||
-						u.InputTokens != v.InputTokens || u.OutputTokens != v.OutputTokens ||
-						u.CacheCreationInputTokens != v.CacheCreationInputTokens || u.CacheReadInputTokens != v.CacheReadInputTokens {
-						liveFatalf(t, "call %d: the SDK read %d/%d/%d/%d, the vendor reported %s", i,
-							u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens, v.RawJSON())
+						!u.JSON.CacheCreationInputTokens.Valid() || !u.JSON.CacheReadInputTokens.Valid() || !sameUsage(u, v) {
+						liveFatalf(t, "call %d: the gateway answered usage %s, the vendor reported %s", i, u.RawJSON(), v.RawJSON())
 					}
 					if i > 0 {
 						read = u.CacheReadInputTokens
@@ -169,8 +165,22 @@ func TestLiveVendorBehavior(t *testing.T) {
 					choice anthropic.ToolChoiceUnionParam
 				}{{"auto", anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}}, {"none", anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}}} {
 					m, err, xs := ask(c.choice, none)
-					if err != nil || len(xs) != 1 || (c.name == "none" && hasToolUse(m)) {
-						liveErrorf(t, "tool_choice %s: %v, %d upstream calls, tool called %v", c.name, err, len(xs), hasToolUse(m))
+					if err != nil || len(xs) != 1 {
+						liveErrorf(t, "tool_choice %s: %v, %d upstream calls, want one", c.name, err, len(xs))
+						continue
+					}
+					var sent struct {
+						ToolChoice json.RawMessage `json:"tool_choice"`
+					}
+					_ = json.Unmarshal(xs[0].sent, &sent)
+					if want := `{"type":"` + c.name + `"}`; string(sent.ToolChoice) != want {
+						liveErrorf(t, "tool_choice %s: the vendor was sent %s, want %s", c.name, sent.ToolChoice, want)
+					}
+					// Both vendors honor none, but not always: MiniMax-M3 once
+					// called the tool under it (docs/HISTORY.md), which is the
+					// vendor's lapse, not the gateway's.
+					if c.name == "none" && hasToolUse(m) {
+						t.Logf("tool_choice none: the model called the tool anyway")
 					}
 				}
 				refused := []string{"any"}

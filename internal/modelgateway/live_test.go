@@ -223,15 +223,20 @@ type readCloser struct{ *bytes.Reader }
 func (readCloser) Close() error { return nil }
 
 // vendorThinking is the thinking values of an answer as the vendor sent it,
-// whole or streamed, assembled by the SDK's own types, and whether a stream
-// interleaved its thinking blocks — a signature for one arriving after a
-// later one started — which the gateway leaves unwrapped by design and
-// expected does not model.
+// and whether a stream interleaved its thinking blocks (vendorAnswer).
 func vendorThinking(raw []byte) (values []string, interleaved bool) {
-	var m anthropic.Message
+	m, interleaved := vendorAnswer(raw)
+	return provenance(&m), interleaved
+}
+
+// vendorAnswer is an answer as the vendor sent it, whole or streamed,
+// assembled by the SDK's own types, and whether a stream interleaved its
+// thinking blocks — a signature for one arriving after a later one started —
+// which the gateway leaves unwrapped by design and expected does not model.
+func vendorAnswer(raw []byte) (m anthropic.Message, interleaved bool) {
 	if bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
 		_ = json.Unmarshal(raw, &m)
-		return provenance(&m), false
+		return m, false
 	}
 	last := int64(-1) // the thinking block that started last
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -251,7 +256,19 @@ func vendorThinking(raw []byte) (values []string, interleaved bool) {
 		}
 		_ = m.Accumulate(ev)
 	}
-	return provenance(&m), interleaved
+	return m, interleaved
+}
+
+// sameUsage reports whether the SDK read the token counts the vendor
+// reported, each assembled the same way.
+func sameUsage(got, vendor anthropic.Usage) bool {
+	return got.InputTokens == vendor.InputTokens && got.OutputTokens == vendor.OutputTokens &&
+		got.CacheCreationInputTokens == vendor.CacheCreationInputTokens && got.CacheReadInputTokens == vendor.CacheReadInputTokens
+}
+
+// counts prints usage's token counts: input, output, cache write, cache read.
+func counts(u anthropic.Usage) string {
+	return fmt.Sprintf("%d/%d/%d/%d", u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens)
 }
 
 // expected is what the gateway must return for the thinking values the
@@ -322,10 +339,11 @@ func liveText(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool) {
 	if err != nil {
 		liveFatalf(t, "%s text: %v", mode, err)
 	}
-	one(t, r.rec, n)
+	_, raw := one(t, r.rec, n).answer()
+	up, _ := vendorAnswer(raw)
 	if m.StopReason != anthropic.StopReasonEndTurn || !strings.Contains(strings.ToLower(textOf(m)), "jupiter") || string(m.Model) != r.alias ||
-		m.Usage.InputTokens == 0 || m.Usage.OutputTokens == 0 {
-		liveFatalf(t, "%s text: %q (stop %q) from model %q, usage %d in, %d out", mode, masked(textOf(m)), m.StopReason, m.Model, m.Usage.InputTokens, m.Usage.OutputTokens)
+		m.Usage.InputTokens == 0 || m.Usage.OutputTokens == 0 || !sameUsage(m.Usage, up.Usage) {
+		liveFatalf(t, "%s text: %q (stop %q) from model %q, usage %s, the vendor's %s", mode, masked(textOf(m)), m.StopReason, m.Model, counts(m.Usage), counts(up.Usage))
 	}
 }
 
@@ -528,6 +546,7 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRou
 	// deserves thinking, which is not what this checks, so a model expected
 	// to think is asked up to three times for an answer that carries some.
 	var m *anthropic.Message
+	var up anthropic.Message
 	var vend []string
 	var interleaved bool
 	for tries < 3 {
@@ -538,7 +557,8 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRou
 			liveFatalf(t, "%s: %v", mode, err)
 		}
 		_, raw := one(t, r.rec, n).answer()
-		vend, interleaved = vendorThinking(raw)
+		up, interleaved = vendorAnswer(raw)
+		vend = provenance(&up)
 		if _, back := expected(vend, r.dep); len(back) > 0 || !r.thinks {
 			break
 		}
@@ -555,6 +575,9 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRou
 	}
 	if m.StopReason != anthropic.StopReasonToolUse {
 		liveFatalf(t, "%s: the model answered without calling the tool (stop %q)", mode, m.StopReason)
+	}
+	if !sameUsage(m.Usage, up.Usage) {
+		liveFatalf(t, "%s: the SDK read usage %s, the vendor reported %s", mode, counts(m.Usage), counts(up.Usage))
 	}
 	// The ledger holds what the caller's SDK added up, written before the
 	// answer ended.
@@ -583,8 +606,12 @@ func liveCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-// textOf is an answer's text, its blocks joined.
+// textOf is an answer's text, its blocks joined; empty for the nil answer
+// an error leaves.
 func textOf(m *anthropic.Message) string {
+	if m == nil {
+		return ""
+	}
 	var b strings.Builder
 	for _, c := range m.Content {
 		if c.Type == "text" {

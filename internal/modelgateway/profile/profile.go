@@ -170,7 +170,9 @@ func choiceType(choice map[string]json.RawMessage) string {
 // 2026-10-08) settles it: MiniMax-M3 and M3.1-Flash-Preview, asked for a fun
 // fact with get_time offered, answered without calling it in every one of 30
 // asks forcing a call — tool_choice any or tool, three times in each thinking
-// mode either model accepts — so both are ignored.
+// mode either model accepts — so both are ignored. Its none passes through:
+// honored in every probe, MiniMax-M3 broke it once in a live-tier run, a
+// rare lapse rather than an ignored field.
 func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 	var stops []json.RawMessage
 	if json.Unmarshal(req["stop_sequences"], &stops) == nil && len(stops) > 0 {

@@ -761,8 +761,8 @@ where a vendor bills cache writes.
     `Message.Accumulate`) on an alias routed to each vendor: text, a tool-use round trip
     that sends the thinking blocks back unchanged, reported usage, and an upstream
     refusal surfacing as an `*anthropic.Error` carrying the upstream's status.
-  - **Vendor behavior:** a `search_result` replay, `count_tokens`, cache usage fields;
-    for MiniMax its `tool_choice` values and whether the CN key works on the
+  - **Vendor behavior:** a `search_result` replay, `count_tokens`, cache usage fields,
+    each vendor's `tool_choice` values; for MiniMax, whether the CN key works on the
     international host. Results land in docs/HISTORY.md.
   - **Embeddings and rerank on Gitee** (slice 4), through openai-go for embeddings and
     a plain HTTP client for rerank, which no SDK covers: text embeddings with

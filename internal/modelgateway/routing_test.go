@@ -268,14 +268,20 @@ func TestADeletedCredentialsKeyIsDropped(t *testing.T) {
 	}
 	b := e.credential(p, "sk-second-key-1", 1)
 	e.must(e.s.DeleteCredential(e.ctx, p.ID, a.ID))
-	for deadline := time.Now().Add(10 * time.Second); ask("fast") != "sk-second-key-1"; {
-		if time.Now().After(deadline) {
-			t.Fatal("the deletion never reached the snapshot")
+	// The second key answering proves nothing alone: a snapshot holding both
+	// credentials can route to it before the deletion arrives. Each request
+	// prunes against the snapshot it sees, so asking until the opened keys
+	// settle waits for the deletion and checks the pruning.
+	want := sorted(b.ID, c.ID)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		k := ask("fast")
+		got := modelgateway.OpenedKeys(e.handler)
+		if k == "sk-second-key-1" && slices.Equal(got, want) {
+			break
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if got, want := modelgateway.OpenedKeys(e.handler), sorted(b.ID, c.ID); !slices.Equal(got, want) {
-		t.Errorf("opened %v, want %v", got, want)
+		if time.Now().After(deadline) {
+			t.Fatalf("opened %v, want %v: the deletion never reached the snapshot, or pruning kept or dropped the wrong keys", got, want)
+		}
 	}
 }
 

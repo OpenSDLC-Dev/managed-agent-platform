@@ -6453,8 +6453,11 @@ answered as follows.
     whether asked or by default, DeepSeek refused it with its own 400, "Thinking mode
     does not support this tool_choice" (12 of 12).
 
-  For a question that asks for the tool, `auto` called it in all 24 asks and `none` in
-  none of 24, on both vendors. The gateway therefore now refuses `any` for DeepSeek and
+  For a question that asks for the tool, `auto` called it in all 24 asks, on both
+  vendors. `none` was honored in all 104 probe asks across both vendors, but in one
+  live-tier run MiniMax-M3, thinking off, called the tool under it: a rare lapse, not
+  an ignored field, so the tier now checks that `none` reaches the vendor unchanged
+  and only logs a tool call made under it. The gateway therefore now refuses `any` for DeepSeek and
   `any` and `tool` for MiniMax, as it refuses whatever a vendor ignores where the answer
   depends on it. `auto`, `none` and DeepSeek's `tool` pass through.
 - **MiniMax region.** The CN key on `https://api.minimax.io/anthropic` gets a 401, which
@@ -6473,13 +6476,14 @@ which are not what it checks, no longer decide the outcome:
   mid-loop gets it too. The tier now closes MiniMax's loop first, checking that each
   MiniMax request carries only MiniMax's thinking.
 - One run's MiniMax `tool_choice` or `search_result` failure was not kept, and three
-  reruns passed. The search turn is now asked up to three times for a search. The `none`
-  check, which a question not needing the tool left vacuous, now asks for the tool.
+  reruns passed. The search turn is now asked up to three times for a search, and the
+  `tool_choice` checks read what the vendor was sent.
 
 MiniMax-M3 answers took up to 142 seconds, inside the tier's three-minute bound per
-call. After these changes, two consecutive runs of the whole tier passed all 42
-subtests. Mutation testing caught all twelve mutants:
+call. After these changes, two consecutive runs of the whole tier each passed all
+21 tests: the two top-level tests and their 19 subtests. Mutation testing caught all fifteen mutants:
 - seven against the refusal rows;
-- four against the live checks: each refusal dropped or widened, and the flattening
-  removed;
-- one sending `auto` where the `none` check expects `none`.
+- seven against the live checks: each refusal dropped or widened; the flattening
+  removed; `auto` rewritten to `none` upstream; a whole answer's usage altered; and
+  its zero `cache_creation_input_tokens` dropped;
+- one sending `auto` where the check expects `none`.
