@@ -134,10 +134,10 @@ func responseItem(m ResponseMeta, n int, blk map[string]json.RawMessage) (map[st
 	case "thinking":
 		t, _ := text(blk, "thinking")
 		sig, _ := text(blk, "signature")
-		return reasoningItem(m.itemID("rs", n), []any{summaryText(t)}, sig), nil
+		return reasoningItem(m.itemID("rs", n), "completed", []any{summaryText(t)}, sig), nil
 	case "redacted_thinking":
 		data, _ := text(blk, "data")
-		return reasoningItem(m.itemID("rs", n), []any{}, data), nil
+		return reasoningItem(m.itemID("rs", n), "completed", []any{}, data), nil
 	case "tool_use":
 		id, _ := text(blk, "id")
 		name, _ := text(blk, "name")
@@ -162,8 +162,8 @@ func outputText(t string) map[string]any {
 func summaryText(t string) map[string]any { return map[string]any{"type": "summary_text", "text": t} }
 
 // reasoningItem is a reasoning item; an empty encrypted_content is null.
-func reasoningItem(id string, summary []any, enc string) map[string]any {
-	item := map[string]any{"id": id, "type": "reasoning", "summary": summary, "encrypted_content": nil}
+func reasoningItem(id, status string, summary []any, enc string) map[string]any {
+	item := map[string]any{"id": id, "type": "reasoning", "status": status, "summary": summary, "encrypted_content": nil}
 	if enc != "" {
 		item["encrypted_content"] = enc
 	}

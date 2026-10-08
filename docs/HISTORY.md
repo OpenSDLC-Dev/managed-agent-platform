@@ -7235,3 +7235,12 @@ upstream's `type` to the caller unredacted — convertedError gave one of a clos
 upstream's own type is any string it sends — and it is now redacted with the message,
 `param` and `code`. The messages of a conversion failure, which name a block the upstream
 sent, are redacted too, whole and streamed. Three mutants over the redactions are caught.
+
+A second Codex pass found three more defects and one overclaim, each defect fixed with a
+test that failed on the code before it: a reasoning item carried no `status`, where
+openai-go's item has one when returned; an upstream error with an empty message lost its
+type, `param` and `code`, the envelope read as no envelope at all; and a `message_stop`
+arriving with a block still open ended the stream completed, the open block's streamed
+content left out of the Response — it now fails. The changelog said `none` turns thinking
+off, which holds only where the upstream has a thinking toggle. Three mutants over the
+fixes are caught, 39 in all.

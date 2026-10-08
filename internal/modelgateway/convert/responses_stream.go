@@ -93,6 +93,11 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 		}
 		usageCounts(s.usage, obj["usage"])
 	case "message_stop":
+		// A block still open has content the caller was streamed and the
+		// Response would leave out.
+		if len(s.open) > 0 {
+			return nil, fmt.Errorf("message_stop arrived with %d block(s) still open", len(s.open))
+		}
 		s.begin(&out)
 		status, incomplete := responseStatus(s.stop)
 		s.emit(&out, "response."+status, map[string]any{"response": s.m.response(status, s.items(), responseUsage(s.usage), incomplete, nil)})
@@ -174,7 +179,7 @@ func (s *ResponsesStream) start(out *bytes.Buffer, obj map[string]json.RawMessag
 		}
 	case "thinking":
 		it.id = s.m.itemID("rs", it.n)
-		s.emit(out, "response.output_item.added", with(at, "item", reasoningItem(it.id, []any{}, "")))
+		s.emit(out, "response.output_item.added", with(at, "item", reasoningItem(it.id, "in_progress", []any{}, "")))
 		s.emit(out, "response.reasoning_summary_part.added", with(at, "item_id", it.id, "summary_index", 0, "part", summaryText("")))
 		if t, _ := text(blk, "thinking"); t != "" {
 			it.text.WriteString(t)
@@ -186,7 +191,7 @@ func (s *ResponsesStream) start(out *bytes.Buffer, obj map[string]json.RawMessag
 		it.id = s.m.itemID("rs", it.n)
 		data, _ := text(blk, "data")
 		it.sig.WriteString(data)
-		s.emit(out, "response.output_item.added", with(at, "item", reasoningItem(it.id, []any{}, data)))
+		s.emit(out, "response.output_item.added", with(at, "item", reasoningItem(it.id, "in_progress", []any{}, data)))
 	case "tool_use":
 		it.id = s.m.itemID("fc", it.n)
 		it.call, _ = text(blk, "id")
@@ -250,9 +255,9 @@ func (s *ResponsesStream) finish(out *bytes.Buffer, obj map[string]json.RawMessa
 		t := it.text.String()
 		s.emit(out, "response.reasoning_summary_text.done", with(at, "item_id", it.id, "summary_index", 0, "text", t))
 		s.emit(out, "response.reasoning_summary_part.done", with(at, "item_id", it.id, "summary_index", 0, "part", summaryText(t)))
-		done = reasoningItem(it.id, []any{summaryText(t)}, it.sig.String())
+		done = reasoningItem(it.id, "completed", []any{summaryText(t)}, it.sig.String())
 	case "redacted_thinking":
-		done = reasoningItem(it.id, []any{}, it.sig.String())
+		done = reasoningItem(it.id, "completed", []any{}, it.sig.String())
 	case "tool_use":
 		args := it.args.String()
 		switch {

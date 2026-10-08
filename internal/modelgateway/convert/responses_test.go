@@ -241,6 +241,11 @@ func TestResponsesAnswer(t *testing.T) {
 	if len(r.Output) != 4 {
 		t.Fatalf("output %+v", r.Output)
 	}
+	for _, o := range r.Output {
+		if o.Status != "completed" {
+			t.Errorf("%s item %s: status %q", o.Type, o.ID, o.Status)
+		}
+	}
 	if o := r.Output[0]; o.Type != "reasoning" || o.ID != "rs_abc_0" || len(o.Summary) != 1 || o.Summary[0].Text != "let me see" || o.EncryptedContent != "mapgw1.sig" {
 		t.Errorf("thinking %+v", o)
 	}
@@ -417,6 +422,14 @@ func TestResponsesStream(t *testing.T) {
 			text += e.Delta
 		case "response.function_call_arguments.delta":
 			args += e.Delta
+		case "response.output_item.added":
+			if e.Item.Status != "in_progress" {
+				t.Errorf("added %s item: status %q", e.Item.Type, e.Item.Status)
+			}
+		case "response.output_item.done":
+			if e.Item.Status != "completed" {
+				t.Errorf("done %s item: status %q", e.Item.Type, e.Item.Status)
+			}
 		}
 	}
 	wantTypes := []string{"response.created", "response.in_progress",
@@ -491,5 +504,20 @@ func TestResponsesStreamEnds(t *testing.T) {
 	if _, err := convert.NewResponsesStream(meta).Event("content_block_start",
 		[]byte(`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s"}}`)); err == nil {
 		t.Error("a server tool's block converted")
+	}
+	// A stream stopping with a block still open has lost that block's
+	// content, which the caller was streamed: it does not end completed.
+	s = convert.NewResponsesStream(meta)
+	for _, ev := range []string{start,
+		`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`content_block_delta {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`,
+		`message_delta {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`} {
+		name, data, _ := strings.Cut(ev, " ")
+		if _, err := s.Event(name, []byte(data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b, err := s.Event("message_stop", []byte(`{"type":"message_stop"}`)); err == nil || bytes.Contains(b, []byte("response.completed")) {
+		t.Errorf("a stream stopping with a block open: %s, %v", b, err)
 	}
 }

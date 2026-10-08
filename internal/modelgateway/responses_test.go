@@ -386,6 +386,8 @@ func TestAConvertedResponsesErrorIsTheUpstreams(t *testing.T) {
 			400, `{"error":{"code":"context_length_exceeded","message":"bad [redacted] here","param":"input","type":"tokens"}}`},
 		{"a key anywhere", status(400, `{"error":{"message":"m","type":"sk-deepseek-key1","param":{"k":"sk-deepseek-key1"},"code":"sk-deepseek-key1"}}`),
 			400, `{"error":{"code":"[redacted]","message":"m","param":{"k":"[redacted]"},"type":"[redacted]"}}`},
+		{"an empty message", status(400, `{"error":{"message":"","type":"invalid_request_error","param":"input","code":"context_length_exceeded"}}`),
+			400, `{"error":{"code":"context_length_exceeded","message":"","param":"input","type":"invalid_request_error"}}`},
 		{"no type", status(404, `{"error":{"message":"no such model"}}`),
 			404, `{"error":{"code":null,"message":"no such model","param":null,"type":"not_found_error"}}`},
 		{"Anthropic's", status(400, `{"type":"error","error":{"type":"invalid_request_error","message":"invalid tool_result content (2013)"}}`),

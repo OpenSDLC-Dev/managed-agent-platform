@@ -102,14 +102,14 @@ func openAIError(b []byte) []byte {
 	typ, msg := "api_error", string(b)
 	var param, code any
 	var env struct {
-		Error struct {
+		Error *struct {
 			Type    string `json:"type"`
 			Message string `json:"message"`
 			Param   any    `json:"param"`
 			Code    any    `json:"code"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(b, &env) == nil && env.Error.Message != "" {
+	if json.Unmarshal(b, &env) == nil && env.Error != nil {
 		msg, param, code = env.Error.Message, env.Error.Param, env.Error.Code
 		if env.Error.Type != "" {
 			typ = env.Error.Type
