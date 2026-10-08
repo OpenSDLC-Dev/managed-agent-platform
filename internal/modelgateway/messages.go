@@ -22,8 +22,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
-// The body bounds: a request as large as the Messages API takes, and an
-// answer well past any model's output.
+// The body bounds: a request as large as the Messages API takes, and a
+// whole answer well past any model's output. An embeddings or rerank answer
+// is held to neither: it is relayed as it arrives (relayVectors).
 const maxRequestBody = 32 << 20
 
 var maxResponseBody = 64 << 20
@@ -69,20 +70,24 @@ func bounded(w http.ResponseWriter) *http.ResponseController {
 }
 
 // route is an inference path: the protocol it speaks, the kind of alias it
-// serves, and on the OpenAI protocol the path an upstream's base URL takes
-// for it (profile). An Anthropic base URL takes the inbound path itself.
+// serves, on the OpenAI protocol the path an upstream's base URL takes for
+// it (profile) — an Anthropic base URL takes the inbound path itself — its
+// name in the ledger, and its GenAI operation, of which the conventions name
+// none for rerank.
 type route struct {
-	proto    profile.Protocol
-	kind     store.Kind
-	upstream string
+	proto     profile.Protocol
+	kind      store.Kind
+	upstream  string
+	endpoint  string
+	operation string
 }
 
 var routes = map[string]route{
-	"/v1/messages":              {profile.Anthropic, store.KindChat, ""},
-	"/v1/messages/count_tokens": {profile.Anthropic, store.KindChat, ""},
-	"/v1/chat/completions":      {profile.OpenAI, store.KindChat, "/chat/completions"},
-	"/v1/embeddings":            {profile.OpenAI, store.KindEmbedding, "/embeddings"},
-	"/v1/rerank":                {profile.OpenAI, store.KindRerank, "/rerank"},
+	"/v1/messages":              {profile.Anthropic, store.KindChat, "", "messages", "chat"},
+	"/v1/messages/count_tokens": {profile.Anthropic, store.KindChat, "", "count_tokens", "count_tokens"},
+	"/v1/chat/completions":      {profile.OpenAI, store.KindChat, "/chat/completions", "chat_completions", "chat"},
+	"/v1/embeddings":            {profile.OpenAI, store.KindEmbedding, "/embeddings", "embeddings", "embeddings"},
+	"/v1/rerank":                {profile.OpenAI, store.KindRerank, "/rerank", "rerank", "rerank"},
 }
 
 // servedUnder reports whether rt is served under prefix, "" for the root:
@@ -143,7 +148,7 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	snap := h.cfg.Catalog.Snapshot()
 	a, ok := snap.Alias(model)
 	switch {
-	case !ok:
+	case !ok, a.Name == "*" && a.Kind != rt.kind: // the wildcard catches names for its own kind's routes alone
 		writeError(w, r, notFound("model: %s", model))
 		return
 	case !c.may(a.Name):
@@ -573,6 +578,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 				return nil, false
 			}
 		}
+	}
+	if routes[c.path].kind != store.KindChat {
+		return relayVectors(w, resp, c, guard, red)
 	}
 	// Once the answer's body has begun the upstream is generating — and
 	// charging — for it, so a break past that point is the caller's 502, not

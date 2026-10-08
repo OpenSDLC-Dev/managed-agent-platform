@@ -2,6 +2,7 @@ package modelgateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"time"
@@ -57,3 +58,20 @@ func SpanName(r *http.Request) string { return spanName(r) }
 
 // ChatUsageOf is chatUsageOf.
 func ChatUsageOf(raw []byte) *store.Tokens { return chatUsageOf(raw) }
+
+// VectorUsageOf is vectorUsageOf.
+func VectorUsageOf(raw []byte) *store.Tokens { return vectorUsageOf(raw) }
+
+// MaxAnswerUsage is the longest usage an answerRewriter keeps.
+const MaxAnswerUsage = maxUsage
+
+// RewriteAnswer is what an answerRewriter for alias makes of chunks, fed one
+// by one, and the usage it kept.
+func RewriteAnswer(alias string, chunks ...[]byte) ([]byte, json.RawMessage) {
+	rw := &answerRewriter{alias: encodeJSON(alias)}
+	var out []byte
+	for _, c := range chunks {
+		out = append(out, rw.rewrite(c)...)
+	}
+	return out, rw.usage
+}

@@ -36,11 +36,15 @@ func NewClient() *http.Client {
 
 // NoReuse is c keeping no connection between requests, for a vendor that
 // drops idle ones: its transport cloned with keep-alives off, so each
-// request dials a connection of its own, on HTTP/2 too, and leaves none for
-// another to take — where setting a request's Close would only retire the
-// connection it was given, which may be one another request left idle. A
-// transport that is not an *http.Transport is the caller's to configure,
-// and c is returned as it is.
+// request dials a connection of its own and leaves none for another to take
+// — where setting a request's Close would only retire the connection it was
+// given, which may be one another request left idle. That holds on HTTP/2
+// as net/http negotiates it, through a pool of the clone's own, every
+// connection in it used once; a transport whose TLSNextProto its caller
+// set, as golang.org/x/net/http2's ConfigureTransport does, upgrades
+// through that package's pool instead, which the clone shares. A transport
+// that is not an *http.Transport is the caller's to configure, and c is
+// returned as it is.
 func NoReuse(c *http.Client) *http.Client {
 	rt := c.Transport
 	if rt == nil {

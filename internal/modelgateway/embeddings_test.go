@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/openai/openai-go/v3"
 	"go.opentelemetry.io/otel/trace"
@@ -28,9 +30,10 @@ const (
 )
 
 // vectors answers an embeddings request: base64 vectors where it asked for
-// them and floats otherwise, with usage unless its input holds objects, as
-// dikw-core found Gitee's multimodal answers; and a rerank request in
-// Gitee's shape, its usage in camelCase.
+// them and floats otherwise, with usage unless its input holds objects,
+// standing for an upstream that reports none — Gitee's multimodal answers
+// do report it (probed 2026-10-08); and a rerank request in Gitee's shape,
+// its usage in camelCase.
 func vectors(w http.ResponseWriter, _ *http.Request, c fakeCall) {
 	if c.Path == "/rerank" {
 		writeBody(w, 200, fmt.Sprintf(`{"model":%q,"usage":{"totalTokens":0,"promptTokens":0},"results":[{"index":1,"document":{"text":"Jupiter is the <i>largest</i> planet."},"relevance_score":0.9982522142273162},{"index":0,"document":{"text":"Octopuses have three hearts."},"relevance_score":1.7366719305164412E-5}]}`, c.Model))
@@ -47,6 +50,14 @@ func vectors(w http.ResponseWriter, _ *http.Request, c fakeCall) {
 	writeBody(w, 200, fmt.Sprintf(`{"object":"list","data":%s,"model":%q%s}`, data, c.Model, usage))
 }
 
+// upstreamAnswer is vectors' answer to up, its model the alias the caller
+// sent: the gateway's answer, byte for byte.
+func upstreamAnswer(up fakeCall, alias json.RawMessage) []byte {
+	rec := httptest.NewRecorder()
+	vectors(rec, nil, up)
+	return bytes.Replace(rec.Body.Bytes(), []byte(fmt.Sprintf(`"model":%q`, up.Model)), append([]byte(`"model":`), alias...), 1)
+}
+
 // row is the ledger's row for a request id.
 func (e *env) row(rid string) store.Usage {
 	e.t.Helper()
@@ -61,9 +72,10 @@ func (e *env) row(rid string) store.Usage {
 
 // Embeddings and rerank pass through on their own routes, at the root and
 // under /openai: the body goes upstream as sent but for model, the answer
-// comes back as sent but for model, its vectors untouched whether float or
-// base64, and the ledger counts the usage the upstream reported — none where
-// it reported none, or reported it in a shape no OpenAI usage takes.
+// comes back byte for byte as sent but for model, its vectors untouched
+// whether float or base64, and the ledger counts the usage the upstream
+// reported — none where it reported none, or reported it in a shape no
+// OpenAI usage takes.
 func TestEmbeddingsAndRerankPassThrough(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, vectors)
@@ -111,19 +123,8 @@ func TestEmbeddingsAndRerankPassThrough(t *testing.T) {
 					t.Errorf("upstream got %s = %s, sent %s", k, up.Body[k], v)
 				}
 			}
-			// The answer is the upstream's, member for member, but for model.
-			var got, want map[string]json.RawMessage
-			_ = json.Unmarshal(b, &got)
-			upstream := httptest.NewRecorder()
-			vectors(upstream, nil, up)
-			_ = json.Unmarshal(upstream.Body.Bytes(), &want)
-			if !bytes.Equal(got["model"], sent["model"]) || len(got) != len(want) {
-				t.Errorf("answered %s for %s", b, upstream.Body.Bytes())
-			}
-			for k, v := range want {
-				if k != "model" && !bytes.Equal(got[k], v) {
-					t.Errorf("answered %s = %s, upstream sent %s", k, got[k], v)
-				}
+			if want := upstreamAnswer(up, sent["model"]); !bytes.Equal(b, want) {
+				t.Errorf("answered %s, want %s", b, want)
 			}
 			u := e.row(resp.Header.Get("request-id"))
 			if u.Protocol != "openai" || u.Endpoint != tc.endpoint || u.Status != 200 || !reflect.DeepEqual(u.Tokens, tc.tokens) {
@@ -218,6 +219,110 @@ func TestEmbeddingsAndRerankKeepToTheirKind(t *testing.T) {
 	}
 	if calls := mm.recorded(); len(calls) != 1 || string(calls[0].Body["parallel_tool_calls"]) != "false" {
 		t.Fatalf("upstream got %v", calls)
+	}
+}
+
+// An embeddings or rerank answer is relayed as it arrives, held to no bound
+// a whole answer is: one past it comes back whole and its usage is counted,
+// where the upstream has charged for it. One that breaks off partway leaves
+// the caller the cut-off body, which no reader takes for a whole answer, and
+// the ledger the failure it was; one that breaks off before its first byte
+// is no answer, and is answered as a failed attempt.
+func TestAVectorAnswerIsRelayedAsItArrives(t *testing.T) {
+	defer modelgateway.SetMaxResponseBody(64)()
+	e := newEnv(t)
+	const cut = `{"object":"list","data":[{"object":"embedding","embedding":[0.5,`
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		input := string(c.Body["input"])
+		if input == `"total"` {
+			writeBody(w, 200, `{"object":"list","data":[],"model":"up","usage":{"total_tokens":9}}`)
+			return
+		}
+		if input != `"break"` && input != `"drop"` {
+			vectors(w, r, c)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(200)
+		if input == `"break"` {
+			_, _ = io.WriteString(w, cut)
+		}
+		w.(http.Flusher).Flush()
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close()
+		}
+	})
+	p := onOpenAI(e, "gitee", f.URL)
+	e.alias("text", target(e.deployment(p, "Qwen3-Embedding-8B", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
+	e.alias("ranker", target(e.deployment(p, "bge-reranker-v2-m3", func(d *store.Deployment) { d.Kind = store.KindRerank }), 0))
+	key := e.key(everyAlias)
+	e.start()
+	bearer := map[string]string{"Authorization": "Bearer " + key}
+
+	for _, tc := range []struct {
+		path, body, alias string
+		tokens            *store.Tokens
+	}{
+		{"/v1/embeddings", dikwText, "text", &store.Tokens{Input: 13}},
+		{"/v1/rerank", dikwRerank, "ranker", nil},
+	} {
+		n := len(f.recorded())
+		resp, b := e.do("POST", tc.path, tc.body, bearer)
+		calls := f.recorded()[n:]
+		if resp.StatusCode != 200 || len(calls) != 1 || len(b) <= 64 || !bytes.Equal(b, upstreamAnswer(calls[0], []byte(`"`+tc.alias+`"`))) {
+			t.Fatalf("%s: %d %s", tc.path, resp.StatusCode, b)
+		}
+		if u := e.row(resp.Header.Get("request-id")); u.Status != 200 || u.ErrorType != "" || !reflect.DeepEqual(u.Tokens, tc.tokens) {
+			t.Errorf("%s: ledger %+v, tokens %+v", tc.path, u, u.Tokens)
+		}
+	}
+
+	// A usage reporting only its total counts that, all of it input.
+	resp, b := e.do("POST", "/v1/embeddings", `{"model":"text","input":"total"}`, bearer)
+	if u := e.row(resp.Header.Get("request-id")); resp.StatusCode != 200 || !reflect.DeepEqual(u.Tokens, &store.Tokens{Input: 9}) {
+		t.Errorf("%d %s: tokens %+v", resp.StatusCode, b, u.Tokens)
+	}
+
+	n := len(f.recorded())
+	resp, b = e.do("POST", "/v1/embeddings", `{"model":"text","input":"break"}`, bearer)
+	if resp.StatusCode != 200 || string(b) != cut || len(f.recorded()) != n+1 {
+		t.Fatalf("%d %s after %d calls", resp.StatusCode, b, len(f.recorded())-n)
+	}
+	if u := e.row(resp.Header.Get("request-id")); u.Status != 200 || u.ErrorType != "api_error" || u.Tokens != nil {
+		t.Errorf("ledger %+v", u)
+	}
+	resp, b = e.do("POST", "/v1/embeddings", `{"model":"text","input":"drop"}`, bearer)
+	if typ, _, _ := openAIEnvelope(b); resp.StatusCode != 502 || typ != "api_error" {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+}
+
+// The wildcard alias catches the names its own kind's routes are sent, and
+// no other route's: a name on an embeddings or rerank route that no alias
+// matches is unknown there, whatever a chat wildcard would serve.
+func TestAWildcardCatchesNamesForItsOwnKind(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, vectors)
+	chat := newFake(t, chatAnswer("Jupiter", deepseekStyle))
+	e.alias("*", target(e.deployment(onOpenAI(e, "openai-generic", chat.URL), "up"), 0))
+	e.alias("text", target(e.deployment(onOpenAI(e, "gitee", f.URL), "Qwen3-Embedding-8B", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
+	key := e.key(everyAlias)
+	e.start()
+	bearer := map[string]string{"Authorization": "Bearer " + key}
+	for _, tc := range []struct {
+		path, body string
+		status     int
+		msg        string
+	}{
+		{"/v1/embeddings", `{"model":"txet","input":"x"}`, 404, "model: txet"},
+		{"/v1/rerank", `{"model":"ranker","query":"q","documents":["a"]}`, 404, "model: ranker"},
+		{"/v1/embeddings", `{"model":"text","input":"x"}`, 200, `"model":"text"`},
+		{"/v1/chat/completions", `{"model":"anything","messages":[{"role":"user","content":"hi"}]}`, 200, "Jupiter"},
+	} {
+		if resp, b := e.do("POST", tc.path, tc.body, bearer); resp.StatusCode != tc.status || !strings.Contains(string(b), tc.msg) {
+			t.Errorf("%s %s: %d %s", tc.path, tc.body, resp.StatusCode, b)
+		}
 	}
 }
 

@@ -172,6 +172,9 @@ func New(cfg Config) (http.Handler, error) {
 		h.client = upstream.NewClient()
 	}
 	h.fresh = upstream.NoReuse(h.client)
+	if h.fresh == h.client {
+		slog.Warn("modelgateway: the client's transport is not an *http.Transport, so a profile that closes its connections reuses them")
+	}
 	return h, nil
 }
 

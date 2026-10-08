@@ -317,9 +317,11 @@ converts when protocols match.
   multimodal objects, and `encoding_format` and `dimensions` go upstream as sent, while
   a stream asked for is refused, as is a `stream` the chat routes would refuse: neither
   API streams, and an upstream that did would answer in a shape whose usage the ledger
-  cannot read — and the response relays unchanged but for `model` where it has one, its
-  vectors never decoded, base64 or float. The gateway splits no batch: an upstream's cap
-  answers with the upstream's own 400, and a caller sizes its batches as it does today.
+  cannot read — and the response is relayed as it arrives, unchanged but for its
+  top-level `model` where it has one, its vectors never held or decoded, base64 or float,
+  so no bound applies to it but the stall guard's. The gateway splits no batch: an
+  upstream's cap answers with the upstream's own 400, and a caller sizes its batches as it
+  does today, within the 32 MiB the gateway takes in any request body.
 
 ### Vendor profiles
 

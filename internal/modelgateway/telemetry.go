@@ -62,11 +62,6 @@ const (
 	attrTokenType  = "modelgateway.token.type"
 )
 
-// operations names the GenAI operation of each route, by its ledger name;
-// the conventions name none for rerank.
-var operations = map[string]string{"messages": "chat", "count_tokens": "count_tokens", "chat_completions": "chat",
-	"embeddings": "embeddings", "rerank": "rerank"}
-
 // serverSpan continues the caller's W3C trace context in one server span for
 // the request, as the control plane's withTracing does. With no tracer
 // provider installed it records nothing.
@@ -156,7 +151,7 @@ func answered(ctx context.Context, status int) {
 // and the error the attempt ended with. The span covers a stream to its end,
 // since the attempt relays it.
 func (h *handler) tracedAttempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt, strip bool) (*failure, bool) {
-	op := operations[endpoints[c.path]]
+	op := routes[c.path].operation
 	attrs := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(op),
 		semconv.GenAIProviderNameKey.String(at.Provider.Profile),
@@ -224,7 +219,7 @@ func errorClass(typ string) string {
 // gateway's metrics, from the usage its ledger row was written with, cost
 // being the row's: nil when it has none, was not written, or holds one no
 // float64 can. A telemetry failure drops the reading, never the request.
-func observe(ctx context.Context, u store.Usage, at *catalog.Attempt, cost *float64) {
+func observe(ctx context.Context, u store.Usage, op string, at *catalog.Attempt, cost *float64) {
 	span := trace.SpanFromContext(ctx)
 	dims := []attribute.KeyValue{attribute.String(attrAlias, u.Alias), attribute.String(attrKey, u.APIKeyID),
 		attribute.String(attrEndpoint, u.Endpoint)}
@@ -246,7 +241,7 @@ func observe(ctx context.Context, u store.Usage, at *catalog.Attempt, cost *floa
 			span.SetStatus(codes.Error, u.ErrorType)
 		}
 	}
-	span.SetAttributes(semconv.GenAIOperationNameKey.String(operations[u.Endpoint]), semconv.GenAIRequestModel(u.Model))
+	span.SetAttributes(semconv.GenAIOperationNameKey.String(op), semconv.GenAIRequestModel(u.Model))
 	span.SetAttributes(dims...)
 	if t := u.Tokens; t != nil {
 		// The conventions' input tokens include the cached ones, which

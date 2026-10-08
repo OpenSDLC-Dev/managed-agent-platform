@@ -13,10 +13,9 @@ import (
 // model and, on a stream, stream_options; the answer comes back as the
 // upstream sent it but for model. Fields are read and written by their exact
 // keys, as the thinking edits are. Its typed reference is openai-go
-// (docs/REFERENCE_PROJECTS.md). Embeddings and rerank pass through the same
-// way, and never stream, so model is all they change either way: a vector,
-// float or base64, is compacted with the rest of its answer, never decoded.
-// A body goes out with its keys sorted, so a key differing from model only
+// (docs/REFERENCE_PROJECTS.md). An embeddings or rerank body passes through
+// the same way, and never streams, so model is all it changes; its answer is
+// relayed as it arrives (vectors.go). A body goes out with its keys sorted, so a key differing from model only
 // in case comes before model, and a decoder that matches keys regardless of
 // case, keeping the last, reads the deployment's upstream id.
 

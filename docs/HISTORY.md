@@ -6728,9 +6728,9 @@ Review found three defects, each fixed with a test that failed on the reviewed c
   does not stop Go's transport giving it one another provider on the same host left
   idle, on HTTP/1.1 or HTTP/2 (Codex). A profile that closes its connections now takes
   a client whose transport keeps none.
-- The docs said an answer's vectors came back byte for byte, where its members are
-  compacted on the way, whitespace inside a vector dropped (Codex). The live check now
-  compares compacted members, and the docs say compacted and never decoded.
+- The docs said an answer's vectors came back byte for byte, where its members were
+  compacted on the way, whitespace inside a vector dropped (Codex). The second round
+  below made the claim true.
 
 Codex also showed that the body goes upstream with its keys sorted, so of two keys
 differing only in case, as `input` and `Input`, a decoder that matches keys regardless
@@ -6739,3 +6739,51 @@ JSON, a key folding to `stream` is refused, and every key folding to `model` sor
 before it, so such a decoder reads the deployment's upstream id; a test pins that last.
 Mutation testing then caught all 27 mutants of the default tier, among them the
 reviewed code's stream skip and its connection handling restored.
+
+A second round — Codex over those fixes, then the Claude review of the branch — found
+five more, each fixed with a test that failed on the code before it:
+- An answer was read whole, held to the 64 MiB bound on a whole answer, and decoded and
+  re-encoded to rewrite its `model`. So 1,000 inputs at Qwen3-Embedding-8B's default
+  4,096 dimensions, within Gitee's cap and some 86 MB as Gitee writes floats, answered
+  502 after Gitee had charged for them, with nothing counted against the ledger or the
+  TPM limit. And an answer was held three or four times over in memory. Embeddings and
+  rerank answers are now relayed as they arrive, by a rewriter that reads only far
+  enough to replace the top-level `model` and keep the top-level `usage`. No bound
+  applies but the stall guard's, and the answer comes back byte for byte but for
+  `model`. A property test cuts 29 bodies, objects and not, at every byte, holding
+  the rewriter to encoding/json's decoder, and a five-minute fuzz run, 7,104,999 inputs,
+  found nothing.
+- Usage was read as a chat completion's. An embeddings or rerank usage now counts
+  `prompt_tokens`, else `total_tokens`; Gitee's camelCase zeros are still not read.
+- A wildcard alias `*` caught every name on every route. So with a chat wildcard, a
+  mistyped embeddings alias answered 400 "serves chat"; a wildcard now catches names on
+  its own kind's routes alone, and the rest are 404.
+- A route's ledger name and operation were two more tables kept in step with the route
+  table by hand; they are fields of the route.
+- The docs claimed no bound of the gateway's own on a batch, where its 32 MiB bound on
+  a request body comes first, and a few hundred images as data URLs reach it. They say
+  so now, and the test fake's multimodal answer, which reports no usage "as dikw-core
+  found", now says it stands for an upstream reporting none: Gitee's report it.
+
+Six were left as they are:
+- An upstream that answers a request not asking for a stream with one is relayed as it
+  came, and its row records no tokens. No caller can ask for that on these routes, and
+  every route's whole answer has been relayed so since slice 2a.
+- A client injected through `Config.Client` whose transport is not an
+  `*http.Transport`, or one x/net's `http2.ConfigureTransport` set up, keeps reusing
+  Gitee's connections. The gateway's own client negotiates HTTP/2 through net/http's
+  copy, whose pool a clone does not share; a test over HTTP/2 pins that, and the
+  gateway logs the first case at startup.
+- A connection per request costs each Gitee call a handshake. A shorter idle timeout
+  would guess at Gitee's, so it stays.
+- An embeddings row's output tokens are 0, which is the count: an embedding generates
+  none.
+- The route table spells out each upstream path, which the passthrough test checks
+  route by route.
+- An unparseable answer passes as it came from the point it stops being JSON, where
+  the whole-answer path passed it untouched; a `model` before that point is still
+  rewritten.
+
+Mutation testing caught 45 of the 45 mutants of the default tier: the first
+round's guards, the route's new fields, the wildcard, the relay's three outcomes, the
+usage keys, and eleven ways to misread JSON a piece at a time.
