@@ -282,7 +282,14 @@ converts when protocols match.
   `count_tokens` is filtered as its `/v1/messages` twin would be. The response relays
   event by event as it arrives — no buffering, `ping` events and keep-alive comments
   kept, each sequence whole — rewriting only `message.model` (back to the alias the
-  caller sent), the usage fields the profile normalizes, and the thinking wrappers. A
+  caller sent), the usage fields the profile normalizes, and the thinking wrappers. On
+  Chat Completions `model` is rewritten in the answer and in every chunk, and a stream is
+  asked for its usage (`stream_options.include_usage`, the caller's other options kept),
+  which the ledger and the TPM limit count and MiniMax reports only when asked (probed
+  2026-10-08); the chunk carrying it — no choices, usage set — is withheld from a caller
+  that did not ask. Such a stream has ended at `[DONE]`, or when the upstream closes it
+  after a choice's finish, as MiniMax-M3 does, sending no `[DONE]`; closed before
+  either, it ends with an error chunk in OpenAI's envelope. A
   conversion path whose upstream sends no pings emits its own during silent gaps. A
   provider configures both of its vendor's endpoints
   and selection prefers the one matching the inbound protocol, so Anthropic and Chat
@@ -335,7 +342,10 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
   `disable_parallel_tool_use`, MiniMax's `stop_sequences`, and thinking disabled on
   MiniMax's M2.x models, which think regardless; and, on the live tier's evidence,
   `tool_choice` `any` on DeepSeek and `any` and `tool` on MiniMax, which answer without
-  the tool call they force — and passes through what
+  the tool call they force, and MiniMax's `disable_parallel_tool_use`. Slice 4 holds
+  Chat Completions to the same rule on its own probes: `parallel_tool_calls: false` on
+  both vendors, and MiniMax's `stop` and `tool_choice` `required` or naming a function
+  (DeepSeek honors those, refusing a forced call with thinking on itself) — and passes through what
   a vendor ignores among sampling knobs, context shaping and server-side features;
   a request such a field bars from a deployment goes to the alias's others, and is
   refused only when none is left — but never a count, which the field leaves
@@ -765,6 +775,11 @@ where a vendor bills cache writes.
   - **Vendor behavior:** a `search_result` replay, `count_tokens`, cache usage fields,
     each vendor's `tool_choice` values; for MiniMax, whether the CN key works on the
     international host. Results land in docs/HISTORY.md.
+  - **Chat Completions** (slice 4), through openai-go to each vendor's OpenAI endpoint:
+    a text answer, whole and streamed with and without the usage chunk asked for,
+    equal to what the vendor sent and counted in the ledger; a tool round trip made
+    with `ToParam`; and each field the gateway refuses for the vendor, asked of the
+    vendor directly too, which must still ignore it.
   - **Embeddings and rerank on Gitee** (slice 4), through openai-go for embeddings and
     a plain HTTP client for rerank, which no SDK covers: text embeddings with
     `dimensions`, asked as float and as base64, decoding to vectors of that length that

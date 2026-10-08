@@ -45,6 +45,11 @@ tool orchestration, permission flow, child-agent lifecycle and message passing, 
 the work at hand needs: never a wire-schema source, never copy code from them, and where
 either conflicts with the Anthropic model, the Anthropic model wins.
 
+The model gateway's OpenAI surfaces (plan 59) take their typed schema from
+**`openai-go`** (https://github.com/openai/openai-go), which drives them in the gateway's
+tests. It has no checkout here: read it in the module cache at the version `go.mod`
+pins.
+
 ## Caveats
 
 The SDK and CLI checkouts track the API's tip and can run ahead of the pin (whatever

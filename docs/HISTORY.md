@@ -6528,3 +6528,58 @@ twenty-four mutants:
   - a vendor's error relayed as a 502;
   - text deltas dropped from a stream, and a whole answer's text emptied;
 - one sending `auto` where the check expects `none`.
+
+## Model gateway Chat Completions (plan 59 slice 4a) — acceptance record, 2026-10-08
+
+Probes sent directly to each vendor's OpenAI endpoint — `https://api.deepseek.com` and
+`https://api.minimax.cn/v1` — decided what the passthrough does, and
+`RUN_LIVE_MODELGATEWAY=deepseek,minimax` then drove it with openai-go v3.73.0 to
+`deepseek-flash`, `deepseek-v4-pro`, `MiniMax-M3` and `MiniMax-M3.1-Flash-Preview`, each
+behind a proxy recording both directions.
+
+- **Model ids** are the same as on each vendor's Anthropic endpoint. MiniMax's `/models`
+  omits M3.1-Flash-Preview, which answers all the same.
+- **Stream usage.** DeepSeek reports a stream's usage unasked, on its last content
+  chunk, before `[DONE]`. MiniMax reports it only for `stream_options.include_usage`, in
+  a chunk of its own whose `choices` is empty, every other chunk carrying `"usage":
+  null`. So the gateway asks every stream for its usage, and withholds that chunk from a
+  caller that did not ask.
+- **Stream end.** MiniMax-M3's streams never send `[DONE]`, M3.1-Flash-Preview's do, and
+  DeepSeek's do. So a stream that closes after a choice's finish has ended normally.
+- **Cache accounting.** Both vendors count cached tokens inside `prompt_tokens` and
+  report them as `prompt_tokens_details.cached_tokens`; DeepSeek also as
+  `prompt_cache_hit_tokens`, beside `prompt_cache_miss_tokens`. The ledger takes input
+  as the prompt less the cached tokens, as the Messages API counts it.
+- **Thinking.** DeepSeek and M3.1-Flash-Preview return `reasoning_content`; MiniMax-M3
+  writes its thinking inline in `content`, as `<think>…</think>`. A tool loop continued
+  once with `reasoning_content` sent back, and once with it dropped, was answered both
+  times by each of the four models.
+- **Errors.** DeepSeek answers in OpenAI's envelope; MiniMax in Anthropic's even here,
+  `{"type":"error","error":{"type":"bad_request_error",…,"http_code":"400"}}`. The
+  gateway relays either as sent, redacted.
+- **What each vendor ignores.** Asked for the time in UTC and Tokyo with
+  `parallel_tool_calls: false`, all four models called the tool twice in each of 12
+  answers. MiniMax counted past `stop: [" 5"]` in all 6 asks, and answered a fun-fact
+  question without calling the tool in all 12 asks forcing it, with `tool_choice`
+  `required` or naming the function; its `auto` (6 of 6) and `none` (6 of 6) were
+  honored. DeepSeek honored `stop`, and honored `required` and a named function with
+  thinking disabled (12 of 12), refusing both with its own 400 otherwise, "Thinking
+  mode does not support this tool_choice". On MiniMax's Anthropic endpoint,
+  `tool_choice.disable_parallel_tool_use` was ignored as well: 6 answers, two calls
+  each. The gateway now refuses `parallel_tool_calls: false` for both vendors,
+  MiniMax's `stop` and forced `tool_choice`, and MiniMax's `disable_parallel_tool_use`
+  on the Messages routes.
+
+The tier's first run failed on the ledger checks of streamed answers: openai-go stops
+reading at `[DONE]`, before the gateway writes the row, so the check now waits for it.
+The whole live tier then passed, its 24 Anthropic tests and the 23 new ones, and the
+Chat Completions tests passed again after their aliases were renamed apart from the
+model ids, so that the gateway's rewrite of `model` shows. Mutation testing caught:
+- all 60 mutants of the default tier, across the routes and envelope, the upstream
+  request, the stream relay, the usage reading, the refusals, the model list and the
+  span names. Two survived at first, both an error in Anthropic's envelope where
+  OpenAI's belongs, until the tests pinned the envelope's exact fields;
+- all 5 against the live checks: the usage not asked of a stream, the usage chunk
+  never withheld, a chunk's model not rewritten, and MiniMax's `stop` and DeepSeek's
+  `parallel_tool_calls` refusals dropped. The chunk's model survived at first, while
+  each live alias shared its model's id.

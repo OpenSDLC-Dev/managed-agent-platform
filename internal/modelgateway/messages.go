@@ -67,8 +67,14 @@ func bounded(w http.ResponseWriter) *http.ResponseController {
 	return rc
 }
 
-// messages serves /v1/messages and its count_tokens twin.
-func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, path string) {
+// inference serves /v1/messages and its count_tokens twin on the Anthropic
+// protocol, and /v1/chat/completions on the OpenAI one: each passes through
+// to the alias's deployments on its own protocol.
+func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, path string) {
+	proto := profile.Anthropic
+	if path == "/v1/chat/completions" {
+		proto = profile.OpenAI
+	}
 	start := time.Now()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
@@ -103,16 +109,16 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		writeError(w, r, invalid("model: %s serves %s, not chat", model, a.Kind))
 		return
 	}
-	attempts := snap.Plan(a, profile.Anthropic, r.Header.Get(SessionHeader), h.draw)
+	attempts := snap.Plan(a, proto, r.Header.Get(SessionHeader), h.draw)
 	if len(attempts) == 0 {
 		writeError(w, r, &apiError{http.StatusServiceUnavailable, "api_error",
-			fmt.Sprintf("model %s has no enabled upstream on the Anthropic protocol", model)})
+			fmt.Sprintf("model %s has no enabled upstream on the %s protocol", model, protocolNames[proto])})
 		return
 	}
 	// A deployment whose vendor would ignore what the request asks for is
 	// skipped; a count is made all the same where every one would, since
 	// what a vendor ignores leaves the count unchanged.
-	kept, ignored := honoring(attempts, top)
+	kept, ignored := honoring(attempts, top, proto)
 	switch {
 	case len(kept) > 0:
 		if len(kept) < len(attempts) {
@@ -143,16 +149,23 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 		return
 	}
 	out := &outcome{}
-	defer h.record(w, r, c, a.Name, model, path, start, out)
+	defer h.record(w, r, c, a.Name, model, path, proto, start, out)
 	call := call{
+		proto:  proto,
 		top:    top,
-		hist:   parseHistory(top["messages"]),
 		alias:  model,
 		path:   path,
-		stream: path == "/v1/messages" && string(bytes.TrimSpace(top["stream"])) == "true",
-		header: forwarded(r.Header),
+		stream: path != "/v1/messages/count_tokens" && string(bytes.TrimSpace(top["stream"])) == "true",
 		start:  start,
 		out:    out,
+	}
+	// Thinking provenance and the caller's headers are the Messages API's:
+	// a Chat Completions caller's reasoning_content carries no signature to
+	// follow, and an OpenAI SDK's headers name an OpenAI account.
+	if proto == profile.Anthropic {
+		call.hist, call.header = parseHistory(top["messages"]), forwarded(r.Header)
+	} else {
+		call.usage = asksForUsage(top)
 	}
 	if dep := call.hist.producer(attempts); dep != "" {
 		attempts = preferring(attempts, dep)
@@ -204,13 +217,18 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request, c caller, pat
 	last.write(w, r, out)
 }
 
+// protocolNames names each protocol for a caller.
+var protocolNames = map[profile.Protocol]string{profile.Anthropic: "Anthropic", profile.OpenAI: "OpenAI"}
+
 // call is what every attempt of one request sends.
 type call struct {
+	proto  profile.Protocol
 	top    map[string]json.RawMessage
 	hist   *history // its messages' thinking, nil when there is none
 	alias  string   // the model name the caller sent, which the answer carries back
 	path   string
 	stream bool
+	usage  bool        // a Chat Completions stream's caller asked for its usage chunk
 	header http.Header // the caller's headers that go upstream
 	start  time.Time   // when the request arrived
 	out    *outcome    // what the ledger is told of it
@@ -359,11 +377,18 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	}
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
 	prof, _ := profile.Lookup(at.Provider.Profile)
-	body := upstreamBody(c, at.Deployment, prof, strip)
-	wrap := newWrapping(at.Deployment.ID, strip)
+	// An OpenAI base URL ends where /chat/completions follows (profile).
+	var body []byte
+	var wrap *wrapping
+	path := c.path
+	if c.proto == profile.OpenAI {
+		body, path = chatBody(c, at.Deployment), "/chat/completions"
+	} else {
+		body, wrap = upstreamBody(c, at.Deployment, prof, strip), newWrapping(at.Deployment.ID, strip)
+	}
 	ctx, guard := provider.NewStallGuard(ctx, at.Provider.StallTimeout)
 	defer guard.Stop()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, at.Endpoint+c.path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, at.Endpoint+path, bytes.NewReader(body))
 	if err != nil {
 		return &failure{status: http.StatusBadGateway, typ: "api_error", err: red.Error(err)}, true
 	}
@@ -375,7 +400,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	}
 	propagate(ctx, at.Provider, req.Header)
 	req.Header.Set("Content-Type", "application/json")
-	if prof.BearerAuth {
+	if prof.BearerAuth || c.proto == profile.OpenAI { // every OpenAI-compatible API takes a Bearer token
 		req.Header.Set("Authorization", "Bearer "+string(key))
 	} else {
 		req.Header.Set("x-api-key", string(key))
@@ -426,7 +451,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			case e.Name == "error":
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 			default:
-				relayStream(ctx, w, events, held, e, c, wrap, requestID(r), guard, red)
+				var p streamProto = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
+				if c.proto == profile.OpenAI {
+					p = &chatStream{c: c, red: red, withhold: !c.usage}
+				}
+				relayStream(ctx, w, events, held, e, c, p, guard, red)
 				return nil, false
 			}
 		}
@@ -446,12 +475,19 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	w.Header().Set("Content-Type", "application/json")
 	bounded(w)
 	w.WriteHeader(resp.StatusCode)
-	body, usage := answerJSON(b, c.alias, wrap)
-	_, _ = w.Write(body)
-	c.out.status = resp.StatusCode
-	if c.path == "/v1/messages" { // a count's answer is a count, not usage, whatever else it names
-		c.out.tokens = usageOf(nil, usage)
+	switch {
+	case c.proto == profile.OpenAI:
+		body, usage := chatAnswerJSON(b, c.alias)
+		_, _ = w.Write(body)
+		c.out.tokens = chatUsageOf(usage)
+	default:
+		body, usage := answerJSON(b, c.alias, wrap)
+		_, _ = w.Write(body)
+		if c.path == "/v1/messages" { // a count's answer is a count, not usage, whatever else it names
+			c.out.tokens = usageOf(nil, usage)
+		}
 	}
+	c.out.status = resp.StatusCode
 	return nil, false
 }
 
@@ -582,27 +618,24 @@ func answerJSON(b []byte, alias string, wrap *wrapping) ([]byte, json.RawMessage
 func keepAlive(e upstream.Event) bool { return e.Name == "ping" || e.Name == "" && e.Data == nil }
 
 // relayStream passes an upstream's events to the caller as each arrives —
-// the keep-alives held before the first, then the first, then the rest —
-// rewriting only message_start's message (answerJSON), an upstream error
-// event (errorJSON) and a thinking block's wrapper, on its start or its first
-// non-empty signature fragment. Comments and pings pass unchanged, and each
-// event goes out
-// whole: one the upstream cut off at the end of its stream is completed when
-// its data parses, so the caller dispatches it and nothing written after it
-// merges in, and dropped when its data does not, being unfinished. The
-// usage message_start and message_delta report, the error the caller is
-// given, and the time to the first event that is not a keep-alive — the
-// relay may begin on keep-alives past maxHeld — go to c.out as they pass.
-// When the caller stops reading — or reads too slowly to take an event within
-// writeStall — the stream is still read. When the upstream fails partway, or
-// ends before message_stop, the caller gets an error event, the only way left
-// to say so, and an unfinished event before it is dropped rather than merged
-// into it. Once message_stop or the upstream's own error event has passed, the
-// stream has said all it will and the relay ends: an upstream that holds its
-// connection open after that holds nothing of the gateway's. Ending there
-// resets the stream on an HTTP/2 connection, which a TLS upstream negotiates,
-// and gives up an HTTP/1.1 one rather than returning it to the pool.
-func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, c call, wrap *wrapping, rid string, guard *provider.StallGuard, red provider.Redactor) {
+// the keep-alives held before the first, then the first, then the rest — as
+// p, the stream's protocol, rewrites or withholds each. Comments and pings
+// pass unchanged, and each event goes out whole: one the upstream cut off at
+// the end of its stream is completed when its data parses, so the caller
+// dispatches it and nothing written after it merges in, and dropped when its
+// data does not, being unfinished. The usage the events report, the error
+// the caller is given, and the time to the first event that is not a
+// keep-alive — the relay may begin on keep-alives past maxHeld — go to c.out
+// as they pass. When the caller stops reading — or reads too slowly to take
+// an event within writeStall — the stream is still read. When the upstream
+// fails partway, or ends before it has said all it will, the caller gets
+// p's error event, the only way left to say so, and an unfinished event
+// before it is dropped rather than merged into it. Once the stream has said
+// all it will the relay ends: an upstream that holds its connection open
+// after that holds nothing of the gateway's. Ending there resets the stream
+// on an HTTP/2 connection, which a TLS upstream negotiates, and gives up an
+// HTTP/1.1 one rather than returning it to the pool.
+func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, c call, p streamProto, guard *provider.StallGuard, red provider.Redactor) {
 	c.out.status = http.StatusOK
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -626,29 +659,11 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		if c.out.ttft == 0 && !keepAlive(e) {
 			c.out.ttft = time.Since(c.start)
 		}
-		out := e.Raw
-		switch {
-		case e.Data == nil:
-		case e.Name == "message_start":
-			d, usage := messageStart(e.Data, c.alias, wrap)
-			c.out.tokens = usageOf(nil, usage)
-			out = e.WithData(d)
-		case e.Name == "message_delta":
-			c.out.tokens = usageOf(c.out.tokens, member(e.Data, "usage"))
-		case e.Name == "error":
-			c.out.errType = errorTypeOf(e.Data, 0)
-			out = e.WithData(errorJSON(ctx, red, e.Data, rid))
-		case e.Name == "content_block_start":
-			if d := wrap.start(e.Data); d != nil {
-				out = e.WithData(d)
-			}
-		case e.Name == "content_block_delta":
-			if d := wrap.delta(e.Data); d != nil {
-				out = e.WithData(d)
-			}
+		out, last := p.event(e)
+		if out != nil {
+			send(out)
 		}
-		send(out)
-		done = done || e.Name == "message_stop" || e.Name == "error"
+		done = done || last
 	}
 	if len(held) > 0 {
 		send(held)
@@ -656,7 +671,7 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 	relay(first)
 	for !done {
 		e, err := events.Next()
-		torn := errors.Is(err, io.EOF) && e.Data != nil && !json.Valid(e.Data)
+		torn := errors.Is(err, io.EOF) && e.Data != nil && !json.Valid(e.Data) && !isDone(e.Data)
 		if len(e.Raw) > 0 && (err == nil || errors.Is(err, io.EOF)) && !torn {
 			if err != nil {
 				e.Raw = terminated(e.Raw)
@@ -667,7 +682,11 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 			continue
 		}
 		if errors.Is(err, io.EOF) {
-			err = errors.New("the stream ended before message_stop")
+			why := p.ended()
+			if why == "" {
+				return
+			}
+			err = errors.New(why)
 		} else {
 			err = guard.Cause(err)
 		}
@@ -676,12 +695,136 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 			typ = "timeout_error"
 		}
 		c.out.errType = typ
-		msg := encodeJSON(map[string]any{"type": "error", "request_id": rid,
-			"error": map[string]string{"type": typ, "message": "upstream stream failed: " + red.Error(err).Error()}})
-		send([]byte("event: error\ndata: " + string(msg) + "\n\n"))
+		send(p.failure(typ, "upstream stream failed: "+red.Error(err).Error()))
 		return
 	}
 }
+
+// streamProto is what relaying a stream takes from its protocol.
+type streamProto interface {
+	// event is e as the caller gets it, nil to withhold it, and whether the
+	// stream has now said all it will.
+	event(e upstream.Event) (out []byte, last bool)
+	// ended is why an upstream ending its stream now has ended it too soon,
+	// or "" when it has said all it will.
+	ended() string
+	// failure is the event telling the caller the stream failed.
+	failure(typ, msg string) []byte
+}
+
+// messagesStream relays an Anthropic stream, rewriting only message_start's
+// message (answerJSON), an upstream error event (errorJSON) and a thinking
+// block's wrapper, on its start or its first non-empty signature fragment;
+// the usage message_start and message_delta report goes to c.out. It has
+// said all it will at message_stop or its own error event.
+type messagesStream struct {
+	c    call
+	wrap *wrapping
+	ctx  context.Context
+	red  provider.Redactor
+	rid  string
+}
+
+func (s *messagesStream) event(e upstream.Event) ([]byte, bool) {
+	out := e.Raw
+	switch {
+	case e.Data == nil:
+	case e.Name == "message_start":
+		d, usage := messageStart(e.Data, s.c.alias, s.wrap)
+		s.c.out.tokens = usageOf(nil, usage)
+		out = e.WithData(d)
+	case e.Name == "message_delta":
+		s.c.out.tokens = usageOf(s.c.out.tokens, member(e.Data, "usage"))
+	case e.Name == "error":
+		s.c.out.errType = errorTypeOf(e.Data, 0)
+		out = e.WithData(errorJSON(s.ctx, s.red, e.Data, s.rid))
+	case e.Name == "content_block_start":
+		if d := s.wrap.start(e.Data); d != nil {
+			out = e.WithData(d)
+		}
+	case e.Name == "content_block_delta":
+		if d := s.wrap.delta(e.Data); d != nil {
+			out = e.WithData(d)
+		}
+	}
+	return out, e.Name == "message_stop" || e.Name == "error"
+}
+
+func (s *messagesStream) ended() string { return "the stream ended before message_stop" }
+
+func (s *messagesStream) failure(typ, msg string) []byte {
+	b := encodeJSON(map[string]any{"type": "error", "request_id": s.rid, "error": map[string]string{"type": typ, "message": msg}})
+	return []byte("event: error\ndata: " + string(b) + "\n\n")
+}
+
+// chatStream relays a Chat Completions stream, rewriting each chunk's model
+// to the name the caller sent and redacting an upstream's error; the last
+// usage a chunk reports goes to c.out. The gateway asks every stream for
+// its usage (chatBody), and withholds the chunk carrying it — choices empty,
+// usage set, as OpenAI documents stream_options.include_usage — from a
+// caller that did not ask, which may not expect a chunk without choices.
+// The stream has said all it will at [DONE] or an error; an upstream may
+// also end it after its finish without [DONE], as MiniMax-M3 does (probed
+// 2026-10-08), which is no failure.
+type chatStream struct {
+	c        call
+	red      provider.Redactor
+	withhold bool // the caller did not ask for the usage chunk
+	finished bool // a choice has finished
+}
+
+func (s *chatStream) event(e upstream.Event) ([]byte, bool) {
+	if e.Data == nil {
+		return e.Raw, false
+	}
+	if isDone(e.Data) {
+		return e.Raw, true
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(e.Data, &obj) != nil || obj == nil {
+		return e.Raw, false
+	}
+	if _, ok := obj["error"]; ok {
+		s.c.out.errType = errorTypeOf(e.Data, 0)
+		return e.WithData(redactJSON(s.red, e.Data)), true
+	}
+	usage := obj["usage"]
+	if t := chatUsageOf(usage); t != nil {
+		s.c.out.tokens = t
+	}
+	var choices []map[string]json.RawMessage
+	_ = json.Unmarshal(obj["choices"], &choices)
+	for _, ch := range choices {
+		var finish string
+		if json.Unmarshal(ch["finish_reason"], &finish) == nil && finish != "" {
+			s.finished = true
+		}
+	}
+	if s.withhold && len(choices) == 0 && len(usage) > 0 && !bytes.Equal(bytes.TrimSpace(usage), []byte("null")) {
+		return nil, false
+	}
+	if _, ok := obj["model"]; !ok {
+		return e.Raw, false
+	}
+	obj["model"] = encodeJSON(s.c.alias)
+	return e.WithData(encodeJSON(obj)), false
+}
+
+func (s *chatStream) ended() string {
+	if s.finished {
+		return ""
+	}
+	return "the stream ended before its finish"
+}
+
+func (s *chatStream) failure(typ, msg string) []byte {
+	b := encodeJSON(map[string]any{"error": map[string]any{"message": msg, "type": typ, "param": nil, "code": nil}})
+	return []byte("data: " + string(b) + "\n\n")
+}
+
+// isDone reports whether a Chat Completions event's data is the [DONE] that
+// ends a stream.
+func isDone(data []byte) bool { return bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) }
 
 // terminated completes an event the upstream cut off at the end of its
 // stream with the blank line that ends an event.

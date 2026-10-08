@@ -63,7 +63,7 @@ const (
 )
 
 // operations names the GenAI operation of each route, by its ledger name.
-var operations = map[string]string{"messages": "chat", "count_tokens": "count_tokens"}
+var operations = map[string]string{"messages": "chat", "count_tokens": "count_tokens", "chat_completions": "chat"}
 
 // serverSpan continues the caller's W3C trace context in one server span for
 // the request, as the control plane's withTracing does. With no tracer
@@ -86,8 +86,12 @@ func spanName(r *http.Request) string {
 	default:
 		return "HTTP"
 	}
-	switch path := strings.TrimPrefix(r.URL.Path, "/anthropic"); {
-	case path == "/v1/messages", path == "/v1/messages/count_tokens", path == "/v1/models":
+	path := strings.TrimPrefix(r.URL.Path, "/anthropic")
+	if p, ok := strings.CutPrefix(r.URL.Path, "/openai"); ok {
+		path = p
+	}
+	switch {
+	case path == "/v1/messages", path == "/v1/messages/count_tokens", path == "/v1/models", path == "/v1/chat/completions":
 		return r.Method + " " + path
 	case strings.HasPrefix(path, "/v1/models/"):
 		return r.Method + " /v1/models/{model_id}"

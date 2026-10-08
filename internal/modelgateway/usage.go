@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
@@ -41,13 +42,13 @@ const recordTimeout = 10 * time.Second
 // chunked one, gets a bound of its own after it, so a slow write here
 // cannot spend the bound the answer was given. A failed write is the
 // operator's to see in the log, never the caller's.
-func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias, model, path string, start time.Time, out *outcome) {
+func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias, model, path string, proto profile.Protocol, start time.Time, out *outcome) {
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Time{})
 	defer func() { _ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load()))) }()
 	u := store.Usage{
 		RequestID: requestID(r), APIKeyID: c.keyID, Model: ledgerText(model), Alias: alias,
-		SessionID: r.Header.Get(SessionHeader), Protocol: "anthropic", Endpoint: endpoints[path],
+		SessionID: r.Header.Get(SessionHeader), Protocol: string(proto), Endpoint: endpoints[path],
 		Status: out.status, ErrorType: ledgerText(out.errType), Tokens: out.tokens, Latency: time.Since(start), TTFT: out.ttft,
 	}
 	if out.at != nil {
@@ -84,7 +85,8 @@ func ledgerText(s string) string {
 }
 
 // endpoints names each inbound route in the ledger.
-var endpoints = map[string]string{"/v1/messages": "messages", "/v1/messages/count_tokens": "count_tokens"}
+var endpoints = map[string]string{"/v1/messages": "messages", "/v1/messages/count_tokens": "count_tokens",
+	"/v1/chat/completions": "chat_completions"}
 
 // admit counts the request against its key's limits, when the key has any,
 // and answers a refusal itself: 429 rate_limit_error with retry-after in
@@ -170,6 +172,43 @@ func usageOf(prev *store.Tokens, raw json.RawMessage) *store.Tokens {
 		return prev
 	}
 	return &t
+}
+
+// chatUsageOf reads an OpenAI usage object, by its exact keys, in the
+// ledger's meaning, the Messages API's: input is the prompt tokens not read
+// from the cache, and cache reads are counted apart. Both vendors count the
+// cache reads inside prompt_tokens and report them as
+// prompt_tokens_details.cached_tokens; DeepSeek also as
+// prompt_cache_hit_tokens, read when the details are absent (probed
+// 2026-10-08). OpenAI reports no cache writes. A usage without either
+// prompt_tokens or completion_tokens, null, or a count usageOf would not
+// read, is nil; a cache count past the prompt's is read as the prompt.
+func chatUsageOf(raw json.RawMessage) *store.Tokens {
+	var u map[string]json.RawMessage
+	if json.Unmarshal(raw, &u) != nil || u == nil {
+		return nil
+	}
+	prompt, okPrompt := countOf(u["prompt_tokens"])
+	completion, okCompletion := countOf(u["completion_tokens"])
+	if !okPrompt && !okCompletion {
+		return nil
+	}
+	cached, ok := countOf(member(u["prompt_tokens_details"], "cached_tokens"))
+	if !ok {
+		cached, _ = countOf(u["prompt_cache_hit_tokens"])
+	}
+	cached = min(cached, prompt)
+	return &store.Tokens{Input: prompt - cached, Output: completion, CacheRead: cached}
+}
+
+// countOf reads a count as usageOf does: a whole number from zero to
+// maxCount, not null.
+func countOf(v json.RawMessage) (int64, bool) {
+	var n int64
+	if len(v) == 0 || bytes.Equal(bytes.TrimSpace(v), []byte("null")) || json.Unmarshal(v, &n) != nil || n < 0 || n > maxCount {
+		return 0, false
+	}
+	return n, true
 }
 
 // member is the value under the exact keys path in a JSON object, nil when

@@ -64,11 +64,13 @@ type Profile struct {
 	// as text, for a vendor that refuses the block, in the rendering the
 	// brain's flatten_search_results uses (internal/provider/anthropic).
 	FlattenSearchResults bool `json:"-"`
-	// Ignores names what in a request to model, a deployment's upstream
-	// model id, the vendor ignores although the answer depends on it — by
-	// its documentation or the live tier — or "" for nothing; no such
-	// deployment serves the request.
-	Ignores func(model string, request map[string]json.RawMessage) string `json:"-"`
+	// Ignores names what in a Messages request to model, a deployment's
+	// upstream model id, the vendor ignores although the answer depends on
+	// it — by its documentation or the live tier — or "" for nothing; no
+	// such deployment serves the request. ChatIgnores is its twin for a
+	// Chat Completions request to the vendor's OpenAI endpoint.
+	Ignores     func(model string, request map[string]json.RawMessage) string `json:"-"`
+	ChatIgnores func(model string, request map[string]json.RawMessage) string `json:"-"`
 }
 
 // Supports reports whether a provider of this profile may have an endpoint on
@@ -91,7 +93,7 @@ var profiles = []Profile{
 	{Name: "deepseek", DisplayName: "DeepSeek", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, BaseURL: "https://api.deepseek.com/anthropic"},
 		{Protocol: OpenAI, BaseURL: "https://api.deepseek.com"},
-	}, FlattenSearchResults: true, Ignores: deepseekIgnores},
+	}, FlattenSearchResults: true, Ignores: deepseekIgnores, ChatIgnores: deepseekChatIgnores},
 	// MiniMax's Messages API reference takes either header and says
 	// "Authorization: Bearer <API_KEY> is recommended". It refuses a
 	// search_result block in a tool_result with a 400, "invalid tool_result
@@ -101,7 +103,7 @@ var profiles = []Profile{
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.minimax.io/anthropic"},
 		{Protocol: OpenAI, Region: RegionCN, BaseURL: "https://api.minimax.cn/v1"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.minimax.io/v1"},
-	}, BearerAuth: true, FlattenSearchResults: true, Ignores: minimaxIgnores},
+	}, BearerAuth: true, FlattenSearchResults: true, Ignores: minimaxIgnores, ChatIgnores: minimaxChatIgnores},
 	// BigModel's Claude API compatibility guide sends the key as x-api-key.
 	{Name: "zhipu", DisplayName: "Zhipu (BigModel · Z.ai)", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/anthropic"},
@@ -177,6 +179,9 @@ func choiceType(choice map[string]json.RawMessage) string {
 // of theirs, so both are ignored. Its none passes through: a lapse of
 // MiniMax-M3's in a few of its asks, not an ignored field. The type is read
 // by its exact key, as MiniMax reads it: {"Type": "none"} is MiniMax's 400.
+// Its disable_parallel_tool_use is ignored too: asked for the time in two
+// timezones at once, M3 and M3.1-Flash-Preview called the tool twice in
+// each of 6 answers that set it (docs/HISTORY.md, 2026-10-08).
 func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 	var stops []json.RawMessage
 	if json.Unmarshal(req["stop_sequences"], &stops) == nil && len(stops) > 0 {
@@ -186,6 +191,10 @@ func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 	if json.Unmarshal(req["tool_choice"], &choice) == nil {
 		if typ := choiceType(choice); typ == "any" || typ == "tool" {
 			return "tool_choice.type"
+		}
+		var ban bool
+		if json.Unmarshal(choice["disable_parallel_tool_use"], &ban) == nil && ban {
+			return "tool_choice.disable_parallel_tool_use"
 		}
 	}
 	var thinking map[string]json.RawMessage
@@ -200,6 +209,52 @@ func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 // minimaxM2 matches MiniMax's M2.x model ids, MiniMax-M2 and MiniMax-M2.7
 // alike, in any case.
 var minimaxM2 = regexp.MustCompile(`(?i)^minimax-m2([.-]|$)`)
+
+// The ChatIgnores hooks rest on the live probes of the vendors' OpenAI
+// endpoints (docs/HISTORY.md, 2026-10-08), under the same rule as Ignores.
+// Asked for the time in two timezones at once with parallel_tool_calls
+// false, both of DeepSeek's models and both of MiniMax's called the tool
+// twice in every one of their 12 answers. DeepSeek honors stop, and honors
+// tool_choice required and a named function with thinking disabled (12 of
+// 12) while refusing both with its own 400 otherwise, so those pass through.
+
+// deepseekChatIgnores: parallel_tool_calls false.
+func deepseekChatIgnores(_ string, req map[string]json.RawMessage) string {
+	return parallelBanned(req)
+}
+
+// minimaxChatIgnores: parallel_tool_calls false; stop, which M3 and
+// M3.1-Flash-Preview counted past in all 6 asks to stop at " 5"; and
+// tool_choice required or naming a function, which they answered a fun-fact
+// question without calling in all 12 asks. Every value is read by its exact
+// key.
+func minimaxChatIgnores(_ string, req map[string]json.RawMessage) string {
+	if f := parallelBanned(req); f != "" {
+		return f
+	}
+	var stop string
+	var stops []json.RawMessage
+	if json.Unmarshal(req["stop"], &stop) == nil && stop != "" || json.Unmarshal(req["stop"], &stops) == nil && len(stops) > 0 {
+		return "stop"
+	}
+	var choice string
+	var named map[string]json.RawMessage
+	if json.Unmarshal(req["tool_choice"], &choice) == nil && choice == "required" ||
+		json.Unmarshal(req["tool_choice"], &named) == nil && choiceType(named) == "function" {
+		return "tool_choice"
+	}
+	return ""
+}
+
+// parallelBanned names parallel_tool_calls when it is false; null, which
+// decodes into a bool as false, sets nothing.
+func parallelBanned(req map[string]json.RawMessage) string {
+	var parallel *bool
+	if json.Unmarshal(req["parallel_tool_calls"], &parallel) == nil && parallel != nil && !*parallel {
+		return "parallel_tool_calls"
+	}
+	return ""
+}
 
 // All returns every profile, as copies the caller may keep and change.
 func All() []Profile {

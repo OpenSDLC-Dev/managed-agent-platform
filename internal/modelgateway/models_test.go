@@ -261,10 +261,12 @@ func TestModels(t *testing.T) {
 			t.Errorf("%s: %d", q, resp.StatusCode)
 		}
 	}
-	// The root answers Anthropic's shape only to an Anthropic caller; the
-	// prefix asks for it explicitly.
-	if resp, _ := e.do("GET", "/v1/models", "", map[string]string{"x-api-key": key}); resp.StatusCode != 404 {
-		t.Errorf("root without anthropic-version: %d", resp.StatusCode)
+	// The root answers Anthropic's shape only to an Anthropic caller, and
+	// OpenAI's to any other (TestModelsInOpenAIsShape); the prefix asks for
+	// Anthropic's explicitly.
+	if resp, b := e.do("GET", "/v1/models", "", map[string]string{"x-api-key": key}); resp.StatusCode != 200 ||
+		!strings.Contains(string(b), `"object":"list"`) || strings.Contains(string(b), "has_more") {
+		t.Errorf("root without anthropic-version: %d %s", resp.StatusCode, b)
 	}
 	if resp, b := e.do("GET", "/anthropic/v1/models", "", map[string]string{"x-api-key": key}); resp.StatusCode != 200 || !strings.Contains(string(b), "chat-00") {
 		t.Errorf("prefixed: %d", resp.StatusCode)

@@ -144,6 +144,48 @@ func (h *handler) listModels(w http.ResponseWriter, r *http.Request, c caller) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": data, "has_more": more, "first_id": first, "last_id": last})
 }
 
+// openAIModel is OpenAI's Model (checked against
+// github.com/openai/openai-go/v3 v3.73.0 — model.go Model), every field it
+// marks required present. An alias has no
+// vendor to name as its owner, so the gateway owns it, and its creation time
+// is the alias's.
+type openAIModel struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+// openAIListable reports whether the caller sees a in OpenAI's list: any
+// alias its grant covers, chat or not, since an OpenAI client may call every
+// kind. The wildcard is a fallback, not a model.
+func openAIListable(c caller, a store.Alias) bool { return a.Name != "*" && c.may(a.Name) }
+
+func openAIModelOf(a store.Alias) openAIModel {
+	return openAIModel{ID: a.Name, Object: "model", Created: a.CreatedAt.Unix(), OwnedBy: "modelgateway"}
+}
+
+// listOpenAIModels answers OpenAI's list, which has no pages.
+func (h *handler) listOpenAIModels(w http.ResponseWriter, _ *http.Request, c caller) {
+	data := []openAIModel{}
+	for _, a := range h.cfg.Catalog.Snapshot().Aliases() {
+		if openAIListable(c, a) {
+			data = append(data, openAIModelOf(a))
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+func (h *handler) getOpenAIModel(w http.ResponseWriter, r *http.Request, c caller, id string) {
+	// Alias answers a name it does not hold with the wildcard, which
+	// openAIListable refuses, so only the exact name is found.
+	if a, ok := h.cfg.Catalog.Snapshot().Alias(id); ok && openAIListable(c, a) {
+		writeJSON(w, http.StatusOK, openAIModelOf(a))
+		return
+	}
+	writeError(w, r, notFound("model: %s", id))
+}
+
 func (h *handler) getModel(w http.ResponseWriter, r *http.Request, c caller, id string) {
 	snap := h.cfg.Catalog.Snapshot()
 	// Alias answers a name it does not hold with the wildcard, which listable
