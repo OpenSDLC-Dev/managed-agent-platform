@@ -7156,7 +7156,8 @@ under the `responses` endpoint and the `openai` protocol; and a tool call with
 from the Response's items with openai-go's `ToParam`, the vendor answered, having been
 sent its own thinking back — on the Anthropic endpoint exactly the signatures the
 reasoning items' `encrypted_content` wrapped, on the OpenAI endpoint its
-`reasoning_content`. All 24 subtests passed.
+`reasoning_content`. All 24 subtests passed, and passed again on the code the review rounds
+below left.
 
 - **Effort.** Asked directly — DeepSeek's two models and MiniMax's two, a one-word
   question on the Anthropic endpoint with `output_config.effort` alone, with adaptive
