@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 )
 
 // Thinking provenance (docs/plan/59_model-gateway.md, "Routing, retries,
@@ -198,9 +199,9 @@ func (h *history) markStale() {
 
 // producer is the deployment among attempts that produced the newest block a
 // request keeps, or "" when no such block names one of them.
-func (h *history) producer(attempts []catalog.Attempt) string {
+func (h *history) producer(attempts []catalog.Attempt) (string, profile.Protocol) {
 	if h == nil {
-		return ""
+		return "", ""
 	}
 	for i := len(h.msgs) - 1; i >= 0; i-- {
 		bs := h.msgs[i].blocks
@@ -210,24 +211,26 @@ func (h *history) producer(attempts []catalog.Attempt) string {
 				continue
 			}
 			for _, at := range attempts {
-				if at.Deployment.ID == b.dep {
-					return b.dep
+				if at.Deployment.ID == b.dep && b.value == "" { // converted from reasoning_content
+					return b.dep, profile.OpenAI
+				} else if at.Deployment.ID == b.dep {
+					return b.dep, profile.Anthropic
 				}
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
-// carries reports whether dep is sent any thinking block, which is whether
-// strip mode would change its request.
-func (h *history) carries(dep string) bool {
+// carries reports whether dep is sent any thinking block on the protocol
+// converting names, which is whether strip mode would change its request.
+func (h *history) carries(dep string, converting bool) bool {
 	if h == nil {
 		return false
 	}
 	for _, m := range h.msgs {
 		for _, b := range m.blocks {
-			if b.keptFor(dep) {
+			if b.keptFor(dep, converting) {
 				return true
 			}
 		}
@@ -235,16 +238,24 @@ func (h *history) carries(dep string) bool {
 	return false
 }
 
-func (b histBlock) keptFor(dep string) bool {
-	return b.field != "" && !b.stale && b.dep != "" && b.dep == dep
+// keptFor reports whether the block goes back to dep, on a conversion
+// attempt when converting is set. A block a converted answer carries wraps
+// an empty value (signer), and one a passthrough answer carries never does,
+// an empty value ending its wrapping; each goes back only on the protocol
+// that produced it, since a vendor's Anthropic endpoint cannot verify
+// reasoning its OpenAI one returned, nor its OpenAI endpoint take a
+// signature.
+func (b histBlock) keptFor(dep string, converting bool) bool {
+	return b.field != "" && !b.stale && b.dep != "" && b.dep == dep && (b.value == "") == converting
 }
 
-// messagesFor is the messages dep is sent: its own thinking blocks unwrapped,
-// every other thinking block removed — all of them in strip mode — and an
+// messagesFor is the messages dep is sent, on a conversion attempt when
+// converting is set: its own thinking blocks from that protocol unwrapped
+// (keptFor), every other thinking block removed — all of them in strip mode — and an
 // assistant message the removal empties removed with it, the user turns it
 // separated joined into one, as the Messages API itself combines consecutive
 // same-role turns.
-func (h *history) messagesFor(dep string, strip bool) json.RawMessage {
+func (h *history) messagesFor(dep string, strip, converting bool) json.RawMessage {
 	var out []outMsg
 	emptied := false
 	for _, m := range h.msgs {
@@ -255,7 +266,7 @@ func (h *history) messagesFor(dep string, strip bool) json.RawMessage {
 				switch {
 				case b.field == "":
 					kept = append(kept, b.raw)
-				case !strip && b.keptFor(dep):
+				case !strip && b.keptFor(dep, converting):
 					kept = append(kept, withString(b.raw, b.field, b.value))
 				}
 			}
@@ -356,19 +367,22 @@ func withString(raw json.RawMessage, field, value string) json.RawMessage {
 	return out
 }
 
-// preferring moves the attempts at dep ahead of the others, each keeping its
-// order: the newest block's producer is tried first, whatever its priority,
-// since it is the one deployment sent the request's newest thinking.
-func preferring(attempts []catalog.Attempt, dep string) []catalog.Attempt {
+// preferring moves the attempts at dep ahead of the others, those on proto
+// first, each keeping its order: the newest block's producer is tried first,
+// whatever its priority, since it is the one deployment sent the request's
+// newest thinking, and on the protocol that produced it, the only one it
+// goes back on (keptFor).
+func preferring(attempts []catalog.Attempt, dep string, proto profile.Protocol) []catalog.Attempt {
 	out := make([]catalog.Attempt, 0, len(attempts))
-	for _, at := range attempts {
-		if at.Deployment.ID == dep {
-			out = append(out, at)
-		}
-	}
-	for _, at := range attempts {
-		if at.Deployment.ID != dep {
-			out = append(out, at)
+	for _, first := range []func(catalog.Attempt) bool{
+		func(at catalog.Attempt) bool { return at.Deployment.ID == dep && at.Protocol == proto },
+		func(at catalog.Attempt) bool { return at.Deployment.ID == dep && at.Protocol != proto },
+		func(at catalog.Attempt) bool { return at.Deployment.ID != dep },
+	} {
+		for _, at := range attempts {
+			if first(at) {
+				out = append(out, at)
+			}
 		}
 	}
 	return out

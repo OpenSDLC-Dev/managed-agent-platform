@@ -3,28 +3,40 @@ package modelgateway
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 	"slices"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
 // honoring keeps the attempts whose vendor does not ignore anything the
-// request, on proto, asks for (profile.Profile.Ignores and ChatIgnores), and
-// names each field the ones it dropped ignore, once and sorted, for the
-// refusal when it keeps none.
-func honoring(attempts []catalog.Attempt, req map[string]json.RawMessage, proto profile.Protocol) ([]catalog.Attempt, []string) {
+// request asks of it on the attempt's protocol (profile.Profile.Ignores and
+// ChatIgnores), and names each field the ones it dropped ignore, once and
+// sorted, for the refusal when it keeps none. A Messages request an attempt
+// converts is judged as converted, the Chat Completions request it becomes,
+// and the fields named as the caller wrote them (convertedField).
+func honoring(attempts []catalog.Attempt, req, converted map[string]json.RawMessage) ([]catalog.Attempt, []string) {
 	var ignored []string
 	kept := attempts[:0:0]
 	for _, at := range attempts {
 		p, _ := profile.Lookup(at.Provider.Profile)
-		ignores := p.Ignores
-		if proto == profile.OpenAI {
+		ignores, asked, named := p.Ignores, req, func(f string) string { return f }
+		if at.Protocol == profile.OpenAI {
 			ignores = p.ChatIgnores
 		}
+		if at.Protocol == profile.OpenAI && converted != nil {
+			// Each vendor takes thinking in its own words (ChatThinking).
+			asked, named = maps.Clone(converted), convertedField
+			delete(asked, "thinking")
+			if t := convert.Thinking(req["thinking"], p.ChatThinking); t != nil {
+				asked["thinking"] = t
+			}
+		}
 		if ignores != nil {
-			if field := ignores(at.Deployment.UpstreamModel, req); field != "" {
+			if field := named(ignores(at.Deployment.UpstreamModel, asked)); field != "" {
 				if !slices.Contains(ignored, field) {
 					ignored = append(ignored, field)
 				}
@@ -35,6 +47,19 @@ func honoring(attempts []catalog.Attempt, req map[string]json.RawMessage, proto 
 	}
 	slices.Sort(ignored)
 	return kept, ignored
+}
+
+// convertedField names a field a Chat Completions hook named in a converted
+// request as the Messages request it came from has it.
+func convertedField(f string) string {
+	if m, ok := map[string]string{
+		"parallel_tool_calls": "tool_choice.disable_parallel_tool_use",
+		"stop":                "stop_sequences",
+		"tool_choice":         "tool_choice.type",
+	}[f]; ok {
+		return m
+	}
+	return f
 }
 
 // flattenSearchResults renders each search_result block in a tool_result's

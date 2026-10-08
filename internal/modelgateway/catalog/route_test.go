@@ -91,6 +91,30 @@ func TestPlanSkipsWhatIsNotEligible(t *testing.T) {
 	}
 }
 
+// A Messages request reaches each credential on the protocol it is allowed
+// on: its own where it can, else OpenAI's, which the gateway converts to. A
+// Chat Completions request is never converted.
+func TestPlanConvertsOnlyWhereItMust(t *testing.T) {
+	cfg := routing()
+	cfg.Credentials[1].Protocols = []profile.Protocol{profile.OpenAI}
+	a := store.Alias{Name: "m", Targets: []store.Target{{DeploymentID: "d1", Weight: 1}}}
+	var got []string
+	for _, at := range newSnapshot(cfg).Plan(a, profile.Anthropic, "", fixed(0.5)) {
+		got = append(got, at.Credential.ID+" "+string(at.Protocol)+" "+at.Endpoint)
+	}
+	want := []string{"c1a anthropic https://one/anthropic", "c1b openai https://one/v1"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("plan = %v, want %v", got, want)
+	}
+	cfg = routing()
+	cfg.Credentials[2].Protocols = []profile.Protocol{profile.OpenAI}
+	cfg.Providers[0].Endpoints = map[profile.Protocol]string{profile.Anthropic: "https://one/anthropic"}
+	a = store.Alias{Name: "m", Targets: []store.Target{{DeploymentID: "d1", Weight: 1}, {DeploymentID: "d3", Weight: 1}}}
+	if got := newSnapshot(cfg).Plan(a, profile.OpenAI, "", fixed(0.5)); len(got) != 0 {
+		t.Errorf("a Chat Completions request reached %v", ids(got))
+	}
+}
+
 // Over many draws, a deployment comes first in proportion to its weight.
 func TestPlanDrawsByWeight(t *testing.T) {
 	s := newSnapshot(routing())

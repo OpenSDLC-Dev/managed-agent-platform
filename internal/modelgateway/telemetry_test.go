@@ -143,7 +143,7 @@ func TestARequestIsTracedAcrossItsAttempts(t *testing.T) {
 		dep, _ := attr(c.Attributes(), "modelgateway.deployment.id")
 		want := map[string]string{"gen_ai.operation.name": "chat", "gen_ai.provider.name": "anthropic-generic",
 			"server.address": "127.0.0.1", "http.response.status_code": "500", "error.type": "api_error",
-			"gen_ai.request.model": "model-a"}
+			"gen_ai.request.model": "model-a", "modelgateway.upstream.protocol": "anthropic"}
 		if i == len(clients)-1 {
 			want = map[string]string{"gen_ai.request.model": "model-b", "http.response.status_code": "200",
 				"modelgateway.credential.id": cred.ID}
@@ -607,5 +607,28 @@ func TestTheMetricsCountWhatTheLedgerRecords(t *testing.T) {
 	}
 	if got, _ := metricSum(rm, modelgateway.MetricCost, map[string]string{}); math.Abs(got-cost) > 1e-12 || cost == 0 {
 		t.Errorf("%s = %v, want the ledger's %v", modelgateway.MetricCost, got, cost)
+	}
+}
+
+// A converted attempt's span names the protocol it reached its upstream on,
+// which is not the caller's.
+func TestAConvertedAttemptNamesItsProtocol(t *testing.T) {
+	rec, _ := observed(t)
+	e := newEnv(t)
+	f := newFake(t, chatAnswer("ok", deepseekStyle))
+	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	clients := ended(t, rec, trace.SpanKindClient, 1)
+	if len(clients) != 1 {
+		t.Fatalf("%d client spans", len(clients))
+	}
+	if got, _ := attr(clients[0].Attributes(), "modelgateway.upstream.protocol"); got != "openai" {
+		t.Errorf("modelgateway.upstream.protocol = %q, want openai", got)
 	}
 }

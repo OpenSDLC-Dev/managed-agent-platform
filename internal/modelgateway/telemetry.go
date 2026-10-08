@@ -60,6 +60,9 @@ const (
 	attrKey        = "modelgateway.api_key.id"
 	attrEndpoint   = "modelgateway.endpoint"
 	attrTokenType  = "modelgateway.token.type"
+	// attrUpstreamProtocol is the protocol an attempt reached its upstream
+	// on, which differs from the caller's where the gateway converts.
+	attrUpstreamProtocol = "modelgateway.upstream.protocol"
 )
 
 // serverSpan continues the caller's W3C trace context in one server span for
@@ -158,6 +161,7 @@ func (h *handler) tracedAttempt(w http.ResponseWriter, r *http.Request, c call, 
 		semconv.GenAIRequestModel(at.Deployment.UpstreamModel),
 		attribute.String(attrDeployment, at.Deployment.ID),
 		attribute.String(attrCredential, at.Credential.ID),
+		attribute.String(attrUpstreamProtocol, string(at.Protocol)),
 	}
 	if u, err := url.Parse(at.Endpoint); err == nil {
 		attrs = append(attrs, semconv.ServerAddress(u.Hostname()))

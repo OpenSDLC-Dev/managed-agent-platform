@@ -21,6 +21,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 // The gateway's live tier (docs/plan/59_model-gateway.md, "Live tier"): the
@@ -339,13 +340,13 @@ func liveTurn(t *testing.T, cl *anthropic.Client, r liveRoute, history []anthrop
 
 // liveSend sends p whole, or streamed and assembled by the SDK's Accumulate;
 // a stream it leaves early is closed, and the vendor stops generating.
-func liveSend(cl *anthropic.Client, p anthropic.MessageNewParams, stream bool) (*anthropic.Message, error) {
+func liveSend(cl *anthropic.Client, p anthropic.MessageNewParams, stream bool, opts ...option.RequestOption) (*anthropic.Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), liveCallTimeout)
 	defer cancel()
 	if !stream {
-		return cl.Messages.New(ctx, p)
+		return cl.Messages.New(ctx, p, opts...)
 	}
-	s := cl.Messages.NewStreaming(ctx, p)
+	s := cl.Messages.NewStreaming(ctx, p, opts...)
 	defer s.Close()
 	var m anthropic.Message
 	for s.Next() {

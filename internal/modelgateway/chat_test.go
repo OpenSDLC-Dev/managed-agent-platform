@@ -292,7 +292,15 @@ func TestAChatStreamBrokenOffEndsWithAnError(t *testing.T) {
 	if s.Err() == nil || !strings.Contains(s.Err().Error(), "the stream ended before its finish") {
 		t.Errorf("the SDK read %v", s.Err())
 	}
-	if rows := e.ledger(); len(rows) != 2 || rows[0].ErrorType != "api_error" {
+	// The SDK stops at the error chunk without reading the response to its
+	// end, so the handler may not yet have written the second row.
+	var rows []store.Usage
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if rows = e.ledger(); len(rows) == 2 {
+			break
+		}
+	}
+	if len(rows) != 2 || rows[0].ErrorType != "api_error" {
 		t.Errorf("ledger: %+v", rows)
 	}
 }
@@ -375,23 +383,30 @@ func TestAChatRequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 	cases := []struct {
 		prof, field, set string
 		unset            []string
+		model            string // the deployment's upstream model, "m" when empty
 	}{
-		{"minimax", "stop", `"stop":["END"]`, []string{`"stop":[]`, `"stop":null`, `"Stop":"END"`}},
-		{"minimax", "stop", `"stop":"END"`, []string{`"stop":""`}},
-		{"minimax", "tool_choice", tools + `,"tool_choice":"required"`, []string{tools + `,"tool_choice":"auto"`, tools + `,"tool_choice":"none"`, tools + `,"Tool_Choice":"required"`}},
-		{"minimax", "tool_choice", tools + `,"tool_choice":{"type":"function","function":{"name":"t"}}`, []string{tools + `,"tool_choice":{"Type":"function","function":{"name":"t"}}`}},
+		{"minimax", "stop", `"stop":["END"]`, []string{`"stop":[]`, `"stop":null`, `"Stop":"END"`}, ""},
+		{"minimax", "stop", `"stop":"END"`, []string{`"stop":""`}, ""},
+		{"minimax", "tool_choice", tools + `,"tool_choice":"required"`, []string{tools + `,"tool_choice":"auto"`, tools + `,"tool_choice":"none"`, tools + `,"Tool_Choice":"required"`}, ""},
+		{"minimax", "tool_choice", tools + `,"tool_choice":{"type":"function","function":{"name":"t"}}`, []string{tools + `,"tool_choice":{"Type":"function","function":{"name":"t"}}`}, ""},
 		{"minimax", "tool_choice", tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"t"}}]}}`,
-			[]string{tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"Mode":"required"}}`}},
-		{"minimax", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`, []string{tools + `,"parallel_tool_calls":true`, tools + `,"parallel_tool_calls":null`}},
+			[]string{tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"Mode":"required"}}`}, ""},
+		{"minimax", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`, []string{tools + `,"parallel_tool_calls":true`, tools + `,"parallel_tool_calls":null`}, ""},
 		{"deepseek", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`,
-			[]string{tools + `,"parallel_tool_calls":true`, tools + `,"tool_choice":"required"`, `"stop":["END"]`}},
+			[]string{tools + `,"parallel_tool_calls":true`, tools + `,"tool_choice":"required"`, `"stop":["END"]`}, ""},
+		{"minimax", "thinking.type", `"thinking":{"type":"disabled"}`,
+			[]string{`"thinking":{"type":"adaptive"}`, `"thinking":{"Type":"disabled"}`}, "MiniMax-M2.7"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.prof+" "+tc.set, func(t *testing.T) {
 			e := newEnv(t)
 			vendor, other := newFake(t, chatAnswer("vendor", deepseekStyle)), newFake(t, chatAnswer("other", deepseekStyle))
 			p := onOpenAI(e, tc.prof, vendor.URL)
-			d := e.deployment(p, "m")
+			model := tc.model
+			if model == "" {
+				model = "m"
+			}
+			d := e.deployment(p, model)
 			e.alias("mixed", target(d, 0), target(e.deployment(onOpenAI(e, "openai-generic", other.URL), "other-model"), 1))
 			e.alias("alone", target(d, 0))
 			key := e.key(everyAlias)
@@ -467,7 +482,7 @@ func TestModelsInOpenAIsShape(t *testing.T) {
 
 // An OpenAI usage object is read by its exact keys in the ledger's meaning:
 // input without the cache reads, which DeepSeek also reports on a key of its
-// own, read when the details are absent.
+// own, read when the details are absent, and without the cache writes.
 func TestChatUsageInTheLedgersMeaning(t *testing.T) {
 	for _, c := range []struct {
 		usage string
@@ -479,6 +494,8 @@ func TestChatUsageInTheLedgersMeaning(t *testing.T) {
 		{`{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":null},"prompt_cache_hit_tokens":7}`, &store.Tokens{Input: 3, Output: 3, CacheRead: 7}},
 		{`{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":40}}`, &store.Tokens{Output: 3, CacheRead: 10}},
 		{`{"prompt_tokens":10,"completion_tokens":3}`, &store.Tokens{Input: 10, Output: 3}},
+		{`{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":50}}`, &store.Tokens{Input: 10, Output: 10, CacheWrite: 50, CacheRead: 40}},
+		{`{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":9}}`, &store.Tokens{Output: 3, CacheWrite: 6, CacheRead: 4}},
 		{`{"completion_tokens":3}`, &store.Tokens{Output: 3}},
 		{`{"Prompt_Tokens":10,"Completion_Tokens":3}`, nil},
 		{`{"prompt_tokens":-1,"completion_tokens":1.5}`, nil},

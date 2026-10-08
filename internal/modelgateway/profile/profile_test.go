@@ -85,7 +85,8 @@ func TestAllReturnsACopy(t *testing.T) {
 	ps := profile.All()
 	ps[0].Hosts[0].BaseURL = "https://evil.example"
 	ps[0].Name = "changed"
-	if got := profile.All(); got[0].Name == "changed" || got[0].Hosts[0].BaseURL == "https://evil.example" {
+	ps[0].ChatThinking["enabled"] = "changed"
+	if got := profile.All(); got[0].Name == "changed" || got[0].Hosts[0].BaseURL == "https://evil.example" || got[0].ChatThinking["enabled"] == "changed" {
 		t.Error("All shares its backing data with callers")
 	}
 }

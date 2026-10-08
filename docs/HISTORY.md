@@ -6854,3 +6854,182 @@ not what it answers, so no test pins that either. A sixth pass found those three
 and the live check still compacting the vendor's members, which would fail a vendor that
 writes whitespace the gateway now keeps; it compares them as written. On the final code
 the whole live tier — DeepSeek, MiniMax and Gitee — passed its 52 tests.
+
+## Model gateway conversion (plan 59 slice 4c) — acceptance record, 2026-10-08
+
+`RUN_LIVE_MODELGATEWAY=deepseek,minimax` drove the conversion path with the Anthropic Go
+SDK, each chat model's provider configured with its vendor's OpenAI endpoint alone, so
+every request converted, behind a proxy recording both directions. For `deepseek-flash`,
+`deepseek-v4-pro`, `MiniMax-M3` and `MiniMax-M3.1-Flash-Preview`: a text answer, whole and
+streamed, equal in blocks, stop reason and usage to the vendor's recorded Chat
+Completions answer as `convert` converts it, its ledger row holding the vendor's usage
+under the `anthropic` protocol; and a tool call returned as `tool_use`, whose
+continuation, built with the SDK's `ToParam`, the vendor answered, having been sent its
+own reasoning back as `reasoning_content`. All 16 subtests passed.
+
+- **Reasoning.** DeepSeek's two models and MiniMax-M3.1-Flash-Preview answered the text
+  question with `reasoning_content`, a thinking block in Messages; on the tool question
+  only `deepseek-flash` reasoned. MiniMax-M3 never sent `reasoning_content`: its
+  reasoning came inline, `<think>…</think>` at the head of its content, so the converted
+  answer's text block holds it and the caller's next turn sends it back as text.
+  Splitting the tags into a thinking block was left undone — the tags are the vendor's
+  own content, and moving them would change what a caller reads for a gain no caller
+  has asked for.
+- **Latency.** MiniMax-M3 once took 139 seconds over a streamed one-word answer; the
+  gateway's pings held the stream open.
+
+Decisions made in the slice, with the alternative each beat:
+- `count_tokens` is never converted, a 404 where only conversion attempts exist, rather
+  than estimated: plan 59 already answers so for a vendor without it, and a client
+  falls back to estimating on its own.
+- A request the conversion cannot carry goes to the alias's passthrough attempts rather
+  than being refused outright, as a request a vendor would ignore goes to the others.
+- A stream that resumes a tool call after starting another fails, rather than holding
+  each call until its arguments end: holding would delay every later event, and neither
+  vendor interleaved on the live tier.
+- A whole answer's tool call whose arguments are not a JSON object is a 502, as a
+  `tool_use` block's input must be an object; a stream's fragments pass unchecked, since
+  a stream cannot take back what it has sent.
+- DeepSeek's `insufficient_system_resource` and any finish Messages has no word for are
+  `end_turn`. `pause_turn` promises a continuation the vendor does not give, and
+  refusing would lose an answer the vendor charged for.
+- The ledger row keeps the caller's protocol, as plan 59's usage row names the inbound
+  one; the attempt's client span names the upstream's, `modelgateway.upstream.protocol`.
+- The brain's OpenAI-protocol adapter now shares the conversion, so a user turn's image,
+  which it used to refuse, reaches its endpoint as an `image_url` part.
+- MiniMax's M2.x thinking disabled is refused on Chat Completions passthrough too, the
+  rule the Messages routes already applied, since the converted request is judged by the
+  Chat Completions hooks.
+
+Writing the docs turned up one defect, fixed with a test that failed on the code before
+it: a deployment reached through two credentials, one passing through and one OpenAI-only,
+would have sent converted reasoning to its vendor's Anthropic endpoint with an empty
+signature. Thinking provenance now returns each block on the protocol that produced it
+alone.
+
+Mutation testing ran over the conversion, the routing, the provenance rule, the gateway's
+conversion path, the vendor hooks and the span. The first pass caught 78 of 96 mutants,
+seven of the misses mutants that did not compile. The rest showed tests missing, each
+added: a non-boolean `disable_parallel_tool_use`, a turn's text blocks joined, a second
+credential a retry would have gone to, pings on a stream that is never idle, a type of
+Anthropic's kept whatever the status, a credential's error type and a stated
+`http_code` partway through a stream, MiniMax's envelope kept, each vendor's word for
+thinking, a system block of another type carrying text, and a chunk the conversion
+cannot carry followed by a finish. Two branches turned out dead and went: a 422 case
+the 4xx rule already covers, and an error chunk's status read from a type that is kept
+anyway. All 95 mutants of the final list are caught.
+
+Review found seven defects and one gate failure, each fixed with a test that failed on
+the code before it:
+- The gateway's idle pings released the stall guard, which counts as the upstream's
+  progress, so a converted stream whose upstream fell silent was pinged every 15
+  seconds and never cut off at a longer stall budget, holding its request and its
+  connections open (the background security review and Codex). A ping now holds
+  nothing; the relay holds the guard across its wait behind one.
+- A chunk the conversion cannot carry ended the stream and closed the upstream, losing
+  the usage it reports after its finish, which the vendor had charged (Codex). The
+  gateway now reads the upstream on to its end, writing nothing more to the caller, and
+  the ledger counts what it reports.
+- Zhipu and Moonshot were sent no thinking, so a request disabling it thought anyway, as
+  both vendors default to (Codex). Both document `thinking.type` enabled or disabled on
+  their OpenAI endpoints — Z.ai's thinking guide from GLM-4.5, Kimi's thinking-models
+  guide for kimi-k2.6 — and now get it; neither has a key for the live tier.
+- `thinking.display: "omitted"` was accepted, and plaintext reasoning returned; it is
+  refused now, as is a thinking field the pin does not name (Codex).
+- A tool's fields beyond its name, description, schema and `strict` went unchecked
+  (Codex): its hints are dropped, `defer_loading: true` and `allowed_callers` without
+  `direct` refused, and any other field refused.
+- An assistant turn of reasoning alone, which an answer that spent its budget thinking
+  leaves, vanished on replay with its reasoning (Codex); it goes back with empty
+  content. The brain's adapter shares the rule, though it makes no such turn itself.
+- A final assistant turn, which Messages continues, went upstream as a turn Chat
+  Completions answers (Codex); it is refused, for the passthrough attempts or a 400.
+  DeepSeek's prefix completion, on its beta endpoint, was left unmapped.
+- An SDK's name in a new comment lacked the citation `tools/sdkref` requires (the
+  verifier). The check reads only the files git tracks, so it passed until the commit.
+
+The security review's other finding, an SSRF through `convert/messages.go`, was left as
+it is. A `url` image source goes upstream as an `image_url`, which the gateway never
+fetches; an upstream that fetches it does so from its own network, which the Messages
+and Chat Completions passthroughs already let the same key ask of it, and the brain's
+Anthropic adapter has always sent such a source.
+
+Mutation testing of the round's guards caught 16 of 18 mutants. Of the two misses, one
+was dead code — closing events after a failure, which the stopped writer never writes —
+and went; the other showed a test missing, a drain that stalls leaving the ledger the
+error the caller was given, which was added.
+
+Codex's second pass, over the fixes, found three more, each fixed with a test that failed
+on the code before it, and the round's eight mutants all caught:
+- A drain read past an upstream's error object, which ends an answer, so keep-alives
+  after one held the request open past any stall budget. It ends there now.
+- A tool name streamed in fragments, which openai-go joins, opened its `tool_use` block
+  with the first fragment and dropped the rest, and a late id was lost the same way.
+  Messages names a tool once, so a name or id arriving, or changing, after the block
+  opens now fails the stream; one repeated unchanged with each fragment carries on.
+- A request without `max_tokens`, which Messages requires, converted to a Chat
+  Completions request with no cap. It is refused now.
+
+`/code-review`, over the code the first round fixed, reported fifteen findings. Twelve were
+fixed, each with a test that failed on the code before it:
+- An answer the token limit cut short in a tool call stopped for `tool_use`, so the SDK's
+  accumulator replaced the partial input with `{}` and an agent loop ran the tool, and the
+  whole answer was a 502. It stops for `max_tokens`, and a whole answer leaves the cut
+  call out.
+- Reasoning went back to its producer deployment on whichever credential the weights put
+  first, so converted reasoning could reach that deployment's passthrough credential,
+  which drops it, and DeepSeek refuses a tool loop without it, unretried. The producer's
+  attempts on the protocol that produced the reasoning go first now.
+- A `content`, `refusal` or `reasoning_content` that was no string — an array of parts,
+  which the pinned openai-go does not type — read as no text, a 200 with an empty answer.
+  It is refused, whole or streamed.
+- An empty `tools` array went upstream as `null`, and `messages: null` converted; the
+  first goes as none, the second is refused.
+- An empty text part beside an image lost its `text` field; it is left out.
+- The shared converter refused a text block without its text, which the brain stores for
+  an empty one (`domain.ContentBlock` omits it), where the brain's adapter had sent empty
+  content, so every later turn of such a session would have failed on an OpenAI-protocol
+  route. Absent is empty again.
+- Of several `output_config` fields refused, a random one was named; the first by name is.
+- `budget_tokens` beside adaptive or disabled thinking, and `display` beside disabled,
+  were accepted where the pinned SDK names neither; they are refused.
+- An error stating 401, 402 or 403 after a converted stream began was
+  `invalid_request_error`; it takes the type Anthropic gives the status.
+- Two copies each of the Messages error event and the Chat Completions keep-alive rule
+  became one, and CLAUDE.md's lossy-conversion rule names the answer conversion
+  `convert` also holds.
+
+A third finding, two tool calls without an `index`, which openai-go requires, merging into
+one, was already closed by the round before's fragment check, which now has a test for
+it. Two were declined. `reasoning_effort` `xhigh` and `max` are values the pinned
+openai-go names, so passing them through is valid Chat Completions. Converting the request
+once per attempt, which the finding called repeated work, is needed: each attempt's
+messages differ by deployment and strip mode, the validation pass decides the routing
+before any attempt, and the cost is JSON encoding beside an upstream call.
+Mutation testing caught all 22 of the round's mutants.
+
+Codex's third pass, over those fixes, found four more, fixed the same way:
+- A Chat Completions usage's `prompt_tokens_details.cache_write_tokens`, which the pinned
+  openai-go names and Kimi's kimi-k3 reports inside `prompt_tokens`, was counted as input,
+  on the Chat Completions passthrough's ledger since slice 4a and now on the converted
+  answer too, priced at the input rate. It is the ledger's cache write, and the converted
+  answer's `cache_creation_input_tokens`.
+- A refusal, which OpenAI sends in place of content and ends with `stop`, stopped for
+  `end_turn`; it stops for `refusal`, whole or streamed.
+- A tool call's arguments sent as a JSON object, as Z.ai's chat-completion reference
+  types them, became `{}`; they are read as their JSON, and any other value that is no
+  string is refused.
+- The absent-text leniency also let an explicit `"text": null` through, which the pinned
+  SDK's schema refuses and the brain never stores; only an absent text is read as empty.
+Mutation testing caught all 13 of the round's mutants.
+
+Codex's fourth pass found three more, fixed the same way, with all 7 of the round's
+mutants caught:
+- A refusal beside a tool call, or `content_filter` with one, stopped for `tool_use`,
+  which hands the calls to a caller to run; the brain and the SDK's tool runner run none
+  for a refusal, since a refusal is terminal. A refusal now stops for `refusal` first.
+- A streamed call's object-valued arguments joined by another fragment, object or
+  string, made input the SDK's accumulator replaces with `{}`; an object must be the
+  call's only fragment, and the stream fails otherwise.
+- A whole answer's refusal beside non-empty content was dropped; the text is the content,
+  then the refusal, as a stream already carried them.

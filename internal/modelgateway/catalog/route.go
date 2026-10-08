@@ -13,12 +13,14 @@ import (
 
 // Attempt is one upstream call a request may make: one deployment, on its
 // provider, with one of the provider's credentials, at the provider's
-// endpoint for the request's protocol.
+// endpoint for Protocol — the request's own, or, where the gateway converts
+// (Plan), another.
 type Attempt struct {
 	Deployment store.Deployment
 	Provider   store.Provider
 	Credential store.Credential
 	Endpoint   string
+	Protocol   profile.Protocol
 }
 
 // Plan orders the attempts a request for a may make on proto
@@ -30,7 +32,12 @@ type Attempt struct {
 //
 // Eligible means enabled all the way down — the deployment, its provider and
 // the credential — with an endpoint on proto and the credential allowed on it.
-// A deployment with no eligible credential is not a target.
+// A Messages request also takes a credential that is not, when it is allowed
+// on its provider's OpenAI endpoint: that attempt converts the request to
+// Chat Completions (docs/plan/59_model-gateway.md, "Two request paths"), so a
+// credential usable on the OpenAI protocol alone still serves Anthropic
+// callers, and one usable on both passes through. A deployment with no
+// eligible credential is not a target.
 //
 // The weighted order is the exponential-key form of weighted sampling without
 // replacement: each candidate draws u in (0, 1] and sorts by -ln(u)/weight, so
@@ -66,12 +73,12 @@ func (s *Snapshot) Plan(a store.Alias, proto profile.Protocol, session string, d
 				continue
 			}
 			prov, ok := s.providers[d.ProviderID]
-			if !ok || !prov.Enabled || prov.Endpoints[proto] == "" {
+			if !ok || !prov.Enabled {
 				continue
 			}
 			var creds []store.Credential
 			for _, c := range s.credentials[prov.ID] {
-				if c.Enabled && slices.Contains(c.Protocols, proto) {
+				if c.Enabled && upstreamProtocol(prov, c, proto) != "" {
 					creds = append(creds, c)
 				}
 			}
@@ -84,11 +91,27 @@ func (s *Snapshot) Plan(a store.Alias, proto profile.Protocol, session string, d
 		for _, t := range group {
 			weighted(t.creds, session, draw, func(c store.Credential) (string, int) { return c.ID, c.Weight })
 			for _, c := range t.creds {
-				out = append(out, Attempt{Deployment: t.d, Provider: t.prov, Credential: c, Endpoint: t.prov.Endpoints[proto]})
+				up := upstreamProtocol(t.prov, c, proto)
+				out = append(out, Attempt{Deployment: t.d, Provider: t.prov, Credential: c, Endpoint: t.prov.Endpoints[up], Protocol: up})
 			}
 		}
 	}
 	return out
+}
+
+// upstreamProtocol is the protocol a request on proto reaches its provider
+// on with credential c: proto itself where the provider has an endpoint on it
+// and c is allowed there, else, for a Messages request, OpenAI's, which the
+// gateway converts to; "" when c cannot serve the request.
+func upstreamProtocol(prov store.Provider, c store.Credential, proto profile.Protocol) profile.Protocol {
+	on := func(p profile.Protocol) bool { return prov.Endpoints[p] != "" && slices.Contains(c.Protocols, p) }
+	switch {
+	case on(proto):
+		return proto
+	case proto == profile.Anthropic && on(profile.OpenAI):
+		return profile.OpenAI
+	}
+	return ""
 }
 
 // weighted sorts xs in place into the weighted order Plan describes.

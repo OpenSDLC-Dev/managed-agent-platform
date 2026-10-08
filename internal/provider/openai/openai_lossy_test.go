@@ -182,22 +182,24 @@ func TestToolUseEmptyInput(t *testing.T) {
 	}
 }
 
-// Thinking blocks have no Chat Completions equivalent and are dropped, not
-// errored — an assistant turn with only thinking yields no assistant message.
-func TestThinkingBlockDropped(t *testing.T) {
+// A signed thinking block is another protocol's and drops out, not errored,
+// so an assistant turn of signed thinking alone yields no assistant message;
+// an unsigned one is reasoning a Chat Completions endpoint produced, and goes
+// back as reasoning_content, the turn's content empty.
+func TestThinkingBlocks(t *testing.T) {
 	body := requestFor(t, provider.Request{
 		System: "sys",
 		Messages: []provider.Message{
-			{Role: "assistant", Content: json.RawMessage(`[{"type":"thinking","thinking":"hmm"}]`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"thinking","thinking":"signed","signature":"sig"}]`)},
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"thinking","thinking":"hmm"}]`)},
+			{Role: "user", Content: json.RawMessage(`"go on"`)},
 		},
 	})
-	msgs := messagesOf(t, body)
-	if len(msgs) != 2 { // system + user; the thinking-only assistant turn drops out
-		t.Fatalf("messages = %d, want 2 (thinking-only assistant dropped)", len(msgs))
-	}
-	if msgs[0]["role"] != "system" || msgs[1]["role"] != "user" {
-		t.Errorf("roles = %v/%v, want system/user", msgs[0]["role"], msgs[1]["role"])
+	want := []map[string]any{{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"},
+		{"role": "assistant", "content": "", "reasoning_content": "hmm"}, {"role": "user", "content": "go on"}}
+	if got := messagesOf(t, body); !reflect.DeepEqual(got, want) {
+		t.Errorf("messages = %v, want %v", got, want)
 	}
 }
 
@@ -209,6 +211,19 @@ func TestMaxTokensOmittedWhenZero(t *testing.T) {
 	})
 	if _, present := body["max_tokens"]; present {
 		t.Errorf("max_tokens should be omitted when zero, got %v", body["max_tokens"])
+	}
+}
+
+// A user turn's image reaches the endpoint as an image_url part, a base64
+// source as a data URL, beside the turn's text.
+func TestImageBlockBecomesAnImageURLPart(t *testing.T) {
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"what is this"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`)}},
+	})
+	got := messagesOf(t, body)[0]["content"]
+	want := []any{map[string]any{"type": "text", "text": "what is this"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,AAAA"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("content = %v, want %v", got, want)
 	}
 }
 
@@ -825,5 +840,22 @@ func TestConfigMaxTokensDefault(t *testing.T) {
 				t.Errorf("max_tokens = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A text block the brain stored empty, which domain.ContentBlock writes
+// without its text, replays as empty content, as it did before the
+// conversion moved to internal/modelgateway/convert.
+func TestEmptyTextBlockReplays(t *testing.T) {
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"text"}]`)},
+			{Role: "user", Content: json.RawMessage(`"again"`)},
+		},
+	})
+	want := []map[string]any{{"role": "user", "content": "hi"}, {"role": "assistant", "content": ""}, {"role": "user", "content": "again"}}
+	if got := messagesOf(t, body); !reflect.DeepEqual(got, want) {
+		t.Errorf("messages = %v, want %v", got, want)
 	}
 }
