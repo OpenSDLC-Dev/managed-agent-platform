@@ -3,15 +3,15 @@
        BRAIN_API_KEY. A ConfigMap rather than the Secret: it holds no credential,
        since api_key_env names the variable, and under existingSecret only the
        chart knows the Service's name. brain.gatewayRoute adds the route's other
-       fields; the four the chart writes, and api_key beside api_key_env, are
-       refused rather than overridden, and so are headers, which could carry a
-       credential into the ConfigMap and which the gateway needs none of. */}}
+       fields, and takes only the four that carry no credential, spelled exactly:
+       the loader's encoding/json matches a name without regard to case, so
+       refusing headers or api_key would let Headers or API_KEY through. */}}
 {{- if (.Values.modelgateway | default dict).enabled }}
 {{- $route := dict "model" "*" "protocol" "anthropic" "base_url" (printf "http://%s-modelgateway:%v" (include "map.fullname" .) .Values.modelgateway.service.port) "api_key_env" "BRAIN_API_KEY" }}
 {{- $extra := .Values.brain.gatewayRoute | default dict }}
 {{- range $k, $_ := $extra }}
-{{- if or (hasKey $route $k) (has $k (list "api_key" "headers")) }}
-{{- fail (printf "brain.gatewayRoute.%s is refused: the route sends every model to the gateway under BRAIN_API_KEY, and it lives in a ConfigMap, which holds no credential." $k) }}
+{{- if not (has $k (list "upstream_model" "stall_timeout" "max_tokens" "flatten_search_results")) }}
+{{- fail (printf "brain.gatewayRoute.%s is refused: it takes only upstream_model, stall_timeout, max_tokens and flatten_search_results. The chart writes the rest — every model to the gateway under BRAIN_API_KEY — in a ConfigMap, which holds no credential." $k) }}
 {{- end }}
 {{- end }}
 apiVersion: v1

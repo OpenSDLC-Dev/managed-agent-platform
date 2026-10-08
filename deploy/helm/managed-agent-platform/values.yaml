@@ -132,11 +132,11 @@ brain:
   # quoted, or passed with --set-string, if it is all digits.
   apiKey: ""
   # -- The gateway route's other fields, with modelgateway.enabled: the chart
-  # writes model, protocol, base_url and api_key_env and refuses them here, and
-  # these join them, checked by the loader as brain.modelProviders' entries are.
-  # max_tokens above all — the brain sets none, so without it the anthropic
-  # adapter sends 8192 — and upstream_model, which pins every agent to one
-  # gateway alias and so bounds the gen_ai.request.model series (#88); also
+  # writes model, protocol, base_url and api_key_env, and takes only these four
+  # beside them, spelled exactly, checked by the loader as brain.modelProviders'
+  # entries are: max_tokens above all — the brain sets none, so without it the
+  # anthropic adapter sends 8192 — upstream_model, which pins every agent to one
+  # gateway alias and so bounds the gen_ai.request.model series (#88),
   # stall_timeout and flatten_search_results. Not api_key or headers: the route
   # is a ConfigMap, which holds no credential.
   # Example:

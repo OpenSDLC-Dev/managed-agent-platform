@@ -7109,13 +7109,15 @@ Fixed in review:
 - Compose's brain could claim a queued turn and send the gateway a key the control plane
   had not registered yet, and the gateway's 401 fails the turn. The control plane
   registers both keys before it listens, so it and the gateway carry a TCP healthcheck
-  and the brain starts once both are healthy — every 5 seconds, since `start_interval`,
+  and the brain starts once the control plane is healthy and the gateway healthy or
+  failed (a direct route needs no gateway) — every 5 seconds, since `start_interval`,
   which would probe faster while starting only, fails `up` on Docker Engines before 25,
   after a 10-minute `start_period`, since migrations wait on their lock without a bound.
 - With its route the chart's own, nothing could set the route's other fields, and the
   brain sets no `max_tokens`, so every turn was held to the anthropic adapter's 8,192;
-  `brain.gatewayRoute` adds them, refusing the four the chart writes, `api_key`, and
-  `headers`, which could carry a credential into the route's ConfigMap.
+  `brain.gatewayRoute` adds them. It takes four keys by exact name: a denylist of
+  `headers` and `api_key` let `Headers` and `API_KEY` carry a credential into the
+  route's ConfigMap, since the loader matches JSON field names without regard to case.
 - An upgrade whose values still carried its routes was first told `brain.apiKey` was
   missing; the routes' refusal now comes first, and both name `modelgateway.enabled=false`.
 - An all-digit `brain.apiKey`, which `--set` or YAML reads as a number, failed the render

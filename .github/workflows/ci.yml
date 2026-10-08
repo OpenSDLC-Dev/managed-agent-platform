@@ -105,9 +105,10 @@ jobs:
           mp="$(helm template t "$CHART" -f "$VALUES" --set brain.gatewayRoute.max_tokens=32000 \
             --show-only templates/brain-configmap.yaml | grep 'model-providers.json:' | sed 's/^[^:]*: //')"
           echo "$mp" | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); want=[{"model":"*","protocol":"anthropic","base_url":"http://t-managed-agent-platform-modelgateway:8090","api_key_env":"BRAIN_API_KEY","max_tokens":32000}]; assert d == want, d; print("ok: brain.gatewayRoute joins the route")'
-          # Refused: the chart's four, api_key beside api_key_env, and headers,
-          # which could carry a credential into the ConfigMap.
-          for k in model protocol base_url api_key api_key_env headers; do
+          # Refused: everything but the four allowed keys — the chart's own, the
+          # credential fields, and their other spellings, which the loader's
+          # case-insensitive JSON would read as the same fields.
+          for k in model protocol base_url api_key api_key_env headers Headers API_KEY Max_Tokens extra; do
             if err="$(helm template t "$CHART" -f "$VALUES" --set "brain.gatewayRoute.$k=x" 2>&1)"; then
               echo "brain.gatewayRoute.$k rendered" >&2; exit 1
             fi

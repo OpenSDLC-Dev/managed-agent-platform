@@ -629,8 +629,9 @@ frozen by slice 2.
   turning it on by default, as slice 5 does, makes a cipher part of every default install:
   a release without one must turn the gateway off itself (`modelgateway.enabled=false`)
   and route the brain itself (`brain.modelProviders`, or an `existingSecret`'s
-  `model-providers.json`), and the chart refuses those routes beside the gateway, which
-  would drop them. The brain's platform API key comes
+  `model-providers.json`). The chart refuses `brain.modelProviders` beside the gateway,
+  which would drop it; an `existingSecret`'s routes it cannot read, and with the gateway
+  on the brain mounts the gateway's route instead. The brain's platform API key comes
   from one Secret that the brain, the control plane and the gateway read: the control plane
   registers it in `api_keys` under the name `brain` exactly as it registers
   `CONTROLPLANE_API_KEY` as `bootstrap` (`api.EnsureAPIKey`, `cmd/controlplane/main.go`),
