@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
@@ -13,15 +14,16 @@ import (
 // relayVectors relays an embeddings or rerank answer as it arrives, its
 // top-level model the name the caller sent and every other byte the
 // upstream's, its usage read on the way (answerRewriter). Such an answer runs
-// to tens of megabytes of vectors, which are neither held nor decoded, so no
-// bound applies to it but the stall guard's. Nothing is written until its
-// first bytes arrive, so an upstream that answers nothing is retried as any
-// is. One that breaks off after them leaves the caller a cut-off body, the
-// only way left to say so, and is recorded as the failure it was; one whose
-// caller has gone is still read to its end, its usage counted.
+// to tens of megabytes of vectors, which are neither held nor decoded; it is
+// cut off past maxVectorAnswer. Nothing is written until its first bytes
+// arrive, so an upstream that answers nothing is retried as any is. One that
+// breaks off after them, or runs past the bound, leaves the caller a cut-off
+// body, the only way left to say so, and is recorded as the failure it was;
+// one whose caller has gone is still read to its end, its usage counted.
 func relayVectors(w http.ResponseWriter, resp *http.Response, c call, guard *provider.StallGuard, red provider.Redactor) (*failure, bool) {
+	body := io.LimitReader(resp.Body, int64(maxVectorAnswer)+1) // a byte past the bound tells it was passed
 	buf := make([]byte, 32<<10)
-	n, err := io.ReadAtLeast(resp.Body, buf, 1)
+	n, err := io.ReadAtLeast(body, buf, 1)
 	if n == 0 && !errors.Is(err, io.EOF) {
 		return noAnswer(guard, red, err)
 	}
@@ -29,19 +31,25 @@ func relayVectors(w http.ResponseWriter, resp *http.Response, c call, guard *pro
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	rw := &answerRewriter{alias: encodeJSON(c.alias)}
-	cw := newCallerWriter(w, c.out.at, guard, false)
+	cw := newCallerWriter(w, guard, false)
 	send := func(b []byte) {
 		if out := rw.rewrite(b); len(out) > 0 {
 			cw.write(out)
 		}
 	}
+	total := n
 	send(buf[:n])
 	for err == nil {
-		n, err = resp.Body.Read(buf)
+		n, err = body.Read(buf)
+		total += n
 		send(buf[:n])
 	}
 	c.out.tokens = vectorUsageOf(rw.usage)
-	if !errors.Is(err, io.EOF) {
+	switch {
+	case total > maxVectorAnswer:
+		c.out.errType = "api_error"
+		slog.Warn("modelgateway: an upstream answer outran the gateway's bound, and was cut off", "bytes", maxVectorAnswer)
+	case !errors.Is(err, io.EOF):
 		c.out.errType = "api_error"
 		if errors.Is(guard.Cause(err), provider.ErrStalled) {
 			c.out.errType = "timeout_error"
@@ -93,7 +101,8 @@ const (
 // answerRewriter rewrites a JSON answer fed to it piece by piece, as it
 // arrives: the value of each top-level member whose key, unescaped, is model
 // becomes alias, whatever the value holds, and the last top-level usage value
-// is kept, without the whitespace between its tokens, up to maxUsage bytes;
+// is kept, each run of whitespace between its tokens as one space, up to
+// maxUsage bytes;
 // every other byte passes as it came. It reads the answer only as far as
 // telling strings, nesting and top-level members apart, so an answer that is
 // not an object, or is malformed, passes as it came from the point it stops
@@ -106,6 +115,7 @@ type answerRewriter struct {
 	inStr    bool
 	esc      bool
 	nest     int    // the nesting within the top-level value being read
+	space    bool   // whether whitespace between the usage's tokens awaits its one space
 	key      []byte // the top-level key being read, quotes included
 	member   string // the key of the top-level value being read
 	capture  []byte // the usage value being read
@@ -174,7 +184,7 @@ func (r *answerRewriter) rewrite(in []byte) []byte {
 			case "model":
 				out = append(out, r.alias...)
 			case "usage":
-				r.capture, r.overflow = r.capture[:0], false
+				r.capture, r.overflow, r.space = r.capture[:0], false, false
 			}
 			i-- // the value's first byte
 		case rwInValue:
@@ -183,12 +193,14 @@ func (r *answerRewriter) rewrite(in []byte) []byte {
 				switch r.member {
 				case "model":
 				case "usage":
-					switch {
-					case !r.inStr && isSpace(b): // between tokens, so no part of the usage
-					case len(r.capture) < maxUsage:
-						r.capture = append(r.capture, b)
-					default:
-						r.overflow = true
+					if !r.inStr && isSpace(b) {
+						r.space = true
+					} else {
+						if r.space {
+							r.keep(' ') // so tokens it parted, as 1 3, stay apart
+							r.space = false
+						}
+						r.keep(b)
 					}
 					out = append(out, b)
 				default:
@@ -218,6 +230,15 @@ func (r *answerRewriter) rewrite(in []byte) []byte {
 		}
 	}
 	return out
+}
+
+// keep adds b to the usage being read, past maxUsage marking it outgrown.
+func (r *answerRewriter) keep(b byte) {
+	if len(r.capture) < maxUsage {
+		r.capture = append(r.capture, b)
+	} else {
+		r.overflow = true
+	}
 }
 
 // valueByte reads b as the next byte of a top-level value: whether it is part

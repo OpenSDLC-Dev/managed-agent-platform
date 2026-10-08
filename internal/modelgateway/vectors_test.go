@@ -78,6 +78,18 @@ func rewritten(t testing.TB, in []byte, alias string) ([]byte, json.RawMessage, 
 	return append(out, in[last:]...), usage, true
 }
 
+// compacted is a kept usage as encoding/json compacts it, nil for none.
+func compacted(usage json.RawMessage) json.RawMessage {
+	if usage == nil {
+		return nil
+	}
+	var c bytes.Buffer
+	if json.Compact(&c, usage) != nil {
+		return usage
+	}
+	return c.Bytes()
+}
+
 // The rewriter makes of an answer what the decoder says it should, however
 // the answer is cut into pieces: whole, in two at every byte, and a byte at
 // a time. What is not an object comes back as it went in.
@@ -87,7 +99,7 @@ func TestAnswerRewriter(t *testing.T) {
 		whole, usage := modelgateway.RewriteAnswer("al\"ias", in)
 		want, wantUsage, object := rewritten(t, in, `al\"ias`)
 		switch {
-		case object && (!bytes.Equal(whole, want) || !bytes.Equal(usage, wantUsage)):
+		case object && (!bytes.Equal(whole, want) || !bytes.Equal(compacted(usage), wantUsage)):
 			t.Errorf("%.80s: rewrote %.200s and kept %.80s, want %.200s and %.80s", a, whole, usage, want, wantUsage)
 		case json.Valid(in) && !object && (!bytes.Equal(whole, in) || usage != nil):
 			t.Errorf("%.80s: rewrote %.200s and kept %.80s", a, whole, usage)
@@ -125,12 +137,28 @@ func FuzzAnswerRewriter(f *testing.F) {
 		}
 		want, wantUsage, object := rewritten(t, in, "m")
 		switch {
-		case object && (!bytes.Equal(whole, want) || !bytes.Equal(usage, wantUsage)):
+		case object && (!bytes.Equal(whole, want) || !bytes.Equal(compacted(usage), wantUsage)):
 			t.Fatalf("rewrote %q and kept %q, want %q and %q", whole, usage, want, wantUsage)
 		case json.Valid(in) && !object && (!bytes.Equal(whole, in) || usage != nil):
 			t.Fatalf("rewrote %q and kept %q", whole, usage)
 		}
 	})
+}
+
+// The usage the rewriter keeps reads as the upstream wrote it: padding
+// between its tokens does not push it past the bound, and tokens whitespace
+// parted are not joined into a count the upstream never reported.
+func TestTheKeptUsageReadsAsWritten(t *testing.T) {
+	for answer, want := range map[string]*store.Tokens{
+		`{"data":[],"usage":{"prompt_tokens":1 3}}`:                                                nil,
+		`{"data":[],"usage":{"total_tokens":4` + "\n" + `2}}`:                                      nil,
+		`{"data":[],"usage":{` + strings.Repeat(" ", 70000) + `"prompt_tokens" :` + "\t" + `13 }}`: {Input: 13},
+	} {
+		_, usage := modelgateway.RewriteAnswer("m", []byte(answer))
+		if got := modelgateway.VectorUsageOf(usage); !reflect.DeepEqual(got, want) {
+			t.Errorf("%.60s: %+v, want %+v", answer, got, want)
+		}
+	}
 }
 
 // An embeddings or rerank usage counts its prompt tokens, or else its total,

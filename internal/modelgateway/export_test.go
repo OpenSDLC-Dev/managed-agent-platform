@@ -7,7 +7,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
@@ -61,13 +60,20 @@ func SpanName(r *http.Request) string { return spanName(r) }
 // ChatUsageOf is chatUsageOf.
 func ChatUsageOf(raw []byte) *store.Tokens { return chatUsageOf(raw) }
 
-// WriteToCaller writes b to w as an answer relayed under guard, from a
-// provider with the stall budget stall, would be, and reports whether the
-// caller is gone.
-func WriteToCaller(w http.ResponseWriter, stall time.Duration, guard *provider.StallGuard, b []byte) bool {
-	cw := newCallerWriter(w, &catalog.Attempt{Provider: store.Provider{StallTimeout: stall}}, guard, false)
+// WriteToCaller writes b to w as an answer relayed under guard would be, and
+// reports whether the caller is gone.
+func WriteToCaller(w http.ResponseWriter, guard *provider.StallGuard, b []byte) bool {
+	cw := newCallerWriter(w, guard, false)
 	cw.write(b)
 	return cw.gone
+}
+
+// SetMaxVectorAnswer lowers the bound on an embeddings or rerank answer for
+// one test, and returns its restore.
+func SetMaxVectorAnswer(n int) func() {
+	old := maxVectorAnswer
+	maxVectorAnswer = n
+	return func() { maxVectorAnswer = old }
 }
 
 // VectorUsageOf is vectorUsageOf.

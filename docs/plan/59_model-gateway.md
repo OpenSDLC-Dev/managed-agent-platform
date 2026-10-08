@@ -319,9 +319,9 @@ converts when protocols match.
   API streams, and an upstream that did would answer in a shape whose usage the ledger
   cannot read — and the response is relayed as it arrives, unchanged but for its
   top-level `model` where it has one, its vectors never held or decoded, base64 or float,
-  so no bound applies to it but the stall guard's. The gateway splits no batch: an
-  upstream's cap answers with the upstream's own 400, and a caller sizes its batches as it
-  does today, within the 32 MiB the gateway takes in any request body.
+  so it is bounded only by the stall guard and 512 MiB in all. The gateway splits no
+  batch: an upstream's cap answers with the upstream's own 400, and a caller sizes its
+  batches as it does today, within the 32 MiB the gateway takes in any request body.
 
 ### Vendor profiles
 

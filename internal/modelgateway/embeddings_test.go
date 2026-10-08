@@ -298,6 +298,24 @@ func TestAVectorAnswerIsRelayedAsItArrives(t *testing.T) {
 	}
 }
 
+// An embeddings or rerank answer past the gateway's bound is cut off there,
+// and recorded as the failure it is.
+func TestAVectorAnswerPastTheBoundIsCutOff(t *testing.T) {
+	defer modelgateway.SetMaxVectorAnswer(100)()
+	e := newEnv(t)
+	f := newFake(t, vectors)
+	e.alias("text", target(e.deployment(onOpenAI(e, "gitee", f.URL), "Qwen3-Embedding-8B", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do("POST", "/v1/embeddings", dikwText, map[string]string{"Authorization": "Bearer " + key})
+	if whole := upstreamAnswer(f.recorded()[0], []byte(`"text"`)); resp.StatusCode != 200 || len(whole) <= 101 || !bytes.Equal(b, whole[:101]) {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	if u := e.row(resp.Header.Get("request-id")); u.Status != 200 || u.ErrorType != "api_error" || u.Tokens != nil {
+		t.Errorf("ledger %+v", u)
+	}
+}
+
 // The wildcard alias catches the names its own kind's routes are sent, and
 // no other route's: a name on an embeddings or rerank route that no alias
 // matches is unknown there, whatever a chat wildcard would serve.

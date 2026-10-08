@@ -22,12 +22,17 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
-// The body bounds: a request as large as the Messages API takes, and a
-// whole answer well past any model's output. An embeddings or rerank answer
-// is held to neither: it is relayed as it arrives (relayVectors).
+// The body bounds: a request as large as the Messages API takes, a whole
+// answer well past any model's output, and an embeddings or rerank answer,
+// relayed as it arrives (relayVectors), several times the largest batch the
+// vendors' caps allow — 1,000 inputs of 4,096 values at Gitee, some 90 MB as
+// it writes them.
 const maxRequestBody = 32 << 20
 
-var maxResponseBody = 64 << 20
+var (
+	maxResponseBody = 64 << 20
+	maxVectorAnswer = 512 << 20
+)
 
 // SessionHeader carries the caller's session id, which keeps a session's
 // requests on one upstream (catalog.Snapshot.Plan). It never goes upstream.
@@ -41,9 +46,8 @@ const maxSessionID = 256
 // SDK sends one.
 const defaultAnthropicVersion = "2023-06-01"
 
-// writeStall bounds each write to the caller (writeBound shortens it for a
-// provider with a short stall budget). A caller that stops reading but keeps
-// its connection open would otherwise hold the handler for as long as it
+// writeStall bounds each write to the caller. A caller that stops reading but
+// keeps its connection open would otherwise hold the handler for as long as it
 // liked; past the bound the caller is treated as gone, and an upstream stream
 // is still read to its end. It
 // is read atomically: a test shortens it while a handler an earlier test
@@ -71,30 +75,34 @@ func bounded(w http.ResponseWriter) *http.ResponseController {
 }
 
 // callerWriter writes an answer to the caller as it arrives, a piece at a
-// time. Each write is held to writeBound, and a caller whose write fails or
+// time. Each write is held to writeStall, and a caller whose write fails or
 // outlasts it is gone: nothing more is written to it, though the upstream
-// answer is still read to its end. No deadline is left armed between writes,
-// while the upstream is read — HTTP/2 resets a stream whose deadline passes
-// with no write pending — and the time a write takes is not the upstream's
-// silence, so the stall guard's clock restarts after it.
+// answer is still read to its end. The stall guard is held while a write
+// lasts: the upstream, unread meanwhile, can show no sign of life, so that
+// time is not its silence, and however short the provider's stall budget, a
+// caller slow to read is not cut off by it, nor one that stops reading able
+// to end the upstream answer before it is read. No deadline is left armed
+// between writes, while the upstream is read: HTTP/2 resets a stream whose
+// deadline passes with no write pending.
 type callerWriter struct {
 	w     http.ResponseWriter
 	rc    *http.ResponseController
-	bound time.Duration
 	guard *provider.StallGuard
 	flush bool // whether each piece is flushed, as a stream's events are
 	gone  bool
 }
 
-func newCallerWriter(w http.ResponseWriter, at *catalog.Attempt, guard *provider.StallGuard, flush bool) *callerWriter {
-	return &callerWriter{w: w, rc: http.NewResponseController(w), bound: writeBound(at.Provider.StallTimeout), guard: guard, flush: flush}
+func newCallerWriter(w http.ResponseWriter, guard *provider.StallGuard, flush bool) *callerWriter {
+	return &callerWriter{w: w, rc: http.NewResponseController(w), guard: guard, flush: flush}
 }
 
 func (cw *callerWriter) write(b []byte) {
 	if cw.gone {
 		return
 	}
-	_ = cw.rc.SetWriteDeadline(time.Now().Add(cw.bound))
+	cw.guard.Hold()
+	defer cw.guard.Release()
+	_ = cw.rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load())))
 	_, err := cw.w.Write(b)
 	if err == nil && cw.flush {
 		if err = cw.rc.Flush(); errors.Is(err, http.ErrNotSupported) {
@@ -102,19 +110,7 @@ func (cw *callerWriter) write(b []byte) {
 		}
 	}
 	_ = cw.rc.SetWriteDeadline(time.Time{})
-	cw.guard.Progress()
 	cw.gone = err != nil
-}
-
-// writeBound is how long one write to the caller may take: writeStall, or
-// half the provider's stall budget where that is shorter, so a write blocked
-// on a caller that stopped reading gives up while the upstream answer it held
-// back can still be read to its end and its usage counted.
-func writeBound(stall time.Duration) time.Duration {
-	if stall <= 0 {
-		stall = provider.DefaultStallTimeout
-	}
-	return min(time.Duration(writeStall.Load()), stall/2)
 }
 
 // route is an inference path: the protocol it speaks, the kind of alias it
@@ -793,7 +789,7 @@ func answerJSON(b []byte, alias string, wrap *wrapping) ([]byte, json.RawMessage
 // the caller is given, and the time to the first event that is not a
 // keep-alive — the relay may begin on keep-alives past maxHeld — go to c.out
 // as they pass. When the caller stops reading — or reads too slowly to take
-// an event within writeBound (callerWriter) — the stream is still read. When the upstream
+// an event within writeStall — the stream is still read. When the upstream
 // fails partway, or ends before it has said all it will, the caller gets
 // p's error event, the only way left to say so, and an unfinished event
 // before it is dropped rather than merged into it. Once the stream has said
@@ -806,7 +802,7 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	send := newCallerWriter(w, c.out.at, guard, true).write
+	send := newCallerWriter(w, guard, true).write
 	done := false
 	relay := func(e upstream.Event) {
 		if c.out.ttft == 0 && !p.keepAlive(e) {

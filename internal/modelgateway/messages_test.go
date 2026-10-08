@@ -2,6 +2,7 @@ package modelgateway_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -641,12 +642,12 @@ func TestAPauseLongerThanTheWriteBoundReachesAnHTTP2Caller(t *testing.T) {
 }
 
 // A caller that stops reading cannot outwait a provider's short stall budget:
-// the write it holds up gives up within half the budget, and the upstream
-// answer is read to its end — a stream finished, an embeddings answer's usage
-// counted — where the guard would otherwise end the answer the gateway had
-// stopped reading.
+// the write it holds up holds the guard with it until it gives up, and the
+// upstream answer is read to its end — a stream finished, an embeddings
+// answer's usage counted — where the guard would otherwise end the answer the
+// gateway had stopped reading.
 func TestACallerThatStopsReadingCannotOutwaitTheStallBudget(t *testing.T) {
-	defer modelgateway.SetWriteStall(10 * time.Second)()
+	defer modelgateway.SetWriteStall(time.Second)()
 	e := newEnv(t)
 	finished := make(chan bool, 2)
 	pad := strings.Repeat("0,", 256<<10)
@@ -670,7 +671,7 @@ func TestACallerThatStopsReadingCannotOutwaitTheStallBudget(t *testing.T) {
 		_, err := io.WriteString(w, end)
 		finished <- err == nil && r.Context().Err() == nil
 	})
-	short := func(p *store.Provider) { p.StallTimeout = 400 * time.Millisecond }
+	short := func(p *store.Provider) { p.StallTimeout = 300 * time.Millisecond }
 	p := e.provider(up.URL, short)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
@@ -778,18 +779,60 @@ func (w *slowWriter) Write(b []byte) (int, error) {
 	return w.ResponseRecorder.Write(b)
 }
 
-// The time a write to the caller takes is not the upstream's silence: the
-// stall guard's budget runs from the write's end, not from the read before it.
+// The time a write to the caller takes is not the upstream's silence,
+// however long it is: the stall guard's budget runs from the write's end.
 func TestTheTimeAWriteTakesIsNotTheUpstreamsSilence(t *testing.T) {
-	const budget = 300 * time.Millisecond
+	const budget = 200 * time.Millisecond
 	ctx, guard := provider.NewStallGuard(context.Background(), budget)
 	defer guard.Stop()
-	if modelgateway.WriteToCaller(&slowWriter{d: 200 * time.Millisecond}, budget, guard, []byte("x")) {
-		t.Fatal("a caller taking 200ms, within half the budget, was let go")
+	if modelgateway.WriteToCaller(&slowWriter{d: 2 * budget}, guard, []byte("x")) {
+		t.Fatal("a caller slower than the stall budget, within the write bound, was let go")
 	}
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(budget / 2)
 	if ctx.Err() != nil {
-		t.Fatal("the guard counted the write's 200ms against the upstream")
+		t.Fatal("the guard counted the write's time against the upstream")
+	}
+}
+
+// However short the provider's stall budget, a caller that reads slowly but
+// steadily is not cut off: its writes are held to the write bound alone.
+func TestAShortStallBudgetDoesNotCutOffASlowReader(t *testing.T) {
+	defer modelgateway.SetWriteStall(5 * time.Second)()
+	e := newEnv(t)
+	pad := strings.Repeat("0,", 2<<20)
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		writeBody(w, 200, `{"object":"list","data":[`+pad+`0],"model":"up","usage":{"prompt_tokens":13}}`)
+	})
+	v := e.provider(up.URL, func(p *store.Provider) {
+		p.Name, p.Profile, p.StallTimeout = "vectors", "openai-generic", 100*time.Millisecond
+		p.Endpoints = map[profile.Protocol]string{profile.OpenAI: up.URL}
+	})
+	e.credential(v, "sk-upstream-1", 1)
+	e.alias("text", target(e.deployment(v, "emb", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
+	key := e.key(everyAlias)
+	e.start()
+	req, _ := http.NewRequest("POST", e.url+"/v1/embeddings", strings.NewReader(`{"model":"text","input":"x"}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got bytes.Buffer
+	buf := make([]byte, 512<<10)
+	for {
+		n, err := io.ReadFull(resp.Body, buf)
+		got.Write(buf[:n])
+		if err != nil {
+			break
+		}
+		time.Sleep(150 * time.Millisecond) // past the budget between reads
+	}
+	if want := `{"object":"list","data":[` + pad + `0],"model":"text","usage":{"prompt_tokens":13}}`; got.String() != want {
+		t.Fatalf("a slow reader got %d bytes of %d", got.Len(), len(want))
+	}
+	if u := e.row(resp.Header.Get("request-id")); u.ErrorType != "" || !reflect.DeepEqual(u.Tokens, &store.Tokens{Input: 13}) {
+		t.Errorf("ledger %+v, tokens %+v", u, u.Tokens)
 	}
 }
 

@@ -6809,5 +6809,27 @@ Mutation testing caught 7 of the 8 mutants of the writer and the usage capture. 
 eighth, ignoring a failed flush, only leaves the caller to the next write, which fails
 on the same dead connection. A test was added for the fifth, a stream left unflushed,
 which no test had caught: nothing had pinned that a stream reaches the caller event by
-event. On that final code the whole live tier — DeepSeek, MiniMax and Gitee — passed its
+event.
+
+A fourth round found two of the third round's fixes flawed (Codex), and the background
+security review flagged, without detail, a resource-exhaustion regression in the relay,
+of which the likeliest was a bound the second round had dropped. Each was fixed with a
+test that failed on the code before it:
+- Holding each write to half a short stall budget cut off a caller reading slowly but
+  steadily. At a budget of 100 ms a write had 50 ms, less than ordinary backpressure or
+  an HTTP/2 flow-control window takes. The stall guard now has a hold
+  (`provider.StallGuard.Hold`), which the gateway takes while a write lasts. A write
+  has `writeStall` again however short the budget, and the upstream's silence counts
+  only while the gateway is reading it.
+- Dropping the whitespace between the usage's tokens joined tokens it parted:
+  `{"prompt_tokens":1 3}`, malformed, was kept as 13 and charged. Each run is now kept
+  as one space, which leaves such a usage unreadable, and padding still cannot push a
+  valid one past the bound.
+- With the 64 MiB bound gone, an answer that never ended was relayed, or read after its
+  caller had gone, for as long as bytes came. An embeddings or rerank answer is now cut
+  off past 512 MiB, several times the largest batch the vendors' caps allow, and its row
+  records `api_error`.
+
+Mutation testing caught all 8 mutants of the hold, the bound and the usage
+capture. On the final code the whole live tier — DeepSeek, MiniMax and Gitee — passed its
 52 tests.
