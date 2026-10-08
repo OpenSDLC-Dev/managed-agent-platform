@@ -160,9 +160,10 @@ model string to the gateway's Service, where it names an alias, under `BRAIN_API
 The brain, the control plane (which registers the key in `api_keys` as `brain`) and the
 gateway read it from the Secret's `brain-api-key`, set from `brain.apiKey`, which must
 differ from `controlplane.apiKey`. `brain.gatewayRoute` adds the route's other fields —
-`max_tokens` above all, since the brain sets none and the anthropic adapter otherwise
-sends 8192. `brain.modelProviders` set beside the gateway fails the render rather than
-being dropped. The upgrade that turns the gateway on fails the turns that run while its
+`upstream_model`, `stall_timeout`, `flatten_search_results` and, above all, `max_tokens`,
+since the brain sets none and the anthropic adapter otherwise sends 8192; any other key
+fails the render, since the route is a ConfigMap. `brain.modelProviders` set beside the
+gateway, or `brain.gatewayRoute` without it, fails the render rather than being dropped. The upgrade that turns the gateway on fails the turns that run while its
 pods and the new control plane come up, so run it while no turns do. The gateway answers no model until its catalogue
 names a deployment for the agent's model: configure vendors through its `/admin/v1/`
 API, which managed-agent-console drives.

@@ -138,7 +138,7 @@ brain:
   # anthropic adapter sends 8192 — upstream_model, which pins every agent to one
   # gateway alias and so bounds the gen_ai.request.model series (#88),
   # stall_timeout and flatten_search_results. Not api_key or headers: the route
-  # is a ConfigMap, which holds no credential.
+  # is a ConfigMap, which holds no credential. Refused with the gateway off.
   # Example:
   #   gatewayRoute:
   #     max_tokens: 32000

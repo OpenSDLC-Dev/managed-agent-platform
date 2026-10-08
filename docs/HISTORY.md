@@ -7118,6 +7118,8 @@ Fixed in review:
   `brain.gatewayRoute` adds them. It takes four keys by exact name: a denylist of
   `headers` and `api_key` let `Headers` and `API_KEY` carry a credential into the
   route's ConfigMap, since the loader matches JSON field names without regard to case.
+  With the gateway off it is refused rather than dropped, as `brain.modelProviders` is
+  beside the gateway.
 - An upgrade whose values still carried its routes was first told `brain.apiKey` was
   missing; the routes' refusal now comes first, and both name `modelgateway.enabled=false`.
 - An all-digit `brain.apiKey`, which `--set` or YAML reads as a number, failed the render
@@ -7135,4 +7137,7 @@ plane archives the `brain` row, as slice 5a has it); an init container ordering 
 cutover (the window is one upgrade's, and the docs say to run it while no turns do); and
 TLS between the brain and the gateway (the chart's Services are plain HTTP throughout,
 the control plane's included, for whatever platform key a caller inside the cluster
-sends; TLS terminates at an ingress, or at a mesh).
+sends; TLS terminates at an ingress, or at a mesh); and checking the types of
+`brain.gatewayRoute`'s four values (one the loader cannot read fails the brain at start,
+and a credential written into one as a string would pass any type check: the allowlist
+bars the fields that use a credential, not every place one could be written).

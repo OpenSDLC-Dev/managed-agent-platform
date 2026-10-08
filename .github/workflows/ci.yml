@@ -926,6 +926,9 @@ jobs:
             --set existingSecret=my-preexisting --set-json 'brain.modelProviders=[{"model":"*"}]'
           refuse 'brain.modelProviders is required with modelgateway.enabled=false' -f "$VALUES" \
             --set modelgateway.enabled=false
+          refuse 'brain.gatewayRoute is set, but modelgateway.enabled=false' -f "$VALUES" \
+            --set modelgateway.enabled=false --set brain.gatewayRoute.max_tokens=32000 \
+            --set-json 'brain.modelProviders=[{"model":"*","protocol":"anthropic","base_url":"http://x","api_key":"k"}]'
           echo "ok: each guard fired for its own reason"
       - name: the CD values file renders, and its sandbox placement survives the render
         # deploy/gcp/staging-values.yaml is the file `.github/workflows/deploy.yml`
