@@ -20,7 +20,7 @@ type Usage struct {
 // caller that named alias as its model. Its content is the first choice's,
 // in the order a Messages answer has it: the reasoning as a thinking block
 // signed by signature (the gateway's provenance wrapper, which the caller
-// returns), the text — a refusal's, when there is no other — and each tool
+// returns), the text — the content's, then a refusal's — and each tool
 // call as a tool_use block. usage is the upstream's, as the caller reads it;
 // nil reports zeros. The id is the upstream's, or id when it names none.
 //
@@ -60,11 +60,7 @@ func Answer(b []byte, alias, id string, usage *Usage, signature func() string) (
 	if r := strs["reasoning_content"]; r != "" {
 		content = append(content, map[string]string{"type": "thinking", "thinking": r, "signature": signature()})
 	}
-	t := strs["content"]
-	if t == "" {
-		t = strs["refusal"]
-	}
-	if t != "" {
+	if t := strs["content"] + strs["refusal"]; t != "" {
 		content = append(content, map[string]string{"type": "text", "text": t})
 	}
 	var calls []map[string]json.RawMessage
@@ -76,7 +72,7 @@ func Answer(b []byte, alias, id string, usage *Usage, signature func() string) (
 		_ = json.Unmarshal(c["function"], &fn)
 		callID, _ := text(c, "id")
 		name, _ := text(fn, "name")
-		args, err := Arguments(fn["arguments"])
+		args, _, err := Arguments(fn["arguments"])
 		if err != nil {
 			return nil, fmt.Errorf("the answer's tool call %d: %w", i, err)
 		}
@@ -105,20 +101,21 @@ func Answer(b []byte, alias, id string, usage *Usage, signature func() string) (
 
 // Arguments is a tool call's arguments as text: a string as it is, a JSON
 // object, which Z.ai's chat-completion reference types them as, as its JSON,
-// and null or absent as none.
-func Arguments(raw json.RawMessage) (string, error) {
+// and null or absent as none. object reports a JSON object, which is whole:
+// no fragment may join it.
+func Arguments(raw json.RawMessage) (text string, object bool, err error) {
 	raw = bytes.TrimSpace(raw)
 	switch {
 	case null(raw):
-		return "", nil
+		return "", false, nil
 	case raw[0] == '"':
 		var s string
 		err := json.Unmarshal(raw, &s)
-		return s, err
+		return s, false, err
 	case raw[0] == '{':
-		return string(raw), nil
+		return string(raw), true, nil
 	}
-	return "", fmt.Errorf("its arguments are neither a string nor an object")
+	return "", false, fmt.Errorf("its arguments are neither a string nor an object")
 }
 
 // toolInput is a tool call's arguments as a tool_use block's input: a JSON
@@ -137,10 +134,13 @@ func toolInput(args string) (json.RawMessage, error) {
 
 // StopReason is a finish_reason as a Messages stop_reason. length is the
 // token limit, a tool call it cut short included, as Messages reports one;
-// otherwise an answer that called a tool stopped for it, whatever
-// finish_reason says, as some OpenAI-compatible servers end a tool turn with
-// stop. content_filter is a refusal, as is an answer that refused, which
-// OpenAI ends with stop and a refusal in place of content; every other
+// then content_filter is a refusal, as is an answer that refused, which
+// OpenAI ends with stop and a refusal in place of content, its tool calls
+// included: a refusal is terminal, and a caller that stops for one runs none
+// of them, as the SDK's tool runner does (checked against anthropic-sdk-go
+// v1.70.1 — betatoolrunner.go determineNextStepFromStopReason). Otherwise an
+// answer that called a tool stopped for it, whatever finish_reason says, as
+// some OpenAI-compatible servers end a tool turn with stop; every other
 // reason is end_turn — stop,
 // which also names a stop sequence that matched, where Chat Completions
 // does not say which, so stop_sequence is never set; and DeepSeek's
@@ -150,10 +150,10 @@ func StopReason(finish string, called, refused bool) string {
 	switch {
 	case finish == "length":
 		return "max_tokens"
-	case called:
-		return "tool_use"
 	case finish == "content_filter", refused:
 		return "refusal"
+	case called:
+		return "tool_use"
 	}
 	return "end_turn"
 }

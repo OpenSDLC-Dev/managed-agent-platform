@@ -160,6 +160,12 @@ func TestStreamRefusals(t *testing.T) {
 		{[]string{chunk(`{"content":[{"type":"text","text":"x"}]}`, "")}, "content"},
 		{[]string{chunk(`{"reasoning_content":7}`, "")}, "reasoning_content"},
 		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":7}}]}`, "")}, "neither a string nor an object"},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":{"x":1}}}]}`, ""),
+			chunk(`{"tool_calls":[{"index":0,"function":{"arguments":{"y":2}}}]}`, "")}, "beside other fragments"},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":{"x":1}}}]}`, ""),
+			chunk(`{"tool_calls":[{"index":0,"function":{"arguments":"{\"y\":2}"}}]}`, "")}, "beside other fragments"},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":"{\"x\":"}}]}`, ""),
+			chunk(`{"tool_calls":[{"index":0,"function":{"arguments":{"y":2}}}]}`, "")}, "beside other fragments"},
 		{[]string{chunk(`{"tool_calls":[{"id":"call_a","function":{"name":"f","arguments":"{}"}}]}`, ""),
 			chunk(`{"tool_calls":[{"id":"call_b","function":{"name":"g","arguments":"{}"}}]}`, "")}, "name or id"},
 		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"a","function":{"name":"get_"}}]}`, ""),
@@ -240,6 +246,13 @@ func TestStreamVendorShapes(t *testing.T) {
 		{[]string{chunk(`{"refusal":"No"}`, ""), chunk(`{}`, "stop")},
 			func(m anthropic.Message) bool {
 				return m.StopReason == "refusal" && len(m.Content) == 1 && m.Content[0].Text == "No"
+			}},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":"{}"}}]}`, ""), chunk(`{"refusal":"No"}`, ""), chunk(`{}`, "stop")},
+			func(m anthropic.Message) bool { return m.StopReason == "refusal" }},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"a","function":{"name":"f","arguments":{"x":1}}}]}`, ""),
+			chunk(`{"tool_calls":[{"index":1,"id":"b","function":{"name":"g","arguments":{"y":2}}}]}`, ""), chunk(`{}`, "tool_calls")},
+			func(m anthropic.Message) bool {
+				return len(m.Content) == 2 && string(m.Content[0].Input) == `{"x":1}` && string(m.Content[1].Input) == `{"y":2}`
 			}},
 		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":{"x":1}}}]}`, ""), chunk(`{}`, "tool_calls")},
 			func(m anthropic.Message) bool { return len(m.Content) == 1 && string(m.Content[0].Input) == `{"x":1}` }},

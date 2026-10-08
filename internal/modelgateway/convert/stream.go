@@ -31,6 +31,8 @@ type Stream struct {
 	call     int64  // the open tool_use block's call index
 	callID   string // and the id and name it opened with
 	callName string
+	callArgs int            // its arguments' fragments so far
+	callObj  bool           // and whether one was a JSON object, which no other may join
 	calls    map[int64]bool // the call indices a tool_use block has opened for
 	called   bool           // a tool call has been seen
 	refused  bool           // a refusal has been seen
@@ -116,7 +118,7 @@ func (s *Stream) choice(out *bytes.Buffer, ch map[string]json.RawMessage) error 
 		}
 		var fn map[string]json.RawMessage
 		_ = json.Unmarshal(c["function"], &fn)
-		args, err := Arguments(fn["arguments"])
+		args, object, err := Arguments(fn["arguments"])
 		if err != nil {
 			return fmt.Errorf("tool call %d: %w", index, err)
 		}
@@ -131,13 +133,17 @@ func (s *Stream) choice(out *bytes.Buffer, ch map[string]json.RawMessage) error 
 			return fmt.Errorf("the upstream went back to tool call %d after starting another", index)
 		default:
 			s.into(out, "tool_use", map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}})
-			s.call, s.callID, s.callName, s.called = index, id, name, true
+			s.call, s.callID, s.callName, s.callArgs, s.callObj, s.called = index, id, name, 0, false, true
 			if s.calls == nil {
 				s.calls = map[int64]bool{}
 			}
 			s.calls[index] = true
 		}
 		if args != "" {
+			if s.callObj || object && s.callArgs > 0 {
+				return fmt.Errorf("tool call %d's arguments came as a JSON object beside other fragments", index)
+			}
+			s.callArgs, s.callObj = s.callArgs+1, object
 			s.delta(out, map[string]string{"type": "input_json_delta", "partial_json": args})
 		}
 		generated = true

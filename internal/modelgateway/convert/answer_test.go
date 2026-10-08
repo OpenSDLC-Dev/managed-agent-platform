@@ -101,7 +101,7 @@ func TestAnswerRefusals(t *testing.T) {
 }
 
 // Messages has a reason for each finish Chat Completions names: the token
-// limit wins, then a tool call whatever the finish says, then a refusal.
+// limit wins, then a refusal, then a tool call whatever the finish says.
 func TestStopReason(t *testing.T) {
 	for _, c := range []struct {
 		finish          string
@@ -110,8 +110,8 @@ func TestStopReason(t *testing.T) {
 	}{
 		{"stop", false, false, "end_turn"}, {"length", false, false, "max_tokens"}, {"content_filter", false, false, "refusal"},
 		{"tool_calls", false, false, "end_turn"}, {"aborted", false, false, "end_turn"}, {"", false, false, "end_turn"},
-		{"length", true, false, "max_tokens"}, {"stop", true, false, "tool_use"}, {"content_filter", true, false, "tool_use"},
-		{"stop", false, true, "refusal"}, {"length", false, true, "max_tokens"}, {"tool_calls", true, true, "tool_use"},
+		{"length", true, false, "max_tokens"}, {"stop", true, false, "tool_use"}, {"content_filter", true, false, "refusal"},
+		{"stop", false, true, "refusal"}, {"length", false, true, "max_tokens"}, {"tool_calls", true, true, "refusal"},
 	} {
 		if got := convert.StopReason(c.finish, c.called, c.refused); got != c.want {
 			t.Errorf("StopReason(%q, %v, %v) = %s, want %s", c.finish, c.called, c.refused, got, c.want)
@@ -166,5 +166,20 @@ func TestAnswerVendorShapes(t *testing.T) {
 	}
 	if _, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":7}}]},"finish_reason":"tool_calls"}]}`), "alias", "msg_1", nil, sig); err == nil || !strings.Contains(err.Error(), "neither a string nor an object") {
 		t.Errorf("number arguments: %v", err)
+	}
+}
+
+// A refusal beside content is the text after it, and beside a tool call
+// still stops for refusal, which a caller does not run the call for.
+func TestAnswerRefusalBesideOthers(t *testing.T) {
+	for answer, want := range map[string]string{
+		`{"choices":[{"index":0,"message":{"role":"assistant","content":"Preface. ","refusal":"I cannot help."},"finish_reason":"stop"}]}`:                                                     "Preface. I cannot help.",
+		`{"choices":[{"index":0,"message":{"role":"assistant","refusal":"No.","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"stop"}]}`: "No.",
+	} {
+		b, err := convert.Answer([]byte(answer), "alias", "msg_1", nil, sig)
+		var m anthropic.Message
+		if err != nil || json.Unmarshal(b, &m) != nil || m.Content[0].Text != want || m.StopReason != "refusal" {
+			t.Errorf("%s: %s, %v", answer, b, err)
+		}
 	}
 }

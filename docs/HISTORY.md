@@ -7022,3 +7022,14 @@ Codex's third pass, over those fixes, found four more, fixed the same way:
 - The absent-text leniency also let an explicit `"text": null` through, which the pinned
   SDK's schema refuses and the brain never stores; only an absent text is read as empty.
 Mutation testing caught all 13 of the round's mutants.
+
+Codex's fourth pass found three more, fixed the same way, with all 7 of the round's
+mutants caught:
+- A refusal beside a tool call, or `content_filter` with one, stopped for `tool_use`,
+  which hands the calls to a caller to run; the brain and the SDK's tool runner run none
+  for a refusal, since a refusal is terminal. A refusal now stops for `refusal` first.
+- A streamed call's object-valued arguments joined by another fragment, object or
+  string, made input the SDK's accumulator replaces with `{}`; an object must be the
+  call's only fragment, and the stream fails otherwise.
+- A whole answer's refusal beside non-empty content was dropped; the text is the content,
+  then the refusal, as a stream already carried them.
