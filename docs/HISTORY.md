@@ -7104,3 +7104,29 @@ Decisions made in the slice, with the alternative each beat:
 - GCP staging turns the gateway off in `staging-values.yaml`: turning it on there takes
   `mode2-secret.sh` writing `brain-api-key`, CD annotating and reading back the gateway's
   ServiceAccount, and its one-proxy-per-deployment check counting a fourth.
+
+Fixed in review:
+- Compose's brain could claim a queued turn and send the gateway a key the control plane
+  had not registered yet, and the gateway's 401 fails the turn. The control plane
+  registers both keys before it listens, so it and the gateway carry a TCP healthcheck,
+  every 2 seconds while starting, and the brain starts once both are healthy.
+- With its route the chart's own, nothing could set the route's other fields, and the
+  brain sets no `max_tokens`, so every turn was held to the anthropic adapter's 8,192;
+  `brain.gatewayRoute` adds them, refusing the four the chart writes and `api_key`.
+- An upgrade whose values still carried its routes was first told `brain.apiKey` was
+  missing; the routes' refusal now comes first, and both name `modelgateway.enabled=false`.
+- An all-digit `brain.apiKey`, which `--set` parses as a number, failed the render with a
+  template type error; the guards and the Secret take it as the string it was.
+- Two of CI's negative checks grepped a render's pipe, so a failing render passed them;
+  they grep a captured render.
+- The rotation window was claimed closed in compose and uniform under Helm; it runs in
+  both directions, and an `existingSecret` rotation restarts nothing.
+
+Declined: normalizing the string `"false"` for `modelgateway.enabled` (the chart passes
+booleans with `--set`, as `values.yaml` says of the others, and the refusal now says
+so); refusing `brain.apiKey` with the gateway off (nothing reads it, and the control
+plane archives the `brain` row, as slice 5a has it); an init container ordering the Helm
+cutover (the window is one upgrade's, and the docs say to run it while no turns do); and
+TLS between the brain and the gateway (the chart's Services are plain HTTP throughout,
+the control plane's included, for whatever platform key a caller inside the cluster
+sends; TLS terminates at an ingress, or at a mesh).

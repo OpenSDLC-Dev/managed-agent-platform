@@ -1,6 +1,7 @@
 # Default values for managed-agent-platform.
-# The chart deploys the three platform processes — controlplane, brain, executor —
-# plus an optional model gateway and an optional in-cluster Postgres. The BYOC worker is NOT part of this chart:
+# The chart deploys the four platform processes — controlplane, brain, executor and
+# the model gateway, which modelgateway.enabled=false leaves out — plus an optional
+# in-cluster Postgres. The BYOC worker is NOT part of this chart:
 # it runs on the customer's own compute, outside the platform's cluster.
 
 # -- Container images. Each process is pulled as a separate image at
@@ -103,7 +104,7 @@ brain:
   # docs/DIVERGENCES.md for why). (The loader also accepts api_key_env,
   # but this chart injects no extra env into the brain, so supply api_key here instead.)
   # No other keys — the loader rejects unknown fields. Contains api_key, so it is stored
-  # in a Secret. REQUIRED (at least one route). base_url is the API ROOT — the adapter
+  # in a Secret. REQUIRED (at least one route) with modelgateway.enabled=false. base_url is the API ROOT — the adapter
   # appends the protocol path (/v1/messages or /v1/chat/completions), so omit a trailing
   # /v1. Leaving upstream_model unset passes the agent's own model string through to the
   # endpoint AND into the gen_ai.request.model metric attribute; since metric attributes
@@ -129,6 +130,17 @@ brain:
   # controlplane.apiKey, so it is a credential of the same weight. Must differ
   # from controlplane.apiKey and carry no surrounding whitespace.
   apiKey: ""
+  # -- The gateway route's other fields, with modelgateway.enabled: the chart
+  # writes model, protocol, base_url and api_key_env and refuses them here, and
+  # these join them, checked by the loader as brain.modelProviders' entries are.
+  # max_tokens above all — the brain sets none, so without it the anthropic
+  # adapter sends 8192 — and upstream_model, which pins every agent to one
+  # gateway alias and so bounds the gen_ai.request.model series (#88); also
+  # stall_timeout, headers and flatten_search_results.
+  # Example:
+  #   gatewayRoute:
+  #     max_tokens: 32000
+  gatewayRoute: {}
 
 executor:
   replicas: 1

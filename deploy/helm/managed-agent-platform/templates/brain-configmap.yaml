@@ -2,8 +2,17 @@
        string goes to the gateway's Service, where it names an alias, under
        BRAIN_API_KEY. A ConfigMap rather than the Secret: it holds no credential,
        since api_key_env names the variable, and under existingSecret only the
-       chart knows the Service's name. */}}
+       chart knows the Service's name. brain.gatewayRoute adds the route's other
+       fields; the four the chart writes, and api_key beside api_key_env, are
+       refused rather than overridden. */}}
 {{- if (.Values.modelgateway | default dict).enabled }}
+{{- $route := dict "model" "*" "protocol" "anthropic" "base_url" (printf "http://%s-modelgateway:%v" (include "map.fullname" .) .Values.modelgateway.service.port) "api_key_env" "BRAIN_API_KEY" }}
+{{- $extra := .Values.brain.gatewayRoute | default dict }}
+{{- range $k, $_ := $extra }}
+{{- if or (hasKey $route $k) (eq $k "api_key") }}
+{{- fail (printf "brain.gatewayRoute.%s is the chart's to write: the route sends every model to the gateway under BRAIN_API_KEY." $k) }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,5 +21,5 @@ metadata:
     {{- include "map.labels" . | nindent 4 }}
     app.kubernetes.io/component: brain
 data:
-  model-providers.json: {{ list (dict "model" "*" "protocol" "anthropic" "base_url" (printf "http://%s-modelgateway:%v" (include "map.fullname" .) .Values.modelgateway.service.port) "api_key_env" "BRAIN_API_KEY") | toJson | quote }}
+  model-providers.json: {{ list (merge $route $extra) | toJson | quote }}
 {{- end }}

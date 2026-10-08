@@ -46,7 +46,9 @@ compute, outside the platform cluster, and reaches the control plane only over t
   defaults resolve to them with the tag following `appVersion`. For a chart
   predating the first published release, or to run your own build, push images a
   cluster can pull and point `image.registry` / `image.repository` / `image.tag`
-  at them. Each process is expected at `{registry}/{repository}/{component}:{tag}`
+  at them. A checkout of `main` between releases is your own build: its
+  `appVersion` names the last release, whose images can lack what its templates
+  expect — a `modelgateway` image, until a release carries one. Each process is expected at `{registry}/{repository}/{component}:{tag}`
   and started with `command: ["/<component>"]`.
 - A vendor account for the model gateway's catalogue, configured after install
   through its admin API — or, with `modelgateway.enabled=false`, a model endpoint
@@ -111,12 +113,14 @@ also accepts `api_key_env`, but the chart injects no extra
 env into the brain, so supply `api_key` here.) See `internal/provider` for the schema.
 
 A `"*"` route with no `upstream_model` — the common shape in front of a gateway, and
-the shape of the route the chart writes for its own — **passes the caller's own model
-string through** to the endpoint and
+the shape of the route the chart writes for its own unless `brain.gatewayRoute` sets
+one — **passes the caller's own model string through** to the endpoint and
 into the `gen_ai.request.model` metric attribute. Metric attributes are aggregation
 keys, so anyone who can supply a model string (creating an agent, or a session with an
 `agent_with_overrides` block) then controls your metrics backend's series count. Set
-`upstream_model`, or use per-model routes, if those paths are exposed to untrusted
+`upstream_model` (with the gateway on, `brain.gatewayRoute.upstream_model`, which
+pins every agent to that alias; the gateway refusing an unknown alias comes after the
+brain has recorded it), or use per-model routes, if those paths are exposed to untrusted
 callers — see the `brain.modelProviders` comment in `values.yaml` and
 [#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88).
 
@@ -155,8 +159,11 @@ The brain's one route is the chart's, in the ConfigMap `<release>-brain-routes`:
 model string to the gateway's Service, where it names an alias, under `BRAIN_API_KEY`.
 The brain, the control plane (which registers the key in `api_keys` as `brain`) and the
 gateway read it from the Secret's `brain-api-key`, set from `brain.apiKey`, which must
-differ from `controlplane.apiKey`. `brain.modelProviders` set beside the gateway fails
-the render rather than being dropped. The gateway answers no model until its catalogue
+differ from `controlplane.apiKey`. `brain.gatewayRoute` adds the route's other fields —
+`max_tokens` above all, since the brain sets none and the anthropic adapter otherwise
+sends 8192. `brain.modelProviders` set beside the gateway fails the render rather than
+being dropped. The upgrade that turns the gateway on fails the turns that run while its
+pods and the new control plane come up, so run it while no turns do. The gateway answers no model until its catalogue
 names a deployment for the agent's model: configure vendors through its `/admin/v1/`
 API, which managed-agent-console drives.
 

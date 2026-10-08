@@ -1,11 +1,4 @@
-{{- /* With the gateway on, the brain's one route is the gateway's
-       (brain-configmap.yaml), so routes of its own would be dropped without a
-       word; refused instead, here rather than in secret.yaml so that an
-       existingSecret release is refused too. */}}
 {{- $gateway := (.Values.modelgateway | default dict).enabled }}
-{{- if and $gateway .Values.brain.modelProviders }}
-{{- fail "brain.modelProviders is set, but modelgateway.enabled routes the brain through the model gateway: configure those vendors in the gateway's catalogue, or set modelgateway.enabled=false to keep these routes." }}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

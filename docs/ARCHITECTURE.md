@@ -81,7 +81,8 @@ they point at is a committed row the listener re-reads for itself.
 1. A client POSTs `user.message`; the session goes `running` and a `model_turn` work
    item is enqueued.
 2. A brain claims it, replays the log into provider messages, and streams the model's
-   response — writing `agent.message` / `agent.thinking` events (with opt-in
+   response — through the model gateway by default, where the agent's model names an
+   alias and the gateway picks the vendor deployment — writing `agent.message` / `agent.thinking` events (with opt-in
    `event_start`/`event_delta` SSE previews) and `span.model_request_start/_end`.
    Replay, like the grader's and dreams' transcripts, follows consumption order
    (`events.ConsumptionOrder`): an input that landed while an earlier request was in
