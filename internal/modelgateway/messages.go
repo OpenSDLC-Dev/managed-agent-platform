@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -367,6 +368,22 @@ var errorStatus = map[string]int{
 	"overloaded_error":      529,
 }
 
+// statedStatus is the status an error body states for itself, for a type
+// the gateway does not know: MiniMax's envelope states it as error.http_code,
+// "400" (probed 2026-10-08), even on its OpenAI endpoint. A 4xx or 5xx is
+// taken, as a string or a number; otherwise the error is a 500.
+func statedStatus(data []byte) int {
+	raw := member(data, "error", "http_code")
+	var code string
+	if json.Unmarshal(raw, &code) != nil {
+		code = string(bytes.TrimSpace(raw))
+	}
+	if n, err := strconv.Atoi(code); err == nil && n >= 400 && n < 600 {
+		return n
+	}
+	return http.StatusInternalServerError
+}
+
 // streamError is a stream whose first event is an error: the upstream refused
 // before it began an answer, so this is the error response it would have sent
 // had its 200 not already gone, retried and relayed like one — its
@@ -379,7 +396,11 @@ func streamError(ctx context.Context, at catalog.Attempt, data []byte, header ht
 	}
 	status, ok := errorStatus[typ]
 	if !ok {
-		status = http.StatusInternalServerError
+		status = statedStatus(data)
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		return refusedCredential(ctx, at, fmt.Sprintf("HTTP %d", status), data, red)
 	}
 	h := header.Clone()
 	h.Set("Content-Type", "application/json")

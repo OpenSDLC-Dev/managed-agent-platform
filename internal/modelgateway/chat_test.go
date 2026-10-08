@@ -850,6 +850,36 @@ func TestAChatStreamOpeningWithAnErrorFallsBack(t *testing.T) {
 	}
 }
 
+// A stream that opens with an error whose type the gateway does not know
+// answers with the status its body states, as MiniMax's envelope does in
+// error.http_code: a 400 is not retried; a 401 is the vendor refusing the
+// gateway's own credential, a 502 the next deployment may cure; a status that
+// is no error is a 500, which it may cure too.
+func TestAStreamOpeningWithAnErrorKeepsTheStatusItStates(t *testing.T) {
+	stated := map[string]string{"bad": `"400"`, "number": `404`, "unauthorized": `"401"`, "fine": `"200"`}
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		sse(w, `data: {"type":"error","error":{"type":"bad_request_error","message":"invalid params","http_code":`+stated[c.Model]+`},"request_id":"r1"}`+"\n\n")
+	})
+	next := newFake(t, chatAnswer("Saturn", deepseekStyle))
+	for m := range stated {
+		e.alias(m, target(e.deployment(onOpenAI(e, "openai-generic", f.URL), m), 0),
+			target(e.deployment(onOpenAI(e, "openai-generic", next.URL), "up"), 1))
+	}
+	key := e.key(everyAlias)
+	e.start()
+	hdr := map[string]string{"Authorization": "Bearer " + key}
+	for m, want := range map[string]int{"bad": 400, "number": 404, "unauthorized": 200, "fine": 200} {
+		resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`","stream":true,"messages":[]}`, hdr)
+		if resp.StatusCode != want || want == 200 && !strings.Contains(string(b), `"content":"aturn"`) || want != 200 && !strings.Contains(string(b), "invalid params") {
+			t.Errorf("%s: %d %q", m, resp.StatusCode, b)
+		}
+	}
+	if len(next.recorded()) != 2 {
+		t.Errorf("%d calls to the next deployment, want the 2 the 401 and the 200 made", len(next.recorded()))
+	}
+}
+
 // A stream asked for several choices (n) has said all it will once every
 // choice has finished: one the upstream closes while another choice is still
 // going is cut off, and ends with an error; one that closes after the last

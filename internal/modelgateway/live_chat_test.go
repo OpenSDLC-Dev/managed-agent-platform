@@ -160,8 +160,11 @@ func TestLiveChatCompletions(t *testing.T) {
 					p.Messages = append(p.Messages, openai.ToolMessage("2026-10-08T12:00:00Z", tc.ID))
 				}
 				next, err := cl.Chat.Completions.New(liveCtx(t), p)
-				if err != nil || len(next.Choices) == 0 || next.Choices[0].Message.Content == "" {
-					liveFatalf(t, "the continuation: %v %s", err, masked(next.RawJSON()))
+				if err != nil {
+					liveFatalf(t, "the continuation: %v", err)
+				}
+				if len(next.Choices) == 0 || next.Choices[0].Message.Content == "" {
+					liveFatalf(t, "the continuation: %s", masked(next.RawJSON()))
 				}
 			})
 		})

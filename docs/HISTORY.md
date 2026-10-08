@@ -6588,7 +6588,7 @@ model ids, so that the gateway's rewrite of `model` shows. Mutation testing caug
   `parallel_tool_calls` refusals dropped. The chunk's model survived at first, while
   each live alias shared its model's id.
 
-Review found eighteen defects, each fixed with a test that failed on the earlier code:
+Review found nineteen defects, each fixed with a test that failed on the earlier code:
 - The gateway took a request for a stream only when `stream` was exactly `true`. A
   value a lenient upstream reads as true, or a key `"Stream"`, which a case-insensitive
   decoder such as Go's reads as `stream`, could have an upstream stream an answer the
@@ -6638,6 +6638,10 @@ Review found eighteen defects, each fixed with a test that failed on the earlier
 - A Messages error event with no data line at all ended a stream that had begun
   without being recorded as an error, where an empty data line was recorded (the
   verifier; it predates this slice).
+- A stream opening with an error in MiniMax's envelope, whose `bad_request_error` the
+  gateway does not know, was taken for a retryable 500, where its `error.http_code`
+  states a 400; such a body's stated status is now its answer (the Codex reviewer on
+  the pull request).
 
 The Claude review's other suggestions were declined: listing in OpenAI's shape only the
 aliases the OpenAI route can serve now (plan 59 lists by grant and kind on both
@@ -6646,7 +6650,7 @@ attempt behind the stream interface (to be weighed when slice 4c adds a third sh
 decoding each chunk once (not measured as a cost); and reusing `answerJSON` for chat
 answers, which would read a top-level `content` array as thinking blocks.
 
-Fifty-seven mutants against those fixes were caught, five only once a test pinned the
+Sixty-one mutants against those fixes were caught, five only once a test pinned the
 guard: a Messages stream cut off on its first event still falls back; a stream that
 began no choice has not finished; the Messages route passes `stream_options` through;
 a dataless event opening a chat stream is no error; and a usage chunk with no
