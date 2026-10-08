@@ -1,0 +1,120 @@
+package convert
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
+// Usage is an answer's token counts in the Messages API's meaning: input
+// excludes the prompt tokens read from the cache, which are counted apart.
+// Chat Completions reports no cache writes, so the counts name none.
+type Usage struct {
+	Input     int64 `json:"input_tokens"`
+	Output    int64 `json:"output_tokens"`
+	CacheRead int64 `json:"cache_read_input_tokens"`
+}
+
+// Answer converts a whole Chat Completions answer to a Messages one, for a
+// caller that named alias as its model. Its content is the first choice's,
+// in the order a Messages answer has it: the reasoning as a thinking block
+// signed by signature (the gateway's provenance wrapper, which the caller
+// returns), the text — a refusal's, when there is no other — and each tool
+// call as a tool_use block. usage is the upstream's, as the caller reads it;
+// nil reports zeros. The id is the upstream's, or id when it names none.
+//
+// It fails on an answer it cannot carry: no choice, a tool call whose
+// arguments are not a JSON object, or the deprecated function_call, which
+// names a call without the id a tool_result answers.
+func Answer(b []byte, alias, id string, usage *Usage, signature func() string) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(b, &obj) != nil || obj == nil {
+		return nil, fmt.Errorf("the answer is not a JSON object")
+	}
+	var choices []map[string]json.RawMessage
+	if json.Unmarshal(obj["choices"], &choices) != nil || len(choices) == 0 {
+		return nil, fmt.Errorf("the answer has no choice")
+	}
+	var msg map[string]json.RawMessage
+	if json.Unmarshal(choices[0]["message"], &msg) != nil || msg == nil {
+		return nil, fmt.Errorf("the answer's choice has no message")
+	}
+	if !null(msg["function_call"]) {
+		return nil, fmt.Errorf("the answer uses the deprecated function_call; the upstream must answer with tool_calls")
+	}
+	var content []any
+	if r, _ := text(msg, "reasoning_content"); r != "" {
+		content = append(content, map[string]string{"type": "thinking", "thinking": r, "signature": signature()})
+	}
+	t, _ := text(msg, "content")
+	if t == "" {
+		t, _ = text(msg, "refusal")
+	}
+	if t != "" {
+		content = append(content, map[string]string{"type": "text", "text": t})
+	}
+	var calls []map[string]json.RawMessage
+	if !null(msg["tool_calls"]) && json.Unmarshal(msg["tool_calls"], &calls) != nil {
+		return nil, fmt.Errorf("the answer's tool_calls is not an array of objects")
+	}
+	for i, c := range calls {
+		var fn map[string]json.RawMessage
+		_ = json.Unmarshal(c["function"], &fn)
+		callID, _ := text(c, "id")
+		name, _ := text(fn, "name")
+		args, _ := text(fn, "arguments")
+		input, err := toolInput(args)
+		if err != nil {
+			return nil, fmt.Errorf("the answer's tool call %d: %w", i, err)
+		}
+		content = append(content, map[string]any{"type": "tool_use", "id": callID, "name": name, "input": input})
+	}
+	if content == nil {
+		content = []any{}
+	}
+	finish, _ := text(choices[0], "finish_reason")
+	if upstreamID, ok := text(obj, "id"); ok && upstreamID != "" {
+		id = upstreamID
+	}
+	if usage == nil {
+		usage = &Usage{}
+	}
+	return encode(map[string]any{
+		"id": id, "type": "message", "role": "assistant", "model": alias, "content": content,
+		"stop_reason": StopReason(finish, len(calls) > 0), "stop_sequence": nil, "usage": usage,
+	}), nil
+}
+
+// toolInput is a tool call's arguments as a tool_use block's input: a JSON
+// object, and an empty one for no arguments at all.
+func toolInput(args string) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace([]byte(args))
+	if len(trimmed) == 0 {
+		return json.RawMessage("{}"), nil
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &obj) != nil || obj == nil {
+		return nil, fmt.Errorf("its arguments are not a JSON object")
+	}
+	return json.RawMessage(trimmed), nil
+}
+
+// StopReason is a finish_reason as a Messages stop_reason. An answer that
+// called a tool stopped for it, whatever finish_reason says, as some
+// OpenAI-compatible servers end a tool turn with stop. length is the token
+// limit, content_filter a refusal; every other reason is end_turn — stop,
+// which also names a stop sequence that matched, where Chat Completions
+// does not say which, so stop_sequence is never set; and DeepSeek's
+// insufficient_system_resource and aborted, an answer the vendor cut short,
+// which Messages has no reason for.
+func StopReason(finish string, called bool) string {
+	switch {
+	case called:
+		return "tool_use"
+	case finish == "length":
+		return "max_tokens"
+	case finish == "content_filter":
+		return "refusal"
+	}
+	return "end_turn"
+}

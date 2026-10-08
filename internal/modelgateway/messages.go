@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/upstream"
@@ -58,6 +60,17 @@ var writeStall = func() *atomic.Int64 {
 	return &d
 }()
 
+// pingEvery is how long a converted stream may go with nothing written to
+// the caller before it is sent a ping, as an Anthropic stream would be: a
+// Chat Completions upstream may say nothing while it reasons, and a proxy
+// between the caller and the gateway may close a connection idle for a
+// minute. Atomic for writeStall's reason.
+var pingEvery = func() *atomic.Int64 {
+	var d atomic.Int64
+	d.Store(int64(15 * time.Second))
+	return &d
+}()
+
 // maxHeld bounds the keep-alives held back before a stream's answer begins:
 // past it the stream is committed to, so an upstream that pings and never
 // answers costs the gateway no more than this.
@@ -85,18 +98,53 @@ func bounded(w http.ResponseWriter) *http.ResponseController {
 // between writes, while the upstream is read: HTTP/2 resets a stream whose
 // deadline passes with no write pending.
 type callerWriter struct {
+	mu    sync.Mutex // orders the relay's writes and its idle pings
 	w     http.ResponseWriter
 	rc    *http.ResponseController
 	guard *provider.StallGuard
 	flush bool // whether each piece is flushed, as a stream's events are
 	gone  bool
+	last  time.Time // when the last write ended, or the writer was made
 }
 
 func newCallerWriter(w http.ResponseWriter, guard *provider.StallGuard, flush bool) *callerWriter {
-	return &callerWriter{w: w, rc: http.NewResponseController(w), guard: guard, flush: flush}
+	return &callerWriter{w: w, rc: http.NewResponseController(w), guard: guard, flush: flush, last: time.Now()}
 }
 
 func (cw *callerWriter) write(b []byte) {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+	cw.writeLocked(b)
+}
+
+// pingWhileIdle writes ping whenever every passes with nothing written,
+// until the stop it returns is called, which waits out a ping being written.
+func (cw *callerWriter) pingWhileIdle(ping []byte, every time.Duration) (stop func()) {
+	done, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		wait := every
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(wait):
+			}
+			cw.mu.Lock()
+			if idle := time.Since(cw.last); idle >= every {
+				cw.writeLocked(ping)
+				wait = every
+			} else {
+				wait = every - idle
+			}
+			cw.mu.Unlock()
+		}
+	}()
+	return func() { close(done); <-finished }
+}
+
+func (cw *callerWriter) writeLocked(b []byte) {
+	defer func() { cw.last = time.Now() }()
 	if cw.gone {
 		return
 	}
@@ -208,6 +256,30 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 			fmt.Sprintf("model %s has no enabled upstream on the %s protocol", model, protocolNames[proto])})
 		return
 	}
+	// An attempt on another protocol converts the request (convert): a
+	// count has no Chat Completions counterpart, so it is the passthrough
+	// attempts' to make, and a request the conversion cannot carry is too.
+	var converted map[string]json.RawMessage
+	switch passing := passingThrough(attempts, proto); {
+	case len(passing) == len(attempts):
+	case path == "/v1/messages/count_tokens":
+		if len(passing) == 0 {
+			writeError(w, r, notFound("model %s has no upstream that counts tokens", model))
+			return
+		}
+		attempts = passing
+	default:
+		b, err := convert.Request(top, "", nil)
+		if err != nil && len(passing) == 0 {
+			writeError(w, r, invalid("%s", err))
+			return
+		}
+		if err != nil {
+			attempts = passing
+			break
+		}
+		_ = json.Unmarshal(b, &converted)
+	}
 	// A deployment whose vendor would ignore what the request asks for is
 	// skipped; a count is made all the same where every one would, since
 	// what a vendor ignores leaves the count unchanged. The profiles' hooks
@@ -215,7 +287,7 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	// shows in its answer — a vector's length, a result's count.
 	kept, ignored := attempts, []string(nil)
 	if rt.kind == store.KindChat {
-		kept, ignored = honoring(attempts, top, proto)
+		kept, ignored = honoring(attempts, top, converted)
 	}
 	switch {
 	case len(kept) > 0:
@@ -298,7 +370,7 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 			return
 		}
 		last = f
-		if !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID) {
+		if !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID, at.Protocol != call.proto) {
 			slog.InfoContext(r.Context(), "modelgateway: upstream refused the request's thinking; retrying without it",
 				"alias", a.Name, "deployment", at.Deployment.ID, "credential", at.Credential.ID)
 			strip = true
@@ -517,12 +589,20 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	}
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
 	prof, _ := profile.Lookup(at.Provider.Profile)
+	up := at.Protocol
+	conv := up != c.proto // the attempt converts the request (converted.go)
 	var body []byte
 	var wrap *wrapping
 	path := c.path
-	if c.proto == profile.OpenAI {
+	switch {
+	case conv:
+		wrap, path = newWrapping(at.Deployment.ID, strip), routes["/v1/chat/completions"].upstream
+		if body, err = convertedBody(c, at.Deployment, prof, strip); err != nil {
+			return &failure{status: http.StatusBadRequest, typ: "invalid_request_error", err: err}, false
+		}
+	case c.proto == profile.OpenAI:
 		body, path = chatBody(c, at.Deployment), routes[c.path].upstream
-	} else {
+	default:
 		body, wrap = upstreamBody(c, at.Deployment, prof, strip), newWrapping(at.Deployment.ID, strip)
 	}
 	ctx, guard := provider.NewStallGuard(ctx, at.Provider.StallTimeout)
@@ -531,15 +611,17 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	if err != nil {
 		return &failure{status: http.StatusBadGateway, typ: "api_error", err: red.Error(err)}, true
 	}
-	for k, vs := range c.header {
-		req.Header[k] = vs
+	if !conv { // an Anthropic SDK's headers name an Anthropic account
+		for k, vs := range c.header {
+			req.Header[k] = vs
+		}
 	}
 	for k, v := range at.Provider.Headers {
 		req.Header.Set(k, v)
 	}
 	propagate(ctx, at.Provider, req.Header)
 	req.Header.Set("Content-Type", "application/json")
-	if prof.BearerAuth || c.proto == profile.OpenAI { // every OpenAI-compatible API takes a Bearer token
+	if prof.BearerAuth || up == profile.OpenAI { // every OpenAI-compatible API takes a Bearer token
 		req.Header.Set("Authorization", "Bearer "+string(key))
 	} else {
 		req.Header.Set("x-api-key", string(key))
@@ -575,6 +657,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			return &failure{status: s, typ: "api_error",
 				err: fmt.Errorf("upstream answered %d with an error body over the gateway's bound of %d bytes", s, maxResponseBody)}, retryable(s, resp.Header)
 		}
+		if conv {
+			h := resp.Header.Clone()
+			h.Set("Content-Type", "application/json")
+			return &failure{status: s, header: h, body: convertedError(ctx, red, b, s, requestID(r))}, retryable(s, resp.Header)
+		}
 		return &failure{status: s, header: resp.Header, body: errorJSON(ctx, red, b, requestID(r))}, retryable(s, resp.Header)
 	}
 	if c.stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
@@ -584,9 +671,12 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		// any refusal. Keep-alives past maxHeld begin it anyway.
 		events := upstream.NewReader(resp.Body)
 		var p streamProto
-		if c.proto == profile.OpenAI {
+		switch {
+		case conv:
+			p = &convStream{c: c, s: convert.NewStream(c.alias, requestID(r), signer(wrap)), ctx: ctx, red: red, rid: requestID(r)}
+		case c.proto == profile.OpenAI:
 			p = &chatStream{c: c, red: red, withhold: !c.usage}
-		} else {
+		default:
 			p = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
 		}
 		var held []byte
@@ -596,15 +686,15 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			// the blank line that ends it, its first chunk included: one
 			// whole there begins the answer, as it would later on. A
 			// Messages stream cut off so before message_stop is no answer.
-			cut := errors.Is(err, io.EOF) && c.proto == profile.OpenAI && e.Data != nil && p.complete(e.Data)
+			cut := errors.Is(err, io.EOF) && up == profile.OpenAI && e.Data != nil && p.complete(e.Data)
 			switch {
 			case err != nil && !cut:
 				return noAnswer(guard, red, err)
 			case p.keepAlive(e) && len(held)+len(e.Raw) <= maxHeld:
 				held = append(held, e.Raw...)
-			case e.Name == "error" && c.proto == profile.Anthropic:
+			case e.Name == "error" && up == profile.Anthropic:
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
-			case c.proto == profile.OpenAI && chatError(e):
+			case up == profile.OpenAI && chatError(e):
 				// What chatStream would end the stream on: an error that
 				// parses is answered as a Messages stream's is, and one
 				// that does not is the gateway's own failure, retried like
@@ -613,7 +703,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 					return &failure{status: http.StatusBadGateway, typ: "api_error",
 						err: errors.New("upstream opened its stream with an event that is not a JSON object")}, true
 				}
-				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
+				f, retry := streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
+				if conv && f.body != nil {
+					f.body = convertedError(ctx, red, e.Data, f.status, requestID(r))
+				}
+				return f, retry
 			default:
 				if cut {
 					e.Raw = terminated(e.Raw)
@@ -638,21 +732,29 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		return &failure{status: http.StatusBadGateway, typ: "api_error",
 			err: fmt.Errorf("upstream answer exceeds the gateway's bound of %d bytes", maxResponseBody)}, false
 	}
-	w.Header().Set("Content-Type", "application/json")
-	bounded(w)
-	w.WriteHeader(resp.StatusCode)
+	var answer []byte
 	switch {
+	case conv:
+		c.out.tokens = chatUsageOf(member(b, "usage"))
+		if answer, err = convert.Answer(b, c.alias, requestID(r), callerUsage(c.out.tokens), signer(wrap)); err != nil {
+			return &failure{status: http.StatusBadGateway, typ: "api_error",
+				err: fmt.Errorf("upstream answer could not be converted: %w", err)}, false
+		}
 	case c.proto == profile.OpenAI:
-		body, usage := chatAnswerJSON(b, c.alias)
-		_, _ = w.Write(body)
+		var usage json.RawMessage
+		answer, usage = chatAnswerJSON(b, c.alias)
 		c.out.tokens = chatUsageOf(usage)
 	default:
-		body, usage := answerJSON(b, c.alias, wrap)
-		_, _ = w.Write(body)
+		var usage json.RawMessage
+		answer, usage = answerJSON(b, c.alias, wrap)
 		if c.path == "/v1/messages" { // a count's answer is a count, not usage, whatever else it names
 			c.out.tokens = usageOf(nil, usage)
 		}
 	}
+	w.Header().Set("Content-Type", "application/json")
+	bounded(w)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(answer)
 	c.out.status = resp.StatusCode
 	return nil, false
 }
@@ -679,7 +781,7 @@ func upstreamBody(c call, d store.Deployment, prof profile.Profile, strip bool) 
 		out[k] = v
 	}
 	if c.hist != nil {
-		out["messages"] = c.hist.messagesFor(d.ID, strip)
+		out["messages"] = c.hist.messagesFor(d.ID, strip, false)
 	}
 	if m, ok := out["messages"]; ok && prof.FlattenSearchResults {
 		out["messages"] = flattenSearchResults(m)
@@ -802,7 +904,11 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	send := newCallerWriter(w, guard, true).write
+	cw := newCallerWriter(w, guard, true)
+	send := cw.write
+	if ping := p.idle(); ping != nil {
+		defer cw.pingWhileIdle(ping, time.Duration(pingEvery.Load()))()
+	}
 	done := false
 	relay := func(e upstream.Event) {
 		if c.out.ttft == 0 && !p.keepAlive(e) {
@@ -814,7 +920,11 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 		}
 		done = done || last
 	}
-	if len(held) > 0 {
+	switch {
+	case len(held) == 0:
+	case p.idle() != nil:
+		send(p.idle())
+	default:
 		send(held)
 	}
 	relay(first)
@@ -833,6 +943,9 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 		// A stream that has said all it will has ended, however it closed.
 		why := p.ended()
 		if why == "" {
+			if end := p.closing(); end != nil {
+				send(end)
+			}
 			return
 		}
 		if errors.Is(err, io.EOF) {
@@ -865,6 +978,13 @@ type streamProto interface {
 	failure(typ, msg string) []byte
 	// keepAlive reports whether e holds the stream open and says nothing.
 	keepAlive(e upstream.Event) bool
+	// closing is what the caller is sent when the upstream ends a stream
+	// that has said all it will, nil for nothing.
+	closing() []byte
+	// idle is the keep-alive the caller is sent in place of the ones held
+	// before the answer began, and whenever pingEvery passes with nothing
+	// written; nil sends the held ones as they came, and nothing else.
+	idle() []byte
 }
 
 // messagesStream relays an Anthropic stream, rewriting only message_start's
@@ -914,6 +1034,10 @@ func (s *messagesStream) event(e upstream.Event) ([]byte, bool) {
 }
 
 func (s *messagesStream) ended() string { return "the stream ended before message_stop" }
+
+func (s *messagesStream) closing() []byte { return nil }
+
+func (s *messagesStream) idle() []byte { return nil }
 
 func (s *messagesStream) complete(data []byte) bool { return json.Valid(data) }
 
@@ -1044,6 +1168,10 @@ func empty(v any) bool {
 }
 
 func (s *chatStream) complete(data []byte) bool { return json.Valid(data) || isDone(data) }
+
+func (s *chatStream) closing() []byte { return nil }
+
+func (s *chatStream) idle() []byte { return nil }
 
 // keepAlive: an event with no data line, which an OpenAI client does not
 // dispatch, whatever its name but error, which the gateway reads as one. A

@@ -39,6 +39,13 @@ func ThinkingRefusal(body []byte) bool { return thinkingRefusal(body) }
 // EscapesName is escapesName.
 func EscapesName(b []byte) bool { return escapesName(b) }
 
+// SetPingEvery shortens how long a converted stream goes unwritten before a
+// ping, for one test, and returns its restore.
+func SetPingEvery(d time.Duration) func() {
+	old := pingEvery.Swap(int64(d))
+	return func() { pingEvery.Store(old) }
+}
+
 // SetWriteStall shortens the bound on a write to the caller for one test, and
 // returns its restore.
 func SetWriteStall(d time.Duration) func() {

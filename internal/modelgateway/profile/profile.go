@@ -23,6 +23,7 @@ package profile
 
 import (
 	"encoding/json"
+	"maps"
 	"regexp"
 )
 
@@ -70,6 +71,11 @@ type Profile struct {
 	// as text, for a vendor that refuses the block, in the rendering the
 	// brain's flatten_search_results uses (internal/provider/anthropic).
 	FlattenSearchResults bool `json:"-"`
+	// ChatThinking is the thinking.type the vendor's OpenAI endpoint takes
+	// for each of the Messages API's, for a request the gateway converts
+	// (internal/modelgateway/convert); nil drops thinking, which Chat
+	// Completions has no field for.
+	ChatThinking map[string]string `json:"-"`
 	// Ignores names what in a Messages request to model, a deployment's
 	// upstream model id, the vendor ignores although the answer depends on
 	// it — by its documentation or the live tier — or "" for nothing; no
@@ -99,7 +105,10 @@ var profiles = []Profile{
 	{Name: "deepseek", DisplayName: "DeepSeek", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, BaseURL: "https://api.deepseek.com/anthropic"},
 		{Protocol: OpenAI, BaseURL: "https://api.deepseek.com"},
-	}, FlattenSearchResults: true, Ignores: deepseekIgnores, ChatIgnores: deepseekChatIgnores},
+	}, FlattenSearchResults: true, Ignores: deepseekIgnores, ChatIgnores: deepseekChatIgnores,
+		// DeepSeek's thinking guide gives both its formats one toggle,
+		// {"thinking": {"type": "enabled/disabled"}}, enabled by default.
+		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
 	// MiniMax's Messages API reference takes either header and says
 	// "Authorization: Bearer <API_KEY> is recommended". It refuses a
 	// search_result block in a tool_result with a 400, "invalid tool_result
@@ -109,7 +118,10 @@ var profiles = []Profile{
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.minimax.io/anthropic"},
 		{Protocol: OpenAI, Region: RegionCN, BaseURL: "https://api.minimax.cn/v1"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.minimax.io/v1"},
-	}, BearerAuth: true, FlattenSearchResults: true, Ignores: minimaxIgnores, ChatIgnores: minimaxChatIgnores},
+	}, BearerAuth: true, FlattenSearchResults: true, Ignores: minimaxIgnores, ChatIgnores: minimaxChatIgnores,
+		// MiniMax's OpenAI Chat Completions reference (text-chat-openai)
+		// takes thinking.type disabled or adaptive, adaptive by default.
+		ChatThinking: map[string]string{"enabled": "adaptive", "adaptive": "adaptive", "disabled": "disabled"}},
 	// BigModel's Claude API compatibility guide sends the key as x-api-key.
 	{Name: "zhipu", DisplayName: "Zhipu (BigModel · Z.ai)", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/anthropic"},
@@ -211,6 +223,12 @@ func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 			return "tool_choice.disable_parallel_tool_use"
 		}
 	}
+	return m2ThinkingDisabled(model, req)
+}
+
+// m2ThinkingDisabled names thinking.type when it is disabled for one of
+// MiniMax's M2.x models, which think regardless.
+func m2ThinkingDisabled(model string, req map[string]json.RawMessage) string {
 	var thinking map[string]json.RawMessage
 	var typ string
 	if minimaxM2.MatchString(model) && json.Unmarshal(req["thinking"], &thinking) == nil &&
@@ -238,12 +256,14 @@ func deepseekChatIgnores(_ string, req map[string]json.RawMessage) string {
 }
 
 // minimaxChatIgnores: parallel_tool_calls false; stop, which M3 and
-// M3.1-Flash-Preview counted past in all 6 asks to stop at " 5"; and a
+// M3.1-Flash-Preview counted past in all 6 asks to stop at " 5"; a
 // tool_choice forcing a call — required or naming a function, which they
 // answered a fun-fact question without calling in all 12 asks, and
-// allowed_tools in required mode, in all 6. A custom tool they refuse with a
-// 400 of their own. Every value is read by its exact key.
-func minimaxChatIgnores(_ string, req map[string]json.RawMessage) string {
+// allowed_tools in required mode, in all 6; and, for the M2.x models,
+// thinking disabled, which the Chat Completions reference has "accepted but
+// ignored" as the Messages one does. A custom tool they refuse with a 400 of
+// their own. Every value is read by its exact key.
+func minimaxChatIgnores(model string, req map[string]json.RawMessage) string {
 	if f := parallelBanned(req); f != "" {
 		return f
 	}
@@ -258,7 +278,7 @@ func minimaxChatIgnores(_ string, req map[string]json.RawMessage) string {
 		json.Unmarshal(req["tool_choice"], &named) == nil && (choiceType(named) == "function" || allowedRequired(named)) {
 		return "tool_choice"
 	}
-	return ""
+	return m2ThinkingDisabled(model, req)
 }
 
 // allowedRequired reports whether a tool_choice is allowed_tools in required
@@ -302,5 +322,6 @@ func Lookup(name string) (Profile, bool) {
 func clone(p Profile) Profile {
 	p.Protocols = append([]Protocol(nil), p.Protocols...)
 	p.Hosts = append([]Host(nil), p.Hosts...)
+	p.ChatThinking = maps.Clone(p.ChatThinking)
 	return p
 }

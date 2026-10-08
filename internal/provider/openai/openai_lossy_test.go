@@ -212,6 +212,19 @@ func TestMaxTokensOmittedWhenZero(t *testing.T) {
 	}
 }
 
+// A user turn's image reaches the endpoint as an image_url part, a base64
+// source as a data URL, beside the turn's text.
+func TestImageBlockBecomesAnImageURLPart(t *testing.T) {
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"what is this"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`)}},
+	})
+	got := messagesOf(t, body)[0]["content"]
+	want := []any{map[string]any{"type": "text", "text": "what is this"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,AAAA"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("content = %v, want %v", got, want)
+	}
+}
+
 func TestUnsupportedBlockErrors(t *testing.T) {
 	f := &fakeServer{}
 	p := start(t, f)

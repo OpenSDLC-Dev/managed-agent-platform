@@ -2,26 +2,19 @@
 // vLLM server, or an internal OpenAI-compatible gateway) to the provider
 // interface. Unlike the anthropic adapter, which is near-verbatim, this is the
 // platform's lossy seam: the internal Request is Anthropic-native, so every turn
-// is translated to OpenAI wire on the way out and back on the way in. All of that
-// conversion is confined here and tested against a fake Chat Completions server
-// — except its search_result rendering, provider.SearchResultText, which lives
-// in the parent package so provider/anthropic's opt-in flatten_search_results
-// can share it (#565).
+// is translated to OpenAI wire on the way out and back on the way in. The way
+// out is internal/modelgateway/convert's (Messages and Tools), which the model
+// gateway's conversion path shares, and whose comments name what it drops and
+// refuses — a signed thinking block and a tool_result's is_error dropped, a
+// built-in tool's schema keywords stripped, an unsupported block failing
+// loudly rather than vanishing. The way in is this package's, tested against a
+// fake Chat Completions server: the deprecated single-function_call streaming
+// format is rejected loudly (the endpoint must emit tool_calls) rather than
+// silently losing the call, and reasoning_content is not read.
 //
 // base_url is the API root, the same convention as the anthropic provider: the
 // adapter appends /v1/chat/completions. Set it to e.g. https://api.openai.com or
 // https://vllm.internal, NOT .../v1.
-//
-// Known lossy gaps (documented, not silent): Anthropic thinking blocks have no
-// Chat Completions equivalent and are dropped; image blocks are not yet mapped
-// and an unsupported block (top-level or inside a tool_result) fails loudly
-// rather than vanishing; a tool_result's is_error flag is dropped (OpenAI's
-// tool message has no error field) — the error text the platform embeds in the
-// result content is still forwarded, so the model sees the failure, only the
-// boolean is lost; and a built-in tool's schema loses its format, minLength
-// and additionalProperties keywords (strippedKeywords says why). Incoming, the
-// deprecated single-function_call streaming format is rejected loudly (the
-// endpoint must emit tool_calls) rather than silently losing the call.
 package openai
 
 import (
@@ -36,6 +29,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
@@ -86,11 +80,15 @@ type openaiProvider struct {
 }
 
 func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (provider.Stream, error) {
-	messages, err := convertMessages(req.System, req.Messages)
+	turns := make([]convert.Message, len(req.Messages))
+	for i, m := range req.Messages {
+		turns[i] = convert.Message{Role: m.Role, Content: m.Content}
+	}
+	messages, err := convert.Messages(req.System, turns)
 	if err != nil {
 		return nil, err
 	}
-	tools, err := convertTools(req.Tools, req.BuiltinTools)
+	tools, err := convert.Tools(req.Tools, req.BuiltinTools)
 	if err != nil {
 		return nil, err
 	}
@@ -195,335 +193,21 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 type chatRequest struct {
 	// Preserve the level; the endpoint validates model-specific support.
 	// https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
-	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
-	Model           string        `json:"model"`
-	Messages        []chatMessage `json:"messages"`
+	ReasoningEffort string                `json:"reasoning_effort,omitempty"`
+	Model           string                `json:"model"`
+	Messages        []convert.ChatMessage `json:"messages"`
 	// max_tokens is the field vLLM and the OpenAI-compatible gateways this
 	// adapter targets accept; only api.openai.com's newest reasoning models
 	// have switched to max_completion_tokens. Omitted when zero so the endpoint
 	// applies its own default.
-	MaxTokens     int64          `json:"max_tokens,omitempty"`
-	Stream        bool           `json:"stream"`
-	StreamOptions *streamOptions `json:"stream_options,omitempty"`
-	Tools         []chatTool     `json:"tools,omitempty"`
+	MaxTokens     int64              `json:"max_tokens,omitempty"`
+	Stream        bool               `json:"stream"`
+	StreamOptions *streamOptions     `json:"stream_options,omitempty"`
+	Tools         []convert.ChatTool `json:"tools,omitempty"`
 }
 
 type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
-}
-
-type chatMessage struct {
-	Role       string         `json:"role"`
-	Content    *string        `json:"content,omitempty"`
-	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-}
-
-type chatToolCall struct {
-	ID       string     `json:"id"`
-	Type     string     `json:"type"`
-	Function chatCallFn `json:"function"`
-}
-
-type chatCallFn struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"` // OpenAI carries tool arguments as a JSON string
-}
-
-type chatTool struct {
-	Type     string     `json:"type"`
-	Function chatToolFn `json:"function"`
-}
-
-type chatToolFn struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-}
-
-// contentBlock is one Anthropic content block, enough to route by type.
-type contentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text"`
-	ID        string          `json:"id"`          // tool_use
-	Name      string          `json:"name"`        // tool_use
-	Input     json.RawMessage `json:"input"`       // tool_use
-	ToolUseID string          `json:"tool_use_id"` // tool_result
-	Content   json.RawMessage `json:"content"`     // tool_result: string or block array; search_result: text blocks
-	Title     string          `json:"title"`       // search_result
-	// Source is raw, not string: search_result carries a URL string here, but
-	// image/document blocks carry an OBJECT under the same key — typing it
-	// string would fail their decode before the unsupported-block guards can
-	// name them.
-	Source json.RawMessage `json:"source"`
-}
-
-func strp(s string) *string { return &s }
-
-// convertMessages turns the Anthropic-native turns into OpenAI messages. A user
-// turn carrying tool_result blocks fans out into one `tool` role message per
-// result (OpenAI's shape), and an assistant turn's tool_use blocks become
-// tool_calls on the assistant message.
-func convertMessages(system string, msgs []provider.Message) ([]chatMessage, error) {
-	var out []chatMessage
-	if system != "" {
-		out = append(out, chatMessage{Role: "system", Content: strp(system)})
-	}
-	for i, m := range msgs {
-		text, isString, err := decodeContent(m.Content)
-		if err != nil {
-			return nil, fmt.Errorf("messages[%d]: %w", i, err)
-		}
-		if isString {
-			out = append(out, chatMessage{Role: m.Role, Content: strp(text)})
-			continue
-		}
-		var blocks []contentBlock
-		if err := json.Unmarshal(m.Content, &blocks); err != nil {
-			return nil, fmt.Errorf("messages[%d]: %w", i, err)
-		}
-		var textParts []string
-		var toolCalls []chatToolCall
-		var toolResults []chatMessage
-		for j, b := range blocks {
-			switch b.Type {
-			case "text":
-				textParts = append(textParts, b.Text)
-			case "tool_use":
-				args, err := compactJSON(b.Input)
-				if err != nil {
-					return nil, fmt.Errorf("messages[%d].blocks[%d]: %w", i, j, err)
-				}
-				toolCalls = append(toolCalls, chatToolCall{
-					ID: b.ID, Type: "function",
-					Function: chatCallFn{Name: b.Name, Arguments: args},
-				})
-			case "tool_result":
-				// b.IsError is intentionally dropped: OpenAI's tool message has
-				// no error field. The error text is in b.Content, which is
-				// forwarded, so the failure still reaches the model (see the
-				// package doc's lossy-gaps note).
-				content, err := toolResultText(b.Content)
-				if err != nil {
-					return nil, fmt.Errorf("messages[%d].blocks[%d]: %w", i, j, err)
-				}
-				toolResults = append(toolResults, chatMessage{
-					Role: "tool", ToolCallID: b.ToolUseID, Content: strp(content),
-				})
-			case "thinking", "redacted_thinking":
-				// No Chat Completions equivalent; dropped by design.
-			default:
-				return nil, fmt.Errorf("messages[%d].blocks[%d]: unsupported content block %q", i, j, b.Type)
-			}
-		}
-		// tool_result blocks belong to a user turn and map to tool messages,
-		// which must precede any user text so they answer the prior assistant.
-		out = append(out, toolResults...)
-		if len(textParts) > 0 || len(toolCalls) > 0 {
-			msg := chatMessage{Role: m.Role, ToolCalls: toolCalls}
-			if len(textParts) > 0 {
-				msg.Content = strp(strings.Join(textParts, ""))
-			}
-			out = append(out, msg)
-		}
-	}
-	return out, nil
-}
-
-// decodeContent reports whether the raw content is a JSON string (and its value)
-// or something else (an array of blocks).
-func decodeContent(raw json.RawMessage) (string, bool, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return "", false, fmt.Errorf("empty content")
-	}
-	if trimmed[0] == '"' {
-		var s string
-		if err := json.Unmarshal(trimmed, &s); err != nil {
-			return "", false, err
-		}
-		return s, true, nil
-	}
-	return "", false, nil
-}
-
-// toolResultText flattens an Anthropic tool_result content (a string, or an
-// array of blocks) into the plain text OpenAI's tool message carries. A
-// search_result block (a web_search answer) flattens to text via
-// provider.SearchResultText (shared with provider/anthropic's opt-in
-// flatten_search_results route flag, #565, so the two adapters render one
-// identically); any other non-text block (e.g. an image) has no
-// representation in an OpenAI tool message, so it fails loudly rather than
-// silently vanishing — matching how an unsupported top-level content block is
-// handled.
-func toolResultText(raw json.RawMessage) (string, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return "", nil
-	}
-	if s, isString, err := decodeContent(raw); err != nil {
-		return "", err
-	} else if isString {
-		return s, nil
-	}
-	var blocks []contentBlock
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", err
-	}
-	var parts []string
-	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			parts = append(parts, b.Text)
-		case "search_result":
-			flat, err := provider.SearchResultText(b.Title, b.Source, b.Content)
-			if err != nil {
-				return "", err
-			}
-			// The flat form is line-shaped; joined bare onto a preceding text
-			// block it would glue onto that block's last line.
-			if n := len(parts); n > 0 && !strings.HasSuffix(parts[n-1], "\n") {
-				parts = append(parts, "\n")
-			}
-			parts = append(parts, flat)
-		default:
-			return "", fmt.Errorf("unsupported tool_result content block %q (OpenAI tool messages are text-only)", b.Type)
-		}
-	}
-	return strings.Join(parts, ""), nil
-}
-
-func compactJSON(raw json.RawMessage) (string, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return "{}", nil
-	}
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, raw); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
-}
-
-// anthropic tool def -> OpenAI function tool. input_schema becomes parameters
-// as it came, except that a built-in's (builtin, the request's BuiltinTools)
-// loses the keywords stripSchemaKeywords removes. strict is never set: OpenAI's
-// strict mode requires every object closed with additionalProperties: false and
-// every field required (its structured-outputs guide), which the built-ins'
-// schemas — optional fields, and additionalProperties stripped — do not meet.
-func convertTools(tools []json.RawMessage, builtin map[string]bool) ([]chatTool, error) {
-	if len(tools) == 0 {
-		return nil, nil
-	}
-	out := make([]chatTool, 0, len(tools))
-	for i, t := range tools {
-		var def struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			InputSchema json.RawMessage `json:"input_schema"`
-		}
-		if err := json.Unmarshal(t, &def); err != nil {
-			return nil, fmt.Errorf("tools[%d]: %w", i, err)
-		}
-		if def.Name == "" {
-			return nil, fmt.Errorf("tools[%d]: missing name", i)
-		}
-		params := def.InputSchema
-		if builtin[def.Name] {
-			stripped, err := stripSchemaKeywords(def.InputSchema)
-			if err != nil {
-				return nil, fmt.Errorf("tools[%d].input_schema: %w", i, err)
-			}
-			params = stripped
-		}
-		out = append(out, chatTool{
-			Type: "function",
-			Function: chatToolFn{
-				Name: def.Name, Description: def.Description, Parameters: params,
-			},
-		})
-	}
-	return out, nil
-}
-
-// strippedKeywords leave the built-in tools' parameters on this route (#682, an
-// owner decision). The built-in web tools carry all three, and since #822 the
-// six sandbox tools carry additionalProperties and edit's old_string minLength,
-// as the reference was recorded handing them to the model, and the anthropic
-// adapter sends them on; but an OpenAI-compatible backend that accepts only
-// part of JSON Schema — Gemini's compatibility endpoint and vLLM's guided
-// decoding were the cases raised — can refuse the whole tool list over one of
-// them, and the built-ins are on by default. What the model loses here is a
-// hint, not the check: the executor validates the web tools' input, the edit
-// tool refuses an empty old_string wherever it runs (executor or BYOC
-// worker), and a sandbox tool refuses, naming it, a property a closed schema
-// would have refused (#827). A custom or MCP tool's schema is never touched:
-// it is a contract its author set, which no platform check stands behind, and
-// whatever it carries it carried before #682.
-// unevaluatedProperties goes with additionalProperties: it is the 2019-09
-// keyword that closes an object the same way, and no built-in carries it yet.
-var strippedKeywords = []string{"format", "minLength", "additionalProperties", "unevaluatedProperties"}
-
-// stripSchemaKeywords removes strippedKeywords from a schema and from every
-// subschema in it, at any depth. A schema with none of them is returned as it
-// came; one that loses any is re-encoded, its numbers kept as written. Either
-// way the request's encoding then compacts it, as it does every schema.
-func stripSchemaKeywords(raw json.RawMessage) (json.RawMessage, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return raw, nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var schema any
-	if err := dec.Decode(&schema); err != nil {
-		return nil, err
-	}
-	if !stripSchema(schema) {
-		return raw, nil
-	}
-	return json.Marshal(schema)
-}
-
-// stripSchema strips one schema in place, reporting whether anything went. It
-// descends through every keyword whose value is a subschema, a list of them or
-// a map of them — drafts 07 to 2020-12 — and only through those, so a property
-// merely named "format" survives, and so does instance data — enum, const,
-// default, examples — whatever keys that data happens to hold.
-func stripSchema(v any) bool {
-	schema, ok := v.(map[string]any)
-	if !ok {
-		return false // a boolean schema, or not a schema at all
-	}
-	stripped := false
-	for _, k := range strippedKeywords {
-		if _, ok := schema[k]; ok {
-			delete(schema, k)
-			stripped = true
-		}
-	}
-	for k, sub := range schema {
-		switch k {
-		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies":
-			// A map from names to subschemas: the names are data. draft-07's
-			// dependencies maps a name to a schema or to a list of names, and
-			// a list is no schema, so stripSchema leaves it be.
-			if m, ok := sub.(map[string]any); ok {
-				for _, s := range m {
-					stripped = stripSchema(s) || stripped
-				}
-			}
-		case "items", "prefixItems", "additionalItems", "contains", "unevaluatedItems",
-			"propertyNames", "contentSchema", "not", "if", "then", "else",
-			"anyOf", "oneOf", "allOf":
-			// One subschema, or a list of them (items' tuple form among them).
-			if list, ok := sub.([]any); ok {
-				for _, s := range list {
-					stripped = stripSchema(s) || stripped
-				}
-				continue
-			}
-			stripped = stripSchema(sub) || stripped
-		}
-	}
-	return stripped
 }
 
 // --- incoming stream translation (OpenAI SSE -> provider chunks) ---

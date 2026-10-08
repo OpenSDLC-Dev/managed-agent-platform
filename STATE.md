@@ -21,7 +21,7 @@ slice 3 is the console repository's own plan.
 - [ ] Slice 4 — OpenAI surfaces, in four PRs
   - [x] 4a — Chat Completions passed through, `/v1/models` and errors in OpenAI's shape
   - [x] 4b — embeddings and rerank with the `gitee` profile
-  - [ ] 4c — Anthropic → Chat Completions conversion, for OpenAI-only credentials
+  - [x] 4c — Anthropic → Chat Completions conversion, for OpenAI-only credentials
   - [ ] 4d — dikw-core through the gateway
 - [ ] Slice 5 — brain cutover: one route through the gateway; `ant` sessions on MiniMax
       and DeepSeek

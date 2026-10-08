@@ -6854,3 +6854,67 @@ not what it answers, so no test pins that either. A sixth pass found those three
 and the live check still compacting the vendor's members, which would fail a vendor that
 writes whitespace the gateway now keeps; it compares them as written. On the final code
 the whole live tier — DeepSeek, MiniMax and Gitee — passed its 52 tests.
+
+## Model gateway conversion (plan 59 slice 4c) — acceptance record, 2026-10-08
+
+`RUN_LIVE_MODELGATEWAY=deepseek,minimax` drove the conversion path with the Anthropic Go
+SDK, each chat model's provider configured with its vendor's OpenAI endpoint alone, so
+every request converted, behind a proxy recording both directions. For `deepseek-flash`,
+`deepseek-v4-pro`, `MiniMax-M3` and `MiniMax-M3.1-Flash-Preview`: a text answer, whole and
+streamed, equal in blocks, stop reason and usage to the vendor's recorded Chat
+Completions answer as `convert` converts it, its ledger row holding the vendor's usage
+under the `anthropic` protocol; and a tool call returned as `tool_use`, whose
+continuation, built with the SDK's `ToParam`, the vendor answered, having been sent its
+own reasoning back as `reasoning_content`. All 16 subtests passed.
+
+- **Reasoning.** DeepSeek's two models and MiniMax-M3.1-Flash-Preview answered the text
+  question with `reasoning_content`, a thinking block in Messages; on the tool question
+  only `deepseek-flash` reasoned. MiniMax-M3 never sent `reasoning_content`: its
+  reasoning came inline, `<think>…</think>` at the head of its content, so the converted
+  answer's text block holds it and the caller's next turn sends it back as text.
+  Splitting the tags into a thinking block was left undone — the tags are the vendor's
+  own content, and moving them would change what a caller reads for a gain no caller
+  has asked for.
+- **Latency.** MiniMax-M3 once took 139 seconds over a streamed one-word answer; the
+  gateway's pings held the stream open.
+
+Decisions made in the slice, with the alternative each beat:
+- `count_tokens` is never converted, a 404 where only conversion attempts exist, rather
+  than estimated: plan 59 already answers so for a vendor without it, and a client
+  falls back to estimating on its own.
+- A request the conversion cannot carry goes to the alias's passthrough attempts rather
+  than being refused outright, as a request a vendor would ignore goes to the others.
+- A stream that resumes a tool call after starting another fails, rather than holding
+  each call until its arguments end: holding would delay every later event, and neither
+  vendor interleaved on the live tier.
+- A whole answer's tool call whose arguments are not a JSON object is a 502, as a
+  `tool_use` block's input must be an object; a stream's fragments pass unchecked, since
+  a stream cannot take back what it has sent.
+- DeepSeek's `insufficient_system_resource` and any finish Messages has no word for are
+  `end_turn`. `pause_turn` promises a continuation the vendor does not give, and
+  refusing would lose an answer the vendor charged for.
+- The ledger row keeps the caller's protocol, as plan 59's usage row names the inbound
+  one; the attempt's client span names the upstream's, `modelgateway.upstream.protocol`.
+- The brain's OpenAI-protocol adapter now shares the conversion, so a user turn's image,
+  which it used to refuse, reaches its endpoint as an `image_url` part.
+- MiniMax's M2.x thinking disabled is refused on Chat Completions passthrough too, the
+  rule the Messages routes already applied, since the converted request is judged by the
+  Chat Completions hooks.
+
+Writing the docs turned up one defect, fixed with a test that failed on the code before
+it: a deployment reached through two credentials, one passing through and one OpenAI-only,
+would have sent converted reasoning to its vendor's Anthropic endpoint with an empty
+signature. Thinking provenance now returns each block on the protocol that produced it
+alone.
+
+Mutation testing ran over the conversion, the routing, the provenance rule, the gateway's
+conversion path, the vendor hooks and the span. The first pass caught 78 of 96 mutants,
+seven of the misses mutants that did not compile. The rest showed tests missing, each
+added: a non-boolean `disable_parallel_tool_use`, a turn's text blocks joined, a second
+credential a retry would have gone to, pings on a stream that is never idle, a type of
+Anthropic's kept whatever the status, a credential's error type and a stated
+`http_code` partway through a stream, MiniMax's envelope kept, each vendor's word for
+thinking, a system block of another type carrying text, and a chunk the conversion
+cannot carry followed by a finish. Two branches turned out dead and went: a 422 case
+the 4xx rule already covers, and an error chunk's status read from a type that is kept
+anyway. All 95 mutants of the final list are caught.

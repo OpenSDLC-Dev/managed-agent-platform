@@ -375,23 +375,30 @@ func TestAChatRequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 	cases := []struct {
 		prof, field, set string
 		unset            []string
+		model            string // the deployment's upstream model, "m" when empty
 	}{
-		{"minimax", "stop", `"stop":["END"]`, []string{`"stop":[]`, `"stop":null`, `"Stop":"END"`}},
-		{"minimax", "stop", `"stop":"END"`, []string{`"stop":""`}},
-		{"minimax", "tool_choice", tools + `,"tool_choice":"required"`, []string{tools + `,"tool_choice":"auto"`, tools + `,"tool_choice":"none"`, tools + `,"Tool_Choice":"required"`}},
-		{"minimax", "tool_choice", tools + `,"tool_choice":{"type":"function","function":{"name":"t"}}`, []string{tools + `,"tool_choice":{"Type":"function","function":{"name":"t"}}`}},
+		{"minimax", "stop", `"stop":["END"]`, []string{`"stop":[]`, `"stop":null`, `"Stop":"END"`}, ""},
+		{"minimax", "stop", `"stop":"END"`, []string{`"stop":""`}, ""},
+		{"minimax", "tool_choice", tools + `,"tool_choice":"required"`, []string{tools + `,"tool_choice":"auto"`, tools + `,"tool_choice":"none"`, tools + `,"Tool_Choice":"required"`}, ""},
+		{"minimax", "tool_choice", tools + `,"tool_choice":{"type":"function","function":{"name":"t"}}`, []string{tools + `,"tool_choice":{"Type":"function","function":{"name":"t"}}`}, ""},
 		{"minimax", "tool_choice", tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"t"}}]}}`,
-			[]string{tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"Mode":"required"}}`}},
-		{"minimax", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`, []string{tools + `,"parallel_tool_calls":true`, tools + `,"parallel_tool_calls":null`}},
+			[]string{tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"Mode":"required"}}`}, ""},
+		{"minimax", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`, []string{tools + `,"parallel_tool_calls":true`, tools + `,"parallel_tool_calls":null`}, ""},
 		{"deepseek", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`,
-			[]string{tools + `,"parallel_tool_calls":true`, tools + `,"tool_choice":"required"`, `"stop":["END"]`}},
+			[]string{tools + `,"parallel_tool_calls":true`, tools + `,"tool_choice":"required"`, `"stop":["END"]`}, ""},
+		{"minimax", "thinking.type", `"thinking":{"type":"disabled"}`,
+			[]string{`"thinking":{"type":"adaptive"}`, `"thinking":{"Type":"disabled"}`}, "MiniMax-M2.7"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.prof+" "+tc.set, func(t *testing.T) {
 			e := newEnv(t)
 			vendor, other := newFake(t, chatAnswer("vendor", deepseekStyle)), newFake(t, chatAnswer("other", deepseekStyle))
 			p := onOpenAI(e, tc.prof, vendor.URL)
-			d := e.deployment(p, "m")
+			model := tc.model
+			if model == "" {
+				model = "m"
+			}
+			d := e.deployment(p, model)
 			e.alias("mixed", target(d, 0), target(e.deployment(onOpenAI(e, "openai-generic", other.URL), "other-model"), 1))
 			e.alias("alone", target(d, 0))
 			key := e.key(everyAlias)
