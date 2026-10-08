@@ -13,7 +13,11 @@ import (
 // model and, on a stream, stream_options; the answer comes back as the
 // upstream sent it but for model. Fields are read and written by their exact
 // keys, as the thinking edits are. Its typed reference is openai-go
-// (docs/REFERENCE_PROJECTS.md).
+// (docs/REFERENCE_PROJECTS.md). An embeddings or rerank body passes through
+// the same way, and never streams, so model is all it changes; its answer is
+// relayed as it arrives (vectors.go). A body goes out with its keys sorted, so a key differing from model only
+// in case comes before model, and a decoder that matches keys regardless of
+// case, keeping the last, reads the deployment's upstream id.
 
 // chatBody is the caller's body for one deployment: model its upstream id,
 // and a stream asking for its usage, which the ledger and the key's TPM
@@ -78,7 +82,7 @@ func asksForUsage(top map[string]json.RawMessage) bool {
 	return json.Unmarshal(member(top["stream_options"], "include_usage"), &asked) == nil && asked
 }
 
-// chatAnswerJSON is a whole Chat Completions answer as the caller gets it,
+// chatAnswerJSON is a whole answer on an OpenAI route as the caller gets it,
 // its model the name the caller sent; anything that is not an object with a
 // model passes unchanged. Its usage object comes back beside it.
 func chatAnswerJSON(b []byte, alias string) ([]byte, json.RawMessage) {

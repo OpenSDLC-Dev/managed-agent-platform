@@ -48,7 +48,7 @@ func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias
 	defer func() { _ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load()))) }()
 	u := store.Usage{
 		RequestID: requestID(r), APIKeyID: c.keyID, Model: ledgerText(model), Alias: alias,
-		SessionID: r.Header.Get(SessionHeader), Protocol: string(proto), Endpoint: endpoints[path],
+		SessionID: r.Header.Get(SessionHeader), Protocol: string(proto), Endpoint: routes[path].endpoint,
 		Status: out.status, ErrorType: ledgerText(out.errType), Tokens: out.tokens, Latency: time.Since(start), TTFT: out.ttft,
 	}
 	if out.at != nil {
@@ -61,7 +61,7 @@ func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias
 		slog.ErrorContext(ctx, "modelgateway: usage could not be recorded", "request_id", u.RequestID,
 			"api_key_id", u.APIKeyID, "deployment", u.DeploymentID, "error", err)
 	}
-	observe(context.WithoutCancel(r.Context()), u, out.at, cost)
+	observe(context.WithoutCancel(r.Context()), u, routes[path].operation, out.at, cost)
 }
 
 // maxLedgerText bounds the text a ledger row takes from a caller or an
@@ -83,10 +83,6 @@ func ledgerText(s string) string {
 	}
 	return s[:i]
 }
-
-// endpoints names each inbound route in the ledger.
-var endpoints = map[string]string{"/v1/messages": "messages", "/v1/messages/count_tokens": "count_tokens",
-	"/v1/chat/completions": "chat_completions"}
 
 // admit counts the request against its key's limits, when the key has any,
 // and answers a refusal itself: 429 rate_limit_error with retry-after in

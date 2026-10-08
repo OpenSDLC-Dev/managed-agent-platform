@@ -2,11 +2,13 @@ package modelgateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
 // OpenedKeys returns the ids of the credentials whose keys the handler holds
@@ -57,3 +59,44 @@ func SpanName(r *http.Request) string { return spanName(r) }
 
 // ChatUsageOf is chatUsageOf.
 func ChatUsageOf(raw []byte) *store.Tokens { return chatUsageOf(raw) }
+
+// WriteToCaller writes b to w as an answer relayed under guard would be, and
+// reports whether the caller is gone.
+func WriteToCaller(w http.ResponseWriter, guard *provider.StallGuard, b []byte) bool {
+	cw := newCallerWriter(w, guard, false)
+	cw.write(b)
+	return cw.gone
+}
+
+// SetMaxVectorAnswer lowers the bound on an embeddings or rerank answer for
+// one test, and returns its restore.
+func SetMaxVectorAnswer(n int) func() {
+	old := maxVectorAnswer
+	maxVectorAnswer = n
+	return func() { maxVectorAnswer = old }
+}
+
+// VectorUsageOf is vectorUsageOf.
+func VectorUsageOf(raw []byte) *store.Tokens { return vectorUsageOf(raw) }
+
+// MaxAnswerUsage is the longest usage an answerRewriter keeps.
+const MaxAnswerUsage = maxUsage
+
+// RewriteAnswer is what an answerRewriter for alias makes of chunks, fed one
+// by one, and the usage it kept.
+func RewriteAnswer(alias string, chunks ...[]byte) ([]byte, json.RawMessage) {
+	rw := &answerRewriter{alias: encodeJSON(alias)}
+	var out []byte
+	for _, c := range chunks {
+		rw.rewrite(c, func(p []byte) { out = append(out, p...) })
+	}
+	return out, rw.usage
+}
+
+// RewrittenLength is the length of what an answerRewriter for alias makes of
+// chunk, kept nowhere.
+func RewrittenLength(alias string, chunk []byte) int {
+	n := 0
+	(&answerRewriter{alias: encodeJSON(alias)}).rewrite(chunk, func(p []byte) { n += len(p) })
+	return n
+}

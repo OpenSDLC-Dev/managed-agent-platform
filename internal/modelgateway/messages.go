@@ -22,11 +22,17 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
-// The body bounds: a request as large as the Messages API takes, and an
-// answer well past any model's output.
+// The body bounds: a request as large as the Messages API takes, a whole
+// answer well past any model's output, and an embeddings or rerank answer,
+// relayed as it arrives (relayVectors), several times the largest batch the
+// vendors' caps allow — 1,000 inputs of 4,096 values at Gitee, some 90 MB as
+// it writes them.
 const maxRequestBody = 32 << 20
 
-var maxResponseBody = 64 << 20
+var (
+	maxResponseBody = 64 << 20
+	maxVectorAnswer = 512 << 20
+)
 
 // SessionHeader carries the caller's session id, which keeps a session's
 // requests on one upstream (catalog.Snapshot.Plan). It never goes upstream.
@@ -68,14 +74,83 @@ func bounded(w http.ResponseWriter) *http.ResponseController {
 	return rc
 }
 
-// inference serves /v1/messages and its count_tokens twin on the Anthropic
-// protocol, and /v1/chat/completions on the OpenAI one: each passes through
-// to the alias's deployments on its own protocol.
-func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, path string) {
-	proto := profile.Anthropic
-	if path == "/v1/chat/completions" {
-		proto = profile.OpenAI
+// callerWriter writes an answer to the caller as it arrives, a piece at a
+// time. Each write is held to writeStall, and a caller whose write fails or
+// outlasts it is gone: nothing more is written to it, though the upstream
+// answer is still read to its end. The stall guard is held while a write
+// lasts: the upstream, unread meanwhile, can show no sign of life, so that
+// time is not its silence, and however short the provider's stall budget, a
+// caller slow to read is not cut off by it, nor one that stops reading able
+// to end the upstream answer before it is read. No deadline is left armed
+// between writes, while the upstream is read: HTTP/2 resets a stream whose
+// deadline passes with no write pending.
+type callerWriter struct {
+	w     http.ResponseWriter
+	rc    *http.ResponseController
+	guard *provider.StallGuard
+	flush bool // whether each piece is flushed, as a stream's events are
+	gone  bool
+}
+
+func newCallerWriter(w http.ResponseWriter, guard *provider.StallGuard, flush bool) *callerWriter {
+	return &callerWriter{w: w, rc: http.NewResponseController(w), guard: guard, flush: flush}
+}
+
+func (cw *callerWriter) write(b []byte) {
+	if cw.gone {
+		return
 	}
+	cw.guard.Hold()
+	defer cw.guard.Release()
+	_ = cw.rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load())))
+	_, err := cw.w.Write(b)
+	if err == nil && cw.flush {
+		if err = cw.rc.Flush(); errors.Is(err, http.ErrNotSupported) {
+			err = nil
+		}
+	}
+	_ = cw.rc.SetWriteDeadline(time.Time{})
+	cw.gone = err != nil
+}
+
+// route is an inference path: the protocol it speaks, the kind of alias it
+// serves, on the OpenAI protocol the path an upstream's base URL takes for
+// it (profile) — an Anthropic base URL takes the inbound path itself — its
+// name in the ledger, and its GenAI operation, of which the conventions name
+// none for rerank.
+type route struct {
+	proto     profile.Protocol
+	kind      store.Kind
+	upstream  string
+	endpoint  string
+	operation string
+}
+
+var routes = map[string]route{
+	"/v1/messages":              {profile.Anthropic, store.KindChat, "", "messages", "chat"},
+	"/v1/messages/count_tokens": {profile.Anthropic, store.KindChat, "", "count_tokens", "count_tokens"},
+	"/v1/chat/completions":      {profile.OpenAI, store.KindChat, "/chat/completions", "chat_completions", "chat"},
+	"/v1/embeddings":            {profile.OpenAI, store.KindEmbedding, "/embeddings", "embeddings", "embeddings"},
+	"/v1/rerank":                {profile.OpenAI, store.KindRerank, "/rerank", "rerank", "rerank"},
+}
+
+// servedUnder reports whether rt is served under prefix, "" for the root:
+// every route is served at the root, and under its own protocol's prefix.
+func (rt route) servedUnder(prefix string) bool {
+	switch prefix {
+	case "/anthropic":
+		return rt.proto == profile.Anthropic
+	case "/openai":
+		return rt.proto == profile.OpenAI
+	}
+	return true
+}
+
+// inference serves the routes: each passes through to the alias's
+// deployments on its own protocol.
+func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, path string) {
+	rt := routes[path]
+	proto := rt.proto
 	start := time.Now()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
@@ -97,8 +172,17 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		writeError(w, r, invalid("model: Field required"))
 		return
 	}
+	// Embeddings and rerank never stream, so they refuse a stream asked
+	// for: an upstream that honored it would answer in a shape whose usage
+	// the ledger and the TPM limit cannot read.
 	streams, bad := streamFlag(top)
-	if bad == nil && proto == profile.OpenAI {
+	switch {
+	case bad != nil:
+	case rt.kind != store.KindChat:
+		if streams {
+			bad = invalid("stream: %s does not stream", path)
+		}
+	case proto == profile.OpenAI:
 		bad = chatStreamOptions(top)
 	}
 	if bad != nil && path != "/v1/messages/count_tokens" {
@@ -108,14 +192,14 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	snap := h.cfg.Catalog.Snapshot()
 	a, ok := snap.Alias(model)
 	switch {
-	case !ok:
+	case !ok, a.Name == "*" && a.Kind != rt.kind: // the wildcard catches names for its own kind's routes alone
 		writeError(w, r, notFound("model: %s", model))
 		return
 	case !c.may(a.Name):
 		writeError(w, r, forbidden("this API key may not use model %s", model))
 		return
-	case a.Kind != store.KindChat:
-		writeError(w, r, invalid("model: %s serves %s, not chat", model, a.Kind))
+	case a.Kind != rt.kind:
+		writeError(w, r, invalid("model: %s serves %s, not %s", model, a.Kind, rt.kind))
 		return
 	}
 	attempts := snap.Plan(a, proto, r.Header.Get(SessionHeader), h.draw)
@@ -126,8 +210,13 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	}
 	// A deployment whose vendor would ignore what the request asks for is
 	// skipped; a count is made all the same where every one would, since
-	// what a vendor ignores leaves the count unchanged.
-	kept, ignored := honoring(attempts, top, proto)
+	// what a vendor ignores leaves the count unchanged. The profiles' hooks
+	// read chat requests: what an embeddings or rerank upstream ignores
+	// shows in its answer — a vector's length, a result's count.
+	kept, ignored := attempts, []string(nil)
+	if rt.kind == store.KindChat {
+		kept, ignored = honoring(attempts, top, proto)
+	}
 	switch {
 	case len(kept) > 0:
 		if len(kept) < len(attempts) {
@@ -428,12 +517,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	}
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
 	prof, _ := profile.Lookup(at.Provider.Profile)
-	// An OpenAI base URL ends where /chat/completions follows (profile).
 	var body []byte
 	var wrap *wrapping
 	path := c.path
 	if c.proto == profile.OpenAI {
-		body, path = chatBody(c, at.Deployment), "/chat/completions"
+		body, path = chatBody(c, at.Deployment), routes[c.path].upstream
 	} else {
 		body, wrap = upstreamBody(c, at.Deployment, prof, strip), newWrapping(at.Deployment.ID, strip)
 	}
@@ -457,7 +545,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		req.Header.Set("x-api-key", string(key))
 	}
 
-	resp, err := h.client.Do(req)
+	client := h.client
+	if prof.CloseConnections {
+		client = h.fresh
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return noAnswer(guard, red, err)
 	}
@@ -530,6 +622,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 				return nil, false
 			}
 		}
+	}
+	if routes[c.path].kind != store.KindChat {
+		return relayVectors(w, resp, c, guard, red)
 	}
 	// Once the answer's body has begun the upstream is generating — and
 	// charging — for it, so a break past that point is the caller's 502, not
@@ -706,22 +801,9 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 	c.out.status = http.StatusOK
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	rc := bounded(w)
 	w.WriteHeader(http.StatusOK)
-	gone, done := false, false
-	send := func(b []byte) {
-		if gone {
-			return
-		}
-		_ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load())))
-		if _, err := w.Write(b); err != nil {
-			gone = true
-			return
-		}
-		if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			gone = true
-		}
-	}
+	send := newCallerWriter(w, guard, true).write
+	done := false
 	relay := func(e upstream.Event) {
 		if c.out.ttft == 0 && !p.keepAlive(e) {
 			c.out.ttft = time.Since(c.start)

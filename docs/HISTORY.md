@@ -6662,3 +6662,195 @@ gateway, which had refused as it should: the check counted upstream calls on the
 recorder the model's own subtests use beside it, and one of their calls fell in its
 window. Each vendor's refusals now have a route of their own, and on the final code the
 whole live tier passed twice more, its 47 tests each time.
+
+## Model gateway embeddings and rerank (plan 59 slice 4b) — acceptance record, 2026-10-08
+
+Probes sent directly to Gitee AI's OpenAI host, `https://ai.gitee.com/v1`, decided what
+the passthrough relies on. `RUN_LIVE_MODELGATEWAY=gitee` then drove the gateway, behind a
+proxy recording both directions: embeddings with openai-go v3.73.0, multimodal
+embeddings and rerank with a plain HTTP client.
+
+- **Encoding.** Asked for `encoding_format: "base64"`, Gitee answers float arrays, the
+  values its float answer holds, from `Qwen3-Embedding-8B`, `Qwen3-Embedding-0.6B` and
+  `bge-m3`. The openai Python SDK keeps a float array as it is, and openai-go reads only
+  floats, so both read the answer, which the gateway never decodes either way.
+- **Dimensions.** `Qwen3-Embedding-8B` and `-0.6B` honor `dimensions` (256, 512), and
+  so does `Qwen3-VL-Embedding-8B` (512), which dikw-core recorded as not taking it
+  (probed 2026-04-25).
+  `bge-m3` answers 1024 values whatever `dimensions` asks. A vector's length shows what
+  an upstream did, so the gateway refuses nothing for it.
+- **Usage.** Embeddings report `usage.prompt_tokens`, multimodal ones included, which
+  plan 59 had recorded as reporting none; the ledger counts them as input. Rerank
+  reports `{"totalTokens":0,"promptTokens":0}`, keys an OpenAI usage does not use, so a
+  rerank row records no tokens.
+- **Rerank.** Without `top_n` every document comes back scored (4 of 4, 5 of 5), not
+  the three Gitee's API definition gives as the default; `top_n: 2` returns two. Each
+  result carries its document whether `return_documents` asks or not.
+- **Caps.** The embedding models take 1000 inputs and refuse 1001 with a 400, "请求参数
+  'input' 不符合支持的格式" — `Qwen3-Embedding-0.6B` and `-8B` and `Qwen3-VL-Embedding-8B`
+  measured, `bge-m3` taking the 64 tried — so dikw-core's observed cap of 25 no longer
+  holds for embeddings. Rerank takes 1 to 25 documents whatever `top_n` asks, refusing the 26th
+  with "无效的参数数组长度: 'documents' 长度是 '1' 到 '25'". Errors come as
+  `{"error":{"code":"400","message":…,"type":"server_error"}}`, a bad key as a 401 in
+  the same envelope.
+- **Connections.** Rerank answers carry `Connection: close`. With dikw-core's report of
+  idle connections dropped mid-batch, the `gitee` profile sends each request on a
+  connection of its own.
+- **Multimodal models.** After a 1000-input batch to `Qwen3-VL-Embedding-8B` (28,890
+  tokens), Gitee began refusing that model for this key, "您绑定的资源包不支持当前模型或算力"
+  (the key's resource package does not cover the model), as it refuses `jina-clip-v2`
+  and `jina-embeddings-v4`; whether the batch caused it is not known.
+  `Qwen3-VL-Embedding-2B` is still covered. It answers one vector, at 21 tokens, for any
+  input holding an image — a text and an image, or two images — and one per text for
+  texts alone. dikw-core sends `Qwen3-VL-Embedding-8B` and expects a vector per input,
+  so slice 4d's image ingest waits on a package covering that model. The live tier
+  uses the 2B model, checks that its answer is relayed rather than how many vectors it
+  holds, and sends no 1000-input multimodal batch, which would cost tens of thousands
+  of tokens a run.
+
+The live tier then passed: text embeddings, float and base64, decoding to 512 values
+that agree; a text-and-image request; rerank ranking the answering document first, its
+scores mapped back by index; the caps of text embeddings and rerank; and one input past
+each cap, multimodal included, relayed as Gitee's own 400. The whole tier, DeepSeek and
+MiniMax beside Gitee, passed its 52 tests. Mutation testing caught all 20 mutants of
+the default tier — the route table, the kind check, the prefixes, the chat checks an
+embeddings or rerank body skips, connection reuse, the ledger's names and the span
+names — and all 3 against the live checks: the answer's `model` not rewritten, an
+embeddings row ledgered as chat, and its usage unread.
+
+Review found three defects, each fixed with a test that failed on the reviewed code:
+- Embeddings and rerank skipped the stream check, so `"stream": true`, or a value or a
+  key's case an upstream could read as one, went upstream as sent. An upstream that
+  streamed in reply was relayed as a whole answer whose usage neither the ledger nor the
+  TPM limit could read (the background security review and Codex). Those routes now
+  refuse a stream and read the flag as the chat routes do.
+- Gitee's requests set `Close`, which retires the connection a request was given but
+  does not stop Go's transport giving it one another provider on the same host left
+  idle, on HTTP/1.1 or HTTP/2 (Codex). A profile that closes its connections now takes
+  a client whose transport keeps none.
+- The docs said an answer's vectors came back byte for byte, where its members were
+  compacted on the way, whitespace inside a vector dropped (Codex). The second round
+  below made the claim true.
+
+Codex also showed that the body goes upstream with its keys sorted, so of two keys
+differing only in case, as `input` and `Input`, a decoder that matches keys regardless
+of case reads the other one last. That was left as it is: member order means nothing to
+JSON, a key folding to `stream` is refused, and every key folding to `model` sorts
+before it, so such a decoder reads the deployment's upstream id; a test pins that last.
+Mutation testing then caught all 27 mutants of the default tier, among them the
+reviewed code's stream skip and its connection handling restored.
+
+A second round — Codex over those fixes, then the Claude review of the branch — found
+five more, each fixed with a test that failed on the code before it:
+- An answer was read whole, held to the 64 MiB bound on a whole answer, and decoded and
+  re-encoded to rewrite its `model`. So 1,000 inputs at Qwen3-Embedding-8B's default
+  4,096 dimensions, within Gitee's cap and some 86 MB as Gitee writes floats, answered
+  502 after Gitee had charged for them, with nothing counted against the ledger or the
+  TPM limit. And an answer was held three or four times over in memory. Embeddings and
+  rerank answers are now relayed as they arrive, by a rewriter that reads only far
+  enough to replace the top-level `model` and keep the top-level `usage`. No bound
+  applies but the stall guard's, and the answer comes back byte for byte but for
+  `model`. A property test cuts 29 bodies, objects and not, at every byte, holding
+  the rewriter to encoding/json's decoder, and a five-minute fuzz run, 7,104,999 inputs,
+  found nothing.
+- Usage was read as a chat completion's. An embeddings or rerank usage now counts
+  `prompt_tokens`, else `total_tokens`; Gitee's camelCase zeros are still not read.
+- A wildcard alias `*` caught every name on every route. So with a chat wildcard, a
+  mistyped embeddings alias answered 400 "serves chat"; a wildcard now catches names on
+  its own kind's routes alone, and the rest are 404.
+- A route's ledger name and operation were two more tables kept in step with the route
+  table by hand; they are fields of the route.
+- The docs claimed no bound of the gateway's own on a batch, where its 32 MiB bound on
+  a request body comes first, and a few hundred images as data URLs reach it. They say
+  so now, and the test fake's multimodal answer, which reports no usage "as dikw-core
+  found", now says it stands for an upstream reporting none: Gitee's report it.
+
+Six were left as they are:
+- An upstream that answers a request not asking for a stream with one is relayed as it
+  came, and its row records no tokens. No caller can ask for that on these routes, and
+  every route's whole answer has been relayed so since slice 2a.
+- A client injected through `Config.Client` whose transport is not an
+  `*http.Transport`, or one x/net's `http2.ConfigureTransport` set up, keeps reusing
+  Gitee's connections. The gateway's own client negotiates HTTP/2 through net/http's
+  copy, whose pool a clone does not share; a test over HTTP/2 pins that, and the
+  gateway logs the first case at startup.
+- A connection per request costs each Gitee call a handshake. A shorter idle timeout
+  would guess at Gitee's, so it stays.
+- An embeddings row's output tokens are 0, which is the count: an embedding generates
+  none.
+- The route table spells out each upstream path, which the passthrough test checks
+  route by route.
+- An unparseable answer passes as it came from the point it stops being JSON, where
+  the whole-answer path passed it untouched; a `model` before that point is still
+  rewritten.
+
+Mutation testing caught 45 of the 45 mutants of the default tier: the first
+round's guards, the route's new fields, the wildcard, the relay's three outcomes, the
+usage keys, and eleven ways to misread JSON a piece at a time.
+
+A third round, Codex over the relay, found three defects in it, each fixed with a test
+that failed on the code before it, and one overclaim:
+- A write to a caller that had stopped reading could block for the minute `writeStall`
+  allows, while a provider's stall budget, which may be set as low as a millisecond,
+  ran on and ended the upstream answer the gateway had stopped reading — its usage lost,
+  and on a stream the rest of it. Streams had had the flaw since slice 2a. A write is
+  now held to half the stall budget where that is shorter, and the budget restarts when
+  the write ends, since time spent writing is not the upstream's silence.
+- A write's deadline stayed armed after it while the next piece was awaited, and HTTP/2
+  resets a stream whose deadline passes with no write pending, so an upstream pausing
+  past the bound, within its stall budget, cost an HTTP/2 caller its answer, on a stream
+  too. Each write's deadline is now cleared after it; both relays share the one writer.
+- The usage kept was bounded with its whitespace, so padding could push a valid one past
+  64 KiB, uncounted. The whitespace between its tokens is no longer kept.
+- A malformed `model` value is replaced like any other, so a malformed answer does not
+  quite pass as it came; the docs now say so.
+
+Mutation testing caught 7 of the 8 mutants of the writer and the usage capture. The
+eighth, ignoring a failed flush, only leaves the caller to the next write, which fails
+on the same dead connection. A test was added for the fifth, a stream left unflushed,
+which no test had caught: nothing had pinned that a stream reaches the caller event by
+event.
+
+A fourth round found two of the third round's fixes flawed (Codex), and the background
+security review flagged, without detail, a resource-exhaustion regression in the relay,
+of which the likeliest was a bound the second round had dropped. Each was fixed with a
+test that failed on the code before it:
+- Holding each write to half a short stall budget cut off a caller reading slowly but
+  steadily. At a budget of 100 ms a write had 50 ms, less than ordinary backpressure or
+  an HTTP/2 flow-control window takes. The stall guard now has a hold
+  (`provider.StallGuard.Hold`), which the gateway takes while a write lasts. A write
+  has `writeStall` again however short the budget, and the upstream's silence counts
+  only while the gateway is reading it.
+- Dropping the whitespace between the usage's tokens joined tokens it parted:
+  `{"prompt_tokens":1 3}`, malformed, was kept as 13 and charged. Each run is now kept
+  as one space, which leaves such a usage unreadable, and padding still cannot push a
+  valid one past the bound.
+- With the 64 MiB bound gone, an answer that never ended was relayed, or read after its
+  caller had gone, for as long as bytes came. An embeddings or rerank answer is now cut
+  off past 512 MiB, several times the largest batch the vendors' caps allow, and its row
+  records `api_error`.
+
+Mutation testing caught all 8 mutants of the hold, the bound and the usage
+capture.
+
+A fifth pass, Codex over those fixes, found three more:
+- The rewriter gathered each piece's output before writing it, the alias included
+  wherever a top-level `model` repeated. A 1 MiB model name, which a wildcard alias
+  admits, and an upstream repeating `model` 1,024 times in 10 KB would have had the
+  gateway hold a gigabyte, under the 512 MiB bound on what it reads and after its
+  caller had gone. The rewriter now hands its output on in pieces, the alias as it is,
+  so what it holds is bounded by the piece it reads.
+- A hold could begin, or end, between the stall guard reading its clock and tripping,
+  so a write could still be counted as silence. A mutex now orders holds against the
+  guard's verdict. No test pins that race, which needs the watcher descheduled at one
+  instruction.
+- The usage's kept spaces counted toward its bound, so padding could push a usage at
+  the bound past it by a byte, against the docs. The bound now counts the usage without
+  them, which the oracle checks at the bound and a byte past it.
+
+The two testable fixes' mutants, each restoring the fourth round's code, were caught. A
+usage that keeps nothing once it has outgrown its bound changes what the rewriter holds,
+not what it answers, so no test pins that either. A sixth pass found those three closed,
+and the live check still compacting the vendor's members, which would fail a vendor that
+writes whitespace the gateway now keeps; it compares them as written. On the final code
+the whole live tier — DeepSeek, MiniMax and Gitee — passed its 52 tests.

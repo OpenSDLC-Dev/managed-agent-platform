@@ -77,6 +77,29 @@ func TestStallGuardProgressPostponesTheTrip(t *testing.T) {
 	}
 }
 
+// A hold stops the clock however long it lasts, and its release restarts
+// the budget rather than resuming it.
+func TestStallGuardHoldStopsTheClock(t *testing.T) {
+	const budget = 100 * time.Millisecond
+	gctx, guard := provider.NewStallGuard(context.Background(), budget)
+	defer guard.Stop()
+
+	guard.Hold()
+	time.Sleep(3 * budget)
+	if gctx.Err() != nil {
+		t.Fatalf("a guard held for %s tripped inside its %s budget", 3*budget, budget)
+	}
+	guard.Release()
+	time.Sleep(budget / 2)
+	if gctx.Err() != nil {
+		t.Fatal("the release did not restart the budget")
+	}
+	waitDone(t, gctx, 3*time.Second)
+	if err := guard.Cause(nil); !errors.Is(err, provider.ErrStalled) {
+		t.Errorf("Cause(nil) = %v, want an error matching ErrStalled once released", err)
+	}
+}
+
 func TestStallGuardStopEndsTheWatch(t *testing.T) {
 	gctx, guard := provider.NewStallGuard(context.Background(), 50*time.Millisecond)
 	guard.Stop()

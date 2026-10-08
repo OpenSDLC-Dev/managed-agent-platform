@@ -24,8 +24,9 @@ import (
 )
 
 // The gateway's live tier (docs/plan/59_model-gateway.md, "Live tier"): the
-// official Anthropic SDK drives the gateway over HTTP, as any SDK caller
-// would, to the real vendors RUN_LIVE_MODELGATEWAY names. Each model's
+// official Anthropic and OpenAI SDKs drive the gateway over HTTP, as any SDK
+// caller would — and a plain HTTP client rerank, which no SDK covers — to the
+// real vendors RUN_LIVE_MODELGATEWAY names. Each model's
 // provider points at a proxy that forwards to the vendor and records both
 // directions, so the checks see what the vendor signed and what the gateway
 // sent it back: neither vendor checks a signature, so its 200 alone proves
@@ -39,9 +40,9 @@ const liveEnv = "RUN_LIVE_MODELGATEWAY"
 type liveVendor struct {
 	name     string // the profile, and the name RUN_LIVE_MODELGATEWAY uses
 	keyEnv   string
-	baseEnv  string // configures the base URL where the vendor has more than one
-	base     string
-	models   []string
+	baseEnv  string                             // configures the base URL where the vendor has more than one
+	base     string                             // its Anthropic base URL; for a vendor without chat, its OpenAI one
+	models   []string                           // its chat models
 	thinking anthropic.ThinkingConfigParamUnion // what asks its models to think
 	quiet    []string                           // its models that return no thinking even so
 }
@@ -59,6 +60,8 @@ var liveVendors = []liveVendor{
 		// its round trip is checked without one, and any it returns is
 		// checked like any other.
 		quiet: []string{"MiniMax-M3.1-Flash-Preview"}},
+	// Gitee AI serves this tier's embeddings and rerank, and no chat.
+	{name: "gitee", keyEnv: "GITEE_API_KEY", base: "https://ai.gitee.com/v1"},
 }
 
 // liveKeys is the keys of the vendors consented to, which a failure's
@@ -89,6 +92,22 @@ func namedVendors(t *testing.T) []liveVendor {
 		v.keyEnv = key // from here on, the key itself
 		liveKeys = append(liveKeys, key)
 		out = append(out, v)
+	}
+	return out
+}
+
+// chatVendors is the named vendors with chat models; a run naming none of
+// them — Gitee alone — skips the chat tests.
+func chatVendors(t *testing.T) []liveVendor {
+	t.Helper()
+	var out []liveVendor
+	for _, v := range namedVendors(t) {
+		if len(v.models) > 0 {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		t.Skipf("%s names no chat vendor", liveEnv)
 	}
 	return out
 }
@@ -399,7 +418,7 @@ type liveRoute struct {
 // MiniMax opens, continued at DeepSeek, gets DeepSeek's refusal relayed. And the SDK lists,
 // a page at a time, every chat alias a key may use and no other, and gets each.
 func TestLiveThinkingRoundTrip(t *testing.T) {
-	vendors := namedVendors(t)
+	vendors := chatVendors(t)
 	e := newEnv(t)
 	routes := map[string][]liveRoute{}
 	var fallback liveRoute
