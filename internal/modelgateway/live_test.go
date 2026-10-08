@@ -343,17 +343,30 @@ func liveSend(cl *anthropic.Client, p anthropic.MessageNewParams, stream bool) (
 func liveText(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool) {
 	t.Helper()
 	mode := map[bool]string{false: "whole", true: "streamed"}[stream]
-	n := r.rec.count()
-	m, err := liveSend(cl, anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Thinking: r.thinking,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Which planet is the largest in the solar system? Answer in one word."))}}, stream)
-	if err != nil {
-		liveFatalf(t, "%s text: %v", mode, err)
-	}
-	_, raw := one(t, r.rec, n).answer()
-	up, _ := vendorAnswer(raw)
-	if m.StopReason != anthropic.StopReasonEndTurn || !strings.Contains(strings.ToLower(textOf(m)), "jupiter") || string(m.Model) != r.alias ||
-		m.Usage.InputTokens == 0 || m.Usage.OutputTokens == 0 || !sameUsage(m.Usage, up.Usage) {
-		liveFatalf(t, "%s text: %q (stop %q) from model %q, usage %s, the vendor's %s", mode, masked(textOf(m)), m.StopReason, m.Model, counts(m.Usage), counts(up.Usage))
+	// The answer must be the vendor's, block for block. Whether the vendor's
+	// names Jupiter is the model's choice: MiniMax-M3 once ended its turn
+	// with no text. So up to three answers are asked for.
+	for try := 1; ; try++ {
+		n := r.rec.count()
+		m, err := liveSend(cl, anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Thinking: r.thinking,
+			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Which planet is the largest in the solar system? Answer in one word."))}}, stream)
+		if err != nil {
+			liveFatalf(t, "%s text: %v", mode, err)
+		}
+		_, raw := one(t, r.rec, n).answer()
+		up, _ := vendorAnswer(raw)
+		if kindsOf(m) != kindsOf(&up) || textOf(m) != textOf(&up) || m.StopReason != up.StopReason || string(m.Model) != r.alias ||
+			m.Usage.InputTokens == 0 || m.Usage.OutputTokens == 0 || !sameUsage(m.Usage, up.Usage) {
+			liveFatalf(t, "%s text: the gateway answered [%s] %q (stop %q) from model %q, usage %s; the vendor sent [%s] %q (stop %q), usage %s",
+				mode, kindsOf(m), masked(textOf(m)), m.StopReason, m.Model, counts(m.Usage), kindsOf(&up), masked(textOf(&up)), up.StopReason, counts(up.Usage))
+		}
+		if m.StopReason == anthropic.StopReasonEndTurn && strings.Contains(strings.ToLower(textOf(m)), "jupiter") {
+			return
+		}
+		if try == 3 {
+			liveFatalf(t, "%s text: three answers without Jupiter, the last [%s] %q (stop %q), as the vendor sent it", mode, kindsOf(m), masked(textOf(m)), m.StopReason)
+		}
+		t.Logf("%s text, answer %d: [%s] %q (stop %q), as the vendor sent it; asking again", mode, try, kindsOf(m), masked(textOf(m)), m.StopReason)
 	}
 }
 
@@ -659,6 +672,15 @@ func liveCtx(t *testing.T) context.Context {
 
 // textOf is an answer's text, its blocks joined; empty for the nil answer
 // an error leaves.
+// kindsOf is m's content block types, in order.
+func kindsOf(m *anthropic.Message) string {
+	var ks []string
+	for _, c := range m.Content {
+		ks = append(ks, c.Type)
+	}
+	return strings.Join(ks, ",")
+}
+
 func textOf(m *anthropic.Message) string {
 	if m == nil {
 		return ""

@@ -6464,7 +6464,7 @@ evidence were answered as follows.
   For a question that asks for the tool, `auto` called it every time: 24 asks through
   the gateway and 18 asked directly. `none` was honored in all 104 asks through the
   gateway and the 3 asked directly of M3.1-Flash-Preview; MiniMax-M3 broke it in 1 of 3
-  asked directly, and in three tier runs. That is a lapse, not an ignored field, so
+  asked directly, and in four tier runs. That is a lapse, not an ignored field, so
   `none` passes through, and the tier checks that it reaches the vendor unchanged and
   only logs a tool call made under it. Both vendors read the choice's `type` by its exact
   key: `{"Type": "none"}` is DeepSeek's 422, "missing field `type`", and MiniMax's 400,
@@ -6476,7 +6476,7 @@ evidence were answered as follows.
   the gateway answers 502 `api_error`, "upstream refused the gateway's credential (HTTP
   401)". A MiniMax provider's base URL must be in its key's region.
 
-The tier failed three times on model behavior, and was changed so that these choices,
+The tier failed four times on model behavior, and was changed so that these choices,
 which are not what it checks, no longer decide the outcome:
 
 - `MiniMax-M3`, thinking adaptively, once answered the round trip's first turn without
@@ -6490,6 +6490,12 @@ which are not what it checks, no longer decide the outcome:
   at MiniMax and continues it at DeepSeek, whose 400 the gateway must relay.
 - One run's MiniMax `tool_choice` or `search_result` failure was not kept, and three
   reruns passed. Each `search_result` turn is now asked up to three times.
+- MiniMax-M3 once ended a streamed answer to the text question with no text, its usage
+  equal to what the vendor reported. The relay passes a text delta byte for byte, so the
+  model is the likelier cause, but the check could not show the vendor's side, and 8
+  further answers, 5 streamed, all named the planet on both sides. The check now
+  requires the gateway's answer to equal the vendor's block for block, and asks up to
+  three times for one naming the planet.
 
 Review then hardened the checks so that each reads what the vendor was sent or reported
 rather than only what the SDK saw. It also found two gateway defects, both fixed with a
@@ -6505,17 +6511,19 @@ test that failed on the earlier code:
 MiniMax-M3 answers took up to 142 seconds, inside the tier's three-minute bound per
 call. Two consecutive runs of the whole tier each passed all 24 tests, the two
 top-level tests and their 22 subtests, before the second review's last changes to the
-checks. After those changes, seven runs met MiniMax overloaded: every failure was its
-HTTP 529, relayed with its status, and every test passed in at least one run, but no
-run passed all 24. Mutation testing caught all twenty-two mutants:
+checks. The runs after those changes met MiniMax overloaded: every failure but
+MiniMax-M3's empty answer above was its HTTP 529, relayed with its status, and every
+test passed in at least one run, but no run passed all 24. Mutation testing caught all
+twenty-four mutants:
 - seven against the refusal rows;
 - three against the pruning tests: no pruning, every key dropped, and the late-open fix
   reverted;
-- eleven against the live checks:
+- thirteen against the live checks:
   - each refusal dropped or widened, and the flattening removed;
   - `auto` rewritten to `none`, and `tool` to `auto`, upstream;
   - a whole answer's usage altered, and its zero `cache_creation_input_tokens` dropped;
   - a vendor counting cache reads in `input_tokens`;
   - the direct check asked with `auto` and a question needing the tool;
   - a vendor's error relayed as a 502;
+  - text deltas dropped from a stream, and a whole answer's text emptied;
 - one sending `auto` where the check expects `none`.
