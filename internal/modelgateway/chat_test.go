@@ -895,7 +895,7 @@ func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
 			sse(w, chunk(c.Model, "A", "stop", ""), fmt.Sprintf("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":%q,\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", c.Model))
 			return
 		case "trailing":
-			sse(w, chunk(c.Model, "A", "stop", ""), choice(c.Model, `0`, `{"role":"assistant","content":"","tool_calls":null,"annotations":[],"audio":{}}`))
+			sse(w, chunk(c.Model, "A", "stop", ""), choice(c.Model, `0`, `{"role":"assistant","content":"","tool_calls":null,"annotations":[ ],"audio":{ }}`))
 			return
 		}
 		sse(w, chunk(c.Model, "Jupiter", "stop", ""), second(c.Model, "Saturn", "stop"))

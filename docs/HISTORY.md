@@ -6588,7 +6588,7 @@ model ids, so that the gateway's rewrite of `model` shows. Mutation testing caug
   `parallel_tool_calls` refusals dropped. The chunk's model survived at first, while
   each live alias shared its model's id.
 
-Review found fourteen defects, each fixed with a test that failed on the earlier code:
+Review found sixteen defects, each fixed with a test that failed on the earlier code:
 - The gateway took a request for a stream only when `stream` was exactly `true`. A
   value a lenient upstream reads as true, or a key `"Stream"`, which a case-insensitive
   decoder such as Go's reads as `stream`, could have an upstream stream an answer the
@@ -6626,6 +6626,12 @@ Review found fourteen defects, each fixed with a test that failed on the earlier
 - A choice whose `index` was missing, null or no whole number counted as choice 0, so
   with `n` above one an unfinished choice could pass as finished.
 - A choice that went on after its finish still counted as finished.
+- That fix read an empty field written with a space inside, `[ ]` or `{ }`, as more of
+  the answer, reopening a finished choice (Codex's pass over that round, as is the one
+  below).
+- Once the reader kept an empty data line as data, an empty `message_start` reset the
+  usage its stream had reported, so the ledger undercounted; an empty event changes no
+  count again, while an empty error event is still recorded as an error.
 
 The Claude review's other suggestions were declined: listing in OpenAI's shape only the
 aliases the OpenAI route can serve now (plan 59 lists by grant and kind on both
@@ -6634,8 +6640,9 @@ attempt behind the stream interface (to be weighed when slice 4c adds a third sh
 decoding each chunk once (not measured as a cost); and reusing `answerJSON` for chat
 answers, which would read a top-level `content` array as thinking blocks.
 
-Forty-eight mutants against those fixes were caught, five only once a test pinned the
+Fifty-five mutants against those fixes were caught, five only once a test pinned the
 guard: a Messages stream cut off on its first event still falls back; a stream that
 began no choice has not finished; the Messages route passes `stream_options` through;
 a dataless event opening a chat stream is no error; and a usage chunk with no
-`choices` at all is withheld like any other, the stream ending after it.
+`choices` at all is withheld like any other, the stream ending after it. On the final
+code the whole live tier passed twice more, its 47 tests each time.

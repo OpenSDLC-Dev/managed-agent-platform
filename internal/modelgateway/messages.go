@@ -787,15 +787,17 @@ func (s *messagesStream) event(e upstream.Event) ([]byte, bool) {
 	out := e.Raw
 	switch {
 	case e.Data == nil:
+	case e.Name == "error":
+		s.c.out.errType = errorTypeOf(e.Data, 0)
+		out = e.WithData(errorJSON(s.ctx, s.red, e.Data, s.rid))
+	case len(e.Data) == 0:
+		// An empty data line says nothing, so it changes no count.
 	case e.Name == "message_start":
 		d, usage := messageStart(e.Data, s.c.alias, s.wrap)
 		s.c.out.tokens = usageOf(nil, usage)
 		out = e.WithData(d)
 	case e.Name == "message_delta":
 		s.c.out.tokens = usageOf(s.c.out.tokens, member(e.Data, "usage"))
-	case e.Name == "error":
-		s.c.out.errType = errorTypeOf(e.Data, 0)
-		out = e.WithData(errorJSON(s.ctx, s.red, e.Data, s.rid))
 	case e.Name == "content_block_start":
 		if d := s.wrap.start(e.Data); d != nil {
 			out = e.WithData(d)
@@ -912,16 +914,27 @@ func (s *chatStream) ended() string {
 // generates reports whether a chunk's choice carries more of the answer: a
 // delta with a field other than role whose value is not null or empty.
 func generates(ch map[string]json.RawMessage) bool {
-	var delta map[string]json.RawMessage
+	var delta map[string]any
 	_ = json.Unmarshal(ch["delta"], &delta)
 	for k, v := range delta {
-		switch string(bytes.TrimSpace(v)) {
-		case "null", `""`, "[]", "{}":
-		default:
-			if k != "role" {
-				return true
-			}
+		if k != "role" && !empty(v) {
+			return true
 		}
+	}
+	return false
+}
+
+// empty reports whether a decoded JSON value is null, "", [] or {}.
+func empty(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
 	}
 	return false
 }
