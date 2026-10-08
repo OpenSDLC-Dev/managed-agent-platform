@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -269,8 +270,11 @@ func TestResponsesRequestNoMessages(t *testing.T) {
 // Calls a client records each beside its output join the turn they came
 // from when their ids name one Response, as the gateway's ids do, so the
 // turn keeps the thinking it began with; calls whose ids name different
-// Responses, or no id at all, are turns of their own.
+// Responses, ids of any form the gateway does not write — a caller's own —
+// or no id at all, are turns of their own.
 func TestResponsesRequestInterleavedCalls(t *testing.T) {
+	// Response ids as the gateway mints them: 24 characters of its alphabet.
+	const a, b, c, d = "0123456789abcdefghjkmnpq", "rstvwxyz0123456789abcdef", "ghjkmnpqrstvwxyz01234567", "zyxwvtsrqpnmkjhgfedcba98"
 	call := func(id, callID string) string {
 		if id != "" {
 			id = `"id":"` + id + `",`
@@ -279,24 +283,28 @@ func TestResponsesRequestInterleavedCalls(t *testing.T) {
 			`{"type":"function_call_output","call_id":"` + callID + `","output":"` + callID + `"}`
 	}
 	got, _ := responsesRequest(t, `{"model":"m","input":[
-		{"type":"reasoning","id":"rs_abc_0","summary":[{"type":"summary_text","text":"hmm"}],"encrypted_content":"mapgw1.sig"},
-		`+call("fc_abc_1", "t1")+`,`+call("fc_abc_2", "t2")+`,`+call("fc_def_0", "t3")+`,`+call("", "t4")+`,`+call("", "t5")+`,
-		{"role":"user","content":"and"},`+call("fc_ghi_0", "t6")+`,{"role":"user","content":"then"},`+call("fc_ghi_1", "t7")+`,
-		`+call("call_x_a", "t8")+`,`+call("call_x_b", "t9")+`]}`)
+		{"type":"reasoning","id":"rs_`+a+`_0","summary":[{"type":"summary_text","text":"hmm"}],"encrypted_content":"mapgw1.sig"},
+		`+call("fc_"+a+"_1", "t1")+`,`+call("fc_"+a+"_2", "t2")+`,`+call("fc_"+b+"_0", "t3")+`,`+call("", "t4")+`,`+call("", "t5")+`,
+		{"role":"user","content":"and"},`+call("fc_"+c+"_0", "t6")+`,{"role":"user","content":"then"},`+call("fc_"+c+"_1", "t7")+`,
+		`+call("fc_"+d+"_a", "t8")+`,`+call("fc_"+d+"_b", "t9")+`,`+call("fc_history_0", "t10")+`,`+call("fc_history_1", "t11")+`,
+		`+call("call_"+d+"_0", "t12")+`,`+call("call_"+d+"_1", "t13")+`,
+		`+call("fc_"+strings.Repeat("u", 24)+"_0", "t14")+`,`+call("fc_"+strings.Repeat("u", 24)+"_1", "t15")+`,`+call("fc_abc_0", "t16")+`,`+call("fc_abc_1", "t17")+`]}`)
 	use := func(id string) string { return `{"type":"tool_use","id":"` + id + `","name":"f","input":{}}` }
 	result := func(id string) string {
 		return `{"type":"tool_result","tool_use_id":"` + id + `","content":"` + id + `"}`
 	}
-	want := decoded(t, `[
-		{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"mapgw1.sig"},`+use("t1")+`,`+use("t2")+`]},
-		{"role":"user","content":[`+result("t1")+`,`+result("t2")+`]},
-		{"role":"assistant","content":[`+use("t3")+`]},{"role":"user","content":[`+result("t3")+`]},
-		{"role":"assistant","content":[`+use("t4")+`]},{"role":"user","content":[`+result("t4")+`]},
-		{"role":"assistant","content":[`+use("t5")+`]},{"role":"user","content":[`+result("t5")+`,{"type":"text","text":"and"}]},
-		{"role":"assistant","content":[`+use("t6")+`]},{"role":"user","content":[`+result("t6")+`,{"type":"text","text":"then"}]},
-		{"role":"assistant","content":[`+use("t7")+`]},{"role":"user","content":[`+result("t7")+`]},
-		{"role":"assistant","content":[`+use("t8")+`]},{"role":"user","content":[`+result("t8")+`]},
-		{"role":"assistant","content":[`+use("t9")+`]},{"role":"user","content":[`+result("t9")+`]}]`)
+	w := (`[
+		{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"mapgw1.sig"},` + use("t1") + `,` + use("t2") + `]},
+		{"role":"user","content":[` + result("t1") + `,` + result("t2") + `]},
+		{"role":"assistant","content":[` + use("t3") + `]},{"role":"user","content":[` + result("t3") + `]},
+		{"role":"assistant","content":[` + use("t4") + `]},{"role":"user","content":[` + result("t4") + `]},
+		{"role":"assistant","content":[` + use("t5") + `]},{"role":"user","content":[` + result("t5") + `,{"type":"text","text":"and"}]},
+		{"role":"assistant","content":[` + use("t6") + `]},{"role":"user","content":[` + result("t6") + `,{"type":"text","text":"then"}]},
+		{"role":"assistant","content":[` + use("t7") + `]},{"role":"user","content":[` + result("t7") + `]}`)
+	for _, id := range []string{"t8", "t9", "t10", "t11", "t12", "t13", "t14", "t15", "t16", "t17"} {
+		w += `,{"role":"assistant","content":[` + use(id) + `]},{"role":"user","content":[` + result(id) + `]}`
+	}
+	want := decoded(t, w+`]`)
 	if !reflect.DeepEqual(got["messages"], want) {
 		t.Errorf("got  %v\nwant %v", got["messages"], want)
 	}
@@ -588,32 +596,124 @@ func TestResponsesStreamToolInputAtStart(t *testing.T) {
 	}
 }
 
-// What a stream holds for its Response is bounded: the content of every
-// kind it keeps — text, thinking, a signature, arguments, a tool's opening
-// input — counts, and the event that passes the bound fails.
+// What a stream holds for its Response comes from its blocks' starts and
+// deltas, so their size is bounded, whatever they hold — a call's id, blocks
+// with nothing in them, text — and the event that passes the bound fails.
 func TestResponsesStreamBound(t *testing.T) {
-	start := `{"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}`
-	for _, c := range []struct{ name, block, delta string }{
-		{"text", `{"type":"text","text":"abcd"}`, `{"type":"text_delta","text":"efghi"}`},
-		{"thinking", `{"type":"thinking","thinking":"abcd","signature":""}`, `{"type":"thinking_delta","thinking":"efghi"}`},
-		{"signature", `{"type":"thinking","thinking":"","signature":"abcd"}`, `{"type":"signature_delta","signature":"efghi"}`},
-		{"arguments", `{"type":"tool_use","id":"t","name":"f","input":{"a":1}}`, `{"type":"input_json_delta","partial_json":"efghi"}`},
-		{"redacted", `{"type":"redacted_thinking","data":"abcdefghi"}`, ``},
+	const limit = 400
+	blockStart := func(i int, blk string) string {
+		return `content_block_start {"type":"content_block_start","index":` + strconv.Itoa(i) + `,"content_block":` + blk + `}`
+	}
+	blockStop := func(i int) string {
+		return `content_block_stop {"type":"content_block_stop","index":` + strconv.Itoa(i) + `}`
+	}
+	var empty, text []string
+	for i := 0; i < 10; i++ {
+		empty = append(empty, blockStart(i, `{"type":"text","text":""}`), blockStop(i))
+		text = append(text, `content_block_delta {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"`+strings.Repeat("x", 50)+`"}}`)
+	}
+	for name, events := range map[string][]string{
+		"a call's id":  {blockStart(0, `{"type":"tool_use","id":"`+strings.Repeat("i", limit)+`","name":"f","input":{}}`)},
+		"empty blocks": empty,
+		"text":         append([]string{blockStart(0, `{"type":"text","text":""}`)}, text...),
 	} {
-		s := convert.NewResponsesStream(meta, 8)
-		if _, err := s.Event("message_start", []byte(start)); err != nil {
+		s := convert.NewResponsesStream(meta, limit)
+		if _, err := s.Event("message_start", []byte(`{"type":"message_start","message":{"usage":{}}}`)); err != nil {
 			t.Fatal(err)
 		}
-		_, err := s.Event("content_block_start", []byte(`{"type":"content_block_start","index":0,"content_block":`+c.block+`}`))
-		if c.delta != "" {
-			if err != nil {
-				t.Fatalf("%s: under the bound: %v", c.name, err)
+		size, failed := 0, false
+		for _, e := range events {
+			n, data, _ := strings.Cut(e, " ")
+			if n != "content_block_stop" {
+				size += len(data)
 			}
-			_, err = s.Event("content_block_delta", []byte(`{"type":"content_block_delta","index":0,"delta":`+c.delta+`}`))
+			_, err := s.Event(n, []byte(data))
+			if want := size > limit; (err != nil) != want || want && err.Error() != "the answer passes the gateway's bound of 400 bytes" {
+				t.Errorf("%s: at %d bytes: %v", name, size, err)
+			}
+			if err != nil {
+				failed = true
+				break
+			}
 		}
-		if err == nil || err.Error() != "the answer passes the gateway's bound of 8 bytes" {
-			t.Errorf("%s: %v", c.name, err)
+		if !failed {
+			t.Errorf("%s: never passed the bound", name)
 		}
+	}
+}
+
+// An event the conversion cannot carry fails it, and the events it made
+// first — the stream's start, a finished item's done — come back with the
+// error, so the failure the caller then sends follows them in sequence.
+func TestResponsesStreamKeepsWhatAFailureFollows(t *testing.T) {
+	server := `content_block_start {"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"s"}}`
+	for name, events := range map[string][]string{
+		"the first event": {strings.Replace(server, "%d", "0", 1)},
+		"after an item": {`message_start {"type":"message_start","message":{"usage":{}}}`,
+			`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"x"}}`,
+			`content_block_stop {"type":"content_block_stop","index":0}`, strings.Replace(server, "%d", "1", 1)},
+	} {
+		s := convert.NewResponsesStream(meta, 1<<20)
+		var all []byte
+		for _, e := range events {
+			n, data, _ := strings.Cut(e, " ")
+			b, err := s.Event(n, []byte(data))
+			all = append(all, b...)
+			if err != nil {
+				all = append(all, s.Failure("api_error", err.Error())...)
+				break
+			}
+		}
+		got := respEvents(t, all) // which checks the sequence runs unbroken from 0
+		if got[0].Type != "response.created" || got[len(got)-1].Type != "response.failed" {
+			t.Errorf("%s: events %+v", name, got)
+		}
+		added, done := 0, 0
+		for _, e := range got {
+			switch e.Type {
+			case "response.output_item.added":
+				added++
+			case "response.output_item.done":
+				done++
+			}
+		}
+		if added != done {
+			t.Errorf("%s: %d items added, %d done", name, added, done)
+		}
+	}
+}
+
+// The item an incomplete answer stopped in is its last in output order, as a
+// whole answer's is, however the blocks' stops interleave; and the stop
+// reason that decides it is the answer's last.
+func TestResponsesStreamIncompleteItem(t *testing.T) {
+	start := `message_start {"type":"message_start","message":{"usage":{}}}`
+	events := respEvents(t, respStream(t, start,
+		`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+		`content_block_start {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t","name":"f","input":{}}}`,
+		`content_block_delta {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}`,
+		`content_block_stop {"type":"content_block_stop","index":1}`,
+		`content_block_delta {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"mapgw1.sig"}}`,
+		`content_block_stop {"type":"content_block_stop","index":0}`,
+		`message_delta {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":3}}`,
+		`message_stop {"type":"message_stop"}`))
+	last := events[len(events)-1]
+	if out := last.Response.Output; len(out) != 2 || out[0].Status != "completed" || out[1].Status != "incomplete" {
+		t.Errorf("output %+v", out)
+	}
+	for _, e := range events {
+		if e.Type == "response.output_item.done" && string(e.Item.Status) != map[string]string{"reasoning": "completed", "function_call": "incomplete"}[e.Item.Type] {
+			t.Errorf("done %s item: %s", e.Item.Type, e.Item.Status)
+		}
+	}
+	events = respEvents(t, respStream(t, start,
+		`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"x"}}`,
+		`content_block_stop {"type":"content_block_stop","index":0}`,
+		`message_delta {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{}}`,
+		`message_delta {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{}}`,
+		`message_stop {"type":"message_stop"}`))
+	if last := events[len(events)-1]; last.Type != "response.completed" || last.Response.Output[0].Status != "completed" || events[len(events)-2].Item.Status != "completed" {
+		t.Errorf("a later stop reason: %+v", events)
 	}
 }
 

@@ -31,8 +31,8 @@ type ResponsesStream struct {
 	stop   string
 	begun  bool
 	done   bool
-	limit  int            // the bytes of content it may hold for the Response
-	size   int            // the bytes it holds
+	limit  int            // the bytes of block starts and deltas it may take
+	size   int            // the bytes it has taken
 	held   map[string]any // the item last finished, done once the stream says how it ended
 	heldN  int
 }
@@ -50,8 +50,9 @@ type item struct {
 	name  string
 }
 
-// NewResponsesStream converts a stream whose Response m describes, holding
-// at most limit bytes of its content for the Response.
+// NewResponsesStream converts a stream whose Response m describes, taking at
+// most limit bytes of block starts and deltas, which everything it holds
+// for the Response comes from.
 func NewResponsesStream(m ResponseMeta, limit int) *ResponsesStream {
 	return &ResponsesStream{m: m, open: map[int64]*item{}, usage: map[string]int64{}, limit: limit}
 }
@@ -62,8 +63,10 @@ func (s *ResponsesStream) Done() bool { return s.done }
 // Event is the events one Messages event becomes, none once the stream is
 // done. It fails on an event it cannot carry: a block with no Responses
 // counterpart, which only a server tool, never asked for, makes, or a delta
-// or stop for a block not open, and content past its bound. An error
-// event ends the stream as response.failed (Failure).
+// or stop for a block not open, and block starts and deltas past its bound.
+// The events made before a failure come back with it, for the caller to
+// send ahead of its own. An error event ends the stream as response.failed
+// (Failure).
 func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 	if s.done {
 		return nil, nil
@@ -72,6 +75,11 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if len(data) > 0 && (json.Unmarshal(data, &obj) != nil || obj == nil) {
 		return nil, fmt.Errorf("a %s event's data is not a JSON object", name)
+	}
+	if name == "content_block_start" || name == "content_block_delta" {
+		if s.size += len(data); s.size > s.limit {
+			return nil, fmt.Errorf("the answer passes the gateway's bound of %d bytes", s.limit)
+		}
 	}
 	switch name {
 	case "message_start":
@@ -83,15 +91,15 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 		s.begin(&out)
 		s.release(&out, "completed")
 		if err := s.start(&out, obj); err != nil {
-			return nil, err
+			return out.Bytes(), err
 		}
 	case "content_block_delta":
 		if err := s.delta(&out, obj); err != nil {
-			return nil, err
+			return out.Bytes(), err
 		}
 	case "content_block_stop":
 		if err := s.finish(&out, obj); err != nil {
-			return nil, err
+			return out.Bytes(), err
 		}
 	case "message_delta":
 		var d map[string]json.RawMessage
@@ -100,8 +108,6 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 			s.stop = stop
 		}
 		usageCounts(s.usage, obj["usage"])
-		status, _ := responseStatus(s.stop)
-		s.release(&out, status)
 	case "message_stop":
 		// A block still open has content the caller was streamed and the
 		// Response would leave out.
@@ -120,16 +126,7 @@ func (s *ResponsesStream) Event(name string, data []byte) ([]byte, error) {
 		msg, _ := text(e, "message")
 		return s.Failure(typ, msg), nil
 	}
-	if s.size > s.limit {
-		return nil, fmt.Errorf("the answer passes the gateway's bound of %d bytes", s.limit)
-	}
 	return out.Bytes(), nil
-}
-
-// keep adds v to b, held for the Response, counting it against the bound.
-func (s *ResponsesStream) keep(b *strings.Builder, v string) {
-	b.WriteString(v)
-	s.size += len(v)
 }
 
 // Failure is the event ending the stream as failed, for an error of the
@@ -195,7 +192,7 @@ func (s *ResponsesStream) start(out *bytes.Buffer, obj map[string]json.RawMessag
 		s.emit(out, "response.output_item.added", with(at, "item", messageItem(it.id, "in_progress", []any{})))
 		s.emit(out, "response.content_part.added", with(at, "item_id", it.id, "content_index", 0, "part", outputText("")))
 		if t, _ := text(blk, "text"); t != "" {
-			s.keep(&it.text, t)
+			it.text.WriteString(t)
 			s.emit(out, "response.output_text.delta", with(at, "item_id", it.id, "content_index", 0, "delta", t, "logprobs", []any{}))
 		}
 	case "thinking":
@@ -203,15 +200,15 @@ func (s *ResponsesStream) start(out *bytes.Buffer, obj map[string]json.RawMessag
 		s.emit(out, "response.output_item.added", with(at, "item", reasoningItem(it.id, "in_progress", []any{}, "")))
 		s.emit(out, "response.reasoning_summary_part.added", with(at, "item_id", it.id, "summary_index", 0, "part", summaryText("")))
 		if t, _ := text(blk, "thinking"); t != "" {
-			s.keep(&it.text, t)
+			it.text.WriteString(t)
 			s.emit(out, "response.reasoning_summary_text.delta", with(at, "item_id", it.id, "summary_index", 0, "delta", t))
 		}
 		sig, _ := text(blk, "signature")
-		s.keep(&it.sig, sig)
+		it.sig.WriteString(sig)
 	case "redacted_thinking":
 		it.id = s.m.itemID("rs", it.n)
 		data, _ := text(blk, "data")
-		s.keep(&it.sig, data)
+		it.sig.WriteString(data)
 		s.emit(out, "response.output_item.added", with(at, "item", reasoningItem(it.id, "in_progress", []any{}, data)))
 	case "tool_use":
 		it.id = s.m.itemID("fc", it.n)
@@ -220,7 +217,6 @@ func (s *ResponsesStream) start(out *bytes.Buffer, obj map[string]json.RawMessag
 		if in := blk["input"]; !null(in) {
 			if args, _ := arguments(in); args != "{}" { // a parsed event's value, which compacts
 				it.input = args
-				s.size += len(args)
 			}
 		}
 		s.emit(out, "response.output_item.added", with(at, "item", callItem(it.id, "in_progress", it.call, it.name, "")))
@@ -241,18 +237,18 @@ func (s *ResponsesStream) delta(out *bytes.Buffer, obj map[string]json.RawMessag
 	switch typ, _ := text(d, "type"); {
 	case typ == "text_delta" && it.typ == "text":
 		t, _ := text(d, "text")
-		s.keep(&it.text, t)
+		it.text.WriteString(t)
 		s.emit(out, "response.output_text.delta", with(at, "content_index", 0, "delta", t, "logprobs", []any{}))
 	case typ == "thinking_delta" && it.typ == "thinking":
 		t, _ := text(d, "thinking")
-		s.keep(&it.text, t)
+		it.text.WriteString(t)
 		s.emit(out, "response.reasoning_summary_text.delta", with(at, "summary_index", 0, "delta", t))
 	case typ == "signature_delta" && it.typ == "thinking":
 		sig, _ := text(d, "signature")
-		s.keep(&it.sig, sig)
+		it.sig.WriteString(sig)
 	case typ == "input_json_delta" && it.typ == "tool_use":
 		t, _ := text(d, "partial_json")
-		s.keep(&it.args, t)
+		it.args.WriteString(t)
 		s.emit(out, "response.function_call_arguments.delta", with(at, "delta", t))
 	case typ == "citations_delta":
 	default:
@@ -293,8 +289,13 @@ func (s *ResponsesStream) finish(out *bytes.Buffer, obj map[string]json.RawMessa
 		s.emit(out, "response.function_call_arguments.done", with(at, "item_id", it.id, "arguments", args))
 		done = callItem(it.id, "completed", it.call, it.name, args)
 	}
-	s.release(out, "completed")
-	s.held, s.heldN = done, it.n
+	if s.held != nil && s.heldN > it.n {
+		// A later item is held: this one is not the last, whatever stops next.
+		s.emit(out, "response.output_item.done", with(at, "item", done))
+	} else {
+		s.release(out, "completed")
+		s.held, s.heldN = done, it.n
+	}
 	s.output[it.n] = done
 	var index int64
 	_ = json.Unmarshal(obj["index"], &index)
@@ -302,10 +303,11 @@ func (s *ResponsesStream) finish(out *bytes.Buffer, obj map[string]json.RawMessa
 	return nil
 }
 
-// release sends the done event of the item last finished, marked status:
-// a block's stop precedes the stop reason that says whether the answer
-// ended in it, incomplete, so its done waits for the next block or the
-// answer's end.
+// release sends the done event of the item held, marked status. Of the
+// finished items, the last in output order is held, as the answer may yet
+// end in it incomplete — which the answer's end alone says, its last stop
+// reason deciding — so its done waits for a later block, the answer's end
+// or a failure.
 func (s *ResponsesStream) release(out *bytes.Buffer, status string) {
 	if s.held == nil {
 		return

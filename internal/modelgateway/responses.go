@@ -186,11 +186,11 @@ func (p *responsesStream) convert(b []byte) []byte {
 		}
 		if e.Name != "" {
 			b, cerr := p.s.Event(e.Name, e.Data)
+			out.Write(b) // the events made before a failure, too
 			if cerr != nil {
 				p.failed, p.c.out.errType = true, "api_error"
-				b = p.s.Failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", p.red.Error(cerr)))
+				out.Write(p.s.Failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", p.red.Error(cerr))))
 			}
-			out.Write(b)
 		}
 		if err != nil {
 			break

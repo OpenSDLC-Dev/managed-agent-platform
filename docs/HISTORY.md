@@ -7277,3 +7277,17 @@ envelope's conversion into convert, where `convertedError`, its precedent, does 
 Twenty-three mutants over the fixes are caught, 72 in all; a twenty-fourth survived as an
 equivalent — a turn of nothing but tool results can only be a user turn — and the redundant
 role check it removed went.
+
+A fourth Codex pass, over that round, found five more in it, each fixed with a test that
+failed on the code before it. The stream's bound counted what a block held but not its
+call id, its name or the block itself, so long ids, or many empty blocks, still grew
+without bound; it now counts the block starts and deltas everything held comes from. A held
+done event was lost, the sequence broken, when the next event failed the conversion — as the
+stream's first two events had been when its first block did, since the slice began; the
+events made before a failure now come back with it. With block stops interleaved, the item
+held was the last to stop, not the last in output order, which a whole answer marks; and
+the first of several `message_delta` events decided its status, where the last should. And
+any id shaped `<x>_<y>_<n>` named a Response, so a caller's own ids could merge sequential
+turns; only an id the gateway writes — `msg`, `rs` or `fc`, its 24-character request id, an
+index — now does. Ten mutants over the fixes are caught, 76 in all, the six that pinned the
+per-field counting and the delta's release gone with them.

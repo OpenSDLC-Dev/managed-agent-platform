@@ -398,17 +398,20 @@ type turn struct {
 }
 
 // responseOf is the Response an output item's id names, as the gateway
-// writes one (ResponseMeta.itemID): what lies between the type's prefix
-// and the item's index; "" for an id of any other form.
+// writes one (ResponseMeta.itemID): msg, rs or fc, the Response's id —
+// the gateway's request id, 24 characters of the platform's id alphabet
+// (newRequestID in internal/modelgateway) — and the item's index. An id of
+// any other form, a caller's own among them, names none: "".
 func responseOf(id string) string {
-	i, j := strings.IndexByte(id, '_'), strings.LastIndexByte(id, '_')
-	if i < 0 || j <= i+1 {
+	parts := strings.Split(id, "_")
+	if len(parts) != 3 || parts[0] != "msg" && parts[0] != "rs" && parts[0] != "fc" ||
+		len(parts[1]) != 24 || strings.Trim(parts[1], "0123456789abcdefghjkmnpqrstvwxyz") != "" {
 		return ""
 	}
-	if _, err := strconv.Atoi(id[j+1:]); err != nil {
+	if _, err := strconv.Atoi(parts[2]); err != nil {
 		return ""
 	}
-	return id[i+1 : j]
+	return parts[1]
 }
 
 // responsesInput is input as Messages' system texts and messages. A string

@@ -531,15 +531,18 @@ func TestAResponsesStreamFailsAsAResponse(t *testing.T) {
 	serverTool := "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"s\",\"name\":\"web_search\",\"input\":{}}}\n\n"
 	for _, c := range []struct {
 		name, tail, msg, errType string
-		usage                    bool
+		usage, itemDone          bool
 	}{
 		{"error event", "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n",
-			"busy", "overloaded_error", false},
-		{"cut off", "", "upstream stream failed: the stream ended before message_stop", "api_error", false},
+			"busy", "overloaded_error", false, false},
+		{"cut off", "", "upstream stream failed: the stream ended before message_stop", "api_error", false, false},
 		{"unconvertible", serverTool + strings.Join(events("m", "")[5:], ""),
-			`upstream stream could not be converted: a "server_tool_use" block has no Responses counterpart`, "api_error", true},
+			`upstream stream could not be converted: a "server_tool_use" block has no Responses counterpart`, "api_error", true, false},
 		{"a key in a block", strings.Replace(serverTool, "server_tool_use", "sk-upstream-1", 1) + strings.Join(events("m", "")[5:], ""),
-			`upstream stream could not be converted: a "[redacted]" block has no Responses counterpart`, "api_error", true},
+			`upstream stream could not be converted: a "[redacted]" block has no Responses counterpart`, "api_error", true, false},
+		// The item finished before the failing block is done before the failure.
+		{"unconvertible after an item", events("m", "")[5] + serverTool + strings.Join(events("m", "")[6:], ""),
+			`upstream stream could not be converted: a "server_tool_use" block has no Responses counterpart`, "api_error", true, true},
 	} {
 		e := newEnv(t)
 		f := newFake(t, func(w http.ResponseWriter, _ *http.Request, call fakeCall) {
@@ -557,6 +560,9 @@ func TestAResponsesStreamFailsAsAResponse(t *testing.T) {
 		types, text, last := streamResponse(t, e.oaClient(key, "/v1"), respParams("fast"))
 		if text != "half" || last.Type != "response.failed" || last.Response.Error.Code != "server_error" || last.Response.Error.Message != c.msg {
 			t.Errorf("%s: stream %v %q %+v", c.name, types, text, last.Response)
+		}
+		if c.itemDone && (len(types) < 2 || types[len(types)-2] != "response.output_item.done" || last.Response.OutputText() != "half") {
+			t.Errorf("%s: stream %v", c.name, types)
 		}
 		rows := e.ledger()
 		if len(rows) != 1 || rows[0].Endpoint != "responses" || rows[0].ErrorType != c.errType ||
