@@ -39,22 +39,29 @@ func TestLiveChatCompletions(t *testing.T) {
 		alias string // unlike the model's id, so its rewrite shows
 		rec   *recorder
 	}
+	newRoute := func(v liveVendor, host, model, alias string) route {
+		r := route{v: v, model: model, alias: alias, rec: &recorder{}}
+		proxy := recordingProxy(t, host, r.rec)
+		p := e.provider(proxy, func(p *store.Provider) {
+			p.Name, p.Profile, p.Endpoints = alias, v.name, map[profile.Protocol]string{profile.OpenAI: proxy}
+		})
+		e.credential(p, v.keyEnv, 1)
+		e.alias(r.alias, target(e.deployment(p, model), 0))
+		return r
+	}
 	var routes []route
+	// Each vendor's refusals have a route of their own, so the calls the
+	// model's own subtests make beside them never land in their count.
+	refusals := map[string]route{}
 	for _, v := range vendors {
 		host := openAIHost(v)
 		if host == "" {
 			t.Fatalf("%s: no OpenAI host in its profile for %s", v.name, v.base)
 		}
 		for _, model := range v.models {
-			r := route{v: v, model: model, alias: "chat-" + model, rec: &recorder{}}
-			proxy := recordingProxy(t, host, r.rec)
-			p := e.provider(proxy, func(p *store.Provider) {
-				p.Name, p.Profile, p.Endpoints = model, v.name, map[profile.Protocol]string{profile.OpenAI: proxy}
-			})
-			e.credential(p, v.keyEnv, 1)
-			e.alias(r.alias, target(e.deployment(p, model), 0))
-			routes = append(routes, r)
+			routes = append(routes, newRoute(v, host, model, "chat-"+model))
 		}
+		refusals[v.name] = newRoute(v, host, v.models[0], "refuse-"+v.models[0])
 	}
 	key := e.key(everyAlias)
 	e.start()
@@ -163,20 +170,15 @@ func TestLiveChatCompletions(t *testing.T) {
 	// The refusals, on each vendor's first model: the gateway sends nothing,
 	// and the vendor asked directly still ignores what is refused.
 	for _, v := range vendors {
+		r := refusals[v.name]
 		t.Run(v.name+" refusals", func(t *testing.T) {
 			t.Parallel()
-			model := v.models[0]
+			model := r.model
 			for _, c := range chatRefusals(v.name) {
-				var rec *recorder
-				for _, r := range routes {
-					if r.model == model {
-						rec = r.rec
-					}
-				}
-				n := rec.count()
-				resp, b := e.do("POST", "/v1/chat/completions", string(c.body("chat-"+model)), map[string]string{"Authorization": "Bearer " + key})
-				if resp.StatusCode != 400 || len(rec.since(n)) != 0 || !strings.Contains(string(b), c.field+": every upstream of model chat-"+model+" ignores it") {
-					liveFatalf(t, "%s: %d %s, %d upstream calls", c.name, resp.StatusCode, b, len(rec.since(n)))
+				n := r.rec.count()
+				resp, b := e.do("POST", "/v1/chat/completions", string(c.body(r.alias)), map[string]string{"Authorization": "Bearer " + key})
+				if resp.StatusCode != 400 || len(r.rec.since(n)) != 0 || !strings.Contains(string(b), c.field+": every upstream of model "+r.alias+" ignores it") {
+					liveFatalf(t, "%s: %d %s, %d upstream calls", c.name, resp.StatusCode, b, len(r.rec.since(n)))
 				}
 				var seen []string
 				ignored := false

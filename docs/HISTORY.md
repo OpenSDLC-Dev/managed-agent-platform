@@ -6588,7 +6588,7 @@ model ids, so that the gateway's rewrite of `model` shows. Mutation testing caug
   `parallel_tool_calls` refusals dropped. The chunk's model survived at first, while
   each live alias shared its model's id.
 
-Review found sixteen defects, each fixed with a test that failed on the earlier code:
+Review found eighteen defects, each fixed with a test that failed on the earlier code:
 - The gateway took a request for a stream only when `stream` was exactly `true`. A
   value a lenient upstream reads as true, or a key `"Stream"`, which a case-insensitive
   decoder such as Go's reads as `stream`, could have an upstream stream an answer the
@@ -6632,6 +6632,12 @@ Review found sixteen defects, each fixed with a test that failed on the earlier 
 - Once the reader kept an empty data line as data, an empty `message_start` reset the
   usage its stream had reported, so the ledger undercounted; an empty event changes no
   count again, while an empty error event is still recorded as an error.
+- Decoding a delta's fields to test them for emptiness read a number past a float64's
+  range as null, which openai-go reads as content, so a finished choice stayed closed
+  (Codex's last pass).
+- A Messages error event with no data line at all ended a stream that had begun
+  without being recorded as an error, where an empty data line was recorded (the
+  verifier; it predates this slice).
 
 The Claude review's other suggestions were declined: listing in OpenAI's shape only the
 aliases the OpenAI route can serve now (plan 59 lists by grant and kind on both
@@ -6640,9 +6646,15 @@ attempt behind the stream interface (to be weighed when slice 4c adds a third sh
 decoding each chunk once (not measured as a cost); and reusing `answerJSON` for chat
 answers, which would read a top-level `content` array as thinking blocks.
 
-Fifty-five mutants against those fixes were caught, five only once a test pinned the
+Fifty-seven mutants against those fixes were caught, five only once a test pinned the
 guard: a Messages stream cut off on its first event still falls back; a stream that
 began no choice has not finished; the Messages route passes `stream_options` through;
 a dataless event opening a chat stream is no error; and a usage chunk with no
-`choices` at all is withheld like any other, the stream ending after it. On the final
-code the whole live tier passed twice more, its 47 tests each time.
+`choices` at all is withheld like any other, the stream ending after it.
+
+The live tier passed twice on the code of each of the last three review rounds but
+once, when the Chat Completions refusal check failed on a race in the test, not in the
+gateway, which had refused as it should: the check counted upstream calls on the
+recorder the model's own subtests use beside it, and one of their calls fell in its
+window. Each vendor's refusals now have a route of their own, and on the final code the
+whole live tier passed twice more, its 47 tests each time.

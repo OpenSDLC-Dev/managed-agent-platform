@@ -786,12 +786,12 @@ func (s *messagesStream) keepAlive(e upstream.Event) bool {
 func (s *messagesStream) event(e upstream.Event) ([]byte, bool) {
 	out := e.Raw
 	switch {
-	case e.Data == nil:
 	case e.Name == "error":
 		s.c.out.errType = errorTypeOf(e.Data, 0)
 		out = e.WithData(errorJSON(s.ctx, s.red, e.Data, s.rid))
 	case len(e.Data) == 0:
-		// An empty data line says nothing, so it changes no count.
+		// An event with no data, or an empty data line, says nothing, so it
+		// changes no count.
 	case e.Name == "message_start":
 		d, usage := messageStart(e.Data, s.c.alias, s.wrap)
 		s.c.out.tokens = usageOf(nil, usage)
@@ -912,10 +912,11 @@ func (s *chatStream) ended() string {
 }
 
 // generates reports whether a chunk's choice carries more of the answer: a
-// delta with a field other than role whose value is not null or empty.
+// delta with a field other than role whose value is not null or empty. Its
+// numbers are read as written, so one past a float64's range is a number
+// still, not a null.
 func generates(ch map[string]json.RawMessage) bool {
-	var delta map[string]any
-	_ = json.Unmarshal(ch["delta"], &delta)
+	delta, _ := decodeJSON(ch["delta"]).(map[string]any)
 	for k, v := range delta {
 		if k != "role" && !empty(v) {
 			return true

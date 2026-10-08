@@ -894,6 +894,9 @@ func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
 		case "choiceless":
 			sse(w, chunk(c.Model, "A", "stop", ""), fmt.Sprintf("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":%q,\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", c.Model))
 			return
+		case "overflow":
+			sse(w, chunk(c.Model, "A", "stop", ""), choice(c.Model, `0`, `{"content":1e309}`))
+			return
 		case "trailing":
 			sse(w, chunk(c.Model, "A", "stop", ""), choice(c.Model, `0`, `{"role":"assistant","content":"","tool_calls":null,"annotations":[ ],"audio":{ }}`))
 			return
@@ -913,7 +916,7 @@ func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
 	e.alias("cut", target(e.deployment(p, "cut"), 0))
 	e.alias("held", target(e.deployment(p, "held"), 0))
 	e.alias("none", target(e.deployment(p, "none"), 0))
-	odd := map[string]string{"aliased": "could not read", "unindexed": "could not read", "unshaped": "could not read", "reopened": "before its finish", "trailing": ""}
+	odd := map[string]string{"aliased": "could not read", "unindexed": "could not read", "unshaped": "could not read", "reopened": "before its finish", "overflow": "before its finish", "trailing": ""}
 	for m := range odd {
 		e.alias(m, target(e.deployment(p, m), 0))
 	}
