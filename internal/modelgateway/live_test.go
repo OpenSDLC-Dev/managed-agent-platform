@@ -570,9 +570,20 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 			liveFatalf(t, "DeepSeek was called %d times, want once: %v", len(xs), err)
 		}
 		vs, raw := xs[0].answer()
+		var vendor struct {
+			Error struct{ Message string } `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &vendor)
+		msg := vendor.Error.Message
 		var apiErr *anthropic.Error
-		if vs != 400 || !errors.As(err, &apiErr) || apiErr.StatusCode != 400 || !strings.Contains(err.Error(), "must be passed back") {
-			liveFatalf(t, "the open loop: %v; DeepSeek answered %d %s; want its 400 relayed", err, vs, masked(string(raw)))
+		var relayed struct {
+			Error struct{ Message string } `json:"error"`
+		}
+		if errors.As(err, &apiErr) {
+			_ = json.Unmarshal([]byte(apiErr.RawJSON()), &relayed)
+		}
+		if vs != 400 || !strings.Contains(msg, "thinking") || apiErr == nil || apiErr.StatusCode != vs || relayed.Error.Message != msg {
+			liveFatalf(t, "the open loop: %v; DeepSeek answered %d %s; want its refusal of the missing thinking relayed", err, vs, masked(string(raw)))
 		}
 	})
 }

@@ -140,12 +140,17 @@ func TestLiveVendorBehavior(t *testing.T) {
 				sys := []anthropic.TextBlockParam{{Text: fmt.Sprintf("Run %d. Answer in one word.\n", time.Now().UnixNano()) +
 					strings.Repeat("This sentence pads the prompt for a prompt cache check. ", 300),
 					CacheControl: anthropic.NewCacheControlEphemeralParam()}}
-				// MiniMax's cache hits come and go from one call to the next
-				// (docs/HISTORY.md), so the calls go on until one reads other than
-				// the first, when the sum below can tell the meanings apart.
+				// A vendor builds its cache within seconds, best effort, and
+				// MiniMax's hits come and go from one call to the next
+				// (docs/HISTORY.md), so the calls go on, two seconds apart, until
+				// one reads other than the first, when the sum below can tell the
+				// meanings apart.
 				var first, prompt int64
 				changed, reread := false, false
-				for i := 0; i < 4 && !changed; i++ {
+				for i := 0; i < 6 && !changed; i++ {
+					if i > 0 {
+						time.Sleep(2 * time.Second)
+					}
 					n := r.rec.count()
 					m, err := cl.Messages.New(liveCtx(t), anthropic.MessageNewParams{Model: model, MaxTokens: 512, System: sys,
 						Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Say ok."))}})
@@ -242,22 +247,23 @@ func TestLiveVendorBehavior(t *testing.T) {
 
 			t.Run("the refused choices asked directly", func(t *testing.T) {
 				// The refusals rest on the vendor ignoring these choices. Asked
-				// directly, a question needing no tool gets no call while a
-				// choice is ignored, and one each time once it is honored; a
-				// vendor that starts honoring one leaves its refusal stale.
+				// directly, a question needing no tool is answered in full without
+				// a call while a choice is ignored, and never once it is honored;
+				// a vendor that starts honoring one leaves its refusal stale. An
+				// answer cut short proves neither, so up to three are asked for.
 				for _, name := range forcedIgnored(r.v.name) {
-					calls := 0
-					for range 2 {
-						called, err := askVendor(r.v, r.alias, forcing(name), noToolNeeded)
+					ignored := false
+					var stops []string
+					for try := 0; try < 3 && !ignored; try++ {
+						m, err := askVendor(r.v, r.alias, forcing(name), noToolNeeded)
 						if err != nil {
 							liveFatalf(t, "tool_choice %s, asked directly: %v", name, err)
 						}
-						if called {
-							calls++
-						}
+						ignored = m.StopReason == anthropic.StopReasonEndTurn && !hasToolUse(m)
+						stops = append(stops, fmt.Sprintf("%s/tool=%v", m.StopReason, hasToolUse(m)))
 					}
-					if calls == 2 {
-						liveErrorf(t, "asked directly with tool_choice %s, %s called the tool both times: the vendor may now honor it, so its refusal in profile.go wants re-measuring", name, r.alias)
+					if !ignored {
+						liveErrorf(t, "asked directly with tool_choice %s, %s never answered in full without the tool (%v): the vendor may now honor it, so its refusal in profile.go wants re-measuring", name, r.alias, stops)
 					}
 				}
 			})
@@ -307,17 +313,18 @@ func forcing(name string) anthropic.ToolChoiceUnionParam {
 }
 
 // askVendor asks v's model directly, without the gateway, with the tier's
-// tool offered under choice, the key sent as v's profile sends it, and
-// reports whether the model called the tool.
-func askVendor(v liveVendor, model string, choice anthropic.ToolChoiceUnionParam, prompt string) (bool, error) {
-	body, err := json.Marshal(anthropic.MessageNewParams{Model: anthropic.Model(model), MaxTokens: 1024, Tools: []anthropic.ToolUnionParam{liveTool},
+// tool offered under choice and the key sent as v's profile sends it, and
+// returns the answer. It follows no redirect, which would carry the key to
+// another host, as the gateway's own client follows none.
+func askVendor(v liveVendor, model string, choice anthropic.ToolChoiceUnionParam, prompt string) (*anthropic.Message, error) {
+	body, err := json.Marshal(anthropic.MessageNewParams{Model: anthropic.Model(model), MaxTokens: 2048, Tools: []anthropic.ToolUnionParam{liveTool},
 		ToolChoice: choice, Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))}})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	req, err := http.NewRequest("POST", strings.TrimRight(v.base, "/")+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Anthropic-Version", "2023-06-01")
@@ -326,20 +333,21 @@ func askVendor(v liveVendor, model string, choice anthropic.ToolChoiceUnionParam
 	} else {
 		req.Header.Set("X-Api-Key", v.keyEnv)
 	}
-	resp, err := (&http.Client{Timeout: liveCallTimeout}).Do(req)
+	cl := &http.Client{Timeout: liveCallTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := cl.Do(req)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return false, fmt.Errorf("%d %s", resp.StatusCode, b)
+		return nil, fmt.Errorf("%d %s", resp.StatusCode, b)
 	}
 	var m anthropic.Message
-	if err := json.Unmarshal(b, &m); err != nil {
-		return false, err
+	if err := json.Unmarshal(b, &m); err != nil || m.StopReason == "" {
+		return nil, fmt.Errorf("an answer with no stop reason (%v): %s", err, b)
 	}
-	return hasToolUse(&m), nil
+	return &m, nil
 }
 
 // otherRegion is the Anthropic host of v's profile in the region v's base URL

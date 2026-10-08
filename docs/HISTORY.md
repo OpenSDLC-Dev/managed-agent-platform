@@ -6464,7 +6464,7 @@ evidence were answered as follows.
   For a question that asks for the tool, `auto` called it every time: 24 asks through
   the gateway and 18 asked directly. `none` was honored in all 104 asks through the
   gateway and the 3 asked directly of M3.1-Flash-Preview; MiniMax-M3 broke it in 1 of 3
-  asked directly, and once in a tier run. That is a lapse, not an ignored field, so
+  asked directly, and in two tier runs. That is a lapse, not an ignored field, so
   `none` passes through, and the tier checks that it reaches the vendor unchanged and
   only logs a tool call made under it. Both vendors read the choice's `type` by its exact
   key: `{"Type": "none"}` is DeepSeek's 422, "missing field `type`", and MiniMax's 400,
@@ -6495,8 +6495,9 @@ Review then hardened the checks so that each reads what the vendor was sent or r
 rather than only what the SDK saw. It also found two gateway defects, both fixed with a
 test that failed on the earlier code:
 - A request routed before a credential's deletion could open the key after a later
-  request had pruned it, and keep it. The gateway now keeps an opened key only while
-  the current snapshot holds the credential.
+  request had pruned it, and keep it. The gateway now keeps a key it opens only if the
+  current snapshot holds the credential; a snapshot that drops it afterwards is pruned
+  on the next open, as before.
 - `TestADeletedCredentialsKeyIsDropped` could pass its wait on a snapshot still holding
   the deleted credential, and so failed under load. It now waits for the opened keys to
   settle.

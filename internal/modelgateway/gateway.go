@@ -99,8 +99,10 @@ type openedKey struct {
 // every Decrypt is a round trip to the key service, which a model call should
 // not wait on, nor pay for, each time. A credential's sealed value never
 // changes — a new key is a new credential — so its id names the key for good,
-// until a snapshot no longer holds it: each new snapshot prunes the keys of
-// the credentials it lost, so a deleted credential's key does not outlive it.
+// until a snapshot no longer holds it: the first open after a new snapshot
+// prunes the keys of the credentials it lost, so a deleted credential's key
+// stays in memory until the next request at most, and serves no request
+// routed after the deletion, which no longer names it.
 func (h *handler) open(ctx context.Context, c store.Credential) ([]byte, error) {
 	snap := h.cfg.Catalog.Snapshot()
 	h.mu.Lock()
