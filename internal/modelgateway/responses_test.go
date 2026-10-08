@@ -349,6 +349,26 @@ func TestAResponsesRequestIsRefusedInItsOwnWords(t *testing.T) {
 	}
 }
 
+// A whole answer carrying a block the conversion cannot carry is the
+// gateway's 502, in OpenAI's envelope, naming the block with the call's key
+// redacted, and is not retried once the upstream has answered.
+func TestAnUnconvertibleResponsesAnswerIsA502(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		writeBody(w, 200, fmt.Sprintf(`{"id":"msg_1","type":"message","role":"assistant","model":%q,"content":[{"type":"sk-upstream-1","id":"s"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":2}}`, c.Model))
+	})
+	p := e.provider(f.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "up-model"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	resp, b := e.do(http.MethodPost, "/v1/responses", `{"model":"fast","input":"hi"}`, map[string]string{"Authorization": "Bearer " + key})
+	want := `{"error":{"code":null,"message":"upstream answer could not be converted: content[0]: a \"[redacted]\" block has no Responses counterpart","param":null,"type":"api_error"}}`
+	if resp.StatusCode != http.StatusBadGateway || strings.TrimSpace(string(b)) != want || len(f.recorded()) != 1 {
+		t.Errorf("%d %s after %d calls, want 502 %s", resp.StatusCode, b, len(f.recorded()), want)
+	}
+}
+
 // On an OpenAI-only credential, the upstream's own error reaches a Responses
 // caller as the upstream wrote it — its type, code and param, its message
 // without the key — rather than the Anthropic type the Messages path makes
@@ -364,6 +384,8 @@ func TestAConvertedResponsesErrorIsTheUpstreams(t *testing.T) {
 	}{
 		{"OpenAI's", status(400, `{"error":{"message":"bad sk-deepseek-key1 here","type":"tokens","param":"input","code":"context_length_exceeded"}}`),
 			400, `{"error":{"code":"context_length_exceeded","message":"bad [redacted] here","param":"input","type":"tokens"}}`},
+		{"a key anywhere", status(400, `{"error":{"message":"m","type":"sk-deepseek-key1","param":{"k":"sk-deepseek-key1"},"code":"sk-deepseek-key1"}}`),
+			400, `{"error":{"code":"[redacted]","message":"m","param":{"k":"[redacted]"},"type":"[redacted]"}}`},
 		{"no type", status(404, `{"error":{"message":"no such model"}}`),
 			404, `{"error":{"code":null,"message":"no such model","param":null,"type":"not_found_error"}}`},
 		{"Anthropic's", status(400, `{"type":"error","error":{"type":"invalid_request_error","message":"invalid tool_result content (2013)"}}`),
@@ -402,6 +424,8 @@ func TestAResponsesStreamFailsAsAResponse(t *testing.T) {
 		{"cut off", "", "upstream stream failed: the stream ended before message_stop", "api_error", false},
 		{"unconvertible", serverTool + strings.Join(events("m", "")[5:], ""),
 			`upstream stream could not be converted: a "server_tool_use" block has no Responses counterpart`, "api_error", true},
+		{"a key in a block", strings.Replace(serverTool, "server_tool_use", "sk-upstream-1", 1) + strings.Join(events("m", "")[5:], ""),
+			`upstream stream could not be converted: a "[redacted]" block has no Responses counterpart`, "api_error", true},
 	} {
 		e := newEnv(t)
 		f := newFake(t, func(w http.ResponseWriter, _ *http.Request, call fakeCall) {

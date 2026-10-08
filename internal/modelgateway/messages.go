@@ -752,7 +752,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			p = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
 		}
 		if c.resp != nil {
-			p = &responsesStream{inner: p, s: convert.NewResponsesStream(*c.resp), c: c}
+			p = &responsesStream{inner: p, s: convert.NewResponsesStream(*c.resp), c: c, red: red}
 		}
 		var held []byte
 		for {
@@ -829,7 +829,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	if c.resp != nil {
 		if answer, err = convert.ResponsesAnswer(answer, *c.resp); err != nil {
 			return &failure{status: http.StatusBadGateway, typ: "api_error",
-				err: fmt.Errorf("upstream answer could not be converted: %w", err)}, false
+				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

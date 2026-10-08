@@ -121,10 +121,12 @@ func openAIError(b []byte) []byte {
 // convertedOpenAIError is an OpenAI-protocol upstream's error on the
 // conversion path as a Responses caller is given it, where a Messages
 // caller is given convertedError's: in OpenAI's envelope, the upstream's own
-// type, param and code kept and its message redacted, a type it states none
-// of being the one convertedError gives the status. A body in Anthropic's
-// envelope, as MiniMax answers on its OpenAI endpoint, reads the same way:
-// its error member holds the type and message, and no param or code.
+// type, message, param and code, each redacted — the type too, which is any
+// string the upstream sent, where convertedError's is one of a closed set —
+// and a type it states none of being the one convertedError gives the
+// status. A body in Anthropic's envelope, as MiniMax answers on its OpenAI
+// endpoint, reads the same way: its error member holds the type and
+// message, and no param or code.
 func convertedOpenAIError(red provider.Redactor, b []byte, status int) []byte {
 	var e struct {
 		Type  string `json:"type"`
@@ -135,7 +137,7 @@ func convertedOpenAIError(red provider.Redactor, b []byte, status int) []byte {
 	if e.Type == "" {
 		e.Type = messagesErrorType("", status)
 	}
-	return encodeJSON(map[string]any{"error": map[string]any{"message": red.String(errorMessage(b)), "type": e.Type,
+	return encodeJSON(map[string]any{"error": map[string]any{"message": red.String(errorMessage(b)), "type": red.String(e.Type),
 		"param": redactValue(red, e.Param), "code": redactValue(red, e.Code)}})
 }
 
@@ -151,6 +153,7 @@ type responsesStream struct {
 	inner  streamProto
 	s      *convert.ResponsesStream
 	c      call
+	red    provider.Redactor // for a conversion failure's message, which names what the upstream sent
 	failed bool
 }
 
@@ -178,7 +181,7 @@ func (p *responsesStream) convert(b []byte) []byte {
 			b, cerr := p.s.Event(e.Name, e.Data)
 			if cerr != nil {
 				p.failed, p.c.out.errType = true, "api_error"
-				b = p.s.Failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", cerr))
+				b = p.s.Failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", p.red.Error(cerr)))
 			}
 			out.Write(b)
 		}

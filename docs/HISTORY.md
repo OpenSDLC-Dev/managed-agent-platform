@@ -7229,3 +7229,9 @@ Fifteen mutants over these fixes then ran beside the first 19. One did not compi
 rewritten; one survived — a branch reading MiniMax's Anthropic envelope apart, which gave
 what the general reading already gives — and the branch went. All 33 mutants of the
 final list are caught.
+
+The background security review then found the conversion path's new error passing the
+upstream's `type` to the caller unredacted — convertedError gave one of a closed set, the
+upstream's own type is any string it sends — and it is now redacted with the message,
+`param` and `code`. The messages of a conversion failure, which name a block the upstream
+sent, are redacted too, whole and streamed. Three mutants over the redactions are caught.
