@@ -9,6 +9,13 @@
 //	                      a value here makes that key env-var-managed: if the
 //	                      value already exists as a console-issued key, the row
 //	                      loses its issuer and any expiry it carried.
+//	BRAIN_API_KEY         the brain's platform key for the model gateway
+//	                      (optional; must differ from CONTROLPLANE_API_KEY and
+//	                      carry no surrounding whitespace), seeded into
+//	                      api_keys as "brain" the same way. Unset, the
+//	                      env-var-managed "brain" key is archived, so a key
+//	                      whose variable was removed stops working; every
+//	                      replica must agree on it, set or unset
 //	BLOB_BACKEND          object storage for skill archives and files: "s3"
 //	                      (default when empty) or "gcs". Empty with no
 //	                      BLOB_ENDPOINT deploys without object storage (the
@@ -80,6 +87,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -124,6 +132,10 @@ func run(ctx context.Context) error {
 	if bootKey == "" {
 		return errors.New("CONTROLPLANE_API_KEY is required")
 	}
+	brainKey := os.Getenv("BRAIN_API_KEY")
+	if err := apikey.CheckBrainKey(bootKey, brainKey); err != nil {
+		return fmt.Errorf("BRAIN_API_KEY %w", err)
+	}
 	addr := os.Getenv("CONTROLPLANE_ADDR")
 	if addr == "" {
 		addr = ":8080"
@@ -135,6 +147,14 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 	if err := api.EnsureAPIKey(ctx, pool, "bootstrap", bootKey); err != nil {
+		return err
+	}
+	if brainKey != "" {
+		err = api.EnsureAPIKey(ctx, pool, "brain", brainKey)
+	} else {
+		err = api.RetireAPIKey(ctx, pool, "brain")
+	}
+	if err != nil {
 		return err
 	}
 	// The queue depth/pending/workers_polling gauges sample the /work/stats view

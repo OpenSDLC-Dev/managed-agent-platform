@@ -130,6 +130,9 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 	for k, v := range p.headers {
 		httpReq.Header.Set(k, v)
 	}
+	for k, v := range provider.CallHeaders(ctx, req) {
+		httpReq.Header.Set(k, v)
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {

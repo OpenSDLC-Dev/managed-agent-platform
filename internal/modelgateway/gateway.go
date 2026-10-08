@@ -21,10 +21,10 @@
 // A request authenticates with a platform API key in x-api-key or as a
 // Bearer, checked by internal/apikey exactly as the control plane checks it,
 // and calls a model only under the key policy an administrator wrote for the
-// key. The bootstrap key — the value the control plane registers as
-// "bootstrap" — needs no policy, being known by its configured value; a policy
-// written for it still applies, and like any key it calls nothing once its row
-// is archived or expired.
+// key. The bootstrap key and the brain's — the values the control plane
+// registers as "bootstrap" and "brain" — need no policy, being known by their
+// configured values; a policy written for either still applies, and like any
+// key each calls nothing once its row is archived or expired.
 //
 // Each inference path is a passthrough to an upstream speaking its protocol:
 // the body is read only as far as its top-level keys, model becomes the
@@ -68,6 +68,7 @@ type Config struct {
 	Keys         apikey.Querier // the platform database, whose api_keys a caller's key is checked against
 	Cipher       secrets.Cipher // opens the credentials the catalog holds sealed
 	BootstrapKey string         // CONTROLPLANE_API_KEY
+	BrainKey     string         // BRAIN_API_KEY; empty: the brain reaches no model here without a policy
 	Admin        http.Handler   // served under /admin/v1/; nil serves none
 
 	// Client calls upstreams; nil takes upstream.NewClient.
@@ -90,11 +91,13 @@ const (
 )
 
 type handler struct {
-	cfg       Config
-	bootstrap [32]byte
-	client    *http.Client
-	fresh     *http.Client // client keeping no connection (profile.CloseConnections)
-	draw      func() float64
+	cfg Config
+	// known holds the digests of the keys known by their configured value
+	// rather than by a policy: the bootstrap key's and the brain's.
+	known  [][32]byte
+	client *http.Client
+	fresh  *http.Client // client keeping no connection (profile.CloseConnections)
+	draw   func() float64
 
 	mu         sync.Mutex
 	opened     map[string]openedKey // by credential id
@@ -160,14 +163,20 @@ func New(cfg Config) (http.Handler, error) {
 	case cfg.BootstrapKey == "":
 		return nil, errors.New("modelgateway: the bootstrap key is required")
 	}
+	if err := apikey.CheckBrainKey(cfg.BootstrapKey, cfg.BrainKey); err != nil {
+		return nil, fmt.Errorf("modelgateway: the brain key %w", err)
+	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = DefaultMaxAttempts
 	}
 	if cfg.Backoff <= 0 {
 		cfg.Backoff = DefaultBackoff
 	}
-	h := &handler{cfg: cfg, bootstrap: sha256.Sum256([]byte(cfg.BootstrapKey)), client: cfg.Client,
+	h := &handler{cfg: cfg, known: [][32]byte{sha256.Sum256([]byte(cfg.BootstrapKey))}, client: cfg.Client,
 		draw: func() float64 { return 1 - mrand.Float64() }, opened: map[string]openedKey{}}
+	if cfg.BrainKey != "" {
+		h.known = append(h.known, sha256.Sum256([]byte(cfg.BrainKey)))
+	}
 	if h.client == nil {
 		h.client = upstream.NewClient()
 	}

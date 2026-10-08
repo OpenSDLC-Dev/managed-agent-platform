@@ -126,8 +126,9 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 		events.Backend{Provider: desc.Protocol, Model: desc.Model})
 
 	req := provider.Request{
-		Effort: agent.Model.Effort,
-		System: graderSystem + "\n\n# Rubric\n\n" + b.rubricText(sctx, d),
+		Effort:    agent.Model.Effort,
+		SessionID: sid.String(),
+		System:    graderSystem + "\n\n# Rubric\n\n" + b.rubricText(sctx, d),
 		Messages: []provider.Message{{
 			Role: "user",
 			Content: mustTextContent("# Outcome\n\n" + d.Description +

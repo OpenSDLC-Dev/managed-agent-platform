@@ -294,3 +294,17 @@ func TestNewRegistryRefusesHeaderNamesAlikeButForCase(t *testing.T) {
 		t.Fatalf("err = %v, want the duplicated header refused by name", err)
 	}
 }
+
+// The trace context and the session header are each call's own
+// (provider.CallHeaders), so a route may not configure them, in any case.
+func TestNewRegistryRefusesTheCallsOwnHeaders(t *testing.T) {
+	for _, name := range []string{"traceparent", "Tracestate", "x-map-session-id", provider.SessionHeader} {
+		_, err := provider.NewRegistry([]provider.Route{
+			{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw", Model: "m",
+				Headers: map[string]string{name: "v"}}},
+		}, factories)
+		if err == nil || !strings.Contains(err.Error(), strings.ToLower(name)) {
+			t.Errorf("%s: err = %v, want the header refused by name", name, err)
+		}
+	}
+}

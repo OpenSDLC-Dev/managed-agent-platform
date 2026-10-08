@@ -442,6 +442,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	}
 	req.Effort = agent.Model.Effort
 	req.BuiltinTools = builtinTools(class)
+	req.SessionID = sid.String()
 	// The start proved the item was this claimant's, but an interrupt can have
 	// stopped it since (queue.CancelSession), a reclaim taken it, or its lease
 	// lapsed, and the keeper would not notice before its first renewal. A call

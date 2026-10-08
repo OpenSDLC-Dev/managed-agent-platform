@@ -339,6 +339,57 @@ func TestEnsureAPIKeyAnnouncesAnAdoption(t *testing.T) {
 	}
 }
 
+// TestRetireAPIKeyEndsOnlyTheRowsItOwns is BRAIN_API_KEY's unset half: a key
+// registered from a variable that is no longer set stops working, rather than
+// living on as a credential nobody holds on purpose. It archives only the
+// env-var-managed rows of that name — a key an admin issued under the same name
+// is the admin's, and keeps working — and touches no other name.
+func TestRetireAPIKeyEndsOnlyTheRowsItOwns(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	const managed, issued, other = "ak-retire-managed", "ak-retire-issued", "ak-retire-other"
+	if err := api.EnsureAPIKey(ctx, s.pool, "retiring", managed); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	if err := api.EnsureAPIKey(ctx, s.pool, "staying", other); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO api_keys (id, name, key_hash, created_by) VALUES ('apikey_retire_issued', 'retiring', $1, 'principal_admin')`,
+		sha256Hex(issued)); err != nil {
+		t.Fatalf("stage issued key: %v", err)
+	}
+	call := func(key string) int {
+		res := s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": key})
+		res.Body.Close()
+		return res.StatusCode
+	}
+
+	warnings := captureWarnings(t)
+	for i := range 2 { // the second retirement finds nothing to do, and says nothing
+		if err := api.RetireAPIKey(ctx, s.pool, "retiring"); err != nil {
+			t.Fatalf("RetireAPIKey: %v", err)
+		}
+		if got, want := strings.Count(warnings(), "archived its env-var-managed key"), 1; got != want {
+			t.Errorf("retirement %d: %d warnings, want %d:\n%s", i+1, got, want, warnings())
+		}
+		for key, want := range map[string]int{managed: http.StatusUnauthorized, issued: http.StatusOK, other: http.StatusOK} {
+			if got := call(key); got != want {
+				t.Errorf("%s: %d, want %d", key, got, want)
+			}
+		}
+	}
+
+	// Setting the variable again brings the same value back.
+	if err := api.EnsureAPIKey(ctx, s.pool, "retiring", managed); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	if got := call(managed); got != http.StatusOK {
+		t.Errorf("re-registered: %d, want 200", got)
+	}
+}
+
 // TestConsoleIssuedKeysAreOutsideTheOneLiveRule is the schema half of plan 32's
 // central compromise. EnsureAPIKey keeps its one-live-per-name guarantee for the
 // rows it owns, while keys an admin issues may share a name freely — which the

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,29 @@ func TestSharedContract(t *testing.T) {
 		Hang:      startHangingAnthropic,
 		Wedge:     startWedgedAnthropic,
 		Keepalive: startKeepaliveAnthropic,
+		Headers: func(t *testing.T, route map[string]string) (provider.Provider, func() http.Header) {
+			f := &fakeServer{t: t, sse: renderAnthropicTurn(providertest.Script{Text: "ok"})}
+			// The handler runs on the server's goroutine and the read on the
+			// test's, so the headers cross under a lock.
+			var mu sync.Mutex
+			var got http.Header
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				got = r.Header.Clone()
+				mu.Unlock()
+				f.handler(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			p, err := anthropic.New(provider.Config{Protocol: "anthropic", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey, Headers: route})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			return p, func() http.Header {
+				mu.Lock()
+				defer mu.Unlock()
+				return got
+			}
+		},
 	})
 }
 

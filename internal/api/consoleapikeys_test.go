@@ -501,6 +501,18 @@ func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("archiving the env-var-managed key: %d %v, want 400", status, obj)
 	}
+	// The brain's row is the other variable's, and the refusal says which.
+	if err := api.EnsureAPIKey(context.Background(), s.pool, "brain", "ak-console-brain"); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	var brainID string
+	if err := s.pool.QueryRow(context.Background(), `SELECT id FROM api_keys WHERE name = 'brain' AND status = 'active'`).Scan(&brainID); err != nil {
+		t.Fatal(err)
+	}
+	status, obj = s.do(http.MethodPost, consoleAPIKey(brainID), map[string]any{"status": "inactive"})
+	if msg := errMessage(obj); status != http.StatusBadRequest || !strings.Contains(msg, "BRAIN_API_KEY") || strings.Contains(msg, "CONTROLPLANE_API_KEY") {
+		t.Errorf("disabling the brain's key: %d %v, want 400 naming BRAIN_API_KEY", status, obj)
+	}
 	// It really is untouched — the control plane's own credential still works.
 	if code, _ := s.do(http.MethodGet, "/v1/agents", nil); code != http.StatusOK {
 		t.Errorf("the bootstrap key stopped working: %d", code)

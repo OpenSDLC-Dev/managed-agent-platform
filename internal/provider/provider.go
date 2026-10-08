@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
 
 // Config constructs one provider instance.
@@ -72,6 +73,27 @@ type Request struct {
 	// the only licence a lossy adapter has to rewrite a definition's schema
 	// (provider/openai strips keywords from these alone, #682); nil names none.
 	BuiltinTools map[string]bool
+	// SessionID is the session the turn belongs to, sent as SessionHeader;
+	// empty sends none.
+	SessionID string
+}
+
+// SessionHeader carries a call's session to the endpoint: the model gateway
+// keys per-session cost and cache locality on it and strips it before its own
+// upstream call (docs/plan/59_model-gateway.md). Another endpoint ignores it.
+const SessionHeader = "X-MAP-Session-ID"
+
+// CallHeaders are the headers every adapter sets on a call beside the route's
+// own, which NewRegistry keeps from naming them: the W3C trace context of
+// ctx, when it carries a span, and the request's SessionHeader, when it names
+// a session.
+func CallHeaders(ctx context.Context, req Request) map[string]string {
+	h := map[string]string{}
+	telemetry.Inject(ctx, h)
+	if req.SessionID != "" {
+		h[SessionHeader] = req.SessionID
+	}
+	return h
 }
 
 // Message is one conversational turn.
@@ -235,6 +257,10 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 			name := strings.ToLower(k)
 			if seen[name] {
 				return nil, fmt.Errorf("route %q sets header %q more than once, in different cases", route.Model, name)
+			}
+			switch name {
+			case "traceparent", "tracestate", strings.ToLower(SessionHeader):
+				return nil, fmt.Errorf("route %q sets header %q, which each call sets itself", route.Model, name)
 			}
 			seen[name] = true
 		}

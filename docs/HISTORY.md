@@ -7033,3 +7033,33 @@ mutants caught:
   call's only fragment, and the stream fails otherwise.
 - A whole answer's refusal beside non-empty content was dropped; the text is the content,
   then the refusal, as a stream already carried them.
+
+## Model gateway brain key and call headers (plan 59 slice 5a) — review record, 2026-10-09
+
+Decisions made in the slice, with the alternative each beat:
+- The trace context and `X-MAP-Session-ID` go to whatever endpoint a route names, a
+  vendor's included, rather than only on routes that opt in as a gateway provider does
+  (`propagate_trace`): principle 3 propagates trace context across every cross-process
+  call and plan 59 has the adapters inject it, and once the brain's one route reaches the
+  gateway, the gateway strips both before any vendor sees them.
+- A route that sets `traceparent`, `tracestate` or the session header is refused at
+  startup, rather than given way to by the call's own value: with no span in reach the
+  route's static value would have gone out alone.
+- A control plane booting without `BRAIN_API_KEY` archives the env-var-managed `brain`
+  key, rather than leaving it live with nobody holding it on purpose. The price is the
+  bootstrap key's own rollout rule: every replica must agree on the variable.
+
+Fixed in review:
+- A brain key differing from the bootstrap key only by surrounding whitespace passed the
+  equality check but arrived as the bootstrap key, since HTTP trims header values; both
+  binaries now refuse surrounding whitespace, through one check in `internal/apikey`.
+- The console's refusal for an env-var-managed row named `CONTROLPLANE_API_KEY` on the
+  `brain` row too; it names the variable that owns the row.
+- A retirement archived a live key without a word; it logs what it archived.
+- A key policy belongs to a row, so a rotation to a value never registered before drops
+  one written for the brain or bootstrap key (an earlier value revives its row, policy
+  and all); the docs now say so, where they had said it still applies.
+
+Declined: a minimum length for `BRAIN_API_KEY`, which the bootstrap key has never had,
+and one shared list of the call's own header names, the refusal sitting beside
+`CallHeaders` in the same file.
