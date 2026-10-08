@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -28,18 +27,12 @@ func relayVectors(w http.ResponseWriter, resp *http.Response, c call, guard *pro
 	}
 	c.out.status = resp.StatusCode
 	w.Header().Set("Content-Type", "application/json")
-	rc := bounded(w)
 	w.WriteHeader(resp.StatusCode)
 	rw := &answerRewriter{alias: encodeJSON(c.alias)}
-	gone := false
+	cw := newCallerWriter(w, c.out.at, guard, false)
 	send := func(b []byte) {
-		out := rw.rewrite(b)
-		if gone || len(out) == 0 {
-			return
-		}
-		_ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load())))
-		if _, err := w.Write(out); err != nil {
-			gone = true
+		if out := rw.rewrite(b); len(out) > 0 {
+			cw.write(out)
 		}
 	}
 	send(buf[:n])
@@ -99,11 +92,12 @@ const (
 
 // answerRewriter rewrites a JSON answer fed to it piece by piece, as it
 // arrives: the value of each top-level member whose key, unescaped, is model
-// becomes alias, and the last top-level usage value is kept, up to maxUsage
-// bytes; every other byte passes as it came. It reads the answer only as far
-// as telling strings, nesting and top-level members apart, so an answer that
-// is not an object, or is malformed, passes as it came from the point it
-// stops making sense.
+// becomes alias, whatever the value holds, and the last top-level usage value
+// is kept, without the whitespace between its tokens, up to maxUsage bytes;
+// every other byte passes as it came. It reads the answer only as far as
+// telling strings, nesting and top-level members apart, so an answer that is
+// not an object, or is malformed, passes as it came from the point it stops
+// making sense — but for a model value, replaced however malformed.
 type answerRewriter struct {
 	alias []byte          // the alias, encoded as a JSON string
 	usage json.RawMessage // the last top-level usage value read whole
@@ -189,9 +183,11 @@ func (r *answerRewriter) rewrite(in []byte) []byte {
 				switch r.member {
 				case "model":
 				case "usage":
-					if len(r.capture) < maxUsage {
+					switch {
+					case !r.inStr && isSpace(b): // between tokens, so no part of the usage
+					case len(r.capture) < maxUsage:
 						r.capture = append(r.capture, b)
-					} else {
+					default:
 						r.overflow = true
 					}
 					out = append(out, b)

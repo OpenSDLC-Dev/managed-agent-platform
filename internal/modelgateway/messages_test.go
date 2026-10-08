@@ -10,13 +10,16 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
 )
@@ -589,6 +592,204 @@ func TestTheWriteBoundDoesNotCutALongStream(t *testing.T) {
 	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
 	if got := string(b); !strings.Contains(got, "event: message_stop") || strings.Contains(got, "event: error") {
 		t.Errorf("a long stream was cut: %s", got)
+	}
+}
+
+// No write deadline outlives its write: an upstream that pauses longer than
+// the write bound between two pieces of its answer, within its stall budget,
+// reaches an HTTP/2 caller whole, a stream or an embeddings answer alike —
+// HTTP/2 resets a stream whose deadline passes with no write pending.
+func TestAPauseLongerThanTheWriteBoundReachesAnHTTP2Caller(t *testing.T) {
+	defer modelgateway.SetWriteStall(200 * time.Millisecond)()
+	e := newEnv(t)
+	e.h2 = true
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		if c.Path == "/embeddings" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, `{"object":"list","data":[`)
+			w.(http.Flusher).Flush()
+			time.Sleep(500 * time.Millisecond)
+			_, _ = io.WriteString(w, `],"model":"up","usage":{"prompt_tokens":13}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		for i, ev := range events(c.Model, "slow") {
+			if i == 2 {
+				time.Sleep(500 * time.Millisecond)
+			}
+			_, _ = io.WriteString(w, ev)
+			w.(http.Flusher).Flush()
+		}
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	e.alias("text", target(e.deployment(onOpenAI(e, "gitee", up.URL), "emb", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
+	key := e.key(everyAlias)
+	e.start()
+
+	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
+	if got := string(b); resp.ProtoMajor != 2 || !strings.Contains(got, "event: message_stop") || strings.Contains(got, "event: error") {
+		t.Errorf("HTTP/%d: a paused stream was cut: %s", resp.ProtoMajor, got)
+	}
+	resp, b = e.do("POST", "/v1/embeddings", `{"model":"text","input":"x"}`, map[string]string{"Authorization": "Bearer " + key})
+	if want := `{"object":"list","data":[],"model":"text","usage":{"prompt_tokens":13}}`; resp.ProtoMajor != 2 || string(b) != want {
+		t.Errorf("HTTP/%d: a paused answer came back as %s", resp.ProtoMajor, b)
+	}
+}
+
+// A caller that stops reading cannot outwait a provider's short stall budget:
+// the write it holds up gives up within half the budget, and the upstream
+// answer is read to its end — a stream finished, an embeddings answer's usage
+// counted — where the guard would otherwise end the answer the gateway had
+// stopped reading.
+func TestACallerThatStopsReadingCannotOutwaitTheStallBudget(t *testing.T) {
+	defer modelgateway.SetWriteStall(10 * time.Second)()
+	e := newEnv(t)
+	finished := make(chan bool, 2)
+	pad := strings.Repeat("0,", 256<<10)
+	up := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		vectors := c.Path == "/embeddings"
+		piece, open, end := "data: "+pad+"\n\n", "", ""
+		w.Header().Set("Content-Type", "text/event-stream")
+		if vectors {
+			piece, open, end = pad, `{"object":"list","data":[`, `0],"model":"up","usage":{"prompt_tokens":13}}`
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, open)
+		for range 32 {
+			if _, err := io.WriteString(w, piece); err != nil {
+				finished <- false
+				return
+			}
+			w.(http.Flusher).Flush()
+		}
+		_, err := io.WriteString(w, end)
+		finished <- err == nil && r.Context().Err() == nil
+	})
+	short := func(p *store.Provider) { p.StallTimeout = 400 * time.Millisecond }
+	p := e.provider(up.URL, short)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	v := e.provider(up.URL, short, func(p *store.Provider) {
+		p.Name, p.Profile = "vectors", "openai-generic"
+		p.Endpoints = map[profile.Protocol]string{profile.OpenAI: up.URL}
+	})
+	e.credential(v, "sk-upstream-2", 1)
+	e.alias("text", target(e.deployment(v, "emb", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
+	key := e.key(everyAlias)
+	e.start()
+
+	for _, tc := range []struct{ path, header, body string }{
+		{"/v1/messages", "x-api-key: " + key, `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`},
+		{"/v1/embeddings", "Authorization: Bearer " + key, `{"model":"text","input":"x"}`},
+	} {
+		conn, err := net.Dial("tcp", strings.TrimPrefix(e.url, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: gw\r\n%s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", tc.path, tc.header, len(tc.body), tc.body)
+		select {
+		case ok := <-finished:
+			if !ok {
+				t.Errorf("%s: the upstream answer was cut off behind a caller that stopped reading", tc.path)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%s: the upstream answer never finished", tc.path)
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var row *store.Usage
+		for _, u := range e.ledger() {
+			if u.Endpoint == "embeddings" {
+				row = &u
+			}
+		}
+		if row != nil {
+			if row.ErrorType != "" || !reflect.DeepEqual(row.Tokens, &store.Tokens{Input: 13}) {
+				t.Errorf("ledger %+v, tokens %+v", row, row.Tokens)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no embeddings row")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A stream reaches the caller event by event: the first event is read
+// while the upstream still holds the rest.
+func TestAStreamReachesTheCallerEventByEvent(t *testing.T) {
+	e := newEnv(t)
+	seen := make(chan struct{})
+	released := make(chan bool, 1)
+	up := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		for i, ev := range events(c.Model, "hi") {
+			if i == 1 {
+				select {
+				case <-seen:
+					released <- true
+				case <-time.After(5 * time.Second):
+					released <- false
+				}
+			}
+			_, _ = io.WriteString(w, ev)
+			w.(http.Flusher).Flush()
+		}
+	})
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	req, _ := http.NewRequest("POST", e.url+"/v1/messages", strings.NewReader(`{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`))
+	req.Header.Set("x-api-key", key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	lines := bufio.NewScanner(resp.Body)
+	for lines.Scan() && lines.Text() != "event: message_start" {
+	}
+	close(seen)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if !<-released {
+		t.Error("the stream's first event reached the caller only after the upstream's last")
+	}
+}
+
+// slowWriter is a caller whose every write takes d.
+type slowWriter struct {
+	httptest.ResponseRecorder
+	d time.Duration
+}
+
+func (w *slowWriter) Write(b []byte) (int, error) {
+	time.Sleep(w.d)
+	return w.ResponseRecorder.Write(b)
+}
+
+// The time a write to the caller takes is not the upstream's silence: the
+// stall guard's budget runs from the write's end, not from the read before it.
+func TestTheTimeAWriteTakesIsNotTheUpstreamsSilence(t *testing.T) {
+	const budget = 300 * time.Millisecond
+	ctx, guard := provider.NewStallGuard(context.Background(), budget)
+	defer guard.Stop()
+	if modelgateway.WriteToCaller(&slowWriter{d: 200 * time.Millisecond}, budget, guard, []byte("x")) {
+		t.Fatal("a caller taking 200ms, within half the budget, was let go")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if ctx.Err() != nil {
+		t.Fatal("the guard counted the write's 200ms against the upstream")
 	}
 }
 

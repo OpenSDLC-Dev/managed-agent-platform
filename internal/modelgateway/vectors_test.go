@@ -31,15 +31,16 @@ var answers = []string{
 	`{"s":"{\"model\":\"in a string\"}\\","model":"m\"\\\u00e9","t":"日本語"}`,
 	`{"usage":"` + strings.Repeat("x", modelgateway.MaxAnswerUsage) + `"}`,
 	`{"usage":{"prompt_tokens":5},"usage":"` + strings.Repeat("x", modelgateway.MaxAnswerUsage) + `"}`,
+	`{"data":[],"usage":{` + strings.Repeat(" ", 70000) + `"prompt_tokens" : 13 , "s":" a b "}}`,
 	`{}`, `{ }`, `[{"model":"in an array"}]`, `"model"`, `null`, `12`,
 	`{"model":`, `{"model":"cut`, `{"usage":{"prompt_tokens":1`, `{"a":1,}`, `{"a" 1,"model":"m"}`, `}{"model":"m"}`, ``,
 }
 
 // rewritten is what the rewriter should make of in, a JSON object: each
 // top-level model value replaced by alias and every other byte kept, with
-// the last top-level usage value — found by encoding/json's decoder, which
-// shares none of the rewriter's code. It reports false for anything but an
-// object.
+// the last top-level usage value, compacted — found by encoding/json's
+// decoder, which shares none of the rewriter's code. It reports false for
+// anything but an object.
 func rewritten(t testing.TB, in []byte, alias string) ([]byte, json.RawMessage, bool) {
 	t.Helper()
 	if !json.Valid(in) || bytes.TrimLeft(in, " \t\r\n")[0] != '{' {
@@ -66,8 +67,10 @@ func rewritten(t testing.TB, in []byte, alias string) ([]byte, json.RawMessage, 
 			out = append(append(out, in[last:start]...), `"`+alias+`"`...)
 			last = end
 		case "usage":
-			usage = raw
-			if len(raw) > modelgateway.MaxAnswerUsage {
+			var c bytes.Buffer
+			_ = json.Compact(&c, raw)
+			usage = c.Bytes()
+			if c.Len() > modelgateway.MaxAnswerUsage {
 				usage = nil
 			}
 		}

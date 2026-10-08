@@ -41,6 +41,8 @@ type env struct {
 	url     string
 	keys    int
 	handler http.Handler
+	h2      bool         // serve the gateway over TLS, and do's requests over HTTP/2
+	httpc   *http.Client // do's client when h2 is set
 }
 
 func newEnv(t *testing.T) *env {
@@ -139,7 +141,14 @@ func (e *env) start(mod ...func(*modelgateway.Config)) {
 	h, err := modelgateway.New(cfg)
 	e.must(err)
 	e.handler = h
-	srv := httptest.NewServer(h)
+	srv := httptest.NewUnstartedServer(h)
+	if e.h2 {
+		srv.EnableHTTP2 = true
+		srv.StartTLS()
+		e.httpc = srv.Client()
+	} else {
+		srv.Start()
+	}
 	e.t.Cleanup(srv.Close)
 	e.url = srv.URL
 }
@@ -159,7 +168,11 @@ func (e *env) do(method, path, body string, header map[string]string) (*http.Res
 	for k, v := range header {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	c := http.DefaultClient
+	if e.httpc != nil {
+		c = e.httpc
+	}
+	resp, err := c.Do(req)
 	e.must(err)
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)

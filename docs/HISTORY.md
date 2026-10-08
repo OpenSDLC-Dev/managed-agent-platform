@@ -6787,3 +6787,27 @@ Six were left as they are:
 Mutation testing caught 45 of the 45 mutants of the default tier: the first
 round's guards, the route's new fields, the wildcard, the relay's three outcomes, the
 usage keys, and eleven ways to misread JSON a piece at a time.
+
+A third round, Codex over the relay, found three defects in it, each fixed with a test
+that failed on the code before it, and one overclaim:
+- A write to a caller that had stopped reading could block for the minute `writeStall`
+  allows, while a provider's stall budget, which may be set as low as a millisecond,
+  ran on and ended the upstream answer the gateway had stopped reading — its usage lost,
+  and on a stream the rest of it. Streams had had the flaw since slice 2a. A write is
+  now held to half the stall budget where that is shorter, and the budget restarts when
+  the write ends, since time spent writing is not the upstream's silence.
+- A write's deadline stayed armed after it while the next piece was awaited, and HTTP/2
+  resets a stream whose deadline passes with no write pending, so an upstream pausing
+  past the bound, within its stall budget, cost an HTTP/2 caller its answer, on a stream
+  too. Each write's deadline is now cleared after it; both relays share the one writer.
+- The usage kept was bounded with its whitespace, so padding could push a valid one past
+  64 KiB, uncounted. The whitespace between its tokens is no longer kept.
+- A malformed `model` value is replaced like any other, so a malformed answer does not
+  quite pass as it came; the docs now say so.
+
+Mutation testing caught 7 of the 8 mutants of the writer and the usage capture. The
+eighth, ignoring a failed flush, only leaves the caller to the next write, which fails
+on the same dead connection. A test was added for the fifth, a stream left unflushed,
+which no test had caught: nothing had pinned that a stream reaches the caller event by
+event. On that final code the whole live tier — DeepSeek, MiniMax and Gitee — passed its
+52 tests.
