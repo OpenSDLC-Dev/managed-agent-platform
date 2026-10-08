@@ -319,20 +319,23 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
 - **Every edit is deterministic and leaves `system` alone,** so an upstream sees one
   stable prefix across a conversation's requests — what preserved thinking checks.
 - **Pass through** by default; the upstream's own error reaches the caller, redacted.
-  What the docs leave uncertain (MiniMax's two `tool_choice` pages; every Zhipu field)
-  passes through until evidence says otherwise — the live tier, for a vendor it has a
-  key for.
+  What the docs leave uncertain (every Zhipu field; MiniMax's two `tool_choice` pages,
+  until slice 2g's live tier settled them) passes through until evidence says
+  otherwise — the live tier, for a vendor it has a key for.
 - **Edit** only what (a) the platform's own traffic needs — `search_result` flattened to
   text through `provider.SearchResultText` where a vendor refuses it, which is the
   brain's `flatten_search_results` moved behind the gateway — or (b) the vendor
   documents as ignored, where dropping it changes nothing.
-- **Refuse** at the gateway only where a vendor documents that it silently ignores a
-  field whose absence changes the result (DeepSeek ignores `disable_parallel_tool_use`),
-  decided per field in the slice, citing the evidence in the profile. Nothing is
+- **Refuse** at the gateway only where a vendor documents, or the live tier shows, that
+  it silently ignores a field whose absence changes the result (DeepSeek ignores
+  `disable_parallel_tool_use`), decided per field in the slice, citing the evidence in
+  the profile. Nothing is
   downgraded silently, as plan 53 decided for effort. Slice 2 reads "changes the
   result" as a bound on the answer a caller's code may rely on — DeepSeek's
   `disable_parallel_tool_use`, MiniMax's `stop_sequences`, and thinking disabled on
-  MiniMax's M2.x models, which think regardless — and passes through what
+  MiniMax's M2.x models, which think regardless; and, on the live tier's evidence,
+  `tool_choice` `any` on DeepSeek and `any` and `tool` on MiniMax, which answer without
+  the tool call they force — and passes through what
   a vendor ignores among sampling knobs, context shaping and server-side features;
   a request such a field bars from a deployment goes to the alias's others, and is
   refused only when none is left — but never a count, which the field leaves
@@ -744,19 +747,23 @@ where a vendor bills cache writes.
   - **Provenance through the real vendors:** each model's provider points at a proxy
     that forwards to the vendor and records both directions, since neither vendor
     checks a signature and its 200 proves nothing. Every model expected to think
-    returns signed thinking; each value the gateway wraps, in block order up to the
+    returns signed thinking, within three asks, since adaptive thinking is the model's
+    choice; each value the gateway wraps, in block order up to the
     first unsigned one, comes back around the vendor's own value and goes back, on
     the continuation the SDK's `ToParam` makes, as exactly that value — a model that
     returns no thinking, as MiniMax-M3.1-Flash-Preview did on 2026-10-07, has its
     round trip checked without it; an alias whose first choice is down
     falls back, and its continuation goes straight to its thinking's producer; a
-    conversation crossing from DeepSeek to MiniMax and back sends each only its own.
+    conversation crossing from DeepSeek to MiniMax and back sends each only its own,
+    MiniMax closing any tool loop it opens first, since DeepSeek refuses a loop that
+    reaches it under MiniMax's ids without DeepSeek's thinking — a refusal the tier
+    checks is relayed as DeepSeek's own 400.
   - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with
     `Message.Accumulate`) on an alias routed to each vendor: text, a tool-use round trip
     that sends the thinking blocks back unchanged, reported usage, and an upstream
     refusal surfacing as an `*anthropic.Error` carrying the upstream's status.
-  - **Vendor behavior:** a `search_result` replay, `count_tokens`, cache usage fields;
-    for MiniMax its `tool_choice` values and whether the CN key works on the
+  - **Vendor behavior:** a `search_result` replay, `count_tokens`, cache usage fields,
+    each vendor's `tool_choice` values; for MiniMax, whether the CN key works on the
     international host. Results land in docs/HISTORY.md.
   - **Embeddings and rerank on Gitee** (slice 4), through openai-go for embeddings and
     a plain HTTP client for rerank, which no SDK covers: text embeddings with

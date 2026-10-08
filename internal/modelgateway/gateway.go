@@ -99,8 +99,10 @@ type openedKey struct {
 // every Decrypt is a round trip to the key service, which a model call should
 // not wait on, nor pay for, each time. A credential's sealed value never
 // changes — a new key is a new credential — so its id names the key for good,
-// until a snapshot no longer holds it: each new snapshot prunes the keys of
-// the credentials it lost, so a deleted credential's key does not outlive it.
+// until a snapshot no longer holds it: the first open after a new snapshot
+// prunes the keys of the credentials it lost, so a deleted credential's key
+// stays in memory until the next request at most, and serves no request
+// routed after the deletion, which no longer names it.
 func (h *handler) open(ctx context.Context, c store.Credential) ([]byte, error) {
 	snap := h.cfg.Catalog.Snapshot()
 	h.mu.Lock()
@@ -121,8 +123,14 @@ func (h *handler) open(ctx context.Context, c store.Credential) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
+	// A request routed on an older snapshot can open a credential after a
+	// later request pruned it: the key serves that request, and is kept only
+	// while the current snapshot holds the credential. A snapshot that drops
+	// it after this check is pruned by the next open.
 	h.mu.Lock()
-	h.opened[c.ID] = openedKey{providerID: c.ProviderID, key: key}
+	if slices.ContainsFunc(h.cfg.Catalog.Snapshot().Credentials(c.ProviderID), func(k store.Credential) bool { return k.ID == c.ID }) {
+		h.opened[c.ID] = openedKey{providerID: c.ProviderID, key: key}
+	}
 	h.mu.Unlock()
 	return key, nil
 }

@@ -136,6 +136,7 @@ var liveDotEnv = sync.OnceValue(func() map[string]string {
 // exchange is one request the gateway sent a vendor and what came back.
 type exchange struct {
 	mu     sync.Mutex
+	path   string
 	sent   []byte
 	status int
 	got    bytes.Buffer
@@ -203,7 +204,7 @@ func recordingProxy(t *testing.T, base string, rec *recorder) string {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body bytes.Buffer
 		_, _ = body.ReadFrom(r.Body)
-		x := &exchange{sent: body.Bytes()}
+		x := &exchange{path: r.URL.Path, sent: body.Bytes()}
 		rec.mu.Lock()
 		rec.log = append(rec.log, x)
 		rec.mu.Unlock()
@@ -222,15 +223,20 @@ type readCloser struct{ *bytes.Reader }
 func (readCloser) Close() error { return nil }
 
 // vendorThinking is the thinking values of an answer as the vendor sent it,
-// whole or streamed, assembled by the SDK's own types, and whether a stream
-// interleaved its thinking blocks — a signature for one arriving after a
-// later one started — which the gateway leaves unwrapped by design and
-// expected does not model.
+// and whether a stream interleaved its thinking blocks (vendorAnswer).
 func vendorThinking(raw []byte) (values []string, interleaved bool) {
-	var m anthropic.Message
+	m, interleaved := vendorAnswer(raw)
+	return provenance(&m), interleaved
+}
+
+// vendorAnswer is an answer as the vendor sent it, whole or streamed,
+// assembled by the SDK's own types, and whether a stream interleaved its
+// thinking blocks — a signature for one arriving after a later one started —
+// which the gateway leaves unwrapped by design and expected does not model.
+func vendorAnswer(raw []byte) (m anthropic.Message, interleaved bool) {
 	if bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
 		_ = json.Unmarshal(raw, &m)
-		return provenance(&m), false
+		return m, false
 	}
 	last := int64(-1) // the thinking block that started last
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -250,7 +256,19 @@ func vendorThinking(raw []byte) (values []string, interleaved bool) {
 		}
 		_ = m.Accumulate(ev)
 	}
-	return provenance(&m), interleaved
+	return m, interleaved
+}
+
+// sameUsage reports whether the SDK read the token counts the vendor
+// reported, each assembled the same way.
+func sameUsage(got, vendor anthropic.Usage) bool {
+	return got.InputTokens == vendor.InputTokens && got.OutputTokens == vendor.OutputTokens &&
+		got.CacheCreationInputTokens == vendor.CacheCreationInputTokens && got.CacheReadInputTokens == vendor.CacheReadInputTokens
+}
+
+// counts prints usage's token counts: input, output, cache write, cache read.
+func counts(u anthropic.Usage) string {
+	return fmt.Sprintf("%d/%d/%d/%d", u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens)
 }
 
 // expected is what the gateway must return for the thinking values the
@@ -279,24 +297,37 @@ func sentThinking(body []byte) []string {
 	return thinkingIn(c)
 }
 
+// liveAskText asks for the tier's one tool, liveTool.
+const liveAskText = "What time is it now? Call the get_time tool first, then answer in one short sentence."
+
 func liveAsk() anthropic.MessageParam {
-	return anthropic.NewUserMessage(anthropic.NewTextBlock("What time is it now? Call the get_time tool first, then answer in one short sentence."))
+	return anthropic.NewUserMessage(anthropic.NewTextBlock(liveAskText))
 }
+
+var liveTool = anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{Name: "get_time",
+	Description: anthropic.String("Returns the current time."), InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}}}}
+
+// liveCallTimeout bounds one live call; MiniMax-M3 has taken 142 seconds.
+const liveCallTimeout = 3 * time.Minute
 
 // liveTurn sends history to r's alias, whole or streamed, with thinking on as
 // its vendor takes it and one tool offered.
 func liveTurn(t *testing.T, cl *anthropic.Client, r liveRoute, history []anthropic.MessageParam, stream bool) (*anthropic.Message, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	return liveSend(cl, anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Messages: history,
+		Thinking: r.thinking, Tools: []anthropic.ToolUnionParam{liveTool}}, stream)
+}
+
+// liveSend sends p whole, or streamed and assembled by the SDK's Accumulate;
+// a stream it leaves early is closed, and the vendor stops generating.
+func liveSend(cl *anthropic.Client, p anthropic.MessageNewParams, stream bool) (*anthropic.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), liveCallTimeout)
 	defer cancel()
-	p := anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Messages: history,
-		Thinking: r.thinking,
-		Tools: []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: "get_time",
-			Description: anthropic.String("Returns the current time."), InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}}}}}}
 	if !stream {
 		return cl.Messages.New(ctx, p)
 	}
 	s := cl.Messages.NewStreaming(ctx, p)
+	defer s.Close()
 	var m anthropic.Message
 	for s.Next() {
 		if err := m.Accumulate(s.Current()); err != nil {
@@ -304,6 +335,39 @@ func liveTurn(t *testing.T, cl *anthropic.Client, r liveRoute, history []anthrop
 		}
 	}
 	return &m, s.Err()
+}
+
+// liveText asks r's alias, whole or streamed, a question with a one-word
+// answer and no tool offered: the answer comes back as text, under the
+// alias, with the usage the vendor reported.
+func liveText(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool) {
+	t.Helper()
+	mode := map[bool]string{false: "whole", true: "streamed"}[stream]
+	// The answer must be the vendor's, block for block. Whether the vendor's
+	// names Jupiter is the model's choice: MiniMax-M3 once ended its turn
+	// with no text. So up to three answers are asked for.
+	for try := 1; ; try++ {
+		n := r.rec.count()
+		m, err := liveSend(cl, anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Thinking: r.thinking,
+			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Which planet is the largest in the solar system? Answer in one word."))}}, stream)
+		if err != nil {
+			liveFatalf(t, "%s text: %v", mode, err)
+		}
+		_, raw := one(t, r.rec, n).answer()
+		up, _ := vendorAnswer(raw)
+		if kindsOf(m) != kindsOf(&up) || textOf(m) != textOf(&up) || m.StopReason != up.StopReason || string(m.Model) != r.alias ||
+			m.Usage.InputTokens == 0 || m.Usage.OutputTokens == 0 || !sameUsage(m.Usage, up.Usage) {
+			liveFatalf(t, "%s text: the gateway answered [%s] %q (stop %q) from model %q, usage %s; the vendor sent [%s] %q (stop %q), usage %s",
+				mode, kindsOf(m), masked(textOf(m)), m.StopReason, m.Model, counts(m.Usage), kindsOf(&up), masked(textOf(&up)), up.StopReason, counts(up.Usage))
+		}
+		if m.StopReason == anthropic.StopReasonEndTurn && strings.Contains(strings.ToLower(textOf(m)), "jupiter") {
+			return
+		}
+		if try == 3 {
+			liveFatalf(t, "%s text: three answers without Jupiter, the last [%s] %q (stop %q), as the vendor sent it", mode, kindsOf(m), masked(textOf(m)), m.StopReason)
+		}
+		t.Logf("%s text, answer %d: [%s] %q (stop %q), as the vendor sent it; asking again", mode, try, kindsOf(m), masked(textOf(m)), m.StopReason)
+	}
 }
 
 // one is the single exchange a call made, or fails the test.
@@ -324,14 +388,16 @@ type liveRoute struct {
 }
 
 // TestLiveThinkingRoundTrip runs, for every model of every named vendor,
-// whole and streamed: a thinking tool call whose signatures come back wrapped
+// whole and streamed: a text answer; a thinking tool call whose signatures come back wrapped
 // around the vendor's own values, then the continuation a client makes by
 // returning the answer as the SDK gives it, which must send the vendor exactly
 // its values; and one refusal relayed with the vendor's status. An alias whose
 // first choice is down falls back to the first named vendor's first model,
 // and the continuation goes straight to the deployment that produced its
 // thinking. With both vendors named, a conversation crosses from DeepSeek to
-// MiniMax and back, and each is sent only its own thinking.
+// MiniMax and back, and each is sent only its own thinking; and a tool loop
+// MiniMax opens, continued at DeepSeek, gets DeepSeek's refusal relayed. And the SDK lists,
+// a page at a time, every chat alias a key may use and no other, and gets each.
 func TestLiveThinkingRoundTrip(t *testing.T) {
 	vendors := namedVendors(t)
 	e := newEnv(t)
@@ -359,9 +425,62 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 			}
 		}
 	}
+	// The list: the chat aliases, an embedding alias beside them, and a key
+	// that may use every alias but the first.
+	var chat []string
+	for _, v := range vendors {
+		for _, r := range routes[v.name] {
+			chat = append(chat, r.alias)
+		}
+	}
+	if fallback.alias != "" {
+		chat = append(chat, fallback.alias)
+	}
+	vp := e.provider(down.URL, func(p *store.Provider) { p.Name = "vectors" })
+	e.credential(vp, "sk-vectors-key1", 1)
+	e.alias("vectors", target(e.deployment(vp, "vectors", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
+	narrow := e.key(append(slices.Clone(chat[1:]), "vectors"))
 	key := e.key(everyAlias)
 	e.start()
 	cl := e.client(key)
+
+	t.Run("model list", func(t *testing.T) {
+		want := slices.Clone(chat[1:])
+		slices.Sort(want)
+		nc := e.client(narrow)
+		pager := nc.Models.ListAutoPaging(liveCtx(t), anthropic.ModelListParams{Limit: anthropic.Int(1)})
+		var got []string
+		for pager.Next() {
+			m := pager.Current()
+			got = append(got, m.ID)
+			for name, ok := range map[string]bool{"id": m.JSON.ID.Valid(), "capabilities": m.JSON.Capabilities.Valid(),
+				"created_at": m.JSON.CreatedAt.Valid(), "display_name": m.JSON.DisplayName.Valid(),
+				"max_input_tokens": m.JSON.MaxInputTokens.Valid(), "max_tokens": m.JSON.MaxTokens.Valid()} {
+				if !ok {
+					t.Errorf("%s: %s missing", m.ID, name)
+				}
+			}
+		}
+		if err := pager.Err(); err != nil || !slices.Equal(got, want) {
+			t.Fatalf("listed %q (%v), want %q", got, err, want)
+		}
+		if page, err := nc.Models.List(liveCtx(t), anthropic.ModelListParams{Limit: anthropic.Int(1)}); err != nil ||
+			len(page.Data) != 1 || page.Data[0].ID != want[0] || !page.HasMore || page.LastID != want[0] {
+			t.Errorf("the first page: %+v, %v", page, err)
+		}
+		for _, id := range want {
+			if m, err := nc.Models.Get(liveCtx(t), id, anthropic.ModelGetParams{}); err != nil || m.ID != id {
+				t.Errorf("get %s: %v", id, err)
+			}
+		}
+		for _, id := range []string{chat[0], "vectors", "nope"} {
+			_, err := nc.Models.Get(liveCtx(t), id, anthropic.ModelGetParams{})
+			var apiErr *anthropic.Error
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 404 {
+				t.Errorf("get %s: %v, want a 404", id, err)
+			}
+		}
+	})
 
 	t.Run("models", func(t *testing.T) {
 		for _, v := range vendors {
@@ -369,6 +488,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 				t.Run(r.alias, func(t *testing.T) {
 					t.Parallel()
 					for _, stream := range []bool{false, true} {
+						liveText(t, cl, r, stream)
 						liveRoundTrip(t, cl, e.s, r, stream)
 					}
 					n := r.rec.count()
@@ -384,9 +504,9 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 	})
 
 	t.Run("fallback", func(t *testing.T) {
-		liveRoundTrip(t, cl, e.s, fallback, false)
-		if n := len(down.recorded()); n != 1 {
-			liveErrorf(t, "the first choice was called %d times, want once: by the first turn, for its one credential, and never by the continuation", n)
+		tries := liveRoundTrip(t, cl, e.s, fallback, false)
+		if n := len(down.recorded()); n != tries {
+			liveErrorf(t, "the first choice was called %d times, want %d: once by each first turn, for its one credential, and never by the continuation", n, tries)
 		}
 	})
 
@@ -403,16 +523,35 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 		_, raw := one(t, ds.rec, n).answer()
 		vend, _ := vendorThinking(raw)
 		_, own := expected(vend, ds.dep)
+		// MiniMax closes the tool loop it may start before the conversation
+		// returns: DeepSeek refuses a loop that reaches it without its thinking
+		// under another vendor's tool ids, and the gateway, sending each vendor
+		// only its own thinking, leaves that refusal to fail like any other
+		// (plan 59, "Retry and fallback happen before the first byte only").
 		h := next([]anthropic.MessageParam{liveAsk()}, m1)
-		n = mm.rec.count()
-		m2, err := liveTurn(t, cl, mm, h, false)
-		if err != nil {
-			liveFatalf(t, "%v", err)
+		var mmOwn []string
+		for calls := 0; ; calls++ {
+			if calls == 3 {
+				liveFatalf(t, "MiniMax called the tool three times without answering")
+			}
+			n = mm.rec.count()
+			m2, err := liveTurn(t, cl, mm, h, false)
+			if err != nil {
+				liveFatalf(t, "%v", err)
+			}
+			x := one(t, mm.rec, n)
+			if sent := sentThinking(x.sent); !slices.Equal(sent, mmOwn) {
+				liveErrorf(t, "MiniMax was sent %q, want only its own %q", abbreviate(sent), abbreviate(mmOwn))
+			}
+			_, raw := x.answer()
+			vend, _ := vendorThinking(raw)
+			_, back := expected(vend, mm.dep)
+			mmOwn = append(mmOwn, back...)
+			h = next(h, m2)
+			if !hasToolUse(m2) {
+				break
+			}
 		}
-		if sent := sentThinking(one(t, mm.rec, n).sent); len(sent) != 0 {
-			liveErrorf(t, "MiniMax was sent DeepSeek's thinking: %q", abbreviate(sent))
-		}
-		h = next(h, m2)
 		n = ds.rec.count()
 		if _, err := liveTurn(t, cl, ds, h, false); err != nil {
 			liveFatalf(t, "%v", err)
@@ -421,30 +560,87 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 			liveErrorf(t, "back at DeepSeek, sent %d values, want its own %d", len(sent), len(own))
 		}
 	})
+
+	t.Run("an open loop across vendors", func(t *testing.T) {
+		// A loop MiniMax opens carries MiniMax's tool ids and none of
+		// DeepSeek's thinking, which DeepSeek refuses; the gateway relays the
+		// refusal as DeepSeek gave it.
+		ds, mm := routes["deepseek"][0], routes["minimax"][0]
+		var m1 *anthropic.Message
+		for try := 0; try < 3 && !hasToolUse(m1); try++ {
+			var err error
+			if m1, err = liveTurn(t, cl, mm, []anthropic.MessageParam{liveAsk()}, false); err != nil {
+				liveFatalf(t, "%v", err)
+			}
+		}
+		if !hasToolUse(m1) {
+			liveFatalf(t, "MiniMax answered three times without calling the tool")
+		}
+		n := ds.rec.count()
+		_, err := liveTurn(t, cl, ds, next([]anthropic.MessageParam{liveAsk()}, m1), false)
+		xs := ds.rec.since(n)
+		if len(xs) != 1 {
+			liveFatalf(t, "DeepSeek was called %d times, want once: %v", len(xs), err)
+		}
+		vs, raw := xs[0].answer()
+		var vendor struct {
+			Error struct{ Message string } `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &vendor)
+		msg := vendor.Error.Message
+		var apiErr *anthropic.Error
+		var relayed struct {
+			Error struct{ Message string } `json:"error"`
+		}
+		if errors.As(err, &apiErr) {
+			_ = json.Unmarshal([]byte(apiErr.RawJSON()), &relayed)
+		}
+		if vs != 400 || !strings.Contains(msg, "thinking") || apiErr == nil || apiErr.StatusCode != vs || relayed.Error.Message != msg {
+			liveFatalf(t, "the open loop: %v; DeepSeek answered %d %s; want its refusal of the missing thinking relayed", err, vs, masked(string(raw)))
+		}
+	})
 }
 
-func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRoute, stream bool) {
+// liveRoundTrip returns how many times it asked the first turn.
+func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRoute, stream bool) (tries int) {
 	t.Helper()
 	mode := map[bool]string{false: "whole", true: "streamed"}[stream]
-	n := r.rec.count()
-	m, err := liveTurn(t, cl, r, []anthropic.MessageParam{liveAsk()}, stream)
-	if err != nil {
-		liveFatalf(t, "%s: %v", mode, err)
+	// A model thinking adaptively decides for itself whether the question
+	// deserves thinking, which is not what this checks, so a model expected
+	// to think is asked up to three times for an answer that carries some.
+	var m *anthropic.Message
+	var up anthropic.Message
+	var vend []string
+	var interleaved bool
+	for tries < 3 {
+		tries++
+		n := r.rec.count()
+		var err error
+		if m, err = liveTurn(t, cl, r, []anthropic.MessageParam{liveAsk()}, stream); err != nil {
+			liveFatalf(t, "%s: %v", mode, err)
+		}
+		_, raw := one(t, r.rec, n).answer()
+		up, interleaved = vendorAnswer(raw)
+		vend = provenance(&up)
+		if _, back := expected(vend, r.dep); len(back) > 0 || !r.thinks {
+			break
+		}
 	}
-	_, raw := one(t, r.rec, n).answer()
-	vend, interleaved := vendorThinking(raw)
 	if interleaved {
 		liveFatalf(t, "%s: the vendor interleaved its thinking blocks, which this tier's oracle does not model", mode)
 	}
 	want, back := expected(vend, r.dep)
 	if len(back) == 0 && r.thinks {
-		liveFatalf(t, "%s: the vendor returned no signed thinking (%q), so there is nothing to round-trip", mode, abbreviate(vend))
+		liveFatalf(t, "%s: the vendor returned no signed thinking in %d answers (%q), so there is nothing to round-trip", mode, tries, abbreviate(vend))
 	}
 	if got := provenance(m); !slices.Equal(got, want) || string(m.Model) != r.alias || m.Usage.OutputTokens == 0 {
 		liveFatalf(t, "%s: model %q, %d output tokens, thinking %q, want %q", mode, m.Model, m.Usage.OutputTokens, abbreviate(got), abbreviate(want))
 	}
 	if m.StopReason != anthropic.StopReasonToolUse {
 		liveFatalf(t, "%s: the model answered without calling the tool (stop %q)", mode, m.StopReason)
+	}
+	if !sameUsage(m.Usage, up.Usage) {
+		liveFatalf(t, "%s: the SDK read usage %s, the vendor reported %s", mode, counts(m.Usage), counts(up.Usage))
 	}
 	// The ledger holds what the caller's SDK added up, written before the
 	// answer ended.
@@ -455,14 +651,47 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRou
 		rows[0].DeploymentID != r.dep || stream != (rows[0].TTFT > 0) {
 		liveFatalf(t, "%s: the ledger holds %+v (%v), want a 200 from %s with the SDK's %+v", mode, rows, err, r.dep, sdk)
 	}
-	n = r.rec.count()
+	n := r.rec.count()
 	if _, err := liveTurn(t, cl, r, next([]anthropic.MessageParam{liveAsk()}, m), stream); err != nil {
 		liveFatalf(t, "%s continuation: %v", mode, err)
 	}
 	if sent := sentThinking(one(t, r.rec, n).sent); !slices.Equal(sent, back) {
 		liveFatalf(t, "%s continuation sent %q, want the vendor's own %q", mode, abbreviate(sent), abbreviate(back))
 	}
-	t.Logf("%s: %d of %d thinking block(s) round-tripped", mode, len(back), len(want))
+	t.Logf("%s: %d of %d thinking block(s) round-tripped, from answer %d", mode, len(back), len(want), tries)
+	return tries
+}
+
+// liveCtx bounds one live call whose answer is read whole, and is
+// cancelled with the test.
+func liveCtx(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), liveCallTimeout)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// kindsOf is m's content block types, in order.
+func kindsOf(m *anthropic.Message) string {
+	var ks []string
+	for _, c := range m.Content {
+		ks = append(ks, c.Type)
+	}
+	return strings.Join(ks, ",")
+}
+
+// textOf is an answer's text, its blocks joined; empty for the nil answer
+// an error leaves.
+func textOf(m *anthropic.Message) string {
+	if m == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range m.Content {
+		if c.Type == "text" {
+			b.WriteString(c.Text)
+		}
+	}
+	return b.String()
 }
 
 // liveFatalf and liveErrorf fail with a message that prints no key: a

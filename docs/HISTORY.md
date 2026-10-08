@@ -6419,3 +6419,112 @@ citations with no findings or pending transitions, the registry checks were clea
 and probe processes and containers were removed.
 
 Review results and CI are recorded in the pull request.
+
+## Model gateway live tier (plan 59 slice 2g) — acceptance record, 2026-10-08
+
+`RUN_LIVE_MODELGATEWAY=deepseek,minimax` drove the gateway with anthropic-sdk-go
+v1.70.1: `deepseek-flash` and `deepseek-v4-pro` on `https://api.deepseek.com/anthropic`,
+`MiniMax-M3` and `MiniMax-M3.1-Flash-Preview` on `https://api.minimax.cn/anthropic`, each
+behind a proxy recording both directions. One-off probes, some sent to the vendors
+directly, filled in what the tier's own calls could not. The questions plan 59 left to
+evidence were answered as follows.
+
+- **Model list.** A key granted every chat alias but one, beside an embedding alias,
+  listed exactly its chat aliases a page of one at a time, each entry carrying the six
+  fields `ModelInfo` marks required; each answered `Models.Get`, and the ungranted
+  alias, the embedding alias and an unknown name answered 404.
+- **`count_tokens`.** Both vendors serve `/v1/messages/count_tokens`, and the gateway
+  relays the count unchanged. The same question counted 50 tokens at DeepSeek and 183 at
+  MiniMax.
+- **`search_result`.** Both models answered a code word from a `search_result` replayed
+  in a tool result. The gateway sent it as text, and with the flattening removed,
+  DeepSeek refused the replay.
+- **Cache usage.** Neither vendor reported a cache write, though the system prompt of
+  about 3,300 tokens was marked `cache_control: ephemeral`. On a prompt new to it,
+  DeepSeek read nothing on the first call and 3,200 of 3,349 tokens on every repeat,
+  from six seconds later. MiniMax's reads came and went: 128 of 3,476 on three repeats,
+  then 3,475, then 131, then 3,456. Input, cache write and cache read added up to the
+  same prompt on every call (3,349; 3,476), so both count `input_tokens` without the
+  cache reads, as the Messages API does and the usage ledger prices. The usage the SDK
+  read through the gateway equalled the vendor's on every answer.
+- **`tool_choice`.** Forcing a tool call does not work on either vendor, for a question
+  that does not need the tool (a fun fact, with `get_time` offered):
+  - `any` produced no tool call in 24 DeepSeek asks: 18 across `deepseek-flash` and
+    `deepseek-v4-pro` with thinking absent, disabled and enabled, and 6 asked directly
+    of `deepseek-chat` and `deepseek-reasoner`, which both answer as `deepseek-v4-flash`.
+  - `any` and `tool` produced no tool call in 54 MiniMax asks: 30 across M3 and
+    M3.1-Flash-Preview in every thinking mode each accepts, and 24 asked directly of
+    MiniMax-M2, M2.1, M2.5 and M2.7. M3.1-Flash-Preview refuses disabled thinking with
+    its own 400.
+  - DeepSeek's `tool` was honored with thinking disabled (6 of 6). With thinking on,
+    whether asked or by default, DeepSeek refused it with its own 400, "Thinking mode
+    does not support this tool_choice" (12 of 12), as the Messages API refuses forced
+    tool use with thinking on.
+
+  For a question that asks for the tool, `auto` called it every time: 24 asks through
+  the gateway and 18 asked directly. `none` was honored in all 104 asks through the
+  gateway and the 3 asked directly of M3.1-Flash-Preview; MiniMax-M3 broke it in 1 of 3
+  asked directly, and in five tier runs. That is a lapse, not an ignored field, so
+  `none` passes through, and the tier checks that it reaches the vendor unchanged and
+  only logs a tool call made under it. Both vendors read the choice's `type` by its exact
+  key: `{"Type": "none"}` is DeepSeek's 422, "missing field `type`", and MiniMax's 400,
+  "invalid params". The gateway therefore now refuses `any` for DeepSeek and `any` and
+  `tool` for MiniMax, on every model, as it refuses whatever a vendor ignores where the
+  answer depends on it; `auto`, `none` and DeepSeek's `tool` pass through. The tier asks
+  each vendor directly, every run, whether it still ignores what is refused.
+- **MiniMax region.** The CN key on `https://api.minimax.io/anthropic` gets a 401, which
+  the gateway answers 502 `api_error`, "upstream refused the gateway's credential (HTTP
+  401)". A MiniMax provider's base URL must be in its key's region.
+
+The tier failed four times on model behavior, and was changed so that these choices,
+which are not what it checks, no longer decide the outcome:
+
+- `MiniMax-M3`, thinking adaptively, once answered the round trip's first turn without
+  thinking. A model expected to think is now asked up to three times.
+- MiniMax sometimes called the tool again on its turn of the cross-vendor conversation.
+  Going back to DeepSeek with that loop open was refused with DeepSeek's "must be passed
+  back": its tool turn carried MiniMax's id and no DeepSeek thinking. Plan 59 decides
+  that the same refusal ends a fallback taken mid-loop, and a caller switching vendors
+  mid-loop gets it too. The conversation now closes MiniMax's loop first, checking that
+  each MiniMax request carries only MiniMax's thinking, and a separate check opens a loop
+  at MiniMax and continues it at DeepSeek, whose 400 the gateway must relay.
+- One run's MiniMax `tool_choice` or `search_result` failure was not kept, and three
+  reruns passed. Each `search_result` turn is now asked up to three times.
+- MiniMax-M3 once ended a streamed answer to the text question with no text, its usage
+  equal to what the vendor reported. The relay passes a text delta byte for byte, so the
+  model is the likelier cause, but the check could not show the vendor's side, and 8
+  further answers, 5 streamed, all named the planet on both sides. The check now
+  requires the gateway's answer to equal the vendor's block for block, and asks up to
+  three times for one naming the planet.
+
+Review then hardened the checks so that each reads what the vendor was sent or reported
+rather than only what the SDK saw. It also found two gateway defects, both fixed with a
+test that failed on the earlier code:
+- A request routed before a credential's deletion could open the key after a later
+  request had pruned it, and keep it. The gateway now keeps a key it opens only if the
+  current snapshot holds the credential; a snapshot that drops it afterwards is pruned
+  on the next open, as before.
+- `TestADeletedCredentialsKeyIsDropped` could pass its wait on a snapshot still holding
+  the deleted credential, and so failed under load. It now waits for the opened keys to
+  settle.
+
+MiniMax-M3 answers took up to 142 seconds, inside the tier's three-minute bound per
+call. Two consecutive runs of the whole tier each passed all 24 tests, the two
+top-level tests and their 22 subtests, before the second review's last changes to the
+checks. The runs after those changes met MiniMax overloaded: every failure but
+MiniMax-M3's empty answer above was its HTTP 529, relayed with its status, and every
+test passed in at least one run, but none passed all 24 until MiniMax recovered. Then
+two consecutive runs on the final checks each passed all 24. Mutation testing caught all
+twenty-four mutants:
+- seven against the refusal rows;
+- three against the pruning tests: no pruning, every key dropped, and the late-open fix
+  reverted;
+- thirteen against the live checks:
+  - each refusal dropped or widened, and the flattening removed;
+  - `auto` rewritten to `none`, and `tool` to `auto`, upstream;
+  - a whole answer's usage altered, and its zero `cache_creation_input_tokens` dropped;
+  - a vendor counting cache reads in `input_tokens`;
+  - the direct check asked with `auto` and a question needing the tool;
+  - a vendor's error relayed as a 502;
+  - text deltas dropped from a stream, and a whole answer's text emptied;
+- one sending `auto` where the check expects `none`.

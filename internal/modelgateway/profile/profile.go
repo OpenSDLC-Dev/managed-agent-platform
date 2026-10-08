@@ -15,8 +15,8 @@
 // A profile also says what the gateway changes on its way to the vendor's
 // Anthropic endpoint, under the plan's edit policy: pass through by default,
 // edit only what the platform's own traffic needs, refuse only what the
-// vendor documents it ignores where the result depends on it. Each edit
-// cites its evidence where it is set.
+// vendor documents it ignores, or the live tier shows it ignoring, where the
+// result depends on it. Each edit cites its evidence where it is set.
 package profile
 
 import (
@@ -65,8 +65,9 @@ type Profile struct {
 	// brain's flatten_search_results uses (internal/provider/anthropic).
 	FlattenSearchResults bool `json:"-"`
 	// Ignores names what in a request to model, a deployment's upstream
-	// model id, the vendor documents it ignores although the answer depends
-	// on it, or "" for nothing; no such deployment serves the request.
+	// model id, the vendor ignores although the answer depends on it — by
+	// its documentation or the live tier — or "" for nothing; no such
+	// deployment serves the request.
 	Ignores func(model string, request map[string]json.RawMessage) string `json:"-"`
 }
 
@@ -132,7 +133,15 @@ var profiles = []Profile{
 // deepseekIgnores: DeepSeek's Anthropic API guide has tool_choice auto, any
 // and tool "Supported (disable_parallel_tool_use is ignored)", and a model
 // free to call tools in parallel may answer with several calls where the
-// caller allowed one.
+// caller allowed one. Its "any" is ignored as well, whatever the guide says:
+// the live tier (docs/HISTORY.md, 2026-10-08) asked deepseek-flash and
+// deepseek-v4-pro for a fun fact with get_time offered and tool_choice any,
+// three times in each thinking mode, and got no tool call in any of the 18
+// answers, nor in 6 from deepseek-chat and deepseek-reasoner, which answer
+// as deepseek-v4-flash. Its "tool" passes through: honored with thinking
+// disabled, and refused with a 400 of DeepSeek's own otherwise ("Thinking
+// mode does not support this tool_choice"), as the Messages API refuses
+// forced tool use with thinking on.
 func deepseekIgnores(_ string, req map[string]json.RawMessage) string {
 	var choice map[string]json.RawMessage
 	var ban bool
@@ -140,7 +149,18 @@ func deepseekIgnores(_ string, req map[string]json.RawMessage) string {
 		json.Unmarshal(choice["disable_parallel_tool_use"], &ban) == nil && ban {
 		return "tool_choice.disable_parallel_tool_use"
 	}
+	if choiceType(choice) == "any" {
+		return "tool_choice.type"
+	}
 	return ""
+}
+
+// choiceType is a tool_choice's type, read by its exact key; empty when
+// there is none.
+func choiceType(choice map[string]json.RawMessage) string {
+	var typ string
+	_ = json.Unmarshal(choice["type"], &typ)
+	return typ
 }
 
 // minimaxIgnores: MiniMax's Anthropic SDK guide (text-anthropic-api) has
@@ -149,10 +169,24 @@ func deepseekIgnores(_ string, req map[string]json.RawMessage) string {
 // disabled is "Accepted but ignored; thinking remains on", so an answer
 // spends the caller's max_tokens on thinking it turned off. MiniMax-M3
 // honors disabled, and M3.1-Flash-Preview refuses it with a 400 of its own.
+// Its two API pages disagree on tool_choice; the live tier (docs/HISTORY.md,
+// 2026-10-08) settles it: MiniMax-M3 and M3.1-Flash-Preview, asked for a fun
+// fact with get_time offered, answered without calling it in every one of 30
+// asks forcing a call — tool_choice any or tool, three times in each thinking
+// mode either model accepts — and MiniMax-M2, M2.1, M2.5 and M2.7 in all 24
+// of theirs, so both are ignored. Its none passes through: a lapse of
+// MiniMax-M3's in a few of its asks, not an ignored field. The type is read
+// by its exact key, as MiniMax reads it: {"Type": "none"} is MiniMax's 400.
 func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 	var stops []json.RawMessage
 	if json.Unmarshal(req["stop_sequences"], &stops) == nil && len(stops) > 0 {
 		return "stop_sequences"
+	}
+	var choice map[string]json.RawMessage
+	if json.Unmarshal(req["tool_choice"], &choice) == nil {
+		if typ := choiceType(choice); typ == "any" || typ == "tool" {
+			return "tool_choice.type"
+		}
 	}
 	var thinking map[string]json.RawMessage
 	var typ string

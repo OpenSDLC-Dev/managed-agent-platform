@@ -268,14 +268,48 @@ func TestADeletedCredentialsKeyIsDropped(t *testing.T) {
 	}
 	b := e.credential(p, "sk-second-key-1", 1)
 	e.must(e.s.DeleteCredential(e.ctx, p.ID, a.ID))
-	for deadline := time.Now().Add(10 * time.Second); ask("fast") != "sk-second-key-1"; {
+	// The second key answering proves nothing alone: a snapshot holding both
+	// credentials can route to it before the deletion arrives. Each request
+	// prunes against the snapshot it sees, so asking until the opened keys
+	// settle waits for the deletion and checks the pruning.
+	want := sorted(b.ID, c.ID)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		k := ask("fast")
+		got := modelgateway.OpenedKeys(e.handler)
+		if k == "sk-second-key-1" && slices.Equal(got, want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("opened %v, want %v: the deletion never reached the snapshot, or pruning kept or dropped the wrong keys", got, want)
+		}
+	}
+}
+
+// A request routed before a credential's deletion can open its key after a
+// later request pruned the deletion: the key serves that request and is not
+// kept, so a deleted credential's key does not outlive it.
+func TestALateOpenOfADeletedCredentialKeepsNoKey(t *testing.T) {
+	e := newEnv(t)
+	p := e.provider("http://127.0.0.1:1")
+	a := e.credential(p, "sk-late-key-1", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	var cat *catalog.Catalog
+	e.start(func(c *modelgateway.Config) { cat = c.Catalog })
+	ctx, cancel := context.WithCancel(e.ctx)
+	ran := make(chan struct{})
+	go func() { defer close(ran); cat.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-ran })
+	e.must(e.s.DeleteCredential(e.ctx, p.ID, a.ID))
+	for deadline := time.Now().Add(10 * time.Second); len(cat.Snapshot().Credentials(p.ID)) != 0; time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the deletion never reached the snapshot")
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
-	if got, want := modelgateway.OpenedKeys(e.handler), sorted(b.ID, c.ID); !slices.Equal(got, want) {
-		t.Errorf("opened %v, want %v", got, want)
+	if key, err := modelgateway.Open(e.handler, e.ctx, a); err != nil || string(key) != "sk-late-key-1" {
+		t.Fatalf("the late open: %q, %v", key, err)
+	}
+	if got := modelgateway.OpenedKeys(e.handler); len(got) != 0 {
+		t.Errorf("kept %v after the snapshot dropped it", got)
 	}
 }
 
