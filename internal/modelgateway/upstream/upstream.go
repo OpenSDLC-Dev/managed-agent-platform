@@ -34,6 +34,29 @@ func NewClient() *http.Client {
 	}
 }
 
+// NoReuse is c keeping no connection between requests, for a vendor that
+// drops idle ones: its transport cloned with keep-alives off, so each
+// request dials a connection of its own, on HTTP/2 too, and leaves none for
+// another to take — where setting a request's Close would only retire the
+// connection it was given, which may be one another request left idle. A
+// transport that is not an *http.Transport is the caller's to configure,
+// and c is returned as it is.
+func NoReuse(c *http.Client) *http.Client {
+	rt := c.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	t, ok := rt.(*http.Transport)
+	if !ok {
+		return c
+	}
+	t = t.Clone()
+	t.DisableKeepAlives = true
+	out := *c
+	out.Transport = t
+	return &out
+}
+
 // MaxEvent bounds one event, so an upstream that never sends a blank line
 // cannot grow the gateway's memory without end.
 const MaxEvent = 16 << 20

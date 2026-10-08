@@ -15,7 +15,10 @@ import (
 // keys, as the thinking edits are. Its typed reference is openai-go
 // (docs/REFERENCE_PROJECTS.md). Embeddings and rerank pass through the same
 // way, and never stream, so model is all they change either way: a vector,
-// float or base64, is relayed as bytes and never decoded.
+// float or base64, is compacted with the rest of its answer, never decoded.
+// A body goes out with its keys sorted, so a key differing from model only
+// in case comes before model, and a decoder that matches keys regardless of
+// case, keeping the last, reads the deployment's upstream id.
 
 // chatBody is the caller's body for one deployment: model its upstream id,
 // and a stream asking for its usage, which the ledger and the key's TPM

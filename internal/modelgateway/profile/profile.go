@@ -62,8 +62,9 @@ type Profile struct {
 	// BearerAuth sends the provider's key to its Anthropic endpoint as
 	// Authorization: Bearer rather than x-api-key, Anthropic's own header.
 	BearerAuth bool `json:"-"`
-	// CloseConnections sends each request on a connection of its own, closed
-	// once the answer is read, for a vendor that drops idle connections.
+	// CloseConnections sends each request on a connection of its own, which
+	// no other request has used or will, for a vendor that drops idle
+	// connections.
 	CloseConnections bool `json:"-"`
 	// FlattenSearchResults sends each search_result block in a tool_result
 	// as text, for a vendor that refuses the block, in the rendering the

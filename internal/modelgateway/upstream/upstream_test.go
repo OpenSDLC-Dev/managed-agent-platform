@@ -112,3 +112,31 @@ func TestClientFollowsNoRedirect(t *testing.T) {
 		t.Errorf("status %d, target reached %t", resp.StatusCode, reached)
 	}
 }
+
+// roundTripper is a transport that is not an *http.Transport.
+type roundTripper struct{}
+
+func (roundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unused")
+}
+
+// NoReuse turns keep-alives off on a clone of the client's transport, the
+// default one included, leaving the original's as it was; a transport of
+// another kind is the caller's, and comes back as it is.
+func TestNoReuseKeepsNoConnection(t *testing.T) {
+	c := upstream.NewClient()
+	fresh := upstream.NoReuse(c)
+	if ft, ok := fresh.Transport.(*http.Transport); !ok || !ft.DisableKeepAlives || fresh.CheckRedirect == nil {
+		t.Errorf("NoReuse(NewClient()) = %+v", fresh)
+	}
+	if c.Transport.(*http.Transport).DisableKeepAlives {
+		t.Error("NoReuse changed the client it was given")
+	}
+	if ft, ok := upstream.NoReuse(&http.Client{}).Transport.(*http.Transport); !ok || !ft.DisableKeepAlives || ft == http.DefaultTransport {
+		t.Error("NoReuse left the default transport keeping connections")
+	}
+	custom := &http.Client{Transport: roundTripper{}}
+	if upstream.NoReuse(custom) != custom {
+		t.Error("NoReuse replaced a transport of another kind")
+	}
+}

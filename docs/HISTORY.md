@@ -6673,7 +6673,7 @@ embeddings and rerank with a plain HTTP client.
 - **Encoding.** Asked for `encoding_format: "base64"`, Gitee answers float arrays, the
   values its float answer holds, from `Qwen3-Embedding-8B`, `Qwen3-Embedding-0.6B` and
   `bge-m3`. The openai Python SDK keeps a float array as it is, and openai-go reads only
-  floats, so both read the answer, which the gateway relays as bytes either way.
+  floats, so both read the answer, which the gateway never decodes either way.
 - **Dimensions.** `Qwen3-Embedding-8B` and `-0.6B` honor `dimensions` (256, 512), and
   so does `Qwen3-VL-Embedding-8B` (512), which dikw-core recorded as not taking it
   (probed 2026-04-25).
@@ -6717,3 +6717,25 @@ the default tier — the route table, the kind check, the prefixes, the chat che
 embeddings or rerank body skips, connection reuse, the ledger's names and the span
 names — and all 3 against the live checks: the answer's `model` not rewritten, an
 embeddings row ledgered as chat, and its usage unread.
+
+Review found three defects, each fixed with a test that failed on the reviewed code:
+- Embeddings and rerank skipped the stream check, so `"stream": true`, or a value or a
+  key's case an upstream could read as one, went upstream as sent. An upstream that
+  streamed in reply was relayed as a whole answer whose usage neither the ledger nor the
+  TPM limit could read (the background security review and Codex). Those routes now
+  refuse a stream and read the flag as the chat routes do.
+- Gitee's requests set `Close`, which retires the connection a request was given but
+  does not stop Go's transport giving it one another provider on the same host left
+  idle, on HTTP/1.1 or HTTP/2 (Codex). A profile that closes its connections now takes
+  a client whose transport keeps none.
+- The docs said an answer's vectors came back byte for byte, where its members are
+  compacted on the way, whitespace inside a vector dropped (Codex). The live check now
+  compares compacted members, and the docs say compacted and never decoded.
+
+Codex also showed that the body goes upstream with its keys sorted, so of two keys
+differing only in case, as `input` and `Input`, a decoder that matches keys regardless
+of case reads the other one last. That was left as it is: member order means nothing to
+JSON, a key folding to `stream` is refused, and every key folding to `model` sorts
+before it, so such a decoder reads the deployment's upstream id; a test pins that last.
+Mutation testing then caught all 27 mutants of the default tier, among them the
+reviewed code's stream skip and its connection handling restored.

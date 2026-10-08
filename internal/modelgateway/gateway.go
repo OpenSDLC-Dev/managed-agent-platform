@@ -93,6 +93,7 @@ type handler struct {
 	cfg       Config
 	bootstrap [32]byte
 	client    *http.Client
+	fresh     *http.Client // client keeping no connection (profile.CloseConnections)
 	draw      func() float64
 
 	mu         sync.Mutex
@@ -170,6 +171,7 @@ func New(cfg Config) (http.Handler, error) {
 	if h.client == nil {
 		h.client = upstream.NewClient()
 	}
+	h.fresh = upstream.NoReuse(h.client)
 	return h, nil
 }
 

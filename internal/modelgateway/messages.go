@@ -123,20 +123,22 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		writeError(w, r, invalid("model: Field required"))
 		return
 	}
-	// An embeddings or rerank body is read for model alone: it never
-	// streams, so what decides a chat request's stream is the upstream's
-	// business there.
-	var streams bool
-	if rt.kind == store.KindChat {
-		var bad *apiError
-		streams, bad = streamFlag(top)
-		if bad == nil && proto == profile.OpenAI {
-			bad = chatStreamOptions(top)
+	// Embeddings and rerank never stream, so they refuse a stream asked
+	// for: an upstream that honored it would answer in a shape whose usage
+	// the ledger and the TPM limit cannot read.
+	streams, bad := streamFlag(top)
+	switch {
+	case bad != nil:
+	case rt.kind != store.KindChat:
+		if streams {
+			bad = invalid("stream: %s does not stream", path)
 		}
-		if bad != nil && path != "/v1/messages/count_tokens" {
-			writeError(w, r, bad)
-			return
-		}
+	case proto == profile.OpenAI:
+		bad = chatStreamOptions(top)
+	}
+	if bad != nil && path != "/v1/messages/count_tokens" {
+		writeError(w, r, bad)
+		return
 	}
 	snap := h.cfg.Catalog.Snapshot()
 	a, ok := snap.Alias(model)
@@ -487,7 +489,6 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		req.Header.Set(k, v)
 	}
 	propagate(ctx, at.Provider, req.Header)
-	req.Close = prof.CloseConnections
 	req.Header.Set("Content-Type", "application/json")
 	if prof.BearerAuth || c.proto == profile.OpenAI { // every OpenAI-compatible API takes a Bearer token
 		req.Header.Set("Authorization", "Bearer "+string(key))
@@ -495,7 +496,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		req.Header.Set("x-api-key", string(key))
 	}
 
-	resp, err := h.client.Do(req)
+	client := h.client
+	if prof.CloseConnections {
+		client = h.fresh
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return noAnswer(guard, red, err)
 	}

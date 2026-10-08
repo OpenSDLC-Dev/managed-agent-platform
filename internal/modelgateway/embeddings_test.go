@@ -111,7 +111,7 @@ func TestEmbeddingsAndRerankPassThrough(t *testing.T) {
 					t.Errorf("upstream got %s = %s, sent %s", k, up.Body[k], v)
 				}
 			}
-			// The answer is the upstream's, byte for byte, but for model.
+			// The answer is the upstream's, member for member, but for model.
 			var got, want map[string]json.RawMessage
 			_ = json.Unmarshal(b, &got)
 			upstream := httptest.NewRecorder()
@@ -144,9 +144,11 @@ func TestEmbeddingsAndRerankPassThrough(t *testing.T) {
 
 // Each route serves its own kind of alias and no other, and only on the
 // OpenAI protocol: no caller reaches an upstream through a route whose
-// answer it could not read. The body is read for model alone, so what a
-// chat request must get right — stream, stream_options, the fields a chat
-// vendor ignores — is the upstream's business here.
+// answer it could not read. Neither API streams, so a stream asked for is
+// refused, as is a stream flag the gateway cannot read: an upstream that
+// streamed would answer in a shape whose usage goes uncounted. What else a
+// chat request must get right — stream_options, the fields a chat vendor
+// ignores — is the upstream's business here.
 func TestEmbeddingsAndRerankKeepToTheirKind(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, vectors)
@@ -180,6 +182,10 @@ func TestEmbeddingsAndRerankKeepToTheirKind(t *testing.T) {
 		{"GET", "/openai/v1/rerank", "", 405, true, "POST"},
 		{"POST", "/anthropic/v1/embeddings", `{"model":"text","input":"x"}`, 404, false, "no such path"},
 		{"POST", "/anthropic/v1/rerank", `{"model":"ranker","query":"q","documents":["a"]}`, 404, false, "no such path"},
+		{"POST", "/v1/embeddings", `{"model":"text","input":"x","stream":true}`, 400, true, "stream: /v1/embeddings does not stream"},
+		{"POST", "/openai/v1/rerank", `{"model":"ranker","query":"q","documents":["a"],"stream":true}`, 400, true, "stream: /v1/rerank does not stream"},
+		{"POST", "/v1/embeddings", `{"model":"text","input":"x","stream":"yes"}`, 400, true, "stream: must be a boolean"},
+		{"POST", "/v1/embeddings", `{"model":"text","input":"x","Stream":true}`, 400, true, "Stream: the field is stream"},
 	} {
 		resp, b := e.do(tc.method, tc.path, tc.body, bearer)
 		if resp.StatusCode != tc.status || !strings.Contains(string(b), tc.msg) {
@@ -193,13 +199,16 @@ func TestEmbeddingsAndRerankKeepToTheirKind(t *testing.T) {
 		t.Fatalf("%d upstream calls for requests the gateway refuses", n)
 	}
 
-	// What would fail a chat request goes upstream as sent.
-	body := `{"model":"text","input":"x","stream":"yes","stream_options":5,"Stream":true}`
+	// What would fail a chat request goes upstream as sent. A key that
+	// differs from model only in case goes before model, so a decoder that
+	// matches keys regardless of case, keeping the last, reads the
+	// deployment's id rather than the caller's.
+	body := `{"model":"text","input":"x","stream":false,"stream_options":5,"Model":"other"}`
 	if resp, b := e.do("POST", "/v1/embeddings", body, bearer); resp.StatusCode != 200 {
 		t.Fatalf("%d %s", resp.StatusCode, b)
 	}
-	if calls := f.recorded(); len(calls) != 1 || string(calls[0].Body["stream"]) != `"yes"` || string(calls[0].Body["stream_options"]) != "5" ||
-		string(calls[0].Body["Stream"]) != "true" {
+	if calls := f.recorded(); len(calls) != 1 || string(calls[0].Body["stream"]) != "false" || string(calls[0].Body["stream_options"]) != "5" ||
+		bytes.LastIndex(calls[0].Raw, []byte(`"model":"Qwen3-Embedding-8B"`)) < bytes.Index(calls[0].Raw, []byte(`"Model":"other"`)) {
 		t.Fatalf("upstream got %s", calls[0].Raw)
 	}
 	// What MiniMax's chat ignores refuses no embeddings request.
@@ -254,34 +263,36 @@ func newConnections(t *testing.T) *connections {
 }
 
 // Gitee drops idle connections mid-batch, so each request to it goes on a
-// connection of its own; any other vendor's are reused.
+// connection no other request has used: not one of its own, nor one another
+// provider on the same host left idle. That provider's are reused.
 func TestGiteeIsSentEachRequestOnAFreshConnection(t *testing.T) {
 	e := newEnv(t)
-	gitee, generic := newConnections(t), newConnections(t)
+	host := newConnections(t)
 	embedding := func(d *store.Deployment) { d.Kind = store.KindEmbedding }
-	e.alias("gitee", target(e.deployment(onOpenAI(e, "gitee", gitee.URL), "m", embedding), 0))
-	e.alias("generic", target(e.deployment(onOpenAI(e, "openai-generic", generic.URL), "m", embedding), 0))
+	e.alias("generic", target(e.deployment(onOpenAI(e, "openai-generic", host.URL), "m", embedding), 0))
+	e.alias("gitee", target(e.deployment(onOpenAI(e, "gitee", host.URL), "m", embedding), 0))
 	key := e.key(everyAlias)
 	e.start()
 	for range 3 {
-		for _, alias := range []string{"gitee", "generic"} {
+		for _, alias := range []string{"generic", "gitee"} {
 			if resp, b := e.do("POST", "/v1/embeddings", fmt.Sprintf(`{"model":%q,"input":"x"}`, alias), map[string]string{"Authorization": "Bearer " + key}); resp.StatusCode != 200 {
 				t.Fatalf("%s: %d %s", alias, resp.StatusCode, b)
 			}
 		}
 	}
-	distinct := func(ss []string) int {
-		seen := map[string]bool{}
-		for _, s := range ss {
-			seen[s] = true
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	seen := map[string]int{}
+	for i, remote := range host.remote {
+		seen[remote]++
+		if gitee := i%2 == 1; host.closed[i] != gitee {
+			t.Errorf("request %d (gitee %t) asked to close its connection: %t", i, gitee, host.closed[i])
 		}
-		return len(seen)
 	}
-	if n := distinct(gitee.remote); n != 3 || !reflect.DeepEqual(gitee.closed, []bool{true, true, true}) {
-		t.Errorf("gitee got 3 requests on %d connections, Connection: close %v", n, gitee.closed)
-	}
-	if n := distinct(generic.remote); n != 1 || !reflect.DeepEqual(generic.closed, []bool{false, false, false}) {
-		t.Errorf("openai-generic got 3 requests on %d connections, Connection: close %v", n, generic.closed)
+	// The generic provider's three requests share one connection; each of
+	// Gitee's has one to itself.
+	if len(host.remote) != 6 || len(seen) != 4 || seen[host.remote[0]] != 3 {
+		t.Errorf("6 requests on connections %v", host.remote)
 	}
 }
 
