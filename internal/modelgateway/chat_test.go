@@ -292,7 +292,15 @@ func TestAChatStreamBrokenOffEndsWithAnError(t *testing.T) {
 	if s.Err() == nil || !strings.Contains(s.Err().Error(), "the stream ended before its finish") {
 		t.Errorf("the SDK read %v", s.Err())
 	}
-	if rows := e.ledger(); len(rows) != 2 || rows[0].ErrorType != "api_error" {
+	// The SDK stops at the error chunk without reading the response to its
+	// end, so the handler may not yet have written the second row.
+	var rows []store.Usage
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if rows = e.ledger(); len(rows) == 2 {
+			break
+		}
+	}
+	if len(rows) != 2 || rows[0].ErrorType != "api_error" {
 		t.Errorf("ledger: %+v", rows)
 	}
 }
