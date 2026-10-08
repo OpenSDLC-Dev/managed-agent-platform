@@ -7141,3 +7141,64 @@ sends; TLS terminates at an ingress, or at a mesh); and checking the types of
 `brain.gatewayRoute`'s four values (one the loader cannot read fails the brain at start,
 and a credential written into one as a string would pass any type check: the allowlist
 bars the fields that use a credential, not every place one could be written).
+
+## Model gateway Responses (plan 59 slice 6) — acceptance record, 2026-10-09
+
+`RUN_LIVE_MODELGATEWAY=deepseek,minimax` drove the gateway's `/v1/responses` with
+openai-go, each chat model on two routes behind a proxy recording both directions: its
+vendor's Anthropic endpoint, which the converted Messages request passes through to, and
+its OpenAI endpoint alone, which that request reaches converted once more, to Chat
+Completions. For `deepseek-flash`, `deepseek-v4-pro`, `MiniMax-M3` and
+`MiniMax-M3.1-Flash-Preview` on both routes: a text answer, whole and streamed, equal
+item for block, in status and in usage to the vendor's recorded answer, its ledger row
+under the `responses` endpoint and the `openai` protocol; and a tool call with
+`reasoning.effort` set, returned as a `function_call` item, whose continuation, built
+from the Response's items with openai-go's `ToParam`, the vendor answered, having been
+sent its own thinking back — on the Anthropic endpoint exactly the signatures the
+reasoning items' `encrypted_content` wrapped, on the OpenAI endpoint its
+`reasoning_content`. All 24 subtests passed.
+
+- **Effort.** Asked directly — DeepSeek's two models and MiniMax's two, a one-word
+  question on the Anthropic endpoint with `output_config.effort` alone, with adaptive
+  thinking beside it and with adaptive alone, and on the OpenAI endpoint with
+  `reasoning_effort` with and without the vendor's thinking toggle — every request was
+  answered 200. DeepSeek's models and MiniMax-M3.1-Flash-Preview thought in each;
+  MiniMax-M3 on its Anthropic endpoint thought only when sent `adaptive`. So an effort
+  asks for adaptive thinking, where it first asked for the effort alone.
+- **Reasoning in the tool loop.** On the first run, at effort `medium`, neither MiniMax
+  model reasoned before its tool call, so the replay check held for them without
+  checking anything. At `high`, with MiniMax-M3 on its Anthropic endpoint required to
+  return reasoning within three asks, as the Messages tier requires of it, it returned
+  signed thinking and the continuation sent the vendor exactly its signatures.
+  MiniMax-M3.1-Flash-Preview, which the tier lists as returning no thinking to its tool
+  question, reasoned before its tool call on neither endpoint, and MiniMax-M3 on its
+  OpenAI endpoint reasons inline, as the slice 4c record says; DeepSeek's two models
+  carried the replay on that endpoint.
+
+Decisions made in the slice, with the alternative each beat:
+- The Messages pipeline serves a Responses request whole — `serve` takes the surface
+  that names the ledger row, and a `ResponseMeta` that converts the answer and its
+  errors — rather than a route of its own: routing, retry, provenance and both upstream
+  protocols come with it, and the conversion is two pure functions and a stream
+  wrapper.
+- `store` is ignored rather than refused: nothing a stored response gives can be asked
+  for without a field the gateway refuses, each saying why.
+- A reasoning item always carries `encrypted_content`, whatever `include` asks, since a
+  stateless conversation that loses it loses the vendor's thinking; its summary is the
+  thinking itself, the one text Messages has.
+- `input_file`, an image by `file_id` and `item_reference` are refused, each naming
+  something stored.
+- A stream failing partway ends with `response.failed`, not an `error` event: openai-go
+  aborts on any event whose data has a top-level `error`, and the caller would lose
+  the items already streamed.
+- `truncation: "auto"` is refused rather than ignored: it asks for input to be dropped
+  when the context overflows, and the gateway cannot choose what to drop.
+- `temperature` above 1 goes as sent rather than rescaled: Messages takes at most 1 and
+  OpenAI 2, and the upstream answers for its own range.
+
+Mutation testing ran over the request, answer and stream conversions, the error
+envelope, the field renaming, the default `max_tokens`, the stored routes and the stream
+wrapper. The first pass caught 16 of 19 mutants; two survived — a tool call whose input
+arrives whole at its start, and a stream that has failed still pinging — and one, the
+default `max_tokens`, did not compile. Each survivor got a test, and the third, rewritten
+to compile, was caught; all 19 are caught.

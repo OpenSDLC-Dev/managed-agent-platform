@@ -88,7 +88,7 @@ internal/
   modelgateway/ # the model gateway (plan 59): Anthropic inference and routing, the upstream
               #   relay, vendor profiles, its schema's queries, the config snapshot, /admin/v1/,
               #   and convert/, the Anthropic ⇄ Chat Completions conversion, whose request half
-              #   provider/openai shares
+              #   provider/openai shares, and Responses ⇄ Anthropic for the stateless /v1/responses
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
   store/      # Postgres schema/migrations, reserved multi-tenant columns
 deploy/{helm,compose,gcp}
@@ -195,4 +195,4 @@ Concretely here: "add validation" → write the failing test for invalid input f
 - **TDD** for anything with behavior: contract test first, then implement. This matters most for provider adapters, event/JSON round-trips against the wire schema, sandbox providers, and the work-queue lease state machine.
 - Keep files focused and small; one clear responsibility per package.
 - Provider-, sandbox-, and queue-backend variability lives behind interfaces with a **shared contract test suite** — every new backend must pass the same suite.
-- Confine lossy conversions to `provider/openai`, `internal/modelgateway/convert` — the Anthropic → Chat Completions request conversion it shares with the model gateway, and the gateway's conversion of the answer back — and the `search_result` rendering they share with `provider/anthropic` (`provider.SearchResultText`), and test them hard; the Anthropic-protocol provider stays near-zero-conversion and applies that rendering only when a route opts into `flatten_search_results`, and the model gateway only where a vendor profile flattens (`internal/modelgateway/edits.go`).
+- Confine lossy conversions to `provider/openai`, `internal/modelgateway/convert` — the Anthropic → Chat Completions request conversion it shares with the model gateway, the gateway's conversion of the answer back, and its Responses ⇄ Anthropic conversion — and the `search_result` rendering they share with `provider/anthropic` (`provider.SearchResultText`), and test them hard; the Anthropic-protocol provider stays near-zero-conversion and applies that rendering only when a route opts into `flatten_search_results`, and the model gateway only where a vendor profile flattens (`internal/modelgateway/edits.go`).
