@@ -182,22 +182,24 @@ func TestToolUseEmptyInput(t *testing.T) {
 	}
 }
 
-// Thinking blocks have no Chat Completions equivalent and are dropped, not
-// errored — an assistant turn with only thinking yields no assistant message.
-func TestThinkingBlockDropped(t *testing.T) {
+// A signed thinking block is another protocol's and drops out, not errored,
+// so an assistant turn of signed thinking alone yields no assistant message;
+// an unsigned one is reasoning a Chat Completions endpoint produced, and goes
+// back as reasoning_content, the turn's content empty.
+func TestThinkingBlocks(t *testing.T) {
 	body := requestFor(t, provider.Request{
 		System: "sys",
 		Messages: []provider.Message{
-			{Role: "assistant", Content: json.RawMessage(`[{"type":"thinking","thinking":"hmm"}]`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"thinking","thinking":"signed","signature":"sig"}]`)},
 			{Role: "user", Content: json.RawMessage(`"hi"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"thinking","thinking":"hmm"}]`)},
+			{Role: "user", Content: json.RawMessage(`"go on"`)},
 		},
 	})
-	msgs := messagesOf(t, body)
-	if len(msgs) != 2 { // system + user; the thinking-only assistant turn drops out
-		t.Fatalf("messages = %d, want 2 (thinking-only assistant dropped)", len(msgs))
-	}
-	if msgs[0]["role"] != "system" || msgs[1]["role"] != "user" {
-		t.Errorf("roles = %v/%v, want system/user", msgs[0]["role"], msgs[1]["role"])
+	want := []map[string]any{{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"},
+		{"role": "assistant", "content": "", "reasoning_content": "hmm"}, {"role": "user", "content": "go on"}}
+	if got := messagesOf(t, body); !reflect.DeepEqual(got, want) {
+		t.Errorf("messages = %v, want %v", got, want)
 	}
 }
 

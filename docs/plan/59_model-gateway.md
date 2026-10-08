@@ -301,7 +301,8 @@ converts when protocols match.
   error, relayed with its credentials removed, or when the upstream closes it after
   every choice's finish, as MiniMax-M3 does, sending no `[DONE]`; closed before any of
   these, it ends with an error chunk in OpenAI's envelope. A conversion path whose
-  upstream sends no pings emits its own during silent gaps. A provider configures both
+  upstream sends no pings emits its own during silent gaps, which do not hold off the
+  upstream's stall budget. A provider configures both
   of its vendor's endpoints
   and selection prefers the one matching the inbound protocol, so Anthropic and Chat
   Completions callers both pass through to all four chat vendors.
@@ -314,14 +315,15 @@ converts when protocols match.
   Slice 4 built the second (`convert`, whose doc gives each field's disposition): a
   credential is tried on the caller's protocol wherever it and its provider allow it, and
   converts only otherwise; a request the conversion cannot carry — structured output, a
-  server tool, a document — goes to the alias's passthrough attempts, answered 400 naming
+  server tool, a document, a prefill — goes to the alias's passthrough attempts, answered 400 naming
   the field when none is left, and `count_tokens`, which Chat Completions lacks, is never
   converted, answering 404 `not_found_error` where only conversion attempts exist. The
   answer comes back whole or as the Messages event flow, `reasoning_content` as a thinking
   block (Routing below), a tool call as `tool_use`, the finish as the stop reason, and an
   upstream error in Anthropic's envelope; a whole answer it cannot carry is the gateway's
-  502, and a stream's chunk an `error` event, neither retried once the upstream has
-  answered. What is dropped, refused or lossy is in docs/DIVERGENCES.md.
+  502, and a stream's chunk an `error` event, the upstream read on for the usage it
+  reports, neither retried once the upstream has answered. What is dropped, refused or
+  lossy is in docs/DIVERGENCES.md.
 - **Embeddings and rerank** have no Anthropic counterpart: passthrough to deployments
   of kind `embedding` (`/v1/embeddings`) and `rerank` (`/v1/rerank`). The body is read
   for `model` and `stream` alone — `input` may hold strings, token arrays or a vendor's

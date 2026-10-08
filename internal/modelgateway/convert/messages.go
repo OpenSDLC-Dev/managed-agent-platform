@@ -154,7 +154,7 @@ func message(m Message) ([]ChatMessage, error) {
 		}
 	}
 	out := results
-	if len(parts) == 0 && len(calls) == 0 {
+	if len(parts) == 0 && len(calls) == 0 && len(reasoning) == 0 {
 		return out, nil
 	}
 	msg := ChatMessage{Role: m.Role, ToolCalls: calls, ReasoningContent: strings.Join(reasoning, "")}
@@ -167,6 +167,8 @@ func message(m Message) ([]ChatMessage, error) {
 			texts[k] = p.Text
 		}
 		msg.Content = encode(strings.Join(texts, ""))
+	case len(calls) == 0: // reasoning alone, as an answer that spent its budget thinking leaves
+		msg.Content = encode("")
 	}
 	return append(out, msg), nil
 }

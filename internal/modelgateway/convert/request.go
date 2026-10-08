@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -26,7 +27,16 @@ import (
 //     server tool uses, and those are refused; and thinking, where the
 //     vendor names no thinking.type;
 //   - refused: output_config.format, structured output a Chat Completions
-//     vendor may not honor, and a server tool.
+//     vendor may not honor; a server tool; thinking.display omitted, since
+//     the vendor's reasoning comes back as text; and a final assistant turn,
+//     which Messages continues and Chat Completions would answer.
+//
+// A tool's name, description, input_schema and strict are mapped; its
+// cache_control, eager_input_streaming (a streaming granularity) and
+// input_examples (a hint) dropped; defer_loading true, which needs tool
+// search, and allowed_callers without "direct", which a model calling the
+// tool directly would overstep, refused, as is a field ToolParam does not
+// name.
 //
 // The error names the field as the caller wrote it.
 func Request(top map[string]json.RawMessage, model string, thinking map[string]string) ([]byte, error) {
@@ -92,6 +102,9 @@ func Request(top map[string]json.RawMessage, model string, thinking map[string]s
 	for i, m := range raws {
 		role, _ := text(m, "role")
 		turns[i] = Message{Role: role, Content: m["content"]}
+	}
+	if n := len(turns); n > 0 && turns[n-1].Role == "assistant" {
+		return nil, fmt.Errorf("messages[%d]: a final assistant turn, which Messages continues, has no Chat Completions counterpart", n-1)
 	}
 	msgs, err := Messages(system, turns)
 	if err != nil {
@@ -160,6 +173,28 @@ func requestTools(raw json.RawMessage) (json.RawMessage, error) {
 			return nil, fmt.Errorf("tools[%d]: a %q server tool has no Chat Completions counterpart", i, typ)
 		} else if !ok && !null(defs[i]["type"]) {
 			return nil, fmt.Errorf("tools[%d].type: must be a string", i)
+		}
+		keys := make([]string, 0, len(defs[i]))
+		for k := range defs[i] {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := defs[i][k]
+			switch k {
+			case "name", "description", "input_schema", "strict", "type", "cache_control", "eager_input_streaming", "input_examples":
+				continue
+			case "defer_loading":
+				if null(v) || bytes.Equal(bytes.TrimSpace(v), []byte("false")) {
+					continue
+				}
+			case "allowed_callers":
+				var callers []string
+				if null(v) || json.Unmarshal(v, &callers) == nil && slices.Contains(callers, "direct") {
+					continue
+				}
+			}
+			return nil, fmt.Errorf("tools[%d].%s: has no Chat Completions counterpart", i, k)
 		}
 	}
 	converted, err := Tools(tools, nil)
@@ -237,6 +272,18 @@ func thinkingType(raw json.RawMessage, vendor map[string]string) (string, error)
 	case "enabled", "adaptive", "disabled":
 	default:
 		return "", fmt.Errorf(".type: %q has no Chat Completions counterpart", typ)
+	}
+	keys := make([]string, 0, len(t))
+	for k := range t {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		switch display, _ := text(t, k); {
+		case k == "type", k == "budget_tokens", null(t[k]), k == "display" && display == "summarized":
+		default:
+			return "", fmt.Errorf(".%s: has no Chat Completions counterpart", k)
+		}
 	}
 	return vendor[typ], nil
 }

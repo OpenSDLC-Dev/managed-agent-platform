@@ -129,13 +129,19 @@ func TestRequestMessages(t *testing.T) {
 		{"role":"user","content":[{"type":"text","text":"look: "},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},{"type":"image","source":{"type":"url","url":"https://a.example/i.png"}}]},
 		{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":""},{"type":"text","text":"calling"},{"type":"tool_use","id":"call_1","name":"get_time","input":{"tz": "UTC"}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"noon"}],"is_error":true},{"type":"text","text":"thanks"},{"type":"text","text":" again"}]},
-		{"role":"assistant","content":[{"type":"thinking","thinking":"signed","signature":"mapgw1.gwdep_x.sig"},{"type":"redacted_thinking","data":"x"},{"type":"text","text":"done"}]}]}`)
+		{"role":"assistant","content":[{"type":"thinking","thinking":"signed","signature":"mapgw1.gwdep_x.sig"},{"type":"redacted_thinking","data":"x"},{"type":"text","text":"done"}]},
+		{"role":"user","content":"and?"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"out of tokens","signature":""}]},
+		{"role":"user","content":"go on"}]}`)
 	want := decoded(t, `[
 		{"role":"user","content":[{"type":"text","text":"look: "},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},{"type":"image_url","image_url":{"url":"https://a.example/i.png"}}]},
 		{"role":"assistant","content":"calling","reasoning_content":"hmm","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_time","arguments":"{\"tz\":\"UTC\"}"}}]},
 		{"role":"tool","content":"noon","tool_call_id":"call_1"},
 		{"role":"user","content":"thanks again"},
-		{"role":"assistant","content":"done"}]`)
+		{"role":"assistant","content":"done"},
+		{"role":"user","content":"and?"},
+		{"role":"assistant","content":"","reasoning_content":"out of tokens"},
+		{"role":"user","content":"go on"}]`)
 	if !reflect.DeepEqual(got["messages"], want) {
 		t.Errorf("messages\ngot  %v\nwant %v", got["messages"], want)
 	}
@@ -146,19 +152,25 @@ func TestRequestMessages(t *testing.T) {
 // a field the conversion does not know.
 func TestRequestRefusals(t *testing.T) {
 	for body, want := range map[string]string{
-		`{"model":"a","max_tokens":8,` + hi + `,"output_config":{"format":{"type":"json_schema","schema":{}}}}`:                                                   "output_config.format",
-		`{"model":"a","max_tokens":8,` + hi + `,"tools":[{"type":"web_search_20250305","name":"web_search"}]}`:                                                    "tools[0]",
-		`{"model":"a","max_tokens":8,` + hi + `,"mcp_servers":[]}`:                                                                                                "mcp_servers",
-		`{"model":"a","max_tokens":8,` + hi + `,"thinking":{"type":"sometimes"}}`:                                                                                 "thinking.type",
-		`{"model":"a","max_tokens":8,` + hi + `,"tool_choice":{"type":"tool"}}`:                                                                                   "tool_choice.name",
-		`{"model":"a","max_tokens":8,` + hi + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":"yes"}}`:                                                 "tool_choice.disable_parallel_tool_use",
-		`{"model":"a","max_tokens":8,` + hi + `,"system":[{"type":"image","source":{}}]}`:                                                                         "system[0]",
-		`{"model":"a","max_tokens":8,` + hi + `,"system":[{"type":"text","text":"a"},{"type":"document","text":"b"}]}`:                                            "system[1]",
-		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"document","source":{}}]}]}`:                                                   "messages[0].content[0]",
-		`{"model":"a","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"image","source":{"type":"url","url":"u"}}]}]}`:                           "messages[0].content[0]",
-		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"file","file_id":"f"}}]}]}`:                           "messages[0].content[0].source",
-		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"image","source":{}}]}]}]}`: "messages[0].content[0].content",
-		`{"model":"a","max_tokens":8,"messages":"hi"}`:                                                                                                            "messages",
+		`{"model":"a","max_tokens":8,` + hi + `,"output_config":{"format":{"type":"json_schema","schema":{}}}}`:                                                        "output_config.format",
+		`{"model":"a","max_tokens":8,` + hi + `,"tools":[{"type":"web_search_20250305","name":"web_search"}]}`:                                                         "tools[0]",
+		`{"model":"a","max_tokens":8,` + hi + `,"mcp_servers":[]}`:                                                                                                     "mcp_servers",
+		`{"model":"a","max_tokens":8,` + hi + `,"thinking":{"type":"sometimes"}}`:                                                                                      "thinking.type",
+		`{"model":"a","max_tokens":8,` + hi + `,"tool_choice":{"type":"tool"}}`:                                                                                        "tool_choice.name",
+		`{"model":"a","max_tokens":8,` + hi + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":"yes"}}`:                                                      "tool_choice.disable_parallel_tool_use",
+		`{"model":"a","max_tokens":8,` + hi + `,"system":[{"type":"image","source":{}}]}`:                                                                              "system[0]",
+		`{"model":"a","max_tokens":8,` + hi + `,"system":[{"type":"text","text":"a"},{"type":"document","text":"b"}]}`:                                                 "system[1]",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"document","source":{}}]}]}`:                                                        "messages[0].content[0]",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"image","source":{"type":"url","url":"u"}}]},{"role":"user","content":"go"}]}`: "messages[0].content[0]",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":"Answer YES or NO."},{"role":"assistant","content":"The answer is Y"}]}`:                     "messages[1]",
+		`{"model":"a","max_tokens":8,` + hi + `,"thinking":{"type":"enabled","budget_tokens":1024,"display":"omitted"}}`:                                               "thinking.display",
+		`{"model":"a","max_tokens":8,` + hi + `,"thinking":{"type":"adaptive","keep":"all"}}`:                                                                          "thinking.keep",
+		`{"model":"a","max_tokens":8,` + hi + `,"tools":[{"name":"f","input_schema":{"type":"object"},"defer_loading":true}]}`:                                         "tools[0].defer_loading",
+		`{"model":"a","max_tokens":8,` + hi + `,"tools":[{"name":"f","input_schema":{"type":"object"},"allowed_callers":["code_execution_20250825"]}]}`:                "tools[0].allowed_callers",
+		`{"model":"a","max_tokens":8,` + hi + `,"tools":[{"name":"f","input_schema":{"type":"object"},"eager":true}]}`:                                                 "tools[0].eager",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"file","file_id":"f"}}]}]}`:                                "messages[0].content[0].source",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"image","source":{}}]}]}]}`:      "messages[0].content[0].content",
+		`{"model":"a","max_tokens":8,"messages":"hi"}`:                                                                                                                 "messages",
 	} {
 		var top map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(body), &top); err != nil {
@@ -167,6 +179,21 @@ func TestRequestRefusals(t *testing.T) {
 		_, err := convert.Request(top, "up", nil)
 		if err == nil || !strings.HasPrefix(err.Error(), want) {
 			t.Errorf("Request(%s) = %v, want an error naming %s", body, err, want)
+		}
+	}
+}
+
+// What a tool or thinking may carry beyond what Chat Completions maps is
+// dropped where it only hints, and the rest of the request converts as if it
+// were absent.
+func TestRequestDroppedOptions(t *testing.T) {
+	plain := request(t, `{"model":"a","max_tokens":8,`+hi+`,"thinking":{"type":"enabled","budget_tokens":1024},"tools":[{"name":"f","input_schema":{"type":"object"}}]}`)
+	for _, body := range []string{
+		`{"model":"a","max_tokens":8,` + hi + `,"thinking":{"type":"enabled","budget_tokens":1024,"display":"summarized"},"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"},"eager_input_streaming":true,"input_examples":[{"q":"north"}],"defer_loading":false,"allowed_callers":["direct","code_execution_20250825"]}]}`,
+		`{"model":"a","max_tokens":8,` + hi + `,"thinking":{"type":"enabled","budget_tokens":1024,"display":null},"tools":[{"name":"f","input_schema":{"type":"object"},"defer_loading":null,"allowed_callers":null}]}`,
+	} {
+		if got := request(t, body); !reflect.DeepEqual(got, plain) {
+			t.Errorf("Request(%s) = %v, want %v", body, got, plain)
 		}
 	}
 }

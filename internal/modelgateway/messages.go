@@ -90,11 +90,14 @@ func bounded(w http.ResponseWriter) *http.ResponseController {
 // callerWriter writes an answer to the caller as it arrives, a piece at a
 // time. Each write is held to writeStall, and a caller whose write fails or
 // outlasts it is gone: nothing more is written to it, though the upstream
-// answer is still read to its end. The stall guard is held while a write
-// lasts: the upstream, unread meanwhile, can show no sign of life, so that
-// time is not its silence, and however short the provider's stall budget, a
-// caller slow to read is not cut off by it, nor one that stops reading able
-// to end the upstream answer before it is read. No deadline is left armed
+// answer is still read to its end. The stall guard is held while the relay
+// writes, its wait behind an idle ping included: the upstream, unread
+// meanwhile, can show no sign of life, so that time is not its silence, and
+// however short the provider's stall budget, a caller slow to read is not cut
+// off by it, nor one that stops reading able to end the upstream answer
+// before it is read. An idle ping holds nothing: it is the gateway's own,
+// written while the upstream is still read, so the upstream's silence goes
+// on counting toward its stall budget. No deadline is left armed
 // between writes, while the upstream is read: HTTP/2 resets a stream whose
 // deadline passes with no write pending.
 type callerWriter struct {
@@ -112,6 +115,8 @@ func newCallerWriter(w http.ResponseWriter, guard *provider.StallGuard, flush bo
 }
 
 func (cw *callerWriter) write(b []byte) {
+	cw.guard.Hold()
+	defer cw.guard.Release()
 	cw.mu.Lock()
 	defer cw.mu.Unlock()
 	cw.writeLocked(b)
@@ -143,13 +148,18 @@ func (cw *callerWriter) pingWhileIdle(ping []byte, every time.Duration) (stop fu
 	return func() { close(done); <-finished }
 }
 
+// stop writes nothing more to the caller, an idle ping included.
+func (cw *callerWriter) stop() {
+	cw.mu.Lock()
+	cw.gone = true
+	cw.mu.Unlock()
+}
+
 func (cw *callerWriter) writeLocked(b []byte) {
 	defer func() { cw.last = time.Now() }()
 	if cw.gone {
 		return
 	}
-	cw.guard.Hold()
-	defer cw.guard.Release()
 	_ = cw.rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load())))
 	_, err := cw.w.Write(b)
 	if err == nil && cw.flush {
@@ -918,6 +928,9 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 		if out != nil {
 			send(out)
 		}
+		if p.draining() {
+			cw.stop()
+		}
 		done = done || last
 	}
 	switch {
@@ -985,6 +998,10 @@ type streamProto interface {
 	// before the answer began, and whenever pingEvery passes with nothing
 	// written; nil sends the held ones as they came, and nothing else.
 	idle() []byte
+	// draining reports whether the caller has been told the stream failed
+	// while the upstream is still read, for the usage it reports: nothing
+	// more is written to the caller.
+	draining() bool
 }
 
 // messagesStream relays an Anthropic stream, rewriting only message_start's
@@ -1038,6 +1055,8 @@ func (s *messagesStream) ended() string { return "the stream ended before messag
 func (s *messagesStream) closing() []byte { return nil }
 
 func (s *messagesStream) idle() []byte { return nil }
+
+func (s *messagesStream) draining() bool { return false }
 
 func (s *messagesStream) complete(data []byte) bool { return json.Valid(data) }
 
@@ -1172,6 +1191,8 @@ func (s *chatStream) complete(data []byte) bool { return json.Valid(data) || isD
 func (s *chatStream) closing() []byte { return nil }
 
 func (s *chatStream) idle() []byte { return nil }
+
+func (s *chatStream) draining() bool { return false }
 
 // keepAlive: an event with no data line, which an OpenAI client does not
 // dispatch, whatever its name but error, which the gateway reads as one. A

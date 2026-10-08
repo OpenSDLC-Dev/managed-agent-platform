@@ -110,24 +110,41 @@ func messagesErrorType(typ string, status int) string {
 // chunk converted (convert.Stream), the usage a chunk reports going to c.out
 // and to message_delta. It reads the stream as chatStream does: a chunk
 // carrying error, or an event named error, ends it, as the Messages error
-// event convertedError makes of it; data that is no JSON object, or a chunk
-// convert cannot carry, ends it with the gateway's own; [DONE] ends it with
+// event convertedError makes of it; data that is no JSON object ends it with
+// the gateway's own; a chunk convert cannot carry ends it for the caller with
+// the gateway's own too, and the upstream, which is still generating and
+// charging, is read on to its end for the usage it reports after its finish
+// (draining); [DONE] ends it with
 // the message's last events, and so does the upstream closing it once the
 // choice has finished, which MiniMax-M3 does without [DONE]. Its keep-alives
 // are Chat Completions', and the caller is sent Messages pings in their
 // place, and whenever the relay has written nothing for pingEvery.
 type convStream struct {
-	c   call
-	s   *convert.Stream
-	ctx context.Context
-	red provider.Redactor
-	rid string
+	c      call
+	s      *convert.Stream
+	ctx    context.Context
+	red    provider.Redactor
+	rid    string
+	failed bool // a chunk could not be converted, and the upstream is read on for its usage alone
 }
 
 func (p *convStream) keepAlive(e upstream.Event) bool { return e.Data == nil && e.Name != "error" }
 
 func (p *convStream) event(e upstream.Event) ([]byte, bool) {
 	named := e.Name == "error"
+	if p.failed {
+		var obj map[string]json.RawMessage
+		switch {
+		case e.Data == nil && !named:
+			return nil, false
+		case named || isDone(e.Data) || json.Unmarshal(e.Data, &obj) != nil:
+			return nil, true
+		}
+		if t := chatUsageOf(obj["usage"]); t != nil {
+			p.c.out.tokens = t
+		}
+		return nil, false
+	}
 	switch {
 	case e.Data == nil && !named:
 		return convert.Ping(), false
@@ -150,8 +167,8 @@ func (p *convStream) event(e upstream.Event) ([]byte, bool) {
 	}
 	out, err := p.s.Chunk(e.Data)
 	if err != nil {
-		p.c.out.errType = "api_error"
-		return p.failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", err)), true
+		p.c.out.errType, p.failed = "api_error", true
+		return p.failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", err)), false
 	}
 	if len(out) == 0 {
 		return nil, false
@@ -159,8 +176,10 @@ func (p *convStream) event(e upstream.Event) ([]byte, bool) {
 	return out, false
 }
 
+// ended is "" once a chunk could not be converted: the caller was given that
+// error, which a drain that then breaks off leaves the ledger's.
 func (p *convStream) ended() string {
-	if p.s.Finished() {
+	if p.failed || p.s.Finished() {
 		return ""
 	}
 	return "the stream ended before its finish"
@@ -174,5 +193,7 @@ func (p *convStream) failure(typ, msg string) []byte {
 }
 
 func (p *convStream) closing() []byte { return p.s.End() }
+
+func (p *convStream) draining() bool { return p.failed }
 
 func (p *convStream) idle() []byte { return convert.Ping() }

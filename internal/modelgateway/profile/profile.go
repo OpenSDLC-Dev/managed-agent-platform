@@ -128,7 +128,10 @@ var profiles = []Profile{
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.z.ai/api/anthropic"},
 		{Protocol: OpenAI, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/paas/v4"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.z.ai/api/paas/v4"},
-	}},
+	},
+		// Z.ai's thinking guide: thinking.type enabled (the default) or
+		// disabled, from GLM-4.5; GLM-5.3 refuses disabled itself.
+		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
 	// Kimi documents its OpenAI-compatible host on the international site
 	// only, and a Bearer token as the one way to send a key: its Claude Code
 	// guide says to remove ANTHROPIC_API_KEY, which sends x-api-key.
@@ -136,7 +139,11 @@ var profiles = []Profile{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://api.moonshot.cn/anthropic"},
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.moonshot.ai/anthropic"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.moonshot.ai/v1"},
-	}, BearerAuth: true},
+	}, BearerAuth: true,
+		// Kimi's thinking-models guide: thinking.type enabled (the default) or
+		// disabled, for kimi-k2.6, the models without the toggle answering
+		// for themselves.
+		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
 	// Gitee AI is v1's embeddings and rerank vendor, dikw-core's default for
 	// both. It drops idle keep-alive connections in the middle of a batch,
 	// which dikw-core works around with a fresh connection per request

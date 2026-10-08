@@ -11,7 +11,8 @@ import (
 // (platform.claude.com/docs/en/build-with-claude/streaming): message_start
 // before anything else; each block's content_block_start, its deltas and
 // its content_block_stop before the next block starts, indices counting up
-// from zero, as anthropic-sdk-go's Message.Accumulate requires; a thinking
+// from zero, as an SDK accumulating the stream requires (checked against
+// anthropic-sdk-go v1.70.1 — messageutil.go Message.Accumulate); a thinking
 // block's signature_delta just before its stop; a tool_use block opened
 // with an empty input, its arguments following as input_json_delta; then
 // message_delta, with the stop reason and the usage, and message_stop.

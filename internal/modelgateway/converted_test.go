@@ -568,14 +568,16 @@ func TestAConvertedStreamPingsOnlyWhenIdle(t *testing.T) {
 }
 
 // Each vendor is sent thinking in its own words on its OpenAI endpoint:
-// MiniMax thinks adaptively when asked to think at all, and DeepSeek takes
-// adaptive as enabled.
+// MiniMax thinks adaptively when asked to think at all, and DeepSeek, Zhipu
+// and Moonshot take adaptive as enabled.
 func TestAConvertedRequestsThinkingIsTheVendors(t *testing.T) {
 	for _, c := range []struct{ prof, asked, sent string }{
 		{"minimax", `{"type":"enabled","budget_tokens":1024}`, `{"type":"adaptive"}`},
 		{"minimax", `{"type":"adaptive"}`, `{"type":"adaptive"}`},
 		{"deepseek", `{"type":"adaptive"}`, `{"type":"enabled"}`},
 		{"deepseek", `{"type":"disabled"}`, `{"type":"disabled"}`},
+		{"zhipu", `{"type":"disabled"}`, `{"type":"disabled"}`},
+		{"moonshot", `{"type":"adaptive"}`, `{"type":"enabled"}`},
 	} {
 		e := newEnv(t)
 		f := newFake(t, chatAnswer("ok", deepseekStyle))
@@ -588,5 +590,115 @@ func TestAConvertedRequestsThinkingIsTheVendors(t *testing.T) {
 		if resp.StatusCode != 200 || len(calls) != 1 || string(calls[0].Body["thinking"]) != c.sent {
 			t.Errorf("%s asked %s: %d %s, sent %s", c.prof, c.asked, resp.StatusCode, b, encodeJSON(calls))
 		}
+	}
+}
+
+// A converted stream's own pings are not the upstream's sign of life: an
+// upstream gone silent is cut off at its provider's stall budget all the
+// same.
+func TestAConvertedStreamStallsThroughItsPings(t *testing.T) {
+	defer modelgateway.SetPingEvery(50 * time.Millisecond)()
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, _ fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"index":0,"delta":{"content":"par"}}]}`+"\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-time.After(3 * time.Second):
+		case <-r.Context().Done():
+		}
+	})
+	p := e.provider(f.URL, func(p *store.Provider) {
+		p.Name, p.Profile, p.StallTimeout = "deepseek", "deepseek", 300*time.Millisecond
+		p.Endpoints = map[profile.Protocol]string{profile.OpenAI: f.URL}
+	})
+	e.credential(p, "sk-deepseek-key1", 1)
+	e.alias("fast", target(e.deployment(p, "deepseek-flash"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	start := time.Now()
+	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
+	lines := dataLines(b)
+	typ, _, _ := errorOf(t, []byte(lines[len(lines)-1]))
+	if took := time.Since(start); typ != "timeout_error" || took > 2*time.Second || !strings.Contains(string(b), "event: ping") {
+		t.Errorf("after %s the stream ended %s:\n%s", took, lines[len(lines)-1], b)
+	}
+}
+
+// A chunk the conversion cannot carry ends the stream for the caller, with
+// nothing after its error, while the upstream, still charging, is read on
+// for the usage it reports after its finish, which the ledger records.
+func TestAnUnconvertibleStreamIsStillCounted(t *testing.T) {
+	defer modelgateway.SetPingEvery(20 * time.Millisecond)()
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for i, ch := range []string{
+			`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"f","arguments":""}}]}}]}`,
+			`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"b","function":{"name":"f","arguments":"{}"}}]}}]}`,
+			`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`,
+			`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
+			"[DONE]",
+		} {
+			if i == 3 { // long enough for idle pings, were any still written
+				time.Sleep(150 * time.Millisecond)
+			}
+			_, _ = io.WriteString(w, "data: "+ch+"\n\n")
+			w.(http.Flusher).Flush()
+		}
+	})
+	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
+	body := strings.TrimSpace(string(b))
+	last := body[strings.LastIndex(body, "event: "):]
+	var rows []store.Usage
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if rows = e.ledger(); len(rows) == 1 {
+			break
+		}
+	}
+	if !strings.HasPrefix(last, "event: error") || strings.Count(body, "event: error") != 1 || !strings.Contains(last, "went back to tool call 0") ||
+		len(rows) != 1 || rows[0].ErrorType != "api_error" || rows[0].Tokens == nil || *rows[0].Tokens != (store.Tokens{Input: 10, Output: 5}) {
+		t.Errorf("stream:\n%s\nledger %+v", b, rows)
+	}
+}
+
+// A drain that stalls after a chunk the conversion could not carry leaves
+// the ledger the error the caller was given.
+func TestAStalledDrainKeepsTheCallersError(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, _ fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"index":0,"delta":{"content":"par"}}]}`+"\n\n"+
+			`data: {"choices":[{"index":1,"delta":{"content":"x"}}]}`+"\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-time.After(3 * time.Second):
+		case <-r.Context().Done():
+		}
+	})
+	p := e.provider(f.URL, func(p *store.Provider) {
+		p.Name, p.Profile, p.StallTimeout = "deepseek", "deepseek", 200*time.Millisecond
+		p.Endpoints = map[profile.Protocol]string{profile.OpenAI: f.URL}
+	})
+	e.credential(p, "sk-deepseek-key1", 1)
+	e.alias("fast", target(e.deployment(p, "deepseek-flash"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
+	var rows []store.Usage
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if rows = e.ledger(); len(rows) == 1 {
+			break
+		}
+	}
+	if len(rows) != 1 || rows[0].ErrorType != "api_error" || !strings.Contains(string(b), "could not be converted") {
+		t.Errorf("stream:\n%s\nledger %+v", b, rows)
 	}
 }

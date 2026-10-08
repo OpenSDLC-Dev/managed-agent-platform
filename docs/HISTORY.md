@@ -6918,3 +6918,43 @@ thinking, a system block of another type carrying text, and a chunk the conversi
 cannot carry followed by a finish. Two branches turned out dead and went: a 422 case
 the 4xx rule already covers, and an error chunk's status read from a type that is kept
 anyway. All 95 mutants of the final list are caught.
+
+Review found seven defects and one gate failure, each fixed with a test that failed on
+the code before it:
+- The gateway's idle pings released the stall guard, which counts as the upstream's
+  progress, so a converted stream whose upstream fell silent was pinged every 15
+  seconds and never cut off at a longer stall budget, holding its request and its
+  connections open (the background security review and Codex). A ping now holds
+  nothing; the relay holds the guard across its wait behind one.
+- A chunk the conversion cannot carry ended the stream and closed the upstream, losing
+  the usage it reports after its finish, which the vendor had charged (Codex). The
+  gateway now reads the upstream on to its end, writing nothing more to the caller, and
+  the ledger counts what it reports.
+- Zhipu and Moonshot were sent no thinking, so a request disabling it thought anyway, as
+  both vendors default to (Codex). Both document `thinking.type` enabled or disabled on
+  their OpenAI endpoints — Z.ai's thinking guide from GLM-4.5, Kimi's thinking-models
+  guide for kimi-k2.6 — and now get it; neither has a key for the live tier.
+- `thinking.display: "omitted"` was accepted, and plaintext reasoning returned; it is
+  refused now, as is a thinking field the pin does not name (Codex).
+- A tool's fields beyond its name, description, schema and `strict` went unchecked
+  (Codex): its hints are dropped, `defer_loading: true` and `allowed_callers` without
+  `direct` refused, and any other field refused.
+- An assistant turn of reasoning alone, which an answer that spent its budget thinking
+  leaves, vanished on replay with its reasoning (Codex); it goes back with empty
+  content. The brain's adapter shares the rule, though it makes no such turn itself.
+- A final assistant turn, which Messages continues, went upstream as a turn Chat
+  Completions answers (Codex); it is refused, for the passthrough attempts or a 400.
+  DeepSeek's prefix completion, on its beta endpoint, was left unmapped.
+- An SDK's name in a new comment lacked the citation `tools/sdkref` requires (the
+  verifier). The check reads only the files git tracks, so it passed until the commit.
+
+The security review's other finding, an SSRF through `convert/messages.go`, was left as
+it is. A `url` image source goes upstream as an `image_url`, which the gateway never
+fetches; an upstream that fetches it does so from its own network, which the Messages
+and Chat Completions passthroughs already let the same key ask of it, and the brain's
+Anthropic adapter has always sent such a source.
+
+Mutation testing of the round's guards caught 16 of 18 mutants. Of the two misses, one
+was dead code — closing events after a failure, which the stopped writer never writes —
+and went; the other showed a test missing, a drain that stalls leaving the ledger the
+error the caller was given, which was added.
