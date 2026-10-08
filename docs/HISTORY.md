@@ -7110,7 +7110,8 @@ Fixed in review:
   had not registered yet, and the gateway's 401 fails the turn. The control plane
   registers both keys before it listens, so it and the gateway carry a TCP healthcheck
   and the brain starts once both are healthy — every 5 seconds, since `start_interval`,
-  which would probe faster while starting only, fails `up` on Docker Engines before 25.
+  which would probe faster while starting only, fails `up` on Docker Engines before 25,
+  after a 10-minute `start_period`, since migrations wait on their lock without a bound.
 - With its route the chart's own, nothing could set the route's other fields, and the
   brain sets no `max_tokens`, so every turn was held to the anthropic adapter's 8,192;
   `brain.gatewayRoute` adds them, refusing the four the chart writes and `api_key`.
