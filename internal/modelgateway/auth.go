@@ -30,7 +30,8 @@ func (c caller) may(alias string) bool {
 // rule — an active, unexpired row — so a key the platform has archived or let
 // expire calls nothing here either; those two keys' values only spare them a
 // policy. A policy belongs to a row, so one written for either key lapses when
-// the key rotates: the new value is a new row.
+// the key rotates to a value never registered before, which is a new row; a
+// value registered before gets its old row back, and that row's policy.
 func (h *handler) authenticate(r *http.Request) (caller, *apiError) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {

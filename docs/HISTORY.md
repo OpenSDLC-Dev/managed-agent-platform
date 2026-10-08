@@ -7056,8 +7056,9 @@ Fixed in review:
 - The console's refusal for an env-var-managed row named `CONTROLPLANE_API_KEY` on the
   `brain` row too; it names the variable that owns the row.
 - A retirement archived a live key without a word; it logs what it archived.
-- A key policy belongs to a row, so a rotation drops one written for the brain or
-  bootstrap key; the docs now say so, where they had said it still applies.
+- A key policy belongs to a row, so a rotation to a value never registered before drops
+  one written for the brain or bootstrap key (an earlier value revives its row, policy
+  and all); the docs now say so, where they had said it still applies.
 
 Declined: a minimum length for `BRAIN_API_KEY`, which the bootstrap key has never had,
 and one shared list of the call's own header names, the refusal sitting beside

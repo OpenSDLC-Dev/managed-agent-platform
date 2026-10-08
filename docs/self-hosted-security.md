@@ -1275,8 +1275,9 @@ carries leading or trailing whitespace, which HTTP trims in transit. Every
 control-plane replica must agree on it, set or unset, as on the bootstrap key: a
 replica booting without it archives the key another replica just registered, as one
 booting with an old bootstrap value revives that value over the new one. The gateway
-needs no key policy for it, but holds it to one written for its row; rotating the key
-makes a new row, so such a policy is written again for the new one.
+needs no key policy for it, but holds it to one written for its row; rotating to a
+value never registered before makes a new row, so such a policy is written again for
+it, while returning to an earlier value revives that value's row and its policy.
 
 Console-**issued** keys are the other writer. The platform generates the secret —
 256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in
