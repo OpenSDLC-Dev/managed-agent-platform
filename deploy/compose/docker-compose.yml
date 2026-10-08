@@ -197,6 +197,15 @@ services:
       idp:
         condition: service_healthy
         required: false
+    # Listening means both keys are registered: the control plane writes them
+    # before it opens its port, so the brain, which waits on this, cannot send
+    # the gateway a key it has not registered yet. A TCP connect, since the
+    # image has bash but no HTTP client.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
     ports:
       # Bound to loopback by default: the committed CONTROLPLANE_API_KEY is a
       # well-known placeholder, so the API must not be reachable from the LAN.
@@ -250,6 +259,12 @@ services:
       idp:
         condition: service_healthy
         required: false
+    # The control plane's TCP check, for the brain to wait on.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8090"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
     ports:
       # The control plane's bind, for the same reason: the admin API accepts the
       # placeholder bootstrap key.
@@ -277,8 +292,14 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      # Both listening before the brain claims a turn: the gateway answers its
+      # model calls, and the control plane has registered the key they carry,
+      # without which the gateway's 401 fails a queued turn rather than
+      # delaying it.
+      controlplane:
+        condition: service_healthy
       modelgateway:
-        condition: service_started
+        condition: service_healthy
     volumes:
       # The brain's model routing (a JSON array — see internal/provider LoadRoutes).
       # Defaults to the committed model-providers.gateway.json, one route sending

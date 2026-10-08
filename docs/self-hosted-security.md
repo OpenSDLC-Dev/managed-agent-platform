@@ -1278,7 +1278,12 @@ replica booting without it archives the key another replica just registered, as 
 booting with an old bootstrap value revives that value over the new one. The gateway
 needs no key policy for it, but holds it to one written for its row; rotating to a
 value never registered before makes a new row, so such a policy is written again for
-it, while returning to an earlier value revives that value's row and its policy.
+it, while returning to an earlier value revives that value's row and its policy. A
+rotation also has a window: a brain sending a value the control plane has not
+registered yet, or has just archived, has its model calls refused with a 401, which
+fails the turn rather than delaying it. Compose closes it by starting the brain only
+once the control plane listens, which it does after registering; a Helm upgrade rolls
+the Deployments together, so rotate while no turns run.
 
 Console-**issued** keys are the other writer. The platform generates the secret —
 256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in

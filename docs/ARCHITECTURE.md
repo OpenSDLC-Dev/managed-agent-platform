@@ -63,7 +63,9 @@ Postgres, all coordination through it:
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
 | `modelgateway` | The model gateway (plan 59): Anthropic Messages, OpenAI's Chat Completions and Embeddings, and rerank for the platform's API keys, routed to the vendor deployments its catalogue configures, beside the `/admin/v1/` API that configures it. It runs one sweep no request drives — the usage ledger's retention, at startup and then hourly, under an advisory lock so replicas take turns. The brain's default route sends every model call to it, under `BRAIN_API_KEY`. Compose runs it; the Helm chart runs it unless `modelgateway.enabled=false`, two replicas behind a PodDisruptionBudget by default, and refuses to without a credential cipher. |
 
-Processes never talk to each other directly. The brain and the executors communicate
+Processes never talk to each other directly, the brain's model calls to the model
+gateway aside: those are the HTTP calls it would otherwise make to a vendor, and carry
+none of a session's coordination. The brain and the executors communicate
 through the control plane's event log and work queue, and where a poll would be too slow
 to wait for, through a Postgres `NOTIFY` that says only *look now* — the work API's long
 poll (#74) and the sandbox reaper's teardown wake (plan 48). Both are wakes over a
