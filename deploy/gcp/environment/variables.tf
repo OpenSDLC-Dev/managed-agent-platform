@@ -82,9 +82,10 @@ variable "release_name" {
 
     The chart's nameOverride and fullnameOverride are NOT accounted for here —
     they replace the chart name the mirrored arithmetic is built on. Set either
-    and you must write all three iam.workloadIdentityUser bindings by hand —
-    controlplane, brain and executor. Miss one and only that component fails,
-    at pod startup, with ADC finding no identity.
+    and you must write the iam.workloadIdentityUser bindings by hand —
+    controlplane, brain and executor, and modelgateway when the chart's
+    modelgateway.enabled is set. Miss one and only that component fails, at
+    pod startup, with ADC finding no identity.
   EOT
   default     = "map"
 }

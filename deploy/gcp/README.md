@@ -18,7 +18,7 @@ identically?"**
 | | `foundation/` | `environment/` |
 | --- | --- | --- |
 | Lifecycle | created once, **never destroyed** | created and destroyed freely |
-| Holds | KMS key ring + crypto key, the three service accounts, the two database Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
+| Holds | KMS key ring + crypto key, the four service accounts, the two database Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
 | Idle cost | cents a month | a running cluster and database |
 | `terraform destroy` | not supported — `prevent_destroy` **and** `deletion_policy = "PREVENT"` | `make gcp-env-destroy` |
 
@@ -47,7 +47,7 @@ A third reason retired with #240, and it is worth recording why rather than dele
 silently: **deleting a service account deletes its HMAC keys**, so the identity holding the
 GCS HMAC pair could not live in the disposable half without stranding a once-readable secret
 in Secret Manager — valid-looking, and dead. Object storage is now reached by the workloads
-themselves through Workload Identity, so there is no HMAC key, no fourth identity, and
+themselves through Workload Identity, so there is no HMAC key, no identity holding one, and
 nothing for a rebuild to carry forward. The two reasons above are untouched.
 
 **No secret value is in either configuration.** Terraform holds names, IAM bindings and
@@ -485,6 +485,7 @@ terraform output -raw  kms_key_name                              # gcpKMS.keyNam
 terraform output -json controlplane_service_account_annotation   # controlplane.serviceAccount.annotations
 terraform output -json brain_service_account_annotation          # brain.serviceAccount.annotations
 terraform output -json executor_service_account_annotation       # executor.serviceAccount.annotations
+terraform output -json modelgateway_service_account_annotation   # modelgateway.serviceAccount.annotations, with modelgateway.enabled
 terraform output -raw  blob_backend                              # BLOB_BACKEND
 terraform output -raw  blob_bucket                               # BLOB_BUCKET
 terraform output -raw  sql_instance_connection_name              # cloudSQLProxy.instanceConnectionName
@@ -692,7 +693,7 @@ last two lines of it — the build and the install — against **one** staging e
 | creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
 | setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
-| build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
+| build and push the five images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **A failed deploy opens an issue**, because it used to notify nobody: `ci` failing blocks a
 merge and is impossible to miss, while `deploy` runs after it and reports to whoever thinks
@@ -795,6 +796,11 @@ exists here precisely because nothing in the repository would otherwise record i
 deploy identity is created with it. They are named here so that setting up a fresh deployment
 is a list to work through rather than a guess, since the workflow's guard refuses to run
 until all eleven exist.
+
+The model gateway's account (`F modelgateway_service_account`) has no variable, because
+`staging-values.yaml` leaves `modelgateway.enabled` off and CD neither annotates nor reads
+back a ServiceAccount the chart does not render. Enabling it there takes a twelfth variable,
+added to the guard, the `--set-string` list and the read-back beside the other three.
 
 Three names are deliberately **not** variables — `K8S_NAMESPACE`, `K8S_SECRET` and
 `HELM_RELEASE` stay literals in the workflow, because they name the *chart's* own objects
@@ -979,7 +985,7 @@ So the workflow builds on the runner and pushes to Artifact Registry. That needs
 permission the deploy identity already holds — `roles/artifactregistry.writer` — and no
 bucket, no staging upload and no Cloud Build API. `cloudbuild.yaml` remains the **manual**
 path's build definition; keep the two saying the same thing, which is why the workflow writes
-its four tags out rather than inferring them.
+its five tags out rather than inferring them.
 
 **Three IAM grants live outside Terraform, and each blocks a different path when it is
 missing.** All were made by hand and are recorded here because nothing in the repository
@@ -989,7 +995,7 @@ would otherwise say they exist:
 | --- | --- | --- |
 | `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
 | the `mapCdRbacWriter` custom role, below | the project | the chart renders a namespaced `Role` and `RoleBinding` for the executor, and `roles/container.developer` carries only `get`/`list` on RBAC resources — so `helm upgrade` is refused the moment either object's rendered content changes. **This role is half the remedy**: an in-cluster basis Role, also below, answers a second gate that Cloud IAM does not reach |
-| `roles/cloudsql.viewer` | the project | `deploy.yml` asks the Cloud SQL Admin API for the instance's connection name rather than composing it, which needs `cloudsql.instances.get`. The three *workload* identities' `roles/cloudsql.client` (`environment/iam.tf`) does not cover the deployer, which is not in this repository's Terraform at all. Without it the deploy fails at the resolve step — early, before the image build, but on every push |
+| `roles/cloudsql.viewer` | the project | `deploy.yml` asks the Cloud SQL Admin API for the instance's connection name rather than composing it, which needs `cloudsql.instances.get`. The *workload* identities' `roles/cloudsql.client` (`environment/iam.tf`) does not cover the deployer, which is not in this repository's Terraform at all. Without it the deploy fails at the resolve step — early, before the image build, but on every push |
 
 The third is what the Cloud SQL Auth Proxy cutover added, and it is read-only:
 
@@ -1513,6 +1519,7 @@ terraform import google_kms_crypto_key.cipher              "$P/locations/$L/keyR
 terraform import google_service_account.controlplane       "$P/serviceAccounts/map-controlplane@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.brain              "$P/serviceAccounts/map-brain@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
+terraform import google_service_account.modelgateway       "$P/serviceAccounts/map-modelgateway@your-project.iam.gserviceaccount.com"
 terraform import google_secret_manager_secret.db_password       "$P/secrets/map-db-password"
 terraform import google_secret_manager_secret.db_admin_password "$P/secrets/map-db-admin-password"
 # The state bucket (#478). Missing it is the worst case in this list, because a

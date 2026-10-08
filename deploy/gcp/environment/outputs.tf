@@ -82,6 +82,11 @@ output "executor_service_account_annotation" {
   description = "Chart: executor.serviceAccount.annotations, verbatim."
 }
 
+output "modelgateway_service_account_annotation" {
+  value       = { "iam.gke.io/gcp-service-account" = data.google_service_account.modelgateway.email }
+  description = "Chart: modelgateway.serviceAccount.annotations, verbatim, when modelgateway.enabled is set. The identity carries roles/cloudkms.cryptoKeyEncrypterDecrypter on the key and roles/cloudsql.client."
+}
+
 # No endpoint and no credential: since #240 this deployment reaches the bucket
 # through internal/blob/gcs, which resolves Google's own endpoint and
 # authenticates with Workload Identity. The `blob-endpoint`, `blob-access-key`

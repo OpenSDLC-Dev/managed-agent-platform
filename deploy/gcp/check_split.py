@@ -84,17 +84,18 @@ UNRECOVERABLE = {
 
 # What foundation/ is expected to protect today. A scan that finds fewer has
 # lost sight of something — the whole check passing over three resources
-# instead of seven is exactly the failure a "did I find anything at all?" guard
+# instead of eight is exactly the failure a "did I find anything at all?" guard
 # is too weak to catch. Raise it with the foundation: left behind, it keeps
 # printing ok over a scan that has quietly stopped seeing the newest resources.
 #
 # Ten until #240, which retired three: the `-storage` service account that held
 # the GCS HMAC key, and the two secret containers holding the key's halves.
-# Object storage authenticates as the workloads themselves now, so there is no
-# fourth identity and no downloaded credential to protect. Lowered deliberately,
+# Object storage authenticates as the workloads themselves now, so that identity
+# and its downloaded credential are gone. Lowered deliberately,
 # which is exactly what the failure message below asks for — the number is a
-# claim about the foundation, not a high-water mark.
-MIN_PROTECTED = 7
+# claim about the foundation, not a high-water mark. Eight since plan 59 slice
+# 2f gave the model gateway its own service account.
+MIN_PROTECTED = 8
 
 ROOT = pathlib.Path(__file__).parent
 RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')

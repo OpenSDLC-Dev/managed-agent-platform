@@ -109,12 +109,14 @@ The SECRETS_ and BAO_ env entries for processes that use the credential cipher
 (docs/plan/12_vaults-credentials.md for the controlplane, which encrypts on
 write and decrypts for mcp_oauth_validate and for egress substitution at the
 gate-config endpoint; plans 25 and 29 for the executor, which decrypts a
-repository's sealed token and an MCP dial's vault credential; the brain holds
-no cipher, and the BYOC worker never talks to bao). Every key is optional,
-exactly like map.blobEnv: a chart Secret rendered without secrets-* keys — or
-an existingSecret that never carried them — deploys without a cipher,
-and the processes serve with vault credential storage unavailable instead of
-crash-looping.
+repository's sealed token and an MCP dial's vault credential; plan 59 for the
+model gateway, which seals and opens vendor keys; the brain holds no cipher,
+and the BYOC worker never talks to bao). Every key is optional, exactly like
+map.blobEnv: a chart Secret rendered without secrets-* keys — or an
+existingSecret that never carried them — deploys without a cipher, and the
+control plane and executor serve with vault credential storage unavailable
+instead of crash-looping. The model gateway is the exception: it needs the
+cipher, so its Deployment refuses to render without one.
 */}}
 {{- define "map.secretsEnv" -}}
 {{- range $var, $key := dict "SECRETS_BACKEND" "secrets-backend" "BAO_ADDR" "bao-addr" "BAO_TOKEN" "bao-token" "BAO_TRANSIT_KEY" "bao-transit-key" "SECRETS_MASTER_KEY" "secrets-master-key" "SECRETS_KEY_ID" "secrets-key-id" "GCPKMS_KEY_NAME" "gcpkms-key-name" }}
@@ -128,10 +130,28 @@ crash-looping.
 {{- end -}}
 
 {{/*
+The credential cipher the release resolves — "openbao", "local", "gcpkms", or
+empty for none — in the order secret.yaml validates the options and refuses two
+at once. secret.yaml writes it as the secrets-backend key, and the model
+gateway's Deployment refuses a release with none, so the two cannot disagree on
+what counts as a cipher.
+*/}}
+{{- define "map.secretsBackend" -}}
+{{- if or .Values.openbao.enabled .Values.externalOpenBao.address -}}
+openbao
+{{- else if .Values.localCipher.masterKey -}}
+local
+{{- else if .Values.gcpKMS.keyName -}}
+gcpkms
+{{- end -}}
+{{- end -}}
+
+{{/*
 The IDENTITY_* env entries for the control plane — the human-auth lane
-(docs/plan/31_console-sso-rbac.md, #56). Rendered inside the controlplane
-container's `env:` list, like map.commonEnv above. No other process has a human
-lane, so no other Deployment includes this.
+(docs/plan/31_console-sso-rbac.md, #56) — and the model gateway, whose admin API
+accepts the same operator credential the console sends the control plane.
+Rendered inside their containers' `env:` lists, like map.commonEnv above. No
+other process has a human lane, so no other Deployment includes this.
 
 Emits NOTHING while identity.mode is empty, and that is not a shortcut around a
 default: `IDENTITY_MODE` unset and `IDENTITY_MODE=disabled` are one state to
@@ -228,13 +248,14 @@ would be an IdP this control plane could not be wired to.
 
 {{/*
 The Cloud SQL Auth Proxy sidecar (#269), rendered under the podSpec of each
-process that opens the database — the controlplane, the brain and the executor.
+process that opens the database — the controlplane, the brain, the executor and
+the model gateway.
 Emits nothing at all unless cloudSQLProxy.enabled. Call with the root context at
 the podSpec's own indentation.
 
 A NATIVE sidecar — an initContainer with `restartPolicy: Always` — which is the
 shape Google documents for GKE, and here it is load-bearing rather than modern:
-all three processes open the database as they start (store.Open migrates), so an
+each of them opens the database as it starts (store.Open migrates), so an
 ordinary container would let them race the proxy and crash-loop until it caught
 up. A native sidecar with a startupProbe starts first and is *ready* first, and
 is torn down last.
@@ -310,7 +331,7 @@ initContainers:
              socket, the application is its own reachability check: `store.Open`
              pings before serving and the process exits non-zero when that
              fails, so the pods crash-loop and `--atomic` rolls back anyway.
-             What the operator gets there is three application containers
+             What the operator gets there is application containers
              failing to reach Postgres, and the work of tracing that back to a
              proxy pointed at an instance that does not exist.
 

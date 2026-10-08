@@ -1,11 +1,11 @@
 # Builds the images this platform deploys, from one Dockerfile.
 #
 # The server stage carries all five server binaries (controlplane, brain,
-# executor, worker, modelgateway; nothing deploys the last before plan 59 slice
-# 2d) and each Deployment picks one with its container command — but the
-# chart composes an image reference as `registry/repository/COMPONENT:tag`
-# (templates/_helpers.tpl, "map.image"), so it looks for three per-component
-# names. They are three tags on ONE build here, so all three resolve to the same
+# executor, worker, modelgateway) and each Deployment picks one with its
+# container command — but the chart composes an image reference as
+# `registry/repository/COMPONENT:tag` (templates/_helpers.tpl, "map.image"), so
+# it looks for four per-component names; the worker is customer-hosted and has
+# none. They are four tags on ONE build here, so all four resolve to the same
 # digest and nothing can drift between them.
 #
 # `--target gate` is a separate image: the per-session egress sidecar needs
@@ -32,6 +32,8 @@ steps:
       - "${_IMAGE_PREFIX}/brain:${_TAG}"
       - -t
       - "${_IMAGE_PREFIX}/executor:${_TAG}"
+      - -t
+      - "${_IMAGE_PREFIX}/modelgateway:${_TAG}"
       - .
   # Shares the module-download layer with the step above on the same daemon
   # and compiles only the gate's own binary, fetching no ripgrep.
@@ -43,6 +45,7 @@ images:
   - "${_IMAGE_PREFIX}/controlplane:${_TAG}"
   - "${_IMAGE_PREFIX}/brain:${_TAG}"
   - "${_IMAGE_PREFIX}/executor:${_TAG}"
+  - "${_IMAGE_PREFIX}/modelgateway:${_TAG}"
   - "${_IMAGE_PREFIX}/gate:${_TAG}"
 # An explicit 40-minute ceiling. This LOWERS the limit rather than raising it — with
 # `builds/timeout` unset the API allows 60 minutes — so a wedged build fails in 40

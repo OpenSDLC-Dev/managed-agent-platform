@@ -27,6 +27,11 @@ output "executor_service_account" {
   description = "Google service account the executor pods impersonate via Workload Identity."
 }
 
+output "modelgateway_service_account" {
+  value       = google_service_account.modelgateway.email
+  description = "Google service account the model gateway pods impersonate via Workload Identity, when the chart's modelgateway.enabled is set."
+}
+
 output "db_password_secret" {
   value       = google_secret_manager_secret.db_password.secret_id
   description = "Secret Manager secret id holding the password of the PLATFORM's database role — the one dbinit.sh creates outside cloudsqlsuperuser, and the one that appears in DATABASE_URL."

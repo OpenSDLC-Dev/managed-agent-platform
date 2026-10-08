@@ -1,12 +1,13 @@
 # Default values for managed-agent-platform.
 # The chart deploys the three platform processes — controlplane, brain, executor —
-# plus an optional in-cluster Postgres. The BYOC worker is NOT part of this chart:
+# plus an optional model gateway and an optional in-cluster Postgres. The BYOC worker is NOT part of this chart:
 # it runs on the customer's own compute, outside the platform's cluster.
 
 # -- Container images. Each process is pulled as a separate image at
-# {registry}/{repository}/{component}:{tag} (component is controlplane|brain|executor).
-# From v0.2.0 onward, releases publish these images (one build, three names —
-# same digest) to ghcr.io/opensdlc-dev/managed-agent-platform
+# {registry}/{repository}/{component}:{tag} (component is
+# controlplane|brain|executor|modelgateway). From v0.2.0 onward, releases publish
+# these images (one build, one name per component — same digest; modelgateway
+# from the first release carrying it) to ghcr.io/opensdlc-dev/managed-agent-platform
 # (docs/RELEASING.md); the defaults below resolve to them, with the tag
 # following the chart's appVersion. Override registry/repository/tag to run
 # your own build.
@@ -20,7 +21,7 @@ image:
 imagePullSecrets: []
 
 # -- OTLP/gRPC collector for traces, metrics, logs. Empty disables export.
-# Wired into all three processes as OTEL_EXPORTER_OTLP_ENDPOINT / _INSECURE.
+# Wired into every process as OTEL_EXPORTER_OTLP_ENDPOINT / _INSECURE.
 otlp:
   endpoint: ""
   insecure: false
@@ -223,6 +224,36 @@ executor:
   # The executor runs sandbox pods in the release namespace via in-cluster config;
   # the chart grants it the pods / pods/exec RBAC it needs there.
 
+# -- The model gateway (docs/plan/59_model-gateway.md): Anthropic Messages for the
+# platform's API keys, routed to the vendor deployments its catalogue holds, and
+# the /admin/v1/ API that managed-agent-console configures it through. It reads
+# the platform's database and the bootstrap key (controlplane.apiKey), and it seals
+# vendor keys with the release's credential cipher, so enabling it needs one —
+# openbao, externalOpenBao, localCipher or gcpKMS: with a chart-managed Secret the
+# render fails without one, and with existingSecret the gateway refuses to start.
+modelgateway:
+  enabled: false
+  # -- Stateless replicas share one database; with two, the PodDisruptionBudget
+  # the chart renders keeps one serving through a node drain, and lets a pod that
+  # is not Ready go.
+  replicas: 2
+  # -- GKE Workload Identity, as the control plane's: the gateway seals a vendor
+  # key on write and opens it to call the vendor, so under gcpKMS its identity
+  # needs roles/cloudkms.cryptoKeyEncrypterDecrypter on the key, and under the
+  # Cloud SQL Auth Proxy roles/cloudsql.client.
+  serviceAccount:
+    annotations: {}
+  service:
+    type: ClusterIP
+    port: 8090
+  # -- SIGTERM starts a drain of up to 30s, so a request in flight can finish;
+  # this is margin over it.
+  terminationGracePeriodSeconds: 45
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 # -- Hardened container runtime for sandbox pods. The sandbox runs untrusted,
 # model-directed commands, so the strength of the container boundary is the
 # strength of your isolation: a sandboxing runtime (gVisor, Kata) is the
@@ -304,7 +335,7 @@ externalDatabase:
   url: ""
 
 # -- Cloud SQL Auth Proxy as a sidecar in the controlplane, brain and executor
-# pods: Google's documented way for a GKE workload to reach a private-IP Cloud
+# pods, and the model gateway's when enabled: Google's documented way for a GKE workload to reach a private-IP Cloud
 # SQL instance. Off by default — it is GCP-only, and mode 2 also runs without it
 # (docs/deploy-gcp.md, "Connecting to a private-IP instance", #269).
 #
@@ -330,13 +361,13 @@ externalDatabase:
 # of the encryption, where neither the instance's `ssl_mode = ENCRYPTED_ONLY`
 # nor `pg_stat_ssl` can see it.
 #
-# One switch for all three processes rather than one each, because they read a
+# One switch for every process rather than one each, because they read a
 # single `database-url` Secret key: a DSN cannot name a loopback socket for some
 # pods and the instance's address for the others.
 #
 # The IAM half is not expressible here. Each pod's ServiceAccount must be
 # annotated onto a Google service account holding `roles/cloudsql.client` — see
-# the three serviceAccount.annotations blocks, and deploy/gcp/, which creates
+# each component's serviceAccount.annotations block, and deploy/gcp/, which creates
 # those accounts and their Workload Identity bindings.
 cloudSQLProxy:
   enabled: false
@@ -364,7 +395,7 @@ cloudSQLProxy:
   # `database-url` names the proxy's loopback socket, the platform is its own
   # check: it pings the database before serving and exits non-zero when that
   # fails, so the pods crash-loop and the release rolls back regardless. What
-  # that costs is the diagnosis — three application containers unable to reach
+  # that costs is the diagnosis — application containers unable to reach
   # Postgres, rather than a proxy naming the instance it could not open.
   #
   # It earns its keep in the window where the proxy is enabled but the DSN does

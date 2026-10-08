@@ -1067,6 +1067,88 @@ jobs:
           echo "$err" | grep 'must equal casdoor.console.clientId' > /dev/null \
             || { echo "the mismatched-audience render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: bundled IdP is off by default, seeds no demo account, and owns its admin password"
+      - name: the model gateway renders only when enabled, and only with a cipher
+        run: |
+          set -euo pipefail
+          # Off by default: the default render names it nowhere. Captured first,
+          # so a render that fails fails here rather than reading as absent.
+          default="$(helm template t "$CHART" -f "$VALUES")"
+          echo "$default" | grep modelgateway > /dev/null \
+            && { echo "the default render names the model gateway" >&2; exit 1; }
+          # A release upgraded with --reuse-values from a chart without the
+          # section has none, and the gateway's templates must not fail on that.
+          helm template t "$CHART" -f "$VALUES" --set modelgateway=null > /dev/null \
+            || { echo "a values tree without the modelgateway section fails the render" >&2; exit 1; }
+          on() { helm template t "$CHART" -f "$VALUES" --set modelgateway.enabled=true "$@"; }
+          for tpl in deployment service serviceaccount pdb; do
+            on --show-only "templates/modelgateway-$tpl.yaml" \
+              | grep '^  name: t-managed-agent-platform-modelgateway$' > /dev/null \
+              || { echo "the enabled gateway's $tpl template renders no t-managed-agent-platform-modelgateway" >&2; exit 1; }
+          done
+          dep="$(on --show-only templates/modelgateway-deployment.yaml)"
+          # Two stateless replicas, and a budget that lets a drain evict one
+          # Ready pod at a time and never pins a lone replica.
+          echo "$dep" | grep '^  replicas: 2$' > /dev/null \
+            || { echo "the gateway does not default to two replicas" >&2; exit 1; }
+          pdb="$(on --show-only templates/modelgateway-pdb.yaml)"
+          echo "$pdb" | grep '^  maxUnavailable: 1$' > /dev/null \
+            || { echo "the gateway's PodDisruptionBudget is not maxUnavailable: 1" >&2; exit 1; }
+          # A pod that is not Ready must not hold the budget and block a drain.
+          echo "$pdb" | grep '^  unhealthyPodEvictionPolicy: AlwaysAllow$' > /dev/null \
+            || { echo "the gateway's PodDisruptionBudget lets an unready pod block a drain" >&2; exit 1; }
+          # The bootstrap key, the DSN and the cipher, each from the Secret key
+          # the Secret writes: an env entry naming an absent key would arrive
+          # unset and the gateway would refuse to start.
+          for pair in CONTROLPLANE_API_KEY:controlplane-api-key DATABASE_URL:database-url SECRETS_BACKEND:secrets-backend; do
+            echo "$dep" | grep -A4 "name: ${pair%%:*}$" | grep "key: ${pair#*:}$" > /dev/null \
+              || { echo "the gateway does not read ${pair%%:*} from the ${pair#*:} Secret key" >&2; exit 1; }
+          done
+          # The replicas prefer different nodes, softly, and the constraint
+          # counts the gateway's own pods: the whole block, selector included.
+          spread="$(echo "$dep" | awk '/^      topologySpreadConstraints:$/ { on = 1; next } on && /^      [^ ]/ { on = 0 } on && !/^ *$/')"
+          # printf, not a multi-line literal: this block's own indentation is
+          # stripped from every line, a quoted string's continuation lines too.
+          want="$(printf '%s\n' \
+            '        - maxSkew: 1' \
+            '          topologyKey: kubernetes.io/hostname' \
+            '          whenUnsatisfiable: ScheduleAnyway' \
+            '          labelSelector:' \
+            '            matchLabels:' \
+            '              app.kubernetes.io/name: managed-agent-platform' \
+            '              app.kubernetes.io/instance: t' \
+            '              app.kubernetes.io/component: modelgateway')"
+          [ "$spread" = "$want" ] \
+            || { echo "the gateway's spread is not the soft per-node one over its own pods:" >&2; echo "$spread" >&2; exit 1; }
+          sa="$(echo "$dep" | awk '$1 == "serviceAccountName:" && !seen { print $2; seen = 1 }')"
+          [ "$sa" = t-managed-agent-platform-modelgateway ] \
+            || { echo "the gateway runs as '${sa:-<none>}', want its own ServiceAccount" >&2; exit 1; }
+          # The admin API accepts the operator credential the console sends.
+          on -f "$IAM_VALUES" --show-only templates/modelgateway-deployment.yaml | grep 'name: IDENTITY_MODE$' > /dev/null \
+            || { echo "the identity lane does not reach the gateway" >&2; exit 1; }
+          # The GCP topology: the Cloud SQL Auth Proxy beside it, and the KMS
+          # key name from its Secret key.
+          gcp="$(helm template t "$CHART" -f deploy/gcp/staging-values.yaml --set modelgateway.enabled=true \
+            --show-only templates/modelgateway-deployment.yaml)"
+          echo "$gcp" | grep '^        - name: cloud-sql-proxy$' > /dev/null \
+            || { echo "the gateway has no Cloud SQL Auth Proxy under the staging values" >&2; exit 1; }
+          echo "$gcp" | grep -A4 'name: GCPKMS_KEY_NAME$' | grep 'key: gcpkms-key-name$' > /dev/null \
+            || { echo "the gateway does not read GCPKMS_KEY_NAME from the gcpkms-key-name Secret key" >&2; exit 1; }
+          # Every cipher the chart resolves satisfies it, not the bundled
+          # OpenBao alone (the local key is the example values' 32-byte seal key).
+          for set in "localCipher.masterKey=Y2ktcGxhY2Vob2xkZXItc3RhdGljLXNlYWwta2V5ISE=" \
+                     "externalOpenBao.address=http://bao.example:8200,externalOpenBao.token=t" \
+                     "gcpKMS.keyName=projects/p/locations/l/keyRings/r/cryptoKeys/k"; do
+            on --set openbao.enabled=false --set "$set" --show-only templates/modelgateway-deployment.yaml > /dev/null \
+              || { echo "the gateway refused a render whose cipher is $set" >&2; exit 1; }
+          done
+          # It seals vendor keys and does not start without a cipher, so a
+          # chart-managed Secret resolving none refuses the render.
+          if err="$(helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false --set modelgateway.enabled=true 2>&1)"; then
+            echo "the gateway rendered without a cipher" >&2; exit 1
+          fi
+          echo "$err" | grep 'modelgateway.enabled needs a credential cipher' > /dev/null \
+            || { echo "the cipher-less render failed for the wrong reason: $err" >&2; exit 1; }
+          echo "ok: off by default; when on, two replicas, a drain-safe budget, its own identity and the cipher it needs"
 
   # The GCP staging Terraform (docs/plan/20, Decision 9). fmt and validate need
   # no credentials, no state and no GCP project, which is what lets them run on
@@ -1358,9 +1440,10 @@ jobs:
           [ "$defnet" = "managed-agent-platform_default" ] \
             || { echo "the default project's network is '$defnet' — an existing stack's volumes would be orphaned" >&2; exit 1; }
           echo "ok: the default project is unchanged"
-      # The stack below never starts openbao and the helm job only renders the
-      # chart's copy, so without this nothing here runs either init script; the
-      # Makefile recipe argues it, and #439 is what it cost. No Docker, so it is
+      # The stack below runs the compose init script on a fresh volume only and
+      # the helm job only renders the chart's copy, so without this nothing here
+      # runs either script's other paths; the Makefile recipe argues it, and #439
+      # is what it cost. No Docker, so it is
       # cheap and it fails before the image build.
       - name: the openbao bootstrap scripts behave
         working-directory: .
@@ -1372,7 +1455,7 @@ jobs:
         run: docker compose build controlplane gate-image
       - name: control plane serves and the brain loads its config
         run: |
-          docker compose up -d postgres minio controlplane brain
+          docker compose up -d postgres minio controlplane brain modelgateway
           key="$(grep '^CONTROLPLANE_API_KEY=' .env | cut -d= -f2-)"
           for i in $(seq 1 30); do
             code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" http://localhost:8080/v1/agents || true)"
@@ -1393,6 +1476,23 @@ jobs:
           done
           [ -n "$brain_ok" ] || { echo "brain did not start cleanly" >&2; docker compose logs brain >&2; exit 1; }
           echo "ok: authed 200, unauthed 401, brain loaded its config"
+      - name: the model gateway serves its admin API and the platform's keys
+        run: |
+          key="$(grep '^CONTROLPLANE_API_KEY=' .env | cut -d= -f2-)"
+          # The admin API takes the bootstrap key as configured; the models list
+          # takes it through the api_keys row the control plane registers, which
+          # the previous step waited for.
+          for i in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" http://localhost:8090/admin/v1/profiles || true)"
+            [ "$code" = "200" ] && break
+            sleep 2
+          done
+          [ "$code" = "200" ] || { echo "the gateway never served its admin API (last: $code)" >&2; docker compose logs modelgateway >&2; exit 1; }
+          noauth="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8090/admin/v1/profiles || true)"
+          [ "$noauth" = "401" ] || { echo "expected 401 from the gateway without a key, got $noauth" >&2; exit 1; }
+          models="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" -H 'anthropic-version: 2023-06-01' http://localhost:8090/v1/models || true)"
+          [ "$models" = "200" ] || { echo "the gateway refused the registered key on /v1/models: $models" >&2; docker compose logs modelgateway >&2; exit 1; }
+          echo "ok: the gateway's admin API answers the bootstrap key, and its models list the registered key"
       # E2E-1 (docs/plan/06_skills.md): the wire-only skills round-trip against
       # the bundled MinIO — upload both forms, list, download and byte-compare,
       # and prove the delete order (skill delete 400s until versions are gone).

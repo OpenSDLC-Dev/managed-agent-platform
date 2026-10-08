@@ -1,12 +1,14 @@
 # managed-agent-platform Helm chart
 
-Deploys the platform's three server processes into a Kubernetes namespace:
+Deploys the platform's three server processes into a Kubernetes namespace, and
+optionally a fourth, the model gateway:
 
 | Process | Kind | Scales | Role |
 |---|---|---|---|
 | **controlplane** | Deployment + Service | independently | the wire-compatible REST API + event log |
 | **brain** | Deployment | independently | the model-turn orchestration pool |
 | **executor** | Deployment + RBAC | independently | runs tools in a per-session **Kubernetes sandbox Pod** |
+| **modelgateway** | Deployment + Service + PodDisruptionBudget | independently (two replicas) | the model gateway, off unless `modelgateway.enabled` |
 
 An optional in-cluster **Postgres** (StatefulSet) is included for a batteries-included
 install, likewise an optional in-cluster **MinIO** (StatefulSet, running PGSTY
@@ -38,8 +40,9 @@ compute, outside the platform cluster, and reaches the control plane only over t
 
 - Kubernetes ≥ 1.26 and Helm ≥ 3.
 - **Container images.** From v0.2.0 onward, releases publish `controlplane`,
-  `brain`, and `executor` images to `ghcr.io/opensdlc-dev/managed-agent-platform`
-  (one build, three names — same digest; see docs/RELEASING.md), and the chart's
+  `brain`, and `executor` images to `ghcr.io/opensdlc-dev/managed-agent-platform`,
+  and `modelgateway` from the first release carrying the gateway (one build, one
+  name per component — same digest; see docs/RELEASING.md), and the chart's
   defaults resolve to them with the tag following `appVersion`. For a chart
   predating the first published release, or to run your own build, push images a
   cluster can pull and point `image.registry` / `image.repository` / `image.tag`
@@ -100,6 +103,11 @@ keys, so anyone who can supply a model string (creating an agent, or a session w
 callers — see the `brain.modelProviders` comment in `values.yaml` and
 [#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88).
 
+Upgrade with your values file, or `--reset-then-reuse-values` (Helm ≥ 3.14), rather
+than `--reuse-values`: that flag keeps the installed chart's defaults instead of the
+new chart's, so a values section a release adds arrives empty — `casdoor`, added in
+v0.3.0, fails the render on it, and `modelgateway` cannot be enabled that way.
+
 ## The executor and the Kubernetes sandbox
 
 The executor is wired to the **k8s** sandbox backend (`SANDBOX_BACKEND=k8s`). It launches,
@@ -107,6 +115,23 @@ execs into, and tears down one sandbox Pod per session in the release namespace,
 **in-cluster config** (its `SANDBOX_K8S_KUBECONFIG` / `_CONTEXT` are intentionally unset).
 The chart grants its ServiceAccount a namespaced Role with exactly the pod lifecycle and
 `pods/exec` verbs the provider calls — nothing cluster-wide.
+
+## The model gateway (`modelgateway.enabled`)
+
+Off by default. Enabled, it runs `cmd/modelgateway`
+([plan 59](../../../docs/plan/59_model-gateway.md)) as `modelgateway.replicas` pods
+(default two, which the scheduler prefers to place on different nodes) behind a
+ClusterIP Service on port 8090, with a PodDisruptionBudget of
+`maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow`: a drain evicts one
+Ready pod at a time, waiting for its replacement before the next, never pins a lone
+replica, and evicts a pod that is not Ready regardless (from Kubernetes 1.27). It reads `database-url` and `controlplane-api-key` from the release's
+Secret, takes `identity.*` so the console's operator sign-in reaches its admin API, and
+seals vendor keys with the release's credential cipher — so it needs one. A chart-managed
+Secret that resolves none fails the render; with `existingSecret` the chart cannot see
+the keys, and a Secret without `secrets-*` leaves the gateway refusing to start. Under
+`gcpKMS` its ServiceAccount needs `roles/cloudkms.cryptoKeyEncrypterDecrypter`, as the
+controlplane's and executor's do; [`deploy/gcp/`](../../gcp/) creates the account and the
+grant.
 
 ## Database
 
@@ -151,7 +176,7 @@ them with a session you delete by hand, delete its session-scoped `files` rows
 
 On GKE, Google's documented way to reach a **private-IP** Cloud SQL instance is the Cloud
 SQL Auth Proxy running in the same pod as the workload. Turning it on adds that container to
-the controlplane, brain and executor deployments:
+the controlplane, brain and executor deployments, and to the model gateway's when enabled:
 
 ```bash
 --set postgresql.enabled=false \
@@ -176,14 +201,14 @@ the tidier-looking shape puts the password and every query on the pod network in
 on the near side of the encryption, where neither the instance's `ssl_mode` setting nor
 `pg_stat_ssl` can see it.
 
-**One switch, three deployments.** All three read a single `database-url` Secret key, so a
+**One switch, every deployment.** They all read a single `database-url` Secret key, so a
 DSN cannot name a loopback socket for some pods and an address for the others.
 
 **Each pod needs an identity.** The proxy authenticates as the pod's Google service account,
-which needs `roles/cloudsql.client` — so all three `serviceAccount.annotations` blocks come
+which needs `roles/cloudsql.client` — so every `serviceAccount.annotations` block comes
 into play, including `brain.serviceAccount.annotations`. Give the brain an account of its
 own rather than the control plane's, which carries KMS decrypt it has no business holding.
-[`deploy/gcp/`](../../gcp/) creates all three accounts and their Workload Identity bindings,
+[`deploy/gcp/`](../../gcp/) creates every account and its Workload Identity binding,
 and [docs/deploy-gcp.md](../../../docs/deploy-gcp.md) documents the simpler alternative:
 a Pod reaching the private IP directly with `sslmode=require`, no sidecar and no Google
 identity, trading certificate verification and IAM authorization for having nothing to set
@@ -209,7 +234,7 @@ it.
 What catches it is the **application**, once `database-url` names the proxy's loopback
 socket: the platform pings the database before serving and exits non-zero when that fails, so
 the pods crash-loop, never go Ready, and `helm upgrade --wait --atomic` rolls the release
-back. A wrong instance does not deploy green. What it does is deploy *confusingly* — three
+back. A wrong instance does not deploy green. What it does is deploy *confusingly* —
 application containers unable to reach Postgres, and the work of tracing that back to a proxy
 pointed at an instance that does not exist.
 
@@ -268,7 +293,8 @@ policy.
 With the bundled instance disabled and no `externalOpenBao.address`, setting
 `localCipher.masterKey` (base64, 32 bytes) selects the AES-256-GCM local cipher —
 minimal deployments only. Leaving all four unset deploys without a cipher: the
-platform runs, vault credential storage is unavailable.
+platform runs, vault credential storage is unavailable, and `modelgateway.enabled`
+fails the render.
 
 ### Google Cloud KMS (`gcpKMS.keyName`)
 
@@ -559,8 +585,8 @@ false).
 
 ## Observability
 
-Set `otlp.endpoint` (OTLP/gRPC) to ship traces, metrics, and logs from all three
-processes; `otlp.insecure=true` to export without TLS.
+Set `otlp.endpoint` (OTLP/gRPC) to ship traces, metrics, and logs from every
+process; `otlp.insecure=true` to export without TLS.
 
 ## Values
 
@@ -576,7 +602,7 @@ Four decisions. Only the database is mandatory; the other three have a supported
 |---|---|---|---|
 | Database | bundled Postgres · `externalDatabase.url` | not an option | `postgresql.enabled` **wins silently** — the external URL is only read when it is false |
 | Object storage | bundled MinIO · any S3-compatible endpoint · `gcsObjectStorage` (Google Cloud Storage natively) | supported: no `blob-*` keys, and the features that need object storage are unavailable | the render **fails**, naming the pair |
-| Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` | supported: no `secrets-*` keys, and vault credential storage is unavailable | the render **fails**, naming the pair |
+| Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` | supported: no `secrets-*` keys, and vault credential storage is unavailable — but not with `modelgateway.enabled`, which fails the render | the render **fails**, naming the pair |
 | Identity | `identity.mode=oidc` · `identity.mode=trusted_proxy` — with the bundled Casdoor as an optional IdP | the default: no `IDENTITY_*` env at all, and `x-api-key` stays the only management credential | not expressible: `mode` is one string |
 
 The Cloud SQL Auth Proxy (`cloudSQLProxy.*`) is not a third database option but a
@@ -588,8 +614,8 @@ Postgres and the proxy's loopback socket — so enabling it means
 
 The Google-native backends authenticate with **Workload Identity**, which is a
 ServiceAccount annotation and no key material: `gcsObjectStorage` needs that
-annotation on all three components, since every process reaches object storage,
-while `gcpKMS` needs only the controlplane and executor.
+annotation on the controlplane, brain and executor, the three that reach object
+storage, while `gcpKMS` needs it on the controlplane, executor and model gateway.
 
 Four things worth understanding before you turn them on:
 

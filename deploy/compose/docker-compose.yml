@@ -1,5 +1,5 @@
-# Local development stack: the three server processes (controlplane + brain +
-# executor) against a Postgres, a MinIO (object storage for skill archives),
+# Local development stack: the four server processes (controlplane + brain +
+# executor + modelgateway) against a Postgres, a MinIO (object storage for skill archives),
 # and an OpenBao (transit cipher for vault credential material,
 # docs/plan/12_vaults-credentials.md), with an optional Jaeger for traces.
 # This is the
@@ -10,7 +10,7 @@
 
 name: managed-agent-platform
 
-# Shared build + wiring for the three app services; each overrides `command`.
+# Shared build + wiring for the app services; each overrides `command`.
 x-app: &app
   build:
     context: ../..
@@ -199,6 +199,56 @@ services:
       # well-known placeholder, so the API must not be reachable from the LAN.
       # Set CONTROLPLANE_BIND=0.0.0.0 (with a real key) to expose it deliberately.
       - "${CONTROLPLANE_BIND:-127.0.0.1}:${CONTROLPLANE_PORT:-8080}:8080"
+
+  # The model gateway (docs/plan/59_model-gateway.md): Anthropic Messages on
+  # :8090 for the platform's API keys, routed to the vendor deployments its
+  # catalogue holds, and the /admin/v1/ API that configures the catalogue. It
+  # routes nothing until a deployment is configured, and the brain does not route
+  # through it.
+  modelgateway:
+    <<: *app
+    command: /modelgateway
+    # SIGTERM drains HTTP for up to 30s so an answer in flight can finish;
+    # compose's 10s default would cut a long stream short.
+    stop_grace_period: 45s
+    environment:
+      <<: *app-env
+      # The admin API takes the bootstrap key; /v1/ takes the api_keys rows the
+      # control plane registers, this key's among them.
+      CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}
+      MODELGATEWAY_ADDR: ":8090"
+      # Vendor keys are sealed with the control plane's cipher, the same transit
+      # key; the gateway does not start without one.
+      SECRETS_BACKEND: openbao
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${BAO_PLATFORM_TOKEN:-map-bao-dev-token}
+      BAO_TRANSIT_KEY: ${BAO_TRANSIT_KEY:-map-secrets}
+      # The admin API accepts the operator sign-in the control plane does, so the
+      # `iam` profile's variables reach it too, with the CA that verifies the
+      # bundled IdP (the control plane's SSL_CERT_FILE comment says why it is
+      # not defaulted).
+      IDENTITY_MODE: ${IDENTITY_MODE:-}
+      IDENTITY_OIDC_ISSUER: ${IDENTITY_OIDC_ISSUER:-}
+      IDENTITY_OIDC_AUDIENCE: ${IDENTITY_OIDC_AUDIENCE:-}
+      IDENTITY_OIDC_JWKS_URL: ${IDENTITY_OIDC_JWKS_URL:-}
+      IDENTITY_CLAIM_ROLES: ${IDENTITY_CLAIM_ROLES:-}
+      IDENTITY_ROLE_MAP: ${IDENTITY_ROLE_MAP:-}
+      SSL_CERT_FILE: ${SSL_CERT_FILE:-}
+    volumes:
+      - idpca:/etc/idp-ca:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openbao-init:
+        condition: service_completed_successfully
+      # required: false for the reason the control plane's says.
+      idp:
+        condition: service_healthy
+        required: false
+    ports:
+      # The control plane's bind, for the same reason: the admin API accepts the
+      # placeholder bootstrap key.
+      - "${CONTROLPLANE_BIND:-127.0.0.1}:${MODELGATEWAY_PORT:-8090}:8090"
 
   brain:
     <<: *app

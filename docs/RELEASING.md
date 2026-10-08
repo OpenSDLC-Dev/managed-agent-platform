@@ -148,8 +148,8 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    `internal/ripgrep/assets/manifest.json`, fetches any that is missing or
    does not match and removes anything else there, so a release cannot build
    from anything else) pushed as
-   `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
-   (same digest, three names — the coordinates the Helm chart composes) plus
+   `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor,modelgateway}:X.Y.Z`
+   (same digest, four names — the coordinates the Helm chart composes) plus
    `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag. The
    server image carries LICENSE, NOTICE and THIRD_PARTY_LICENSES at its root.
 4. `make release-chart PUSH=1 VERSION=X.Y.Z` — the chart to
@@ -176,6 +176,8 @@ afterwards — notes and title, the draft flag, and the assets it re-uploads
 with `--clobber`. For a tag from before a notes fix that means republishing
 the body the fix removed: v0.2.0, whose links were made absolute retroactively
 for #425, is the live case. One first-publish note: packages
-created by `GITHUB_TOKEN` start **private** — flip the four image packages
-and the chart to public once, in the org's package settings, so anonymous
-pulls work.
+created by `GITHUB_TOKEN` start **private** — flip the five image packages
+(`controlplane`, `brain`, `executor`, `modelgateway`, `gate`) and the chart to
+public in the org's package settings, so anonymous pulls work. It is once per
+package, so the first release publishing `modelgateway` needs its own flip
+where the others are already public.

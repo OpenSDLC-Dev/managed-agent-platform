@@ -61,7 +61,7 @@ Postgres, all coordination through it:
 | `brain` | The harness pool. Claims `model_turn` work, replays the session's event log to rebuild context, calls the model provider, writes the resulting events, enqueues tool work, suspends. |
 | `executor` | The built-in sandbox worker for platform-managed (`cloud`) environments. Claims `tool_exec` work, runs the tool inside the session's sandbox container, posts `agent.tool_result`. Also claims `web_exec` work — web_fetch/web_search, run in its own process with no sandbox, for **both** environment kinds — `outputs_harvest` work, the deliverables snapshot of `/mnt/session/outputs/` a cloud session takes when an outcome-grading cycle begins and when a brain settlement folds the session idle, and `mcp_exec` work — both halves of the MCP path, likewise in its own process with no sandbox and for **both** environment kinds: the discovery that fills `mcp_catalogs`, enqueued when a turn suspends for a declared server with no row, and the tool call itself, enqueued when the brain routes an `mcp__{server}__{tool}` the model asked for. |
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
-| `modelgateway` | The model gateway (plan 59): Anthropic Messages for the platform's API keys, routed to the vendor deployments its catalogue configures, beside the `/admin/v1/` API that configures it. It runs one sweep no request drives — the usage ledger's retention, at startup and then hourly, under an advisory lock so replicas take turns. No agent traffic reaches it yet — the brain moves onto it in plan 59's slice 5 — and compose and Helm do not run it yet. |
+| `modelgateway` | The model gateway (plan 59): Anthropic Messages for the platform's API keys, routed to the vendor deployments its catalogue configures, beside the `/admin/v1/` API that configures it. It runs one sweep no request drives — the usage ledger's retention, at startup and then hourly, under an advisory lock so replicas take turns. No agent traffic reaches it yet — the brain moves onto it in plan 59's slice 5. Compose runs it; the Helm chart runs it when `modelgateway.enabled` is set, two replicas behind a PodDisruptionBudget by default, and refuses to without a credential cipher. |
 
 Processes never talk to each other directly. The brain and the executors communicate
 through the control plane's event log and work queue, and where a poll would be too slow
@@ -471,7 +471,7 @@ Layout order is by layer, as the repo is.
 
 ### Model gateway (plan 59)
 
-Served by `cmd/modelgateway`; nothing deploys it or sends it agent traffic yet.
+Served by `cmd/modelgateway`, which compose runs and the Helm chart runs when `modelgateway.enabled` is set; no agent traffic reaches it yet.
 
 | Package | What it owns |
 |---|---|

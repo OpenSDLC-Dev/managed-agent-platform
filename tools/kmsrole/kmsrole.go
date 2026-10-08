@@ -56,14 +56,15 @@
 // direction.
 //
 // It assumes cmd/<name> runs as the service account labelled <name>. That is
-// true of the three workloads and not of the other three: cmd/gate is a sidecar
-// in the executor's pod and shares the executor's identity, cmd/worker is
-// customer-hosted with no GCP identity at all, and cmd/modelgateway runs nowhere
-// on GCP yet. The first two do not reach the cipher, so the assumption costs
-// them nothing; the day one does, this guard reports it ungranted and the
-// mapping has to be taught here. modelgateway does reach it, and is taught:
-// `unhosted` names it, and the entry stops holding the moment anything starts
-// deploying the binary (unhosted's own comment says how that is detected).
+// true of the four workloads and not of the other two: cmd/gate is a sidecar in
+// the executor's pod and shares the executor's identity, and cmd/worker is
+// customer-hosted with no GCP identity at all. Neither reaches the cipher, so
+// the assumption costs them nothing; the day one does, this guard reports it
+// ungranted and the mapping has to be taught here. A binary that reaches the
+// cipher and runs nowhere on GCP is taught through `unhosted`, whose entry stops
+// holding the moment anything starts deploying it (its own comment says how
+// that is detected). None does today: cmd/modelgateway was one until plan 59
+// slice 2f deployed it.
 //
 // # What it refuses
 //
@@ -255,9 +256,7 @@ type Report struct {
 // prose is not one: a .md file, unless it sits under a templates/ directory,
 // which Helm renders whatever the extension. A dot-directory is skipped, as
 // readGrants skips it.
-var unhosted = map[string]string{
-	"modelgateway": "nothing deploys it to GCP before plan 59 slice 2d",
-}
+var unhosted = map[string]string{}
 
 // stillUnhosted refuses an unhosted entry that has gone stale.
 func stillUnhosted(root, tfDir, binary string) error {
