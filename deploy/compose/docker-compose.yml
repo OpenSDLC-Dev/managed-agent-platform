@@ -303,8 +303,12 @@ services:
       # delaying it.
       controlplane:
         condition: service_healthy
+      # Waited for while it comes up, but not required: a brain routed past
+      # the gateway (MODEL_PROVIDERS_FILE) starts though the gateway fails, as
+      # one on the default route would find it down after starting anyway.
       modelgateway:
         condition: service_healthy
+        required: false
     volumes:
       # The brain's model routing (a JSON array — see internal/provider LoadRoutes).
       # Defaults to the committed model-providers.gateway.json, one route sending

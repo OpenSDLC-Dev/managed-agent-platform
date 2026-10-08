@@ -626,9 +626,10 @@ frozen by slice 2.
   default, since every agent turn now depends on it. Until the cutover nothing does, so
   slice 2 ships the chart's gateway behind `modelgateway.enabled`, off: the chart still
   installs without a credential cipher, which the gateway refuses to start without, and
-  turning it on by default, as slice 5 does, makes a cipher part of every default install;
-  a release without one turns the gateway off and routes the brain itself
-  (`brain.modelProviders`), and the chart refuses those routes beside the gateway, which
+  turning it on by default, as slice 5 does, makes a cipher part of every default install:
+  a release without one must turn the gateway off itself (`modelgateway.enabled=false`)
+  and route the brain itself (`brain.modelProviders`, or an `existingSecret`'s
+  `model-providers.json`), and the chart refuses those routes beside the gateway, which
   would drop them. The brain's platform API key comes
   from one Secret that the brain, the control plane and the gateway read: the control plane
   registers it in `api_keys` under the name `brain` exactly as it registers

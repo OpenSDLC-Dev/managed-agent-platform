@@ -137,7 +137,8 @@ brain:
   # max_tokens above all — the brain sets none, so without it the anthropic
   # adapter sends 8192 — and upstream_model, which pins every agent to one
   # gateway alias and so bounds the gen_ai.request.model series (#88); also
-  # stall_timeout, headers and flatten_search_results.
+  # stall_timeout and flatten_search_results. Not api_key or headers: the route
+  # is a ConfigMap, which holds no credential.
   # Example:
   #   gatewayRoute:
   #     max_tokens: 32000

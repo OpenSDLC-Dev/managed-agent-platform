@@ -4,13 +4,14 @@
        since api_key_env names the variable, and under existingSecret only the
        chart knows the Service's name. brain.gatewayRoute adds the route's other
        fields; the four the chart writes, and api_key beside api_key_env, are
-       refused rather than overridden. */}}
+       refused rather than overridden, and so are headers, which could carry a
+       credential into the ConfigMap and which the gateway needs none of. */}}
 {{- if (.Values.modelgateway | default dict).enabled }}
 {{- $route := dict "model" "*" "protocol" "anthropic" "base_url" (printf "http://%s-modelgateway:%v" (include "map.fullname" .) .Values.modelgateway.service.port) "api_key_env" "BRAIN_API_KEY" }}
 {{- $extra := .Values.brain.gatewayRoute | default dict }}
 {{- range $k, $_ := $extra }}
-{{- if or (hasKey $route $k) (eq $k "api_key") }}
-{{- fail (printf "brain.gatewayRoute.%s is the chart's to write: the route sends every model to the gateway under BRAIN_API_KEY." $k) }}
+{{- if or (hasKey $route $k) (has $k (list "api_key" "headers")) }}
+{{- fail (printf "brain.gatewayRoute.%s is refused: the route sends every model to the gateway under BRAIN_API_KEY, and it lives in a ConfigMap, which holds no credential." $k) }}
 {{- end }}
 {{- end }}
 apiVersion: v1

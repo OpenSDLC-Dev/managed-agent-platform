@@ -7114,7 +7114,8 @@ Fixed in review:
   after a 10-minute `start_period`, since migrations wait on their lock without a bound.
 - With its route the chart's own, nothing could set the route's other fields, and the
   brain sets no `max_tokens`, so every turn was held to the anthropic adapter's 8,192;
-  `brain.gatewayRoute` adds them, refusing the four the chart writes and `api_key`.
+  `brain.gatewayRoute` adds them, refusing the four the chart writes, `api_key`, and
+  `headers`, which could carry a credential into the route's ConfigMap.
 - An upgrade whose values still carried its routes was first told `brain.apiKey` was
   missing; the routes' refusal now comes first, and both name `modelgateway.enabled=false`.
 - An all-digit `brain.apiKey`, which `--set` or YAML reads as a number, failed the render
