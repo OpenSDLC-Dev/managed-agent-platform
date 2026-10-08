@@ -104,9 +104,7 @@ func (r *Reader) Next() (Event, error) {
 		switch f := field(line); {
 		case len(line) > 0 && len(trimmed) == 0:
 			// The blank line that ends the event.
-			if data != nil {
-				e.Data = bytes.Join(data, []byte("\n"))
-			}
+			e.Data = joined(data)
 			return e, nil
 		case f == "event":
 			e.Name = string(value(trimmed))
@@ -114,12 +112,20 @@ func (r *Reader) Next() (Event, error) {
 			data = append(data, append([]byte(nil), value(trimmed)...))
 		}
 		if err != nil {
-			if data != nil {
-				e.Data = bytes.Join(data, []byte("\n"))
-			}
+			e.Data = joined(data)
 			return e, err
 		}
 	}
+}
+
+// joined is an event's data lines joined by "\n": nil when it has none, and
+// empty but not nil when its one data line is empty, which is data still —
+// a client dispatches it.
+func joined(data [][]byte) []byte {
+	if data == nil {
+		return nil
+	}
+	return append([]byte{}, bytes.Join(data, []byte("\n"))...)
 }
 
 func (r *Reader) longLine(have int) ([]byte, error) {

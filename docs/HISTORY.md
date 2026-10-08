@@ -6545,7 +6545,8 @@ behind a proxy recording both directions.
   null`. So the gateway asks every stream for its usage, and withholds that chunk from a
   caller that did not ask.
 - **Stream end.** MiniMax-M3's streams never send `[DONE]`, M3.1-Flash-Preview's do, and
-  DeepSeek's do. So a stream that closes after a choice's finish has ended normally.
+  DeepSeek's do. So a stream that closes once every choice has finished has ended
+  normally.
 - **Cache accounting.** Both vendors count cached tokens inside `prompt_tokens` and
   report them as `prompt_tokens_details.cached_tokens`; DeepSeek also as
   `prompt_cache_hit_tokens`, beside `prompt_cache_miss_tokens`. The ledger takes input
@@ -6563,9 +6564,11 @@ behind a proxy recording both directions.
   question without calling the tool in all 12 asks forcing it, with `tool_choice`
   `required` or naming the function, and in all 6 with `allowed_tools` in `required`
   mode; its `auto` (6 of 6) and `none` (6 of 6) were honored. Both vendors refuse a
-  custom tool with a 400 of their own, and DeepSeek `allowed_tools` too. DeepSeek honored `stop`, and honored `required` and a named function with
-  thinking disabled (12 of 12), refusing both with its own 400 otherwise, "Thinking
-  mode does not support this tool_choice". On MiniMax's Anthropic endpoint,
+  custom tool with an error of their own, MiniMax a 400 and DeepSeek a 422, and
+  DeepSeek refuses `allowed_tools` too. DeepSeek honored `stop`, and honored `required`
+  and a named function with thinking disabled (12 of 12), refusing both with its own
+  400 otherwise, "Thinking mode does not support this tool_choice". On MiniMax's
+  Anthropic endpoint,
   `tool_choice.disable_parallel_tool_use` was ignored as well: 6 answers, two calls
   each. The gateway now refuses `parallel_tool_calls: false` for both vendors,
   MiniMax's `stop` and forced `tool_choice`, and MiniMax's `disable_parallel_tool_use`
@@ -6585,7 +6588,7 @@ model ids, so that the gateway's rewrite of `model` shows. Mutation testing caug
   `parallel_tool_calls` refusals dropped. The chunk's model survived at first, while
   each live alias shared its model's id.
 
-Review found ten defects, each fixed with a test that failed on the earlier code:
+Review found fourteen defects, each fixed with a test that failed on the earlier code:
 - The gateway took a request for a stream only when `stream` was exactly `true`. A
   value a lenient upstream reads as true, or a key `"Stream"`, which a case-insensitive
   decoder such as Go's reads as `stream`, could have an upstream stream an answer the
@@ -6609,12 +6612,20 @@ Review found ten defects, each fixed with a test that failed on the earlier code
   review, as are the four below).
 - A stall or reset after every choice had finished was reported as a failure.
 - `stream_options` that was not an object, or a key such as `ſtream_options` or
-  `Include_Usage`, which sorts after the gateway's own and which Go's decoder reads in
+  `include_uſage`, which sorts after the gateway's own and which Go's decoder reads in
   its place, could leave a stream's usage unreported, as the stream flag could.
 - MiniMax's `allowed_tools` in `required` mode, which openai-go can send, was not
   refused; a probe then found MiniMax ignoring it in all 6 asks.
 - Routes under the other protocol's prefix, which answer 404, were given route span
   names.
+- A chat stream opening with a ping that carried data held it as a keep-alive and
+  relayed it unread and unredacted, where an OpenAI client reads any event's data as a
+  chunk (Codex's pass over that round, as are the three below).
+- An empty data line was read as no data at all, so it passed as a keep-alive, where
+  an OpenAI client fails on it.
+- A choice whose `index` was missing, null or no whole number counted as choice 0, so
+  with `n` above one an unfinished choice could pass as finished.
+- A choice that went on after its finish still counted as finished.
 
 The Claude review's other suggestions were declined: listing in OpenAI's shape only the
 aliases the OpenAI route can serve now (plan 59 lists by grant and kind on both
@@ -6623,7 +6634,8 @@ attempt behind the stream interface (to be weighed when slice 4c adds a third sh
 decoding each chunk once (not measured as a cost); and reusing `answerJSON` for chat
 answers, which would read a top-level `content` array as thinking blocks.
 
-Thirty-two mutants against those fixes were caught, four only once a test pinned the
+Forty-eight mutants against those fixes were caught, five only once a test pinned the
 guard: a Messages stream cut off on its first event still falls back; a stream that
 began no choice has not finished; the Messages route passes `stream_options` through;
-and a dataless event opening a chat stream is no error.
+a dataless event opening a chat stream is no error; and a usage chunk with no
+`choices` at all is withheld like any other, the stream ending after it.

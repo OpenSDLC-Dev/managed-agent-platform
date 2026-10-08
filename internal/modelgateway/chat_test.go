@@ -738,6 +738,7 @@ func TestAChatStreamsMalformedErrorIsStillRedacted(t *testing.T) {
 		"named-done":   "event: error\ndata: [DONE]\n\n",
 		"diagnostic":   "data: oops\ndata: sk-openai-generic-key1\n\n",
 		"named-parses": "event: error\ndata: {\"message\":\"bad sk-openai-generic\\u002dkey1\"}\n\n",
+		"empty":        "data:\n\n",
 	}
 	e := newEnv(t)
 	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
@@ -807,6 +808,13 @@ func TestAChatStreamOpeningWithAnErrorFallsBack(t *testing.T) {
 		"named": "event: error\ndata: {\"error\":{\"message\":\"busy\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\n",
 		"bare":  "data: {\"error\":{\"message\":\"busy\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\n",
 		"torn":  "data: {\"error\":{\"message\":\"busy\"\n\n",
+		// An OpenAI client dispatches a ping's data, and an empty data line,
+		// as any chunk's: neither is a keep-alive here.
+		"ping":   "event: ping\ndata: diagnostic sk-openai-generic-key1\n\n" + chunk("ping", "Jupiter", "stop", chatUsage),
+		"pinged": "event: ping\ndata: {\"error\":{\"message\":\"busy\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\n",
+		"empty":  "data:\n\n" + chunk("empty", "Jupiter", "stop", chatUsage),
+		// An event named error says so with no data in it.
+		"dataless": "event: error\n\n" + chunk("dataless", "Jupiter", "stop", chatUsage),
 	}
 	e := newEnv(t)
 	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) { sse(w, opening[c.Model]) })
@@ -824,21 +832,21 @@ func TestAChatStreamOpeningWithAnErrorFallsBack(t *testing.T) {
 	if resp, b := e.do("POST", "/v1/chat/completions", `{"model":"quiet","stream":true,"messages":[]}`, hdr); resp.StatusCode != 200 || !strings.Contains(string(b), "Jupiter") {
 		t.Errorf("quiet: %d %q", resp.StatusCode, b)
 	}
-	for _, m := range []string{"named", "bare", "torn"} {
+	for _, m := range []string{"named", "bare", "torn", "ping", "pinged", "empty", "dataless"} {
 		if resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`","stream":true,"messages":[]}`, hdr); resp.StatusCode != 200 || !strings.Contains(string(b), `"content":"aturn"`) {
 			t.Errorf("%s: %d %q", m, resp.StatusCode, b)
 		}
 		want := http.StatusInternalServerError
-		if m == "torn" {
+		if m == "torn" || m == "ping" || m == "empty" || m == "dataless" {
 			want = http.StatusBadGateway
 		}
 		if resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`-alone","stream":true,"messages":[]}`, hdr); resp.StatusCode != want ||
-			!strings.Contains(string(b), `"error":{`) || strings.Contains(string(b), "data:") {
+			!strings.Contains(string(b), `"error":{`) || strings.Contains(string(b), "data:") || strings.Contains(string(b), "key1") {
 			t.Errorf("%s alone: %d %q", m, resp.StatusCode, b)
 		}
 	}
-	if len(next.recorded()) != 3 {
-		t.Errorf("%d calls to the fallback, want %d", len(next.recorded()), 3)
+	if len(next.recorded()) != 7 {
+		t.Errorf("%d calls to the fallback, want %d", len(next.recorded()), 7)
 	}
 }
 
@@ -854,6 +862,9 @@ func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
 		}
 		return fmt.Sprintf("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,\"choices\":[{\"index\":1,\"delta\":{\"content\":%q},\"finish_reason\":%s}]}\n\n", model, content, f)
 	}
+	choice := func(model, index, delta string) string {
+		return fmt.Sprintf("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,\"choices\":[{\"index\":%s,\"delta\":%s,\"finish_reason\":null}]}\n\n", model, index, delta)
+	}
 	release := make(chan struct{})
 	defer close(release)
 	e := newEnv(t)
@@ -864,6 +875,27 @@ func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
 			return
 		case "none":
 			sse(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"","choices":[],"prompt_filter_results":[]}`+"\n\n")
+			return
+		case "aliased":
+			sse(w, chunk(c.Model, "A", "stop", ""), choice(c.Model, `1.5`, `{"content":"B"}`))
+			return
+		case "unindexed":
+			sse(w, chunk(c.Model, "A", "stop", ""), choice(c.Model, `null`, `{"content":"B"}`))
+			return
+		case "unshaped":
+			sse(w, chunk(c.Model, "A", "stop", ""), fmt.Sprintf("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":%q,\"choices\":\"x\"}\n\n", c.Model))
+			return
+		case "reopened":
+			sse(w, chunk(c.Model, "A", "stop", ""), choice(c.Model, `0`, `{"content":"B"}`))
+			return
+		case "usage-unshaped":
+			sse(w, chunk(c.Model, "A", "stop", ""), fmt.Sprintf("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":%q,\"choices\":\"x\",\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", c.Model), "data: [DONE]\n\n")
+			return
+		case "choiceless":
+			sse(w, chunk(c.Model, "A", "stop", ""), fmt.Sprintf("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":%q,\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", c.Model))
+			return
+		case "trailing":
+			sse(w, chunk(c.Model, "A", "stop", ""), choice(c.Model, `0`, `{"role":"assistant","content":"","tool_calls":null,"annotations":[],"audio":{}}`))
 			return
 		}
 		sse(w, chunk(c.Model, "Jupiter", "stop", ""), second(c.Model, "Saturn", "stop"))
@@ -881,6 +913,12 @@ func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
 	e.alias("cut", target(e.deployment(p, "cut"), 0))
 	e.alias("held", target(e.deployment(p, "held"), 0))
 	e.alias("none", target(e.deployment(p, "none"), 0))
+	odd := map[string]string{"aliased": "could not read", "unindexed": "could not read", "unshaped": "could not read", "reopened": "before its finish", "trailing": ""}
+	for m := range odd {
+		e.alias(m, target(e.deployment(p, m), 0))
+	}
+	e.alias("usage-unshaped", target(e.deployment(p, "usage-unshaped"), 0))
+	e.alias("choiceless", target(e.deployment(p, "choiceless"), 0))
 	key := e.key(everyAlias)
 	e.start()
 	hdr := map[string]string{"Authorization": "Bearer " + key}
@@ -902,5 +940,34 @@ func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
 		t.Errorf("none: %q", b)
 	} else if typ, _, ok := openAIEnvelope([]byte(lines[1])); !ok || typ != "api_error" {
 		t.Errorf("none ended with %s", lines[1])
+	}
+	// A choice whose index is no whole number cannot be told from the
+	// finished one, a choice that goes on after its finish has not finished,
+	// and one that only repeats its role or empty fields after it has.
+	for m, want := range odd {
+		_, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`","n":2,"stream":true,"messages":[]}`, hdr)
+		lines := dataLines(b)
+		switch {
+		case want == "":
+			if len(lines) != 2 || strings.Contains(string(b), `"error"`) {
+				t.Errorf("%s: %q", m, b)
+			}
+		case len(lines) != 3:
+			t.Errorf("%s: %q", m, b)
+		default:
+			if typ, msg, ok := openAIEnvelope([]byte(lines[2])); !ok || typ != "api_error" || !strings.Contains(msg, want) {
+				t.Errorf("%s ended with %s", m, lines[2])
+			}
+		}
+	}
+	// A usage chunk whose choices the gateway cannot read is no usage chunk
+	// it may withhold.
+	if _, b := e.do("POST", "/v1/chat/completions", `{"model":"usage-unshaped","stream":true,"messages":[]}`, hdr); len(dataLines(b)) != 3 || strings.Contains(string(b), `"error"`) {
+		t.Errorf("usage-unshaped: %q", b)
+	}
+	// A usage chunk with no choices at all is one, after which the stream
+	// has ended without [DONE].
+	if _, b := e.do("POST", "/v1/chat/completions", `{"model":"choiceless","stream":true,"messages":[]}`, hdr); len(dataLines(b)) != 1 || strings.Contains(string(b), `"error"`) {
+		t.Errorf("choiceless: %q", b)
 	}
 }

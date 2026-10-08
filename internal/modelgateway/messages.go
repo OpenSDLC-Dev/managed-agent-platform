@@ -465,8 +465,8 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		return &failure{status: s, header: resp.Header, body: errorJSON(ctx, red, b, requestID(r))}, retryable(s, resp.Header)
 	}
 	if c.stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		// The answer begins with the first event that is not a keep-alive (a
-		// comment or a ping); until then the caller has seen nothing and the
+		// The answer begins with the first event that is not a keep-alive
+		// (p.keepAlive); until then the caller has seen nothing and the
 		// upstream may yet refuse, as an error event, which is answered like
 		// any refusal. Keep-alives past maxHeld begin it anyway.
 		events := upstream.NewReader(resp.Body)
@@ -487,7 +487,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			switch {
 			case err != nil && !cut:
 				return noAnswer(guard, red, err)
-			case keepAlive(e) && len(held)+len(e.Raw) <= maxHeld:
+			case p.keepAlive(e) && len(held)+len(e.Raw) <= maxHeld:
 				held = append(held, e.Raw...)
 			case e.Name == "error" && c.proto == profile.Anthropic:
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
@@ -663,13 +663,9 @@ func answerJSON(b []byte, alias string, wrap *wrapping) ([]byte, json.RawMessage
 	return encodeJSON(obj), usage
 }
 
-// keepAlive is an event that holds a stream open and says nothing: a
-// comment or a ping.
-func keepAlive(e upstream.Event) bool { return e.Name == "ping" || e.Name == "" && e.Data == nil }
-
 // relayStream passes an upstream's events to the caller as each arrives —
 // the keep-alives held before the first, then the first, then the rest — as
-// p, the stream's protocol, rewrites or withholds each. Comments and pings
+// p, the stream's protocol, rewrites or withholds each. Its keep-alives
 // pass unchanged, and each event goes out whole: one the upstream cut off at
 // the end of its stream is completed when its data parses, so the caller
 // dispatches it and nothing written after it merges in, and dropped when its
@@ -706,7 +702,7 @@ func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, fi
 		}
 	}
 	relay := func(e upstream.Event) {
-		if c.out.ttft == 0 && !keepAlive(e) {
+		if c.out.ttft == 0 && !p.keepAlive(e) {
 			c.out.ttft = time.Since(c.start)
 		}
 		out, last := p.event(e)
@@ -764,6 +760,8 @@ type streamProto interface {
 	complete(data []byte) bool
 	// failure is the event telling the caller the stream failed.
 	failure(typ, msg string) []byte
+	// keepAlive reports whether e holds the stream open and says nothing.
+	keepAlive(e upstream.Event) bool
 }
 
 // messagesStream relays an Anthropic stream, rewriting only message_start's
@@ -777,6 +775,12 @@ type messagesStream struct {
 	ctx  context.Context
 	red  provider.Redactor
 	rid  string
+}
+
+// keepAlive: a comment or a ping, which the Messages API sends to hold a
+// stream open, or an unnamed event with no data in it.
+func (s *messagesStream) keepAlive(e upstream.Event) bool {
+	return e.Name == "ping" || e.Name == "" && len(e.Data) == 0
 }
 
 func (s *messagesStream) event(e upstream.Event) ([]byte, bool) {
@@ -832,6 +836,7 @@ type chatStream struct {
 	red      provider.Redactor
 	withhold bool           // the caller did not ask for the usage chunk
 	finished map[int64]bool // each choice begun, by index: whether it has finished
+	unread   bool           // a choice passed whose index the gateway could not read
 }
 
 func (s *chatStream) event(e upstream.Event) ([]byte, bool) {
@@ -856,18 +861,26 @@ func (s *chatStream) event(e upstream.Event) ([]byte, bool) {
 		s.c.out.tokens = t
 	}
 	var choices []map[string]json.RawMessage
-	_ = json.Unmarshal(obj["choices"], &choices)
+	_, has := obj["choices"]
+	bad := has && json.Unmarshal(obj["choices"], &choices) != nil
+	if bad {
+		s.unread, choices = true, nil
+	}
 	for _, ch := range choices {
-		var index int64
-		_ = json.Unmarshal(ch["index"], &index)
+		index, ok := countOf(ch["index"])
+		if !ok {
+			s.unread = true
+			continue
+		}
 		var finish string
 		over := json.Unmarshal(ch["finish_reason"], &finish) == nil && finish != ""
 		if s.finished == nil {
 			s.finished = map[int64]bool{}
 		}
-		s.finished[index] = s.finished[index] || over
+		// A choice that goes on after its finish has not finished.
+		s.finished[index] = over || s.finished[index] && !generates(ch)
 	}
-	if s.withhold && len(choices) == 0 && len(usage) > 0 && !bytes.Equal(bytes.TrimSpace(usage), []byte("null")) {
+	if s.withhold && !bad && len(choices) == 0 && len(usage) > 0 && !bytes.Equal(bytes.TrimSpace(usage), []byte("null")) {
 		return nil, false
 	}
 	if _, ok := obj["model"]; !ok {
@@ -878,8 +891,13 @@ func (s *chatStream) event(e upstream.Event) ([]byte, bool) {
 }
 
 // ended: a stream has said all it will once every choice it began — n
-// may ask for several — has finished.
+// may ask for several — has finished and not gone on. A choice whose index
+// is missing or no whole number cannot be told apart from the rest, so once
+// one has passed, only [DONE] ends the stream.
 func (s *chatStream) ended() string {
+	if s.unread {
+		return "the stream ended after a choice whose index the gateway could not read"
+	}
 	for _, over := range s.finished {
 		if !over {
 			return "the stream ended before its finish"
@@ -891,7 +909,29 @@ func (s *chatStream) ended() string {
 	return ""
 }
 
+// generates reports whether a chunk's choice carries more of the answer: a
+// delta with a field other than role whose value is not null or empty.
+func generates(ch map[string]json.RawMessage) bool {
+	var delta map[string]json.RawMessage
+	_ = json.Unmarshal(ch["delta"], &delta)
+	for k, v := range delta {
+		switch string(bytes.TrimSpace(v)) {
+		case "null", `""`, "[]", "{}":
+		default:
+			if k != "role" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *chatStream) complete(data []byte) bool { return json.Valid(data) || isDone(data) }
+
+// keepAlive: an event with no data line, which an OpenAI client does not
+// dispatch, whatever its name but error, which the gateway reads as one. A
+// ping that carries data is data to such a client, read as any chunk is.
+func (s *chatStream) keepAlive(e upstream.Event) bool { return e.Data == nil && e.Name != "error" }
 
 func (s *chatStream) failure(typ, msg string) []byte {
 	b := encodeJSON(map[string]any{"error": map[string]any{"message": msg, "type": typ, "param": nil, "code": nil}})

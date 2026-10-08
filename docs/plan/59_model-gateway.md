@@ -292,11 +292,12 @@ converts when protocols match.
   that an upstream might read as asking for a stream is refused (`count_tokens`, which
   never streams, excepted), as is, on Chat Completions, `stream_options` the gateway
   could not ask through: not an object or null, or a key differing from it or
-  `include_usage` only in case. Such a stream has ended at `[DONE]`, or when the upstream closes it
-  after every choice's finish, as MiniMax-M3 does, sending no `[DONE]`; closed before
-  either, it ends with an error chunk in OpenAI's envelope. A
-  conversion path whose upstream sends no pings emits its own during silent gaps. A
-  provider configures both of its vendor's endpoints
+  `include_usage` only in case. Such a stream has ended at `[DONE]`, at an upstream's
+  error, relayed with its credentials removed, or when the upstream closes it after
+  every choice's finish, as MiniMax-M3 does, sending no `[DONE]`; closed before any of
+  these, it ends with an error chunk in OpenAI's envelope. A conversion path whose
+  upstream sends no pings emits its own during silent gaps. A provider configures both
+  of its vendor's endpoints
   and selection prefers the one matching the inbound protocol, so Anthropic and Chat
   Completions callers both pass through to all four chat vendors.
 - **Conversion** — the protocols differ. v1 needs two directions: Responses (inbound) ↔
