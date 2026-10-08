@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -20,12 +25,16 @@ import (
 //   - a search_result replayed in a tool result reaches the vendor flattened
 //     to text, which the model then answers from;
 //   - the cache usage fields come back as the vendor reported them, a
-//     repeated prompt reading from the cache;
-//   - tool_choice auto and none reach the vendor exactly as asked, while a
-//     choice forcing a tool call that the vendor ignores (any on both, tool on
-//     MiniMax) is refused with no upstream call, and DeepSeek's tool is honored
-//     with thinking disabled and refused by DeepSeek with it on;
-//   - MiniMax's CN key on its international host is a credential the vendor
+//     repeated prompt reading from the cache, and input_tokens, cache write
+//     and cache read add up to the same prompt on every call, as the Messages
+//     API's do;
+//   - tool_choice auto and none reach the vendor exactly as asked; a choice
+//     forcing a tool call that the vendor ignores (any on both, tool on
+//     MiniMax) is refused with no upstream call, and the vendor asked
+//     directly still ignores it, which is the evidence the refusal rests
+//     on; DeepSeek's tool is honored with thinking disabled and refused by
+//     DeepSeek with it on;
+//   - a MiniMax key on its other region's host is a credential the vendor
 //     refuses, which the gateway answers as its own failure.
 func TestLiveVendorBehavior(t *testing.T) {
 	vendors := namedVendors(t)
@@ -34,22 +43,21 @@ func TestLiveVendorBehavior(t *testing.T) {
 		v     liveVendor
 		alias string
 		rec   *recorder
+		other *recorder // the key on its other region's host, where there is one
 	}
 	var routes []route
-	var intl *recorder
 	for _, v := range vendors {
-		model := v.models[0]
-		rec := &recorder{}
-		p := e.provider(recordingProxy(t, v.base, rec), func(p *store.Provider) { p.Name, p.Profile = model, v.name })
+		r := route{v: v, alias: v.models[0], rec: &recorder{}}
+		p := e.provider(recordingProxy(t, v.base, r.rec), func(p *store.Provider) { p.Name, p.Profile = r.alias, v.name })
 		e.credential(p, v.keyEnv, 1)
-		e.alias(model, target(e.deployment(p, model), 0))
-		routes = append(routes, route{v, model, rec})
-		if v.name == "minimax" && strings.Contains(v.base, "minimax.cn") {
-			intl = &recorder{}
-			ip := e.provider(recordingProxy(t, "https://api.minimax.io/anthropic", intl), func(p *store.Provider) { p.Name, p.Profile = "minimax-intl", v.name })
-			e.credential(ip, v.keyEnv, 1)
-			e.alias("minimax-intl", target(e.deployment(ip, model), 0))
+		e.alias(r.alias, target(e.deployment(p, r.alias), 0))
+		if host := otherRegion(v); host != "" {
+			r.other = &recorder{}
+			op := e.provider(recordingProxy(t, host, r.other), func(p *store.Provider) { p.Name, p.Profile = r.alias+"-other-region", v.name })
+			e.credential(op, v.keyEnv, 1)
+			e.alias(r.alias+"-other-region", target(e.deployment(op, r.alias), 0))
 		}
+		routes = append(routes, r)
 	}
 	key := e.key(everyAlias)
 	e.start()
@@ -63,14 +71,17 @@ func TestLiveVendorBehavior(t *testing.T) {
 			t.Run("count_tokens", func(t *testing.T) {
 				n := r.rec.count()
 				ct, err := cl.Messages.CountTokens(liveCtx(t), anthropic.MessageCountTokensParams{Model: model, Messages: []anthropic.MessageParam{liveAsk()}})
-				x := one(t, r.rec, n)
-				status, raw := x.answer()
+				xs := r.rec.since(n)
+				if err != nil || len(xs) != 1 {
+					liveFatalf(t, "count_tokens: %v, %d upstream calls, want one", err, len(xs))
+				}
+				status, raw := xs[0].answer()
 				var up struct {
 					InputTokens int64 `json:"input_tokens"`
 				}
 				_ = json.Unmarshal(raw, &up)
-				if err != nil || status != 200 || ct.InputTokens <= 0 || ct.InputTokens != up.InputTokens || !strings.HasSuffix(x.path, "/v1/messages/count_tokens") {
-					liveFatalf(t, "count_tokens: %v, %+v; the vendor answered %d %s at %s", err, ct, status, raw, x.path)
+				if status != 200 || ct.InputTokens <= 0 || ct.InputTokens != up.InputTokens || !strings.HasSuffix(xs[0].path, "/v1/messages/count_tokens") {
+					liveFatalf(t, "count_tokens: %+v; the vendor answered %d %s at %s", ct, status, raw, xs[0].path)
 				}
 				t.Logf("count_tokens: %d input tokens", ct.InputTokens)
 			})
@@ -82,8 +93,8 @@ func TestLiveVendorBehavior(t *testing.T) {
 				ask := anthropic.NewUserMessage(anthropic.NewTextBlock("What is the project's code word? Search the knowledge base for it, then answer with the code word alone."))
 				p := anthropic.MessageNewParams{Model: model, MaxTokens: 2048, Thinking: r.v.thinking, Tools: []anthropic.ToolUnionParam{search},
 					Messages: []anthropic.MessageParam{ask}}
-				// Whether the model chooses to search is not what this checks, so
-				// it is asked up to three times.
+				// Whether the model searches, and how it words its answer, are
+				// its own, so each turn is asked up to three times.
 				var m1 *anthropic.Message
 				var results []anthropic.ContentBlockParamUnion
 				for try := 0; try < 3 && len(results) == 0; try++ {
@@ -104,22 +115,37 @@ func TestLiveVendorBehavior(t *testing.T) {
 					liveFatalf(t, "the model answered three times without searching (stop %q)", m1.StopReason)
 				}
 				p.Messages = append(p.Messages, m1.ToParam(), anthropic.NewUserMessage(results...))
-				n := r.rec.count()
-				m2, err := cl.Messages.New(liveCtx(t), p)
-				sent := one(t, r.rec, n).sent
-				if bytes.Contains(sent, []byte(`"search_result"`)) || !bytes.Contains(sent, []byte("PELICAN-42")) || !bytes.Contains(sent, []byte("https://kb.example/code-word")) {
-					liveFatalf(t, "the vendor was not sent the search result flattened to text: %s", abbreviate([]string{string(sent)}))
+				var m2 *anthropic.Message
+				for try := 0; try < 3 && !strings.Contains(strings.ToUpper(textOf(m2)), "PELICAN"); try++ {
+					n := r.rec.count()
+					var err error
+					m2, err = cl.Messages.New(liveCtx(t), p)
+					xs := r.rec.since(n)
+					if err != nil || len(xs) != 1 {
+						liveFatalf(t, "the replay: %v, %d upstream calls, want one", err, len(xs))
+					}
+					if sent := xs[0].sent; bytes.Contains(sent, []byte(`"search_result"`)) || !bytes.Contains(sent, []byte("PELICAN-42")) ||
+						!bytes.Contains(sent, []byte("https://kb.example/code-word")) {
+						liveFatalf(t, "the vendor was not sent the search result flattened to text: %s", abbreviate([]string{string(sent)}))
+					}
 				}
-				if err != nil || !strings.Contains(strings.ToUpper(textOf(m2)), "PELICAN-42") {
-					liveFatalf(t, "the replay: %v; answered %q", err, masked(textOf(m2)))
+				if !strings.Contains(strings.ToUpper(textOf(m2)), "PELICAN") {
+					liveFatalf(t, "three replays answered without the code word: %q (stop %q)", masked(textOf(m2)), m2.StopReason)
 				}
 			})
 
 			t.Run("cache", func(t *testing.T) {
-				sys := []anthropic.TextBlockParam{{Text: "Answer in one word.\n" + strings.Repeat("This sentence pads the prompt for a prompt cache check. ", 300),
+				// A prompt no earlier run sent, so the first call reads nothing
+				// from the cache and a later one reads what this run wrote.
+				sys := []anthropic.TextBlockParam{{Text: fmt.Sprintf("Run %d. Answer in one word.\n", time.Now().UnixNano()) +
+					strings.Repeat("This sentence pads the prompt for a prompt cache check. ", 300),
 					CacheControl: anthropic.NewCacheControlEphemeralParam()}}
-				var read int64
-				for i := 0; i < 4 && (i < 2 || read == 0); i++ {
+				// MiniMax's cache hits come and go from one call to the next
+				// (docs/HISTORY.md), so the calls go on until one reads other than
+				// the first, when the sum below can tell the meanings apart.
+				var first, prompt int64
+				changed, reread := false, false
+				for i := 0; i < 4 && !changed; i++ {
 					n := r.rec.count()
 					m, err := cl.Messages.New(liveCtx(t), anthropic.MessageNewParams{Model: model, MaxTokens: 512, System: sys,
 						Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Say ok."))}})
@@ -133,26 +159,36 @@ func TestLiveVendorBehavior(t *testing.T) {
 						!u.JSON.CacheCreationInputTokens.Valid() || !u.JSON.CacheReadInputTokens.Valid() || !sameUsage(u, v) {
 						liveFatalf(t, "call %d: the gateway answered usage %s, the vendor reported %s", i, u.RawJSON(), v.RawJSON())
 					}
-					if i > 0 {
-						read = u.CacheReadInputTokens
+					// In the Messages API's meaning, which the usage ledger prices,
+					// input_tokens counts only what was neither read from the cache
+					// nor written to it, so the three add up to the same prompt on
+					// every call; input_tokens that counted the reads too would grow
+					// the sum as the reads change.
+					if sum := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens; i == 0 {
+						first, prompt = u.CacheReadInputTokens, sum
+					} else if sum != prompt {
+						liveFatalf(t, "call %d: input, cache write and cache read add up to %d, against %d on the first call", i, sum, prompt)
+					} else {
+						changed, reread = u.CacheReadInputTokens != first, reread || u.CacheReadInputTokens > 0
 					}
 					t.Logf("cache call %d: input %d, cache write %d, cache read %d", i, u.InputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens)
 				}
-				if read == 0 {
-					liveFatalf(t, "three repeats of a %d-character prompt read nothing from the cache", len(sys[0].Text))
+				if !reread {
+					liveFatalf(t, "no repeat of a %d-character prompt read from the cache", len(sys[0].Text))
+				}
+				if !changed {
+					t.Logf("every call read %d tokens from the cache, so the sums could not tell input_tokens' meanings apart", first)
 				}
 			})
 
 			t.Run("tool_choice", func(t *testing.T) {
-				getTime := anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{Name: "get_time",
-					Description: anthropic.String("Returns the current time."), InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}}}}
-				ask := func(choice anthropic.ToolChoiceUnionParam, thinking anthropic.ThinkingConfigParamUnion) (*anthropic.Message, error, []*exchange) {
+				ask := func(choice anthropic.ToolChoiceUnionParam, thinking anthropic.ThinkingConfigParamUnion, prompt string) (*anthropic.Message, []*exchange, error) {
 					n := r.rec.count()
-					m, err := cl.Messages.New(liveCtx(t), anthropic.MessageNewParams{Model: model, MaxTokens: 2048, Tools: []anthropic.ToolUnionParam{getTime},
-						ToolChoice: choice, Thinking: thinking, Messages: []anthropic.MessageParam{liveAsk()}})
-					return m, err, r.rec.since(n)
+					m, err := cl.Messages.New(liveCtx(t), anthropic.MessageNewParams{Model: model, MaxTokens: 2048, Tools: []anthropic.ToolUnionParam{liveTool},
+						ToolChoice: choice, Thinking: thinking, Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))}})
+					return m, r.rec.since(n), err
 				}
-				status := func(err error) int {
+				statusOf := func(err error) int {
 					var apiErr *anthropic.Error
 					if errors.As(err, &apiErr) {
 						return apiErr.StatusCode
@@ -164,7 +200,7 @@ func TestLiveVendorBehavior(t *testing.T) {
 					name   string
 					choice anthropic.ToolChoiceUnionParam
 				}{{"auto", anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}}, {"none", anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}}} {
-					m, err, xs := ask(c.choice, none)
+					m, xs, err := ask(c.choice, none, liveAskText)
 					if err != nil || len(xs) != 1 {
 						liveErrorf(t, "tool_choice %s: %v, %d upstream calls, want one", c.name, err, len(xs))
 						continue
@@ -176,57 +212,156 @@ func TestLiveVendorBehavior(t *testing.T) {
 					if want := `{"type":"` + c.name + `"}`; string(sent.ToolChoice) != want {
 						liveErrorf(t, "tool_choice %s: the vendor was sent %s, want %s", c.name, sent.ToolChoice, want)
 					}
-					// Both vendors honor none, but not always: MiniMax-M3 once
-					// called the tool under it (docs/HISTORY.md), which is the
-					// vendor's lapse, not the gateway's.
+					// MiniMax-M3 honors none, but not always (docs/HISTORY.md):
+					// the vendor's lapse, not the gateway's.
 					if c.name == "none" && hasToolUse(m) {
 						t.Logf("tool_choice none: the model called the tool anyway")
 					}
 				}
-				refused := []string{"any"}
-				if r.v.name == "minimax" {
-					refused = append(refused, "tool")
-				}
-				for _, name := range refused {
-					choice := anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
-					if name == "tool" {
-						choice = anthropic.ToolChoiceUnionParam{OfTool: &anthropic.ToolChoiceToolParam{Name: "get_time"}}
-					}
-					_, err, xs := ask(choice, none)
-					if status(err) != 400 || len(xs) != 0 || !strings.Contains(err.Error(), "tool_choice.type") {
+				for _, name := range forcedIgnored(r.v.name) {
+					_, xs, err := ask(forcing(name), none, noToolNeeded)
+					if statusOf(err) != 400 || len(xs) != 0 || !strings.Contains(err.Error(), "tool_choice.type") {
 						liveErrorf(t, "tool_choice %s: %v, %d upstream calls; want the gateway's 400 naming tool_choice.type, and none", name, err, len(xs))
 					}
 				}
 				if r.v.name == "deepseek" {
-					tool := anthropic.ToolChoiceUnionParam{OfTool: &anthropic.ToolChoiceToolParam{Name: "get_time"}}
-					m, err, xs := ask(tool, anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}})
+					// A question needing no tool, so a call proves the choice forced it.
+					m, xs, err := ask(forcing("tool"), anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}}, noToolNeeded)
 					if err != nil || len(xs) != 1 || !hasToolUse(m) {
 						liveErrorf(t, "tool_choice tool, thinking disabled: %v, %d upstream calls; want get_time called", err, len(xs))
 					}
-					_, err, xs = ask(tool, none)
+					_, xs, err = ask(forcing("tool"), none, noToolNeeded)
 					if len(xs) != 1 {
-						liveFatalf(t, "tool_choice tool, thinking on: %d upstream calls, want 1", len(xs))
+						liveFatalf(t, "tool_choice tool, thinking on: %v, %d upstream calls, want 1", err, len(xs))
 					}
-					if vs, _ := xs[0].answer(); status(err) != 400 || vs != 400 {
+					if vs, _ := xs[0].answer(); statusOf(err) != 400 || vs != 400 {
 						liveErrorf(t, "tool_choice tool, thinking on: %v; the vendor answered %d; want DeepSeek's own 400 relayed", err, vs)
 					}
 				}
 			})
 
-			if r.v.name == "minimax" && intl != nil {
-				t.Run("cn key on the international host", func(t *testing.T) {
-					n := intl.count()
-					_, err := cl.Messages.New(liveCtx(t), anthropic.MessageNewParams{Model: "minimax-intl", MaxTokens: 64,
+			t.Run("the refused choices asked directly", func(t *testing.T) {
+				// The refusals rest on the vendor ignoring these choices. Asked
+				// directly, a question needing no tool gets no call while a
+				// choice is ignored, and one each time once it is honored; a
+				// vendor that starts honoring one leaves its refusal stale.
+				for _, name := range forcedIgnored(r.v.name) {
+					calls := 0
+					for range 2 {
+						called, err := askVendor(r.v, r.alias, forcing(name), noToolNeeded)
+						if err != nil {
+							liveFatalf(t, "tool_choice %s, asked directly: %v", name, err)
+						}
+						if called {
+							calls++
+						}
+					}
+					if calls == 2 {
+						liveErrorf(t, "asked directly with tool_choice %s, %s called the tool both times: the vendor may now honor it, so its refusal in profile.go wants re-measuring", name, r.alias)
+					}
+				}
+			})
+
+			if r.v.name == "minimax" {
+				t.Run("a key on its other region's host", func(t *testing.T) {
+					if r.other == nil {
+						t.Skipf("%s is neither of the profile's MiniMax hosts, so there is no other region to try", r.v.base)
+					}
+					n := r.other.count()
+					_, err := cl.Messages.New(liveCtx(t), anthropic.MessageNewParams{Model: model + "-other-region", MaxTokens: 64,
 						Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Say ok."))}})
-					vs, _ := one(t, intl, n).answer()
+					xs := r.other.since(n)
+					if len(xs) != 1 {
+						liveFatalf(t, "the other region: %v, %d upstream calls, want one", err, len(xs))
+					}
+					vs, _ := xs[0].answer()
 					var apiErr *anthropic.Error
 					if vs != 401 || !errors.As(err, &apiErr) || apiErr.StatusCode != 502 {
-						liveErrorf(t, "the CN key on the international host: the vendor answered %d, the gateway %v; want 401, then the gateway's 502", vs, err)
+						liveErrorf(t, "the key on its other region's host: the vendor answered %d, the gateway %v; want 401, then the gateway's 502", vs, err)
 					}
 				})
 			}
 		})
 	}
+}
+
+// noToolNeeded is a question no offered tool helps with: a tool call made
+// to it was forced.
+const noToolNeeded = "Hello! Tell me a fun fact about the number seven, in one sentence."
+
+// forcedIgnored is the forcing tool_choice values the vendor's profile
+// refuses, because the vendor ignores them.
+func forcedIgnored(vendor string) []string {
+	if vendor == "minimax" {
+		return []string{"any", "tool"}
+	}
+	return []string{"any"}
+}
+
+// forcing is the tool_choice forcing a call by name: any, or tool (get_time).
+func forcing(name string) anthropic.ToolChoiceUnionParam {
+	if name == "tool" {
+		return anthropic.ToolChoiceUnionParam{OfTool: &anthropic.ToolChoiceToolParam{Name: "get_time"}}
+	}
+	return anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
+}
+
+// askVendor asks v's model directly, without the gateway, with the tier's
+// tool offered under choice, the key sent as v's profile sends it, and
+// reports whether the model called the tool.
+func askVendor(v liveVendor, model string, choice anthropic.ToolChoiceUnionParam, prompt string) (bool, error) {
+	body, err := json.Marshal(anthropic.MessageNewParams{Model: anthropic.Model(model), MaxTokens: 1024, Tools: []anthropic.ToolUnionParam{liveTool},
+		ToolChoice: choice, Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))}})
+	if err != nil {
+		return false, err
+	}
+	req, err := http.NewRequest("POST", strings.TrimRight(v.base, "/")+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+	if prof, _ := profile.Lookup(v.name); prof.BearerAuth {
+		req.Header.Set("Authorization", "Bearer "+v.keyEnv)
+	} else {
+		req.Header.Set("X-Api-Key", v.keyEnv)
+	}
+	resp, err := (&http.Client{Timeout: liveCallTimeout}).Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return false, fmt.Errorf("%d %s", resp.StatusCode, b)
+	}
+	var m anthropic.Message
+	if err := json.Unmarshal(b, &m); err != nil {
+		return false, err
+	}
+	return hasToolUse(&m), nil
+}
+
+// otherRegion is the Anthropic host of v's profile in the region v's base URL
+// is not, for MiniMax, whose key works in its own region only; empty for
+// another vendor, or for a base URL that is neither region's host.
+func otherRegion(v liveVendor) string {
+	if v.name != "minimax" {
+		return ""
+	}
+	prof, _ := profile.Lookup(v.name)
+	mine := profile.Region("")
+	for _, h := range prof.Hosts {
+		if h.Protocol == profile.Anthropic && strings.TrimRight(h.BaseURL, "/") == strings.TrimRight(v.base, "/") {
+			mine = h.Region
+		}
+	}
+	for _, h := range prof.Hosts {
+		if mine != "" && h.Protocol == profile.Anthropic && h.Region != mine {
+			return h.BaseURL
+		}
+	}
+	return ""
 }
 
 func hasToolUse(m *anthropic.Message) bool {

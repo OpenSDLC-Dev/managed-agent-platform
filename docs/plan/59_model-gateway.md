@@ -319,9 +319,9 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
 - **Every edit is deterministic and leaves `system` alone,** so an upstream sees one
   stable prefix across a conversation's requests — what preserved thinking checks.
 - **Pass through** by default; the upstream's own error reaches the caller, redacted.
-  What the docs leave uncertain (MiniMax's two `tool_choice` pages; every Zhipu field)
-  passes through until evidence says otherwise — the live tier, for a vendor it has a
-  key for.
+  What the docs leave uncertain (every Zhipu field; MiniMax's two `tool_choice` pages,
+  until slice 2g's live tier settled them) passes through until evidence says
+  otherwise — the live tier, for a vendor it has a key for.
 - **Edit** only what (a) the platform's own traffic needs — `search_result` flattened to
   text through `provider.SearchResultText` where a vendor refuses it, which is the
   brain's `flatten_search_results` moved behind the gateway — or (b) the vendor
@@ -756,7 +756,8 @@ where a vendor bills cache writes.
     falls back, and its continuation goes straight to its thinking's producer; a
     conversation crossing from DeepSeek to MiniMax and back sends each only its own,
     MiniMax closing any tool loop it opens first, since DeepSeek refuses a loop that
-    reaches it under MiniMax's ids without DeepSeek's thinking.
+    reaches it under MiniMax's ids without DeepSeek's thinking — a refusal the tier
+    checks is relayed as DeepSeek's own 400.
   - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with
     `Message.Accumulate`) on an alias routed to each vendor: text, a tool-use round trip
     that sends the thinking blocks back unchanged, reported usage, and an upstream

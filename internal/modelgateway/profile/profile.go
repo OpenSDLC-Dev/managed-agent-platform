@@ -65,8 +65,9 @@ type Profile struct {
 	// brain's flatten_search_results uses (internal/provider/anthropic).
 	FlattenSearchResults bool `json:"-"`
 	// Ignores names what in a request to model, a deployment's upstream
-	// model id, the vendor documents it ignores although the answer depends
-	// on it, or "" for nothing; no such deployment serves the request.
+	// model id, the vendor ignores although the answer depends on it — by
+	// its documentation or the live tier — or "" for nothing; no such
+	// deployment serves the request.
 	Ignores func(model string, request map[string]json.RawMessage) string `json:"-"`
 }
 
@@ -136,9 +137,11 @@ var profiles = []Profile{
 // the live tier (docs/HISTORY.md, 2026-10-08) asked deepseek-flash and
 // deepseek-v4-pro for a fun fact with get_time offered and tool_choice any,
 // three times in each thinking mode, and got no tool call in any of the 18
-// answers. Its "tool" passes through: honored with thinking disabled, and
-// refused with a 400 of DeepSeek's own otherwise ("Thinking mode does not
-// support this tool_choice").
+// answers, nor in 6 from deepseek-chat and deepseek-reasoner, which answer
+// as deepseek-v4-flash. Its "tool" passes through: honored with thinking
+// disabled, and refused with a 400 of DeepSeek's own otherwise ("Thinking
+// mode does not support this tool_choice"), as the Messages API refuses
+// forced tool use with thinking on.
 func deepseekIgnores(_ string, req map[string]json.RawMessage) string {
 	var choice map[string]json.RawMessage
 	var ban bool
@@ -170,9 +173,10 @@ func choiceType(choice map[string]json.RawMessage) string {
 // 2026-10-08) settles it: MiniMax-M3 and M3.1-Flash-Preview, asked for a fun
 // fact with get_time offered, answered without calling it in every one of 30
 // asks forcing a call — tool_choice any or tool, three times in each thinking
-// mode either model accepts — so both are ignored. Its none passes through:
-// honored in every probe, MiniMax-M3 broke it once in a live-tier run, a
-// rare lapse rather than an ignored field.
+// mode either model accepts — and MiniMax-M2, M2.1, M2.5 and M2.7 in all 24
+// of theirs, so both are ignored. Its none passes through: a lapse of
+// MiniMax-M3's in a few of its asks, not an ignored field. The type is read
+// by its exact key, as MiniMax reads it: {"Type": "none"} is MiniMax's 400.
 func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 	var stops []json.RawMessage
 	if json.Unmarshal(req["stop_sequences"], &stops) == nil && len(stops) > 0 {

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"slices"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
 // OpenedKeys returns the ids of the credentials whose keys the handler holds
@@ -19,6 +21,11 @@ func OpenedKeys(h http.Handler) []string {
 	}
 	slices.Sort(ids)
 	return ids
+}
+
+// Open is the handler's open, as a request routed on c would call it.
+func Open(h http.Handler, ctx context.Context, c store.Credential) ([]byte, error) {
+	return h.(*handler).open(ctx, c)
 }
 
 // Backoff is the handler's wait before retry n.

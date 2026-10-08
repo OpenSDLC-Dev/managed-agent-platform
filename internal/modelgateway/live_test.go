@@ -297,27 +297,37 @@ func sentThinking(body []byte) []string {
 	return thinkingIn(c)
 }
 
+// liveAskText asks for the tier's one tool, liveTool.
+const liveAskText = "What time is it now? Call the get_time tool first, then answer in one short sentence."
+
 func liveAsk() anthropic.MessageParam {
-	return anthropic.NewUserMessage(anthropic.NewTextBlock("What time is it now? Call the get_time tool first, then answer in one short sentence."))
+	return anthropic.NewUserMessage(anthropic.NewTextBlock(liveAskText))
 }
+
+var liveTool = anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{Name: "get_time",
+	Description: anthropic.String("Returns the current time."), InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}}}}
+
+// liveCallTimeout bounds one live call; MiniMax-M3 has taken 142 seconds.
+const liveCallTimeout = 3 * time.Minute
 
 // liveTurn sends history to r's alias, whole or streamed, with thinking on as
 // its vendor takes it and one tool offered.
 func liveTurn(t *testing.T, cl *anthropic.Client, r liveRoute, history []anthropic.MessageParam, stream bool) (*anthropic.Message, error) {
 	t.Helper()
-	return liveSend(t, cl, anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Messages: history,
-		Thinking: r.thinking,
-		Tools: []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: "get_time",
-			Description: anthropic.String("Returns the current time."), InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{}}}}}}, stream)
+	return liveSend(cl, anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Messages: history,
+		Thinking: r.thinking, Tools: []anthropic.ToolUnionParam{liveTool}}, stream)
 }
 
-// liveSend sends p whole, or streamed and assembled by the SDK's Accumulate.
-func liveSend(t *testing.T, cl *anthropic.Client, p anthropic.MessageNewParams, stream bool) (*anthropic.Message, error) {
-	ctx := liveCtx(t)
+// liveSend sends p whole, or streamed and assembled by the SDK's Accumulate;
+// a stream it leaves early is closed, and the vendor stops generating.
+func liveSend(cl *anthropic.Client, p anthropic.MessageNewParams, stream bool) (*anthropic.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), liveCallTimeout)
+	defer cancel()
 	if !stream {
 		return cl.Messages.New(ctx, p)
 	}
 	s := cl.Messages.NewStreaming(ctx, p)
+	defer s.Close()
 	var m anthropic.Message
 	for s.Next() {
 		if err := m.Accumulate(s.Current()); err != nil {
@@ -334,7 +344,7 @@ func liveText(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool) {
 	t.Helper()
 	mode := map[bool]string{false: "whole", true: "streamed"}[stream]
 	n := r.rec.count()
-	m, err := liveSend(t, cl, anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Thinking: r.thinking,
+	m, err := liveSend(cl, anthropic.MessageNewParams{Model: anthropic.Model(r.alias), MaxTokens: 2048, Thinking: r.thinking,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Which planet is the largest in the solar system? Answer in one word."))}}, stream)
 	if err != nil {
 		liveFatalf(t, "%s text: %v", mode, err)
@@ -372,7 +382,8 @@ type liveRoute struct {
 // first choice is down falls back to the first named vendor's first model,
 // and the continuation goes straight to the deployment that produced its
 // thinking. With both vendors named, a conversation crosses from DeepSeek to
-// MiniMax and back, and each is sent only its own thinking. And the SDK lists,
+// MiniMax and back, and each is sent only its own thinking; and a tool loop
+// MiniMax opens, continued at DeepSeek, gets DeepSeek's refusal relayed. And the SDK lists,
 // a page at a time, every chat alias a key may use and no other, and gets each.
 func TestLiveThinkingRoundTrip(t *testing.T) {
 	vendors := namedVendors(t)
@@ -536,6 +547,34 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 			liveErrorf(t, "back at DeepSeek, sent %d values, want its own %d", len(sent), len(own))
 		}
 	})
+
+	t.Run("an open loop across vendors", func(t *testing.T) {
+		// A loop MiniMax opens carries MiniMax's tool ids and none of
+		// DeepSeek's thinking, which DeepSeek refuses; the gateway relays the
+		// refusal as DeepSeek gave it.
+		ds, mm := routes["deepseek"][0], routes["minimax"][0]
+		var m1 *anthropic.Message
+		for try := 0; try < 3 && !hasToolUse(m1); try++ {
+			var err error
+			if m1, err = liveTurn(t, cl, mm, []anthropic.MessageParam{liveAsk()}, false); err != nil {
+				liveFatalf(t, "%v", err)
+			}
+		}
+		if !hasToolUse(m1) {
+			liveFatalf(t, "MiniMax answered three times without calling the tool")
+		}
+		n := ds.rec.count()
+		_, err := liveTurn(t, cl, ds, next([]anthropic.MessageParam{liveAsk()}, m1), false)
+		xs := ds.rec.since(n)
+		if len(xs) != 1 {
+			liveFatalf(t, "DeepSeek was called %d times, want once: %v", len(xs), err)
+		}
+		vs, raw := xs[0].answer()
+		var apiErr *anthropic.Error
+		if vs != 400 || !errors.As(err, &apiErr) || apiErr.StatusCode != 400 || !strings.Contains(err.Error(), "must be passed back") {
+			liveFatalf(t, "the open loop: %v; DeepSeek answered %d %s; want its 400 relayed", err, vs, masked(string(raw)))
+		}
+	})
 }
 
 // liveRoundTrip returns how many times it asked the first turn.
@@ -599,9 +638,10 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRou
 	return tries
 }
 
-// liveCtx bounds one live call, and is cancelled with the test.
+// liveCtx bounds one live call whose answer is read whole, and is
+// cancelled with the test.
 func liveCtx(t *testing.T) context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), liveCallTimeout)
 	t.Cleanup(cancel)
 	return ctx
 }

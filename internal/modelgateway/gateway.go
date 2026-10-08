@@ -121,8 +121,14 @@ func (h *handler) open(ctx context.Context, c store.Credential) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
+	// A request routed on an older snapshot can open a credential after a
+	// later request pruned it: the key serves that request, and is kept only
+	// while the current snapshot holds the credential. A snapshot that drops
+	// it after this check is pruned by the next open.
 	h.mu.Lock()
-	h.opened[c.ID] = openedKey{providerID: c.ProviderID, key: key}
+	if slices.ContainsFunc(h.cfg.Catalog.Snapshot().Credentials(c.ProviderID), func(k store.Credential) bool { return k.ID == c.ID }) {
+		h.opened[c.ID] = openedKey{providerID: c.ProviderID, key: key}
+	}
 	h.mu.Unlock()
 	return key, nil
 }
