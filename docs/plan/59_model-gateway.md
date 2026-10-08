@@ -616,7 +616,7 @@ frozen by slice 2.
 ### Brain integration
 
 - One route: `{"model": "*", "protocol": "anthropic", "base_url": <gateway>,
-  "api_key": <platform API key>}`, no `upstream_model`, so the agent's model string
+  "api_key_env": "BRAIN_API_KEY"}`, no `upstream_model`, so the agent's model string
   reaches the gateway as the alias.
 - `internal/provider` injects the W3C trace context (`telemetry.Inject`) on both adapters'
   requests, and the brain sends `X-MAP-Session-ID` for per-session cost and cache
@@ -626,7 +626,10 @@ frozen by slice 2.
   default, since every agent turn now depends on it. Until the cutover nothing does, so
   slice 2 ships the chart's gateway behind `modelgateway.enabled`, off: the chart still
   installs without a credential cipher, which the gateway refuses to start without, and
-  turning it on by default makes a cipher part of every default install. The brain's platform API key comes
+  turning it on by default, as slice 5 does, makes a cipher part of every default install;
+  a release without one turns the gateway off and routes the brain itself
+  (`brain.modelProviders`), and the chart refuses those routes beside the gateway, which
+  would drop them. The brain's platform API key comes
   from one Secret that the brain, the control plane and the gateway read: the control plane
   registers it in `api_keys` under the name `brain` exactly as it registers
   `CONTROLPLANE_API_KEY` as `bootstrap` (`api.EnsureAPIKey`, `cmd/controlplane/main.go`),

@@ -23,8 +23,7 @@ slice 3 is the console repository's own plan.
   - [x] 4b — embeddings and rerank with the `gitee` profile
   - [x] 4c — Anthropic → Chat Completions conversion, for OpenAI-only credentials
   - [ ] 4d — dikw-core through the gateway
-- [ ] Slice 5 — brain cutover, in two PRs
-  - [x] 5a — each model call's trace and session headers; the brain's key, `BRAIN_API_KEY`
-  - [ ] 5b — one route through the gateway in compose and Helm; `ant` sessions on MiniMax
-        and DeepSeek
+- [x] Slice 5 — brain cutover, in two PRs: each model call's trace and session headers and
+      the brain's key, `BRAIN_API_KEY` (5a); one route through the gateway in compose and
+      Helm, with `ant` sessions on MiniMax and DeepSeek (5b)
 - [ ] Slice 6 — stateless Responses

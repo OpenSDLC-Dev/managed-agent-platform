@@ -44,8 +44,9 @@ then what you own.
 These hold without any operator action. They are the invariants the codebase
 tests and the reference design commits to.
 
-- **Credentials never enter the sandbox.** Model API keys live in the brain's
-  provider config; the sandbox — where untrusted tool commands run — never sees
+- **Credentials never enter the sandbox.** Model API keys live sealed in the model
+  gateway's catalogue, or in the brain's provider config where it routes past the
+  gateway; the sandbox — where untrusted tool commands run — never sees
   them. Provider adapters redact the credentials they were configured with (the
   API key, a `base_url` userinfo password, an auth header) out of any error that
   quotes an endpoint (`internal/provider/redact.go`), so an endpoint that echoes

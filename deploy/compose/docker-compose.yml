@@ -134,6 +134,9 @@ services:
     environment:
       <<: *app-env
       CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}
+      # Registered in api_keys as "brain", the key the brain calls the gateway
+      # with; unset, the control plane archives it.
+      BRAIN_API_KEY: ${BRAIN_API_KEY:?set BRAIN_API_KEY in .env}
       CONTROLPLANE_ADDR: ":8080"
       # Skill archives go to the bundled MinIO (plain HTTP inside the network).
       BLOB_ENDPOINT: minio:9000
@@ -202,9 +205,9 @@ services:
 
   # The model gateway (docs/plan/59_model-gateway.md): Anthropic Messages on
   # :8090 for the platform's API keys, routed to the vendor deployments its
-  # catalogue holds, and the /admin/v1/ API that configures the catalogue. It
-  # routes nothing until a deployment is configured, and the brain does not route
-  # through it.
+  # catalogue holds, and the /admin/v1/ API that configures the catalogue. The
+  # brain sends every model call here, and it answers none until a deployment is
+  # configured for the agent's model.
   modelgateway:
     <<: *app
     command: /modelgateway
@@ -216,6 +219,8 @@ services:
       # The admin API takes the bootstrap key; /v1/ takes the api_keys rows the
       # control plane registers, this key's among them.
       CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}
+      # The brain's key needs no key policy here; the admin API refuses it.
+      BRAIN_API_KEY: ${BRAIN_API_KEY:?set BRAIN_API_KEY in .env}
       MODELGATEWAY_ADDR: ":8090"
       # Vendor keys are sealed with the control plane's cipher, the same transit
       # key; the gateway does not start without one.
@@ -256,6 +261,8 @@ services:
     environment:
       <<: *app-env
       MODEL_PROVIDERS_PATH: /etc/map/model-providers.json
+      # The default route's key (model-providers.gateway.json reads it by name).
+      BRAIN_API_KEY: ${BRAIN_API_KEY:?set BRAIN_API_KEY in .env}
       # File-rubric outcome snapshots are read from the same bundled MinIO the
       # controlplane writes them to; unset BLOB_ENDPOINT and file rubrics
       # grade from the outcome description alone (plan 21 slice 3).
@@ -270,13 +277,17 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      modelgateway:
+        condition: service_started
     volumes:
       # The brain's model routing (a JSON array — see internal/provider LoadRoutes).
-      # Defaults to the committed example so the stack comes up out of the box;
-      # set MODEL_PROVIDERS_FILE=model-providers.json (after copying + editing it)
-      # to point at a real endpoint. Referencing an always-present file avoids
-      # Docker silently creating a directory when the source is missing.
-      - ./${MODEL_PROVIDERS_FILE:-model-providers.example.json}:/etc/map/model-providers.json:ro
+      # Defaults to the committed model-providers.gateway.json, one route sending
+      # every model to the gateway under BRAIN_API_KEY. To route past the gateway,
+      # copy model-providers.example.json to model-providers.json, edit it, and
+      # set MODEL_PROVIDERS_FILE=model-providers.json. Referencing an
+      # always-present file avoids Docker silently creating a directory when the
+      # source is missing.
+      - ./${MODEL_PROVIDERS_FILE:-model-providers.gateway.json}:/etc/map/model-providers.json:ro
 
   executor:
     <<: *app

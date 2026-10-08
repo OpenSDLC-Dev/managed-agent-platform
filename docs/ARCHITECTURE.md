@@ -61,7 +61,7 @@ Postgres, all coordination through it:
 | `brain` | The harness pool. Claims `model_turn` work, replays the session's event log to rebuild context, calls the model provider, writes the resulting events, enqueues tool work, suspends. |
 | `executor` | The built-in sandbox worker for platform-managed (`cloud`) environments. Claims `tool_exec` work, runs the tool inside the session's sandbox container, posts `agent.tool_result`. Also claims `web_exec` work — web_fetch/web_search, run in its own process with no sandbox, for **both** environment kinds — `outputs_harvest` work, the deliverables snapshot of `/mnt/session/outputs/` a cloud session takes when an outcome-grading cycle begins and when a brain settlement folds the session idle, and `mcp_exec` work — both halves of the MCP path, likewise in its own process with no sandbox and for **both** environment kinds: the discovery that fills `mcp_catalogs`, enqueued when a turn suspends for a declared server with no row, and the tool call itself, enqueued when the brain routes an `mcp__{server}__{tool}` the model asked for. |
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
-| `modelgateway` | The model gateway (plan 59): Anthropic Messages, OpenAI's Chat Completions and Embeddings, and rerank for the platform's API keys, routed to the vendor deployments its catalogue configures, beside the `/admin/v1/` API that configures it. It runs one sweep no request drives — the usage ledger's retention, at startup and then hourly, under an advisory lock so replicas take turns. No agent traffic reaches it yet — the brain moves onto it in plan 59's slice 5. Compose runs it; the Helm chart runs it when `modelgateway.enabled` is set, two replicas behind a PodDisruptionBudget by default, and refuses to without a credential cipher. |
+| `modelgateway` | The model gateway (plan 59): Anthropic Messages, OpenAI's Chat Completions and Embeddings, and rerank for the platform's API keys, routed to the vendor deployments its catalogue configures, beside the `/admin/v1/` API that configures it. It runs one sweep no request drives — the usage ledger's retention, at startup and then hourly, under an advisory lock so replicas take turns. The brain's default route sends every model call to it, under `BRAIN_API_KEY`. Compose runs it; the Helm chart runs it unless `modelgateway.enabled=false`, two replicas behind a PodDisruptionBudget by default, and refuses to without a credential cipher. |
 
 Processes never talk to each other directly. The brain and the executors communicate
 through the control plane's event log and work queue, and where a poll would be too slow
@@ -473,7 +473,7 @@ Layout order is by layer, as the repo is.
 
 ### Model gateway (plan 59)
 
-Served by `cmd/modelgateway`, which compose runs and the Helm chart runs when `modelgateway.enabled` is set; no agent traffic reaches it yet.
+Served by `cmd/modelgateway`, which compose runs and the Helm chart runs unless `modelgateway.enabled=false`; the brain's default route sends every model call to it.
 
 | Package | What it owns |
 |---|---|
@@ -530,7 +530,8 @@ and holds the two OS-touching adapters `gaterun/` declares.
   at egress time: the sandbox sees opaque `vltph_` placeholders, and the per-session gate
   substitutes the real value on admitted plain-HTTP egress alone (both backends when the
   executor opts in; in-sandbox HTTPS keeps its placeholders until #166). Model
-  keys live in the brain's provider config; the sandbox sees none of them. Provider adapters redact the credentials they were configured with
+  keys live sealed in the model gateway's catalogue, or in the brain's provider config
+  where it routes past the gateway; the sandbox sees none of them. Provider adapters redact the credentials they were configured with
   — the api key, a `base_url` userinfo password, an auth header — out of the errors that
   quote an endpoint (`internal/provider/redact.go`), so an endpoint echoing the request's
   auth header back cannot land the key in a `session.error` event, which is append-only

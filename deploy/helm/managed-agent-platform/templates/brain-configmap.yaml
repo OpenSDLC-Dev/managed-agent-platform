@@ -1,0 +1,16 @@
+{{- /* The brain's one route with the model gateway on (plan 59): every model
+       string goes to the gateway's Service, where it names an alias, under
+       BRAIN_API_KEY. A ConfigMap rather than the Secret: it holds no credential,
+       since api_key_env names the variable, and under existingSecret only the
+       chart knows the Service's name. */}}
+{{- if (.Values.modelgateway | default dict).enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "map.fullname" . }}-brain-routes
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: brain
+data:
+  model-providers.json: {{ list (dict "model" "*" "protocol" "anthropic" "base_url" (printf "http://%s-modelgateway:%v" (include "map.fullname" .) .Values.modelgateway.service.port) "api_key_env" "BRAIN_API_KEY") | toJson | quote }}
+{{- end }}

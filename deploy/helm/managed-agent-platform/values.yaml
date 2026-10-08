@@ -117,7 +117,18 @@ brain:
   #       protocol: anthropic
   #       base_url: https://gateway.internal
   #       api_key: sk-...
+  # Only with modelgateway.enabled=false: with the gateway on, the chart writes
+  # the brain's one route itself — every model string to the gateway's Service,
+  # under brain.apiKey — and refuses routes here, which it would otherwise drop.
   modelProviders: []
+  # -- The brain's platform API key for the model gateway, BRAIN_API_KEY.
+  # REQUIRED with modelgateway.enabled: set via --set or a values file, or point
+  # existingSecret at a Secret holding key `brain-api-key`. The control plane
+  # registers it in api_keys as "brain" and the gateway lets it call any model
+  # without a key policy; it also authenticates the management API, like
+  # controlplane.apiKey, so it is a credential of the same weight. Must differ
+  # from controlplane.apiKey and carry no surrounding whitespace.
+  apiKey: ""
 
 executor:
   replicas: 1
@@ -226,13 +237,17 @@ executor:
 
 # -- The model gateway (docs/plan/59_model-gateway.md): Anthropic Messages for the
 # platform's API keys, routed to the vendor deployments its catalogue holds, and
-# the /admin/v1/ API that managed-agent-console configures it through. It reads
-# the platform's database and the bootstrap key (controlplane.apiKey), and it seals
-# vendor keys with the release's credential cipher, so enabling it needs one —
-# openbao, externalOpenBao, localCipher or gcpKMS: with a chart-managed Secret the
-# render fails without one, and with existingSecret the gateway refuses to start.
+# the /admin/v1/ API that managed-agent-console configures it through. On, the
+# brain sends every model call through it (brain.apiKey); off, the brain routes
+# itself (brain.modelProviders). It reads the platform's database and the
+# bootstrap key (controlplane.apiKey), and it seals vendor keys with the
+# release's credential cipher, so it needs one — openbao (the default),
+# externalOpenBao, localCipher or gcpKMS: with a chart-managed Secret the render
+# fails without one, and with existingSecret the gateway refuses to start. A
+# boolean: pass it with --set, never --set-string, since the string "false" is
+# truthy.
 modelgateway:
-  enabled: false
+  enabled: true
   # -- Stateless replicas share one database; with two, the PodDisruptionBudget
   # the chart renders keeps one serving through a node drain, and lets a pod that
   # is not Ready go.
@@ -548,7 +563,8 @@ externalOpenBao:
 # configured: AES-256-GCM under this base64 32-byte master key
 # (`openssl rand -base64 32`), stored in the chart Secret. Minimal deployments
 # only — no rotation story. Leaving masterKey empty too deploys without a
-# cipher: the platform runs, vault credential storage is unavailable.
+# cipher: the platform runs, vault credential storage is unavailable, and
+# modelgateway.enabled must be off, since the gateway needs one.
 localCipher:
   masterKey: ""
   keyId: local-1
@@ -808,8 +824,9 @@ casdoor:
 
 # -- Reference a pre-created Secret instead of letting the chart create one. When
 # set, the chart creates NO Secret and every process reads credentials from this
-# one, which must carry keys: controlplane-api-key, model-providers.json,
-# database-url (plus the blob-* keys if object storage is in use, and the
+# one, which must carry keys: controlplane-api-key, database-url, and
+# brain-api-key with modelgateway.enabled or model-providers.json without it
+# (plus the blob-* keys if object storage is in use, and the
 # secrets-backend key if a credential cipher is in use, plus that backend's own:
 # bao-* for OpenBao, secrets-* for the local cipher, gcpkms-key-name for Cloud
 # KMS — see templates/_helpers.tpl map.secretsEnv). Incompatible with postgresql.enabled,

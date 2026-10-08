@@ -7063,3 +7063,44 @@ Fixed in review:
 Declined: a minimum length for `BRAIN_API_KEY`, which the bootstrap key has never had,
 and one shared list of the call's own header names, the refusal sitting beside
 `CallHeaders` in the same file.
+
+## Model gateway brain cutover (plan 59 slice 5) — acceptance record, 2026-10-09
+
+A compose stack built from the branch, as its own project (`-p map5b`) on ports 18080 and
+18090, with `.env.example` copied unedited: the brain mounted the committed
+`model-providers.gateway.json`, and the control plane registered `BRAIN_API_KEY` as the
+env-managed `brain` row. The gateway took that key on `/v1/models` (200) and refused it on
+`/admin/v1/profiles` (401). Its catalogue was configured through the admin API — DeepSeek's
+Anthropic endpoint behind alias `deepseek-flash`, MiniMax's CN endpoint (`api.minimax.cn`)
+behind `minimax-m3` for `MiniMax-M3` — and the real `ant` CLI (1.30.0) then ran one session
+per alias, each agent with the bash toolset unattended, asked to run
+`echo $((17*23)) && uname -s` and report both outputs.
+
+- **MiniMax-M3:** `agent.tool_use` (bash), `agent.tool_result` `391` / `Linux`, then
+  `agent.message` "The calculation `17*23` equals 391, and the operating system is
+  Linux."; `end_turn`.
+- **deepseek-flash:** the same, an `agent.thinking` event before each call's output, and
+  the second call reading 2,432 of its input tokens from the vendor's cache; `end_turn`.
+- **The gateway's ledger** held four rows, two per session, every one 200 under the
+  `brain` key's id and carrying its session's id from `X-MAP-Session-ID`.
+
+`ant beta:agents create --model` refuses a plain model string, Claude's included — the
+flag is typed as the `model_config` object (`requestflag.Flag[map[string]any]`) — so the
+agents were created with `--model '{"id":"<alias>"}'`.
+
+Decisions made in the slice, with the alternative each beat:
+- The chart writes the brain's gateway route into a ConfigMap rather than the Secret: it
+  holds no credential (`api_key_env` names the variable), and under `existingSecret` only
+  the chart knows the gateway Service's name.
+- `brain.modelProviders` beside the gateway fails the render, `existingSecret` or not,
+  rather than being dropped in favour of the gateway's route.
+- `BRAIN_API_KEY`'s Secret reference is not optional in any of the three pods: a
+  pre-created Secret without the key stops them with the kubelet naming it, where an
+  optional reference would start a control plane that archives the key the brain then
+  lacks.
+- Compose requires `BRAIN_API_KEY` in `.env` (`:?`) rather than defaulting it in the
+  compose file, as it does `CONTROLPLANE_API_KEY`: a key that authenticates the
+  management API stays visible where an operator replaces the placeholder.
+- GCP staging turns the gateway off in `staging-values.yaml`: turning it on there takes
+  `mode2-secret.sh` writing `brain-api-key`, CD annotating and reading back the gateway's
+  ServiceAccount, and its one-proxy-per-deployment check counting a fourth.

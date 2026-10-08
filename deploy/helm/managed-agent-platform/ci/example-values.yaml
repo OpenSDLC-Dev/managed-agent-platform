@@ -8,11 +8,7 @@ image:
 controlplane:
   apiKey: "ci-placeholder-key"
 brain:
-  modelProviders:
-    - model: "*"
-      protocol: anthropic
-      base_url: https://gateway.example.internal
-      api_key: ci-placeholder-secret
+  apiKey: "ci-placeholder-brain-key"
 postgresql:
   password: "ciPlaceholderPgPass"
 minio:
