@@ -54,7 +54,9 @@ func responseStatus(stop string) (string, map[string]string) {
 }
 
 // responseUsage is a Messages usage as a Response's: input counts the prompt
-// tokens read from the cache and written to it, which Messages counts apart.
+// tokens read from the cache and written to it, which Messages counts apart,
+// and the reasoning tokens are the thinking tokens the upstream reported in
+// output_tokens_details, or 0 where it reported none.
 func responseUsage(u map[string]int64) map[string]any {
 	in := u["input_tokens"] + u["cache_read_input_tokens"] + u["cache_creation_input_tokens"]
 	return map[string]any{
@@ -63,13 +65,14 @@ func responseUsage(u map[string]int64) map[string]any {
 			"cached_tokens": u["cache_read_input_tokens"], "cache_write_tokens": u["cache_creation_input_tokens"],
 		},
 		"output_tokens":         u["output_tokens"],
-		"output_tokens_details": map[string]int64{"reasoning_tokens": 0},
+		"output_tokens_details": map[string]int64{"reasoning_tokens": u["thinking_tokens"]},
 		"total_tokens":          in + u["output_tokens"],
 	}
 }
 
-// usageCounts reads a Messages usage object's counts, overwriting those in
-// into: a stream's message_delta restates what it reports.
+// usageCounts reads a Messages usage object's counts, its thinking tokens
+// as "thinking_tokens", overwriting those in into: a stream's message_delta
+// restates what it reports.
 func usageCounts(into map[string]int64, raw json.RawMessage) {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(raw, &obj) != nil {
@@ -80,6 +83,12 @@ func usageCounts(into map[string]int64, raw json.RawMessage) {
 		if json.Unmarshal(obj[k], &n) == nil && !null(obj[k]) {
 			into[k] = n
 		}
+	}
+	var details map[string]json.RawMessage
+	var n int64
+	if json.Unmarshal(obj["output_tokens_details"], &details) == nil &&
+		json.Unmarshal(details["thinking_tokens"], &n) == nil && !null(details["thinking_tokens"]) {
+		into["thinking_tokens"] = n
 	}
 }
 

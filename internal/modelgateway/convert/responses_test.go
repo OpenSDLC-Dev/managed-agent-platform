@@ -80,15 +80,19 @@ func TestResponsesRequestDefaults(t *testing.T) {
 
 func TestResponsesRequestToolChoiceAndEffort(t *testing.T) {
 	for in, want := range map[string]string{
-		`"tool_choice":"none"`:                                 `"tool_choice":{"type":"none"}`,
-		`"tool_choice":"auto"`:                                 `"tool_choice":{"type":"auto"}`,
-		`"tool_choice":{"type":"function","name":"f"}`:         `"tool_choice":{"type":"tool","name":"f"}`,
-		`"parallel_tool_calls":false`:                          `"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`,
-		`"parallel_tool_calls":false,"tool_choice":"none"`:     `"tool_choice":{"type":"none"}`,
-		`"reasoning":{"effort":"none"}`:                        `"thinking":{"type":"disabled"}`,
-		`"reasoning":{"effort":"xhigh"}`:                       `"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}`,
-		`"reasoning":{"effort":null,"summary":"detailed"}`:     ``,
-		`"text":{"format":{"type":"text"},"verbosity":"high"}`: ``,
+		`"tool_choice":"none"`:                                                            `"tool_choice":{"type":"none"}`,
+		`"tool_choice":"auto"`:                                                            `"tool_choice":{"type":"auto"}`,
+		`"tool_choice":{"type":"function","name":"f"}`:                                    `"tool_choice":{"type":"tool","name":"f"}`,
+		`"parallel_tool_calls":false`:                                                     `"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`,
+		`"parallel_tool_calls":false,"tool_choice":"none"`:                                `"tool_choice":{"type":"none"}`,
+		`"reasoning":{"effort":"none"}`:                                                   `"thinking":{"type":"disabled"}`,
+		`"reasoning":{"effort":"xhigh"}`:                                                  `"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}`,
+		`"reasoning":{"effort":null,"summary":"detailed"}`:                                ``,
+		`"reasoning":{"context":"all_turns","mode":"standard","generate_summary":"auto"}`: ``,
+		`"reasoning":{"context":"auto","mode":null}`:                                      ``,
+		`"prompt_cache_options":{"mode":"explicit","ttl":"30m","prewarm":false}`:          ``,
+		`"prompt_cache_options":{"comparison_response_id":null}`:                          ``,
+		`"text":{"format":{"type":"text"},"verbosity":"high"}`:                            ``,
 	} {
 		got, _ := responsesRequest(t, `{"model":"m","input":"hi",`+in+`}`)
 		w := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]`
@@ -137,6 +141,13 @@ func TestResponsesRequestRefusals(t *testing.T) {
 		`{"model":"m","input":"hi","parallel_tool_calls":"no"}`:                                                                "parallel_tool_calls: must be a boolean",
 		`{"model":"m","input":"hi","instructions":["x"]}`:                                                                      "instructions: must be a string",
 		`{"model":"m","input":{"role":"user"}}`:                                                                                "input: must be a string or an array of objects",
+		`{"model":"m","input":"hi","reasoning":{"context":"current_turn"}}`:                                                    `reasoning.context: "current_turn" is not supported`,
+		`{"model":"m","input":"hi","reasoning":{"context":"recent"}}`:                                                          `reasoning.context: "recent" is not supported`,
+		`{"model":"m","input":"hi","reasoning":{"mode":"pro"}}`:                                                                `reasoning.mode: "pro" is not supported`,
+		`{"model":"m","input":"hi","reasoning":{"effort":"low","budget":1}}`:                                                   "reasoning.budget: not supported",
+		`{"model":"m","input":"hi","prompt_cache_options":{"prewarm":true}}`:                                                   "prompt_cache_options.prewarm: the gateway always generates",
+		`{"model":"m","input":"hi","prompt_cache_options":{"comparison_response_id":"resp_1"}}`:                                "prompt_cache_options.comparison_response_id: the gateway stores no response",
+		`{"model":"m","input":"hi","prompt_cache_options":"x"}`:                                                                "prompt_cache_options: must be an object",
 	} {
 		var top map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(body), &top); err != nil {
@@ -254,6 +265,29 @@ func TestResponsesAnswer(t *testing.T) {
 		if _, ok := raw[k]; !ok {
 			t.Errorf("the Response lacks %s, which openai-go requires", k)
 		}
+	}
+}
+
+// The thinking tokens an upstream reports, as MiniMax does, are the
+// Response's reasoning tokens, whole and streamed — a stream's last report
+// standing; where it reports none they are 0.
+func TestResponsesReasoningTokens(t *testing.T) {
+	r, _ := answer(t, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hi"}],
+		"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":9,"output_tokens_details":{"thinking_tokens":6}}}`)
+	if got := r.Usage.OutputTokensDetails.ReasoningTokens; got != 6 {
+		t.Errorf("whole: reasoning_tokens %d, want 6", got)
+	}
+	if r, _ := answer(t, fullAnswer); r.Usage.OutputTokensDetails.ReasoningTokens != 0 {
+		t.Errorf("whole, none reported: reasoning_tokens %d", r.Usage.OutputTokensDetails.ReasoningTokens)
+	}
+	events := respEvents(t, respStream(t,
+		`message_start {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0,"output_tokens_details":{"thinking_tokens":0}}}}`,
+		`content_block_start {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`content_block_stop {"type":"content_block_stop","index":0}`,
+		`message_delta {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5,"output_tokens_details":{"thinking_tokens":3}}}`,
+		`message_stop {"type":"message_stop"}`))
+	if got := events[len(events)-1].Response.Usage.OutputTokensDetails.ReasoningTokens; got != 3 {
+		t.Errorf("streamed: reasoning_tokens %d, want 3", got)
 	}
 }
 

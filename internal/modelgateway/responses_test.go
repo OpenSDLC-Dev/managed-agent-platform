@@ -256,7 +256,9 @@ func TestAFailedResponsesStreamWritesNothingMore(t *testing.T) {
 		}
 		w.(http.Flusher).Flush()
 		time.Sleep(200 * time.Millisecond)
-		for _, s := range ev[5:] {
+		// The usage, then an error of the upstream's own, which must not
+		// replace the failure the caller was given.
+		for _, s := range append(ev[5:7:7], "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n") {
 			_, _ = io.WriteString(w, s)
 		}
 	})
@@ -270,7 +272,7 @@ func TestAFailedResponsesStreamWritesNothingMore(t *testing.T) {
 	if !ok || strings.Contains(before, "event: ping") || strings.Count(after, "\n\n") != 1 {
 		t.Errorf("stream %s", b)
 	}
-	if rows := e.ledger(); len(rows) != 1 || rows[0].Tokens == nil || rows[0].Tokens.Output != 2 {
+	if rows := e.ledger(); len(rows) != 1 || rows[0].Tokens == nil || rows[0].Tokens.Output != 2 || rows[0].ErrorType != "api_error" {
 		t.Errorf("ledger %+v", rows)
 	}
 }
@@ -344,6 +346,43 @@ func TestAResponsesRequestIsRefusedInItsOwnWords(t *testing.T) {
 	}
 	if resp, _ := e.do(http.MethodGet, "/v1/responses", "", map[string]string{"Authorization": "Bearer " + key}); resp.StatusCode != 405 {
 		t.Errorf("GET /v1/responses: %d", resp.StatusCode)
+	}
+}
+
+// On an OpenAI-only credential, the upstream's own error reaches a Responses
+// caller as the upstream wrote it — its type, code and param, its message
+// without the key — rather than the Anthropic type the Messages path makes
+// of it: as an error response, and as the error a stream opens with. A body
+// stating no type has the one its status gives, and MiniMax's, in
+// Anthropic's envelope, keeps its own.
+func TestAConvertedResponsesErrorIsTheUpstreams(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		answer func(http.ResponseWriter, *http.Request, fakeCall)
+		status int
+		want   string
+	}{
+		{"OpenAI's", status(400, `{"error":{"message":"bad sk-deepseek-key1 here","type":"tokens","param":"input","code":"context_length_exceeded"}}`),
+			400, `{"error":{"code":"context_length_exceeded","message":"bad [redacted] here","param":"input","type":"tokens"}}`},
+		{"no type", status(404, `{"error":{"message":"no such model"}}`),
+			404, `{"error":{"code":null,"message":"no such model","param":null,"type":"not_found_error"}}`},
+		{"Anthropic's", status(400, `{"type":"error","error":{"type":"invalid_request_error","message":"invalid tool_result content (2013)"}}`),
+			400, `{"error":{"code":null,"message":"invalid tool_result content (2013)","param":null,"type":"invalid_request_error"}}`},
+		{"a stream's first event", func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, `data: {"error":{"message":"too long","type":"tokens","param":null,"code":"context_length_exceeded","http_code":"400"}}`+"\n\n")
+		}, 400, `{"error":{"code":"context_length_exceeded","message":"too long","param":null,"type":"tokens"}}`},
+	} {
+		e := newEnv(t)
+		f := newFake(t, c.answer)
+		e.alias("chat", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
+		key := e.key(everyAlias)
+		e.start()
+		resp, b := e.do(http.MethodPost, "/v1/responses", `{"model":"chat","input":"hi","stream":true}`, map[string]string{"Authorization": "Bearer " + key})
+		if resp.StatusCode != c.status || string(b) != c.want {
+			t.Errorf("%s: %d %s, want %d %s", c.name, resp.StatusCode, b, c.status, c.want)
+		}
 	}
 }
 

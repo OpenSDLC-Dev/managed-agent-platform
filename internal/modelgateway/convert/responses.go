@@ -39,22 +39,29 @@ type Responses struct {
 //     reasoning model reasons, and MiniMax-M3 thinks only when sent
 //     adaptive (probed 2026-10-09; DeepSeek's and MiniMax's models all
 //     take it), while a request with no effort leaves thinking to the
-//     model; and text.format json_schema (output_config.format);
+//     model — and where a Chat Completions upstream's profile names no
+//     thinking toggle (openai-generic), none reaches it as nothing, as a
+//     Messages request's disabled thinking does (Request), so its model
+//     reasons as by default; and text.format json_schema
+//     (output_config.format);
 //   - echoed only: metadata, as Messages' metadata takes a user_id alone,
 //     and truncation disabled, which is what the gateway does;
 //   - dropped: store, as nothing is stored whatever it says; include, but
 //     for logprobs, as a reasoning item always carries encrypted_content;
 //     reasoning.summary and text.verbosity, ways of writing the answer a
-//     Messages model has no knob for; max_tool_calls, which counts built-in
-//     tool calls, and those are refused; stream_options, service_tier,
-//     prompt_cache_key, prompt_cache_retention, safety_identifier and user,
-//     an OpenAI account's knobs; and top_logprobs 0;
+//     Messages model has no knob for (responsesEffort has reasoning's other
+//     fields); max_tool_calls, which counts built-in tool calls, and those
+//     are refused; stream_options, service_tier, prompt_cache_key,
+//     prompt_cache_retention, prompt_cache_options, safety_identifier and
+//     user, an OpenAI account's knobs; and top_logprobs 0;
 //   - refused: previous_response_id, conversation and prompt, which name
-//     stored state; background true; truncation auto, which would drop input
-//     the gateway cannot choose; text.format json_object, which Messages
-//     cannot ask for without a schema; logprobs, which Messages does not
-//     return; and context_management, moderation and access_programs, which
-//     ask of the answer what a Messages model does not do.
+//     stored state, as does prompt_cache_options.comparison_response_id;
+//     prompt_cache_options.prewarm true, which asks for no answer;
+//     background true; truncation auto, which would drop input the gateway
+//     cannot choose; text.format json_object, which Messages cannot ask for
+//     without a schema; logprobs, which Messages does not return; and
+//     context_management, moderation and access_programs, which ask of the
+//     answer what a Messages model does not do.
 func ResponsesRequest(top map[string]json.RawMessage) (Responses, error) {
 	out := map[string]json.RawMessage{}
 	echo := map[string]json.RawMessage{
@@ -161,6 +168,18 @@ func ResponsesRequest(top map[string]json.RawMessage) (Responses, error) {
 			return Responses{}, fmt.Errorf("%s: the gateway stores no response, so a request carries its whole conversation in input", k)
 		case "prompt":
 			return Responses{}, fmt.Errorf("prompt: the gateway stores no prompt template")
+		case "prompt_cache_options":
+			var opts map[string]json.RawMessage
+			if json.Unmarshal(v, &opts) != nil {
+				return Responses{}, fmt.Errorf("prompt_cache_options: must be an object")
+			}
+			var prewarm bool
+			if json.Unmarshal(opts["prewarm"], &prewarm) == nil && prewarm {
+				return Responses{}, fmt.Errorf("prompt_cache_options.prewarm: the gateway always generates an answer")
+			}
+			if !null(opts["comparison_response_id"]) {
+				return Responses{}, fmt.Errorf("prompt_cache_options.comparison_response_id: the gateway stores no response")
+			}
 		case "store", "max_tool_calls", "stream_options", "service_tier", "prompt_cache_key",
 			"prompt_cache_retention", "safety_identifier", "user":
 		default:
@@ -277,11 +296,35 @@ func responsesToolChoice(raw json.RawMessage) (map[string]any, error) {
 
 // responsesEffort is reasoning.effort as Messages' output_config.effort,
 // minimal as low, which is Messages' least; none stays none, which turns
-// thinking off; "" is no effort asked.
+// thinking off; "" is no effort asked. Of reasoning's other fields, summary
+// and generate_summary are dropped, as a Messages model writes no summary;
+// context auto and all_turns and mode standard are what the gateway does —
+// every reasoning item the input carries goes back to the model, provenance
+// permitting — and any other context or mode, which would ask for less, or
+// for another way of reasoning, is refused.
 func responsesEffort(raw json.RawMessage) (string, error) {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(raw, &obj) != nil {
 		return "", fmt.Errorf(": must be an object")
+	}
+	for _, k := range slices.Sorted(maps.Keys(obj)) {
+		if null(obj[k]) {
+			continue
+		}
+		v, _ := text(obj, k)
+		switch k {
+		case "effort", "summary", "generate_summary":
+		case "context":
+			if v != "auto" && v != "all_turns" {
+				return "", fmt.Errorf(".context: %q is not supported: the gateway sends the model every reasoning item the input carries, so leave out those it should not see", v)
+			}
+		case "mode":
+			if v != "standard" {
+				return "", fmt.Errorf(".mode: %q is not supported by the gateway's Responses API; only standard is", v)
+			}
+		default:
+			return "", fmt.Errorf(".%s: not supported by the gateway's Responses API", k)
+		}
 	}
 	if null(obj["effort"]) {
 		return "", nil

@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/upstream"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
 // responses serves POST /v1/responses, OpenAI's Responses API without its
@@ -93,24 +94,49 @@ func responsesField(s string) string {
 
 // openAIError is an upstream's error body, which the gateway relays in
 // Anthropic's envelope on the Messages path (errorJSON, convertedError), in
-// OpenAI's: its type and message where it is in either envelope, and the
-// whole body as the message, of type api_error, where it is in neither.
-// The body was redacted before it came here.
+// OpenAI's: its type and message where it is in either envelope, with the
+// param and code OpenAI's carries, and the whole body as the message, of
+// type api_error, where it is in neither. The body was redacted before it
+// came here.
 func openAIError(b []byte) []byte {
 	typ, msg := "api_error", string(b)
+	var param, code any
 	var env struct {
 		Error struct {
 			Type    string `json:"type"`
 			Message string `json:"message"`
+			Param   any    `json:"param"`
+			Code    any    `json:"code"`
 		} `json:"error"`
 	}
 	if json.Unmarshal(b, &env) == nil && env.Error.Message != "" {
-		msg = env.Error.Message
+		msg, param, code = env.Error.Message, env.Error.Param, env.Error.Code
 		if env.Error.Type != "" {
 			typ = env.Error.Type
 		}
 	}
-	return encodeJSON(map[string]any{"error": map[string]any{"message": msg, "type": typ, "param": nil, "code": nil}})
+	return encodeJSON(map[string]any{"error": map[string]any{"message": msg, "type": typ, "param": param, "code": code}})
+}
+
+// convertedOpenAIError is an OpenAI-protocol upstream's error on the
+// conversion path as a Responses caller is given it, where a Messages
+// caller is given convertedError's: in OpenAI's envelope, the upstream's own
+// type, param and code kept and its message redacted, a type it states none
+// of being the one convertedError gives the status. A body in Anthropic's
+// envelope, as MiniMax answers on its OpenAI endpoint, reads the same way:
+// its error member holds the type and message, and no param or code.
+func convertedOpenAIError(red provider.Redactor, b []byte, status int) []byte {
+	var e struct {
+		Type  string `json:"type"`
+		Param any    `json:"param"`
+		Code  any    `json:"code"`
+	}
+	_ = json.Unmarshal(member(b, "error"), &e)
+	if e.Type == "" {
+		e.Type = messagesErrorType("", status)
+	}
+	return encodeJSON(map[string]any{"error": map[string]any{"message": red.String(errorMessage(b)), "type": e.Type,
+		"param": redactValue(red, e.Param), "code": redactValue(red, e.Code)}})
 }
 
 // responsesStream relays a stream to a Responses caller: inner, the
@@ -128,11 +154,17 @@ type responsesStream struct {
 	failed bool
 }
 
+// event is inner's events converted. Once the conversion has failed, inner
+// reads on for the usage, but the error the ledger records stays the one the
+// caller was given, whatever inner makes of an error after it.
 func (p *responsesStream) event(e upstream.Event) ([]byte, bool) {
-	out, last := p.inner.event(e)
 	if p.failed {
+		typ := p.c.out.errType
+		_, last := p.inner.event(e)
+		p.c.out.errType = typ
 		return nil, last
 	}
+	out, last := p.inner.event(e)
 	return p.convert(out), last
 }
 

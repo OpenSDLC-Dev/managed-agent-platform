@@ -487,6 +487,17 @@ func (c call) fail(w http.ResponseWriter, r *http.Request, f *failure) {
 	f.write(w, r, c.out)
 }
 
+// upstreamError is an upstream's error on the conversion path as c's caller
+// is given it: convertedError's, or for a Responses request
+// convertedOpenAIError's, which keeps the OpenAI fields the Messages pivot
+// would lose.
+func (c call) upstreamError(ctx context.Context, red provider.Redactor, b []byte, status int, rid string) []byte {
+	if c.resp != nil {
+		return convertedOpenAIError(red, b, status)
+	}
+	return convertedError(ctx, red, b, status, rid)
+}
+
 // forwarded keeps the caller's anthropic-* headers, verbatim and as an open
 // list, and nothing else: its credential, the X-MAP-* headers and anything a
 // client sets for its own transport stay at the gateway.
@@ -721,7 +732,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		if conv {
 			h := resp.Header.Clone()
 			h.Set("Content-Type", "application/json")
-			return &failure{status: s, header: h, body: convertedError(ctx, red, b, s, requestID(r))}, retryable(s, resp.Header)
+			return &failure{status: s, header: h, body: c.upstreamError(ctx, red, b, s, requestID(r))}, retryable(s, resp.Header)
 		}
 		return &failure{status: s, header: resp.Header, body: errorJSON(ctx, red, b, requestID(r))}, retryable(s, resp.Header)
 	}
@@ -769,7 +780,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 				}
 				f, retry := streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 				if conv && f.body != nil {
-					f.body = convertedError(ctx, red, e.Data, f.status, requestID(r))
+					f.body = c.upstreamError(ctx, red, e.Data, f.status, requestID(r))
 				}
 				return f, retry
 			default:

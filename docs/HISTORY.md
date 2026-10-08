@@ -7202,3 +7202,30 @@ wrapper. The first pass caught 16 of 19 mutants; two survived — a tool call wh
 arrives whole at its start, and a stream that has failed still pinging — and one, the
 default `max_tokens`, did not compile. Each survivor got a test, and the third, rewritten
 to compile, was caught; all 19 are caught.
+
+Review found five defects and one documented disposition to correct, each defect fixed
+with a test that failed on the code before it (Codex):
+- `reasoning.context` and `reasoning.mode` were accepted and echoed, though the gateway
+  does neither `current_turn` nor `pro`. Each is now refused unless it names what the
+  gateway does, as is any other field of `reasoning`.
+- `prompt_cache_options`, a field the pin names, fell to the catch-all refusal without a
+  disposition of its own. It is now dropped, but for `prewarm` true, which asks for no
+  answer, and a `comparison_response_id`, which names a stored response; both are
+  refused.
+- On the conversion path an OpenAI upstream's error reached a Responses caller as the
+  Anthropic type the Messages path gives it, its `code` and `param` lost. A Responses
+  caller now gets the upstream's own type, `code` and `param`, its message redacted.
+- After a stream had failed in conversion, an error the upstream sent while it was read
+  on for its usage replaced, in the ledger, the error the caller had been given.
+- `reasoning_tokens` was 0 though an upstream reports thinking tokens in
+  `output_tokens_details`, as MiniMax does; it is now that count.
+- `reasoning.effort: "none"` reaches an `openai-generic` upstream as nothing, its profile
+  naming no thinking toggle, so its model reasons as by default. This is the disposition
+  the conversion already gives a Messages request's disabled thinking, kept rather than
+  sending `reasoning_effort: "none"`, which a model without reasoning refuses; the
+  registry now says so.
+
+Fifteen mutants over these fixes then ran beside the first 19. One did not compile until
+rewritten; one survived — a branch reading MiniMax's Anthropic envelope apart, which gave
+what the general reading already gives — and the branch went. All 33 mutants of the
+final list are caught.
