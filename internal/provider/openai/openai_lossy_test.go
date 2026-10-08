@@ -842,3 +842,20 @@ func TestConfigMaxTokensDefault(t *testing.T) {
 		})
 	}
 }
+
+// A text block the brain stored empty, which domain.ContentBlock writes
+// without its text, replays as empty content, as it did before the
+// conversion moved to internal/modelgateway/convert.
+func TestEmptyTextBlockReplays(t *testing.T) {
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"text"}]`)},
+			{Role: "user", Content: json.RawMessage(`"again"`)},
+		},
+	})
+	want := []map[string]any{{"role": "user", "content": "hi"}, {"role": "assistant", "content": ""}, {"role": "user", "content": "again"}}
+	if got := messagesOf(t, body); !reflect.DeepEqual(got, want) {
+		t.Errorf("messages = %v, want %v", got, want)
+	}
+}

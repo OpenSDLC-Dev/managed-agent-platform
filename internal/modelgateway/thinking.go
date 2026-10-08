@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 )
 
 // Thinking provenance (docs/plan/59_model-gateway.md, "Routing, retries,
@@ -198,9 +199,9 @@ func (h *history) markStale() {
 
 // producer is the deployment among attempts that produced the newest block a
 // request keeps, or "" when no such block names one of them.
-func (h *history) producer(attempts []catalog.Attempt) string {
+func (h *history) producer(attempts []catalog.Attempt) (string, profile.Protocol) {
 	if h == nil {
-		return ""
+		return "", ""
 	}
 	for i := len(h.msgs) - 1; i >= 0; i-- {
 		bs := h.msgs[i].blocks
@@ -210,13 +211,15 @@ func (h *history) producer(attempts []catalog.Attempt) string {
 				continue
 			}
 			for _, at := range attempts {
-				if at.Deployment.ID == b.dep {
-					return b.dep
+				if at.Deployment.ID == b.dep && b.value == "" { // converted from reasoning_content
+					return b.dep, profile.OpenAI
+				} else if at.Deployment.ID == b.dep {
+					return b.dep, profile.Anthropic
 				}
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // carries reports whether dep is sent any thinking block on the protocol
@@ -364,19 +367,22 @@ func withString(raw json.RawMessage, field, value string) json.RawMessage {
 	return out
 }
 
-// preferring moves the attempts at dep ahead of the others, each keeping its
-// order: the newest block's producer is tried first, whatever its priority,
-// since it is the one deployment sent the request's newest thinking.
-func preferring(attempts []catalog.Attempt, dep string) []catalog.Attempt {
+// preferring moves the attempts at dep ahead of the others, those on proto
+// first, each keeping its order: the newest block's producer is tried first,
+// whatever its priority, since it is the one deployment sent the request's
+// newest thinking, and on the protocol that produced it, the only one it
+// goes back on (keptFor).
+func preferring(attempts []catalog.Attempt, dep string, proto profile.Protocol) []catalog.Attempt {
 	out := make([]catalog.Attempt, 0, len(attempts))
-	for _, at := range attempts {
-		if at.Deployment.ID == dep {
-			out = append(out, at)
-		}
-	}
-	for _, at := range attempts {
-		if at.Deployment.ID != dep {
-			out = append(out, at)
+	for _, first := range []func(catalog.Attempt) bool{
+		func(at catalog.Attempt) bool { return at.Deployment.ID == dep && at.Protocol == proto },
+		func(at catalog.Attempt) bool { return at.Deployment.ID == dep && at.Protocol != proto },
+		func(at catalog.Attempt) bool { return at.Deployment.ID != dep },
+	} {
+		for _, at := range attempts {
+			if first(at) {
+				out = append(out, at)
+			}
 		}
 	}
 	return out

@@ -6958,3 +6958,52 @@ Mutation testing of the round's guards caught 16 of 18 mutants. Of the two misse
 was dead code — closing events after a failure, which the stopped writer never writes —
 and went; the other showed a test missing, a drain that stalls leaving the ledger the
 error the caller was given, which was added.
+
+Codex's second pass, over the fixes, found three more, each fixed with a test that failed
+on the code before it, and the round's eight mutants all caught:
+- A drain read past an upstream's error object, which ends an answer, so keep-alives
+  after one held the request open past any stall budget. It ends there now.
+- A tool name streamed in fragments, which openai-go joins, opened its `tool_use` block
+  with the first fragment and dropped the rest, and a late id was lost the same way.
+  Messages names a tool once, so a name or id arriving, or changing, after the block
+  opens now fails the stream; one repeated unchanged with each fragment carries on.
+- A request without `max_tokens`, which Messages requires, converted to a Chat
+  Completions request with no cap. It is refused now.
+
+`/code-review`, over the code the first round fixed, reported fifteen findings. Twelve were
+fixed, each with a test that failed on the code before it:
+- An answer the token limit cut short in a tool call stopped for `tool_use`, so the SDK's
+  accumulator replaced the partial input with `{}` and an agent loop ran the tool, and the
+  whole answer was a 502. It stops for `max_tokens`, and a whole answer leaves the cut
+  call out.
+- Reasoning went back to its producer deployment on whichever credential the weights put
+  first, so converted reasoning could reach that deployment's passthrough credential,
+  which drops it, and DeepSeek refuses a tool loop without it, unretried. The producer's
+  attempts on the protocol that produced the reasoning go first now.
+- A `content`, `refusal` or `reasoning_content` that was no string — an array of parts,
+  which the pinned openai-go does not type — read as no text, a 200 with an empty answer.
+  It is refused, whole or streamed.
+- An empty `tools` array went upstream as `null`, and `messages: null` converted; the
+  first goes as none, the second is refused.
+- An empty text part beside an image lost its `text` field; it is left out.
+- The shared converter refused a text block without its text, which the brain stores for
+  an empty one (`domain.ContentBlock` omits it), where the brain's adapter had sent empty
+  content, so every later turn of such a session would have failed on an OpenAI-protocol
+  route. Absent is empty again.
+- Of several `output_config` fields refused, a random one was named; the first by name is.
+- `budget_tokens` beside adaptive or disabled thinking, and `display` beside disabled,
+  were accepted where the pinned SDK names neither; they are refused.
+- An error stating 401, 402 or 403 after a converted stream began was
+  `invalid_request_error`; it takes the type Anthropic gives the status.
+- Two copies each of the Messages error event and the Chat Completions keep-alive rule
+  became one, and CLAUDE.md's lossy-conversion rule names the answer conversion
+  `convert` also holds.
+
+A third finding, two tool calls without an `index`, which openai-go requires, merging into
+one, was already closed by the round before's fragment check, which now has a test for
+it. Two were declined. `reasoning_effort` `xhigh` and `max` are values the pinned
+openai-go names, so passing them through is valid Chat Completions. Converting the request
+once per attempt, which the finding called repeated work, is needed: each attempt's
+messages differ by deployment and strip mode, the validation pass decides the routing
+before any attempt, and the cost is JSON encoding beside an upstream call.
+Mutation testing caught all 22 of the round's mutants.

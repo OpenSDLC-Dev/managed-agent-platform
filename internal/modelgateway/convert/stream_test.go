@@ -157,6 +157,14 @@ func TestStreamRefusals(t *testing.T) {
 			chunk(`{"tool_calls":[{"index":1,"id":"b","function":{"name":"b"}}]}`, ""),
 			chunk(`{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}`, "")}, "went back to tool call 0"},
 		{[]string{chunk(`{"tool_calls":[{"index":"0"}]}`, "")}, "index"},
+		{[]string{chunk(`{"content":[{"type":"text","text":"x"}]}`, "")}, "content"},
+		{[]string{chunk(`{"reasoning_content":7}`, "")}, "reasoning_content"},
+		{[]string{chunk(`{"tool_calls":[{"id":"call_a","function":{"name":"f","arguments":"{}"}}]}`, ""),
+			chunk(`{"tool_calls":[{"id":"call_b","function":{"name":"g","arguments":"{}"}}]}`, "")}, "name or id"},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"a","function":{"name":"get_"}}]}`, ""),
+			chunk(`{"tool_calls":[{"index":0,"function":{"name":"time"}}]}`, "")}, "name or id"},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"function":{"name":"f"}}]}`, ""),
+			chunk(`{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"{}"}}]}`, "")}, "name or id"},
 		{[]string{chunk(`{"tool_calls":{}}`, "")}, "tool_calls"},
 	} {
 		s := convert.NewStream("alias", "req_1", sig)
@@ -177,5 +185,46 @@ func TestPing(t *testing.T) {
 	name, data, _ := strings.Cut(strings.TrimSuffix(string(convert.Ping()), "\n\n"), "\ndata: ")
 	if err := json.Unmarshal([]byte(data), &e); err != nil || name != "event: ping" || e.Type != "ping" {
 		t.Errorf("%q: %v", convert.Ping(), err)
+	}
+}
+
+// A tool call's id and name sent again with each fragment, unchanged, are a
+// repeat: the call is named once and its arguments joined.
+func TestStreamRepeatedToolCallFields(t *testing.T) {
+	s := convert.NewStream("alias", "req_1", sig)
+	var out []byte
+	for _, ch := range []string{
+		chunk(`{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_time","arguments":"{\"tz\":"}}]}`, ""),
+		chunk(`{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_time","arguments":"\"UTC\"}"}}]}`, ""),
+		chunk(`{}`, "tool_calls"),
+	} {
+		b, err := s.Chunk([]byte(ch))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, b...)
+	}
+	m, _ := accumulated(t, append(out, s.End()...))
+	if len(m.Content) != 1 || m.Content[0].Name != "get_time" || m.Content[0].ID != "call_1" || string(m.Content[0].Input) != `{"tz":"UTC"}` {
+		t.Errorf("content %+v", m.Content)
+	}
+}
+
+// A stream the token limit cut short in a tool call stops for max_tokens.
+func TestStreamCutShortInACall(t *testing.T) {
+	s := convert.NewStream("alias", "req_1", sig)
+	var out []byte
+	for _, ch := range []string{
+		chunk(`{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"f","arguments":"{\"a\":"}}]}`, ""),
+		chunk(`{}`, "length"),
+	} {
+		b, err := s.Chunk([]byte(ch))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, b...)
+	}
+	if m, _ := accumulated(t, append(out, s.End()...)); m.StopReason != "max_tokens" {
+		t.Errorf("stop_reason %s", m.StopReason)
 	}
 }

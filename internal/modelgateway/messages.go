@@ -347,8 +347,8 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	} else {
 		call.usage = asksForUsage(top)
 	}
-	if dep := call.hist.producer(attempts); dep != "" {
-		attempts = preferring(attempts, dep)
+	if dep, on := call.hist.producer(attempts); dep != "" {
+		attempts = preferring(attempts, dep, on)
 	}
 	// MaxAttempts bounds the calls to each deployment rather than to the
 	// alias, so a deployment with many credentials cannot spend the budget a
@@ -1060,8 +1060,12 @@ func (s *messagesStream) draining() bool { return false }
 
 func (s *messagesStream) complete(data []byte) bool { return json.Valid(data) }
 
-func (s *messagesStream) failure(typ, msg string) []byte {
-	b := encodeJSON(map[string]any{"type": "error", "request_id": s.rid, "error": map[string]string{"type": typ, "message": msg}})
+func (s *messagesStream) failure(typ, msg string) []byte { return messagesError(s.rid, typ, msg) }
+
+// messagesError is the Messages error event that ends a stream once it has
+// begun, carrying the gateway's request id.
+func messagesError(rid, typ, msg string) []byte {
+	b := encodeJSON(map[string]any{"type": "error", "request_id": rid, "error": map[string]string{"type": typ, "message": msg}})
 	return []byte("event: error\ndata: " + string(b) + "\n\n")
 }
 
@@ -1080,6 +1084,7 @@ func (s *messagesStream) failure(typ, msg string) []byte {
 // also end the stream without [DONE] once every choice has finished, as
 // MiniMax-M3 does (probed 2026-10-08), which is no failure.
 type chatStream struct {
+	chatFraming
 	c        call
 	red      provider.Redactor
 	withhold bool           // the caller did not ask for the usage chunk
@@ -1186,7 +1191,12 @@ func empty(v any) bool {
 	return false
 }
 
-func (s *chatStream) complete(data []byte) bool { return json.Valid(data) || isDone(data) }
+// chatFraming is how a Chat Completions stream's events are read, whatever
+// the caller is sent: its relay as it is (chatStream) or converted
+// (convStream).
+type chatFraming struct{}
+
+func (chatFraming) complete(data []byte) bool { return json.Valid(data) || isDone(data) }
 
 func (s *chatStream) closing() []byte { return nil }
 
@@ -1197,7 +1207,7 @@ func (s *chatStream) draining() bool { return false }
 // keepAlive: an event with no data line, which an OpenAI client does not
 // dispatch, whatever its name but error, which the gateway reads as one. A
 // ping that carries data is data to such a client, read as any chunk is.
-func (s *chatStream) keepAlive(e upstream.Event) bool { return e.Data == nil && e.Name != "error" }
+func (chatFraming) keepAlive(e upstream.Event) bool { return e.Data == nil && e.Name != "error" }
 
 func (s *chatStream) failure(typ, msg string) []byte {
 	b := encodeJSON(map[string]any{"error": map[string]any{"message": msg, "type": typ, "param": nil, "code": nil}})

@@ -25,10 +25,12 @@ type Stream struct {
 	usage     Usage
 
 	started  bool
-	finished bool           // the choice has finished, and not gone on
-	next     int            // the next block's index
-	open     string         // the open block's type, "" for none
-	call     int64          // the open tool_use block's call index
+	finished bool   // the choice has finished, and not gone on
+	next     int    // the next block's index
+	open     string // the open block's type, "" for none
+	call     int64  // the open tool_use block's call index
+	callID   string // and the id and name it opened with
+	callName string
 	calls    map[int64]bool // the call indices a tool_use block has opened for
 	called   bool           // a tool call has been seen
 	stop     string         // the choice's finish_reason
@@ -49,8 +51,12 @@ func (s *Stream) SetUsage(u Usage) { s.usage = u }
 func (s *Stream) Finished() bool { return s.finished }
 
 // Chunk is the events one chunk, a JSON object, becomes. It fails on a chunk
-// it cannot carry: a second choice, the deprecated function_call, or a
-// fragment of a tool call whose block an interleaved call already ended.
+// it cannot carry: a second choice, the deprecated function_call, a fragment
+// of a tool call whose block an interleaved call already ended, or a tool
+// call's name or id arriving, or changing, once its block has opened —
+// Chat Completions may stream a name in pieces, which openai-go joins, where
+// Messages names the tool once, at content_block_start. An open call's name
+// or id sent again unchanged is a repeat, and carries on.
 func (s *Stream) Chunk(data []byte) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(data, &obj) != nil || obj == nil {
@@ -80,6 +86,11 @@ func (s *Stream) choice(out *bytes.Buffer, ch map[string]json.RawMessage) error 
 	if !null(delta["function_call"]) {
 		return fmt.Errorf("the upstream streamed the deprecated function_call; it must stream tool_calls")
 	}
+	for _, key := range []string{"reasoning_content", "content", "refusal"} {
+		if _, ok := text(delta, key); !ok && !null(delta[key]) {
+			return fmt.Errorf("a chunk's %s is not a string", key)
+		}
+	}
 	generated := false
 	if r, _ := text(delta, "reasoning_content"); r != "" {
 		s.into(out, "thinking", nil)
@@ -105,15 +116,18 @@ func (s *Stream) choice(out *bytes.Buffer, ch map[string]json.RawMessage) error 
 		var fn map[string]json.RawMessage
 		_ = json.Unmarshal(c["function"], &fn)
 		args, _ := text(fn, "arguments")
+		id, _ := text(c, "id")
+		name, _ := text(fn, "name")
 		switch {
 		case s.open == "tool_use" && s.call == index:
+			if id != "" && id != s.callID || name != "" && name != s.callName {
+				return fmt.Errorf("the upstream streamed tool call %d's name or id after starting it", index)
+			}
 		case s.calls[index]:
 			return fmt.Errorf("the upstream went back to tool call %d after starting another", index)
 		default:
-			id, _ := text(c, "id")
-			name, _ := text(fn, "name")
 			s.into(out, "tool_use", map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}})
-			s.call, s.called = index, true
+			s.call, s.callID, s.callName, s.called = index, id, name, true
 			if s.calls == nil {
 				s.calls = map[int64]bool{}
 			}

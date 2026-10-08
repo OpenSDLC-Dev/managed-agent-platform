@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -525,6 +526,9 @@ func TestAConvertedStreamErrorsType(t *testing.T) {
 		`{"error":{"message":"no","type":"permission_error"}}`:                  "permission_error",
 		`{"error":{"message":"slow down","type":"vendor_x","http_code":"429"}}`: "rate_limit_error",
 		`{"error":{"message":"broke","type":"vendor_x"}}`:                       "api_error",
+		`{"error":{"message":"no","type":"vendor_x","http_code":"401"}}`:        "authentication_error",
+		`{"error":{"message":"no","type":"vendor_x","http_code":"402"}}`:        "billing_error",
+		`{"error":{"message":"no","type":"vendor_x","http_code":"403"}}`:        "permission_error",
 	} {
 		e := newEnv(t)
 		f := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
@@ -700,5 +704,83 @@ func TestAStalledDrainKeepsTheCallersError(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ErrorType != "api_error" || !strings.Contains(string(b), "could not be converted") {
 		t.Errorf("stream:\n%s\nledger %+v", b, rows)
+	}
+}
+
+// A drain ends at an upstream's error, keep-alives after it or not.
+func TestADrainEndsAtTheUpstreamsError(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, _ fakeCall) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"index":1,"delta":{"content":"x"}}]}`+"\n\n"+
+			`data: {"error":{"type":"api_error","message":"generation failed"}}`+"\n\n")
+		w.(http.Flusher).Flush()
+		for i := 0; i < 60; i++ {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+			_, _ = io.WriteString(w, ": keep-alive\n\n")
+			w.(http.Flusher).Flush()
+		}
+	})
+	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	start := time.Now()
+	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
+	var rows []store.Usage
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if rows = e.ledger(); len(rows) == 1 {
+			break
+		}
+	}
+	if took := time.Since(start); took > 1500*time.Millisecond || len(rows) != 1 || rows[0].ErrorType != "api_error" {
+		t.Errorf("after %s, stream:\n%s\nledger %+v", took, b, rows)
+	}
+}
+
+// The newest thinking goes first to the deployment that produced it, on the
+// protocol that produced it, the only one it goes back on: a converted
+// answer's reasoning to the credential that converts, a signed block to the
+// one that passes through, whichever the weights favor.
+func TestThinkingGoesFirstToItsProtocol(t *testing.T) {
+	for _, c := range []struct {
+		sig   string // the signature after the deployment id
+		heavy []profile.Protocol
+		want  string
+	}{
+		{"", nil, "/chat/completions"},
+		{"sig", []profile.Protocol{profile.OpenAI}, "/anthropic/v1/messages"},
+	} {
+		e := newEnv(t)
+		f := newFake(t, either("ok"))
+		p := e.provider(f.URL, func(p *store.Provider) {
+			p.Name, p.Profile = "deepseek", "deepseek"
+			p.Endpoints = map[profile.Protocol]string{profile.Anthropic: f.URL + "/anthropic", profile.OpenAI: f.URL}
+		})
+		for i, protos := range [][]profile.Protocol{nil, {profile.OpenAI}} {
+			weight := 1
+			if slices.Equal(protos, c.heavy) {
+				weight = 1000
+			}
+			ct, kid, err := e.cipher.Encrypt(e.ctx, []byte(fmt.Sprintf("sk-deepseek-key%d", i)))
+			e.must(err)
+			_, err = e.s.CreateCredential(e.ctx, store.Credential{ProviderID: p.ID, Ciphertext: ct, KeyID: kid,
+				LastFour: fmt.Sprintf("key%d", i), Weight: weight, Enabled: true, Protocols: protos})
+			e.must(err)
+		}
+		d := e.deployment(p, "deepseek-flash")
+		e.alias("m", target(d, 0))
+		key := e.key(everyAlias)
+		e.start()
+		history := fmt.Sprintf(`[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"mapgw1.%s.%s"},{"type":"text","text":"one"}]},{"role":"user","content":"go"}]`, d.ID, c.sig)
+		resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"messages":`+history+`}`,
+			map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
+		if calls := f.recorded(); resp.StatusCode != 200 || len(calls) != 1 || calls[0].Path != c.want {
+			t.Errorf("signature %q: %d %s, calls %v, want %s", c.sig, resp.StatusCode, b, calls, c.want)
+		}
 	}
 }

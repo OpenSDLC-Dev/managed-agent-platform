@@ -171,6 +171,13 @@ func TestRequestRefusals(t *testing.T) {
 		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"file","file_id":"f"}}]}]}`:                                "messages[0].content[0].source",
 		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"image","source":{}}]}]}]}`:      "messages[0].content[0].content",
 		`{"model":"a","max_tokens":8,"messages":"hi"}`:                                                                                                                 "messages",
+		`{"model":"a","max_tokens":8,"messages":null}`:                                                                                                                 "messages",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":7}]}]}`:                                                               "messages[0].content[0].text",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"text","text":7}]}]}]}`:          "messages[0].content[0].content: [0].text",
+		`{"model":"a","max_tokens":8,` + hi + `,"thinking":{"type":"adaptive","budget_tokens":1024}}`:                                                                  "thinking.budget_tokens",
+		`{"model":"a","max_tokens":8,` + hi + `,"thinking":{"type":"disabled","display":"summarized"}}`:                                                                "thinking.display",
+		`{"model":"a",` + hi + `}`:                   "max_tokens",
+		`{"model":"a","max_tokens":null,` + hi + `}`: "max_tokens",
 	} {
 		var top map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(body), &top); err != nil {
@@ -195,5 +202,33 @@ func TestRequestDroppedOptions(t *testing.T) {
 		if got := request(t, body); !reflect.DeepEqual(got, plain) {
 			t.Errorf("Request(%s) = %v, want %v", body, got, plain)
 		}
+	}
+}
+
+// Of several output_config fields refused, the first by name is named, every
+// time.
+func TestRequestOutputConfigRefusalIsStable(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		_, err := convert.Request(map[string]json.RawMessage{"model": json.RawMessage(`"a"`), "max_tokens": json.RawMessage(`8`),
+			"messages": json.RawMessage(`[{"role":"user","content":"hi"}]`), "output_config": json.RawMessage(`{"format":{"type":"json_schema"},"effort":1}`)}, "up", nil)
+		if err == nil || !strings.HasPrefix(err.Error(), "output_config.effort") {
+			t.Fatalf("run %d: %v, want output_config.effort named", i, err)
+		}
+	}
+}
+
+// An empty tools array goes as none, and an empty text block — absent text,
+// as the brain stores one — as empty text, left out beside an image.
+func TestRequestEmpties(t *testing.T) {
+	got := request(t, `{"model":"a","max_tokens":8,"tools":[],"messages":[
+		{"role":"user","content":[{"type":"text","text":""},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]},
+		{"role":"assistant","content":[{"type":"text"},{"type":"tool_use","id":"c","name":"f","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"text"}]}]}]}`)
+	want := decoded(t, `{"model":"up","max_tokens":8,"messages":[
+		{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},
+		{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"c","content":""}]}`)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %v\nwant %v", got, want)
 	}
 }

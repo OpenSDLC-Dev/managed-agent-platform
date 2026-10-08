@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
@@ -92,6 +93,14 @@ func messagesErrorType(typ string, status int) string {
 	case "authentication_error", "permission_error", "billing_error":
 		return typ
 	}
+	switch status { // which only an error after the answer began states: refusedCredential takes the others
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusPaymentRequired:
+		return "billing_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	}
 	if _, ok := errorStatus[typ]; ok {
 		return typ
 	}
@@ -120,6 +129,7 @@ func messagesErrorType(typ string, status int) string {
 // are Chat Completions', and the caller is sent Messages pings in their
 // place, and whenever the relay has written nothing for pingEvery.
 type convStream struct {
+	chatFraming
 	c      call
 	s      *convert.Stream
 	ctx    context.Context
@@ -127,8 +137,6 @@ type convStream struct {
 	rid    string
 	failed bool // a chunk could not be converted, and the upstream is read on for its usage alone
 }
-
-func (p *convStream) keepAlive(e upstream.Event) bool { return e.Data == nil && e.Name != "error" }
 
 func (p *convStream) event(e upstream.Event) ([]byte, bool) {
 	named := e.Name == "error"
@@ -138,6 +146,9 @@ func (p *convStream) event(e upstream.Event) ([]byte, bool) {
 		case e.Data == nil && !named:
 			return nil, false
 		case named || isDone(e.Data) || json.Unmarshal(e.Data, &obj) != nil:
+			return nil, true
+		}
+		if _, ok := obj["error"]; ok { // the upstream has ended its answer
 			return nil, true
 		}
 		if t := chatUsageOf(obj["usage"]); t != nil {
@@ -185,12 +196,7 @@ func (p *convStream) ended() string {
 	return "the stream ended before its finish"
 }
 
-func (p *convStream) complete(data []byte) bool { return json.Valid(data) || isDone(data) }
-
-func (p *convStream) failure(typ, msg string) []byte {
-	b := encodeJSON(map[string]any{"type": "error", "request_id": p.rid, "error": map[string]string{"type": typ, "message": msg}})
-	return []byte("event: error\ndata: " + string(b) + "\n\n")
-}
+func (p *convStream) failure(typ, msg string) []byte { return messagesError(p.rid, typ, msg) }
 
 func (p *convStream) closing() []byte { return p.s.End() }
 

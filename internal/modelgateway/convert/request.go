@@ -40,6 +40,9 @@ import (
 //
 // The error names the field as the caller wrote it.
 func Request(top map[string]json.RawMessage, model string, thinking map[string]string) ([]byte, error) {
+	if null(top["max_tokens"]) { // which Chat Completions leaves to the upstream
+		return nil, fmt.Errorf("max_tokens: required")
+	}
 	out := map[string]json.RawMessage{"model": encode(model)}
 	keys := make([]string, 0, len(top))
 	for k := range top {
@@ -95,7 +98,7 @@ func Request(top map[string]json.RawMessage, model string, thinking map[string]s
 		return nil, fmt.Errorf("system%w", err)
 	}
 	var raws []map[string]json.RawMessage
-	if json.Unmarshal(top["messages"], &raws) != nil {
+	if null(top["messages"]) || json.Unmarshal(top["messages"], &raws) != nil {
 		return nil, fmt.Errorf("messages: must be an array of objects")
 	}
 	turns := make([]Message, len(raws))
@@ -163,6 +166,9 @@ func requestTools(raw json.RawMessage) (json.RawMessage, error) {
 	var tools []json.RawMessage
 	if json.Unmarshal(raw, &tools) != nil {
 		return nil, fmt.Errorf("tools: must be an array")
+	}
+	if len(tools) == 0 { // as absent, since a Chat Completions server may refuse an empty or null one
+		return nil, nil
 	}
 	defs := make([]map[string]json.RawMessage, len(tools))
 	for i, t := range tools {
@@ -261,7 +267,11 @@ func Thinking(raw json.RawMessage, vendor map[string]string) json.RawMessage {
 
 // thinkingType is the vendor's thinking.type for the request's thinking,
 // "" where the vendor names none; budget_tokens has no counterpart on these
-// endpoints and goes with the rest.
+// endpoints and goes with the rest. A field is refused where its type does
+// not take it (checked against anthropic-sdk-go v1.70.1 — message.go
+// ThinkingConfigEnabledParam, ThinkingConfigAdaptiveParam and
+// ThinkingConfigDisabledParam): budget_tokens beside enabled alone, display
+// beside enabled and adaptive.
 func thinkingType(raw json.RawMessage, vendor map[string]string) (string, error) {
 	var t map[string]json.RawMessage
 	if json.Unmarshal(raw, &t) != nil {
@@ -278,9 +288,10 @@ func thinkingType(raw json.RawMessage, vendor map[string]string) (string, error)
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	takes := map[string]bool{"type": true, "budget_tokens": typ == "enabled", "display": typ != "disabled"}
 	for _, k := range keys {
 		switch display, _ := text(t, k); {
-		case k == "type", k == "budget_tokens", null(t[k]), k == "display" && display == "summarized":
+		case null(t[k]), takes[k] && (k != "display" || display == "summarized"):
 		default:
 			return "", fmt.Errorf(".%s: has no Chat Completions counterpart", k)
 		}
@@ -295,8 +306,14 @@ func outputConfig(raw json.RawMessage) (json.RawMessage, error) {
 	if json.Unmarshal(raw, &c) != nil {
 		return nil, fmt.Errorf(": must be an object")
 	}
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var effort json.RawMessage
-	for k, v := range c {
+	for _, k := range keys {
+		v := c[k]
 		switch {
 		case null(v):
 		case k == "effort":

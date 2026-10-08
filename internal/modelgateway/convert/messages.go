@@ -114,7 +114,7 @@ func message(m Message) ([]ChatMessage, error) {
 		switch typ {
 		case "text":
 			t, ok := text(b, "text")
-			if !ok {
+			if !ok && !null(b["text"]) { // absent is empty, as domain.ContentBlock stores an empty one
 				return nil, fmt.Errorf("content[%d].text: must be a string", j)
 			}
 			parts = append(parts, part{Type: "text", Text: t})
@@ -159,8 +159,14 @@ func message(m Message) ([]ChatMessage, error) {
 	}
 	msg := ChatMessage{Role: m.Role, ToolCalls: calls, ReasoningContent: strings.Join(reasoning, "")}
 	switch {
-	case images:
-		msg.Content = encode(parts)
+	case images: // an empty text part, which a Chat Completions server may refuse, carries nothing
+		kept := make([]part, 0, len(parts))
+		for _, p := range parts {
+			if p.Type != "text" || p.Text != "" {
+				kept = append(kept, p)
+			}
+		}
+		msg.Content = encode(kept)
 	case len(parts) > 0:
 		texts := make([]string, len(parts))
 		for k, p := range parts {
@@ -247,7 +253,7 @@ func resultText(raw json.RawMessage) (string, error) {
 		switch typ, _ := text(b, "type"); typ {
 		case "text":
 			t, ok := text(b, "text")
-			if !ok {
+			if !ok && !null(b["text"]) {
 				return "", fmt.Errorf("[%d].text: must be a string", j)
 			}
 			out = append(out, t)

@@ -110,10 +110,39 @@ func TestStopReason(t *testing.T) {
 	}{
 		{"stop", false, "end_turn"}, {"length", false, "max_tokens"}, {"content_filter", false, "refusal"},
 		{"tool_calls", false, "end_turn"}, {"aborted", false, "end_turn"}, {"", false, "end_turn"},
-		{"length", true, "tool_use"}, {"stop", true, "tool_use"},
+		{"length", true, "max_tokens"}, {"stop", true, "tool_use"}, {"content_filter", true, "tool_use"},
 	} {
 		if got := convert.StopReason(c.finish, c.called); got != c.want {
 			t.Errorf("StopReason(%q, %v) = %s, want %s", c.finish, c.called, got, c.want)
+		}
+	}
+}
+
+// A tool call the token limit cut short is left out of a whole answer, which
+// stops for max_tokens; one whose arguments are whole stays.
+func TestAnswerCutShort(t *testing.T) {
+	b, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"calling","tool_calls":[
+		{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}},
+		{"id":"c2","type":"function","function":{"name":"g","arguments":"{\"a\":"}}]},"finish_reason":"length"}]}`), "alias", "msg_1", nil, sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m anthropic.Message
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Content) != 2 || m.Content[0].Text != "calling" || m.Content[1].ID != "c1" || m.StopReason != "max_tokens" {
+		t.Errorf("answer %s", b)
+	}
+}
+
+// A content, refusal or reasoning_content that is not a string is refused,
+// rather than read as no text.
+func TestAnswerNonStringText(t *testing.T) {
+	for _, key := range []string{"content", "refusal", "reasoning_content"} {
+		_, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","`+key+`":[{"type":"text","text":"hello"}]},"finish_reason":"stop"}]}`), "alias", "msg_1", nil, sig)
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("%s: %v, want an error naming it", key, err)
 		}
 	}
 }
