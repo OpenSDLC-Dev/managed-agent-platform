@@ -171,6 +171,8 @@ func TestRequestRefusals(t *testing.T) {
 		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"file","file_id":"f"}}]}]}`:                                "messages[0].content[0].source",
 		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"image","source":{}}]}]}]}`:      "messages[0].content[0].content",
 		`{"model":"a","max_tokens":8,"messages":"hi"}`:                                                                                                                 "messages",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":null}]}]}`:                                                            "messages[0].content[0].text",
+		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"text","text":null}]}]}]}`:       "messages[0].content[0].content: [0].text",
 		`{"model":"a","max_tokens":8,"messages":null}`:                                                                                                                 "messages",
 		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":7}]}]}`:                                                               "messages[0].content[0].text",
 		`{"model":"a","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"text","text":7}]}]}]}`:          "messages[0].content[0].content: [0].text",

@@ -7007,3 +7007,18 @@ once per attempt, which the finding called repeated work, is needed: each attemp
 messages differ by deployment and strip mode, the validation pass decides the routing
 before any attempt, and the cost is JSON encoding beside an upstream call.
 Mutation testing caught all 22 of the round's mutants.
+
+Codex's third pass, over those fixes, found four more, fixed the same way:
+- A Chat Completions usage's `prompt_tokens_details.cache_write_tokens`, which the pinned
+  openai-go names and Kimi's kimi-k3 reports inside `prompt_tokens`, was counted as input,
+  on the Chat Completions passthrough's ledger since slice 4a and now on the converted
+  answer too, priced at the input rate. It is the ledger's cache write, and the converted
+  answer's `cache_creation_input_tokens`.
+- A refusal, which OpenAI sends in place of content and ends with `stop`, stopped for
+  `end_turn`; it stops for `refusal`, whole or streamed.
+- A tool call's arguments sent as a JSON object, as Z.ai's chat-completion reference
+  types them, became `{}`; they are read as their JSON, and any other value that is no
+  string is refused.
+- The absent-text leniency also let an explicit `"text": null` through, which the pinned
+  SDK's schema refuses and the brain never stores; only an absent text is read as empty.
+Mutation testing caught all 13 of the round's mutants.

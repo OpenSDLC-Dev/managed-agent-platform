@@ -33,6 +33,7 @@ type Stream struct {
 	callName string
 	calls    map[int64]bool // the call indices a tool_use block has opened for
 	called   bool           // a tool call has been seen
+	refused  bool           // a refusal has been seen
 	stop     string         // the choice's finish_reason
 }
 
@@ -101,7 +102,7 @@ func (s *Stream) choice(out *bytes.Buffer, ch map[string]json.RawMessage) error 
 		if t, _ := text(delta, key); t != "" {
 			s.into(out, "text", nil)
 			s.delta(out, map[string]string{"type": "text_delta", "text": t})
-			generated = true
+			generated, s.refused = true, s.refused || key == "refusal"
 		}
 	}
 	var calls []map[string]json.RawMessage
@@ -115,7 +116,10 @@ func (s *Stream) choice(out *bytes.Buffer, ch map[string]json.RawMessage) error 
 		}
 		var fn map[string]json.RawMessage
 		_ = json.Unmarshal(c["function"], &fn)
-		args, _ := text(fn, "arguments")
+		args, err := Arguments(fn["arguments"])
+		if err != nil {
+			return fmt.Errorf("tool call %d: %w", index, err)
+		}
 		id, _ := text(c, "id")
 		name, _ := text(fn, "name")
 		switch {
@@ -156,7 +160,7 @@ func (s *Stream) End() []byte {
 	s.close(&out)
 	event(&out, "message_delta", map[string]any{
 		"type":  "message_delta",
-		"delta": map[string]any{"stop_reason": StopReason(s.stop, s.called), "stop_sequence": nil},
+		"delta": map[string]any{"stop_reason": StopReason(s.stop, s.called, s.refused), "stop_sequence": nil},
 		"usage": s.usage,
 	})
 	event(&out, "message_stop", map[string]string{"type": "message_stop"})

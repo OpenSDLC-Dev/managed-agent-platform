@@ -114,7 +114,7 @@ func message(m Message) ([]ChatMessage, error) {
 		switch typ {
 		case "text":
 			t, ok := text(b, "text")
-			if !ok && !null(b["text"]) { // absent is empty, as domain.ContentBlock stores an empty one
+			if _, present := b["text"]; !ok && present { // absent is empty, as domain.ContentBlock stores an empty one
 				return nil, fmt.Errorf("content[%d].text: must be a string", j)
 			}
 			parts = append(parts, part{Type: "text", Text: t})
@@ -253,7 +253,7 @@ func resultText(raw json.RawMessage) (string, error) {
 		switch typ, _ := text(b, "type"); typ {
 		case "text":
 			t, ok := text(b, "text")
-			if !ok && !null(b["text"]) {
+			if _, present := b["text"]; !ok && present {
 				return "", fmt.Errorf("[%d].text: must be a string", j)
 			}
 			out = append(out, t)

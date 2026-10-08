@@ -474,7 +474,7 @@ func TestModelsInOpenAIsShape(t *testing.T) {
 
 // An OpenAI usage object is read by its exact keys in the ledger's meaning:
 // input without the cache reads, which DeepSeek also reports on a key of its
-// own, read when the details are absent.
+// own, read when the details are absent, and without the cache writes.
 func TestChatUsageInTheLedgersMeaning(t *testing.T) {
 	for _, c := range []struct {
 		usage string
@@ -486,6 +486,8 @@ func TestChatUsageInTheLedgersMeaning(t *testing.T) {
 		{`{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":null},"prompt_cache_hit_tokens":7}`, &store.Tokens{Input: 3, Output: 3, CacheRead: 7}},
 		{`{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":40}}`, &store.Tokens{Output: 3, CacheRead: 10}},
 		{`{"prompt_tokens":10,"completion_tokens":3}`, &store.Tokens{Input: 10, Output: 3}},
+		{`{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":50}}`, &store.Tokens{Input: 10, Output: 10, CacheWrite: 50, CacheRead: 40}},
+		{`{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":9}}`, &store.Tokens{Output: 3, CacheWrite: 6, CacheRead: 4}},
 		{`{"completion_tokens":3}`, &store.Tokens{Output: 3}},
 		{`{"Prompt_Tokens":10,"Completion_Tokens":3}`, nil},
 		{`{"prompt_tokens":-1,"completion_tokens":1.5}`, nil},

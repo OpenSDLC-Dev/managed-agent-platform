@@ -175,9 +175,13 @@ func usageOf(prev *store.Tokens, raw json.RawMessage) *store.Tokens {
 // cache reads inside prompt_tokens and report them as
 // prompt_tokens_details.cached_tokens; DeepSeek also as
 // prompt_cache_hit_tokens, read when the details are absent (probed
-// 2026-10-08). OpenAI reports no cache writes. A usage without either
+// 2026-10-08). Cache writes, also inside prompt_tokens, are
+// prompt_tokens_details.cache_write_tokens (checked against
+// github.com/openai/openai-go/v3 v3.73.0 — completion.go
+// CompletionUsagePromptTokensDetails), which Kimi reports for kimi-k3
+// (platform.kimi.ai's context-caching guide). A usage without either
 // prompt_tokens or completion_tokens, null, or a count usageOf would not
-// read, is nil; a cache count past the prompt's is read as the prompt.
+// read, is nil; cache counts past the prompt's are read as the prompt.
 func chatUsageOf(raw json.RawMessage) *store.Tokens {
 	var u map[string]json.RawMessage
 	if json.Unmarshal(raw, &u) != nil || u == nil {
@@ -192,8 +196,10 @@ func chatUsageOf(raw json.RawMessage) *store.Tokens {
 	if !ok {
 		cached, _ = countOf(u["prompt_cache_hit_tokens"])
 	}
+	written, _ := countOf(member(u["prompt_tokens_details"], "cache_write_tokens"))
 	cached = min(cached, prompt)
-	return &store.Tokens{Input: prompt - cached, Output: completion, CacheRead: cached}
+	written = min(written, prompt-cached)
+	return &store.Tokens{Input: prompt - cached - written, Output: completion, CacheWrite: written, CacheRead: cached}
 }
 
 // countOf reads a count: a whole number from zero to maxCount, not null.

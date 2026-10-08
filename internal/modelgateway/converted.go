@@ -65,7 +65,7 @@ func callerUsage(t *store.Tokens) *convert.Usage {
 	if t == nil {
 		return nil
 	}
-	return &convert.Usage{Input: t.Input, Output: t.Output, CacheRead: t.CacheRead}
+	return &convert.Usage{Input: t.Input, Output: t.Output, CacheWrite: t.CacheWrite, CacheRead: t.CacheRead}
 }
 
 // convertedError is an upstream's error on the conversion path, a body or a

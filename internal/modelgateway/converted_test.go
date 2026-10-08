@@ -784,3 +784,24 @@ func TestThinkingGoesFirstToItsProtocol(t *testing.T) {
 		}
 	}
 }
+
+// The cache writes a converted answer's upstream reports reach the caller
+// and the ledger apart from its input.
+func TestAConvertedAnswersCacheWrites(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
+		writeBody(w, 200, `{"id":"c1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":50}}}`)
+	})
+	e.alias("fast", target(e.deployment(onOpenAI(e, "moonshot", f.URL), "kimi-k3"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	m, err := e.client(key).Messages.New(context.Background(), anthropic.MessageNewParams{Model: "fast", MaxTokens: 8, Messages: hello()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := e.ledger()
+	if m.Usage.InputTokens != 10 || m.Usage.CacheCreationInputTokens != 50 || m.Usage.CacheReadInputTokens != 40 ||
+		len(rows) != 1 || rows[0].Tokens == nil || *rows[0].Tokens != (store.Tokens{Input: 10, Output: 10, CacheWrite: 50, CacheRead: 40}) {
+		t.Errorf("usage %+v, ledger %+v", m.Usage, rows)
+	}
+}

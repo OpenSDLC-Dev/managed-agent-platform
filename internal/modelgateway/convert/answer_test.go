@@ -79,7 +79,7 @@ func TestAnswerFallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m := message(t, b); m.ID != "req_1" || !bytes.Contains(b, []byte(`"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0}`)) {
+	if m := message(t, b); m.ID != "req_1" || !bytes.Contains(b, []byte(`"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`)) {
 		t.Errorf("%s", b)
 	}
 }
@@ -100,20 +100,21 @@ func TestAnswerRefusals(t *testing.T) {
 	}
 }
 
-// Messages has a reason for each finish Chat Completions names: a tool
-// call wins whatever the finish says.
+// Messages has a reason for each finish Chat Completions names: the token
+// limit wins, then a tool call whatever the finish says, then a refusal.
 func TestStopReason(t *testing.T) {
 	for _, c := range []struct {
-		finish string
-		called bool
-		want   string
+		finish          string
+		called, refused bool
+		want            string
 	}{
-		{"stop", false, "end_turn"}, {"length", false, "max_tokens"}, {"content_filter", false, "refusal"},
-		{"tool_calls", false, "end_turn"}, {"aborted", false, "end_turn"}, {"", false, "end_turn"},
-		{"length", true, "max_tokens"}, {"stop", true, "tool_use"}, {"content_filter", true, "tool_use"},
+		{"stop", false, false, "end_turn"}, {"length", false, false, "max_tokens"}, {"content_filter", false, false, "refusal"},
+		{"tool_calls", false, false, "end_turn"}, {"aborted", false, false, "end_turn"}, {"", false, false, "end_turn"},
+		{"length", true, false, "max_tokens"}, {"stop", true, false, "tool_use"}, {"content_filter", true, false, "tool_use"},
+		{"stop", false, true, "refusal"}, {"length", false, true, "max_tokens"}, {"tool_calls", true, true, "tool_use"},
 	} {
-		if got := convert.StopReason(c.finish, c.called); got != c.want {
-			t.Errorf("StopReason(%q, %v) = %s, want %s", c.finish, c.called, got, c.want)
+		if got := convert.StopReason(c.finish, c.called, c.refused); got != c.want {
+			t.Errorf("StopReason(%q, %v, %v) = %s, want %s", c.finish, c.called, c.refused, got, c.want)
 		}
 	}
 }
@@ -144,5 +145,26 @@ func TestAnswerNonStringText(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), key) {
 			t.Errorf("%s: %v, want an error naming it", key, err)
 		}
+	}
+}
+
+// A refusal, which OpenAI sends in place of content and ends with stop, is
+// the answer's text and its stop reason; tool arguments sent as a JSON
+// object are read as its JSON; and cache writes are counted apart.
+func TestAnswerVendorShapes(t *testing.T) {
+	b, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"No"},"finish_reason":"stop"}]}`), "alias", "msg_1", nil, sig)
+	var m anthropic.Message
+	if err != nil || json.Unmarshal(b, &m) != nil || len(m.Content) != 1 || m.Content[0].Text != "No" || m.StopReason != "refusal" {
+		t.Errorf("refusal: %s, %v", b, err)
+	}
+	b, err = convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":{"x":1}}}]},"finish_reason":"tool_calls"}]}`),
+		"alias", "msg_1", &convert.Usage{Input: 10, Output: 10, CacheWrite: 50, CacheRead: 40}, sig)
+	m = anthropic.Message{}
+	if err != nil || json.Unmarshal(b, &m) != nil || len(m.Content) != 1 || string(m.Content[0].Input) != `{"x":1}` ||
+		m.Usage.InputTokens != 10 || m.Usage.CacheCreationInputTokens != 50 || m.Usage.CacheReadInputTokens != 40 {
+		t.Errorf("object arguments and usage: %s, %v", b, err)
+	}
+	if _, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":7}}]},"finish_reason":"tool_calls"}]}`), "alias", "msg_1", nil, sig); err == nil || !strings.Contains(err.Error(), "neither a string nor an object") {
+		t.Errorf("number arguments: %v", err)
 	}
 }

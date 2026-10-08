@@ -159,6 +159,7 @@ func TestStreamRefusals(t *testing.T) {
 		{[]string{chunk(`{"tool_calls":[{"index":"0"}]}`, "")}, "index"},
 		{[]string{chunk(`{"content":[{"type":"text","text":"x"}]}`, "")}, "content"},
 		{[]string{chunk(`{"reasoning_content":7}`, "")}, "reasoning_content"},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":7}}]}`, "")}, "neither a string nor an object"},
 		{[]string{chunk(`{"tool_calls":[{"id":"call_a","function":{"name":"f","arguments":"{}"}}]}`, ""),
 			chunk(`{"tool_calls":[{"id":"call_b","function":{"name":"g","arguments":"{}"}}]}`, "")}, "name or id"},
 		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"a","function":{"name":"get_"}}]}`, ""),
@@ -226,5 +227,34 @@ func TestStreamCutShortInACall(t *testing.T) {
 	}
 	if m, _ := accumulated(t, append(out, s.End()...)); m.StopReason != "max_tokens" {
 		t.Errorf("stop_reason %s", m.StopReason)
+	}
+}
+
+// A streamed refusal stops for refusal, and tool arguments sent as a JSON
+// object are the input.
+func TestStreamVendorShapes(t *testing.T) {
+	for _, c := range []struct {
+		chunks []string
+		check  func(anthropic.Message) bool
+	}{
+		{[]string{chunk(`{"refusal":"No"}`, ""), chunk(`{}`, "stop")},
+			func(m anthropic.Message) bool {
+				return m.StopReason == "refusal" && len(m.Content) == 1 && m.Content[0].Text == "No"
+			}},
+		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":{"x":1}}}]}`, ""), chunk(`{}`, "tool_calls")},
+			func(m anthropic.Message) bool { return len(m.Content) == 1 && string(m.Content[0].Input) == `{"x":1}` }},
+	} {
+		s := convert.NewStream("alias", "req_1", sig)
+		var out []byte
+		for _, ch := range c.chunks {
+			b, err := s.Chunk([]byte(ch))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, b...)
+		}
+		if m, _ := accumulated(t, append(out, s.End()...)); !c.check(m) {
+			t.Errorf("%v: %+v", c.chunks, m)
+		}
 	}
 }

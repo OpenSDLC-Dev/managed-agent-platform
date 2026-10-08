@@ -7,12 +7,13 @@ import (
 )
 
 // Usage is an answer's token counts in the Messages API's meaning: input
-// excludes the prompt tokens read from the cache, which are counted apart.
-// Chat Completions reports no cache writes, so the counts name none.
+// excludes the prompt tokens read from the cache and written to it, which
+// are counted apart.
 type Usage struct {
-	Input     int64 `json:"input_tokens"`
-	Output    int64 `json:"output_tokens"`
-	CacheRead int64 `json:"cache_read_input_tokens"`
+	Input      int64 `json:"input_tokens"`
+	Output     int64 `json:"output_tokens"`
+	CacheWrite int64 `json:"cache_creation_input_tokens"`
+	CacheRead  int64 `json:"cache_read_input_tokens"`
 }
 
 // Answer converts a whole Chat Completions answer to a Messages one, for a
@@ -75,7 +76,10 @@ func Answer(b []byte, alias, id string, usage *Usage, signature func() string) (
 		_ = json.Unmarshal(c["function"], &fn)
 		callID, _ := text(c, "id")
 		name, _ := text(fn, "name")
-		args, _ := text(fn, "arguments")
+		args, err := Arguments(fn["arguments"])
+		if err != nil {
+			return nil, fmt.Errorf("the answer's tool call %d: %w", i, err)
+		}
 		input, err := toolInput(args)
 		if err != nil && finish == "length" {
 			continue
@@ -95,8 +99,26 @@ func Answer(b []byte, alias, id string, usage *Usage, signature func() string) (
 	}
 	return encode(map[string]any{
 		"id": id, "type": "message", "role": "assistant", "model": alias, "content": content,
-		"stop_reason": StopReason(finish, len(calls) > 0), "stop_sequence": nil, "usage": usage,
+		"stop_reason": StopReason(finish, len(calls) > 0, strs["refusal"] != ""), "stop_sequence": nil, "usage": usage,
 	}), nil
+}
+
+// Arguments is a tool call's arguments as text: a string as it is, a JSON
+// object, which Z.ai's chat-completion reference types them as, as its JSON,
+// and null or absent as none.
+func Arguments(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	switch {
+	case null(raw):
+		return "", nil
+	case raw[0] == '"':
+		var s string
+		err := json.Unmarshal(raw, &s)
+		return s, err
+	case raw[0] == '{':
+		return string(raw), nil
+	}
+	return "", fmt.Errorf("its arguments are neither a string nor an object")
 }
 
 // toolInput is a tool call's arguments as a tool_use block's input: a JSON
@@ -117,18 +139,20 @@ func toolInput(args string) (json.RawMessage, error) {
 // token limit, a tool call it cut short included, as Messages reports one;
 // otherwise an answer that called a tool stopped for it, whatever
 // finish_reason says, as some OpenAI-compatible servers end a tool turn with
-// stop. content_filter is a refusal; every other reason is end_turn — stop,
+// stop. content_filter is a refusal, as is an answer that refused, which
+// OpenAI ends with stop and a refusal in place of content; every other
+// reason is end_turn — stop,
 // which also names a stop sequence that matched, where Chat Completions
 // does not say which, so stop_sequence is never set; and DeepSeek's
 // insufficient_system_resource and aborted, an answer the vendor cut short,
 // which Messages has no reason for.
-func StopReason(finish string, called bool) string {
+func StopReason(finish string, called, refused bool) string {
 	switch {
 	case finish == "length":
 		return "max_tokens"
 	case called:
 		return "tool_use"
-	case finish == "content_filter":
+	case finish == "content_filter", refused:
 		return "refusal"
 	}
 	return "end_turn"
