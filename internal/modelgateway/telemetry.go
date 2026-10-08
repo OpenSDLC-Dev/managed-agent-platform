@@ -62,8 +62,10 @@ const (
 	attrTokenType  = "modelgateway.token.type"
 )
 
-// operations names the GenAI operation of each route, by its ledger name.
-var operations = map[string]string{"messages": "chat", "count_tokens": "count_tokens", "chat_completions": "chat"}
+// operations names the GenAI operation of each route, by its ledger name;
+// the conventions name none for rerank.
+var operations = map[string]string{"messages": "chat", "count_tokens": "count_tokens", "chat_completions": "chat",
+	"embeddings": "embeddings", "rerank": "rerank"}
 
 // serverSpan continues the caller's W3C trace context in one server span for
 // the request, as the control plane's withTracing does. With no tracer
@@ -95,10 +97,9 @@ func spanName(r *http.Request) string {
 			break
 		}
 	}
+	rt, inferring := routes[path]
 	switch {
-	case path == "/v1/models",
-		(path == "/v1/messages" || path == "/v1/messages/count_tokens") && prefix != "/openai",
-		path == "/v1/chat/completions" && prefix != "/anthropic":
+	case path == "/v1/models", inferring && rt.servedUnder(prefix):
 		return r.Method + " " + path
 	case strings.HasPrefix(path, "/v1/models/"):
 		return r.Method + " /v1/models/{model_id}"

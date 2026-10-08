@@ -156,10 +156,12 @@ Moonshot document neither; MiniMax keeps only a legacy embeddings page in a shap
 own (`texts` and `type` in, `vectors` out, on `api.minimax.chat`), which no profile
 adopts. Gitee AI serves both under `https://ai.gitee.com/v1`, per the OpenAPI spec it
 publishes at `/v1/yaml`: `/embeddings` OpenAI-shaped, with `dimensions` and the
-multimodal objects dikw-core sends (below), and `/rerank` with `top_n` defaulting to 3. Neither vendor
-says whether it accepts `encoding_format: "base64"` — Gitee's spec lists the field with
-a `float` default and no values, Zhipu's has no such field — but dikw-core's working
-Gitee setup sends it on every request, so Gitee at least accepts it.
+multimodal objects dikw-core sends (below), and `/rerank`, whose `top_n` the spec
+defaults to 3 — though Gitee scores every document when it is left out (probed
+2026-10-08). Neither vendor says whether it accepts `encoding_format: "base64"` —
+Gitee's spec lists the field with a `float` default and no values, Zhipu's has no such
+field — but dikw-core's working Gitee setup sends it on every request, so Gitee at least
+accepts it; asked for it, Gitee answers floats (probed 2026-10-08).
 
 **dikw-core** ([OpenDIKW/dikw-core](https://github.com/OpenDIKW/dikw-core) at `ef219da`,
 v0.6.5), the embedding and rerank client of record:
@@ -173,13 +175,16 @@ v0.6.5), the embedding and rerank client of record:
   `data[].index` (`:327`) and treats `usage.prompt_tokens` as optional.
 - Multimodal embeddings post Gitee's own shape to the same `/embeddings` path:
   `input` is a list of `{"text": …}` or `{"image": "data:<mime>;base64,…"}` objects,
-  and the response carries no `usage` (`src/dikw_core/providers/gitee_multimodal.py`).
+  and dikw-core expects no `usage` in the response
+  (`src/dikw_core/providers/gitee_multimodal.py`), though Gitee reports `prompt_tokens`
+  there too (probed 2026-10-08).
 - Rerank posts `{model, query, documents, top_n}` to `/rerank` and reads
   `results[{index, relevance_score}]` (`src/dikw_core/providers/rerank.py`).
 - It sizes its own batches. It observed Gitee refusing more than 25 inputs on both calls
   with a 400 in Gitee's own words (`docs/providers.md`, gotcha 2), where Gitee's spec
   allows 1000 embedding inputs and sets no rerank cap (above) — so the cap is the live
-  tier's to measure, and nothing in the gateway depends on it.
+  tier's to measure, and nothing in the gateway depends on it. It measured 1000
+  embedding inputs, multimodal ones included, and 25 rerank documents (2026-10-08).
 - Gitee drops idle keep-alive connections in the middle of a batch, so dikw-core opens a
   fresh connection per request (`src/dikw_core/providers/_http.py`).
 - An index's version is its dimension, normalization, distance and a revision its
@@ -319,10 +324,11 @@ converts when protocols match.
 A profile is declarative data plus at most a few Go hooks, compiled in: `deepseek`,
 `minimax`, `zhipu`, `moonshot`, `gitee`, and `anthropic-generic` / `openai-generic` for
 any conformant endpoint (the later engine profiles join these). It names the request
-path per protocol and per kind, the CN and international hosts, the auth header,
-content-block edits, field strips, the usage mapping, whether connections are reused
-(not for `gitee`, which drops idle ones mid-batch), and whether `count_tokens`
-exists — where it does not, that alias's `count_tokens` answers `404 not_found_error`
+path per protocol and per kind (every v1 profile's are the same: an OpenAI host is the
+base of `/chat/completions`, `/embeddings` and `/rerank`), the CN and international
+hosts, the auth header, content-block edits, field strips, the usage mapping, whether
+connections are reused (not for `gitee`, which drops idle ones mid-batch), and whether
+`count_tokens` exists — where it does not, that alias's `count_tokens` answers `404 not_found_error`
 and a client falls back to estimating, as the compatibility guide describes. No v1
 profile records its absence: DeepSeek and MiniMax answer it (probed 2026-10-07), and
 Zhipu and Moonshot, which do not document it, answer for themselves.
@@ -418,9 +424,9 @@ defaults, as the platform's top-level resource tables do
   (or were tried last), session id, inbound protocol and route, the status and error
   type the caller was given, the token counts the upstream reported (input, output,
   cache write, cache read), cost at the prices in force, latency, time to first token.
-  No count is estimated: a response without `usage`, as Gitee's multimodal embeddings
-  answer, records no tokens and no cost, and a `count_tokens` answer is a count, not
-  usage. Metadata only. Kept 90 days by default (`MODELGATEWAY_USAGE_RETENTION`) and
+  No count is estimated: a response without `usage`, or with counts under keys an
+  OpenAI usage does not use, as Gitee's rerank reports its zeros, records no tokens and
+  no cost, and a `count_tokens` answer is a count, not usage. Metadata only. Kept 90 days by default (`MODELGATEWAY_USAGE_RETENTION`) and
   deleted by a sweep any replica may run under an advisory lock.
 - **usage_daily** — rollups per UTC day, key, matched alias (Telemetry below) and
   deployment, written by the statement that writes each usage row, so no job builds

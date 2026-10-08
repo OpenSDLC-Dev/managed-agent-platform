@@ -6662,3 +6662,58 @@ gateway, which had refused as it should: the check counted upstream calls on the
 recorder the model's own subtests use beside it, and one of their calls fell in its
 window. Each vendor's refusals now have a route of their own, and on the final code the
 whole live tier passed twice more, its 47 tests each time.
+
+## Model gateway embeddings and rerank (plan 59 slice 4b) — acceptance record, 2026-10-08
+
+Probes sent directly to Gitee AI's OpenAI host, `https://ai.gitee.com/v1`, decided what
+the passthrough relies on. `RUN_LIVE_MODELGATEWAY=gitee` then drove the gateway, behind a
+proxy recording both directions: embeddings with openai-go v3.73.0, multimodal
+embeddings and rerank with a plain HTTP client.
+
+- **Encoding.** Asked for `encoding_format: "base64"`, Gitee answers float arrays, the
+  values its float answer holds, from `Qwen3-Embedding-8B`, `Qwen3-Embedding-0.6B` and
+  `bge-m3`. The openai Python SDK keeps a float array as it is, and openai-go reads only
+  floats, so both read the answer, which the gateway relays as bytes either way.
+- **Dimensions.** `Qwen3-Embedding-8B` and `-0.6B` honor `dimensions` (256, 512), and
+  so does `Qwen3-VL-Embedding-8B` (512), which dikw-core recorded as not taking it
+  (probed 2026-04-25).
+  `bge-m3` answers 1024 values whatever `dimensions` asks. A vector's length shows what
+  an upstream did, so the gateway refuses nothing for it.
+- **Usage.** Embeddings report `usage.prompt_tokens`, multimodal ones included, which
+  plan 59 had recorded as reporting none; the ledger counts them as input. Rerank
+  reports `{"totalTokens":0,"promptTokens":0}`, keys an OpenAI usage does not use, so a
+  rerank row records no tokens.
+- **Rerank.** Without `top_n` every document comes back scored (4 of 4, 5 of 5), not
+  the three Gitee's API definition gives as the default; `top_n: 2` returns two. Each
+  result carries its document whether `return_documents` asks or not.
+- **Caps.** The embedding models take 1000 inputs and refuse 1001 with a 400, "请求参数
+  'input' 不符合支持的格式" — `Qwen3-Embedding-0.6B` and `-8B` and `Qwen3-VL-Embedding-8B`
+  measured, `bge-m3` taking the 64 tried — so dikw-core's observed cap of 25 no longer
+  holds for embeddings. Rerank takes 1 to 25 documents whatever `top_n` asks, refusing the 26th
+  with "无效的参数数组长度: 'documents' 长度是 '1' 到 '25'". Errors come as
+  `{"error":{"code":"400","message":…,"type":"server_error"}}`, a bad key as a 401 in
+  the same envelope.
+- **Connections.** Rerank answers carry `Connection: close`. With dikw-core's report of
+  idle connections dropped mid-batch, the `gitee` profile sends each request on a
+  connection of its own.
+- **Multimodal models.** After a 1000-input batch to `Qwen3-VL-Embedding-8B` (28,890
+  tokens), Gitee began refusing that model for this key, "您绑定的资源包不支持当前模型或算力"
+  (the key's resource package does not cover the model), as it refuses `jina-clip-v2`
+  and `jina-embeddings-v4`; whether the batch caused it is not known.
+  `Qwen3-VL-Embedding-2B` is still covered. It answers one vector, at 21 tokens, for any
+  input holding an image — a text and an image, or two images — and one per text for
+  texts alone. dikw-core sends `Qwen3-VL-Embedding-8B` and expects a vector per input,
+  so slice 4d's image ingest waits on a package covering that model. The live tier
+  uses the 2B model, checks that its answer is relayed rather than how many vectors it
+  holds, and sends no 1000-input multimodal batch, which would cost tens of thousands
+  of tokens a run.
+
+The live tier then passed: text embeddings, float and base64, decoding to 512 values
+that agree; a text-and-image request; rerank ranking the answering document first, its
+scores mapped back by index; the caps of text embeddings and rerank; and one input past
+each cap, multimodal included, relayed as Gitee's own 400. The whole tier, DeepSeek and
+MiniMax beside Gitee, passed its 52 tests. Mutation testing caught all 20 mutants of
+the default tier — the route table, the kind check, the prefixes, the chat checks an
+embeddings or rerank body skips, connection reuse, the ledger's names and the span
+names — and all 3 against the live checks: the answer's `model` not rewritten, an
+embeddings row ledgered as chat, and its usage unread.

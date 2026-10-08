@@ -68,14 +68,40 @@ func bounded(w http.ResponseWriter) *http.ResponseController {
 	return rc
 }
 
-// inference serves /v1/messages and its count_tokens twin on the Anthropic
-// protocol, and /v1/chat/completions on the OpenAI one: each passes through
-// to the alias's deployments on its own protocol.
-func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, path string) {
-	proto := profile.Anthropic
-	if path == "/v1/chat/completions" {
-		proto = profile.OpenAI
+// route is an inference path: the protocol it speaks, the kind of alias it
+// serves, and on the OpenAI protocol the path an upstream's base URL takes
+// for it (profile). An Anthropic base URL takes the inbound path itself.
+type route struct {
+	proto    profile.Protocol
+	kind     store.Kind
+	upstream string
+}
+
+var routes = map[string]route{
+	"/v1/messages":              {profile.Anthropic, store.KindChat, ""},
+	"/v1/messages/count_tokens": {profile.Anthropic, store.KindChat, ""},
+	"/v1/chat/completions":      {profile.OpenAI, store.KindChat, "/chat/completions"},
+	"/v1/embeddings":            {profile.OpenAI, store.KindEmbedding, "/embeddings"},
+	"/v1/rerank":                {profile.OpenAI, store.KindRerank, "/rerank"},
+}
+
+// servedUnder reports whether rt is served under prefix, "" for the root:
+// every route is served at the root, and under its own protocol's prefix.
+func (rt route) servedUnder(prefix string) bool {
+	switch prefix {
+	case "/anthropic":
+		return rt.proto == profile.Anthropic
+	case "/openai":
+		return rt.proto == profile.OpenAI
 	}
+	return true
+}
+
+// inference serves the routes: each passes through to the alias's
+// deployments on its own protocol.
+func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, path string) {
+	rt := routes[path]
+	proto := rt.proto
 	start := time.Now()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
@@ -97,13 +123,20 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		writeError(w, r, invalid("model: Field required"))
 		return
 	}
-	streams, bad := streamFlag(top)
-	if bad == nil && proto == profile.OpenAI {
-		bad = chatStreamOptions(top)
-	}
-	if bad != nil && path != "/v1/messages/count_tokens" {
-		writeError(w, r, bad)
-		return
+	// An embeddings or rerank body is read for model alone: it never
+	// streams, so what decides a chat request's stream is the upstream's
+	// business there.
+	var streams bool
+	if rt.kind == store.KindChat {
+		var bad *apiError
+		streams, bad = streamFlag(top)
+		if bad == nil && proto == profile.OpenAI {
+			bad = chatStreamOptions(top)
+		}
+		if bad != nil && path != "/v1/messages/count_tokens" {
+			writeError(w, r, bad)
+			return
+		}
 	}
 	snap := h.cfg.Catalog.Snapshot()
 	a, ok := snap.Alias(model)
@@ -114,8 +147,8 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	case !c.may(a.Name):
 		writeError(w, r, forbidden("this API key may not use model %s", model))
 		return
-	case a.Kind != store.KindChat:
-		writeError(w, r, invalid("model: %s serves %s, not chat", model, a.Kind))
+	case a.Kind != rt.kind:
+		writeError(w, r, invalid("model: %s serves %s, not %s", model, a.Kind, rt.kind))
 		return
 	}
 	attempts := snap.Plan(a, proto, r.Header.Get(SessionHeader), h.draw)
@@ -126,8 +159,13 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	}
 	// A deployment whose vendor would ignore what the request asks for is
 	// skipped; a count is made all the same where every one would, since
-	// what a vendor ignores leaves the count unchanged.
-	kept, ignored := honoring(attempts, top, proto)
+	// what a vendor ignores leaves the count unchanged. The profiles' hooks
+	// read chat requests: what an embeddings or rerank upstream ignores
+	// shows in its answer — a vector's length, a result's count.
+	kept, ignored := attempts, []string(nil)
+	if rt.kind == store.KindChat {
+		kept, ignored = honoring(attempts, top, proto)
+	}
 	switch {
 	case len(kept) > 0:
 		if len(kept) < len(attempts) {
@@ -428,12 +466,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	}
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
 	prof, _ := profile.Lookup(at.Provider.Profile)
-	// An OpenAI base URL ends where /chat/completions follows (profile).
 	var body []byte
 	var wrap *wrapping
 	path := c.path
 	if c.proto == profile.OpenAI {
-		body, path = chatBody(c, at.Deployment), "/chat/completions"
+		body, path = chatBody(c, at.Deployment), routes[c.path].upstream
 	} else {
 		body, wrap = upstreamBody(c, at.Deployment, prof, strip), newWrapping(at.Deployment.ID, strip)
 	}
@@ -450,6 +487,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		req.Header.Set(k, v)
 	}
 	propagate(ctx, at.Provider, req.Header)
+	req.Close = prof.CloseConnections
 	req.Header.Set("Content-Type", "application/json")
 	if prof.BearerAuth || c.proto == profile.OpenAI { // every OpenAI-compatible API takes a Bearer token
 		req.Header.Set("Authorization", "Bearer "+string(key))

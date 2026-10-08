@@ -86,7 +86,7 @@ func ledgerText(s string) string {
 
 // endpoints names each inbound route in the ledger.
 var endpoints = map[string]string{"/v1/messages": "messages", "/v1/messages/count_tokens": "count_tokens",
-	"/v1/chat/completions": "chat_completions"}
+	"/v1/chat/completions": "chat_completions", "/v1/embeddings": "embeddings", "/v1/rerank": "rerank"}
 
 // admit counts the request against its key's limits, when the key has any,
 // and answers a refusal itself: 429 rate_limit_error with retry-after in
@@ -179,7 +179,9 @@ func usageOf(prev *store.Tokens, raw json.RawMessage) *store.Tokens {
 // cache reads inside prompt_tokens and report them as
 // prompt_tokens_details.cached_tokens; DeepSeek also as
 // prompt_cache_hit_tokens, read when the details are absent (probed
-// 2026-10-08). OpenAI reports no cache writes. A usage without either
+// 2026-10-08). OpenAI reports no cache writes. An embeddings answer reports
+// prompt_tokens alone; Gitee's rerank answers report zeros under camelCase
+// keys, which are not read (probed 2026-10-08). A usage without either
 // prompt_tokens or completion_tokens, null, or a count usageOf would not
 // read, is nil; a cache count past the prompt's is read as the prompt.
 func chatUsageOf(raw json.RawMessage) *store.Tokens {

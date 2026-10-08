@@ -8,9 +8,11 @@
 // The hosts are the vendors' own (Ground truth, "Vendors", verified
 // 2026-10-04): DeepSeek's API docs (api-docs.deepseek.com, guides/anthropic_api),
 // MiniMax's CN and international API references, Zhipu's BigModel and Z.ai
-// docs, and Kimi's platform docs (platform.kimi.ai, api/messages). A host here
-// is a base URL: the Anthropic SDKs append /v1/messages to one, the OpenAI
-// SDKs /chat/completions.
+// docs, Kimi's platform docs (platform.kimi.ai, api/messages), and the API
+// definition Gitee AI publishes at ai.gitee.com/v1/yaml. A host here is a
+// base URL: the Anthropic SDKs append /v1/messages to one, the OpenAI SDKs
+// /chat/completions and /embeddings, and a rerank client /rerank — the same
+// paths on every profile's hosts.
 //
 // A profile also says what the gateway changes on its way to the vendor's
 // Anthropic endpoint, under the plan's edit policy: pass through by default,
@@ -60,6 +62,9 @@ type Profile struct {
 	// BearerAuth sends the provider's key to its Anthropic endpoint as
 	// Authorization: Bearer rather than x-api-key, Anthropic's own header.
 	BearerAuth bool `json:"-"`
+	// CloseConnections sends each request on a connection of its own, closed
+	// once the answer is read, for a vendor that drops idle connections.
+	CloseConnections bool `json:"-"`
 	// FlattenSearchResults sends each search_result block in a tool_result
 	// as text, for a vendor that refuses the block, in the rendering the
 	// brain's flatten_search_results uses (internal/provider/anthropic).
@@ -119,6 +124,14 @@ var profiles = []Profile{
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.moonshot.ai/anthropic"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.moonshot.ai/v1"},
 	}, BearerAuth: true},
+	// Gitee AI is v1's embeddings and rerank vendor, dikw-core's default for
+	// both. It drops idle keep-alive connections in the middle of a batch,
+	// which dikw-core works around with a fresh connection per request
+	// (src/dikw_core/providers/_http.py), and its rerank answers say
+	// Connection: close (probed 2026-10-08).
+	{Name: "gitee", DisplayName: "Gitee AI", Protocols: []Protocol{OpenAI}, Hosts: []Host{
+		{Protocol: OpenAI, BaseURL: "https://ai.gitee.com/v1"},
+	}, CloseConnections: true},
 	{Name: "anthropic-generic", DisplayName: "Any Anthropic Messages endpoint", Protocols: []Protocol{Anthropic}},
 	{Name: "openai-generic", DisplayName: "Any OpenAI-compatible endpoint", Protocols: []Protocol{OpenAI}},
 }

@@ -37,7 +37,7 @@ import (
 //   - a MiniMax key on its other region's host is a credential the vendor
 //     refuses, which the gateway answers as its own failure.
 func TestLiveVendorBehavior(t *testing.T) {
-	vendors := namedVendors(t)
+	vendors := chatVendors(t)
 	e := newEnv(t)
 	type route struct {
 		v     liveVendor

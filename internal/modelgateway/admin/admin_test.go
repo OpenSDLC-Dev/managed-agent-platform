@@ -246,12 +246,15 @@ func TestAuthByRole(t *testing.T) {
 func TestProfiles(t *testing.T) {
 	e := newEnv(t, false)
 	list := e.admin("GET", "/admin/v1/profiles", nil).list()
-	if len(list) != 6 || list[0]["type"] != "profile" {
+	if len(list) != 7 || list[0]["type"] != "profile" {
 		t.Fatalf("profiles = %v", list)
 	}
 	p := e.ok(e.admin("GET", "/admin/v1/profiles/minimax", nil), "get minimax")
 	if p["name"] != "minimax" || len(p["hosts"].([]any)) != 4 {
 		t.Errorf("minimax = %v", p)
+	}
+	if p := e.ok(e.admin("GET", "/admin/v1/profiles/gitee", nil), "get gitee"); len(p["hosts"].([]any)) != 1 || len(p["protocols"].([]any)) != 1 {
+		t.Errorf("gitee = %v", p)
 	}
 	e.refused(e.admin("GET", "/admin/v1/profiles/nope", nil), http.StatusNotFound, "not_found_error", "nope")
 }

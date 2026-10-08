@@ -31,7 +31,7 @@ import (
 //     refused with no upstream call, and the vendor asked directly still
 //     ignores it, which is the evidence the refusal rests on.
 func TestLiveChatCompletions(t *testing.T) {
-	vendors := namedVendors(t)
+	vendors := chatVendors(t)
 	e := newEnv(t)
 	type route struct {
 		v     liveVendor

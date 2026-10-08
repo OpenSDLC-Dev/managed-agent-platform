@@ -1,7 +1,8 @@
 // Package modelgateway is the model gateway's HTTP surface
-// (docs/plan/59_model-gateway.md): Anthropic Messages and OpenAI's Chat
-// Completions for a platform API key, routed to the deployments an alias
-// names, beside the admin API it mounts under /admin/v1/.
+// (docs/plan/59_model-gateway.md): Anthropic Messages, OpenAI's Chat
+// Completions and Embeddings, and rerank for a platform API key, routed to
+// the deployments an alias names, beside the admin API it mounts under
+// /admin/v1/.
 //
 // Inference routes, the Anthropic ones also under an /anthropic prefix and
 // the OpenAI ones under /openai:
@@ -9,6 +10,9 @@
 //	POST /v1/messages               streamed and not
 //	POST /v1/messages/count_tokens
 //	POST /v1/chat/completions       OpenAI's; streamed and not
+//	POST /v1/embeddings             OpenAI's, to an embedding alias
+//	POST /v1/rerank                 the Jina/Cohere shape, to a rerank alias;
+//	                                answered in OpenAI's envelope
 //	GET  /v1/models                 Anthropic's shape for a request that
 //	                                carries anthropic-version or the prefix,
 //	                                OpenAI's otherwise
@@ -51,6 +55,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/upstream"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
@@ -194,11 +199,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Each route answers in its protocol's shape, errors included: the
-	// prefix names the protocol, Chat Completions is OpenAI's, and the
-	// models root is Anthropic's for a request carrying anthropic-version,
-	// which every Anthropic SDK sends and no OpenAI SDK does.
+	// prefix names the protocol, Chat Completions, Embeddings and rerank are
+	// OpenAI's, and the models root is Anthropic's for a request carrying
+	// anthropic-version, which every Anthropic SDK sends and no OpenAI SDK
+	// does.
 	models := path == "/v1/models" || strings.HasPrefix(path, "/v1/models/")
-	openAI := prefix == "/openai" || prefix == "" && (path == "/v1/chat/completions" || models && r.Header.Get("anthropic-version") == "")
+	rt, inferring := routes[path]
+	openAI := prefix == "/openai" || prefix == "" && (inferring && rt.proto == profile.OpenAI || models && r.Header.Get("anthropic-version") == "")
 	r = r.WithContext(context.WithValue(r.Context(), openAIKey{}, openAI))
 	// Authenticate before routing, so an unauthenticated caller learns
 	// nothing about which paths exist.
@@ -208,7 +215,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case !openAI && (path == "/v1/messages" || path == "/v1/messages/count_tokens"), openAI && path == "/v1/chat/completions":
+	case inferring && rt.servedUnder(prefix):
 		if r.Method != http.MethodPost {
 			writeError(w, r, notAllowed(r.Method, "POST"))
 			return

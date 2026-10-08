@@ -64,6 +64,21 @@ func TestVendorAndGenericProfiles(t *testing.T) {
 	}
 }
 
+// Gitee AI serves embeddings and rerank on its OpenAI host alone, and is the
+// one profile whose connections are not reused.
+func TestGiteeProfile(t *testing.T) {
+	p, ok := profile.Lookup("gitee")
+	if !ok || !slices.Equal(p.Protocols, []profile.Protocol{profile.OpenAI}) ||
+		!slices.Equal(p.Hosts, []profile.Host{{Protocol: profile.OpenAI, BaseURL: "https://ai.gitee.com/v1"}}) {
+		t.Fatalf("gitee = %+v", p)
+	}
+	for _, q := range profile.All() {
+		if q.CloseConnections != (q.Name == "gitee") {
+			t.Errorf("%s closes its connections: %t", q.Name, q.CloseConnections)
+		}
+	}
+}
+
 // All returns a copy: a caller that edits what it got cannot change the
 // profiles every other caller reads.
 func TestAllReturnsACopy(t *testing.T) {

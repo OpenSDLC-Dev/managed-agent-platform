@@ -20,7 +20,7 @@ slice 3 is the console repository's own plan.
       operator's `foundation/` and `environment/` apply); the live tier
 - [ ] Slice 4 — OpenAI surfaces, in four PRs
   - [x] 4a — Chat Completions passed through, `/v1/models` and errors in OpenAI's shape
-  - [ ] 4b — embeddings and rerank with the `gitee` profile
+  - [x] 4b — embeddings and rerank with the `gitee` profile
   - [ ] 4c — Anthropic → Chat Completions conversion, for OpenAI-only credentials
   - [ ] 4d — dikw-core through the gateway
 - [ ] Slice 5 — brain cutover: one route through the gateway; `ant` sessions on MiniMax
