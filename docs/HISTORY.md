@@ -6464,7 +6464,7 @@ evidence were answered as follows.
   For a question that asks for the tool, `auto` called it every time: 24 asks through
   the gateway and 18 asked directly. `none` was honored in all 104 asks through the
   gateway and the 3 asked directly of M3.1-Flash-Preview; MiniMax-M3 broke it in 1 of 3
-  asked directly, and in four tier runs. That is a lapse, not an ignored field, so
+  asked directly, and in five tier runs. That is a lapse, not an ignored field, so
   `none` passes through, and the tier checks that it reaches the vendor unchanged and
   only logs a tool call made under it. Both vendors read the choice's `type` by its exact
   key: `{"Type": "none"}` is DeepSeek's 422, "missing field `type`", and MiniMax's 400,
@@ -6513,7 +6513,8 @@ call. Two consecutive runs of the whole tier each passed all 24 tests, the two
 top-level tests and their 22 subtests, before the second review's last changes to the
 checks. The runs after those changes met MiniMax overloaded: every failure but
 MiniMax-M3's empty answer above was its HTTP 529, relayed with its status, and every
-test passed in at least one run, but no run passed all 24. Mutation testing caught all
+test passed in at least one run, but none passed all 24 until MiniMax recovered. Then
+two consecutive runs on the final checks each passed all 24. Mutation testing caught all
 twenty-four mutants:
 - seven against the refusal rows;
 - three against the pruning tests: no pruning, every key dropped, and the late-open fix
