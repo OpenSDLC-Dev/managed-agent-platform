@@ -6419,3 +6419,67 @@ citations with no findings or pending transitions, the registry checks were clea
 and probe processes and containers were removed.
 
 Review results and CI are recorded in the pull request.
+
+## Model gateway live tier (plan 59 slice 2g) — acceptance record, 2026-10-08
+
+`RUN_LIVE_MODELGATEWAY=deepseek,minimax` drove the gateway with anthropic-sdk-go
+v1.70.1: `deepseek-flash` and `deepseek-v4-pro` on `https://api.deepseek.com/anthropic`,
+`MiniMax-M3` and `MiniMax-M3.1-Flash-Preview` on `https://api.minimax.cn/anthropic`, each
+behind a proxy recording both directions. The questions plan 59 left to evidence were
+answered as follows.
+
+- **Model list.** A key granted every chat alias but one, beside an embedding alias,
+  listed exactly its chat aliases a page of one at a time, each entry carrying the six
+  fields `ModelInfo` marks required; each answered `Models.Get`, and the ungranted
+  alias, the embedding alias and an unknown name answered 404.
+- **`count_tokens`.** Both vendors serve `/v1/messages/count_tokens`, and the gateway
+  relays the count unchanged. The same question counted 50 tokens at DeepSeek and 183 at
+  MiniMax.
+- **`search_result`.** Both models answered a code word from a `search_result` replayed
+  in a tool result. The gateway sent it as text, and with the flattening removed,
+  DeepSeek refused the replay.
+- **Cache usage.** Neither vendor reported a cache write, though the system prompt of
+  about 3,300 tokens was marked `cache_control: ephemeral`. Both reported reads on a
+  repeat: DeepSeek read 3,200 of 3,339 input tokens, MiniMax 3,456 of 3,466. The usage
+  the SDK read through the gateway equalled the vendor's on every answer.
+- **`tool_choice`.** Forcing a tool call does not work on either vendor, for a question
+  that does not need the tool (a fun fact, with `get_time` offered):
+  - `any` produced no tool call in 18 DeepSeek asks, across both models with thinking
+    absent, disabled and enabled, three each.
+  - `any` and `tool` produced no tool call in 30 MiniMax asks, three each in every
+    thinking mode the model accepts. M3.1-Flash-Preview refuses disabled thinking with
+    its own 400.
+  - DeepSeek's `tool` was honored with thinking disabled (6 of 6). With thinking on,
+    whether asked or by default, DeepSeek refused it with its own 400, "Thinking mode
+    does not support this tool_choice" (12 of 12).
+
+  For a question that asks for the tool, `auto` called it in all 24 asks and `none` in
+  none of 24, on both vendors. The gateway therefore now refuses `any` for DeepSeek and
+  `any` and `tool` for MiniMax, as it refuses whatever a vendor ignores where the answer
+  depends on it. `auto`, `none` and DeepSeek's `tool` pass through.
+- **MiniMax region.** The CN key on `https://api.minimax.io/anthropic` gets a 401, which
+  the gateway answers 502 `api_error`, "upstream refused the gateway's credential (HTTP
+  401)". A MiniMax provider's base URL must be in its key's region.
+
+The tier failed three times on model behavior, and was changed so that these choices,
+which are not what it checks, no longer decide the outcome:
+
+- `MiniMax-M3`, thinking adaptively, once answered the round trip's first turn without
+  thinking. A model expected to think is now asked up to three times.
+- MiniMax sometimes called the tool again on its turn of the cross-vendor conversation.
+  Going back to DeepSeek with that loop open was refused with DeepSeek's "must be passed
+  back": its tool turn carried MiniMax's id and no DeepSeek thinking. Plan 59 decides
+  that the same refusal ends a fallback taken mid-loop, and a caller switching vendors
+  mid-loop gets it too. The tier now closes MiniMax's loop first, checking that each
+  MiniMax request carries only MiniMax's thinking.
+- One run's MiniMax `tool_choice` or `search_result` failure was not kept, and three
+  reruns passed. The search turn is now asked up to three times for a search. The `none`
+  check, which a question not needing the tool left vacuous, now asks for the tool.
+
+MiniMax-M3 answers took up to 142 seconds, inside the tier's three-minute bound per
+call. After these changes, two consecutive runs of the whole tier passed all 42
+subtests. Mutation testing caught all twelve mutants:
+- seven against the refusal rows;
+- four against the live checks: each refusal dropped or widened, and the flattening
+  removed;
+- one sending `auto` where the `none` check expects `none`.

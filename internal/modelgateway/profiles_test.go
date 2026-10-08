@@ -200,9 +200,10 @@ func TestEachProfileSendsTheKeyAsItsVendorDocuments(t *testing.T) {
 	}
 }
 
-// A vendor that documents ignoring something bounding the answer — DeepSeek
-// tool_choice's disable_parallel_tool_use, MiniMax stop_sequences, and
-// thinking disabled on MiniMax's M2.x — is never sent a request that sets it:
+// A vendor that ignores something bounding the answer — DeepSeek tool_choice's
+// disable_parallel_tool_use and its type any, MiniMax stop_sequences and its
+// tool_choice types any and tool, and thinking disabled on MiniMax's M2.x — is
+// never sent a request that sets it:
 // another of the model's deployments serves it, and where there is none the
 // gateway refuses it, naming the field. A count is routed alike, but made
 // where every deployment would ignore the field, which leaves it unchanged.
@@ -215,12 +216,18 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 	}{
 		{"deepseek", "deepseek-flash", "tool_choice.disable_parallel_tool_use", tools + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`,
 			[]string{tools + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":false}`, tools + `,"tool_choice":{"type":"auto","Disable_Parallel_Tool_Use":true}`}},
+		{"deepseek", "deepseek-v4-pro", "tool_choice.type", tools + `,"tool_choice":{"type":"any"}`,
+			[]string{tools + `,"tool_choice":{"type":"tool","name":"t"}`, tools + `,"tool_choice":{"type":"auto"}`, tools + `,"tool_choice":{"Type":"any"}`}},
 		{"minimax", "MiniMax-M3", "stop_sequences", `"stop_sequences":["END"]`, []string{`"stop_sequences":[]`, `"Stop_Sequences":["END"]`}},
+		{"minimax", "MiniMax-M3.1-Flash-Preview", "tool_choice.type", tools + `,"tool_choice":{"type":"tool","name":"t"}`,
+			[]string{tools + `,"tool_choice":{"type":"auto"}`, tools + `,"tool_choice":{"type":"none"}`, tools + `,"tool_choice":{"Type":"tool","name":"t"}`}},
+		{"minimax", "MiniMax-M3", "tool_choice.type", tools + `,"tool_choice":{"type":"any"}`,
+			[]string{tools + `,"tool_choice":{"type":"auto"}`, tools + `,"tool_choice":{"Type":"any"}`}},
 		{"minimax", "MiniMax-M2.7", "thinking.type", `"thinking":{"type":"disabled"}`,
 			[]string{`"thinking":{"type":"adaptive"}`, `"thinking":{"Type":"disabled"}`, `"Thinking":{"type":"disabled"}`}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.model, func(t *testing.T) {
+		t.Run(tc.model+" "+tc.field, func(t *testing.T) {
 			e := newEnv(t)
 			vendor, other := newFake(t, message("vendor")), newFake(t, message("other"))
 			p := onProfile(e, tc.prof, vendor.URL)

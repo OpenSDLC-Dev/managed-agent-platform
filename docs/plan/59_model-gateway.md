@@ -326,13 +326,16 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
   text through `provider.SearchResultText` where a vendor refuses it, which is the
   brain's `flatten_search_results` moved behind the gateway — or (b) the vendor
   documents as ignored, where dropping it changes nothing.
-- **Refuse** at the gateway only where a vendor documents that it silently ignores a
-  field whose absence changes the result (DeepSeek ignores `disable_parallel_tool_use`),
-  decided per field in the slice, citing the evidence in the profile. Nothing is
+- **Refuse** at the gateway only where a vendor documents, or the live tier shows, that
+  it silently ignores a field whose absence changes the result (DeepSeek ignores
+  `disable_parallel_tool_use`), decided per field in the slice, citing the evidence in
+  the profile. Nothing is
   downgraded silently, as plan 53 decided for effort. Slice 2 reads "changes the
   result" as a bound on the answer a caller's code may rely on — DeepSeek's
   `disable_parallel_tool_use`, MiniMax's `stop_sequences`, and thinking disabled on
-  MiniMax's M2.x models, which think regardless — and passes through what
+  MiniMax's M2.x models, which think regardless; and, on the live tier's evidence,
+  `tool_choice` `any` on DeepSeek and `any` and `tool` on MiniMax, which answer without
+  the tool call they force — and passes through what
   a vendor ignores among sampling knobs, context shaping and server-side features;
   a request such a field bars from a deployment goes to the alias's others, and is
   refused only when none is left — but never a count, which the field leaves
@@ -744,13 +747,16 @@ where a vendor bills cache writes.
   - **Provenance through the real vendors:** each model's provider points at a proxy
     that forwards to the vendor and records both directions, since neither vendor
     checks a signature and its 200 proves nothing. Every model expected to think
-    returns signed thinking; each value the gateway wraps, in block order up to the
+    returns signed thinking, within three asks, since adaptive thinking is the model's
+    choice; each value the gateway wraps, in block order up to the
     first unsigned one, comes back around the vendor's own value and goes back, on
     the continuation the SDK's `ToParam` makes, as exactly that value — a model that
     returns no thinking, as MiniMax-M3.1-Flash-Preview did on 2026-10-07, has its
     round trip checked without it; an alias whose first choice is down
     falls back, and its continuation goes straight to its thinking's producer; a
-    conversation crossing from DeepSeek to MiniMax and back sends each only its own.
+    conversation crossing from DeepSeek to MiniMax and back sends each only its own,
+    MiniMax closing any tool loop it opens first, since DeepSeek refuses a loop that
+    reaches it under MiniMax's ids without DeepSeek's thinking.
   - **Model calls:** `Messages.New` and `Messages.NewStreaming` (assembled with
     `Message.Accumulate`) on an alias routed to each vendor: text, a tool-use round trip
     that sends the thinking blocks back unchanged, reported usage, and an upstream

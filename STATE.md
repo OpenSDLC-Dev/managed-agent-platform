@@ -14,16 +14,10 @@ slice 3 is the console repository's own plan.
 - [x] Slice 1 — store and catalogue: the `modelgateway` schema (migration 0049), the
       platform key check shared (`internal/apikey`), the admin API under both auth modes,
       the notify-driven snapshot, the four chat vendors' profiles
-- [ ] Slice 2 — Anthropic inference, in seven PRs; freezes the admin API
-  - [x] 2a — `cmd/modelgateway`: `/v1/messages` (streamed and not) and `count_tokens`
-        passed through, `/v1/models`, routing with retry and fallback, the stall guard
-  - [x] 2b — thinking provenance, the strip-mode backstop, the live tier's round trip
-  - [x] 2c — the profiles' auth header and edits
-  - [x] 2d — usage rows, retention and rollups, the admin usage reads; RPM and TPM limits
-  - [x] 2e — telemetry, carrying the caller's trace context through the gateway
-  - [x] 2f — compose and Helm (`modelgateway.enabled`, off until slice 5), and a GCP identity
-        granted the cipher, awaiting an operator's `foundation/` and `environment/` apply
-  - [ ] 2g — the rest of the live tier (model list, vendor behavior)
+- [x] Slice 2 — Anthropic inference, in seven PRs (2a–2g): `/v1/messages`, `count_tokens`
+      and `/v1/models` with routing, retry and fallback; thinking provenance; the profiles'
+      edits; usage and limits; telemetry; compose, Helm and a GCP identity (awaiting an
+      operator's `foundation/` and `environment/` apply); the live tier
 - [ ] Slice 4 — OpenAI surfaces, embeddings and rerank with the `gitee` profile; dikw-core
       through the gateway
 - [ ] Slice 5 — brain cutover: one route through the gateway; `ant` sessions on MiniMax
