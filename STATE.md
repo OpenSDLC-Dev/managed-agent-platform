@@ -26,4 +26,5 @@ slice 3 is the console repository's own plan.
 - [x] Slice 5 — brain cutover, in two PRs: each model call's trace and session headers and
       the brain's key, `BRAIN_API_KEY` (5a); one route through the gateway in compose and
       Helm, with `ant` sessions on MiniMax and DeepSeek (5b)
-- [ ] Slice 6 — stateless Responses
+- [x] Slice 6 — stateless Responses: `/v1/responses` converted to Messages and served as
+      `/v1/messages` is, whole and streamed; the stored routes and state refused

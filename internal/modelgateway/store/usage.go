@@ -41,7 +41,7 @@ type Usage struct {
 	CredentialID string
 	SessionID    string // "" when the caller sent none
 	Protocol     string // the inbound protocol
-	Endpoint     string // "messages", "count_tokens"
+	Endpoint     string // the route's: "messages", "count_tokens", "chat_completions", "responses", "embeddings", "rerank"
 	Status       int    // the HTTP status the caller was given
 	ErrorType    string // the error the caller was given, "" when none
 	Tokens       *Tokens

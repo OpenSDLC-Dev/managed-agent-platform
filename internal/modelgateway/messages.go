@@ -189,6 +189,7 @@ var routes = map[string]route{
 	"/v1/messages":              {profile.Anthropic, store.KindChat, "", "messages", "chat"},
 	"/v1/messages/count_tokens": {profile.Anthropic, store.KindChat, "", "count_tokens", "count_tokens"},
 	"/v1/chat/completions":      {profile.OpenAI, store.KindChat, "/chat/completions", "chat_completions", "chat"},
+	"/v1/responses":             {profile.OpenAI, store.KindChat, "", "responses", "chat"}, // served as /v1/messages (responses.go)
 	"/v1/embeddings":            {profile.OpenAI, store.KindEmbedding, "/embeddings", "embeddings", "embeddings"},
 	"/v1/rerank":                {profile.OpenAI, store.KindRerank, "/rerank", "rerank", "rerank"},
 }
@@ -208,23 +209,43 @@ func (rt route) servedUnder(prefix string) bool {
 // inference serves the routes: each passes through to the alias's
 // deployments on its own protocol.
 func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, path string) {
-	rt := routes[path]
-	proto := rt.proto
 	start := time.Now()
+	if top, ok := readRequest(w, r); ok {
+		h.serve(w, r, c, path, path, top, nil, start)
+	}
+}
+
+// readRequest is the request's body, a JSON object, or false once the
+// caller has been answered why it is not one.
+func readRequest(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeError(w, r, &apiError{http.StatusRequestEntityTooLarge, "request_too_large", "Request exceeds the maximum allowed number of bytes."})
-			return
+			return nil, false
 		}
 		writeError(w, r, invalid("Failed to read request body: %s", err))
-		return
+		return nil, false
 	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil || top == nil {
 		writeError(w, r, invalid("Failed to parse request body as JSON"))
-		return
+		return nil, false
+	}
+	return top, true
+}
+
+// serve answers top on the route at path. surface is the route the caller
+// asked for, which the ledger records: path itself, but for a Responses
+// request (resp), which is served as the Messages request it converts to,
+// its answer converted back and the fields a refusal names its own.
+func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, surface string, top map[string]json.RawMessage, resp *convert.ResponseMeta, start time.Time) {
+	rt := routes[path]
+	proto := rt.proto
+	named := func(s string) string { return s }
+	if resp != nil {
+		named = responsesField
 	}
 	var model string
 	if err := json.Unmarshal(top["model"], &model); err != nil || model == "" {
@@ -261,10 +282,19 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		writeError(w, r, invalid("model: %s serves %s, not %s", model, a.Kind, rt.kind))
 		return
 	}
+	if resp != nil {
+		resp.Model = model
+		if _, ok := top["max_tokens"]; !ok {
+			top["max_tokens"] = encodeJSON(defaultMaxTokens(snap, a))
+		}
+	}
 	attempts := snap.Plan(a, proto, r.Header.Get(SessionHeader), h.draw)
 	if len(attempts) == 0 {
-		writeError(w, r, &apiError{http.StatusServiceUnavailable, "api_error",
-			fmt.Sprintf("model %s has no enabled upstream on the %s protocol", model, protocolNames[proto])})
+		msg := fmt.Sprintf("model %s has no enabled upstream on the %s protocol", model, protocolNames[proto])
+		if resp != nil { // served on either protocol (catalog.Snapshot.Plan)
+			msg = fmt.Sprintf("model %s has no enabled upstream", model)
+		}
+		writeError(w, r, &apiError{http.StatusServiceUnavailable, "api_error", msg})
 		return
 	}
 	// An attempt on another protocol converts the request (convert): a
@@ -282,7 +312,7 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	default:
 		b, err := convert.Request(top, "", nil)
 		if err != nil && len(passing) == 0 {
-			writeError(w, r, invalid("%s", err))
+			writeError(w, r, invalid("%s", named(err.Error())))
 			return
 		}
 		if err != nil {
@@ -309,9 +339,12 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		attempts = kept
 	case path == "/v1/messages/count_tokens":
 	case len(ignored) == 1:
-		writeError(w, r, invalid("%s: every upstream of model %s ignores it", ignored[0], model))
+		writeError(w, r, invalid("%s: every upstream of model %s ignores it", named(ignored[0]), model))
 		return
 	default:
+		for i := range ignored {
+			ignored[i] = named(ignored[i])
+		}
 		writeError(w, r, invalid("every upstream of model %s ignores one of %s", model, strings.Join(ignored, ", ")))
 		return
 	}
@@ -330,13 +363,14 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		return
 	}
 	out := &outcome{}
-	defer h.record(w, r, c, a.Name, model, path, proto, start, out)
+	defer h.record(w, r, c, a.Name, model, surface, routes[surface].proto, start, out)
 	call := call{
 		proto:  proto,
 		top:    top,
 		alias:  model,
 		path:   path,
 		stream: path != "/v1/messages/count_tokens" && streams,
+		resp:   resp,
 		start:  start,
 		out:    out,
 	}
@@ -389,13 +423,13 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 			continue
 		}
 		if !retry {
-			f.write(w, r, out)
+			call.fail(w, r, f)
 			return
 		}
 		slog.InfoContext(r.Context(), "modelgateway: attempt failed", "alias", a.Name,
 			"deployment", at.Deployment.ID, "credential", at.Credential.ID, "status", f.status, "error", f.err)
 	}
-	last.write(w, r, out)
+	call.fail(w, r, last)
 }
 
 // streamFlag is a request's stream. Whether the answer streams decides how
@@ -431,10 +465,34 @@ type call struct {
 	alias  string   // the model name the caller sent, which the answer carries back
 	path   string
 	stream bool
-	usage  bool        // a Chat Completions stream's caller asked for its usage chunk
-	header http.Header // the caller's headers that go upstream
-	start  time.Time   // when the request arrived
-	out    *outcome    // what the ledger is told of it
+	usage  bool                  // a Chat Completions stream's caller asked for its usage chunk
+	header http.Header           // the caller's headers that go upstream
+	resp   *convert.ResponseMeta // the Response a Responses request is answered with, nil for any other
+	start  time.Time             // when the request arrived
+	out    *outcome              // what the ledger is told of it
+}
+
+// fail answers the caller with f: an upstream's error body, which is in
+// Anthropic's envelope on the Messages path, in OpenAI's for a Responses
+// request (openAIError).
+func (c call) fail(w http.ResponseWriter, r *http.Request, f *failure) {
+	if c.resp != nil && f.body != nil {
+		f.body = openAIError(f.body)
+		f.header = f.header.Clone()
+		f.header.Set("Content-Type", "application/json")
+	}
+	f.write(w, r, c.out)
+}
+
+// upstreamError is an upstream's error on the conversion path as c's caller
+// is given it: convertedError's, or for a Responses request
+// convertedOpenAIError's, which keeps the OpenAI fields the Messages pivot
+// would lose.
+func (c call) upstreamError(ctx context.Context, red provider.Redactor, b []byte, status int, rid string) []byte {
+	if c.resp != nil {
+		return convertedOpenAIError(red, b, status)
+	}
+	return convertedError(ctx, red, b, status, rid)
 }
 
 // forwarded keeps the caller's anthropic-* headers, verbatim and as an open
@@ -671,7 +729,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		if conv {
 			h := resp.Header.Clone()
 			h.Set("Content-Type", "application/json")
-			return &failure{status: s, header: h, body: convertedError(ctx, red, b, s, requestID(r))}, retryable(s, resp.Header)
+			return &failure{status: s, header: h, body: c.upstreamError(ctx, red, b, s, requestID(r))}, retryable(s, resp.Header)
 		}
 		return &failure{status: s, header: resp.Header, body: errorJSON(ctx, red, b, requestID(r))}, retryable(s, resp.Header)
 	}
@@ -689,6 +747,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			p = &chatStream{c: c, red: red, withhold: !c.usage}
 		default:
 			p = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
+		}
+		if c.resp != nil {
+			p = &responsesStream{inner: p, s: convert.NewResponsesStream(*c.resp, maxResponseBody), c: c, red: red}
 		}
 		var held []byte
 		for {
@@ -716,7 +777,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 				}
 				f, retry := streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 				if conv && f.body != nil {
-					f.body = convertedError(ctx, red, e.Data, f.status, requestID(r))
+					f.body = c.upstreamError(ctx, red, e.Data, f.status, requestID(r))
 				}
 				return f, retry
 			default:
@@ -760,6 +821,12 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		answer, usage = answerJSON(b, c.alias, wrap)
 		if c.path == "/v1/messages" { // a count's answer is a count, not usage, whatever else it names
 			c.out.tokens = usageOf(nil, usage)
+		}
+	}
+	if c.resp != nil {
+		if answer, err = convert.ResponsesAnswer(answer, *c.resp); err != nil {
+			return &failure{status: http.StatusBadGateway, typ: "api_error",
+				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

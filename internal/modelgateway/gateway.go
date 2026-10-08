@@ -219,7 +219,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// does.
 	models := path == "/v1/models" || strings.HasPrefix(path, "/v1/models/")
 	rt, inferring := routes[path]
-	openAI := prefix == "/openai" || prefix == "" && (inferring && rt.proto == profile.OpenAI || models && r.Header.Get("anthropic-version") == "")
+	stored := strings.HasPrefix(path, "/v1/responses/") && prefix != "/anthropic" // a stored response's routes (responses.go)
+	openAI := prefix == "/openai" || prefix == "" && (inferring && rt.proto == profile.OpenAI || stored || models && r.Header.Get("anthropic-version") == "")
 	r = r.WithContext(context.WithValue(r.Context(), openAIKey{}, openAI))
 	// Authenticate before routing, so an unauthenticated caller learns
 	// nothing about which paths exist.
@@ -234,7 +235,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, notAllowed(r.Method, "POST"))
 			return
 		}
+		if path == "/v1/responses" {
+			h.responses(w, r, c)
+			return
+		}
 		h.inference(w, r, c, path)
+	case stored && (path == "/v1/responses/input_tokens" || path == "/v1/responses/compact"):
+		writeError(w, r, notFound("%s: not supported by the gateway's Responses API, which serves POST /v1/responses alone", r.URL.Path))
+	case stored:
+		writeError(w, r, notFound("%s: the gateway's Responses API is stateless — it stores no response, and serves POST /v1/responses alone", r.URL.Path))
 	case models:
 		if r.Method != http.MethodGet {
 			writeError(w, r, notAllowed(r.Method, "GET"))

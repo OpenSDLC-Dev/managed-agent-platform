@@ -1,5 +1,8 @@
 // Package convert translates Anthropic Messages to OpenAI Chat Completions
-// (docs/plan/59_model-gateway.md, "Two request paths"). Two callers share it:
+// (docs/plan/59_model-gateway.md, "Two request paths"), and OpenAI's
+// Responses API to Messages and back, for the gateway's stateless
+// /v1/responses (responses.go, responses_answer.go, responses_stream.go,
+// whose comments give its dispositions). Two callers share the first:
 // the model gateway's conversion path, which serves a Messages request from
 // a Chat Completions upstream and answers in Messages, and the brain's
 // provider/openai, which sends its Anthropic-native turns the same way and

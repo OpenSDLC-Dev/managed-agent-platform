@@ -7141,3 +7141,157 @@ sends; TLS terminates at an ingress, or at a mesh); and checking the types of
 `brain.gatewayRoute`'s four values (one the loader cannot read fails the brain at start,
 and a credential written into one as a string would pass any type check: the allowlist
 bars the fields that use a credential, not every place one could be written).
+
+## Model gateway Responses (plan 59 slice 6) — acceptance record, 2026-10-09
+
+`RUN_LIVE_MODELGATEWAY=deepseek,minimax` drove the gateway's `/v1/responses` with
+openai-go, each chat model on two routes behind a proxy recording both directions: its
+vendor's Anthropic endpoint, which the converted Messages request passes through to, and
+its OpenAI endpoint alone, which that request reaches converted once more, to Chat
+Completions. For `deepseek-flash`, `deepseek-v4-pro`, `MiniMax-M3` and
+`MiniMax-M3.1-Flash-Preview` on both routes: a text answer, whole and streamed, equal
+item for block, in status and in usage to the vendor's recorded answer, its ledger row
+under the `responses` endpoint and the `openai` protocol; and a tool call with
+`reasoning.effort` set, returned as a `function_call` item, whose continuation, built
+from the Response's items with openai-go's `ToParam`, the vendor answered, having been
+sent its own thinking back — on the Anthropic endpoint exactly the signatures the
+reasoning items' `encrypted_content` wrapped, on the OpenAI endpoint its
+`reasoning_content`. All 24 subtests passed, and passed again on the code the review rounds
+below left.
+
+- **Effort.** Asked directly — DeepSeek's two models and MiniMax's two, a one-word
+  question on the Anthropic endpoint with `output_config.effort` alone, with adaptive
+  thinking beside it and with adaptive alone, and on the OpenAI endpoint with
+  `reasoning_effort` with and without the vendor's thinking toggle — every request was
+  answered 200. DeepSeek's models and MiniMax-M3.1-Flash-Preview thought in each;
+  MiniMax-M3 on its Anthropic endpoint thought only when sent `adaptive`. So an effort
+  asks for adaptive thinking, where it first asked for the effort alone.
+- **Reasoning in the tool loop.** On the first run, at effort `medium`, neither MiniMax
+  model reasoned before its tool call, so the replay check held for them without
+  checking anything. At `high`, with MiniMax-M3 on its Anthropic endpoint required to
+  return reasoning within three asks, as the Messages tier requires of it, it returned
+  signed thinking and the continuation sent the vendor exactly its signatures.
+  MiniMax-M3.1-Flash-Preview, which the tier lists as returning no thinking to its tool
+  question, reasoned before its tool call on neither endpoint, and MiniMax-M3 on its
+  OpenAI endpoint reasons inline, as the slice 4c record says; DeepSeek's two models
+  carried the replay on that endpoint.
+
+Decisions made in the slice, with the alternative each beat:
+- The Messages pipeline serves a Responses request whole — `serve` takes the surface
+  that names the ledger row, and a `ResponseMeta` that converts the answer and its
+  errors — rather than a route of its own: routing, retry, provenance and both upstream
+  protocols come with it, and the conversion is two pure functions and a stream
+  wrapper.
+- `store` is ignored rather than refused: nothing a stored response gives can be asked
+  for without a field the gateway refuses, each saying why.
+- A reasoning item always carries `encrypted_content`, whatever `include` asks, since a
+  stateless conversation that loses it loses the vendor's thinking; its summary is the
+  thinking itself, the one text Messages has.
+- `input_file`, an image by `file_id` and `item_reference` are refused, each naming
+  something stored.
+- A stream failing partway ends with `response.failed`, not an `error` event: openai-go
+  aborts on any event whose data has a top-level `error`, and the caller would lose
+  the items already streamed.
+- `truncation: "auto"` is refused rather than ignored: it asks for input to be dropped
+  when the context overflows, and the gateway cannot choose what to drop.
+- `temperature` above 1 goes as sent rather than rescaled: Messages takes at most 1 and
+  OpenAI 2, and the upstream answers for its own range.
+
+Mutation testing ran over the request, answer and stream conversions, the error
+envelope, the field renaming, the default `max_tokens`, the stored routes and the stream
+wrapper. The first pass caught 16 of 19 mutants; two survived — a tool call whose input
+arrives whole at its start, and a stream that has failed still pinging — and one, the
+default `max_tokens`, did not compile. Each survivor got a test, and the third, rewritten
+to compile, was caught; all 19 are caught.
+
+Review found five defects and one documented disposition to correct, each defect fixed
+with a test that failed on the code before it (Codex):
+- `reasoning.context` and `reasoning.mode` were accepted and echoed, though the gateway
+  does neither `current_turn` nor `pro`. Each is now refused unless it names what the
+  gateway does, as is any other field of `reasoning`.
+- `prompt_cache_options`, a field the pin names, fell to the catch-all refusal without a
+  disposition of its own. It is now dropped, but for `prewarm` true, which asks for no
+  answer, and a `comparison_response_id`, which names a stored response; both are
+  refused.
+- On the conversion path an OpenAI upstream's error reached a Responses caller as the
+  Anthropic type the Messages path gives it, its `code` and `param` lost. A Responses
+  caller now gets the upstream's own type, `code` and `param`, its message redacted.
+- After a stream had failed in conversion, an error the upstream sent while it was read
+  on for its usage replaced, in the ledger, the error the caller had been given.
+- `reasoning_tokens` was 0 though an upstream reports thinking tokens in
+  `output_tokens_details`, as MiniMax does; it is now that count.
+- `reasoning.effort: "none"` reaches an `openai-generic` upstream as nothing, its profile
+  naming no thinking toggle, so its model reasons as by default. This is the disposition
+  the conversion already gives a Messages request's disabled thinking, kept rather than
+  sending `reasoning_effort: "none"`, which a model without reasoning refuses; the
+  registry now says so.
+
+Fifteen mutants over these fixes then ran beside the first 19. One did not compile until
+rewritten; one survived — a branch reading MiniMax's Anthropic envelope apart, which gave
+what the general reading already gives — and the branch went. All 33 mutants of the
+final list are caught.
+
+The background security review then found the conversion path's new error passing the
+upstream's `type` to the caller unredacted — convertedError gave one of a closed set, the
+upstream's own type is any string it sends — and it is now redacted with the message,
+`param` and `code`. The messages of a conversion failure, which name a block the upstream
+sent, are redacted too, whole and streamed. Three mutants over the redactions are caught.
+
+A second Codex pass found three more defects and one overclaim, each defect fixed with a
+test that failed on the code before it: a reasoning item carried no `status`, where
+openai-go's item has one when returned; an upstream error with an empty message lost its
+type, `param` and `code`, the envelope read as no envelope at all; and a `message_stop`
+arriving with a block still open ended the stream completed, the open block's streamed
+content left out of the Response — it now fails. The changelog said `none` turns thinking
+off, which holds only where the upstream has a thinking toggle. Three mutants over the
+fixes are caught, 39 in all.
+
+A third Codex pass found two more, each fixed with a test that failed on the code before
+it. A credential holding a quote or a backslash, which credentials may, still reached the
+caller through a conversion failure: the block's type was Go-quoted into the message, so
+`"` became `\"` and the literal match missed it; the type is now written as sent. And a
+stream held everything it converted for its last event without bound, so an upstream
+streaming faster than its stall budget could grow the gateway's memory past what a whole
+answer may take; the stream now fails past that bound, 64 MiB. Ten mutants over both are
+caught, 49 in all.
+
+`/code-review`, its agents on Opus, found fifteen: ten fixed, each with a test that failed on
+the code before it, and five declined. Fixed: a request offering no tools still sent a
+`tool_choice` — for `parallel_tool_calls: false`, or `none` or `auto` — which DeepSeek's and
+MiniMax's profiles refuse as ignored, failing a toolless request on every alias of theirs;
+an input with no user or assistant item encoded `messages` as null; calls a client records
+beside their outputs split into turns, the last losing the thinking Messages requires of it,
+and now rejoin their turn when their ids name one Response, as the gateway's do; the item an
+incomplete Response stopped in was marked completed, a cut-off call's partial arguments
+looking runnable; an event the gateway's rewriting grew past the 16 MiB bound on one event
+went missing from the stream; a usage count the ledger rejects reached the caller;
+parameters stating no type reached Messages, which requires one; two ways of compacting a
+tool input became one; `call.fail` lost a second header whitelist; and the 503 for a model
+with no upstream named the Anthropic protocol to a Responses caller, while `input_tokens`
+and `compact` were refused as stored state. Declined: an effort sent without checking the
+deployment can think, as the platform leaves effort's capability to the endpoint (plan 53's
+entry in docs/DIVERGENCES.md) and OpenAI itself refuses an effort its model cannot take; one
+surface adapter in place of the `c.resp` branches, and handing parsed events to the stream
+converter instead of re-reading SSE, design changes past this slice; one helper for OpenAI's
+four-key error envelope, whose other two builders predate the branch; and moving the error
+envelope's conversion into convert, where `convertedError`, its precedent, does not live.
+Twenty-three mutants over the fixes are caught, 72 in all; a twenty-fourth survived as an
+equivalent — a turn of nothing but tool results can only be a user turn — and the redundant
+role check it removed went.
+
+A fourth Codex pass, over that round, found five more in it, each fixed with a test that
+failed on the code before it. The stream's bound counted what a block held but not its
+call id, its name or the block itself, so long ids, or many empty blocks, still grew
+without bound; it now counts the block starts and deltas everything held comes from. A held
+done event was lost, the sequence broken, when the next event failed the conversion — as the
+stream's first two events had been when its first block did, since the slice began; the
+events made before a failure now come back with it. With block stops interleaved, the item
+held was the last to stop, not the last in output order, which a whole answer marks; and
+the first of several `message_delta` events decided its status, where the last should. And
+any id shaped `<x>_<y>_<n>` named a Response, so a caller's own ids could merge sequential
+turns; only an id the gateway writes — `msg`, `rs` or `fc`, its 24-character request id, an
+index — now does. Ten mutants over the fixes are caught, 76 in all, the six that pinned the
+per-field counting and the delta's release gone with them.
+
+A fifth pass found one more: an index with a sign, `-1` or `+2`, passed for one the gateway
+writes; the index is now decimal digits alone, its mutants caught, 77 in all.
