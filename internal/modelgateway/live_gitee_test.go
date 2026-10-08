@@ -211,8 +211,8 @@ func namedVendor(t *testing.T, name string) liveVendor {
 }
 
 // relayed fails unless the gateway's answer is the vendor's, but for model,
-// which names the alias: each other member as the vendor wrote it,
-// compacted, vectors included.
+// which names the alias: each other member byte for byte as the vendor wrote
+// it, vectors included.
 func relayed(t *testing.T, vendor, gateway []byte, alias string) {
 	t.Helper()
 	var up, got map[string]json.RawMessage
@@ -220,8 +220,7 @@ func relayed(t *testing.T, vendor, gateway []byte, alias string) {
 		liveFatalf(t, "the gateway answered %s; the vendor sent %s", abbreviated(gateway), abbreviated(vendor))
 	}
 	for k, v := range up {
-		var compact bytes.Buffer
-		if k != "model" && (json.Compact(&compact, v) != nil || !bytes.Equal(got[k], compact.Bytes())) {
+		if k != "model" && !bytes.Equal(got[k], v) {
 			liveFatalf(t, "the gateway answered %s = %s; the vendor sent %s", k, abbreviated(got[k]), abbreviated(v))
 		}
 	}

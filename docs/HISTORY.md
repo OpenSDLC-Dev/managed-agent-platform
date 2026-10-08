@@ -6850,5 +6850,7 @@ A fifth pass, Codex over those fixes, found three more:
 
 The two testable fixes' mutants, each restoring the fourth round's code, were caught. A
 usage that keeps nothing once it has outgrown its bound changes what the rewriter holds,
-not what it answers, so no test pins that either. On the final code the whole live tier
-— DeepSeek, MiniMax and Gitee — passed its 52 tests.
+not what it answers, so no test pins that either. A sixth pass found those three closed,
+and the live check still compacting the vendor's members, which would fail a vendor that
+writes whitespace the gateway now keeps; it compares them as written. On the final code
+the whole live tier — DeepSeek, MiniMax and Gitee — passed its 52 tests.
