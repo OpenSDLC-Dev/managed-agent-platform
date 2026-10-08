@@ -670,8 +670,6 @@ func liveCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-// textOf is an answer's text, its blocks joined; empty for the nil answer
-// an error leaves.
 // kindsOf is m's content block types, in order.
 func kindsOf(m *anthropic.Message) string {
 	var ks []string
@@ -681,6 +679,8 @@ func kindsOf(m *anthropic.Message) string {
 	return strings.Join(ks, ",")
 }
 
+// textOf is an answer's text, its blocks joined; empty for the nil answer
+// an error leaves.
 func textOf(m *anthropic.Message) string {
 	if m == nil {
 		return ""
