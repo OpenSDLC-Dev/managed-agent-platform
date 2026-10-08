@@ -62,9 +62,12 @@ type StallGuard struct {
 	d time.Duration
 	// start is the monotonic base last is measured from; storing an instant
 	// instead would compare a wall clock against the timer's monotonic one.
-	start   time.Time
-	last    atomic.Int64 // nanoseconds since start of the last sign of life
-	held    atomic.Int32 // the Holds not yet Released
+	start time.Time
+	last  atomic.Int64 // nanoseconds since start of the last sign of life
+	// mu orders a Hold or a Release against the watch's verdict, so a hold
+	// cannot begin, or end, between the watch reading the clock and tripping.
+	mu      sync.Mutex
+	held    int // the Holds not yet Released, under mu
 	cancel  context.CancelFunc
 	tripped atomic.Bool
 	stop    chan struct{}
@@ -151,11 +154,14 @@ func (g *StallGuard) watch(ctx context.Context) {
 			// early on progress that had just arrived. Late is the safe direction:
 			// it delays a wedged endpoint's failure by a scheduling gap, where
 			// early would end a healthy turn.
-			if g.held.Load() > 0 {
+			g.mu.Lock()
+			if g.held > 0 {
+				g.mu.Unlock()
 				t.Reset(g.d)
 				continue
 			}
 			if idle := time.Since(g.start) - time.Duration(g.last.Load()); idle < g.d {
+				g.mu.Unlock()
 				t.Reset(g.d - idle)
 				continue
 			}
@@ -163,6 +169,7 @@ func (g *StallGuard) watch(ctx context.Context) {
 			// the verdict must be visible before the wait it ends.
 			g.tripped.Store(true)
 			g.cancel()
+			g.mu.Unlock()
 			return
 		}
 	}
@@ -177,12 +184,18 @@ func (g *StallGuard) Progress() { g.last.Store(int64(time.Since(g.start))) }
 // matching Release: the time a reader spends not reading the endpoint, on
 // business of its own — writing what it read onward — when the endpoint,
 // unread, cannot show a sign of life. Release counts as one.
-func (g *StallGuard) Hold() { g.held.Add(1) }
+func (g *StallGuard) Hold() {
+	g.mu.Lock()
+	g.held++
+	g.mu.Unlock()
+}
 
 // Release ends a Hold.
 func (g *StallGuard) Release() {
+	g.mu.Lock()
 	g.Progress()
-	g.held.Add(-1)
+	g.held--
+	g.mu.Unlock()
 }
 
 // Stop releases the guard and the context it returned. It is idempotent, so a

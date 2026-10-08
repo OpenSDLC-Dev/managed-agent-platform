@@ -6831,5 +6831,24 @@ test that failed on the code before it:
   records `api_error`.
 
 Mutation testing caught all 8 mutants of the hold, the bound and the usage
-capture. On the final code the whole live tier — DeepSeek, MiniMax and Gitee — passed its
-52 tests.
+capture.
+
+A fifth pass, Codex over those fixes, found three more:
+- The rewriter gathered each piece's output before writing it, the alias included
+  wherever a top-level `model` repeated. A 1 MiB model name, which a wildcard alias
+  admits, and an upstream repeating `model` 1,024 times in 10 KB would have had the
+  gateway hold a gigabyte, under the 512 MiB bound on what it reads and after its
+  caller had gone. The rewriter now hands its output on in pieces, the alias as it is,
+  so what it holds is bounded by the piece it reads.
+- A hold could begin, or end, between the stall guard reading its clock and tripping,
+  so a write could still be counted as silence. A mutex now orders holds against the
+  guard's verdict. No test pins that race, which needs the watcher descheduled at one
+  instruction.
+- The usage's kept spaces counted toward its bound, so padding could push a usage at
+  the bound past it by a byte, against the docs. The bound now counts the usage without
+  them, which the oracle checks at the bound and a byte past it.
+
+The two testable fixes' mutants, each restoring the fourth round's code, were caught. A
+usage that keeps nothing once it has outgrown its bound changes what the rewriter holds,
+not what it answers, so no test pins that either. On the final code the whole live tier
+— DeepSeek, MiniMax and Gitee — passed its 52 tests.

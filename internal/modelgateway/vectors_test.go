@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -32,6 +33,10 @@ var answers = []string{
 	`{"usage":"` + strings.Repeat("x", modelgateway.MaxAnswerUsage) + `"}`,
 	`{"usage":{"prompt_tokens":5},"usage":"` + strings.Repeat("x", modelgateway.MaxAnswerUsage) + `"}`,
 	`{"data":[],"usage":{` + strings.Repeat(" ", 70000) + `"prompt_tokens" : 13 , "s":" a b "}}`,
+	// A usage at the bound and one past it, either padded past it with
+	// whitespace between its tokens: the bound counts the usage without it.
+	`{"usage":{"prompt_tokens":13,"s":"` + strings.Repeat("x", modelgateway.MaxAnswerUsage-27) + `"` + strings.Repeat(" ", 70000) + `}}`,
+	`{"usage":{"prompt_tokens":13,"s":"` + strings.Repeat("x", modelgateway.MaxAnswerUsage-26) + `"` + strings.Repeat(" ", 70000) + `}}`,
 	`{}`, `{ }`, `[{"model":"in an array"}]`, `"model"`, `null`, `12`,
 	`{"model":`, `{"model":"cut`, `{"usage":{"prompt_tokens":1`, `{"a":1,}`, `{"a" 1,"model":"m"}`, `}{"model":"m"}`, ``,
 }
@@ -143,6 +148,24 @@ func FuzzAnswerRewriter(f *testing.F) {
 			t.Fatalf("rewrote %q and kept %q", whole, usage)
 		}
 	})
+}
+
+// What the rewriter holds is bounded by the piece it is given, however long
+// the alias and however many model members an answer repeats: each alias it
+// hands on is the one it was made with, not a copy.
+func TestRewritingRepeatedModelsHoldsLittle(t *testing.T) {
+	alias := strings.Repeat("x", 256<<10)
+	chunk := []byte("{" + strings.Repeat(`"model":0,`, 1024) + `"n":1}`)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	n := modelgateway.RewrittenLength(alias, chunk)
+	runtime.ReadMemStats(&after)
+	if want := len(chunk) - 1024 + 1024*(len(alias)+2); n != want {
+		t.Errorf("rewrote %d bytes, want %d", n, want)
+	}
+	if held := after.TotalAlloc - before.TotalAlloc; held > 8<<20 {
+		t.Errorf("rewriting %d bytes allocated %d", len(chunk), held)
+	}
 }
 
 // The usage the rewriter keeps reads as the upstream wrote it: padding

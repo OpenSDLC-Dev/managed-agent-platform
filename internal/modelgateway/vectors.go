@@ -32,11 +32,12 @@ func relayVectors(w http.ResponseWriter, resp *http.Response, c call, guard *pro
 	w.WriteHeader(resp.StatusCode)
 	rw := &answerRewriter{alias: encodeJSON(c.alias)}
 	cw := newCallerWriter(w, guard, false)
-	send := func(b []byte) {
-		if out := rw.rewrite(b); len(out) > 0 {
-			cw.write(out)
+	emit := func(p []byte) {
+		if len(p) > 0 {
+			cw.write(p)
 		}
 	}
+	send := func(b []byte) { rw.rewrite(b, emit) }
 	total := n
 	send(buf[:n])
 	for err == nil {
@@ -80,7 +81,8 @@ func vectorUsageOf(raw json.RawMessage) *store.Tokens {
 }
 
 // The rewriter's bounds: a key longer than maxKey is no key it looks for, and
-// a usage longer than maxUsage is not kept.
+// a usage of more than maxUsage bytes, the whitespace between its tokens
+// aside, is not kept.
 const (
 	maxKey   = 256
 	maxUsage = 64 << 10
@@ -102,7 +104,7 @@ const (
 // arrives: the value of each top-level member whose key, unescaped, is model
 // becomes alias, whatever the value holds, and the last top-level usage value
 // is kept, each run of whitespace between its tokens as one space, up to
-// maxUsage bytes;
+// maxUsage bytes besides those spaces;
 // every other byte passes as it came. It reads the answer only as far as
 // telling strings, nesting and top-level members apart, so an answer that is
 // not an object, or is malformed, passes as it came from the point it stops
@@ -119,17 +121,22 @@ type answerRewriter struct {
 	key      []byte // the top-level key being read, quotes included
 	member   string // the key of the top-level value being read
 	capture  []byte // the usage value being read
+	kept     int    // its bytes counted against maxUsage: all but the single spaces
 	overflow bool   // whether the key or the usage being read outgrew its bound
 }
 
-// rewrite is in as the caller gets it.
-func (r *answerRewriter) rewrite(in []byte) []byte {
-	out := make([]byte, 0, len(in)+len(r.alias))
+// rewrite hands emit in as the caller gets it, in pieces, none held past the
+// call: the bytes up to a model value, then the alias, then what follows, so
+// what the rewrite holds is bounded by in alone, however long the alias and
+// however many model members an answer repeats.
+func (r *answerRewriter) rewrite(in []byte, emit func([]byte)) {
+	out := make([]byte, 0, len(in))
 	for i := 0; i < len(in); i++ {
 		b := in[i]
 		switch r.state {
 		case rwPass:
-			return append(out, in[i:]...)
+			emit(append(out, in[i:]...))
+			return
 		case rwStart:
 			out = append(out, b)
 			switch {
@@ -182,9 +189,11 @@ func (r *answerRewriter) rewrite(in []byte) []byte {
 			r.state, r.nest, r.inStr, r.esc = rwInValue, 0, false, false
 			switch r.member {
 			case "model":
-				out = append(out, r.alias...)
+				emit(out)
+				emit(r.alias)
+				out = out[:0]
 			case "usage":
-				r.capture, r.overflow, r.space = r.capture[:0], false, false
+				r.capture, r.kept, r.overflow, r.space = r.capture[:0], 0, false, false
 			}
 			i-- // the value's first byte
 		case rwInValue:
@@ -197,10 +206,10 @@ func (r *answerRewriter) rewrite(in []byte) []byte {
 						r.space = true
 					} else {
 						if r.space {
-							r.keep(' ') // so tokens it parted, as 1 3, stay apart
+							r.keep(' ', false) // so tokens it parted, as 1 3, stay apart
 							r.space = false
 						}
-						r.keep(b)
+						r.keep(b, true)
 					}
 					out = append(out, b)
 				default:
@@ -229,14 +238,22 @@ func (r *answerRewriter) rewrite(in []byte) []byte {
 			}
 		}
 	}
-	return out
+	emit(out)
 }
 
-// keep adds b to the usage being read, past maxUsage marking it outgrown.
-func (r *answerRewriter) keep(b byte) {
-	if len(r.capture) < maxUsage {
+// keep adds b to the usage being read, counted against maxUsage unless it is
+// a run's one space, which comes before a counted byte, so the usage holds at
+// most twice the bound. Past the bound it is outgrown, and nothing more is
+// kept.
+func (r *answerRewriter) keep(b byte, counted bool) {
+	switch {
+	case r.overflow:
+	case !counted:
 		r.capture = append(r.capture, b)
-	} else {
+	case r.kept < maxUsage:
+		r.capture = append(r.capture, b)
+		r.kept++
+	default:
 		r.overflow = true
 	}
 }
