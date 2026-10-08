@@ -3,6 +3,7 @@ package modelgateway
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
@@ -30,18 +31,44 @@ func chatBody(c call, d store.Deployment) []byte {
 	return encodeJSON(out)
 }
 
-// withUsage is stream_options with include_usage true, its other options
-// kept; a value that is not an object goes as sent, for the upstream to
-// refuse.
+// withUsage is stream_options, an object or null (chatStreamOptions), with
+// include_usage true and its other options kept.
 func withUsage(raw json.RawMessage) json.RawMessage {
 	opts := map[string]json.RawMessage{}
-	if len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		if json.Unmarshal(raw, &opts) != nil || opts == nil {
-			return raw
-		}
+	_ = json.Unmarshal(raw, &opts)
+	if opts == nil {
+		opts = map[string]json.RawMessage{}
 	}
 	opts["include_usage"] = json.RawMessage("true")
 	return encodeJSON(opts)
+}
+
+// chatStreamOptions refuses stream_options the gateway could not ask for a
+// stream's usage through, for streamFlag's reason: a value that is not an
+// object or null, or a key that differs from stream_options or
+// include_usage only in case, which a case-insensitive decoder may read in
+// place of the gateway's own — Go's takes the later of two, and a key
+// spelled with ſ sorts after it — leaving a stream's usage unreported.
+func chatStreamOptions(top map[string]json.RawMessage) *apiError {
+	for k := range top {
+		if k != "stream_options" && strings.EqualFold(k, "stream_options") {
+			return invalid("%s: the field is stream_options, spelled in lower case", k)
+		}
+	}
+	raw := bytes.TrimSpace(top["stream_options"])
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	var opts map[string]json.RawMessage
+	if json.Unmarshal(raw, &opts) != nil {
+		return invalid("stream_options: must be an object")
+	}
+	for k := range opts {
+		if k != "include_usage" && strings.EqualFold(k, "include_usage") {
+			return invalid("stream_options.%s: the field is include_usage, spelled in lower case", k)
+		}
+	}
+	return nil
 }
 
 // asksForUsage reports whether a Chat Completions request asks for its

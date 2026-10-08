@@ -380,6 +380,8 @@ func TestAChatRequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 		{"minimax", "stop", `"stop":"END"`, []string{`"stop":""`}},
 		{"minimax", "tool_choice", tools + `,"tool_choice":"required"`, []string{tools + `,"tool_choice":"auto"`, tools + `,"tool_choice":"none"`, tools + `,"Tool_Choice":"required"`}},
 		{"minimax", "tool_choice", tools + `,"tool_choice":{"type":"function","function":{"name":"t"}}`, []string{tools + `,"tool_choice":{"Type":"function","function":{"name":"t"}}`}},
+		{"minimax", "tool_choice", tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"t"}}]}}`,
+			[]string{tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"Mode":"required"}}`}},
 		{"minimax", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`, []string{tools + `,"parallel_tool_calls":true`, tools + `,"parallel_tool_calls":null`}},
 		{"deepseek", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`,
 			[]string{tools + `,"parallel_tool_calls":true`, tools + `,"tool_choice":"required"`, `"stop":["END"]`}},
@@ -493,8 +495,10 @@ func TestChatUsageInTheLedgersMeaning(t *testing.T) {
 }
 
 // The gateway's ask for a stream's usage keeps the caller's other stream
-// options; a value that is not an object goes as sent, for the upstream to
-// refuse, and a request that is not a stream gains none.
+// options, and a request that is not a stream gains none. Stream options it
+// could not ask through — not an object, or a key that differs from
+// stream_options or include_usage only in case — are refused before any
+// upstream is asked.
 func TestAChatStreamsOptionsAreKept(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, chatAnswer("Jupiter", minimaxStyle))
@@ -509,8 +513,7 @@ func TestAChatStreamsOptionsAreKept(t *testing.T) {
 	}
 	for opts, want := range map[string]string{
 		`{"include_usage":false,"include_obfuscation":true}`: `{"include_obfuscation":true,"include_usage":true}`,
-		`null`:  `{"include_usage":true}`,
-		`"all"`: `"all"`,
+		`null`: `{"include_usage":true}`,
 	} {
 		if got, _ := sent(fmt.Sprintf(`{"model":"m","stream":true,"stream_options":%s,"messages":[{"role":"user","content":"hi"}]}`, opts)); string(got) != want {
 			t.Errorf("%s was sent as %s, want %s", opts, got, want)
@@ -518,6 +521,17 @@ func TestAChatStreamsOptionsAreKept(t *testing.T) {
 	}
 	if got, ok := sent(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`); ok {
 		t.Errorf("a whole answer was asked with stream_options %s", got)
+	}
+	n := len(f.recorded())
+	for _, set := range []string{`"stream_options":"all"`, `"stream_options":[]`, `"Stream_Options":{}`, `"ſtream_options":{"include_usage":false}`,
+		`"stream_options":{"Include_Usage":false}`, `"stream_options":{"include_uſage":false}`} {
+		resp, b := e.do("POST", "/v1/chat/completions", `{"model":"m","stream":true,`+set+`,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
+		if typ, _, ok := openAIEnvelope(b); resp.StatusCode != 400 || !ok || typ != "invalid_request_error" {
+			t.Errorf("%s: %d %s", set, resp.StatusCode, b)
+		}
+	}
+	if len(f.recorded()) != n {
+		t.Errorf("a refused request reached the upstream")
 	}
 }
 
@@ -702,32 +716,58 @@ func TestAStreamFlagTheGatewayCannotReadIsRefused(t *testing.T) {
 	if resp, b := e.do("POST", "/v1/messages/count_tokens", `{"model":"msgs","messages":[],"stream":1}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
 		t.Errorf("count_tokens: %d %s", resp.StatusCode, b)
 	}
-	if n, m := len(oa.recorded()), len(an.recorded()); n != 2 || m != 3 {
-		t.Errorf("%d and %d upstream calls, want the 2 whole chat answers and the 2 whole messages and a count", n, m)
+	// stream_options is the Chat Completions route's alone to ask through.
+	if resp, b := e.do("POST", "/v1/messages", `{"model":"msgs","max_tokens":8,"messages":[],"stream_options":"x","Stream_Options":{}}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
+		t.Errorf("messages with stream_options: %d %s", resp.StatusCode, b)
+	}
+	if n, m := len(oa.recorded()), len(an.recorded()); n != 2 || m != 4 {
+		t.Errorf("%d and %d upstream calls, want the 2 whole chat answers, and the 3 whole messages and a count", n, m)
 	}
 }
 
-// An upstream's error in a chat stream is read as one whether or not its
-// data parses, and whatever the event is named: the call's credential is
-// removed and the stream ends there. Data that is no JSON object passes with
-// the credential removed, and the stream goes on.
+// An upstream's error in a chat stream ends it, whatever the event is named
+// and whether or not its data parses, and no credential reaches the caller,
+// escaped or not. An error that parses is relayed with the credential
+// removed; data that is no JSON object — an error that does not parse, an
+// empty error, a diagnostic — is replaced by the gateway's own error.
 func TestAChatStreamsMalformedErrorIsStillRedacted(t *testing.T) {
+	bad := map[string]string{
+		"named-torn":   "event: error\ndata: {\"error\":{\"message\":\"sk-openai-generic\\u002dkey1\",\"type\":\"server_error\"}\n\n",
+		"bare-torn":    "data: {\"error\":{\"message\":\"busy sk-openai-generic-key1\",\"type\":\"server_error\"}\n\n",
+		"named-empty":  "event: error\ndata:\n\n",
+		"named-done":   "event: error\ndata: [DONE]\n\n",
+		"diagnostic":   "data: oops\ndata: sk-openai-generic-key1\n\n",
+		"named-parses": "event: error\ndata: {\"message\":\"bad sk-openai-generic\\u002dkey1\"}\n\n",
+	}
 	e := newEnv(t)
 	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
-		sse(w, chunk(c.Model, "Jup", "", ""), "data: oops sk-openai-generic-key1\n\n",
-			"event: error\ndata: {\"error\":{\"message\":\"bad sk-openai-generic-key1\",\"type\":\"server_error\"}\n\n", chunk(c.Model, "iter", "stop", ""))
+		sse(w, chunk(c.Model, "Jup", "", ""), bad[c.Model], chunk(c.Model, "iter", "stop", ""))
 	})
-	e.alias("m", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), "up"), 0))
+	p := onOpenAI(e, "openai-generic", f.URL)
+	for m := range bad {
+		e.alias(m, target(e.deployment(p, m), 0))
+	}
 	key := e.key(everyAlias)
 	e.start()
-	resp, b := e.do("POST", "/v1/chat/completions", `{"model":"m","stream":true,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
-	lines := dataLines(b)
-	if resp.StatusCode != 200 || len(lines) != 3 || !strings.HasPrefix(lines[1], "oops ") || !strings.Contains(lines[2], "server_error") ||
-		strings.Contains(string(b), "sk-openai-generic-key1") {
-		t.Fatalf("%d %q", resp.StatusCode, b)
+	for m := range bad {
+		resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`","stream":true,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
+		lines := dataLines(b)
+		if resp.StatusCode != 200 || len(lines) != 2 || strings.Contains(string(b), "key1") {
+			t.Errorf("%s: %d %q", m, resp.StatusCode, b)
+			continue
+		}
+		if typ, msg, ok := openAIEnvelope([]byte(lines[1])); m != "named-parses" && (!ok || typ != "api_error" || !strings.Contains(msg, "not a JSON object")) {
+			t.Errorf("%s ended with %s", m, lines[1])
+		}
 	}
-	if rows := e.ledger(); len(rows) != 1 || rows[0].ErrorType != "api_error" {
-		t.Errorf("ledger: %+v", rows)
+	rows := e.ledger()
+	if len(rows) != len(bad) {
+		t.Fatalf("%d ledger rows", len(rows))
+	}
+	for _, row := range rows {
+		if row.ErrorType != "api_error" {
+			t.Errorf("ledger: %+v", row)
+		}
 	}
 }
 
@@ -756,31 +796,111 @@ func TestAChatStreamsOnlyChunkCutOffAtTheEndIsTheAnswer(t *testing.T) {
 	}
 }
 
-// A chat stream that opens with an error, named or not, is relayed as it
-// is: the caller's answer, not a refusal to fall back from.
-func TestAChatStreamOpeningWithAnErrorIsRelayed(t *testing.T) {
+// A chat stream that opens with an error has not begun the caller's answer,
+// as a Messages stream that does has not (plan 59, "Retry and fallback
+// happen before the first byte only"): it falls back like any refusal, and
+// with nothing else to serve, the caller gets the error as the HTTP response
+// it would have been — the gateway's own when the event is no JSON object.
+func TestAChatStreamOpeningWithAnErrorFallsBack(t *testing.T) {
+	opening := map[string]string{
+		"quiet": "event: open\n\n" + chunk("quiet", "Jupiter", "stop", chatUsage) + "data: [DONE]\n\n",
+		"named": "event: error\ndata: {\"error\":{\"message\":\"busy\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\n",
+		"bare":  "data: {\"error\":{\"message\":\"busy\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\n",
+		"torn":  "data: {\"error\":{\"message\":\"busy\"\n\n",
+	}
 	e := newEnv(t)
-	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
-		name := ""
-		if c.Model == "named" {
-			name = "event: error\n"
-		}
-		sse(w, name+`data: {"error":{"message":"busy","type":"server_error","param":null,"code":null}}`+"\n\n")
-	})
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) { sse(w, opening[c.Model]) })
 	next := newFake(t, chatAnswer("Saturn", deepseekStyle))
-	for _, m := range []string{"named", "bare"} {
+	for m := range opening {
 		e.alias(m, target(e.deployment(onOpenAI(e, "openai-generic", f.URL), m), 0),
 			target(e.deployment(onOpenAI(e, "openai-generic", next.URL), "up"), 1))
+		e.alias(m+"-alone", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), m), 0))
 	}
 	key := e.key(everyAlias)
 	e.start()
-	for _, m := range []string{"named", "bare"} {
-		resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`","stream":true,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
-		if lines := dataLines(b); resp.StatusCode != 200 || len(lines) != 1 || !strings.Contains(lines[0], "busy") {
+	hdr := map[string]string{"Authorization": "Bearer " + key}
+	// An event opening the stream with no data, named other than error, is
+	// no error: the answer begins there.
+	if resp, b := e.do("POST", "/v1/chat/completions", `{"model":"quiet","stream":true,"messages":[]}`, hdr); resp.StatusCode != 200 || !strings.Contains(string(b), "Jupiter") {
+		t.Errorf("quiet: %d %q", resp.StatusCode, b)
+	}
+	for _, m := range []string{"named", "bare", "torn"} {
+		if resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`","stream":true,"messages":[]}`, hdr); resp.StatusCode != 200 || !strings.Contains(string(b), `"content":"aturn"`) {
 			t.Errorf("%s: %d %q", m, resp.StatusCode, b)
 		}
+		want := http.StatusInternalServerError
+		if m == "torn" {
+			want = http.StatusBadGateway
+		}
+		if resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`-alone","stream":true,"messages":[]}`, hdr); resp.StatusCode != want ||
+			!strings.Contains(string(b), `"error":{`) || strings.Contains(string(b), "data:") {
+			t.Errorf("%s alone: %d %q", m, resp.StatusCode, b)
+		}
 	}
-	if len(next.recorded()) != 0 {
-		t.Errorf("the fallback was asked")
+	if len(next.recorded()) != 3 {
+		t.Errorf("%d calls to the fallback, want %d", len(next.recorded()), 3)
+	}
+}
+
+// A stream asked for several choices (n) has said all it will once every
+// choice has finished: one the upstream closes while another choice is still
+// going is cut off, and ends with an error; one that closes after the last
+// finish has ended, however it closed, a stall included.
+func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
+	second := func(model, content, finish string) string {
+		f := "null"
+		if finish != "" {
+			f = fmt.Sprintf("%q", finish)
+		}
+		return fmt.Sprintf("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,\"choices\":[{\"index\":1,\"delta\":{\"content\":%q},\"finish_reason\":%s}]}\n\n", model, content, f)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		switch c.Model {
+		case "cut":
+			sse(w, chunk(c.Model, "Jupiter", "stop", ""), second(c.Model, "Sat", ""))
+			return
+		case "none":
+			sse(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"","choices":[],"prompt_filter_results":[]}`+"\n\n")
+			return
+		}
+		sse(w, chunk(c.Model, "Jupiter", "stop", ""), second(c.Model, "Saturn", "stop"))
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	p := e.provider(f.URL, func(p *store.Provider) {
+		p.Name, p.Profile = "openai-generic", "openai-generic"
+		p.Endpoints = map[profile.Protocol]string{profile.OpenAI: f.URL}
+		p.StallTimeout = 150 * time.Millisecond
+	})
+	e.credential(p, "sk-openai-generic-key1", 1)
+	e.alias("cut", target(e.deployment(p, "cut"), 0))
+	e.alias("held", target(e.deployment(p, "held"), 0))
+	e.alias("none", target(e.deployment(p, "none"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	hdr := map[string]string{"Authorization": "Bearer " + key}
+	_, b := e.do("POST", "/v1/chat/completions", `{"model":"cut","n":2,"stream":true,"messages":[]}`, hdr)
+	if lines := dataLines(b); len(lines) != 3 {
+		t.Errorf("cut: %q", b)
+	} else if typ, msg, ok := openAIEnvelope([]byte(lines[2])); !ok || typ != "api_error" || !strings.Contains(msg, "before its finish") {
+		t.Errorf("cut ended with %s", lines[2])
+	}
+	if _, b := e.do("POST", "/v1/chat/completions", `{"model":"held","n":2,"stream":true,"messages":[]}`, hdr); len(dataLines(b)) != 2 || strings.Contains(string(b), `"error"`) {
+		t.Errorf("held: %q", b)
+	}
+	if rows := e.ledger(); len(rows) != 2 || rows[0].ErrorType != "" || rows[1].ErrorType != "api_error" {
+		t.Errorf("ledger: %+v", rows)
+	}
+	// A stream that began no choice has not finished either.
+	_, b = e.do("POST", "/v1/chat/completions", `{"model":"none","stream":true,"messages":[]}`, hdr)
+	if lines := dataLines(b); len(lines) != 2 {
+		t.Errorf("none: %q", b)
+	} else if typ, _, ok := openAIEnvelope([]byte(lines[1])); !ok || typ != "api_error" {
+		t.Errorf("none ended with %s", lines[1])
 	}
 }

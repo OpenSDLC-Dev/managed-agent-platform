@@ -6561,8 +6561,9 @@ behind a proxy recording both directions.
   `parallel_tool_calls: false`, all four models called the tool twice in each of 12
   answers. MiniMax counted past `stop: [" 5"]` in all 6 asks, and answered a fun-fact
   question without calling the tool in all 12 asks forcing it, with `tool_choice`
-  `required` or naming the function; its `auto` (6 of 6) and `none` (6 of 6) were
-  honored. DeepSeek honored `stop`, and honored `required` and a named function with
+  `required` or naming the function, and in all 6 with `allowed_tools` in `required`
+  mode; its `auto` (6 of 6) and `none` (6 of 6) were honored. Both vendors refuse a
+  custom tool with a 400 of their own, and DeepSeek `allowed_tools` too. DeepSeek honored `stop`, and honored `required` and a named function with
   thinking disabled (12 of 12), refusing both with its own 400 otherwise, "Thinking
   mode does not support this tool_choice". On MiniMax's Anthropic endpoint,
   `tool_choice.disable_parallel_tool_use` was ignored as well: 6 answers, two calls
@@ -6584,20 +6585,45 @@ model ids, so that the gateway's rewrite of `model` shows. Mutation testing caug
   `parallel_tool_calls` refusals dropped. The chunk's model survived at first, while
   each live alias shared its model's id.
 
-Review then found five defects, each fixed with a test that failed on the earlier code:
+Review found ten defects, each fixed with a test that failed on the earlier code:
 - The gateway took a request for a stream only when `stream` was exactly `true`. A
   value a lenient upstream reads as true, or a key `"Stream"`, which a case-insensitive
   decoder such as Go's reads as `stream`, could have an upstream stream an answer the
   gateway relayed as a whole one, its usage unread by the ledger and the TPM limit.
   Both are refused now, on both protocols (the background security review).
 - An error chunk whose data did not parse passed unredacted, and an event named
-  `error` was not read as an error (Codex).
+  `error` was not read as an error (Codex). The first fix redacted such data as text,
+  which Codex's next pass showed misses a credential JSON-escaped inside it, and left
+  an unnamed one and an empty named one unread; data that is not a JSON object is now
+  replaced by the gateway's own error, which ends the stream.
 - A chat stream whose only chunk the upstream cut off at its end was taken for no
   answer, and the next deployment was asked (Codex).
 - A chat stream opening with an event named `error` was retried, as a Messages
-  stream's would be, where the same error unnamed was relayed (Codex).
+  stream's would be, where the same error unnamed was relayed (Codex). The Claude
+  review then pointed out that plan 59 retries every stream that opens with an error,
+  so both are retried now, as is one whose data is not a JSON object.
 - The `[DONE]` exception for a last event cut off at the end of a stream applied to
   Messages streams too (Codex).
+- With `n` above one, the first choice to finish ended the wait for the rest, so a
+  stream closed while another choice was still going passed as whole (the Claude
+  review, as are the four below).
+- A stall or reset after every choice had finished was reported as a failure.
+- `stream_options` that was not an object, or a key such as `ſtream_options` or
+  `Include_Usage`, which sorts after the gateway's own and which Go's decoder reads in
+  its place, could leave a stream's usage unreported, as the stream flag could.
+- MiniMax's `allowed_tools` in `required` mode, which openai-go can send, was not
+  refused; a probe then found MiniMax ignoring it in all 6 asks.
+- Routes under the other protocol's prefix, which answer 404, were given route span
+  names.
 
-Twelve mutants against those fixes were caught, one only once a test pinned that a
-Messages stream cut off on its first event still falls back.
+The Claude review's other suggestions were declined: listing in OpenAI's shape only the
+aliases the OpenAI route can serve now (plan 59 lists by grant and kind on both
+shapes, and slice 4b serves the embedding kind); moving every protocol branch of the
+attempt behind the stream interface (to be weighed when slice 4c adds a third shape);
+decoding each chunk once (not measured as a cost); and reusing `answerJSON` for chat
+answers, which would read a top-level `content` array as thinking blocks.
+
+Thirty-two mutants against those fixes were caught, four only once a test pinned the
+guard: a Messages stream cut off on its first event still falls back; a stream that
+began no choice has not finished; the Messages route passes `stream_options` through;
+and a dataless event opening a chat stream is no error.

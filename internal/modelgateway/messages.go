@@ -97,6 +97,9 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 		return
 	}
 	streams, bad := streamFlag(top)
+	if bad == nil && proto == profile.OpenAI {
+		bad = chatStreamOptions(top)
+	}
 	if bad != nil && path != "/v1/messages/count_tokens" {
 		writeError(w, r, bad)
 		return
@@ -222,7 +225,6 @@ func (h *handler) inference(w http.ResponseWriter, r *http.Request, c caller, pa
 	last.write(w, r, out)
 }
 
-// protocolNames names each protocol for a caller.
 // streamFlag is a request's stream. Whether the answer streams decides how
 // it is relayed and its usage read, so the flag must mean to every upstream
 // what it means to the gateway: a value that is not a boolean, which a
@@ -245,6 +247,7 @@ func streamFlag(top map[string]json.RawMessage) (bool, *apiError) {
 	return false, invalid("stream: must be a boolean")
 }
 
+// protocolNames names each protocol for a caller.
 var protocolNames = map[profile.Protocol]string{profile.Anthropic: "Anthropic", profile.OpenAI: "OpenAI"}
 
 // call is what every attempt of one request sends.
@@ -467,9 +470,11 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		// upstream may yet refuse, as an error event, which is answered like
 		// any refusal. Keep-alives past maxHeld begin it anyway.
 		events := upstream.NewReader(resp.Body)
-		var p streamProto = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
+		var p streamProto
 		if c.proto == profile.OpenAI {
 			p = &chatStream{c: c, red: red, withhold: !c.usage}
+		} else {
+			p = &messagesStream{c: c, wrap: wrap, ctx: ctx, red: red, rid: requestID(r)}
 		}
 		var held []byte
 		for {
@@ -486,13 +491,21 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 				held = append(held, e.Raw...)
 			case e.Name == "error" && c.proto == profile.Anthropic:
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
+			case c.proto == profile.OpenAI && chatError(e):
+				// What chatStream would end the stream on: an error that
+				// parses is answered as a Messages stream's is, and one
+				// that does not is the gateway's own failure, retried like
+				// an upstream that broke off before it answered.
+				if !jsonObject(e.Data) {
+					return &failure{status: http.StatusBadGateway, typ: "api_error",
+						err: errors.New("upstream opened its stream with an event that is not a JSON object")}, true
+				}
+				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 			default:
-				// A Chat Completions stream that opens with an error is
-				// relayed as it is (chatStream).
 				if cut {
 					e.Raw = terminated(e.Raw)
 				}
-				relayStream(ctx, w, events, held, e, c, p, guard, red)
+				relayStream(w, events, held, e, c, p, guard, red)
 				return nil, false
 			}
 		}
@@ -672,7 +685,7 @@ func keepAlive(e upstream.Event) bool { return e.Name == "ping" || e.Name == "" 
 // after that holds nothing of the gateway's. Ending there resets the stream
 // on an HTTP/2 connection, which a TLS upstream negotiates, and gives up an
 // HTTP/1.1 one rather than returning it to the pool.
-func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, c call, p streamProto, guard *provider.StallGuard, red provider.Redactor) {
+func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, c call, p streamProto, guard *provider.StallGuard, red provider.Redactor) {
 	c.out.status = http.StatusOK
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -718,11 +731,12 @@ func relayStream(ctx context.Context, w http.ResponseWriter, events *upstream.Re
 		if err == nil || done {
 			continue
 		}
+		// A stream that has said all it will has ended, however it closed.
+		why := p.ended()
+		if why == "" {
+			return
+		}
 		if errors.Is(err, io.EOF) {
-			why := p.ended()
-			if why == "" {
-				return
-			}
 			err = errors.New(why)
 		} else {
 			err = guard.Cause(err)
@@ -805,34 +819,37 @@ func (s *messagesStream) failure(typ, msg string) []byte {
 // its usage (chatBody), and withholds the chunk carrying it — choices empty,
 // usage set, as OpenAI documents stream_options.include_usage — from a
 // caller that did not ask, which may not expect a chunk without choices.
-// The stream has said all it will at [DONE] or an error — data carrying
-// error, as openai-go reads one, or an event named error whatever its data
-// — which reaches the caller with the call's credentials removed, as does
-// data that is no JSON object, an upstream's diagnostic perhaps. An
-// upstream may also end the stream after its finish without [DONE], as
+// The stream has said all it will at [DONE] or an error: data carrying
+// error, as openai-go reads one, or an event named error, either relayed
+// with the call's credentials removed. Data that is no JSON object, an
+// error that does not parse among them, is no chunk a client can read
+// either, and may carry a credential in a form no redaction finds, so the
+// gateway's own error takes its place and ends the stream. An upstream may
+// also end the stream without [DONE] once every choice has finished, as
 // MiniMax-M3 does (probed 2026-10-08), which is no failure.
 type chatStream struct {
 	c        call
 	red      provider.Redactor
-	withhold bool // the caller did not ask for the usage chunk
-	finished bool // a choice has finished
+	withhold bool           // the caller did not ask for the usage chunk
+	finished map[int64]bool // each choice begun, by index: whether it has finished
 }
 
 func (s *chatStream) event(e upstream.Event) ([]byte, bool) {
-	if e.Data == nil {
+	named := e.Name == "error"
+	switch {
+	case e.Data == nil && !named:
 		return e.Raw, false
-	}
-	if isDone(e.Data) {
+	case isDone(e.Data) && !named:
 		return e.Raw, true
 	}
 	var obj map[string]json.RawMessage
-	_ = json.Unmarshal(e.Data, &obj)
-	if _, ok := obj["error"]; ok || e.Name == "error" {
+	if json.Unmarshal(e.Data, &obj) != nil || obj == nil {
+		s.c.out.errType = "api_error"
+		return s.failure("api_error", "upstream sent an event that is not a JSON object"), true
+	}
+	if _, ok := obj["error"]; ok || named {
 		s.c.out.errType = errorTypeOf(e.Data, 0)
 		return e.WithData(redactJSON(s.red, e.Data)), true
-	}
-	if obj == nil {
-		return e.WithData(redactJSON(s.red, e.Data)), false
 	}
 	usage := obj["usage"]
 	if t := chatUsageOf(usage); t != nil {
@@ -841,10 +858,14 @@ func (s *chatStream) event(e upstream.Event) ([]byte, bool) {
 	var choices []map[string]json.RawMessage
 	_ = json.Unmarshal(obj["choices"], &choices)
 	for _, ch := range choices {
+		var index int64
+		_ = json.Unmarshal(ch["index"], &index)
 		var finish string
-		if json.Unmarshal(ch["finish_reason"], &finish) == nil && finish != "" {
-			s.finished = true
+		over := json.Unmarshal(ch["finish_reason"], &finish) == nil && finish != ""
+		if s.finished == nil {
+			s.finished = map[int64]bool{}
 		}
+		s.finished[index] = s.finished[index] || over
 	}
 	if s.withhold && len(choices) == 0 && len(usage) > 0 && !bytes.Equal(bytes.TrimSpace(usage), []byte("null")) {
 		return nil, false
@@ -856,11 +877,18 @@ func (s *chatStream) event(e upstream.Event) ([]byte, bool) {
 	return e.WithData(encodeJSON(obj)), false
 }
 
+// ended: a stream has said all it will once every choice it began — n
+// may ask for several — has finished.
 func (s *chatStream) ended() string {
-	if s.finished {
-		return ""
+	for _, over := range s.finished {
+		if !over {
+			return "the stream ended before its finish"
+		}
 	}
-	return "the stream ended before its finish"
+	if len(s.finished) == 0 {
+		return "the stream ended before its finish"
+	}
+	return ""
 }
 
 func (s *chatStream) complete(data []byte) bool { return json.Valid(data) || isDone(data) }
@@ -868,6 +896,30 @@ func (s *chatStream) complete(data []byte) bool { return json.Valid(data) || isD
 func (s *chatStream) failure(typ, msg string) []byte {
 	b := encodeJSON(map[string]any{"error": map[string]any{"message": msg, "type": typ, "param": nil, "code": nil}})
 	return []byte("data: " + string(b) + "\n\n")
+}
+
+// chatError reports whether a Chat Completions event is one chatStream ends
+// the stream on: an event named error, or data carrying error or that is no
+// JSON object.
+func chatError(e upstream.Event) bool {
+	switch {
+	case e.Name == "error":
+		return true
+	case e.Data == nil, isDone(e.Data):
+		return false
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(e.Data, &obj) != nil || obj == nil {
+		return true
+	}
+	_, ok := obj["error"]
+	return ok
+}
+
+// jsonObject reports whether data is a JSON object.
+func jsonObject(data []byte) bool {
+	var obj map[string]json.RawMessage
+	return json.Unmarshal(data, &obj) == nil && obj != nil
 }
 
 // isDone reports whether a Chat Completions event's data is the [DONE] that

@@ -224,10 +224,11 @@ func deepseekChatIgnores(_ string, req map[string]json.RawMessage) string {
 }
 
 // minimaxChatIgnores: parallel_tool_calls false; stop, which M3 and
-// M3.1-Flash-Preview counted past in all 6 asks to stop at " 5"; and
-// tool_choice required or naming a function, which they answered a fun-fact
-// question without calling in all 12 asks. Every value is read by its exact
-// key.
+// M3.1-Flash-Preview counted past in all 6 asks to stop at " 5"; and a
+// tool_choice forcing a call — required or naming a function, which they
+// answered a fun-fact question without calling in all 12 asks, and
+// allowed_tools in required mode, in all 6. A custom tool they refuse with a
+// 400 of their own. Every value is read by its exact key.
 func minimaxChatIgnores(_ string, req map[string]json.RawMessage) string {
 	if f := parallelBanned(req); f != "" {
 		return f
@@ -240,10 +241,19 @@ func minimaxChatIgnores(_ string, req map[string]json.RawMessage) string {
 	var choice string
 	var named map[string]json.RawMessage
 	if json.Unmarshal(req["tool_choice"], &choice) == nil && choice == "required" ||
-		json.Unmarshal(req["tool_choice"], &named) == nil && choiceType(named) == "function" {
+		json.Unmarshal(req["tool_choice"], &named) == nil && (choiceType(named) == "function" || allowedRequired(named)) {
 		return "tool_choice"
 	}
 	return ""
+}
+
+// allowedRequired reports whether a tool_choice is allowed_tools in required
+// mode, which forces a call among the tools it names.
+func allowedRequired(choice map[string]json.RawMessage) bool {
+	var allowed map[string]json.RawMessage
+	var mode string
+	return choiceType(choice) == "allowed_tools" && json.Unmarshal(choice["allowed_tools"], &allowed) == nil &&
+		json.Unmarshal(allowed["mode"], &mode) == nil && mode == "required"
 }
 
 // parallelBanned names parallel_tool_calls when it is false; null, which

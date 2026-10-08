@@ -258,6 +258,9 @@ func chatRefusals(vendor string) []chatRefusal {
 			{"tool_choice required", "tool_choice", request(noToolNeeded, map[string]any{"tools": []any{timeTool}, "tool_choice": "required"}), finishedWithoutTool},
 			{"tool_choice naming a function", "tool_choice", request(noToolNeeded, map[string]any{"tools": []any{timeTool},
 				"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "get_time"}}}), finishedWithoutTool},
+			{"tool_choice allowed_tools required", "tool_choice", request(noToolNeeded, map[string]any{"tools": []any{timeTool},
+				"tool_choice": map[string]any{"type": "allowed_tools", "allowed_tools": map[string]any{"mode": "required",
+					"tools": []any{map[string]any{"type": "function", "function": map[string]any{"name": "get_time"}}}}}}), finishedWithoutTool},
 		}
 	}
 	return nil

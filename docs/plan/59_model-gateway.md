@@ -287,10 +287,13 @@ converts when protocols match.
   asked for its usage (`stream_options.include_usage`, the caller's other options kept),
   which the ledger and the TPM limit count and MiniMax reports only when asked (probed
   2026-10-08); the chunk carrying it — no choices, usage set — is withheld from a caller
-  that did not ask. On both protocols `stream` must be a boolean, spelled exactly: the
-  gateway relays and counts the answer by it, so a value or a key's case that an
-  upstream might read as asking for a stream is refused. Such a stream has ended at `[DONE]`, or when the upstream closes it
-  after a choice's finish, as MiniMax-M3 does, sending no `[DONE]`; closed before
+  that did not ask. On both protocols `stream` must be a boolean or null, spelled
+  exactly: the gateway relays and counts the answer by it, so a value or a key's case
+  that an upstream might read as asking for a stream is refused (`count_tokens`, which
+  never streams, excepted), as is, on Chat Completions, `stream_options` the gateway
+  could not ask through: not an object or null, or a key differing from it or
+  `include_usage` only in case. Such a stream has ended at `[DONE]`, or when the upstream closes it
+  after every choice's finish, as MiniMax-M3 does, sending no `[DONE]`; closed before
   either, it ends with an error chunk in OpenAI's envelope. A
   conversion path whose upstream sends no pings emits its own during silent gaps. A
   provider configures both of its vendor's endpoints
@@ -346,8 +349,8 @@ The edit policy, which keeps a profile from quietly changing what a caller asked
   `tool_choice` `any` on DeepSeek and `any` and `tool` on MiniMax, which answer without
   the tool call they force, and MiniMax's `disable_parallel_tool_use`. Slice 4 holds
   Chat Completions to the same rule on its own probes: `parallel_tool_calls: false` on
-  both vendors, and MiniMax's `stop` and `tool_choice` `required` or naming a function
-  (DeepSeek honors those, refusing a forced call with thinking on itself) — and passes through what
+  both vendors, and MiniMax's `stop` and a `tool_choice` forcing a call (`required`, naming
+  a function, or `allowed_tools` in `required` mode; DeepSeek honors the first two, refusing a forced call with thinking on itself) — and passes through what
   a vendor ignores among sampling knobs, context shaping and server-side features;
   a request such a field bars from a deployment goes to the alias's others, and is
   refused only when none is left — but never a count, which the field leaves

@@ -162,8 +162,7 @@ func usageOf(prev *store.Tokens, raw json.RawMessage) *store.Tokens {
 	}
 	read := false
 	for _, c := range usageCounts {
-		var n int64
-		if v, ok := u[c.key]; ok && !bytes.Equal(bytes.TrimSpace(v), []byte("null")) && json.Unmarshal(v, &n) == nil && n >= 0 && n <= maxCount {
+		if n, ok := countOf(u[c.key]); ok {
 			*c.get(&t) = n
 			read = true
 		}
@@ -201,8 +200,7 @@ func chatUsageOf(raw json.RawMessage) *store.Tokens {
 	return &store.Tokens{Input: prompt - cached, Output: completion, CacheRead: cached}
 }
 
-// countOf reads a count as usageOf does: a whole number from zero to
-// maxCount, not null.
+// countOf reads a count: a whole number from zero to maxCount, not null.
 func countOf(v json.RawMessage) (int64, bool) {
 	var n int64
 	if len(v) == 0 || bytes.Equal(bytes.TrimSpace(v), []byte("null")) || json.Unmarshal(v, &n) != nil || n < 0 || n > maxCount {

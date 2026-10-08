@@ -86,12 +86,19 @@ func spanName(r *http.Request) string {
 	default:
 		return "HTTP"
 	}
-	path := strings.TrimPrefix(r.URL.Path, "/anthropic")
-	if p, ok := strings.CutPrefix(r.URL.Path, "/openai"); ok {
-		path = p
+	// The prefixes as ServeHTTP reads them: each protocol's routes under its
+	// own prefix only.
+	path, prefix := r.URL.Path, ""
+	for _, p := range []string{"/anthropic", "/openai"} {
+		if rest, ok := strings.CutPrefix(path, p); ok && strings.HasPrefix(rest, "/v1/") {
+			path, prefix = rest, p
+			break
+		}
 	}
 	switch {
-	case path == "/v1/messages", path == "/v1/messages/count_tokens", path == "/v1/models", path == "/v1/chat/completions":
+	case path == "/v1/models",
+		(path == "/v1/messages" || path == "/v1/messages/count_tokens") && prefix != "/openai",
+		path == "/v1/chat/completions" && prefix != "/anthropic":
 		return r.Method + " " + path
 	case strings.HasPrefix(path, "/v1/models/"):
 		return r.Method + " /v1/models/{model_id}"
