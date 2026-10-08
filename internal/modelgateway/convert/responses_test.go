@@ -288,7 +288,7 @@ func TestResponsesRequestInterleavedCalls(t *testing.T) {
 		{"role":"user","content":"and"},`+call("fc_"+c+"_0", "t6")+`,{"role":"user","content":"then"},`+call("fc_"+c+"_1", "t7")+`,
 		`+call("fc_"+d+"_a", "t8")+`,`+call("fc_"+d+"_b", "t9")+`,`+call("fc_history_0", "t10")+`,`+call("fc_history_1", "t11")+`,
 		`+call("call_"+d+"_0", "t12")+`,`+call("call_"+d+"_1", "t13")+`,
-		`+call("fc_"+strings.Repeat("u", 24)+"_0", "t14")+`,`+call("fc_"+strings.Repeat("u", 24)+"_1", "t15")+`,`+call("fc_abc_0", "t16")+`,`+call("fc_abc_1", "t17")+`]}`)
+		`+call("fc_"+strings.Repeat("u", 24)+"_0", "t14")+`,`+call("fc_"+strings.Repeat("u", 24)+"_1", "t15")+`,`+call("fc_abc_0", "t16")+`,`+call("fc_abc_1", "t17")+`,`+call("fc_"+a+"_-1", "t18")+`,`+call("fc_"+a+"_+2", "t19")+`]}`)
 	use := func(id string) string { return `{"type":"tool_use","id":"` + id + `","name":"f","input":{}}` }
 	result := func(id string) string {
 		return `{"type":"tool_result","tool_use_id":"` + id + `","content":"` + id + `"}`
@@ -301,7 +301,7 @@ func TestResponsesRequestInterleavedCalls(t *testing.T) {
 		{"role":"assistant","content":[` + use("t5") + `]},{"role":"user","content":[` + result("t5") + `,{"type":"text","text":"and"}]},
 		{"role":"assistant","content":[` + use("t6") + `]},{"role":"user","content":[` + result("t6") + `,{"type":"text","text":"then"}]},
 		{"role":"assistant","content":[` + use("t7") + `]},{"role":"user","content":[` + result("t7") + `]}`)
-	for _, id := range []string{"t8", "t9", "t10", "t11", "t12", "t13", "t14", "t15", "t16", "t17"} {
+	for _, id := range []string{"t8", "t9", "t10", "t11", "t12", "t13", "t14", "t15", "t16", "t17", "t18", "t19"} {
 		w += `,{"role":"assistant","content":[` + use(id) + `]},{"role":"user","content":[` + result(id) + `]}`
 	}
 	want := decoded(t, w+`]`)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -408,7 +407,7 @@ func responseOf(id string) string {
 		len(parts[1]) != 24 || strings.Trim(parts[1], "0123456789abcdefghjkmnpqrstvwxyz") != "" {
 		return ""
 	}
-	if _, err := strconv.Atoi(parts[2]); err != nil {
+	if parts[2] == "" || strings.Trim(parts[2], "0123456789") != "" { // a decimal index, unsigned
 		return ""
 	}
 	return parts[1]

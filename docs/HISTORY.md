@@ -7291,3 +7291,6 @@ any id shaped `<x>_<y>_<n>` named a Response, so a caller's own ids could merge 
 turns; only an id the gateway writes — `msg`, `rs` or `fc`, its 24-character request id, an
 index — now does. Ten mutants over the fixes are caught, 76 in all, the six that pinned the
 per-field counting and the delta's release gone with them.
+
+A fifth pass found one more: an index with a sign, `-1` or `+2`, passed for one the gateway
+writes; the index is now decimal digits alone, its mutants caught, 77 in all.
