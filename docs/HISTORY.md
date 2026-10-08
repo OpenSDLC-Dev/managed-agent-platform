@@ -7108,15 +7108,17 @@ Decisions made in the slice, with the alternative each beat:
 Fixed in review:
 - Compose's brain could claim a queued turn and send the gateway a key the control plane
   had not registered yet, and the gateway's 401 fails the turn. The control plane
-  registers both keys before it listens, so it and the gateway carry a TCP healthcheck,
-  every 2 seconds while starting, and the brain starts once both are healthy.
+  registers both keys before it listens, so it and the gateway carry a TCP healthcheck
+  and the brain starts once both are healthy — every 5 seconds, since `start_interval`,
+  which would probe faster while starting only, fails `up` on Docker Engines before 25.
 - With its route the chart's own, nothing could set the route's other fields, and the
   brain sets no `max_tokens`, so every turn was held to the anthropic adapter's 8,192;
   `brain.gatewayRoute` adds them, refusing the four the chart writes and `api_key`.
 - An upgrade whose values still carried its routes was first told `brain.apiKey` was
   missing; the routes' refusal now comes first, and both name `modelgateway.enabled=false`.
-- An all-digit `brain.apiKey`, which `--set` parses as a number, failed the render with a
-  template type error; the guards and the Secret take it as the string it was.
+- An all-digit `brain.apiKey`, which `--set` or YAML reads as a number, failed the render
+  with a template type error, and no rendering of the number is the value written —
+  `00123456` is octal, a long one a float — so a key that is not a string is refused.
 - Two of CI's negative checks grepped a render's pipe, so a failing render passed them;
   they grep a captured render.
 - The rotation window was claimed closed in compose and uniform under Helm; it runs in

@@ -902,12 +902,14 @@ jobs:
           refuse 'brain.apiKey is required with modelgateway.enabled' -f "$VALUES" --set brain.apiKey=
           # apikey.CheckBrainKey's two refusals, made at render.
           refuse 'brain.apiKey must differ from controlplane.apiKey' -f "$VALUES" --set brain.apiKey=ci-placeholder-key
-          # A key --set parses as a number is compared, and written, as the string it was.
-          refuse 'brain.apiKey must differ from controlplane.apiKey' -f "$VALUES" \
-            --set controlplane.apiKey=12345678 --set brain.apiKey=12345678
-          helm template t "$CHART" -f "$VALUES" --set brain.apiKey=12345678 --show-only templates/secret.yaml \
-            | grep "^  brain-api-key: \"$(printf 12345678 | base64)\"$" > /dev/null \
-            || { echo "an all-digit brain.apiKey is not written as its digits" >&2; exit 1; }
+          # A key read as a number has lost its digits (00123456 is octal), so it
+          # is refused rather than written as something the operator never wrote.
+          refuse 'brain.apiKey must be a string' -f "$VALUES" --set brain.apiKey=12345678
+          printf 'brain:\n  apiKey: 00123456\n' > "/tmp/numeric-key.yaml"
+          refuse 'brain.apiKey must be a string' -f "$VALUES" -f "/tmp/numeric-key.yaml"
+          helm template t "$CHART" -f "$VALUES" --set-string brain.apiKey=00123456 --show-only templates/secret.yaml \
+            | grep "^  brain-api-key: \"$(printf 00123456 | base64)\"$" > /dev/null \
+            || { echo "a quoted all-digit brain.apiKey is not written as its digits" >&2; exit 1; }
           refuse 'brain.apiKey has leading or trailing whitespace' -f "$VALUES" --set 'brain.apiKey=k '
           # The gateway on drops routes of the brain's own, so it refuses them,
           # with existingSecret too.

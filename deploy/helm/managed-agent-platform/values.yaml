@@ -128,7 +128,8 @@ brain:
   # registers it in api_keys as "brain" and the gateway lets it call any model
   # without a key policy; it also authenticates the management API, like
   # controlplane.apiKey, so it is a credential of the same weight. Must differ
-  # from controlplane.apiKey and carry no surrounding whitespace.
+  # from controlplane.apiKey, carry no surrounding whitespace, and be a string —
+  # quoted, or passed with --set-string, if it is all digits.
   apiKey: ""
   # -- The gateway route's other fields, with modelgateway.enabled: the chart
   # writes model, protocol, base_url and api_key_env and refuses them here, and

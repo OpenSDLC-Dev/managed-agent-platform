@@ -1284,9 +1284,10 @@ restarted control plane archived it, or sending the new one before the control p
 registered it, has its model calls refused with a 401, which fails the turn rather
 than delaying it — so rotate while no turns run. Compose starts the brain only once the
 control plane listens, which it does after registering, so a fresh stack never sends
-an unregistered key; neither it nor Helm orders a restart of running containers, and
-under `existingSecret` a changed Secret restarts nothing, so there a rotation is a
-restart of all three.
+an unregistered key; neither it nor Helm sequences the restarts of running containers
+(Helm rolls all three pods on a chart-managed key change, together), and under
+`existingSecret` a changed Secret restarts nothing, so there a rotation is a restart of
+all three.
 
 Console-**issued** keys are the other writer. The platform generates the secret —
 256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in
