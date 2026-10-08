@@ -21,18 +21,19 @@ tool error saying it carries no ripgrep.
 From this directory:
 
 ```sh
-cp .env.example .env         # set CONTROLPLANE_API_KEY
+cp .env.example .env         # set CONTROLPLANE_API_KEY and BRAIN_API_KEY
 docker compose up --build
 ```
 
 - Control plane API: `http://localhost:8080` (bound to loopback by default; see below).
 - Drive it with the real CLI: `ANTHROPIC_API_KEY=<CONTROLPLANE_API_KEY> ant --base-url http://localhost:8080 beta:agents list` (management commands ignore `ANTHROPIC_BASE_URL`; only the worker/auth subcommands honor it).
-- Model gateway: `http://localhost:8090`, on the same loopback bind. Its `/admin/v1/` API takes `CONTROLPLANE_API_KEY`, and it routes nothing until a deployment is configured there ([plan 59](../../docs/plan/59_model-gateway.md)); the brain does not go through it.
+- Model gateway: `http://localhost:8090`, on the same loopback bind. The brain sends every model call here, under `BRAIN_API_KEY`. Its `/admin/v1/` API takes `CONTROLPLANE_API_KEY`, and the gateway answers no model until a deployment and an alias for it are configured there ([plan 59](../../docs/plan/59_model-gateway.md)).
 
-The stack comes up out of the box — the brain loads the committed
-`model-providers.example.json` and idles (its placeholder endpoint isn't real, so
-model *turns* won't run until you point it at your own; see below). To use your
-endpoint:
+The stack comes up out of the box and idles: the brain's one route, the committed
+`model-providers.gateway.json`, is the gateway, so model *turns* fail until its
+catalogue names a deployment for the agent's model — configured through
+managed-agent-console or the `/admin/v1/` API. To route the brain to your endpoint
+without the gateway instead:
 
 ```sh
 cp model-providers.example.json model-providers.json   # then edit base_url + api_key
@@ -44,9 +45,9 @@ binary applies database migrations itself on connect (advisory-locked), so there
 is no separate migrate step.
 
 The API is published on **loopback (`127.0.0.1`) by default**, because the
-committed `CONTROLPLANE_API_KEY` is a well-known placeholder — anyone who can
-reach the port can drive the API with it. To expose it on the LAN, set a real key
-and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
+committed `CONTROLPLANE_API_KEY` and `BRAIN_API_KEY` are well-known placeholders —
+anyone who can reach the port can drive the API with either. To expose it on the
+LAN, set real keys and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 
 ## A second stack beside the first
 
@@ -96,8 +97,8 @@ Two files, and each documents its own settings in place rather than here:
 
 - **[`.env.example`](./.env.example)** — copy it to `.env` (compose reads that
   automatically; never commit it). It carries the handful you are expected to set:
-  `CONTROLPLANE_API_KEY` is the only **required** one, and `CONTROLPLANE_BIND` stays
-  on loopback until you replace the placeholder key.
+  `CONTROLPLANE_API_KEY` and `BRAIN_API_KEY` are the **required** ones, and
+  `CONTROLPLANE_BIND` stays on loopback until you replace the placeholder keys.
 - **[`docker-compose.yml`](./docker-compose.yml)** — every other variable the stack
   passes through, declared on the service that reads it and grouped under comments
   explaining the group: the executor's timeouts and reap intervals, sandbox
@@ -118,15 +119,16 @@ missing rather than failing the turn.
 The **model routing** file (mounted into the brain at
 `/etc/map/model-providers.json`) is a **JSON array** of routes, each with `model`
 (`"*"` is the default route), `protocol` (`anthropic` or `openai`), `base_url`,
-and `api_key`. `base_url` is the **API root** — the adapter appends the protocol
+and `api_key` or `api_key_env`, the name of a variable holding it. `base_url` is the **API root** — the adapter appends the protocol
 path (`/v1/messages` or `/v1/chat/completions`), so give e.g.
 `https://api.openai.com`, **not** `.../v1`. See `model-providers.example.json` and
-`internal/provider` (`LoadRoutes`). The mount defaults to the committed example
-(so the stack starts and idles); point `MODEL_PROVIDERS_FILE` at your gitignored
-copy for real turns.
+`internal/provider` (`LoadRoutes`). The mount defaults to the committed
+`model-providers.gateway.json`, one route sending every model to the gateway under
+`BRAIN_API_KEY`; point `MODEL_PROVIDERS_FILE` at your gitignored copy of the example
+to route the brain yourself.
 
 A route may also set `upstream_model`, the model id the endpoint actually
-receives. Leaving it unset — as the committed example does — **passes the
+receives. Leaving it unset — as both committed files do — **passes the
 agent's own model string through** to the endpoint, which is the point of a
 `"*"` route in front of a gateway that already understands your model names.
 Note what that also means for metrics: the passed-through string becomes the

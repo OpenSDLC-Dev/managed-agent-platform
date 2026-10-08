@@ -39,7 +39,9 @@ its PersistentVolumes are the thing the teardown section warns about.
 assumes mode 2 unless it says otherwise. The switch is `existingSecret`: set it and the
 chart creates no Secret of its own and reads every credential from the one you pre-created,
 which must carry `controlplane-api-key`, `model-providers.json`, `database-url`,
-`blob-backend` (`gcs`) plus `blob-bucket`, and `secrets-backend` plus `gcpkms-key-name`.
+`blob-backend` (`gcs`) plus `blob-bucket`, and `secrets-backend` plus `gcpkms-key-name` —
+`model-providers.json` because `staging-values.yaml` turns the model gateway off; with it
+on, `brain-api-key` takes that key's place.
 Object storage needs no credential key of its own since #240: it authenticates as the
 workload through Workload Identity. `existingSecret` is
 incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart
@@ -313,7 +315,7 @@ holds `roles/storage.objectViewer` there. Its own account rather than the contro
 remains the point: annotating the brain onto that account would be the shortcut, and it would
 hand the brain the KMS decrypt that account carries.
 
-The model gateway is off as `staging-values.yaml` writes it. With `modelgateway.enabled` it
+The model gateway is off as `staging-values.yaml` writes it, where the chart defaults it on. With `modelgateway.enabled` it
 needs a fourth, `terraform output -json modelgateway_service_account_annotation`: an account
 holding the controlplane's KMS role — the gateway seals vendor keys and opens one on every
 model call — and `roles/cloudsql.client`, its own for the brain's reason.

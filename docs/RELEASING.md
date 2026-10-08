@@ -180,4 +180,5 @@ created by `GITHUB_TOKEN` start **private** — flip the five image packages
 (`controlplane`, `brain`, `executor`, `modelgateway`, `gate`) and the chart to
 public in the org's package settings, so anonymous pulls work. It is once per
 package, so the first release publishing `modelgateway` needs its own flip
-where the others are already public.
+where the others are already public — and until it has one, a default chart
+install, whose gateway is on, cannot pull its image.

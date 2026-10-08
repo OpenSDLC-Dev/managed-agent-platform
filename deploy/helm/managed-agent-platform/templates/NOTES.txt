@@ -19,6 +19,13 @@ Reach the API from your shell:
   # ANTHROPIC_BASE_URL; the ant CLI's management commands ignore it — pass
   # --base-url instead.
 
+{{- if (.Values.modelgateway | default dict).enabled }}
+
+The brain sends every model call to the model gateway, which answers none until
+its catalogue names a vendor deployment for the agent's model: configure one
+through its /admin/v1/ API (managed-agent-console does), with the
+controlplane.apiKey.
+{{- end }}
 {{- if .Values.casdoor.enabled }}
 
 The bundled identity provider is at {{ include "map.casdoorOrigin" . }} — serve that host over

@@ -130,6 +130,26 @@ cipher, so its Deployment refuses to render without one.
 {{- end -}}
 
 {{/*
+BRAIN_API_KEY, the brain's platform key for the model gateway (plan 59), for the
+three processes that share it: the brain sends it on its one route, the control
+plane registers it in api_keys as "brain", and the gateway exempts it from key
+policy. Rendered with the gateway on only: with it off the brain routes past the
+gateway, and a control plane without the variable archives the key nobody holds.
+Not optional, as controlplane-api-key is not: a pre-created Secret without the
+key stops the three pods with the kubelet naming it, where an optional reference
+would start a control plane that archives the key the brain then lacks.
+*/}}
+{{- define "map.brainKeyEnv" -}}
+{{- if (.Values.modelgateway | default dict).enabled }}
+- name: BRAIN_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "map.secretName" . }}
+      key: brain-api-key
+{{- end }}
+{{- end -}}
+
+{{/*
 The credential cipher the release resolves — "openbao", "local", "gcpkms", or
 empty for none — in the order secret.yaml validates the options and refuses two
 at once. secret.yaml writes it as the secrets-backend key, and the model

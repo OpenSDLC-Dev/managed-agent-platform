@@ -40,6 +40,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "map.secretName" . }}
                   key: controlplane-api-key
+            {{- include "map.brainKeyEnv" . | nindent 12 }}
             {{- /* Set, not true: a Go template reads a YAML-numeric 0 as false, so
                    `with` would drop the one value that disables the runner and
                    leave it at its 30s default with no warning. `kindIs "invalid"`

@@ -1,0 +1,26 @@
+{{- /* The brain's one route with the model gateway on (plan 59): every model
+       string goes to the gateway's Service, where it names an alias, under
+       BRAIN_API_KEY. A ConfigMap rather than the Secret: it holds no credential,
+       since api_key_env names the variable, and under existingSecret only the
+       chart knows the Service's name. brain.gatewayRoute adds the route's other
+       fields, and takes only the four that carry no credential, spelled exactly:
+       the loader's encoding/json matches a name without regard to case, so
+       refusing headers or api_key would let Headers or API_KEY through. */}}
+{{- if (.Values.modelgateway | default dict).enabled }}
+{{- $route := dict "model" "*" "protocol" "anthropic" "base_url" (printf "http://%s-modelgateway:%v" (include "map.fullname" .) .Values.modelgateway.service.port) "api_key_env" "BRAIN_API_KEY" }}
+{{- $extra := .Values.brain.gatewayRoute | default dict }}
+{{- range $k, $_ := $extra }}
+{{- if not (has $k (list "upstream_model" "stall_timeout" "max_tokens" "flatten_search_results")) }}
+{{- fail (printf "brain.gatewayRoute.%s is refused: it takes only upstream_model, stall_timeout, max_tokens and flatten_search_results. The chart writes the rest — every model to the gateway under BRAIN_API_KEY — in a ConfigMap, which holds no credential." $k) }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "map.fullname" . }}-brain-routes
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: brain
+data:
+  model-providers.json: {{ list (merge $route $extra) | toJson | quote }}
+{{- end }}

@@ -400,7 +400,7 @@ supply alongside it, and the render fails naming each one you miss:
 | Value | Why |
 | --- | --- |
 | `controlplane.apiKey` | the management API key |
-| `brain.modelProviders` | at least one model route, as a JSON array |
+| `brain.apiKey` | the brain's key for the model gateway, which the chart runs by default; with `modelgateway.enabled=false`, `brain.modelProviders` instead: at least one model route, as a JSON array |
 | `postgresql.password` | bundled Postgres; must be URL-safe — it is embedded in `DATABASE_URL` |
 | `minio.rootUser` / `minio.rootPassword` | bundled object storage |
 | `openbao.staticSealKey` / `openbao.platformToken` | bundled OpenBao; the seal key is base64 of exactly 32 bytes |
@@ -410,7 +410,7 @@ without them — which is why they are called out here rather than left to be di
 
 | Value | Why |
 | --- | --- |
-| `image.tag` | the tag `cloudbuild.yaml` pushed. Empty falls back to the chart's `appVersion` (`0.5.1`), which this flow's Artifact Registry does not hold, so all three platform pods sit in `ImagePullBackOff` |
+| `image.tag` | the tag `cloudbuild.yaml` pushed. Empty falls back to the chart's `appVersion` (`0.5.1`), which this flow's Artifact Registry does not hold, so every platform pod sits in `ImagePullBackOff` |
 | `executor.gateImage` | the full `…/gate:TAG` reference. Empty is *valid* and means no gate: `limited` and vault-attached sessions fall back to the backend's own fail-closed networking, and credential substitution does not happen |
 
 Pass them on the `helm` command line, **not** by appending to the values file. The fragment
@@ -485,7 +485,7 @@ terraform output -raw  kms_key_name                              # gcpKMS.keyNam
 terraform output -json controlplane_service_account_annotation   # controlplane.serviceAccount.annotations
 terraform output -json brain_service_account_annotation          # brain.serviceAccount.annotations
 terraform output -json executor_service_account_annotation       # executor.serviceAccount.annotations
-terraform output -json modelgateway_service_account_annotation   # modelgateway.serviceAccount.annotations, with modelgateway.enabled
+terraform output -json modelgateway_service_account_annotation   # modelgateway.serviceAccount.annotations, unless modelgateway.enabled=false
 terraform output -raw  blob_backend                              # BLOB_BACKEND
 terraform output -raw  blob_bucket                               # BLOB_BUCKET
 terraform output -raw  sql_instance_connection_name              # cloudSQLProxy.instanceConnectionName
@@ -798,7 +798,7 @@ is a list to work through rather than a guess, since the workflow's guard refuse
 until all eleven exist.
 
 The model gateway's account (`F modelgateway_service_account`) has no variable, because
-`staging-values.yaml` leaves `modelgateway.enabled` off and CD neither annotates nor reads
+`staging-values.yaml` turns `modelgateway.enabled` off and CD neither annotates nor reads
 back a ServiceAccount the chart does not render. Enabling it there takes a twelfth variable,
 added to the guard, the `--set-string` list and the read-back beside the other three.
 
@@ -1502,9 +1502,10 @@ its resources carry `prevent_destroy`, and it is applied rarely.
 **No secret is in either state file.** That is the point of `bootstrap.sh` and of
 `password_wo`: the two database passwords exist in Secret Manager and nowhere else Terraform
 can reach. Since #240 they are the only such values — object storage authenticates with
-Workload Identity and has no credential to keep anywhere. (The model key is pasted from its own provider into the Helm values
-in mode-1; in mode-2 it rides `model-providers.json` inside the pre-created Secret, so it
-never reaches a values file either.) So a lost state file costs you bookkeeping, not
+Workload Identity and has no credential to keep anywhere. (In mode-1 a model key goes into the
+model gateway's catalogue through its admin API, sealed there by the bundled OpenBao —
+or, with the gateway off, into the Helm values; in mode-2 it rides `model-providers.json`
+inside the pre-created Secret, so it never reaches a values file either.) So a lost state file costs you bookkeeping, not
 credentials.
 
 Losing `foundation/`'s state is recoverable, because every resource in it is adoptable — but

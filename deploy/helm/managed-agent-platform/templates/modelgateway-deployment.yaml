@@ -65,6 +65,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "map.secretName" . }}
                   key: controlplane-api-key
+            {{- include "map.brainKeyEnv" . | nindent 12 }}
             {{- include "map.commonEnv" . | nindent 12 }}
             {{- include "map.secretsEnv" . | nindent 12 }}
             {{- include "map.identityEnv" . | nindent 12 }}

@@ -408,8 +408,8 @@ jobs:
 
           # One build, four tags — so controlplane, brain, executor and
           # modelgateway resolve to a single digest and cannot drift apart
-          # between components. The chart deploys the gateway only when
-          # modelgateway.enabled is set; the tag costs nothing until then.
+          # between components. staging-values.yaml turns the gateway off, so
+          # the tag costs nothing until it is turned on.
           docker build \
             -t "$ARTIFACT_REGISTRY/controlplane:$GITHUB_SHA" \
             -t "$ARTIFACT_REGISTRY/brain:$GITHUB_SHA" \

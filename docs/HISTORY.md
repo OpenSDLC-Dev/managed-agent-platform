@@ -7063,3 +7063,81 @@ Fixed in review:
 Declined: a minimum length for `BRAIN_API_KEY`, which the bootstrap key has never had,
 and one shared list of the call's own header names, the refusal sitting beside
 `CallHeaders` in the same file.
+
+## Model gateway brain cutover (plan 59 slice 5) — acceptance record, 2026-10-09
+
+A compose stack built from the branch, as its own project (`-p map5b`) on ports 18080 and
+18090, with `.env.example` copied unedited: the brain mounted the committed
+`model-providers.gateway.json`, and the control plane registered `BRAIN_API_KEY` as the
+env-managed `brain` row. The gateway took that key on `/v1/models` (200) and refused it on
+`/admin/v1/profiles` (401). Its catalogue was configured through the admin API — DeepSeek's
+Anthropic endpoint behind alias `deepseek-flash`, MiniMax's CN endpoint (`api.minimax.cn`)
+behind `minimax-m3` for `MiniMax-M3` — and the real `ant` CLI (1.30.0) then ran one session
+per alias, each agent with the bash toolset unattended, asked to run
+`echo $((17*23)) && uname -s` and report both outputs.
+
+- **MiniMax-M3:** `agent.tool_use` (bash), `agent.tool_result` `391` / `Linux`, then
+  `agent.message` "The calculation `17*23` equals 391, and the operating system is
+  Linux."; `end_turn`.
+- **deepseek-flash:** the same, an `agent.thinking` event before each call's output, and
+  the second call reading 2,432 of its input tokens from the vendor's cache; `end_turn`.
+- **The gateway's ledger** held four rows, two per session, every one 200 under the
+  `brain` key's id and carrying its session's id from `X-MAP-Session-ID`.
+
+`ant beta:agents create --model` refuses a plain model string, Claude's included — the
+flag is typed as the `model_config` object (`requestflag.Flag[map[string]any]`) — so the
+agents were created with `--model '{"id":"<alias>"}'`.
+
+Decisions made in the slice, with the alternative each beat:
+- The chart writes the brain's gateway route into a ConfigMap rather than the Secret: it
+  holds no credential (`api_key_env` names the variable), and under `existingSecret` only
+  the chart knows the gateway Service's name.
+- `brain.modelProviders` beside the gateway fails the render, `existingSecret` or not,
+  rather than being dropped in favour of the gateway's route.
+- `BRAIN_API_KEY`'s Secret reference is not optional in any of the three pods: a
+  pre-created Secret without the key stops them with the kubelet naming it, where an
+  optional reference would start a control plane that archives the key the brain then
+  lacks.
+- Compose requires `BRAIN_API_KEY` in `.env` (`:?`) rather than defaulting it in the
+  compose file, as it does `CONTROLPLANE_API_KEY`: a key that authenticates the
+  management API stays visible where an operator replaces the placeholder.
+- GCP staging turns the gateway off in `staging-values.yaml`: turning it on there takes
+  `mode2-secret.sh` writing `brain-api-key`, CD annotating and reading back the gateway's
+  ServiceAccount, and its one-proxy-per-deployment check counting a fourth.
+
+Fixed in review:
+- Compose's brain could claim a queued turn and send the gateway a key the control plane
+  had not registered yet, and the gateway's 401 fails the turn. The control plane
+  registers both keys before it listens, so it and the gateway carry a TCP healthcheck
+  and the brain starts once the control plane is healthy and the gateway healthy or
+  failed (a direct route needs no gateway) — every 5 seconds, since `start_interval`,
+  which would probe faster while starting only, fails `up` on Docker Engines before 25,
+  after a 10-minute `start_period`, since migrations wait on their lock without a bound.
+- With its route the chart's own, nothing could set the route's other fields, and the
+  brain sets no `max_tokens`, so every turn was held to the anthropic adapter's 8,192;
+  `brain.gatewayRoute` adds them. It takes four keys by exact name: a denylist of
+  `headers` and `api_key` let `Headers` and `API_KEY` carry a credential into the
+  route's ConfigMap, since the loader matches JSON field names without regard to case.
+  With the gateway off it is refused rather than dropped, as `brain.modelProviders` is
+  beside the gateway.
+- An upgrade whose values still carried its routes was first told `brain.apiKey` was
+  missing; the routes' refusal now comes first, and both name `modelgateway.enabled=false`.
+- An all-digit `brain.apiKey`, which `--set` or YAML reads as a number, failed the render
+  with a template type error, and no rendering of the number is the value written —
+  `00123456` is octal, a long one a float — so a key that is not a string is refused.
+- Two of CI's negative checks grepped a render's pipe, so a failing render passed them;
+  they grep a captured render.
+- The rotation window was claimed closed in compose and uniform under Helm; it runs in
+  both directions, and an `existingSecret` rotation restarts nothing.
+
+Declined: normalizing the string `"false"` for `modelgateway.enabled` (the chart passes
+booleans with `--set`, as `values.yaml` says of the others, and the refusal now says
+so); refusing `brain.apiKey` with the gateway off (nothing reads it, and the control
+plane archives the `brain` row, as slice 5a has it); an init container ordering the Helm
+cutover (the window is one upgrade's, and the docs say to run it while no turns do); and
+TLS between the brain and the gateway (the chart's Services are plain HTTP throughout,
+the control plane's included, for whatever platform key a caller inside the cluster
+sends; TLS terminates at an ingress, or at a mesh); and checking the types of
+`brain.gatewayRoute`'s four values (one the loader cannot read fails the brain at start,
+and a credential written into one as a string would pass any type check: the allowlist
+bars the fields that use a credential, not every place one could be written).

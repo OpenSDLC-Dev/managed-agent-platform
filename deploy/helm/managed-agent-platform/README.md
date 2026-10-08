@@ -1,14 +1,14 @@
 # managed-agent-platform Helm chart
 
-Deploys the platform's three server processes into a Kubernetes namespace, and
-optionally a fourth, the model gateway:
+Deploys the platform's four server processes into a Kubernetes namespace, the
+model gateway among them unless `modelgateway.enabled=false`:
 
 | Process | Kind | Scales | Role |
 |---|---|---|---|
 | **controlplane** | Deployment + Service | independently | the wire-compatible REST API + event log |
 | **brain** | Deployment | independently | the model-turn orchestration pool |
 | **executor** | Deployment + RBAC | independently | runs tools in a per-session **Kubernetes sandbox Pod** |
-| **modelgateway** | Deployment + Service + PodDisruptionBudget | independently (two replicas) | the model gateway, off unless `modelgateway.enabled` |
+| **modelgateway** | Deployment + Service + PodDisruptionBudget | independently (two replicas) | the model gateway every model call goes through |
 
 An optional in-cluster **Postgres** (StatefulSet) is included for a batteries-included
 install, likewise an optional in-cluster **MinIO** (StatefulSet, running PGSTY
@@ -46,15 +46,19 @@ compute, outside the platform cluster, and reaches the control plane only over t
   defaults resolve to them with the tag following `appVersion`. For a chart
   predating the first published release, or to run your own build, push images a
   cluster can pull and point `image.registry` / `image.repository` / `image.tag`
-  at them. Each process is expected at `{registry}/{repository}/{component}:{tag}`
+  at them. A checkout of `main` between releases is your own build: its
+  `appVersion` names the last release, whose images can lack what its templates
+  expect — a `modelgateway` image, until a release carries one. Each process is expected at `{registry}/{repository}/{component}:{tag}`
   and started with `command: ["/<component>"]`.
-- A model endpoint the brain can reach (an Anthropic-protocol endpoint or an
-  OpenAI-compatible gateway), configured via `brain.modelProviders`.
+- A vendor account for the model gateway's catalogue, configured after install
+  through its admin API — or, with `modelgateway.enabled=false`, a model endpoint
+  the brain reaches itself (an Anthropic-protocol endpoint or an OpenAI-compatible
+  gateway), configured via `brain.modelProviders`.
 
 ## Install
 
-Minimum required values: a bootstrap API key, at least one model provider, and — with
-the bundled Postgres, MinIO, and OpenBao — a database password, MinIO root
+Minimum required values: a bootstrap API key, the brain's key for the model gateway,
+and — with the bundled Postgres, MinIO, and OpenBao — a database password, MinIO root
 credentials, and the OpenBao seal key + platform token (none is auto-generated: a
 generated credential is unstable under `helm template`/GitOps; MinIO requires a
 root password of at least 8 characters).
@@ -68,6 +72,20 @@ helm install map ./deploy/helm/managed-agent-platform \
   --set minio.rootPassword=$(openssl rand -hex 24) \
   --set openbao.staticSealKey=$(openssl rand -base64 32) \
   --set openbao.platformToken=$(openssl rand -hex 24) \
+  --set brain.apiKey=$(openssl rand -hex 24)
+```
+
+The brain then sends every model call to the model gateway, which answers none until
+its catalogue names a deployment for the agent's model (see
+[the model gateway](#the-model-gateway-modelgatewayenabled) below).
+
+### Without the gateway
+
+With `modelgateway.enabled=false`, the brain routes itself, and
+`brain.modelProviders` replaces `brain.apiKey` among the required values:
+
+```bash
+  --set modelgateway.enabled=false \
   --set-json 'brain.modelProviders=[{"model":"*","protocol":"anthropic","base_url":"https://gateway.internal","api_key":"sk-..."}]'
 ```
 
@@ -94,19 +112,23 @@ the API root — the adapter appends `/v1/messages`
 also accepts `api_key_env`, but the chart injects no extra
 env into the brain, so supply `api_key` here.) See `internal/provider` for the schema.
 
-The install above — a `"*"` route with no `upstream_model`, the common shape in front
-of a gateway — **passes the caller's own model string through** to the endpoint and
+A `"*"` route with no `upstream_model` — the common shape in front of a gateway, and
+the shape of the route the chart writes for its own unless `brain.gatewayRoute` sets
+one — **passes the caller's own model string through** to the endpoint and
 into the `gen_ai.request.model` metric attribute. Metric attributes are aggregation
 keys, so anyone who can supply a model string (creating an agent, or a session with an
 `agent_with_overrides` block) then controls your metrics backend's series count. Set
-`upstream_model`, or use per-model routes, if those paths are exposed to untrusted
+`upstream_model` (with the gateway on, `brain.gatewayRoute.upstream_model`, which
+pins every agent to that alias; the gateway refusing an unknown alias comes after the
+brain has recorded it), or use per-model routes, if those paths are exposed to untrusted
 callers — see the `brain.modelProviders` comment in `values.yaml` and
 [#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88).
 
 Upgrade with your values file, or `--reset-then-reuse-values` (Helm ≥ 3.14), rather
 than `--reuse-values`: that flag keeps the installed chart's defaults instead of the
 new chart's, so a values section a release adds arrives empty — `casdoor`, added in
-v0.3.0, fails the render on it, and `modelgateway` cannot be enabled that way.
+v0.3.0, fails the render on it, and `modelgateway` keeps the installed chart's
+default, off.
 
 ## The executor and the Kubernetes sandbox
 
@@ -118,13 +140,13 @@ The chart grants its ServiceAccount a namespaced Role with exactly the pod lifec
 
 ## The model gateway (`modelgateway.enabled`)
 
-Off by default. Enabled, it runs `cmd/modelgateway`
+On by default. It runs `cmd/modelgateway`
 ([plan 59](../../../docs/plan/59_model-gateway.md)) as `modelgateway.replicas` pods
 (default two, which the scheduler prefers to place on different nodes) behind a
 ClusterIP Service on port 8090, with a PodDisruptionBudget of
 `maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow`: a drain evicts one
 Ready pod at a time, waiting for its replacement before the next, never pins a lone
-replica, and evicts a pod that is not Ready regardless (from Kubernetes 1.27). It reads `database-url` and `controlplane-api-key` from the release's
+replica, and evicts a pod that is not Ready regardless (from Kubernetes 1.27). It reads `database-url`, `controlplane-api-key` and `brain-api-key` from the release's
 Secret, takes `identity.*` so the console's operator sign-in reaches its admin API, and
 seals vendor keys with the release's credential cipher — so it needs one. A chart-managed
 Secret that resolves none fails the render; with `existingSecret` the chart cannot see
@@ -132,6 +154,19 @@ the keys, and a Secret without `secrets-*` leaves the gateway refusing to start.
 `gcpKMS` its ServiceAccount needs `roles/cloudkms.cryptoKeyEncrypterDecrypter`, as the
 controlplane's and executor's do; [`deploy/gcp/`](../../gcp/) creates the account and the
 grant.
+
+The brain's one route is the chart's, in the ConfigMap `<release>-brain-routes`: every
+model string to the gateway's Service, where it names an alias, under `BRAIN_API_KEY`.
+The brain, the control plane (which registers the key in `api_keys` as `brain`) and the
+gateway read it from the Secret's `brain-api-key`, set from `brain.apiKey`, which must
+differ from `controlplane.apiKey`. `brain.gatewayRoute` adds the route's other fields —
+`upstream_model`, `stall_timeout`, `flatten_search_results` and, above all, `max_tokens`,
+since the brain sets none and the anthropic adapter otherwise sends 8192; any other key
+fails the render, since the route is a ConfigMap. `brain.modelProviders` set beside the
+gateway, or `brain.gatewayRoute` without it, fails the render rather than being dropped. The upgrade that turns the gateway on fails the turns that run while its
+pods and the new control plane come up, so run it while no turns do. The gateway answers no model until its catalogue
+names a deployment for the agent's model: configure vendors through its `/admin/v1/`
+API, which managed-agent-console drives.
 
 ## Database
 
@@ -292,9 +327,9 @@ policy.
 
 With the bundled instance disabled and no `externalOpenBao.address`, setting
 `localCipher.masterKey` (base64, 32 bytes) selects the AES-256-GCM local cipher —
-minimal deployments only. Leaving all four unset deploys without a cipher: the
-platform runs, vault credential storage is unavailable, and `modelgateway.enabled`
-fails the render.
+minimal deployments only. Leaving all four unset deploys without a cipher only with
+`modelgateway.enabled=false`, which the gateway needs: the platform then runs with
+vault credential storage unavailable.
 
 ### Google Cloud KMS (`gcpKMS.keyName`)
 
@@ -574,7 +609,8 @@ passwords and this IdP is published.
 ## Managing your own Secret
 
 To keep credentials out of Helm values, pre-create a Secret with keys
-`controlplane-api-key`, `model-providers.json`, and `database-url` (plus the
+`controlplane-api-key`, `database-url`, and `brain-api-key` — or `model-providers.json`
+with `modelgateway.enabled=false` (plus the
 `blob-*` keys for object storage and, for the credential cipher if used, the
 `secrets-backend` key plus that backend's own — `bao-*` for OpenBao, `secrets-*`
 for the local cipher, `gcpkms-key-name` for Cloud KMS), then set
@@ -602,7 +638,7 @@ Four decisions. Only the database is mandatory; the other three have a supported
 |---|---|---|---|
 | Database | bundled Postgres · `externalDatabase.url` | not an option | `postgresql.enabled` **wins silently** — the external URL is only read when it is false |
 | Object storage | bundled MinIO · any S3-compatible endpoint · `gcsObjectStorage` (Google Cloud Storage natively) | supported: no `blob-*` keys, and the features that need object storage are unavailable | the render **fails**, naming the pair |
-| Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` | supported: no `secrets-*` keys, and vault credential storage is unavailable — but not with `modelgateway.enabled`, which fails the render | the render **fails**, naming the pair |
+| Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` | supported with `modelgateway.enabled=false`: no `secrets-*` keys, and vault credential storage is unavailable; with the gateway on, the render fails | the render **fails**, naming the pair |
 | Identity | `identity.mode=oidc` · `identity.mode=trusted_proxy` — with the bundled Casdoor as an optional IdP | the default: no `IDENTITY_*` env at all, and `x-api-key` stays the only management credential | not expressible: `mode` is one string |
 
 The Cloud SQL Auth Proxy (`cloudSQLProxy.*`) is not a third database option but a
@@ -652,7 +688,7 @@ Four things worth understanding before you turn them on:
   `values.yaml` carries the per-field table beside the keys.
 
 Nothing here is auto-generated: every secret-shaped value you must supply yourself —
-`controlplane.apiKey`, `postgresql.password`, the MinIO pair (`minio.rootUser` /
+`controlplane.apiKey`, `brain.apiKey`, `postgresql.password`, the MinIO pair (`minio.rootUser` /
 `minio.rootPassword`, whose password needs at least 8 characters, and which the
 **default** object-storage option requires), the OpenBao pair, and the Casdoor pair.
 The chart refuses to render without one rather than inventing a credential you did

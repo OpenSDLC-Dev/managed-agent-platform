@@ -44,8 +44,9 @@ then what you own.
 These hold without any operator action. They are the invariants the codebase
 tests and the reference design commits to.
 
-- **Credentials never enter the sandbox.** Model API keys live in the brain's
-  provider config; the sandbox — where untrusted tool commands run — never sees
+- **Credentials never enter the sandbox.** Model API keys live sealed in the model
+  gateway's catalogue, or in the brain's provider config where it routes past the
+  gateway; the sandbox — where untrusted tool commands run — never sees
   them. Provider adapters redact the credentials they were configured with (the
   API key, a `base_url` userinfo password, an auth header) out of any error that
   quotes an endpoint (`internal/provider/redact.go`), so an endpoint that echoes
@@ -1277,7 +1278,16 @@ replica booting without it archives the key another replica just registered, as 
 booting with an old bootstrap value revives that value over the new one. The gateway
 needs no key policy for it, but holds it to one written for its row; rotating to a
 value never registered before makes a new row, so such a policy is written again for
-it, while returning to an earlier value revives that value's row and its policy.
+it, while returning to an earlier value revives that value's row and its policy. A
+rotation has a window in both directions: a brain still sending the old value after a
+restarted control plane archived it, or sending the new one before the control plane
+registered it, has its model calls refused with a 401, which fails the turn rather
+than delaying it — so rotate while no turns run. Compose starts the brain only once the
+control plane listens, which it does after registering, so a fresh stack never sends
+an unregistered key; neither it nor Helm sequences the restarts of running containers
+(on a chart-managed key change Helm rolls every pod that checksums the Secret at once),
+and under `existingSecret` a changed Secret restarts nothing, so there a rotation is a
+restart of the control plane, the brain and the gateway.
 
 Console-**issued** keys are the other writer. The platform generates the secret —
 256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in

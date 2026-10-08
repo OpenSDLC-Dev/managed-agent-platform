@@ -59,11 +59,63 @@ jobs:
         run: helm lint "$CHART" -f "$VALUES" -f "$IAM_VALUES"
       - name: helm template renders (smoke)
         run: helm template t "$CHART" -f "$VALUES" > /dev/null
-      - name: brain model-providers file is the JSON array the loader requires
+      - name: brain model-providers file is the JSON array the loader requires, gateway on and off
         run: |
-          mp="$(helm template t "$CHART" -f "$VALUES" --show-only templates/secret.yaml \
+          set -euo pipefail
+          # On, the default: one route, every model to the gateway's Service under
+          # BRAIN_API_KEY, from a ConfigMap the brain mounts in the Secret's place.
+          mp="$(helm template t "$CHART" -f "$VALUES" --show-only templates/brain-configmap.yaml \
+            | grep 'model-providers.json:' | sed 's/^[^:]*: //')"
+          echo "$mp" | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); want=[{"model":"*","protocol":"anthropic","base_url":"http://t-managed-agent-platform-modelgateway:8090","api_key_env":"BRAIN_API_KEY"}]; assert d == want, d; print("ok: the gateway route")'
+          # The route names the Service the chart renders, port included.
+          helm template t "$CHART" -f "$VALUES" --show-only templates/modelgateway-service.yaml \
+            | grep '^      port: 8090$' > /dev/null \
+            || { echo "the gateway's Service does not listen on the port the brain's route names" >&2; exit 1; }
+          helm template t "$CHART" -f "$VALUES" --show-only templates/brain-deployment.yaml \
+            | grep -A2 '^        - name: model-providers$' | grep '^            name: t-managed-agent-platform-brain-routes$' > /dev/null \
+            || { echo "the brain does not mount the gateway route" >&2; exit 1; }
+          # The key the route names reaches the three processes that share it,
+          # from the Secret key the Secret writes, and no other.
+          for tpl in brain controlplane modelgateway; do
+            helm template t "$CHART" -f "$VALUES" --show-only "templates/$tpl-deployment.yaml" \
+              | grep -A4 'name: BRAIN_API_KEY$' | grep 'key: brain-api-key$' > /dev/null \
+              || { echo "the $tpl does not read BRAIN_API_KEY from the brain-api-key Secret key" >&2; exit 1; }
+          done
+          # Each negative check greps a captured render, so a render that fails
+          # fails the step rather than matching nothing.
+          exe="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
+          echo "$exe" | grep 'BRAIN_API_KEY' > /dev/null \
+            && { echo "the executor is handed BRAIN_API_KEY" >&2; exit 1; }
+          sec="$(helm template t "$CHART" -f "$VALUES" --show-only templates/secret.yaml)"
+          echo "$sec" | grep '^  brain-api-key: ' > /dev/null \
+            || { echo "the Secret does not write brain-api-key" >&2; exit 1; }
+          echo "$sec" | grep 'model-providers.json' > /dev/null \
+            && { echo "the Secret writes model-providers.json with the gateway on" >&2; exit 1; }
+          # Off: the brain routes itself, from the Secret's model-providers.json,
+          # and nothing names the gateway's route or key.
+          off() { helm template t "$CHART" -f "$VALUES" --set modelgateway.enabled=false \
+            --set-json 'brain.modelProviders=[{"model":"*","protocol":"anthropic","base_url":"https://gateway.example.internal","api_key":"ci-placeholder-secret"}]' "$@"; }
+          mp="$(off --show-only templates/secret.yaml \
             | grep 'model-providers.json:' | awk '{print $2}' | tr -d '"' | base64 -d)"
-          echo "$mp" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list) and d and all("model" in e for e in d), "model-providers.json must be a non-empty JSON array of route objects"; print("ok:", len(d), "route(s)")'
+          echo "$mp" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list) and d and all("model" in e for e in d), "model-providers.json must be a non-empty JSON array of route objects"; print("ok:", len(d), "route(s) with the gateway off")'
+          offr="$(off)"
+          echo "$offr" | grep 'BRAIN_API_KEY\|brain-routes\|brain-api-key' > /dev/null \
+            && { echo "the gateway-off render names the gateway's route or key" >&2; exit 1; }
+          # brain.gatewayRoute joins the chart's four fields; it may not replace them.
+          mp="$(helm template t "$CHART" -f "$VALUES" --set brain.gatewayRoute.max_tokens=32000 \
+            --show-only templates/brain-configmap.yaml | grep 'model-providers.json:' | sed 's/^[^:]*: //')"
+          echo "$mp" | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); want=[{"model":"*","protocol":"anthropic","base_url":"http://t-managed-agent-platform-modelgateway:8090","api_key_env":"BRAIN_API_KEY","max_tokens":32000}]; assert d == want, d; print("ok: brain.gatewayRoute joins the route")'
+          # Refused: everything but the four allowed keys — the chart's own, the
+          # credential fields, and their other spellings, which the loader's
+          # case-insensitive JSON would read as the same fields.
+          for k in model protocol base_url api_key api_key_env headers Headers API_KEY Max_Tokens extra; do
+            if err="$(helm template t "$CHART" -f "$VALUES" --set "brain.gatewayRoute.$k=x" 2>&1)"; then
+              echo "brain.gatewayRoute.$k rendered" >&2; exit 1
+            fi
+            echo "$err" | grep -F "brain.gatewayRoute.$k is refused" > /dev/null \
+              || { echo "brain.gatewayRoute.$k refused for the wrong reason: $err" >&2; exit 1; }
+          done
+          echo "ok: the gateway route on, the Secret's routes off"
       - name: external-database path renders
         run: |
           helm template t "$CHART" -f "$VALUES" \
@@ -836,13 +888,48 @@ jobs:
             --set casdoor.ingress.host=idp.example > /dev/null \
             || { echo "casdoor.enabled with identity.mode empty must render" >&2; exit 1; }
           echo "ok: the IdP's refusals and its single entrance"
-      - name: required-value guard fires (missing controlplane.apiKey)
+      - name: required-value guards fire, each for its own reason
         run: |
-          if helm template t "$CHART" --set image.tag=x \
-               --set-json 'brain.modelProviders=[{"model":"*"}]' > /dev/null 2>&1; then
-            echo "expected the missing-apiKey guard to fail the render" >&2; exit 1
-          fi
-          echo "ok: guard fired"
+          set -euo pipefail
+          # The message, not the exit status: with several guards in play, a
+          # render refused by another one would pass for this one.
+          refuse() {
+            want="$1"; shift
+            if err="$(helm template t "$CHART" "$@" 2>&1)"; then
+              echo "rendered, want the refusal: $want" >&2; exit 1
+            fi
+            echo "$err" | grep -F -- "$want" > /dev/null \
+              || { echo "refused for the wrong reason (want: $want): $err" >&2; exit 1; }
+          }
+          refuse 'controlplane.apiKey is required' --set image.tag=x --set brain.apiKey=b
+          refuse 'brain.apiKey is required with modelgateway.enabled' -f "$VALUES" --set brain.apiKey=
+          # apikey.CheckBrainKey's two refusals, made at render.
+          refuse 'brain.apiKey must differ from controlplane.apiKey' -f "$VALUES" --set brain.apiKey=ci-placeholder-key
+          # A key read as a number has lost its digits (00123456 is octal), so it
+          # is refused rather than written as something the operator never wrote.
+          refuse 'brain.apiKey must be a string' -f "$VALUES" --set brain.apiKey=12345678
+          printf 'brain:\n  apiKey: 00123456\n' | refuse 'brain.apiKey must be a string' -f "$VALUES" -f -
+          helm template t "$CHART" -f "$VALUES" --set-string brain.apiKey=00123456 --show-only templates/secret.yaml \
+            | grep "^  brain-api-key: \"$(printf 00123456 | base64)\"$" > /dev/null \
+            || { echo "a quoted all-digit brain.apiKey is not written as its digits" >&2; exit 1; }
+          refuse 'brain.apiKey has leading or trailing whitespace' -f "$VALUES" --set 'brain.apiKey=k '
+          # The gateway on drops routes of the brain's own, so it refuses them,
+          # with existingSecret too.
+          refuse 'brain.modelProviders is set, but modelgateway.enabled' -f "$VALUES" \
+            --set-json 'brain.modelProviders=[{"model":"*"}]'
+          # An upgrade's values carry routes and no brain.apiKey: it is told how to
+          # keep them before it is told the key is missing.
+          refuse 'brain.modelProviders is set, but modelgateway.enabled' -f "$VALUES" --set brain.apiKey= \
+            --set-json 'brain.modelProviders=[{"model":"*"}]'
+          refuse 'brain.modelProviders is set, but modelgateway.enabled' -f "$VALUES" \
+            --set postgresql.enabled=false --set minio.enabled=false --set openbao.enabled=false \
+            --set existingSecret=my-preexisting --set-json 'brain.modelProviders=[{"model":"*"}]'
+          refuse 'brain.modelProviders is required with modelgateway.enabled=false' -f "$VALUES" \
+            --set modelgateway.enabled=false
+          refuse 'brain.gatewayRoute is set, but modelgateway.enabled=false' -f "$VALUES" \
+            --set modelgateway.enabled=false --set brain.gatewayRoute.max_tokens=32000 \
+            --set-json 'brain.modelProviders=[{"model":"*","protocol":"anthropic","base_url":"http://x","api_key":"k"}]'
+          echo "ok: each guard fired for its own reason"
       - name: the CD values file renders, and its sandbox placement survives the render
         # deploy/gcp/staging-values.yaml is the file `.github/workflows/deploy.yml`
         # installs with, and the chart ships no values.schema.json — so a
@@ -1067,19 +1154,23 @@ jobs:
           echo "$err" | grep 'must equal casdoor.console.clientId' > /dev/null \
             || { echo "the mismatched-audience render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: bundled IdP is off by default, seeds no demo account, and owns its admin password"
-      - name: the model gateway renders only when enabled, and only with a cipher
+      - name: the model gateway renders by default, only when enabled, and only with a cipher
         run: |
           set -euo pipefail
-          # Off by default: the default render names it nowhere. Captured first,
-          # so a render that fails fails here rather than reading as absent.
+          # On by default. Captured first, so a render that fails fails here
+          # rather than reading as absent.
           default="$(helm template t "$CHART" -f "$VALUES")"
-          echo "$default" | grep modelgateway > /dev/null \
-            && { echo "the default render names the model gateway" >&2; exit 1; }
+          echo "$default" | grep '^  name: t-managed-agent-platform-modelgateway$' > /dev/null \
+            || { echo "the default render has no model gateway" >&2; exit 1; }
           # A release upgraded with --reuse-values from a chart without the
-          # section has none, and the gateway's templates must not fail on that.
-          helm template t "$CHART" -f "$VALUES" --set modelgateway=null > /dev/null \
+          # section has none: the templates must not fail on that, and the
+          # gateway is off there, so the brain keeps the routes it had.
+          none="$(helm template t "$CHART" -f "$VALUES" --set modelgateway=null \
+            --set-json 'brain.modelProviders=[{"model":"*"}]')" \
             || { echo "a values tree without the modelgateway section fails the render" >&2; exit 1; }
-          on() { helm template t "$CHART" -f "$VALUES" --set modelgateway.enabled=true "$@"; }
+          echo "$none" | grep 'modelgateway\|brain-routes' > /dev/null \
+            && { echo "a values tree without the modelgateway section renders the gateway" >&2; exit 1; }
+          on() { helm template t "$CHART" -f "$VALUES" "$@"; }
           for tpl in deployment service serviceaccount pdb; do
             on --show-only "templates/modelgateway-$tpl.yaml" \
               | grep '^  name: t-managed-agent-platform-modelgateway$' > /dev/null \
@@ -1143,12 +1234,16 @@ jobs:
           done
           # It seals vendor keys and does not start without a cipher, so a
           # chart-managed Secret resolving none refuses the render.
-          if err="$(helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false --set modelgateway.enabled=true 2>&1)"; then
+          if err="$(helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false 2>&1)"; then
             echo "the gateway rendered without a cipher" >&2; exit 1
           fi
           echo "$err" | grep 'modelgateway.enabled needs a credential cipher' > /dev/null \
             || { echo "the cipher-less render failed for the wrong reason: $err" >&2; exit 1; }
-          echo "ok: off by default; when on, two replicas, a drain-safe budget, its own identity and the cipher it needs"
+          # Turning it off is how a release goes without a cipher.
+          helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false --set modelgateway.enabled=false \
+            --set-json 'brain.modelProviders=[{"model":"*"}]' > /dev/null \
+            || { echo "a release with the gateway off still needs a cipher" >&2; exit 1; }
+          echo "ok: on by default; two replicas, a drain-safe budget, its own identity and the cipher it needs"
 
   # The GCP staging Terraform (docs/plan/20, Decision 9). fmt and validate need
   # no credentials, no state and no GCP project, which is what lets them run on
@@ -1396,7 +1491,8 @@ jobs:
           persist-credentials: false
       - name: seed local env from the committed example
         # model-providers.json is intentionally NOT created: the brain mount
-        # defaults to the committed example, so this also exercises that default.
+        # defaults to the committed gateway route, so this also exercises that
+        # default.
         run: cp .env.example .env
       - name: docker compose config is valid
         run: docker compose config --quiet
@@ -1492,7 +1588,14 @@ jobs:
           [ "$noauth" = "401" ] || { echo "expected 401 from the gateway without a key, got $noauth" >&2; exit 1; }
           models="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" -H 'anthropic-version: 2023-06-01' http://localhost:8090/v1/models || true)"
           [ "$models" = "200" ] || { echo "the gateway refused the registered key on /v1/models: $models" >&2; docker compose logs modelgateway >&2; exit 1; }
-          echo "ok: the gateway's admin API answers the bootstrap key, and its models list the registered key"
+          # The brain's key, which its default route sends: registered by the
+          # control plane, accepted on /v1/, refused by the admin API.
+          brain="$(grep '^BRAIN_API_KEY=' .env | cut -d= -f2-)"
+          models="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $brain" -H 'anthropic-version: 2023-06-01' http://localhost:8090/v1/models || true)"
+          [ "$models" = "200" ] || { echo "the gateway refused the brain's key on /v1/models: $models" >&2; docker compose logs modelgateway controlplane >&2; exit 1; }
+          admin="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $brain" http://localhost:8090/admin/v1/profiles || true)"
+          [ "$admin" = "401" ] || { echo "the admin API answered the brain's key with $admin, want 401" >&2; exit 1; }
+          echo "ok: the gateway's admin API answers the bootstrap key, and its models list the registered keys"
       # E2E-1 (docs/plan/06_skills.md): the wire-only skills round-trip against
       # the bundled MinIO — upload both forms, list, download and byte-compare,
       # and prove the delete order (skill delete 400s until versions are gone).

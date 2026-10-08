@@ -1,3 +1,4 @@
+{{- $gateway := (.Values.modelgateway | default dict).enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,9 +14,14 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the pods when the chart-managed Secret (DSN, model providers) changes
-        # on upgrade. Inert when existingSecret is set (no Secret is rendered).
+        # Roll the pods when the chart-managed Secret (DSN, model providers or
+        # the brain's key) changes on upgrade. Inert when existingSecret is set
+        # (no Secret is rendered).
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+        {{- if $gateway }}
+        # And when the gateway route does: its Service's port is in it.
+        checksum/routes: {{ include (print $.Template.BasePath "/brain-configmap.yaml") . | sha256sum | quote }}
+        {{- end }}
       labels:
         {{- include "map.labels" . | nindent 8 }}
         app.kubernetes.io/component: brain
@@ -31,6 +37,7 @@ spec:
           env:
             - name: MODEL_PROVIDERS_PATH
               value: /etc/managed-agent-platform/model-providers.json
+            {{- include "map.brainKeyEnv" . | nindent 12 }}
             {{- with .Values.brain.leaseTTL }}
             - name: BRAIN_LEASE_TTL
               value: {{ . | quote }}
@@ -51,6 +58,13 @@ spec:
           {{- end }}
       volumes:
         - name: model-providers
+          {{- if $gateway }}
+          configMap:
+            name: {{ include "map.fullname" . }}-brain-routes
+            items:
+              - key: model-providers.json
+                path: model-providers.json
+          {{- else }}
           secret:
             secretName: {{ include "map.secretName" . }}
             # optional so a missing key surfaces as a clear brain error ("model
@@ -60,6 +74,7 @@ spec:
             items:
               - key: model-providers.json
                 path: model-providers.json
+          {{- end }}
       {{- with .Values.brain.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
