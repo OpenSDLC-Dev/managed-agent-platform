@@ -84,7 +84,11 @@ func TestAResponsesRequestIsServedAsMessages(t *testing.T) {
 		last.Response.Usage.OutputTokens != 2 || types[0] != "response.created" {
 		t.Errorf("stream: %v %q %+v", types, text, last.Response)
 	}
-	for _, row := range e.ledger() {
+	rows := e.ledger()
+	if len(rows) != 2 {
+		t.Fatalf("ledger rows %d, want one for each request: %+v", len(rows), rows)
+	}
+	for _, row := range rows {
 		if row.Protocol != string(profile.OpenAI) || row.Endpoint != "responses" || row.Status != 200 ||
 			row.Tokens == nil || row.Tokens.Input != 5 || row.Tokens.Output != 2 {
 			t.Errorf("ledger row %+v %+v", row, row.Tokens)
