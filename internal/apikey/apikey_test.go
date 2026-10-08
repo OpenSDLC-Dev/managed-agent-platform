@@ -50,3 +50,21 @@ func TestHash(t *testing.T) {
 		t.Errorf("Hash = %s, want %s", got, want)
 	}
 }
+
+func TestCheckBrainKey(t *testing.T) {
+	const boot = "sk-map-boot"
+	for brain, refused := range map[string]bool{
+		"":               false,
+		"sk-map-brain":   false,
+		"sk map brain":   false, // inner whitespace survives HTTP
+		boot:             true,
+		boot + " ":       true,
+		"\tsk-map-brain": true,
+		"sk-map-brain\n": true,
+		"sk-map-brain\r": true,
+	} {
+		if err := apikey.CheckBrainKey(boot, brain); (err != nil) != refused {
+			t.Errorf("%q: %v, want refused %v", brain, err, refused)
+		}
+	}
+}

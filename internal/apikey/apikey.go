@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/textproto"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -44,4 +45,26 @@ func Authenticate(ctx context.Context, db Querier, key string) (string, error) {
 		return "", nil
 	}
 	return id, err
+}
+
+// CheckBrainKey says why brain cannot serve as the brain's key beside the
+// bootstrap key boot, or returns nil when it can, as an empty brain key —
+// none configured — always can. The control plane and the gateway both ask
+// it, so the two refuse the same values. Its error reads after the variable's
+// name.
+func CheckBrainKey(boot, brain string) error {
+	switch {
+	case brain == "":
+		return nil
+	case brain == boot:
+		// The control plane registers each key by its value under its own
+		// name, so one value under both would move its row between them.
+		return errors.New("must differ from the bootstrap key")
+	case textproto.TrimString(brain) != brain:
+		// HTTP trims a header value's surrounding whitespace, so such a key
+		// arrives as another: the bootstrap key, if the two differ by
+		// nothing else.
+		return errors.New("has leading or trailing whitespace, which no request can carry")
+	}
+	return nil
 }

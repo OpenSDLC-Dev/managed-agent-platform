@@ -366,9 +366,13 @@ func TestRetireAPIKeyEndsOnlyTheRowsItOwns(t *testing.T) {
 		return res.StatusCode
 	}
 
-	for range 2 { // the second retirement finds nothing to do, and says nothing went wrong
+	warnings := captureWarnings(t)
+	for i := range 2 { // the second retirement finds nothing to do, and says nothing
 		if err := api.RetireAPIKey(ctx, s.pool, "retiring"); err != nil {
 			t.Fatalf("RetireAPIKey: %v", err)
+		}
+		if got, want := strings.Count(warnings(), "archived its env-var-managed key"), 1; got != want {
+			t.Errorf("retirement %d: %d warnings, want %d:\n%s", i+1, got, want, warnings())
 		}
 		for key, want := range map[string]int{managed: http.StatusUnauthorized, issued: http.StatusOK, other: http.StatusOK} {
 			if got := call(key); got != want {

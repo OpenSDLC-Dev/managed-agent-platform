@@ -149,11 +149,19 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 // RetireAPIKey archives every live env-var-managed key under name — the rows
 // EnsureAPIKey writes — so a key whose variable is no longer set stops working
 // at the next boot instead of outliving its configuration. A key issued over
-// the console under the same name records its issuer and is left alone.
+// the console under the same name records its issuer and is left alone. A
+// retirement that archives anything is logged, since whatever still holds the
+// key is refused from then on.
 func RetireAPIKey(ctx context.Context, pool *pgxpool.Pool, name string) error {
-	_, err := pool.Exec(ctx,
+	tag, err := pool.Exec(ctx,
 		`UPDATE api_keys SET status = 'archived' WHERE name = $1 AND status = 'active' AND created_by IS NULL`, name)
-	return err
+	if err != nil {
+		return err
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		slog.WarnContext(ctx, "management key's variable is unset; archived its env-var-managed key", "name", name, "archived", n)
+	}
+	return nil
 }
 
 // requireAPIKey is the management-auth middleware: every /v1 route needs a

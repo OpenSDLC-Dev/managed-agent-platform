@@ -1270,7 +1270,13 @@ than leaving it live with nobody holding it on purpose. It is a platform key lik
 other row, so it authenticates the management API too — no wider than the database
 credential the brain already holds, but worth holding as closely as the bootstrap
 key. The control plane and the gateway both refuse to start when it equals
-`CONTROLPLANE_API_KEY`, since one value cannot be registered under two names.
+`CONTROLPLANE_API_KEY`, since one value cannot be registered under two names, or
+carries leading or trailing whitespace, which HTTP trims in transit. Every
+control-plane replica must agree on it, set or unset, as on the bootstrap key: a
+replica booting without it archives the key another replica just registered, as one
+booting with an old bootstrap value revives that value over the new one. The gateway
+needs no key policy for it, but holds it to one written for its row; rotating the key
+makes a new row, so such a policy is written again for the new one.
 
 Console-**issued** keys are the other writer. The platform generates the secret —
 256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in

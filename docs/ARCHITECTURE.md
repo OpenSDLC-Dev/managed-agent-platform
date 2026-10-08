@@ -726,8 +726,8 @@ by outcome (`created`/`failed` sub-attributed by error.type/`abandoned`),
 `deployment.occurrences.skipped` (the catch-up collapse count, added by the claim's winner
 after its commit so a rollback cannot double-count), and `deployment.tick.duration`, the
 signal that one sweep has outgrown its 30-second interval. Every model call the brain
-makes carries the trace context of the span it runs under and its session in
-`X-MAP-Session-ID`, whatever the endpoint (`provider.CallHeaders`). The model gateway continues
+makes carries its session in `X-MAP-Session-ID` and, with tracing on, the trace context
+of the span it runs under, whatever the endpoint (`provider.CallHeaders`). The model gateway continues
 a caller's `traceparent` in a server span per request, opens a client span per upstream
 attempt, and records `modelgateway.requests`, `.request.duration`,
 `.time_to_first_token`, `.tokens` by kind and `.cost` from each ledger row's usage, by matched

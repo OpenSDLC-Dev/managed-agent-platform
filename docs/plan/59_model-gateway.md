@@ -618,10 +618,10 @@ frozen by slice 2.
 - One route: `{"model": "*", "protocol": "anthropic", "base_url": <gateway>,
   "api_key": <platform API key>}`, no `upstream_model`, so the agent's model string
   reaches the gateway as the alias.
-- `internal/provider` injects `traceparent` (`telemetry.Inject`) on both adapters'
-  requests — it sends none today — and the brain sends `X-MAP-Session-ID` for
-  per-session cost and cache locality. Both headers are each call's own, so a route may
-  not configure them (`provider.NewRegistry` refuses it).
+- `internal/provider` injects the W3C trace context (`telemetry.Inject`) on both adapters'
+  requests, and the brain sends `X-MAP-Session-ID` for per-session cost and cache
+  locality. `traceparent`, `tracestate` and the session header are each call's own, so a
+  route may not configure them (`provider.NewRegistry` refuses it).
 - compose and Helm run the gateway — Helm with two replicas and a PodDisruptionBudget by
   default, since every agent turn now depends on it. Until the cutover nothing does, so
   slice 2 ships the chart's gateway behind `modelgateway.enabled`, off: the chart still

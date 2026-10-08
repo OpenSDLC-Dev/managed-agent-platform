@@ -162,10 +162,9 @@ func New(cfg Config) (http.Handler, error) {
 		return nil, errors.New("modelgateway: a secrets cipher is required")
 	case cfg.BootstrapKey == "":
 		return nil, errors.New("modelgateway: the bootstrap key is required")
-	case cfg.BrainKey == cfg.BootstrapKey:
-		// The control plane registers each key by its value under its own
-		// name, so one value under both would move its row between them.
-		return nil, errors.New("modelgateway: the brain key must differ from the bootstrap key")
+	}
+	if err := apikey.CheckBrainKey(cfg.BootstrapKey, cfg.BrainKey); err != nil {
+		return nil, fmt.Errorf("modelgateway: the brain key %w", err)
 	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = DefaultMaxAttempts

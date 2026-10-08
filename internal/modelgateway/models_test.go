@@ -11,6 +11,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -146,7 +147,11 @@ func TestTheBrainKey(t *testing.T) {
 		resp, _ := e.do("POST", "/v1/messages", `{"model":"`+model+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": brain})
 		return resp.StatusCode
 	}
-	e.start(func(c *modelgateway.Config) { c.BrainKey = brain })
+	adminAPI, err := admin.New(admin.Config{Store: e.s, Cipher: e.cipher, BootstrapKey: bootstrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.start(func(c *modelgateway.Config) { c.BrainKey = brain; c.Admin = adminAPI })
 	if s := call("fast"); s != 401 {
 		t.Errorf("no row: %d", s)
 	}
@@ -156,6 +161,12 @@ func TestTheBrainKey(t *testing.T) {
 	for _, model := range []string{"fast", "slow"} {
 		if s := call(model); s != 200 {
 			t.Errorf("no policy, %s: %d", model, s)
+		}
+	}
+	// The admin API answers the bootstrap key alone.
+	for key, want := range map[string]int{bootstrap: 200, brain: 401} {
+		if resp, b := e.do("GET", "/admin/v1/profiles", "", map[string]string{"x-api-key": key}); resp.StatusCode != want {
+			t.Errorf("admin with %s: %d %s, want %d", key, resp.StatusCode, b, want)
 		}
 	}
 

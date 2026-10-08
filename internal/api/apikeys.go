@@ -45,7 +45,7 @@ type ManagementKey struct {
 	PartialKeyHint string
 	CreatedAt      time.Time
 	// CreatedBy is nil for a key nobody issued — one seeded from
-	// CONTROLPLANE_API_KEY. That is the same predicate api_keys_one_live_unissued
+	// CONTROLPLANE_API_KEY or BRAIN_API_KEY. That is the same predicate api_keys_one_live_unissued
 	// keys on, so "nil issuer" and "env-var-managed" are one fact, not two.
 	CreatedBy *string
 	// ExpiresAt is nil for a key that never expires: the console's own "Never".

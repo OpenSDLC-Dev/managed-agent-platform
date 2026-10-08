@@ -18,6 +18,8 @@
 //	                       active it calls any model unless a key policy
 //	                       written for it says less, and it never reaches the
 //	                       admin API. It must differ from CONTROLPLANE_API_KEY
+//	                       and carry no surrounding whitespace
+//	                       (apikey.CheckBrainKey)
 //	SECRETS_BACKEND        the cipher sealing vendor credentials (required):
 //	                       "openbao", "local" or "gcpkms", with the variables
 //	                       cmd/controlplane documents for each

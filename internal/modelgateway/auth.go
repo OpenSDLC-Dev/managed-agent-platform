@@ -29,7 +29,8 @@ func (c caller) may(alias string) bool {
 // bootstrap and brain keys included, authenticates by the control plane's
 // rule — an active, unexpired row — so a key the platform has archived or let
 // expire calls nothing here either; those two keys' values only spare them a
-// policy.
+// policy. A policy belongs to a row, so one written for either key lapses when
+// the key rotates: the new value is a new row.
 func (h *handler) authenticate(r *http.Request) (caller, *apiError) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {

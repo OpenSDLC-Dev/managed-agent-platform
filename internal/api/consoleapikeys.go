@@ -311,9 +311,10 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	var createdBy *string
 	var current string
 	var lapsed bool
+	var rowName string
 	err = tx.QueryRow(ctx,
-		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now())
-		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed)
+		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now()), name
+		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed, &rowName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
 	}
@@ -335,7 +336,8 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// inactive", follows that advice, is refused again, and is never told the thing
 	// they could act on.
 	//
-	// The rule itself: a key nobody issued belongs to CONTROLPLANE_API_KEY and this
+	// The rule itself: a key nobody issued belongs to its environment variable —
+	// CONTROLPLANE_API_KEY, or BRAIN_API_KEY for the row named brain — and this
 	// route does not get to touch it. Its lifecycle already has an owner —
 	// rotation-by-restart — so a console disable would be silently undone by the
 	// next boot. And renaming it would break that rotation outright: EnsureAPIKey
@@ -344,7 +346,11 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// exactly the race api_keys_one_live_unissued exists to prevent. The row is
 	// still listed — hiding it would be a worse lie than refusing to mutate it.
 	if createdBy == nil {
-		return nil, errInvalid("api key %s is managed by CONTROLPLANE_API_KEY; rotate it by restarting the control plane with a new value", keyID)
+		variable := "CONTROLPLANE_API_KEY"
+		if rowName == "brain" {
+			variable = "BRAIN_API_KEY"
+		}
+		return nil, errInvalid("api key %s is managed by %s; rotate it by restarting the control plane with a new value", keyID, variable)
 	}
 	// Archived is terminal, and NOTHING may be patched onto an archived row — the
 	// repeated archive included. The reference refuses all five shapes with one
