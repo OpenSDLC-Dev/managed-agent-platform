@@ -334,13 +334,21 @@ brain:
       memory: 128Mi
 
 # Off, where the chart defaults it on: staging's brain still routes itself, through
-# the `model-providers.json` key above. On would take three changes CD does not make
-# yet — mode2-secret.sh writing `brain-api-key` in that key's place, deploy.yml
-# annotating and reading back the gateway's own ServiceAccount (it seals vendor keys
-# with Cloud KMS), and its check that one proxy per deployment names the Cloud SQL
-# instance counting a fourth.
+# the `model-providers.json` key above. CD reads this switch off the chart's render
+# and follows it, so turning it on is this line plus what CD cannot do itself: the
+# operator's apply of `foundation/` then `environment/`, which make the gateway's
+# identity and its grants (it seals vendor keys with Cloud KMS); a `brain-api-key`
+# secret in Secret Manager, which mode2-secret.sh then writes in the routes' place;
+# the `MODELGATEWAY_SERVICE_ACCOUNT` repository variable; and, once the gateway
+# runs, a deployment in its catalogue for the brain's model, without which every
+# turn fails (#906).
 modelgateway:
   enabled: false
+  # Example value; the workflow overrides it from `MODELGATEWAY_SERVICE_ACCOUNT`
+  # while the gateway runs.
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: map-modelgateway@your-project.iam.gserviceaccount.com
 
 executor:
   # This identity is what the sandbox path and the executor's own blob access

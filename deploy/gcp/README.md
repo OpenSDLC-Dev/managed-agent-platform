@@ -540,6 +540,8 @@ gcloud container clusters get-credentials "$cluster" --zone "$zone" --project "$
 blob_bucket="$(terraform -chdir="$env" output -raw blob_bucket)"
 kms_key_name="$(terraform -chdir="$env" output -raw kms_key_name)"
 export PROJECT="$project" BLOB_BUCKET="$blob_bucket" KMS_KEY_NAME="$kms_key_name"
+# Add MODELGATEWAY=true while the values you deploy run the model gateway: the
+# Secret then carries brain-api-key in model-providers.json's place.
 "$repo/deploy/gcp/mode2-secret.sh"
 ```
 
@@ -690,7 +692,7 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-env-tfvars` | a human, once per checkout — `*.tfvars` is gitignored, so a fresh clone has none |
 | `PROJECT=… make gcp-env-apply` | a human, interactively — `PROJECT` names the state bucket as well as the project |
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
-| creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
+| creating `controlplane-api-key`, `database-url` and `model-providers` — `brain-api-key` in the last one's place while `staging-values.yaml` runs the model gateway | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
 | setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
 | build and push the five images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
@@ -727,7 +729,10 @@ path, never by value. Creating them means MINTING them — and one of the three 
 model API key, which no automation here may mint on anyone's
 behalf. `controlplane-api-key` is any high-entropy value
 (`openssl rand -hex 32`), `database-url` is composed below, and `model-providers` is the one
-a human must supply.
+a human must supply. While `staging-values.yaml` runs the model gateway the pipeline reads
+`brain-api-key` in `model-providers`' place — the brain's key for the gateway, minted the way
+`controlplane-api-key` is and different from it — and the vendor keys live in the gateway's
+catalogue instead.
 
 The containers themselves are one command each. Unlike `bootstrap.sh`'s two these carry no
 `<prefix>`, because the workflow reads them by bare name — which is also why a second
@@ -789,6 +794,7 @@ same against `foundation/`:
 | `BLOB_BUCKET` | the GCS bucket, written into the mode-2 Secret as `blob-bucket` | `E blob_bucket` |
 | `KMS_KEY_NAME` | the CryptoKey resource name, written in as `gcpkms-key-name` | `E kms_key_name` (`F kms_key_name` is the same key) |
 | `CONTROLPLANE_SERVICE_ACCOUNT`, `BRAIN_SERVICE_ACCOUNT`, `EXECUTOR_SERVICE_ACCOUNT` | the three Workload-Identity Google service accounts the chart annotates each component's ServiceAccount with | `F controlplane_service_account`, `F brain_service_account`, `F executor_service_account` — bare emails. (`environment/`'s `*_service_account_annotation` outputs hold the same emails wrapped in the chart's annotation map, which is the wrong shape for a variable.) |
+| `MODELGATEWAY_SERVICE_ACCOUNT` | the model gateway's, the same way — needed only while `staging-values.yaml` runs the gateway | `F modelgateway_service_account` |
 
 The two "not in Terraform" rows are not an oversight to be tidied away: the WIF provider is
 deliberately outside this configuration — see the attribute-condition command below, which
@@ -797,10 +803,11 @@ deploy identity is created with it. They are named here so that setting up a fre
 is a list to work through rather than a guess, since the workflow's guard refuses to run
 until all eleven exist.
 
-The model gateway's account (`F modelgateway_service_account`) has no variable, because
-`staging-values.yaml` turns `modelgateway.enabled` off and CD neither annotates nor reads
-back a ServiceAccount the chart does not render. Enabling it there takes a twelfth variable,
-added to the guard, the `--set-string` list and the read-back beside the other three.
+The model gateway's account is a twelfth, outside the guard's eleven, because nothing reads
+it while `staging-values.yaml` turns `modelgateway.enabled` off. The workflow reads that
+switch off the chart's render, before the build; while the gateway runs it requires the
+variable by the guard's rule, annotates the gateway's ServiceAccount with it and reads that
+back beside the other three, and expects a fourth Cloud SQL proxy.
 
 Three names are deliberately **not** variables — `K8S_NAMESPACE`, `K8S_SECRET` and
 `HELM_RELEASE` stay literals in the workflow, because they name the *chart's* own objects
@@ -1280,12 +1287,13 @@ printf '%s' "postgres://map:$pw@$ip:5432/map?sslmode=require" \
 **The `map-platform` Secret is assembled by the pipeline**, because nothing else can: the
 chart writes no Secret in this mode and Terraform holds no secret *values* by design. The
 workflow runs [`mode2-secret.sh`](./mode2-secret.sh) — the same file an operator runs by hand
-above — which reads `controlplane-api-key`, `database-url` and `model-providers` out of
+above — which reads `controlplane-api-key`, `database-url` and `model-providers` (or,
+while the gateway runs, `brain-api-key`, since the chart then writes the brain's route) out of
 Secret Manager into a mode-700 temp directory, writes the four non-secret literals
 (`blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms`, `gcpkms-key-name`) beside them,
 and applies all seven with `kubectl create secret generic … --from-file=… --dry-run=client
 -o yaml | kubectl apply -f -`. `--from-file` and never `--from-literal`: a literal puts every
-credential on the process's argv. Rotating `controlplane-api-key` or `model-providers` is
+credential on the process's argv. Rotating any of the three is
 `gcloud secrets versions add` followed by a re-run of the workflow.
 
 **That re-run has to roll the pods, and it will not do so by itself.** Env from a
@@ -1505,7 +1513,8 @@ can reach. Since #240 they are the only such values — object storage authentic
 Workload Identity and has no credential to keep anywhere. (In mode-1 a model key goes into the
 model gateway's catalogue through its admin API, sealed there by the bundled OpenBao —
 or, with the gateway off, into the Helm values; in mode-2 it rides `model-providers.json`
-inside the pre-created Secret, so it never reaches a values file either.) So a lost state file costs you bookkeeping, not
+inside the pre-created Secret, or with the gateway on goes into its catalogue, sealed with
+Cloud KMS, so it never reaches a values file either.) So a lost state file costs you bookkeeping, not
 credentials.
 
 Losing `foundation/`'s state is recoverable, because every resource in it is adoptable — but

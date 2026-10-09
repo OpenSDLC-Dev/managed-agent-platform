@@ -68,6 +68,15 @@ GOOD = {
                        b'"base_url":"https://api.anthropic.com","api_key":"sk-ant-0123456789"}]',
 }
 
+# The same, with the model gateway on (MODELGATEWAY=true): the brain's key for
+# the gateway in place of its routes, which the chart then writes itself.
+KEYS_GW = [k if k != "model-providers.json" else "brain-api-key" for k in KEYS]
+GOOD_GW = {
+    "controlplane-api-key": GOOD["controlplane-api-key"],
+    "database-url": GOOD["database-url"],
+    "brain-api-key": b"sk-brain-fedcba9876543210",
+}
+
 FAKE_GCLOUD = r'''#!/usr/bin/env python3
 import os, sys, pathlib
 S = pathlib.Path(os.environ["FAKE_STATE"])
@@ -502,6 +511,64 @@ def main():
               not any(p.is_dir() for p in pathlib.Path(tmp).glob("mode2-secret.*")),
               "scratch dirs left behind: %r"
               % sorted(p.name for p in pathlib.Path(tmp).glob("mode2-secret.*")))
+
+        # With the gateway on, the chart writes the brain's one route itself and
+        # reads the brain's key for it out of `brain-api-key`, so that key takes
+        # the routes' place and the routes are not read at all — a project that
+        # has moved to the gateway may well have deleted them.
+        print("with the model gateway on, brain-api-key takes model-providers.json's place")
+        gw = {"MODELGATEWAY": "true"}
+        on = run(tmp, "gw", versions=GOOD_GW, env_extra=gw)
+        check("exits 0", on.code == 0, on.out)
+        check("writes the seven gateway keys and no others",
+              sorted(p.name[len("key."):] for p in on.state.glob("key.*")) == sorted(KEYS_GW),
+              repr(sorted(p.name for p in on.state.glob("key.*"))))
+        check("brain-api-key carries its version's bytes verbatim",
+              on.key("brain-api-key") == GOOD_GW["brain-api-key"])
+        check("model-providers is never read", "--secret=model-providers" not in on.calls(),
+              on.calls())
+        check("...and brain-api-key is not on any command line",
+              GOOD_GW["brain-api-key"].decode() not in on.calls())
+        check("...and with the gateway off, brain-api-key is never read",
+              "--secret=brain-api-key" not in r.calls(), r.calls())
+        ghgw = run(tmp, "ghgw", versions=GOOD_GW, env_extra=gw, github=True)
+        check("brain-api-key is masked under GITHUB_ACTIONS",
+              ghgw.code == 0 and "::add-mask::" + GOOD_GW["brain-api-key"].decode() in ghgw.proc.stdout,
+              ghgw.out)
+        off = run(tmp, "gwfalse", env_extra={"MODELGATEWAY": "false"})
+        check("MODELGATEWAY=false is the gateway off",
+              off.code == 0 and off.key("model-providers.json") == GOOD["model-providers"]
+              and off.key("brain-api-key") is None, off.out)
+
+        print("...and a brain-api-key the platform would refuse at startup is refused here")
+        b = run(tmp, "gwmissing", env_extra=gw,
+                versions={k: v for k, v in GOOD_GW.items() if k != "brain-api-key"})
+        check("an absent brain-api-key is refused, by name",
+              b.code != 0 and "brain-api-key" in b.out, b.out)
+        check("...and no Secret is applied", not (b.state / "applied.manifest").exists())
+        for label, body in (
+            ("an empty", b""),
+            ("a whitespace-only", b"   "),
+            ("a newline-terminated", GOOD_GW["brain-api-key"] + b"\n"),
+            ("a space-led", b" " + GOOD_GW["brain-api-key"]),
+            ("a tab-ended", GOOD_GW["brain-api-key"] + b"\t"),
+            ("a CR-ended", GOOD_GW["brain-api-key"] + b"\r"),
+            # The control plane registers each key under its own name by its
+            # value, so one value under both names is refused by both binaries.
+            ("the control plane's key as the", GOOD_GW["controlplane-api-key"]),
+        ):
+            bad = dict(GOOD_GW)
+            bad["brain-api-key"] = body
+            b = run(tmp, "gwbad", versions=bad, env_extra=gw)
+            check("%s brain-api-key is refused" % label, b.code != 0, b.out)
+            check("...and no Secret is applied", not (b.state / "applied.manifest").exists())
+
+        print("MODELGATEWAY takes true or false, and nothing that only looks like one")
+        for value in ("1", "yes", "True", " true"):
+            m = run(tmp, "gwvalue", versions=GOOD_GW, env_extra={"MODELGATEWAY": value})
+            check("MODELGATEWAY=%r is refused" % value,
+                  m.code != 0 and "MODELGATEWAY" in m.out, m.out)
+            check("...and no Secret is applied", not (m.state / "applied.manifest").exists())
 
         print("a SECRET_DIR that does not exist yet is created, not refused")
         # The scenario above hands over a directory that already exists, so the
