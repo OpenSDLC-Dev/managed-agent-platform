@@ -388,10 +388,12 @@ jobs:
           # rather than reading as a gateway that is off.
           manifest="$(helm template "$HELM_RELEASE" deploy/helm/managed-agent-platform \
             -f deploy/gcp/staging-values.yaml)"
-          case "$manifest" in
-            *"app.kubernetes.io/component: modelgateway"*) on=true ;;
-            *) on=false ;;
-          esac
+          # The component label as a whole line, which only the gateway's own
+          # objects carry: a substring would also take a label that merely
+          # begins with it, and a false "on" reshapes the Secret.
+          n="$(printf '%s\n' "$manifest" \
+            | grep -cxE '[[:space:]]*app\.kubernetes\.io/component: modelgateway' || true)"
+          if [ "$n" -gt 0 ]; then on=true; else on=false; fi
           if [ "$on" = true ]; then
             case "$MODELGATEWAY_SERVICE_ACCOUNT" in
               "" | *[[:space:],]*)
@@ -570,10 +572,6 @@ jobs:
         if: env.POWERED_OFF != 'true'
         run: |
           set -euo pipefail
-          # The chart composes {registry}/{repository}/{component}:{tag}, so the
-          # split is at the FIRST slash of ARTIFACT_REGISTRY and nowhere else.
-          # Getting it wrong renders a reference that is merely wrong rather than
-          # invalid — the render succeeds, the pods never pull.
           # The gateway's override rides the positional parameters, which a
           # `run:` script starts without: they are the one list `set -u` lets
           # expand empty in every bash, where an empty array is unset to bash
@@ -581,6 +579,10 @@ jobs:
           if [ "$MODELGATEWAY" = true ]; then
             set -- --set-string "modelgateway.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=$MODELGATEWAY_SERVICE_ACCOUNT"
           fi
+          # The chart composes {registry}/{repository}/{component}:{tag}, so the
+          # split is at the FIRST slash of ARTIFACT_REGISTRY and nowhere else.
+          # Getting it wrong renders a reference that is merely wrong rather than
+          # invalid — the render succeeds, the pods never pull.
           helm upgrade --install "$HELM_RELEASE" deploy/helm/managed-agent-platform \
             --namespace "$K8S_NAMESPACE" --create-namespace \
             -f deploy/gcp/staging-values.yaml \
@@ -693,7 +695,7 @@ jobs:
           echo "all $want proxies dial $SQL_CONNECTION_NAME"
 
       # Only when the Secret really changed — see the note at the end of the
-      # assemble step. On an ordinary push the seven values are identical, this
+      # assemble step. On an ordinary push the values are identical, this
       # is skipped, and the rollout `helm upgrade` already performed for the new
       # `image.tag` is the only one. On a rotation dispatch it is the only
       # rollout there is.

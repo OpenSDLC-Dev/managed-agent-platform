@@ -539,9 +539,10 @@ gcloud container clusters get-credentials "$cluster" --zone "$zone" --project "$
 # set" is a worse diagnosis than the Terraform error this form stops on.
 blob_bucket="$(terraform -chdir="$env" output -raw blob_bucket)"
 kms_key_name="$(terraform -chdir="$env" output -raw kms_key_name)"
-export PROJECT="$project" BLOB_BUCKET="$blob_bucket" KMS_KEY_NAME="$kms_key_name"
-# Add MODELGATEWAY=true while the values you deploy run the model gateway: the
-# Secret then carries brain-api-key in model-providers.json's place.
+# MODELGATEWAY is required: true while the values you deploy run the model
+# gateway (the chart's modelgateway.enabled, on unless a values file turns it
+# off), and the Secret then requires brain-api-key in model-providers.json's place.
+export PROJECT="$project" BLOB_BUCKET="$blob_bucket" KMS_KEY_NAME="$kms_key_name" MODELGATEWAY=false
 "$repo/deploy/gcp/mode2-secret.sh"
 ```
 
@@ -555,16 +556,16 @@ repository — ["Continuous delivery"](#continuous-delivery) says who owns them 
 in each.
 
 Two things it does **not** do, both of which matter on a re-run rather than a first install.
-`apply` adds and updates keys but removes none, so a `map-platform` that predates #240 keeps
-its `blob-endpoint` / `blob-access-key` / `blob-secret-key` and goes on injecting them into
-every pod — `templates/secret.yaml` says to delete those by hand, and that is still true
+`apply` removes only the keys its own previous apply wrote, so one the Secret got any other
+way stays: a `map-platform` that predates #240 may still carry `blob-endpoint` /
+`blob-access-key` / `blob-secret-key` and go on injecting them into every pod — `templates/secret.yaml` says to delete those by hand, and that is still true
 here. And rotating a value changes nothing a running pod can see: env from a `secretKeyRef`
 is read once at start, and with `existingSecret` the chart renders no Secret, so
 `helm upgrade` produces a byte-identical pod template and correctly does nothing. CD rolls
 the pods itself when the apply reports a change; by hand that is `kubectl rollout restart`
-over the three Deployments.
+over every Deployment in the release.
 
-**Apply all three.** The brain's annotation used to be the one that was only sometimes
+**Apply every annotation.** The brain's annotation used to be the one that was only sometimes
 needed — it existed for the Cloud SQL Auth Proxy (chart: `cloudSQLProxy.enabled`), and under
 the direct-connection path no component uses a Google identity for the database. #240 ended
 that: the brain reads the blob bucket (rubric snapshots and deliverables) and its account
@@ -694,7 +695,7 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `model-providers` — `brain-api-key` in the last one's place while `staging-values.yaml` runs the model gateway | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
-| setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
+| setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment — and a twelfth, `MODELGATEWAY_SERVICE_ACCOUNT`, before `staging-values.yaml` turns the model gateway on |
 | build and push the five images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **A failed deploy opens an issue**, because it used to notify nobody: `ci` failing blocks a
@@ -747,7 +748,14 @@ done
 ```
 
 Until a container exists, adding its version fails with `NOT_FOUND` rather than working, and
-so does the deploy that reads it.
+so does the deploy that reads it. Before turning the model gateway on, add `brain-api-key` the
+same way, with a value of its own:
+
+```sh
+gcloud secrets create brain-api-key --project="$project" --replication-policy=automatic
+printf '%s' "$(openssl rand -hex 32)" \
+  | gcloud secrets versions add brain-api-key --project="$project" --data-file=-
+```
 
 **`gcp-db-init` is a prerequisite here, not a formality.** Mode 1 never ran it at all — the
 bundled Postgres creates its own role from `postgresql.password`. Mode 2's `database-url`
@@ -815,14 +823,15 @@ rather than an operator, and `K8S_SECRET` in particular has to equal `existingSe
 [`staging-values.yaml`](./staging-values.yaml), which is in git: a variable would let the two
 drift into a release bound to a Secret nothing creates, with no diff to notice it in.
 
-The workflow **asserts every one of them** before it authenticates or builds anything, in a
-step that runs second — after the ref guard, which refuses an unauthorised ref while telling
+The workflow **asserts every one of the eleven** before it authenticates or builds anything,
+in a step that runs second — after the ref guard, which refuses an unauthorised ref while telling
 it nothing. An unset variable renders as the empty string rather than failing, and
 `gcloud --project ""`, `get-credentials "" --zone ""` and an image tag with no repository all
 fail late and confusingly. Whitespace and commas are rejected as well as emptiness: a value
 of one space is no configuration while passing a `-z` test, and four of them —
 `ARTIFACT_REGISTRY` and the three service accounts — reach `helm --set-string`, whose
-assignment list is comma-separated.
+assignment list is comma-separated. The twelfth, the gateway's account, is held to the same
+rule after checkout, while the gateway runs, since the guard cannot read the chart.
 
 The cost of the move is that the deployment target is no longer reviewable in the diff that
 changes it — a variable is edited in a settings page, not in a PR. That is the trade, and
@@ -1289,12 +1298,14 @@ chart writes no Secret in this mode and Terraform holds no secret *values* by de
 workflow runs [`mode2-secret.sh`](./mode2-secret.sh) — the same file an operator runs by hand
 above — which reads `controlplane-api-key`, `database-url` and `model-providers` (or,
 while the gateway runs, `brain-api-key`, since the chart then writes the brain's route) out of
-Secret Manager into a mode-700 temp directory, writes the four non-secret literals
+Secret Manager into a mode-700 temp directory, carries the other gateway mode's key beside
+them when Secret Manager has it, so that a release rolled back across the switch finds its
+own, writes the four non-secret literals
 (`blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms`, `gcpkms-key-name`) beside them,
-and applies all seven with `kubectl create secret generic … --from-file=… --dry-run=client
+and applies them all with `kubectl create secret generic … --from-file=… --dry-run=client
 -o yaml | kubectl apply -f -`. `--from-file` and never `--from-literal`: a literal puts every
-credential on the process's argv. Rotating any of the three is
-`gcloud secrets versions add` followed by a re-run of the workflow.
+credential on the process's argv. Rotating `controlplane-api-key`, `model-providers` or
+`brain-api-key` is `gcloud secrets versions add` followed by a re-run of the workflow.
 
 **That re-run has to roll the pods, and it will not do so by itself.** Env from a
 `secretKeyRef` is read once, at process start; a `workflow_dispatch` after a rotation
@@ -1306,7 +1317,7 @@ serving the *archived* key, and `controlplane`'s rotation-by-restart semantics
 (`EnsureAPIKey`, `internal/api/auth.go`) mean the new key is not even registered until one
 restarts. So the workflow keeps the one word `kubectl apply` prints — created, configured or
 unchanged — and rolls every Deployment in the release when, and only when, the Secret
-actually changed. An ordinary push skips it: the seven values are identical and the rollout
+actually changed. An ordinary push skips it: the values are identical and the rollout
 `helm upgrade` did for the new `image.tag` is the only one.
 
 `database-url` is the exception, because it is **derived** rather than primary: it is composed

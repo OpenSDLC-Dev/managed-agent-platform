@@ -218,6 +218,9 @@ def run(tmp, name, versions=None, faults=(), env_extra=None, github=False, verb=
     env["PROJECT"] = "p"
     env["BLOB_BUCKET"] = "map-blobs"
     env["KMS_KEY_NAME"] = "projects/p/locations/us-central1/keyRings/map/cryptoKeys/vault"
+    # Set, not inherited: an operator who exported MODELGATEWAY=true for a
+    # hand run would otherwise turn every gateway-off scenario into a gateway one.
+    env["MODELGATEWAY"] = "false"
     env.pop("K8S_NAMESPACE", None)
     env.pop("K8S_SECRET", None)
     env.pop("SECRET_DIR", None)
@@ -461,17 +464,18 @@ def main():
         nov = run(tmp, "noghenv", verb="created", env_extra={"GITHUB_ENV": None})
         check("no GITHUB_ENV means no SECRET_CHANGED and no failure", nov.code == 0, nov.out)
 
-        # One PATH per tool, holding the other two and nothing else, because a
-        # scenario that only ever hides `jq` leaves the other two entries of the
+        # One PATH per tool, holding the others and nothing else, because a
+        # scenario that only ever hides `jq` leaves the other entries of the
         # preflight loop unverifiable: cutting them to `for tool in jq` would
         # keep the suite green. Everything a refusal needs is a bash builtin,
         # which is why the script can still speak with no tool in reach.
         print("a missing tool is named rather than misdiagnosed")
-        for missing in ("gcloud", "kubectl", "jq"):
+        for missing in ("gcloud", "kubectl", "jq", "cmp"):
             only = pathlib.Path(tmp) / ("bin.no-" + missing)
             only.mkdir(exist_ok=True)
             for name, src in (("gcloud", binp / "gcloud"), ("kubectl", binp / "kubectl"),
-                              ("jq", pathlib.Path(shutil.which("jq")))):
+                              ("jq", pathlib.Path(shutil.which("jq"))),
+                              ("cmp", pathlib.Path(shutil.which("cmp")))):
                 if name != missing and not (only / name).exists():
                     (only / name).symlink_to(src)
             t = run(tmp, "no" + missing, env_extra={"PATH": str(only)})
@@ -514,8 +518,7 @@ def main():
 
         # With the gateway on, the chart writes the brain's one route itself and
         # reads the brain's key for it out of `brain-api-key`, so that key takes
-        # the routes' place and the routes are not read at all — a project that
-        # has moved to the gateway may well have deleted them.
+        # the routes' place as the one required.
         print("with the model gateway on, brain-api-key takes model-providers.json's place")
         gw = {"MODELGATEWAY": "true"}
         on = run(tmp, "gw", versions=GOOD_GW, env_extra=gw)
@@ -525,20 +528,12 @@ def main():
               repr(sorted(p.name for p in on.state.glob("key.*"))))
         check("brain-api-key carries its version's bytes verbatim",
               on.key("brain-api-key") == GOOD_GW["brain-api-key"])
-        check("model-providers is never read", "--secret=model-providers" not in on.calls(),
-              on.calls())
-        check("...and brain-api-key is not on any command line",
+        check("...and is not on any command line",
               GOOD_GW["brain-api-key"].decode() not in on.calls())
-        check("...and with the gateway off, brain-api-key is never read",
-              "--secret=brain-api-key" not in r.calls(), r.calls())
         ghgw = run(tmp, "ghgw", versions=GOOD_GW, env_extra=gw, github=True)
         check("brain-api-key is masked under GITHUB_ACTIONS",
               ghgw.code == 0 and "::add-mask::" + GOOD_GW["brain-api-key"].decode() in ghgw.proc.stdout,
               ghgw.out)
-        off = run(tmp, "gwfalse", env_extra={"MODELGATEWAY": "false"})
-        check("MODELGATEWAY=false is the gateway off",
-              off.code == 0 and off.key("model-providers.json") == GOOD["model-providers"]
-              and off.key("brain-api-key") is None, off.out)
 
         print("...and a brain-api-key the platform would refuse at startup is refused here")
         b = run(tmp, "gwmissing", env_extra=gw,
@@ -562,13 +557,64 @@ def main():
             b = run(tmp, "gwbad", versions=bad, env_extra=gw)
             check("%s brain-api-key is refused" % label, b.code != 0, b.out)
             check("...and no Secret is applied", not (b.state / "applied.manifest").exists())
+        # The verbatim check is one loop over a list the gateway extends, so
+        # the two keys it always covered are held in this mode too.
+        for secret in ("controlplane-api-key", "database-url"):
+            bad = dict(GOOD_GW)
+            bad[secret] = GOOD_GW[secret] + b"\n"
+            b = run(tmp, "gwnewline", versions=bad, env_extra=gw)
+            check("a newline in %s is refused with the gateway on too" % secret, b.code != 0, b.out)
 
-        print("MODELGATEWAY takes true or false, and nothing that only looks like one")
-        for value in ("1", "yes", "True", " true"):
+        # `kubectl apply` drops a key its previous apply wrote, and the Secret is
+        # applied before `helm upgrade --atomic`: a flip of the switch that rolls
+        # back would restart the old revision on a Secret without its key. So
+        # each mode carries the other's when Secret Manager has it — and only
+        # then, and never at the price of a deploy that does not read it.
+        print("each mode carries the other's key, so a rollback across the switch finds its own")
+        both = dict(GOOD_GW, **{"model-providers": GOOD["model-providers"]})
+        c = run(tmp, "carryon", versions=both, env_extra=gw)
+        check("gateway on: the routes ride along beside brain-api-key",
+              c.code == 0 and sorted(p.name[len("key."):] for p in c.state.glob("key.*"))
+              == sorted(KEYS_GW + ["model-providers.json"])
+              and c.key("model-providers.json") == GOOD["model-providers"], c.out)
+        ghc = run(tmp, "ghcarryon", versions=both, env_extra=gw, github=True)
+        check("...with the api_key inside them masked",
+              ghc.code == 0 and "::add-mask::sk-ant-0123456789" in ghc.proc.stdout, ghc.out)
+        check("...and their absence is silent", on.code == 0 and "Not carrying" not in on.out, on.out)
+        for label, versions, faults in (
+            ("unreadable routes", both, ("denied.model-providers",)),
+            ("routes no rollback could use", dict(both, **{"model-providers": b'{"model":"*"}'}), ()),
+        ):
+            u = run(tmp, "carrybad", versions=versions, env_extra=gw, faults=faults)
+            check("gateway on, %s: deployed without them, and said so" % label,
+                  u.code == 0 and u.key("model-providers.json") is None
+                  and u.key("brain-api-key") == GOOD_GW["brain-api-key"]
+                  and "Not carrying 'model-providers'" in u.out, u.out)
+        offc = run(tmp, "carryoff", versions=dict(GOOD, **{"brain-api-key": GOOD_GW["brain-api-key"]}))
+        check("gateway off: brain-api-key rides along beside the routes",
+              offc.code == 0 and sorted(p.name[len("key."):] for p in offc.state.glob("key.*"))
+              == sorted(KEYS + ["brain-api-key"])
+              and offc.key("brain-api-key") == GOOD_GW["brain-api-key"], offc.out)
+        ghoff = run(tmp, "ghcarryoff", versions=dict(GOOD, **{"brain-api-key": GOOD_GW["brain-api-key"]}),
+                    github=True)
+        check("...masked", ghoff.code == 0
+              and "::add-mask::" + GOOD_GW["brain-api-key"].decode() in ghoff.proc.stdout, ghoff.out)
+        check("...and its absence is silent, the Secret the same seven keys",
+              r.code == 0 and "Not carrying" not in r.out and r.key("brain-api-key") is None, r.out)
+        deny = run(tmp, "carryoffdenied", versions=dict(GOOD, **{"brain-api-key": GOOD_GW["brain-api-key"]}),
+                   faults=("denied.brain-api-key",))
+        check("gateway off, an unreadable brain-api-key: deployed without it, and said so",
+              deny.code == 0 and deny.key("brain-api-key") is None
+              and deny.key("model-providers.json") == GOOD["model-providers"]
+              and "Not carrying 'brain-api-key'" in deny.out, deny.out)
+
+        print("MODELGATEWAY is required, and takes true or false and nothing that only looks like one")
+        for value in (None, "", "1", "yes", "True", " true"):
             m = run(tmp, "gwvalue", versions=GOOD_GW, env_extra={"MODELGATEWAY": value})
             check("MODELGATEWAY=%r is refused" % value,
                   m.code != 0 and "MODELGATEWAY" in m.out, m.out)
-            check("...and no Secret is applied", not (m.state / "applied.manifest").exists())
+            check("...and nothing is fetched or applied", "gcloud" not in m.calls()
+                  and not (m.state / "applied.manifest").exists(), m.calls())
 
         print("a SECRET_DIR that does not exist yet is created, not refused")
         # The scenario above hands over a directory that already exists, so the
