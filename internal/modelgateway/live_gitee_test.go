@@ -49,10 +49,13 @@ func TestLiveGiteeEmbeddingsAndRerank(t *testing.T) {
 	})
 	e.credential(p, v.keyEnv, 1)
 	embedding := func(d *store.Deployment) { d.Kind = store.KindEmbedding }
-	e.alias("text", target(e.deployment(p, "Qwen3-Embedding-8B", embedding), 0))
-	// Qwen3-VL-Embedding-8B, dikw-core's choice, is outside the resource
+	// Gitee serves Qwen3-Embedding-0.6B free, so the thousand-input cap run
+	// costs the resource package nothing.
+	e.alias("text", target(e.deployment(p, "Qwen3-Embedding-0.6B", embedding), 0))
+	// Qwen3-VL-Embedding-8B, the knowledge-base client's choice, is outside the resource
 	// package of the key this tier ran under on 2026-10-08.
 	e.alias("vision", target(e.deployment(p, "Qwen3-VL-Embedding-2B", embedding), 0))
+	// So is Qwen3-Reranker-0.6B, free on Gitee, on 2026-10-09 (#903).
 	e.alias("ranker", target(e.deployment(p, "bge-reranker-v2-m3", func(d *store.Deployment) { d.Kind = store.KindRerank }), 0))
 	key := e.key(everyAlias)
 	e.start()
@@ -274,8 +277,8 @@ func liveUsageLedger(t *testing.T, e *env, resp *http.Response, vendor []byte, e
 	liveFatalf(t, "no ledger row for %q", rid)
 }
 
-// redSquare is a small PNG as a data URL, the shape dikw-core sends an
-// image in.
+// redSquare is a small PNG as a data URL, the shape the knowledge-base client
+// sends an image in.
 func redSquare() string {
 	img := image.NewRGBA(image.Rect(0, 0, 32, 32))
 	for x := range 32 {

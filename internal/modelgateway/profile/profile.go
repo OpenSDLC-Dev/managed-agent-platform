@@ -144,11 +144,11 @@ var profiles = []Profile{
 		// disabled, for kimi-k2.6, the models without the toggle answering
 		// for themselves.
 		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
-	// Gitee AI is v1's embeddings and rerank vendor, dikw-core's default for
-	// both. It drops idle keep-alive connections in the middle of a batch,
-	// which dikw-core works around with a fresh connection per request
-	// (src/dikw_core/providers/_http.py), and its rerank answers say
-	// Connection: close (probed 2026-10-08).
+	// Gitee AI is v1's embeddings and rerank vendor, the knowledge-base
+	// client's default for both. It drops idle keep-alive connections in the
+	// middle of a batch, which that client works around with a fresh
+	// connection per request, and its rerank answers say Connection: close
+	// (probed 2026-10-08).
 	{Name: "gitee", DisplayName: "Gitee AI", Protocols: []Protocol{OpenAI}, Hosts: []Host{
 		{Protocol: OpenAI, BaseURL: "https://ai.gitee.com/v1"},
 	}, CloseConnections: true},
