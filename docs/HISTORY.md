@@ -6675,8 +6675,8 @@ embeddings and rerank with a plain HTTP client.
   `bge-m3`. The openai Python SDK keeps a float array as it is, and openai-go reads only
   floats, so both read the answer, which the gateway never decodes either way.
 - **Dimensions.** `Qwen3-Embedding-8B` and `-0.6B` honor `dimensions` (256, 512), and
-  so does `Qwen3-VL-Embedding-8B` (512), which dikw-core recorded as not taking it
-  (probed 2026-04-25).
+  so does `Qwen3-VL-Embedding-8B` (512), which the knowledge-base client recorded as
+  not taking it (probed 2026-04-25).
   `bge-m3` answers 1024 values whatever `dimensions` asks. A vector's length shows what
   an upstream did, so the gateway refuses nothing for it.
 - **Usage.** Embeddings report `usage.prompt_tokens`, multimodal ones included, which
@@ -6688,12 +6688,12 @@ embeddings and rerank with a plain HTTP client.
   result carries its document whether `return_documents` asks or not.
 - **Caps.** The embedding models take 1000 inputs and refuse 1001 with a 400, "请求参数
   'input' 不符合支持的格式" — `Qwen3-Embedding-0.6B` and `-8B` and `Qwen3-VL-Embedding-8B`
-  measured, `bge-m3` taking the 64 tried — so dikw-core's observed cap of 25 no longer
+  measured, `bge-m3` taking the 64 tried — so the knowledge-base client's observed cap of 25 no longer
   holds for embeddings. Rerank takes 1 to 25 documents whatever `top_n` asks, refusing the 26th
   with "无效的参数数组长度: 'documents' 长度是 '1' 到 '25'". Errors come as
   `{"error":{"code":"400","message":…,"type":"server_error"}}`, a bad key as a 401 in
   the same envelope.
-- **Connections.** Rerank answers carry `Connection: close`. With dikw-core's report of
+- **Connections.** Rerank answers carry `Connection: close`. With the knowledge-base client's report of
   idle connections dropped mid-batch, the `gitee` profile sends each request on a
   connection of its own.
 - **Multimodal models.** After a 1000-input batch to `Qwen3-VL-Embedding-8B` (28,890
@@ -6702,7 +6702,7 @@ embeddings and rerank with a plain HTTP client.
   and `jina-embeddings-v4`; whether the batch caused it is not known.
   `Qwen3-VL-Embedding-2B` is still covered. It answers one vector, at 21 tokens, for any
   input holding an image — a text and an image, or two images — and one per text for
-  texts alone. dikw-core sends `Qwen3-VL-Embedding-8B` and expects a vector per input,
+  texts alone. The knowledge-base client sends `Qwen3-VL-Embedding-8B` and expects a vector per input,
   so slice 4d's image ingest waits on a package covering that model. The live tier
   uses the 2B model, checks that its answer is relayed rather than how many vectors it
   holds, and sends no 1000-input multimodal batch, which would cost tens of thousands
@@ -6762,8 +6762,8 @@ five more, each fixed with a test that failed on the code before it:
   table by hand; they are fields of the route.
 - The docs claimed no bound of the gateway's own on a batch, where its 32 MiB bound on
   a request body comes first, and a few hundred images as data URLs reach it. They say
-  so now, and the test fake's multimodal answer, which reports no usage "as dikw-core
-  found", now says it stands for an upstream reporting none: Gitee's report it.
+  so now, and the test fake's multimodal answer, whose comment credited its missing
+  usage to the knowledge-base client's finding, now says it stands for an upstream reporting none: Gitee's report it.
 
 Six were left as they are:
 - An upstream that answers a request not asking for a stream with one is relayed as it
@@ -7295,3 +7295,81 @@ per-field counting and the delta's release gone with them.
 
 A fifth pass found one more: an index with a sign, `-1` or `+2`, passed for one the gateway
 writes; the index is now decimal digits alone, its mutants caught, 77 in all.
+
+## Model gateway and the knowledge-base client (plan 59 slice 4d) — acceptance record, 2026-10-09
+
+What was asked: that the gateway serve every kind of model call the knowledge-base
+client of plan 59's Ground truth makes. Moving that client onto the gateway is its own
+project's work and was not done here. Its CLI ran unchanged from its own environment, in
+a scratch directory, and its checkout was left untouched — afterwards no file in it
+outside the environment and version control was newer than a marker set before the
+first run. `cmd/modelgateway`, built from this branch, ran against a throwaway Postgres,
+configured over `/admin/v1/`, one platform key behind every key variable of a scratch
+configuration, with five aliases:
+
+- `deepseek-v4-pro` on DeepSeek's Anthropic endpoint;
+- the same model on DeepSeek's OpenAI endpoint alone;
+- Gitee's `Qwen3-Embedding-0.6B`, which Gitee serves free;
+- Gitee's `Qwen3-VL-Embedding-2B` — the client's own choice, `Qwen3-VL-Embedding-8B`, is
+  outside the Gitee key's resource package (#903);
+- Gitee's `bge-reranker-v2-m3` — the free `Qwen3-Reranker-0.6B` is outside the package
+  too (#903).
+
+| The client's call | Through the gateway | Result |
+| --- | --- | --- |
+| Messages, streamed (the Anthropic Python SDK) | DeepSeek's Anthropic endpoint, passed through | health check passed |
+| Messages, streamed | DeepSeek's OpenAI endpoint, converted to Chat Completions | health check passed |
+| Chat Completions, streamed (the OpenAI Python SDK) | DeepSeek's OpenAI endpoint, passed through | health check passed |
+| Responses, streamed: the payload its Responses provider builds | both DeepSeek aliases, converted to Messages (and on to Chat Completions) | completed, "Jupiter is the largest planet." |
+| Text embeddings, `dimensions` on every request | `Qwen3-Embedding-0.6B` | health check at 1024 dimensions; ingest of two documents, two chunks |
+| Rerank | `bge-reranker-v2-m3` | a retrieve put the document answering the query first (0.99, the other 0.70) |
+| Multimodal embeddings, Gitee's shape | `Qwen3-VL-Embedding-2B` | ingest embedded the chunks and an image a source references, and a retrieve with rerank returned it as the top document's asset; its multimodal probe failed the health check (below) |
+
+- **The multimodal health check.** The client probes with one request holding a text and
+  an image and wants a vector for each; `Qwen3-VL-Embedding-2B` answers one vector for
+  any request holding an image, so the check reports one vector for two inputs. Sent
+  straight to Gitee, the same probe gets the same one vector (an image alone, one; two
+  texts, two), and the live tier's `relayed` check holds the gateway's answer equal to
+  Gitee's but for `model`. Ingest passed because the run held one image, so its one
+  asset request held one input; the client sends up to 16 images a request, and one
+  holding two or more would fail the same way on this model. Whether the client works on
+  the 8B model is #903's.
+- **The Responses provider.** It may be pointed at any endpoint, but it authenticates
+  with a ChatGPT OAuth access token, refreshing through OpenAI's issuer any token that is
+  not an unexpired JWT, so it cannot present a platform key and the client cannot reach
+  the gateway with it. The payload it builds — `model`, `instructions`, a user
+  `input_text`, `store: false`, no `max_output_tokens` — was built by its own code,
+  imported read-only, and streamed through the OpenAI Python SDK's `responses.stream` at
+  the gateway, as the client streams it.
+- **The ledger** held 18 rows, all 200: `messages` for the three Messages health checks
+  (two in the text configuration, one in the multimodal, whose LLM leg passed),
+  `chat_completions` for the one, `responses` for the two Responses streams, 10
+  `embeddings` and 2 `rerank`.
+- **The live tier on free models.** `Qwen3-Embedding-0.6B` honors `dimensions` (256 and
+  512), takes 1,000 inputs and refuses 1,001 with the 400 the tier relays, so it replaced
+  `Qwen3-Embedding-8B` as the tier's text model, and the tier's thousand-input cap run is
+  now made on a free model; `TestLiveGiteeEmbeddingsAndRerank` passed, 4 of 4.
+
+The acceptance's other half, `ant` sessions through the brain, is slice 5's record above.
+
+**Plan 59 progress summary (archived).** The plan landed in #882 — plan 60 (#67, merged
+as #884) gated its slice 5 — and was delivered in this repository's five slices:
+1 — the store, the catalogue, the admin API and the shared key check (#885); 2 —
+Anthropic inference with routing, retry and fallback, thinking provenance, the profiles'
+edits, usage and limits, telemetry, compose, Helm and a GCP identity, and the live tier
+(#886–#892); 4 — Chat Completions passed through, embeddings and rerank, Anthropic ⇄ Chat
+Completions conversion, and this acceptance (#893–#895, #907); 5 — each model call's
+trace and session headers, the brain's key, and one route through the gateway by default
+(#896, #897); 6 — stateless Responses (#898). Slice 4's acceptance holds but for the
+multimodal health check, which fails on the substitute model the Gitee key reaches
+(#903). Slice 3, the console's Models section, is
+the console repository's own plan. What the plan left to later plans is filed: engine
+profiles for vLLM and its kin (#899), a Gemini protocol (#900), Vertex (#236), stored
+Responses state (#901), `cache_control` injection (#902), a standalone image (#904) and
+Chat Completions inbound to an Anthropic-only upstream (#905) — #236 itself frames Vertex
+as a brain provider for Claude models, so the plan's wider gateway scope is noted there;
+the live rows that wait on
+credentials — Zhipu, Moonshot and two Gitee models — are #903; and DeepSeek's refusal of a
+tool loop whose thinking the brain dropped is #883. Turning the gateway on in GCP staging — an
+operator's `foundation/` and `environment/` apply and three CD changes — is #906, and a
+first release must make the `modelgateway` image package public (docs/RELEASING.md).

@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 ---
 
 # Model gateway: a standalone, Anthropic-native model service (plan 59)
@@ -31,7 +31,8 @@ Scope decisions settled with the user on 2026-10-04:
    platform. A separate image waits for someone who deploys the gateway alone and needs
    it smaller.
 3. **v1 upstreams are the four vendors' official cloud APIs, plus Gitee AI** for
-   embeddings and rerank — dikw-core's default vendor for both (decision 9). Gemini,
+   embeddings and rerank — the knowledge-base client's default vendor for both
+   (decision 9). Gemini,
    Vertex (#236) and self-hosted engines (vLLM, SGLang, …) follow in later plans, with
    bifrost as the reference (Later upstreams says for what).
 4. **Governance serves internal applications, on the platform's own API keys.** A caller
@@ -66,10 +67,11 @@ Scope decisions settled with the user on 2026-10-04:
    Zhipu's docs leave it open), but the brain stores no thinking content, and
    Anthropic's API checks a returned block against the `system`, `tools` and messages
    before it. That plan gates slice 5 (the brain cutover), not the gateway.
-9. **Embeddings and rerank are shaped by dikw-core** (OpenDIKW's knowledge-base engine):
-   the gateway serves its three calls unchanged, so dikw-core moves onto the gateway by
-   configuration alone — `embedding_base_url`, `assets.multimodal.base_url` and
-   `rerank_base_url` at the gateway, a platform API key behind its key variables.
+9. **Embeddings and rerank are shaped by the knowledge-base client's calls** (Ground
+   truth): the gateway serves its three calls — text embeddings, multimodal embeddings
+   and rerank — unchanged, so that client's embedding, multimodal and rerank legs move
+   onto the gateway by configuration alone, their base URLs at the gateway and a
+   platform API key behind its key variables.
 
 Out of scope: Claude Code as a client (Anthropic does not support routing it to
 non-Claude models), logging request or response content, semantic caching, an MCP
@@ -156,43 +158,40 @@ Moonshot document neither; MiniMax keeps only a legacy embeddings page in a shap
 own (`texts` and `type` in, `vectors` out, on `api.minimax.chat`), which no profile
 adopts. Gitee AI serves both under `https://ai.gitee.com/v1`, per the OpenAPI spec it
 publishes at `/v1/yaml`: `/embeddings` OpenAI-shaped, with `dimensions` and the
-multimodal objects dikw-core sends (below), and `/rerank`, whose `top_n` the spec
+multimodal objects the client below sends, and `/rerank`, whose `top_n` the spec
 defaults to 3 — though Gitee scores every document when it is left out (probed
 2026-10-08). Neither vendor says whether it accepts `encoding_format: "base64"` —
 Gitee's spec lists the field with a `float` default and no values, Zhipu's has no such
-field — but dikw-core's working Gitee setup sends it on every request, so Gitee at least
-accepts it; asked for it, Gitee answers floats (probed 2026-10-08).
+field — but the OpenAI Python SDK sends it whenever its caller names none (below), and
+Gitee accepts it; asked for it, Gitee answers floats (probed 2026-10-08).
 
-**dikw-core** ([OpenDIKW/dikw-core](https://github.com/OpenDIKW/dikw-core) at `ef219da`,
-v0.6.5), the embedding and rerank client of record:
+**The knowledge-base client**, the embedding and rerank client of record:
 
 - Text embeddings go through the `openai` Python SDK (2.33.0 in its lock):
   `embeddings.create(model, input=[…strings], dimensions=…)`, with `dimensions` on every
-  request (`src/dikw_core/providers/openai_compat.py:267`). The SDK adds
+  request. The SDK adds
   `encoding_format: "base64"` whenever the caller names none, and decodes a string
   vector but keeps a float array as it is (`openai/resources/embeddings.py:111-133`),
-  so an upstream answering either way works. dikw-core reorders the result by
-  `data[].index` (`:327`) and treats `usage.prompt_tokens` as optional.
+  so an upstream answering either way works. The client reorders the result by
+  `data[].index` and treats `usage.prompt_tokens` as optional.
 - Multimodal embeddings post Gitee's own shape to the same `/embeddings` path:
   `input` is a list of `{"text": …}` or `{"image": "data:<mime>;base64,…"}` objects,
-  and dikw-core expects no `usage` in the response
-  (`src/dikw_core/providers/gitee_multimodal.py`), though Gitee reports `prompt_tokens`
-  there too (probed 2026-10-08).
+  and the client expects no `usage` in the response, though Gitee reports
+  `prompt_tokens` there too (probed 2026-10-08).
 - Rerank posts `{model, query, documents, top_n}` to `/rerank` and reads
-  `results[{index, relevance_score}]` (`src/dikw_core/providers/rerank.py`).
+  `results[{index, relevance_score}]`.
 - It sizes its own batches. It observed Gitee refusing more than 25 inputs on both calls
-  with a 400 in Gitee's own words (`docs/providers.md`, gotcha 2), where Gitee's spec
+  with a 400 in Gitee's own words, where Gitee's spec
   allows 1000 embedding inputs and sets no rerank cap (above) — so the cap is the live
   tier's to measure, and nothing in the gateway depends on it. It measured 1000
   embedding inputs, multimodal ones included, and 25 rerank documents (2026-10-08).
-- Gitee drops idle keep-alive connections in the middle of a batch, so dikw-core opens a
-  fresh connection per request (`src/dikw_core/providers/_http.py`).
+- Gitee drops idle keep-alive connections in the middle of a batch, so the client opens
+  a fresh connection per request.
 - An index's version is its dimension, normalization, distance and a revision its
-  operator bumps "when a vendor silently refreshes weights behind a stable model name"
-  (`src/dikw_core/config.py:108-117`), and a changed dimension means wiping the index
-  and ingesting again (`docs/providers.md`, gotcha 1). Vectors that change under an
+  operator bumps when a vendor refreshes a model's weights under an unchanged name, and
+  a changed dimension means wiping the index and ingesting again. Vectors that change under an
   unchanged name corrupt an index without an error.
-- Its LLM leg is `anthropic_compat`: the Anthropic Python SDK's `messages.stream`, with
+- Its LLM leg is the Anthropic Python SDK's `messages.stream`, with
   `cache_control` on the system block, which the passthrough path serves as it is.
 
 **bifrost** ([maximhq/bifrost](https://github.com/maximhq/bifrost) at `3b31be003`,
@@ -428,7 +427,7 @@ defaults, as the platform's top-level resource tables do
   `claude-*` alias is only a name, which is how clients that hard-code Claude names
   reach a vendor model. An `embedding` alias has exactly one deployment, fixed when the
   alias is created: an index built through it would mix two vector spaces without an
-  error (Ground truth, dikw-core), so a new embedding model is a new alias. Its
+  error (Ground truth, the knowledge-base client), so a new embedding model is a new alias. Its
   credentials still balance and rotate.
 - **key_policy** — per platform API key (`api_keys.id`), the grant that lets it call
   models: an optional alias allow-list, optional RPM and TPM limits. A key with no row
@@ -693,8 +692,8 @@ frozen by slice 2.
    and Rerank passthrough with the `gitee` profile, Models in OpenAI's shape,
    Anthropic ↔ Chat Completions conversion for OpenAI-only credentials (the conversion
    moving out of `internal/provider/openai`), `openai-go` into
-   docs/REFERENCE_PROJECTS.md; the live tier on Gitee AI. Acceptance: dikw-core through
-   the gateway.
+   docs/REFERENCE_PROJECTS.md; the live tier on Gitee AI. Acceptance: the knowledge-base
+   client's model calls through the gateway.
 5. **Brain cutover:** the `traceparent` and session-id headers, the one-route default in
    compose and Helm with the seeded key, and the chart's `modelgateway.enabled` on by
    default; `flatten_search_results` stays accepted for the
@@ -778,7 +777,7 @@ where a vendor bills cache writes.
   without a grant refused inference, including one an application issued itself under
   the name `bootstrap`, and refused the admin API.
 - **Clients:** the official Anthropic and OpenAI Go SDKs drive the gateway in-process —
-  streaming, tool loops with thinking, errors. dikw-core's request bodies are replayed
+  streaming, tool loops with thinking, errors. The knowledge-base client's request bodies are replayed
   as fixtures, not left to a Go SDK's defaults: `encoding_format: "base64"` (its
   SDK's default) and `dimensions` on every embeddings request, Gitee's multimodal
   objects, a rerank batch — the embeddings answered once with float vectors and once
@@ -830,11 +829,11 @@ where a vendor bills cache writes.
     call's batch cap measured, the 400 past it relayed in Gitee's own words.
   - Zhipu and Moonshot join when keys exist. Until then their profiles are checked
     against fake upstreams only, and Zhipu's whole support matrix stays unconfirmed.
-- **Acceptance:** slice 4's dikw-core run — its embedding, multimodal and rerank base
-  URLs and its Anthropic leg's `llm_base_url` all at the gateway, a platform API key
-  behind each key variable — passing `dikw client serve-and-run --base <base> -- check`,
-  then an ingest whose sources include an image embedded through `assets.multimodal`,
-  and a retrieve with rerank; and slice 5's `ant` sessions through the brain.
+- **Acceptance:** slice 4's run of the knowledge-base client — its embedding,
+  multimodal and rerank base URLs and its LLM's base URL all at the gateway, a platform
+  API key behind each key variable — passing its health check, then an ingest whose
+  sources include an image embedded through its multimodal model, and a retrieve with
+  rerank; and slice 5's `ant` sessions through the brain.
   Transcripts in docs/HISTORY.md.
 - Every slice: `make verify` (the coverage gate takes in the new packages), the
   verifier, both reviews and green CI, per CLAUDE.md.

@@ -19,14 +19,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// dikw-core's three request bodies (docs/plan/59_model-gateway.md, Ground
-// truth): text embeddings as the openai Python SDK sends them, with
+// The knowledge-base client's three request bodies (docs/plan/59_model-gateway.md,
+// Ground truth): text embeddings as the openai Python SDK sends them, with
 // dimensions and its base64 default; Gitee's multimodal objects; and a
 // rerank batch scoring every document.
 const (
-	dikwText       = `{"input":["Jupiter is the largest planet.","Octopuses have three hearts."],"model":"text","dimensions":1024,"encoding_format":"base64"}`
-	dikwMultimodal = `{"model":"vision","input":[{"text":"a red square"},{"image":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}]}`
-	dikwRerank     = `{"model":"ranker","query":"Which planet is the largest? <b>&</b>","documents":["Octopuses have three hearts.","Jupiter is the <i>largest</i> planet.","Paris is in France."],"top_n":3}`
+	clientText       = `{"input":["Jupiter is the largest planet.","Octopuses have three hearts."],"model":"text","dimensions":1024,"encoding_format":"base64"}`
+	clientMultimodal = `{"model":"vision","input":[{"text":"a red square"},{"image":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}]}`
+	clientRerank     = `{"model":"ranker","query":"Which planet is the largest? <b>&</b>","documents":["Octopuses have three hearts.","Jupiter is the <i>largest</i> planet.","Paris is in France."],"top_n":3}`
 )
 
 // vectors answers an embeddings request: base64 vectors where it asked for
@@ -87,16 +87,16 @@ func TestEmbeddingsAndRerankPassThrough(t *testing.T) {
 	key := e.key(everyAlias)
 	e.start()
 
-	float := strings.Replace(dikwText, `"base64"`, `"float"`, 1)
+	float := strings.Replace(clientText, `"base64"`, `"float"`, 1)
 	for _, tc := range []struct {
 		name, path, body, upstreamPath, upstreamModel, endpoint string
 		tokens                                                  *store.Tokens
 	}{
-		{"base64", "/v1/embeddings", dikwText, "/embeddings", "Qwen3-Embedding-8B", "embeddings", &store.Tokens{Input: 13}},
+		{"base64", "/v1/embeddings", clientText, "/embeddings", "Qwen3-Embedding-8B", "embeddings", &store.Tokens{Input: 13}},
 		{"float", "/openai/v1/embeddings", float, "/embeddings", "Qwen3-Embedding-8B", "embeddings", &store.Tokens{Input: 13}},
-		{"multimodal", "/v1/embeddings", dikwMultimodal, "/embeddings", "Qwen3-VL-Embedding-8B", "embeddings", nil},
-		{"rerank", "/v1/rerank", dikwRerank, "/rerank", "bge-reranker-v2-m3", "rerank", nil},
-		{"rerank, prefixed", "/openai/v1/rerank", dikwRerank, "/rerank", "bge-reranker-v2-m3", "rerank", nil},
+		{"multimodal", "/v1/embeddings", clientMultimodal, "/embeddings", "Qwen3-VL-Embedding-8B", "embeddings", nil},
+		{"rerank", "/v1/rerank", clientRerank, "/rerank", "bge-reranker-v2-m3", "rerank", nil},
+		{"rerank, prefixed", "/openai/v1/rerank", clientRerank, "/rerank", "bge-reranker-v2-m3", "rerank", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			n := len(f.recorded())
@@ -264,8 +264,8 @@ func TestAVectorAnswerIsRelayedAsItArrives(t *testing.T) {
 		path, body, alias string
 		tokens            *store.Tokens
 	}{
-		{"/v1/embeddings", dikwText, "text", &store.Tokens{Input: 13}},
-		{"/v1/rerank", dikwRerank, "ranker", nil},
+		{"/v1/embeddings", clientText, "text", &store.Tokens{Input: 13}},
+		{"/v1/rerank", clientRerank, "ranker", nil},
 	} {
 		n := len(f.recorded())
 		resp, b := e.do("POST", tc.path, tc.body, bearer)
@@ -307,7 +307,7 @@ func TestAVectorAnswerPastTheBoundIsCutOff(t *testing.T) {
 	e.alias("text", target(e.deployment(onOpenAI(e, "gitee", f.URL), "Qwen3-Embedding-8B", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
 	key := e.key(everyAlias)
 	e.start()
-	resp, b := e.do("POST", "/v1/embeddings", dikwText, map[string]string{"Authorization": "Bearer " + key})
+	resp, b := e.do("POST", "/v1/embeddings", clientText, map[string]string{"Authorization": "Bearer " + key})
 	if whole := upstreamAnswer(f.recorded()[0], []byte(`"text"`)); resp.StatusCode != 200 || len(whole) <= 101 || !bytes.Equal(b, whole[:101]) {
 		t.Fatalf("%d %s", resp.StatusCode, b)
 	}
@@ -430,8 +430,8 @@ func TestEmbeddingsAndRerankAreTracedAsTheirOperations(t *testing.T) {
 	key := e.key(everyAlias)
 	e.start()
 	for i, tc := range []struct{ path, body, route, op, client, input string }{
-		{"/openai/v1/embeddings", dikwText, "POST /v1/embeddings", "embeddings", "embeddings Qwen3-Embedding-8B", "13"},
-		{"/v1/rerank", dikwRerank, "POST /v1/rerank", "rerank", "rerank bge-reranker-v2-m3", ""},
+		{"/openai/v1/embeddings", clientText, "POST /v1/embeddings", "embeddings", "embeddings Qwen3-Embedding-8B", "13"},
+		{"/v1/rerank", clientRerank, "POST /v1/rerank", "rerank", "rerank bge-reranker-v2-m3", ""},
 	} {
 		if resp, b := e.do("POST", tc.path, tc.body, map[string]string{"Authorization": "Bearer " + key}); resp.StatusCode != 200 {
 			t.Fatalf("%d %s", resp.StatusCode, b)
