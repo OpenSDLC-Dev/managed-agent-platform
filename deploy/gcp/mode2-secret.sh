@@ -366,7 +366,7 @@ EOF
   carry_file=brain-api-key
   if carry brain-api-key "$carry_file"; then
     mask_file "$d/$carry_file"
-    # Only a key a rollback could start on: the refusals the gateway-on branch
+    # Only a key a rollback could use: the refusals the gateway-on branch
     # makes, as one test.
     if ! LC_ALL=C grep -q '[^[:space:]]' "$d/$carry_file" \
        || [ "$(wc -l < "$d/$carry_file")" -ne 0 ] \

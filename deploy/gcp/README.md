@@ -1299,7 +1299,7 @@ workflow runs [`mode2-secret.sh`](./mode2-secret.sh) — the same file an operat
 above — which reads `controlplane-api-key`, `database-url` and `model-providers` (or,
 while the gateway runs, `brain-api-key`, since the chart then writes the brain's route) out of
 Secret Manager into a mode-700 temp directory, carries the other gateway mode's key beside
-them when Secret Manager has one that release could start on, so that a release rolled back
+them when Secret Manager has one that release could use, so that a release rolled back
 across the switch finds its own, writes the four non-secret literals
 (`blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms`, `gcpkms-key-name`) beside them,
 and applies them all with `kubectl create secret generic … --from-file=… --dry-run=client
