@@ -71,9 +71,10 @@ which deployment answered and what its vendor checks.
    - any converted answer — the gateway signed its blocks itself;
    - a passthrough answer from a deployment whose vendor profile sets
      `ThinkingAnyPrefix`: DeepSeek, by #883's probe. Every other vendor keeps
-     Anthropic's rule until a probe shows otherwise; MiniMax's Anthropic
-     endpoint is probed in this plan the same way, and flagged only on that
-     evidence.
+     Anthropic's rule. MiniMax's Anthropic endpoint, probed in this plan the
+     same way, checks neither a signature nor a prefix, but it needs no
+     thinking back, and the probe covered one host and one model of a profile
+     that serves two hosts, so it stays unflagged.
    The header is the gateway's own, written after the attempt that answered is
    known; an upstream's header of that name is never relayed.
 3. **The brain stores such a response's blocks under the route alone.** The
@@ -81,7 +82,9 @@ which deployment answered and what its vendor checks.
    done chunk (`Chunk.ThinkingAnyPrefix`, `KindDone` only). The stream then
    stores the response's kept blocks with the digest `any:` followed by the hex
    SHA-256 of the framed route, in place of the prefix chain's — a value no
-   chain digest (bare hex) can equal, so no migration. Blocks stored before this
+   chain digest (bare hex) can equal, so no migration. The digest is chosen at
+   the done chunk, so URL media, which keeps a checked response's thinking from
+   being stored (plan 60), does not stop an unchecked one's. Blocks stored before this
    change keep their digests and the rule they were stored under.
 4. **Replay admits a block whose digest is either one.** `admitThinking` keeps a
    stored block when its model matches and its digest equals the chain at its
@@ -108,9 +111,9 @@ which deployment answered and what its vendor checks.
   `ThinkingAnyPrefix` on `Chunk`.
 - `internal/provider/anthropic`: the middleware records the header in a holder
   the call's context carries; the stream sets it on its done chunk.
-- `internal/brain`: `anyPrefixDigest(route)`; the stream rewrites the turn's kept
-  blocks' digests when the done chunk says so; `admitThinking` accepts either
-  digest.
+- `internal/brain`: `anyPrefixDigest(route)`; the stream chooses each kept
+  block's digest at the done chunk (`digestThinking`), the route's when it says
+  so and the chain's otherwise; `admitThinking` accepts either digest.
 
 ## Verification
 

@@ -80,12 +80,12 @@ func (c *prefixChain) sum() string { return hex.EncodeToString(c.h.Sum(nil)) }
 // prefix's when the endpoint said its thinking may go back under any prefix
 // (provider.Chunk.ThinkingAnyPrefix): the model gateway's word for a vendor
 // that checks none (#883, docs/plan/61_thinking-replay-via-gateway.md). It
-// binds the block to its route alone; its "any:" head keeps it from ever
-// equalling a chain's digest, which is bare hex.
+// binds the block to its route alone; its events.AnyPrefix head keeps it from
+// ever equalling a chain's digest, which is bare hex.
 func anyPrefixDigest(route string) string {
 	c := &prefixChain{h: sha256.New()}
 	c.write("route", []byte(route))
-	return "any:" + c.sum()
+	return events.AnyPrefix + c.sum()
 }
 
 // requestChain is the chain over a whole request as sent over route: the
@@ -165,8 +165,10 @@ func admitThinking(t replayThinking, system string, tools []json.RawMessage, msg
 // URL, anywhere in its messages, tool results included. The bytes behind a URL
 // can change while the request stays the same, and a block replayed over
 // changed bytes is one under another prefix, so a response to such a request
-// keeps no thinking. Only the stream needs to ask: a stored block's digest
-// matches only a prefix identical to one that had no URL media.
+// keeps no thinking under its prefix (digestThinking). Only the stream needs to
+// ask: a chain digest matches only a prefix identical to one that had no URL
+// media, and an anyPrefixDigest block's producer checks no prefix, URL media
+// and all.
 func urlMedia(req provider.Request) (bool, error) {
 	for _, m := range req.Messages {
 		var v any

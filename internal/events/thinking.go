@@ -16,7 +16,10 @@ import (
 // back — a thinking block with its signature, or a redacted_thinking block —
 // stored beside the agent.thinking event it belongs to, which stays
 // content-free on the wire. Model and PrefixDigest are the guard it is
-// replayed under; the brain computes and checks both.
+// replayed under; the brain computes and checks both. PrefixDigest is the hex
+// SHA-256 of the request prefix the block was produced under, or, for a block
+// whose producer checks no prefix, AnyPrefix followed by one of its route
+// alone (#883, docs/plan/61_thinking-replay-via-gateway.md).
 type ThinkingBlock struct {
 	EventID      domain.ID
 	Model        string
@@ -81,6 +84,9 @@ func (l *Log) ThinkingBlocks(ctx context.Context, sessionID, threadID domain.ID)
 	}
 	return out, rows.Err()
 }
+
+// AnyPrefix heads the PrefixDigest of a block whose producer checks no prefix.
+const AnyPrefix = "any:"
 
 // DropThinking forgets every block a session kept. The brain calls it when a
 // model request fails with blocks to replay: an endpoint that refuses a kept

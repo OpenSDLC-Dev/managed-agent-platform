@@ -133,12 +133,7 @@ var profiles = []Profile{
 	}, BearerAuth: true, FlattenSearchResults: true, Ignores: minimaxIgnores, ChatIgnores: minimaxChatIgnores,
 		// MiniMax's OpenAI Chat Completions reference (text-chat-openai)
 		// takes thinking.type disabled or adaptive, adaptive by default.
-		ChatThinking: map[string]string{"enabled": "adaptive", "adaptive": "adaptive", "disabled": "disabled"},
-		// Its Anthropic endpoint answered MiniMax-M3's tool loop with the
-		// thinking's signature made up, under a changed system prompt, and
-		// with the thinking gone under a foreign tool id (plan 61, probed on
-		// api.minimax.cn 2026-10-09).
-		ThinkingAnyPrefix: true},
+		ChatThinking: map[string]string{"enabled": "adaptive", "adaptive": "adaptive", "disabled": "disabled"}},
 	// BigModel's Claude API compatibility guide sends the key as x-api-key.
 	{Name: "zhipu", DisplayName: "Zhipu (BigModel · Z.ai)", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/anthropic"},

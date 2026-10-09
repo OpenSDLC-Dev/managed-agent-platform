@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
 )
 
 // endTurn is a minimal answer: one text block, then the stop.
@@ -92,19 +91,11 @@ func TestTheThinkingPrefixWordIsTheStreamedAnswers(t *testing.T) {
 		}
 		w.Header().Set("content-type", "text/event-stream")
 		for _, data := range endTurn {
-			var m struct {
-				Type string `json:"type"`
-			}
-			_ = json.Unmarshal([]byte(data), &m)
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", m.Type, data)
+			writeAnthropicFrame(w, data)
 		}
 	}))
 	t.Cleanup(srv.Close)
-	p, err := anthropic.New(provider.Config{Protocol: "anthropic", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if done := doneOf(t, p, "hi"); done.ThinkingAnyPrefix {
+	if done := doneOf(t, newAnthropicProvider(t, srv, 0), "hi"); done.ThinkingAnyPrefix {
 		t.Error("ThinkingAnyPrefix carried over from a refused attempt")
 	}
 	if n.Load() != 2 {
@@ -126,19 +117,12 @@ func TestTheThinkingPrefixWordIsPerCall(t *testing.T) {
 		}
 		w.Header().Set("content-type", "text/event-stream")
 		for _, data := range endTurn {
-			var m struct {
-				Type string `json:"type"`
-			}
-			_ = json.Unmarshal([]byte(data), &m)
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", m.Type, data)
+			writeAnthropicFrame(w, data)
 			w.(http.Flusher).Flush()
 		}
 	}))
 	t.Cleanup(srv.Close)
-	p, err := anthropic.New(provider.Config{Protocol: "anthropic", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := newAnthropicProvider(t, srv, 0)
 	var wg sync.WaitGroup
 	for i := range 40 {
 		wg.Add(1)

@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -70,7 +69,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 				return resp, err
 			}
 			if w, ok := req.Context().Value(prefixWordKey{}).(*prefixWord); ok {
-				w.unchecked.Store(resp.Header.Get(provider.ThinkingPrefixHeader) == "unchecked")
+				w.unchecked = resp.Header.Get(provider.ThinkingPrefixHeader) == "unchecked"
 			}
 			resp.Body = provider.ProgressBody(req.Context(), resp.Body)
 			return resp, nil
@@ -113,8 +112,9 @@ type anthropicProvider struct {
 // carried from the client's middleware to the call's stream. The client serves
 // every call, so the word rides the call's context; every response the SDK
 // receives overwrites it, a refused attempt it retries included, so the answer
-// that streams decides.
-type prefixWord struct{ unchecked atomic.Bool }
+// that streams decides. The SDK sends the request, retries and all, before
+// NewStreaming returns, so every write precedes the stream's one read.
+type prefixWord struct{ unchecked bool }
 
 type prefixWordKey struct{}
 
@@ -416,7 +416,7 @@ func (s *stream) Next() bool {
 				usage = &u
 			}
 			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: usage,
-				ThinkingAnyPrefix: s.word.unchecked.Load()}
+				ThinkingAnyPrefix: s.word.unchecked}
 			return true
 		}
 	}

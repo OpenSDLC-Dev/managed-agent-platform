@@ -51,11 +51,11 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ## Thinking replay through the model gateway (plan 61, #883) — archived 2026-10-09, delivered in one PR
 
-The tests were written first and run against the unchanged code. The gateway test's rows that expect `X-MAP-Thinking-Prefix: unchecked` found none, and its negative rows already passed, an upstream's own header of that name among them. The adapter's tests that expect the word found none on the done chunk. Two of the brain's four new tests failed: the unit test's tool-set and reorder rows dropped the block, and the end-to-end test lost the block at the `system.message` and stored only chain digests. The digest-shape test passed once its function existed, and the model-change test passed, since both rules drop there; the mutations below are what prove them. Then each guard was broken on its own in a scratch copy, 17 mutants, and the test that pins it failed each time:
+The tests were written first and run against the unchanged code. The gateway test's rows that expect `X-MAP-Thinking-Prefix: unchecked` found none, and its negative rows already passed, an upstream's own header of that name among them. The adapter's tests that expect the word found none on the done chunk. Two of the brain's first four new tests failed (review added a row and a test, both pinned by the mutants below): the unit test's tool-set and reorder rows dropped the block, and the end-to-end test lost the block at the `system.message` and stored only chain digests. The digest-shape test passed once its function existed, and the model-change test passed, since both rules drop there; the mutations below are what prove them. Then each guard of the code as merged was broken on its own in a scratch copy, 18 mutants, and the test that pins it failed each time:
 
-- the gateway (8): the profile flag ignored, conversion ignored, Responses or counts not excluded, the streamed or the whole answer left unmarked, DeepSeek's or MiniMax's flag cleared;
+- the gateway (7): the profile flag ignored, conversion ignored, Responses or counts not excluded, the streamed or the whole answer left unmarked, DeepSeek's flag cleared;
 - the adapter (4): the header never read, any value taken for `unchecked`, a retried attempt's word left standing, the done chunk left unmarked;
-- the brain (5): the `any:` digest not admitted, or blind to the route, the model check skipped for it, the stream keeping chain digests, every response stored as unchecked.
+- the brain (7): the `any:` digest not admitted, or blind to the route, the model check skipped for it, the stream keeping chain digests, every response stored as unchecked, URL media stopping an unchecked response's thinking, a failed request keeping unchecked thinking.
 
 The probe, on 2026-10-09: one tool-calling request per vendor, asked to think, then its continuation in seven variants. DeepSeek ran `deepseek-flash` on `https://api.deepseek.com/anthropic`, MiniMax ran `MiniMax-M3` on `https://api.minimax.cn/anthropic`:
 
@@ -69,7 +69,7 @@ The probe, on 2026-10-09: one tool-calling request per vendor, asked to think, t
 | foreign tool id, thinking kept | 200 | 200 |
 | foreign tool id, thinking kept, system prompt changed | 200 | 200 |
 
-Neither vendor checks a signature or a prefix, so both profiles set `ThinkingAnyPrefix`; only DeepSeek needs it.
+Neither vendor checks a signature or a prefix, but only DeepSeek needs its thinking back, so only DeepSeek's profile sets `ThinkingAnyPrefix`. MiniMax's was set, then cleared in review: the probe covered one host and one model of a profile that serves two hosts, and a flag MiniMax does not need is a risk with nothing to pay for it.
 
 The live tier ran `TestLiveBrainThinkingThroughTheGateway` under `RUN_LIVE_MODELGATEWAY=deepseek,minimax` the same day: the brain, through an in-process gateway, ran a tool loop with a `system.message` between the call and its result.
 
@@ -80,9 +80,14 @@ The live tier ran `TestLiveBrainThinkingThroughTheGateway` under `RUN_LIVE_MODEL
 | DeepSeek through a generic-profile provider | the block dropped, the request refused: #883 |
 | MiniMax passthrough and converted | no thinking returned; the loop answered |
 
-MiniMax-M3 thinks only when asked adaptively, and the brain sends no `thinking` field, so its flag rests on the probe alone. The DeepSeek passthrough loop, run on `origin/main`'s code (774c74b2), failed the same way as the generic route: DeepSeek's 400, `` The `content[].thinking` in the thinking mode must be passed back to the API. ``, after the brain's retries were exhausted.
+MiniMax-M3 thinks only when asked adaptively, and the brain sends no `thinking` field. A DeepSeek route that returns no thinking fails the test rather than passing on its loop alone. The DeepSeek passthrough loop, run on `origin/main`'s code (774c74b2), failed the same way as the generic route: DeepSeek's 400, `` The `content[].thinking` in the thinking mode must be passed back to the API. ``, and the session idled, its `retry_status` `exhausted`.
 
-**Plan 61 progress summary (archived).** Delivered in one PR (#908): the gateway's header, the adapter's word on the done chunk, the brain's `any:` digest, both vendors' flags on the probe above, and the live loop. A route straight to DeepSeek keeps the gap by decision 5; #883's option 1, a per-route setting, is the answer if one is ever needed.
+Review hardening. The verifier passed the branch with notes: the plan named the wrong live tier, the PR number was a prediction, and it could not read which MiniMax host the probe used (`api.minimax.cn`, printed by the probe's own run). Codex (`gpt-6.1-sol`, `xhigh`) found nothing to change; its remark that a loop returning no thinking proves nothing is why DeepSeek's routes now fail without it. `/code-review` (Opus) raised eleven findings:
+
+- **Fixed:** URL media stopped an unchecked response's thinking, because the stream decided from it before the done chunk said what the endpoint checks. The digest is now chosen at the done chunk, which also stops hashing a request whose digest an unchecked response throws away. The other fixes: MiniMax unflagged, the comments on `urlMedia` and `ThinkingBlock`, the adapter's holder a plain bool (the SDK sends the request before `NewStreaming` returns), the adapter tests on the package's frame helper, the digest-shape test's tautology, and plan 60's fragment no longer restating this one.
+- **Declined:** keeping unchecked blocks through a failed request. The brain cannot tell a refusal of a kept block from any other failure, and a block an endpoint refuses would fail every turn after. Dropping one costs DeepSeek at most a continuation chained without a user message, since a failed turn idles the session and DeepSeek checks no loop a user message has closed. `TestAFailedRequestForgetsUncheckedThinking` pins it.
+
+**Plan 61 progress summary (archived).** Delivered in one PR (#908): the gateway's header, the adapter's word on the done chunk, the brain's `any:` digest chosen at the done chunk, DeepSeek's flag on the probe above, and the live loop. A route straight to DeepSeek keeps the gap by decision 5; #883's option 1, a per-route setting, is the answer if one is ever needed.
 
 ## Thinking persistence and replay (plan 60, #67) — archived 2026-10-04, delivered in one PR
 

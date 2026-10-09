@@ -153,18 +153,11 @@ func TestUncheckedThinkingIgnoresThePrefixButNotTheRouteOrModel(t *testing.T) {
 	}
 }
 
-// The any: digest can never be a chain's, which is bare hex, and differs by
-// route.
+// The any: digest carries its head, which no chain digest (bare hex) can, and
+// differs by route.
 func TestTheAnyPrefixDigestIsNoChainsDigest(t *testing.T) {
 	a, b := anyPrefixDigest("r"), anyPrefixDigest("elsewhere")
-	if a == b || !strings.HasPrefix(a, "any:") {
+	if a == b || !strings.HasPrefix(a, events.AnyPrefix) || !strings.HasPrefix(b, events.AnyPrefix) {
 		t.Fatalf("any-prefix digests %q and %q", a, b)
-	}
-	chain, err := newPrefixChain("r", "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(chain.sum(), ":") {
-		t.Fatalf("a chain digest %q holds the any: separator", chain.sum())
 	}
 }

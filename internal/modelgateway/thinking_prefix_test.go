@@ -22,8 +22,8 @@ func named(e *env, name, prof string, endpoints map[profile.Protocol]string) sto
 // The gateway says, on a Messages answer, when the answer's thinking may go
 // back under any prefix (docs/plan/61_thinking-replay-via-gateway.md): on a
 // passthrough answer from a deployment whose vendor checks no prefix
-// (DeepSeek, MiniMax), and on a converted answer, whose thinking the gateway
-// signed itself, whatever its vendor — streamed and whole alike. The attempt that answered decides, not
+// (DeepSeek), and on a converted answer, whose thinking the gateway signed
+// itself, whatever its vendor — streamed and whole alike. The attempt that answered decides, not
 // one that failed before it. Every other answer says nothing: another
 // vendor's, an error, a count, a Chat Completions or Responses caller's. An
 // upstream's own header of that name never reaches the caller.
@@ -44,7 +44,6 @@ func TestTheGatewaySaysWhenThinkingMayGoBackUnderAnyPrefix(t *testing.T) {
 		map[profile.Protocol]string{profile.Anthropic: ds.URL, profile.OpenAI: ds.URL}), "deepseek-flash")
 	generic := e.deployment(named(e, "plain", "anthropic-generic", anth(plain.URL)), "m")
 	e.alias("deepseek", target(deepseek, 0))
-	e.alias("minimax", target(e.deployment(named(e, "mm-anth", "minimax", anth(ds.URL)), "MiniMax-M3"), 0))
 	e.alias("generic", target(generic, 0))
 	e.alias("converted", target(e.deployment(named(e, "oa", "openai-generic",
 		map[profile.Protocol]string{profile.OpenAI: ds.URL}), "any-model"), 0))
@@ -62,7 +61,6 @@ func TestTheGatewaySaysWhenThinkingMayGoBackUnderAnyPrefix(t *testing.T) {
 	}{
 		{"deepseek whole", "/v1/messages", `{"model":"deepseek","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, 200, true},
 		{"deepseek streamed", "/v1/messages", `{"model":"deepseek","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, 200, true},
-		{"minimax", "/v1/messages", `{"model":"minimax","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, 200, true},
 		{"converted whole", "/v1/messages", `{"model":"converted","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, 200, true},
 		{"converted streamed", "/v1/messages", `{"model":"converted","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, 200, true},
 		{"another vendor", "/v1/messages", `{"model":"generic","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, 200, false},

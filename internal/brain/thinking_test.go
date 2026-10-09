@@ -336,22 +336,27 @@ func (h *harness) wakeWith(t *testing.T, content []map[string]any) {
 // A block produced after an image or document fetched by URL is not kept: the
 // bytes behind a URL can change while the request stays the same, and a block
 // replayed over changed bytes is one under another prefix. Inline media is
-// hashed with the request and keeps its blocks.
+// hashed with the request and keeps its blocks. A block whose endpoint said
+// its thinking may go back under any prefix is kept after URL media too: its
+// producer checks no prefix, the bytes behind a URL included (#883).
 func TestThinkingIsNotKeptAfterURLMedia(t *testing.T) {
+	url := map[string]any{"type": "url", "url": "https://example.com/latest.png"}
 	for _, tc := range []struct {
 		name   string
 		source map[string]any
+		fin    provider.Chunk
 		want   int
 	}{
-		{"url", map[string]any{"type": "url", "url": "https://example.com/latest.png"}, 0},
-		{"base64", map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}, 1},
+		{"url", url, done("tool_use", 3), 0},
+		{"base64", map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}, done("tool_use", 3), 1},
+		{"url, unchecked", url, uncheckedDone("tool_use", 3), 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{{
 				thinkingChunk(0, "look"), signatureChunk(0, "s"),
 				provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 					ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
-				done("tool_use", 3),
+				tc.fin,
 			}}, nil)
 			h.lookupAgent(t, "fixture-model", "s")
 			h.wakeWith(t, []map[string]any{
@@ -458,6 +463,41 @@ func TestAFailedRequestForgetsTheSessionsThinking(t *testing.T) {
 	h.runOnce(t)
 	if got := blockTypes(h.assistantBlocks(t, 2)[0]); !slices.Equal(got, []string{"tool_use"}) {
 		t.Errorf("assistant blocks after the refusal = %v, want the tool call alone", got)
+	}
+}
+
+// A failed request forgets unchecked thinking too. The brain cannot tell a
+// refusal of a kept block from any other failure, and a block an endpoint
+// refuses would fail every turn after, while dropping one costs DeepSeek at
+// most the request that resumes the loop without a user message — the session
+// idles on a failure, and DeepSeek checks no loop a user message has closed
+// (#883).
+func TestAFailedRequestForgetsUncheckedThinking(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			thinkingChunk(0, "first"), signatureChunk(0, "s"),
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
+			uncheckedDone("tool_use", 3),
+		},
+		{},
+		{textChunk(0, "ok"), done("end_turn", 1)},
+	}, []error{nil, errors.New("529 Overloaded")})
+	h.lookupAgent(t, "fixture-model", "s")
+	h.wake(t, "go")
+	h.runOnce(t)
+	h.answerLookup(t, "ok")
+	h.runOnce(t)
+	if n := h.countType(t, "session.error"); n != 1 {
+		t.Fatalf("session.error events = %d, want the failed request's", n)
+	}
+	if n := h.thinkingRows(t); n != 0 {
+		t.Fatalf("kept %d thinking blocks after the failure, want none", n)
+	}
+	h.wake(t, "try again")
+	h.runOnce(t)
+	if got := blockTypes(h.assistantBlocks(t, 2)[0]); !slices.Equal(got, []string{"tool_use"}) {
+		t.Errorf("assistant blocks after the failure = %v, want the tool call alone", got)
 	}
 }
 
