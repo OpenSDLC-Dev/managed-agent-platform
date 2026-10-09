@@ -38,10 +38,10 @@ its PersistentVolumes are the thing the teardown section warns about.
 **Mode 2** points the platform at Cloud SQL, Cloud Storage and Cloud KMS. Everything below
 assumes mode 2 unless it says otherwise. The switch is `existingSecret`: set it and the
 chart creates no Secret of its own and reads every credential from the one you pre-created,
-which must carry `controlplane-api-key`, `model-providers.json`, `database-url`,
+which must carry `controlplane-api-key`, `brain-api-key`, `database-url`,
 `blob-backend` (`gcs`) plus `blob-bucket`, and `secrets-backend` plus `gcpkms-key-name` —
-`model-providers.json` because `staging-values.yaml` turns the model gateway off; with it
-on, `brain-api-key` takes that key's place.
+`brain-api-key` because `staging-values.yaml` runs the model gateway; with it off,
+`model-providers.json` takes that key's place.
 Object storage needs no credential key of its own since #240: it authenticates as the
 workload through Workload Identity. `existingSecret` is
 incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart
@@ -144,7 +144,7 @@ comment above the value says what leaving it empty costs.
 
 Everything else is the mode-2 configuration
 [`staging-values.yaml`](../deploy/gcp/staging-values.yaml) already carries with its reasons
-— `existingSecret`, the three `enabled: false` guards, `cloudSQLProxy`, the three Workload
+— `existingSecret`, the three `enabled: false` guards, `cloudSQLProxy`, the Workload
 Identity annotations, `sandboxPlacement` — with your own coordinates in place of this
 repository's. **That file opens with an `image:` block of its own, and it is the one part
 not to bring**: `registry.invalid` is unresolvable by design, so copying the file wholesale
@@ -315,7 +315,7 @@ holds `roles/storage.objectViewer` there. Its own account rather than the contro
 remains the point: annotating the brain onto that account would be the shortcut, and it would
 hand the brain the KMS decrypt that account carries.
 
-The model gateway is off as `staging-values.yaml` writes it, where the chart defaults it on. With `modelgateway.enabled` it
+The model gateway is on, as the chart defaults it and `staging-values.yaml` leaves it, and it
 needs a fourth, `terraform output -json modelgateway_service_account_annotation`: an account
 holding the controlplane's KMS role — the gateway seals vendor keys and opens one on every
 model call — and `roles/cloudsql.client`, its own for the brain's reason.

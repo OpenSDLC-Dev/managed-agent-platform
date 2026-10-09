@@ -193,6 +193,11 @@ that the prefix they read is still the one `env-power.sh` writes.
 - A GCP project with billing enabled, and `gcloud auth application-default login`.
 - Terraform ≥ 1.11 — `brew install hashicorp/tap/terraform`. It is not in Homebrew core.
   (1.11 for `password_wo`; `foundation/` alone needs only 1.5.)
+- Regional quota for the default node pools: four nodes with a 100 GB `pd-balanced` boot disk
+  each, 400 GB against `SSD_TOTAL_GB`, where a new project's limit in `us-central1` is 250 GB
+  and the shortfall fails the sandbox pool's creation as `GCE_QUOTA_EXCEEDED`. Request more,
+  or add `-var platform_node_count=1 -var sandbox_node_count=1` to the apply, which fits
+  and is what the #906 acceptance run did.
 - `kubectl` and `helm` for the deploy that follows, and `jq` if that deploy is mode 2 —
   the Secret assembly checks the model routes with it before applying them.
 
@@ -541,8 +546,9 @@ blob_bucket="$(terraform -chdir="$env" output -raw blob_bucket)"
 kms_key_name="$(terraform -chdir="$env" output -raw kms_key_name)"
 # MODELGATEWAY is required: true while the values you deploy run the model
 # gateway (the chart's modelgateway.enabled, on unless a values file turns it
-# off), and the Secret then requires brain-api-key in model-providers.json's place.
-export PROJECT="$project" BLOB_BUCKET="$blob_bucket" KMS_KEY_NAME="$kms_key_name" MODELGATEWAY=false
+# off, and staging-values.yaml leaves it on); false with it off, and the Secret
+# then requires model-providers.json in brain-api-key's place.
+export PROJECT="$project" BLOB_BUCKET="$blob_bucket" KMS_KEY_NAME="$kms_key_name" MODELGATEWAY=true
 "$repo/deploy/gcp/mode2-secret.sh"
 ```
 
@@ -693,9 +699,9 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-env-tfvars` | a human, once per checkout — `*.tfvars` is gitignored, so a fresh clone has none |
 | `PROJECT=… make gcp-env-apply` | a human, interactively — `PROJECT` names the state bucket as well as the project |
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
-| creating `controlplane-api-key`, `database-url` and `model-providers` — `brain-api-key` in the last one's place while `staging-values.yaml` runs the model gateway | a human, once — `bootstrap.sh` does not create these |
-| replacing the `model-providers` placeholder | a human, once |
-| setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment — and a twelfth, `MODELGATEWAY_SERVICE_ACCOUNT`, before `staging-values.yaml` turns the model gateway on |
+| creating `controlplane-api-key`, `database-url` and `brain-api-key` — `model-providers` in the last one's place while `staging-values.yaml` turns the model gateway off | a human, once — `bootstrap.sh` does not create these |
+| adding the vendor key and an alias for the agents' model to the gateway's catalogue | a human, after every `environment/` rebuild — the catalogue lives in Cloud SQL |
+| setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment — and a twelfth, `MODELGATEWAY_SERVICE_ACCOUNT`, while `staging-values.yaml` runs the model gateway, as it does |
 | build and push the five images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **A failed deploy opens an issue**, because it used to notify nobody: `ci` failing blocks a
@@ -722,18 +728,16 @@ a blind notifier and a broken deploy are different problems for different people
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two the provisioning flow reads
 back — `environment/` reads the admin one, `make gcp-db-init` reads both. The three
-the pipeline reads — `controlplane-api-key`, `database-url`, `model-providers` — are created
+the pipeline reads — `controlplane-api-key`, `database-url`, `brain-api-key` — are created
 out of band by whoever stands the environment up, and this repository ships no tool that
 creates them. [`mode2-secret.sh`](./mode2-secret.sh) does assemble the Secret out of them,
 which is a different act: it reads values that already exist and hands them to Kubernetes by
-path, never by value. Creating them means MINTING them — and one of the three is a live
-model API key, which no automation here may mint on anyone's
-behalf. `controlplane-api-key` is any high-entropy value
-(`openssl rand -hex 32`), `database-url` is composed below, and `model-providers` is the one
-a human must supply. While `staging-values.yaml` runs the model gateway the pipeline reads
-`brain-api-key` in `model-providers`' place — the brain's key for the gateway, minted the way
-`controlplane-api-key` is and different from it — and the vendor keys live in the gateway's
-catalogue instead.
+path, never by value. Creating them means MINTING them. `controlplane-api-key` and
+`brain-api-key` are two different high-entropy values (`openssl rand -hex 32`), and
+`database-url` is composed below. The live model API key is none of the three, and no
+automation here may mint it on anyone's behalf: it goes into the gateway's catalogue, below.
+With the gateway off the pipeline reads `model-providers` in `brain-api-key`'s place — the
+brain's routes, vendor keys inside them — and that is the one a human must supply.
 
 The containers themselves are one command each. Unlike `bootstrap.sh`'s two these carry no
 `<prefix>`, because the workflow reads them by bare name — which is also why a second
@@ -742,20 +746,18 @@ environment in the same project would collide on them:
 ```sh
 project=your-project-id
 
-for s in controlplane-api-key database-url model-providers; do
+for s in controlplane-api-key database-url brain-api-key; do
   gcloud secrets create "$s" --project="$project" --replication-policy=automatic
+done
+for s in controlplane-api-key brain-api-key; do
+  printf '%s' "$(openssl rand -hex 32)" \
+    | gcloud secrets versions add "$s" --project="$project" --data-file=-
 done
 ```
 
 Until a container exists, adding its version fails with `NOT_FOUND` rather than working, and
-so does the deploy that reads it. Before turning the model gateway on, add `brain-api-key` the
-same way, with a value of its own:
-
-```sh
-gcloud secrets create brain-api-key --project="$project" --replication-policy=automatic
-printf '%s' "$(openssl rand -hex 32)" \
-  | gcloud secrets versions add brain-api-key --project="$project" --data-file=-
-```
+so does the deploy that reads it. With the gateway off, `model-providers` takes
+`brain-api-key`'s place in the first loop, and its version is the routes array below.
 
 **`gcp-db-init` is a prerequisite here, not a formality.** Mode 1 never ran it at all — the
 bundled Postgres creates its own role from `postgresql.password`. Mode 2's `database-url`
@@ -812,7 +814,7 @@ is a list to work through rather than a guess, since the workflow's guard refuse
 until all eleven exist.
 
 The model gateway's account is a twelfth, outside the guard's eleven, because nothing reads
-it while `staging-values.yaml` turns `modelgateway.enabled` off. The workflow reads that
+it while `modelgateway.enabled` is off — `staging-values.yaml` leaves it on. The workflow reads that
 switch off the chart's render, before the build; while the gateway runs it requires the
 variable by the guard's rule, annotates the gateway's ServiceAccount with it and reads that
 back beside the other three, and expects a fourth Cloud SQL proxy.
@@ -1178,7 +1180,7 @@ YAML
 
 [`staging-values.yaml`](./staging-values.yaml) is the versioned input the pipeline reads, and
 it is **mode 2**: `existingSecret: map-platform`, the bundled Postgres/MinIO/OpenBao all
-`enabled: false`, all three Workload Identity annotations, the sandbox
+`enabled: false`, the Workload Identity annotations, the sandbox
 `nodeSelector`/`tolerations` pair, `controlplane.service.type: LoadBalancer`, and modest
 resource requests. It holds **no credential and no `image.tag`**. The credentials are not
 withheld from it — in mode 2 the chart renders no Secret at all, so it takes no credential
@@ -1296,8 +1298,8 @@ printf '%s' "postgres://map:$pw@$ip:5432/map?sslmode=require" \
 **The `map-platform` Secret is assembled by the pipeline**, because nothing else can: the
 chart writes no Secret in this mode and Terraform holds no secret *values* by design. The
 workflow runs [`mode2-secret.sh`](./mode2-secret.sh) — the same file an operator runs by hand
-above — which reads `controlplane-api-key`, `database-url` and `model-providers` (or,
-while the gateway runs, `brain-api-key`, since the chart then writes the brain's route) out of
+above — which reads `controlplane-api-key`, `database-url` and `brain-api-key` (or, with
+the gateway off, `model-providers`, since the chart then writes no route of its own) out of
 Secret Manager into a mode-700 temp directory, carries the other gateway mode's key beside
 them when Secret Manager has one that release could use, so that a release rolled back
 across the switch finds its own, writes the four non-secret literals
@@ -1340,6 +1342,9 @@ The five **mode-1** secrets — `postgres-password`, `minio-root-user`, `minio-r
 deliberately left in place rather than deleted: mode 1 is still the documented manual path
 above, and a secret with a version is a secret that can still decrypt something.
 
+This and the next paragraph are the gateway-off mode's, the only one that reads
+`model-providers`.
+
 **`model-providers` was given a version, and that version is a placeholder.** It is a real
 endpoint (`https://api.anthropic.com`) with a fake key, stored so the pipeline could be
 proven end to end without inventing a credential. Nothing here can tell you whether it is
@@ -1361,13 +1366,46 @@ routes from a file rather than stdin; any other refusal — a denied permission,
 version — it leaves to gcloud's own error, because the create it would otherwise advise is
 not the fix for those.
 
+**While the gateway runs, its catalogue is the model route, and it starts empty.** It lives in
+Cloud SQL beside everything else, so a rebuilt environment has none, and every turn fails —
+`404 not_found_error` for a model no alias names — until a human adds the vendor key and an
+alias for the agents' model; no automation here may, for the reason above. The admin API is
+on the gateway's own port, which only a port-forward reaches, and takes `controlplane-api-key`.
+These are the four calls the #906 acceptance run made, each answering with the id the next
+needs, the two keys kept off every argv:
+
+```sh
+kubectl -n map port-forward svc/map-managed-agent-platform-modelgateway 18090:8090 &
+d="$(mktemp -d)"
+{ printf 'header = "x-api-key: '
+  gcloud secrets versions access latest --secret=controlplane-api-key --project="$GCP_PROJECT_ID"
+  printf '"\n'
+} > "$d/curlrc"
+gw() { curl -sS --noproxy '*' -K "$d/curlrc" -H 'content-type: application/json' \
+         --data-binary @- "http://127.0.0.1:18090/admin/v1/$1"; }
+
+pid="$(echo '{"name":"deepseek","profile":"deepseek",
+            "endpoints":{"anthropic":"https://api.deepseek.com/anthropic"}}' | gw providers | jq -r .id)"
+# The vendor key from a file you wrote, never an argument.
+jq -n --rawfile k vendor-key.txt '{key: ($k | rtrimstr("\n"))}' | gw "providers/$pid/credentials" > /dev/null
+dep="$(jq -n --arg p "$pid" '{provider_id: $p, upstream_model: "deepseek-v4-flash", kind: "chat"}' \
+        | gw deployments | jq -r .id)"
+jq -n --arg d "$dep" '{name: "deepseek-flash", targets: [{deployment_id: $d}]}' | gw aliases
+rm -rf "$d"; kill %1
+```
+
+An agent then names the alias as its model (`{"id": "deepseek-flash"}`). `GET
+/admin/v1/profiles` lists the other vendor profiles, and `GET /admin/v1/usage/requests` is the
+ledger to check a turn against: one row per model call, naming the alias, deployment and
+session.
+
 **What the smoke step proves, and what it does not.** It waits for the LoadBalancer's
 external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the management key —
 which exercises the key end to end and takes a round trip through Cloud SQL, so it is a real
 check rather than a readiness probe restated — and to answer something *other* than 200
 without it, which is the check that an address on the public internet is not simply open. It
-does **not** run a session, so it says nothing about the model route (a placeholder unless
-someone has replaced it), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
+does **not** run a session, so it says nothing about the model route (an empty catalogue
+after a rebuild), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
 pipeline's.
 
 **That address is plain HTTP on a bare IP**, and

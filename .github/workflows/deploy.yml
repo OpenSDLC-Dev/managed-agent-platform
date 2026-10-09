@@ -451,8 +451,7 @@ jobs:
 
           # One build, four tags — so controlplane, brain, executor and
           # modelgateway resolve to a single digest and cannot drift apart
-          # between components. staging-values.yaml turns the gateway off, so
-          # the tag costs nothing until it is turned on.
+          # between components.
           docker build \
             -t "$ARTIFACT_REGISTRY/controlplane:$GITHUB_SHA" \
             -t "$ARTIFACT_REGISTRY/brain:$GITHUB_SHA" \
