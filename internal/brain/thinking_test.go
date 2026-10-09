@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -335,22 +336,27 @@ func (h *harness) wakeWith(t *testing.T, content []map[string]any) {
 // A block produced after an image or document fetched by URL is not kept: the
 // bytes behind a URL can change while the request stays the same, and a block
 // replayed over changed bytes is one under another prefix. Inline media is
-// hashed with the request and keeps its blocks.
+// hashed with the request and keeps its blocks. A block whose endpoint said
+// its thinking may go back under any prefix is kept after URL media too: its
+// producer checks no prefix, the bytes behind a URL included (#883).
 func TestThinkingIsNotKeptAfterURLMedia(t *testing.T) {
+	url := map[string]any{"type": "url", "url": "https://example.com/latest.png"}
 	for _, tc := range []struct {
 		name   string
 		source map[string]any
+		fin    provider.Chunk
 		want   int
 	}{
-		{"url", map[string]any{"type": "url", "url": "https://example.com/latest.png"}, 0},
-		{"base64", map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}, 1},
+		{"url", url, done("tool_use", 3), 0},
+		{"base64", map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}, done("tool_use", 3), 1},
+		{"url, unchecked", url, uncheckedDone("tool_use", 3), 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{{
 				thinkingChunk(0, "look"), signatureChunk(0, "s"),
 				provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 					ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
-				done("tool_use", 3),
+				tc.fin,
 			}}, nil)
 			h.lookupAgent(t, "fixture-model", "s")
 			h.wakeWith(t, []map[string]any{
@@ -460,6 +466,41 @@ func TestAFailedRequestForgetsTheSessionsThinking(t *testing.T) {
 	}
 }
 
+// A failed request forgets unchecked thinking too. The brain cannot tell a
+// refusal of a kept block from any other failure, and a block an endpoint
+// refuses would fail every turn after, while dropping one costs DeepSeek at
+// most the request that resumes the loop without a user message — the session
+// idles on a failure, and DeepSeek checks no loop a user message has closed
+// (#883).
+func TestAFailedRequestForgetsUncheckedThinking(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			thinkingChunk(0, "first"), signatureChunk(0, "s"),
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
+			uncheckedDone("tool_use", 3),
+		},
+		{},
+		{textChunk(0, "ok"), done("end_turn", 1)},
+	}, []error{nil, errors.New("529 Overloaded")})
+	h.lookupAgent(t, "fixture-model", "s")
+	h.wake(t, "go")
+	h.runOnce(t)
+	h.answerLookup(t, "ok")
+	h.runOnce(t)
+	if n := h.countType(t, "session.error"); n != 1 {
+		t.Fatalf("session.error events = %d, want the failed request's", n)
+	}
+	if n := h.thinkingRows(t); n != 0 {
+		t.Fatalf("kept %d thinking blocks after the failure, want none", n)
+	}
+	h.wake(t, "try again")
+	h.runOnce(t)
+	if got := blockTypes(h.assistantBlocks(t, 2)[0]); !slices.Equal(got, []string{"tool_use"}) {
+		t.Errorf("assistant blocks after the failure = %v, want the tool call alone", got)
+	}
+}
+
 // A block goes back only to the model that produced it: an agent switched to
 // another model loses its earlier thinking rather than sending one vendor's
 // signature to another.
@@ -520,5 +561,102 @@ func TestThinkingDropsExactlyTheBlocksBeforeAPrefixChange(t *testing.T) {
 	}
 	if got := blockTypes(turns[1]); !slices.Equal(got, []string{"thinking", "tool_use"}) {
 		t.Errorf("second turn = %v, want its thinking kept", got)
+	}
+}
+
+// uncheckedDone is done with the endpoint's word that the turn's thinking may
+// go back under any prefix (provider.ThinkingPrefixHeader).
+func uncheckedDone(stop string, out int64) provider.Chunk {
+	c := done(stop, out)
+	c.ThinkingAnyPrefix = true
+	return c
+}
+
+// digests is the session's stored prefix digests, oldest block first.
+func (h *harness) digests(t *testing.T) []string {
+	t.Helper()
+	rows, err := h.pool.Query(context.Background(),
+		`SELECT t.prefix_digest FROM thinking_blocks t JOIN events e ON e.id = t.event_id
+		  WHERE t.session_id = $1 ORDER BY e.seq`, h.sessionID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// #883: a turn whose endpoint said its thinking may go back under any prefix —
+// the model gateway's word for DeepSeek, which refuses a tool loop that lost
+// its thinking (docs/plan/61_thinking-replay-via-gateway.md) — keeps that
+// thinking through every system.message after it, stored under its route's
+// digest. A turn whose endpoint said nothing beside it keeps plan 60's rule:
+// its thinking drops at the next prefix change.
+func TestUncheckedThinkingSurvivesAPrefixChange(t *testing.T) {
+	call := func(id string) provider.Chunk {
+		return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: id, Name: "lookup", Input: json.RawMessage(`{}`)}}
+	}
+	h := newHarness(t, [][]provider.Chunk{
+		{thinkingChunk(0, "first"), signatureChunk(0, "s1"), call("toolu_1"), uncheckedDone("tool_use", 3)},
+		{thinkingChunk(0, "second"), signatureChunk(0, "s2"), call("toolu_2"), done("tool_use", 3)},
+		{textChunk(0, "done"), done("end_turn", 1)},
+	}, nil)
+	instruct := func(text string) {
+		t.Helper()
+		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{{
+			Type:    domain.EventSystemMessage,
+			Payload: json.RawMessage(`{"content":[{"type":"text","text":"` + text + `"}]}`),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.lookupAgent(t, "fixture-model", "s")
+	h.wake(t, "go")
+	h.runOnce(t)
+	instruct("a new instruction")
+	h.answerLookup(t, "one")
+	h.runOnce(t)
+	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !slices.Equal(got, []string{"thinking", "tool_use"}) {
+		t.Errorf("after the system.message the unchecked block dropped: %v", got)
+	}
+	instruct("another instruction")
+	h.answerLookup(t, "two")
+	h.runOnce(t)
+	turns := h.assistantBlocks(t, 2)
+	if len(turns) != 2 {
+		t.Fatalf("third request has %d assistant messages, want 2", len(turns))
+	}
+	if got := blockTypes(turns[0]); !slices.Equal(got, []string{"thinking", "tool_use"}) {
+		t.Errorf("first turn = %v, want its unchecked thinking kept", got)
+	}
+	if got := blockTypes(turns[1]); !slices.Equal(got, []string{"tool_use"}) {
+		t.Errorf("second turn = %v, want its checked thinking dropped", got)
+	}
+	d := h.digests(t)
+	if len(d) != 2 || !strings.HasPrefix(d[0], "any:") || strings.HasPrefix(d[1], "any:") {
+		t.Errorf("stored digests = %q, want the first under its route and the second under its prefix", d)
+	}
+}
+
+// An unchecked block still goes back only to the model that produced it.
+func TestUncheckedThinkingDropsWhenTheModelChanges(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{thinkingChunk(0, "x"), signatureChunk(0, "s"),
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_1", Name: "lookup", Input: json.RawMessage(`{}`)}},
+			uncheckedDone("tool_use", 3)},
+		{textChunk(0, "ok"), done("end_turn", 1)},
+	}, nil)
+	h.lookupAgent(t, "model-a", "s")
+	h.wake(t, "go")
+	h.runOnce(t)
+	h.lookupAgent(t, "model-b", "s")
+	h.answerLookup(t, "ok")
+	h.runOnce(t)
+	if got := blockTypes(h.assistantBlocks(t, 1)[0]); !slices.Equal(got, []string{"tool_use"}) {
+		t.Errorf("assistant blocks after a model change = %v, want the tool call alone", got)
 	}
 }

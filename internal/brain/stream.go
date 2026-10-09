@@ -36,8 +36,10 @@ type turnResult struct {
 	// call, an empty stream): there is no first token, so none is recorded.
 	firstTokenAt time.Time
 	// thinking is the response's leading run of signed thinking and redacted
-	// blocks, each with the prefix digest it was produced under, which the
-	// settlement keeps for replay when the turn commits an answer (#67).
+	// blocks, each with the prefix digest it was produced under — or its
+	// route's anyPrefixDigest, when the endpoint said its thinking may go back
+	// under any prefix (#883) — which the settlement keeps for replay when the
+	// turn commits an answer (#67).
 	thinking []events.ThinkingBlock
 }
 
@@ -90,29 +92,16 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	// leaves in the indices ends the run too.
 	leading := true
 	var next int64
-	// chain is the prefix the next kept block was produced under, built from
-	// the request on the first block kept.
-	var chain *prefixChain
+	// keep holds a block of the run; its digest waits for the done chunk,
+	// which says what the endpoint checks (digestThinking).
 	keep := func(id domain.ID, index int64, block any) error {
-		if chain == nil {
-			if media, err := urlMedia(req); err != nil || media {
-				leading = false
-				return err
-			}
-			var err error
-			if chain, err = requestChain(desc.Route, req); err != nil {
-				return err
-			}
-		}
 		raw, err := json.Marshal(block)
 		if err != nil {
 			return err
 		}
-		turn.thinking = append(turn.thinking, events.ThinkingBlock{
-			EventID: id, Model: desc.Model, PrefixDigest: chain.sum(), Block: raw,
-		})
+		turn.thinking = append(turn.thinking, events.ThinkingBlock{EventID: id, Model: desc.Model, Block: raw})
 		next = index + 1
-		return chain.add("assistant", raw)
+		return nil
 	}
 
 	closeThinking := func() error {
@@ -270,6 +259,9 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			if err := closeThinking(); err != nil {
 				return nil, err
 			}
+			if err := digestThinking(turn, req, desc.Route, c.ThinkingAnyPrefix); err != nil {
+				return nil, err
+			}
 			turn.stopReason = c.StopReason
 			if c.Usage != nil {
 				// Copied, not aliased: the chunk belongs to the provider,
@@ -286,6 +278,41 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		return nil, fmt.Errorf("model stream ended without a stop reason")
 	}
 	return turn, nil
+}
+
+// digestThinking gives each block a finished response kept the digest it is
+// stored under. When the endpoint said its thinking may go back under any
+// prefix (#883) that is the route's anyPrefixDigest, and nothing else of the
+// request matters. Otherwise it is the prefix the block was produced under —
+// the request's chain, which each kept block extends before the next — and a
+// request that showed the model URL media keeps nothing: the bytes behind a URL
+// can change while the request stays the same.
+func digestThinking(turn *turnResult, req provider.Request, route string, anyPrefix bool) error {
+	if len(turn.thinking) == 0 {
+		return nil
+	}
+	if anyPrefix {
+		d := anyPrefixDigest(route)
+		for i := range turn.thinking {
+			turn.thinking[i].PrefixDigest = d
+		}
+		return nil
+	}
+	if media, err := urlMedia(req); err != nil || media {
+		turn.thinking = nil
+		return err
+	}
+	chain, err := requestChain(route, req)
+	if err != nil {
+		return err
+	}
+	for i := range turn.thinking {
+		turn.thinking[i].PrefixDigest = chain.sum()
+		if err := chain.add("assistant", turn.thinking[i].Block); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func stripValue(v any) (any, error) {

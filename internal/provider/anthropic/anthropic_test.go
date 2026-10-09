@@ -29,6 +29,8 @@ type fakeServer struct {
 	// echoKey makes the error body quote the request's x-api-key header back,
 	// the way some gateways do (see TestGenerateUpstreamErrorNeverQuotes...).
 	echoKey bool
+	// header is set on the streamed answer.
+	header http.Header
 }
 
 // testAPIKey is the credential start() configures the adapter with, so a test
@@ -64,6 +66,9 @@ func (f *fakeServer) handler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(f.status)
 		fmt.Fprintf(w, `{"type":"error","error":{"type":"authentication_error","message":%q}}`, msg)
 		return
+	}
+	for k, vs := range f.header {
+		w.Header()[k] = vs
 	}
 	w.Header().Set("content-type", "text/event-stream")
 	for _, data := range f.sse {

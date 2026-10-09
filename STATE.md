@@ -4,8 +4,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 59](./docs/plan/59_model-gateway.md) (the model gateway) archived
-2026-10-09; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
+**None.** [Plan 61](./docs/plan/61_thinking-replay-via-gateway.md) (thinking replay through
+the model gateway, #883) archived 2026-10-09; its delivery record is
+[docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 

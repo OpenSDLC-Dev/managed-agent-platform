@@ -42,7 +42,9 @@ import (
 // kept (thinking.blocks) replays as that block, in its assistant turn ahead of
 // the text and tool calls it led to, when admitThinking finds it still valid:
 // sent to the model that produced it, under the prefix it was produced under
-// (#67, docs/plan/60_thinking-replay.md). Any other replays as nothing.
+// (#67, docs/plan/60_thinking-replay.md) — or under any prefix over the route
+// it came over, when the endpoint said its producer checks none (#883,
+// docs/plan/61_thinking-replay-via-gateway.md). Any other replays as nothing.
 func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock, memoryBlock string, thinking replayThinking) (provider.Request, int64, error) {
 	req := provider.Request{System: system, Tools: tools}
 	// Startup metadata blocks sit after the agent's own system prompt and before

@@ -61,10 +61,15 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		// SDK owns the response body, and a middleware is the only place an
 		// adapter can reach it; the guard rides the request context because
 		// this client is built once and serves whatever turns follow.
+		//
+		// It is also where the call's prefixWord hears each response.
 		option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
 			resp, err := next(req)
 			if err != nil || resp == nil {
 				return resp, err
+			}
+			if w, ok := req.Context().Value(prefixWordKey{}).(*prefixWord); ok {
+				w.unchecked = resp.Header.Get(provider.ThinkingPrefixHeader) == "unchecked"
 			}
 			resp.Body = provider.ProgressBody(req.Context(), resp.Body)
 			return resp, nil
@@ -102,6 +107,16 @@ type anthropicProvider struct {
 	// so both an echoed credential and one carried in base_url reach its text.
 	redact provider.Redactor
 }
+
+// prefixWord is what one call's endpoint said in provider.ThinkingPrefixHeader,
+// carried from the client's middleware to the call's stream. The client serves
+// every call, so the word rides the call's context; every response the SDK
+// receives overwrites it, a refused attempt it retries included, so the answer
+// that streams decides. The SDK sends the request, retries and all, before
+// NewStreaming returns, so every write precedes the stream's one read.
+type prefixWord struct{ unchecked bool }
+
+type prefixWordKey struct{}
 
 // defaultMaxTokens applies when neither the request nor the route config sets
 // one; the wire field is required.
@@ -170,7 +185,8 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 		call = append(call, option.WithHeader(k, v))
 	}
 	gctx, guard := provider.NewStallGuard(ctx, p.stall)
-	events := p.client.Messages.NewStreaming(gctx, params, call...)
+	word := &prefixWord{}
+	events := p.client.Messages.NewStreaming(context.WithValue(gctx, prefixWordKey{}, word), params, call...)
 	if err := events.Err(); err != nil {
 		err = guard.Cause(p.redact.Error(err))
 		guard.Stop()
@@ -179,7 +195,7 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 	// The stream carries the redactor too: an endpoint can report a failure
 	// mid-stream under HTTP 200, and that error surfaces from Err() after
 	// Next(), never from here.
-	return &stream{events: events, redact: p.redact, guard: guard}, nil
+	return &stream{events: events, redact: p.redact, guard: guard, word: word}, nil
 }
 
 // stream translates the Messages API event stream into provider chunks:
@@ -190,6 +206,7 @@ type stream struct {
 	events *ssestream.Stream[sdk.MessageStreamEventUnion]
 	redact provider.Redactor
 	guard  *provider.StallGuard
+	word   *prefixWord // reported on the done chunk
 	cur    provider.Chunk
 	err    error
 	// pending holds chunks one wire event produced beyond the first: a thinking
@@ -398,7 +415,8 @@ func (s *stream) Next() bool {
 				u := s.usage
 				usage = &u
 			}
-			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: usage}
+			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: usage,
+				ThinkingAnyPrefix: s.word.unchecked}
 			return true
 		}
 	}
