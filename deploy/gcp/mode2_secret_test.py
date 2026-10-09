@@ -607,6 +607,19 @@ def main():
               deny.code == 0 and deny.key("brain-api-key") is None
               and deny.key("model-providers.json") == GOOD["model-providers"]
               and "Not carrying 'brain-api-key'" in deny.out, deny.out)
+        for label, body in (
+            ("an empty", b""),
+            ("a blank", b"   "),
+            ("a newline-terminated", GOOD_GW["brain-api-key"] + b"\n"),
+            ("a space-led", b" " + GOOD_GW["brain-api-key"]),
+            ("a CR-ended", GOOD_GW["brain-api-key"] + b"\r"),
+            ("the control plane's key as the", GOOD["controlplane-api-key"]),
+        ):
+            u = run(tmp, "carryoffbad", versions=dict(GOOD, **{"brain-api-key": body}))
+            check("gateway off, %s brain-api-key: deployed without it, and said so" % label,
+                  u.code == 0 and u.key("brain-api-key") is None
+                  and u.key("model-providers.json") == GOOD["model-providers"]
+                  and "Not carrying 'brain-api-key'" in u.out, u.out)
 
         print("MODELGATEWAY is required, and takes true or false and nothing that only looks like one")
         for value in (None, "", "1", "yes", "True", " true"):

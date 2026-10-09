@@ -366,6 +366,15 @@ EOF
   carry_file=brain-api-key
   if carry brain-api-key "$carry_file"; then
     mask_file "$d/$carry_file"
+    # Only a key a rollback could start on: the refusals the gateway-on branch
+    # makes, as one test.
+    if ! LC_ALL=C grep -q '[^[:space:]]' "$d/$carry_file" \
+       || [ "$(wc -l < "$d/$carry_file")" -ne 0 ] \
+       || LC_ALL=C grep -qE $'^[ \t\r]|[ \t\r]$' "$d/$carry_file" \
+       || cmp -s "$d/controlplane-api-key" "$d/$carry_file"; then
+      rm -f "$d/$carry_file"
+      echo "Not carrying 'brain-api-key' into the Secret: the control plane and the gateway would refuse it, so no rollback could use it." >&2
+    fi
   fi
 fi
 
