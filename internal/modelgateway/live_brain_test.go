@@ -28,9 +28,13 @@ import (
 type brainRoute struct {
 	name, alias string
 	rec         *recorder
-	// refused is a route whose provider's profile says nothing of the vendor's
-	// thinking: the brain keeps plan 60's rule there, as it did on every route
-	// before plan 61.
+	// unchecked is a route whose answers the gateway marks unchecked — a
+	// converted one, or a flagged profile's — so the brain stores its thinking
+	// under the route alone and sends it back after the system.message. Any
+	// other keeps plan 60's rule: its thinking drops there.
+	unchecked bool
+	// refused is a vendor that refuses the continuation that lost its
+	// thinking, which a checked route meets: #883 itself.
 	refused bool
 	// thinks is a vendor that thinks unasked, as DeepSeek does: a loop that
 	// returns no thinking fails, since it proves nothing.
@@ -65,9 +69,11 @@ func TestLiveBrainThinkingThroughTheGateway(t *testing.T) {
 	}
 	for _, v := range vendors {
 		model, thinks := v.models[0], v.name == "deepseek"
-		add(brainRoute{name: v.name + "/passthrough", alias: "brain-pass-" + v.name, rec: &recorder{}, thinks: thinks}, v.name, model, anth, v.base)
+		flagged, _ := profile.Lookup(v.name)
+		add(brainRoute{name: v.name + "/passthrough", alias: "brain-pass-" + v.name, rec: &recorder{},
+			unchecked: flagged.ThinkingAnyPrefix, refused: thinks, thinks: thinks}, v.name, model, anth, v.base)
 		if host := openAIHost(v); host != "" {
-			add(brainRoute{name: v.name + "/converted", alias: "brain-conv-" + v.name, rec: &recorder{}, thinks: thinks}, v.name, model,
+			add(brainRoute{name: v.name + "/converted", alias: "brain-conv-" + v.name, rec: &recorder{}, unchecked: true, refused: thinks, thinks: thinks}, v.name, model,
 				func(proxy string) map[profile.Protocol]string {
 					return map[profile.Protocol]string{profile.OpenAI: proxy}
 				}, host)
@@ -173,7 +179,7 @@ func brainLoop(t *testing.T, e *env, key string, r brainRoute) {
 		t.Logf("%s returned no thinking with its tool call: the loop runs, but there is nothing to replay", r.name)
 	}
 	for _, k := range kept {
-		if got := strings.HasPrefix(k.PrefixDigest, "any:"); got == r.refused {
+		if got := strings.HasPrefix(k.PrefixDigest, "any:"); got != r.unchecked {
 			t.Fatalf("a block stored under %q: the gateway's word did not reach the brain as this route says", k.PrefixDigest)
 		}
 	}
@@ -189,9 +195,9 @@ func brainLoop(t *testing.T, e *env, key string, r brainRoute) {
 	run()
 
 	errs := ofType("session.error")
-	if r.refused {
+	if len(kept) > 0 && !r.unchecked && r.refused {
 		if len(errs) == 0 || !strings.Contains(string(errs[len(errs)-1].Body), "must be passed back") {
-			t.Fatalf("the generic route was not refused for the thinking it dropped: %d session.error events", len(errs))
+			t.Fatalf("the route was not refused for the thinking it dropped: %d session.error events", len(errs))
 		}
 		t.Logf("%s: the brain dropped the call's thinking at the system.message, and the vendor refused the request (#883)", r.name)
 		return
@@ -203,10 +209,17 @@ func brainLoop(t *testing.T, e *env, key string, r brainRoute) {
 		return
 	}
 	out := r.rec.since(sent)
-	if len(out) == 0 || !carriesThinking(t, out[len(out)-1].sent) {
-		t.Fatalf("the request the vendor answered after the system.message carried no thinking")
+	if len(out) == 0 {
+		t.Fatal("no request reached the vendor after the system.message")
 	}
-	t.Logf("%s: %d thinking blocks kept under the route alone, sent back after the system.message, and answered", r.name, len(kept))
+	if got := carriesThinking(t, out[len(out)-1].sent); got != r.unchecked {
+		t.Fatalf("the request after the system.message carried thinking: %v, want %v", got, r.unchecked)
+	}
+	if r.unchecked {
+		t.Logf("%s: %d thinking blocks kept under the route alone, sent back after the system.message, and answered", r.name, len(kept))
+	} else {
+		t.Logf("%s: %d thinking blocks dropped at the system.message, and the vendor answered without them", r.name, len(kept))
+	}
 }
 
 // postResult answers a custom tool call through the control plane, as a
