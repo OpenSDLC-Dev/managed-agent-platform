@@ -76,6 +76,13 @@ type Profile struct {
 	// (internal/modelgateway/convert); nil drops thinking, which Chat
 	// Completions has no field for.
 	ChatThinking map[string]string `json:"-"`
+	// ThinkingAnyPrefix marks a vendor whose Anthropic endpoint checks a
+	// thinking block against neither its signature nor the request prefix it
+	// was produced under, so the gateway tells the caller its answers'
+	// thinking may go back under any prefix (provider.ThinkingPrefixHeader;
+	// docs/plan/61_thinking-replay-via-gateway.md). Unset keeps the Messages
+	// API's rule, the brain's default.
+	ThinkingAnyPrefix bool `json:"-"`
 	// Ignores names what in a Messages request to model, a deployment's
 	// upstream model id, the vendor ignores although the answer depends on
 	// it — by its documentation or the live tier — or "" for nothing; no
@@ -108,7 +115,12 @@ var profiles = []Profile{
 	}, FlattenSearchResults: true, Ignores: deepseekIgnores, ChatIgnores: deepseekChatIgnores,
 		// DeepSeek's thinking guide gives both its formats one toggle,
 		// {"thinking": {"type": "enabled/disabled"}}, enabled by default.
-		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
+		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"},
+		// Its Anthropic endpoint answers a thinking block with a made-up
+		// signature, or none, and one under a changed prefix, but refuses a
+		// tool loop whose thinking is gone unless the tool ids are its own
+		// (#883, probed 2026-10-04).
+		ThinkingAnyPrefix: true},
 	// MiniMax's Messages API reference takes either header and says
 	// "Authorization: Bearer <API_KEY> is recommended". It refuses a
 	// search_result block in a tool_result with a 400, "invalid tool_result

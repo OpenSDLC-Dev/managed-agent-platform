@@ -3,6 +3,7 @@ package brain
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -111,5 +112,59 @@ func TestThinkingDropsWhenEarlierMessagesReorder(t *testing.T) {
 	}
 	if got := assistantTypes(t, "r", nil, reordered, kept); !slices.Equal(got, []string{"text"}) {
 		t.Errorf("reordered: assistant blocks = %v, want the block dropped", got)
+	}
+}
+
+// A block stored under its route's any: digest — its producer checks no
+// prefix (#883, docs/plan/61_thinking-replay-via-gateway.md) — goes back after
+// a tool set change and a reorder of earlier messages, and still drops when
+// the route or the model changes.
+func TestUncheckedThinkingIgnoresThePrefixButNotTheRouteOrModel(t *testing.T) {
+	think := ev(3, domain.EventAgentThinking, `{}`)
+	answer := ev(4, domain.EventAgentMessage, `{"content":[{"type":"text","text":"a"}]}`)
+	inOrder := []domain.Event{
+		ev(1, domain.EventUserMessage, `{"content":"one"}`),
+		ev(2, domain.EventUserMessage, `{"content":"two"}`),
+	}
+	kept := keptUnder(t, think.ID, nil, inOrder)
+	kept.PrefixDigest = anyPrefixDigest("r")
+	history := append(slices.Clone(inOrder), think, answer)
+	tools := []json.RawMessage{json.RawMessage(`{"name":"b","input_schema":{"type":"object"}}`)}
+	reordered := []domain.Event{
+		ev(1, domain.EventUserMessage, `{"content":"two"}`),
+		ev(2, domain.EventUserMessage, `{"content":"one"}`),
+		think, answer,
+	}
+	keptTypes, dropped := []string{"thinking", "text"}, []string{"text"}
+
+	if got := assistantTypes(t, "r", tools, history, kept); !slices.Equal(got, keptTypes) {
+		t.Errorf("tool added: assistant blocks = %v, want the block kept", got)
+	}
+	if got := assistantTypes(t, "r", nil, reordered, kept); !slices.Equal(got, keptTypes) {
+		t.Errorf("reordered: assistant blocks = %v, want the block kept", got)
+	}
+	if got := assistantTypes(t, "elsewhere", nil, history, kept); !slices.Equal(got, dropped) {
+		t.Errorf("another route: assistant blocks = %v, want the block dropped", got)
+	}
+	other := kept
+	other.Model = "another-model"
+	if got := assistantTypes(t, "r", nil, history, other); !slices.Equal(got, dropped) {
+		t.Errorf("another model: assistant blocks = %v, want the block dropped", got)
+	}
+}
+
+// The any: digest can never be a chain's, which is bare hex, and differs by
+// route.
+func TestTheAnyPrefixDigestIsNoChainsDigest(t *testing.T) {
+	a, b := anyPrefixDigest("r"), anyPrefixDigest("elsewhere")
+	if a == b || !strings.HasPrefix(a, "any:") {
+		t.Fatalf("any-prefix digests %q and %q", a, b)
+	}
+	chain, err := newPrefixChain("r", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(chain.sum(), ":") {
+		t.Fatalf("a chain digest %q holds the any: separator", chain.sum())
 	}
 }

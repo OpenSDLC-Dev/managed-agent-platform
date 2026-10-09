@@ -416,6 +416,17 @@ func thinkingRefusal(body []byte) bool {
 	return strings.Contains(msg, "redacted_thinking") || strings.Contains(msg, "thinking block") || blockField.MatchString(msg)
 }
 
+// prefixUnchecked reports whether an attempt's answer to a Messages caller
+// carries thinking that no upstream checks against the request prefix it was
+// produced under, which the caller is told in provider.ThinkingPrefixHeader
+// (docs/plan/61_thinking-replay-via-gateway.md): a converted answer's, whose
+// blocks the gateway signed itself, or a passthrough answer's from a vendor
+// whose profile says it checks none. The header is the gateway's own, written
+// by the attempt that answers; an upstream's never reaches the caller.
+func (c call) prefixUnchecked(conv bool, prof profile.Profile) bool {
+	return c.path == "/v1/messages" && c.resp == nil && (conv || prof.ThinkingAnyPrefix)
+}
+
 // thinkingParams name what configures thinking, as Anthropic's configuration
 // refusals do (platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting,
 // read 2026-10-05).

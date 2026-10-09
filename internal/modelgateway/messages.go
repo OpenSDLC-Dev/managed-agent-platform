@@ -660,6 +660,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	prof, _ := profile.Lookup(at.Provider.Profile)
 	up := at.Protocol
 	conv := up != c.proto // the attempt converts the request (converted.go)
+	unchecked := c.prefixUnchecked(conv, prof)
 	var body []byte
 	var wrap *wrapping
 	path := c.path
@@ -784,6 +785,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 				if cut {
 					e.Raw = terminated(e.Raw)
 				}
+				if unchecked {
+					w.Header().Set(provider.ThinkingPrefixHeader, "unchecked")
+				}
 				relayStream(w, events, held, e, c, p, guard, red)
 				return nil, false
 			}
@@ -828,6 +832,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			return &failure{status: http.StatusBadGateway, typ: "api_error",
 				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false
 		}
+	}
+	if unchecked {
+		w.Header().Set(provider.ThinkingPrefixHeader, "unchecked")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	bounded(w)

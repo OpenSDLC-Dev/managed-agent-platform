@@ -76,6 +76,18 @@ func (c *prefixChain) write(tag string, b []byte) {
 // sum is the digest of everything added so far; adding may continue after it.
 func (c *prefixChain) sum() string { return hex.EncodeToString(c.h.Sum(nil)) }
 
+// anyPrefixDigest is the digest a block is stored under in place of its
+// prefix's when the endpoint said its thinking may go back under any prefix
+// (provider.Chunk.ThinkingAnyPrefix): the model gateway's word for a vendor
+// that checks none (#883, docs/plan/61_thinking-replay-via-gateway.md). It
+// binds the block to its route alone; its "any:" head keeps it from ever
+// equalling a chain's digest, which is bare hex.
+func anyPrefixDigest(route string) string {
+	c := &prefixChain{h: sha256.New()}
+	c.write("route", []byte(route))
+	return "any:" + c.sum()
+}
+
 // requestChain is the chain over a whole request as sent over route: the
 // point the first block of its response is produced at.
 func requestChain(route string, req provider.Request) (*prefixChain, error) {
@@ -108,7 +120,9 @@ type replayMessage struct {
 
 // admitThinking walks a built request in order and removes each stored
 // thinking block whose model or prefix differs from the one it was produced
-// under. It runs last because the system prompt is only final once every
+// under — its prefix unless it was stored under its route's anyPrefixDigest,
+// whose producer checks none, and which goes back over that route under any
+// prefix (#883). It runs last because the system prompt is only final once every
 // system.message has been read, and a system prompt change moves every
 // block's prefix. A kept block joins the prefix later blocks are checked
 // against and a removed one does not, so a removal drops exactly the blocks
@@ -121,6 +135,7 @@ func admitThinking(t replayThinking, system string, tools []json.RawMessage, msg
 	if err != nil {
 		return err
 	}
+	anyPrefix := anyPrefixDigest(t.route)
 	for mi := range msgs {
 		m := &msgs[mi]
 		if len(m.thinking) == 0 {
@@ -133,7 +148,7 @@ func admitThinking(t replayThinking, system string, tools []json.RawMessage, msg
 		}
 		kept := make([]json.RawMessage, 0, len(m.blocks))
 		for i, b := range m.blocks {
-			if tb, ok := m.thinking[i]; ok && (tb.Model != t.model || tb.PrefixDigest != chain.sum()) {
+			if tb, ok := m.thinking[i]; ok && (tb.Model != t.model || (tb.PrefixDigest != chain.sum() && tb.PrefixDigest != anyPrefix)) {
 				continue
 			}
 			if err := chain.add(m.role, b); err != nil {

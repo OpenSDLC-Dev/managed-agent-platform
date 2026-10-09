@@ -36,8 +36,10 @@ type turnResult struct {
 	// call, an empty stream): there is no first token, so none is recorded.
 	firstTokenAt time.Time
 	// thinking is the response's leading run of signed thinking and redacted
-	// blocks, each with the prefix digest it was produced under, which the
-	// settlement keeps for replay when the turn commits an answer (#67).
+	// blocks, each with the prefix digest it was produced under — or its
+	// route's anyPrefixDigest, when the endpoint said its thinking may go back
+	// under any prefix (#883) — which the settlement keeps for replay when the
+	// turn commits an answer (#67).
 	thinking []events.ThinkingBlock
 }
 
@@ -269,6 +271,11 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		case provider.KindDone:
 			if err := closeThinking(); err != nil {
 				return nil, err
+			}
+			if c.ThinkingAnyPrefix {
+				for i := range turn.thinking {
+					turn.thinking[i].PrefixDigest = anyPrefixDigest(desc.Route)
+				}
 			}
 			turn.stopReason = c.StopReason
 			if c.Usage != nil {

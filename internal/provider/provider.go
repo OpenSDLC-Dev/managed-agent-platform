@@ -83,6 +83,13 @@ type Request struct {
 // upstream call (docs/plan/59_model-gateway.md). Another endpoint ignores it.
 const SessionHeader = "X-MAP-Session-ID"
 
+// ThinkingPrefixHeader is the model gateway's word, on a Messages answer, that
+// the answer's thinking may go back under any prefix: its value is
+// "unchecked" when the upstream that produced it checks none (#883,
+// docs/plan/61_thinking-replay-via-gateway.md). An answer without it keeps
+// plan 60's rule, the Messages API's.
+const ThinkingPrefixHeader = "X-MAP-Thinking-Prefix"
+
 // CallHeaders are the headers every adapter sets on a call beside the route's
 // own, which NewRegistry keeps from naming them: the W3C trace context of
 // ctx, when it carries a span, and the request's SessionHeader, when it names
@@ -143,6 +150,10 @@ type Chunk struct {
 	// a model that ran for free, and the token metric would record it as one
 	// (#90).
 	Usage *domain.ModelUsage
+	// ThinkingAnyPrefix is KindDone only: the endpoint said, in
+	// ThinkingPrefixHeader, that this turn's thinking may go back under any
+	// prefix. An adapter that reads no such word leaves it false.
+	ThinkingAnyPrefix bool
 }
 
 // ToolUse is a complete tool call emitted by the model.
