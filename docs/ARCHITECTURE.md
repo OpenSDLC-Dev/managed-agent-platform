@@ -100,8 +100,12 @@ they point at is a committed row the listener re-reads for itself.
    sends each back only to the model id that produced it and only under the request
    prefix it was produced under. Any brain replays them. The guard is this platform's,
    stricter than the API's own binding: a changed prompt drops the blocks rather than
-   sending one an Anthropic endpoint refuses, though DeepSeek refuses a tool loop that
-   lost its thinking (#883; plan 60). A request that fails while blocks are there to
+   sending one an Anthropic endpoint refuses (plan 60). DeepSeek refuses a tool loop
+   that lost its thinking, so where the model gateway answers with
+   `X-MAP-Thinking-Prefix: unchecked` — the producing vendor checks no prefix, or the
+   gateway converted the answer — the brain stores those blocks under their route alone
+   and sends them back under any prefix; a route straight to DeepSeek keeps the gap
+   (#883; plan 61). A request that fails while blocks are there to
    replay drops them all, so a refused block cannot fail every turn after.
 3. Tool calls commit as events with stable IDs. Custom calls and self-hosted
    sandbox calls wait on external results; ask-policy calls wait for authorization.

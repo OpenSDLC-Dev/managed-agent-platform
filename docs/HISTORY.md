@@ -49,6 +49,41 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Thinking replay through the model gateway (plan 61, #883) — archived 2026-10-09, delivered in one PR
+
+The tests were written first and run against the unchanged code. The gateway test's rows that expect `X-MAP-Thinking-Prefix: unchecked` found none, and its negative rows already passed, an upstream's own header of that name among them. The adapter's tests that expect the word found none on the done chunk. Two of the brain's four new tests failed: the unit test's tool-set and reorder rows dropped the block, and the end-to-end test lost the block at the `system.message` and stored only chain digests. The digest-shape test passed once its function existed, and the model-change test passed, since both rules drop there; the mutations below are what prove them. Then each guard was broken on its own in a scratch copy, 17 mutants, and the test that pins it failed each time:
+
+- the gateway (8): the profile flag ignored, conversion ignored, Responses or counts not excluded, the streamed or the whole answer left unmarked, DeepSeek's or MiniMax's flag cleared;
+- the adapter (4): the header never read, any value taken for `unchecked`, a retried attempt's word left standing, the done chunk left unmarked;
+- the brain (5): the `any:` digest not admitted, or blind to the route, the model check skipped for it, the stream keeping chain digests, every response stored as unchecked.
+
+The probe, on 2026-10-09: one tool-calling request per vendor, asked to think, then its continuation in seven variants. DeepSeek ran `deepseek-flash` on `https://api.deepseek.com/anthropic`, MiniMax ran `MiniMax-M3` on `https://api.minimax.cn/anthropic`:
+
+| Continuation | DeepSeek | MiniMax |
+| --- | --- | --- |
+| as given | 200 | 200 |
+| thinking removed, the vendor's tool id | 200 | 200 |
+| thinking removed, a foreign tool id | 400, `must be passed back` | 200 |
+| signature made up | 200 | 200 |
+| system prompt changed | 200 | 200 |
+| foreign tool id, thinking kept | 200 | 200 |
+| foreign tool id, thinking kept, system prompt changed | 200 | 200 |
+
+Neither vendor checks a signature or a prefix, so both profiles set `ThinkingAnyPrefix`; only DeepSeek needs it.
+
+The live tier ran `TestLiveBrainThinkingThroughTheGateway` under `RUN_LIVE_MODELGATEWAY=deepseek,minimax` the same day: the brain, through an in-process gateway, ran a tool loop with a `system.message` between the call and its result.
+
+| Route | Result |
+| --- | --- |
+| DeepSeek passthrough | 1 block stored under the route alone, sent back after the `system.message`, answered |
+| DeepSeek converted | the same, sent back as `reasoning_content` |
+| DeepSeek through a generic-profile provider | the block dropped, the request refused: #883 |
+| MiniMax passthrough and converted | no thinking returned; the loop answered |
+
+MiniMax-M3 thinks only when asked adaptively, and the brain sends no `thinking` field, so its flag rests on the probe alone. The DeepSeek passthrough loop, run on `origin/main`'s code (774c74b2), failed the same way as the generic route: DeepSeek's 400, `` The `content[].thinking` in the thinking mode must be passed back to the API. ``, after the brain's retries were exhausted.
+
+**Plan 61 progress summary (archived).** Delivered in one PR (#908): the gateway's header, the adapter's word on the done chunk, the brain's `any:` digest, both vendors' flags on the probe above, and the live loop. A route straight to DeepSeek keeps the gap by decision 5; #883's option 1, a per-route setting, is the answer if one is ever needed.
+
 ## Thinking persistence and replay (plan 60, #67) — archived 2026-10-04, delivered in one PR
 
 The brain tests were written first. Run against the unchanged brain, six of the seven failed: the replayed turn came back `[tool_use]` without its thinking, a thinking block and a redacted one produced a single `agent.thinking` event between them, and the two tests that count kept blocks found no `thinking_blocks` relation. The model-switch test passed, since an unchanged brain sends no thinking to drop; the mutation below is what proves it. Then each guard was broken on its own, and the test that pins it failed each time:

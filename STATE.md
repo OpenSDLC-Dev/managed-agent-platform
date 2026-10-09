@@ -4,14 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 61](./docs/plan/61_thinking-replay-via-gateway.md) (#883): a stored thinking
-block goes back under any prefix when the model gateway says the vendor that
-produced it checks none (`X-MAP-Thinking-Prefix: unchecked`).
+**None.** [Plan 61](./docs/plan/61_thinking-replay-via-gateway.md) (thinking replay through
+the model gateway, #883) archived 2026-10-09; its delivery record is
+[docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 
-- [ ] Gateway: `ThinkingAnyPrefix` on DeepSeek's profile; the header on converted and flagged answers
-- [ ] Anthropic adapter: the header reported on the done chunk
-- [ ] Brain: blocks stored under the route's `any:` digest, and admitted under any prefix
-- [ ] MiniMax probed; live loop through the gateway on DeepSeek, passthrough and converted
-- [ ] Docs: DIVERGENCES.md, ARCHITECTURE.md, changelog fragment; the plan archives and #883 closes
+_None — no active work._
