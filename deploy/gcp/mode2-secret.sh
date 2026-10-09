@@ -2,8 +2,9 @@
 # Assemble mode 2's Kubernetes Secret: the object the chart's `existingSecret`
 # names, which nothing else can build. The chart renders no Secret when
 # `existingSecret` is set, and Terraform holds no secret VALUES by design, so
-# three keys come from Secret Manager, four are coordinates, and they belong in
-# one object only because that is the shape `existingSecret` defines.
+# three keys come from Secret Manager (four, when the other gateway mode's rides
+# along), four are coordinates, and they belong in one object only because that
+# is the shape `existingSecret` defines.
 #
 # Two callers, one source. `.github/workflows/deploy.yml` runs this on every
 # push; an operator runs it by hand, and deploy/gcp/README.md shows where its
@@ -15,6 +16,12 @@
 #   PROJECT         the GCP project holding the Secret Manager secrets  (required)
 #   BLOB_BUCKET     `terraform output -raw blob_bucket`                 (required)
 #   KMS_KEY_NAME    `terraform output -raw kms_key_name`                (required)
+#   MODELGATEWAY    `true` when the release runs the model gateway (the chart's
+#                   modelgateway.enabled), else `false`               (required)
+#                   The Secret then requires `brain-api-key`, the brain's key
+#                   for the gateway, in place of `model-providers.json`, since
+#                   the chart writes the brain's one route itself. Each mode
+#                   also carries the other's key when Secret Manager holds it.
 #   K8S_NAMESPACE   default `map`
 #   K8S_SECRET      default `map-platform`, which is what
 #                   deploy/gcp/staging-values.yaml's `existingSecret` names
@@ -85,11 +92,26 @@ require PROJECT
 require BLOB_BUCKET
 require KMS_KEY_NAME
 
+# Required, with no default: the chart runs the gateway unless a values file
+# says otherwise, so no default here is right for every values file. And refused
+# unless exactly true or false, since a `1` or a `True` meant as on would
+# assemble the Secret a gateway-off release reads.
+gateway="${MODELGATEWAY:-}"
+case "$gateway" in
+  true | false) ;;
+  *)
+    fail "MODELGATEWAY is '$gateway'; it takes true or false — true when the release runs the model gateway (the chart's modelgateway.enabled)"
+    exit 1
+    ;;
+esac
+
 # Named before anything is fetched, as bootstrap.sh and dbinit.sh do. An absent
 # `jq` matters most: it exits 127 into the shape check's `if !`, which then
 # blames a healthy `model-providers` for a missing binary — and by then three
-# credentials are already on disk. `jq` arrives with neither gcloud nor kubectl.
-for tool in gcloud kubectl jq; do
+# credentials are already on disk. `jq` arrives with neither gcloud nor kubectl,
+# and `cmp` is diffutils' rather than coreutils': a missing one would read as two
+# brain keys that differ.
+for tool in gcloud kubectl jq cmp; do
   if ! command -v "$tool" > /dev/null; then
     fail "$tool is required and not on PATH"
     exit 1
@@ -150,12 +172,68 @@ fetch() {
   mask_file "$d/$2"
 }
 
+# carry SECRET_ID DEST — the key the OTHER gateway mode requires, carried so the
+# Secret serves either revision of the release. This script runs before
+# `helm upgrade --atomic`, and `kubectl apply` drops a key its previous apply
+# wrote, so a flip of the switch that rolls back would otherwise restart the old
+# revision on a Secret without its key. This release reads none of it, so
+# carrying is best effort: a NOT_FOUND, the steady state, is silent, and any
+# other failure is replayed and skipped rather than failing a deploy that does
+# not need the value.
+carry() {
+  if gcloud secrets versions access latest \
+       --secret="$1" --project="$PROJECT" --out-file="$d/$2" 2>"$d/$2.err"; then
+    cat "$d/$2.err" >&2
+    return 0
+  fi
+  if ! grep -q NOT_FOUND "$d/$2.err"; then
+    cat "$d/$2.err" >&2
+    echo "Not carrying '$1' into the Secret: this release does not read it, and a rollback across the gateway switch would." >&2
+  fi
+  rm -f "$d/$2"
+  return 1
+}
+
+# The routes' two checks, made wherever the routes go into the Secret.
+#
+# The brain's loader (internal/provider.LoadRoutes) requires a JSON ARRAY of
+# route objects and rejects anything else with "must be a JSON array". Checking
+# it here costs a second; getting it wrong costs the full `--wait --atomic
+# --timeout 10m` before the release rolls back.
+#
+# `-s` is what makes it one document. Without it jq evaluates each top-level
+# document in turn and `-e` takes its status from the LAST one, so a bare object
+# followed by a valid array passes while the bytes Kubernetes stores are not a
+# JSON array at all. A second `versions add` cannot produce that — it writes a
+# whole new version — but one `--data-file` holding two documents can, which is
+# what concatenating two route files, or editing one in place, produces.
+routes_ok() {
+  jq -e -s 'length == 1 and (.[0] | type == "array" and length > 0 and all(.[]; has("model")))' \
+    "$d/model-providers.json" > /dev/null
+}
+
+# The api_key inside is the actual secret; the surrounding JSON is not. Masking
+# per line would be useless here (a pretty-printed payload would register "[" as
+# a redaction), so mask exactly the keys.
+mask_routes() {
+  in_actions || return 0
+  jq -r '.[].api_key // empty' "$d/model-providers.json" |
+    while IFS= read -r k; do
+      if [ "${#k}" -ge 8 ]; then printf '::add-mask::%s\n' "$k"; fi
+    done
+}
+
 fetch controlplane-api-key controlplane-api-key
 fetch database-url         database-url
+verbatim=(controlplane-api-key database-url)
+if [ "$gateway" = true ]; then
+  fetch brain-api-key brain-api-key
+  verbatim+=(brain-api-key)
+fi
 
 # A trailing newline is the classic way one of these gets stored (an `echo` where
-# bootstrap.sh uses `printf '%s'`), and both are embedded VERBATIM: one in an
-# x-api-key comparison, one as a DSN. So the deploy would succeed and the
+# bootstrap.sh uses `printf '%s'`), and each is embedded VERBATIM: an API key in
+# an x-api-key comparison, the DSN as a DSN. So the deploy would succeed and the
 # platform would then reject the very key CD smoke-tests with, or fail to parse
 # its own database URL. Refuse it here, where the fix is one command.
 #
@@ -163,7 +241,7 @@ fetch database-url         database-url
 # document read by a parser, a human adds it with `--data-file=/path/to/file`,
 # and every editor on earth ends a file with a newline. Its shape is checked
 # below instead.
-for f in controlplane-api-key database-url; do
+for f in "${verbatim[@]}"; do
   if [ "$(wc -l < "$d/$f")" -ne 0 ]; then
     fail "Secret Manager secret '$f' contains a newline"
     echo "It is used verbatim, so a trailing newline is part of the value." >&2
@@ -173,46 +251,77 @@ for f in controlplane-api-key database-url; do
   fi
 done
 
-# model-providers is fetched on its own because its failure mode is its own.
-# Nothing in this repository creates or fills it — deploy/gcp/README.md
-# ("Continuous delivery") owns which secrets are stood up out of band and by whom
-# — so it may be missing, or present with no version, and those need different
-# commands. This script cannot tell which: for a secret that is absent,
-# `versions access latest` answers `NOT_FOUND: Secret [...] not found or has no
-# versions` — measured against the API at gcloud 578, a sentence that names both
-# states while committing to neither. Whatever a versionless one answers, that
-# reply already leaves the state open, so one branch handles both and names both
-# commands, create first. What the secret holds when it is right is a live model
-# API key, the one credential no automation may mint, so this script can repair
-# neither state: it stops rather than deploying a brain that crash-loops on an
-# empty config.
-if ! gcloud secrets versions access latest \
-       --secret=model-providers --project="$PROJECT" \
-       --out-file="$d/model-providers.json" 2>"$d/model-providers.err"; then
-  rc=1
-else
-  rc=0
-fi
-# Replayed either way, so a warning on the success path is not swallowed by the
-# capture that exists for the failure path.
-cat "$d/model-providers.err" >&2
-if [ "$rc" -ne 0 ]; then
-  # This branch catches every way the read can fail, and the advice below answers
-  # exactly one of them. A denied permission, a disabled API, a version someone
-  # disabled or an unreachable endpoint is not a secret anybody needs to create,
-  # so route on the status Google returned and let the error above speak for the
-  # rest.
-  if ! grep -q NOT_FOUND "$d/model-providers.err"; then
-    fail "cannot read the 'model-providers' secret — the error above says why, and it is not a NOT_FOUND"
-    echo "The error above is the whole of what this script knows, and it does not say" >&2
-    echo "the secret is absent — though a caller without access is told that too," >&2
-    echo "so absent is not ruled out either. Start with what it does name: the" >&2
-    echo "deploy identity's Secret Manager access, whether the API is enabled on" >&2
-    echo "$PROJECT, and whether the newest version was disabled." >&2
+if [ "$gateway" = true ]; then
+  # The two refusals the control plane and the gateway both make at startup
+  # (apikey.CheckBrainKey), made here as the chart makes them at render for a
+  # Secret it writes. With `existingSecret` it sees none, so a key either binary
+  # refuses would otherwise surface as pods crash-looping until `--atomic` rolls
+  # the release back. One value under both names, because the control plane
+  # registers each key by its value under its own name; surrounding whitespace,
+  # because HTTP trims it off a header, so no request can carry the key.
+  if cmp -s "$d/controlplane-api-key" "$d/brain-api-key"; then
+    fail "Secret Manager secret 'brain-api-key' equals 'controlplane-api-key'"
+    echo "The two must differ. Add a fresh version without a trailing newline:" >&2
+    echo "  printf '%s' \"\$(openssl rand -hex 32)\" | gcloud secrets versions add brain-api-key --project=$PROJECT --data-file=-" >&2
     exit 1
   fi
-  fail "cannot read the 'model-providers' secret — it must exist AND have an enabled version, and only a human can supply one"
-  cat >&2 <<EOF
+  if LC_ALL=C grep -qE $'^[ \t\r]|[ \t\r]$' "$d/brain-api-key"; then
+    fail "Secret Manager secret 'brain-api-key' has leading or trailing whitespace, which no request can carry"
+    exit 1
+  fi
+  brain_file=brain-api-key
+  # Carried only in the shape a rollback could use, which jq checks first, since
+  # masking the keys inside needs a document jq can read.
+  carry_file=model-providers.json
+  if carry model-providers "$carry_file"; then
+    if routes_ok; then
+      mask_routes
+    else
+      rm -f "$d/$carry_file"
+      echo "Not carrying 'model-providers' into the Secret: it is not a non-empty JSON array of route objects, so no rollback could use it." >&2
+    fi
+  fi
+else
+  # model-providers is fetched on its own because its failure mode is its own.
+  # Nothing in this repository creates or fills it — deploy/gcp/README.md
+  # ("Continuous delivery") owns which secrets are stood up out of band and by whom
+  # — so it may be missing, or present with no version, and those need different
+  # commands. This script cannot tell which: for a secret that is absent,
+  # `versions access latest` answers `NOT_FOUND: Secret [...] not found or has no
+  # versions` — measured against the API at gcloud 578, a sentence that names both
+  # states while committing to neither. Whatever a versionless one answers, that
+  # reply already leaves the state open, so one branch handles both and names both
+  # commands, create first. What the secret holds when it is right is a live model
+  # API key, the one credential no automation may mint, so this script can repair
+  # neither state: it stops rather than deploying a brain that crash-loops on an
+  # empty config.
+  if ! gcloud secrets versions access latest \
+         --secret=model-providers --project="$PROJECT" \
+         --out-file="$d/model-providers.json" 2>"$d/model-providers.err"; then
+    rc=1
+  else
+    rc=0
+  fi
+  # Replayed either way, so a warning on the success path is not swallowed by the
+  # capture that exists for the failure path.
+  cat "$d/model-providers.err" >&2
+  if [ "$rc" -ne 0 ]; then
+    # This branch catches every way the read can fail, and the advice below answers
+    # exactly one of them. A denied permission, a disabled API, a version someone
+    # disabled or an unreachable endpoint is not a secret anybody needs to create,
+    # so route on the status Google returned and let the error above speak for the
+    # rest.
+    if ! grep -q NOT_FOUND "$d/model-providers.err"; then
+      fail "cannot read the 'model-providers' secret — the error above says why, and it is not a NOT_FOUND"
+      echo "The error above is the whole of what this script knows, and it does not say" >&2
+      echo "the secret is absent — though a caller without access is told that too," >&2
+      echo "so absent is not ruled out either. Start with what it does name: the" >&2
+      echo "deploy identity's Secret Manager access, whether the API is enabled on" >&2
+      echo "$PROJECT, and whether the newest version was disabled." >&2
+      exit 1
+    fi
+    fail "cannot read the 'model-providers' secret — it must exist AND have an enabled version, and only a human can supply one"
+    cat >&2 <<EOF
 This is deliberate and this script cannot fix it: model-providers holds a live
 model API key.
 
@@ -236,43 +345,45 @@ deploy/helm/managed-agent-platform/values.yaml. base_url is the API ROOT: the
 adapter appends /v1/messages or /v1/chat/completions itself, so omit a trailing
 /v1.
 EOF
-  # The one line of this guidance that is GitHub's alone: a CD run does not
-  # resume once the secret exists, and an operator who created it on the
-  # strength of the text above would otherwise wait for a deploy that never
-  # comes. Its absence is what a local run wants — there is no workflow to
-  # re-run, only this script.
-  if in_actions; then
-    echo "Then re-run this workflow (Actions -> deploy -> Run workflow)." >&2
+    # The one line of this guidance that is GitHub's alone: a CD run does not
+    # resume once the secret exists, and an operator who created it on the
+    # strength of the text above would otherwise wait for a deploy that never
+    # comes. Its absence is what a local run wants — there is no workflow to
+    # re-run, only this script.
+    if in_actions; then
+      echo "Then re-run this workflow (Actions -> deploy -> Run workflow)." >&2
+    fi
+    exit 1
   fi
-  exit 1
+
+  if ! routes_ok; then
+    fail "the 'model-providers' secret is not a non-empty JSON array of route objects"
+    echo "Each entry needs at least \"model\" (\"*\" is the default route)." >&2
+    exit 1
+  fi
+  mask_routes
+  brain_file=model-providers.json
+  carry_file=brain-api-key
+  if carry brain-api-key "$carry_file"; then
+    mask_file "$d/$carry_file"
+    # Only a key a rollback could use: the refusals the gateway-on branch
+    # makes, as one test.
+    if ! LC_ALL=C grep -q '[^[:space:]]' "$d/$carry_file" \
+       || [ "$(wc -l < "$d/$carry_file")" -ne 0 ] \
+       || LC_ALL=C grep -qE $'^[ \t\r]|[ \t\r]$' "$d/$carry_file" \
+       || cmp -s "$d/controlplane-api-key" "$d/$carry_file"; then
+      rm -f "$d/$carry_file"
+      echo "Not carrying 'brain-api-key' into the Secret: the control plane and the gateway would refuse it, so no rollback could use it." >&2
+    fi
+  fi
 fi
 
-# The brain's loader (internal/provider.LoadRoutes) requires a JSON ARRAY of
-# route objects and rejects anything else with "must be a JSON array". Checking
-# it here costs a second; getting it wrong costs the full `--wait --atomic
-# --timeout 10m` before the release rolls back.
-#
-# `-s` is what makes it one document. Without it jq evaluates each top-level
-# document in turn and `-e` takes its status from the LAST one, so a bare object
-# followed by a valid array passes while the bytes Kubernetes stores are not a
-# JSON array at all. A second `versions add` cannot produce that — it writes a
-# whole new version — but one `--data-file` holding two documents can, which is
-# what concatenating two route files, or editing one in place, produces.
-if ! jq -e -s 'length == 1 and (.[0] | type == "array" and length > 0 and all(.[]; has("model")))' \
-     "$d/model-providers.json" > /dev/null; then
-  fail "the 'model-providers' secret is not a non-empty JSON array of route objects"
-  echo "Each entry needs at least \"model\" (\"*\" is the default route)." >&2
-  exit 1
-fi
-
-# The api_key inside is the actual secret; the surrounding JSON is not. Masking
-# per line would be useless here (a pretty-printed payload would register "[" as
-# a redaction), so mask exactly the keys.
-if in_actions; then
-  jq -r '.[].api_key // empty' "$d/model-providers.json" |
-    while IFS= read -r k; do
-      if [ "${#k}" -ge 8 ]; then printf '::add-mask::%s\n' "$k"; fi
-    done
+# The carried key's flag exists only when its file does; expanded below as
+# `${carried[@]+...}` because bash before 4.4 calls an empty array unset under
+# `set -u`, and operators run this on macOS's bash 3.2.
+carried=()
+if [ -f "$d/$carry_file" ]; then
+  carried=(--from-file="$d/$carry_file")
 fi
 
 # The four coordinates. Non-secret, but the chart reads all seven keys from this
@@ -303,7 +414,8 @@ applied="$(kubectl create secret generic "$secret" \
   --namespace "$namespace" \
   --from-file="$d/controlplane-api-key" \
   --from-file="$d/database-url" \
-  --from-file="$d/model-providers.json" \
+  --from-file="$d/$brain_file" \
+  ${carried[@]+"${carried[@]}"} \
   --from-file="$d/blob-backend" \
   --from-file="$d/blob-bucket" \
   --from-file="$d/secrets-backend" \
