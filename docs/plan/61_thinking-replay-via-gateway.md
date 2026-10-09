@@ -127,7 +127,7 @@ which deployment answered and what its vendor checks.
   dropped on a model change and a route change; a response without the header
   stores chain digests exactly as before; the digest a turn stores is the one the
   next build admits.
-- Live (`RUN_LIVE_MODEL_TESTS`, DeepSeek through an in-process gateway): a tool
+- Live (`RUN_LIVE_MODELGATEWAY`, DeepSeek through an in-process gateway): a tool
   loop whose system prompt changes between the call and its result carries the
   loop's thinking and is answered 200, on DeepSeek's Anthropic endpoint and
   through conversion; the same loop on the code before this plan meets

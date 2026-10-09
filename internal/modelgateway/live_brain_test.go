@@ -32,6 +32,9 @@ type brainRoute struct {
 	// thinking: the brain keeps plan 60's rule there, as it did on every route
 	// before plan 61.
 	refused bool
+	// thinks is a vendor that thinks unasked, as DeepSeek does: a loop that
+	// returns no thinking fails, since it proves nothing.
+	thinks bool
 }
 
 // TestLiveBrainThinkingThroughTheGateway is #883 end to end
@@ -61,16 +64,16 @@ func TestLiveBrainThinkingThroughTheGateway(t *testing.T) {
 		return map[profile.Protocol]string{profile.Anthropic: proxy}
 	}
 	for _, v := range vendors {
-		model := v.models[0]
-		add(brainRoute{name: v.name + "/passthrough", alias: "brain-pass-" + v.name, rec: &recorder{}}, v.name, model, anth, v.base)
+		model, thinks := v.models[0], v.name == "deepseek"
+		add(brainRoute{name: v.name + "/passthrough", alias: "brain-pass-" + v.name, rec: &recorder{}, thinks: thinks}, v.name, model, anth, v.base)
 		if host := openAIHost(v); host != "" {
-			add(brainRoute{name: v.name + "/converted", alias: "brain-conv-" + v.name, rec: &recorder{}}, v.name, model,
+			add(brainRoute{name: v.name + "/converted", alias: "brain-conv-" + v.name, rec: &recorder{}, thinks: thinks}, v.name, model,
 				func(proxy string) map[profile.Protocol]string {
 					return map[profile.Protocol]string{profile.OpenAI: proxy}
 				}, host)
 		}
-		if v.name == "deepseek" {
-			r := brainRoute{name: "deepseek/generic", alias: "brain-generic-deepseek", rec: &recorder{}, refused: true}
+		if thinks {
+			r := brainRoute{name: "deepseek/generic", alias: "brain-generic-deepseek", rec: &recorder{}, refused: true, thinks: true}
 			proxy := recordingProxy(t, v.base, r.rec)
 			p := e.provider(proxy, func(p *store.Provider) { p.Name = r.alias })
 			e.credential(p, v.keyEnv, 1)
@@ -164,6 +167,9 @@ func brainLoop(t *testing.T, e *env, key string, r brainRoute) {
 		t.Fatal(err)
 	}
 	if len(kept) == 0 {
+		if r.thinks {
+			t.Fatalf("%s returned no thinking with its tool call, which it gives unasked", r.name)
+		}
 		t.Logf("%s returned no thinking with its tool call: the loop runs, but there is nothing to replay", r.name)
 	}
 	for _, k := range kept {
@@ -184,9 +190,6 @@ func brainLoop(t *testing.T, e *env, key string, r brainRoute) {
 
 	errs := ofType("session.error")
 	if r.refused {
-		if len(kept) == 0 {
-			t.Skipf("%s returned no thinking: nothing for the brain to drop", r.name)
-		}
 		if len(errs) == 0 || !strings.Contains(string(errs[len(errs)-1].Body), "must be passed back") {
 			t.Fatalf("the generic route was not refused for the thinking it dropped: %d session.error events", len(errs))
 		}
