@@ -121,7 +121,7 @@ API answered the free calls and the errors.
      `generationConfig`; `cache_control`, `metadata`, `service_tier` dropped.
    - thinking: `enabled` with `budget_tokens` → `thinkingBudget`; `adaptive` → no
      budget; either sets `includeThoughts` unless `display` is `omitted`; `disabled` or
-     none sends nothing, since Gemini 3 cannot stop thinking (Ground truth);
+     none sends no setting of its own, since Gemini 3 cannot stop thinking (Ground truth);
      `output_config.effort` → `thinkingLevel` (`xhigh` and `max` as `high`) when no budget is set,
      a level the model lacks answered by Gemini's own `400`.
 6. **A function call's signature travels in a leading thinking block.** An answer
