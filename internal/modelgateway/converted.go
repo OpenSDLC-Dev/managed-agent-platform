@@ -193,7 +193,7 @@ func (p *convStream) event(e upstream.Event) ([]byte, bool) {
 	out, err := p.s.Chunk(e.Data)
 	if err != nil {
 		p.c.out.errType, p.failed = "api_error", true
-		return p.failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", err)), false
+		return p.failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", p.red.Error(err))), false
 	}
 	if len(out) == 0 {
 		return nil, false

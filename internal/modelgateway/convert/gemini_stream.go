@@ -15,8 +15,8 @@ import (
 // block with a single input_json_delta.
 //
 // The leading thinking block opens on the first thought, or on a signed
-// call that comes before any text or call, and closes at the first text or
-// call: its signature, sign applied to GeminiSignaturePrefix and the first
+// call that comes before any text or call, and closes at the first text,
+// call or finish: its signature, sign applied to GeminiSignaturePrefix and the first
 // call's signature when that call is what closes it, is its signature_delta,
 // so the stream accumulates to the message GeminiAnswer makes of the whole
 // answer. What comes after the block closed cannot reach it: a later
@@ -24,18 +24,18 @@ import (
 // for which GeminiRequest sends the sentinel on replay.
 //
 // A candidate's finishReason finishes the stream, until a chunk carries
-// more of the answer, and End makes
-// message_delta of it and of the usage SetUsage recorded, which Gemini
+// more of the answer, and End makes message_delta of it and of the usage SetUsage recorded, which Gemini
 // reports in full on its last chunk alone; Gemini sends no [DONE], so a
-// stream ends when its upstream closes it. A prompt blocked with no
-// candidate finishes it as an empty refusal.
+// stream ends when its upstream closes it. A prompt blocked, with no
+// candidate, before any answer finishes it as an empty refusal.
 type GeminiStream struct {
-	s       Stream
-	leading bool   // the leading thinking block may still open
-	callSig string // the signature of the call that closed it
-	calls   int
-	reason  string // the finish reason
-	blocked bool
+	s        Stream
+	leading  bool   // the leading thinking block may still open
+	callSig  string // the signature of the call that closed it
+	calls    int
+	reason   string // the finish reason
+	blocked  bool
+	answered bool // a chunk has carried some of the answer
 }
 
 // NewGeminiStream converts a stream for a caller that named alias as its
@@ -69,8 +69,7 @@ func (g *GeminiStream) Chunk(data []byte) ([]byte, error) {
 	if len(cands) == 0 {
 		var feedback map[string]json.RawMessage
 		_ = json.Unmarshal(obj["promptFeedback"], &feedback)
-		if reason, _ := text(feedback, "blockReason"); reason != "" {
-			g.s.close(&out)
+		if reason, _ := text(feedback, "blockReason"); reason != "" && !g.answered {
 			g.blocked, g.s.finished = true, true
 		}
 		return out.Bytes(), nil
@@ -87,8 +86,8 @@ func (g *GeminiStream) Chunk(data []byte) ([]byte, error) {
 			return nil, fmt.Errorf("a chunk's part %d: %w", i, err)
 		}
 	}
-	if out.Len() > before { // a candidate that goes on after its finish has not finished
-		g.s.finished = false
+	if out.Len() > before { // an answer, or more of one after its finish or a block, has not finished
+		g.answered, g.blocked, g.s.finished = true, false, false
 	}
 	if reason, _ := text(cands[0], "finishReason"); reason != "" {
 		if _, err := geminiStop(reason, g.calls > 0); err != nil {
@@ -98,16 +97,14 @@ func (g *GeminiStream) Chunk(data []byte) ([]byte, error) {
 			return nil, err
 		}
 		g.s.close(&out)
-		g.reason, g.s.finished = reason, true
+		g.reason, g.s.finished, g.leading = reason, true, false
 	}
 	return out.Bytes(), nil
 }
 
 func (g *GeminiStream) part(out *bytes.Buffer, p map[string]json.RawMessage) error {
-	for _, k := range []string{"inlineData", "fileData", "executableCode", "codeExecutionResult"} {
-		if !null(p[k]) {
-			return fmt.Errorf("%s has no Messages counterpart", k)
-		}
+	if err := geminiUnsupported(p); err != nil {
+		return err
 	}
 	if !null(p["functionCall"]) {
 		call, err := geminiCallOf(p["functionCall"], g.s.id, g.calls)

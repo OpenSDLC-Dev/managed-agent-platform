@@ -799,33 +799,38 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		var held []byte
 		for {
 			e, err := events.Next()
-			// A Chat Completions or Gemini stream may close on its last
-			// chunk without the blank line that ends it, its first chunk
+			// Every stream but a Messages one may close on its last chunk
+			// without the blank line that ends it, its first chunk
 			// included: one whole there begins the answer, as it would later
 			// on. A Messages stream cut off so before message_stop is no
 			// answer.
-			cut := errors.Is(err, io.EOF) && (up == profile.OpenAI || up == profile.Gemini) && e.Data != nil && p.complete(e.Data)
+			cut := errors.Is(err, io.EOF) && up != profile.Anthropic && e.Data != nil && p.complete(e.Data)
 			switch {
+			case up == profile.Gemini && e.Data == nil && bytes.HasPrefix(bytes.TrimSpace(e.Raw), []byte("[")):
+				// The JSON array streamGenerateContent answers without
+				// alt=sse: an answer the upstream has made, and charged
+				// for, that the gateway cannot read — not a stream that
+				// broke off, for another attempt to make again.
+				return &failure{status: http.StatusBadGateway, typ: "api_error",
+					err: errors.New("upstream answered a streamed request with a JSON array, not an event stream")}, false
 			case err != nil && !cut:
 				return noAnswer(guard, red, err)
 			case p.keepAlive(e) && len(held)+len(e.Raw) <= maxHeld:
 				held = append(held, e.Raw...)
 			case e.Name == "error" && up == profile.Anthropic:
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
-			case up == profile.Gemini && chatError(e):
+			case up != profile.Anthropic && chatError(e):
+				// What chatStream or convStream would end the stream on: an
+				// error that parses is answered as a Messages stream's is,
+				// and one that does not is the gateway's own failure,
+				// retried like an upstream that broke off before it
+				// answered.
 				if !jsonObject(e.Data) {
 					return &failure{status: http.StatusBadGateway, typ: "api_error",
 						err: errors.New("upstream opened its stream with an event that is not a JSON object")}, true
 				}
-				return geminiStreamError(ctx, c, at, e.Data, resp.Header, requestID(r), red)
-			case up == profile.OpenAI && chatError(e):
-				// What chatStream would end the stream on: an error that
-				// parses is answered as a Messages stream's is, and one
-				// that does not is the gateway's own failure, retried like
-				// an upstream that broke off before it answered.
-				if !jsonObject(e.Data) {
-					return &failure{status: http.StatusBadGateway, typ: "api_error",
-						err: errors.New("upstream opened its stream with an event that is not a JSON object")}, true
+				if up == profile.Gemini {
+					return geminiStreamError(ctx, c, at, e.Data, resp.Header, requestID(r), red)
 				}
 				f, retry := streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 				if conv && f.body != nil {

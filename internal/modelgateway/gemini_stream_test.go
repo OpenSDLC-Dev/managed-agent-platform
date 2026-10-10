@@ -122,7 +122,8 @@ func TestAGeminiStreamCarriesItsSignature(t *testing.T) {
 
 // A stream that opens with an error object answers as that error's response,
 // its status the error's code, retried as one would be, a refused key the
-// gateway's own failure; an error once the
+// gateway's own failure; a 200 that is no stream fails unretried; an error
+// once the
 // answer has begun, a stream the upstream closes before its finish, and a
 // chunk the conversion cannot carry each end the stream with an error event.
 func TestGeminiStreamErrors(t *testing.T) {
@@ -133,9 +134,11 @@ func TestGeminiStreamErrors(t *testing.T) {
 	broke := newFake(t, geminiSSE("text/event-stream", geminiPiece, exhausted))
 	cut := newFake(t, geminiSSE("text/event-stream", geminiPiece))
 	odd := newFake(t, geminiSSE("text/event-stream", geminiPiece, `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"eA=="}}]}}]}`, geminiFinish))
-	for name, f := range map[string]*fake{"opens": opens, "denied": denied, "broke": broke, "cut": cut, "odd": odd} {
+	echo := newFake(t, geminiSSE("text/event-stream", geminiPiece, `{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"bad call to AIza-gemini-key1"}]}`))
+	whole := newFake(t, rawBody("application/json", "["+geminiPiece+",\r\n"+geminiFinish+"]"))
+	for name, f := range map[string]*fake{"opens": opens, "denied": denied, "broke": broke, "cut": cut, "odd": odd, "echo": echo, "whole": whole} {
 		p := onGemini(e, f.URL)
-		if name == "opens" || name == "denied" {
+		if name == "opens" || name == "denied" || name == "whole" {
 			e.credential(p, "AIza-gemini-key2", 1)
 		}
 		e.alias(name, target(e.deployment(p, "gemini-3.8-flash"), 0))
@@ -159,14 +162,23 @@ func TestGeminiStreamErrors(t *testing.T) {
 	if n := len(denied.recorded()); n != 2 {
 		t.Errorf("denied was called %d times, want once per credential", n)
 	}
+	// A 200 that is no stream is an answer the conversion cannot read, not
+	// a stream that broke off: another credential is not asked to generate
+	// it again.
+	resp, b = e.do("POST", "/v1/messages", strings.Replace(body, "%s", "whole", 1), hdr)
+	if typ, _, _ := errorOf(t, b); resp.StatusCode != http.StatusBadGateway || typ != "api_error" || len(whole.recorded()) != 1 {
+		t.Errorf("whole: %d %s, called %d times", resp.StatusCode, typ, len(whole.recorded()))
+	}
 	for name, want := range map[string][]string{
 		"broke": {`"type":"rate_limit_error"`, `"message":"Resource has been exhausted"`},
 		"cut":   {"the stream ended before its finish"},
 		"odd":   {"inlineData has no Messages counterpart"},
+		"echo":  {"MALFORMED_FUNCTION_CALL: bad call to"},
 	} {
 		resp, b := e.do("POST", "/v1/messages", strings.Replace(body, "%s", name, 1), hdr)
 		s := string(b)
-		ok := resp.StatusCode == 200 && strings.Contains(s, `"text":"Jupiter"`) && strings.Contains(s, "event: error\n") && !strings.Contains(s, "message_stop")
+		ok := resp.StatusCode == 200 && strings.Contains(s, `"text":"Jupiter"`) && strings.Contains(s, "event: error\n") && !strings.Contains(s, "message_stop") &&
+			!strings.Contains(s, "AIza-gemini-key1")
 		for _, w := range want {
 			ok = ok && strings.Contains(s, w)
 		}

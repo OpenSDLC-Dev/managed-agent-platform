@@ -87,10 +87,15 @@ func TestGeminiStreamLeadingBlock(t *testing.T) {
 		chunks []string
 		want   string
 	}{
-		"an unsigned call first":    {[]string{unsigned, stop}, "tool_use(c1 f {}) / tool_use"},
-		"a signed call first":       {[]string{signed, stop}, `thinking(|mapgw1.gwdep_g.gemini:c2ln) tool_use(c1 f {"a":1}) / tool_use`},
-		"thoughts, then a call":     {[]string{thought, thought, signed, stop}, `thinking(hmmhmm|mapgw1.gwdep_g.gemini:c2ln) tool_use(c1 f {"a":1}) / tool_use`},
-		"text, then a signed call":  {[]string{text, signed, stop}, `text(calling) tool_use(c1 f {"a":1}) / tool_use`},
+		"an unsigned call first":   {[]string{unsigned, stop}, "tool_use(c1 f {}) / tool_use"},
+		"a signed call first":      {[]string{signed, stop}, `thinking(|mapgw1.gwdep_g.gemini:c2ln) tool_use(c1 f {"a":1}) / tool_use`},
+		"thoughts, then a call":    {[]string{thought, thought, signed, stop}, `thinking(hmmhmm|mapgw1.gwdep_g.gemini:c2ln) tool_use(c1 f {"a":1}) / tool_use`},
+		"text, then a signed call": {[]string{text, signed, stop}, `text(calling) tool_use(c1 f {"a":1}) / tool_use`},
+		"more after a finish": {[]string{`{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true}]},"finishReason":"STOP"}],"responseId":"r1"}`,
+			`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"f","args":{"a":1}},"thoughtSignature":"c2ln"}]},"finishReason":"STOP"}],"responseId":"r1"}`},
+			`thinking(hmm|mapgw1.gwdep_g.gemini:) tool_use(c1 f {"a":1}) / tool_use`},
+		"a block, then an answer":   {[]string{`{"promptFeedback":{"blockReason":"SAFETY"}}`, text, stop}, "text(calling) / end_turn"},
+		"an answer, then a block":   {[]string{text, `{"candidates":[],"promptFeedback":{"blockReason":"OTHER"}}`, stop}, "text(calling) / end_turn"},
 		"a thought after a call":    {[]string{unsigned, thought, stop}, "tool_use(c1 f {}) / tool_use"},
 		"a thought after text":      {[]string{text, thought, text, stop}, "text(callingcalling) / end_turn"},
 		"thoughts alone":            {[]string{thought, stop}, "thinking(hmm|mapgw1.gwdep_g.gemini:) / end_turn"},
@@ -105,14 +110,21 @@ func TestGeminiStreamLeadingBlock(t *testing.T) {
 		}
 	}
 
-	noID := `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f"}},{"functionCall":{"name":"g"}}]},"finishReason":"STOP"}],"responseId":"r9"}`
-	streamedIDs, _ := accumulated(t, geminiStreamed(t, noID))
-	whole, err := convert.GeminiAnswer([]byte(noID), "alias", "req_1", nil, wrapSig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := summary(streamedIDs), summary(message(t, whole)); got != want || !strings.HasPrefix(streamedIDs.Content[0].ID, "toolu_") {
-		t.Errorf("ids: streamed %s, whole %s", got, want)
+	// Whole and streamed, an answer converts alike: calls without ids get
+	// the same ones, and an empty thought, signed or not, is no summary.
+	for _, answer := range []string{
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f"}},{"functionCall":{"name":"g"}}]},"finishReason":"STOP"}],"responseId":"r9"}`,
+		`{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"c2ln"},{"text":"hi"}]},"finishReason":"STOP"}],"responseId":"r9"}`,
+	} {
+		streamed, _ := accumulated(t, geminiStreamed(t, answer))
+		whole, err := convert.GeminiAnswer([]byte(answer), "alias", "req_1", nil, wrapSig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := summary(streamed), summary(message(t, whole)); got != want || strings.HasPrefix(got, "thinking") ||
+			streamed.Content[0].Type == "tool_use" && !strings.HasPrefix(streamed.Content[0].ID, "toolu_") {
+			t.Errorf("%s: streamed %s, whole %s", answer, got, want)
+		}
 	}
 }
 
