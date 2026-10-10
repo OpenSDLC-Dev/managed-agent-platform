@@ -1386,8 +1386,9 @@ checked against a stand-in gateway, not a live one. Save it and run it with `bas
 (`GCP_PROJECT_ID=… bash seed-catalogue.sh vendor-key.txt`) rather than pasting it: zsh reads
 `#` as a command unless `interactivecomments` is set, and runs no `EXIT` trap on Ctrl-C. It
 keeps both keys off every argv, stops at the first call that fails, so a rejected key never
-leaves an alias behind that answers `503`, refuses a forward that is not its own, and on exit,
-Ctrl-C included, removes the key file and stops the forward:
+leaves an alias behind that answers `503`, makes each call only while its own forward is
+alive — that forward listens on `127.0.0.1` alone, so one that cannot have the port exits —
+and on exit, Ctrl-C included, removes the key file and stops the forward:
 
 ```bash
 #!/usr/bin/env bash
@@ -1401,11 +1402,12 @@ trap 'rm -rf "$d"; [ -z "$pf" ] || kill "$pf" 2>/dev/null || true' EXIT
   printf '"\n'
 } > "$d/curlrc"
 
-kubectl -n map port-forward svc/map-managed-agent-platform-modelgateway 18090:8090 > "$d/forward.log" 2>&1 &
+kubectl -n map port-forward --address=127.0.0.1 svc/map-managed-agent-platform-modelgateway 18090:8090 \
+  > "$d/forward.log" 2>&1 &
 pf=$!
-# Wait for THIS forward to say it listens. One that cannot bind (an old forward
-# holds the port) exits, and kill -0 then stops the script before any write can
-# reach whatever answers on that port instead.
+# Wait for THIS forward to say it listens on 127.0.0.1. One that cannot have the
+# port exits, and kill -0 stops the script at once; one that never says so is
+# refused by the grep after the loop. Either way, before any write.
 for _ in $(seq 30); do
   grep -q '^Forwarding from 127.0.0.1:18090' "$d/forward.log" && break
   kill -0 "$pf"
@@ -1413,8 +1415,10 @@ for _ in $(seq 30); do
 done
 grep -q '^Forwarding from 127.0.0.1:18090' "$d/forward.log"
 
-gw() { curl -sS --fail-with-body --noproxy '*' -K "$d/curlrc" -H 'content-type: application/json' \
-         --data-binary @- "http://127.0.0.1:18090/admin/v1/$1"; }
+# Each call only while that forward lives: one that died since may have handed the
+# port to another listener.
+gw() { kill -0 "$pf" && curl -sS --fail-with-body --noproxy '*' -K "$d/curlrc" \
+         -H 'content-type: application/json' --data-binary @- "http://127.0.0.1:18090/admin/v1/$1"; }
 
 pid="$(echo '{"name":"deepseek","profile":"deepseek",
             "endpoints":{"anthropic":"https://api.deepseek.com/anthropic"}}' | gw providers | jq -er .id)"
