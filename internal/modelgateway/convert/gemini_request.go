@@ -321,8 +321,14 @@ func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, s
 			}
 			parts = append(parts, geminiPart{InlineData: blob})
 		case "tool_use":
-			id, _ := text(b, "id")
-			name, _ := text(b, "name")
+			id, okID := text(b, "id")
+			name, okName := text(b, "name")
+			switch {
+			case !okID || id == "":
+				return nil, "", fmt.Errorf("content[%d].id: must be a non-empty string", j)
+			case !okName || name == "":
+				return nil, "", fmt.Errorf("content[%d].name: must be a non-empty string", j)
+			}
 			args, err := geminiArgs(b["input"])
 			if err != nil {
 				return nil, "", fmt.Errorf("content[%d].input: %w", j, err)
