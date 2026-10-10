@@ -13,8 +13,9 @@
 # five are re-proved on every deploy, by two different means rather than one.
 # The `identity:` block postdates that run entirely and is not covered by it:
 # it says so where it sits, along with what it presumes that this environment
-# does not yet provide.
-# The three IDENTITIES are read back out of the cluster by the step after
+# does not yet provide. Nor is the `modelgateway:` block, whose own run is
+# docs/HISTORY.md's (#906).
+# The IDENTITIES are read back out of the cluster by the step after
 # `helm upgrade`, which compares each ServiceAccount's annotation against the
 # variable it came from. The two IMAGE halves are not read back and do not need
 # to be: an override that failed to land leaves `registry.invalid`, the pods
@@ -23,10 +24,11 @@
 #
 # **It is a reference deployment, not this cluster's values file.** Every value
 # below that would name an operator — the image registry and repository, and the
-# three Workload-Identity service accounts — is written here against the neutral
-# project `your-project`, and the workflow overrides all five with `--set-string`
+# Workload-Identity service accounts — is written here against the neutral
+# project `your-project`, and the workflow overrides each with `--set-string`
 # from repository variables (`ARTIFACT_REGISTRY`, `CONTROLPLANE_SERVICE_ACCOUNT`,
-# `BRAIN_SERVICE_ACCOUNT`, `EXECUTOR_SERVICE_ACCOUNT`). This repository is public,
+# `BRAIN_SERVICE_ACCOUNT`, `EXECUTOR_SERVICE_ACCOUNT`,
+# `MODELGATEWAY_SERVICE_ACCOUNT`). This repository is public,
 # and one that names one operator's project, registry and identities hands a
 # reader a target list and ties the project to a cluster nobody cloning it can
 # reach.
@@ -72,7 +74,7 @@
 # already prepared — sitting unused.
 #
 # Every coordinate below came from `terraform -chdir=deploy/gcp/environment
-# output`, transcribed rather than generated — the identifying five as the
+# output`, transcribed rather than generated — the identifying ones as the
 # repository variables the workflow overrides them from, the rest as the literals
 # here. If `main.tf` changes the taint, the registry, or a service account, there
 # are two places to change: this file for what a rebuild does not identify, and
@@ -83,12 +85,12 @@
 #   * Every credential — and in mode 2 that is not a list of values withheld, it
 #     is a whole mechanism moved: the chart writes no Secret at all, so there is
 #     nothing here to withhold. `controlplane-api-key`, `database-url` and
-#     `model-providers.json` reach the cluster in the pre-created Secret named
+#     `brain-api-key` reach the cluster in the pre-created Secret named
 #     below, which the workflow assembles from Secret Manager at deploy time.
 #   * `image.tag` and `executor.gateImage`. Both name a build, and the workflow
 #     sets both from the *same* commit SHA it built with. An empty `image.tag`
 #     falls back to the chart's appVersion, which this Artifact Registry does not
-#     hold — all three platform pods sit in ImagePullBackOff. Pinning a tag in
+#     hold — every platform pod sits in ImagePullBackOff. Pinning a tag in
 #     this file would be worse: it would deploy whatever commit was current when
 #     the line was last edited.
 
@@ -113,21 +115,21 @@ image:
 # The switch that selects mode 2. Set, the chart renders NO Secret of its own and
 # every process reads its configuration from this one instead. The workflow's
 # "Assemble the mode-2 Secret" step creates it in namespace `map` with the seven
-# keys the chart's `map.secretsEnv` helper looks for — `brain-api-key` in
-# `model-providers.json`'s place while the gateway runs, and either mode also
+# keys the chart's `map.secretsEnv` helper looks for — `model-providers.json`
+# in `brain-api-key`'s place while the gateway is off, and either mode also
 # carries the other's key when Secret Manager has it (`modelgateway:` below):
 #
 #   controlplane-api-key   the management API key          (Secret Manager)
 #   database-url           the Cloud SQL DSN                (Secret Manager)
-#   model-providers.json   the model routes, a JSON array   (Secret Manager)
+#   brain-api-key          the brain's key for the gateway  (Secret Manager)
 #   blob-backend           gcs                              (literal)
 #   blob-bucket            the GCS bucket, from BLOB_BUCKET (literal)
 #   secrets-backend        gcpkms                           (literal)
 #   gcpkms-key-name        the full CryptoKey resource name (literal)
 #
 # Object storage carries no credential key since #240 — the workloads authenticate
-# to GCS as themselves through Workload Identity, which is what the three
-# annotations below are for. `gcsObjectStorage.enabled` is deliberately left false:
+# to GCS as themselves through Workload Identity, which is what the controlplane,
+# brain and executor annotations below are for. `gcsObjectStorage.enabled` is deliberately left false:
 # it is the mode-1 route to the same bucket, and the chart refuses it alongside
 # `existingSecret` because in this mode the value would select nothing.
 existingSecret: map-platform
@@ -143,7 +145,7 @@ minio:
 openbao:
   enabled: false
 
-# The Cloud SQL Auth Proxy, as a native sidecar in all three deployments. What it
+# The Cloud SQL Auth Proxy, as a native sidecar in each deployment. What it
 # buys is that no address is written down anywhere: the PROXY is given the
 # instance's connection name, and the DSN then names the proxy's loopback socket
 # rather than the database. A rebuilt Cloud SQL instance gets a new private IP —
@@ -163,7 +165,7 @@ openbao:
 # `--atomic` rolls back. A wrong instance does not deploy green here.
 #
 # What the flag buys is WHERE the failure appears. Without it an operator sees
-# three application containers unable to reach Postgres and has to work back to
+# the application containers unable to reach Postgres and has to work back to
 # a proxy pointed at the wrong instance; with it the sidecar exits first, naming
 # the instance it could not open. And it covers the one state where nothing else
 # does: a rebuild re-points `database-url` at the instance's address (the
@@ -335,19 +337,26 @@ brain:
       cpu: 100m
       memory: 128Mi
 
-# Off, where the chart defaults it on: staging's brain still routes itself, through
-# the `model-providers.json` key above. CD reads this switch off the chart's render
-# and follows it, so turning it on is this line plus what CD cannot do itself: the
-# operator's apply of `foundation/` then `environment/`, which make the gateway's
-# identity and its grants (it seals vendor keys with Cloud KMS); a `brain-api-key`
-# secret in Secret Manager, which mode2-secret.sh then writes in the routes' place;
-# the `MODELGATEWAY_SERVICE_ACCOUNT` repository variable; and, once the gateway
-# runs, a deployment in its catalogue for the brain's model, without which every
-# turn fails (#906). The Secret carries the routes on beside `brain-api-key`
-# while Secret Manager has them, so the flip's `--atomic` rollback restarts the
-# old brain on a Secret that still holds them; the way back off is the same.
+# On, as the chart defaults it: the brain's one route sends every model call to
+# the gateway under the `brain-api-key` key above, and the gateway calls the
+# vendor with a key from its own catalogue, sealed with Cloud KMS. The catalogue
+# lives in Cloud SQL, so a rebuilt environment starts with it EMPTY, and every
+# turn fails until someone adds a provider, credential, deployment and alias for
+# the agents' model over the admin API (this directory's README, under
+# "Continuous delivery"). CD reads this switch off the chart's render and
+# follows it; turning it off needs the `model-providers` secret back in Secret
+# Manager first. Either way the Secret carries the other mode's key while Secret
+# Manager has a usable one, so a flip's `--atomic` rollback restarts the old
+# brain on a Secret that still holds it.
 modelgateway:
-  enabled: false
+  enabled: true
+  # One, like every other component here, where the chart runs two. Its
+  # PodDisruptionBudget lets one pod go at a time, and `make gcp-env-stop`
+  # drains the whole platform pool at once: the first evicted pod has nowhere
+  # to land, the budget then holds the second, and GKE waits up to an hour
+  # before forcing it (seen on the #906 acceptance run). At one replica the
+  # budget lets the drain through.
+  replicas: 1
   # Example value; the workflow overrides it from `MODELGATEWAY_SERVICE_ACCOUNT`
   # while the gateway runs.
   serviceAccount:

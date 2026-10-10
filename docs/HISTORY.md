@@ -49,6 +49,46 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## GCP staging with the model gateway on (#906, run 2026-10-09) — ✅ passed
+
+**Where.** Not the environment CD deploys: that one is parked, and its credentials are on another machine. A second
+project's `environment/` was rebuilt from `main`'s Terraform, with `staging-values.yaml` as #910 leaves it but for `replicas: 1`, which parking (below) added. Two
+things differed from what CD does, and both are named here so the record claims no more than it covers.
+`deploy.yml`'s own `run:` scripts ran locally, in order, unedited, under `bash -eo pipefail` with the repository
+variables replaced by this environment's Terraform outputs — skipping only the `uses:` steps (checkout, the WIF
+login, the tool installs) and the image build, which `deploy/gcp/cloudbuild.yaml` did instead with the same five
+tags. And they ran as the project's Owner, so the deploy identity's own grants, the RBAC basis among them, were
+not exercised.
+
+**The rebuild hit a quota first.** The sandbox pool failed to create with `GCE_QUOTA_EXCEEDED`: the default pools
+are four nodes with a 100 GB `pd-balanced` boot disk each, and the project's `SSD_TOTAL_GB` limit in
+`us-central1` was 250 GB. One node per pool (`-var platform_node_count=1 -var sandbox_node_count=1`) fits, and
+the run used that; `deploy/gcp/README.md`'s prerequisites now say so.
+
+**The deploy.** `make gcp-db-init` asserted the `map` role, then every step passed: the gateway step read
+`MODELGATEWAY=true` off the render; `mode2-secret.sh` built `map-platform` with seven keys, `brain-api-key`
+among them and `model-providers.json` absent (Secret Manager had none to carry); `helm upgrade --atomic`
+completed; the read-back found all four Workload Identity annotations as meant and four Cloud SQL proxies
+dialling the instance the deploy resolved, with `database-url` naming the proxy's loopback socket
+(`127.0.0.1:5432`), so every query went through them; and the smoke answered 200 with the key and 401 without one. Five
+pods ran 2/2 on the platform node, two of them the gateway.
+
+**The catalogue and a session.** Over a port-forward with `controlplane-api-key`, four admin calls made a
+`deepseek` provider, a credential, a `deepseek-v4-flash` chat deployment and the alias `deepseek-flash`; the
+credential's response did not echo the key. An agent on that alias with the built-in toolset, in a new session:
+turn 1 called `bash` with `echo gateway-ok-$((6*7))`, which ran on the sandbox node, and answered
+`gateway-ok-42`; turn 2, replaying turn 1's thinking and tool use, answered that the number was 42. Both ended
+`end_turn`, with no error event. The brain's only route names the gateway's Service, and the gateway's ledger
+(`GET /admin/v1/usage/requests`) held three rows, one per model call, each `200` against that alias, deployment,
+credential and session. Opening the sealed key on each call is a Cloud KMS decrypt as the gateway's own Google
+service account.
+
+**Parking it found the one change the run forced.** `make gcp-env-stop` drains the whole platform pool at once.
+The first gateway pod it evicted had nowhere to land, which left the gateway's PodDisruptionBudget
+(`maxUnavailable: 1`) at zero allowed disruptions, so the second could not be evicted, and the resize sat in
+`RECONCILING`, where GKE waits up to an hour before forcing a pod. Scaling the gateway to one replica let the
+drain through at once. `staging-values.yaml` now runs one replica, like every other component there.
+
 ## Thinking replay through the model gateway (plan 61, #883) — archived 2026-10-09, delivered in one PR
 
 The tests were written first and run against the unchanged code. The gateway test's rows that expect `X-MAP-Thinking-Prefix: unchecked` found none, and its negative rows already passed, an upstream's own header of that name among them. The adapter's tests that expect the word found none on the done chunk. Two of the brain's first four new tests failed (review added a row and a test, both pinned by the mutants below): the unit test's tool-set and reorder rows dropped the block, and the end-to-end test lost the block at the `system.message` and stored only chain digests. The digest-shape test passed once its function existed, and the model-change test passed, since both rules drop there; the mutations below are what prove them. Then each guard of the code as merged was broken on its own in a scratch copy, 18 mutants, and the test that pins it failed each time:
