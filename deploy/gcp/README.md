@@ -1386,9 +1386,10 @@ checked against a stand-in gateway, not a live one. Save it and run it with `bas
 (`GCP_PROJECT_ID=… bash seed-catalogue.sh vendor-key.txt`) rather than pasting it: zsh reads
 `#` as a command unless `interactivecomments` is set, and runs no `EXIT` trap on Ctrl-C. It
 keeps both keys off every argv, stops at the first call that fails, so a rejected key never
-leaves an alias behind that answers `503`, makes each call only while its own forward is
-alive — that forward listens on `127.0.0.1` alone, so one that cannot have the port exits —
-and on exit, Ctrl-C included, removes the key file and stops the forward:
+leaves an alias behind that answers `503`, checks just before each call that its own forward
+is still running — that forward listens on `127.0.0.1` alone, so one that cannot have the port
+exits; a forward that dies between the check and the connection is a window no shell check
+closes — and on exit, Ctrl-C included, removes the key file and stops the forward:
 
 ```bash
 #!/usr/bin/env bash
@@ -1415,8 +1416,8 @@ for _ in $(seq 30); do
 done
 grep -q '^Forwarding from 127.0.0.1:18090' "$d/forward.log"
 
-# Each call only while that forward lives: one that died since may have handed the
-# port to another listener.
+# Checked just before each call: a forward that died since may have handed the port
+# to another listener.
 gw() { kill -0 "$pf" && curl -sS --fail-with-body --noproxy '*' -K "$d/curlrc" \
          -H 'content-type: application/json' --data-binary @- "http://127.0.0.1:18090/admin/v1/$1"; }
 
