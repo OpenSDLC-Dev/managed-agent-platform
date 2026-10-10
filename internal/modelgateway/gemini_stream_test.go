@@ -176,6 +176,48 @@ func TestGeminiStreamErrors(t *testing.T) {
 	}
 }
 
+// rawBody answers body as it is, under contentType.
+func rawBody(contentType, body string) func(http.ResponseWriter, *http.Request, fakeCall) {
+	return func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, body)
+	}
+}
+
+// An error Gemini sends as bare JSON rather than as a data line, as genai's
+// stream reader also takes one, is read as an error object: as the error's
+// response when it opens the stream, as an error event once the answer has
+// begun. A stream whose one chunk the upstream closes without its blank line
+// is whole all the same.
+func TestGeminiStreamFraming(t *testing.T) {
+	e := newEnv(t)
+	bare := newFake(t, rawBody("text/event-stream", "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Request contains an invalid argument.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n"))
+	late := newFake(t, rawBody("text/event-stream", "data: "+geminiPiece+"\r\n\r\n"+`{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}`+"\n"))
+	lone := newFake(t, rawBody("text/event-stream", "data: "+`{"candidates":[{"content":{"parts":[{"text":"Jupiter"}]},"finishReason":"STOP"}],"usageMetadata":`+geminiUsage+`}`+"\r\n"))
+	for name, f := range map[string]*fake{"bare": bare, "late": late, "lone": lone} {
+		e.alias(name, target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
+	}
+	key := e.key(everyAlias)
+	e.start()
+	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
+	body := `{"model":"%s","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+
+	resp, b := e.do("POST", "/v1/messages", strings.Replace(body, "%s", "bare", 1), hdr)
+	if typ, msg, _ := errorOf(t, b); resp.StatusCode != http.StatusBadRequest || typ != "invalid_request_error" || msg != "Request contains an invalid argument." {
+		t.Errorf("bare: %d %s %s", resp.StatusCode, typ, msg)
+	}
+	resp, b = e.do("POST", "/v1/messages", strings.Replace(body, "%s", "late", 1), hdr)
+	if s := string(b); resp.StatusCode != 200 || !strings.Contains(s, `"text":"Jupiter"`) || !strings.Contains(s, "event: error\n") ||
+		!strings.Contains(s, "Internal error encountered.") || strings.Contains(s, "message_stop") {
+		t.Errorf("late: %d\n%s", resp.StatusCode, s)
+	}
+	resp, b = e.do("POST", "/v1/messages", strings.Replace(body, "%s", "lone", 1), hdr)
+	if s := string(b); resp.StatusCode != 200 || !strings.Contains(s, `"text":"Jupiter"`) || !strings.HasSuffix(s, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n") {
+		t.Errorf("lone: %d\n%s", resp.StatusCode, s)
+	}
+}
+
 // A streamed Responses request reaches Gemini through both conversions.
 func TestAStreamedResponsesRequestReachesGemini(t *testing.T) {
 	e := newEnv(t)

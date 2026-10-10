@@ -779,6 +779,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		// upstream may yet refuse, as an error event, which is answered like
 		// any refusal. Keep-alives past maxHeld begin it anyway.
 		events := upstream.NewReader(resp.Body)
+		events.BareJSON = up == profile.Gemini
 		var p streamProto
 		switch {
 		case up == profile.Gemini:
@@ -798,11 +799,12 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		var held []byte
 		for {
 			e, err := events.Next()
-			// A Chat Completions stream may close on its last chunk without
-			// the blank line that ends it, its first chunk included: one
-			// whole there begins the answer, as it would later on. A
-			// Messages stream cut off so before message_stop is no answer.
-			cut := errors.Is(err, io.EOF) && up == profile.OpenAI && e.Data != nil && p.complete(e.Data)
+			// A Chat Completions or Gemini stream may close on its last
+			// chunk without the blank line that ends it, its first chunk
+			// included: one whole there begins the answer, as it would later
+			// on. A Messages stream cut off so before message_stop is no
+			// answer.
+			cut := errors.Is(err, io.EOF) && (up == profile.OpenAI || up == profile.Gemini) && e.Data != nil && p.complete(e.Data)
 			switch {
 			case err != nil && !cut:
 				return noAnswer(guard, red, err)

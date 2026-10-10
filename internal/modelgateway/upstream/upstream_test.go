@@ -181,3 +181,29 @@ func TestNoReuseKeepsNoConnectionOverHTTP2(t *testing.T) {
 		t.Errorf("4 requests on connections %v", remotes)
 	}
 }
+
+// A reader asked to take bare JSON reads a block with no field that is a
+// JSON object, on one line or several, as its own data, as genai's stream
+// reader takes an error Gemini sends so; a comment block stays a keep-alive,
+// a block that only opens like JSON has no data, and a reader not asked
+// leaves such a block without data.
+func TestReaderReadsBareJSON(t *testing.T) {
+	const pretty = "{\n  \"error\": {\n    \"code\": 400\n  }\n}\n"
+	for in, want := range map[string]string{
+		"{\"error\":{\"code\":400}}\n\n": `{"error":{"code":400}}`,
+		pretty + "\n":                    strings.TrimSpace(pretty),
+		pretty:                           strings.TrimSpace(pretty),
+		": keep-alive\n\n":               "",
+		"{not json}\n\n":                 "",
+	} {
+		r := upstream.NewReader(strings.NewReader(in))
+		r.BareJSON = true
+		e, err := r.Next()
+		if err != nil && !errors.Is(err, io.EOF) || string(e.Data) != want || (want == "") != (e.Data == nil) {
+			t.Errorf("%q: data %q (nil %v), %v", in, e.Data, e.Data == nil, err)
+		}
+		if e2, _ := upstream.NewReader(strings.NewReader(in)).Next(); e2.Data != nil {
+			t.Errorf("%q, not asked: data %q", in, e2.Data)
+		}
+	}
+}

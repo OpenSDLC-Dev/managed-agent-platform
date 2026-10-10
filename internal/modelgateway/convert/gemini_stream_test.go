@@ -117,7 +117,7 @@ func TestGeminiStreamLeadingBlock(t *testing.T) {
 }
 
 // A stream has not finished until a candidate names its finish reason, or
-// the prompt is blocked.
+// the prompt is blocked, and not once it goes on after one.
 func TestGeminiStreamFinished(t *testing.T) {
 	s := convert.NewGeminiStream("alias", "req_1", wrapSig)
 	if _, err := s.Chunk([]byte(`{"candidates":[{"content":{"parts":[{"text":"a"}]}}],"usageMetadata":{"trafficType":"ON_DEMAND"}}`)); err != nil || s.Finished() {
@@ -125,6 +125,10 @@ func TestGeminiStreamFinished(t *testing.T) {
 	}
 	if _, err := s.Chunk([]byte(`{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}]}`)); err != nil || !s.Finished() {
 		t.Fatalf("finished %v, %v", s.Finished(), err)
+	}
+	// One that goes on after its finish has not finished.
+	if _, err := s.Chunk([]byte(`{"candidates":[{"content":{"parts":[{"text":"more"}]}}]}`)); err != nil || s.Finished() {
+		t.Fatalf("after more: finished %v, %v", s.Finished(), err)
 	}
 }
 

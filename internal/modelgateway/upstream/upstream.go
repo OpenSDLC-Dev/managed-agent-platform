@@ -7,6 +7,7 @@ package upstream
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -98,7 +99,15 @@ func (e Event) WithData(data []byte) []byte {
 }
 
 // Reader reads a stream's events.
-type Reader struct{ br *bufio.Reader }
+type Reader struct {
+	br *bufio.Reader
+	// BareJSON reads a block with no field that is a JSON object, on one
+	// line or several, as its own data: the error a Gemini stream may send
+	// bare rather than as a data line, which genai's stream reader takes as
+	// one (google.golang.org/genai 1.73.0, api_client.go
+	// iterateResponseStream).
+	BareJSON bool
+}
 
 // NewReader reads events from r.
 func NewReader(r io.Reader) *Reader {
@@ -131,7 +140,7 @@ func (r *Reader) Next() (Event, error) {
 		switch f := field(line); {
 		case len(line) > 0 && len(trimmed) == 0:
 			// The blank line that ends the event.
-			e.Data = joined(data)
+			e.Data = r.dataOf(e, data)
 			return e, nil
 		case f == "event":
 			e.Name = string(value(trimmed))
@@ -139,10 +148,19 @@ func (r *Reader) Next() (Event, error) {
 			data = append(data, append([]byte(nil), value(trimmed)...))
 		}
 		if err != nil {
-			e.Data = joined(data)
+			e.Data = r.dataOf(e, data)
 			return e, err
 		}
 	}
+}
+
+// dataOf is an event's data: its data lines joined, or the block itself
+// where the reader takes bare JSON and the block is a JSON object.
+func (r *Reader) dataOf(e Event, data [][]byte) []byte {
+	if raw := bytes.TrimSpace(e.Raw); r.BareJSON && len(raw) > 0 && raw[0] == '{' && json.Valid(raw) {
+		return append([]byte{}, raw...)
+	}
+	return joined(data)
 }
 
 // joined is an event's data lines joined by "\n": nil when it has none, and

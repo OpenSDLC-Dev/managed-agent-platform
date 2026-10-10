@@ -23,7 +23,8 @@ import (
 // thought is dropped, and so is the signature of a call that follows text,
 // for which GeminiRequest sends the sentinel on replay.
 //
-// A candidate's finishReason finishes the stream, and End makes
+// A candidate's finishReason finishes the stream, until a chunk carries
+// more of the answer, and End makes
 // message_delta of it and of the usage SetUsage recorded, which Gemini
 // reports in full on its last chunk alone; Gemini sends no [DONE], so a
 // stream ends when its upstream closes it. A prompt blocked with no
@@ -80,10 +81,14 @@ func (g *GeminiStream) Chunk(data []byte) ([]byte, error) {
 	if !null(content["parts"]) && json.Unmarshal(content["parts"], &parts) != nil {
 		return nil, fmt.Errorf("a chunk's parts is not an array of objects")
 	}
+	before := out.Len()
 	for i, p := range parts {
 		if err := g.part(&out, p); err != nil {
 			return nil, fmt.Errorf("a chunk's part %d: %w", i, err)
 		}
+	}
+	if out.Len() > before { // a candidate that goes on after its finish has not finished
+		g.s.finished = false
 	}
 	if reason, _ := text(cands[0], "finishReason"); reason != "" {
 		if _, err := geminiStop(reason, g.calls > 0); err != nil {
