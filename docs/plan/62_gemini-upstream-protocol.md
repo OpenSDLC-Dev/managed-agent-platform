@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#900"
 ---
 
@@ -190,10 +190,12 @@ API answered the free calls and the errors.
   `gemini` profile.
 - `internal/modelgateway/catalog`: `upstreamProtocol` converts a Messages request to
   Gemini when the credential speaks `gemini` alone.
-- `internal/modelgateway`: the attempt's conversion is named (none, Chat Completions,
-  Gemini) rather than a boolean; a Gemini attempt builds its URL and `x-goog-api-key`
+- `internal/modelgateway`: a Gemini attempt is read before the Chat Completions
+  direction wherever the two part — as built, a `case up == profile.Gemini` ahead of each
+  `conv` case rather than a named conversion; it builds its URL and `x-goog-api-key`
   header, converts the request, and reads the answer through the Gemini whole-answer
-  and stream readers; the planning pre-check and `honoring` gain the Gemini direction's
+  and stream readers, the stream relayed by the Chat Completions direction's
+  `convStream`, which takes either converter; the planning pre-check and `honoring` gain the Gemini direction's
   refusals and drops; `thinking.go` reads the protocol off a wrapped value.
 - `internal/modelgateway/convert`: the three Gemini files above and their tests; the
   package comment names three directions.

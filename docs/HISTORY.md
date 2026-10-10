@@ -49,6 +49,32 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## A Gemini upstream protocol for the model gateway (plan 62, #900) — archived 2026-10-11, delivered in two PRs (#916 and this close-out)
+
+No key could generate: the maintainer's Gemini API key answers every billable call 402, its prepaid balance empty, and the user chose to build first and leave generation to #903. So the answer and stream converters are tested over answers and two streams `gemini-3.8-flash` gave on Vertex on 2026-10-10, committed under `internal/modelgateway/convert/testdata/gemini`. The request side is checked live, through the free `countTokens`. One more wire fact was measured during review, with a made-up key on `models.list`, `countTokens` and `generateContent`: Gemini answers a key that is not valid with 400 `INVALID_ARGUMENT`, reason `API_KEY_INVALID`, not with a 401, so the gateway reads that reason as a refused credential.
+
+The live tier ran `TestLiveGeminiCountsTheConvertedRequest` under `RUN_LIVE_MODELGATEWAY=gemini` on 2026-10-11. Gemini's `countTokens` parsed every converted shape:
+
+| Request | Tokens |
+| --- | --- |
+| system prompt in two blocks, a tool with `$defs`, a type union and `additionalProperties`, `tool_choice` naming it | 90 |
+| a tool loop: a signed call and one under the sentinel, an error result with an image, a `search_result` | 1256 |
+| an image in a user turn | 1095 |
+| the sampling fields; thinking enabled, enabled and omitted, adaptive with `low`, disabled; effort `medium` and `max` | 5 each |
+
+A scratch copy whose conversion sent `thinkingLevel` `MEDIUM_X` failed its row with Gemini's 400, so the rows check the shape and not merely the key.
+
+Every guard was broken on its own in a scratch copy, and the test that pins it failed each time. #916: 24 mutants in `convert`, 11 in the gateway, 11 for the Claude review's fixes and 5 for Codex's; CodeRabbit's two refusal rows failed against the code before their fix. The close-out: 17 in the stream converter, where the first run found a dead line (removed) and an unpinned rule (a thought after a call; a row added), and 11 in the gateway's stream wiring.
+
+Review hardening, #916. The verifier passed it, with `make verify` green at 91.48% coverage. Codex (`gpt-6.1-sol`, `xhigh`) found two defects, both fixed. A signature in a thinking-only assistant message lost to the sentinel on the next message's call, since messages were signed before same-role turns were joined. An empty-string `system` sent a part with no field set. `/code-review` (Opus) raised fourteen findings:
+
+- **Fixed (nine):** the 400 key refusal above; `models/…` and `tunedModels/…` names; `disable_parallel_tool_use: true` refused, as the gateway already routes it away from DeepSeek; a final assistant turn left once empty user turns are dropped; `LANGUAGE` and `IMAGE_OTHER` as errors, not refusals; Gemini's `thought_signature` refusals earning the strip-mode retry, which settles decision 10's open point; one refusal whatever the draw when both conversions refuse; and two tests, on the escaped path and on provenance between protocols.
+- **Declined (five):** the stream switch's ordering, guarded then by the pre-check and given its Gemini case in the close-out; converting again per attempt, as the Chat Completions direction does for its per-deployment history; shared validators, since the conversions' dispositions differ on purpose; and two style notes.
+
+CodeRabbit raised two findings, both fixed: a `tool_use` without a string `id` or `name` is refused, and REFERENCE_PROJECTS.md no longer claims a bare `go mod download` fetches genai.
+
+**Plan 62 progress summary (archived).** Delivered in two PRs. #916 landed whole answers: migration 0052 and the `gemini` profile, the request and answer conversions, routing, and provenance's `gemini:` tag. The close-out landed streaming, the `countTokens` live tier and this record. Generation's live rows (a whole and a streamed answer, a tool loop, the brain end to end) wait on a key that can pay, in #903. Vertex stays #236's.
+
 ## GCP staging with the model gateway on (#906, run 2026-10-09) — ✅ passed
 
 **Where.** Not the environment CD deploys: that one is parked, and its credentials are on another machine. A second
