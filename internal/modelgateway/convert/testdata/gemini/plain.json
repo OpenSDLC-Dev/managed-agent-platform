@@ -1,0 +1,38 @@
+{
+ "candidates": [
+  {
+   "content": {
+    "role": "model",
+    "parts": [
+     {
+      "text": "Hello there, how are you?",
+      "thoughtSignature": "AY89a19MqVmso+zmRnU/fXCczjEi7lGj5mURaN0bUQUWPrm7zwQ3Ry5gqWFSHF3IeVRgHcDbetLEgPqK/zNxuDiZ8/USoidMIoozgH9lFKaC+qD3UuYNnUzlFCdhwBKYCCZcvb7zd2xO+f4s9Z2dGG6QKifRfBHrKtLyUab6/SdNnhHSm9Krqr0+pUL/4tidfzxnu9zPQHVsBqfujRNzWx4rMOrSoprlE9FLuCnjeGdNJMcSCnsTIzp6GJ2o8P/V5ZaHoYHBtBIZr4AStbBq/RXRZNB6g01QrqPxlnQ5RAaYC8eEVMe1SA0hKmAuFWTnsyewiA3JL0ra6fyC2En73bStLN1UN05LfKfP05KBkZs1Abumy23E6Qb6NUtnbe3JnZmI5J1nt9zQHFp7I+q1YcUQPS0BSQSRR4z/GQ0T2b85FPA8mYlQ7NX//nPSzWgPsIxbBffo/ftng2SorFLxiFnA4a8EJQ0u4htRzP7OEcLWUBllZjKkOim6YIbeWEoEazrxB6j/Yl6UZns18+0sWVSUHfYYn0gE5p8Srblk40CKNkQUgXRmugcEPfDY7mvH/NsX8Qe79mwHQICH4N1axQGHz5MQTtiC4lC63+WiOn3izEBd34GUd/xdRrgjV4zALEBHWuJcZUa7fgDe61fviVvM9KY82DOCxf4tu1nej3xPyQ8wYYuGtCoISXtMiWeS4xcMaqhBpy/bHAq9CvmoBC3IOdeUh5szFoKUi2g/3P8y42IckdeMm37YHy+AGVsi5zmEj40sXGA2/UzSDvOxl4uutJRg43q9yrd7HHTmh98SPpGPIUJbv3XK7QzcFdOLhX87PuPqrRMIIHtfGP3PyZJ3SCOTNTcozfwkHMTYtNjDLxcXlBQC80pfARxjRCE6GPTQ0JkeOyPMyAAa09OCFoJxBt8k43sd53OJQ3z7kQVikP20c/OrBQY0zxMM+2COzCLMKzjVyfvH0w0h0gDsHoq2BpTYYJh/TTM6JX9/7KsMhxT4suEy98qlShEkr11WOCiu64lROQ6Z+JfeCJx6vHp5FFPYYOI6Qj3pl3m0JaN4wLktxXBqwQ/TFKXQLrrUVmHzmvXpPvuoYbZb1Yf2w+4Ml17AtpPirgoiaEuFhG/8uX8lXMBPshNjBNZ6mebXlkheWLpq+UprcZwIiN0ez9ZMiZRG12tghUtJHjgc3+ve0ZLebJbNycnP0LEn00w6sbXVkUx3tSiUSsUUz8W5YRcUOfi79uatMLksZ0mPskMKMkxr0G1HbCYfjck+d4VB5jgE3McyW3N4704BXexlRYBjAYb7u3lkhxU80Z5/dH56ANDedxQYtkyYgavef4/JPysI2COkKOt4GkKtl+bmO1Np98rqyBjfrTRZ+TBFJyWTMpoOvBNNuKHCLT4jOTTv/rPrrkw8WVPGNRl0U1oApffnuF/uyfRdaWCmRo4="
+     }
+    ]
+   },
+   "finishReason": "STOP"
+  }
+ ],
+ "usageMetadata": {
+  "promptTokenCount": 6,
+  "candidatesTokenCount": 7,
+  "totalTokenCount": 341,
+  "trafficType": "ON_DEMAND",
+  "promptTokensDetails": [
+   {
+    "modality": "TEXT",
+    "tokenCount": 6
+   }
+  ],
+  "candidatesTokensDetails": [
+   {
+    "modality": "TEXT",
+    "tokenCount": 7
+   }
+  ],
+  "thoughtsTokenCount": 328
+ },
+ "modelVersion": "gemini-3.8-flash",
+ "createTime": "2026-10-10T13:50:57.010756Z",
+ "responseId": "wULKaoRUsY3H2A-nxuWJCw"
+}

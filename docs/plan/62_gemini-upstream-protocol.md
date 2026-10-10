@@ -119,14 +119,15 @@ API answered the free calls and the errors.
    - thinking: `enabled` with `budget_tokens` → `thinkingBudget`; `adaptive` → no
      budget; either sets `includeThoughts` unless `display` is `omitted`; `disabled` or
      none sends nothing, since Gemini 3 cannot stop thinking (Ground truth);
-     `output_config.effort` → `thinkingLevel` (`max` as `high`) when no budget is set,
+     `output_config.effort` → `thinkingLevel` (`xhigh` and `max` as `high`) when no budget is set,
      a level the model lacks answered by Gemini's own `400`.
-6. **A function call's signature travels in a leading thinking block.** The answer
-   opens with one `thinking` block: the thought summaries, when there are any, as its
-   text — empty text otherwise, the shape a Claude 5 model returns with
-   `display: "omitted"` — and as its signature the deployment's provenance wrapper
-   around `gemini:` and the signature of the answer's first `functionCall`, or
-   `gemini:` alone when it has none. Leading, because the brain stores no other block
+6. **A function call's signature travels in a leading thinking block.** An answer
+   with thought summaries or a signed `functionCall` opens with one `thinking` block:
+   the summaries, when there are any, as its text — empty text otherwise, the shape a
+   Claude 5 model returns with `display: "omitted"` — and as its signature the
+   deployment's provenance wrapper around `gemini:` and the signature of the answer's
+   first `functionCall`, or `gemini:` alone when it has none. An answer with neither
+   opens with no thinking block, which would carry nothing back. Leading, because the brain stores no other block
    (Ground truth), and it replays that block within the tool loop (plan 60). On the next
    request the block contributes only its signature, set on that turn's first
    `functionCall`; its summary text is not sent back. A `functionCall` that would leave
@@ -145,12 +146,13 @@ API answered the free calls and the errors.
 8. **The answer conversion** (`convert/gemini_answer.go`): the first candidate's parts
    become blocks; a `functionCall` without an id gets `toolu_` and a deterministic
    suffix. `STOP` is `tool_use` when the answer holds a call and `end_turn` otherwise;
-   `MAX_TOKENS` is `max_tokens`; the safety class (`SAFETY`, `RECITATION`,
+   `MAX_TOKENS` is `max_tokens`, and so is `CONTINUATION`, an answer the server's own
+   limit cut short; the safety class (`SAFETY`, `RECITATION`,
    `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `LANGUAGE`, `IMAGE_*`) is `refusal`; a
    prompt blocked with no candidate (`promptFeedback.blockReason`) is an empty
    `refusal`; the malformed class (`MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`,
-   `TOO_MANY_TOOL_CALLS`, `MISSING_THOUGHT_SIGNATURE`, `MALFORMED_RESPONSE`) and any
-   unknown reason are a `502 api_error` naming it, its tokens still counted. Usage:
+   `TOO_MANY_TOOL_CALLS`, `MISSING_THOUGHT_SIGNATURE`, `MALFORMED_RESPONSE`), `OTHER`,
+   `NO_IMAGE` and any unknown reason are a `502 api_error` naming it, its tokens still counted. Usage:
    input is `promptTokenCount` plus `toolUsePromptTokenCount` minus
    `cachedContentTokenCount`, which is the cache read; output is `candidatesTokenCount`
    plus `thoughtsTokenCount`. Errors go through `convertedError`.
