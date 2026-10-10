@@ -166,12 +166,13 @@ API answered the free calls and the errors.
 9. **The stream conversion** (`convert/gemini_stream.go`) re-emits each chunk's parts as
    Messages events: thought parts as `thinking_delta`, text as `text_delta`, a function
    call as one `tool_use` block with a single `input_json_delta`. The leading thinking
-   block stays open until the first text or function call; that call's signature, when
+   block stays open until the first text, function call or finish; that call's signature, when
    the block is still open, is its `signature_delta`, and a call that comes first opens
    an empty block to carry it (decision 6). The
    last chunk's `finishReason` and `usageMetadata` become `message_delta`, and the
-   stream ends at EOF, as Gemini sends no `[DONE]`. An error object in a `200` stream
-   becomes an `error` event.
+   stream ends at EOF, as Gemini sends no `[DONE]`. An error object that opens a `200`
+   stream answers as that error's response, as before a stream; a later one becomes an
+   `error` event.
 10. **Gemini answers are prefix-unchecked** (plan 61's `X-MAP-Thinking-Prefix`), as
     every converted answer is. Whether Gemini checks a signature against the history
     before it is not measured. `thinkingRefusal` reads a `400` naming a
