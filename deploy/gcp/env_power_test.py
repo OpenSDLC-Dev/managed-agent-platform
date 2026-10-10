@@ -16,7 +16,7 @@ The two that would cost real money to get wrong:
     Postgres that is still starting. Both are invisible to any static check and
     both are one refactor away from inverting.
 
-THE FAKE MODELS FOUR THINGS THAT REAL GCLOUD ACTUALLY DOES, each of which the
+THE FAKE MODELS FIVE THINGS THAT REAL GCLOUD ACTUALLY DOES, each of which the
 script would otherwise get wrong in a way no static check could see:
 
   - `--update-labels` REPLACES the cluster's label set. It is not a merge,
@@ -34,6 +34,10 @@ script would otherwise get wrong in a way no static check could see:
   - gcloud on Windows terminates its lines CRLF. A pool name read with the CR
     still attached produces `node pool "platform\r" not found` on every call
     after the listing — observed against the real cluster, not theorised.
+  - a node pool at zero nodes has no `initialNodeCount` at all: GKE omits the
+    zero, so `value(initialNodeCount)` prints an empty line, not `0`. Observed on
+    staging (#914), where a fake that printed `0` let `start` skip every parked
+    pool and still clear the saved sizes.
 
 Projections are enforced rather than ignored: a `describe` whose `--format` asks
 for the wrong field is an error here, because a fake that prints the right answer
@@ -217,7 +221,11 @@ if pos[:3] == ["container", "node-pools", "describe"]:
     c = cluster(flags["--cluster"])
     if pos[3] not in c["pools"]:
         die("ERROR: (gcloud) NOT_FOUND: node pool \"%s\" not found" % pos[3])
-    out(c["pools"][pos[3]])
+    if fault("describe." + pos[3]):
+        die("ERROR: (gcloud.container.node-pools.describe) UNAVAILABLE: backend error")
+    # GKE omits a zero count, so the projection is an empty line -- see this
+    # file's docstring.
+    out(c["pools"][pos[3]] or "")
     sys.exit(0)
 
 if pos[:3] == ["sql", "instances", "describe"]:
@@ -616,6 +624,9 @@ def main():
         check("names both pools", "platform" in r.out and "sandbox" in r.out, r.out)
         check("reports the database state", "STOPPED" in r.out, r.out)
         check("shows what they were parked from", "parked from 3" in r.out, r.out)
+        # The symptom #914 showed first: a blank count where GKE omits the zero.
+        check("counts a parked pool as zero, not blank",
+              " 0 node(s), parked from 3" in r.out, r.out)
         check("issues no write", not any(w in c for c in r.calls
                                          for w in ("resize", "update", "patch")), r.calls)
 
@@ -625,6 +636,17 @@ def main():
         # stops the database while the other pool is still serving.
         st = new_state(tmp, "partial")
         r = run(tmp, st, "stop", faults=["list-partial"])
+        check("refuses", r.code != 0, r.out)
+        check("resizes nothing", r.first("clusters resize") == -1, r.calls)
+        check("never touches the database", r.first("sql instances patch") == -1, r.calls)
+        check("the pools are untouched", r.pools() == {"platform": 3, "sandbox": 1}, r.pools())
+
+        print("a pool size gcloud cannot report is not read as zero")
+        # An empty answer means zero (#914), so a describe that FAILS must never
+        # reach that reading: stop would take the pool for parked and stop the
+        # database under it.
+        st = new_state(tmp, "describefails")
+        r = run(tmp, st, "stop", faults=["describe.sandbox"])
         check("refuses", r.code != 0, r.out)
         check("resizes nothing", r.first("clusters resize") == -1, r.calls)
         check("never touches the database", r.first("sql instances patch") == -1, r.calls)

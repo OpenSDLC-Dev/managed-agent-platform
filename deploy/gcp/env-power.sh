@@ -132,9 +132,17 @@ if [[ ${#POOLS[@]} -eq 0 ]]; then
 	exit 1
 fi
 
+# GKE omits a zero `initialNodeCount`, so a pool at zero nodes projects an empty
+# line, not `0` (#914). Left empty, every parked pool reads as running: `start`
+# skipped them all and still cleared their saved sizes. The `|| return` is not
+# decoration — this runs inside `$(...)`, where bash clears `set -e`, so without
+# it a describe that FAILED would read as zero too, and `stop` would stop the
+# database under a pool it took for parked.
 pool_size() {
-	g container node-pools describe "$1" --cluster="$CLUSTER" \
-		--location="$LOCATION" --format="value(initialNodeCount)"
+	local n
+	n="$(g container node-pools describe "$1" --cluster="$CLUSTER" \
+		--location="$LOCATION" --format="value(initialNodeCount)")" || return
+	echo "${n:-0}"
 }
 
 sql_state() {
