@@ -79,6 +79,21 @@ func TestGiteeProfile(t *testing.T) {
 	}
 }
 
+// The Gemini API speaks its own protocol alone, at its one published host
+// (docs/plan/62_gemini-upstream-protocol.md).
+func TestGeminiProfile(t *testing.T) {
+	p, ok := profile.Lookup("gemini")
+	if !ok || !slices.Equal(p.Protocols, []profile.Protocol{profile.Gemini}) ||
+		!slices.Equal(p.Hosts, []profile.Host{{Protocol: profile.Gemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"}}) {
+		t.Fatalf("gemini = %+v", p)
+	}
+	for _, q := range profile.All() {
+		if q.Name != "gemini" && q.Supports(profile.Gemini) {
+			t.Errorf("%s speaks gemini", q.Name)
+		}
+	}
+}
+
 // All returns a copy: a caller that edits what it got cannot change the
 // profiles every other caller reads.
 func TestAllReturnsACopy(t *testing.T) {

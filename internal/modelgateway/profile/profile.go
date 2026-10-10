@@ -9,10 +9,11 @@
 // 2026-10-04): DeepSeek's API docs (api-docs.deepseek.com, guides/anthropic_api),
 // MiniMax's CN and international API references, Zhipu's BigModel and Z.ai
 // docs, Kimi's platform docs (platform.kimi.ai, api/messages), and the API
-// definition Gitee AI publishes at ai.gitee.com/v1/yaml. A host here is a
-// base URL: the Anthropic SDKs append /v1/messages to one, the OpenAI SDKs
-// /chat/completions and /embeddings, and a rerank client /rerank — the same
-// paths on every profile's hosts.
+// definition Gitee AI publishes at ai.gitee.com/v1/yaml, and Google's Gemini
+// API reference. A host here is a base URL: the Anthropic SDKs append
+// /v1/messages to one, the OpenAI SDKs /chat/completions and /embeddings, a
+// rerank client /rerank, and a Gemini client /models/{model}:generateContent
+// — the same paths on every profile's hosts.
 //
 // A profile also says what the gateway changes on its way to the vendor's
 // Anthropic endpoint, under the plan's edit policy: pass through by default,
@@ -33,7 +34,11 @@ type Protocol string
 const (
 	Anthropic Protocol = "anthropic" // Anthropic Messages
 	OpenAI    Protocol = "openai"    // OpenAI-compatible APIs
+	Gemini    Protocol = "gemini"    // the Gemini API's generateContent
 )
+
+// Known reports whether p is one of the protocols above.
+func (p Protocol) Known() bool { return p == Anthropic || p == OpenAI || p == Gemini }
 
 // Region is the console a host belongs to. A vendor's CN and international
 // sites issue their own keys, so a provider, one account, uses one region's
@@ -164,6 +169,13 @@ var profiles = []Profile{
 	{Name: "gitee", DisplayName: "Gitee AI", Protocols: []Protocol{OpenAI}, Hosts: []Host{
 		{Protocol: OpenAI, BaseURL: "https://ai.gitee.com/v1"},
 	}, CloseConnections: true},
+	// Google's Gemini API (AI Studio), reached with an API key sent as
+	// x-goog-api-key; a Messages request to it is converted
+	// (docs/plan/62_gemini-upstream-protocol.md). Its host is the base the
+	// gateway appends /models/{model}:generateContent to.
+	{Name: "gemini", DisplayName: "Google Gemini API", Protocols: []Protocol{Gemini}, Hosts: []Host{
+		{Protocol: Gemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"},
+	}},
 	{Name: "anthropic-generic", DisplayName: "Any Anthropic Messages endpoint", Protocols: []Protocol{Anthropic}},
 	{Name: "openai-generic", DisplayName: "Any OpenAI-compatible endpoint", Protocols: []Protocol{OpenAI}},
 }

@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 issue: "#900"
 ---
 
@@ -60,7 +60,9 @@ API answered the free calls and the errors.
   text or a tool call is not stored (`internal/brain/stream.go`, plan 60 decision 3).
 - **Errors** are `{"error": {"code", "message", "status"}}`: `404 NOT_FOUND` for an
   unknown model, `400 INVALID_ARGUMENT`, and `402 RESOURCE_EXHAUSTED` for an empty
-  prepaid balance, which `messagesErrorType` already reads as `billing_error`.
+  prepaid balance, which an attempt already reads as the vendor refusing the gateway's
+  credential (`refusedCredential`), as it reads DeepSeek's `402`: the next attempt is
+  tried, and the caller gets `502 api_error` when none is left.
 - **The typed schema** is `google.golang.org/genai` (v1.73.0, read in the module cache,
   never a dependency): `Part.ThoughtSignature`, `ThinkingConfig{IncludeThoughts,
   ThinkingBudget, ThinkingLevel}`, `FunctionCall{ID, Name, Args}`; its converters
@@ -199,7 +201,7 @@ API answered the free calls and the errors.
   streamed; a two-turn tool loop whose second request carries the first answer's
   signature on its `functionCall`; passthrough preferred over Gemini; `503` for Chat
   Completions and `404` for `count_tokens` on a Gemini-only alias; a Responses request
-  through Gemini; the URL, the header, and a `402` read as `billing_error`.
+  through Gemini; the URL, the header, and a `402` read as a refused credential.
 - Live (`RUN_LIVE_MODELGATEWAY=gemini`, `GEMINI_API_KEY` in `.env`): `countTokens`
   answers `200` for the converted form of a request carrying a system prompt, tools with
   `$defs`, type unions and `additionalProperties`, a tool loop's history with ids and a

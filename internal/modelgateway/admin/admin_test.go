@@ -246,7 +246,7 @@ func TestAuthByRole(t *testing.T) {
 func TestProfiles(t *testing.T) {
 	e := newEnv(t, false)
 	list := e.admin("GET", "/admin/v1/profiles", nil).list()
-	if len(list) != 7 || list[0]["type"] != "profile" {
+	if len(list) != 8 || list[0]["type"] != "profile" {
 		t.Fatalf("profiles = %v", list)
 	}
 	p := e.ok(e.admin("GET", "/admin/v1/profiles/minimax", nil), "get minimax")
@@ -279,7 +279,8 @@ func TestProviders(t *testing.T) {
 		"unknown profile":      {map[string]any{"name": "p", "profile": "openrouter", "endpoints": deepseekBoth}, "openrouter"},
 		"protocol off profile": {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"openai": "https://x.example"}}, "openai"},
 		"no endpoint":          {map[string]any{"name": "p", "profile": "deepseek", "endpoints": map[string]string{}}, "endpoint"},
-		"unknown protocol":     {map[string]any{"name": "p", "profile": "deepseek", "endpoints": map[string]string{"gemini": "https://x.example"}}, "gemini"},
+		"unknown protocol":     {map[string]any{"name": "p", "profile": "deepseek", "endpoints": map[string]string{"bedrock": "https://x.example"}}, "bedrock"},
+		"gemini off profile":   {map[string]any{"name": "p", "profile": "deepseek", "endpoints": map[string]string{"gemini": "https://x.example"}}, "gemini"},
 		"userinfo":             {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "https://u:p@x.example"}}, "userinfo"},
 		"query":                {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "https://x.example/?key=s"}}, "query"},
 		"fragment":             {map[string]any{"name": "p", "profile": "anthropic-generic", "endpoints": map[string]string{"anthropic": "https://x.example/#f"}}, "fragment"},
@@ -398,6 +399,26 @@ func TestCredentials(t *testing.T) {
 	}
 	e.ok(e.admin("DELETE", "/admin/v1/providers/"+pid+"/credentials/"+cid, nil), "delete")
 	e.refused(e.admin("DELETE", "/admin/v1/providers/"+pid+"/credentials/"+cid, nil), http.StatusNotFound, "not_found_error", cid)
+}
+
+// A Gemini API provider takes its one endpoint and keys usable on it alone.
+func TestGeminiProvider(t *testing.T) {
+	e := newEnv(t, false)
+	created := e.ok(e.admin("POST", "/admin/v1/providers", map[string]any{
+		"name": "gemini", "profile": "gemini", "endpoints": map[string]string{"gemini": "https://generativelanguage.googleapis.com/v1beta/"},
+	}), "create")
+	if created["endpoints"].(map[string]any)["gemini"] != "https://generativelanguage.googleapis.com/v1beta" {
+		t.Fatalf("created = %v", created)
+	}
+	pid := created["id"].(string)
+	c := e.ok(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials", map[string]any{"key": "AIzaSy-0123456789abcdef", "protocols": []string{"gemini"}}), "credential")
+	if ps := c["protocols"].([]any); len(ps) != 1 || ps[0] != "gemini" {
+		t.Fatalf("credential = %v", c)
+	}
+	e.refused(e.admin("POST", "/admin/v1/providers/"+pid+"/credentials", map[string]any{"key": "AIzaSy-0123456789abcdef", "protocols": []string{"openai"}}),
+		http.StatusBadRequest, "invalid_request_error", "openai")
+	e.refused(e.admin("POST", "/admin/v1/providers", map[string]any{"name": "p", "profile": "gemini", "endpoints": map[string]string{"anthropic": "https://x.example"}}),
+		http.StatusBadRequest, "invalid_request_error", "anthropic")
 }
 
 func TestDeployments(t *testing.T) {
