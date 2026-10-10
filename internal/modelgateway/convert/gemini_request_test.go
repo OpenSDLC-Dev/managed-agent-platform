@@ -65,6 +65,31 @@ func TestGeminiRequestSystemBlocks(t *testing.T) {
 	if want := decoded(t, `{"parts":[{"text":"a"},{"text":"b"}]}`); !reflect.DeepEqual(got["systemInstruction"], want) {
 		t.Errorf("systemInstruction = %v, want %v", got["systemInstruction"], want)
 	}
+	// An empty prompt is none, in either form: a part needs a field set.
+	for _, system := range []string{`""`, `[{"type":"text","text":""}]`} {
+		if got := geminiRequest(t, `{"max_tokens":8,`+hi+`,"system":`+system+`}`); got["systemInstruction"] != nil {
+			t.Errorf("system %s became %v", system, got["systemInstruction"])
+		}
+	}
+}
+
+// Consecutive assistant messages are one turn, as the Messages API reads
+// them: a signature in one goes on the turn's first call in the next.
+func TestGeminiRequestSignatureAcrossSplitAssistantMessages(t *testing.T) {
+	const (
+		thinking = `{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"gemini:U0lH"}]}`
+		text     = `{"role":"assistant","content":[{"type":"text","text":"calling"}]}`
+		calls    = `{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"f","input":{}},{"type":"tool_use","id":"t2","name":"f","input":{}}]}`
+	)
+	for name, turn := range map[string]string{"signature first": thinking + "," + text + "," + calls, "signature after text": text + "," + thinking + "," + calls} {
+		got := geminiRequest(t, `{"max_tokens":8,"messages":[{"role":"user","content":"go"},`+turn+`,
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"},{"type":"tool_result","tool_use_id":"t2"}]}]}`)
+		want := decoded(t, `[{"role":"model","parts":[{"text":"calling"},{"functionCall":{"id":"t1","name":"f","args":{}},"thoughtSignature":"U0lH"},
+			{"functionCall":{"id":"t2","name":"f","args":{}}}]}]`)
+		if contents := got["contents"].([]any); len(contents) != 3 || !reflect.DeepEqual(contents[1:2], want) {
+			t.Errorf("%s: got %v\nwant %v at [1]", name, got["contents"], want)
+		}
+	}
 }
 
 func TestGeminiRequestToolChoice(t *testing.T) {

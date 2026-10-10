@@ -2,6 +2,7 @@ package convert
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -27,10 +28,13 @@ const GeminiSignaturePrefix = "gemini:"
 // value decodes as URL-safe base64.
 const skipSignature = "skip_thought_signature_validator"
 
-// geminiContent is one turn of a generateContent request or answer.
+// geminiContent is one turn of a generateContent request or answer. While a
+// request is converted, signature is the Gemini signature the turn's thinking
+// carries back, for its first call.
 type geminiContent struct {
-	Role  string       `json:"role,omitempty"`
-	Parts []geminiPart `json:"parts"`
+	Role      string       `json:"role,omitempty"`
+	Parts     []geminiPart `json:"parts"`
+	signature string
 }
 
 // geminiPart is one part of a turn: text, an inline image, a function call or
@@ -183,6 +187,9 @@ func geminiSystem(raw json.RawMessage) (*geminiContent, error) {
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
+		if s == "" { // a part needs a field set, and an empty text sets none
+			return nil, nil
+		}
 		return &geminiContent{Parts: []geminiPart{{Text: s}}}, nil
 	}
 	var blocks []map[string]json.RawMessage
@@ -207,7 +214,10 @@ func geminiSystem(raw json.RawMessage) (*geminiContent, error) {
 }
 
 // geminiContents converts the conversation, joining consecutive turns of one
-// role, and those a turn contributing no part leaves adjacent.
+// role, and those a turn contributing no part leaves adjacent. A joined
+// turn's signature is the first its messages carry, set on its first call;
+// Gemini signs a turn's first call alone, and checks that one, so a call that
+// leads a turn with none carries skipSignature.
 func geminiContents(raw json.RawMessage) ([]geminiContent, error) {
 	var msgs []map[string]json.RawMessage
 	if null(raw) || json.Unmarshal(raw, &msgs) != nil {
@@ -229,39 +239,62 @@ func geminiContents(raw json.RawMessage) ([]geminiContent, error) {
 		default:
 			return nil, fmt.Errorf("messages[%d].role: %q has no Gemini counterpart", i, role)
 		}
-		parts, err := geminiParts(m["content"], called)
+		parts, signature, err := geminiParts(m["content"], called)
 		if err != nil {
 			return nil, fmt.Errorf("messages[%d].%w", i, err)
 		}
-		if len(parts) == 0 {
-			continue
-		}
-		if n := len(out); n > 0 && out[n-1].Role == role {
-			out[n-1].Parts = append(out[n-1].Parts, parts...)
-			continue
-		}
-		out = append(out, geminiContent{Role: role, Parts: parts})
+		out = joined(out, geminiContent{Role: role, Parts: parts, signature: signature})
 	}
-	return out, nil
+	// A message contributing no part — thinking alone, or empty — has given
+	// its signature to its turn; dropped now, it may leave two turns of one
+	// role adjacent.
+	kept := out[:0:0]
+	for _, c := range out {
+		if len(c.Parts) > 0 {
+			kept = joined(kept, c)
+		}
+	}
+	for _, c := range kept {
+		for k := range c.Parts {
+			if c.Parts[k].FunctionCall != nil {
+				c.Parts[k].ThoughtSignature = cmp.Or(c.signature, skipSignature)
+				break
+			}
+		}
+	}
+	return kept, nil
 }
 
-// geminiParts converts one turn's content, recording each tool_use it holds
-// in called.
-func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, error) {
+// joined appends c to turns, or joins it to the last turn when that is of
+// c's role, which keeps the first signature either carries.
+func joined(turns []geminiContent, c geminiContent) []geminiContent {
+	n := len(turns)
+	if n == 0 || turns[n-1].Role != c.Role {
+		return append(turns, c)
+	}
+	turns[n-1].Parts = append(turns[n-1].Parts, c.Parts...)
+	turns[n-1].signature = cmp.Or(turns[n-1].signature, c.signature)
+	return turns
+}
+
+// geminiParts converts one message's content, and returns the Gemini
+// signature its first thinking block to carry one holds, recording each
+// tool_use it holds in called.
+func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, string, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) > 0 && raw[0] == '"' {
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
-			return nil, fmt.Errorf("content: %w", err)
+			return nil, "", fmt.Errorf("content: %w", err)
 		}
 		if s == "" {
-			return nil, nil
+			return nil, "", nil
 		}
-		return []geminiPart{{Text: s}}, nil
+		return []geminiPart{{Text: s}}, "", nil
 	}
 	var blocks []map[string]json.RawMessage
 	if json.Unmarshal(raw, &blocks) != nil {
-		return nil, fmt.Errorf("content: must be a string or an array of blocks")
+		return nil, "", fmt.Errorf("content: must be a string or an array of blocks")
 	}
 	var (
 		parts     []geminiPart
@@ -273,7 +306,7 @@ func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, e
 		case "text":
 			t, ok := text(b, "text")
 			if _, present := b["text"]; !ok && present {
-				return nil, fmt.Errorf("content[%d].text: must be a string", j)
+				return nil, "", fmt.Errorf("content[%d].text: must be a string", j)
 			}
 			if t != "" {
 				parts = append(parts, geminiPart{Text: t})
@@ -281,7 +314,7 @@ func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, e
 		case "image":
 			blob, err := geminiImage(b["source"])
 			if err != nil {
-				return nil, fmt.Errorf("content[%d].source: %w", j, err)
+				return nil, "", fmt.Errorf("content[%d].source: %w", j, err)
 			}
 			parts = append(parts, geminiPart{InlineData: blob})
 		case "tool_use":
@@ -289,7 +322,7 @@ func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, e
 			name, _ := text(b, "name")
 			args, err := geminiArgs(b["input"])
 			if err != nil {
-				return nil, fmt.Errorf("content[%d].input: %w", j, err)
+				return nil, "", fmt.Errorf("content[%d].input: %w", j, err)
 			}
 			called[id] = name
 			parts = append(parts, geminiPart{FunctionCall: &geminiCall{ID: id, Name: name, Args: args}})
@@ -297,11 +330,11 @@ func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, e
 			id, _ := text(b, "tool_use_id")
 			name, ok := called[id]
 			if !ok {
-				return nil, fmt.Errorf("content[%d].tool_use_id: %q answers no earlier tool_use", j, id)
+				return nil, "", fmt.Errorf("content[%d].tool_use_id: %q answers no earlier tool_use", j, id)
 			}
 			output, images, err := geminiResultContent(b["content"])
 			if err != nil {
-				return nil, fmt.Errorf("content[%d].content%w", j, err)
+				return nil, "", fmt.Errorf("content[%d].content%w", j, err)
 			}
 			key := "output"
 			if bytes.Equal(bytes.TrimSpace(b["is_error"]), []byte("true")) {
@@ -315,20 +348,10 @@ func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, e
 			}
 		case "redacted_thinking":
 		default:
-			return nil, fmt.Errorf("content[%d]: a %q block has no Gemini counterpart", j, typ)
+			return nil, "", fmt.Errorf("content[%d]: a %q block has no Gemini counterpart", j, typ)
 		}
 	}
-	// Gemini signs a turn's first call alone, and checks that one.
-	for k := range parts {
-		if parts[k].FunctionCall != nil {
-			parts[k].ThoughtSignature = signature
-			if signature == "" {
-				parts[k].ThoughtSignature = skipSignature
-			}
-			break
-		}
-	}
-	return parts, nil
+	return parts, signature, nil
 }
 
 // geminiImage is a base64 image source as inline data; Gemini fetches no URL
