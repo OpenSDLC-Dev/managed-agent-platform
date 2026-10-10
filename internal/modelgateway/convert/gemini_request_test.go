@@ -195,7 +195,7 @@ func TestGeminiRequestSearchResult(t *testing.T) {
 func TestGeminiRequestJoinsSameRoleTurns(t *testing.T) {
 	got := geminiRequest(t, `{"max_tokens":8,"messages":[{"role":"user","content":"a"},{"role":"user","content":[{"type":"text","text":"b"}]},
 		{"role":"assistant","content":[{"type":"thinking","thinking":"x","signature":"gemini:S"}]},{"role":"user","content":"c"},
-		{"role":"assistant","content":"d"},{"role":"user","content":""},{"role":"user","content":"e"}]}`)
+		{"role":"assistant","content":"d"},{"role":"user","content":""},{"role":"user","content":[{"type":"text","text":""},{"type":"text","text":"e"}]}]}`)
 	want := decoded(t, `[{"role":"user","parts":[{"text":"a"},{"text":"b"},{"text":"c"}]},{"role":"model","parts":[{"text":"d"}]},
 		{"role":"user","parts":[{"text":"e"}]}]`)
 	if !reflect.DeepEqual(got["contents"], want) {
@@ -214,6 +214,16 @@ func TestGeminiRequestEncoding(t *testing.T) {
 	b, _ := convert.GeminiRequest(top)
 	if !strings.Contains(string(a), "<a & b>") || string(a) != string(b) {
 		t.Errorf("a = %s\nb = %s", a, b)
+	}
+}
+
+// An image Gemini would have to fetch is refused as such: Gemini fetches no
+// URL a caller names.
+func TestGeminiRequestRefusesAURLImage(t *testing.T) {
+	var top map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(`{"max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://x.example/a.png"}}]}]}`), &top)
+	if _, err := convert.GeminiRequest(top); err == nil || !strings.Contains(err.Error(), `a "url" source has no Gemini counterpart`) {
+		t.Errorf("err = %v", err)
 	}
 }
 

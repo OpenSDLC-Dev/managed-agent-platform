@@ -97,6 +97,22 @@ func TestAMessagesRequestReachesGemini(t *testing.T) {
 	}
 }
 
+// The model goes in the path escaped, so a deployment's model id can add no
+// query and no path of its own.
+func TestAGeminiModelIsEscapedInThePath(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, geminiText("ok"))
+	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini/x?alt=sse"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	if _, err := e.client(key).Messages.New(context.Background(), anthropic.MessageNewParams{Model: "g", MaxTokens: 8, Messages: hello()}); err != nil {
+		t.Fatal(err)
+	}
+	if call := f.recorded()[0]; call.Path != "/v1beta/models/gemini/x?alt=sse:generateContent" || call.Query != "" {
+		t.Errorf("upstream path %q, query %q", call.Path, call.Query)
+	}
+}
+
 // A Gemini answer's call leads with a thinking block carrying its signature
 // under the deployment's provenance; sent back in a tool loop, the signature
 // returns to that deployment on its call, and another deployment gets the

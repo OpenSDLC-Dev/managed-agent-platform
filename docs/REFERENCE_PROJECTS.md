@@ -51,10 +51,11 @@ tests. It has no checkout here: read it in the module cache at the version `go.m
 pins.
 
 Its Gemini upstream (plan 62) takes its typed schema from **`google.golang.org/genai`**
-(https://github.com/googleapis/go-genai) at v1.73.0, with the Gemini API's REST reference
-for the field names on the wire where the SDK's types differ from them (its `models.go`
-converters give them). It is not a dependency: read it in the module cache
-(`go mod download google.golang.org/genai@v1.73.0`), and never import it.
+(https://github.com/googleapis/go-genai), at the release docs/DIVERGENCES.md's Gemini entry
+names (1.73.0), with the Gemini API's REST reference for the field names on the wire where
+the SDK's types differ from them (its `models.go` converters give them). It is not a
+dependency: `go mod download` puts it in the module cache to be read, and nothing imports
+it.
 
 ## Caveats
 
