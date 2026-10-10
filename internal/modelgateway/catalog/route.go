@@ -33,11 +33,12 @@ type Attempt struct {
 // Eligible means enabled all the way down — the deployment, its provider and
 // the credential — with an endpoint on proto and the credential allowed on it.
 // A Messages request also takes a credential that is not, when it is allowed
-// on its provider's OpenAI endpoint: that attempt converts the request to
-// Chat Completions (docs/plan/59_model-gateway.md, "Two request paths"), so a
-// credential usable on the OpenAI protocol alone still serves Anthropic
-// callers, and one usable on both passes through. A deployment with no
-// eligible credential is not a target.
+// on its provider's OpenAI or Gemini endpoint: that attempt converts the
+// request to Chat Completions (docs/plan/59_model-gateway.md, "Two request
+// paths") or to generateContent, so a credential usable on the OpenAI or
+// Gemini protocol alone still serves Anthropic callers, and one usable on
+// both passes through. A deployment with no eligible credential is not a
+// target.
 //
 // The weighted order is the exponential-key form of weighted sampling without
 // replacement: each candidate draws u in (0, 1] and sorts by -ln(u)/weight, so
@@ -101,8 +102,9 @@ func (s *Snapshot) Plan(a store.Alias, proto profile.Protocol, session string, d
 
 // upstreamProtocol is the protocol a request on proto reaches its provider
 // on with credential c: proto itself where the provider has an endpoint on it
-// and c is allowed there, else, for a Messages request, OpenAI's, which the
-// gateway converts to; "" when c cannot serve the request.
+// and c is allowed there, else, for a Messages request, OpenAI's, then
+// Gemini's, which the gateway converts to (docs/plan/62_gemini-upstream-protocol.md);
+// "" when c cannot serve the request.
 func upstreamProtocol(prov store.Provider, c store.Credential, proto profile.Protocol) profile.Protocol {
 	on := func(p profile.Protocol) bool { return prov.Endpoints[p] != "" && slices.Contains(c.Protocols, p) }
 	switch {
@@ -110,6 +112,8 @@ func upstreamProtocol(prov store.Provider, c store.Credential, proto profile.Pro
 		return proto
 	case proto == profile.Anthropic && on(profile.OpenAI):
 		return profile.OpenAI
+	case proto == profile.Anthropic && on(profile.Gemini):
+		return profile.Gemini
 	}
 	return ""
 }

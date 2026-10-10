@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,23 +12,26 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const providerCols = `id, name, profile, anthropic_base_url, openai_base_url, headers, stall_timeout_ms, propagate_trace, enabled, created_at, updated_at`
+const providerCols = `id, name, profile, anthropic_base_url, openai_base_url, gemini_base_url, headers, stall_timeout_ms, propagate_trace, enabled, created_at, updated_at`
+
+// protocols is every upstream protocol, in the order of providerCols' endpoint
+// columns.
+var protocols = []profile.Protocol{profile.Anthropic, profile.OpenAI, profile.Gemini}
 
 func scanProvider(row pgx.Row) (Provider, error) {
 	var (
-		p         Provider
-		anth, oai *string
-		stall     *int32
+		p     Provider
+		urls  = make([]*string, len(protocols))
+		stall *int32
 	)
-	if err := row.Scan(&p.ID, &p.Name, &p.Profile, &anth, &oai, &p.Headers, &stall, &p.PropagateTrace, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.Profile, &urls[0], &urls[1], &urls[2], &p.Headers, &stall, &p.PropagateTrace, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return Provider{}, err
 	}
 	p.Endpoints = map[profile.Protocol]string{}
-	if anth != nil {
-		p.Endpoints[profile.Anthropic] = *anth
-	}
-	if oai != nil {
-		p.Endpoints[profile.OpenAI] = *oai
+	for i, u := range urls {
+		if u != nil {
+			p.Endpoints[protocols[i]] = *u
+		}
 	}
 	if stall != nil {
 		p.StallTimeout = time.Duration(*stall) * time.Millisecond
@@ -65,7 +69,7 @@ func (s *Store) CreateProvider(ctx context.Context, p Provider) (Provider, error
 		return Provider{}, fail(ErrInvalid, "a provider needs at least one endpoint")
 	}
 	for proto := range p.Endpoints {
-		if proto != profile.Anthropic && proto != profile.OpenAI {
+		if !slices.Contains(protocols, proto) {
 			return Provider{}, fail(ErrInvalid, "unknown protocol %q", proto)
 		}
 	}
@@ -73,9 +77,9 @@ func (s *Store) CreateProvider(ctx context.Context, p Provider) (Provider, error
 	err := s.write(ctx, func(tx pgx.Tx) error {
 		var err error
 		out, err = scanProvider(tx.QueryRow(ctx,
-			`INSERT INTO modelgateway.providers (id, name, profile, anthropic_base_url, openai_base_url, headers, stall_timeout_ms, propagate_trace, enabled)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING `+providerCols,
-			newID("gwprov"), p.Name, p.Profile, endpoint(p, profile.Anthropic), endpoint(p, profile.OpenAI),
+			`INSERT INTO modelgateway.providers (id, name, profile, anthropic_base_url, openai_base_url, gemini_base_url, headers, stall_timeout_ms, propagate_trace, enabled)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING `+providerCols,
+			newID("gwprov"), p.Name, p.Profile, endpoint(p, profile.Anthropic), endpoint(p, profile.OpenAI), endpoint(p, profile.Gemini),
 			headersParam(p.Headers), stallParam(p.StallTimeout), p.PropagateTrace, p.Enabled))
 		return err
 	})

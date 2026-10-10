@@ -4,10 +4,14 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 61](./docs/plan/61_thinking-replay-via-gateway.md) (thinking replay through
-the model gateway, #883) archived 2026-10-09; its delivery record is
-[docs/HISTORY.md](./docs/HISTORY.md).
+**A Gemini upstream protocol** ([plan 62](./docs/plan/62_gemini-upstream-protocol.md),
+#900): the model gateway answers a Messages request from a Gemini model through the
+Gemini API with an API key, converting it to `generateContent` and back.
 
 ## Tasks
 
-_None — no active work._
+- [x] PR 1 — whole answers: migration 0052 and the `gemini` profile, the request and
+      answer conversions, routing, thinking provenance's `gemini:` tag; a streamed
+      request is refused on a Gemini-only alias
+- [ ] PR 2 — streaming, the free `countTokens` live rows, the plan's close; generation
+      live rows join #903

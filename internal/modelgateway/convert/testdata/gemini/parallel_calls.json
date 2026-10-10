@@ -1,0 +1,53 @@
+{
+ "candidates": [
+  {
+   "content": {
+    "role": "model",
+    "parts": [
+     {
+      "functionCall": {
+       "name": "get_weather",
+       "args": {
+        "city": "Paris"
+       },
+       "id": "call_38500"
+      },
+      "thoughtSignature": "AY89a1+w0r4F6F9Zj4/AJOMMhNQZKbbxTzZhvKtuLLqr9QL5cx3Cxy/4iC8MpsHvSfFzBGQuhtizm2sN12JItMun++lhL72QxyJrBFZnCEaxQKQaoqhNBr3A3o+TV/tSyeBUOgx/igQaht5BVGqe0UbMMZASLzw0sADtURRX4a0BBzWKYiKVu3t/6rLfgL5Yl8zwEJm/otBLvsMpyeEBF1Ku93+QimYUJnQZfu1jS+uNITfnqTqaHF35Xt3S73ddTS7q1k91WmrI2Vjm"
+     },
+     {
+      "functionCall": {
+       "name": "get_weather",
+       "args": {
+        "city": "Tokyo"
+       },
+       "id": "call_38501"
+      }
+     }
+    ]
+   },
+   "finishReason": "STOP"
+  }
+ ],
+ "usageMetadata": {
+  "promptTokenCount": 37,
+  "candidatesTokenCount": 32,
+  "totalTokenCount": 97,
+  "trafficType": "ON_DEMAND",
+  "promptTokensDetails": [
+   {
+    "modality": "TEXT",
+    "tokenCount": 37
+   }
+  ],
+  "candidatesTokensDetails": [
+   {
+    "modality": "TEXT",
+    "tokenCount": 32
+   }
+  ],
+  "thoughtsTokenCount": 28
+ },
+ "modelVersion": "gemini-3.8-flash",
+ "createTime": "2026-10-10T13:51:35.779225Z",
+ "responseId": "50LKatnHL7ydvdAPh6rWkAU"
+}

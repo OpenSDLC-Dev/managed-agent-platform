@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 )
 
@@ -211,10 +212,8 @@ func (h *history) producer(attempts []catalog.Attempt) (string, profile.Protocol
 				continue
 			}
 			for _, at := range attempts {
-				if at.Deployment.ID == b.dep && b.value == "" { // converted from reasoning_content
-					return b.dep, profile.OpenAI
-				} else if at.Deployment.ID == b.dep {
-					return b.dep, profile.Anthropic
+				if at.Deployment.ID == b.dep {
+					return b.dep, b.protocol()
 				}
 			}
 		}
@@ -222,15 +221,15 @@ func (h *history) producer(attempts []catalog.Attempt) (string, profile.Protocol
 	return "", ""
 }
 
-// carries reports whether dep is sent any thinking block on the protocol
-// converting names, which is whether strip mode would change its request.
-func (h *history) carries(dep string, converting bool) bool {
+// carries reports whether dep is sent any thinking block on the upstream
+// protocol up, which is whether strip mode would change its request.
+func (h *history) carries(dep string, up profile.Protocol) bool {
 	if h == nil {
 		return false
 	}
 	for _, m := range h.msgs {
 		for _, b := range m.blocks {
-			if b.keptFor(dep, converting) {
+			if b.keptFor(dep, up) {
 				return true
 			}
 		}
@@ -238,24 +237,37 @@ func (h *history) carries(dep string, converting bool) bool {
 	return false
 }
 
-// keptFor reports whether the block goes back to dep, on a conversion
-// attempt when converting is set. A block a converted answer carries wraps
-// an empty value (signer), and one a passthrough answer carries never does,
-// an empty value ending its wrapping; each goes back only on the protocol
-// that produced it, since a vendor's Anthropic endpoint cannot verify
-// reasoning its OpenAI one returned, nor its OpenAI endpoint take a
-// signature.
-func (b histBlock) keptFor(dep string, converting bool) bool {
-	return b.field != "" && !b.stale && b.dep != "" && b.dep == dep && (b.value == "") == converting
+// keptFor reports whether the block goes back to dep on the upstream
+// protocol up: only on the protocol that produced it (protocol), since a
+// vendor's Anthropic endpoint cannot verify reasoning its OpenAI one
+// returned, nor its OpenAI endpoint take a signature, nor either a Gemini
+// one's.
+func (b histBlock) keptFor(dep string, up profile.Protocol) bool {
+	return b.field != "" && !b.stale && b.dep != "" && b.dep == dep && b.protocol() == up
 }
 
-// messagesFor is the messages dep is sent, on a conversion attempt when
-// converting is set: its own thinking blocks from that protocol unwrapped
-// (keptFor), every other thinking block removed — all of them in strip mode — and an
-// assistant message the removal empties removed with it, the user turns it
-// separated joined into one, as the Messages API itself combines consecutive
-// same-role turns.
-func (h *history) messagesFor(dep string, strip, converting bool) json.RawMessage {
+// protocol is the upstream protocol that produced the block, read off its
+// wrapped value: a Chat Completions answer's reasoning wraps an empty one
+// (signer), a Gemini answer's thinking one opening with
+// convert.GeminiSignaturePrefix, and a passthrough answer's never either —
+// an empty value ends its wrapping, and base64 holds no colon.
+func (b histBlock) protocol() profile.Protocol {
+	switch {
+	case b.value == "":
+		return profile.OpenAI
+	case strings.HasPrefix(b.value, convert.GeminiSignaturePrefix):
+		return profile.Gemini
+	}
+	return profile.Anthropic
+}
+
+// messagesFor is the messages dep is sent on the upstream protocol up: its
+// own thinking blocks from that protocol unwrapped (keptFor), every other
+// thinking block removed — all of them in strip mode — and an assistant
+// message the removal empties removed with it, the user turns it separated
+// joined into one, as the Messages API itself combines consecutive same-role
+// turns.
+func (h *history) messagesFor(dep string, strip bool, up profile.Protocol) json.RawMessage {
 	var out []outMsg
 	emptied := false
 	for _, m := range h.msgs {
@@ -266,7 +278,7 @@ func (h *history) messagesFor(dep string, strip, converting bool) json.RawMessag
 				switch {
 				case b.field == "":
 					kept = append(kept, b.raw)
-				case !strip && b.keptFor(dep, converting):
+				case !strip && b.keptFor(dep, up):
 					kept = append(kept, withString(b.raw, b.field, b.value))
 				}
 			}
@@ -391,7 +403,9 @@ func preferring(attempts []catalog.Attempt, dep string, proto profile.Protocol) 
 // thinkingRefusal reports whether an upstream's 400 refuses the thinking the
 // request carried, so that one more attempt without it may cure the request:
 // its message names a thinking block's signature, a redacted_thinking block,
-// a thinking block, or a thinking field of one of the request's blocks.
+// a thinking block, a thinking field of one of the request's blocks, or a
+// function call's thought_signature, as Gemini names the signature it refuses
+// (measured 2026-10-10), where strip mode sends the sentinel instead.
 // Removing thinking cannot cure three refusals that do so, which are not:
 // DeepSeek's "must be passed back" and Anthropic's "must start with a thinking
 // block", which ask for thinking the request lacks, and one about a parameter
@@ -405,7 +419,7 @@ func thinkingRefusal(body []byte) bool {
 	switch {
 	case strings.Contains(msg, "must be passed back"), strings.Contains(msg, "must start with a thinking block"):
 		return false
-	case strings.Contains(msg, "signature") && strings.Contains(msg, "thinking"):
+	case strings.Contains(msg, "signature") && strings.Contains(msg, "thinking"), strings.Contains(msg, "thought_signature"):
 		return true
 	}
 	for _, p := range thinkingParams {

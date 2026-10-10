@@ -194,6 +194,46 @@ func TestCredentials(t *testing.T) {
 	}
 }
 
+// A Gemini endpoint is stored beside the other two, alone or with them, and a
+// credential on a Gemini-only provider defaults to that protocol.
+func TestGeminiEndpoint(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	const gemini = "https://generativelanguage.googleapis.com/v1beta"
+	p, err := s.CreateProvider(ctx, store.Provider{Name: "gemini", Profile: "gemini",
+		Endpoints: map[profile.Protocol]string{profile.Gemini: gemini}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetProvider(ctx, p.ID); err != nil || len(got.Endpoints) != 1 || got.Endpoints[profile.Gemini] != gemini {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	c, err := s.CreateCredential(ctx, store.Credential{ProviderID: p.ID, Ciphertext: []byte{1}, KeyID: "k", Weight: 1, Enabled: true})
+	if err != nil || !slices.Equal(c.Protocols, []profile.Protocol{profile.Gemini}) {
+		t.Fatalf("credential = %+v, %v", c, err)
+	}
+	_, err = s.CreateCredential(ctx, store.Credential{ProviderID: p.ID, Ciphertext: []byte{1}, KeyID: "k", Weight: 1,
+		Protocols: []profile.Protocol{profile.Anthropic}})
+	wantErr(t, err, store.ErrInvalid, "anthropic")
+
+	all := both()
+	all[profile.Gemini] = gemini
+	q, err := s.CreateProvider(ctx, store.Provider{Name: "all", Profile: "anthropic-generic", Endpoints: all, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err = s.CreateCredential(ctx, store.Credential{ProviderID: q.ID, Ciphertext: []byte{1}, KeyID: "k", Weight: 1, Enabled: true})
+	if err != nil || !slices.Equal(c.Protocols, []profile.Protocol{profile.Anthropic, profile.Gemini, profile.OpenAI}) {
+		t.Fatalf("credential = %+v, %v", c, err)
+	}
+	if list, err := s.ListProviders(ctx); err != nil || len(list) != 2 || list[1].Endpoints[profile.Gemini] != gemini {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
+	_, err = s.CreateProvider(ctx, store.Provider{Name: "x", Profile: "gemini",
+		Endpoints: map[profile.Protocol]string{"bedrock": "https://x.example"}})
+	wantErr(t, err, store.ErrInvalid, "bedrock")
+}
+
 // A provider with a deployment cannot be deleted; its credentials go with it
 // once it can.
 func TestProviderDeleteRespectsDeployments(t *testing.T) {

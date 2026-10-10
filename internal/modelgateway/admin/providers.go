@@ -104,8 +104,8 @@ func (h *handler) createProvider(r *http.Request) (any, error) {
 	}
 	endpoints := make(map[profile.Protocol]string, len(req.Endpoints))
 	for proto, raw := range req.Endpoints {
-		if proto != profile.Anthropic && proto != profile.OpenAI {
-			return nil, invalid("endpoints: unknown protocol %q; the protocols are anthropic and openai", proto)
+		if !proto.Known() {
+			return nil, invalid("endpoints: unknown protocol %q; the protocols are anthropic, openai and gemini", proto)
 		}
 		if !prof.Supports(proto) {
 			return nil, invalid("profile %q does not speak %s", prof.Name, proto)
@@ -263,8 +263,8 @@ func lastFour(key string) string {
 
 func checkProtocols(ps []profile.Protocol) error {
 	for i, p := range ps {
-		if p != profile.Anthropic && p != profile.OpenAI {
-			return invalid("protocols: unknown protocol %q; the protocols are anthropic and openai", p)
+		if !p.Known() {
+			return invalid("protocols: unknown protocol %q; the protocols are anthropic, openai and gemini", p)
 		}
 		if slices.Contains(ps[:i], p) {
 			return invalid("protocols names %s twice", p)

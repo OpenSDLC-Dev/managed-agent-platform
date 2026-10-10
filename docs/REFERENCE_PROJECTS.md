@@ -50,6 +50,14 @@ The model gateway's OpenAI surfaces (plan 59) take their typed schema from
 tests. It has no checkout here: read it in the module cache at the version `go.mod`
 pins.
 
+Its Gemini upstream (plan 62) takes its typed schema from **`google.golang.org/genai`**
+(https://github.com/googleapis/go-genai), at the release docs/DIVERGENCES.md's Gemini entry
+names (1.73.0), with the Gemini API's REST reference for the field names on the wire where
+the SDK's types differ from them (its `models.go` converters give them). It is not a
+dependency, so a bare `go mod download` does not fetch it: give that command the module
+path and the release, with Go's `v` prefix, to put it in the module cache to be read. Nothing
+imports it.
+
 ## Caveats
 
 The SDK and CLI checkouts track the API's tip and can run ahead of the pin (whatever

@@ -46,7 +46,7 @@ func convertedBody(c call, d store.Deployment, prof profile.Profile, strip bool)
 		for k, v := range c.top {
 			top[k] = v
 		}
-		top["messages"] = c.hist.messagesFor(d.ID, strip, true)
+		top["messages"] = c.hist.messagesFor(d.ID, strip, profile.OpenAI)
 	}
 	return convert.Request(top, d.UpstreamModel, prof.ChatThinking)
 }
