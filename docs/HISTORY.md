@@ -52,7 +52,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 ## GCP staging with the model gateway on (#906, run 2026-10-09) — ✅ passed
 
 **Where.** Not the environment CD deploys: that one is parked, and its credentials are on another machine. A second
-project's `environment/` was rebuilt from `main`'s Terraform, with `staging-values.yaml` as #910 leaves it. Two
+project's `environment/` was rebuilt from `main`'s Terraform, with `staging-values.yaml` as #910 leaves it but for `replicas: 1`, which parking (below) added. Two
 things differed from what CD does, and both are named here so the record claims no more than it covers.
 `deploy.yml`'s own `run:` scripts ran locally, in order, unedited, under `bash -eo pipefail` with the repository
 variables replaced by this environment's Terraform outputs — skipping only the `uses:` steps (checkout, the WIF

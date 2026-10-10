@@ -194,10 +194,11 @@ that the prefix they read is still the one `env-power.sh` writes.
 - Terraform ≥ 1.11 — `brew install hashicorp/tap/terraform`. It is not in Homebrew core.
   (1.11 for `password_wo`; `foundation/` alone needs only 1.5.)
 - Regional quota for the default node pools: four nodes with a 100 GB `pd-balanced` boot disk
-  each, 400 GB against `SSD_TOTAL_GB`, where a new project's limit in `us-central1` is 250 GB
-  and the shortfall fails the sandbox pool's creation as `GCE_QUOTA_EXCEEDED`. Request more,
-  or add `-var platform_node_count=1 -var sandbox_node_count=1` to the apply, which fits
-  and is what the #906 acceptance run did.
+  each, 400 GB against `SSD_TOTAL_GB`. The #906 acceptance project's limit in `us-central1` was
+  250 GB (`gcloud compute regions describe us-central1` shows yours), and the shortfall failed
+  the sandbox pool's creation as `GCE_QUOTA_EXCEEDED`. Request more, or set
+  `platform_node_count = 1` and `sandbox_node_count = 1` in `environment/terraform.tfvars`,
+  which fits; a one-off `-var` on the command line is undone by the next plain apply.
 - `kubectl` and `helm` for the deploy that follows, and `jq` if that deploy is mode 2 —
   the Secret assembly checks the model routes with it before applying them.
 
@@ -749,15 +750,20 @@ project=your-project-id
 for s in controlplane-api-key database-url brain-api-key; do
   gcloud secrets create "$s" --project="$project" --replication-policy=automatic
 done
-for s in controlplane-api-key brain-api-key; do
-  printf '%s' "$(openssl rand -hex 32)" \
-    | gcloud secrets versions add "$s" --project="$project" --data-file=-
-done
 ```
 
 Until a container exists, adding its version fails with `NOT_FOUND` rather than working, and
-so does the deploy that reads it. With the gateway off, `model-providers` takes
-`brain-api-key`'s place in the first loop, and its version is the routes array below.
+so does the deploy that reads it. `brain-api-key`'s version is the one below, and on an
+environment that predates the gateway it is the only one to add: a new version of
+`controlplane-api-key` there rotates the key every client of the management API holds.
+
+```sh
+printf '%s' "$(openssl rand -hex 32)" \
+  | gcloud secrets versions add brain-api-key --project="$project" --data-file=-
+```
+
+With the gateway off, `model-providers` takes `brain-api-key`'s place in the loop, and its
+version is the routes array below rather than that command.
 
 **`gcp-db-init` is a prerequisite here, not a formality.** Mode 1 never ran it at all — the
 bundled Postgres creates its own role from `postgresql.password`. Mode 2's `database-url`
@@ -1222,12 +1228,12 @@ moving values out of the diff that stays.
 
 Rebuilding `environment/` does not change any of this **unless a coordinate changes**, and
 the two places to check are no longer both files: the sandbox pair stays in
-`staging-values.yaml`, while the image prefix, the three service-account emails,
+`staging-values.yaml`, while the image prefix, the service-account emails,
 `BLOB_BUCKET` and `KMS_KEY_NAME` are now repository variables. All of them are transcribed
 from `environment/`, not generated from it, so diff them against `terraform output` after a
 change to `main.tf` — `gh variable list` for the variables, the file for the rest. Get the
 registry prefix wrong and the render still succeeds; it just names images that do not exist,
-and all three pods sit in `ImagePullBackOff`.
+and every pod sits in `ImagePullBackOff`.
 
 **There is a third thing a rebuild moves, and it is not in either file: `database-url`.** A
 recreated Cloud SQL instance gets a **new private IP**, and a DSN that hard-codes the old one
@@ -1369,35 +1375,47 @@ not the fix for those.
 **While the gateway runs, its catalogue is the model route, and it starts empty.** It lives in
 Cloud SQL beside everything else, so a rebuilt environment has none, and every turn fails —
 `404 not_found_error` for a model no alias names — until a human adds the vendor key and an
-alias for the agents' model; no automation here may, for the reason above. The admin API is
-on the gateway's own port, which only a port-forward reaches, and takes `controlplane-api-key`.
-These are the four calls the #906 acceptance run made, each answering with the id the next
-needs, the two keys kept off every argv:
+alias for the agents' model; no automation here may, for the reason above. The admin API
+shares the gateway's port, a ClusterIP Service that nothing outside the cluster reaches but a
+port-forward, and takes `controlplane-api-key`. The #906 acceptance run made these four calls
+with these bodies, each answering with the id the next needs; the wrapper around them was
+checked against a stand-in gateway, not a live one. It keeps both keys off every argv, stops
+at the first call that fails, so a rejected key never leaves an alias behind that answers
+`503`, and its trap removes the key file and stops the forward:
 
 ```sh
-kubectl -n map port-forward svc/map-managed-agent-platform-modelgateway 18090:8090 &
+(
+set -euo pipefail
+kubectl -n map port-forward svc/map-managed-agent-platform-modelgateway 18090:8090 > /dev/null &
+pf=$!
 d="$(mktemp -d)"
+trap 'rm -rf "$d"; kill "$pf" 2>/dev/null || true' EXIT
 { printf 'header = "x-api-key: '
   gcloud secrets versions access latest --secret=controlplane-api-key --project="$GCP_PROJECT_ID"
   printf '"\n'
 } > "$d/curlrc"
-gw() { curl -sS --noproxy '*' -K "$d/curlrc" -H 'content-type: application/json' \
+for _ in 1 2 3 4 5 6 7 8 9 10; do   # until the forward listens
+  curl -s -o /dev/null --noproxy '*' http://127.0.0.1:18090/ && break; sleep 1
+done
+gw() { curl -sS --fail-with-body --noproxy '*' -K "$d/curlrc" -H 'content-type: application/json' \
          --data-binary @- "http://127.0.0.1:18090/admin/v1/$1"; }
 
 pid="$(echo '{"name":"deepseek","profile":"deepseek",
-            "endpoints":{"anthropic":"https://api.deepseek.com/anthropic"}}' | gw providers | jq -r .id)"
+            "endpoints":{"anthropic":"https://api.deepseek.com/anthropic"}}' | gw providers | jq -er .id)"
 # The vendor key from a file you wrote, never an argument.
-jq -n --rawfile k vendor-key.txt '{key: ($k | rtrimstr("\n"))}' | gw "providers/$pid/credentials" > /dev/null
+jq -n --rawfile k vendor-key.txt '{key: ($k | rtrimstr("\n"))}' | gw "providers/$pid/credentials" | jq -er .id
 dep="$(jq -n --arg p "$pid" '{provider_id: $p, upstream_model: "deepseek-v4-flash", kind: "chat"}' \
-        | gw deployments | jq -r .id)"
-jq -n --arg d "$dep" '{name: "deepseek-flash", targets: [{deployment_id: $d}]}' | gw aliases
-rm -rf "$d"; kill %1
+        | gw deployments | jq -er .id)"
+jq -n --arg d "$dep" '{name: "deepseek-flash", targets: [{deployment_id: $d}]}' | gw aliases | jq -er .name
+)
 ```
 
-An agent then names the alias as its model (`{"id": "deepseek-flash"}`). `GET
-/admin/v1/profiles` lists the other vendor profiles, and `GET /admin/v1/usage/requests` is the
-ledger to check a turn against: one row per model call, naming the alias, deployment and
-session.
+An agent then names the alias as its model (`{"id": "deepseek-flash"}`). An alias named `*`
+answers every model string no other alias names, which is how agents created before the
+gateway keep the model strings they have. `GET /admin/v1/profiles` lists the other vendor
+profiles, and `GET /admin/v1/usage/requests` is the ledger to check a turn against, one row
+per model call naming the alias, deployment and session: both GETs, with the same key, over a
+forward of their own.
 
 **What the smoke step proves, and what it does not.** It waits for the LoadBalancer's
 external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the management key —

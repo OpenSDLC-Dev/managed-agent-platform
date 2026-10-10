@@ -318,7 +318,9 @@ hand the brain the KMS decrypt that account carries.
 The model gateway is on, as the chart defaults it and `staging-values.yaml` leaves it, and it
 needs a fourth, `terraform output -json modelgateway_service_account_annotation`: an account
 holding the controlplane's KMS role — the gateway seals vendor keys and opens one on every
-model call — and `roles/cloudsql.client`, its own for the brain's reason.
+model call — and `roles/cloudsql.client`, its own for the brain's reason. Its catalogue starts
+empty, so every turn answers `404` until a vendor key and an alias for the agent's model exist;
+[deploy/gcp/README.md](../deploy/gcp/README.md) gives the four admin calls that add them.
 
 Miss the brain's annotation and nothing fails loudly. Its blob reads are written to degrade —
 a deliverable that cannot be read is listed but not inlined, and an unreadable rubric snapshot

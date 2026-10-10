@@ -74,7 +74,7 @@
 # already prepared — sitting unused.
 #
 # Every coordinate below came from `terraform -chdir=deploy/gcp/environment
-# output`, transcribed rather than generated — the identifying five as the
+# output`, transcribed rather than generated — the identifying ones as the
 # repository variables the workflow overrides them from, the rest as the literals
 # here. If `main.tf` changes the taint, the registry, or a service account, there
 # are two places to change: this file for what a rebuild does not identify, and
@@ -128,8 +128,8 @@ image:
 #   gcpkms-key-name        the full CryptoKey resource name (literal)
 #
 # Object storage carries no credential key since #240 — the workloads authenticate
-# to GCS as themselves through Workload Identity, which is what the three
-# annotations below are for. `gcsObjectStorage.enabled` is deliberately left false:
+# to GCS as themselves through Workload Identity, which is what the controlplane,
+# brain and executor annotations below are for. `gcsObjectStorage.enabled` is deliberately left false:
 # it is the mode-1 route to the same bucket, and the chart refuses it alongside
 # `existingSecret` because in this mode the value would select nothing.
 existingSecret: map-platform

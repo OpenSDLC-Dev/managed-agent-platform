@@ -966,7 +966,15 @@ jobs:
           echo "$out" | grep -F -- '--run-connection-test' > /dev/null \
             || { echo "staging-values.yaml no longer turns on cloudSQLProxy.connectionTest" >&2
                  echo "$out" >&2; exit 1; }
-          echo "ok: CD values file renders with the sandbox pair and the proxy connection test"
+          # The gateway's single replica, pinned for the same reason: at the
+          # chart's two, its disruption budget holds `make gcp-env-stop`'s drain
+          # for up to an hour, and a misspelt key renders green at two.
+          gw="$(helm template t "$CHART" -f deploy/gcp/staging-values.yaml \
+            --show-only templates/modelgateway-deployment.yaml)"
+          echo "$gw" | grep -x '  replicas: 1' > /dev/null \
+            || { echo "staging-values.yaml no longer runs one model gateway replica" >&2
+                 echo "$gw" | grep 'replicas:' >&2; exit 1; }
+          echo "ok: CD values file renders with the sandbox pair, the proxy connection test and one gateway replica"
       - name: the mode-2 assembly and the chart agree on the Secret's keys
         # Mode 2 splits one contract across two files nothing joins.
         # deploy/gcp/mode2-secret.sh writes seven FILES into a temp dir and
