@@ -69,7 +69,8 @@ the run used that; `deploy/gcp/README.md`'s prerequisites now say so.
 `MODELGATEWAY=true` off the render; `mode2-secret.sh` built `map-platform` with seven keys, `brain-api-key`
 among them and `model-providers.json` absent (Secret Manager had none to carry); `helm upgrade --atomic`
 completed; the read-back found all four Workload Identity annotations as meant and four Cloud SQL proxies
-dialling the instance the deploy resolved; and the smoke answered 200 with the key and 401 without one. Five
+dialling the instance the deploy resolved, with `database-url` naming the proxy's loopback socket
+(`127.0.0.1:5432`), so every query went through them; and the smoke answered 200 with the key and 401 without one. Five
 pods ran 2/2 on the platform node, two of them the gateway.
 
 **The catalogue and a session.** Over a port-forward with `controlplane-api-key`, four admin calls made a
