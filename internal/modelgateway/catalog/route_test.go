@@ -115,6 +115,30 @@ func TestPlanConvertsOnlyWhereItMust(t *testing.T) {
 	}
 }
 
+// A Messages request reaches a Gemini provider on the Gemini protocol, which
+// the gateway converts to, after its own and OpenAI's; no other request does.
+func TestPlanConvertsToGemini(t *testing.T) {
+	cfg := routing()
+	cfg.Providers = append(cfg.Providers, store.Provider{ID: "p3", Enabled: true,
+		Endpoints: map[profile.Protocol]string{profile.Gemini: "https://g/v1beta"}})
+	cfg.Credentials = append(cfg.Credentials, store.Credential{ID: "c3", ProviderID: "p3", Protocols: []profile.Protocol{profile.Gemini}, Weight: 1, Enabled: true})
+	cfg.Deployments = append(cfg.Deployments, store.Deployment{ID: "d4", ProviderID: "p3", Kind: store.KindChat, Enabled: true})
+	a := store.Alias{Name: "m", Targets: []store.Target{{DeploymentID: "d4", Weight: 1}}}
+	s := newSnapshot(cfg)
+	got := s.Plan(a, profile.Anthropic, "", fixed(0.5))
+	if len(got) != 1 || got[0].Protocol != profile.Gemini || got[0].Endpoint != "https://g/v1beta" {
+		t.Errorf("plan = %+v", got)
+	}
+	if got := s.Plan(a, profile.OpenAI, "", fixed(0.5)); len(got) != 0 {
+		t.Errorf("a Chat Completions request reached %v", ids(got))
+	}
+	cfg.Providers[2].Endpoints[profile.OpenAI] = "https://g/openai"
+	cfg.Credentials[3].Protocols = []profile.Protocol{profile.Gemini, profile.OpenAI}
+	if got := newSnapshot(cfg).Plan(a, profile.Anthropic, "", fixed(0.5)); len(got) != 1 || got[0].Protocol != profile.OpenAI {
+		t.Errorf("plan = %+v, want the OpenAI conversion first", got)
+	}
+}
+
 // Over many draws, a deployment comes first in proportion to its weight.
 func TestPlanDrawsByWeight(t *testing.T) {
 	s := newSnapshot(routing())

@@ -17,15 +17,19 @@ import (
 // ChatIgnores), and names each field the ones it dropped ignore, once and
 // sorted, for the refusal when it keeps none. A Messages request an attempt
 // converts is judged as converted, the Chat Completions request it becomes,
-// and the fields named as the caller wrote them (convertedField).
+// and the fields named as the caller wrote them (convertedField); one it
+// converts to Gemini is judged by no hook.
 func honoring(attempts []catalog.Attempt, req, converted map[string]json.RawMessage) ([]catalog.Attempt, []string) {
 	var ignored []string
 	kept := attempts[:0:0]
 	for _, at := range attempts {
 		p, _ := profile.Lookup(at.Provider.Profile)
 		ignores, asked, named := p.Ignores, req, func(f string) string { return f }
-		if at.Protocol == profile.OpenAI {
+		switch at.Protocol {
+		case profile.OpenAI:
 			ignores = p.ChatIgnores
+		case profile.Gemini: // no profile's hooks read a generateContent request
+			ignores = nil
 		}
 		if at.Protocol == profile.OpenAI && converted != nil {
 			// Each vendor takes thinking in its own words (ChatThinking).

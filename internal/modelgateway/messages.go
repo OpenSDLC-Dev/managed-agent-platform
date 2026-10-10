@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -298,8 +299,10 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 		return
 	}
 	// An attempt on another protocol converts the request (convert): a
-	// count has no Chat Completions counterpart, so it is the passthrough
-	// attempts' to make, and a request the conversion cannot carry is too.
+	// count has no Chat Completions or Gemini counterpart, so it is the
+	// passthrough attempts' to make, and a request a conversion cannot carry
+	// is the other attempts', the first refusal answering it when none is
+	// left.
 	var converted map[string]json.RawMessage
 	switch passing := passingThrough(attempts, proto); {
 	case len(passing) == len(attempts):
@@ -310,16 +313,40 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 		}
 		attempts = passing
 	default:
-		b, err := convert.Request(top, "", nil)
-		if err != nil && len(passing) == 0 {
-			writeError(w, r, invalid("%s", named(err.Error())))
+		refused := map[profile.Protocol]error{}
+		on := func(up profile.Protocol) bool {
+			return slices.ContainsFunc(attempts, func(at catalog.Attempt) bool { return at.Protocol == up })
+		}
+		if on(profile.OpenAI) {
+			if b, err := convert.Request(top, "", nil); err != nil {
+				refused[profile.OpenAI] = err
+			} else {
+				_ = json.Unmarshal(b, &converted)
+			}
+		}
+		if on(profile.Gemini) {
+			if _, err := convert.GeminiRequest(top); err != nil {
+				refused[profile.Gemini] = err
+			} else if streams {
+				refused[profile.Gemini] = errGeminiStream
+			}
+		}
+		var first error
+		kept := attempts[:0:0]
+		for _, at := range attempts {
+			if err := refused[at.Protocol]; err != nil {
+				if first == nil {
+					first = err
+				}
+				continue
+			}
+			kept = append(kept, at)
+		}
+		if len(kept) == 0 {
+			writeError(w, r, invalid("%s", named(first.Error())))
 			return
 		}
-		if err != nil {
-			attempts = passing
-			break
-		}
-		_ = json.Unmarshal(b, &converted)
+		attempts = kept
 	}
 	// A deployment whose vendor would ignore what the request asks for is
 	// skipped; a count is made all the same where every one would, since
@@ -415,7 +442,7 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 			return
 		}
 		last = f
-		if !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID, at.Protocol != call.proto) {
+		if !strip && f.refusesThinking() && call.hist.carries(at.Deployment.ID, at.Protocol) {
 			slog.InfoContext(r.Context(), "modelgateway: upstream refused the request's thinking; retrying without it",
 				"alias", a.Name, "deployment", at.Deployment.ID, "credential", at.Credential.ID)
 			strip = true
@@ -659,12 +686,17 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	red := provider.NewRedactor(provider.Config{APIKey: string(key), Headers: at.Provider.Headers})
 	prof, _ := profile.Lookup(at.Provider.Profile)
 	up := at.Protocol
-	conv := up != c.proto // the attempt converts the request (converted.go)
+	conv := up != c.proto // the attempt converts the request (converted.go, gemini.go)
 	unchecked := c.prefixUnchecked(conv, prof)
 	var body []byte
 	var wrap *wrapping
 	path := c.path
 	switch {
+	case up == profile.Gemini:
+		wrap, path = newWrapping(at.Deployment.ID, strip), geminiPath(at.Deployment.UpstreamModel)
+		if body, err = geminiBody(c, at.Deployment, strip); err != nil {
+			return &failure{status: http.StatusBadRequest, typ: "invalid_request_error", err: err}, false
+		}
 	case conv:
 		wrap, path = newWrapping(at.Deployment.ID, strip), routes["/v1/chat/completions"].upstream
 		if body, err = convertedBody(c, at.Deployment, prof, strip); err != nil {
@@ -691,9 +723,12 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	}
 	propagate(ctx, at.Provider, req.Header)
 	req.Header.Set("Content-Type", "application/json")
-	if prof.BearerAuth || up == profile.OpenAI { // every OpenAI-compatible API takes a Bearer token
+	switch {
+	case up == profile.Gemini:
+		req.Header.Set("x-goog-api-key", string(key))
+	case prof.BearerAuth || up == profile.OpenAI: // every OpenAI-compatible API takes a Bearer token
 		req.Header.Set("Authorization", "Bearer "+string(key))
-	} else {
+	default:
 		req.Header.Set("x-api-key", string(key))
 	}
 
@@ -810,6 +845,12 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	}
 	var answer []byte
 	switch {
+	case up == profile.Gemini:
+		c.out.tokens = geminiUsageOf(member(b, "usageMetadata"))
+		if answer, err = convert.GeminiAnswer(b, c.alias, requestID(r), callerUsage(c.out.tokens), wrap.wrap); err != nil {
+			return &failure{status: http.StatusBadGateway, typ: "api_error",
+				err: fmt.Errorf("upstream answer could not be converted: %w", err)}, false
+		}
 	case conv:
 		c.out.tokens = chatUsageOf(member(b, "usage"))
 		if answer, err = convert.Answer(b, c.alias, requestID(r), callerUsage(c.out.tokens), signer(wrap)); err != nil {
@@ -866,7 +907,7 @@ func upstreamBody(c call, d store.Deployment, prof profile.Profile, strip bool) 
 		out[k] = v
 	}
 	if c.hist != nil {
-		out["messages"] = c.hist.messagesFor(d.ID, strip, false)
+		out["messages"] = c.hist.messagesFor(d.ID, strip, profile.Anthropic)
 	}
 	if m, ok := out["messages"]; ok && prof.FlattenSearchResults {
 		out["messages"] = flattenSearchResults(m)
