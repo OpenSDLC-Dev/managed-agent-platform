@@ -137,7 +137,9 @@ fi
 # skipped them all and still cleared their saved sizes. The `|| return` is not
 # decoration — this runs inside `$(...)`, where bash clears `set -e`, so without
 # it a describe that FAILED would read as zero too, and `stop` would stop the
-# database under a pool it took for parked.
+# database under a pool it took for parked. And `initialNodeCount` follows a
+# resize but not the autoscaler, so it is a pool's size only while the pool has
+# no autoscaling — which environment/main.tf declares on neither pool.
 pool_size() {
 	local n
 	n="$(g container node-pools describe "$1" --cluster="$CLUSTER" \

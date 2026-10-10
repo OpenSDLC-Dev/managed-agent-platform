@@ -36,8 +36,8 @@ script would otherwise get wrong in a way no static check could see:
     after the listing — observed against the real cluster, not theorised.
   - a node pool at zero nodes has no `initialNodeCount` at all: GKE omits the
     zero, so `value(initialNodeCount)` prints an empty line, not `0`. Observed on
-    staging (#914), where a fake that printed `0` let `start` skip every parked
-    pool and still clear the saved sizes.
+    staging (#914): that empty answer made `start` skip every parked pool and
+    still clear the saved sizes, and a fake that printed `0` hid it from this test.
 
 Projections are enforced rather than ignored: a `describe` whose `--format` asks
 for the wrong field is an error here, because a fake that prints the right answer
@@ -651,6 +651,13 @@ def main():
         check("resizes nothing", r.first("clusters resize") == -1, r.calls)
         check("never touches the database", r.first("sql instances patch") == -1, r.calls)
         check("the pools are untouched", r.pools() == {"platform": 3, "sandbox": 1}, r.pools())
+        # And on the way up, where a misread zero would hand a LIVE pool NODES'
+        # size: sandbox runs 1 node, so a resize to 2 would be the misread.
+        st = new_state(tmp, "describefailsstart")
+        r = run(tmp, st, "start", faults=["describe.sandbox"], env_extra={"NODES": "2"})
+        check("start refuses too", r.code != 0, r.out)
+        check("start resizes nothing", r.first("clusters resize") == -1, r.calls)
+        check("start never touches the database", r.first("sql instances patch") == -1, r.calls)
 
         print("a denied listing is not reported as a missing cluster")
         st = new_state(tmp, "denied")

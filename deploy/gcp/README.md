@@ -1718,13 +1718,15 @@ database stops, Cloud SQL `RUNNABLE` before any node returns.
 
 The fake `gcloud` dies on any invocation it does not recognise, and checks each `describe`'s
 `--format` as well, because a fake that answers the right question when the wrong one was
-asked cannot catch the script asking it. Four real behaviours are modelled deliberately,
+asked cannot catch the script asking it. Five real behaviours are modelled deliberately,
 each one something the script would otherwise get wrong invisibly: `--update-labels`
 **replaces** rather than merges; `--remove-labels` errors on a label that is not there; a
 `value(resourceLabels.<key>)` projection on a missing key prints empty and exits 0 — which is
-what lets `start` tell "no saved size" from "could not ask"; and gcloud on Windows terminates
+what lets `start` tell "no saved size" from "could not ask"; gcloud on Windows terminates
 its lines CRLF, which left a stray carriage return on every discovered pool name until the
-script stripped it.
+script stripped it; and a pool at zero nodes has no `initialNodeCount`, so its size prints
+empty rather than `0` — the fake once printed `0`, and `start` shipped skipping every parked
+pool (#914).
 
 Eleven mutations were run against the suite, one per defect the reviews of this change found,
 and every one turns it red: restoring a constant, inverting either ordering, skipping the
