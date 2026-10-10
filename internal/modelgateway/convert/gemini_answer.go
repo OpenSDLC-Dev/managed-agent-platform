@@ -73,10 +73,8 @@ func GeminiAnswer(b []byte, alias, id string, usage *Usage, sign func(value stri
 		joined    *strings.Builder // the text block the next text part joins, if the last block is one
 	)
 	for i, p := range parts {
-		for _, k := range []string{"inlineData", "fileData", "executableCode", "codeExecutionResult"} {
-			if !null(p[k]) {
-				return nil, fmt.Errorf("the answer's part %d: %s has no Messages counterpart", i, k)
-			}
+		if err := geminiUnsupported(p); err != nil {
+			return nil, fmt.Errorf("the answer's part %d: %w", i, err)
 		}
 		if !null(p["functionCall"]) {
 			call, err := geminiCallOf(p["functionCall"], id, calls)
@@ -95,9 +93,9 @@ func GeminiAnswer(b []byte, alias, id string, usage *Usage, sign func(value stri
 			return nil, fmt.Errorf("the answer's part %d: text is not a string", i)
 		}
 		switch {
+		case t == "": // an empty thought too, which summarizes nothing
 		case isTrue(p["thought"]):
 			summaries = append(summaries, t)
-		case t == "":
 		case joined != nil:
 			joined.WriteString(t)
 		default:
@@ -198,3 +196,14 @@ func geminiStop(reason string, called bool) (string, error) {
 
 // isTrue reports whether v is JSON true.
 func isTrue(v json.RawMessage) bool { return bytes.Equal(bytes.TrimSpace(v), []byte("true")) }
+
+// geminiUnsupported fails on a part of a kind a Messages answer has no
+// counterpart for, the whole answer and the stream alike.
+func geminiUnsupported(p map[string]json.RawMessage) error {
+	for _, k := range []string{"inlineData", "fileData", "executableCode", "codeExecutionResult"} {
+		if !null(p[k]) {
+			return fmt.Errorf("%s has no Messages counterpart", k)
+		}
+	}
+	return nil
+}

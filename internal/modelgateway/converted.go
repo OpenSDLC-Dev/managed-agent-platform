@@ -117,7 +117,10 @@ func messagesErrorType(typ string, status int) string {
 
 // convStream relays a Chat Completions stream to a Messages caller, each
 // chunk converted (convert.Stream), the usage a chunk reports going to c.out
-// and to message_delta. It reads the stream as chatStream does: a chunk
+// and to message_delta — or a Gemini stream, its chunks converted by
+// convert.GeminiStream, read alike but for where a chunk reports its usage
+// (usage) and an error its status (status); Gemini sends no [DONE], and
+// closes the stream once its candidate has finished. It reads the stream as chatStream does: a chunk
 // carrying error, or an event named error, ends it, as the Messages error
 // event convertedError makes of it; data that is no JSON object ends it with
 // the gateway's own; a chunk convert cannot carry ends it for the caller with
@@ -131,11 +134,22 @@ func messagesErrorType(typ string, status int) string {
 type convStream struct {
 	chatFraming
 	c      call
-	s      *convert.Stream
+	s      chunkConverter
+	usage  func(chunk map[string]json.RawMessage) *store.Tokens // the usage a chunk reports, nil for none
+	status func(data []byte) int                                // the status an error event states
 	ctx    context.Context
 	red    provider.Redactor
 	rid    string
 	failed bool // a chunk could not be converted, and the upstream is read on for its usage alone
+}
+
+// chunkConverter converts a stream to Messages events chunk by chunk:
+// convert.Stream, or convert.GeminiStream.
+type chunkConverter interface {
+	Chunk(data []byte) ([]byte, error)
+	SetUsage(u convert.Usage)
+	Finished() bool
+	End() []byte
 }
 
 func (p *convStream) event(e upstream.Event) ([]byte, bool) {
@@ -151,7 +165,7 @@ func (p *convStream) event(e upstream.Event) ([]byte, bool) {
 		if _, ok := obj["error"]; ok { // the upstream has ended its answer
 			return nil, true
 		}
-		if t := chatUsageOf(obj["usage"]); t != nil {
+		if t := p.usage(obj); t != nil {
 			p.c.out.tokens = t
 		}
 		return nil, false
@@ -168,18 +182,18 @@ func (p *convStream) event(e upstream.Event) ([]byte, bool) {
 		return p.failure("api_error", "upstream sent an event that is not a JSON object"), true
 	}
 	if _, ok := obj["error"]; ok || named {
-		b := convertedError(p.ctx, p.red, e.Data, statedStatus(e.Data), p.rid)
+		b := convertedError(p.ctx, p.red, e.Data, p.status(e.Data), p.rid)
 		p.c.out.errType = errorTypeOf(b, 0)
 		return []byte("event: error\ndata: " + string(b) + "\n\n"), true
 	}
-	if t := chatUsageOf(obj["usage"]); t != nil {
+	if t := p.usage(obj); t != nil {
 		p.c.out.tokens = t
 		p.s.SetUsage(*callerUsage(t))
 	}
 	out, err := p.s.Chunk(e.Data)
 	if err != nil {
 		p.c.out.errType, p.failed = "api_error", true
-		return p.failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", err)), false
+		return p.failure("api_error", fmt.Sprintf("upstream stream could not be converted: %s", p.red.Error(err))), false
 	}
 	if len(out) == 0 {
 		return nil, false

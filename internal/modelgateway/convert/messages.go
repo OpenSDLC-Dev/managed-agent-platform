@@ -3,7 +3,7 @@
 // API to Messages and back, for the gateway's stateless /v1/responses
 // (responses.go, responses_answer.go, responses_stream.go, whose comments
 // give its dispositions); and Messages to the Gemini API's generateContent
-// and back, for a Gemini upstream (gemini_request.go, gemini_answer.go;
+// and back, for a Gemini upstream (gemini_request.go, gemini_answer.go, gemini_stream.go;
 // docs/plan/62_gemini-upstream-protocol.md). Two callers share the first:
 // the model gateway's conversion path, which serves a Messages request from
 // a Chat Completions upstream and answers in Messages, and the brain's

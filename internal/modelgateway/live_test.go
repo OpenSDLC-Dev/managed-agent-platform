@@ -63,6 +63,9 @@ var liveVendors = []liveVendor{
 		quiet: []string{"MiniMax-M3.1-Flash-Preview"}},
 	// Gitee AI serves this tier's embeddings and rerank, and no chat.
 	{name: "gitee", keyEnv: "GITEE_API_KEY", base: "https://ai.gitee.com/v1"},
+	// The Gemini API counts this tier's converted requests, and no chat: the
+	// key it runs under answers every billable call 402 (#903).
+	{name: "gemini", keyEnv: "GEMINI_API_KEY", base: "https://generativelanguage.googleapis.com/v1beta"},
 }
 
 // liveKeys is the keys of the vendors consented to, which a failure's

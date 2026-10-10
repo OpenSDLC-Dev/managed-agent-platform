@@ -181,8 +181,8 @@ func TestAGeminiToolLoopCarriesItsSignature(t *testing.T) {
 }
 
 // A Gemini-only alias answers no Chat Completions request and no count; a
-// request Gemini cannot carry, or one that streams, is refused naming why,
-// and goes to another target that can serve it.
+// request Gemini cannot carry is refused naming why, and goes to another
+// target that can serve it.
 func TestWhatAGeminiAttemptCannotServe(t *testing.T) {
 	e := newEnv(t)
 	gf := newFake(t, geminiText("from gemini"))
@@ -210,9 +210,8 @@ func TestWhatAGeminiAttemptCannotServe(t *testing.T) {
 	}
 
 	doc := `{"model":"%s","max_tokens":8,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","media_type":"text/plain","data":"x"}}]}]}`
-	streamed := `{"model":"%s","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
 	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
-	for body, field := range map[string]string{doc: "messages[0].content[0]", streamed: "stream"} {
+	for body, field := range map[string]string{doc: "messages[0].content[0]"} {
 		resp, b := e.do("POST", "/v1/messages", strings.Replace(body, "%s", "g", 1), hdr)
 		if typ, msg, _ := errorOf(t, b); resp.StatusCode != http.StatusBadRequest || typ != "invalid_request_error" || !strings.HasPrefix(msg, field) {
 			t.Errorf("%s: %d %s %s", field, resp.StatusCode, typ, msg)

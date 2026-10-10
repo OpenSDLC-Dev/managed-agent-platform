@@ -328,8 +328,6 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 		if on(profile.Gemini) {
 			if _, err := convert.GeminiRequest(top); err != nil {
 				refused[profile.Gemini] = err
-			} else if streams {
-				refused[profile.Gemini] = errGeminiStream
 			}
 		}
 		kept := attempts[:0:0]
@@ -694,7 +692,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	path := c.path
 	switch {
 	case up == profile.Gemini:
-		wrap, path = newWrapping(at.Deployment.ID, strip), geminiPath(at.Deployment.UpstreamModel)
+		wrap, path = newWrapping(at.Deployment.ID, strip), geminiPath(at.Deployment.UpstreamModel, c.stream)
 		if body, err = geminiBody(c, at.Deployment, strip); err != nil {
 			return &failure{status: http.StatusBadRequest, typ: "invalid_request_error", err: err}, false
 		}
@@ -773,16 +771,23 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		}
 		return &failure{status: s, header: resp.Header, body: errorJSON(ctx, red, b, requestID(r))}, retryable(s, resp.Header)
 	}
-	if c.stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+	// A Gemini attempt asked for alt=sse, whose 200 is a stream whatever
+	// Content-Type it names.
+	if c.stream && (up == profile.Gemini || strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")) {
 		// The answer begins with the first event that is not a keep-alive
 		// (p.keepAlive); until then the caller has seen nothing and the
 		// upstream may yet refuse, as an error event, which is answered like
 		// any refusal. Keep-alives past maxHeld begin it anyway.
 		events := upstream.NewReader(resp.Body)
+		events.BareJSON = up == profile.Gemini
 		var p streamProto
 		switch {
+		case up == profile.Gemini:
+			p = &convStream{c: c, s: convert.NewGeminiStream(c.alias, requestID(r), wrap.wrap), ctx: ctx, red: red, rid: requestID(r),
+				usage: func(o map[string]json.RawMessage) *store.Tokens { return geminiUsageOf(o["usageMetadata"]) }, status: geminiStatus}
 		case conv:
-			p = &convStream{c: c, s: convert.NewStream(c.alias, requestID(r), signer(wrap)), ctx: ctx, red: red, rid: requestID(r)}
+			p = &convStream{c: c, s: convert.NewStream(c.alias, requestID(r), signer(wrap)), ctx: ctx, red: red, rid: requestID(r),
+				usage: func(o map[string]json.RawMessage) *store.Tokens { return chatUsageOf(o["usage"]) }, status: statedStatus}
 		case c.proto == profile.OpenAI:
 			p = &chatStream{c: c, red: red, withhold: !c.usage}
 		default:
@@ -794,26 +799,38 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		var held []byte
 		for {
 			e, err := events.Next()
-			// A Chat Completions stream may close on its last chunk without
-			// the blank line that ends it, its first chunk included: one
-			// whole there begins the answer, as it would later on. A
-			// Messages stream cut off so before message_stop is no answer.
-			cut := errors.Is(err, io.EOF) && up == profile.OpenAI && e.Data != nil && p.complete(e.Data)
+			// Every stream but a Messages one may close on its last chunk
+			// without the blank line that ends it, its first chunk
+			// included: one whole there begins the answer, as it would later
+			// on. A Messages stream cut off so before message_stop is no
+			// answer.
+			cut := errors.Is(err, io.EOF) && up != profile.Anthropic && e.Data != nil && p.complete(e.Data)
 			switch {
+			case up == profile.Gemini && e.Data == nil && bytes.HasPrefix(bytes.TrimSpace(e.Raw), []byte("[")):
+				// The JSON array streamGenerateContent answers without
+				// alt=sse: an answer the upstream has made, and charged
+				// for, that the gateway cannot read — not a stream that
+				// broke off, for another attempt to make again.
+				return &failure{status: http.StatusBadGateway, typ: "api_error",
+					err: errors.New("upstream answered a streamed request with a JSON array, not an event stream")}, false
 			case err != nil && !cut:
 				return noAnswer(guard, red, err)
 			case p.keepAlive(e) && len(held)+len(e.Raw) <= maxHeld:
 				held = append(held, e.Raw...)
 			case e.Name == "error" && up == profile.Anthropic:
 				return streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
-			case up == profile.OpenAI && chatError(e):
-				// What chatStream would end the stream on: an error that
-				// parses is answered as a Messages stream's is, and one
-				// that does not is the gateway's own failure, retried like
-				// an upstream that broke off before it answered.
+			case up != profile.Anthropic && chatError(e):
+				// What chatStream or convStream would end the stream on: an
+				// error that parses is answered as a Messages stream's is,
+				// and one that does not is the gateway's own failure,
+				// retried like an upstream that broke off before it
+				// answered.
 				if !jsonObject(e.Data) {
 					return &failure{status: http.StatusBadGateway, typ: "api_error",
 						err: errors.New("upstream opened its stream with an event that is not a JSON object")}, true
+				}
+				if up == profile.Gemini {
+					return geminiStreamError(ctx, c, at, e.Data, resp.Header, requestID(r), red)
 				}
 				f, retry := streamError(ctx, at, e.Data, resp.Header, requestID(r), red)
 				if conv && f.body != nil {
