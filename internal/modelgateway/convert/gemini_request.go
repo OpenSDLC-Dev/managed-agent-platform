@@ -507,9 +507,10 @@ func geminiToolChoice(raw json.RawMessage) (map[string]any, error) {
 	return nil, fmt.Errorf(".type: %q has no Gemini counterpart", typ)
 }
 
-// geminiLevels is the thinkingLevel each effort becomes; Gemini's highest is
-// high.
-var geminiLevels = map[string]string{"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
+// geminiLevels is the thinkingLevel each effort becomes, in
+// google.golang.org/genai 1.73.0's ThinkingLevel values; Gemini's highest is
+// HIGH.
+var geminiLevels = map[string]string{"low": "LOW", "medium": "MEDIUM", "high": "HIGH", "xhigh": "HIGH", "max": "HIGH"}
 
 // geminiEffort is output_config's effort as a thinkingLevel, or "" for none;
 // format is refused.

@@ -98,13 +98,13 @@ func TestGeminiRequestThinking(t *testing.T) {
 		`"thinking":{"type":"adaptive","display":"summarized"}`:                               `{"includeThoughts":true}`,
 		`"thinking":{"type":"adaptive","display":"omitted"}`:                                  ``,
 		`"thinking":{"type":"enabled","budget_tokens":1024,"display":"omitted"}`:              `{"thinkingBudget":1024}`,
-		`"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"}`:                  `{"includeThoughts":true,"thinkingLevel":"medium"}`,
+		`"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"}`:                  `{"includeThoughts":true,"thinkingLevel":"MEDIUM"}`,
 		`"thinking":{"type":"enabled","budget_tokens":1024},"output_config":{"effort":"low"}`: `{"includeThoughts":true,"thinkingBudget":1024}`,
 		`"thinking":{"type":"disabled"}`:                                                      ``,
-		`"thinking":{"type":"disabled"},"output_config":{"effort":"low"}`:                     `{"thinkingLevel":"low"}`,
-		`"output_config":{"effort":"high"}`:                                                   `{"thinkingLevel":"high"}`,
-		`"output_config":{"effort":"xhigh"}`:                                                  `{"thinkingLevel":"high"}`,
-		`"output_config":{"effort":"max"}`:                                                    `{"thinkingLevel":"high"}`,
+		`"thinking":{"type":"disabled"},"output_config":{"effort":"low"}`:                     `{"thinkingLevel":"LOW"}`,
+		`"output_config":{"effort":"high"}`:                                                   `{"thinkingLevel":"HIGH"}`,
+		`"output_config":{"effort":"xhigh"}`:                                                  `{"thinkingLevel":"HIGH"}`,
+		`"output_config":{"effort":"max"}`:                                                    `{"thinkingLevel":"HIGH"}`,
 	} {
 		got := geminiRequest(t, `{"max_tokens":8,`+hi+`,`+in+`}`)
 		cfg := got["generationConfig"].(map[string]any)["thinkingConfig"]

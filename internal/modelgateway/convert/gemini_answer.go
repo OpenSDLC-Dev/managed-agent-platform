@@ -166,10 +166,11 @@ func geminiCallID(answerID string, n int) string {
 	return "toolu_" + hex.EncodeToString(sum[:12])
 }
 
-// geminiStop is a finishReason as a Messages stop_reason (genai v1.73.0's
-// FinishReason, and bifrost's two more). STOP, a stop sequence's included, is
-// tool_use for an answer that called a tool, as Gemini ends a tool turn so,
-// and otherwise end_turn, as is an answer naming no reason; MAX_TOKENS is
+// geminiStop is a finishReason as a Messages stop_reason
+// (google.golang.org/genai 1.73.0's FinishReason, and bifrost's two more).
+// STOP, a stop sequence's included, is tool_use for an answer that called a
+// tool, as Gemini ends a tool turn so, and otherwise end_turn, as is an
+// answer naming no reason; MAX_TOKENS is
 // max_tokens, and so is CONTINUATION, an answer the server's own limit cut
 // short, which the caller may ask to continue. Every reason a safety or
 // policy check stopped the answer for is refusal. The rest — a malformed or
