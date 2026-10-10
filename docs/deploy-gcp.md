@@ -329,11 +329,11 @@ outage. The mode-2 acceptance run predates all of this: it took the direct path 
 [#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269), which gave the
 brain a ServiceAccount at all, was a follow-on rather than a blocker at the time.
 
-Neither half of the proxy path has been exercised on a live GKE cluster. The chart renders
-it, a real API server accepts the manifests, and the Terraform passes the credential-free
-checks — but the mode-2 acceptance run predates all of it and took the direct path, so what
-is established here is that the configuration is well-formed, not that a pod has connected
-through it.
+The #906 acceptance run ([docs/HISTORY.md](./HISTORY.md), 2026-10-09) exercised both halves
+of the proxy path on GKE: the sidecar, with `connectionTest` on, ran in all four deployments
+and dialled the instance the deploy resolved, and `database-url` named its loopback socket,
+so the session that run drove reached Cloud SQL through it. The earlier mode-2 acceptance
+run predates the proxy and took the direct path.
 
 ## Exposing the control plane
 

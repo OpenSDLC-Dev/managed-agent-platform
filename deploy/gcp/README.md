@@ -701,9 +701,9 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-env-apply` | a human, interactively — `PROJECT` names the state bucket as well as the project |
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `brain-api-key` — `model-providers` in the last one's place while `staging-values.yaml` turns the model gateway off | a human, once — `bootstrap.sh` does not create these |
-| adding the vendor key and an alias for the agents' model to the gateway's catalogue | a human, after every `environment/` rebuild — the catalogue lives in Cloud SQL |
 | setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment — and a twelfth, `MODELGATEWAY_SERVICE_ACCOUNT`, while `staging-values.yaml` runs the model gateway, as it does |
 | build and push the five images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
+| adding the vendor key and an alias for the agents' model to the gateway's catalogue | a human, after CD's first deploy and after every `environment/` rebuild — the catalogue lives in Cloud SQL, and the gateway Service it is reached through comes with the release |
 
 **A failed deploy opens an issue**, because it used to notify nobody: `ci` failing blocks a
 merge and is impossible to miss, while `deploy` runs after it and reports to whoever thinks
@@ -1398,10 +1398,10 @@ key_file="${1:?usage: seed-catalogue.sh VENDOR_KEY_FILE}"
 d="$(mktemp -d)"
 pf=""
 trap 'rm -rf "$d"; [ -z "$pf" ] || kill "$pf" 2>/dev/null || true' EXIT
-{ printf 'header = "x-api-key: '
-  gcloud secrets versions access latest --secret=controlplane-api-key --project="$GCP_PROJECT_ID"
-  printf '"\n'
-} > "$d/curlrc"
+k="$(gcloud secrets versions access latest --secret=controlplane-api-key --project="$GCP_PROJECT_ID")"
+k="${k//\\/\\\\}"; k="${k//\"/\\\"}"   # curl's config quoting: \ and " escaped
+printf 'header = "x-api-key: %s"\n' "$k" > "$d/curlrc"   # a builtin: the key reaches no argv
+unset k
 
 kubectl -n map port-forward --address=127.0.0.1 svc/map-managed-agent-platform-modelgateway 18090:8090 \
   > "$d/forward.log" 2>&1 &
