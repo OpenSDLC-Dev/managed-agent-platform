@@ -172,11 +172,14 @@ func geminiCallID(answerID string, n int) string {
 // tool, as Gemini ends a tool turn so, and otherwise end_turn, as is an
 // answer naming no reason; MAX_TOKENS is
 // max_tokens, and so is CONTINUATION, an answer the server's own limit cut
-// short, which the caller may ask to continue. Every reason a safety or
+// short: the answer is truncated either way, though the conversion carries
+// no continuation_token for Gemini to resume from, and refuses the final
+// assistant turn a Messages caller continues with. Every reason a safety or
 // policy check stopped the answer for is refusal. The rest — a malformed or
 // unexpected call, too many calls, a missing signature, a malformed answer,
-// OTHER, and any reason Gemini adds later — have no stop_reason a caller
-// could act on, and fail, naming the reason.
+// an unsupported language, an image stopped for no stated reason, OTHER, and
+// any reason Gemini adds later — have no stop_reason a caller could act on,
+// and fail, naming the reason.
 func geminiStop(reason string, called bool) (string, error) {
 	switch reason {
 	case "", "STOP":
@@ -186,8 +189,8 @@ func geminiStop(reason string, called bool) (string, error) {
 		return "end_turn", nil
 	case "MAX_TOKENS", "CONTINUATION":
 		return "max_tokens", nil
-	case "SAFETY", "RECITATION", "LANGUAGE", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
-		"IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "IMAGE_OTHER":
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+		"IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION":
 		return "refusal", nil
 	}
 	return "", fmt.Errorf("the answer finished %s", reason)

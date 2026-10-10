@@ -211,13 +211,15 @@ type fake struct {
 }
 
 type fakeCall struct {
-	Path   string
-	Query  string
-	Key    string
-	Model  string
-	Header http.Header
-	Body   map[string]json.RawMessage
-	Raw    []byte // the body as received
+	Path  string
+	Query string
+	// EscapedPath is the path as sent, its escapes kept.
+	EscapedPath string
+	Key         string
+	Model       string
+	Header      http.Header
+	Body        map[string]json.RawMessage
+	Raw         []byte // the body as received
 }
 
 func newFake(t *testing.T, answer func(w http.ResponseWriter, r *http.Request, c fakeCall)) *fake {
@@ -225,7 +227,7 @@ func newFake(t *testing.T, answer func(w http.ResponseWriter, r *http.Request, c
 	f := &fake{answer: answer}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		c := fakeCall{Path: r.URL.Path, Query: r.URL.RawQuery, Key: r.Header.Get("x-api-key"), Header: r.Header.Clone(), Raw: b}
+		c := fakeCall{Path: r.URL.Path, Query: r.URL.RawQuery, EscapedPath: r.URL.EscapedPath(), Key: r.Header.Get("x-api-key"), Header: r.Header.Clone(), Raw: b}
 		_ = json.Unmarshal(b, &c.Body)
 		_ = json.Unmarshal(c.Body["model"], &c.Model)
 		f.mu.Lock()

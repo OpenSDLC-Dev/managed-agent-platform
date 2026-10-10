@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
@@ -32,6 +33,12 @@ func Open(h http.Handler, ctx context.Context, c store.Credential) ([]byte, erro
 
 // Backoff is the handler's wait before retry n.
 func Backoff(h http.Handler, ctx context.Context, n int) bool { return h.(*handler).backoff(ctx, n) }
+
+// KeptFor is keptFor, for a thinking block naming dep as its producer under
+// value, judged for toDep on the upstream protocol up.
+func KeptFor(dep, value, toDep string, up profile.Protocol) bool {
+	return histBlock{field: "signature", dep: dep, value: value}.keptFor(toDep, up)
+}
 
 // ThinkingRefusal is thinkingRefusal.
 func ThinkingRefusal(body []byte) bool { return thinkingRefusal(body) }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -97,19 +98,32 @@ func TestAMessagesRequestReachesGemini(t *testing.T) {
 	}
 }
 
-// The model goes in the path escaped, so a deployment's model id can add no
+// The model goes in the path escaped, under models/ or the collection its
+// name opens with, as genai reads a name, so a deployment's model id can add no
 // query and no path of its own.
 func TestAGeminiModelIsEscapedInThePath(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, geminiText("ok"))
-	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini/x?alt=sse"), 0))
+	paths := map[string]string{
+		"gemini/x?alt=sse":        "/v1beta/models/gemini%2Fx%3Falt=sse:generateContent",
+		"models/gemini-3.8-flash": "/v1beta/models/gemini-3.8-flash:generateContent",
+		"tunedModels/mine":        "/v1beta/tunedModels/mine:generateContent",
+		"models/../x":             "/v1beta/models/..%2Fx:generateContent",
+	}
+	p := onGemini(e, f.URL)
+	for model := range paths {
+		e.alias(model, target(e.deployment(p, model), 0))
+	}
 	key := e.key(everyAlias)
 	e.start()
-	if _, err := e.client(key).Messages.New(context.Background(), anthropic.MessageNewParams{Model: "g", MaxTokens: 8, Messages: hello()}); err != nil {
-		t.Fatal(err)
-	}
-	if call := f.recorded()[0]; call.Path != "/v1beta/models/gemini/x?alt=sse:generateContent" || call.Query != "" {
-		t.Errorf("upstream path %q, query %q", call.Path, call.Query)
+	for model, want := range paths {
+		if _, err := e.client(key).Messages.New(context.Background(), anthropic.MessageNewParams{Model: model, MaxTokens: 8, Messages: hello()}); err != nil {
+			t.Fatal(err)
+		}
+		calls := f.recorded()
+		if call := calls[len(calls)-1]; call.EscapedPath != want || call.Query != "" {
+			t.Errorf("%s: upstream path %q, query %q, want %q", model, call.EscapedPath, call.Query, want)
+		}
 	}
 }
 
@@ -216,16 +230,21 @@ func TestWhatAGeminiAttemptCannotServe(t *testing.T) {
 }
 
 // Gemini refusing the gateway's key — its 402 for an empty prepaid balance
-// among them — is the gateway's own failure: each credential is tried, and
+// among them, and its 400 for a key that is not valid (measured 2026-10-10) —
+// is the gateway's own failure: each credential is tried, and
 // the caller is answered 502 api_error. Any other error reaches the caller in
 // Anthropic's envelope, its message Gemini's and its type the status's.
 func TestGeminiErrors(t *testing.T) {
 	e := newEnv(t)
 	depleted := newFake(t, status(402, `{"error":{"code":402,"message":"Your prepayment credits are depleted.","status":"RESOURCE_EXHAUSTED"}}`))
 	bad := newFake(t, status(400, `{"error":{"code":400,"message":"* GenerateContentRequest.contents: contents is not specified","status":"INVALID_ARGUMENT"}}`))
+	revoked := newFake(t, status(400, `{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"API_KEY_INVALID","domain":"googleapis.com","metadata":{"service":"generativelanguage.googleapis.com"}}]}}`))
 	p := onGemini(e, depleted.URL)
 	e.credential(p, "AIza-gemini-key2", 1)
 	e.alias("depleted", target(e.deployment(p, "gemini-3.8-flash"), 0))
+	rp := onGemini(e, revoked.URL)
+	e.credential(rp, "AIza-gemini-key2", 1)
+	e.alias("revoked", target(e.deployment(rp, "gemini-3.8-flash"), 0))
 	e.alias("bad", target(e.deployment(onGemini(e, bad.URL), "gemini-3.8-flash"), 0))
 	key := e.key(everyAlias)
 	e.start()
@@ -237,6 +256,13 @@ func TestGeminiErrors(t *testing.T) {
 	}
 	if n := len(depleted.recorded()); n != 2 {
 		t.Errorf("depleted was called %d times, want once per credential", n)
+	}
+	resp, b = e.do("POST", "/v1/messages", `{"model":"revoked","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, hdr)
+	if typ, msg, _ := errorOf(t, b); resp.StatusCode != http.StatusBadGateway || typ != "api_error" || !strings.Contains(msg, "credential") {
+		t.Errorf("revoked: %d %s %s", resp.StatusCode, typ, msg)
+	}
+	if n := len(revoked.recorded()); n != 2 {
+		t.Errorf("revoked was called %d times, want once per credential", n)
 	}
 	resp, b = e.do("POST", "/v1/messages", `{"model":"bad","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, hdr)
 	if typ, msg, rid := errorOf(t, b); resp.StatusCode != http.StatusBadRequest || typ != "invalid_request_error" ||
@@ -291,4 +317,82 @@ func decodedJSON(t *testing.T, s string) any {
 		t.Fatalf("%s: %v", s, err)
 	}
 	return v
+}
+
+// A block goes back only to the deployment that produced it, and only on the
+// protocol that did: a Gemini signature to no Anthropic or OpenAI attempt,
+// and theirs to no Gemini one.
+func TestProvenanceKeepsEachProtocolsThinking(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		up    profile.Protocol
+		want  bool
+	}{
+		{"gemini:c2ln", profile.Gemini, true},
+		{"gemini:c2ln", profile.Anthropic, false},
+		{"gemini:c2ln", profile.OpenAI, false},
+		{"EqQBCkgIBRABGAIiQL", profile.Anthropic, true},
+		{"EqQBCkgIBRABGAIiQL", profile.Gemini, false},
+		{"", profile.OpenAI, true},
+		{"", profile.Gemini, false},
+	} {
+		if got := modelgateway.KeptFor("dep_1", tc.value, "dep_1", tc.up); got != tc.want {
+			t.Errorf("%q on %s: kept %v, want %v", tc.value, tc.up, got, tc.want)
+		}
+	}
+	if modelgateway.KeptFor("dep_1", "gemini:c2ln", "dep_2", profile.Gemini) {
+		t.Error("a Gemini block went to another deployment")
+	}
+}
+
+// Gemini refusing a call's signature is a thinking refusal: the request goes
+// once more without its thinking, the sentinel in the signature's place.
+func TestAGeminiSignatureRefusalIsStrippedOnce(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		if strings.Contains(string(c.Raw), `"thoughtSignature":"c2lnLTE="`) {
+			writeBody(w, 400, `{"error":{"code":400,"message":"Function call is missing a thought_signature in functionCall parts","status":"INVALID_ARGUMENT"}}`)
+			return
+		}
+		geminiLoop(w, r, c)
+	})
+	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	cl := e.client(key)
+	tools := []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: "get_time",
+		InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{"tz": map[string]any{"type": "string"}}}}}}
+	first, err := cl.Messages.New(context.Background(), anthropic.MessageNewParams{Model: "g", MaxTokens: 64, Messages: hello(), Tools: tools})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := append(hello(), first.ToParam(), anthropic.NewUserMessage(anthropic.NewToolResultBlock("call_1", "noon", false)))
+	m, err := cl.Messages.New(context.Background(), anthropic.MessageNewParams{Model: "g", MaxTokens: 64, Messages: loop, Tools: tools})
+	if err != nil || len(m.Content) != 1 || m.Content[0].Text != "noon it is" {
+		t.Fatalf("%+v, %v", m, err)
+	}
+	calls := f.recorded()
+	if len(calls) != 3 || !strings.Contains(string(calls[2].Raw), `"thoughtSignature":"skip_thought_signature_validator"`) {
+		t.Errorf("%d calls, the last %s", len(calls), calls[len(calls)-1].Raw)
+	}
+}
+
+// When every attempt's conversion refuses a request, the refusal answered is
+// the same one whatever order the draw put the attempts in.
+func TestBothConversionsRefusingAnswerOneWay(t *testing.T) {
+	e := newEnv(t)
+	gf := newFake(t, geminiText("unused"))
+	of := newFake(t, status(500, `{}`))
+	e.alias("both", target(e.deployment(onGemini(e, gf.URL), "gemini-3.8-flash"), 0),
+		target(e.deployment(onOpenAI(e, "openai-generic", of.URL), "gpt"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	doc := `{"model":"both","max_tokens":8,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","media_type":"text/plain","data":"x"}}]}]}`
+	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
+	for range 12 {
+		resp, b := e.do("POST", "/v1/messages", doc, hdr)
+		if _, msg, _ := errorOf(t, b); resp.StatusCode != http.StatusBadRequest || !strings.Contains(msg, "Chat Completions") {
+			t.Fatalf("%d %s", resp.StatusCode, msg)
+		}
+	}
 }

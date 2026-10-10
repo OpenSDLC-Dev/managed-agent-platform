@@ -301,8 +301,9 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 	// An attempt on another protocol converts the request (convert): a
 	// count has no Chat Completions or Gemini counterpart, so it is the
 	// passthrough attempts' to make, and a request a conversion cannot carry
-	// is the other attempts', the first refusal answering it when none is
-	// left.
+	// is the other attempts', the Chat Completions conversion's refusal, else
+	// Gemini's, answering it when none is left — one refusal, whatever order
+	// the draw put the attempts in.
 	var converted map[string]json.RawMessage
 	switch passing := passingThrough(attempts, proto); {
 	case len(passing) == len(attempts):
@@ -331,19 +332,18 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 				refused[profile.Gemini] = errGeminiStream
 			}
 		}
-		var first error
 		kept := attempts[:0:0]
 		for _, at := range attempts {
-			if err := refused[at.Protocol]; err != nil {
-				if first == nil {
-					first = err
-				}
-				continue
+			if refused[at.Protocol] == nil {
+				kept = append(kept, at)
 			}
-			kept = append(kept, at)
 		}
 		if len(kept) == 0 {
-			writeError(w, r, invalid("%s", named(first.Error())))
+			err := refused[profile.OpenAI]
+			if err == nil {
+				err = refused[profile.Gemini]
+			}
+			writeError(w, r, invalid("%s", named(err.Error())))
 			return
 		}
 		attempts = kept
@@ -602,7 +602,8 @@ func retryable(status int, h http.Header) bool {
 // It is not the caller's to read as its own authentication failing, and
 // another credential may serve, so it is a retryable 502 whose detail goes to
 // the log.
-// The refusal is named by its HTTP status or, in a stream, its error type.
+// The refusal is named by its HTTP status, in a stream its error type, or
+// Gemini's reason where it refuses a key with a 400 (geminiKeyRefused).
 func refusedCredential(ctx context.Context, at catalog.Attempt, refusal string, detail []byte, red provider.Redactor) (*failure, bool) {
 	slog.WarnContext(ctx, "modelgateway: upstream refused a credential", "credential", at.Credential.ID,
 		"deployment", at.Deployment.ID, "refusal", refusal, "detail", red.String(string(detail)))
@@ -761,6 +762,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		case len(b) > maxResponseBody:
 			return &failure{status: s, typ: "api_error",
 				err: fmt.Errorf("upstream answered %d with an error body over the gateway's bound of %d bytes", s, maxResponseBody)}, retryable(s, resp.Header)
+		}
+		if up == profile.Gemini && geminiKeyRefused(b) {
+			return refusedCredential(ctx, at, "API_KEY_INVALID", b, red)
 		}
 		if conv {
 			h := resp.Header.Clone()

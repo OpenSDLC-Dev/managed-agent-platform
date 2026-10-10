@@ -81,14 +81,14 @@ type geminiResult struct {
 //     NONE), and into generationConfig max_tokens, temperature, top_p, top_k
 //     and stop_sequences, and thinking and output_config.effort as
 //     thinkingConfig (geminiThinking);
-//   - dropped: stream, which the URL carries; tool_choice's
-//     disable_parallel_tool_use, as Gemini has no such switch; cache_control,
-//     as Gemini caches a prompt's prefix on its own; metadata, service_tier,
+//   - dropped: stream, which the URL carries; cache_control, as Gemini
+//     caches a prompt's prefix on its own; metadata, service_tier,
 //     inference_geo and container, as Request drops them;
-//   - refused: output_config.format; a server tool, and a tool that is
-//     strict — Gemini bounds no call's input to its schema — or
-//     defer_loading, or not callable directly; and a final assistant turn,
-//     which Gemini would answer rather than continue.
+//   - refused: output_config.format; tool_choice's disable_parallel_tool_use
+//     true, as Gemini has no switch to hold an answer to one call; a server
+//     tool, and a tool that is strict — Gemini bounds no call's input to its
+//     schema — or defer_loading, or not callable directly; and a final
+//     assistant turn, which Gemini would answer rather than continue.
 //
 // In the turns, a user turn is user and an assistant turn model; consecutive
 // turns of one role are one turn, as the Messages API reads them. Text is
@@ -253,6 +253,9 @@ func geminiContents(raw json.RawMessage) ([]geminiContent, error) {
 		if len(c.Parts) > 0 {
 			kept = joined(kept, c)
 		}
+	}
+	if n := len(kept); n > 0 && kept[n-1].Role == "model" {
+		return nil, fmt.Errorf("messages: the user turns after the last assistant turn hold nothing Gemini is sent, which leaves a final assistant turn, and that has no Gemini counterpart")
 	}
 	for _, c := range kept {
 		for k := range c.Parts {
@@ -501,14 +504,19 @@ func geminiTools(raw json.RawMessage) ([]map[string]any, error) {
 }
 
 // geminiToolChoice is tool_choice as a functionCallingConfig. Its
-// disable_parallel_tool_use is checked, and dropped.
+// disable_parallel_tool_use may not be true: Gemini has no switch to hold an
+// answer to one call, and an answer that calls several where the caller
+// allowed one is what the gateway sends a request elsewhere rather than risk
+// (profile.go, deepseekIgnores).
 func geminiToolChoice(raw json.RawMessage) (map[string]any, error) {
 	var c map[string]json.RawMessage
 	if json.Unmarshal(raw, &c) != nil {
 		return nil, fmt.Errorf(": must be an object")
 	}
 	switch v := bytes.TrimSpace(c["disable_parallel_tool_use"]); {
-	case len(v) == 0, bytes.Equal(v, []byte("true")), bytes.Equal(v, []byte("false")), bytes.Equal(v, []byte("null")):
+	case len(v) == 0, bytes.Equal(v, []byte("false")), bytes.Equal(v, []byte("null")):
+	case bytes.Equal(v, []byte("true")):
+		return nil, fmt.Errorf(".disable_parallel_tool_use: true has no Gemini counterpart, as Gemini may answer with several calls")
 	default:
 		return nil, fmt.Errorf(".disable_parallel_tool_use: must be a boolean")
 	}

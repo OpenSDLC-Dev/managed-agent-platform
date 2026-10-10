@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"net/url"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
@@ -19,7 +20,8 @@ import (
 // that produced it — with the provider's key as x-goog-api-key, and the
 // answer comes back as a Messages one (convert.GeminiAnswer). Everything else
 // is the Chat Completions conversion's (converted.go): routing, retries,
-// limits, telemetry, errors and the ledger.
+// limits, telemetry, errors — but the 400 Gemini refuses a key with
+// (geminiKeyRefused) — and the ledger.
 
 // errGeminiStream is the refusal of a streamed request by a Gemini attempt,
 // which answers whole answers alone until the stream conversion lands.
@@ -39,9 +41,41 @@ func geminiBody(c call, d store.Deployment, strip bool) ([]byte, error) {
 }
 
 // geminiPath is the path under a Gemini base URL that answers model, which
-// goes in the path, escaped, rather than in the body.
+// goes in the path rather than in the body: under models/, or under the
+// collection a name opening models/ or tunedModels/ names, as genai's tModel
+// reads a name (google.golang.org/genai 1.73.0, transformer.go), the rest
+// escaped, so it can add no segment or query.
 func geminiPath(model string) string {
-	return "/models/" + url.PathEscape(model) + ":generateContent"
+	collection := "models"
+	for _, c := range []string{"models", "tunedModels"} {
+		if rest, ok := strings.CutPrefix(model, c+"/"); ok {
+			collection, model = c, rest
+			break
+		}
+	}
+	return "/" + collection + "/" + url.PathEscape(model) + ":generateContent"
+}
+
+// geminiKeyRefused reports whether a Gemini error refuses the key itself,
+// which Google answers 400 INVALID_ARGUMENT with the google.rpc.ErrorInfo
+// reason API_KEY_INVALID (measured 2026-10-10) rather than a 401, so its
+// status alone would hand the caller the gateway's credential failure as a
+// fault in its own request.
+func geminiKeyRefused(b []byte) bool {
+	var e struct {
+		Error struct {
+			Details []struct {
+				Reason string `json:"reason"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(b, &e)
+	for _, d := range e.Error.Details {
+		if d.Reason == "API_KEY_INVALID" {
+			return true
+		}
+	}
+	return false
 }
 
 // geminiUsageOf is the ledger's reading of a generateContent answer's

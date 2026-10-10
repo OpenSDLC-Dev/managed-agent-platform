@@ -91,7 +91,9 @@ API answered the free calls and the errors.
    already.
 3. **The model goes in the path.** A Gemini attempt's URL is the provider's base, then
    `/models/<upstream model, path-escaped>:generateContent`, or
-   `:streamGenerateContent?alt=sse`; the request body carries no model.
+   `:streamGenerateContent?alt=sse`; the request body carries no model. A model named
+   `models/…` or `tunedModels/…` goes under that collection, as genai reads a name, the
+   rest still escaped.
 4. **Messages inbound only.** A Messages request (and `/v1/responses`, served as one)
    converts to Gemini when the alias's credential speaks only `gemini`; passthrough is
    still preferred where it exists. Chat Completions, embeddings and rerank never
@@ -102,8 +104,8 @@ API answered the free calls and the errors.
    disposition the way `convert.Request` gives one:
    - `system` → `systemInstruction`; user and assistant turns → `user` and `model`;
      text → `text`; a base64 image → `inlineData` (a URL image is refused, as is a
-     `document`); a final assistant turn is refused, as Gemini refuses a request
-     ending on `model`.
+     `document`); a final assistant turn is refused, counted once empty turns are
+     dropped, as Gemini refuses a request ending on `model`.
    - `tool_use` → `functionCall{id, name, args}`; `tool_result` →
      `functionResponse{id, name, response}`, its name read off the `tool_use` with that
      id in the history, its text as `{"output": …}` or, with `is_error`,
@@ -112,8 +114,9 @@ API answered the free calls and the errors.
    - tools → `functionDeclarations` with the caller's JSON Schema as
      `parametersJsonSchema`, unchanged; server tools refused; `tool_choice` `auto`,
      `any`, `tool`, `none` → `AUTO`, `ANY`, `ANY` with `allowedFunctionNames`, `NONE`,
-     sent only beside a declaration; `disable_parallel_tool_use` dropped (Gemini has
-     no such switch).
+     sent only beside a declaration; `disable_parallel_tool_use: true` refused (Gemini
+     has no such switch, and a vendor that would ignore it is sent nothing, as DeepSeek
+     is).
    - `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences` →
      `generationConfig`; `cache_control`, `metadata`, `service_tier` dropped.
    - thinking: `enabled` with `budget_tokens` → `thinkingBudget`; `adaptive` → no
@@ -147,15 +150,19 @@ API answered the free calls and the errors.
    become blocks; a `functionCall` without an id gets `toolu_` and a deterministic
    suffix. `STOP` is `tool_use` when the answer holds a call and `end_turn` otherwise;
    `MAX_TOKENS` is `max_tokens`, and so is `CONTINUATION`, an answer the server's own
-   limit cut short; the safety class (`SAFETY`, `RECITATION`,
-   `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `LANGUAGE`, `IMAGE_*`) is `refusal`; a
+   limit cut short; the safety class (`SAFETY`, `RECITATION`, `BLOCKLIST`,
+   `PROHIBITED_CONTENT`, `SPII`, `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`,
+   `IMAGE_RECITATION`) is `refusal`; a
    prompt blocked with no candidate (`promptFeedback.blockReason`) is an empty
    `refusal`; the malformed class (`MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`,
    `TOO_MANY_TOOL_CALLS`, `MISSING_THOUGHT_SIGNATURE`, `MALFORMED_RESPONSE`), `OTHER`,
-   `NO_IMAGE` and any unknown reason are a `502 api_error` naming it, its tokens still counted. Usage:
+   `NO_IMAGE`, `LANGUAGE` and `IMAGE_OTHER` (no policy check stops either) and any
+   unknown reason are a `502 api_error` naming it, its tokens still counted. Usage:
    input is `promptTokenCount` plus `toolUsePromptTokenCount` minus
    `cachedContentTokenCount`, which is the cache read; output is `candidatesTokenCount`
-   plus `thoughtsTokenCount`. Errors go through `convertedError`.
+   plus `thoughtsTokenCount`. Errors go through `convertedError`, but a `400` with the
+   reason `API_KEY_INVALID`, Gemini's answer to a key that is not valid (measured), is a
+   refused credential, as its `401`, `402` and `403` are.
 9. **The stream conversion** (`convert/gemini_stream.go`) re-emits each chunk's parts as
    Messages events: thought parts as `thinking_delta`, text as `text_delta`, a function
    call as one `tool_use` block with a single `input_json_delta`. The leading thinking
@@ -167,8 +174,10 @@ API answered the free calls and the errors.
    becomes an `error` event.
 10. **Gemini answers are prefix-unchecked** (plan 61's `X-MAP-Thinking-Prefix`), as
     every converted answer is. Whether Gemini checks a signature against the history
-    before it is not measured; if it does, its refusal joins `thinkingRefusal`, strip
-    mode resends without thinking, and the sentinel answers for the missing signature.
+    before it is not measured. `thinkingRefusal` reads a `400` naming a
+    `thought_signature`, the word both measured signature refusals use, so if it does,
+    strip mode resends without thinking, and the sentinel answers for the missing
+    signature.
 11. **The wire authority** for Gemini is its REST reference, `google.golang.org/genai`
     at the version docs/REFERENCE_PROJECTS.md names, and the answers recorded here,
     kept as test data. The SDK is read, not imported.

@@ -112,10 +112,9 @@ func TestGeminiAnswerFinishReasons(t *testing.T) {
 	for reason, want := range map[string]string{
 		"STOP": "text(x) / end_turn", "": "text(x) / end_turn",
 		"MAX_TOKENS": "text(x) / max_tokens", "CONTINUATION": "text(x) / max_tokens",
-		"SAFETY": "text(x) / refusal", "RECITATION": "text(x) / refusal", "LANGUAGE": "text(x) / refusal",
+		"SAFETY": "text(x) / refusal", "RECITATION": "text(x) / refusal",
 		"BLOCKLIST": "text(x) / refusal", "PROHIBITED_CONTENT": "text(x) / refusal", "SPII": "text(x) / refusal",
 		"IMAGE_SAFETY": "text(x) / refusal", "IMAGE_PROHIBITED_CONTENT": "text(x) / refusal", "IMAGE_RECITATION": "text(x) / refusal",
-		"IMAGE_OTHER": "text(x) / refusal",
 	} {
 		if got := geminiAnswer(t, []byte(answer(reason))); got != want {
 			t.Errorf("%q: got %s, want %s", reason, got, want)
@@ -128,7 +127,7 @@ func TestGeminiAnswerFinishReasons(t *testing.T) {
 		t.Errorf("a blocked prompt: %s", got)
 	}
 	for _, reason := range []string{"MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS", "MISSING_THOUGHT_SIGNATURE",
-		"MALFORMED_RESPONSE", "OTHER", "NO_IMAGE", "FINISH_REASON_UNSPECIFIED", "SOMETHING_NEW"} {
+		"MALFORMED_RESPONSE", "OTHER", "NO_IMAGE", "LANGUAGE", "IMAGE_OTHER", "FINISH_REASON_UNSPECIFIED", "SOMETHING_NEW"} {
 		_, err := convert.GeminiAnswer([]byte(answer(reason)), "alias", "req_1", nil, wrapSig)
 		if err == nil || !strings.Contains(err.Error(), reason) || !strings.Contains(err.Error(), "call f was malformed") {
 			t.Errorf("%s: err = %v, want one naming it and its message", reason, err)

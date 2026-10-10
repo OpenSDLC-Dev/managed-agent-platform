@@ -1109,6 +1109,9 @@ func TestThinkingRefusal(t *testing.T) {
 		{invalidRequest("2 validation errors: messages.0.content: Field required; thinking.budget_tokens: too small"), false},
 		{invalidRequest("invalid request signature"), false},
 		{invalidRequest("messages.3.content.0.text: invalid value \"I was thinking...\""), false},
+		// Gemini's, for a function call's signature (measured 2026-10-10).
+		{invalidRequest("Function call is missing a thought_signature in functionCall parts"), true},
+		{invalidRequest("Invalid value at 'contents[1].parts[0].thought_signature' (TYPE_BYTES), Base64 decoding failed for \"c2ln!\""), true},
 	} {
 		if got := modelgateway.ThinkingRefusal([]byte(tc.body)); got != tc.want {
 			t.Errorf("ThinkingRefusal(%s) = %v, want %v", tc.body, got, tc.want)

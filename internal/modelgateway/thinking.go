@@ -403,7 +403,9 @@ func preferring(attempts []catalog.Attempt, dep string, proto profile.Protocol) 
 // thinkingRefusal reports whether an upstream's 400 refuses the thinking the
 // request carried, so that one more attempt without it may cure the request:
 // its message names a thinking block's signature, a redacted_thinking block,
-// a thinking block, or a thinking field of one of the request's blocks.
+// a thinking block, a thinking field of one of the request's blocks, or a
+// function call's thought_signature, as Gemini names the signature it refuses
+// (measured 2026-10-10), where strip mode sends the sentinel instead.
 // Removing thinking cannot cure three refusals that do so, which are not:
 // DeepSeek's "must be passed back" and Anthropic's "must start with a thinking
 // block", which ask for thinking the request lacks, and one about a parameter
@@ -417,7 +419,7 @@ func thinkingRefusal(body []byte) bool {
 	switch {
 	case strings.Contains(msg, "must be passed back"), strings.Contains(msg, "must start with a thinking block"):
 		return false
-	case strings.Contains(msg, "signature") && strings.Contains(msg, "thinking"):
+	case strings.Contains(msg, "signature") && strings.Contains(msg, "thinking"), strings.Contains(msg, "thought_signature"):
 		return true
 	}
 	for _, p := range thinkingParams {
