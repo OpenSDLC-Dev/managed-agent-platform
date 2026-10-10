@@ -753,17 +753,20 @@ done
 ```
 
 Until a container exists, adding its version fails with `NOT_FOUND` rather than working, and
-so does the deploy that reads it. `brain-api-key`'s version is the one below, and on an
-environment that predates the gateway it is the only one to add: a new version of
-`controlplane-api-key` there rotates the key every client of the management API holds.
+so does the deploy that reads it. The two keys' versions are one command each. On a fresh
+environment run both; on one that predates the gateway run only the second, because a new
+version of `controlplane-api-key` there rotates the key every client of the management API
+holds:
 
 ```sh
+printf '%s' "$(openssl rand -hex 32)" \
+  | gcloud secrets versions add controlplane-api-key --project="$project" --data-file=-
 printf '%s' "$(openssl rand -hex 32)" \
   | gcloud secrets versions add brain-api-key --project="$project" --data-file=-
 ```
 
 With the gateway off, `model-providers` takes `brain-api-key`'s place in the loop, and its
-version is the routes array below rather than that command.
+version is the routes array below rather than the second command.
 
 **`gcp-db-init` is a prerequisite here, not a formality.** Mode 1 never ran it at all — the
 bundled Postgres creates its own role from `postgresql.password`. Mode 2's `database-url`
@@ -1252,7 +1255,7 @@ above, at "Three of those secrets are not `bootstrap.sh`'s". So the migration is
 and the order is not optional: the proxy has to be listening before anything is told to use
 it.
 
-1. Deploy with the proxy on. It starts in all three pods and sits unused; the DSN still names
+1. Deploy with the proxy on. It starts in every pod and sits unused; the DSN still names
    the instance's address, and nothing about connectivity changes. **A proxy that starts is
    not, by itself, a proxy that can reach the instance** — its `/startup` and `/liveness`
    probes answer once the listeners are up, whatever the connection name says, and neither
@@ -1378,36 +1381,48 @@ Cloud SQL beside everything else, so a rebuilt environment has none, and every t
 alias for the agents' model; no automation here may, for the reason above. The admin API
 shares the gateway's port, a ClusterIP Service that nothing outside the cluster reaches but a
 port-forward, and takes `controlplane-api-key`. The #906 acceptance run made these four calls
-with these bodies, each answering with the id the next needs; the wrapper around them was
-checked against a stand-in gateway, not a live one. It keeps both keys off every argv, stops
-at the first call that fails, so a rejected key never leaves an alias behind that answers
-`503`, and its trap removes the key file and stops the forward:
+with these bodies, each answering with the id the next needs; the script around them was
+checked against a stand-in gateway, not a live one. Save it and run it with `bash`
+(`GCP_PROJECT_ID=… bash seed-catalogue.sh vendor-key.txt`) rather than pasting it: zsh reads
+`#` as a command unless `interactivecomments` is set, and runs no `EXIT` trap on Ctrl-C. It
+keeps both keys off every argv, stops at the first call that fails, so a rejected key never
+leaves an alias behind that answers `503`, refuses a forward that is not its own, and on exit,
+Ctrl-C included, removes the key file and stops the forward:
 
-```sh
-(
+```bash
+#!/usr/bin/env bash
 set -euo pipefail
-kubectl -n map port-forward svc/map-managed-agent-platform-modelgateway 18090:8090 > /dev/null &
-pf=$!
+key_file="${1:?usage: seed-catalogue.sh VENDOR_KEY_FILE}"
 d="$(mktemp -d)"
-trap 'rm -rf "$d"; kill "$pf" 2>/dev/null || true' EXIT
+pf=""
+trap 'rm -rf "$d"; [ -z "$pf" ] || kill "$pf" 2>/dev/null || true' EXIT
 { printf 'header = "x-api-key: '
   gcloud secrets versions access latest --secret=controlplane-api-key --project="$GCP_PROJECT_ID"
   printf '"\n'
 } > "$d/curlrc"
-for _ in 1 2 3 4 5 6 7 8 9 10; do   # until the forward listens
-  curl -s -o /dev/null --noproxy '*' http://127.0.0.1:18090/ && break; sleep 1
+
+kubectl -n map port-forward svc/map-managed-agent-platform-modelgateway 18090:8090 > "$d/forward.log" 2>&1 &
+pf=$!
+# Wait for THIS forward to say it listens. One that cannot bind (an old forward
+# holds the port) exits, and kill -0 then stops the script before any write can
+# reach whatever answers on that port instead.
+for _ in $(seq 30); do
+  grep -q '^Forwarding from 127.0.0.1:18090' "$d/forward.log" && break
+  kill -0 "$pf"
+  sleep 1
 done
+grep -q '^Forwarding from 127.0.0.1:18090' "$d/forward.log"
+
 gw() { curl -sS --fail-with-body --noproxy '*' -K "$d/curlrc" -H 'content-type: application/json' \
          --data-binary @- "http://127.0.0.1:18090/admin/v1/$1"; }
 
 pid="$(echo '{"name":"deepseek","profile":"deepseek",
             "endpoints":{"anthropic":"https://api.deepseek.com/anthropic"}}' | gw providers | jq -er .id)"
-# The vendor key from a file you wrote, never an argument.
-jq -n --rawfile k vendor-key.txt '{key: ($k | rtrimstr("\n"))}' | gw "providers/$pid/credentials" | jq -er .id
+# The vendor key from the file, never an argument.
+jq -n --rawfile k "$key_file" '{key: ($k | rtrimstr("\n"))}' | gw "providers/$pid/credentials" | jq -er .id
 dep="$(jq -n --arg p "$pid" '{provider_id: $p, upstream_model: "deepseek-v4-flash", kind: "chat"}' \
         | gw deployments | jq -er .id)"
 jq -n --arg d "$dep" '{name: "deepseek-flash", targets: [{deployment_id: $d}]}' | gw aliases | jq -er .name
-)
 ```
 
 An agent then names the alias as its model (`{"id": "deepseek-flash"}`). An alias named `*`
