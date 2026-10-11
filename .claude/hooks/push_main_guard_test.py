@@ -11,6 +11,7 @@ below matter as much as the refusals.
 """
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -121,6 +122,43 @@ class Hook(unittest.TestCase):
         for stdin in ("not json", "{}", json.dumps({"tool_input": {"command": 7}})):
             with self.subTest(stdin=stdin):
                 self.assertEqual(self.run_hook(stdin).returncode, 0)
+
+
+class Settings(unittest.TestCase):
+    """The command line .claude/settings.json registers, run the way Claude Code runs it.
+
+    A session that enters a worktree keeps $CLAUDE_PROJECT_DIR on the main checkout,
+    so the branch that adds this hook ran it against a checkout without the script.
+    python3 exits 2 when it cannot open its script, and 2 refuses the call: until the
+    command checked for the file first, it blocked every Bash call in that session.
+    """
+
+    ROOT = HOOK.parent.parent.parent
+    repo_on = Hook.repo_on
+    payload = Hook.payload
+
+    def run_command(self, stdin, project_dir, path=None):
+        settings = json.loads((self.ROOT / ".claude" / "settings.json").read_text())
+        [entry] = [e for e in settings["hooks"]["PreToolUse"] if e["matcher"] == "Bash"]
+        [hook] = entry["hooks"]
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=str(project_dir),
+                   PATH=path or os.environ["PATH"])
+        return subprocess.run(["/bin/sh", "-c", hook["command"]], input=stdin, env=env,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_refuses_a_push_to_main(self):
+        result = self.run_command(self.payload("git push", self.repo_on("main")), self.ROOT)
+        self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_allows_everything_when_the_checkout_has_no_script(self):
+        result = self.run_command(self.payload("git push", self.repo_on("main")),
+                                  tempfile.mkdtemp())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_allows_everything_without_python3(self):
+        result = self.run_command(self.payload("git push", self.repo_on("main")), self.ROOT,
+                                  path=tempfile.mkdtemp())
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
