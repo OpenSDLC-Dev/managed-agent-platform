@@ -2,9 +2,12 @@
 """PreToolUse guard: refuse a Bash command whose `git push` would update main.
 
 Every change lands through a branch, a PR and a squash merge (CLAUDE.md,
-"Iteration workflow"), so no session needs to push to main or master. A session
-that runs with permission prompts off has nothing else between a mistaken push
-and the default branch.
+"Iteration workflow"), so no session needs to push to main or master.
+
+GitHub's protection on main refuses a force-push and a deletion from anyone. Its
+required checks (`ci`, `coverage`) do not bind an admin, and the gh token these
+sessions push with is an admin's (2026-10-11). So for a plain push from a
+session that runs with permission prompts off, this guard is the only check.
 
 The guard reads the command text. It catches mistakes, not intent: a push run
 from a script or an alias goes through unseen. It reads the PreToolUse payload

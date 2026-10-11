@@ -13,6 +13,7 @@ below matter as much as the refusals.
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -100,8 +101,13 @@ class Hook(unittest.TestCase):
         return subprocess.run([sys.executable, str(HOOK)], input=stdin,
                               capture_output=True, text=True, timeout=30)
 
-    def repo_on(self, branch):
+    def scratch(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        return directory
+
+    def repo_on(self, branch):
+        directory = self.scratch()
         subprocess.run(["git", "init", "-q", "-b", branch, directory], check=True)
         return directory
 
@@ -134,6 +140,7 @@ class Settings(unittest.TestCase):
     """
 
     ROOT = HOOK.parent.parent.parent
+    scratch = Hook.scratch
     repo_on = Hook.repo_on
     payload = Hook.payload
 
@@ -152,12 +159,12 @@ class Settings(unittest.TestCase):
 
     def test_allows_everything_when_the_checkout_has_no_script(self):
         result = self.run_command(self.payload("git push", self.repo_on("main")),
-                                  tempfile.mkdtemp())
+                                  self.scratch())
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_allows_everything_without_python3(self):
         result = self.run_command(self.payload("git push", self.repo_on("main")), self.ROOT,
-                                  path=tempfile.mkdtemp())
+                                  path=self.scratch())
         self.assertEqual(result.returncode, 0, result.stderr)
 
 

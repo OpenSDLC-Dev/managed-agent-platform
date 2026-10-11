@@ -1887,7 +1887,7 @@ yet enforce") and `:485`'s parenthetical, and `CLAUDE.md:36`'s parenthetical. Th
 are still true here: §7.5's enumerated by-id reads on `vaults`, `vault_credentials`,
 `skills` and `files` are unscoped until that slice closes them, and a doc asserting enforcement
 one slice early is the overclaim the verifier's docs rung exists to catch. Slice 5 flips all
-seven. The principle halves stay verbatim whenever they flip — scoping is org/workspace/project
+six. The principle halves stay verbatim whenever they flip — scoping is org/workspace/project
 and never a user, the adk `AppName`+`UserID` divergence, the `created_by`/`metadata` hooks.
 · Registry: re-argue `:19`'s parenthetical; **add an entry** for a
 cross-tenant resource read and a cross-tenant create-time reference both answering the absent-id

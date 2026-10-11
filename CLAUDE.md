@@ -81,7 +81,7 @@ make openbao-init-test   # ...and the compose + chart OpenBao init scripts, run 
 make cd-outcome-test     # ...and the CD failure notifier's classifier, which `workflow_run` would otherwise first run on main
 make parked-test         # ...and the parked-cluster label rule `deploy.yml` and `staging-parked.yml` share
 make retry-test          # ...and the retry wrapper both notifiers copy, lifted out of the workflow YAML and run
-make push-guard-test     # ...and the PreToolUse hook that refuses a `git push` to main, the one check left with permission prompts off
+make push-guard-test     # ...and the PreToolUse hook that refuses a `git push` to main, the only check on an admin's plain push with permission prompts off
 make identifiers-test    # ...and the documentation, for the four shapes an operator's coordinates take (#356's rule)
 make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires, every `actions/checkout` for the `persist-credentials: false` beside it, and every setup-go step and Go image reference for go.mod's `toolchain` release (images by digest too)
 make pipes-test          # ...and every pipeline in them, for a reading end that can exit 0 before EOF: under `pipefail` a `grep -q` that has matched carries the writer's SIGPIPE to 141 and the step reports a miss

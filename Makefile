@@ -355,9 +355,9 @@ retry-test:
 	python3 .github/scripts/retry_test.py
 
 # The hook that refuses a `git push` to main (.claude/hooks/push_main_guard.py).
-# Sessions here run with permission prompts off, so it is the one check between
-# a mistaken push and the default branch. Both of its failures are silent: a
-# missed shape pushes, and a false match refuses a push the workflow needs.
+# For a plain push from an admin's session with permission prompts off, it is the
+# only check; its docstring says why. Both of its failures are silent: a missed
+# shape pushes, and a false match refuses a push the workflow needs.
 push-guard-test:
 	python3 .claude/hooks/push_main_guard_test.py
 
