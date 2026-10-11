@@ -107,7 +107,7 @@ The module path `github.com/OpenSDLC-Dev/managed-agent-platform` carries the own
 
 ## Iteration workflow (branch → review → PR → CI → squash merge)
 
-Every change lands through a PR; **never commit directly to `main`**. Releases are their own ritual — a release PR plus an annotated tag; versioning policy and the steps live in [docs/RELEASING.md](./docs/RELEASING.md).
+Every change lands through a PR; **never commit directly to `main`**. Main's branch protection holds admins to this too (#920). It refuses any direct push to `main`, and a merge needs green `ci` and `coverage` checks. A merge on red, even in an emergency, needs a maintainer to turn off its "Do not allow bypassing the above settings" option for the duration. Releases are their own ritual — a release PR plus an annotated tag; versioning policy and the steps live in [docs/RELEASING.md](./docs/RELEASING.md).
 
 Review tiering: a diff whose changed paths (by `git diff main...HEAD --name-only`) are exclusively documentation markdown — `*.md` files outside `.claude/`, excluding CLAUDE.md and AGENTS.md themselves — may run a **single** code reviewer instead of the dual pass in step 4, but always keeps the verifier run, including its docs-consistency rung. Markdown that steers behavior (`.claude/` agents and skills, CLAUDE.md, AGENTS.md), anything else, or any ambiguity takes the full ritual.
 
