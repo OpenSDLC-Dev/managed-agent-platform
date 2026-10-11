@@ -20,26 +20,62 @@ Two ground rules for every pass:
 
 ## Verifier (Claude side)
 
-The model is pinned in `.claude/agents/verifier.md` (`model: claude-fable-5`). Dispatch
-with **no** `model` override (`Agent({subagent_type: "verifier", …})`) so the pin wins. Do
-not override to opus — that was a temporary quota workaround, lifted 2026-07-15.
+`.claude/agents/verifier.md`'s frontmatter pins the verifier's model and effort; this skill
+does not restate them. Dispatch it with **no** `model` or `effort` override, so the pins win:
+
+- From the main session: `Agent({subagent_type: "verifier", …})`. A `model` or `effort`
+  passed per invocation outranks the frontmatter.
+- From a Workflow script: `agent(prompt, {agentType: "verifier", schema})`. A general agent
+  told to read verifier.md gets every tool and neither pin.
+- Three environment variables outrank the pins (Claude Code 2.1.296):
+  - `CLAUDE_CODE_EFFORT_LEVEL` outranks every `effort`.
+  - `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` ignores the frontmatter `model` and every `model`
+    passed per invocation.
+  - `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` replaces every model in a Workflow run.
+
+  Leave them unset, or name them in the PR's verification section.
+- Settings can still lower the pins without a word in a background agent: a
+  `maxEffortLevel` or an organization effort cap clamps `effort`, and an `availableModels`
+  allowlist substitutes a blocked model. So read the model and the effort from the agent's
+  transcript, which records both on every turn, and name them in the PR.
+
+Do not override to opus by default; that was a temporary quota workaround, lifted
+2026-07-15. If the pinned model's quota runs out, re-dispatch with `model: "opus"`, tell the
+verifier it runs by override and must hold the same bar, and disclose the override in the
+PR. The Agent tool takes only the alias, which can resolve to the session's own model, so
+read the exact model id from the agent's transcript before you name it. Never skip
+verification.
 
 ## /code-review (Claude side)
 
-Run its agents on **Opus 5** (user decision, 2026-07-25, superseding the Opus 4.8 pin of
-2026-07-16), not the session model. Subagents inherit the main loop's model unless told
-otherwise, and the code-review workflow's `agent()` calls omit `model`, so:
+Run it on the current Opus, `claude-opus-5-5` (user decision, 2026-07-25: a reviewer weaker
+than the implementer finds nothing, and its silence reads as a clean bill of health), at
+level `xhigh` with no finding cap (user decision, 2026-10-11).
 
-1. Launch `/code-review`; the Workflow tool result names the persisted script path.
-2. Edit that script, adding `model: "opus"` to **every** `agent()` opts object — the alias
-   resolves to the current Opus generation.
-3. Re-invoke with `{scriptPath}` only — a fresh run. Never add `resumeFromRunId`: it
-   replays cached results from the old model, which defeats the re-run.
-4. Confirm from the run's agent metadata (or the transcripts under
-   `~/.claude/projects/<project>/<session>/subagents/workflows/<runId>/`) that agents ran
-   on the current Opus (`claude-opus-5-5` as of 2026-10-04). The alias is what makes step
-   2 short, and the only thing that can go wrong with it: if it resolved to an older Opus,
-   put the exact model id in the `model` field instead and re-run.
+1. Name the level and the cap first, then the scope:
+   `Skill({skill: "code-review", args: "xhigh --max-findings all <scope>"})`. Both choices
+   are sticky: without a level the command reuses the level typed last, so an unpinned pass
+   drifts the way Codex's config did. Three recorded `/code-review` passes in
+   docs/HISTORY.md stopped at exactly fifteen findings; the verify rule above is the filter,
+   not a cap.
+2. The Skill route runs as one background fork on the session's model. If the session runs
+   another model (another family, or an older Opus after a flagged message switched it),
+   take step 3's route. A review on the weaker model is not this pass.
+3. If the Skill route is refused or the session runs another model, launch
+   `Workflow({name: "code-review", args: …})` with the same arguments. Its `agent()` calls
+   inherit the session's model when their opts name none, so on another model add
+   `model: "claude-opus-5-5"` to every opts object in the persisted script. Use the full id,
+   because the `opus` alias follows the session's own Opus. Re-invoke with `{scriptPath}`
+   only. Never add `resumeFromRunId`: it replays cached results from the old model.
+
+   That workflow is not registered in every session: the route worked on 2026-08-08 and
+   answered `not found. Available: deep-research` on 2026-08-22. If it is missing and the
+   session runs another model, ask the user to run `/model claude-opus-5-5`. Only the user
+   can switch the session's model.
+4. Confirm the model before citing it. A fork's transcript
+   (`~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl`) records `"model"`
+   on every turn; a Workflow run's transcripts sit under `subagents/workflows/<runId>/`.
+   In the PR description, name what ran: `/code-review (<model id>, xhigh)`.
 
 ## Codex reviewer
 
@@ -76,6 +112,15 @@ user-invocable only (`disable-model-invocation`).
   model at least (`review "--scope branch --base main --model gpt-6.1-sol"`) and say in
   the PR that its effort was the config's.
 - **Stall mode:** the `task` subcommand can hang on its internal "wait" collaboration tool
-  and never emit a verdict. Watch the log for the `Turn completed` marker, cap the wait at
-  ~12 minutes, and do not let a stalled Codex pass block a PR the verifier and the Claude
-  review already covered — note the stall in the PR description instead.
+  and never emit a verdict. Watch the log for the `Turn completed` marker. Elapsed time
+  alone never makes a stall: an `xhigh` pass can run 20 to 30 minutes and return its best
+  findings late, so budget about 25 minutes. Do not suspect a stall before about 12 minutes;
+  after that, a stall is a run none of whose rollout logs has grown between two checks a
+  few minutes apart. A run's sub-sessions write logs of their own, and the parent's log
+  stops while it waits on them. To find the logs, touch a marker file in your scratch
+  directory just before the launch, then run
+  `find ~/.codex/sessions -name 'rollout-*.jsonl' -newer <marker> | xargs grep -lF '"cwd":"<worktree-path>"'`.
+  The marker leaves out earlier runs, and the anchored `cwd` leaves out another worktree
+  whose path shares a prefix. Remove the marker when the run ends. Do not let a stalled pass
+  block a PR the verifier and the Claude review already covered — note the stall in the PR
+  description instead.

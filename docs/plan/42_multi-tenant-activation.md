@@ -1880,14 +1880,15 @@ unscoped by design. · Every existing single-workspace test still passes with a 
 populated in the same database.
 
 **Docs.** `changelog.d/` · STATE.md · **the "does not yet enforce" sentences stay for one more
-slice** — all seven coordinates: `internal/store/store.go:34` and `:37-38`,
-`internal/domain/session.go:44-45`,
-`docs/ARCHITECTURE.md:368` (the `store/` row's "reserves the multi-tenant columns it does not
-yet enforce") and `:485`'s parenthetical, `CLAUDE.md:36`'s parenthetical and `:85`'s layout
-line. They are still true here: §7.5's enumerated by-id reads on `vaults`, `vault_credentials`,
+slice** — all six places: the package comment of `internal/store/store.go` (its "does not
+yet enforce" sentence and its inheritance sentence), the `Scope` comment in
+`internal/domain/session.go`, two places in `docs/ARCHITECTURE.md` (the `store/` row's
+"reserves the multi-tenant columns it does not yet enforce" and the "(reserved,
+single-tenant defaults in v1)" parenthetical), and `CLAUDE.md` principle 5's parenthetical.
+They are still true here: §7.5's enumerated by-id reads on `vaults`, `vault_credentials`,
 `skills` and `files` are unscoped until that slice closes them, and a doc asserting enforcement
 one slice early is the overclaim the verifier's docs rung exists to catch. Slice 5 flips all
-seven. The principle halves stay verbatim whenever they flip — scoping is org/workspace/project
+six. The principle halves stay verbatim whenever they flip — scoping is org/workspace/project
 and never a user, the adk `AppName`+`UserID` divergence, the `created_by`/`metadata` hooks.
 · Registry: re-argue `:19`'s parenthetical; **add an entry** for a
 cross-tenant resource read and a cross-tenant create-time reference both answering the absent-id
@@ -2024,9 +2025,8 @@ rewind list (`internal/store/store_test.go:533-545`) must gain that migration's 
 ends on a schema no deployment reaches.
 
 **Docs.** `changelog.d/` · STATE.md · **the "does not yet enforce" claims flip here**, where they
-finally become false — seven coordinates across four files: `internal/store/store.go:34` and
-`:37-38`, `internal/domain/session.go:44-45`, `docs/ARCHITECTURE.md:368` and `:485`,
-`CLAUDE.md:36` and `:85` (§7.4 says why they wait for this slice). · Registry: **rewrite the two entries carrying the clause
+finally become false — the six places across four files that slice 4's Docs list names
+(§7.4 says why they wait for this slice). · Registry: **rewrite the two entries carrying the clause
 "scopes nothing per environment (skills are workspace-global)"** — `:163`, which #575's
 2026-09-03 recording promoted from INFERRED to CONFIRMED, and `:64`, plan 39's twin from the
 2026-09-04 recording — to the per-workspace rule plus the `anthropic`-source carve-out. **Both

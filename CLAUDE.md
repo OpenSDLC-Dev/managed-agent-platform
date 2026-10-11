@@ -52,48 +52,7 @@ Six read-only local reference sources serve as ground truth and design reference
 
 ## Repo layout
 
-```
-cmd/{controlplane,brain,executor,worker,modelgateway}   # the five server binaries
-cmd/gate                                   # per-session egress sidecar (plan 12)
-internal/
-  domain/     # Anthropic-native types — the source of truth; no adk/genai here
-  api/        # wire-compatible REST handlers, ID prefixes, auth, work API
-  events/     # append-only store, SSE (Postgres LISTEN/NOTIFY), delta reconciliation
-  brain/      # orchestration loop, replay, provider request assembly
-  provider/   # ModelProvider iface + anthropic/ + openai/ + registry (model→provider)
-  executor/   # tool_exec consumer — the platform-managed half of the pull protocol
-  worker/     # BYOC worker — the customer-hosted twin of executor/, wire-only
-  toolset/    # the built-in tools (agent_toolset_20260401)
-  webtool/    # web_fetch/web_search backends: Searcher/Fetcher ifaces + tavily/ + jina/
-  mcp/        # the MCP client: a thin wrapper over the official go-sdk (plan 29)
-  dialguard/  # the dialler under the five paths that reach a customer-supplied
-              #   or agent-declared destination — gate, MCP client, vault probe,
-              #   token refresh, JWKS fetch: resolves a name once, holds each
-              #   address to the SSRF floor, dials what survives. Not a universal
-              #   egress check; docs/ARCHITECTURE.md says what it is not
-  oauthrefresh/ # the RFC 6749 refresh-token grant, shared by the mcp_oauth_validate
-              #   probe and the executor's dial-time credential refresh (plan 29)
-  sandbox/    # Sandbox/Provider iface + docker/ + k8s/ + backend selection + shell/
-  blob/       # object-storage seam: Store iface + s3/ (S3-compatible via minio-go)
-              #   + gcs/ (GCS-native, Application Default Credentials) + backend/ (selection)
-  secrets/    # credential-cipher seam: Cipher iface + backend/ (selection) + local/ (AES-GCM)
-              #   + openbao/ (transit) + gcpkms/ (Cloud KMS)
-  skills/     # skill-upload validation + canonical-zip normalization (SKILL.md frontmatter)
-  cron/       # the 5-field POSIX cron engine behind a deployment schedule; embeds
-              #   time/tzdata, because the server image ships no zoneinfo (plan 37)
-  queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
-  identity/   # the human-auth boundary: OIDC / trusted-proxy JWT verifier, claim→role
-              #   mapping, bounded JWKS cache (go-jose; no vendor SDK)
-  apikey/     # the platform API key check, shared by the control plane and the model gateway
-  modelgateway/ # the model gateway (plan 59): Anthropic inference and routing, the upstream
-              #   relay, vendor profiles, its schema's queries, the config snapshot, /admin/v1/,
-              #   and convert/, the Anthropic ⇄ Chat Completions conversion, whose request half
-              #   provider/openai shares, Responses ⇄ Anthropic for the stateless /v1/responses,
-              #   and Anthropic ⇄ Gemini generateContent for a Gemini upstream (plan 62)
-  telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
-  store/      # Postgres schema/migrations, reserved multi-tenant columns
-deploy/{helm,compose,gcp}
-```
+`cmd/` holds the five server binaries and `cmd/gate`, named under Core architecture; `internal/` holds the packages; `deploy/{helm,compose,gcp}` holds the install paths.
 
 **Test support is named, not listed here**: a directory under `internal/` whose name ends in `test` is one (`pgtest`, `sandboxtest`, `mcptest`, …). The `test` recipe in the Makefile holds the authoritative set, because it has to spell them out to keep them out of the coverage denominator — so adding one means editing that recipe: both its exclusion expression and the comment above it that names the same packages in prose. Beside them sit the top-level `evals/` live suite and `acceptance/` doc-example suite. There is no `internal/policy`: permission policy lives across `domain`/`toolset`/`brain`/`api`.
 
@@ -164,17 +123,36 @@ Review tiering: a diff whose changed paths (by `git diff main...HEAD --name-only
 
 These bias toward caution over speed. For trivial changes, use judgment.
 
-**Think before coding.** State assumptions explicitly rather than picking silently. This codebase has a specific failure mode: *guessing at the wire schema*. When an exact JSON shape isn't in the public docs, do not invent it — read the reference checkouts (SDK types first), and record a real `ant` CLI stream when only behavior can answer. Likewise, if a requirement admits two readings (e.g. whether a field is session-local or agent-level), surface both and ask. If something is confusing, stop and name what's confusing. If a simpler approach exists, say so — push back when warranted.
+**Think before coding.** State assumptions explicitly rather than picking silently. This codebase has a specific failure mode: *guessing at the wire schema*. When an exact JSON shape isn't in the public docs, do not invent it — read the reference checkouts (SDK types first), and record a real `ant` CLI stream when only behavior can answer. Likewise, if a requirement admits two readings (e.g. whether a field is session-local or agent-level) and the code, the docs and the reference checkouts do not settle it, surface both and ask. If something is confusing, name it, then settle it from the code, the docs and the reference checkouts; what they cannot settle goes to the user under the pause rule below. If a simpler approach exists, say so — push back when warranted.
 
 **Assessment is a deliverable too.** When the user is describing a problem or asking a question rather than requesting a change, report your findings and stop — don't fix until asked. Before any state-changing command (killing a server, dropping a test database, rewriting `.claude/` or workflow config), check the evidence supports *that specific* action — a pattern-matched signal may have a different cause.
 
-**Pause only when the work genuinely requires the user.** That means: a destructive or irreversible action, a real scope change, or input only they can provide (credentials, account approvals, a product decision). Hitting one of these, ask and end the turn. Everything else — retries, missing information you can gather, long verification loops — is yours to push through; never end the turn on a promise of work not yet done.
+**Pause only when the work genuinely requires the user.** That means three things:
+
+- a destructive or irreversible action the user did not ask for:
+  - deleting data or resources this run did not create, such as a database, a container, a branch or a cloud resource (a tracked file that a branch deletes does not count, because git keeps it);
+  - force-pushing or rewriting pushed history, except a `git push --force-with-lease` to the PR branch you are working on;
+  - a `gcp-*` target that changes cloud state;
+  - editing configuration outside this repository, such as `~/.claude/settings.json` or `~/.codex/config.toml`;
+- a real scope change;
+- input only they can provide (credentials, account approvals, a product decision).
+
+Hitting one of these, ask as soon as you know, with your recommendation. Then carry on with whatever part of the task does not depend on the answer, and end the turn when nothing else can advance. Everything else — retries, missing information you can gather, long verification loops — is yours to push through. While work you were asked for is still owed, these are not pauses:
+
+- a summary that names the next step instead of taking it;
+- an offer to continue;
+- a list of decisions, none of which blocks the work;
+- a report because a milestone is done or the turn has run long.
+
+Put status notes in the same message as your next tool call. Waiting is the exception. In an interactive session, when nothing else can advance and a background task or watcher that the harness tracks is still running, say once what you are waiting for and end the turn; it wakes you when it finishes or reports. A process you detached yourself, such as a `setsid` run, wakes nothing, so start a watcher on it before you end the turn. A subagent or a headless run ends when its turn ends, so it waits inside its own tool calls.
 
 **Simplicity first.** Write the minimum code that solves the problem; nothing speculative. Reserving a seam means a column or an interface boundary, **not** an implementation. Do not build ahead of the current slice. No abstractions for single-use code, no configurability nobody asked for, no error handling for impossible states. If 200 lines could be 50, rewrite it. The test: would a senior engineer call this overcomplicated?
 
 **Surgical changes.** Every changed line should trace directly to the request. Don't "improve" adjacent code, comments, or formatting; match the existing style even where you'd choose differently. Clean up orphans *your* change created (now-unused imports, functions); leave pre-existing dead code alone — mention it instead of deleting it.
 
 **Documents say what code cannot.** Before writing prose, ask whether a comment beside the code would carry it better. It usually would: a comment cannot drift from what it describes, and a document always can — this repo's package reference was three to ten times smaller than the comments it restated, and wrong in places they were right. A document earns its place with what spans files: a subsystem's shape, an invariant two packages share, a decision and the alternative it beat, a contract an operator depends on. It does not earn it by restating a signature, inventorying files, or narrating behavior a reader can run. **Then write it short** — say each thing once, where it belongs, and stop; the concrete number beats "several", the name beats "the relevant component", and a sentence that only announces the next one is deletable. Length is not the target; it is what falls out of saying each thing once. **But never trade truth for brevity**: a shorter sentence that overclaims is a defect, not an improvement — qualify it, or leave it long. Before cutting a fact, confirm it survives somewhere — a comment, an open issue, a changelog entry — and if it does not, move it there first.
+
+**Write it plain.** Write new repository prose about 80% of the way to ASD-STE100, Simplified Technical English. That covers docs, changelog fragments, PR descriptions and commit messages. Give each sentence one idea, and split a sentence longer than about 25 words. Give each paragraph one topic. Put three or more parallel items in a vertical list. Use one word for one thing. A list of identifiers or a quoted message is data, not a sentence. When you split a sentence, keep every qualifier that keeps the claim true. The rule guides the writer; it is not a verifier finding. It does not restyle text you do not otherwise change, and a changelog fragment keeps its one-paragraph format. To explain a flow in a PR description or a final report, draw it.
 
 **Leave the machine as you found it.** Whatever a run spawns, it owns. Interrupting `make verify` still leaks one fixture container per test binary, because the `defer` that removes it never runs — `internal/dockertest` bounds the damage by labelling and later reaping them (#346), but background load, servers and probes have no such backstop. So: note what is already running before you start, look afterwards at what *you* started (`ps`, `docker ps -a`) rather than trusting that a `kill` worked, and remove only what is yours. A fixture label names the suite, never the session, so a parallel session's containers and the local kind cluster are indistinguishable from your own — when the only evidence is a timestamp, ask before sweeping.
 
@@ -186,11 +164,11 @@ These bias toward caution over speed. For trivial changes, use judgment.
 
 Concretely here: "add validation" → write the failing test for invalid input first; "fix the bug" → write the reproducing test first; "refactor X" → tests green before and after. Strong success criteria let you loop to done without check-ins; weak ones ("make it work") don't.
 
-**Independent verification (definition of done).** The implementer never certifies their own work. Before any nontrivial change is declared done — before STATE.md's task progress claims new behavior, before a commit that claims working behavior — dispatch the **`verifier` subagent** with what changed and the success criteria; `.claude/agents/verifier.md` defines the rungs it runs, docs consistency among them. A FAIL or an unresolved blocker means the work is **not done**: fix, then re-verify. Dispatch it with no model override so its pinned model wins — a weak verifier certifies anything. Its verdict and evidence belong in the final report to the user.
+**Independent verification (definition of done).** The implementer never certifies their own work. Before any nontrivial change is declared done — before STATE.md's task progress claims new behavior, before a commit that claims working behavior — dispatch the **`verifier` subagent** with what changed and the success criteria; `.claude/agents/verifier.md` defines the rungs it runs, docs consistency among them. A FAIL or an unresolved blocker means the work is **not done**: fix, then re-verify. Dispatch it with no model or effort override so its pins win — a weak verifier certifies anything. Its verdict and evidence belong in the final report to the user.
 
-**Report only what you can evidence.** Every progress claim cites a tool result from this session — a test run, a diff, a CLI transcript. Unverified work is labeled as such; failures are reported with their output; skipped steps are named. Done-and-verified is stated plainly, without hedging.
+**Report only what you can evidence.** Every progress claim cites a tool result from this session — a test run, a diff, a CLI transcript. Unverified work is labeled as such, naming where you looked; failures are reported with their output; skipped steps are named. Done-and-verified is stated plainly, without hedging.
 
-**Write the final report for a reader who wasn't there.** Open with the outcome, then the supporting detail, then what's needed from the user. Complete sentences, terms spelled out, no arrow chains, no labels invented mid-session unless re-introduced. If short and clear conflict, choose clear.
+**Write the final report for a reader who wasn't there.** Open with the outcome, then what's needed from the user, or that nothing is, then the supporting detail. Complete sentences, terms spelled out, no arrow chains, no labels invented mid-session unless re-introduced. If short and clear conflict, choose clear.
 
 **Testing conventions.**
 - **TDD** for anything with behavior: contract test first, then implement. This matters most for provider adapters, event/JSON round-trips against the wire schema, sandbox providers, and the work-queue lease state machine.

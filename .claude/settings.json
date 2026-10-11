@@ -31,5 +31,9 @@
   },
   "enabledPlugins": {
     "gopls-lsp@claude-plugins-official": true
+  },
+  "attribution": {
+    "pr": "",
+    "sessionUrl": false
   }
 }

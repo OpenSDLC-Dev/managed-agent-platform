@@ -3,6 +3,7 @@ name: issue-triage
 description: Read-only triage of a GitHub issue for this repo. Dispatched when work is about to start from an issue; judges whether the issue needs a docs/plan/ file to clarify and decompose it first, or can go straight to STATE.md tasks. Returns a single strict-JSON verdict — it never drafts the plan, never edits files, never decides for the main agent.
 tools: Bash, Read, Grep, Glob
 model: claude-sonnet-5
+effort: xhigh
 hooks:
   PreToolUse:
     - matcher: "Bash"
