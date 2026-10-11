@@ -49,6 +49,18 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Main's branch protection binds admins (#920) — the designs it beat, 2026-10-12
+
+Main's protection skipped admins, and sessions here push with an admin's gh token. The fix is two repository settings: `enforce_admins` on, and a required pull request with zero approvals. Three designs were rejected, and one gap stays open.
+
+**Rejected: a PreToolUse hook that refuses `git push` to main (#919).** It read each Bash command as text. Reviewers let a push through with a `#` comment line, a `2>&1` suffix, a wrapper such as `timeout`, `--git-dir <path>` or a glob refspec. It also refused heredoc bodies that only mention a push. A text match cannot hold a shell command line, so #919 dropped the hook before merge.
+
+**Rejected: `enforce_admins` alone, as #920 proposed.** A scratch branch with the same settings measured it. An admin's push of a commit with no checks was refused: `GH006 … 2 of 2 required status checks are expected`. A push of a commit that already had passing `ci` and `coverage` went through, because GitHub lets such a commit be pushed directly. With a pull request also required, both pushes were refused: `Changes must be made through a pull request`.
+
+**Rejected: a ruleset that lets admins bypass only through a pull request.** /code-review proposed it, so that a merge on red needs no toggle. But every admin-token session could then merge on red at any time with `gh pr merge --squash --admin`. #920 chose to make admins pass the checks like everyone else. Of the 538 merged pull requests that ran `ci` and `coverage`, none merged before both passed, so none of them would have needed the toggle.
+
+**Open: a push that GitHub counts as a pull request's merge.** GitHub's docs say a pull request's merge commit, made by hand and pushed directly, fails unless it matches GitHub's merge when either of two stale-review settings is on. Both are off here. It is an untested inference that `git push origin HEAD:main`, from a branch whose open pull request meets every rule, would then land the branch unsquashed. `ci` and `coverage` would have passed, but the squash, the review threads and the other CI jobs could be skipped. No probe tried it, because a probe needs an open pull request and its full CI run.
+
 ## A Gemini upstream protocol for the model gateway (plan 62, #900) — archived 2026-10-11, delivered in two PRs (#916 and this close-out)
 
 No key could generate: the maintainer's Gemini API key answers every billable call 402, its prepaid balance empty, and the user chose to build first and leave generation to #903. So the answer and stream converters are tested over answers and two streams `gemini-3.8-flash` gave on Vertex on 2026-10-10, committed under `internal/modelgateway/convert/testdata/gemini`. The request side is checked live, through the free `countTokens`. One more wire fact was measured during review, with a made-up key on `models.list`, `countTokens` and `generateContent`: Gemini answers a key that is not valid with 400 `INVALID_ARGUMENT`, reason `API_KEY_INVALID`, not with a 401, so the gateway reads that reason as a refused credential.
