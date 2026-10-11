@@ -45,10 +45,10 @@ server unchanged. An agent is three independently-swappable pieces:
                                                  │ model calls             │  (web_exec, mcp_exec,    │
                                                  │ (default route)         │  both env kinds)         │
                                                  │                         └──────────────────────────┘
-                                                 │                             ▲ same pull protocol
-                                                 │                             │
+                                                 │                             ┆ same pull protocol as the executor
+                                                 │                             ┆
                                                  │          customer BYOC worker (ant beta:worker
-                                                 │          or cmd/worker) pulls /work/poll
+                                                 │          or cmd/worker) polls the control plane's /work/poll
                                                  ▼
                                           ┌──────────────┐
                                           │ modelgateway │──▶ upstream model endpoints
