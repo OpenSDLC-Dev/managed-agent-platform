@@ -77,7 +77,6 @@ Progress is tracked in:
 Deferred past v1 — **seams reserved, not implemented**, each tracked as an issue. The canonical list is the open issues whose titles carry the `(post-v1)` marker (`gh issue list --state open --limit 100 --search "post-v1 in:title"`, which also returns the occasional issue that merely mentions the phrase); the notes below single out what most often surprises a reader, and are neither the whole of that set nor confined to it. Vaults, skills, files, repository mounting, memory stores and scheduled deployments were on this list and have since landed; what remains includes:
 
 - The **multi-tenant** half of RBAC and SSO ([#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56), which stays open for it). Single-tenant SSO and the three-role matrix are done.
-- **Repository materialization on BYOC compute** ([#322](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/322)): a `self_hosted` session accepts a `github_repository` resource and mounts nothing, without being told otherwise.
 - **BYOC gate delivery** ([#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)) and **credential substitution inside TLS** ([#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)) — until #166, an in-sandbox HTTPS request keeps its vault placeholders rather than having them substituted at egress.
 
 ## Development
