@@ -32,8 +32,8 @@ server unchanged. An agent is three independently-swappable pieces:
                                                │  resource CRUD + optimistic versions      │
                                                │  session state machine (idle/running/…)   │
                                                └──┬───────────────┬────────────────┬───────┘
-                                 model_turn work  │               │ append-only    │ tool_exec · web_exec ·
-                                                  ▼               ▼ event log      ▼ mcp_exec · outputs_harvest
+                                 model_turn work  │               │ append-only    │ tool_exec, web_exec, mcp_exec,
+                                                  ▼               ▼ event log      ▼ outputs_harvest (work queue)
                                           ┌──────────────┐  ┌──────────┐   ┌──────────────────────────┐
                                           │ brain pool   │  │ Postgres │   │ executor                 │
                                           │ (stateless:  │◀▶│ events   │◀─▶│  Docker / K8s sandbox    │

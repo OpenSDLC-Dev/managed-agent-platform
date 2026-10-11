@@ -23,18 +23,21 @@ Two ground rules for every pass:
 `.claude/agents/verifier.md`'s frontmatter pins the verifier's model and effort; this skill
 does not restate them. Dispatch it with **no** `model` or `effort` override, so the pins win:
 
-- From the main session: `Agent({subagent_type: "verifier", …})`. A per-invocation `model`
-  outranks the frontmatter.
+- From the main session: `Agent({subagent_type: "verifier", …})`, with no `model` or
+  `effort` parameter. Either one, passed per invocation, outranks the frontmatter.
 - From a Workflow script: `agent(prompt, {agentType: "verifier", schema})`, with no `model`
   or `effort` in the opts. A general agent told to read verifier.md gets every tool and
   neither pin.
-- Only a `CLAUDE_CODE_EFFORT_LEVEL` environment variable outranks the frontmatter `effort`.
-  Leave it unset, or name it in the PR's verification section.
+- Two environment variables outrank the pins. `CLAUDE_CODE_EFFORT_LEVEL` outranks every
+  `effort`, and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` makes Claude Code ignore the frontmatter
+  `model`. Leave both unset, or name them in the PR's verification section.
 
 Do not override to opus by default; that was a temporary quota workaround, lifted
 2026-07-15. If the pinned model's quota runs out, re-dispatch with `model: "opus"`, tell the
 verifier it runs by override and must hold the same bar, and disclose the override in the
-PR. Never skip verification.
+PR. The Agent tool takes only the alias, which can resolve to the session's own model, so
+read the exact model id from the agent's transcript before you name it. Never skip
+verification.
 
 ## /code-review (Claude side)
 
@@ -45,14 +48,14 @@ level `xhigh` with no finding cap (user decision, 2026-10-11).
 1. Name the level and the cap first, then the scope:
    `Skill({skill: "code-review", args: "xhigh --max-findings all <scope>"})`. Both choices
    are sticky: without a level the command reuses the level typed last, so an unpinned pass
-   drifts the way Codex's config did. Two recorded reviews in docs/HISTORY.md stopped at
-   exactly fifteen findings; the verify rule above is the filter, not a cap.
+   drifts the way Codex's config did. Three recorded `/code-review` passes in
+   docs/HISTORY.md stopped at exactly fifteen findings; the verify rule above is the filter,
+   not a cap.
 2. The Skill route runs as one background fork on the session's model. If the session runs
    another model (another family, or an older Opus after a flagged message switched it),
-   ask the user to run `/model claude-opus-5-5` first. A review on the weaker model is not
-   this pass.
-3. If the Skill route is refused, launch `Workflow({name: "code-review", args: …})` with the
-   same arguments. Its `agent()` calls inherit the session's model when their opts name
+   take step 3's route instead. A review on the weaker model is not this pass.
+3. If the Skill route is refused or the session runs another model, launch
+   `Workflow({name: "code-review", args: …})` with the same arguments. Its `agent()` calls inherit the session's model when their opts name
    none. If the session is not on `claude-opus-5-5`, add `model: "claude-opus-5-5"` to every
    opts object in the persisted script; use the full id, because the `opus` alias follows
    the session's own Opus. Re-invoke with `{scriptPath}` only. Never add `resumeFromRunId`:
@@ -100,8 +103,9 @@ user-invocable only (`disable-model-invocation`).
   and never emit a verdict. Watch the log for the `Turn completed` marker. Elapsed time
   alone never makes a stall: an `xhigh` pass can run 20 to 30 minutes and return its best
   findings late, so budget about 25 minutes. Do not suspect a stall before about 12 minutes;
-  after that, a stall is a run whose rollout log has stopped growing. Find that log with
-  `grep -l <worktree-path> ~/.codex/sessions/**/rollout-*.jsonl`, not by taking the newest
-  file, because one `task` run opens several sessions, and compare its line count across
-  checks a few minutes apart. Do not let a stalled pass block a PR the verifier and the
+  after that, a stall is a run whose rollout log has stopped growing. Touch a marker file
+  just before the launch, then find the run's logs with
+  `find ~/.codex/sessions -name 'rollout-*.jsonl' -newer <marker> | xargs grep -l <worktree-path>`.
+  A plain `grep -l` also matches every earlier run under that path, and the newest file can
+  belong to another session. Compare the line counts across checks a few minutes apart. Do not let a stalled pass block a PR the verifier and the
   Claude review already covered — note the stall in the PR description instead.

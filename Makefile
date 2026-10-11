@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test push-guard-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
+	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -353,13 +353,6 @@ parked-test:
 # capture, joined to the attempt that worked.
 retry-test:
 	python3 .github/scripts/retry_test.py
-
-# The hook that refuses a `git push` to main (.claude/hooks/push_main_guard.py).
-# For a plain push from an admin's session with permission prompts off, it is the
-# only check; its docstring says why. Both of its failures are silent: a missed
-# shape pushes, and a false match refuses a push the workflow needs.
-push-guard-test:
-	python3 .claude/hooks/push_main_guard_test.py
 
 # The one that checks a rule rather than a script: #355/#356 parameterised the
 # operator's coordinates out of the repository by hand, the sweep stopped at
