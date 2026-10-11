@@ -131,7 +131,7 @@ These bias toward caution over speed. For trivial changes, use judgment.
 
 - a destructive or irreversible action the user did not ask for:
   - deleting data or resources this run did not create, such as a database, a container, a branch or a cloud resource (a tracked file that a branch deletes does not count, because git keeps it);
-  - force-pushing or rewriting pushed history, except on the PR branch you are working on;
+  - force-pushing or rewriting pushed history, except a `git push --force-with-lease` to the PR branch you are working on;
   - a `gcp-*` target that changes cloud state;
   - editing configuration outside this repository, such as `~/.claude/settings.json` or `~/.codex/config.toml`;
 - a real scope change;
@@ -164,7 +164,7 @@ Put status notes in the same message as your next tool call. Waiting is the exce
 
 Concretely here: "add validation" → write the failing test for invalid input first; "fix the bug" → write the reproducing test first; "refactor X" → tests green before and after. Strong success criteria let you loop to done without check-ins; weak ones ("make it work") don't.
 
-**Independent verification (definition of done).** The implementer never certifies their own work. Before any nontrivial change is declared done — before STATE.md's task progress claims new behavior, before a commit that claims working behavior — dispatch the **`verifier` subagent** with what changed and the success criteria; `.claude/agents/verifier.md` defines the rungs it runs, docs consistency among them. A FAIL or an unresolved blocker means the work is **not done**: fix, then re-verify. Dispatch it with no model override so its pinned model wins — a weak verifier certifies anything. Its verdict and evidence belong in the final report to the user.
+**Independent verification (definition of done).** The implementer never certifies their own work. Before any nontrivial change is declared done — before STATE.md's task progress claims new behavior, before a commit that claims working behavior — dispatch the **`verifier` subagent** with what changed and the success criteria; `.claude/agents/verifier.md` defines the rungs it runs, docs consistency among them. A FAIL or an unresolved blocker means the work is **not done**: fix, then re-verify. Dispatch it with no model or effort override so its pins win — a weak verifier certifies anything. Its verdict and evidence belong in the final report to the user.
 
 **Report only what you can evidence.** Every progress claim cites a tool result from this session — a test run, a diff, a CLI transcript. Unverified work is labeled as such, naming where you looked; failures are reported with their output; skipped steps are named. Done-and-verified is stated plainly, without hedging.
 

@@ -23,14 +23,17 @@ Two ground rules for every pass:
 `.claude/agents/verifier.md`'s frontmatter pins the verifier's model and effort; this skill
 does not restate them. Dispatch it with **no** `model` or `effort` override, so the pins win:
 
-- From the main session: `Agent({subagent_type: "verifier", …})`, with no `model` or
-  `effort` parameter. Either one, passed per invocation, outranks the frontmatter.
-- From a Workflow script: `agent(prompt, {agentType: "verifier", schema})`, with no `model`
-  or `effort` in the opts. A general agent told to read verifier.md gets every tool and
-  neither pin.
-- Two environment variables outrank the pins. `CLAUDE_CODE_EFFORT_LEVEL` outranks every
-  `effort`, and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` makes Claude Code ignore the frontmatter
-  `model`. Leave both unset, or name them in the PR's verification section.
+- From the main session: `Agent({subagent_type: "verifier", …})`. A `model` or `effort`
+  passed per invocation outranks the frontmatter.
+- From a Workflow script: `agent(prompt, {agentType: "verifier", schema})`. A general agent
+  told to read verifier.md gets every tool and neither pin.
+- Three environment variables outrank the pins (Claude Code 2.1.296):
+  - `CLAUDE_CODE_EFFORT_LEVEL` outranks every `effort`.
+  - `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` ignores the frontmatter `model` and every `model`
+    passed per invocation.
+  - `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` replaces every model in a Workflow run.
+
+  Leave them unset, or name them in the PR's verification section.
 - Settings can still lower the pins without a word in a background agent: a
   `maxEffortLevel` or an organization effort cap clamps `effort`, and an `availableModels`
   allowlist substitutes a blocked model. So read the model and the effort from the agent's
@@ -57,15 +60,18 @@ level `xhigh` with no finding cap (user decision, 2026-10-11).
    not a cap.
 2. The Skill route runs as one background fork on the session's model. If the session runs
    another model (another family, or an older Opus after a flagged message switched it),
-   ask the user to run `/model claude-opus-5-5` first, because only the user can switch the
-   session's model. A review on the weaker model is not this pass.
-3. If the Skill route is refused, launch `Workflow({name: "code-review", args: …})` with the
-   same arguments. Not every version registers that workflow: on 2026-08-22 it answered
-   `not found. Available: deep-research`. Its `agent()` calls inherit the session's model
-   when their opts name none. If the session is not on `claude-opus-5-5`, add `model: "claude-opus-5-5"` to every
-   opts object in the persisted script; use the full id, because the `opus` alias follows
-   the session's own Opus. Re-invoke with `{scriptPath}` only. Never add `resumeFromRunId`:
-   it replays cached results from the old model.
+   take step 3's route. A review on the weaker model is not this pass.
+3. If the Skill route is refused or the session runs another model, launch
+   `Workflow({name: "code-review", args: …})` with the same arguments. Its `agent()` calls
+   inherit the session's model when their opts name none, so on another model add
+   `model: "claude-opus-5-5"` to every opts object in the persisted script. Use the full id,
+   because the `opus` alias follows the session's own Opus. Re-invoke with `{scriptPath}`
+   only. Never add `resumeFromRunId`: it replays cached results from the old model.
+
+   That workflow is not registered in every session: the route worked on 2026-08-08 and
+   answered `not found. Available: deep-research` on 2026-08-22. If it is missing and the
+   session runs another model, ask the user to run `/model claude-opus-5-5`. Only the user
+   can switch the session's model.
 4. Confirm the model before citing it. A fork's transcript
    (`~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl`) records `"model"`
    on every turn; a Workflow run's transcripts sit under `subagents/workflows/<runId>/`.
@@ -109,9 +115,12 @@ user-invocable only (`disable-model-invocation`).
   and never emit a verdict. Watch the log for the `Turn completed` marker. Elapsed time
   alone never makes a stall: an `xhigh` pass can run 20 to 30 minutes and return its best
   findings late, so budget about 25 minutes. Do not suspect a stall before about 12 minutes;
-  after that, a stall is a run whose rollout log has stopped growing. Touch a marker file
-  just before the launch, then find the run's logs with
-  `find ~/.codex/sessions -name 'rollout-*.jsonl' -newer <marker> | xargs grep -l <worktree-path>`.
-  A plain `grep -l` also matches every earlier run under that path, and the newest file can
-  belong to another session. Compare the line counts across checks a few minutes apart. Do not let a stalled pass block a PR the verifier and the
-  Claude review already covered — note the stall in the PR description instead.
+  after that, a stall is a run none of whose rollout logs has grown between two checks a
+  few minutes apart. A run's sub-sessions write logs of their own, and the parent's log
+  stops while it waits on them. To find the logs, touch a marker file in your scratch
+  directory just before the launch, then run
+  `find ~/.codex/sessions -name 'rollout-*.jsonl' -newer <marker> | xargs grep -lF '"cwd":"<worktree-path>"'`.
+  The marker leaves out earlier runs, and the anchored `cwd` leaves out another worktree
+  whose path shares a prefix. Remove the marker when the run ends. Do not let a stalled pass
+  block a PR the verifier and the Claude review already covered — note the stall in the PR
+  description instead.
