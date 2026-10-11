@@ -107,7 +107,7 @@ The module path `github.com/OpenSDLC-Dev/managed-agent-platform` carries the own
 
 ## Iteration workflow (branch → review → PR → CI → squash merge)
 
-Every change lands through a PR; **never commit directly to `main`**. Main's branch protection holds admins to this too (#920). It refuses any direct push to `main`, and a merge needs green `ci` and `coverage` checks. A merge on red, even in an emergency, needs a maintainer to turn off its "Do not allow bypassing the above settings" option for the duration. Releases are their own ritual — a release PR plus an annotated tag; versioning policy and the steps live in [docs/RELEASING.md](./docs/RELEASING.md).
+Every change lands through a PR; **never commit directly to `main`**. Main's branch protection requires a PR for every change, from admins too (#920). A merge needs the `ci` and `coverage` checks to pass. The protection checks only those two; step 6's "never merge red" covers the whole workflow. Only the user can make an exception to step 6. An admin then turns off `enforce_admins` ("Do not allow bypassing the above settings"), merges with `gh pr merge --admin`, and turns it back on at once. Releases are their own ritual — a release PR plus an annotated tag; versioning policy and the steps live in [docs/RELEASING.md](./docs/RELEASING.md).
 
 Review tiering: a diff whose changed paths (by `git diff main...HEAD --name-only`) are exclusively documentation markdown — `*.md` files outside `.claude/`, excluding CLAUDE.md and AGENTS.md themselves — may run a **single** code reviewer instead of the dual pass in step 4, but always keeps the verifier run, including its docs-consistency rung. Markdown that steers behavior (`.claude/` agents and skills, CLAUDE.md, AGENTS.md), anything else, or any ambiguity takes the full ritual.
 
@@ -133,7 +133,7 @@ These bias toward caution over speed. For trivial changes, use judgment.
   - deleting data or resources this run did not create, such as a database, a container, a branch or a cloud resource (a tracked file that a branch deletes does not count, because git keeps it);
   - force-pushing or rewriting pushed history, except a `git push --force-with-lease` to the PR branch you are working on;
   - a `gcp-*` target that changes cloud state;
-  - editing configuration outside this repository, such as `~/.claude/settings.json` or `~/.codex/config.toml`;
+  - editing configuration outside this repository, such as `~/.claude/settings.json`, `~/.codex/config.toml` or a GitHub repository setting like main's branch protection;
 - a real scope change;
 - input only they can provide (credentials, account approvals, a product decision).
 
