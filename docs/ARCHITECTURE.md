@@ -32,22 +32,27 @@ server unchanged. An agent is three independently-swappable pieces:
                                                │  resource CRUD + optimistic versions      │
                                                │  session state machine (idle/running/…)   │
                                                └──┬───────────────┬────────────────┬───────┘
-                                 model_turn work  │               │ append-only    │ tool_exec + web_exec
-                                                  ▼               ▼ event log      ▼  (work queue)
+                                 model_turn work  │               │ append-only    │ tool_exec · web_exec ·
+                                                  ▼               ▼ event log      ▼ mcp_exec · outputs_harvest
                                           ┌──────────────┐  ┌──────────┐   ┌──────────────────────────┐
                                           │ brain pool   │  │ Postgres │   │ executor                 │
                                           │ (stateless:  │◀▶│ events   │◀─▶│  Docker / K8s sandbox    │
                                           │ replay log,  │  │ sessions │   │  providers; runs the     │
                                           │ call model,  │  │ agents…  │   │  built-in toolset in a   │
                                           │ emit events) │  └──────────┘   │  per-session container;  │
-                                          └──────────────┘                 │  web_fetch/web_search    │
-                                                                           │  in-process (web_exec,   │
-                                                                           │  both env kinds)         │
-                                                                           └──────────────────────────┘
-                                                                               ▲ same pull protocol
-                                                                               │
-                                                            customer BYOC worker (ant beta:worker
-                                                            or cmd/worker) pulls /work/poll
+                                          └──────┬───────┘                 │  web_fetch/web_search    │
+                                                 │                         │  and MCP in-process      │
+                                                 │ model calls             │  (web_exec, mcp_exec,    │
+                                                 │ (default route)         │  both env kinds)         │
+                                                 │                         └──────────────────────────┘
+                                                 │                             ▲ same pull protocol
+                                                 │                             │
+                                                 │          customer BYOC worker (ant beta:worker
+                                                 │          or cmd/worker) pulls /work/poll
+                                                 ▼
+                                          ┌──────────────┐
+                                          │ modelgateway │──▶ upstream model endpoints
+                                          └──────────────┘
 ```
 
 ## Process topology

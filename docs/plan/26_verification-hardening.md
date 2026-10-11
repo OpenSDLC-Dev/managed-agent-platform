@@ -81,9 +81,9 @@ Measured at 56f81f9, not assumed:
 - The bare word `BLOCKED` already appears in `internal/sandbox/sandboxtest/egress.go:125,131`
   as an egress-probe **behavior** token; a marker must not collide with a bare-word grep.
 - The verifier's report format is an exact prose template
-  (`.claude/agents/verifier.md:32-39`); rung 2's scratch-copy mutation proof is
+  (`.claude/agents/verifier.md:33-40`); rung 2's scratch-copy mutation proof is
   discretionary — "When you doubt a specific test can fail, you may prove it"
-  (`verifier.md:23`, reinforced at `:3` and `:12`). Practice is already stricter than the
+  (`verifier.md:24`, reinforced at `:3` and `:13`). Practice is already stricter than the
   rule.
 - `evals` artifacts carry no rerun command: the `record` struct
   (`evals/report_test.go:41-54`) and `renderSummary`'s failure detail

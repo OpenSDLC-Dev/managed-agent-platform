@@ -52,48 +52,7 @@ Six read-only local reference sources serve as ground truth and design reference
 
 ## Repo layout
 
-```
-cmd/{controlplane,brain,executor,worker,modelgateway}   # the five server binaries
-cmd/gate                                   # per-session egress sidecar (plan 12)
-internal/
-  domain/     # Anthropic-native types — the source of truth; no adk/genai here
-  api/        # wire-compatible REST handlers, ID prefixes, auth, work API
-  events/     # append-only store, SSE (Postgres LISTEN/NOTIFY), delta reconciliation
-  brain/      # orchestration loop, replay, provider request assembly
-  provider/   # ModelProvider iface + anthropic/ + openai/ + registry (model→provider)
-  executor/   # tool_exec consumer — the platform-managed half of the pull protocol
-  worker/     # BYOC worker — the customer-hosted twin of executor/, wire-only
-  toolset/    # the built-in tools (agent_toolset_20260401)
-  webtool/    # web_fetch/web_search backends: Searcher/Fetcher ifaces + tavily/ + jina/
-  mcp/        # the MCP client: a thin wrapper over the official go-sdk (plan 29)
-  dialguard/  # the dialler under the five paths that reach a customer-supplied
-              #   or agent-declared destination — gate, MCP client, vault probe,
-              #   token refresh, JWKS fetch: resolves a name once, holds each
-              #   address to the SSRF floor, dials what survives. Not a universal
-              #   egress check; docs/ARCHITECTURE.md says what it is not
-  oauthrefresh/ # the RFC 6749 refresh-token grant, shared by the mcp_oauth_validate
-              #   probe and the executor's dial-time credential refresh (plan 29)
-  sandbox/    # Sandbox/Provider iface + docker/ + k8s/ + backend selection + shell/
-  blob/       # object-storage seam: Store iface + s3/ (S3-compatible via minio-go)
-              #   + gcs/ (GCS-native, Application Default Credentials) + backend/ (selection)
-  secrets/    # credential-cipher seam: Cipher iface + backend/ (selection) + local/ (AES-GCM)
-              #   + openbao/ (transit) + gcpkms/ (Cloud KMS)
-  skills/     # skill-upload validation + canonical-zip normalization (SKILL.md frontmatter)
-  cron/       # the 5-field POSIX cron engine behind a deployment schedule; embeds
-              #   time/tzdata, because the server image ships no zoneinfo (plan 37)
-  queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
-  identity/   # the human-auth boundary: OIDC / trusted-proxy JWT verifier, claim→role
-              #   mapping, bounded JWKS cache (go-jose; no vendor SDK)
-  apikey/     # the platform API key check, shared by the control plane and the model gateway
-  modelgateway/ # the model gateway (plan 59): Anthropic inference and routing, the upstream
-              #   relay, vendor profiles, its schema's queries, the config snapshot, /admin/v1/,
-              #   and convert/, the Anthropic ⇄ Chat Completions conversion, whose request half
-              #   provider/openai shares, Responses ⇄ Anthropic for the stateless /v1/responses,
-              #   and Anthropic ⇄ Gemini generateContent for a Gemini upstream (plan 62)
-  telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
-  store/      # Postgres schema/migrations, reserved multi-tenant columns
-deploy/{helm,compose,gcp}
-```
+`cmd/` holds the five server binaries and `cmd/gate`, named under Core architecture; `internal/` holds the packages; `deploy/{helm,compose,gcp}` holds the install paths.
 
 **Test support is named, not listed here**: a directory under `internal/` whose name ends in `test` is one (`pgtest`, `sandboxtest`, `mcptest`, …). The `test` recipe in the Makefile holds the authoritative set, because it has to spell them out to keep them out of the coverage denominator — so adding one means editing that recipe: both its exclusion expression and the comment above it that names the same packages in prose. Beside them sit the top-level `evals/` live suite and `acceptance/` doc-example suite. There is no `internal/policy`: permission policy lives across `domain`/`toolset`/`brain`/`api`.
 
@@ -122,6 +81,7 @@ make openbao-init-test   # ...and the compose + chart OpenBao init scripts, run 
 make cd-outcome-test     # ...and the CD failure notifier's classifier, which `workflow_run` would otherwise first run on main
 make parked-test         # ...and the parked-cluster label rule `deploy.yml` and `staging-parked.yml` share
 make retry-test          # ...and the retry wrapper both notifiers copy, lifted out of the workflow YAML and run
+make push-guard-test     # ...and the PreToolUse hook that refuses a `git push` to main, the one check left with permission prompts off
 make identifiers-test    # ...and the documentation, for the four shapes an operator's coordinates take (#356's rule)
 make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires, every `actions/checkout` for the `persist-credentials: false` beside it, and every setup-go step and Go image reference for go.mod's `toolchain` release (images by digest too)
 make pipes-test          # ...and every pipeline in them, for a reading end that can exit 0 before EOF: under `pipefail` a `grep -q` that has matched carries the writer's SIGPIPE to 141 and the step reports a miss
@@ -132,7 +92,7 @@ make gcp-kms-role-check  # ...and each identity's key-level Cloud KMS role again
 make gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test gcp-mode2-secret-test gcp-power-test gcp-tfvars-test gcp-env-targets-test  # ...and its tooling, run rather than read
 ```
 
-The `gcp-*` targets — like `eval`, `openbao-init-test`, `cd-outcome-test`, `parked-test`, `retry-test`, `identifiers-test`, `pins-test`, `pipes-test`, `tf-corpus-check` (the terraform-binary oracle behind the shared `.tf` corpus; of the two rungs that read the corpus itself, `tools/kmsrole`'s own test is in the gate and the Python one runs under `gcp-split-check-test`), `registry-check` (the half of the [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) pointer guard that asks GitHub whether an issue is still open; its shape half runs inside the gate as `tools/registrycheck`'s own test), `sdk-bump-report` (plan 51's judgment rung over the same file's SDK citations and the ones in Go comments, whose two failing rungs likewise run in the gate as `tools/sdkref`'s own test; `make sdk-bump-report` prints what they find, above its report) and the release tooling (`changelog`, `changelog-notes`; [docs/RELEASING.md](./docs/RELEASING.md)) — sit **outside** the gate on purpose: `deploy/gcp/`'s Terraform is developer tooling for GCP deployment (plan 20, Decision 9), never a dependency of the platform, its build, or `make verify`. The twelve `gcp-*` checking targets above need no credentials and all run in CI; the apply targets cost money and are interactive by design, and `gcp-env-stop`/`gcp-env-start`/`gcp-env-status` park and revive staging without Terraform, state or tfvars at all. `environment/`'s state is a GCS bucket `foundation/` owns (#478), passed to `init` as `-backend-config` rather than committed, so `PROJECT` is now required by the targets that touch it; `foundation/`'s own state stays local, deliberately. Each recipe says what it is for. Terraform is not installed by this repo, and is not in Homebrew core: `brew install hashicorp/tap/terraform`.
+The `gcp-*` targets — like `eval`, `openbao-init-test`, `cd-outcome-test`, `parked-test`, `retry-test`, `push-guard-test`, `identifiers-test`, `pins-test`, `pipes-test`, `tf-corpus-check` (the terraform-binary oracle behind the shared `.tf` corpus; of the two rungs that read the corpus itself, `tools/kmsrole`'s own test is in the gate and the Python one runs under `gcp-split-check-test`), `registry-check` (the half of the [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) pointer guard that asks GitHub whether an issue is still open; its shape half runs inside the gate as `tools/registrycheck`'s own test), `sdk-bump-report` (plan 51's judgment rung over the same file's SDK citations and the ones in Go comments, whose two failing rungs likewise run in the gate as `tools/sdkref`'s own test; `make sdk-bump-report` prints what they find, above its report) and the release tooling (`changelog`, `changelog-notes`; [docs/RELEASING.md](./docs/RELEASING.md)) — sit **outside** the gate on purpose: `deploy/gcp/`'s Terraform is developer tooling for GCP deployment (plan 20, Decision 9), never a dependency of the platform, its build, or `make verify`. The twelve `gcp-*` checking targets above need no credentials and all run in CI; the apply targets cost money and are interactive by design, and `gcp-env-stop`/`gcp-env-start`/`gcp-env-status` park and revive staging without Terraform, state or tfvars at all. `environment/`'s state is a GCS bucket `foundation/` owns (#478), passed to `init` as `-backend-config` rather than committed, so `PROJECT` is now required by the targets that touch it; `foundation/`'s own state stays local, deliberately. Each recipe says what it is for. Terraform is not installed by this repo, and is not in Homebrew core: `brew install hashicorp/tap/terraform`.
 
 CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. A second workflow, `registry.yml`, runs `make registry-check` nightly and on any PR touching the registry, the guard or the Makefile — the state rung a credential-free gate cannot hold. A third, `sdk-bump.yml`, runs `make sdk-bump-report` on any PR touching `go.mod`, a citation (`docs/DIVERGENCES.md` or a Go file) or the Makefile, and fails while a transition it reports awaits a disposition — so a transition is read on the pull request that brings it, and `make verify` deliberately never reads one. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — `cmd/` main glue and test support are deliberately outside the denominator, and the `test` recipe both computes that denominator and argues the exclusion. `make test` needs a reachable Docker daemon and the `docker` CLI on PATH, which the store, API, sandbox and toolset suites drive it through, a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works), and GitHub until `make ripgrep` has fetched the pinned ripgrep the grep tool runs, and it runs from a git clone, not a source archive (`tools/sdkref` asks git which files are this repository's); a missing daemon, binary, cluster or clone is a hard failure, not a skip.
 
@@ -164,17 +124,32 @@ Review tiering: a diff whose changed paths (by `git diff main...HEAD --name-only
 
 These bias toward caution over speed. For trivial changes, use judgment.
 
-**Think before coding.** State assumptions explicitly rather than picking silently. This codebase has a specific failure mode: *guessing at the wire schema*. When an exact JSON shape isn't in the public docs, do not invent it — read the reference checkouts (SDK types first), and record a real `ant` CLI stream when only behavior can answer. Likewise, if a requirement admits two readings (e.g. whether a field is session-local or agent-level), surface both and ask. If something is confusing, stop and name what's confusing. If a simpler approach exists, say so — push back when warranted.
+**Think before coding.** State assumptions explicitly rather than picking silently. This codebase has a specific failure mode: *guessing at the wire schema*. When an exact JSON shape isn't in the public docs, do not invent it — read the reference checkouts (SDK types first), and record a real `ant` CLI stream when only behavior can answer. Likewise, if a requirement admits two readings (e.g. whether a field is session-local or agent-level), surface both and ask. If something is confusing, name it, then settle it from the code, the docs and the reference checkouts; what they cannot settle goes to the user under the pause rule below. If a simpler approach exists, say so — push back when warranted.
 
 **Assessment is a deliverable too.** When the user is describing a problem or asking a question rather than requesting a change, report your findings and stop — don't fix until asked. Before any state-changing command (killing a server, dropping a test database, rewriting `.claude/` or workflow config), check the evidence supports *that specific* action — a pattern-matched signal may have a different cause.
 
-**Pause only when the work genuinely requires the user.** That means: a destructive or irreversible action, a real scope change, or input only they can provide (credentials, account approvals, a product decision). Hitting one of these, ask and end the turn. Everything else — retries, missing information you can gather, long verification loops — is yours to push through; never end the turn on a promise of work not yet done.
+**Pause only when the work genuinely requires the user.** That means three things:
+
+- a destructive or irreversible action the user did not ask for: deleting data or resources this run did not create (a database, a container, a branch, a cloud resource — not a tracked file a branch deletes, since git keeps it), force-pushing or rewriting pushed history, a `gcp-*` target that changes cloud state, or editing configuration outside this repository (`~/.claude/settings.json`, `~/.codex/config.toml`);
+- a real scope change;
+- input only they can provide (credentials, account approvals, a product decision).
+
+Hitting one of these, ask as soon as you know, with your recommendation. Then carry on with whatever part of the task does not depend on the answer, and end the turn when nothing else can advance. Everything else — retries, missing information you can gather, long verification loops — is yours to push through. While work you were asked for is still owed, these are not pauses:
+
+- a summary that names the next step instead of taking it;
+- an offer to continue;
+- a list of decisions, none of which blocks the work;
+- a report because a milestone is done or the turn has run long.
+
+Put status notes in the same message as your next tool call. Waiting is the exception. In an interactive session, when a background task or watcher you started is still running, say once what you are waiting for and end the turn; its completion wakes you. A subagent or a headless run ends when its turn ends, so it waits inside its own tool calls.
 
 **Simplicity first.** Write the minimum code that solves the problem; nothing speculative. Reserving a seam means a column or an interface boundary, **not** an implementation. Do not build ahead of the current slice. No abstractions for single-use code, no configurability nobody asked for, no error handling for impossible states. If 200 lines could be 50, rewrite it. The test: would a senior engineer call this overcomplicated?
 
 **Surgical changes.** Every changed line should trace directly to the request. Don't "improve" adjacent code, comments, or formatting; match the existing style even where you'd choose differently. Clean up orphans *your* change created (now-unused imports, functions); leave pre-existing dead code alone — mention it instead of deleting it.
 
 **Documents say what code cannot.** Before writing prose, ask whether a comment beside the code would carry it better. It usually would: a comment cannot drift from what it describes, and a document always can — this repo's package reference was three to ten times smaller than the comments it restated, and wrong in places they were right. A document earns its place with what spans files: a subsystem's shape, an invariant two packages share, a decision and the alternative it beat, a contract an operator depends on. It does not earn it by restating a signature, inventorying files, or narrating behavior a reader can run. **Then write it short** — say each thing once, where it belongs, and stop; the concrete number beats "several", the name beats "the relevant component", and a sentence that only announces the next one is deletable. Length is not the target; it is what falls out of saying each thing once. **But never trade truth for brevity**: a shorter sentence that overclaims is a defect, not an improvement — qualify it, or leave it long. Before cutting a fact, confirm it survives somewhere — a comment, an open issue, a changelog entry — and if it does not, move it there first.
+
+**Write it plain.** Write new repository prose about 80% of the way to ASD-STE100, Simplified Technical English. That covers docs, changelog fragments, PR descriptions and commit messages. Give each sentence one idea, and split a sentence longer than about 25 words. Give each paragraph one topic. Put three or more parallel items in a vertical list. Use one word for one thing. A list of identifiers or a quoted message is data, not a sentence. When you split a sentence, keep every qualifier that keeps the claim true. The rule guides the writer; it is not a verifier finding. It does not restyle text you do not otherwise change, and a changelog fragment keeps its one-paragraph format. To explain a flow in a PR description or a final report, draw it.
 
 **Leave the machine as you found it.** Whatever a run spawns, it owns. Interrupting `make verify` still leaks one fixture container per test binary, because the `defer` that removes it never runs — `internal/dockertest` bounds the damage by labelling and later reaping them (#346), but background load, servers and probes have no such backstop. So: note what is already running before you start, look afterwards at what *you* started (`ps`, `docker ps -a`) rather than trusting that a `kill` worked, and remove only what is yours. A fixture label names the suite, never the session, so a parallel session's containers and the local kind cluster are indistinguishable from your own — when the only evidence is a timestamp, ask before sweeping.
 
@@ -188,9 +163,9 @@ Concretely here: "add validation" → write the failing test for invalid input f
 
 **Independent verification (definition of done).** The implementer never certifies their own work. Before any nontrivial change is declared done — before STATE.md's task progress claims new behavior, before a commit that claims working behavior — dispatch the **`verifier` subagent** with what changed and the success criteria; `.claude/agents/verifier.md` defines the rungs it runs, docs consistency among them. A FAIL or an unresolved blocker means the work is **not done**: fix, then re-verify. Dispatch it with no model override so its pinned model wins — a weak verifier certifies anything. Its verdict and evidence belong in the final report to the user.
 
-**Report only what you can evidence.** Every progress claim cites a tool result from this session — a test run, a diff, a CLI transcript. Unverified work is labeled as such; failures are reported with their output; skipped steps are named. Done-and-verified is stated plainly, without hedging.
+**Report only what you can evidence.** Every progress claim cites a tool result from this session — a test run, a diff, a CLI transcript. Unverified work is labeled as such, naming where you looked; failures are reported with their output; skipped steps are named. Done-and-verified is stated plainly, without hedging.
 
-**Write the final report for a reader who wasn't there.** Open with the outcome, then the supporting detail, then what's needed from the user. Complete sentences, terms spelled out, no arrow chains, no labels invented mid-session unless re-introduced. If short and clear conflict, choose clear.
+**Write the final report for a reader who wasn't there.** Open with the outcome, then what's needed from the user, or that nothing is, then the supporting detail. Complete sentences, terms spelled out, no arrow chains, no labels invented mid-session unless re-introduced. If short and clear conflict, choose clear.
 
 **Testing conventions.**
 - **TDD** for anything with behavior: contract test first, then implement. This matters most for provider adapters, event/JSON round-trips against the wire schema, sandbox providers, and the work-queue lease state machine.
