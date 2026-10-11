@@ -31,6 +31,10 @@ does not restate them. Dispatch it with **no** `model` or `effort` override, so 
 - Two environment variables outrank the pins. `CLAUDE_CODE_EFFORT_LEVEL` outranks every
   `effort`, and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` makes Claude Code ignore the frontmatter
   `model`. Leave both unset, or name them in the PR's verification section.
+- Settings can still lower the pins without a word in a background agent: a
+  `maxEffortLevel` or an organization effort cap clamps `effort`, and an `availableModels`
+  allowlist substitutes a blocked model. So read the model and the effort from the agent's
+  transcript, which records both on every turn, and name them in the PR.
 
 Do not override to opus by default; that was a temporary quota workaround, lifted
 2026-07-15. If the pinned model's quota runs out, re-dispatch with `model: "opus"`, tell the
@@ -53,10 +57,12 @@ level `xhigh` with no finding cap (user decision, 2026-10-11).
    not a cap.
 2. The Skill route runs as one background fork on the session's model. If the session runs
    another model (another family, or an older Opus after a flagged message switched it),
-   take step 3's route instead. A review on the weaker model is not this pass.
-3. If the Skill route is refused or the session runs another model, launch
-   `Workflow({name: "code-review", args: …})` with the same arguments. Its `agent()` calls inherit the session's model when their opts name
-   none. If the session is not on `claude-opus-5-5`, add `model: "claude-opus-5-5"` to every
+   ask the user to run `/model claude-opus-5-5` first, because only the user can switch the
+   session's model. A review on the weaker model is not this pass.
+3. If the Skill route is refused, launch `Workflow({name: "code-review", args: …})` with the
+   same arguments. Not every version registers that workflow: on 2026-08-22 it answered
+   `not found. Available: deep-research`. Its `agent()` calls inherit the session's model
+   when their opts name none. If the session is not on `claude-opus-5-5`, add `model: "claude-opus-5-5"` to every
    opts object in the persisted script; use the full id, because the `opus` alias follows
    the session's own Opus. Re-invoke with `{scriptPath}` only. Never add `resumeFromRunId`:
    it replays cached results from the old model.

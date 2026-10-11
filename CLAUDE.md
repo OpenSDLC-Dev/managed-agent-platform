@@ -144,7 +144,7 @@ Hitting one of these, ask as soon as you know, with your recommendation. Then ca
 - a list of decisions, none of which blocks the work;
 - a report because a milestone is done or the turn has run long.
 
-Put status notes in the same message as your next tool call. Waiting is the exception. In an interactive session, when a background task or watcher that the harness tracks is still running, say once what you are waiting for and end the turn; its completion wakes you. A process you detached yourself, such as a `setsid` run, wakes nothing, so start a watcher on it before you end the turn. A subagent or a headless run ends when its turn ends, so it waits inside its own tool calls.
+Put status notes in the same message as your next tool call. Waiting is the exception. In an interactive session, when nothing else can advance and a background task or watcher that the harness tracks is still running, say once what you are waiting for and end the turn; it wakes you when it finishes or reports. A process you detached yourself, such as a `setsid` run, wakes nothing, so start a watcher on it before you end the turn. A subagent or a headless run ends when its turn ends, so it waits inside its own tool calls.
 
 **Simplicity first.** Write the minimum code that solves the problem; nothing speculative. Reserving a seam means a column or an interface boundary, **not** an implementation. Do not build ahead of the current slice. No abstractions for single-use code, no configurability nobody asked for, no error handling for impossible states. If 200 lines could be 50, rewrite it. The test: would a senior engineer call this overcomplicated?
 
