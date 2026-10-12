@@ -64,7 +64,7 @@ var errRepoNoCredential = errors.New("repository credential row missing")
 // and the agent sees an absent path. Unlike a file's, it also surfaces as a
 // session.error the client can see (decision 4). refs come from the same
 // locked session read that gated the run (sessionForRun).
-func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, progress func()) {
+func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, skilled bool, progress func()) {
 	mounts := make([]repoRef, 0, len(refs))
 	for _, r := range refs {
 		if r.Type == "github_repository" && r.ID != "" && r.URL != "" && r.MountPath != "" {
@@ -121,7 +121,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		// database by any route other than the create endpoint would otherwise
 		// have that command built for it. `/workspace/repo/..` cleans to
 		// `/workspace`; `/tmp` is the platform's own staging root.
-		if err := e.safeRepoMount(m.MountPath); err != nil {
+		if err := e.safeRepoMount(m.MountPath, skilled); err != nil {
 			failed++
 			recordRepoMaterialized(ctx, repoOutcomeInternal)
 			slog.WarnContext(ctx, "repository mount path refused by the executor",
@@ -257,18 +257,22 @@ const repoStagingRoot = "/tmp"
 // ask for; this decides only what may be destroyed. Three of the refusals are
 // things the control plane cannot know, which is why they live here:
 //
-//   - the workdir, and the skills directory inside it. Skills are materialized
-//     into <workdir>/skills a few lines before repositories are, so a mount of
-//     either would `rm -rf` a tree written in the same pass — while the system
-//     prompt goes on naming skills/<dir>/SKILL.md. This is reachable without
-//     anyone trying: a repository named `skills` derives exactly
-//     <workdir>/skills as its default mount.
+//   - the workdir or a directory holding it, and — when the run has skills
+//     (skilled) — the skills directory inside it and every path below it.
+//     Skills are materialized into <workdir>/skills a few lines before
+//     repositories are, so such a mount would `rm -rf` a tree written in the
+//     same pass, while the system prompt goes on naming
+//     skills/<dir>/SKILL.md. Create refuses the same paths under the default
+//     workdir only (#584), so this is the one guard for any other; a
+//     skill-free run leaves the directory alone, so a repository named
+//     `skills` may take its default mount there, as the reference was
+//     recorded doing.
 //   - another repository's staging path. `/workspace/.x.map-repo-staging` is a
 //     mount path the API accepts, and cloning `/workspace/x` removes it twice.
 //
 // The workdir is executor configuration, and the staging name is an executor
 // implementation detail; neither is visible where the resource is validated.
-func (e *Executor) safeRepoMount(mount string) error {
+func (e *Executor) safeRepoMount(mount string, skilled bool) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
 	}
@@ -285,8 +289,11 @@ func (e *Executor) safeRepoMount(mount string) error {
 	if workdir == "" {
 		workdir = sandbox.DefaultWorkdir
 	}
-	if mount == path.Clean(workdir) || mount == path.Join(workdir, "skills") {
-		return fmt.Errorf("mount path %q is the sandbox workdir or its skills directory", mount)
+	if wd := path.Clean(workdir); mount == wd || strings.HasPrefix(wd, mount+"/") {
+		return fmt.Errorf("mount path %q is the sandbox workdir or holds it", mount)
+	}
+	if root := path.Join(workdir, "skills"); skilled && (mount == root || strings.HasPrefix(mount, root+"/")) {
+		return fmt.Errorf("mount path %q is under the skills directory", mount)
 	}
 	if strings.HasPrefix(path.Base(mount), ".") && strings.HasSuffix(mount, stagingSuffix) {
 		return fmt.Errorf("mount path %q is a repository staging path", mount)
