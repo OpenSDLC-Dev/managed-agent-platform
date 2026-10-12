@@ -20,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 // Unit M of plan 25 (docs/plan/25_git-repo-mounting.md, "Verification"): the
@@ -1072,6 +1073,27 @@ func TestRepoZeroShaIsRefused(t *testing.T) {
 	}
 }
 
+// TestRepoMalformedShaIsRefused 🔍: create admits only forty hex characters,
+// but a stored row is read back here, and the commit fetch puts its sha into a
+// refspec. Anything else would reach the remote as a branch name (`abc`) or
+// break the refspec (`a:b`), so it is refused first, as the caller's.
+func TestRepoMalformedShaIsRefused(t *testing.T) {
+	for _, sha := range []string{"abc", strings.Repeat("a", 39), strings.Repeat("g", 40), "a:" + strings.Repeat("b", 38), strings.Repeat("c", 39) + "*"} {
+		t.Run(sha, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: sha}}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if got := cloneReason(err); err == nil || got != repoOutcomeCheckout {
+				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeCheckout, err)
+			}
+			if n := fx.requests.Load(); n != 0 {
+				t.Errorf("the remote was asked %d time(s)", n)
+			}
+		})
+	}
+}
+
 // TestCloneReasonBlamesOurselvesForCancellation 🔍: nothing but this platform
 // cancels a clone's context without a deadline — a lost lease, or a shutting
 // down executor. go-git surfaces it as a *url.Error, which the network arm's
@@ -1170,6 +1192,49 @@ func TestCloneReasonBlamesTheRightSide(t *testing.T) {
 			}
 		})
 	}
+
+	// A name git admits but go-git cannot carry is our limit, not the caller's
+	// mistake. go-git builds a branch's refspec from Short(), which stops at a
+	// space and would fetch another branch's tree, so that name is refused
+	// before the remote is asked.
+	t.Run("branch name go-git cuts short", func(t *testing.T) {
+		name := "feat" + string(rune(0x00a0)) + "x"
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		fx.branch(t, "feat", map[string]string{"feat.txt": "x\n"})
+		fx.branch(t, name, map[string]string{"x.txt": "x\n"})
+		_, _, cleanup, err := cloneToTar(context.Background(),
+			repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: name}}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
+			t.Errorf("cloneReason = %q, want %q — the limit is go-git's: %v", got, repoOutcomeInternal, err)
+		}
+		if n := fx.requests.Load(); n != 0 {
+			t.Errorf("the remote was asked %d time(s)", n)
+		}
+	})
+	// The caller named no branch at all, so go-git refusing the remote's
+	// default branch name, which git admits, cannot be the caller's checkout.
+	t.Run("default branch go-git refuses", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		head, err := fx.repo.Head()
+		if err != nil {
+			t.Fatalf("Head: %v", err)
+		}
+		at := plumbing.ReferenceName("refs/heads/feature/@/topic")
+		for _, ref := range []*plumbing.Reference{
+			plumbing.NewHashReference(at, head.Hash()),
+			plumbing.NewSymbolicReference(plumbing.HEAD, at),
+		} {
+			if err := fx.repo.Storer.SetReference(ref); err != nil {
+				t.Fatalf("SetReference: %v", err)
+			}
+		}
+		_, _, cleanup, err := cloneToTar(context.Background(), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
+			t.Errorf("cloneReason = %q, want %q — no checkout was named: %v", got, repoOutcomeInternal, err)
+		}
+	})
 
 	t.Run("remote answers 200 with a non-git body", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

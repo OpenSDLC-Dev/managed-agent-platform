@@ -31,6 +31,12 @@ import (
 // blow far past the cap before anyone measured it (plan 25 decision 1).
 var errCloneTooLarge = errors.New("clone exceeded the byte budget")
 
+// errBranchName marks a branch checkout refused before the remote is asked,
+// for a name git's ref rules refuse. It is the caller's mistake; go-git's own
+// ErrInvalidReferenceName is not, since it also refuses a default branch the
+// caller never named.
+var errBranchName = errors.New("invalid branch name")
+
 // tokenUsername is the username GitHub expects beside a personal access token
 // in HTTP basic auth. The token rides the Authorization header of each request
 // — never the URL and never the on-disk .git/config — which is what keeps it
@@ -88,7 +94,13 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 			// a wildcard would fetch every branch's tree before the checkout
 			// failed, so it is refused before the remote is asked.
 			if err := opts.ReferenceName.Validate(); err != nil {
-				return "", 0, cleanup, fmt.Errorf("%w: branch %q", err, r.Checkout.Name)
+				return "", 0, cleanup, fmt.Errorf("%w %q: %w", errBranchName, r.Checkout.Name, err)
+			}
+			// go-git builds the branch's refspec from Short(), which stops at any
+			// space a name may hold and would fetch another branch's tree. git
+			// admits such a name, so the limit is ours and the reason `internal`.
+			if opts.ReferenceName.Short() != r.Checkout.Name {
+				return "", 0, cleanup, fmt.Errorf("go-git cannot fetch branch %q: it cuts the name at a space", r.Checkout.Name)
 			}
 		}
 		defaultBranch = opts.ReferenceName == ""
@@ -125,6 +137,12 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 // carries no ref beside its detached HEAD.
 func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Filesystem,
 	url string, auth transport.AuthMethod, sha string) (*git.Repository, error) {
+	// Create admits forty hex characters only, but the row is read back here
+	// and the sha goes into a refspec: anything else would reach the remote as
+	// a branch name, or break the refspec.
+	if !plumbing.IsHash(sha) {
+		return nil, fmt.Errorf("%w: %q is not a commit id", plumbing.ErrObjectNotFound, sha)
+	}
 	hash := plumbing.NewHash(sha)
 	// The null object id is forty hex characters, so it passes the create
 	// endpoint's sha validation — and go-git's CheckoutOptions.Validate
@@ -148,7 +166,7 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	const scratch = plumbing.ReferenceName("refs/map-checkout")
 	err = repo.FetchContext(ctx, &git.FetchOptions{
 		RemoteName: "origin", Auth: auth, Depth: 1,
-		RefSpecs: []config.RefSpec{config.RefSpec(sha + ":" + scratch.String())},
+		RefSpecs: []config.RefSpec{config.RefSpec(hash.String() + ":" + scratch.String())},
 	})
 	// The remote refuses a commit it does not have in words go-git carries as
 	// plain text, with no sentinel to match. The sha is the caller's.
@@ -358,7 +376,7 @@ func cloneReason(err error) string {
 		// A branch name git's ref rules refuse — `foo:bar`, say. It is the
 		// caller's ref that is wrong, so `internal` would send the operator to
 		// read our logs over their own typo.
-		errors.Is(err, plumbing.ErrInvalidReferenceName):
+		errors.Is(err, errBranchName):
 		return repoOutcomeCheckout
 	case isRemoteStatusError(err), isNetworkError(err), isProtocolError(err):
 		return repoOutcomeNetwork
