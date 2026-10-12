@@ -15,7 +15,7 @@ checkout shallow, with two remotes (#582). The user decided on 2026-10-12:
 
 Delivered in one PR, which archives this plan.
 
-## Ground truth (verified 2026-10-12)
+## Ground truth (verified 2026-10-12 and 2026-10-13)
 
 - **The recorded checkout** (2026-09-03 batch2 `session.events.list.repo-inspect`,
   `https://github.com/anthropics/skills`, default branch): `git rev-parse
@@ -63,28 +63,36 @@ Delivered in one PR, which archives this plan.
     v0 it writes one when `<b>` is the default branch;
   - a default branch named `HEAD/<x>` clones fine, to
     `refs/remotes/origin/HEAD/<x>` and no `origin/HEAD`, whose name the
-    tracking ref needs as a directory;
+    tracking ref needs as a directory. One named `HEAD` leaves `origin/HEAD`
+    naming itself;
   - a tag that points at the fetched commit is kept; other tags are not.
-- **GitHub serves a commit by SHA that no branch need reach** (measured
-  2026-10-13): a depth-1 fetch got the head of a fork's pull request,
-  `refs/pull/2004/head` of `anthropics/skills`, one commit ahead of `main`.
+- **GitHub serves any commit in a repository's fork network by SHA, through
+  the repository's own URL** (measured 2026-10-13 on `anthropics/skills`). Two
+  depth-1 fetches succeeded: a fork's pull request head (`refs/pull/2004/head`,
+  one commit ahead of `main`) and a commit only a fork's branch holds
+  (`TheAwesomeAray/skills`, in no pull request GitHub's search finds).
+- **go-git's ref-name check is git's, plus one rule:** it refuses a path
+  component that is just `@`, which git accepts. go-git's clone refuses such a
+  branch anyway, when it creates the local branch.
 - **The test fixture could not serve a shallow request.** It was go-git's own
   server-side transport, which refuses one outright and cannot truncate history.
-  `git http-backend` can, and `make test` already needs a git binary
-  (`tools/sdkref` asks git which files are tracked).
+  `git http-backend` can. `make test` already needs git (`tools/sdkref` asks it
+  which files are tracked), and now its `http-backend` helper too.
 
 ## Decisions
 
 1. **Depth 1 for every form, and no tags.** Default branch and branch use
    `Depth: 1, SingleBranch: true, Tags: NoTags`. A commit no longer needs the
-   full history. A branch name git's ref-name rules refuse is refused before
-   the remote is asked: one with a wildcard would fetch every branch's tree.
+   full history. A branch name go-git's ref-name check refuses is refused
+   before the remote is asked: one with a wildcard would fetch every branch's
+   tree.
 2. **A commit is fetched by its exact SHA** into a scratch ref directly under
    `refs/`, checked out detached, and the ref removed, so nothing stands beside
    HEAD. There is no fallback to a full clone: the URL grammar admits only
-   `github.com`, which answers a want for any commit its advertised refs reach,
-   pull requests' among them. The null SHA is still refused before the remote
-   is asked.
+   `github.com`, which serves any commit in the fork network this way. A commit
+   checkout can therefore mount a fork's code under the repository's name, as
+   `git fetch <sha>` can; the owner decided on the exact-SHA fetch before this
+   was measured. The null SHA is still refused before the remote is asked.
 3. **The recorded `.git/config`**, written after the checkout:
    - `origin` and `github`, both at the URL's `.git` spelling, each fetching
      `+refs/heads/*` into its own namespace;
@@ -99,9 +107,11 @@ Delivered in one PR, which archives this plan.
    checkout also gets `origin/HEAD` naming its tracking ref, unless the branch
    is named `HEAD/<x>` or the remote's HEAD names no branch. No other branch is
    fetched: the recording does not show which the reference's holds. A commit
-   checkout has no refs. The one difference left is the tag at the fetched
-   commit, which git keeps and decision 1 drops: go-git follows tags only for a
-   wildcard refspec.
+   checkout has no refs. Two differences are left:
+   - the tag at the fetched commit, which git keeps and decision 1 drops:
+     go-git follows tags only for a wildcard refspec;
+   - a default branch named `HEAD`, which gets neither ref here, where git
+     leaves `origin/HEAD` naming itself.
 5. **An unknown SHA reports `checkout`.** The commit fetch wraps the remote's
    `not our ref` as `plumbing.ErrObjectNotFound`. That keeps `cloneReason`
    sentinel-based. The match is on text, so a host that words it otherwise, or

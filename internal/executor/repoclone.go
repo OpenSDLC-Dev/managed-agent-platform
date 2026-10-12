@@ -75,6 +75,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	// a commit is fetched by its exact SHA (fetchCommit).
 	auth := &githttp.BasicAuth{Username: tokenUsername, Password: token}
 	var repo *git.Repository
+	var defaultBranch bool
 	if r.Checkout != nil && r.Checkout.Type == "commit" {
 		repo, err = fetchCommit(ctx, storer, tree, r.URL, auth, r.Checkout.Sha)
 	} else {
@@ -90,6 +91,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 				return "", 0, cleanup, fmt.Errorf("%w: branch %q", err, r.Checkout.Name)
 			}
 		}
+		defaultBranch = opts.ReferenceName == ""
 		repo, err = git.CloneContext(ctx, storer, tree, opts)
 	}
 	if err != nil {
@@ -104,7 +106,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	if err := ctx.Err(); err != nil {
 		return "", 0, cleanup, err
 	}
-	if err := shapeCheckout(repo, r.URL, r.Checkout == nil); err != nil {
+	if err := shapeCheckout(repo, r.URL, defaultBranch); err != nil {
 		return "", 0, cleanup, err
 	}
 
@@ -216,8 +218,10 @@ func shapeCheckout(repo *git.Repository, url string, defaultBranch bool) error {
 // does: the branch's remote-tracking ref, and origin/HEAD naming it as the
 // remote's default. go-git's clone leaves origin/HEAD a plain ref instead,
 // which goes first. `git clone` leaves no origin/HEAD at all when the remote's
-// HEAD names no branch, which leaves the checkout detached, or when the branch
-// is named HEAD/<x>, whose tracking ref needs origin/HEAD's name as a directory.
+// HEAD names no branch, which leaves the checkout detached, or when the
+// branch's tracking ref takes origin/HEAD's name: as a directory for a branch
+// named HEAD/<x>, or as itself for one named HEAD. That one gets no tracking
+// ref either; git 2.54 leaves origin/HEAD there naming itself.
 func trackDefaultBranch(repo *git.Repository) error {
 	remoteHEAD := plumbing.NewRemoteHEADReferenceName("origin")
 	if err := repo.Storer.RemoveReference(remoteHEAD); err != nil {
@@ -227,7 +231,12 @@ func trackDefaultBranch(repo *git.Repository) error {
 	if err != nil || !head.Name().IsBranch() {
 		return err
 	}
-	branch := head.Name().Short()
+	// Not Short(), which scans the name and stops at any space a branch name
+	// may hold, a non-breaking one included.
+	branch := strings.TrimPrefix(head.Name().String(), "refs/heads/")
+	if branch == "HEAD" {
+		return nil
+	}
 	tracking := plumbing.NewRemoteReferenceName("origin", branch)
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(tracking, head.Hash())); err != nil {
 		return err

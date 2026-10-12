@@ -51,6 +51,9 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 		file     string
 	}{
 		{"default branch", nil, "master", "second.txt"},
+		// Create admits no such checkout, but whatever takes the default
+		// branch's clone gets its refs too.
+		{"untyped checkout", &repoCheckout{}, "master", "second.txt"},
 		{"branch", &repoCheckout{Type: "branch", Name: "feature/topic"}, "feature/topic", "feature.txt"},
 		{"commit", &repoCheckout{Type: "commit", Sha: first.Hash().String()}, "", "first.txt"},
 	} {
@@ -93,8 +96,17 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 				if refs != "" {
 					t.Errorf("refs = %q, want none beside the detached HEAD", refs)
 				}
-				if _, err := os.Stat(filepath.Join(dir, ".git", "refs", "map")); !os.IsNotExist(err) {
-					t.Errorf("the scratch ref's directory was shipped: %v", err)
+				// The scratch ref leaves nothing behind, not even a directory.
+				entries, err := os.ReadDir(filepath.Join(dir, ".git", "refs"))
+				if err != nil {
+					t.Fatalf("read .git/refs: %v", err)
+				}
+				var names []string
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				if got := strings.Join(names, " "); got != "heads tags" {
+					t.Errorf(".git/refs holds %q, want only the heads and tags `git init` makes", got)
 				}
 				return
 			}
@@ -117,7 +129,7 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 				}
 			}
 			want := "refs/heads/" + tc.branch + "\nrefs/remotes/origin/" + tc.branch
-			if tc.checkout == nil {
+			if tc.checkout == nil || tc.checkout.Type == "" {
 				if got := gitIn(t, dir, "symbolic-ref refs/remotes/origin/HEAD"); got != "refs/remotes/origin/"+tc.branch {
 					t.Errorf("origin/HEAD names %s, want refs/remotes/origin/%s", got, tc.branch)
 				}
@@ -130,27 +142,56 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 	}
 }
 
-// TestRepoDefaultBranchUnderHEADClones 🔍: git admits a branch named
-// HEAD/<x>, and `git clone` of a repository whose default branch it is leaves
-// refs/remotes/origin/HEAD/<x> and no origin/HEAD, which that name's directory
-// rules out (git 2.54, measured). The clone does the same rather than fail.
+// TestRepoDefaultBranchUnderHEADClones 🔍: git admits a branch named HEAD or
+// HEAD/<x>, and either one's tracking ref takes origin/HEAD's name. `git
+// clone` of a repository whose default branch is HEAD/<x> leaves the tracking
+// ref and no origin/HEAD, which that name's directory rules out (git 2.54,
+// measured). For HEAD, the tracking ref would be origin/HEAD itself, so
+// neither is written. The clone succeeds either way.
 func TestRepoDefaultBranchUnderHEADClones(t *testing.T) {
+	for _, tc := range []struct{ branch, refs string }{
+		{"HEAD/topic", "refs/heads/HEAD/topic\nrefs/remotes/origin/HEAD/topic"},
+		{"HEAD", "refs/heads/HEAD"},
+	} {
+		t.Run(tc.branch, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"first.txt": "one\n"})
+			fx.branch(t, tc.branch, map[string]string{"topic.txt": "on the branch\n"})
+			if err := fx.repo.Storer.SetReference(plumbing.NewSymbolicReference(
+				plumbing.HEAD, plumbing.NewBranchReferenceName(tc.branch))); err != nil {
+				t.Fatalf("make %s the default branch: %v", tc.branch, err)
+			}
+			dir := cloneAndUnpack(t, repoRef{URL: fx.url()})
+			if _, err := os.Stat(filepath.Join(dir, "topic.txt")); err != nil {
+				t.Errorf("topic.txt is missing from the checkout: %v", err)
+			}
+			if got := gitIn(t, dir, "for-each-ref --format=%(refname)"); got != tc.refs {
+				t.Errorf("refs = %q, want %q", got, tc.refs)
+			}
+			// for-each-ref hides an origin/HEAD that names itself; rev-parse
+			// warns about it.
+			if out, _ := gitCmd(t, dir, "rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD").CombinedOutput(); len(out) != 0 {
+				t.Errorf("origin/HEAD: %s, want none", strings.TrimSpace(string(out)))
+			}
+		})
+	}
+}
+
+// TestRepoDefaultBranchNameIsKeptWhole 🔍: git admits a non-breaking space in
+// a branch name, and go-git's ReferenceName.Short reads one as the end of the
+// name. `HEAD<nbsp>topic` cut short is `HEAD`, which would make origin/HEAD
+// name itself.
+func TestRepoDefaultBranchNameIsKeptWhole(t *testing.T) {
+	branch := "HEAD" + string(rune(0x00a0)) + "topic"
 	fx := newGitFixture(t, map[string]string{"first.txt": "one\n"})
-	fx.branch(t, "HEAD/topic", map[string]string{"topic.txt": "on the branch\n"})
+	fx.branch(t, branch, map[string]string{"topic.txt": "on the branch\n"})
 	if err := fx.repo.Storer.SetReference(plumbing.NewSymbolicReference(
-		plumbing.HEAD, plumbing.NewBranchReferenceName("HEAD/topic"))); err != nil {
-		t.Fatalf("make HEAD/topic the default branch: %v", err)
+		plumbing.HEAD, plumbing.NewBranchReferenceName(branch))); err != nil {
+		t.Fatalf("make %q the default branch: %v", branch, err)
 	}
 	dir := cloneAndUnpack(t, repoRef{URL: fx.url()})
-	if _, err := os.Stat(filepath.Join(dir, "topic.txt")); err != nil {
-		t.Errorf("topic.txt is missing from the checkout: %v", err)
-	}
-	if got, want := gitIn(t, dir, "for-each-ref --format=%(refname)"),
-		"refs/heads/HEAD/topic\nrefs/remotes/origin/HEAD/topic"; got != want {
-		t.Errorf("refs = %q, want %q", got, want)
-	}
-	if got := gitIn(t, dir, "rev-parse --symbolic-full-name @{upstream}"); got != "refs/remotes/origin/HEAD/topic" {
-		t.Errorf("upstream = %q, want refs/remotes/origin/HEAD/topic", got)
+	out, err := gitCmd(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD").Output()
+	if got, want := strings.TrimSpace(string(out)), "refs/remotes/origin/"+branch; err != nil || got != want {
+		t.Errorf("origin/HEAD names %q (%v), want %q", got, err, want)
 	}
 }
 

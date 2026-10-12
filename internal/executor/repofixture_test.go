@@ -49,6 +49,9 @@ type gitFixture struct {
 	// clones counts POSTs to the upload-pack endpoint — one per real clone,
 	// which is how m-idempotence proves a second pass fetched nothing.
 	clones atomic.Int64
+	// requests counts every request, the ref advertisement's included — how a
+	// row proves the remote was never asked.
+	requests atomic.Int64
 	// status, when non-zero, is answered instead of serving the repository.
 	status atomic.Int64
 	// echoAuth makes the refusal body quote the credentials it was given, both
@@ -161,6 +164,7 @@ func (f *gitFixture) branch(t *testing.T, name string, files map[string]string) 
 // serve is git http-backend behind the handler-level failure modes the
 // adversarial rows drive.
 func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
+	f.requests.Add(1)
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		f.sawAuth.Store(auth)
 	}

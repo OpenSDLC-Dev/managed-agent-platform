@@ -5,7 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **None.** [Plan 63](./docs/plan/63_shallow-repo-clone.md) (#582), a shallow repository
-clone in the reference's shape, archived 2026-10-12 in one PR; its delivery record is
+clone in the reference's shape, archived 2026-10-13 in one PR; its delivery record is
 [docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks

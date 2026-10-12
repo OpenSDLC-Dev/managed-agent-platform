@@ -1067,7 +1067,7 @@ func TestRepoZeroShaIsRefused(t *testing.T) {
 	}
 	// Refused before the remote is asked: a fetch of the null id fails there
 	// too, but costs a round trip and rests on the host's answer.
-	if n := fx.clones.Load(); n != 0 {
+	if n := fx.requests.Load(); n != 0 {
 		t.Errorf("the null commit id was asked of the remote %d time(s)", n)
 	}
 }
@@ -1165,8 +1165,8 @@ func TestCloneReasonBlamesTheRightSide(t *testing.T) {
 				t.Errorf("cloneReason = %q, want %q — the ref is the caller's, not ours: %v",
 					got, repoOutcomeCheckout, err)
 			}
-			if n := fx.clones.Load(); n != 0 {
-				t.Errorf("branch %q was fetched %d time(s)", name, n)
+			if n := fx.requests.Load(); n != 0 {
+				t.Errorf("the remote was asked %d time(s) about branch %q", n, name)
 			}
 		})
 	}
