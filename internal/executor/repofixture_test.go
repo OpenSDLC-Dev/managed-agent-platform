@@ -30,8 +30,10 @@ import (
 // to git's own `git http-backend`, the upload-pack GitHub runs, behind
 // net/http/cgi. go-git's server-side transport would be the dependency-free
 // choice, but it refuses a shallow request outright and cannot answer one
-// (#582), and every clone asks for depth 1. `make test` already needs a git
-// binary, so this adds no requirement.
+// (#582), and every clone asks for depth 1. `make test` already needs git
+// (tools/sdkref asks it which files are tracked); this needs its http-backend
+// helper too, which some distributions package apart from git, and without
+// it these tests fail rather than skip.
 //
 // Failure modes are handler-level, which is what lets one fixture drive every
 // adversarial row: status answers the auth and not-found reasons, a stall

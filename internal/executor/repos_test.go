@@ -1149,20 +1149,27 @@ func (c spentAfterFetch) Err() error {
 // something that is not a git response, which is what a captive portal, an
 // outage page, or a proxy that swallowed the repository does.
 func TestCloneReasonBlamesTheRightSide(t *testing.T) {
-	t.Run("malformed branch name", func(t *testing.T) {
-		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-		_, _, cleanup, err := cloneToTar(context.Background(),
-			repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: "foo:bar"}},
-			"ghp_fixture", 1<<30)
-		defer cleanup()
-		if err == nil {
-			t.Fatal("a branch name with a refspec separator cloned successfully")
-		}
-		if got := cloneReason(err); got != repoOutcomeCheckout {
-			t.Errorf("cloneReason = %q, want %q — the ref is the caller's, not ours: %v",
-				got, repoOutcomeCheckout, err)
-		}
-	})
+	// A wildcard would build a refspec that fetches every branch's tree before
+	// the checkout fails, so each name is refused before the remote is asked.
+	for _, name := range []string{"foo:bar", "*", "feature/*"} {
+		t.Run("malformed branch name "+name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: name}},
+				"ghp_fixture", 1<<30)
+			defer cleanup()
+			if err == nil {
+				t.Fatalf("branch %q cloned successfully", name)
+			}
+			if got := cloneReason(err); got != repoOutcomeCheckout {
+				t.Errorf("cloneReason = %q, want %q — the ref is the caller's, not ours: %v",
+					got, repoOutcomeCheckout, err)
+			}
+			if n := fx.clones.Load(); n != 0 {
+				t.Errorf("branch %q was fetched %d time(s)", name, n)
+			}
+		})
+	}
 
 	t.Run("remote answers 200 with a non-git body", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

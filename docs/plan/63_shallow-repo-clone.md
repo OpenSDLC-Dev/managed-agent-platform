@@ -58,11 +58,16 @@ Delivered in one PR, which archives this plan.
     tree of its commit, at depth 1 too (found in review, from
     `CloneOptions.Validate` and a scratch probe). A fetch's default follows
     tags only for a wildcard refspec, which an exact SHA is not.
-- **Real `git clone`** (git 2.54, measured): `--branch <b>` leaves no
-  `origin/HEAD` at depth 1, because that ref names the remote's default branch.
-  A default branch named `HEAD/<x>` clones fine, to
-  `refs/remotes/origin/HEAD/<x>` and no `origin/HEAD`, whose name the
-  tracking ref needs as a directory.
+- **Real `git clone --depth 1`** (git 2.54, measured):
+  - `--branch <b>` leaves no `origin/HEAD` over protocol v2, the default. Over
+    v0 it writes one when `<b>` is the default branch;
+  - a default branch named `HEAD/<x>` clones fine, to
+    `refs/remotes/origin/HEAD/<x>` and no `origin/HEAD`, whose name the
+    tracking ref needs as a directory;
+  - a tag that points at the fetched commit is kept; other tags are not.
+- **GitHub serves a commit by SHA that no branch need reach** (measured
+  2026-10-13): a depth-1 fetch got the head of a fork's pull request,
+  `refs/pull/2004/head` of `anthropics/skills`, one commit ahead of `main`.
 - **The test fixture could not serve a shallow request.** It was go-git's own
   server-side transport, which refuses one outright and cannot truncate history.
   `git http-backend` can, and `make test` already needs a git binary
@@ -72,12 +77,14 @@ Delivered in one PR, which archives this plan.
 
 1. **Depth 1 for every form, and no tags.** Default branch and branch use
    `Depth: 1, SingleBranch: true, Tags: NoTags`. A commit no longer needs the
-   full history.
-2. **A commit is fetched by its exact SHA** into a scratch ref, checked out
-   detached, and the ref removed, so no ref stands beside HEAD. There is no
-   fallback to a full clone: the URL grammar admits only `github.com`, which
-   answers a want for any commit its refs reach. The null SHA is still refused
-   before the remote is asked.
+   full history. A branch name git's ref-name rules refuse is refused before
+   the remote is asked: one with a wildcard would fetch every branch's tree.
+2. **A commit is fetched by its exact SHA** into a scratch ref directly under
+   `refs/`, checked out detached, and the ref removed, so nothing stands beside
+   HEAD. There is no fallback to a full clone: the URL grammar admits only
+   `github.com`, which answers a want for any commit its advertised refs reach,
+   pull requests' among them. The null SHA is still refused before the remote
+   is asked.
 3. **The recorded `.git/config`**, written after the checkout:
    - `origin` and `github`, both at the URL's `.git` spelling, each fetching
      `+refs/heads/*` into its own namespace;
@@ -86,12 +93,15 @@ Delivered in one PR, which archives this plan.
 
    Section order is go-git's. No credential is written: the token rides a
    request header only.
-4. **Refs as `git clone` leaves them.** A branch checkout keeps the `[branch]`
-   upstream and `refs/remotes/origin/<branch>` go-git's clone gives it, so
-   `git status` has an upstream. A default-branch checkout also gets
-   `origin/HEAD` naming its tracking ref, unless the branch is named
-   `HEAD/<x>`. No other branch is fetched: the recording does not show which
-   the reference's holds. A commit checkout has no refs.
+4. **Refs as `git clone --depth 1` leaves them over protocol v2.** A branch
+   checkout keeps the `[branch]` upstream and `refs/remotes/origin/<branch>`
+   go-git's clone gives it, so `git status` has an upstream. A default-branch
+   checkout also gets `origin/HEAD` naming its tracking ref, unless the branch
+   is named `HEAD/<x>` or the remote's HEAD names no branch. No other branch is
+   fetched: the recording does not show which the reference's holds. A commit
+   checkout has no refs. The one difference left is the tag at the fetched
+   commit, which git keeps and decision 1 drops: go-git follows tags only for a
+   wildcard refspec.
 5. **An unknown SHA reports `checkout`.** The commit fetch wraps the remote's
    `not our ref` as `plumbing.ErrObjectNotFound`. That keeps `cloneReason`
    sentinel-based. The match is on text, so a host that words it otherwise, or

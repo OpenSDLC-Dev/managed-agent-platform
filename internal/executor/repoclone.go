@@ -83,6 +83,12 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		opts := &git.CloneOptions{URL: r.URL, Auth: auth, Depth: 1, SingleBranch: true, Tags: git.NoTags}
 		if r.Checkout != nil && r.Checkout.Type == "branch" {
 			opts.ReferenceName = plumbing.NewBranchReferenceName(r.Checkout.Name)
+			// A name git's ref rules refuse is the caller's mistake, and one with
+			// a wildcard would fetch every branch's tree before the checkout
+			// failed, so it is refused before the remote is asked.
+			if err := opts.ReferenceName.Validate(); err != nil {
+				return "", 0, cleanup, fmt.Errorf("%w: branch %q", err, r.Checkout.Name)
+			}
 		}
 		repo, err = git.CloneContext(ctx, storer, tree, opts)
 	}
@@ -135,7 +141,9 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{url}}); err != nil {
 		return nil, err
 	}
-	const scratch = plumbing.ReferenceName("refs/map/checkout")
+	// Directly under refs/, which Init made, so removing the ref leaves no
+	// directory of ours behind.
+	const scratch = plumbing.ReferenceName("refs/map-checkout")
 	err = repo.FetchContext(ctx, &git.FetchOptions{
 		RemoteName: "origin", Auth: auth, Depth: 1,
 		RefSpecs: []config.RefSpec{config.RefSpec(sha + ":" + scratch.String())},
@@ -166,10 +174,8 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // URL's `.git` spelling and fetching every branch, automatic gc off, and the
 // core keys `git init` writes. A branch checkout keeps the upstream and the
 // remote-tracking ref go-git's clone gives it, as `git clone --branch` leaves
-// them. A default-branch checkout (defaultBranch) also gets what `git clone`
-// leaves there: the branch's remote-tracking ref, and origin/HEAD naming it as
-// the remote's default — which only that form may claim. No credential is
-// written: the token only ever rides a request header.
+// them; a default-branch checkout (defaultBranch) gets trackDefaultBranch's.
+// No credential is written: the token only ever rides a request header.
 func shapeCheckout(repo *git.Repository, url string, defaultBranch bool) error {
 	if !strings.HasSuffix(url, ".git") {
 		url += ".git"
@@ -181,7 +187,7 @@ func shapeCheckout(repo *git.Repository, url string, defaultBranch bool) error {
 	cfg.Remotes = map[string]*config.RemoteConfig{}
 	for _, name := range []string{"origin", "github"} {
 		cfg.Remotes[name] = &config.RemoteConfig{Name: name, URLs: []string{url},
-			Fetch: []config.RefSpec{config.RefSpec("+refs/heads/*:refs/remotes/" + name + "/*")}}
+			Fetch: []config.RefSpec{config.RefSpec(fmt.Sprintf(config.DefaultFetchRefSpec, name))}}
 	}
 	cfg.Raw.Section("gc").SetOption("auto", "0")
 	core := cfg.Raw.Section("core")
@@ -189,27 +195,8 @@ func shapeCheckout(repo *git.Repository, url string, defaultBranch bool) error {
 	core.SetOption("filemode", "true")
 	core.SetOption("logallrefupdates", "true")
 	if defaultBranch {
-		head, err := repo.Head()
-		if err != nil {
+		if err := trackDefaultBranch(repo); err != nil {
 			return err
-		}
-		// go-git's clone leaves origin/HEAD a plain ref, which goes first: a
-		// default branch named HEAD/<x> needs that name as a directory for its
-		// tracking ref, and `git clone` then leaves no origin/HEAD at all.
-		remoteHEAD := plumbing.NewRemoteHEADReferenceName("origin")
-		if err := repo.Storer.RemoveReference(remoteHEAD); err != nil {
-			return err
-		}
-		branch := head.Name().Short()
-		tracking := plumbing.NewRemoteReferenceName("origin", branch)
-		refs := []*plumbing.Reference{plumbing.NewHashReference(tracking, head.Hash())}
-		if !strings.HasPrefix(branch, "HEAD/") {
-			refs = append(refs, plumbing.NewSymbolicReference(remoteHEAD, tracking))
-		}
-		for _, ref := range refs {
-			if err := repo.Storer.SetReference(ref); err != nil {
-				return err
-			}
 		}
 	}
 	if err := repo.SetConfig(cfg); err != nil {
@@ -223,6 +210,32 @@ func shapeCheckout(repo *git.Repository, url string, defaultBranch bool) error {
 	}
 	cfg.Raw.Section("remote").Subsection("github").SetOption("gh-resolved", "base")
 	return repo.SetConfig(cfg)
+}
+
+// trackDefaultBranch leaves a default-branch checkout's refs as `git clone`
+// does: the branch's remote-tracking ref, and origin/HEAD naming it as the
+// remote's default. go-git's clone leaves origin/HEAD a plain ref instead,
+// which goes first. `git clone` leaves no origin/HEAD at all when the remote's
+// HEAD names no branch, which leaves the checkout detached, or when the branch
+// is named HEAD/<x>, whose tracking ref needs origin/HEAD's name as a directory.
+func trackDefaultBranch(repo *git.Repository) error {
+	remoteHEAD := plumbing.NewRemoteHEADReferenceName("origin")
+	if err := repo.Storer.RemoveReference(remoteHEAD); err != nil {
+		return err
+	}
+	head, err := repo.Head()
+	if err != nil || !head.Name().IsBranch() {
+		return err
+	}
+	branch := head.Name().Short()
+	tracking := plumbing.NewRemoteReferenceName("origin", branch)
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(tracking, head.Hash())); err != nil {
+		return err
+	}
+	if strings.HasPrefix(branch, "HEAD/") {
+		return nil
+	}
+	return repo.Storer.SetReference(plumbing.NewSymbolicReference(remoteHEAD, tracking))
 }
 
 // packTree writes dir's contents to a tar file with paths relative to dir, so
@@ -333,12 +346,10 @@ func cloneReason(err error) string {
 	case errors.Is(err, plumbing.ErrObjectNotFound),
 		errors.Is(err, plumbing.ErrReferenceNotFound),
 		errors.Is(err, git.NoMatchingRefSpecError{}),
-		// A checkout descriptor go-git will not even build a refspec from —
-		// `foo:bar` as a branch name, say. It is the caller's ref that is
-		// wrong, so `internal` would send the operator to read our logs over
-		// their own typo.
-		errors.Is(err, config.ErrRefSpecMalformedSeparator),
-		errors.Is(err, config.ErrRefSpecMalformedWildcard):
+		// A branch name git's ref rules refuse — `foo:bar`, say. It is the
+		// caller's ref that is wrong, so `internal` would send the operator to
+		// read our logs over their own typo.
+		errors.Is(err, plumbing.ErrInvalidReferenceName):
 		return repoOutcomeCheckout
 	case isRemoteStatusError(err), isNetworkError(err), isProtocolError(err):
 		return repoOutcomeNetwork

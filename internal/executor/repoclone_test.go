@@ -93,6 +93,9 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 				if refs != "" {
 					t.Errorf("refs = %q, want none beside the detached HEAD", refs)
 				}
+				if _, err := os.Stat(filepath.Join(dir, ".git", "refs", "map")); !os.IsNotExist(err) {
+					t.Errorf("the scratch ref's directory was shipped: %v", err)
+				}
 				return
 			}
 			if got := gitIn(t, dir, "symbolic-ref HEAD"); got != "refs/heads/"+tc.branch {
@@ -148,6 +151,49 @@ func TestRepoDefaultBranchUnderHEADClones(t *testing.T) {
 	}
 	if got := gitIn(t, dir, "rev-parse --symbolic-full-name @{upstream}"); got != "refs/remotes/origin/HEAD/topic" {
 		t.Errorf("upstream = %q, want refs/remotes/origin/HEAD/topic", got)
+	}
+}
+
+// TestRepoDetachedRemoteHEADClones 🔍: a remote whose HEAD names no branch
+// leaves the clone detached, and `git clone` then leaves no origin/HEAD —
+// there is no default branch for it to name. Without a branch to track,
+// origin/HEAD must not be made to name itself.
+func TestRepoDetachedRemoteHEADClones(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"first.txt": "one\n"})
+	first, err := fx.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	// go-git matches a HEAD the remote names no branch for against any ref at
+	// its commit — this tag — and so checks it out detached.
+	if _, err := fx.repo.CreateTag("v0", first.Hash(), nil); err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	fx.commit(t, "second", map[string]string{"second.txt": "two\n"})
+	if err := fx.repo.Storer.SetReference(plumbing.NewHashReference(plumbing.HEAD, first.Hash())); err != nil {
+		t.Fatalf("detach the remote's HEAD: %v", err)
+	}
+	dir := cloneAndUnpack(t, repoRef{URL: fx.url()})
+	if got := gitIn(t, dir, "rev-parse HEAD"); got != first.Hash().String() {
+		t.Errorf("HEAD = %s, want the remote's HEAD %s", got, first.Hash())
+	}
+	// Silent only when there is no such ref: git prints the hash of one that
+	// resolves, and a warning for one that names itself, which for-each-ref
+	// would hide.
+	if out, _ := gitCmd(t, dir, "rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD").CombinedOutput(); len(out) != 0 {
+		t.Errorf("origin/HEAD: %s, want none", strings.TrimSpace(string(out)))
+	}
+}
+
+// TestRepoGitSuffixIsNotDoubled 🔍: a URL already spelled with `.git` keeps
+// that one suffix in both remotes.
+func TestRepoGitSuffixIsNotDoubled(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	dir := cloneAndUnpack(t, repoRef{URL: fx.url()})
+	for _, remote := range []string{"origin", "github"} {
+		if got := gitIn(t, dir, "config remote."+remote+".url"); got != fx.url() {
+			t.Errorf("remote.%s.url = %q, want %q", remote, got, fx.url())
+		}
 	}
 }
 
