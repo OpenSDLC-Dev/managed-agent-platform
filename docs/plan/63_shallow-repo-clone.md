@@ -74,7 +74,8 @@ Delivered in one PR, which archives this plan.
 - **go-git's ref-name check is `git check-ref-format`'s rules for the full
   ref, plus two** (measured with git 2.54): it refuses a path component that
   is just `@`, which git accepts and go-git's clone refuses anyway when it
-  creates the local branch; and a branch name that starts with `-`, which
+  creates the local branch, unless its `[branch]` cut drops the `@` (as for
+  `arefs/heads/@`); and a branch name that starts with `-`, which
   `check-ref-format --branch` refuses too. It admits a branch named `HEAD`,
   which `--branch` refuses.
 - **go-git cuts some names git admits.** `ReferenceName.Short()` scans with
@@ -86,7 +87,8 @@ Delivered in one PR, which archives this plan.
   `[branch]` section (found in review and probed; this predates the plan).
 - **The remote serves a tree or a blob by its id** as readily as a commit;
   go-git's checkout then fails with an error of its own (found in review).
-  It peels an annotated tag's id to the tag's commit.
+  It peels an annotated tag's id to the tag's commit, one level only: a tag
+  of a tag fails, where git peels both.
 - **The test fixture could not serve a shallow request.** It was go-git's own
   server-side transport, which refuses one outright and cannot truncate history.
   `git http-backend` can. `make test` already needs git (`tools/sdkref` asks it
@@ -131,10 +133,11 @@ Delivered in one PR, which archives this plan.
      leaves `origin/HEAD` naming itself.
 5. **An unknown SHA reports `checkout`.** The commit fetch wraps the remote's
    `not our ref` as `plumbing.ErrObjectNotFound`. That keeps `cloneReason`
-   sentinel-based. An id the remote has that names a tree or a blob reports
-   `checkout` too, from go-git's checkout error. The match is on text, so a host that words it otherwise, or
+   sentinel-based. The match is on text, so a host that words it otherwise, or
    does not admit a SHA want at all, reports a reason other than `checkout`: a
-   failed clone either way, with a less exact reason.
+   failed clone either way, with a less exact reason. An id the remote has
+   that names a tree or a blob reports `checkout` too, by its type, checked
+   after the fetch.
 6. **The fixture serves through `git http-backend`** behind `net/http/cgi`, with
    `uploadpack.allowReachableSHA1InWant` set the way GitHub behaves. Its
    handler-level failure modes stay in front of it.

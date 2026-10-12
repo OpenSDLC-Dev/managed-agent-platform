@@ -274,6 +274,21 @@ func TestRepoAnnotatedTagShaMountsItsCommit(t *testing.T) {
 	if got := gitIn(t, dir, "rev-parse HEAD"); got != head.Hash().String() {
 		t.Errorf("HEAD = %s, want the tag's commit %s", got, head.Hash())
 	}
+
+	// git peels a tag of a tag too, but go-git's checkout peels one level and
+	// refuses the rest. The id names a commit git can reach, so the limit is
+	// ours, and must not read as the caller's.
+	outer, err := fx.repo.CreateTag("v1-of-v1", tag.Hash(), &git.CreateTagOptions{Message: "v1-of-v1",
+		Tagger: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}})
+	if err != nil {
+		t.Fatalf("tag of a tag: %v", err)
+	}
+	_, _, cleanup, err := cloneToTar(context.Background(),
+		repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: outer.Hash().String()}}, "ghp_fixture", 1<<30)
+	defer cleanup()
+	if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
+		t.Errorf("cloneReason = %q, want %q — a tag of a tag is go-git's limit: %v", got, repoOutcomeInternal, err)
+	}
 }
 
 // TestRepoBranchNameHoldingRefsHeads 🔍: git admits a branch name that holds

@@ -20,7 +20,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/filesystem"
@@ -33,9 +32,11 @@ import (
 var errCloneTooLarge = errors.New("clone exceeded the byte budget")
 
 // errBranchName marks a branch checkout refused before the remote is asked,
-// for a name git's ref rules refuse. It is the caller's mistake; go-git's own
-// ErrInvalidReferenceName is not, since it also refuses a default branch the
-// caller never named.
+// for a name go-git's ref-name check refuses: git's rules, plus two of go-git's
+// own that git does not hold (a lone `@` component, a leading `-`). The caller
+// named the branch and can rename it, so it reads as the caller's; go-git's
+// own ErrInvalidReferenceName does not, since it also refuses a default branch
+// the caller never named.
 var errBranchName = errors.New("invalid branch name")
 
 // errBranchUnsupported marks a branch checkout refused before the remote is
@@ -194,17 +195,22 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The remote serves a tree or a blob by its id as readily as a commit. Such
+	// an id is the caller's, and names no commit; go-git's checkout would
+	// refuse it with an error that reads as ours. An annotated tag is left to
+	// the checkout, which peels one to its commit, as the full clone's did.
+	obj, err := repo.Object(plumbing.AnyObject, hash)
+	if err != nil {
+		return nil, err
+	}
+	if t := obj.Type(); t == plumbing.TreeObject || t == plumbing.BlobObject {
+		return nil, fmt.Errorf("%w: %s names a %s, not a commit", plumbing.ErrObjectNotFound, sha, t)
+	}
 	wt, err := repo.Worktree()
 	if err != nil {
 		return nil, err
 	}
-	// The checkout peels an annotated tag to its commit, as the full clone's
-	// did. The remote serves a tree or a blob by its id as readily, and the
-	// checkout's refusal of one would read as ours: the id is the caller's.
 	if err := wt.Checkout(&git.CheckoutOptions{Hash: hash}); err != nil {
-		if errors.Is(err, object.ErrUnsupportedObject) {
-			return nil, fmt.Errorf("%w: %s names no commit: %w", plumbing.ErrObjectNotFound, sha, err)
-		}
 		return nil, err
 	}
 	return repo, repo.Storer.RemoveReference(scratch)
@@ -534,6 +540,10 @@ func newMeteredFS(inner billy.Filesystem, spent *atomic.Int64, limit int64) bill
 // reported success, which the `.git` probe then trusts forever. BoundOS keeps
 // the target verbatim while still refusing to escape the root, which is what
 // git does and what the sandbox needs to resolve the link in its own namespace.
+//
+// root must hold no symlink: BoundOS resolves a path only as far as it exists,
+// so under a symlinked root a file in a directory not yet made reads as
+// outside it. cloneToTar resolves its spool first.
 func newCloneFS(root string, spent *atomic.Int64, limit int64) billy.Filesystem {
 	return newMeteredFS(osfs.New(root, osfs.WithBoundOS()), spent, limit)
 }
