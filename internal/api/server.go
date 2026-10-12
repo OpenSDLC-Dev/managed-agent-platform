@@ -741,8 +741,8 @@ var errMethodNotAllowed = &apiError{http.StatusMethodNotAllowed, errTypeInvalidR
 // answers that DELETE a 404 of its own (#592) — "not found", lower-case, and
 // without the `x-should-retry` its unknown-path 404 carries — on each of the
 // sixteen live agents a teardown sweep tried (2026-09-03 batch2 idx 209–224
-// `sweep.del.agent.*`). No agent is looked up, so an absent or a malformed id
-// answers the same; that the reference does too is inferred. Every other
+// `sweep.del.agent.*`). No agent is looked up, so an archived, an absent or a
+// malformed id answers the same; that the reference does too is inferred. Every other
 // unsupported method keeps the 405, on the agent routes too, since none was
 // recorded there.
 func errUnsupportedMethod(r *http.Request) error {

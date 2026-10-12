@@ -838,8 +838,8 @@ func TestAgentArchive(t *testing.T) {
 // DELETE takes the reference's answer: a 404 in words of its own, "not found",
 // recorded on each of the sixteen live agents a teardown sweep tried to delete
 // (managed-agents-wire-recordings 2026-09-03/batch2.json idx 209–224
-// `sweep.del.agent.*`, #592). No agent is looked up, so an absent or a
-// malformed id answers alike (INFERRED, docs/DIVERGENCES.md). The agent's
+// `sweep.del.agent.*`, #592). No agent is looked up, so an archived, an absent
+// or a malformed id answers alike (INFERRED, docs/DIVERGENCES.md). The agent's
 // other unsupported methods, and a DELETE on the agent routes around it, keep
 // the 405 no recording reaches.
 func TestAgentDeleteIsTheReferencesNotFound(t *testing.T) {
@@ -865,6 +865,12 @@ func TestAgentDeleteIsTheReferencesNotFound(t *testing.T) {
 		status, body := s.do(tc.method, tc.path, nil)
 		wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
 	}
+
+	if status, body := s.do(http.MethodPost, "/v1/agents/"+id+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, body)
+	}
+	status, body := s.do(http.MethodDelete, "/v1/agents/"+id, nil)
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "not found")
 }
 
 // Archiving an agent is refused while a live deployment pins it — where the
