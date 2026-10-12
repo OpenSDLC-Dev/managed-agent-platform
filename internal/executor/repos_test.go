@@ -860,11 +860,8 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 	// entries missing an id or a url, before any of this.
 	for _, mount := range []string{
 		"/workspace/repo/..", "/tmp", "/tmp/", "/", "relative/path",
-		// The sandbox workdir and the skills tree materialized into it a few
-		// lines earlier in the same pass. `/workspace/skills` is what a
-		// repository *named* skills derives as its default mount, so this one
-		// needs no tampering at all.
-		"/workspace", "/workspace/skills",
+		// The sandbox workdir, which holds every other mount.
+		"/workspace",
 		// Another repository's staging path, which this one's extraction
 		// removes twice.
 		"/workspace/.x.map-repo-staging",
@@ -887,6 +884,80 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 				t.Error("the repository was cloned before its mount path was judged")
 			}
 		})
+	}
+}
+
+// TestRepoUnderSkillsRootNeedsASkillFreeRun 🔍: the skills directory, and every
+// path below it, is refused when the run has skills to land there — its
+// agent's or a roster member's — because those trees are written a few lines
+// before repositories are, in the same pass (#584). `/workspace/skills` is what
+// a repository named skills derives as its default mount, so this needs no
+// tampering at all. A skill-free run leaves the directory alone, so the clone
+// goes ahead there.
+func TestRepoUnderSkillsRootNeedsASkillFreeRun(t *testing.T) {
+	for _, skilled := range []struct {
+		name string
+		ref  func(*testing.T, *harness)
+	}{
+		{"own skill", func(t *testing.T, h *harness) { h.refSkills(t, [2]string{"skill_root", "1"}) }},
+		{"roster member's skill", func(t *testing.T, h *harness) {
+			h.refRoster(t, rosterMember{name: "researcher", skills: [][2]string{{"skill_root", "1"}}})
+		}},
+	} {
+		for _, mount := range []string{"/workspace/skills", "/workspace/skills/pdf"} {
+			t.Run(skilled.name+" "+mount, func(t *testing.T) {
+				fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+				sb := &fakeSandbox{}
+				h := newHarness(t, sb)
+				h.seedSkill(t, "skill_root", "1", "pdf", map[string]string{"SKILL.md": "# pdf"})
+				skilled.ref(t, h)
+				h.seedRepoResource(t, "sesrsc_skills", fx.url(), mount, "ghp_fixture", nil)
+
+				h.runPass(t)
+
+				if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != repoOutcomeInternal {
+					t.Fatalf("clone errors = %v, want exactly one internal for %q", errs, mount)
+				}
+				if fx.clones.Load() != 0 {
+					t.Error("the repository was cloned before its mount path was judged")
+				}
+				if got := sb.files["/workspace/skills/pdf/SKILL.md"]; got != "# pdf" {
+					t.Errorf("skills/pdf/SKILL.md = %q after the refused clone, want the skill intact", got)
+				}
+			})
+		}
+	}
+
+	t.Run("skill-free", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		h := newHarness(t, &fakeSandbox{})
+		h.seedRepoResource(t, "sesrsc_skills", fx.url(), "/workspace/skills", "ghp_fixture", nil)
+
+		h.runPass(t)
+
+		if fx.clones.Load() != 1 {
+			t.Errorf("clones = %d, want 1: a skill-free run may mount a repository on the skills directory", fx.clones.Load())
+		}
+	})
+}
+
+// TestRepoRefusesADirectoryHoldingTheWorkdir 🔍: under a configured workdir
+// the control plane cannot see, a mount above it would remove the workdir —
+// skills and every other mount — with it, so the executor refuses it too.
+func TestRepoRefusesADirectoryHoldingTheWorkdir(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	prov := &fakeProvider{sb: &fakeSandbox{}}
+	h := newHarnessWith(t, prov, Config{Workdir: "/srv/work"})
+	h.prov = prov
+	h.seedRepoResource(t, "sesrsc_above", fx.url(), "/srv", "ghp_fixture", nil)
+
+	h.runPass(t)
+
+	if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != repoOutcomeInternal {
+		t.Fatalf("clone errors = %v, want exactly one internal for /srv", errs)
+	}
+	if fx.clones.Load() != 0 {
+		t.Error("the repository was cloned before its mount path was judged")
 	}
 }
 

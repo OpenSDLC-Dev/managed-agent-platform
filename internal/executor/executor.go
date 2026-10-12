@@ -583,7 +583,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	progress()
 	// Repositories before files, so a file mount may deliberately overlay into
 	// a checkout (plan 25 decision 5).
-	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, progress)
+	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, len(sess.skills) > 0, progress)
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
 	progress()

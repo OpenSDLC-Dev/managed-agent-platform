@@ -1596,10 +1596,10 @@ func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 		"one repository twice at its default": {[]any{repoBody("g", nil), repoBody("g", nil)},
 			overlap("/workspace/example-repo", "/workspace/example-repo"),
 			`the default mount_path and the default mount_path both resolve to "/workspace/example-repo"`},
-		"a repository above another's default": {
-			[]any{repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace"}), repoBody("g", nil)},
-			overlap("/workspace", "/workspace/example-repo"),
-			`mount_path "/workspace" is an ancestor of the repository's default mount_path "/workspace/example-repo"`},
+		"a repository's default above another": {
+			[]any{repoBody("g", nil), repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/example-repo/src"})},
+			overlap("/workspace/example-repo", "/workspace/example-repo/src"),
+			`the default mount_path "/workspace/example-repo" is an ancestor of repository mount_path "/workspace/example-repo/src"`},
 		"a file above a repository": {
 			[]any{file(fileA, "repo"), repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
 			overlap("/mnt/session/uploads/repo", "/mnt/session/uploads/repo/src"),

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -71,10 +72,23 @@ const maxReposPerSession = 8
 // reservedRepoMounts are mount targets a repository may never take (plan 25
 // decision 3): "/" (extraction over the rootfs breaks the sandbox image
 // contract, and a re-clone's cleared target would be the sandbox itself),
-// "/tmp" (the ancestor of the executor's in-sandbox staging path) and, from
-// plan 36 (decision 8), memoryMountParent — validateRepoMountPath also refuses
-// anything below it, which the equal-path map cannot express.
-var reservedRepoMounts = map[string]bool{"/": true, "/tmp": true, memoryMountParent: true}
+// "/tmp" (the ancestor of the executor's in-sandbox staging path), from
+// plan 36 (decision 8) memoryMountParent — validateRepoMountPath also refuses
+// anything below it, which the equal-path map cannot express — and, from #584,
+// "/workspace", the sandbox workdir under its default configuration, which the
+// executor refused already: a clone there would replace every other mount
+// beneath it. The reference refuses none of these; it rebases every mount
+// under /workspace (#922), and what it makes of /workspace itself is unrecorded.
+var reservedRepoMounts = map[string]bool{"/": true, "/tmp": true, memoryMountParent: true, "/workspace": true}
+
+// skillsRoot is where the executor lands a session's skills, one directory per
+// skill — <workdir>/skills under the default workdir (internal/executor's
+// materializeSkills), the place the reference was recorded extracting them
+// (docs/DIVERGENCES.md, the Level-1 skill-injection entry). The workdir is
+// executor configuration the control plane cannot see, so this judges the
+// default layout only; under another EXECUTOR_WORKDIR, the executor's own
+// guard (safeRepoMount) is the one that protects the skills.
+const skillsRoot = defaultRepoMountRoot + "skills"
 
 // memoryMountParent is the directory every attached memory store mounts under
 // (the memory guide: "a directory under /mnt/memory/"); a store's own mount is
@@ -321,12 +335,10 @@ func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourc
 				if f == resourceForSession && out[max(pi, ri)].kind == resourceKindRepo {
 					return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
 				}
+				// r's mount is the caller's own: a default one sits directly
+				// under /workspace, and nothing may take that or "/".
 				if f == resourceForDeployment {
-					repo := "repository mount_path " + strconv.Quote(r.mountPath)
-					if r.givenMountPath == "" {
-						repo = "the repository's default mount_path " + strconv.Quote(r.mountPath)
-					}
-					return nil, errInvalid("%s is an ancestor of %s", p.mountWords(true), repo)
+					return nil, errInvalid("%s is an ancestor of repository mount_path %q", p.mountWords(true), r.mountPath)
 				}
 				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
 			}
@@ -1058,6 +1070,49 @@ func resourceInputsHaveRepo(inputs []resourceInput) bool {
 		}
 	}
 	return false
+}
+
+// repoUnderSkillsRoot reports whether in is a repository mounted at skillsRoot
+// or below it.
+func repoUnderSkillsRoot(in resourceInput) bool {
+	return in.kind == resourceKindRepo &&
+		(in.mountPath == skillsRoot || properPathAncestor(skillsRoot, in.mountPath))
+}
+
+// refuseSkillsRootRepository refuses a repository mounted at skillsRoot or
+// below it when the session has skills to land there (#584): a clone replaces
+// its mount whole, so it would remove skill trees written in the same pass. The
+// session's skills are its agent's and every roster member's, the union the
+// executor materializes. A skill-free session may mount one there — the
+// reference was recorded cloning anthropics/skills to /workspace/skills for an
+// agent with no skills (2026-09-03 batch2 sess.create.repo-wrong-token) — so
+// the judgment needs the resolved agent. It is classified for a deployment's
+// fire: a row stored before the refusal records a run that pauses nothing,
+// where an unclassified 400 would be retried on every tick.
+func refuseSkillsRootRepository(agent sessionAgentJSON, inputs []resourceInput) error {
+	i := slices.IndexFunc(inputs, repoUnderSkillsRoot)
+	if i < 0 {
+		return nil
+	}
+	skilled := len(agent.Skills) > 0
+	if !skilled && present(agent.Multiagent) {
+		var roster struct {
+			Agents []struct {
+				Skills []json.RawMessage `json:"skills"`
+			} `json:"agents"`
+		}
+		if err := json.Unmarshal(agent.Multiagent, &roster); err != nil {
+			return fmt.Errorf("decode roster snapshot: %w", err)
+		}
+		for _, m := range roster.Agents {
+			skilled = skilled || len(m.Skills) > 0
+		}
+	}
+	if !skilled {
+		return nil
+	}
+	return classified("session_creation_rejected_error", errInvalid(
+		"mount_path %q is reserved: the agent's skills are materialized under %s", inputs[i].mountPath, skillsRoot))
 }
 
 // insertSessionResourceCredentials stores each repository's pre-sealed token
