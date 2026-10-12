@@ -851,8 +851,8 @@ func TestAgentDeleteIsTheReferencesNotFound(t *testing.T) {
 		wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "not found")
 	}
 	status, got := s.do(http.MethodGet, "/v1/agents/"+id, nil)
-	if status != http.StatusOK || got["archived_at"] != nil {
-		t.Errorf("get after delete: %d, archived_at %v; want the agent untouched", status, got["archived_at"])
+	if archivedAt, present := got["archived_at"]; status != http.StatusOK || !present || archivedAt != nil {
+		t.Errorf("get after delete: %d, archived_at %v (present %t); want the agent untouched", status, archivedAt, present)
 	}
 
 	for _, tc := range []struct{ method, path string }{

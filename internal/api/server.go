@@ -734,8 +734,9 @@ func isBareSessionPath(p string) bool {
 // the client's own request.
 var errMethodNotAllowed = &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest, "Method Not Allowed"}
 
-// errUnsupportedMethod is the /v1 fallbacks' answer to a method no route on
-// the matched path serves: errMethodNotAllowed, but for an agent's DELETE.
+// errUnsupportedMethod is the /v1 resource fallbacks' answer to a method no
+// route on the matched path serves (the work API's fallbacks answer
+// errMethodNotAllowed directly): errMethodNotAllowed, but for an agent's DELETE.
 // Neither platform deletes an agent, only archives one, and the reference
 // answers that DELETE a 404 of its own (#592) — "not found", lower-case, and
 // without the `x-should-retry` its unknown-path 404 carries — on each of the
