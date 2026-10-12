@@ -55,12 +55,20 @@ The fixture changed first. go-git's server-side transport refuses a shallow requ
 
 Each guard of the code as merged was then broken on its own in an overlay copy, and a test failed each time:
 
-- the clone (6): no depth on a branch clone, no depth on a commit fetch, the `not our ref` wrap dropped, the scratch ref kept, the null-SHA check skipped before the remote is asked, both of the default arm's context re-checks gone (either one alone is invisible, as the budget test says);
-- the shape (7): no `.git` suffix, one remote, no `gh-resolved`, no `gc.auto`, a `core` key dropped, no remote-tracking ref, no `origin/HEAD`.
+- the clone (7): no depth on a branch clone, no depth on a commit fetch, every tag fetched beside a branch, the `not our ref` wrap dropped, the scratch ref kept, the null-SHA check skipped before the remote is asked, both of the default arm's context re-checks gone (either one alone is invisible, as the budget test says);
+- the shape (11): no `.git` suffix, one remote, no `gh-resolved`, no `gc.auto`, a `core` key dropped, no remote-tracking ref, no `origin/HEAD`, `origin/HEAD` on every form, on none, go-git's own `origin/HEAD` left in place, and `origin/HEAD` written beside a default branch named `HEAD/<x>`.
 
-One mutant survived and its code went: an explicit `[branch]` block, which go-git's clone already writes.
+Two mutants survived, and their code went: an explicit `[branch]` block, which go-git's clone already writes, and no-tags on the commit fetch, because go-git follows tags only for a wildcard refspec. The fixture was checked the same way: without its `uploadpack.allowReachableSHA1InWant`, four tests fail.
 
-**Plan 63 progress summary (archived).** Delivered in one PR: depth 1 for every checkout form, a commit fetched by its exact SHA, the recorded `.git/config` and the refs `git clone` leaves, an unknown SHA blamed on the checkout, and a fixture that can serve shallow requests.
+Review hardening. The verifier's first run was stopped when the reviews below changed behavior; it ran again on the fixed branch. /code-review (`claude-opus-5-5`, xhigh) returned eight findings and Codex (`gpt-6.1-sol`, xhigh) three; the first two below came from both.
+
+- **Fixed:** every tag was fetched beside a branch, with its commit's tree, because go-git's clone defaults to all tags. A probe fetched a 5 MB blob only an old tag reached. Both clone paths now fetch none, and the shape test tags an old commit.
+- **Fixed:** `origin/HEAD` named a checked-out branch as the remote's default. `git clone --branch` leaves none at depth 1, so only a default-branch checkout gets it now.
+- **Fixed:** a default branch named `HEAD/<x>` failed the clone, because go-git's plain `origin/HEAD` blocked the tracking ref's directory. Real git clones it with no `origin/HEAD`, and so does this one now. Codex found it on a branch checkout, which the fix above had already cleared.
+- **Fixed:** the docs repeated the `origin/HEAD` claim; the test helper passed the caller's `GIT_*` variables to git, which a git hook's `GIT_DIR` would have redirected; the fixture read the host's system git config and needed git 2.31 for `GIT_CONFIG_COUNT`; and a comment gave the second config write a reason that covered one of its five keys.
+- **Declined:** a sentinel instead of the `not our ref` text match. go-git has none. A changed wording reports a less exact reason for a clone that fails either way, as plan 63 decision 5 says.
+
+**Plan 63 progress summary (archived).** Delivered in one PR: depth 1 and no tags for every checkout form, a commit fetched by its exact SHA, the recorded `.git/config` and the refs `git clone` leaves, an unknown SHA blamed on the checkout, and a fixture that can serve shallow requests.
 
 ## Main's branch protection binds admins (#920) — the designs it beat, 2026-10-12
 

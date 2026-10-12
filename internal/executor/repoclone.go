@@ -78,7 +78,9 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	if r.Checkout != nil && r.Checkout.Type == "commit" {
 		repo, err = fetchCommit(ctx, storer, tree, r.URL, auth, r.Checkout.Sha)
 	} else {
-		opts := &git.CloneOptions{URL: r.URL, Auth: auth, Depth: 1, SingleBranch: true}
+		// No tags: go-git's default fetches every one, each with the tree of its
+		// commit, which would bring back the history depth 1 leaves out.
+		opts := &git.CloneOptions{URL: r.URL, Auth: auth, Depth: 1, SingleBranch: true, Tags: git.NoTags}
 		if r.Checkout != nil && r.Checkout.Type == "branch" {
 			opts.ReferenceName = plumbing.NewBranchReferenceName(r.Checkout.Name)
 		}
@@ -96,7 +98,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	if err := ctx.Err(); err != nil {
 		return "", 0, cleanup, err
 	}
-	if err := shapeCheckout(repo, r.URL); err != nil {
+	if err := shapeCheckout(repo, r.URL, r.Checkout == nil); err != nil {
 		return "", 0, cleanup, err
 	}
 
@@ -162,12 +164,13 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // shapeCheckout gives a checkout the .git/config and refs the reference's
 // carried (#582): `origin` and GitHub CLI's base remote `github`, both at the
 // URL's `.git` spelling and fetching every branch, automatic gc off, and the
-// core keys `git init` writes. A branch checkout keeps the upstream go-git's
-// clone gives it, and gets the rest of what `git clone` leaves — the branch's
-// remote-tracking ref, with origin/HEAD naming it — so `git status` and
-// `git pull` work as they would in the reference's. No credential is written:
-// the token only ever rides a request header.
-func shapeCheckout(repo *git.Repository, url string) error {
+// core keys `git init` writes. A branch checkout keeps the upstream and the
+// remote-tracking ref go-git's clone gives it, as `git clone --branch` leaves
+// them. A default-branch checkout (defaultBranch) also gets what `git clone`
+// leaves there: the branch's remote-tracking ref, and origin/HEAD naming it as
+// the remote's default — which only that form may claim. No credential is
+// written: the token only ever rides a request header.
+func shapeCheckout(repo *git.Repository, url string, defaultBranch bool) error {
 	if !strings.HasSuffix(url, ".git") {
 		url += ".git"
 	}
@@ -180,16 +183,30 @@ func shapeCheckout(repo *git.Repository, url string) error {
 		cfg.Remotes[name] = &config.RemoteConfig{Name: name, URLs: []string{url},
 			Fetch: []config.RefSpec{config.RefSpec("+refs/heads/*:refs/remotes/" + name + "/*")}}
 	}
-	head, err := repo.Head()
-	if err != nil {
-		return err
-	}
-	if branch := head.Name(); branch.IsBranch() {
-		tracking := plumbing.NewRemoteReferenceName("origin", branch.Short())
-		for _, ref := range []*plumbing.Reference{
-			plumbing.NewHashReference(tracking, head.Hash()),
-			plumbing.NewSymbolicReference(plumbing.NewRemoteHEADReferenceName("origin"), tracking),
-		} {
+	cfg.Raw.Section("gc").SetOption("auto", "0")
+	core := cfg.Raw.Section("core")
+	core.SetOption("repositoryformatversion", "0")
+	core.SetOption("filemode", "true")
+	core.SetOption("logallrefupdates", "true")
+	if defaultBranch {
+		head, err := repo.Head()
+		if err != nil {
+			return err
+		}
+		// go-git's clone leaves origin/HEAD a plain ref, which goes first: a
+		// default branch named HEAD/<x> needs that name as a directory for its
+		// tracking ref, and `git clone` then leaves no origin/HEAD at all.
+		remoteHEAD := plumbing.NewRemoteHEADReferenceName("origin")
+		if err := repo.Storer.RemoveReference(remoteHEAD); err != nil {
+			return err
+		}
+		branch := head.Name().Short()
+		tracking := plumbing.NewRemoteReferenceName("origin", branch)
+		refs := []*plumbing.Reference{plumbing.NewHashReference(tracking, head.Hash())}
+		if !strings.HasPrefix(branch, "HEAD/") {
+			refs = append(refs, plumbing.NewSymbolicReference(remoteHEAD, tracking))
+		}
+		for _, ref := range refs {
 			if err := repo.Storer.SetReference(ref); err != nil {
 				return err
 			}
@@ -205,11 +222,6 @@ func shapeCheckout(repo *git.Repository, url string) error {
 		return err
 	}
 	cfg.Raw.Section("remote").Subsection("github").SetOption("gh-resolved", "base")
-	cfg.Raw.Section("gc").SetOption("auto", "0")
-	core := cfg.Raw.Section("core")
-	core.SetOption("repositoryformatversion", "0")
-	core.SetOption("filemode", "true")
-	core.SetOption("logallrefupdates", "true")
 	return repo.SetConfig(cfg)
 }
 

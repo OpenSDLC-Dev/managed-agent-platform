@@ -53,7 +53,16 @@ Delivered in one PR, which archives this plan.
     sentinel, so `cloneReason` called it `internal`;
   - go-git rebuilds a remote's subsection from its typed fields on every
     config write. A key it has no field for, like `gh-resolved`, needs a second
-    write.
+    write;
+  - a clone left at go-git's default tag mode fetches every tag, each with the
+    tree of its commit, at depth 1 too (found in review, from
+    `CloneOptions.Validate` and a scratch probe). A fetch's default follows
+    tags only for a wildcard refspec, which an exact SHA is not.
+- **Real `git clone`** (git 2.54, measured): `--branch <b>` leaves no
+  `origin/HEAD` at depth 1, because that ref names the remote's default branch.
+  A default branch named `HEAD/<x>` clones fine, to
+  `refs/remotes/origin/HEAD/<x>` and no `origin/HEAD`, whose name the
+  tracking ref needs as a directory.
 - **The test fixture could not serve a shallow request.** It was go-git's own
   server-side transport, which refuses one outright and cannot truncate history.
   `git http-backend` can, and `make test` already needs a git binary
@@ -61,8 +70,9 @@ Delivered in one PR, which archives this plan.
 
 ## Decisions
 
-1. **Depth 1 for every form.** Default branch and branch use `Depth: 1,
-   SingleBranch: true`. A commit no longer needs the full history.
+1. **Depth 1 for every form, and no tags.** Default branch and branch use
+   `Depth: 1, SingleBranch: true, Tags: NoTags`. A commit no longer needs the
+   full history.
 2. **A commit is fetched by its exact SHA** into a scratch ref, checked out
    detached, and the ref removed, so no ref stands beside HEAD. There is no
    fallback to a full clone: the URL grammar admits only `github.com`, which
@@ -76,14 +86,17 @@ Delivered in one PR, which archives this plan.
 
    Section order is go-git's. No credential is written: the token rides a
    request header only.
-4. **Refs as `git clone` leaves them.** A branch checkout keeps its `[branch]`
-   upstream and gets `refs/remotes/origin/<branch>`, with `origin/HEAD` naming
-   it, so `git status` has an upstream. No other branch is fetched: the
-   recording does not show which the reference's holds. A commit checkout has
-   no refs.
+4. **Refs as `git clone` leaves them.** A branch checkout keeps the `[branch]`
+   upstream and `refs/remotes/origin/<branch>` go-git's clone gives it, so
+   `git status` has an upstream. A default-branch checkout also gets
+   `origin/HEAD` naming its tracking ref, unless the branch is named
+   `HEAD/<x>`. No other branch is fetched: the recording does not show which
+   the reference's holds. A commit checkout has no refs.
 5. **An unknown SHA reports `checkout`.** The commit fetch wraps the remote's
    `not our ref` as `plumbing.ErrObjectNotFound`. That keeps `cloneReason`
-   sentinel-based.
+   sentinel-based. The match is on text, so a host that words it otherwise, or
+   does not admit a SHA want at all, reports a reason other than `checkout`: a
+   failed clone either way, with a less exact reason.
 6. **The fixture serves through `git http-backend`** behind `net/http/cgi`, with
    `uploadpack.allowReachableSHA1InWant` set the way GitHub behaves. Its
    handler-level failure modes stay in front of it.

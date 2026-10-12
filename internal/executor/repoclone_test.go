@@ -10,6 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // TestRepoCloneShapeMatchesTheReference 🔍 pins the checkout #582 recorded
@@ -18,16 +23,25 @@ import (
 // spelling of the URL, the second one GitHub CLI's base remote, with automatic
 // gc off. Every checkout form is depth 1 — a commit included, fetched by its
 // exact SHA rather than out of the full history, so the fixture's commit is not
-// its default branch's tip. Each tree is judged by the git binary itself, which
-// is what an agent's script runs against.
+// its default branch's tip — and fetches no tag: the tag on the first commit
+// would bring that commit back into a branch's clone. Refs are what `git clone`
+// leaves, and origin/HEAD, which names the remote's default branch, appears
+// only when that branch is the one checked out. Each tree is judged by the git
+// binary itself, which is what an agent's script runs against.
 func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"first.txt": "one\n"})
 	first, err := fx.repo.Head()
 	if err != nil {
 		t.Fatalf("Head: %v", err)
 	}
+	// Annotated, so a fetch that follows tags would carry it with the commit.
+	tag, err := fx.repo.CreateTag("v0", first.Hash(), &git.CreateTagOptions{Message: "v0",
+		Tagger: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}})
+	if err != nil {
+		t.Fatalf("tag: %v", err)
+	}
 	fx.commit(t, "second", map[string]string{"second.txt": "two\n"})
-	fx.branch(t, "feature", map[string]string{"feature.txt": "on the branch\n"})
+	fx.branch(t, "feature/topic", map[string]string{"feature.txt": "on the branch\n"})
 	url := fx.srv.URL + "/o/r"
 
 	for _, tc := range []struct {
@@ -37,7 +51,7 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 		file     string
 	}{
 		{"default branch", nil, "master", "second.txt"},
-		{"branch", &repoCheckout{Type: "branch", Name: "feature"}, "feature", "feature.txt"},
+		{"branch", &repoCheckout{Type: "branch", Name: "feature/topic"}, "feature/topic", "feature.txt"},
 		{"commit", &repoCheckout{Type: "commit", Sha: first.Hash().String()}, "", "first.txt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,6 +78,9 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 				}
 			}
 			gitIn(t, dir, "fsck --connectivity-only")
+			if gitCmd(t, dir, "cat-file", "-e", tag.Hash().String()).Run() == nil {
+				t.Error("the tag on the first commit was fetched")
+			}
 
 			refs := gitIn(t, dir, "for-each-ref --format=%(refname)")
 			if tc.branch == "" {
@@ -81,24 +98,56 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 			if got := gitIn(t, dir, "symbolic-ref HEAD"); got != "refs/heads/"+tc.branch {
 				t.Errorf("HEAD names %s, want refs/heads/%s", got, tc.branch)
 			}
+			if gitCmd(t, dir, "cat-file", "-e", first.Hash().String()).Run() == nil {
+				t.Error("the tagged first commit was fetched beside the branch")
+			}
 			for _, c := range []struct{ args, want string }{
+				// The upstream and remote-tracking ref `git clone` leaves, so
+				// `git status` and `git pull` work.
 				{"config branch." + tc.branch + ".remote", "origin"},
 				{"config branch." + tc.branch + ".merge", "refs/heads/" + tc.branch},
-				// What `git clone` leaves: the branch's remote-tracking ref,
-				// and origin/HEAD naming it, so `git status` has an upstream.
 				{"rev-parse refs/remotes/origin/" + tc.branch, gitIn(t, dir, "rev-parse HEAD")},
-				{"symbolic-ref refs/remotes/origin/HEAD", "refs/remotes/origin/" + tc.branch},
 				{"rev-parse --abbrev-ref @{upstream}", "origin/" + tc.branch},
 			} {
 				if got := gitIn(t, dir, c.args); got != c.want {
 					t.Errorf("git %s = %q, want %q", c.args, got, c.want)
 				}
 			}
-			want := "refs/heads/" + tc.branch + "\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/" + tc.branch
+			want := "refs/heads/" + tc.branch + "\nrefs/remotes/origin/" + tc.branch
+			if tc.checkout == nil {
+				if got := gitIn(t, dir, "symbolic-ref refs/remotes/origin/HEAD"); got != "refs/remotes/origin/"+tc.branch {
+					t.Errorf("origin/HEAD names %s, want refs/remotes/origin/%s", got, tc.branch)
+				}
+				want = "refs/heads/" + tc.branch + "\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/" + tc.branch
+			}
 			if refs != want {
 				t.Errorf("refs = %q, want %q", refs, want)
 			}
 		})
+	}
+}
+
+// TestRepoDefaultBranchUnderHEADClones 🔍: git admits a branch named
+// HEAD/<x>, and `git clone` of a repository whose default branch it is leaves
+// refs/remotes/origin/HEAD/<x> and no origin/HEAD, which that name's directory
+// rules out (git 2.54, measured). The clone does the same rather than fail.
+func TestRepoDefaultBranchUnderHEADClones(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"first.txt": "one\n"})
+	fx.branch(t, "HEAD/topic", map[string]string{"topic.txt": "on the branch\n"})
+	if err := fx.repo.Storer.SetReference(plumbing.NewSymbolicReference(
+		plumbing.HEAD, plumbing.NewBranchReferenceName("HEAD/topic"))); err != nil {
+		t.Fatalf("make HEAD/topic the default branch: %v", err)
+	}
+	dir := cloneAndUnpack(t, repoRef{URL: fx.url()})
+	if _, err := os.Stat(filepath.Join(dir, "topic.txt")); err != nil {
+		t.Errorf("topic.txt is missing from the checkout: %v", err)
+	}
+	if got, want := gitIn(t, dir, "for-each-ref --format=%(refname)"),
+		"refs/heads/HEAD/topic\nrefs/remotes/origin/HEAD/topic"; got != want {
+		t.Errorf("refs = %q, want %q", got, want)
+	}
+	if got := gitIn(t, dir, "rev-parse --symbolic-full-name @{upstream}"); got != "refs/remotes/origin/HEAD/topic" {
+		t.Errorf("upstream = %q, want refs/remotes/origin/HEAD/topic", got)
 	}
 }
 
@@ -176,11 +225,18 @@ func gitIn(t *testing.T, dir, args string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// gitCmd is git in dir, isolated from the host's own git configuration.
+// gitCmd is git in dir, isolated from the host's own git configuration and
+// from any GIT_* variable the caller carries — a git hook running the tests
+// exports GIT_DIR, which would point every check at the outer repository.
 func gitCmd(t *testing.T, dir string, args ...string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "HOME="+t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Env = append(cmd.Env, "HOME="+t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 	return cmd
 }

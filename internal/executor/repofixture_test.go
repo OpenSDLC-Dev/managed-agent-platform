@@ -83,14 +83,13 @@ func newGitFixture(t *testing.T, files map[string]string) *gitFixture {
 		t.Fatalf("the fixture serves through git http-backend: %v", err)
 	}
 	f := &gitFixture{dir: dir, repo: repo, backend: &cgi.Handler{
-		Path: gitBin, Args: []string{"http-backend"},
+		// GitHub answers a want for any commit its refs reach; git's own
+		// upload-pack does only when told to. `-c` reaches the upload-pack the
+		// backend runs, on any git version.
+		Path: gitBin, Args: []string{"-c", "uploadpack.allowReachableSHA1InWant=true", "http-backend"},
 		Env: []string{
 			"GIT_PROJECT_ROOT=" + base, "GIT_HTTP_EXPORT_ALL=1",
-			"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(),
-			// GitHub answers a want for any commit its refs reach; git's own
-			// upload-pack does only when told to.
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=uploadpack.allowReachableSHA1InWant", "GIT_CONFIG_VALUE_0=true",
+			"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1",
 		},
 	}}
 	f.commit(t, "initial", files)
