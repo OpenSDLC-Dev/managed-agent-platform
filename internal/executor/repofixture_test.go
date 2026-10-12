@@ -87,6 +87,15 @@ func newGitFixture(t *testing.T, files map[string]string) *gitFixture {
 	if err != nil {
 		t.Fatalf("the fixture serves through git http-backend: %v", err)
 	}
+	// Some distributions package the helper apart from git. Without it every
+	// request answers 500, which would read as the network's failure.
+	execPath, err := exec.Command(gitBin, "--exec-path").Output()
+	if err != nil {
+		t.Fatalf("git --exec-path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(strings.TrimSpace(string(execPath)), "git-http-backend")); err != nil {
+		t.Fatalf("the fixture serves through git's http-backend helper, which is not installed: %v", err)
+	}
 	f := &gitFixture{dir: dir, repo: repo, backend: &cgi.Handler{
 		// GitHub answers a want for a commit no ref names; git's own
 		// upload-pack does only when told to. `-c` reaches the upload-pack the

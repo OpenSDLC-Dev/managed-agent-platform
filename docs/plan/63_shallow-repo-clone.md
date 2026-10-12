@@ -109,8 +109,9 @@ Delivered in one PR, which archives this plan.
    HEAD. There is no fallback to a full clone: the URL grammar admits only
    `github.com`, which serves any commit in the fork network this way. A commit
    checkout can therefore mount a fork's code under the repository's name, as
-   `git fetch <sha>` can; the owner decided on the exact-SHA fetch before this
-   was measured. The null SHA is still refused before the remote is asked.
+   `git fetch <sha>` can. The owner decided on the exact-SHA fetch before this
+   was measured, and kept it on 2026-10-13, after. The null SHA is still
+   refused before the remote is asked.
 3. **The recorded `.git/config`**, written after the checkout:
    - `origin` and `github`, both at the URL's `.git` spelling, each fetching
      `+refs/heads/*` into its own namespace;
@@ -136,8 +137,8 @@ Delivered in one PR, which archives this plan.
    sentinel-based. The match is on text, so a host that words it otherwise, or
    does not admit a SHA want at all, reports a reason other than `checkout`: a
    failed clone either way, with a less exact reason. An id the remote has
-   that names a tree or a blob reports `checkout` too, by its type, checked
-   after the fetch.
+   that names a tree or a blob, or an annotated tag of one, reports
+   `checkout` too, by its type, checked after the fetch.
 6. **The fixture serves through `git http-backend`** behind `net/http/cgi`, with
    `uploadpack.allowReachableSHA1InWant` set the way GitHub behaves. Its
    handler-level failure modes stay in front of it.

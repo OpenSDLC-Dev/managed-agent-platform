@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/filesystem"
@@ -106,9 +107,10 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		opts := &git.CloneOptions{URL: r.URL, Auth: auth, Depth: 1, SingleBranch: true, Tags: git.NoTags}
 		if r.Checkout != nil && r.Checkout.Type == "branch" {
 			opts.ReferenceName = plumbing.NewBranchReferenceName(r.Checkout.Name)
-			// A name git's ref rules refuse is the caller's mistake, and one with
-			// a wildcard would fetch every branch's tree before the checkout
-			// failed, so it is refused before the remote is asked.
+			// A name go-git's ref-name check refuses is the caller's to rename
+			// (errBranchName), and one with a wildcard would fetch every
+			// branch's tree before the checkout failed, so it is refused before
+			// the remote is asked.
 			if err := opts.ReferenceName.Validate(); err != nil {
 				return "", 0, cleanup, fmt.Errorf("%w %q: %w", errBranchName, r.Checkout.Name, err)
 			}
@@ -195,15 +197,20 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// The remote serves a tree or a blob by its id as readily as a commit. Such
-	// an id is the caller's, and names no commit; go-git's checkout would
-	// refuse it with an error that reads as ours. An annotated tag is left to
-	// the checkout, which peels one to its commit, as the full clone's did.
+	// The remote serves a tree or a blob by its id as readily as a commit, and
+	// an annotated tag of one. Such an id is the caller's, and names no commit;
+	// go-git's checkout would refuse it with an error that reads as ours. Any
+	// other tag is left to the checkout, which peels one to its commit, as the
+	// full clone's did, and refuses a tag of a tag, which git would peel.
 	obj, err := repo.Object(plumbing.AnyObject, hash)
 	if err != nil {
 		return nil, err
 	}
-	if t := obj.Type(); t == plumbing.TreeObject || t == plumbing.BlobObject {
+	t := obj.Type()
+	if tag, ok := obj.(*object.Tag); ok {
+		t = tag.TargetType
+	}
+	if t == plumbing.TreeObject || t == plumbing.BlobObject {
 		return nil, fmt.Errorf("%w: %s names a %s, not a commit", plumbing.ErrObjectNotFound, sha, t)
 	}
 	wt, err := repo.Worktree()
@@ -404,9 +411,9 @@ func cloneReason(err error) string {
 	case errors.Is(err, plumbing.ErrObjectNotFound),
 		errors.Is(err, plumbing.ErrReferenceNotFound),
 		errors.Is(err, git.NoMatchingRefSpecError{}),
-		// A branch name git's ref rules refuse — `foo:bar`, say. It is the
-		// caller's ref that is wrong, so `internal` would send the operator to
-		// read our logs over their own typo.
+		// A branch name go-git's ref-name check refuses — `foo:bar`, say. It
+		// is the caller's ref that is wrong, so `internal` would send the
+		// operator to read our logs over their own typo.
 		errors.Is(err, errBranchName):
 		return repoOutcomeCheckout
 	case isRemoteStatusError(err), isNetworkError(err), isProtocolError(err):

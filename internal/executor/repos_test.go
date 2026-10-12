@@ -20,7 +20,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
+	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // Unit M of plan 25 (docs/plan/25_git-repo-mounting.md, "Verification"): the
@@ -785,7 +787,10 @@ func TestMeteredFSChrootSharesTheBudget(t *testing.T) {
 // let the sandbox resolve it in its own namespace, which is what git does.
 func TestCloneSpoolSymlinks(t *testing.T) {
 	var spent atomic.Int64
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir()) // newCloneFS's root holds no symlink
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	fs := newCloneFS(dir, &spent, 1<<20)
 
 	const target = "/etc/hosts"
@@ -1090,7 +1095,18 @@ func TestRepoNonCommitShaBlamesTheCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("File: %v", err)
 	}
-	for kind, id := range map[string]string{"tree": commit.TreeHash.String(), "blob": file.Hash.String()} {
+	ids := map[string]string{"tree": commit.TreeHash.String(), "blob": file.Hash.String()}
+	// An annotated tag can point at a tree or a blob too, and names no commit
+	// either; go-git's checkout refuses it with the same error of its own.
+	for _, kind := range []string{"tree", "blob"} {
+		tag, err := fx.repo.CreateTag("of-a-"+kind, plumbing.NewHash(ids[kind]), &git.CreateTagOptions{Message: kind,
+			Tagger: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}})
+		if err != nil {
+			t.Fatalf("tag of a %s: %v", kind, err)
+		}
+		ids["tag of a "+kind] = tag.Hash().String()
+	}
+	for kind, id := range ids {
 		t.Run(kind, func(t *testing.T) {
 			_, _, cleanup, err := cloneToTar(context.Background(),
 				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: id}}, "ghp_fixture", 1<<30)
