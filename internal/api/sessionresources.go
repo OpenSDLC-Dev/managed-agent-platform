@@ -1019,10 +1019,33 @@ var errRepoSecretsUnavailable = &apiError{http.StatusInternalServerError, errTyp
 // self-hosted-sandboxes § "Session resources"). Only the repository is
 // refused here: the BYOC worker materializes a file, and it clones nothing
 // (#322 closed without building that). A deployment's fire records the
-// reference's run type for the case, which pauses a schedule.
+// reference's run type for the case, and a scheduled fire pauses on it.
 func errSelfHostedRepository(envID string) error {
 	return classified("self_hosted_resources_unsupported_error", errInvalid(
 		"Environment %s is a self-hosted environment. `resources` are not supported with self-hosted environments.", envID))
+}
+
+// refuseSelfHostedRepository answers errSelfHostedRepository when envID names
+// a self_hosted environment; its callers ask only for resources that mount a
+// repository. Session create and the deployment routes ask before the token
+// is sealed, so a refused request spends no cipher round trip, and a missing
+// or failing cipher cannot turn the 400 into a 5xx. An environment's kind
+// never changes after create (updateEnvironment refuses the flip), so that
+// read needs no lock. An environment it cannot find is left to the caller's
+// own lookup, which answers in the reference's words.
+func refuseSelfHostedRepository(ctx context.Context, db querier, envID string) error {
+	var kind string
+	err := db.QueryRow(ctx, `SELECT kind FROM environments WHERE id = $1`+notInternal, envID).Scan(&kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if domain.EnvironmentKind(kind) == domain.EnvSelfHosted {
+		return errSelfHostedRepository(envID)
+	}
+	return nil
 }
 
 // resourceInputsHaveRepo reports whether any validated input is a repository —

@@ -17,23 +17,27 @@ func selfHostedResourcesRefusal(envID string) string {
 	return "Environment " + envID + " is a self-hosted environment. `resources` are not supported with self-hosted environments."
 }
 
-func createSelfHostedEnvironment(t *testing.T, s *tserver) string {
-	t.Helper()
-	return createEnvironment(t, s, map[string]any{
-		"name": "byoc", "config": map[string]any{"type": "self_hosted"}})["id"].(string)
+func selfHostedRepo() map[string]any {
+	return map[string]any{"type": "github_repository", "url": "https://github.com/acme/orders",
+		"authorization_token": "ghp_byoc"}
 }
 
 // A self_hosted session that mounts a repository is refused before anything
-// is stored, in the reference's words; a file stays accepted, because the BYOC
-// worker does materialize one.
+// is stored, in the reference's words, and counted as an invalid resource
+// mutation; a file stays accepted, because the BYOC worker does materialize
+// one.
 func TestSelfHostedSessionRefusesARepository(t *testing.T) {
+	collect := collectMetrics(t)
 	s := newTestServer(t)
 	agentID, _ := fixture(t, s)
-	envID := createSelfHostedEnvironment(t, s)
+	envID := selfHostedEnv(t, s, "byoc")
 
 	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
 		"agent": agentID, "environment_id": envID, "resources": []any{repoBody("ghp_byoc", nil)}})
 	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", selfHostedResourcesRefusal(envID))
+	if got := resourceMutationCount(t, collect(), "invalid"); got != 1 {
+		t.Errorf("session.resources{invalid} = %d, want 1 for the refused create", got)
+	}
 
 	var sessions, credentials int
 	if err := s.pool.QueryRow(t.Context(),
@@ -57,19 +61,38 @@ func TestSelfHostedSessionRefusesARepository(t *testing.T) {
 	}
 }
 
+// The refusal comes before the token is sealed, so a deployment with no
+// secrets cipher answers the reference's 400 rather than the 500 a cloud
+// repository gets there — on session create and on both deployment routes.
+func TestSelfHostedRepositoryRefusalPrecedesTheCipher(t *testing.T) {
+	s := newTestServerWithCipher(t, nil)
+	agentID, _ := fixture(t, s)
+	envID := selfHostedEnv(t, s, "byoc")
+
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "resources": []any{repoBody("ghp_byoc", nil)}})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", selfHostedResourcesRefusal(envID))
+
+	create := deploymentBody(agentID, envID)
+	create["resources"] = []any{selfHostedRepo()}
+	status, body = s.do(http.MethodPost, "/v1/deployments", create)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", selfHostedResourcesRefusal(envID))
+
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	status, body = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": []any{selfHostedRepo()}})
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", selfHostedResourcesRefusal(envID))
+}
+
 // A deployment is refused the same way on create and on update: whether the
 // update brings the repository or moves a repository-bearing deployment onto a
-// self_hosted environment. An update that touches neither leaves a deployment
-// alone, and a file stays accepted.
+// self_hosted environment. A file stays accepted.
 func TestSelfHostedDeploymentRefusesARepository(t *testing.T) {
 	s := newTestServer(t)
 	agentID, cloudEnv := fixture(t, s)
-	envID := createSelfHostedEnvironment(t, s)
-	repo := map[string]any{"type": "github_repository", "url": "https://github.com/acme/orders",
-		"authorization_token": "ghp_byoc"}
+	envID := selfHostedEnv(t, s, "byoc")
 
 	body := deploymentBody(agentID, envID)
-	body["resources"] = []any{repo}
+	body["resources"] = []any{selfHostedRepo()}
 	status, res := s.do(http.MethodPost, "/v1/deployments", body)
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", selfHostedResourcesRefusal(envID))
 	var count int
@@ -85,11 +108,11 @@ func TestSelfHostedDeploymentRefusesARepository(t *testing.T) {
 	withFile["resources"] = []any{map[string]any{"type": "file", "file_id": fileID}}
 	byoc := createDeployment(t, s, withFile)["id"].(string)
 
-	status, res = s.do(http.MethodPost, "/v1/deployments/"+byoc, map[string]any{"resources": []any{repo}})
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+byoc, map[string]any{"resources": []any{selfHostedRepo()}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", selfHostedResourcesRefusal(envID))
 
 	cloudBody := deploymentBody(agentID, cloudEnv)
-	cloudBody["resources"] = []any{repo}
+	cloudBody["resources"] = []any{selfHostedRepo()}
 	cloud := createDeployment(t, s, cloudBody)["id"].(string)
 	status, res = s.do(http.MethodPost, "/v1/deployments/"+cloud, map[string]any{"environment_id": envID})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", selfHostedResourcesRefusal(envID))
@@ -101,10 +124,6 @@ func TestSelfHostedDeploymentRefusesARepository(t *testing.T) {
 	if stored != cloudEnv {
 		t.Errorf("environment_id = %s after the refused update, want %s", stored, cloudEnv)
 	}
-
-	if status, res := s.do(http.MethodPost, "/v1/deployments/"+cloud, map[string]any{"name": "renamed"}); status != http.StatusOK {
-		t.Errorf("an update touching neither environment nor resources: status %d (%v), want 200", status, res)
-	}
 }
 
 // legacySelfHostedRepoDeployment stores what the create and update routes now
@@ -113,10 +132,9 @@ func TestSelfHostedDeploymentRefusesARepository(t *testing.T) {
 // then moved by SQL, past the route.
 func legacySelfHostedRepoDeployment(t *testing.T, s *tserver, body map[string]any) (deplID, envID string) {
 	t.Helper()
-	body["resources"] = []any{map[string]any{"type": "github_repository",
-		"url": "https://github.com/acme/orders", "authorization_token": "ghp_byoc"}}
+	body["resources"] = []any{selfHostedRepo()}
 	deplID = createDeployment(t, s, body)["id"].(string)
-	envID = createSelfHostedEnvironment(t, s)
+	envID = selfHostedEnv(t, s, "byoc-"+deplID)
 	if _, err := s.pool.Exec(t.Context(),
 		`UPDATE deployments SET environment_id = $2 WHERE id = $1`, deplID, envID); err != nil {
 		t.Fatal(err)
@@ -124,10 +142,34 @@ func legacySelfHostedRepoDeployment(t *testing.T, s *tserver, body map[string]an
 	return deplID, envID
 }
 
+// A row stored before the refusal is left alone by an update that touches
+// neither its environment nor its resources, and either repair — dropping the
+// repository, or moving the deployment to a cloud environment — is accepted.
+func TestSelfHostedRepositoryDeploymentStoredEarlierCanBeRepaired(t *testing.T) {
+	s := newTestServer(t)
+	agentID, cloudEnv := fixture(t, s)
+
+	renamed, _ := legacySelfHostedRepoDeployment(t, s, deploymentBody(agentID, cloudEnv))
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+renamed, map[string]any{"name": "renamed"}); status != http.StatusOK {
+		t.Errorf("rename: status %d (%v), want 200", status, res)
+	}
+
+	cleared, _ := legacySelfHostedRepoDeployment(t, s, deploymentBody(agentID, cloudEnv))
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+cleared, map[string]any{"resources": []any{}}); status != http.StatusOK {
+		t.Errorf("clearing the repository: status %d (%v), want 200", status, res)
+	}
+
+	moved, _ := legacySelfHostedRepoDeployment(t, s, deploymentBody(agentID, cloudEnv))
+	if status, res := s.do(http.MethodPost, "/v1/deployments/"+moved, map[string]any{"environment_id": cloudEnv}); status != http.StatusOK {
+		t.Errorf("moving to a cloud environment: status %d (%v), want 200", status, res)
+	}
+}
+
 // Such a deployment fails its fire as self_hosted_resources_unsupported_error,
 // the reference's run type for it, rather than creating a session whose
-// repository nothing will ever mount: a manual run records the type, and a
-// scheduled fire records it and pauses the deployment.
+// repository nothing will ever mount: a manual run records the type and leaves
+// the deployment active, and a scheduled fire records it and pauses the
+// deployment.
 func TestSelfHostedRepositoryDeploymentFailsItsFire(t *testing.T) {
 	s := newTestServer(t)
 	agentID, cloudEnv := fixture(t, s)
@@ -140,6 +182,9 @@ func TestSelfHostedRepositoryDeploymentFailsItsFire(t *testing.T) {
 	}
 	if re["message"] != selfHostedResourcesRefusal(envID) {
 		t.Errorf("error.message = %v, want %q", re["message"], selfHostedResourcesRefusal(envID))
+	}
+	if code, d := s.do(http.MethodGet, "/v1/deployments/"+manual, nil); code != http.StatusOK || d["status"] != "active" {
+		t.Errorf("after the manual run: %d, status %v; a failed manual run must not pause", code, d["status"])
 	}
 
 	scheduled, _ := legacySelfHostedRepoDeployment(t, s, scheduledBody(agentID, cloudEnv, "0 9 * * *", "UTC"))

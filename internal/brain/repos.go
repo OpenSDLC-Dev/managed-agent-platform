@@ -43,12 +43,12 @@ type repoMount struct {
 // the reference — and telling the model a checkout is present when none is
 // would be a false statement, not a harmless omission. Create refuses a
 // repository there now (errSelfHostedRepository, #322), so the gate guards the
-// sessions stored before it did. The same rule applies
-// one repository at a time: a clone the executor could not make is tolerated
-// deliberately, leaving the session running with an absent mount, and the
-// session.error that records it never reaches the model in replay. Rendered
-// unqualified, this block would then assert that checkout for the rest of the
-// session and send the model looking down a path that is not there.
+// sessions stored before it did. The same rule applies one repository at a
+// time: a clone the executor could not make is tolerated deliberately, leaving
+// the session running with an absent mount, and the session.error that records
+// it never reaches the model in replay. Rendered unqualified, this block would
+// then assert that checkout for the rest of the session and send the model
+// looking down a path that is not there.
 func (b *Brain) resolveReposBlock(ctx context.Context, sid domain.ID, resourcesJSON []byte, envKind string) (string, int) {
 	if len(resourcesJSON) == 0 || envKind != "cloud" {
 		return "", 0

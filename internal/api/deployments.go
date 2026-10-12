@@ -279,6 +279,14 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	// The reference refuses a self_hosted deployment's repository up front
+	// ("Deployments that target a self-hosted environment follow the same
+	// rule"), so a schedule never fires sessions nothing will mount it in.
+	if resourceInputsHaveRepo(resourceInputs) {
+		if err := refuseSelfHostedRepository(ctx, s.pool, envID); err != nil {
+			return nil, err
+		}
+	}
 	sealed, err := s.sealDeploymentRepoTokens(ctx, resourceInputs)
 	if err != nil {
 		return nil, err
@@ -306,9 +314,6 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 	}
 
 	stored := deploymentResourcesFrom(resourceInputs, sealed)
-	if err := refuseSelfHostedRepository(ctx, tx, envID, stored); err != nil {
-		return nil, err
-	}
 	d, err := scanDeployment(tx.QueryRow(ctx,
 		`INSERT INTO deployments (id, name, description, agent_id, agent_version, environment_id,
 			vault_ids, initial_events, resources, metadata, schedule_expression, schedule_timezone, created_by)
@@ -497,6 +502,20 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 	_, resourcesSet := obj["resources"]
 	var sealed []sealedToken
 	if resourcesSet {
+		if resourceInputsHaveRepo(resourceInputs) {
+			// Refused before sealing, as create does, against the environment
+			// the row will name; the transaction judges the pair again below.
+			target, _, _, _ := stringField(obj, "environment_id")
+			if target == "" {
+				err := s.pool.QueryRow(ctx, `SELECT environment_id FROM deployments WHERE id = $1`, id).Scan(&target)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return nil, err
+				}
+			}
+			if err := refuseSelfHostedRepository(ctx, s.pool, target); err != nil {
+				return nil, err
+			}
+		}
 		if sealed, err = s.sealDeploymentRepoTokens(ctx, resourceInputs); err != nil {
 			return nil, err
 		}
@@ -616,12 +635,18 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 	// update that touches neither leaves a row stored before the refusal alone:
 	// its fire records the refusal instead.
 	if _, envSet := obj["environment_id"]; envSet || resourcesSet {
-		var final []deploymentResource
-		if err := json.Unmarshal(resourcesJSON, &final); err != nil {
-			return nil, err
+		repo := resourceInputsHaveRepo(resourceInputs)
+		if !resourcesSet {
+			var kept []deploymentResource
+			if err := json.Unmarshal(resourcesJSON, &kept); err != nil {
+				return nil, err
+			}
+			repo = slices.ContainsFunc(kept, func(r deploymentResource) bool { return r.Type == "github_repository" })
 		}
-		if err := refuseSelfHostedRepository(ctx, tx, envID, final); err != nil {
-			return nil, err
+		if repo {
+			if err := refuseSelfHostedRepository(ctx, tx, envID); err != nil {
+				return nil, err
+			}
 		}
 	}
 	metadata := d.Metadata
@@ -801,26 +826,6 @@ func (s *server) sealDeploymentRepoTokens(ctx context.Context, inputs []resource
 // delete or archive cannot slip between the check and the write, the discipline
 // createSessionInTx applies to the same row. A missing one answers in the
 // reference's words, as every environment lookup does (#540).
-// refuseSelfHostedRepository is the deployment routes' half of the refusal
-// createSessionInTx makes (errSelfHostedRepository): the reference refuses a
-// self_hosted deployment's repository up front ("Deployments that target a
-// self-hosted environment follow the same rule"), so a schedule never fires
-// sessions whose repository nothing will mount. The environment is read only
-// when a repository is there to refuse.
-func refuseSelfHostedRepository(ctx context.Context, tx pgx.Tx, envID string, resources []deploymentResource) error {
-	if !slices.ContainsFunc(resources, func(r deploymentResource) bool { return r.Type == "github_repository" }) {
-		return nil
-	}
-	var kind string
-	if err := tx.QueryRow(ctx, `SELECT kind FROM environments WHERE id = $1`, envID).Scan(&kind); err != nil {
-		return err
-	}
-	if domain.EnvironmentKind(kind) == domain.EnvSelfHosted {
-		return errSelfHostedRepository(envID)
-	}
-	return nil
-}
-
 func requireLiveEnvironment(ctx context.Context, tx pgx.Tx, envID string) error {
 	var archivedAt *time.Time
 	err := tx.QueryRow(ctx, `SELECT archived_at FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&archivedAt)

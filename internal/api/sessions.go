@@ -627,6 +627,10 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	var sealedTokens []sealedToken
 	if resourceInputsHaveRepo(resourceInputs) {
+		if err := refuseSelfHostedRepository(ctx, s.pool, envID); err != nil {
+			recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
+			return nil, err
+		}
 		if s.cipher == nil {
 			// Refused, never stored unencrypted (plan 25 decision 2).
 			recordResourceMutation(ctx, resourceOutcomeError, 1)
@@ -831,8 +835,12 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, classified("environment_archived_error",
 			errInvalid("environment %s is archived", in.envID))
 	}
+	// createSession has refused this already; a deployment's fire reaches it
+	// for a row stored before the deployment routes refused it too.
 	if domain.EnvironmentKind(envKind) == domain.EnvSelfHosted && resourceInputsHaveRepo(in.resourceInputs) {
-		return createdSession{}, errSelfHostedRepository(in.envID)
+		err := errSelfHostedRepository(in.envID)
+		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
+		return createdSession{}, err
 	}
 	// vault_ids and metadata are both NOT NULL, and every wire path parses a
 	// value for each; a caller that has neither (the dream runner) passes nil.
