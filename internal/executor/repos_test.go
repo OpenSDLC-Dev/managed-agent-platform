@@ -1073,6 +1073,27 @@ func TestRepoZeroShaIsRefused(t *testing.T) {
 	}
 }
 
+// TestRepoNonCommitShaBlamesTheCheckout 🔍: the remote serves a tree or a blob
+// by its id as readily as a commit, and go-git's checkout then fails with an
+// error of its own. The id is the caller's, and names no commit.
+func TestRepoNonCommitShaBlamesTheCheckout(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	head, err := fx.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	commit, err := fx.repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("CommitObject: %v", err)
+	}
+	_, _, cleanup, err := cloneToTar(context.Background(),
+		repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: commit.TreeHash.String()}}, "ghp_fixture", 1<<30)
+	defer cleanup()
+	if got := cloneReason(err); err == nil || got != repoOutcomeCheckout {
+		t.Errorf("cloneReason = %q, want %q — a tree id names no commit: %v", got, repoOutcomeCheckout, err)
+	}
+}
+
 // TestRepoMalformedShaIsRefused 🔍: create admits only forty hex characters,
 // but a stored row is read back here, and the commit fetch puts its sha into a
 // refspec. Anything else would reach the remote as a branch name (`abc`) or
@@ -1194,24 +1215,34 @@ func TestCloneReasonBlamesTheRightSide(t *testing.T) {
 	}
 
 	// A name git admits but go-git cannot carry is our limit, not the caller's
-	// mistake. go-git builds a branch's refspec from Short(), which stops at a
-	// space and would fetch another branch's tree, so that name is refused
-	// before the remote is asked.
-	t.Run("branch name go-git cuts short", func(t *testing.T) {
-		name := "feat" + string(rune(0x00a0)) + "x"
-		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-		fx.branch(t, "feat", map[string]string{"feat.txt": "x\n"})
-		fx.branch(t, name, map[string]string{"x.txt": "x\n"})
-		_, _, cleanup, err := cloneToTar(context.Background(),
-			repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: name}}, "ghp_fixture", 1<<30)
-		defer cleanup()
-		if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
-			t.Errorf("cloneReason = %q, want %q — the limit is go-git's: %v", got, repoOutcomeInternal, err)
-		}
-		if n := fx.requests.Load(); n != 0 {
-			t.Errorf("the remote was asked %d time(s)", n)
-		}
-	})
+	// mistake, so it is refused before the remote is asked, as `internal`.
+	// go-git builds a branch's refspec from Short(), which stops at a space and
+	// would fetch another branch's tree, and names the [branch] section from
+	// the text before a second refs/heads/, which fails or writes a stray
+	// section after the fetch. `EOF` in a name must not read as the network's.
+	nbsp := string(rune(0x00a0))
+	for _, name := range []string{"feat" + nbsp + "x", "fix/EOF" + nbsp + "crash", "feature/refs/heads/x", "arefs/heads/b"} {
+		t.Run("branch name go-git cannot carry "+name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			fx.branch(t, "feat", map[string]string{"feat.txt": "x\n"})
+			head, err := fx.repo.Head()
+			if err != nil {
+				t.Fatalf("Head: %v", err)
+			}
+			if err := fx.repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(name), head.Hash())); err != nil {
+				t.Fatalf("SetReference: %v", err)
+			}
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: name}}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
+				t.Errorf("cloneReason = %q, want %q — the limit is go-git's: %v", got, repoOutcomeInternal, err)
+			}
+			if n := fx.requests.Load(); n != 0 {
+				t.Errorf("the remote was asked %d time(s)", n)
+			}
+		})
+	}
 	// The caller named no branch at all, so go-git refusing the remote's
 	// default branch name, which git admits, cannot be the caller's checkout.
 	t.Run("default branch go-git refuses", func(t *testing.T) {

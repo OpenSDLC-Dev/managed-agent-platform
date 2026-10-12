@@ -71,15 +71,18 @@ Delivered in one PR, which archives this plan.
   depth-1 fetches succeeded: a fork's pull request head (`refs/pull/2004/head`,
   one commit ahead of `main`) and a commit only a fork's branch holds
   (`TheAwesomeAray/skills`, in no pull request GitHub's search finds).
-- **go-git's ref-name check is git's, plus one rule:** it refuses a path
+- **go-git's ref-name check is git's branch-name rules
+  (`check-ref-format --branch`), plus one rule:** it refuses a path
   component that is just `@`, which git accepts. go-git's clone refuses such a
   branch anyway, when it creates the local branch.
 - **go-git cuts some names git admits.** `ReferenceName.Short()` scans with
   `fmt.Sscanf`, which stops at any space, a non-breaking one included, and
   go-git builds a single-branch refspec from it. Its `[branch]` section name
   stops at the next `refs/heads/` in the ref, so a branch name that holds that
-  text loses its end, and the checkout gets no upstream (found in review, from
-  go-git's source; this predates the plan).
+  text loses its end: the clone fails after the fetch, or writes a stray
+  `[branch]` section (found in review and probed; this predates the plan).
+- **The remote serves a tree or a blob by its id** as readily as a commit;
+  go-git's checkout then fails with an error of its own (found in review).
 - **The test fixture could not serve a shallow request.** It was go-git's own
   server-side transport, which refuses one outright and cannot truncate history.
   `git http-backend` can. `make test` already needs git (`tools/sdkref` asks it
@@ -91,9 +94,10 @@ Delivered in one PR, which archives this plan.
    `Depth: 1, SingleBranch: true, Tags: NoTags`. A commit no longer needs the
    full history. A branch name go-git's ref-name check refuses is refused
    before the remote is asked, with reason `checkout`: one with a wildcard
-   would fetch every branch's tree. So is a name holding a space, which
-   go-git's `Short()` would cut, fetching another branch. git admits that
-   name, so the reason is `internal`.
+   would fetch every branch's tree. So is a name go-git would cut: one
+   holding a space, which `Short()` stops at, fetching another branch, or
+   holding `refs/heads/`, which breaks its `[branch]` section after the
+   fetch. git admits those names, so the reason is `internal`.
 2. **A commit is fetched by its exact SHA** into a scratch ref directly under
    `refs/`, checked out detached, and the ref removed, so nothing stands beside
    HEAD. There is no fallback to a full clone: the URL grammar admits only
@@ -111,9 +115,8 @@ Delivered in one PR, which archives this plan.
    request header only.
 4. **Refs as `git clone --depth 1` leaves them over protocol v2.** A branch
    checkout keeps the `[branch]` upstream and `refs/remotes/origin/<branch>`
-   go-git's clone gives it, so `git status` has an upstream. go-git cuts a
-   branch name that holds `refs/heads/` at that text when it names the
-   upstream, as it did before this plan; such a branch gets no upstream. A default-branch
+   go-git's clone gives it, so `git status` has an upstream (a name go-git
+   would cut is refused first, by decision 1). A default-branch
    checkout also gets `origin/HEAD` naming its tracking ref, unless the branch
    is named `HEAD/<x>` or the remote's HEAD names no branch. No other branch is
    fetched: the recording does not show which the reference's holds. A commit

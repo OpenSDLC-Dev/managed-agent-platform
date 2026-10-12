@@ -55,7 +55,7 @@ Tests came before code. With only the fixture swapped to `git http-backend`, the
 
 Each guard of the code as merged was then broken on its own in an overlay copy, and a test failed each time:
 
-- the clone (13): no depth on a branch clone, every tag fetched beside a branch, the branch-name check skipped, its reason dropped, go-git's own invalid-name error blamed on the checkout, a branch name `Short()` cuts fetched anyway, a SHA that is not forty hex characters sent to the remote, no depth on a commit fetch, the `not our ref` wrap dropped, the scratch ref kept, the scratch ref in a directory of its own, the null-SHA check skipped before the remote is asked, both of the default arm's context re-checks gone (either one alone is invisible, as the budget test says);
+- the clone (16): no depth on a branch clone, every tag fetched beside a branch, the branch-name check skipped, its reason dropped, go-git's own invalid-name error blamed on the checkout, a branch name `Short()` cuts fetched anyway, one holding `refs/heads/` fetched anyway, their `internal` reason dropped, a SHA that is not forty hex characters sent to the remote, a tree id checked out as if it named a commit, no depth on a commit fetch, the `not our ref` wrap dropped, the scratch ref kept, the scratch ref in a directory of its own, the null-SHA check skipped before the remote is asked, both of the default arm's context re-checks gone (either one alone is invisible, as the budget test says);
 - the shape (15): no `.git` suffix, a doubled one, one remote, no `gh-resolved`, no `gc.auto`, a `core` key dropped, the default-branch refs on every form, on none, or only for a nil checkout, go-git's own `origin/HEAD` left in place, no remote-tracking ref, no `origin/HEAD`, a branch named `HEAD` tracked anyway, the branch name cut short by `Short()`, and `origin/HEAD` written beside a default branch named `HEAD/<x>`.
 
 Three mutants survived:
@@ -66,7 +66,7 @@ Three mutants survived:
 
 The fixture was checked the same way: without its `uploadpack.allowReachableSHA1InWant`, four tests fail.
 
-Review hardening. Four verifier runs were stopped when review findings changed behavior, and it ran again on the final branch. Four rounds of /code-review (`claude-opus-5-5`, xhigh) and Codex (`gpt-6.1-sol`, xhigh) ran. They returned eight and three findings, then twelve and three, then fourteen and two, then ten and two.
+Review hardening. Five verifier runs were stopped when review findings changed behavior, and it ran again on the final branch. Five rounds of /code-review (`claude-opus-5-5`, xhigh) and Codex (`gpt-6.1-sol`, xhigh) ran. They returned eight and three findings, then twelve and three, fourteen and two, ten and two, and thirteen and none.
 
 - **Fixed:** every tag was fetched beside a branch, with its commit's tree, because go-git's clone defaults to all tags. A probe fetched a 5 MB blob only an old tag reached. Both clone paths now fetch none, and the shape test tags an old commit. Both reviewers found it.
 - **Fixed:** `origin/HEAD` named a checked-out branch as the remote's default. `git clone --depth 1 --branch` leaves none over protocol v2, so only a default-branch checkout gets it now. Both reviewers found it.
@@ -76,7 +76,8 @@ Review hardening. Four verifier runs were stopped when review findings changed b
   - a default branch named exactly `HEAD`;
   - a default branch whose name holds a non-breaking space, which go-git's `ReferenceName.Short` cuts short.
 - **Fixed:** a branch named `*` built a wildcard refspec that fetched every branch's tree before the checkout failed. That predates this PR, whose full clone fetched more. Such a name is now refused before the remote is asked.
-- **Fixed:** a branch checkout whose name holds a space fetched another branch's tree, because go-git builds its refspec from `Short()`; the code before this PR did the same. Such a name is now refused before the remote is asked, with reason `internal`, since git admits it.
+- **Fixed:** a branch checkout whose name go-git cuts fetched before it failed. One holding a space fetched another branch's tree, because go-git builds its refspec from `Short()`. One holding `refs/heads/` failed after the fetch, or wrote a stray `[branch]` section, because go-git names that section from the text before it. The code before this PR did the same. Such a name is now refused before the remote is asked, with reason `internal`, since git admits it. Its error carries a sentinel, so a name holding `EOF` no longer reads as the network's.
+- **Fixed:** a commit id that names a tree or a blob was fetched, then failed in go-git's checkout with reason `internal`. It now reports `checkout`.
 - **Fixed:** a stored commit SHA that is not forty hex characters went into the refspec, reaching the remote as a branch name (`abc`) or breaking the refspec. Create refuses such a SHA, but the row is read back, so it is now refused first, with reason `checkout`.
 - **Fixed:** go-git's own invalid-name error was mapped to `checkout`, so a default branch go-git refuses, which the caller never named, was blamed on the caller. Only the name check's own error maps to `checkout` now.
 - **Fixed:** the default-branch flag came from `Checkout == nil`, while the clone arm came from the checkout type, so a checkout with no type took the default branch's clone without its refs. Create admits no such checkout, but the flag now comes from the arm.
@@ -89,7 +90,8 @@ Review hardening. Four verifier runs were stopped when review findings changed b
   - `make test`'s prerequisites in CLAUDE.md, AGENTS.md and README.md did not name git's `http-backend` helper;
   - a branch checkout was said to have no `origin/HEAD`, where one named `HEAD` tracks as that very name;
   - the archive date preceded the evidence it cites;
-  - a reference sentence said "cloned in full" right before "shallow".
+  - a reference sentence said "cloned in full" right before "shallow";
+  - two comments said GitHub serves only the commits its refs reach, and one counted seven returns that no longer numbered seven.
 - **Fixed:** in the tests and the fixture:
   - the test helper passed the caller's `GIT_*` variables to git, which a git hook's `GIT_DIR` would have redirected;
   - the fixture read the host's system git config and needed git 2.31 for `GIT_CONFIG_COUNT`;
@@ -102,11 +104,14 @@ Review hardening. Four verifier runs were stopped when review findings changed b
   - the fetch refspec restated `config.DefaultFetchRefSpec` by hand.
 - **Declined:** a sentinel instead of the `not our ref` text match. go-git has none. A changed wording reports a less exact reason for a clone that fails either way, as plan 63 decision 5 says.
 - **Declined:** reporting a branch checkout with an `@` path component as `internal`. git accepts the name, and go-git's name check refuses it with reason `checkout` before the fetch. Without the check, go-git's clone refuses it after the fetch (measured), so no such branch could be mounted before this PR either. A default branch so named reports `internal`.
-- **Declined:** a branch whose name holds `refs/heads/`. go-git names its `[branch]` section from the text before the next `refs/heads/`, so the checkout gets no upstream, as it did before this PR.
+- **Declined:** a go-git refusal of a branch named with a leading `-`, read as stricter than git. `git check-ref-format --branch -foo` refuses it too (measured); only the plain ref check admits it.
+- **Declined:** matching `not our ref` on go-git's `*pktline.ErrorLine` rather than on text. go-git wraps the remote's answer with `%s` (`plumbing/transport/internal/common/common.go:488`), so the type does not survive.
+- **Declined:** a URL whose `.git` suffix differs in case or is percent-encoded, which would get a second suffix. Untested on GitHub, and not otherwise reported.
+- **Declined:** a remote HEAD detached at a commit no ref names, which go-git reports as a missing reference, blamed on the checkout. That predates this PR, and GitHub's HEAD always names a branch.
 - **Declined:** a default branch whose name is not valid UTF-8, which git admits. The config re-read now fails on it with reason `internal`, where the full clone succeeded. No case of such a branch on GitHub is known.
 - **Declined:** restricting a commit checkout to commits the repository's own branches reach. GitHub serves any commit in the fork network by SHA through the repository's URL (measured), as `git fetch <sha>` gets. A check would need the history that depth 1 leaves out. The changelog and the registry say so.
 - **Declined:** matching `HEAD/<x>` without regard to case, for an executor run natively on a case-insensitive filesystem. Production executors run Linux images, where the two names do not collide, and a case-blind match would drop `origin/HEAD` there for a default branch named `head/<x>`.
-- **Declined:** one construction path, `Init` and `Fetch`, for every form. It costs a separate listing of the remote's refs and re-implements go-git's HEAD resolution, and the `HEAD/<x>` and detached cases stay either way.
+- **Declined:** one construction path, `Init` and `Fetch`, for every form, proposed in three rounds. The default-branch form would need a separate listing of the remote's refs and go-git's HEAD resolution re-implemented. The branch form would need neither, and would carry the names go-git cuts, but those names are refused cleanly now, and the `HEAD/<x>` and detached cases stay either way.
 - **Declined:** one config write instead of two, a commit fetch without a persisted `origin` remote, and one test `HOME` per test instead of per git command: cleanup only.
 
 **Plan 63 progress summary (archived).** Delivered in one PR: depth 1 and no tags for every checkout form, a branch name refused before the fetch when git would refuse it or go-git would cut it, a commit fetched by its exact SHA, the recorded `.git/config` and the refs `git clone` leaves, an unknown SHA blamed on the checkout, and a fixture that can serve shallow requests.

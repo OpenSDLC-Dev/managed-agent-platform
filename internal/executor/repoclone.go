@@ -37,6 +37,10 @@ var errCloneTooLarge = errors.New("clone exceeded the byte budget")
 // caller never named.
 var errBranchName = errors.New("invalid branch name")
 
+// errBranchUnsupported marks a branch checkout refused before the remote is
+// asked, for a name git admits but go-git cannot carry. The limit is ours.
+var errBranchUnsupported = errors.New("go-git cannot carry the branch name")
+
 // tokenUsername is the username GitHub expects beside a personal access token
 // in HTTP basic auth. The token rides the Authorization header of each request
 // — never the URL and never the on-disk .git/config — which is what keeps it
@@ -57,7 +61,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	// Every error out of here is logged by the caller, and the ones go-git
 	// builds from a refusing host's response body can quote the credential
 	// straight back at us. Scrubbed once, at the boundary, rather than at each
-	// of the seven returns below.
+	// return below.
 	defer func() { err = scrubTokenErr(err, token) }()
 
 	spool, err := os.MkdirTemp("", "map-repo-clone-")
@@ -96,11 +100,13 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 			if err := opts.ReferenceName.Validate(); err != nil {
 				return "", 0, cleanup, fmt.Errorf("%w %q: %w", errBranchName, r.Checkout.Name, err)
 			}
-			// go-git builds the branch's refspec from Short(), which stops at any
-			// space a name may hold and would fetch another branch's tree. git
-			// admits such a name, so the limit is ours and the reason `internal`.
-			if opts.ReferenceName.Short() != r.Checkout.Name {
-				return "", 0, cleanup, fmt.Errorf("go-git cannot fetch branch %q: it cuts the name at a space", r.Checkout.Name)
+			// git admits these names, but go-git cuts them: it builds the refspec
+			// from Short(), which stops at any space and would fetch another
+			// branch's tree, and names the [branch] section from the text before
+			// a second refs/heads/, which fails or writes a stray section after
+			// the fetch.
+			if opts.ReferenceName.Short() != r.Checkout.Name || strings.Contains(r.Checkout.Name, "refs/heads/") {
+				return "", 0, cleanup, fmt.Errorf("%w %q", errBranchUnsupported, r.Checkout.Name)
 			}
 		}
 		defaultBranch = opts.ReferenceName == ""
@@ -132,7 +138,8 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 
 // fetchCommit fetches the one commit sha names, at depth 1, into a fresh
 // repository and checks it out detached. GitHub answers a want for any commit
-// its refs reach, so a commit needs no more history than a branch does. The
+// in the repository's fork network, a fork's own included (plan 63), so a
+// commit needs no more history than a branch does. The
 // commit lands under a scratch ref, removed once HEAD holds it, so the checkout
 // carries no ref beside its detached HEAD.
 func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Filesystem,
@@ -178,6 +185,11 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// The remote serves a tree or a blob by its id as readily as a commit, and
+	// the checkout's own error would read as ours. The id is the caller's.
+	if _, err := repo.CommitObject(hash); err != nil {
+		return nil, fmt.Errorf("%w: %s names no commit: %w", plumbing.ErrObjectNotFound, sha, err)
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
@@ -363,6 +375,10 @@ func cloneReason(err error) string {
 	// which the network fallback below happily matches, so our own withdrawal
 	// would otherwise be counted and logged as the git host's failure.
 	case errors.Is(err, context.Canceled):
+		return repoOutcomeInternal
+	// Its message quotes the caller's branch name, which the network arm's
+	// text match below could take for the host's failure.
+	case errors.Is(err, errBranchUnsupported):
 		return repoOutcomeInternal
 	case errors.Is(err, transport.ErrAuthenticationRequired),
 		errors.Is(err, transport.ErrAuthorizationFailed):
