@@ -1013,6 +1013,18 @@ func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (mem
 var errRepoSecretsUnavailable = &apiError{http.StatusInternalServerError, errTypeAPI,
 	"a secrets cipher is not configured on this deployment; github_repository resources are unavailable"}
 
+// errSelfHostedRepository refuses a github_repository resource on a
+// self_hosted environment, in the reference's sentence for a self-hosted
+// session that carries a file or a repository (managed-agents/
+// self-hosted-sandboxes § "Session resources"). Only the repository is
+// refused here: the BYOC worker materializes a file, and it clones nothing
+// (#322 closed without building that). A deployment's fire records the
+// reference's run type for the case, which pauses a schedule.
+func errSelfHostedRepository(envID string) error {
+	return classified("self_hosted_resources_unsupported_error", errInvalid(
+		"Environment %s is a self-hosted environment. `resources` are not supported with self-hosted environments.", envID))
+}
+
 // resourceInputsHaveRepo reports whether any validated input is a repository —
 // the create path fails fast on a cipher-less deployment before touching the
 // database.

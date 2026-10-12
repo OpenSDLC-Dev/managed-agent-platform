@@ -831,6 +831,9 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		return createdSession{}, classified("environment_archived_error",
 			errInvalid("environment %s is archived", in.envID))
 	}
+	if domain.EnvironmentKind(envKind) == domain.EnvSelfHosted && resourceInputsHaveRepo(in.resourceInputs) {
+		return createdSession{}, errSelfHostedRepository(in.envID)
+	}
 	// vault_ids and metadata are both NOT NULL, and every wire path parses a
 	// value for each; a caller that has neither (the dream runner) passes nil.
 	if in.vaultIDs == nil {
