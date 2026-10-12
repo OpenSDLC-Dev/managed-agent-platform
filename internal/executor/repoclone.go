@@ -197,14 +197,18 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// The remote serves a tree or a blob by its id as readily as a commit, and
-	// an annotated tag of one, at any depth of tags. Such an id is the
-	// caller's, and names no commit; go-git's checkout would refuse it with an
-	// error that reads as ours. A tag of a commit is left to the checkout,
-	// which peels one level, as the full clone's did, and refuses a tag of a
-	// tag, which git would peel.
+	// The id may name an annotated tag, at any depth of tags, which git peels
+	// to what it names; go-git's checkout peels one level only, so the chain
+	// is peeled here. The remote serves a tree or a blob by its id as readily
+	// as a commit, and a tag of one: such an id is the caller's, and names no
+	// commit, where go-git's checkout would refuse it with an error that reads
+	// as ours.
 	obj, err := repo.Object(plumbing.AnyObject, hash)
 	for err == nil && obj.Type() == plumbing.TagObject {
+		// A chain of tags is as long as the byte budget lets it be.
+		if err = ctx.Err(); err != nil {
+			break
+		}
 		obj, err = obj.(*object.Tag).Object()
 	}
 	if err != nil {
@@ -217,7 +221,7 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	if err != nil {
 		return nil, err
 	}
-	if err := wt.Checkout(&git.CheckoutOptions{Hash: hash}); err != nil {
+	if err := wt.Checkout(&git.CheckoutOptions{Hash: obj.ID()}); err != nil {
 		return nil, err
 	}
 	return repo, repo.Storer.RemoveReference(scratch)

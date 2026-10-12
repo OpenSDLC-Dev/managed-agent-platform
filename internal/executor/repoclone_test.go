@@ -3,6 +3,7 @@ package executor
 import (
 	"archive/tar"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"os"
@@ -40,13 +41,9 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tag: %v", err)
 	}
-	fx.commit(t, "second", map[string]string{"second.txt": "two\n"})
 	// The commit row's: it has a parent, so one commit in its clone is the
 	// depth at work, and a tip after it, so it is fetched by its SHA.
-	second, err := fx.repo.Head()
-	if err != nil {
-		t.Fatalf("Head: %v", err)
-	}
+	second := fx.commit(t, "second", map[string]string{"second.txt": "two\n"})
 	fx.commit(t, "third", map[string]string{"third.txt": "three\n"})
 	fx.branch(t, "feature/topic", map[string]string{"feature.txt": "on the branch\n"})
 	url := fx.srv.URL + "/o/r"
@@ -62,7 +59,7 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 		// branch's clone gets its refs too.
 		{"untyped checkout", &repoCheckout{}, "master", "third.txt"},
 		{"branch", &repoCheckout{Type: "branch", Name: "feature/topic"}, "feature/topic", "feature.txt"},
-		{"commit", &repoCheckout{Type: "commit", Sha: second.Hash().String()}, "", "second.txt"},
+		{"commit", &repoCheckout{Type: "commit", Sha: second.String()}, "", "second.txt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := cloneAndUnpack(t, repoRef{URL: url, Checkout: tc.checkout})
@@ -94,8 +91,8 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 
 			refs := gitIn(t, dir, "for-each-ref --format=%(refname)")
 			if tc.branch == "" {
-				if got := gitIn(t, dir, "rev-parse HEAD"); got != second.Hash().String() {
-					t.Errorf("HEAD = %s, want the requested commit %s", got, second.Hash())
+				if got := gitIn(t, dir, "rev-parse HEAD"); got != second.String() {
+					t.Errorf("HEAD = %s, want the requested commit %s", got, second)
 				}
 				if _, err := os.Stat(filepath.Join(dir, "third.txt")); err == nil {
 					t.Error("the commit checkout holds the tip's tree, not the requested commit's")
@@ -292,19 +289,16 @@ func TestRepoAnnotatedTagShaMountsItsCommit(t *testing.T) {
 		t.Errorf("commits = %s, want 1", got)
 	}
 
-	// git peels a tag of a tag too, but go-git's checkout peels one level and
-	// refuses the rest. The id names a commit git can reach, so the limit is
-	// ours, and must not read as the caller's.
+	// git peels a tag of a tag too, where go-git's checkout peels one level
+	// only; the chain is peeled before the checkout, so it mounts as in git.
 	outer, err := fx.repo.CreateTag("v1-of-v1", tag.Hash(), &git.CreateTagOptions{Message: "v1-of-v1",
 		Tagger: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}})
 	if err != nil {
 		t.Fatalf("tag of a tag: %v", err)
 	}
-	_, _, cleanup, err := cloneToTar(context.Background(),
-		repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: outer.Hash().String()}}, "ghp_fixture", 1<<30)
-	defer cleanup()
-	if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
-		t.Errorf("cloneReason = %q, want %q — a tag of a tag is go-git's limit: %v", got, repoOutcomeInternal, err)
+	dir = cloneAndUnpack(t, repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: outer.Hash().String()}})
+	if got := gitIn(t, dir, "rev-parse HEAD"); got != head.Hash().String() {
+		t.Errorf("HEAD = %s, want the commit under both tags %s", got, head.Hash())
 	}
 }
 
@@ -321,6 +315,48 @@ func TestRepoUppercaseShaMounts(t *testing.T) {
 	if got := gitIn(t, dir, "rev-parse HEAD"); got != head.Hash().String() {
 		t.Errorf("HEAD = %s, want %s", got, head.Hash())
 	}
+}
+
+// TestRepoCommitFetchCarriesTheTokenAndTheDeadline 🔍: the commit form fetches
+// on its own, apart from the clone the other forms share, so it must carry the
+// token a private repository asks for, and the deadline a stalled remote
+// needs — the check after the fetch would still say `timeout`, but only once
+// the stall had held the executor.
+func TestRepoCommitFetchCarriesTheTokenAndTheDeadline(t *testing.T) {
+	t.Run("token", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		head, err := fx.repo.Head()
+		if err != nil {
+			t.Fatalf("Head: %v", err)
+		}
+		fx.wantAuth.Store("Basic " + base64.StdEncoding.EncodeToString([]byte(tokenUsername+":ghp_fixture")))
+		_, _, cleanup, err := cloneToTar(context.Background(),
+			repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: head.Hash().String()}}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if err != nil {
+			t.Fatalf("a commit fetch from a remote that wants the token failed: %v", err)
+		}
+	})
+	t.Run("deadline", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		head, err := fx.repo.Head()
+		if err != nil {
+			t.Fatalf("Head: %v", err)
+		}
+		fx.stall.Store(int64(2 * time.Second))
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, _, cleanup, err := cloneToTar(ctx,
+			repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: head.Hash().String()}}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if got := cloneReason(err); err == nil || got != repoOutcomeTimeout {
+			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
+		}
+		if d := time.Since(start); d >= time.Second {
+			t.Errorf("the fetch waited %s on a stalled remote, past its 200ms deadline", d)
+		}
+	})
 }
 
 // TestRepoBranchNameHoldingRefsHeads 🔍: git admits a branch name that holds

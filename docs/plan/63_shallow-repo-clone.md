@@ -138,7 +138,8 @@ Delivered in one PR, which archives this plan.
    does not admit a SHA want at all, reports a reason other than `checkout`: a
    failed clone either way, with a less exact reason. An id the remote has
    that names a tree or a blob, or an annotated tag of one at any depth, reports
-   `checkout` too, by its type, checked after the fetch.
+   `checkout` too, by its type, checked after the fetch. A tag of a commit, at
+   any depth, mounts that commit: the chain is peeled before the checkout.
 6. **The fixture serves through `git http-backend`** behind `net/http/cgi`, with
    `uploadpack.allowReachableSHA1InWant` set the way GitHub behaves. Its
    handler-level failure modes stay in front of it.
