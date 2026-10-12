@@ -1086,11 +1086,19 @@ func TestRepoNonCommitShaBlamesTheCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommitObject: %v", err)
 	}
-	_, _, cleanup, err := cloneToTar(context.Background(),
-		repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: commit.TreeHash.String()}}, "ghp_fixture", 1<<30)
-	defer cleanup()
-	if got := cloneReason(err); err == nil || got != repoOutcomeCheckout {
-		t.Errorf("cloneReason = %q, want %q — a tree id names no commit: %v", got, repoOutcomeCheckout, err)
+	file, err := commit.File("README.md")
+	if err != nil {
+		t.Fatalf("File: %v", err)
+	}
+	for kind, id := range map[string]string{"tree": commit.TreeHash.String(), "blob": file.Hash.String()} {
+		t.Run(kind, func(t *testing.T) {
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: id}}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if got := cloneReason(err); err == nil || got != repoOutcomeCheckout {
+				t.Errorf("cloneReason = %q, want %q — a %s id names no commit: %v", got, repoOutcomeCheckout, kind, err)
+			}
+		})
 	}
 }
 
@@ -1146,23 +1154,34 @@ func TestCloneReasonBlamesOurselvesForCancellation(t *testing.T) {
 //
 // The re-checks that bound those phases are deliberately redundant — each one
 // downstream catches what the one before it would have — so no single check's
-// removal changes the outcome, and what this row pins is the bound rather than
-// any one of them. Measured rather than assumed: this row's arm passes two, the
-// one after the clone and the tar walk's, and goes red with both gone; each
-// alone is invisible. fetchCommit's, before a commit's checkout, guards an arm
-// this row does not take.
+// removal changes the outcome, and what each row pins is the bound rather than
+// any one of them. Measured rather than assumed: the default arm passes two,
+// the one after the clone and the tar walk's, and goes red with both gone; each
+// alone is invisible. The commit arm passes fetchCommit's, before its
+// checkout, as well, and goes red with all three gone.
 func TestRepoCloneStopsOnASpentBudgetAfterTheFetch(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-	ctx := spentAfterFetch{Context: context.Background(), fetched: &fx.clones}
-
-	tarPath, size, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
-	defer cleanup()
-	if err == nil {
-		t.Fatalf("a clone whose budget expired after the fetch ran to completion, packing %s (%d bytes)",
-			tarPath, size)
+	head, err := fx.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
 	}
-	if got := cloneReason(err); got != repoOutcomeTimeout {
-		t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
+	for arm, checkout := range map[string]*repoCheckout{
+		"default branch": nil,
+		"commit":         {Type: "commit", Sha: head.Hash().String()},
+	} {
+		t.Run(arm, func(t *testing.T) {
+			fx.clones.Store(0) // the other row's fetch would spend this one up front
+			ctx := spentAfterFetch{Context: context.Background(), fetched: &fx.clones}
+			tarPath, size, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url(), Checkout: checkout}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if err == nil {
+				t.Fatalf("a clone whose budget expired after the fetch ran to completion, packing %s (%d bytes)",
+					tarPath, size)
+			}
+			if got := cloneReason(err); got != repoOutcomeTimeout {
+				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
+			}
+		})
 	}
 }
 

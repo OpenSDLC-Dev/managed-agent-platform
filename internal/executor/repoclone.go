@@ -70,6 +70,15 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		return "", 0, func() {}, err
 	}
 	cleanup = func() { _ = os.RemoveAll(spool) }
+	// BoundOS refuses a path that resolves outside its root, and a file whose
+	// parent is not yet made resolves only partway. Under a temp dir reached
+	// through a symlink, as macOS's is, every nested file of a checkout read as
+	// outside, so the root is the resolved spool.
+	resolved, err := filepath.EvalSymlinks(spool)
+	if err != nil {
+		return "", 0, cleanup, err
+	}
+	spool = resolved
 
 	var spent atomic.Int64
 	tree := newCloneFS(filepath.Join(spool, "tree"), &spent, maxBytes)
@@ -79,11 +88,12 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	}
 	storer := filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault())
 
-	// Every checkout is depth 1, as the reference's was recorded (#582): only
-	// the requested commit's tree and history travels. A branch checkout
-	// fetches that branch; omitted means the remote's own HEAD — the default
-	// branch, resolved here rather than at create (plan 25 decisions 3 and 7);
-	// a commit is fetched by its exact SHA (fetchCommit).
+	// Every checkout is depth 1 (plan 63): the requested commit and its tree
+	// travel, and no history. The reference's default-branch checkout was
+	// recorded shallow (#582); the branch and commit forms follow it by our
+	// choice. A branch checkout fetches that branch; omitted means the remote's
+	// own HEAD — the default branch, resolved here rather than at create (plan
+	// 25 decisions 3 and 7); a commit is fetched by its exact SHA (fetchCommit).
 	auth := &githttp.BasicAuth{Username: tokenUsername, Password: token}
 	var repo *git.Repository
 	var defaultBranch bool
@@ -247,10 +257,10 @@ func shapeCheckout(repo *git.Repository, url string, defaultBranch bool) error {
 // does: the branch's remote-tracking ref, and origin/HEAD naming it as the
 // remote's default. go-git's clone leaves origin/HEAD a plain ref instead,
 // which goes first. `git clone` leaves no origin/HEAD at all when the remote's
-// HEAD names no branch, which leaves the checkout detached, or when the
-// branch's tracking ref takes origin/HEAD's name: as a directory for a branch
-// named HEAD/<x>, or as itself for one named HEAD. That one gets no tracking
-// ref either; git 2.54 leaves origin/HEAD there naming itself.
+// HEAD names no branch, which leaves the checkout detached, or for a branch
+// named HEAD/<x>, whose tracking ref needs origin/HEAD's name as a directory.
+// A branch named HEAD would track as origin/HEAD itself, which git 2.54
+// leaves naming itself; this writes neither ref for it instead.
 func trackDefaultBranch(repo *git.Repository) error {
 	remoteHEAD := plumbing.NewRemoteHEADReferenceName("origin")
 	if err := repo.Storer.RemoveReference(remoteHEAD); err != nil {

@@ -307,6 +307,25 @@ func TestRepoBranchNameHoldingRefsHeads(t *testing.T) {
 	})
 }
 
+// TestRepoNestedTreeMountsUnderASymlinkedTempDir 🔍: macOS's TMPDIR is reached
+// through a symlink (/var is /private/var), and go-billy's BoundOS refuses a
+// path that resolves outside its root. A file whose parent directory was not
+// yet made resolved only partway, so under such a spool every repository with
+// a subdirectory failed to check out. The symlink is made here, so the test
+// bites on every platform.
+func TestRepoNestedTreeMountsUnderASymlinkedTempDir(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n", "docs/guide/intro.md": "nested\n"})
+	link := filepath.Join(t.TempDir(), "tmp")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	t.Setenv("TMPDIR", link)
+	dir := cloneAndUnpack(t, repoRef{URL: fx.url()})
+	if _, err := os.Stat(filepath.Join(dir, "docs", "guide", "intro.md")); err != nil {
+		t.Errorf("the nested file is not mounted: %v", err)
+	}
+}
+
 // cloneAndUnpack clones r and unpacks the tar cloneToTar ships, returning the
 // directory the sandbox's mount would hold.
 func cloneAndUnpack(t *testing.T, r repoRef) string {
