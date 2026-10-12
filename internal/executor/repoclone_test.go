@@ -256,6 +256,57 @@ func TestRepoUnknownCommitBlamesTheCheckout(t *testing.T) {
 	}
 }
 
+// TestRepoAnnotatedTagShaMountsItsCommit 🔍: an annotated tag's id is what
+// `git rev-parse <tag>` gives, and the full clone's checkout peeled it to the
+// tag's commit. The shallow fetch must mount that commit too.
+func TestRepoAnnotatedTagShaMountsItsCommit(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	head, err := fx.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	tag, err := fx.repo.CreateTag("v1", head.Hash(), &git.CreateTagOptions{Message: "v1",
+		Tagger: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}})
+	if err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	dir := cloneAndUnpack(t, repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: tag.Hash().String()}})
+	if got := gitIn(t, dir, "rev-parse HEAD"); got != head.Hash().String() {
+		t.Errorf("HEAD = %s, want the tag's commit %s", got, head.Hash())
+	}
+}
+
+// TestRepoBranchNameHoldingRefsHeads 🔍: git admits a branch name that holds
+// `refs/heads/`, and go-git fetches the right branch for it, but names the
+// [branch] section from the text before that second `refs/heads/`. A name
+// whose cut is a valid branch mounted before #582 and must still; one whose cut
+// is not fails after the fetch, as it did, on go-git's account.
+func TestRepoBranchNameHoldingRefsHeads(t *testing.T) {
+	t.Run("cut is a valid name", func(t *testing.T) {
+		const name = "arefs/heads/b"
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		fx.branch(t, name, map[string]string{"b.txt": "on the branch\n"})
+		dir := cloneAndUnpack(t, repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: name}})
+		if got := gitIn(t, dir, "symbolic-ref HEAD"); got != "refs/heads/"+name {
+			t.Errorf("HEAD = %s, want refs/heads/%s", got, name)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "b.txt")); err != nil {
+			t.Errorf("the branch's tree is not mounted: %v", err)
+		}
+	})
+	t.Run("cut is not a valid name", func(t *testing.T) {
+		const name = "feature/refs/heads/x"
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		fx.branch(t, name, map[string]string{"x.txt": "on the branch\n"})
+		_, _, cleanup, err := cloneToTar(context.Background(),
+			repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: name}}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
+			t.Errorf("cloneReason = %q, want %q — the limit is go-git's: %v", got, repoOutcomeInternal, err)
+		}
+	})
+}
+
 // cloneAndUnpack clones r and unpacks the tar cloneToTar ships, returning the
 // directory the sandbox's mount would hold.
 func cloneAndUnpack(t *testing.T, r repoRef) string {

@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/filesystem"
@@ -100,12 +101,9 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 			if err := opts.ReferenceName.Validate(); err != nil {
 				return "", 0, cleanup, fmt.Errorf("%w %q: %w", errBranchName, r.Checkout.Name, err)
 			}
-			// git admits these names, but go-git cuts them: it builds the refspec
-			// from Short(), which stops at any space and would fetch another
-			// branch's tree, and names the [branch] section from the text before
-			// a second refs/heads/, which fails or writes a stray section after
-			// the fetch.
-			if opts.ReferenceName.Short() != r.Checkout.Name || strings.Contains(r.Checkout.Name, "refs/heads/") {
+			// git admits a non-ASCII space, but go-git builds the refspec from
+			// Short(), which stops at one and would fetch another branch's tree.
+			if opts.ReferenceName.Short() != r.Checkout.Name {
 				return "", 0, cleanup, fmt.Errorf("%w %q", errBranchUnsupported, r.Checkout.Name)
 			}
 		}
@@ -186,16 +184,17 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// The remote serves a tree or a blob by its id as readily as a commit, and
-	// the checkout's own error would read as ours. The id is the caller's.
-	if _, err := repo.CommitObject(hash); err != nil {
-		return nil, fmt.Errorf("%w: %s names no commit: %w", plumbing.ErrObjectNotFound, sha, err)
-	}
 	wt, err := repo.Worktree()
 	if err != nil {
 		return nil, err
 	}
+	// The checkout peels an annotated tag to its commit, as the full clone's
+	// did. The remote serves a tree or a blob by its id as readily, and the
+	// checkout's refusal of one would read as ours: the id is the caller's.
 	if err := wt.Checkout(&git.CheckoutOptions{Hash: hash}); err != nil {
+		if errors.Is(err, object.ErrUnsupportedObject) {
+			return nil, fmt.Errorf("%w: %s names no commit: %w", plumbing.ErrObjectNotFound, sha, err)
+		}
 		return nil, err
 	}
 	return repo, repo.Storer.RemoveReference(scratch)

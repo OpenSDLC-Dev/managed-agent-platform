@@ -71,18 +71,22 @@ Delivered in one PR, which archives this plan.
   depth-1 fetches succeeded: a fork's pull request head (`refs/pull/2004/head`,
   one commit ahead of `main`) and a commit only a fork's branch holds
   (`TheAwesomeAray/skills`, in no pull request GitHub's search finds).
-- **go-git's ref-name check is git's branch-name rules
-  (`check-ref-format --branch`), plus one rule:** it refuses a path
-  component that is just `@`, which git accepts. go-git's clone refuses such a
-  branch anyway, when it creates the local branch.
+- **go-git's ref-name check is `git check-ref-format`'s rules for the full
+  ref, plus two** (measured with git 2.54): it refuses a path component that
+  is just `@`, which git accepts and go-git's clone refuses anyway when it
+  creates the local branch; and a branch name that starts with `-`, which
+  `check-ref-format --branch` refuses too. It admits a branch named `HEAD`,
+  which `--branch` refuses.
 - **go-git cuts some names git admits.** `ReferenceName.Short()` scans with
-  `fmt.Sscanf`, which stops at any space, a non-breaking one included, and
-  go-git builds a single-branch refspec from it. Its `[branch]` section name
+  `fmt.Sscanf`, which stops at any Unicode space, and go-git builds a
+  single-branch refspec from it. git refuses an ASCII space, but admits a
+  non-breaking one. Its `[branch]` section name
   stops at the next `refs/heads/` in the ref, so a branch name that holds that
   text loses its end: the clone fails after the fetch, or writes a stray
   `[branch]` section (found in review and probed; this predates the plan).
 - **The remote serves a tree or a blob by its id** as readily as a commit;
   go-git's checkout then fails with an error of its own (found in review).
+  It peels an annotated tag's id to the tag's commit.
 - **The test fixture could not serve a shallow request.** It was go-git's own
   server-side transport, which refuses one outright and cannot truncate history.
   `git http-backend` can. `make test` already needs git (`tools/sdkref` asks it
@@ -94,10 +98,10 @@ Delivered in one PR, which archives this plan.
    `Depth: 1, SingleBranch: true, Tags: NoTags`. A commit no longer needs the
    full history. A branch name go-git's ref-name check refuses is refused
    before the remote is asked, with reason `checkout`: one with a wildcard
-   would fetch every branch's tree. So is a name go-git would cut: one
-   holding a space, which `Short()` stops at, fetching another branch, or
-   holding `refs/heads/`, which breaks its `[branch]` section after the
-   fetch. git admits those names, so the reason is `internal`.
+   would fetch every branch's tree. So is a name holding a non-ASCII space,
+   which git admits but `Short()` cuts, fetching another branch; the reason
+   is `internal`. A name holding `refs/heads/` is not refused: go-git
+   fetches the right branch, and some such names mounted before this plan.
 2. **A commit is fetched by its exact SHA** into a scratch ref directly under
    `refs/`, checked out detached, and the ref removed, so nothing stands beside
    HEAD. There is no fallback to a full clone: the URL grammar admits only
@@ -115,8 +119,8 @@ Delivered in one PR, which archives this plan.
    request header only.
 4. **Refs as `git clone --depth 1` leaves them over protocol v2.** A branch
    checkout keeps the `[branch]` upstream and `refs/remotes/origin/<branch>`
-   go-git's clone gives it, so `git status` has an upstream (a name go-git
-   would cut is refused first, by decision 1). A default-branch
+   go-git's clone gives it, so `git status` has an upstream, except for a
+   name holding `refs/heads/`, whose section go-git misnames. A default-branch
    checkout also gets `origin/HEAD` naming its tracking ref, unless the branch
    is named `HEAD/<x>` or the remote's HEAD names no branch. No other branch is
    fetched: the recording does not show which the reference's holds. A commit
@@ -127,7 +131,8 @@ Delivered in one PR, which archives this plan.
      leaves `origin/HEAD` naming itself.
 5. **An unknown SHA reports `checkout`.** The commit fetch wraps the remote's
    `not our ref` as `plumbing.ErrObjectNotFound`. That keeps `cloneReason`
-   sentinel-based. The match is on text, so a host that words it otherwise, or
+   sentinel-based. An id the remote has that names a tree or a blob reports
+   `checkout` too, from go-git's checkout error. The match is on text, so a host that words it otherwise, or
    does not admit a SHA want at all, reports a reason other than `checkout`: a
    failed clone either way, with a less exact reason.
 6. **The fixture serves through `git http-backend`** behind `net/http/cgi`, with

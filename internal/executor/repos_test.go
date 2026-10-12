@@ -1216,12 +1216,11 @@ func TestCloneReasonBlamesTheRightSide(t *testing.T) {
 
 	// A name git admits but go-git cannot carry is our limit, not the caller's
 	// mistake, so it is refused before the remote is asked, as `internal`.
-	// go-git builds a branch's refspec from Short(), which stops at a space and
-	// would fetch another branch's tree, and names the [branch] section from
-	// the text before a second refs/heads/, which fails or writes a stray
-	// section after the fetch. `EOF` in a name must not read as the network's.
-	nbsp := string(rune(0x00a0))
-	for _, name := range []string{"feat" + nbsp + "x", "fix/EOF" + nbsp + "crash", "feature/refs/heads/x", "arefs/heads/b"} {
+	// go-git builds a branch's refspec from Short(), which stops at a non-ASCII
+	// space and would fetch another branch's tree. `EOF` in a name must not
+	// read as the network's.
+	nbsp, emsp := string(rune(0x00a0)), string(rune(0x2003))
+	for _, name := range []string{"feat" + nbsp + "x", "feat" + emsp + "x", "fix/EOF" + nbsp + "crash"} {
 		t.Run("branch name go-git cannot carry "+name, func(t *testing.T) {
 			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 			fx.branch(t, "feat", map[string]string{"feat.txt": "x\n"})
