@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -278,6 +279,14 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	// The reference refuses a self_hosted deployment's repository up front
+	// ("Deployments that target a self-hosted environment follow the same
+	// rule"), so a schedule never fires sessions nothing will mount it in.
+	if resourceInputsHaveRepo(resourceInputs) {
+		if err := refuseSelfHostedRepository(ctx, s.pool, envID); err != nil {
+			return nil, err
+		}
+	}
 	sealed, err := s.sealDeploymentRepoTokens(ctx, resourceInputs)
 	if err != nil {
 		return nil, err
@@ -493,6 +502,20 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 	_, resourcesSet := obj["resources"]
 	var sealed []sealedToken
 	if resourcesSet {
+		if resourceInputsHaveRepo(resourceInputs) {
+			// Refused before sealing, as create does, against the environment
+			// the row will name; the transaction judges the pair again below.
+			target, _, _, _ := stringField(obj, "environment_id")
+			if target == "" {
+				err := s.pool.QueryRow(ctx, `SELECT environment_id FROM deployments WHERE id = $1`, id).Scan(&target)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return nil, err
+				}
+			}
+			if err := refuseSelfHostedRepository(ctx, s.pool, target); err != nil {
+				return nil, err
+			}
+		}
 		if sealed, err = s.sealDeploymentRepoTokens(ctx, resourceInputs); err != nil {
 			return nil, err
 		}
@@ -605,6 +628,25 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		if err := tx.QueryRow(ctx, `SELECT resources FROM deployments WHERE id = $1`, id).
 			Scan(&resourcesJSON); err != nil {
 			return nil, err
+		}
+	}
+	// Judged on what the row will hold, so moving a repository onto a
+	// self_hosted environment is refused as surely as bringing one there. An
+	// update that touches neither leaves a row stored before the refusal alone:
+	// its fire records the refusal instead.
+	if _, envSet := obj["environment_id"]; envSet || resourcesSet {
+		repo := resourceInputsHaveRepo(resourceInputs)
+		if !resourcesSet {
+			var kept []deploymentResource
+			if err := json.Unmarshal(resourcesJSON, &kept); err != nil {
+				return nil, err
+			}
+			repo = slices.ContainsFunc(kept, func(r deploymentResource) bool { return r.Type == "github_repository" })
+		}
+		if repo {
+			if err := refuseSelfHostedRepository(ctx, tx, envID); err != nil {
+				return nil, err
+			}
 		}
 	}
 	metadata := d.Metadata
