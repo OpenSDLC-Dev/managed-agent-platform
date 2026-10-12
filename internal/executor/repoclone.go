@@ -163,12 +163,12 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	}
 	hash := plumbing.NewHash(sha)
 	// The null object id is forty hex characters, so it passes the create
-	// endpoint's sha validation — and go-git's CheckoutOptions.Validate
-	// substitutes `master` for a zero hash rather than refusing it. Left
-	// alone, a session asking for 000…0 would be told its clone succeeded
-	// while the mount held a branch nobody named. (GitHub's webhooks put
-	// forty zeros in `before`/`after` on branch create and delete, so a
-	// forwarding app reaches this without inventing anything.)
+	// endpoint's sha validation. go-git's CheckoutOptions.Validate substitutes
+	// `master` for a zero hash rather than refusing it, and the remote refuses
+	// a want for it; refused here first, the reason rests on neither and costs
+	// no round trip. (GitHub's webhooks put forty zeros in `before`/`after` on
+	// branch create and delete, so a forwarding app reaches this without
+	// inventing anything.)
 	if hash.IsZero() {
 		return nil, fmt.Errorf("%w: the null commit id %s", plumbing.ErrObjectNotFound, sha)
 	}
@@ -198,19 +198,19 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 		return nil, err
 	}
 	// The remote serves a tree or a blob by its id as readily as a commit, and
-	// an annotated tag of one. Such an id is the caller's, and names no commit;
-	// go-git's checkout would refuse it with an error that reads as ours. Any
-	// other tag is left to the checkout, which peels one to its commit, as the
-	// full clone's did, and refuses a tag of a tag, which git would peel.
+	// an annotated tag of one, at any depth of tags. Such an id is the
+	// caller's, and names no commit; go-git's checkout would refuse it with an
+	// error that reads as ours. A tag of a commit is left to the checkout,
+	// which peels one level, as the full clone's did, and refuses a tag of a
+	// tag, which git would peel.
 	obj, err := repo.Object(plumbing.AnyObject, hash)
+	for err == nil && obj.Type() == plumbing.TagObject {
+		obj, err = obj.(*object.Tag).Object()
+	}
 	if err != nil {
 		return nil, err
 	}
-	t := obj.Type()
-	if tag, ok := obj.(*object.Tag); ok {
-		t = tag.TargetType
-	}
-	if t == plumbing.TreeObject || t == plumbing.BlobObject {
+	if t := obj.Type(); t == plumbing.TreeObject || t == plumbing.BlobObject {
 		return nil, fmt.Errorf("%w: %s names a %s, not a commit", plumbing.ErrObjectNotFound, sha, t)
 	}
 	wt, err := repo.Worktree()

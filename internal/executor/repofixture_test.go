@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -87,24 +88,25 @@ func newGitFixture(t *testing.T, files map[string]string) *gitFixture {
 	if err != nil {
 		t.Fatalf("the fixture serves through git http-backend: %v", err)
 	}
-	// Some distributions package the helper apart from git. Without it every
-	// request answers 500, which would read as the network's failure.
-	execPath, err := exec.Command(gitBin, "--exec-path").Output()
-	if err != nil {
-		t.Fatalf("git --exec-path: %v", err)
+	env := []string{
+		"GIT_PROJECT_ROOT=" + base, "GIT_HTTP_EXPORT_ALL=1",
+		"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1",
 	}
-	if _, err := os.Stat(filepath.Join(strings.TrimSpace(string(execPath)), "git-http-backend")); err != nil {
-		t.Fatalf("the fixture serves through git's http-backend helper, which is not installed: %v", err)
+	// Some distributions package the helper apart from git. Without it every
+	// request answers 500, which would read as the network's failure. It is
+	// asked for the way the handler runs it, so git finds it, or does not,
+	// exactly as it then will.
+	probe := exec.Command(gitBin, "http-backend")
+	probe.Env = env
+	if out, _ := probe.CombinedOutput(); bytes.Contains(out, []byte("is not a git command")) {
+		t.Fatalf("the fixture serves through git's http-backend helper, which is not installed: %s", out)
 	}
 	f := &gitFixture{dir: dir, repo: repo, backend: &cgi.Handler{
 		// GitHub answers a want for a commit no ref names; git's own
 		// upload-pack does only when told to. `-c` reaches the upload-pack the
 		// backend runs, on any git version.
 		Path: gitBin, Args: []string{"-c", "uploadpack.allowReachableSHA1InWant=true", "http-backend"},
-		Env: []string{
-			"GIT_PROJECT_ROOT=" + base, "GIT_HTTP_EXPORT_ALL=1",
-			"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1",
-		},
+		Env: env,
 	}}
 	f.commit(t, "initial", files)
 

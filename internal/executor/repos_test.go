@@ -1053,12 +1053,13 @@ func TestRepoCancelledCloneSweepsTheSandbox(t *testing.T) {
 }
 
 // TestRepoZeroShaIsRefused 🔍: the null object id is 40 hex characters, so it
-// passes create-time validation — and go-git's CheckoutOptions.Validate quietly
-// substitutes `master` for a zero hash rather than failing. The clone would
-// then report success while the mount holds a branch nobody asked for, and the
-// session's own resource keeps advertising the sha. (GitHub's webhook payloads
-// carry 40 zeros in `before`/`after` on branch create and delete, so a
-// forwarding app reaches this without inventing anything.)
+// passes create-time validation. go-git's CheckoutOptions.Validate quietly
+// substitutes `master` for a zero hash rather than failing, which once mounted
+// a branch nobody asked for under a resource advertising the sha; the remote
+// refuses a want for it too. It is refused before the remote is asked, so the
+// reason rests on neither. (GitHub's webhook payloads carry 40 zeros in
+// `before`/`after` on branch create and delete, so a forwarding app reaches
+// this without inventing anything.)
 func TestRepoZeroShaIsRefused(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	_, _, cleanup, err := cloneToTar(context.Background(),
@@ -1106,6 +1107,12 @@ func TestRepoNonCommitShaBlamesTheCheckout(t *testing.T) {
 		}
 		ids["tag of a "+kind] = tag.Hash().String()
 	}
+	outer, err := fx.repo.CreateTag("of-a-tag-of-a-tree", plumbing.NewHash(ids["tag of a tree"]), &git.CreateTagOptions{
+		Message: "tag of a tag", Tagger: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}})
+	if err != nil {
+		t.Fatalf("tag of a tag of a tree: %v", err)
+	}
+	ids["tag of a tag of a tree"] = outer.Hash().String()
 	for kind, id := range ids {
 		t.Run(kind, func(t *testing.T) {
 			_, _, cleanup, err := cloneToTar(context.Background(),

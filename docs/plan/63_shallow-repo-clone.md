@@ -137,7 +137,7 @@ Delivered in one PR, which archives this plan.
    sentinel-based. The match is on text, so a host that words it otherwise, or
    does not admit a SHA want at all, reports a reason other than `checkout`: a
    failed clone either way, with a less exact reason. An id the remote has
-   that names a tree or a blob, or an annotated tag of one, reports
+   that names a tree or a blob, or an annotated tag of one at any depth, reports
    `checkout` too, by its type, checked after the fetch.
 6. **The fixture serves through `git http-backend`** behind `net/http/cgi`, with
    `uploadpack.allowReachableSHA1InWant` set the way GitHub behaves. Its

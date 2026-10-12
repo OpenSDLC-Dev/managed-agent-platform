@@ -41,6 +41,13 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 		t.Fatalf("tag: %v", err)
 	}
 	fx.commit(t, "second", map[string]string{"second.txt": "two\n"})
+	// The commit row's: it has a parent, so one commit in its clone is the
+	// depth at work, and a tip after it, so it is fetched by its SHA.
+	second, err := fx.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	fx.commit(t, "third", map[string]string{"third.txt": "three\n"})
 	fx.branch(t, "feature/topic", map[string]string{"feature.txt": "on the branch\n"})
 	url := fx.srv.URL + "/o/r"
 
@@ -50,12 +57,12 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 		branch   string // "" for a detached commit checkout
 		file     string
 	}{
-		{"default branch", nil, "master", "second.txt"},
+		{"default branch", nil, "master", "third.txt"},
 		// Create admits no such checkout, but whatever takes the default
 		// branch's clone gets its refs too.
-		{"untyped checkout", &repoCheckout{}, "master", "second.txt"},
+		{"untyped checkout", &repoCheckout{}, "master", "third.txt"},
 		{"branch", &repoCheckout{Type: "branch", Name: "feature/topic"}, "feature/topic", "feature.txt"},
-		{"commit", &repoCheckout{Type: "commit", Sha: first.Hash().String()}, "", "first.txt"},
+		{"commit", &repoCheckout{Type: "commit", Sha: second.Hash().String()}, "", "second.txt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := cloneAndUnpack(t, repoRef{URL: url, Checkout: tc.checkout})
@@ -87,8 +94,11 @@ func TestRepoCloneShapeMatchesTheReference(t *testing.T) {
 
 			refs := gitIn(t, dir, "for-each-ref --format=%(refname)")
 			if tc.branch == "" {
-				if got := gitIn(t, dir, "rev-parse HEAD"); got != first.Hash().String() {
-					t.Errorf("HEAD = %s, want the requested commit %s", got, first.Hash())
+				if got := gitIn(t, dir, "rev-parse HEAD"); got != second.Hash().String() {
+					t.Errorf("HEAD = %s, want the requested commit %s", got, second.Hash())
+				}
+				if _, err := os.Stat(filepath.Join(dir, "third.txt")); err == nil {
+					t.Error("the commit checkout holds the tip's tree, not the requested commit's")
 				}
 				if out, err := gitCmd(t, dir, "symbolic-ref", "-q", "HEAD").Output(); err == nil {
 					t.Errorf("HEAD names %s, want it detached", strings.TrimSpace(string(out)))
@@ -261,6 +271,7 @@ func TestRepoUnknownCommitBlamesTheCheckout(t *testing.T) {
 // tag's commit. The shallow fetch must mount that commit too.
 func TestRepoAnnotatedTagShaMountsItsCommit(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	fx.commit(t, "second", map[string]string{"second.txt": "two\n"}) // a parent left behind
 	head, err := fx.repo.Head()
 	if err != nil {
 		t.Fatalf("Head: %v", err)
@@ -273,6 +284,12 @@ func TestRepoAnnotatedTagShaMountsItsCommit(t *testing.T) {
 	dir := cloneAndUnpack(t, repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: tag.Hash().String()}})
 	if got := gitIn(t, dir, "rev-parse HEAD"); got != head.Hash().String() {
 		t.Errorf("HEAD = %s, want the tag's commit %s", got, head.Hash())
+	}
+	if got := gitIn(t, dir, "rev-parse --is-shallow-repository"); got != "true" {
+		t.Errorf("shallow = %s, want true", got)
+	}
+	if got := gitIn(t, dir, "rev-list --count HEAD"); got != "1" {
+		t.Errorf("commits = %s, want 1", got)
 	}
 
 	// git peels a tag of a tag too, but go-git's checkout peels one level and
@@ -288,6 +305,21 @@ func TestRepoAnnotatedTagShaMountsItsCommit(t *testing.T) {
 	defer cleanup()
 	if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
 		t.Errorf("cloneReason = %q, want %q — a tag of a tag is go-git's limit: %v", got, repoOutcomeInternal, err)
+	}
+}
+
+// TestRepoUppercaseShaMounts 🔍: create admits a sha in either case. The fetch
+// asks for the parsed hash, which go-git spells in lower case, as a want must.
+func TestRepoUppercaseShaMounts(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	head, err := fx.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	sha := strings.ToUpper(head.Hash().String())
+	dir := cloneAndUnpack(t, repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: sha}})
+	if got := gitIn(t, dir, "rev-parse HEAD"); got != head.Hash().String() {
+		t.Errorf("HEAD = %s, want %s", got, head.Hash())
 	}
 }
 
