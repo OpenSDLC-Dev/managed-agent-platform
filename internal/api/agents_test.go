@@ -834,6 +834,39 @@ func TestAgentArchive(t *testing.T) {
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
 
+// An agent is archived, never deleted, here as on the reference, and its
+// DELETE takes the reference's answer: a 404 in words of its own, "not found",
+// recorded on each of the sixteen live agents a teardown sweep tried to delete
+// (managed-agents-wire-recordings 2026-09-03/batch2.json idx 209–224
+// `sweep.del.agent.*`, #592). No agent is looked up, so an absent or a
+// malformed id answers alike (INFERRED, docs/DIVERGENCES.md). The agent's
+// other unsupported methods, and a DELETE on the agent routes around it, keep
+// the 405 no recording reaches.
+func TestAgentDeleteIsTheReferencesNotFound(t *testing.T) {
+	s := newTestServer(t)
+	id := createAgent(t, s, map[string]any{"name": "kept", "model": "m"})["id"].(string)
+
+	for _, target := range []string{id, absentAgentID, "undefined"} {
+		status, body := s.do(http.MethodDelete, "/v1/agents/"+target, nil)
+		wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "not found")
+	}
+	status, got := s.do(http.MethodGet, "/v1/agents/"+id, nil)
+	if status != http.StatusOK || got["archived_at"] != nil {
+		t.Errorf("get after delete: %d, archived_at %v; want the agent untouched", status, got["archived_at"])
+	}
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPut, "/v1/agents/" + id},
+		{http.MethodPatch, "/v1/agents/" + id},
+		{http.MethodDelete, "/v1/agents"},
+		{http.MethodDelete, "/v1/agents/" + id + "/versions"},
+		{http.MethodDelete, "/v1/agents/" + id + "/archive"},
+	} {
+		status, body := s.do(tc.method, tc.path, nil)
+		wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
+	}
+}
+
 // Archiving an agent is refused while a live deployment pins it — where the
 // reference archives those deployments in the same operation (plan 37
 // decision 7). The cascade is what this platform cannot afford: nothing
