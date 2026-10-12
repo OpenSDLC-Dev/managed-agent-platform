@@ -1065,6 +1065,11 @@ func TestRepoZeroShaIsRefused(t *testing.T) {
 	if got := cloneReason(err); got != repoOutcomeCheckout {
 		t.Errorf("cloneReason = %q, want %q — the sha is the caller's: %v", got, repoOutcomeCheckout, err)
 	}
+	// Refused before the remote is asked: a fetch of the null id fails there
+	// too, but costs a round trip and rests on the host's answer.
+	if n := fx.clones.Load(); n != 0 {
+		t.Errorf("the null commit id was asked of the remote %d time(s)", n)
+	}
 }
 
 // TestCloneReasonBlamesOurselvesForCancellation 🔍: nothing but this platform
@@ -1096,13 +1101,13 @@ func TestCloneReasonBlamesOurselvesForCancellation(t *testing.T) {
 // or packs for hours holds the executor for as long as it likes, and
 // EXECUTOR_REPO_CLONE_TIMEOUT bounds nothing but the fetch.
 //
-// The three re-checks that bound those phases are deliberately redundant — each
-// one downstream catches what the one before it would have — so no single
-// check's removal changes the outcome, and what this row pins is the bound
-// rather than any one of them. Measured rather than assumed: the row goes red
-// with all three gone, and with the first and the last gone together; each one
-// alone is invisible. The middle check guards the commit checkout, an arm this
-// row does not take, so only the all-three run covers it.
+// The re-checks that bound those phases are deliberately redundant — each one
+// downstream catches what the one before it would have — so no single check's
+// removal changes the outcome, and what this row pins is the bound rather than
+// any one of them. Measured rather than assumed: this row's arm passes two, the
+// one after the clone and the tar walk's, and goes red with both gone; each
+// alone is invisible. fetchCommit's, before a commit's checkout, guards an arm
+// this row does not take.
 func TestRepoCloneStopsOnASpentBudgetAfterTheFetch(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	ctx := spentAfterFetch{Context: context.Background(), fetched: &fx.clones}

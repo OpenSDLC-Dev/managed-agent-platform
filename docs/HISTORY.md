@@ -49,6 +49,19 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## A shallow repository clone in the reference's shape (plan 63, #582) — archived 2026-10-12, delivered in one PR
+
+The fixture changed first. go-git's server-side transport refuses a shallow request, so the executor's git fixture now serves through `git http-backend`. All 31 repository and clone tests passed on it against the unchanged full-clone code. Then the tests were written and run against that code. `TestRepoCloneShapeMatchesTheReference` failed on every form: the clone was not shallow, `rev-list` counted 2 or 3 commits, and the recorded config keys were absent. `TestRepoUnknownCommitBlamesTheCheckout` passed, as it should: the full clone's checkout already blamed the SHA, and the mutants below prove the fetch path keeps that.
+
+Each guard of the code as merged was then broken on its own in an overlay copy, and a test failed each time:
+
+- the clone (6): no depth on a branch clone, no depth on a commit fetch, the `not our ref` wrap dropped, the scratch ref kept, the null-SHA check skipped before the remote is asked, both of the default arm's context re-checks gone (either one alone is invisible, as the budget test says);
+- the shape (7): no `.git` suffix, one remote, no `gh-resolved`, no `gc.auto`, a `core` key dropped, no remote-tracking ref, no `origin/HEAD`.
+
+One mutant survived and its code went: an explicit `[branch]` block, which go-git's clone already writes.
+
+**Plan 63 progress summary (archived).** Delivered in one PR: depth 1 for every checkout form, a commit fetched by its exact SHA, the recorded `.git/config` and the refs `git clone` leaves, an unknown SHA blamed on the checkout, and a fixture that can serve shallow requests.
+
 ## Main's branch protection binds admins (#920) — the designs it beat, 2026-10-12
 
 Main's protection skipped admins, and sessions here push with an admin's gh token. The fix is two repository settings: `enforce_admins` on, and a required pull request with zero approvals. Three designs were rejected, and one gap stays open.

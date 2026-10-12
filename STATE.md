@@ -4,10 +4,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 62](./docs/plan/62_gemini-upstream-protocol.md) (#900), a Gemini upstream
-for the model gateway, archived 2026-10-11 after two PRs, #916 and the close-out; its
-delivery record is [docs/HISTORY.md](./docs/HISTORY.md), and its generation live rows
-wait on a key that can pay, in #903.
+**None.** [Plan 63](./docs/plan/63_shallow-repo-clone.md) (#582), a shallow repository
+clone in the reference's shape, archived 2026-10-12 in one PR; its delivery record is
+[docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 

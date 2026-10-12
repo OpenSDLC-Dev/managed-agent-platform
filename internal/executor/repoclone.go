@@ -68,52 +68,36 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	}
 	storer := filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault())
 
-	opts := &git.CloneOptions{
-		URL:  r.URL,
-		Auth: &githttp.BasicAuth{Username: tokenUsername, Password: token},
+	// Every checkout is depth 1, as the reference's was recorded (#582): only
+	// the requested commit's tree and history travels. A branch checkout
+	// fetches that branch; omitted means the remote's own HEAD — the default
+	// branch, resolved here rather than at create (plan 25 decisions 3 and 7);
+	// a commit is fetched by its exact SHA (fetchCommit).
+	auth := &githttp.BasicAuth{Username: tokenUsername, Password: token}
+	var repo *git.Repository
+	if r.Checkout != nil && r.Checkout.Type == "commit" {
+		repo, err = fetchCommit(ctx, storer, tree, r.URL, auth, r.Checkout.Sha)
+	} else {
+		opts := &git.CloneOptions{URL: r.URL, Auth: auth, Depth: 1, SingleBranch: true}
+		if r.Checkout != nil && r.Checkout.Type == "branch" {
+			opts.ReferenceName = plumbing.NewBranchReferenceName(r.Checkout.Name)
+		}
+		repo, err = git.CloneContext(ctx, storer, tree, opts)
 	}
-	// A branch checkout fetches only that branch; a commit checkout needs
-	// arbitrary history, so it clones fully and detaches afterwards. Omitted
-	// means the remote's own HEAD — the default branch, resolved here rather
-	// than at create (plan 25 decisions 3 and 7).
-	if r.Checkout != nil && r.Checkout.Type == "branch" {
-		opts.ReferenceName = plumbing.NewBranchReferenceName(r.Checkout.Name)
-		opts.SingleBranch = true
-	}
-	repo, err := git.CloneContext(ctx, storer, tree, opts)
 	if err != nil {
 		return "", 0, cleanup, err
 	}
 	// go-git applies the context to transport only — its post-fetch worktree
-	// reset runs to completion whatever the deadline says — so the phases after
-	// it are bounded here instead. Without this a repository that downloads
-	// inside the deadline and then checks out or packs for hours would hold the
-	// executor indefinitely, and the deadline would bound nothing but the fetch.
+	// reset and a commit's checkout run to completion whatever the deadline
+	// says — so the phases after it are bounded here instead. Without this a
+	// repository that downloads inside the deadline and then checks out or
+	// packs for hours would hold the executor indefinitely, and the deadline
+	// would bound nothing but the fetch.
 	if err := ctx.Err(); err != nil {
 		return "", 0, cleanup, err
 	}
-	if r.Checkout != nil && r.Checkout.Type == "commit" {
-		hash := plumbing.NewHash(r.Checkout.Sha)
-		// The null object id is forty hex characters, so it passes the create
-		// endpoint's sha validation — and go-git's CheckoutOptions.Validate
-		// substitutes `master` for a zero hash rather than refusing it. Left
-		// alone, a session asking for 000…0 would be told its clone succeeded
-		// while the mount held a branch nobody named. (GitHub's webhooks put
-		// forty zeros in `before`/`after` on branch create and delete, so a
-		// forwarding app reaches this without inventing anything.)
-		if hash.IsZero() {
-			return "", 0, cleanup, fmt.Errorf("%w: the null commit id %s", plumbing.ErrObjectNotFound, r.Checkout.Sha)
-		}
-		wt, werr := repo.Worktree()
-		if werr != nil {
-			return "", 0, cleanup, werr
-		}
-		if werr := wt.Checkout(&git.CheckoutOptions{Hash: hash}); werr != nil {
-			return "", 0, cleanup, werr
-		}
-		if err := ctx.Err(); err != nil {
-			return "", 0, cleanup, err
-		}
+	if err := shapeCheckout(repo, r.URL); err != nil {
+		return "", 0, cleanup, err
 	}
 
 	tarPath = filepath.Join(spool, "repo.tar")
@@ -122,6 +106,111 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		return "", 0, cleanup, err
 	}
 	return tarPath, size, cleanup, nil
+}
+
+// fetchCommit fetches the one commit sha names, at depth 1, into a fresh
+// repository and checks it out detached. GitHub answers a want for any commit
+// its refs reach, so a commit needs no more history than a branch does. The
+// commit lands under a scratch ref, removed once HEAD holds it, so the checkout
+// carries no ref beside its detached HEAD.
+func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Filesystem,
+	url string, auth transport.AuthMethod, sha string) (*git.Repository, error) {
+	hash := plumbing.NewHash(sha)
+	// The null object id is forty hex characters, so it passes the create
+	// endpoint's sha validation — and go-git's CheckoutOptions.Validate
+	// substitutes `master` for a zero hash rather than refusing it. Left
+	// alone, a session asking for 000…0 would be told its clone succeeded
+	// while the mount held a branch nobody named. (GitHub's webhooks put
+	// forty zeros in `before`/`after` on branch create and delete, so a
+	// forwarding app reaches this without inventing anything.)
+	if hash.IsZero() {
+		return nil, fmt.Errorf("%w: the null commit id %s", plumbing.ErrObjectNotFound, sha)
+	}
+	repo, err := git.Init(storer, tree)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{url}}); err != nil {
+		return nil, err
+	}
+	const scratch = plumbing.ReferenceName("refs/map/checkout")
+	err = repo.FetchContext(ctx, &git.FetchOptions{
+		RemoteName: "origin", Auth: auth, Depth: 1,
+		RefSpecs: []config.RefSpec{config.RefSpec(sha + ":" + scratch.String())},
+	})
+	// The remote refuses a commit it does not have in words go-git carries as
+	// plain text, with no sentinel to match. The sha is the caller's.
+	if err != nil && strings.Contains(err.Error(), "not our ref") {
+		return nil, fmt.Errorf("%w: %w", plumbing.ErrObjectNotFound, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		return nil, err
+	}
+	if err := wt.Checkout(&git.CheckoutOptions{Hash: hash}); err != nil {
+		return nil, err
+	}
+	return repo, repo.Storer.RemoveReference(scratch)
+}
+
+// shapeCheckout gives a checkout the .git/config and refs the reference's
+// carried (#582): `origin` and GitHub CLI's base remote `github`, both at the
+// URL's `.git` spelling and fetching every branch, automatic gc off, and the
+// core keys `git init` writes. A branch checkout keeps the upstream go-git's
+// clone gives it, and gets the rest of what `git clone` leaves — the branch's
+// remote-tracking ref, with origin/HEAD naming it — so `git status` and
+// `git pull` work as they would in the reference's. No credential is written:
+// the token only ever rides a request header.
+func shapeCheckout(repo *git.Repository, url string) error {
+	if !strings.HasSuffix(url, ".git") {
+		url += ".git"
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		return err
+	}
+	cfg.Remotes = map[string]*config.RemoteConfig{}
+	for _, name := range []string{"origin", "github"} {
+		cfg.Remotes[name] = &config.RemoteConfig{Name: name, URLs: []string{url},
+			Fetch: []config.RefSpec{config.RefSpec("+refs/heads/*:refs/remotes/" + name + "/*")}}
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return err
+	}
+	if branch := head.Name(); branch.IsBranch() {
+		tracking := plumbing.NewRemoteReferenceName("origin", branch.Short())
+		for _, ref := range []*plumbing.Reference{
+			plumbing.NewHashReference(tracking, head.Hash()),
+			plumbing.NewSymbolicReference(plumbing.NewRemoteHEADReferenceName("origin"), tracking),
+		} {
+			if err := repo.Storer.SetReference(ref); err != nil {
+				return err
+			}
+		}
+	}
+	if err := repo.SetConfig(cfg); err != nil {
+		return err
+	}
+	// A remote's subsection is rebuilt from its typed fields on every write,
+	// so the one key go-git has no field for goes in a second write, after the
+	// first has made the subsection raw configuration go-git keeps.
+	if cfg, err = repo.Config(); err != nil {
+		return err
+	}
+	cfg.Raw.Section("remote").Subsection("github").SetOption("gh-resolved", "base")
+	cfg.Raw.Section("gc").SetOption("auto", "0")
+	core := cfg.Raw.Section("core")
+	core.SetOption("repositoryformatversion", "0")
+	core.SetOption("filemode", "true")
+	core.SetOption("logallrefupdates", "true")
+	return repo.SetConfig(cfg)
 }
 
 // packTree writes dir's contents to a tar file with paths relative to dir, so
