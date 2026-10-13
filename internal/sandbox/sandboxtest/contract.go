@@ -2060,8 +2060,9 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 
 	// A read-only root is not a bare flag: the platform itself writes several
 	// paths inside the sandbox — the workdir, /tmp, the persistent shell's state
-	// root, the session-resource mount root — and a read-only root that reached
-	// any of them would be a sandbox whose very first bash call faults instead
+	// root, the session-resource mount root, the repository root — and a
+	// read-only root that reached any of them would be a sandbox whose very
+	// first bash call faults instead
 	// of answering. Every path sandbox.WritablePaths names is asserted, so a
 	// future writer that forgets to add its path here fails the row rather than
 	// the deployment.

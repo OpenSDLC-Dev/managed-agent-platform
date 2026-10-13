@@ -445,31 +445,21 @@ func TestSessionListFiltersByMemoryStore(t *testing.T) {
 	}
 }
 
-// /mnt/memory is reserved: a repository may not mount at it or below it
-// (decision 8); a sibling path stays legal. The path rule runs at parse time,
-// before the create touches the cipher or the database.
-func TestSessionRepoMountRefusedUnderMemoryRoot(t *testing.T) {
+// The memory stores' parent stays theirs (decision 8): a repository spelled
+// at or below /mnt/memory roots under /workspace (#922), as the reference
+// rooted /mnt/memory (2026-09-03 batch1 idx 93).
+func TestSessionRepoMountNeverReachesTheMemoryRoot(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	for _, mount := range []string{"/mnt/memory", "/mnt/memory/notes"} {
-		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+	for _, mount := range []string{"/mnt/memory", "/mnt/memory/notes", "/mnt/memoryx"} {
+		sess := createSession(t, s, map[string]any{
 			"agent": agentID, "environment_id": envID,
 			"resources": []any{map[string]any{"type": "github_repository", "url": "https://github.com/x/y",
 				"authorization_token": "t", "mount_path": mount}},
 		})
-		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
-		if msg, _ := body["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "reserved") {
-			t.Errorf("%s: message %q, want the reservation named", mount, msg)
+		if got := resourcesOf(t, sess)[0]["mount_path"]; got != "/workspace"+mount {
+			t.Errorf("%s: mount_path = %v, want /workspace%s", mount, got, mount)
 		}
-	}
-	// A sibling path is not below the parent, and stays legal.
-	sess := createSession(t, s, map[string]any{
-		"agent": agentID, "environment_id": envID,
-		"resources": []any{map[string]any{"type": "github_repository", "url": "https://github.com/x/y",
-			"authorization_token": "t", "mount_path": "/mnt/memoryx"}},
-	})
-	if got := resourcesOf(t, sess)[0]["mount_path"]; got != "/mnt/memoryx" {
-		t.Errorf("/mnt/memoryx: mount_path = %v", got)
 	}
 }
 

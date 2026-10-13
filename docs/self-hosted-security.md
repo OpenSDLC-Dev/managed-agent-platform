@@ -26,7 +26,7 @@ deliberate divergences from the reference are in
 | **Non-root execution** | Runs the image's default user, or the uid `SANDBOX_RUN_AS_USER` names | Shipping an image whose default user is unprivileged, and whose workdir that user can reach |
 | **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; AppArmor/SELinux profiles |
 | **Syscall filtering** | On **Kubernetes**, sets `seccompProfile: RuntimeDefault` on every sandbox pod, always — covering the sandbox container, the gate sidecar and the netsetup init container. Not configurable, and it is the runtime's own curated filter, not one the platform authors. Docker containers already receive their runtime's default | Not disabling it out of band (a node whose runtime has no default profile refuses the pod); AppArmor/SELinux, which are still yours |
-| **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
+| **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/workspace` where repositories mount, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
 | **Sandbox egress** | `limited` = `allowed_hosts`, plus — each under its own flag — the `host:port` endpoints the session's agent declares MCP servers at (`allow_mcp_servers`) and the platform's curated 30-host package-registry set, which reaches source forges and container registries too (`allow_package_managers`; §5), through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Sandbox placement** | On **Kubernetes**, puts your `nodeSelector` and `tolerations` on every sandbox pod (`SANDBOX_K8S_NODE_SELECTOR` / `SANDBOX_K8S_TOLERATIONS`; the chart's `sandboxPlacement`), and refuses a malformed one at startup | Building the node pool, labelling and tainting it, and keeping the platform's own workloads off it |
@@ -657,7 +657,16 @@ in the code (`sandbox.WritablePaths`) precisely so neither backend can forget on
 - **`/mnt`**, the parent of the mount point for a session's file resources
   (`/mnt/session/uploads/…`, and `/mnt/session/uploads/<file_id>` when the
   caller supplies no `mount_path`) — since #323 every resolved mount path is
-  under it, not just the default-placed ones.
+  under it, not just the default-placed ones;
+- **`/workspace`**, where every repository mounts whatever the workdir
+  (#922) — the workdir itself by default, and a mount of its own only when
+  the workdir is configured elsewhere. There, on Kubernetes, its `emptyDir`
+  hides whatever the image ships under `/workspace`; Docker copies that
+  content into its volume. A repository stored before #922 keeps the
+  literal path it was given, which can fall outside every path here. The
+  executor refuses to clone one at `/workspace`, the uploads or outputs
+  directory, `/mnt/memory` or the shell state root, or at a directory
+  holding one.
 
 Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
 existing container removal takes away with the container.

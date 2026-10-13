@@ -168,6 +168,82 @@ func TestCaptureCombinesRootsStripsSentinelsMarksReady(t *testing.T) {
 	}
 }
 
+// TestCheckpointRootsHoldTheRepositoryRoot: /workspace is a root whatever the
+// workdir (#922), and a workdir below it is captured with it, not twice.
+func TestCheckpointRootsHoldTheRepositoryRoot(t *testing.T) {
+	sid := domain.NewID(domain.PrefixSession)
+	tail := []string{sandbox.ShellStateRoot + "/" + sid.String(), outputsDir}
+	for workdir, head := range map[string][]string{
+		"":                 {"/workspace"},
+		"/workspace/agent": {"/workspace"},
+		"/srv/work":        {"/srv/work", "/workspace"},
+	} {
+		e := &Executor{cfg: Config{Workdir: workdir}.withDefaults()}
+		if got, want := e.checkpointRoots(sid), append(head, tail...); !slices.Equal(got, want) {
+			t.Errorf("workdir %q: roots = %v, want %v", workdir, got, want)
+		}
+	}
+}
+
+// TestCaptureKeepsTheRepositoryRoot: every repository mounts under /workspace
+// whatever the workdir (#922), so a checkpoint keeps it. A workdir below it is
+// captured inside it, a workdir beside it is a root of its own, and only the
+// workdir's own sentinels are stripped either way.
+func TestCaptureKeepsTheRepositoryRoot(t *testing.T) {
+	for _, tc := range []struct {
+		workdir  string
+		exports  map[string]map[string]string
+		kept     []string
+		stripped []string
+	}{
+		{"/workspace/agent", map[string]map[string]string{
+			"/workspace": {
+				"workspace/repo/.git/HEAD":             "ref",
+				"workspace/agent/notes.txt":            "keep me",
+				"workspace/agent/skills/.materialized": "sentinel",
+				"workspace/agent/.files_materialized":  "sentinel",
+				"workspace/skills/.materialized":       "not the workdir's, kept",
+			}},
+			[]string{"workspace/repo/.git/HEAD", "workspace/agent/notes.txt", "workspace/skills/.materialized"},
+			[]string{"workspace/agent/skills/.materialized", "workspace/agent/.files_materialized"}},
+		{"/srv/work", map[string]map[string]string{
+			"/srv/work": {
+				"work/notes.txt":            "keep me",
+				"work/skills/.materialized": "sentinel",
+			},
+			"/workspace": {
+				"workspace/repo/.git/HEAD":       "ref",
+				"workspace/skills/.materialized": "not the workdir's, kept",
+			}},
+			[]string{"srv/work/notes.txt", "workspace/repo/.git/HEAD", "workspace/skills/.materialized"},
+			[]string{"srv/work/skills/.materialized"}},
+	} {
+		t.Run(tc.workdir, func(t *testing.T) {
+			h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{Workdir: tc.workdir})
+			h.prov = h.exec.provider.(*fakeProvider)
+			h.prov.owned = []domain.ID{h.sid}
+			h.prov.exports = map[string][]byte{}
+			for root, files := range tc.exports {
+				h.prov.exports[root] = exportTar(t, files, nil)
+			}
+			if err := h.exec.captureCheckpoint(context.Background(), h.sid); err != nil {
+				t.Fatalf("capture: %v", err)
+			}
+			got := checkpointMembers(t, h)
+			for _, want := range tc.kept {
+				if _, ok := got[want]; !ok {
+					t.Errorf("checkpoint missing member %q (have %v)", want, keys(got))
+				}
+			}
+			for _, gone := range tc.stripped {
+				if _, ok := got[gone]; ok {
+					t.Errorf("sentinel %q survived capture", gone)
+				}
+			}
+		})
+	}
+}
+
 func keys(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

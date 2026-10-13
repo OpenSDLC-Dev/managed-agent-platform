@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -48,12 +47,13 @@ const defaultMountRoot = "/mnt/session/uploads/"
 // and echoed on every read (#849).
 const maxMountPathBytes = 1024
 
-// defaultRepoMountRoot prefixes the default mount for a github_repository
-// resource: /workspace/<repo-name> (the SDK documents the default, checked
-// against anthropic-sdk-go v1.70.1 — betasession.go
+// defaultRepoMountRoot is the directory every github_repository mount sits
+// under (resolveRepoMountPath, #922), and the prefix of the default one:
+// /workspace/<repo-name> (the SDK documents the default, checked against
+// anthropic-sdk-go v1.70.1 — betasession.go
 // BetaManagedAgentsGitHubRepositoryResourceParams.MountPath; the <repo-name>
 // derivation — last URL segment, ".git" stripped — is INFERRED, plan 25
-// decision 3). Unlike file mounts, repo mounts are used literally.
+// decision 3).
 const defaultRepoMountRoot = "/workspace/"
 
 // maxAuthorizationTokenBytes caps a github_repository authorization_token (400
@@ -69,32 +69,11 @@ const maxAuthorizationTokenBytes = 8192
 // aggregate clone time and disk at count × the per-repo budget.
 const maxReposPerSession = 8
 
-// reservedRepoMounts are mount targets a repository may never take (plan 25
-// decision 3): "/" (extraction over the rootfs breaks the sandbox image
-// contract, and a re-clone's cleared target would be the sandbox itself),
-// "/tmp" (the ancestor of the executor's in-sandbox staging path), from
-// plan 36 (decision 8) memoryMountParent — validateRepoMountPath also refuses
-// anything below it, which the equal-path map cannot express — and, from #584,
-// "/workspace", the sandbox workdir under its default configuration, which the
-// executor refused already: a clone there would replace every other mount
-// beneath it. The reference refuses none of these; it rebases every mount
-// under /workspace (#922), and what it makes of /workspace itself is unrecorded.
-var reservedRepoMounts = map[string]bool{"/": true, "/tmp": true, memoryMountParent: true, "/workspace": true}
-
-// skillsRoot is where the executor lands a session's skills, one directory per
-// skill — <workdir>/skills under the default workdir (internal/executor's
-// materializeSkills), the place the reference was recorded extracting them
-// (docs/DIVERGENCES.md, the Level-1 skill-injection entry). The workdir is
-// executor configuration the control plane cannot see, so this judges the
-// default layout only; under another EXECUTOR_WORKDIR, the executor's own
-// guard (safeRepoMount) is the one that protects the skills.
-const skillsRoot = defaultRepoMountRoot + "skills"
-
 // memoryMountParent is the directory every attached memory store mounts under
 // (the memory guide: "a directory under /mnt/memory/"); a store's own mount is
-// memoryMountParent + "/" + its slug. A file mount cannot reach it
-// (resolveMountPath roots files under /mnt/session/uploads) and a repository
-// mount is refused at or below it, so the parent is the stores' alone.
+// memoryMountParent + "/" + its slug. No other mount can reach it:
+// resolveMountPath roots files under /mnt/session/uploads, and
+// resolveRepoMountPath roots repositories under /workspace.
 const memoryMountParent = "/mnt/memory"
 
 // memoryMountNameMax is NAME_MAX, the longest name a Linux directory entry
@@ -251,19 +230,18 @@ func parseSessionResourceInputs(obj map[string]json.RawMessage) ([]resourceInput
 // github_repository or memory_store) with a valid file_id, canonical GitHub
 // URL + token, or memory_store_id. A file's mount_path resolves
 // (resolveMountPath) under the uploads root — so "data.csv" and "/data.csv"
-// collide the way they will in the sandbox — while a repository's is the
-// literal container path (validateRepoMountPath). Existence of a referenced
-// file, and the store a memory element names, are checked later, inside the
-// create transaction (materializeResourceInputs). Cross-resource rules (plan
-// 25 decision 3): uniqueness is judged on the resolved/path.Clean forms so
+// collide the way they will in the sandbox — and a repository's under
+// /workspace (resolveRepoMountPath), so the two arms never meet. Existence of
+// a referenced file, and the store a memory element names, are checked later,
+// inside the create transaction (materializeResourceInputs). Cross-resource
+// rules (plan 25 decision 3): uniqueness is judged on the resolved forms so
 // aliases of one directory cannot coexist; no resource may sit at a proper
-// ancestor of a repository's mount (a file there is a non-directory where the
-// clone needs a directory, and nested repos would let a fresh re-clone of the
-// outer clear the inner — a resource inside a repo mount, the supported
-// overlay, stays legal); and a session mounts at most maxReposPerSession
-// repositories. A memory element has no mount path yet — it is derived from
-// the store's name in the transaction, under memoryMountParent, which no file
-// or repository mount can reach — so it takes only its own two rules here:
+// ancestor of a repository's mount (nested repos would let a fresh re-clone
+// of the outer clear the inner); and a session mounts at most
+// maxReposPerSession repositories. A memory element has no mount path yet —
+// it is derived from the store's name in the transaction, under
+// memoryMountParent, which no file or repository mount can reach — so it
+// takes only its own two rules here:
 // the same store at most once and at most maxMemoryStoresPerSession of them
 // (plan 36 decision 7). f picks the words a refusal takes; an element parser
 // whose sentences name the element is handed its index too. The deployment
@@ -321,27 +299,22 @@ func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourc
 	if repos > maxReposPerSession {
 		return nil, errInvalid("a session can mount at most %d github_repository resources", maxReposPerSession)
 	}
-	for ri, r := range out {
+	for _, r := range out {
 		if r.kind != resourceKindRepo {
 			continue
 		}
-		for pi, p := range out {
-			if p.kind == resourceKindMemory {
+		for _, p := range out {
+			// Only a repository can sit above one: files root under the uploads
+			// directory, and memory stores under /mnt/memory (#922).
+			if p.kind != resourceKindRepo || !properPathAncestor(path.Clean(p.mountPath), path.Clean(r.mountPath)) {
 				continue
 			}
-			if properPathAncestor(path.Clean(p.mountPath), path.Clean(r.mountPath)) {
-				// out holds every element at its request index, so the later
-				// of the pair is the one the reference's sentence is about.
-				if f == resourceForSession && out[max(pi, ri)].kind == resourceKindRepo {
-					return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
-				}
-				// r's mount is the caller's own: a default one sits directly
-				// under /workspace, and nothing may take that or "/".
-				if f == resourceForDeployment {
-					return nil, errInvalid("%s is an ancestor of repository mount_path %q", p.mountWords(true), r.mountPath)
-				}
-				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
+			if f == resourceForDeployment {
+				// Both named as the caller spelled them (#849). r is never a
+				// default, whose only ancestors, /workspace and "/", no mount takes.
+				return nil, errInvalid("%s is an ancestor of repository %s", p.mountWords(true), r.mountWords(true))
 			}
+			return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
 		}
 	}
 	return out, nil
@@ -436,8 +409,7 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 	if f == resourceForDeployment && len(given) > maxMountPathBytes {
 		// The spelling is stored and echoed there (#849), and resolution
 		// bounds only what it resolves to: "/" + "a/../"×800000 + "x" is
-		// /mnt/session/uploads/x. A repository's spelling, when it sends one,
-		// is its resolved path, bounded already.
+		// /mnt/session/uploads/x. A repository's spelling is held the same way.
 		return resourceInput{}, errInvalid("mount_path must be at most %d bytes as sent", maxMountPathBytes)
 	}
 	mountPath := defaultMountRoot + fileID // omitted, or null or ""
@@ -586,14 +558,12 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 	if err != nil {
 		return resourceInput{}, err
 	}
-	mountPath := given
-	if mountPath == "" { // omitted, or null or ""
-		mountPath = defaultRepoMountRoot + repoName
+	if f == resourceForDeployment && len(given) > maxMountPathBytes {
+		// Stored and echoed there (#849); parseFileResource says why.
+		return resourceInput{}, errInvalid("mount_path must be at most %d bytes as sent", maxMountPathBytes)
 	}
-	// The derived default is validated too, not just a supplied path: the
-	// grammar above keeps the repo name clean and storable, and this keeps
-	// that true by construction (and bounds a pathologically long name).
-	if err := validateRepoMountPath(mountPath); err != nil {
+	mountPath, err := resolveRepoMountPath(given, repoName, f)
+	if err != nil {
 		return resourceInput{}, err
 	}
 	return resourceInput{
@@ -628,9 +598,9 @@ func parseGitHubRepoURL(raw string) (string, error) {
 	if len(segs) != 2 || !validRepoURLSegment(segs[0]) || !validRepoURLSegment(segs[1]) {
 		return "", bad()
 	}
-	// The repo name becomes the default mount path's last element, so the
-	// names path.Clean would rewrite are refused here — "acme/.." would
-	// otherwise derive /workspace/.., the reserved "/" in disguise.
+	// The repo name becomes the default mount path's last element, which is
+	// not cleaned, so the names path.Clean would rewrite are refused here —
+	// "acme/.." would otherwise derive /workspace/.., which is "/".
 	name := strings.TrimSuffix(segs[1], ".git")
 	if name == "" || name == "." || name == ".." {
 		return "", bad()
@@ -721,35 +691,71 @@ func isFullCommitSHA(s string) bool {
 	return true
 }
 
-// validateRepoMountPath enforces the repository arm's mount-path rules
-// (plan 25 decision 3, INFERRED). Unlike a file's mount_path — which
-// resolveMountPath roots under the session's uploads directory (#323) — a
-// repository's is the literal container path (the documented default is
-// /workspace/<repo-name>), so it must be absolute, bounded, and storable (an
-// unstorable byte would otherwise fail as a 500 when the resources array binds
-// into the jsonb column, see #135); it must equal its path.Clean form —
-// aliases like /workspace/./r or a trailing slash would evade the cleaned-form
-// uniqueness check — and may not take a reserved target.
-func validateRepoMountPath(p string) error {
-	if !strings.HasPrefix(p, "/") {
-		return errInvalid("mount_path must be an absolute path")
+// resolveRepoMountPath maps a github_repository mount_path to the container
+// path the repository is cloned into, "" (omitted, null or empty) taking the
+// default /workspace/<repoName>. Every path is rooted under /workspace, as
+// the docs put it ("the directory under /workspace to clone the repository
+// into") and the reference was recorded doing (#922, plan 64 lists each
+// probe). The path is cleaned first, so its ".." resolves before rooting:
+//
+//   - /workspace, or a path below it, keeps its place, matched as a
+//     directory: /workspaceX/repo is rooted like any other path.
+//   - A relative path led by `workspace/` drops that component
+//     (`workspace/rel` is /workspace/rel), while a bare `workspace` names a
+//     directory of that name (/workspace/workspace).
+//   - Any other path, absolute or relative, is rooted: /tmp is
+//     /workspace/tmp, and /workspace/../etc, cleaned to /etc, is
+//     /workspace/etc.
+//
+// A path that lands on /workspace itself — "/", "/workspace", "." — takes the
+// default, as "/" and "/workspace" did there. A cleaned relative path still
+// led by ".." climbs out, and is refused, in the reference's words on session
+// create (2026-10-13 setup[14], `../x`) and in ours elsewhere (#540). The rule
+// fits every recorded input; what it does with any other is ours.
+//
+// The rooted path is what gets cloned into, so it carries the bounds: at most
+// maxMountPathBytes, and storable text (an unstorable byte would otherwise
+// fail as a 500 when the resources array binds into the jsonb column, #135).
+// The derived default is bounded too, which a pathologically long repository
+// name needs. It is never /workspace itself, nor above it, so no target is
+// reserved: the default workdir, /tmp, the memory stores' parent and the
+// uploads root are all out of reach. A workdir configured below /workspace
+// is not, nor a directory between the two; the executor refuses both. Nor
+// is the skills directory: a repository may share it with the session's
+// skills, as the reference was recorded doing (setup[17–21]), and the
+// executor writes the skills after the clone.
+func resolveRepoMountPath(p, repoName string, f resourceFlavor) (string, error) {
+	root := strings.TrimSuffix(defaultRepoMountRoot, "/")
+	clean := path.Clean(p)
+	var rel string
+	switch {
+	case clean == root || properPathAncestor(root, clean):
+		rel = strings.TrimPrefix(clean, root)
+	case strings.HasPrefix(clean, "workspace/"):
+		rel = strings.TrimPrefix(clean, "workspace")
+	default:
+		rel = clean
 	}
-	if len(p) > maxMountPathBytes {
-		return errInvalid("mount_path must be at most %d bytes", maxMountPathBytes)
+	rel = strings.TrimPrefix(rel, "/")
+	if rel == ".." || strings.HasPrefix(rel, "../") {
+		// The recorded sentence quotes the path as sent, so it is said only of
+		// one short enough to quote.
+		if f == resourceForSession && len(p) <= maxMountPathBytes {
+			return "", errInvalid("Invalid `github_repository` resource: mount path %q escapes %s", p, defaultRepoMountRoot)
+		}
+		return "", errInvalid("mount_path must resolve to a path under %s", root)
 	}
-	if !storableText(p) {
-		return errInvalid("mount_path must be storable text")
+	resolved := path.Join(root, rel)
+	if resolved == root {
+		resolved = defaultRepoMountRoot + repoName
 	}
-	if path.Clean(p) != p {
-		return errInvalid("mount_path must be a clean absolute path (no \".\", \"..\", doubled separators, or trailing slash)")
+	if len(resolved) > maxMountPathBytes {
+		return "", errInvalid("mount_path must be at most %d bytes once rooted under %s", maxMountPathBytes, root)
 	}
-	if reservedRepoMounts[p] {
-		return errInvalid("mount_path %q is reserved", p)
+	if !storableText(resolved) {
+		return "", errInvalid("mount_path must be storable text")
 	}
-	if strings.HasPrefix(p, memoryMountParent+"/") {
-		return errInvalid("mount_path %q is reserved for memory stores", p)
-	}
-	return nil
+	return resolved, nil
 }
 
 // resolveMountPath maps a caller-supplied mount_path to the container path the
@@ -1070,49 +1076,6 @@ func resourceInputsHaveRepo(inputs []resourceInput) bool {
 		}
 	}
 	return false
-}
-
-// repoUnderSkillsRoot reports whether in is a repository mounted at skillsRoot
-// or below it.
-func repoUnderSkillsRoot(in resourceInput) bool {
-	return in.kind == resourceKindRepo &&
-		(in.mountPath == skillsRoot || properPathAncestor(skillsRoot, in.mountPath))
-}
-
-// refuseSkillsRootRepository refuses a repository mounted at skillsRoot or
-// below it when the session has skills to land there (#584): a clone replaces
-// its mount whole, so it would remove skill trees written in the same pass. The
-// session's skills are its agent's and every roster member's, the union the
-// executor materializes. A skill-free session may mount one there — the
-// reference was recorded cloning anthropics/skills to /workspace/skills for an
-// agent with no skills (2026-09-03 batch2 sess.create.repo-wrong-token) — so
-// the judgment needs the resolved agent. It is classified for a deployment's
-// fire: a row stored before the refusal records a run that pauses nothing,
-// where an unclassified 400 would be retried on every tick.
-func refuseSkillsRootRepository(agent sessionAgentJSON, inputs []resourceInput) error {
-	i := slices.IndexFunc(inputs, repoUnderSkillsRoot)
-	if i < 0 {
-		return nil
-	}
-	skilled := len(agent.Skills) > 0
-	if !skilled && present(agent.Multiagent) {
-		var roster struct {
-			Agents []struct {
-				Skills []json.RawMessage `json:"skills"`
-			} `json:"agents"`
-		}
-		if err := json.Unmarshal(agent.Multiagent, &roster); err != nil {
-			return fmt.Errorf("decode roster snapshot: %w", err)
-		}
-		for _, m := range roster.Agents {
-			skilled = skilled || len(m.Skills) > 0
-		}
-	}
-	if !skilled {
-		return nil
-	}
-	return classified("session_creation_rejected_error", errInvalid(
-		"mount_path %q is reserved: the agent's skills are materialized under %s", inputs[i].mountPath, skillsRoot))
 }
 
 // insertSessionResourceCredentials stores each repository's pre-sealed token
@@ -1454,8 +1417,9 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 	if rm := repoMountBelow(resources, in.mountPath); rm != "" {
 		// The same ancestor rule create enforces (parseResourceInputs): a
 		// resource above a repository's mount is a non-directory where the
-		// clone needs a directory. A file inside the repo's tree — the
-		// supported overlay — stays legal.
+		// clone needs a directory. A file inside the repo's tree stays legal:
+		// the overlay plan 25 supports, which since #922 only a repository
+		// stored before it can meet, as files root under the uploads directory.
 		return fileResourceJSON{}, errInvalid("mount_path %q is an ancestor of repository mount_path %q", in.mountPath, rm)
 	}
 	copyID, err := mountFileCopy(ctx, tx, id, in.fileID)

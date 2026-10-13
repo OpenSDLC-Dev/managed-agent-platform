@@ -14,7 +14,18 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
+
+// TestRepoMountRootIsTheSandboxRepositoryRoot: create roots every repository
+// where the executor keeps a writable, checkpointed directory (#922), so the
+// two constants must name one directory.
+func TestRepoMountRootIsTheSandboxRepositoryRoot(t *testing.T) {
+	if want := sandbox.RepositoryRoot + "/"; defaultRepoMountRoot != want {
+		t.Errorf("defaultRepoMountRoot = %q, want %q", defaultRepoMountRoot, want)
+	}
+}
 
 func TestCursorRoundTrip(t *testing.T) {
 	ts := time.Date(2026, 7, 10, 1, 2, 3, 456789000, time.UTC)

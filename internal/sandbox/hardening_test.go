@@ -250,6 +250,15 @@ func TestWritablePaths(t *testing.T) {
 			seen[p] = true
 		}
 	}
+	// Every repository mounts under /workspace whatever the workdir (#922).
+	if got := sandbox.WritablePaths("/srv/work"); !slices.Contains(got, "/workspace") {
+		t.Errorf("WritablePaths(%q) = %v, want /workspace, where repositories mount", "/srv/work", got)
+	}
+	// A workdir below /workspace is mounted after it, not hidden by it.
+	if got := sandbox.WritablePaths("/workspace/agent"); !slices.Contains(got, "/workspace") ||
+		slices.Index(got, "/workspace") > slices.Index(got, "/workspace/agent") {
+		t.Errorf("WritablePaths(%q) = %v, want /workspace before the workdir below it", "/workspace/agent", got)
+	}
 	// An empty workdir is the same default the providers resolve.
 	if got := sandbox.WritablePaths(""); !slices.Contains(got, sandbox.DefaultWorkdir) {
 		t.Errorf("WritablePaths(\"\") = %v, want the default workdir", got)
@@ -307,7 +316,7 @@ func TestCapDropAcceptsTheDefaultsAndTheWildcard(t *testing.T) {
 func TestWritablePathsNormalizesBeforeDeduplicating(t *testing.T) {
 	for _, workdir := range []string{"/tmp/", "/tmp", "//tmp", "/tmp/."} {
 		got := sandbox.WritablePaths(workdir)
-		if len(got) != 3 {
+		if len(got) != 4 {
 			t.Errorf("WritablePaths(%q) = %v, want the workdir folded into the fixed paths", workdir, got)
 		}
 		if !slices.Contains(got, "/tmp") {

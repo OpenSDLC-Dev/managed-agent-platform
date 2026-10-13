@@ -1427,9 +1427,10 @@ func TestDeploymentEchoesMountPathsAsGiven(t *testing.T) {
 
 // TestDeploymentValidatesMountPathsUpFront: storing a mount_path as given does
 // not defer judging it (#849). A path session create would refuse on its own
-// — one resolveMountPath roots nowhere, or a repository path
-// validateRepoMountPath refuses — is refused by deployment create and update
-// too, in the words session create answers it with.
+// — one resolveMountPath or resolveRepoMountPath roots nowhere — is refused
+// by deployment create and update too, in the words session create answers
+// it with, save a repository's climb, which session create answers in the
+// reference's recorded words and the deployment routes in ours (#540).
 func TestDeploymentValidatesMountPathsUpFront(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -1441,15 +1442,12 @@ func TestDeploymentValidatesMountPathsUpFront(t *testing.T) {
 	repo := func(mount string) map[string]any { return repoBody("g", map[string]any{"mount_path": mount}) }
 
 	for name, res := range map[string]map[string]any{
-		"a file at the filesystem root":     file("/"),
-		"a file naming the uploads root":    file("/mnt/session/uploads"),
-		"a file climbing out":               file("../etc/passwd"),
-		"a file too long once resolved":     file("/" + strings.Repeat("a", 1010)),
-		"a repository at a relative path":   repo("workspace/r"),
-		"a repository at an unclean path":   repo("/workspace/./r"),
-		"a repository at a reserved path":   repo("/tmp"),
-		"a repository among memory mounts":  repo("/mnt/memory/r"),
-		"a repository whose default is bad": repoBody("g", map[string]any{"url": "https://github.com/acme/" + strings.Repeat("r", 1020)}),
+		"a file at the filesystem root":       file("/"),
+		"a file naming the uploads root":      file("/mnt/session/uploads"),
+		"a file climbing out":                 file("../etc/passwd"),
+		"a file too long once resolved":       file("/" + strings.Repeat("a", 1010)),
+		"a repository too long once resolved": repo("/" + strings.Repeat("a", 1014)),
+		"a repository whose default is bad":   repoBody("g", map[string]any{"url": "https://github.com/acme/" + strings.Repeat("r", 1020)}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			resources := []any{res}
@@ -1466,6 +1464,14 @@ func TestDeploymentValidatesMountPathsUpFront(t *testing.T) {
 			wantErrMsg(t, status, updated, http.StatusBadRequest, "invalid_request_error", errMessage(refused))
 		})
 	}
+
+	climb := []any{repo("../x")}
+	body := deploymentBody(agentID, envID)
+	body["resources"] = climb
+	status, res := s.do(http.MethodPost, "/v1/deployments", body)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must resolve to a path under /workspace")
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": climb})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must resolve to a path under /workspace")
 }
 
 // TestDeploymentStoresTheResolvedPathBesideTheSpelling: the stored element's
@@ -1557,6 +1563,16 @@ func TestDeploymentBoundsTheStoredSpelling(t *testing.T) {
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes as sent")
 	status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": file(tooLong)})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes as sent")
+
+	// A repository's spelling is rooted too since #922, and held the same way.
+	repo := []any{repoBody("g", map[string]any{"mount_path": tooLong})}
+	if status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "resources": repo}); status != http.StatusOK {
+		t.Errorf("session create, a repository: %d %v, want 200", status, res)
+	}
+	body["resources"] = repo
+	status, res = s.do(http.MethodPost, "/v1/deployments", body)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "mount_path must be at most 1024 bytes as sent")
 }
 
 // TestDeploymentRefusesResolvedMountOverlapsUpFront: echoing a mount_path as
@@ -1601,10 +1617,18 @@ func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 			[]any{repoBody("g", nil), repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/example-repo/src"})},
 			overlap("/workspace/example-repo", "/workspace/example-repo/src"),
 			`the default mount_path "/workspace/example-repo" is an ancestor of repository mount_path "/workspace/example-repo/src"`},
-		"a file above a repository": {
-			[]any{file(fileA, "repo"), repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
-			overlap("/mnt/session/uploads/repo", "/mnt/session/uploads/repo/src"),
-			`mount_path "repo" (resolves to "/mnt/session/uploads/repo") is an ancestor of repository mount_path "/mnt/session/uploads/repo/src"`},
+		"two repositories on one path once rooted": {
+			[]any{repoBody("g", map[string]any{"mount_path": "/tmp"}), repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/tmp"})},
+			overlap("/workspace/tmp", "/workspace/tmp"),
+			`mount_path "/tmp" and mount_path "/workspace/tmp" both resolve to "/workspace/tmp"`},
+		"a repository above another by two spellings": {
+			[]any{repoBody("g", map[string]any{"mount_path": "/x"}), repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "x/y"})},
+			overlap("/workspace/x", "/workspace/x/y"),
+			`mount_path "/x" (resolves to "/workspace/x") is an ancestor of repository mount_path "x/y" (resolves to "/workspace/x/y")`},
+		"a repository above another once rooted": {
+			[]any{repoBody("g", map[string]any{"mount_path": "/tmp"}), repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/tmp/sub"})},
+			overlap("/workspace/tmp", "/workspace/tmp/sub"),
+			`mount_path "/tmp" (resolves to "/workspace/tmp") is an ancestor of repository mount_path "/workspace/tmp/sub"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{

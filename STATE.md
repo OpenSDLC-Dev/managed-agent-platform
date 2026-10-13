@@ -4,9 +4,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 63](./docs/plan/63_shallow-repo-clone.md) (#582), a shallow repository
-clone in the reference's shape, archived 2026-10-13 in one PR; its delivery record is
-[docs/HISTORY.md](./docs/HISTORY.md).
+**None.** [Plan 64](./docs/plan/64_repo-mounts-under-workspace.md) (#922), repository
+mounts rooted under `/workspace` as the reference roots them, archived 2026-10-13 in one
+PR; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 

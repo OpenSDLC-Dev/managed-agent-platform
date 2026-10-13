@@ -579,19 +579,24 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// inside the passes, per skill, per repository and per mount, because a
 	// pass over many of them is legitimately long while each item is not.
 	progress()
-	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
-	progress()
-	// Repositories before files, so a file mount may deliberately overlay into
-	// a checkout (plan 25 decision 5).
+	// Repositories first. A clone replaces its mount whole, and a repository
+	// may share the skills directory (#922), so skills are written after it.
+	// Files come after too, so a file mount may overlay into a checkout (plan 25
+	// decision 5), which since #922 only a resource stored before it can do.
 	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, len(sess.skills) > 0, progress)
+	progress()
+	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
 	progress()
-	// Memory stores last: their mounts are reserved against the others
-	// (/mnt/memory), so nothing here can overlay them. A mount the sandbox
-	// already held is reconciled before the tools read it — the store's
-	// changes since the last run land now, and what a faulted run wrote
-	// goes up — so a store's change reaches a session at its next run.
+	// Memory stores last, so nothing here overlays them: files root under
+	// the uploads directory and repositories under /workspace. From plan 36
+	// until #922 rooted them, create refused a repository at /mnt/memory or
+	// below it, and safeRepoMount refuses one stored earlier at /mnt/memory
+	// or a directory holding it. A mount the sandbox already held is
+	// reconciled before the tools read it — the store's changes since the
+	// last run land now, and what a faulted run wrote goes up — so a
+	// store's change reaches a session at its next run.
 	// A store whose directory's listing did not answer is left out of this
 	// run's syncs (materializeMemory); the tools still see its mount.
 	existing, unanswered := e.materializeMemory(ctx, sb, item.SessionID, sess.memories, progress)

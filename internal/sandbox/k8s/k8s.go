@@ -668,8 +668,8 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 }
 
 // volumeName derives a pod-unique, DNS-1123 volume name from a writable mount
-// path ("/var/lib/map-shell" → "map-w-var-lib-map-shell-<hash>"). Three of the
-// paths are the platform's own (sandbox.WritablePaths); the fourth is the
+// path ("/var/lib/map-shell" → "map-w-var-lib-map-shell-<hash>"). All but one
+// of the paths are the platform's own (sandbox.WritablePaths); the other is the
 // configured workdir, which is an operator's string and so cannot be assumed
 // short, lowercase, or free of the characters folded to '-' here. The readable
 // stem alone would therefore not do: it can exceed the 63-character label limit,

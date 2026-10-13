@@ -88,7 +88,8 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 		t.Errorf("created_at %v != updated_at %v on create", res["created_at"], res["updated_at"])
 	}
 
-	// w-create-full: everything as given, .git stripped only for the default.
+	// w-create-full: everything as given, .git stripped only for the default,
+	// and the mount_path rooted under /workspace (#922).
 	sess = createRepoSession(t, s, repoBody("ghp_full", map[string]any{
 		"url":        repoTestURL + ".git",
 		"mount_path": "/srv/checkout",
@@ -99,8 +100,8 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 	if res["url"] != repoTestURL+".git" {
 		t.Errorf("url = %v, want the .git form echoed as given", res["url"])
 	}
-	if res["mount_path"] != "/srv/checkout" {
-		t.Errorf("mount_path = %v, want /srv/checkout", res["mount_path"])
+	if res["mount_path"] != "/workspace/srv/checkout" {
+		t.Errorf("mount_path = %v, want /workspace/srv/checkout", res["mount_path"])
 	}
 	co, _ := res["checkout"].(map[string]any)
 	if co["type"] != "branch" || co["name"] != "feature/x" {
@@ -131,14 +132,13 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 	}
 
 	// w-multi: two repos + one file, all rendered, paths distinct. A file
-	// inside a repo's tree is the supported overlay direction — and since a
-	// file's mount_path resolves under the uploads root (#323), the overlaid
-	// repo mounts there and the file's already-rooted path passes through.
+	// roots under the uploads directory (#323) and a repository under
+	// /workspace (#922), so the same spelling lands in two places.
 	fileID := uploadOneFile(t, s, "overlay.txt")
 	sess = createRepoSession(t, s,
 		repoBody("ghp_a", nil),
-		repoBody("ghp_b", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/mnt/session/uploads/proj"}),
-		map[string]any{"type": "file", "file_id": fileID, "mount_path": "/mnt/session/uploads/proj/config.json"},
+		repoBody("ghp_b", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/proj"}),
+		map[string]any{"type": "file", "file_id": fileID, "mount_path": "/proj/config.json"},
 	)
 	all := resourcesOf(t, sess)
 	if len(all) != 3 {
@@ -153,8 +153,88 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 	if types["github_repository"] != 2 || types["file"] != 1 {
 		t.Errorf("resource types = %v, want 2 repos + 1 file", types)
 	}
-	if !mounts["/mnt/session/uploads/proj/config.json"] {
-		t.Errorf("mounts = %v, want the overlay file kept inside the repo tree", mounts)
+	if !mounts["/workspace/proj"] || !mounts["/mnt/session/uploads/proj/config.json"] {
+		t.Errorf("mounts = %v, want the repository under /workspace and the file under the uploads root", mounts)
+	}
+}
+
+// TestSessionRepoMountPathRootsUnderWorkspace 🔍: a mount_path is rooted under
+// /workspace as the reference roots it (#922, plan 64), echoed on create and on
+// the resource list alike. Each recorded row cites its probe; the rest are
+// ours, the rule carried on past what was recorded.
+func TestSessionRepoMountPathRootsUnderWorkspace(t *testing.T) {
+	s := newTestServer(t)
+	const def = "/workspace/example-repo"
+	for _, tc := range []struct{ sent, want string }{
+		{"/tmp", "/workspace/tmp"},                         // 2026-09-03 batch1 idx 94
+		{"/mnt/memory", "/workspace/mnt/memory"},           // batch1 idx 93
+		{"/", def},                                         // batch1 idx 95
+		{"/workspace/x/../y", "/workspace/y"},              // batch1 idx 96
+		{"workspace/rel", "/workspace/rel"},                // batch1 idx 97
+		{"/workspace", def},                                // 2026-10-13 setup[2]
+		{"/workspace/", def},                               // setup[4]
+		{"workspace", "/workspace/workspace"},              // setup[6]
+		{"/workspaceX/repo", "/workspace/workspaceX/repo"}, // setup[8]
+		{"/opt/repo", "/workspace/opt/repo"},               // setup[10]
+		{"/workspace/../etc", "/workspace/etc"},            // setup[12]
+		{"/workspace/sdk", "/workspace/sdk"},               // kept, as setup[18] kept /workspace/skills
+		{".", def},
+		{"opt/repo", "/workspace/opt/repo"},
+		{"/workspace/./r", "/workspace/r"},
+		{"/workspace//r/", "/workspace/r"},
+		{"workspace/../x", "/workspace/x"},
+		{"/mnt/session/uploads/r", "/workspace/mnt/session/uploads/r"},
+		// A name that only starts with two dots climbs nowhere.
+		{"..x", "/workspace/..x"},
+		{"/workspace/..hidden", "/workspace/..hidden"},
+	} {
+		sess := createRepoSession(t, s, repoBody("g", map[string]any{"mount_path": tc.sent}))
+		if got := resourcesOf(t, sess)[0]["mount_path"]; got != tc.want {
+			t.Errorf("mount_path %q: echoed %v, want %q", tc.sent, got, tc.want)
+		}
+		status, list := s.do(http.MethodGet, "/v1/sessions/"+sess["id"].(string)+"/resources", nil)
+		if data, _ := list["data"].([]any); status != http.StatusOK || len(data) != 1 ||
+			data[0].(map[string]any)["mount_path"] != tc.want {
+			t.Errorf("mount_path %q: listed %d %v, want %q", tc.sent, status, list["data"], tc.want)
+		}
+	}
+
+	agentID, envID := fixture(t, s)
+	overlap := func(a, b string) string {
+		return "Invalid `github_repository` resource: `mount_path` overlaps another resource: " + a + " and " + b + "; set distinct `mount_path` values"
+	}
+	other := "https://github.com/example-org/other"
+	for name, tc := range map[string]struct {
+		resources []any
+		want      string
+	}{
+		// 2026-10-13 setup[14].
+		"a relative climb": {[]any{repoBody("g", map[string]any{"mount_path": "../x"})},
+			"Invalid `github_repository` resource: mount path \"../x\" escapes /workspace/"},
+		"a deeper climb": {[]any{repoBody("g", map[string]any{"mount_path": "workspace/../../x"})},
+			"Invalid `github_repository` resource: mount path \"workspace/../../x\" escapes /workspace/"},
+		// The recorded sentence quotes the path; one too long to quote takes ours.
+		"a climb too long to quote": {[]any{repoBody("g", map[string]any{"mount_path": "../" + strings.Repeat("x", 1024)})},
+			"mount_path must resolve to a path under /workspace"},
+		// setup[15] and [16]: judged on the rooted paths.
+		"one path after rooting": {[]any{
+			repoBody("g", map[string]any{"mount_path": "/tmp"}),
+			repoBody("g", map[string]any{"url": other, "mount_path": "/workspace/tmp"})},
+			overlap("/workspace/tmp", "/workspace/tmp")},
+		"nested after rooting": {[]any{
+			repoBody("g", map[string]any{"mount_path": "/tmp"}),
+			repoBody("g", map[string]any{"url": other, "mount_path": "/workspace/tmp/sub"})},
+			overlap("/workspace/tmp", "/workspace/tmp/sub")},
+		"the default twice by two spellings": {[]any{
+			repoBody("g", map[string]any{"mount_path": "/"}),
+			repoBody("g", map[string]any{"mount_path": "/workspace"})},
+			overlap(def, def)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+				"agent": agentID, "environment_id": envID, "resources": tc.resources})
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
+		})
 	}
 }
 
@@ -248,13 +328,14 @@ func (sb *syncBuf) Bytes() []byte {
 }
 
 // TestSessionRepoCreateValidation is w-no-token, w-bad-url, w-bad-checkout,
-// w-relative-mount, w-unclean-mount, w-mount-bounds, w-mount-collision,
-// w-nesting, and w-repo-cap 🔍: the create-time rejections, all INFERRED
-// strictness (plan 25 decision 3).
+// w-mount-climb, w-mount-bounds, w-mount-collision, w-nesting, and
+// w-repo-cap 🔍: the create-time rejections, INFERRED strictness (plan 25
+// decision 3) save where a recording is cited. A relative, unclean or
+// reserved-looking mount_path is rooted rather than refused (#922,
+// TestSessionRepoMountPathRootsUnderWorkspace).
 func TestSessionRepoCreateValidation(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	fileID := uploadOneFile(t, s, "anchor.txt")
 	sha := strings.Repeat("ab", 20)
 
 	nineRepos := make([]any, 9)
@@ -293,31 +374,21 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"non-hex sha":       {repoBody("g", map[string]any{"checkout": map[string]any{"type": "commit", "sha": strings.Repeat("g", 40)}})},
 		"checkout bad keys": {repoBody("g", map[string]any{"checkout": map[string]any{"type": "branch", "name": "m", "sha": sha}})},
 		"unknown repo key":  {repoBody("g", map[string]any{"depth": 1})},
-		// w-relative-mount: path.Clean leaves a relative path relative, so the
-		// clean-form rule below never sees these — the absolute check is the
-		// only guard between them and a uniqueness comparison on the wrong
-		// spelling (../mnt/session/uploads/x aliases a file mount).
-		"relative mount":     {repoBody("g", map[string]any{"mount_path": "workspace/r"})},
+		// w-mount-climb: a cleaned relative path still led by ".." (its
+		// recorded words are in TestSessionRepoMountPathRootsUnderWorkspace).
 		"parent-climb mount": {repoBody("g", map[string]any{"mount_path": "../mnt/session/uploads/x"})},
-		"dot mount":          {repoBody("g", map[string]any{"mount_path": "."})},
-		// w-unclean-mount
-		"dot segment":          {repoBody("g", map[string]any{"mount_path": "/workspace/./r"})},
-		"doubled slash":        {repoBody("g", map[string]any{"mount_path": "/workspace//r"})},
-		"trailing slash mount": {repoBody("g", map[string]any{"mount_path": "/workspace/r/"})},
 		// w-mount-bounds: the supplied path's own length and storability. The
 		// URL cases above reach the length guard through the derived default;
-		// "oversized mount" drives validateRepoMountPath directly, which is the
+		// "oversized mount" drives resolveRepoMountPath directly, which is the
 		// arm a caller controls. "unstorable mount" lands one layer earlier —
 		// rejectNUL walks the whole decoded body (wire.go), so a NUL never
-		// reaches validateRepoMountPath's storableText — and what it pins is the
+		// reaches resolveRepoMountPath's storableText — and what it pins is the
 		// outcome that matters: a 400, never the #135 500 at the jsonb bind.
 		// There is no invalid-UTF-8 case because JSON cannot carry one; the
 		// marshaller substitutes U+FFFD before the request leaves the client.
 		"oversized mount":  {repoBody("g", map[string]any{"mount_path": "/workspace/" + strings.Repeat("x", 1024)})},
 		"unstorable mount": {repoBody("g", map[string]any{"mount_path": "/workspace/\x00r"})},
 		// w-mount-collision and w-nesting are below, with their messages.
-		"root mount":    {repoBody("g", map[string]any{"mount_path": "/"})},
-		"staging mount": {repoBody("g", map[string]any{"mount_path": "/tmp"})},
 		// w-repo-cap
 		"nine repos": nineRepos,
 	} {
@@ -355,10 +426,7 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"explicit port":  {[]any{repoBody("g", map[string]any{"url": "https://github.com:443/o/r"})}, badURL},
 		"query url":      {[]any{repoBody("g", map[string]any{"url": repoTestURL + "?token=x"})}, badURL},
 		"extra segments": {[]any{repoBody("g", map[string]any{"url": repoTestURL + "/tree/main"})}, badURL},
-		// w-mount-collision (aliases of one directory; the file arm compares
-		// by its uploads-resolved path since #323, so a relative file
-		// spelling collides with a repo's literal path at the same place).
-		// 2026-09-03 batch1 `session.create.repo-same-mount-twice` and
+		// w-mount-collision: 2026-09-03 batch1 `session.create.repo-same-mount-twice` and
 		// `session.create.repo-same-repo-twice`.
 		"repo/repo collision": {[]any{
 			repoBody("g", map[string]any{"mount_path": "/workspace/same"}),
@@ -366,14 +434,6 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 			overlap("/workspace/same", "/workspace/same")},
 		"same repo twice": {[]any{repoBody("g", nil), repoBody("g", nil)},
 			overlap("/workspace/example-repo", "/workspace/example-repo")},
-		"alias collision": {[]any{
-			map[string]any{"type": "file", "file_id": fileID, "mount_path": "same"},
-			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/same"})},
-			overlap("/mnt/session/uploads/same", "/mnt/session/uploads/same")},
-		"alias collision, the file later": {[]any{
-			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/same"}),
-			map[string]any{"type": "file", "file_id": fileID, "mount_path": "same"}},
-			`mount_path "/mnt/session/uploads/same" is used by more than one resource`},
 		// w-nesting: 2026-09-03 batch1 `session.create.repo-nested-mounts`,
 		// the ancestor named first.
 		"nested repos": {[]any{
@@ -384,14 +444,6 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 			repoBody("g", map[string]any{"url": other, "mount_path": "/workspace/outer/inner"}),
 			repoBody("g", map[string]any{"mount_path": "/workspace/outer"})},
 			overlap("/workspace/outer", "/workspace/outer/inner")},
-		"file ancestor of repo": {[]any{
-			map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo"},
-			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
-			overlap("/mnt/session/uploads/repo", "/mnt/session/uploads/repo/src")},
-		"file ancestor of repo, the file later": {[]any{
-			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"}),
-			map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo"}},
-			`mount_path "/mnt/session/uploads/repo" is an ancestor of repository mount_path "/mnt/session/uploads/repo/src"`},
 	} {
 		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
 			"agent": agentID, "environment_id": envID, "resources": tc.resources})
@@ -417,12 +469,13 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 	}
 }
 
-// TestSessionRepoAcceptedGeometry is w-geometry-ok 🔍: the two cross-arm
+// TestSessionRepoAcceptedGeometry is w-geometry-ok 🔍: two cross-arm
 // geometries that must be ACCEPTED. Both are traps for an implementation that
 // compares supplied mount_path spellings rather than stored ones — a file's
-// stored path is its resolveMountPath output (#323), a repo's is the literal
-// value — so a 400 here is the mirror image of the w-nesting rejections and
-// would go unnoticed by a matrix that only ever asserts refusals.
+// stored path is its resolveMountPath output (#323), a repo's its
+// resolveRepoMountPath output (#922) — so a 400 here is the mirror image of
+// the w-nesting rejections and would go unnoticed by a matrix that only ever
+// asserts refusals.
 func TestSessionRepoAcceptedGeometry(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -430,10 +483,9 @@ func TestSessionRepoAcceptedGeometry(t *testing.T) {
 	disjointFile := uploadOneFile(t, s, "disjoint.txt")
 
 	for name, resources := range map[string][]any{
-		// The overlay decision 5 orders repos before files to support: the file
-		// lands inside the repo's tree. Reachable only where the two arms can
-		// meet — a repo mounted under the uploads root, not at the default.
-		"file overlays into repo": {
+		// Reads as a file inside the repository's tree, but is not: the
+		// repository roots at /workspace/mnt/session/uploads/r.
+		"apparent overlay is disjoint": {
 			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/r"}),
 			map[string]any{"type": "file", "file_id": overlayFile, "mount_path": "r/src/x"}},
 		// Reads as a file sitting at an ancestor of the repo, but is not: the
@@ -596,9 +648,16 @@ func TestSessionRepoAddPostCreateRejected(t *testing.T) {
 	agentID, envID := readableFixture(t, s)
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "resources": []any{
 		repoBody("ghp_seed", nil),
-		repoBody("ghp_up", map[string]any{
-			"url": "https://github.com/example-org/other", "mount_path": "/mnt/session/uploads/repo/src"})}})
+		repoBody("ghp_up", map[string]any{"url": "https://github.com/example-org/other"})}})
 	sid := sess["id"].(string)
+	// Create roots a repository under /workspace (#922), out of a file's
+	// reach; a session stored before that holds the literal path, the one
+	// this add rule still guards.
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE sessions SET resources = jsonb_set(resources, '{1,mount_path}', '"/mnt/session/uploads/repo/src"') WHERE id = $1`,
+		sid); err != nil {
+		t.Fatal(err)
+	}
 
 	// Refused on its type before the variant is read, in the words the
 	// reference refuses a memory_store with there (2026-09-02 batch2
