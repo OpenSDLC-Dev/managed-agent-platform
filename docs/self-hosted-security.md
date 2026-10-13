@@ -660,8 +660,9 @@ in the code (`sandbox.WritablePaths`) precisely so neither backend can forget on
   under it, not just the default-placed ones;
 - **`/workspace`**, where every repository mounts whatever the workdir
   (#922) — the workdir itself by default, and a mount of its own only when
-  the workdir is configured elsewhere, where its mount hides whatever the
-  image ships under `/workspace`. A repository stored before #922 keeps the
+  the workdir is configured elsewhere. There, on Kubernetes, its `emptyDir`
+  hides whatever the image ships under `/workspace`; Docker copies that
+  content into its volume. A repository stored before #922 keeps the
   literal path it was given, which can fall outside every path here.
 
 Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its

@@ -71,6 +71,8 @@ Every recorded `mount_path`, all on session create:
      client sees a clone failure;
    - a checkout at the skills directory itself has its own `.materialized`
      removed before it lands, so the skills step never reads it as its marker.
+     In a run without skills the file lands, but an idle checkpoint does not
+     keep it: capture strips the sentinel's path whatever the file holds.
 
    Where both write one file, the skill's wins. Where a checkout puts a
    directory at a path a skill writes as a file, that skill fails part way

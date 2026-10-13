@@ -13,7 +13,6 @@ package executor
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -68,12 +67,6 @@ var errCaptureSessionDeleted = errors.New("session deleted during capture")
 // the in-sandbox extraction; /tmp is writable in every hardening shape and is
 // deliberately not part of the checkpoint itself.
 const restoreTarPath = "/tmp/.map-restore.tar"
-
-// maxSentinelBytes bounds what capture reads of a file at the skills
-// sentinel's place to tell a sentinel from a checkout's own file. A sentinel
-// lists one short {skill_id, version} pair per skill, and a session carries
-// at most 500; a file past the bound is no sentinel the skills step wrote.
-const maxSentinelBytes = 1 << 20
 
 // checkpointRoots are the roots plan 24 D5 preserves: the workdir, the
 // persistent shell's per-session state (cwd/env survive a resume), and the
@@ -295,22 +288,8 @@ func rerootInto(tw *tar.Writer, rc io.Reader, root string, strip func(rest strin
 		default:
 			return fmt.Errorf("member %q outside the export's top-level directory", hdr.Name)
 		}
-		var body io.Reader = tr
 		if strip != nil && strip(rest) {
-			// The skills sentinel is dropped only when it is one: a repository
-			// may share the skills directory (#922), and a checkout's own file
-			// there, which ParseSentinel refuses, vouches for nothing.
-			if gopath.Base(rest) != skills.SentinelName || hdr.Typeflag != tar.TypeReg {
-				continue
-			}
-			head, err := io.ReadAll(io.LimitReader(tr, maxSentinelBytes+1))
-			if err != nil {
-				return err
-			}
-			if _, ok := skills.ParseSentinel(head); ok {
-				continue
-			}
-			body = io.MultiReader(bytes.NewReader(head), tr)
+			continue
 		}
 		out := *hdr // shallow copy; Name is rewritten, everything else carried
 		// Except the detected wire format: re-rooting lengthens the name, and
@@ -333,7 +312,7 @@ func rerootInto(tw *tar.Writer, rc io.Reader, root string, strip func(rest strin
 			return err
 		}
 		if hdr.Typeflag == tar.TypeReg {
-			if _, err := io.Copy(tw, body); err != nil {
+			if _, err := io.Copy(tw, tr); err != nil {
 				return err
 			}
 		}
