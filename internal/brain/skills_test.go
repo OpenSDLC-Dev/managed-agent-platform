@@ -32,7 +32,7 @@ func TestRenderSkillsBlock(t *testing.T) {
 		"- then follow its instructions and use its code, rather than writing your own from scratch.\n\n" +
 		"<system-reminder>Read the matching SKILL.md before you act. " +
 		"A skill's instructions and code take precedence over a generic approach.</system-reminder>\n" +
-		"- Skills are installed under `/workspace/skills/`.\n\n" +
+		"- Skills are available under `/workspace/skills/`.\n\n" +
 		"<available_skills>\n" +
 		"<skill>\n  <name>alpha</name>\n" +
 		"  <description>Use for &#34;alpha&#34; &lt;tasks&gt; &amp; more</description>\n" +
@@ -46,9 +46,17 @@ func TestRenderSkillsBlock(t *testing.T) {
 
 	// A self-hosted root is relative, in the sentence and in every location.
 	rel := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "skills")
-	if !strings.Contains(rel, "installed under `skills/`.") ||
+	if !strings.Contains(rel, "available under `skills/`.") ||
 		!strings.Contains(rel, "<location>skills/alpha/SKILL.md</location>") {
 		t.Errorf("relative-root block = %q", rel)
+	}
+
+	// The root is configuration, but it is escaped wherever it appears, so no
+	// value can close a tag or open one.
+	odd := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "/a&b/<x>/skills")
+	if !strings.Contains(odd, "available under `/a&amp;b/&lt;x&gt;/skills/`.") ||
+		!strings.Contains(odd, "<location>/a&amp;b/&lt;x&gt;/skills/alpha/SKILL.md</location>") {
+		t.Errorf("an odd root is not escaped: %q", odd)
 	}
 }
 
@@ -62,6 +70,7 @@ func TestSkillsRoot(t *testing.T) {
 	}{
 		{"", "cloud", "/workspace/skills"},
 		{"/srv/agent", "cloud", "/srv/agent/skills"},
+		{"/srv/agent/", "cloud", "/srv/agent/skills"},
 		{"/srv/agent", "self_hosted", "skills"},
 		{"", "self_hosted", "skills"},
 	} {

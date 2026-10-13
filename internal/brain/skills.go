@@ -95,8 +95,8 @@ func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAge
 // session it is absolute, the executor's workdir (Config.Workdir) joined with
 // "skills", as the reference names /workspace/skills/. A self-hosted worker's
 // workdir is the customer's (WORKER_WORKDIR), so no value here can name it:
-// that root stays relative, which the file tools and bash both resolve against
-// the workdir (plan 65 decision 1).
+// that root stays relative. The file tools resolve it against the workdir, and
+// so does bash until the agent changes directory (plan 65 decision 1).
 func (b *Brain) skillsRoot(envKind string) string {
 	if envKind != "cloud" {
 		return "skills"
@@ -178,17 +178,18 @@ const skillsLead = "**Using skills**\n\n" +
 // to the system prompt, in the template a 2026-09-03 recording captured (#581):
 // a lead, then an <available_skills> list with one <skill> per skill, carrying
 // its name, its description and the location of its SKILL.md under root. The
-// list is the reference's shape. The lead gives the recorded lead's directions
-// and its reminder in our own words, not its text. Text in the list is escaped
-// as html.EscapeString does, which writes `"` as &#34;, as the recording shows.
-// Empty input yields an empty block, so nothing is appended.
+// list and the sentence naming the root are the reference's. The lead gives the
+// recorded lead's directions and its reminder in our own words, not its text.
+// Every value is escaped as html.EscapeString does, which writes `"` as &#34;,
+// as the recording shows. Empty input yields an empty block, so nothing is
+// appended.
 func renderSkillsBlock(metas []skillMeta, root string) string {
 	if len(metas) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString(skillsLead)
-	b.WriteString("- Skills are installed under `" + root + "/`.\n\n")
+	b.WriteString("- Skills are available under `" + html.EscapeString(root) + "/`.\n\n")
 	b.WriteString("<available_skills>\n")
 	for _, m := range metas {
 		b.WriteString("<skill>\n  <name>")

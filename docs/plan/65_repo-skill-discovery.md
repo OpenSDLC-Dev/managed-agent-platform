@@ -7,7 +7,7 @@ issue: "#921"
 
 The reference loads skills from a mounted `github_repository`'s root
 `.claude/skills` directory and announces them to the agent (#921). This
-platform announces only the agent's own `skills[]`, and in a prose template
+platform announced only the agent's own `skills[]`, and in a prose template
 where the reference uses XML (#581). The owner decided on 2026-10-14:
 
 - **discover before the first model request**, as the reference does: the
@@ -69,8 +69,8 @@ API exposes no raw prompt):
    renders as recorded. Names, descriptions and locations are escaped as
    `html.EscapeString` does, which writes `"` as `&#34;`, as recorded.
    - The lead gives the recorded lead's directions and its reminder in our own
-     words, not its text, then the "installed under" sentence. This is ours,
-     registered.
+     words, not its text. This is ours, registered. The "available under"
+     sentence follows it, as recorded.
    - A cloud session's location is absolute: `<workdir>/skills/<dir>/SKILL.md`.
      The brain reads the workdir from `EXECUTOR_WORKDIR`, which Helm now sets
      on the brain from the same `executor.sandboxWorkdir` value.

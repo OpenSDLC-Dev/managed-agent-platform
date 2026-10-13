@@ -119,7 +119,7 @@ func TestSkillsInjectedUnderTheWorkdir(t *testing.T) {
 	h.runOnce(t)
 
 	sys := h.provider.calls[0].System
-	if !strings.Contains(sys, "- Skills are installed under `/srv/agent/skills/`.") ||
+	if !strings.Contains(sys, "- Skills are available under `/srv/agent/skills/`.") ||
 		!strings.Contains(sys, "<location>/srv/agent/skills/alpha/SKILL.md</location>") {
 		t.Errorf("system does not name the skill under the configured workdir: %q", sys)
 	}
