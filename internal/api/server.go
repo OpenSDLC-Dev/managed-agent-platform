@@ -269,7 +269,8 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// routes (2026-09-12-console-141 `deployment.final-runs`, 2026-09-05-dreams
 	// `rec91.control.dreams.extra-segment`), "Not found" everywhere else that
 	// was recorded (`/v1/dreamz`, `/v1/outcomes`, `/v1/work`, an unknown
-	// memory-store subpath among them).
+	// memory-store subpath among them). An unsupported method is a 405 but on
+	// one route the reference answers otherwise (errUnsupportedMethod).
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errUnknownPath(r))
 	})
@@ -300,7 +301,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		"/v1/deployment_runs", "/v1/deployment_runs/{id}",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, errMethodNotAllowed)
+			writeError(w, r, errUnsupportedMethod(r))
 		})
 	}
 
@@ -732,6 +733,24 @@ func isBareSessionPath(p string) bool {
 // the method nor the path is named, as the reference names neither; both are
 // the client's own request.
 var errMethodNotAllowed = &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest, "Method Not Allowed"}
+
+// errUnsupportedMethod is the /v1 resource fallbacks' answer to a method no
+// route on the matched path serves (the work API's fallbacks answer
+// errMethodNotAllowed directly): errMethodNotAllowed, but for an agent's DELETE.
+// Neither platform deletes an agent, only archives one, and the reference
+// answers that DELETE a 404 of its own (#592) — "not found", lower-case, and
+// without the `x-should-retry` its unknown-path 404 carries — on each of the
+// sixteen live agents a teardown sweep tried (2026-09-03 batch2 idx 209–224
+// `sweep.del.agent.*`). No agent is looked up, so an archived, an absent or a
+// malformed id answers the same; that the reference does too is inferred. Every other
+// unsupported method keeps the 405, on the agent routes too, since none was
+// recorded there.
+func errUnsupportedMethod(r *http.Request) error {
+	if r.Method == http.MethodDelete && r.Pattern == "/v1/agents/{id}" {
+		return errNotFound("not found")
+	}
+	return errMethodNotAllowed
+}
 
 // errUnknownPath is the wire 404 for a path no route matches — see the "/"
 // fallback for the two spellings and where each was recorded. The lower-case

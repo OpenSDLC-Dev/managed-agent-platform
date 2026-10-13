@@ -218,9 +218,10 @@ func TestDeploymentSubObjectsRefuseUnknownKeysAndRequireTheirType(t *testing.T) 
 		`Failed to parse request body: unknown field "enabled"`)
 }
 
-// An unsupported method on a deployment path answers 405 like every other /v1
-// family, not the catch-all 404 an unregistered pattern would give — including
-// DELETE, which this surface deliberately does not serve.
+// An unsupported method on a deployment path answers 405, as one does on every
+// other /v1 family but an agent's DELETE (errUnsupportedMethod), not the
+// catch-all 404 an unregistered pattern would give — including DELETE, which
+// this surface deliberately does not serve.
 func TestDeploymentPathsAnswer405NotTheCatchAll(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

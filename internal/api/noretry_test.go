@@ -75,9 +75,11 @@ func TestXShouldRetryFollowsTheRecordings(t *testing.T) {
 		{"an unknown console path", http.MethodGet, "/api/oauth/organizations/default/environments/" + envID + "/secrets", nil, mgmt, 404, true},
 
 		// Recorded without it: 2026-09-05-dreams `rec91.control.dreams.extra-segment`, 2026-09-03 batch2 idx 5
-		// `envkey.agents.list-should-refuse`, 2026-09-02 batch2 `agent.update.stale-version`, #160's lane for
-		// session create; and an environment's own 404 on a route no recording reaches.
+		// `envkey.agents.list-should-refuse` and idx 209–224 `sweep.del.agent.*`, 2026-09-02 batch2
+		// `agent.update.stale-version`, #160's lane for session create; and an environment's own 404 on a route
+		// no recording reaches.
 		{"an unknown dream subpath", http.MethodGet, "/v1/dreams/drm_0000000000000000000000gk/bogus", nil, mgmt, 404, false},
+		{"deleting an agent", http.MethodDelete, "/v1/agents/" + agentID, nil, mgmt, 404, false},
 		{"an environment key's agents list", http.MethodGet, "/v1/agents", nil, bearer(shKey), 401, false},
 		{"a stale agent version", http.MethodPost, "/v1/agents/" + agentID, map[string]any{"version": 7, "name": "renamed"}, mgmt, 409, false},
 		{"a session in an absent environment", http.MethodPost, "/v1/sessions", map[string]any{"agent": agentID, "environment_id": absentEnv}, mgmt, 404, false},
