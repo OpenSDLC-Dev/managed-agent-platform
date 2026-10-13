@@ -145,7 +145,7 @@ A sentinel is whatever the skills step will later accept: up to the sandbox's 4 
 **Round 7, on the data directories.** The verifier passed it with findings, after `make verify` (91.51% coverage) and a probe in which repositories stored at the uploads and outputs directories were refused and their contents kept. Its concern was the memory-mount comment. Codex found one overclaim and `/code-review` fourteen findings. Fixed:
 
 - **`/workspace` is a platform directory too.** Under a workdir outside it, nothing refused a repository stored there before #922, and a re-clone removed every other checkout. A test pins the refusal.
-- **Mutants drop each listed directory alone**, and the admission test now covers paths below the outputs directory and `/mnt/memory`.
+- **Mutants drop `/workspace`, the uploads and the outputs directory each alone**, and the admission test now covers paths below the outputs directory and `/mnt/memory`.
 - **Docs:**
   - the executor refuses to clone at those paths; a checkout already there stays;
   - a session created before #922 keeps its path too, not only a deployment;
