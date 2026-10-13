@@ -78,8 +78,10 @@ Every recorded `mount_path`, all on session create:
    directory at a path a skill writes as a file, that skill fails part way
    and is skipped, and every skill is written again on each pass, as after
    any skill that cannot be written. The executor refuses a mount at or
-   below either materialization sentinel, which create accepts. The
-   reference's behaviour there is unrecorded, so that part is ours.
+   below either materialization sentinel or a directory named like a
+   staging directory, and one at a configured workdir or a directory
+   holding it; create accepts them all. The reference's behaviour there is unrecorded, so that part is
+   ours.
 5. **Stored deployments keep the path they resolved.** A fire never
    re-resolves a stored path (#849). A deployment stored before this plan
    mounts its literal path until its resources are sent again.

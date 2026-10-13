@@ -55,23 +55,23 @@ The rooting rule waited on a recording. The owner chose to record the edges the 
 
 Tests came before code. `TestSessionRepoMountPathRootsUnderWorkspace` failed on the literal-path code at its first row (`/tmp` reserved). `TestRepoSharesTheSkillsDirectory`, on a Docker sandbox, failed in two steps: with the skills clause gone and the old order, both mounts lost the skill on the first pass; with repositories first, the `/workspace/skills/pdf` mount, whose checkout brings a `SKILL.md` of its own, still lost it on a re-clone, because the sentinel's probe found that file. Dropping the sentinel after such a clone made it pass.
 
-Each guard of the code as merged was then broken on its own in an overlay copy, and a test failed each time (29 of 29):
+Each guard of the code as merged was then broken on its own in an overlay copy, and a test failed each time (32 of 32):
 
 - the rule: a string-prefix match on `/workspace`, no `workspace/` strip, no climb refusal, a climb read as any name led by two dots, no default for `/workspace` itself, and rooting before cleaning;
 - the refusals: the session's words on a deployment, an over-long path quoted in them, no bound on a deployment's stored spelling, and an ancestor refusal naming the rooted path;
-- the executor's order and drop: skills written before repositories, a drop in a run with no skills, no drop, a drop in its own exec before the clone, a drop before the unpack, a drop between the old tree's removal and the move, a drop after the move, a checkout's own `.materialized` left in the staged tree, and a drop only at the skills directory itself;
-- the executor's guard: no sentinel refused, only the exact sentinel refused, the files sentinel unguarded, and a path below a staging directory admitted;
+- the executor's order and drop: skills written before repositories, a drop in a run with no skills, no drop, a drop in its own exec before the clone, a drop before the unpack, a drop between the old tree's removal and the move, a drop after the move, a checkout's own `.materialized` left in the staged tree, a skill-free checkout's own `.materialized` removed, and a drop only at the skills directory itself;
+- the executor's guard: no sentinel refused, only the exact sentinel refused, the files sentinel unguarded, a path below a staging directory admitted, no platform directory refused, and only the platform directory itself refused;
 - the checkpoint: no `/workspace` root beside a workdir elsewhere, a workdir below it captured as a second root, its sentinels kept there, and every root's sentinels stripped;
 - the sandbox: `/workspace` left out of the read-only root's writable paths, and mounted after a workdir below it.
 
-Review took four rounds. Each ran the verifier (`claude-fable-5-1`, xhigh; in rounds 3 and 4 `claude-opus-5-5` by override, the pinned model's quota spent), Codex (`gpt-6.1-sol`, xhigh) and `/code-review` (`claude-opus-5-5`, xhigh, no cap).
+Review took five rounds. Each ran the verifier (`claude-fable-5-1`, xhigh; from round 3 on `claude-opus-5-5` by override, the pinned model's quota spent), Codex (`gpt-6.1-sol`, xhigh) and `/code-review` (`claude-opus-5-5`, xhigh, no cap).
 
 **Round 1, on the first commit.** The verifier passed it with findings, after `make verify` (91.49% coverage) and a live control plane that echoed every recorded input byte for byte. Codex found three defects and `/code-review` fifteen findings, the two overlapping. Fixed:
 
 - **The sentinel dropped after the clone.** An executor that died between the two left the checkout's `SKILL.md` vouched for, and the skill lost for good. The drop moved before the clone, and in round 2 into the extraction.
 - **A drop in a run with no skills**, which removed a checkout's own tracked `.materialized`.
 - **A mount at the sentinel**, which made every pass rewrite every skill. The executor refuses one at or below it.
-- **`/workspace` unwritable** under a read-only root with a configured workdir, so no repository could land.
+- **`/workspace` unwritable** under a read-only root with the workdir configured elsewhere, so no repository could land.
 - **Refusal words:** a deployment's ancestor refusal named a path the caller never sent, the climb refusal quoted a path of any length, and the length refusal did not say it bounds the rooted path.
 - **Docs:** two registry entries and two comments still described #584's refusal, the changelog fragment misdescribed the release before it, and a test row cited a deployment recording for a session echo.
 
@@ -85,7 +85,7 @@ Review took four rounds. Each ran the verifier (`claude-fable-5-1`, xhigh; in ro
   It now runs inside the extraction script, after the new tree is staged and before the old one goes. A removal that fails is a failed extraction.
 - **A checkout's own `.materialized`** at the skills directory is removed from the staged tree. A forged one matching the run's skills would otherwise have stood in for the marker.
 - **The files sentinel** is refused as a mount, as the skills sentinel is.
-- **Checkpoints keep `/workspace`** under a configured workdir, so an agent's work in a checkout survives an idle reap.
+- **Checkpoints keep `/workspace`** under a workdir configured elsewhere, so an agent's work in a checkout survives an idle reap.
 - **Smaller fixes:**
   - `/workspace` mounts before a workdir below it;
   - a test holds create's repository root to the sandbox's;
@@ -100,11 +100,11 @@ Review took four rounds. Each ran the verifier (`claude-fable-5-1`, xhigh; in ro
 - **Docs:**
   - a skill a checkout blocks is partly written, and every skill is rewritten each pass;
   - the registry names the paths create accepts and the executor refuses;
-  - the operator guide says what the `/workspace` mount does to what the image ships there;
-  - the release note says an earlier executor cannot restore a checkpoint taken under a configured workdir.
+  - the operator guide says the `/workspace` mount hides what the image ships there;
+  - the release note says an earlier executor cannot restore a checkpoint that holds `/workspace` beside a configured workdir.
 - **Smaller fixes:** one helper names the skills sentinel for its writer, the guard and the drop; the mount-order test no longer passes with `/workspace` missing; a stale comment on memory mounts.
 
-**Round 4, on those fixes.** The verifier passed them with findings, all on docs. Codex found five defects and `/code-review` fourteen findings. Most fell on round 3's capture check:
+**Round 4, on those fixes.** The verifier passed them with findings: a way past round 3's capture check, and the rest on docs. Codex found five defects and `/code-review` fourteen findings. Most fell on round 3's capture check:
 
 - a valid sentinel padded past the read bound;
 - a checkout's JSON that parses as one;
@@ -112,28 +112,42 @@ Review took four rounds. Each ran the verifier (`claude-fable-5-1`, xhigh; in ro
 - a real sentinel from a coordinator and its roster larger than the bound;
 - a sentinel of another generation kept.
 
-The skills step trusts a sentinel of any size, so no bound covers every one it would accept. Round 4 reverted the check: capture strips the sentinel's path whatever the file holds, as before. The registry and plan 64 now say the path is the platform's. Fixed besides:
+A sentinel is whatever the skills step will later accept: up to the sandbox's 4 MiB read cap, and of whatever generation that executor reads. Capture cannot tell one from a checkout's file without mirroring that step, so round 4 reverted the check: capture strips the sentinel's path whatever the file holds, as before. The registry and plan 64 now say the path is the platform's. Fixed besides:
 
 - **The operator guide:** on Docker the `/workspace` volume takes the image's content, and only Kubernetes's `emptyDir` hides it.
-- **The release note:** an earlier executor cannot restore a checkpoint taken under any configured workdir, one below `/workspace` too.
+- **The release note:** an earlier executor cannot restore a checkpoint that holds `/workspace` under any workdir other than `/workspace`, one below it too.
 - **The registry:** the paths create accepts and the executor refuses include a configured workdir, a directory holding it, and paths below a staging directory.
 - **Smaller fixes:** the memory-mount comment, and two mutants this record described alike.
 
-Declined, over the four rounds:
+**Round 5, on the revert.** The verifier passed it with notes, all on docs and comments, after `make verify` (91.51% coverage) and a real-sandbox capture under five workdir setups. Neither reviewer found a defect in the revert. Codex found three overclaims and `/code-review` nine findings. Fixed:
+
+- **A repository stored before #922 at `/mnt`**, or at another directory holding `/mnt/session`, `/mnt/memory` or the shell state. A re-clone there removed memory stores, uploads and outputs with it. The gap predated this plan. Create no longer yields such a path, but a stored deployment keeps it on every fire. The executor now refuses one.
+- **A test pins that a checkout at the skills directory keeps its own `.materialized`** in a run without skills.
+- **Docs:**
+  - a sentinel read is capped at 4 MiB, so the reason round 4 gave for its revert was restated;
+  - the executor refuses those paths only when it would clone there;
+  - a workdir configured as `/workspace` is the default, which an earlier executor restores;
+  - plan 64 lists every path create accepts and the executor refuses, and the registry names the staging paths as the code matches them;
+  - a comment said create keeps every workdir out of reach, which holds only for the default one;
+  - round 4's record said its verifier's findings were all on docs;
+  - round 3's record says again what round 3 shipped.
+
+Declined, over the five rounds:
 
 - **A flag from the clone to the skills step** in place of the sentinel drop. A flag dies with the executor between the two, which is the case the drop must cover.
 - **Repairing a session whose skill a checkout replaced before this change.** Nothing in the sandbox tells that checkout from the agent's own edit.
 - **Refusing at create a mount where a skill writes a file.** The owner chose to share the directory. The outcome is one skill partly written, and every skill written again each pass, as after any skill that cannot be written. The plan and the registry say so.
-- **Refusing the sentinel and staging paths at create.** Create does not know the executor's workdir, and both names are the executor's own. The executor refuses them on each run, and the client sees a clone error.
+- **Refusing the sentinel and staging paths at create.** Create does not know the executor's workdir, and both names are the executor's own. The executor refuses them whenever it would clone there, and the client sees a clone error.
 - **One marker per skill** in place of the one sentinel. That redesigns skill materialization. The cost of one marker is that a re-clone under the skills directory rewrites every skill.
 - **An upgrade order** for the window when the control plane is newer than an executor. An older executor treats such a session as v0.5.1 did, and the window closes with the rollout.
 - **Five inputs whose reading depends on whether the reference cleans before it strips `workspace/`**: `workspace/..`, `workspace/../x`, `workspace/`, an empty string and `.`. They stay ours, registered, and managed-agents-wire-recordings#25 asks for them.
 - **A checkout's symlink at a skill's directory**, which the skills step writes through. The sandbox is one trust domain: the agent can plant the same link, and the repository is the session creator's choice.
-- **Capturing `/workspace` only for sessions with repositories**, under a configured workdir. Capture would need the session's resources. An image that ships content under `/workspace` beside a configured workdir pays for it within `CheckpointMaxBytes`, as the workdir does.
+- **Capturing `/workspace` only for sessions with repositories**, under a workdir configured elsewhere. Capture would need the session's resources. An image that ships content under `/workspace` beside a configured workdir pays for it within `CheckpointMaxBytes`, as the workdir does.
 - **One source for the durable directories**, shared by `WritablePaths` and `checkpointRoots`. They answer different questions: what to mount, nested or not, and what to capture once.
 - **A non-root sandbox and a root-owned or missing `/workspace`**, which a restore or a clone may fail on. The default workdir has had the same shape from the start, and nothing here changes it.
-- **Keeping a checkout's own `.materialized` across an idle checkpoint**, in a run without skills. Telling it from a sentinel means parsing the whole file, of any size, as the skills step would. The case is a repository at the skills directory itself that tracks that file.
+- **Keeping a checkout's own `.materialized` across an idle checkpoint**, in a run without skills. Telling it from a sentinel means mirroring how the skills step, in this release or a later one, reads its marker. Skipping the strip for a session with no skills means a lookup in capture. The case is a repository at the skills directory itself that tracks that file, so its `.git`, which the checkpoint keeps, holds it.
 - **Moving the skills sentinel out of the skills directory**, which would retire the special cases a shared directory needs. It changes a layout every existing sandbox holds, and the re-clone drop stays either way.
+- **Leaving a checkout's own `.materialized` in place when the executor has no object store**, so no skills step runs. The path is the platform's in a run with skills either way.
 - **One resolver for the workdir default.** The two copies the new code does not use predate this plan.
 
 Superseded on the way: #584's changelog fragment, unreleased, whose refusal and `/workspace` reservation this plan removes. The release note says the net change once, in #922's fragment.

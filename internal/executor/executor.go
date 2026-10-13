@@ -590,9 +590,9 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
 	progress()
 	// Memory stores last, so nothing here overlays them: files root under
-	// the uploads directory and repositories under /workspace. A repository
-	// stored before #922 keeps its literal path, which create refused under
-	// /mnt/memory once memory stores existed (plan 36). A mount the sandbox
+	// the uploads directory and repositories under /workspace, and
+	// safeRepoMount refuses a repository stored earlier at /mnt/memory or a
+	// directory holding it. A mount the sandbox
 	// already held is reconciled before the tools read it — the store's
 	// changes since the last run land now, and what a faulted run wrote
 	// goes up — so a store's change reaches a session at its next run.

@@ -275,6 +275,11 @@ const repoStagingRoot = "/tmp"
 //
 // The workdir is executor configuration, and the staging name is an executor
 // implementation detail; neither is visible where the resource is validated.
+//
+// It also refuses a directory the platform keeps beside the workdir, or one
+// holding it: `/mnt/session` (uploads and outputs), `/mnt/memory` and the
+// shell state root. Create never yields one since #922, but a repository
+// stored before keeps its literal path, and `/mnt` was one create accepted.
 func (e *Executor) safeRepoMount(mount string) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
@@ -303,6 +308,11 @@ func (e *Executor) safeRepoMount(mount string) error {
 	for _, c := range strings.Split(mount, "/") {
 		if strings.HasPrefix(c, ".") && strings.HasSuffix(c, stagingSuffix) {
 			return fmt.Errorf("mount path %q is a repository staging path or below one", mount)
+		}
+	}
+	for _, d := range []string{"/mnt/session", "/mnt/memory", sandbox.ShellStateRoot} {
+		if mount == d || strings.HasPrefix(d, mount+"/") {
+			return fmt.Errorf("mount path %q is a platform directory or holds one", mount)
 		}
 	}
 	return nil

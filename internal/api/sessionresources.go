@@ -718,10 +718,12 @@ func isFullCommitSHA(s string) bool {
 // fail as a 500 when the resources array binds into the jsonb column, #135).
 // The derived default is bounded too, which a pathologically long repository
 // name needs. It is never /workspace itself, nor above it, so no target is
-// reserved: the workdir, /tmp, the memory stores' parent and the uploads root
-// are all out of reach. The skills directory is not: a repository may share
-// it with the session's skills, as the reference was recorded doing
-// (setup[17–21]), and the executor writes the skills after the clone.
+// reserved: the default workdir, /tmp, the memory stores' parent and the
+// uploads root are all out of reach. A workdir configured below /workspace
+// is not, and the executor refuses it there. Nor is the skills directory: a
+// repository may share it with the session's skills, as the reference was
+// recorded doing (setup[17–21]), and the executor writes the skills after
+// the clone.
 func resolveRepoMountPath(p, repoName string, f resourceFlavor) (string, error) {
 	root := strings.TrimSuffix(defaultRepoMountRoot, "/")
 	clean := path.Clean(p)

@@ -885,6 +885,9 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 		// write as files.
 		"/workspace/skills/.materialized", "/workspace/skills/.materialized/x",
 		"/workspace/.files_materialized", "/workspace/.files_materialized/x",
+		// A directory the platform keeps, or one holding it, which a
+		// repository stored before #922 may still name.
+		"/mnt", "/mnt/session", "/mnt/memory", "/var/lib", "/var/lib/map-shell",
 	} {
 		t.Run(mount, func(t *testing.T) {
 			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
@@ -1050,6 +1053,16 @@ func TestRepoDropsTheSkillsSentinelWithTheTreeItReplaces(t *testing.T) {
 			if got := readSandboxFile(t, sb, "/workspace/skills/"+file); got != want {
 				t.Errorf("%s = %q, want %q", file, got, want)
 			}
+		}
+	})
+
+	// The skills sentinel's path is the platform's only in a run with skills:
+	// without them, a checkout at the skills directory keeps its own file.
+	t.Run("a skill-free checkout's own marker", func(t *testing.T) {
+		tracked := map[string]string{"README.md": "repo\n", ".materialized": "tracked\n"}
+		_, sb, _, _ := setup(t, nil, tracked, "/workspace/skills", nil)
+		if got := readSandboxFile(t, sb, "/workspace/skills/.materialized"); got != "tracked\n" {
+			t.Errorf(".materialized = %q, want the checkout's own file", got)
 		}
 	})
 
