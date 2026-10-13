@@ -46,6 +46,9 @@ spec:
             - name: BRAIN_POLL_INTERVAL
               value: {{ . | quote }}
             {{- end }}
+            # The executor's workdir: the skills block names the skills under it.
+            - name: EXECUTOR_WORKDIR
+              value: {{ .Values.executor.sandboxWorkdir | quote }}
             {{- include "map.commonEnv" . | nindent 12 }}
             {{- include "map.blobEnv" . | nindent 12 }}
           volumeMounts:

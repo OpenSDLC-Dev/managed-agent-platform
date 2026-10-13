@@ -44,6 +44,10 @@ type Config struct {
 	LeaseTTL time.Duration
 	// PollInterval is the idle wait between empty queue checks.
 	PollInterval time.Duration
+	// Workdir is the executor's sandbox working directory, where it lands a
+	// session's skills; the skills block names them under it. Empty means
+	// sandbox.DefaultWorkdir, the executor's own default.
+	Workdir string
 }
 
 const (
@@ -293,7 +297,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// Level-1 skill injection: resolve the agent's skills[] to a system-prompt
 	// block at request-assembly time (plan design decision 5). Best-effort — an
 	// unresolvable reference is a logged miss, not a failed turn.
-	skillsBlock, skillsInjected, skillsMisses := b.resolveSkillsBlock(ctx, agent)
+	skillsBlock, skillsInjected, skillsMisses := b.resolveSkillsBlock(ctx, agent, envKind)
 	// Count the misses now, before any early return below (a replay error, an
 	// unrouted model, a failed span start) can abandon them: a resolve miss is a
 	// fact of request assembly, independent of whether the turn later fails for

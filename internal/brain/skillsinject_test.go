@@ -63,7 +63,11 @@ func TestSkillsInjectedIntoModelRequest(t *testing.T) {
 	if !strings.HasPrefix(sys, "base prompt") {
 		t.Errorf("system dropped the agent prompt: %q", sys)
 	}
-	if !strings.Contains(sys, "alpha - Alpha skill (skills/alpha/SKILL.md)") {
+	// The harness's environment is self-hosted, whose workdir the brain cannot
+	// know, so the location is relative (TestSkillsInjectedUnderTheWorkdir has
+	// the cloud half).
+	if !strings.Contains(sys, "<name>alpha</name>\n  <description>Alpha skill</description>\n"+
+		"  <location>skills/alpha/SKILL.md</location>") {
 		t.Errorf("system missing the injected skill block: %q", sys)
 	}
 	// The dangling reference is exactly one resolve miss; the turn still ran.
@@ -78,6 +82,46 @@ func TestSkillsInjectedIntoModelRequest(t *testing.T) {
 	}
 	if got := spanIntAttr(t, recorder, "model_request", "skills.block_chars"); got != int64(len(sys)-len("base prompt\n\n")) {
 		t.Errorf("span skills.block_chars = %d, want the injected block length", got)
+	}
+}
+
+// TestSkillsInjectedUnderTheWorkdir is the cloud half of the wiring: the block
+// names each skill at its absolute location under the workdir the brain was
+// configured with, which cmd/brain reads from EXECUTOR_WORKDIR (plan 65
+// decision 1).
+func TestSkillsInjectedUnderTheWorkdir(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
+		textChunk(0, "ok"),
+		done("end_turn", 3),
+	}}, nil)
+	h.brain = brain.New(h.pool, h.registry, nil, brain.Config{Workdir: "/srv/agent"})
+	ctx := context.Background()
+
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ('skill_a','custom','alpha','100')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory)
+		 VALUES ('skillver_a100','skill_a','100','alpha','Alpha skill','alpha')`); err != nil {
+		t.Fatal(err)
+	}
+	resolved := `{"type":"agent","id":"agent_fixture","version":1,"name":"fixture",` +
+		`"model":{"id":"fixture-model"},"system":"base prompt","description":"",` +
+		`"tools":[],"mcp_servers":[],` +
+		`"skills":[{"type":"skill","skill_id":"skill_a","version":"100"}],"multiagent":null}`
+	if _, err := h.pool.Exec(ctx, `UPDATE sessions SET resolved_agent=$1 WHERE id=$2`,
+		resolved, h.sessionID.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "hi")
+	h.runOnce(t)
+
+	sys := h.provider.calls[0].System
+	if !strings.Contains(sys, "- Skills are installed under `/srv/agent/skills/`.") ||
+		!strings.Contains(sys, "<location>/srv/agent/skills/alpha/SKILL.md</location>") {
+		t.Errorf("system does not name the skill under the configured workdir: %q", sys)
 	}
 }
 

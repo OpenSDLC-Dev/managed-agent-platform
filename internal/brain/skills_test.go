@@ -13,27 +13,62 @@ import (
 )
 
 func TestRenderSkillsBlock(t *testing.T) {
-	if got := renderSkillsBlock(nil); got != "" {
+	if got := renderSkillsBlock(nil, "/workspace/skills"); got != "" {
 		t.Errorf("empty set = %q, want empty", got)
 	}
-	one := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "Alpha skill", Dir: "alpha"}})
-	if !strings.Contains(one, "- alpha - Alpha skill (skills/alpha/SKILL.md)") {
-		t.Errorf("one-skill block missing the bullet: %q", one)
+	// The whole block, so the template is pinned rather than sampled (#581):
+	// the lead, the root, then one <skill> per skill in order. The description
+	// is escaped as recorded (`"` is &#34;), an empty one keeps its tags, and a
+	// location follows the materialization directory, not the name.
+	got := renderSkillsBlock([]skillMeta{
+		{Name: "alpha", Description: `Use for "alpha" <tasks> & more`, Dir: "alpha"},
+		{Name: "beta", Description: "", Dir: "beta-skill_b"},
+	}, "/workspace/skills")
+	want := "**Using skills**\n\n" +
+		"A skill is a set of instructions, and often code, for one kind of task. " +
+		"Before you write code or run a tool for a task:\n" +
+		"- check the task against each skill's description below;\n" +
+		"- when one matches, read that skill's SKILL.md first;\n" +
+		"- then follow its instructions and use its code, rather than writing your own from scratch.\n\n" +
+		"<system-reminder>Read the matching SKILL.md before you act. " +
+		"A skill's instructions and code take precedence over a generic approach.</system-reminder>\n" +
+		"- Skills are installed under `/workspace/skills/`.\n\n" +
+		"<available_skills>\n" +
+		"<skill>\n  <name>alpha</name>\n" +
+		"  <description>Use for &#34;alpha&#34; &lt;tasks&gt; &amp; more</description>\n" +
+		"  <location>/workspace/skills/alpha/SKILL.md</location>\n</skill>\n" +
+		"<skill>\n  <name>beta</name>\n  <description></description>\n" +
+		"  <location>/workspace/skills/beta-skill_b/SKILL.md</location>\n</skill>\n" +
+		"</available_skills>"
+	if got != want {
+		t.Errorf("block =\n%s\nwant\n%s", got, want)
 	}
-	if !strings.HasPrefix(one, "Available skills.") {
-		t.Errorf("block missing lead line: %q", one)
+
+	// A self-hosted root is relative, in the sentence and in every location.
+	rel := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "skills")
+	if !strings.Contains(rel, "installed under `skills/`.") ||
+		!strings.Contains(rel, "<location>skills/alpha/SKILL.md</location>") {
+		t.Errorf("relative-root block = %q", rel)
 	}
-	// A skill with no description drops the " - description" tail but keeps the path.
-	noDesc := renderSkillsBlock([]skillMeta{{Name: "beta", Description: "", Dir: "beta"}})
-	if !strings.Contains(noDesc, "- beta (skills/beta/SKILL.md)") || strings.Contains(noDesc, "beta - ") {
-		t.Errorf("no-description block wrong: %q", noDesc)
-	}
-	multi := renderSkillsBlock([]skillMeta{
-		{Name: "a", Description: "one", Dir: "a"},
-		{Name: "b", Description: "two", Dir: "b"},
-	})
-	if strings.Count(multi, "\n- ") != 2 {
-		t.Errorf("multi block should have two bullets: %q", multi)
+}
+
+// TestSkillsRoot pins where the block says the skills are: under the
+// configured executor workdir on a cloud session, the default when none is
+// configured, and relative on a self-hosted one, whose workdir the brain cannot
+// know.
+func TestSkillsRoot(t *testing.T) {
+	for _, c := range []struct {
+		workdir, envKind, want string
+	}{
+		{"", "cloud", "/workspace/skills"},
+		{"/srv/agent", "cloud", "/srv/agent/skills"},
+		{"/srv/agent", "self_hosted", "skills"},
+		{"", "self_hosted", "skills"},
+	} {
+		b := &Brain{cfg: Config{Workdir: c.workdir}}
+		if got := b.skillsRoot(c.envKind); got != c.want {
+			t.Errorf("skillsRoot(workdir %q, %s) = %q, want %q", c.workdir, c.envKind, got, c.want)
+		}
 	}
 }
 
@@ -72,7 +107,7 @@ func TestResolveSkillsBlock(t *testing.T) {
 	b := &Brain{pool: pool}
 	ctx := context.Background()
 
-	if block, injected, misses := b.resolveSkillsBlock(ctx, domain.ResolvedAgent{}); block != "" || injected != 0 || misses != 0 {
+	if block, injected, misses := b.resolveSkillsBlock(ctx, domain.ResolvedAgent{}, "cloud"); block != "" || injected != 0 || misses != 0 {
 		t.Errorf("no skills = %q,%d,%d", block, injected, misses)
 	}
 
@@ -88,21 +123,23 @@ func TestResolveSkillsBlock(t *testing.T) {
 		json.RawMessage(`not json`),    // malformed -> miss
 	}}}
 
-	block, injected, misses := b.resolveSkillsBlock(ctx, agent)
+	block, injected, misses := b.resolveSkillsBlock(ctx, agent, "cloud")
 	if injected != 2 {
 		t.Errorf("injected = %d, want 2", injected)
 	}
 	if misses != 3 {
 		t.Errorf("misses = %d, want 3 (dangling + empty id + malformed)", misses)
 	}
-	if !strings.Contains(block, "alpha - Alpha skill (skills/alpha/SKILL.md)") {
+	if !strings.Contains(block, "<name>alpha</name>\n  <description>Alpha skill</description>\n"+
+		"  <location>/workspace/skills/alpha/SKILL.md</location>") {
 		t.Errorf("block missing skill_a: %q", block)
 	}
-	// skill_b resolved through latest_version; empty description omits the tail.
-	if !strings.Contains(block, "- beta (skills/beta/SKILL.md)") {
+	// skill_b resolved through latest_version; its empty description keeps the tags.
+	if !strings.Contains(block, "<name>beta</name>\n  <description></description>\n"+
+		"  <location>/workspace/skills/beta/SKILL.md</location>") {
 		t.Errorf("block missing skill_b via latest: %q", block)
 	}
-	if strings.Count(block, "\n- ") != 2 {
+	if strings.Count(block, "<skill>") != 2 {
 		t.Errorf("block should carry exactly the two resolved skills: %q", block)
 	}
 
@@ -113,7 +150,7 @@ func TestResolveSkillsBlock(t *testing.T) {
 	}
 	_, injected, misses = b.resolveSkillsBlock(ctx, domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
 		Skills: []json.RawMessage{ref(t, "skill_b", "latest")},
-	}})
+	}}, "cloud")
 	if injected != 0 || misses != 1 {
 		t.Errorf("versionless latest = injected %d misses %d, want 0/1", injected, misses)
 	}
@@ -241,7 +278,7 @@ func TestResolveSkillsBlockInjectsIDPinnedVersion(t *testing.T) {
 
 	block, injected, misses := b.resolveSkillsBlock(ctx, domain.ResolvedAgent{
 		AgentSpec: domain.AgentSpec{Skills: []json.RawMessage{ref(t, "skill_inj", "skver_ver100")}},
-	})
+	}, "cloud")
 	if injected != 1 || misses != 0 {
 		t.Fatalf("id pin = injected %d misses %d, want 1/0", injected, misses)
 	}
@@ -254,7 +291,7 @@ func TestResolveSkillsBlockInjectsIDPinnedVersion(t *testing.T) {
 
 	_, injected, misses = b.resolveSkillsBlock(ctx, domain.ResolvedAgent{
 		AgentSpec: domain.AgentSpec{Skills: []json.RawMessage{ref(t, "skill_inj", "skver_absent")}},
-	})
+	}, "cloud")
 	if injected != 0 || misses != 1 {
 		t.Errorf("dangling id pin = injected %d misses %d, want 0/1", injected, misses)
 	}
