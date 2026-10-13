@@ -590,12 +590,13 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
 	progress()
 	// Memory stores last, so nothing here overlays them: files root under
-	// the uploads directory and repositories under /workspace, and
-	// safeRepoMount refuses a repository stored earlier at /mnt/memory or a
-	// directory holding it. A mount the sandbox
-	// already held is reconciled before the tools read it — the store's
-	// changes since the last run land now, and what a faulted run wrote
-	// goes up — so a store's change reaches a session at its next run.
+	// the uploads directory and repositories under /workspace. Create has
+	// refused a repository at /mnt/memory or any path below it since plan
+	// 36, and safeRepoMount refuses one stored earlier at a directory
+	// holding it. A mount the sandbox already held is reconciled before the
+	// tools read it — the store's changes since the last run land now, and
+	// what a faulted run wrote goes up — so a store's change reaches a
+	// session at its next run.
 	// A store whose directory's listing did not answer is left out of this
 	// run's syncs (materializeMemory); the tools still see its mount.
 	existing, unanswered := e.materializeMemory(ctx, sb, item.SessionID, sess.memories, progress)

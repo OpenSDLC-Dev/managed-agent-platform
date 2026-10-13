@@ -865,11 +865,14 @@ func writeTo(t *testing.T, fs billy.Filesystem, name string, n int) (string, err
 //
 // Create-time validation never yields the first six, since it roots every
 // path under /workspace (#922): reaching the executor, they come from another
-// route or a tampered row. The rest are paths create accepts and only the
-// executor knows to refuse. Either way the second check earns its place,
-// because the operation on the other side is destructive and irreversible. `/workspace/repo/..` cleans to `/workspace` and
-// would delete the whole workspace; `/tmp` is the platform's own sandbox
-// staging root and would take every in-flight tar with it.
+// route or a tampered row. The staging and sentinel paths are ones create
+// accepts and only the executor knows to refuse. The platform directories,
+// and the directories holding them, are ones a repository stored before
+// #922 may still name. In every case the second check earns its place,
+// because the operation on the other side is destructive and irreversible.
+// `/workspace/repo/..` cleans to `/workspace` and would delete the whole
+// workspace; `/tmp` is the platform's own sandbox staging root and would
+// take every in-flight tar with it.
 func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 	// An empty mount_path is not here: a resource missing one is malformed
 	// rather than dangerous, and materializeRepos' own filter drops it with the
@@ -887,7 +890,8 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 		"/workspace/.files_materialized", "/workspace/.files_materialized/x",
 		// A directory the platform keeps, or one holding it, which a
 		// repository stored before #922 may still name.
-		"/mnt", "/mnt/session", "/mnt/memory", "/var/lib", "/var/lib/map-shell",
+		"/mnt", "/mnt/session", "/mnt/session/uploads", "/mnt/session/outputs", "/mnt/memory",
+		"/var/lib", "/var/lib/map-shell",
 	} {
 		t.Run(mount, func(t *testing.T) {
 			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
@@ -907,6 +911,20 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 				t.Error("the repository was cloned before its mount path was judged")
 			}
 		})
+	}
+}
+
+// TestRepoAdmitsAPathBesideAPlatformDirectory: the platform-directory
+// refusal is for a directory the platform keeps and the directories holding
+// it, by whole path components. A repository stored before #922 beside one,
+// or below the uploads directory, still mounts.
+func TestRepoAdmitsAPathBesideAPlatformDirectory(t *testing.T) {
+	for _, mount := range []string{
+		"/mnt/sess", "/mnt/data", "/mnt/session/uploads/repo", "/var/lib/map", "/opt/repo", "/workspace/repo",
+	} {
+		if err := (&Executor{}).safeRepoMount(mount); err != nil {
+			t.Errorf("safeRepoMount(%q) = %v, want it admitted", mount, err)
+		}
 	}
 }
 
@@ -1056,8 +1074,8 @@ func TestRepoDropsTheSkillsSentinelWithTheTreeItReplaces(t *testing.T) {
 		}
 	})
 
-	// The skills sentinel's path is the platform's only in a run with skills:
-	// without them, a checkout at the skills directory keeps its own file.
+	// In a run without skills nothing drops a checkout's own file at the
+	// sentinel's path as it lands. Only an idle checkpoint strips it.
 	t.Run("a skill-free checkout's own marker", func(t *testing.T) {
 		tracked := map[string]string{"README.md": "repo\n", ".materialized": "tracked\n"}
 		_, sb, _, _ := setup(t, nil, tracked, "/workspace/skills", nil)

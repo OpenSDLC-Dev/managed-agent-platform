@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -277,9 +278,10 @@ const repoStagingRoot = "/tmp"
 // implementation detail; neither is visible where the resource is validated.
 //
 // It also refuses a directory the platform keeps beside the workdir, or one
-// holding it: `/mnt/session` (uploads and outputs), `/mnt/memory` and the
-// shell state root. Create never yields one since #922, but a repository
-// stored before keeps its literal path, and `/mnt` was one create accepted.
+// holding it: the uploads and outputs directories, the memory stores' root
+// and the shell state root. Create never yields one since #922, but a
+// repository stored before keeps its literal path, and `/mnt` was one
+// create accepted.
 func (e *Executor) safeRepoMount(mount string) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
@@ -310,7 +312,7 @@ func (e *Executor) safeRepoMount(mount string) error {
 			return fmt.Errorf("mount path %q is a repository staging path or below one", mount)
 		}
 	}
-	for _, d := range []string{"/mnt/session", "/mnt/memory", sandbox.ShellStateRoot} {
+	for _, d := range []string{"/mnt/session/uploads", outputsDir, toolset.MemoryMountRoot, sandbox.ShellStateRoot} {
 		if mount == d || strings.HasPrefix(d, mount+"/") {
 			return fmt.Errorf("mount path %q is a platform directory or holds one", mount)
 		}

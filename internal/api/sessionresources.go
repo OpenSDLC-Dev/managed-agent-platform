@@ -720,10 +720,10 @@ func isFullCommitSHA(s string) bool {
 // name needs. It is never /workspace itself, nor above it, so no target is
 // reserved: the default workdir, /tmp, the memory stores' parent and the
 // uploads root are all out of reach. A workdir configured below /workspace
-// is not, and the executor refuses it there. Nor is the skills directory: a
-// repository may share it with the session's skills, as the reference was
-// recorded doing (setup[17–21]), and the executor writes the skills after
-// the clone.
+// is not, nor a directory between the two; the executor refuses both. Nor
+// is the skills directory: a repository may share it with the session's
+// skills, as the reference was recorded doing (setup[17–21]), and the
+// executor writes the skills after the clone.
 func resolveRepoMountPath(p, repoName string, f resourceFlavor) (string, error) {
 	root := strings.TrimSuffix(defaultRepoMountRoot, "/")
 	clean := path.Clean(p)

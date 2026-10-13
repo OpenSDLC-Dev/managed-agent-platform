@@ -55,16 +55,16 @@ The rooting rule waited on a recording. The owner chose to record the edges the 
 
 Tests came before code. `TestSessionRepoMountPathRootsUnderWorkspace` failed on the literal-path code at its first row (`/tmp` reserved). `TestRepoSharesTheSkillsDirectory`, on a Docker sandbox, failed in two steps: with the skills clause gone and the old order, both mounts lost the skill on the first pass; with repositories first, the `/workspace/skills/pdf` mount, whose checkout brings a `SKILL.md` of its own, still lost it on a re-clone, because the sentinel's probe found that file. Dropping the sentinel after such a clone made it pass.
 
-Each guard of the code as merged was then broken on its own in an overlay copy, and a test failed each time (32 of 32):
+Each guard of the code as merged was then broken on its own in an overlay copy, and a test failed each time (33 of 33):
 
 - the rule: a string-prefix match on `/workspace`, no `workspace/` strip, no climb refusal, a climb read as any name led by two dots, no default for `/workspace` itself, and rooting before cleaning;
 - the refusals: the session's words on a deployment, an over-long path quoted in them, no bound on a deployment's stored spelling, and an ancestor refusal naming the rooted path;
 - the executor's order and drop: skills written before repositories, a drop in a run with no skills, no drop, a drop in its own exec before the clone, a drop before the unpack, a drop between the old tree's removal and the move, a drop after the move, a checkout's own `.materialized` left in the staged tree, a skill-free checkout's own `.materialized` removed, and a drop only at the skills directory itself;
-- the executor's guard: no sentinel refused, only the exact sentinel refused, the files sentinel unguarded, a path below a staging directory admitted, no platform directory refused, and only the platform directory itself refused;
+- the executor's guard: no sentinel refused, only the exact sentinel refused, the files sentinel unguarded, a path below a staging directory admitted, no platform directory refused, only the platform directory itself refused, and a path beside one refused;
 - the checkpoint: no `/workspace` root beside a workdir elsewhere, a workdir below it captured as a second root, its sentinels kept there, and every root's sentinels stripped;
 - the sandbox: `/workspace` left out of the read-only root's writable paths, and mounted after a workdir below it.
 
-Review took five rounds. Each ran the verifier (`claude-fable-5-1`, xhigh; from round 3 on `claude-opus-5-5` by override, the pinned model's quota spent), Codex (`gpt-6.1-sol`, xhigh) and `/code-review` (`claude-opus-5-5`, xhigh, no cap).
+Review took six rounds. Each ran the verifier (`claude-fable-5-1`, xhigh; from round 3 on `claude-opus-5-5` by override, the pinned model's quota spent), Codex (`gpt-6.1-sol`, xhigh) and `/code-review` (`claude-opus-5-5`, xhigh, no cap).
 
 **Round 1, on the first commit.** The verifier passed it with findings, after `make verify` (91.49% coverage) and a live control plane that echoed every recorded input byte for byte. Codex found three defects and `/code-review` fifteen findings, the two overlapping. Fixed:
 
@@ -115,13 +115,13 @@ Review took five rounds. Each ran the verifier (`claude-fable-5-1`, xhigh; from 
 A sentinel is whatever the skills step will later accept: up to the sandbox's 4 MiB read cap, and of whatever generation that executor reads. Capture cannot tell one from a checkout's file without mirroring that step, so round 4 reverted the check: capture strips the sentinel's path whatever the file holds, as before. The registry and plan 64 now say the path is the platform's. Fixed besides:
 
 - **The operator guide:** on Docker the `/workspace` volume takes the image's content, and only Kubernetes's `emptyDir` hides it.
-- **The release note:** an earlier executor cannot restore a checkpoint that holds `/workspace` under any workdir other than `/workspace`, one below it too.
+- **The release note:** an earlier executor cannot restore a checkpoint taken under any configured workdir, one below `/workspace` too.
 - **The registry:** the paths create accepts and the executor refuses include a configured workdir, a directory holding it, and paths below a staging directory.
 - **Smaller fixes:** the memory-mount comment, and two mutants this record described alike.
 
 **Round 5, on the revert.** The verifier passed it with notes, all on docs and comments, after `make verify` (91.51% coverage) and a real-sandbox capture under five workdir setups. Neither reviewer found a defect in the revert. Codex found three overclaims and `/code-review` nine findings. Fixed:
 
-- **A repository stored before #922 at `/mnt`**, or at another directory holding `/mnt/session`, `/mnt/memory` or the shell state. A re-clone there removed memory stores, uploads and outputs with it. The gap predated this plan. Create no longer yields such a path, but a stored deployment keeps it on every fire. The executor now refuses one.
+- **A repository stored before #922 at `/mnt`**, or at another directory holding `/mnt/session`, `/mnt/memory` or the shell state. A re-clone there removed memory stores, uploads and outputs, or the shell state, with it. The gap predated this plan. Create no longer yields such a path, but a stored deployment keeps it on every fire. The executor now refuses one.
 - **A test pins that a checkout at the skills directory keeps its own `.materialized`** in a run without skills.
 - **Docs:**
   - a sentinel read is capped at 4 MiB, so the reason round 4 gave for its revert was restated;
@@ -132,7 +132,17 @@ A sentinel is whatever the skills step will later accept: up to the sandbox's 4 
   - round 4's record said its verifier's findings were all on docs;
   - round 3's record says again what round 3 shipped.
 
-Declined, over the five rounds:
+**Round 6, on that guard.** The verifier passed it with findings, after `make verify` (91.51% coverage) and a probe in which a repository stored at `/mnt` no longer removed outputs or memory stores. Its concern was Codex's defect. Codex found one defect and `/code-review` thirteen findings. Fixed:
+
+- **The guard missed the platform's data directories themselves.** It refused `/mnt/session` and the directories holding it, but not the uploads or outputs directory, where a re-clone removed the agent's deliverables. It now lists those, the memory stores' root and the shell state root, by their constants where the package has them.
+- **A test pins what the guard admits**, such as `/mnt/sess` beside `/mnt/session`, so an over-reaching match fails it.
+- **Docs:**
+  - plan 64, the registry, the operator guide and the release note now say the executor refuses a stored path at, or holding, a platform directory;
+  - the create-accepted workdir paths are those below `/workspace`, not any configured workdir;
+  - the memory-mount comment names create's refusal again;
+  - two test comments overclaimed.
+
+Declined, over the six rounds:
 
 - **A flag from the clone to the skills step** in place of the sentinel drop. A flag dies with the executor between the two, which is the case the drop must cover.
 - **Repairing a session whose skill a checkout replaced before this change.** Nothing in the sandbox tells that checkout from the agent's own edit.
@@ -148,6 +158,8 @@ Declined, over the five rounds:
 - **Keeping a checkout's own `.materialized` across an idle checkpoint**, in a run without skills. Telling it from a sentinel means mirroring how the skills step, in this release or a later one, reads its marker. Skipping the strip for a session with no skills means a lookup in capture. The case is a repository at the skills directory itself that tracks that file, so its `.git`, which the checkpoint keeps, holds it.
 - **Moving the skills sentinel out of the skills directory**, which would retire the special cases a shared directory needs. It changes a layout every existing sandbox holds, and the re-clone drop stays either way.
 - **Leaving a checkout's own `.materialized` in place when the executor has no object store**, so no skills step runs. The path is the platform's in a run with skills either way.
+- **Refusing the platform's scratch paths under `/tmp`** (the packages sentinel, the spill directory and ripgrep) as mounts. A repository stored there loses scratch the platform rebuilds, not the session's data.
+- **One check for the workdir and the platform directories.** Their refusals say different things.
 - **One resolver for the workdir default.** The two copies the new code does not use predate this plan.
 
 Superseded on the way: #584's changelog fragment, unreleased, whose refusal and `/workspace` reservation this plan removes. The release note says the net change once, in #922's fragment.
