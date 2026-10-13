@@ -73,10 +73,11 @@ Every recorded `mount_path`, all on session create:
      removed before it lands, so the skills step never reads it as its marker.
 
    Where both write one file, the skill's wins. Where a checkout puts a
-   directory at a path a skill writes as a file, that skill is skipped each
-   pass, as any skill that cannot be written is. The executor refuses a
-   mount at or below either materialization sentinel. The reference's
-   behaviour there is unrecorded, so that part is ours.
+   directory at a path a skill writes as a file, that skill fails part way
+   and is skipped, and every skill is written again on each pass, as after
+   any skill that cannot be written. The executor refuses a mount at or
+   below either materialization sentinel, which create accepts. The
+   reference's behaviour there is unrecorded, so that part is ours.
 5. **Stored deployments keep the path they resolved.** A fire never
    re-resolves a stored path (#849). A deployment stored before this plan
    mounts its literal path until its resources are sent again.
@@ -84,7 +85,7 @@ Every recorded `mount_path`, all on session create:
    there whatever the executor's workdir. So a read-only root filesystem
    keeps it writable beside the workdir (`sandbox.WritablePaths`), and an
    idle checkpoint keeps it as a root (`checkpointRoots`). A workdir below it
-   is one mount and one root with it.
+   is captured within it, and mounted after it.
 
 ## Not settled here
 

@@ -17,6 +17,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
 // exportTar builds what a backend's Export streams: members under one
@@ -125,7 +126,7 @@ func TestCaptureCombinesRootsStripsSentinelsMarksReady(t *testing.T) {
 		"/workspace": exportTar(t, map[string]string{
 			"workspace/":                        "",
 			"workspace/notes.txt":               "keep me",
-			"workspace/skills/.materialized":    "sentinel",
+			"workspace/skills/.materialized":    skillsSentinel,
 			"workspace/.files_materialized":     "sentinel",
 			"workspace/sub/.files_materialized": "decoy — agent state, kept",
 		}, map[string]string{"workspace/notes.link": "notes.txt"}),
@@ -168,6 +169,27 @@ func TestCaptureCombinesRootsStripsSentinelsMarksReady(t *testing.T) {
 	}
 }
 
+// skillsSentinel is a skills sentinel as the skills step writes one, which
+// capture drops; a file at its place that is not one is a checkout's own.
+var skillsSentinel = string(skills.Sentinel([]skills.Resolved{{ID: "skill_x", Version: "1"}}))
+
+// TestCaptureKeepsACheckoutsOwnMarker: a repository may share the skills
+// directory (#922), so capture drops a file at the skills sentinel's place
+// only when it is a sentinel. A checkout's own file there is state.
+func TestCaptureKeepsACheckoutsOwnMarker(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	h.prov.owned = []domain.ID{h.sid}
+	h.prov.exports = map[string][]byte{
+		"/workspace": exportTar(t, map[string]string{"workspace/skills/.materialized": "tracked by the checkout\n"}, nil),
+	}
+	if err := h.exec.captureCheckpoint(context.Background(), h.sid); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if got := checkpointMembers(t, h)["workspace/skills/.materialized"]; got != "tracked by the checkout\n" {
+		t.Errorf("skills/.materialized = %q, want the checkout's own file kept", got)
+	}
+}
+
 // TestCheckpointRootsHoldTheRepositoryRoot: /workspace is a root whatever the
 // workdir (#922), and a workdir below it is captured with it, not twice.
 func TestCheckpointRootsHoldTheRepositoryRoot(t *testing.T) {
@@ -200,7 +222,7 @@ func TestCaptureKeepsTheRepositoryRoot(t *testing.T) {
 			"/workspace": {
 				"workspace/repo/.git/HEAD":             "ref",
 				"workspace/agent/notes.txt":            "keep me",
-				"workspace/agent/skills/.materialized": "sentinel",
+				"workspace/agent/skills/.materialized": skillsSentinel,
 				"workspace/agent/.files_materialized":  "sentinel",
 				"workspace/skills/.materialized":       "not the workdir's, kept",
 			}},
@@ -209,7 +231,7 @@ func TestCaptureKeepsTheRepositoryRoot(t *testing.T) {
 		{"/srv/work", map[string]map[string]string{
 			"/srv/work": {
 				"work/notes.txt":            "keep me",
-				"work/skills/.materialized": "sentinel",
+				"work/skills/.materialized": skillsSentinel,
 			},
 			"/workspace": {
 				"workspace/repo/.git/HEAD":       "ref",

@@ -878,9 +878,9 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 		"/workspace/repo/..", "/tmp", "/tmp/", "/", "relative/path",
 		// The sandbox workdir, which holds every other mount.
 		"/workspace",
-		// Another repository's staging path, which this one's extraction
-		// removes twice.
-		"/workspace/.x.map-repo-staging",
+		// Another repository's staging path, or a path below one, which this
+		// one's extraction removes twice.
+		"/workspace/.x.map-repo-staging", "/workspace/.x.map-repo-staging/work",
 		// The materialization sentinels, which the skills and files steps
 		// write as files.
 		"/workspace/skills/.materialized", "/workspace/skills/.materialized/x",
@@ -989,12 +989,16 @@ func TestRepoDropsTheSkillsSentinelWithTheTreeItReplaces(t *testing.T) {
 	t.Run("a refused drop", func(t *testing.T) {
 		const mount = "/workspace/skills/pdf"
 		h, sb, wrapped, _ := setup(t, pdf, checkout, mount, nil)
-		// The agent removes the checkout; the re-clone's drop fails.
-		exec(t, sb, "rm -rf "+shellQuote(mount))
+		// The agent edits the tree and removes only its .git; the re-clone's
+		// drop fails, which must leave the old tree as it was.
+		exec(t, sb, "echo edited > "+shellQuote(mount+"/README.md")+" && rm -rf "+shellQuote(mount+"/.git"))
 		wrapped.refuse.Store(true)
 		h.runPass(t)
 		if n := h.cloneErrors(t); n != 1 {
 			t.Fatalf("clone errors = %d, want 1: a drop that fails fails the clone where the client sees it", n)
+		}
+		if got := readSandboxFile(t, sb, mount+"/README.md"); got != "edited\n" {
+			t.Errorf("README.md = %q, want the agent's edit: a failed drop removes nothing", got)
 		}
 		wrapped.refuse.Store(false)
 		h.runPass(t)
@@ -1002,6 +1006,22 @@ func TestRepoDropsTheSkillsSentinelWithTheTreeItReplaces(t *testing.T) {
 			if got := readSandboxFile(t, sb, mount+"/"+file); got != want {
 				t.Errorf("%s = %q, want %q", file, got, want)
 			}
+		}
+	})
+
+	// The drop waits for the new tree to be staged: an unpack that fails keeps
+	// the sentinel, and so the agent's edits to its skills.
+	t.Run("a failed unpack", func(t *testing.T) {
+		const mount, edited = "/workspace/skills/other", "/workspace/skills/pdf/SKILL.md"
+		h, sb, wrapped, _ := setup(t, pdf, checkout, mount, nil)
+		exec(t, sb, "echo edited > "+shellQuote(edited)+" && rm -rf "+shellQuote(mount+"/.git"))
+		wrapped.failUnpack.Store(true)
+		h.runPass(t)
+		if n := h.cloneErrors(t); n != 1 {
+			t.Fatalf("clone errors = %d, want 1 from the failed unpack", n)
+		}
+		if got := readSandboxFile(t, sb, edited); got != "edited\n" {
+			t.Errorf("SKILL.md = %q, want the agent's edit: an unpack that fails drops nothing", got)
 		}
 	})
 
@@ -1046,11 +1066,12 @@ func TestRepoDropsTheSkillsSentinelWithTheTreeItReplaces(t *testing.T) {
 
 // sentinelProvider's sandboxes count the commands that name the skills
 // sentinel and, while refuse is set, run each with its removal replaced by
-// `false`, as a removal that fails would.
+// `false`, as a removal that fails would. While failUnpack is set, a clone's
+// extraction fails at its unpack.
 type sentinelProvider struct {
 	sandbox.Provider
-	refuse atomic.Bool
-	drops  atomic.Int32
+	refuse, failUnpack atomic.Bool
+	drops              atomic.Int32
 }
 
 func (p *sentinelProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -1074,6 +1095,9 @@ func (s *sentinelSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sa
 		if s.p.refuse.Load() {
 			req.Command = strings.Replace(req.Command, drop, "false", 1)
 		}
+	}
+	if s.p.failUnpack.Load() && strings.Contains(req.Command, stagingSuffix) {
+		req.Command = strings.Replace(req.Command, " && tar -xf ", " && false && tar -xf ", 1)
 	}
 	return s.Sandbox.Exec(ctx, req)
 }

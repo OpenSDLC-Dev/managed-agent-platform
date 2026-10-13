@@ -14,7 +14,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -270,8 +269,9 @@ const repoStagingRoot = "/tmp"
 //   - a materialization sentinel, `<workdir>/skills/.materialized` or
 //     `<workdir>/.files_materialized`, or a path below one: the skills and
 //     files steps write them as files after the repositories land.
-//   - another repository's staging path. `/workspace/.x.map-repo-staging` is a
-//     mount path the API accepts, and cloning `/workspace/x` removes it twice.
+//   - another repository's staging path, or a path below one.
+//     `/workspace/.x.map-repo-staging` is a mount path the API accepts, and
+//     cloning `/workspace/x` removes it, and all below it, twice.
 //
 // The workdir is executor configuration, and the staging name is an executor
 // implementation detail; neither is visible where the resource is validated.
@@ -295,13 +295,15 @@ func (e *Executor) safeRepoMount(mount string) error {
 	if wd := path.Clean(workdir); mount == wd || strings.HasPrefix(wd, mount+"/") {
 		return fmt.Errorf("mount path %q is the sandbox workdir or holds it", mount)
 	}
-	for _, s := range []string{path.Join(workdir, "skills", skills.SentinelName), path.Join(workdir, filesSentinelName)} {
+	for _, s := range []string{e.skillsSentinelPath(), path.Join(workdir, filesSentinelName)} {
 		if mount == s || strings.HasPrefix(mount, s+"/") {
 			return fmt.Errorf("mount path %q is a materialization sentinel or below one", mount)
 		}
 	}
-	if strings.HasPrefix(path.Base(mount), ".") && strings.HasSuffix(mount, stagingSuffix) {
-		return fmt.Errorf("mount path %q is a repository staging path", mount)
+	for _, c := range strings.Split(mount, "/") {
+		if strings.HasPrefix(c, ".") && strings.HasSuffix(c, stagingSuffix) {
+			return fmt.Errorf("mount path %q is a repository staging path or below one", mount)
+		}
 	}
 	return nil
 }
@@ -313,11 +315,11 @@ func (e *Executor) safeRepoMount(mount string) error {
 // SKILL.md, which the checkout may bring itself. Without the drop, the skills
 // step after the repositories would trust them.
 func (e *Executor) skillsSentinel(mount string) string {
-	root := path.Join(e.checkpointWorkdir(), "skills")
-	if mount != root && !strings.HasPrefix(mount, root+"/") {
+	sentinel := e.skillsSentinelPath()
+	if root := path.Dir(sentinel); mount != root && !strings.HasPrefix(mount, root+"/") {
 		return ""
 	}
-	return path.Join(root, skills.SentinelName)
+	return sentinel
 }
 
 // stagingPath is where a mount's tree is unpacked before being renamed into

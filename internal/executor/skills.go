@@ -99,7 +99,7 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 	// The skip needs the marker to match the resolved set AND the recorded
 	// trees to still hold their SKILL.md — the workdir is agent-writable, so
 	// a tool call may have deleted skills the marker still claims.
-	sentinelPath := path.Join(workdir, "skills", skills.SentinelName)
+	sentinelPath := e.skillsSentinelPath()
 	// The probe is one sandbox read per recorded tree — a session may reference
 	// hundreds — and the skip returns without ever entering the write loop, so
 	// the reads report as they land rather than the whole probe counting as one
@@ -141,6 +141,12 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 	if err := sb.WriteFile(ctx, sentinelPath, skills.Sentinel(landed)); err != nil {
 		slog.WarnContext(ctx, "skills sentinel not written", "session_id", sid, "err", err)
 	}
+}
+
+// skillsSentinelPath is where the skills step keeps its sentinel. The
+// repository pass names it too, to drop it and to refuse a mount on it.
+func (e *Executor) skillsSentinelPath() string {
+	return path.Join(e.checkpointWorkdir(), "skills", skills.SentinelName)
 }
 
 // skipSkill is the per-skill tolerance path: log, count, continue. A digest

@@ -589,8 +589,9 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
 	progress()
-	// Memory stores last: their mounts are reserved against the others
-	// (/mnt/memory), so nothing here can overlay them. A mount the sandbox
+	// Memory stores last: no other mount reaches /mnt/memory — files root
+	// under the uploads directory and repositories under /workspace — so
+	// nothing here can overlay them. A mount the sandbox
 	// already held is reconciled before the tools read it — the store's
 	// changes since the last run land now, and what a faulted run wrote
 	// goes up — so a store's change reaches a session at its next run.
