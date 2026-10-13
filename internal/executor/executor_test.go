@@ -1370,7 +1370,7 @@ func TestMaterializationReportsProgressPerItem(t *testing.T) {
 		{Type: "github_repository", ID: "sesrsc_a", URL: "https://github.com/o/a", MountPath: "/workspace/a"},
 		{Type: "github_repository", ID: "sesrsc_b", URL: "https://github.com/o/b", MountPath: "/workspace/b"},
 		{Type: "github_repository", ID: "sesrsc_c", URL: "https://github.com/o/c", MountPath: "/workspace/c"},
-	}, false, count)
+	}, count)
 	if reports != 6 {
 		t.Errorf("repos reports = %d, want 6 (one per repository, refused ones included, plus one before each clone)", reports)
 	}

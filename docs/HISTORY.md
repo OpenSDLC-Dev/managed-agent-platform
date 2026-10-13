@@ -49,6 +49,20 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Repository mounts rooted under /workspace (plan 64, #922) — archived 2026-10-13, delivered in one PR
+
+The rooting rule waited on a recording. The owner chose to record the edges the 2026-09-03 probes left open rather than infer them, and managed-agents-wire-recordings#22 and #23 recorded them the same day (`2026-10-13-repo-mount-skills`). One finding reversed #584, merged the day before: the reference accepted a repository at `/workspace/skills` beside an attached skill, and the two shared the directory. Asked again with that evidence, the owner chose to share it too.
+
+Tests came before code. `TestSessionRepoMountPathRootsUnderWorkspace` failed on the literal-path code at its first row (`/tmp` reserved). `TestRepoSharesTheSkillsDirectory`, on a Docker sandbox, failed in two steps: with the skills clause gone and the old order, both mounts lost the skill on the first pass; with repositories first, the `/workspace/skills/pdf` mount, whose checkout brings a `SKILL.md` of its own, still lost it on a re-clone, because the sentinel's probe found that file. Dropping the sentinel after such a clone made it pass.
+
+Each new guard was then broken on its own in an overlay copy, and a test failed each time (10 of 10): a string-prefix match on `/workspace`, no `workspace/` strip, no climb refusal, no default for `/workspace` itself, rooting before cleaning, the session's words on a deployment, no bound on a deployment's stored spelling, skills written before repositories, no sentinel drop, and a drop only at the directory itself.
+
+Superseded on the way: #584's changelog fragment, unreleased, whose refusal and `/workspace` reservation this plan removes. The release note says the net change once, in #922's fragment.
+
+**Plan 64 progress summary (archived).** Delivered in one PR: every `mount_path` rooted under `/workspace` as recorded, a climb refused and overlaps judged once rooted, in the reference's words on session create, no reserved targets, a deployment's spelling bounded as sent, and a repository sharing the skills directory, cloned before skills are written.
+
+---
+
 ## A shallow repository clone in the reference's shape (plan 63, #582) — archived 2026-10-13, delivered in one PR
 
 Tests came before code. With only the fixture swapped to `git http-backend`, the 31 repository and clone tests passed on the full-clone code, and `TestRepoCloneShapeMatchesTheReference` failed there on every form: not shallow, 2 or 3 commits, no recorded config key. Every bug a review found has a test that fails without its fix: either run on the code before the fix, or under a mutant below that reverts it.

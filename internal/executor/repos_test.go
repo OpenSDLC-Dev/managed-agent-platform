@@ -893,58 +893,49 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 	}
 }
 
-// TestRepoUnderSkillsRootNeedsASkillFreeRun 🔍: the skills directory, and every
-// path below it, is refused when the run has skills to land there — its
-// agent's or a roster member's — because those trees are written a few lines
-// before repositories are, in the same pass (#584). `/workspace/skills` is what
-// a repository named skills derives as its default mount, so this needs no
-// tampering at all. A skill-free run leaves the directory alone, so the clone
-// goes ahead there.
-func TestRepoUnderSkillsRootNeedsASkillFreeRun(t *testing.T) {
-	for _, skilled := range []struct {
-		name string
-		ref  func(*testing.T, *harness)
-	}{
-		{"own skill", func(t *testing.T, h *harness) { h.refSkills(t, [2]string{"skill_root", "1"}) }},
-		{"roster member's skill", func(t *testing.T, h *harness) {
-			h.refRoster(t, rosterMember{name: "researcher", skills: [][2]string{{"skill_root", "1"}}})
-		}},
-	} {
-		for _, mount := range []string{"/workspace/skills", "/workspace/skills/pdf"} {
-			t.Run(skilled.name+" "+mount, func(t *testing.T) {
-				fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-				sb := &fakeSandbox{}
-				h := newHarness(t, sb)
-				h.seedSkill(t, "skill_root", "1", "pdf", map[string]string{"SKILL.md": "# pdf"})
-				skilled.ref(t, h)
-				h.seedRepoResource(t, "sesrsc_skills", fx.url(), mount, "ghp_fixture", nil)
+// TestRepoSharesTheSkillsDirectory 🔍: a repository may share the skills
+// directory with the run's skills, as the reference was recorded doing (#922,
+// plan 64). Repositories are cloned before skills are written, so a clone,
+// which replaces its mount whole, never removes a skill landed in the same
+// pass; and a clone at or below the directory drops the skills sentinel, so a
+// re-clone in a later pass has the skills written again. The `pdf` mount is
+// the case the sentinel's own SKILL.md probe misses: the checkout brings a
+// SKILL.md of its own there. Where both write one path, the skill's file wins.
+func TestRepoSharesTheSkillsDirectory(t *testing.T) {
+	for _, mount := range []string{"/workspace/skills", "/workspace/skills/pdf"} {
+		t.Run(mount, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "repo\n", "SKILL.md": "the checkout's\n"})
+			h, provider := dockerRepoHarness(t)
+			h.seedSkill(t, "skill_root", "1", "pdf", map[string]string{"SKILL.md": "# pdf"})
+			h.refSkills(t, [2]string{"skill_root", "1"})
+			h.seedRepoResource(t, "sesrsc_skills", fx.url(), mount, "ghp_fixture", nil)
 
-				h.runPass(t)
+			h.runPass(t)
+			sb := adopt(t, provider, h)
+			both := func(when string) {
+				t.Helper()
+				if got := readSandboxFile(t, sb, "/workspace/skills/pdf/SKILL.md"); got != "# pdf" {
+					t.Errorf("%s: skills/pdf/SKILL.md = %q, want the skill's", when, got)
+				}
+				if got := readSandboxFile(t, sb, mount+"/README.md"); got != "repo\n" {
+					t.Errorf("%s: README.md = %q, want the checkout's", when, got)
+				}
+			}
+			both("first pass")
 
-				if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != repoOutcomeInternal {
-					t.Fatalf("clone errors = %v, want exactly one internal for %q", errs, mount)
-				}
-				if fx.clones.Load() != 0 {
-					t.Error("the repository was cloned before its mount path was judged")
-				}
-				if got := sb.files["/workspace/skills/pdf/SKILL.md"]; got != "# pdf" {
-					t.Errorf("skills/pdf/SKILL.md = %q after the refused clone, want the skill intact", got)
-				}
-			})
-		}
+			// The agent removes the checkout; the next pass clones it again,
+			// over the skill.
+			if _, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+				Command: "rm -rf " + shellQuote(mount)}); err != nil {
+				t.Fatalf("remove the checkout: %v", err)
+			}
+			h.runPass(t)
+			if got := fx.clones.Load(); got != 2 {
+				t.Fatalf("clones = %d, want 2: the removed checkout cloned again", got)
+			}
+			both("after a re-clone")
+		})
 	}
-
-	t.Run("skill-free", func(t *testing.T) {
-		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-		h := newHarness(t, &fakeSandbox{})
-		h.seedRepoResource(t, "sesrsc_skills", fx.url(), "/workspace/skills", "ghp_fixture", nil)
-
-		h.runPass(t)
-
-		if fx.clones.Load() != 1 {
-			t.Errorf("clones = %d, want 1: a skill-free run may mount a repository on the skills directory", fx.clones.Load())
-		}
-	})
 }
 
 // TestRepoRefusesADirectoryHoldingTheWorkdir 🔍: under a configured workdir

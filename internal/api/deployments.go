@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -307,9 +306,6 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 	}
 	agent, err := resolveDeploymentAgent(ctx, tx, agentRaw)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.refuseDeploymentSkillsRoot(ctx, tx, agent, resourceInputs); err != nil {
 		return nil, err
 	}
 	if err := s.validateDeploymentInitialEvents(initial); err != nil {
@@ -634,13 +630,11 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		}
 	}
 	// Judged on what the row will hold, so moving a repository onto a
-	// self_hosted environment, or re-pinning one under the skills root to a
-	// skilled agent, is refused as surely as bringing it there. An update that
-	// touches none of the pair leaves a row stored before the refusal alone:
-	// its fire records the refusal instead.
+	// self_hosted environment is refused as surely as bringing it there. An
+	// update that touches neither leaves a row stored before the refusal
+	// alone: its fire records the refusal instead.
 	_, envSet := obj["environment_id"]
-	_, agentSet := obj["agent"]
-	if envSet || agentSet || resourcesSet {
+	if envSet || resourcesSet {
 		final := resourceInputs
 		if !resourcesSet {
 			// Kept resources matter here only as repository mounts.
@@ -655,13 +649,8 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 				}
 			}
 		}
-		if (envSet || resourcesSet) && resourceInputsHaveRepo(final) {
+		if resourceInputsHaveRepo(final) {
 			if err := refuseSelfHostedRepository(ctx, tx, envID); err != nil {
-				return nil, err
-			}
-		}
-		if agentSet || resourcesSet {
-			if err := s.refuseDeploymentSkillsRoot(ctx, tx, agent, final); err != nil {
 				return nil, err
 			}
 		}
@@ -856,20 +845,4 @@ func requireLiveEnvironment(ctx context.Context, tx pgx.Tx, envID string) error 
 		return errInvalid("environment %s is archived", envID)
 	}
 	return nil
-}
-
-// refuseDeploymentSkillsRoot applies refuseSkillsRootRepository to the agent
-// version a deployment pins, resolved with its roster as a fire resolves it.
-// It resolves only when a repository sits under the skills root, so no other
-// deployment pays for the roster snapshot, or meets at create an error only its
-// fire used to raise.
-func (s *server) refuseDeploymentSkillsRoot(ctx context.Context, db querier, agent domain.AgentReference, inputs []resourceInput) error {
-	if !slices.ContainsFunc(inputs, repoUnderSkillsRoot) {
-		return nil
-	}
-	resolved, err := s.resolveAgent(ctx, db, mustJSON(agent), false)
-	if err != nil {
-		return err
-	}
-	return refuseSkillsRootRepository(resolved, inputs)
 }

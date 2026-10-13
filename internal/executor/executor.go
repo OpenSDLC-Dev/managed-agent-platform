@@ -579,11 +579,13 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// inside the passes, per skill, per repository and per mount, because a
 	// pass over many of them is legitimately long while each item is not.
 	progress()
-	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
+	// Repositories first. A clone replaces its mount whole, and a repository
+	// may share the skills directory (#922), so skills are written after it.
+	// Files come after too, so a file mount may overlay into a checkout (plan 25
+	// decision 5), which since #922 only a resource stored before it can do.
+	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, progress)
 	progress()
-	// Repositories before files, so a file mount may deliberately overlay into
-	// a checkout (plan 25 decision 5).
-	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, len(sess.skills) > 0, progress)
+	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
 	progress()

@@ -861,10 +861,6 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	if err := admitMCPServers(envConfig, agent.MCPServers); err != nil {
 		return createdSession{}, err
 	}
-	if err := refuseSkillsRootRepository(agent, in.resourceInputs); err != nil {
-		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
-		return createdSession{}, err
-	}
 	agentJSON, err := json.Marshal(agent)
 	if err != nil {
 		return createdSession{}, err

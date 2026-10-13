@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -51,8 +52,8 @@ const repoCloneErrorType = "github_repository_clone_error"
 var errRepoNoCredential = errors.New("repository credential row missing")
 
 // materializeRepos clones each mounted repository into the sandbox before the
-// tools run, between skills and files so a file mount may deliberately overlay
-// into a checkout (plan 25 decision 5). Idempotence is the probe alone — a repo
+// tools run, first of the passes (provisionAndRun says why). Idempotence is
+// the probe alone — a repo
 // materializes iff the probe answers that `<mount>/.git` is absent, and a pass
 // whose probe does not answer clones nothing (#860, repoPresence) — deliberately without a sentinel:
 // the mounted set is fixed at create, so a marker would have no drift to
@@ -64,7 +65,7 @@ var errRepoNoCredential = errors.New("repository credential row missing")
 // and the agent sees an absent path. Unlike a file's, it also surfaces as a
 // session.error the client can see (decision 4). refs come from the same
 // locked session read that gated the run (sessionForRun).
-func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, skilled bool, progress func()) {
+func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, progress func()) {
 	mounts := make([]repoRef, 0, len(refs))
 	for _, r := range refs {
 		if r.Type == "github_repository" && r.ID != "" && r.URL != "" && r.MountPath != "" {
@@ -121,7 +122,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		// database by any route other than the create endpoint would otherwise
 		// have that command built for it. `/workspace/repo/..` cleans to
 		// `/workspace`; `/tmp` is the platform's own staging root.
-		if err := e.safeRepoMount(m.MountPath, skilled); err != nil {
+		if err := e.safeRepoMount(m.MountPath); err != nil {
 			failed++
 			recordRepoMaterialized(ctx, repoOutcomeInternal)
 			slog.WarnContext(ctx, "repository mount path refused by the executor",
@@ -167,6 +168,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		recordRepoMaterializeBytes(ctx, bytes)
 		slog.InfoContext(ctx, "repository materialized",
 			"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath, "bytes", bytes)
+		e.dropSkillsSentinel(ctx, sb, sid, m.MountPath)
 	}
 	span.SetAttributes(
 		attribute.Int("repos.materialized", landed),
@@ -242,9 +244,9 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 const repoSweepTimeout = 15 * time.Second
 
 // repoStagingRoot is where a clone's tar lands inside the sandbox on its way
-// to the mount. /tmp is one of the two reserved mount targets (plan 25
-// decision 3), which is what keeps a repository from being mounted over the
-// staging area.
+// to the mount. A repository never mounts over it: create roots every mount
+// under /workspace (#922), and safeRepoMount refuses it for a row from any
+// other route.
 const repoStagingRoot = "/tmp"
 
 // safeRepoMount is the executor's own judgment of a mount path, independent of
@@ -254,25 +256,17 @@ const repoStagingRoot = "/tmp"
 //
 // It is deliberately not a second copy of the API's full grammar (nesting,
 // per-session caps, the URL-derived default). Those decide what a caller may
-// ask for; this decides only what may be destroyed. Three of the refusals are
+// ask for; this decides only what may be destroyed. Two of the refusals are
 // things the control plane cannot know, which is why they live here:
 //
-//   - the workdir or a directory holding it, and — when the run has skills
-//     (skilled) — the skills directory inside it and every path below it.
-//     Skills are materialized into <workdir>/skills a few lines before
-//     repositories are, so such a mount would `rm -rf` a tree written in the
-//     same pass, while the system prompt goes on naming
-//     skills/<dir>/SKILL.md. Create refuses the same paths under the default
-//     workdir only (#584), so this is the one guard for any other; a
-//     skill-free run leaves the directory alone, so a repository named
-//     `skills` may take its default mount there, as the reference was
-//     recorded doing.
+//   - the workdir or a directory holding it. Create never yields one under
+//     the default workdir (#922), but the workdir is configurable.
 //   - another repository's staging path. `/workspace/.x.map-repo-staging` is a
 //     mount path the API accepts, and cloning `/workspace/x` removes it twice.
 //
 // The workdir is executor configuration, and the staging name is an executor
 // implementation detail; neither is visible where the resource is validated.
-func (e *Executor) safeRepoMount(mount string, skilled bool) error {
+func (e *Executor) safeRepoMount(mount string) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
 	}
@@ -292,13 +286,32 @@ func (e *Executor) safeRepoMount(mount string, skilled bool) error {
 	if wd := path.Clean(workdir); mount == wd || strings.HasPrefix(wd, mount+"/") {
 		return fmt.Errorf("mount path %q is the sandbox workdir or holds it", mount)
 	}
-	if root := path.Join(workdir, "skills"); skilled && (mount == root || strings.HasPrefix(mount, root+"/")) {
-		return fmt.Errorf("mount path %q is under the skills directory", mount)
-	}
 	if strings.HasPrefix(path.Base(mount), ".") && strings.HasSuffix(mount, stagingSuffix) {
 		return fmt.Errorf("mount path %q is a repository staging path", mount)
 	}
 	return nil
+}
+
+// dropSkillsSentinel removes the skills sentinel once a clone has landed at or
+// below the skills directory, which a repository may share with the run's
+// skills (#922). The clone replaced its mount whole, skill files with it, and
+// the sentinel's probe reads only each skill's SKILL.md, which the checkout may
+// bring itself; without the sentinel, the skills step that follows the
+// repositories writes them all again.
+func (e *Executor) dropSkillsSentinel(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, mount string) {
+	workdir := e.cfg.Workdir
+	if workdir == "" {
+		workdir = sandbox.DefaultWorkdir
+	}
+	root := path.Join(workdir, "skills")
+	if mount != root && !strings.HasPrefix(mount, root+"/") {
+		return
+	}
+	sentinel := path.Join(root, skills.SentinelName)
+	if _, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: "rm -f " + shellQuote(sentinel)}); err != nil {
+		slog.WarnContext(ctx, "skills sentinel not removed after a clone under the skills directory",
+			"session_id", sid, "mount_path", mount, "err", err)
+	}
 }
 
 // stagingPath is where a mount's tree is unpacked before being renamed into
