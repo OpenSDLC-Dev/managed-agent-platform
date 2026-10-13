@@ -180,7 +180,12 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 		f.sawAuth.Store(auth)
 	}
 	if d := f.stall.Load(); d > 0 {
-		time.Sleep(time.Duration(d))
+		// Until the client gives up, so a long stall holds up no test's cleanup.
+		select {
+		case <-time.After(time.Duration(d)):
+		case <-r.Context().Done():
+			return
+		}
 	}
 	if want, _ := f.wantAuth.Load().(string); want != "" && r.Header.Get("Authorization") != want {
 		http.Error(w, "bad credentials", http.StatusUnauthorized)

@@ -343,7 +343,9 @@ func TestRepoCommitFetchCarriesTheTokenAndTheDeadline(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Head: %v", err)
 		}
-		fx.stall.Store(int64(2 * time.Second))
+		// A stall far past the deadline, and a bound far between them, so a
+		// loaded machine cannot fail a fetch that gave up in time.
+		fx.stall.Store(int64(time.Minute))
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 		start := time.Now()
@@ -353,7 +355,7 @@ func TestRepoCommitFetchCarriesTheTokenAndTheDeadline(t *testing.T) {
 		if got := cloneReason(err); err == nil || got != repoOutcomeTimeout {
 			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
 		}
-		if d := time.Since(start); d >= time.Second {
+		if d := time.Since(start); d >= 30*time.Second {
 			t.Errorf("the fetch waited %s on a stalled remote, past its 200ms deadline", d)
 		}
 	})

@@ -33,11 +33,11 @@ import (
 var errCloneTooLarge = errors.New("clone exceeded the byte budget")
 
 // errBranchName marks a branch checkout refused before the remote is asked,
-// for a name go-git's ref-name check refuses: git's rules, plus two of go-git's
-// own that git does not hold (a lone `@` component, a leading `-`). The caller
-// named the branch and can rename it, so it reads as the caller's; go-git's
-// own ErrInvalidReferenceName does not, since it also refuses a default branch
-// the caller never named.
+// for a name go-git's ref-name check refuses: git's rules, a leading `-`, which
+// git's branch-name check refuses too, and a lone `@` component, which git
+// admits. The caller named the branch and can rename it, so it reads as the
+// caller's; go-git's own ErrInvalidReferenceName does not, since it also
+// refuses a default branch the caller never named.
 var errBranchName = errors.New("invalid branch name")
 
 // errBranchUnsupported marks a branch checkout refused before the remote is
@@ -91,7 +91,8 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	storer := filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault())
 
 	// Every checkout is depth 1 (plan 63): the requested commit and its tree
-	// travel, and no history. The reference's default-branch checkout was
+	// travel, with the tag objects an id that names a tag goes through, and no
+	// history. The reference's default-branch checkout was
 	// recorded shallow (#582); the branch and commit forms follow it by our
 	// choice. A branch checkout fetches that branch; omitted means the remote's
 	// own HEAD — the default branch, resolved here rather than at create (plan

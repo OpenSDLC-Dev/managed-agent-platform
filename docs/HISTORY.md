@@ -66,7 +66,7 @@ Three mutants survived:
 
 The fixture was checked the same way: without its `uploadpack.allowReachableSHA1InWant`, four tests fail.
 
-Review hardening. Six verifier runs were stopped when review findings changed behavior. A seventh passed with one finding, and checked the fixes after it again on the final branch. Eleven rounds of /code-review (`claude-opus-5-5`, xhigh) and Codex (`gpt-6.1-sol`, xhigh) ran. They returned eight and three findings, then twelve and three, fourteen and two, ten and two, thirteen and none, eight and two, seven and none, four and one, eight and one, nine and one, and eight and one.
+Review hardening. Six verifier runs were stopped when review findings changed behavior. A seventh passed with one finding, and checked the fixes after it again on the final branch. Twelve rounds of /code-review (`claude-opus-5-5`, xhigh) and Codex (`gpt-6.1-sol`, xhigh) ran. They returned eight and three findings, then twelve and three, fourteen and two, ten and two, thirteen and none, eight and two, seven and none, four and one, eight and one, nine and one, eight and one, and five and one.
 
 - **Fixed:** every tag was fetched beside a branch, with its commit's tree, because go-git's clone defaults to all tags. A probe fetched a 5 MB blob only an old tag reached. Both clone paths now fetch none, and the shape test tags an old commit. Both reviewers found it.
 - **Fixed:** `origin/HEAD` named a checked-out branch as the remote's default. `git clone --depth 1 --branch` leaves none over protocol v2, so only a default-branch checkout gets it now. Both reviewers found it.
@@ -100,6 +100,7 @@ Review hardening. Six verifier runs were stopped when review findings changed be
   - a name holding any space was said to report `internal`, though git and go-git both refuse an ASCII one, with reason `checkout`;
   - a code comment called depth 1 for every form the recorded reference's, and another said git leaves no `origin/HEAD` for a default branch named `HEAD`, a line before saying it leaves one naming itself;
   - the registry's test citation filed five `repos_test.go` tests under `repoclone_test.go`;
+  - `errBranchName`'s comment counted a leading `-` among go-git's own rules, which `git check-ref-format --branch` holds too, and the changelog and a comment said no tag object travels, where an id that names a tag brings the tags it goes through;
   - the null-SHA guard's comment said the clone would succeed on the wrong branch without it, which the fetch by SHA no longer does: the remote refuses the want;
   - the plan and the registry still said go-git could check out no branch with a lone `@` component, and three comments on `errBranchName` called its names the ones git refuses;
   - `newCloneFS` did not state that its root must hold no symlink, and `TestCloneSpoolSymlinks` rooted it under macOS's symlinked temp directory.
@@ -113,7 +114,7 @@ Review hardening. Six verifier runs were stopped when review findings changed be
   - the fixture did not check for git's `http-backend` helper, so a host without it failed every test with a 500 that read as the network's. A first check looked for the helper's file, apart from how the handler runs it, and could fail a working git; the check now runs the handler's own command in its environment;
   - the shape test's commit row and the annotated-tag test checked out a root commit, where one commit in the clone proves no depth;
   - an upper-case SHA, which create admits, had no test (raised on the pull request);
-  - the commit fetch carries the token and the deadline apart from the other forms' clone, and neither had a test of its own.
+  - the commit fetch carries the token and the deadline apart from the other forms' clone, and neither had a test of its own. The deadline row first bounded the fetch at one second against a two-second stall, which a loaded machine could fail; the stall is now a minute, the bound thirty seconds, and the fixture's stall ends when the client gives up.
 - **Fixed:** in the code itself:
   - a comment gave the second config write a reason that covered one of its five keys;
   - the commit form shipped an empty `refs/map/` directory;
@@ -133,6 +134,8 @@ Review hardening. Six verifier runs were stopped when review findings changed be
 - **Declined:** the plan's "Delivered in one PR, which archives this plan", read as progress tracking. CLAUDE.md asks an archived plan file to say which PR finished it, and the progress summary is in this entry.
 - **Declined:** resolving the root's symlinks inside `newCloneFS`, so that every caller gets it. The root must exist to be resolved, and `cloneToTar` makes it later; the only other caller is a test. Its comment states the precondition.
 - **Declined:** one config write instead of two, a commit fetch without a persisted `origin` remote, one test `HOME` per test instead of per git command, the descriptor checks moved ahead of the spool directory, one fixture shared by the subtests that never reach it, one `cloneReason` arm for the two `internal` ones, the default-branch flag replaced by a call in the default arm, a fixture helper for tags, and one helper probe per test binary: cleanup only.
+- **Declined:** keeping `context.DeadlineExceeded` when a deadline fires while go-git decodes an upload-pack response. go-git wraps the decode error with `%s` (`plumbing/transport/internal/common/common.go:488`), so the reason is `internal`. The full clone before this PR decoded the same response through the same wrap.
+- **Declined:** a reason for go-git's `ErrExactSHA1NotSupported`, which a host that admits no SHA want raises. The URL grammar admits only `github.com`, which does, and plan 63 decision 5 covers such a host.
 - **Declined:** cutting the registry entry's measurements down to a pointer at plan 63. The registry is what the verifier's wire-compatibility rung and outside reviewers read for a divergence, and the plan is archived.
 - **Declined:** refusing a stored checkout whose type is neither `branch` nor `commit`. It clones the default branch, as it did before this PR; create admits no other type, and the untyped row of the shape test pins that path.
 - **Declined:** a ref for the tag a commit checkout was given by id. The tag object stays in the clone with no ref, which `git fsck` lists as dangling and `git fetch --depth 1 <sha>` leaves the same way.
