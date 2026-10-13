@@ -278,10 +278,11 @@ const repoStagingRoot = "/tmp"
 // implementation detail; neither is visible where the resource is validated.
 //
 // It also refuses a directory the platform keeps beside the workdir, or one
-// holding it: the uploads and outputs directories, the memory stores' root
-// and the shell state root. Create never yields one since #922, but a
-// repository stored before keeps its literal path, and `/mnt` was one
-// create accepted.
+// holding it: the repository root, the uploads and outputs directories,
+// the memory stores' root and the shell state root. Create never yields
+// one since #922, but a repository stored before keeps its literal path,
+// and `/mnt` was one create accepted. Below one, a re-clone removes only
+// the checkout's own tree, as anywhere. Paths the image ships are #930.
 func (e *Executor) safeRepoMount(mount string) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
@@ -312,7 +313,7 @@ func (e *Executor) safeRepoMount(mount string) error {
 			return fmt.Errorf("mount path %q is a repository staging path or below one", mount)
 		}
 	}
-	for _, d := range []string{"/mnt/session/uploads", outputsDir, toolset.MemoryMountRoot, sandbox.ShellStateRoot} {
+	for _, d := range []string{sandbox.RepositoryRoot, "/mnt/session/uploads", outputsDir, toolset.MemoryMountRoot, sandbox.ShellStateRoot} {
 		if mount == d || strings.HasPrefix(d, mount+"/") {
 			return fmt.Errorf("mount path %q is a platform directory or holds one", mount)
 		}

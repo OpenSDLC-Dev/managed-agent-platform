@@ -868,7 +868,8 @@ func writeTo(t *testing.T, fs billy.Filesystem, name string, n int) (string, err
 // route or a tampered row. The staging and sentinel paths are ones create
 // accepts and only the executor knows to refuse. The platform directories,
 // and the directories holding them, are ones a repository stored before
-// #922 may still name. In every case the second check earns its place,
+// #922 may still name (`/mnt/memory` only one stored before plan 36). In
+// every case the second check earns its place,
 // because the operation on the other side is destructive and irreversible.
 // `/workspace/repo/..` cleans to `/workspace` and would delete the whole
 // workspace; `/tmp` is the platform's own sandbox staging root and would
@@ -916,15 +917,30 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 
 // TestRepoAdmitsAPathBesideAPlatformDirectory: the platform-directory
 // refusal is for a directory the platform keeps and the directories holding
-// it, by whole path components. A repository stored before #922 beside one,
-// or below the uploads directory, still mounts.
+// it, by whole path components. A path beside one, or below one, passes the
+// guard.
 func TestRepoAdmitsAPathBesideAPlatformDirectory(t *testing.T) {
 	for _, mount := range []string{
-		"/mnt/sess", "/mnt/data", "/mnt/session/uploads/repo", "/var/lib/map", "/opt/repo", "/workspace/repo",
+		"/mnt/sess", "/mnt/data", "/mnt/session/uploads/repo", "/mnt/session/outputs/report",
+		"/mnt/memory/x", "/var/lib/map", "/opt/repo", "/workspace/repo",
 	} {
 		if err := (&Executor{}).safeRepoMount(mount); err != nil {
 			t.Errorf("safeRepoMount(%q) = %v, want it admitted", mount, err)
 		}
+	}
+}
+
+// TestRepoRefusesTheRepositoryRootBesideAWorkdir: under a workdir outside
+// /workspace, the workdir check does not cover /workspace, where every other
+// repository mounts. A repository stored before #922 at that literal path
+// would remove them all.
+func TestRepoRefusesTheRepositoryRootBesideAWorkdir(t *testing.T) {
+	e := &Executor{cfg: Config{Workdir: "/srv/work"}}
+	if err := e.safeRepoMount("/workspace"); err == nil {
+		t.Error("safeRepoMount(/workspace) admitted it under a workdir at /srv/work")
+	}
+	if err := e.safeRepoMount("/workspace/repo"); err != nil {
+		t.Errorf("safeRepoMount(/workspace/repo) = %v, want it admitted", err)
 	}
 }
 

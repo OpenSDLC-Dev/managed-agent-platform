@@ -664,8 +664,9 @@ in the code (`sandbox.WritablePaths`) precisely so neither backend can forget on
   hides whatever the image ships under `/workspace`; Docker copies that
   content into its volume. A repository stored before #922 keeps the
   literal path it was given, which can fall outside every path here. The
-  executor refuses one at the uploads or outputs directory, `/mnt/memory`
-  or the shell state root, or at a directory holding one.
+  executor refuses to clone one at `/workspace`, the uploads or outputs
+  directory, `/mnt/memory` or the shell state root, or at a directory
+  holding one.
 
 Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
 existing container removal takes away with the container.

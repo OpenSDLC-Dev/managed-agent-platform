@@ -84,10 +84,11 @@ Every recorded `mount_path`, all on session create:
    reference's behaviour there is unrecorded, so that part is ours.
 5. **Stored deployments keep the path they resolved.** A fire never
    re-resolves a stored path (#849). A deployment stored before this plan
-   mounts its literal path until its resources are sent again. The executor
-   refuses such a path at the uploads or outputs directory, `/mnt/memory`
-   or the shell state root, or at a directory holding one: a re-clone there
-   would remove what the platform keeps beneath it.
+   mounts its literal path until its resources are sent again, and a
+   session created before it keeps its own. The executor refuses to clone
+   one that is `/workspace`, the uploads or outputs directory,
+   `/mnt/memory` or the shell state root, or a directory holding one. A
+   re-clone there would remove what the platform keeps beneath it.
 6. **`/workspace` stays writable and checkpointed.** Every repository mounts
    there whatever the executor's workdir. So a read-only root filesystem
    keeps it writable beside the workdir (`sandbox.WritablePaths`), and an
@@ -97,4 +98,5 @@ Every recorded `mount_path`, all on session create:
 ## Not settled here
 
 The repository cap stays eight, though the reference accepted nine (2026-09-03
-batch1 idx 98). Repository skill discovery is #921.
+batch1 idx 98). Repository skill discovery is #921. A repository stored
+before this plan at a literal path outside `/workspace` is #930.
