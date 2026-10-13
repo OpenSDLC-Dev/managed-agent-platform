@@ -20,6 +20,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // Unit M of plan 25 (docs/plan/25_git-repo-mounting.md, "Verification"): the
@@ -784,7 +787,10 @@ func TestMeteredFSChrootSharesTheBudget(t *testing.T) {
 // let the sandbox resolve it in its own namespace, which is what git does.
 func TestCloneSpoolSymlinks(t *testing.T) {
 	var spent atomic.Int64
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir()) // newCloneFS's root holds no symlink
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	fs := newCloneFS(dir, &spent, 1<<20)
 
 	const target = "/etc/hosts"
@@ -1047,12 +1053,13 @@ func TestRepoCancelledCloneSweepsTheSandbox(t *testing.T) {
 }
 
 // TestRepoZeroShaIsRefused 🔍: the null object id is 40 hex characters, so it
-// passes create-time validation — and go-git's CheckoutOptions.Validate quietly
-// substitutes `master` for a zero hash rather than failing. The clone would
-// then report success while the mount holds a branch nobody asked for, and the
-// session's own resource keeps advertising the sha. (GitHub's webhook payloads
-// carry 40 zeros in `before`/`after` on branch create and delete, so a
-// forwarding app reaches this without inventing anything.)
+// passes create-time validation. go-git's CheckoutOptions.Validate quietly
+// substitutes `master` for a zero hash rather than failing, which once mounted
+// a branch nobody asked for under a resource advertising the sha; the remote
+// refuses a want for it too. It is refused before the remote is asked, so the
+// reason rests on neither. (GitHub's webhook payloads carry 40 zeros in
+// `before`/`after` on branch create and delete, so a forwarding app reaches
+// this without inventing anything.)
 func TestRepoZeroShaIsRefused(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	_, _, cleanup, err := cloneToTar(context.Background(),
@@ -1064,6 +1071,78 @@ func TestRepoZeroShaIsRefused(t *testing.T) {
 	}
 	if got := cloneReason(err); got != repoOutcomeCheckout {
 		t.Errorf("cloneReason = %q, want %q — the sha is the caller's: %v", got, repoOutcomeCheckout, err)
+	}
+	// Refused before the remote is asked: a fetch of the null id fails there
+	// too, but costs a round trip and rests on the host's answer.
+	if n := fx.requests.Load(); n != 0 {
+		t.Errorf("the null commit id was asked of the remote %d time(s)", n)
+	}
+}
+
+// TestRepoNonCommitShaBlamesTheCheckout 🔍: the remote serves a tree or a blob
+// by its id as readily as a commit, and go-git's checkout then fails with an
+// error of its own. The id is the caller's, and names no commit.
+func TestRepoNonCommitShaBlamesTheCheckout(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	head, err := fx.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	commit, err := fx.repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("CommitObject: %v", err)
+	}
+	file, err := commit.File("README.md")
+	if err != nil {
+		t.Fatalf("File: %v", err)
+	}
+	ids := map[string]string{"tree": commit.TreeHash.String(), "blob": file.Hash.String()}
+	// An annotated tag can point at a tree or a blob too, and names no commit
+	// either; go-git's checkout refuses it with the same error of its own.
+	for _, kind := range []string{"tree", "blob"} {
+		tag, err := fx.repo.CreateTag("of-a-"+kind, plumbing.NewHash(ids[kind]), &git.CreateTagOptions{Message: kind,
+			Tagger: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}})
+		if err != nil {
+			t.Fatalf("tag of a %s: %v", kind, err)
+		}
+		ids["tag of a "+kind] = tag.Hash().String()
+	}
+	outer, err := fx.repo.CreateTag("of-a-tag-of-a-tree", plumbing.NewHash(ids["tag of a tree"]), &git.CreateTagOptions{
+		Message: "tag of a tag", Tagger: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}})
+	if err != nil {
+		t.Fatalf("tag of a tag of a tree: %v", err)
+	}
+	ids["tag of a tag of a tree"] = outer.Hash().String()
+	for kind, id := range ids {
+		t.Run(kind, func(t *testing.T) {
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: id}}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if got := cloneReason(err); err == nil || got != repoOutcomeCheckout {
+				t.Errorf("cloneReason = %q, want %q — a %s id names no commit: %v", got, repoOutcomeCheckout, kind, err)
+			}
+		})
+	}
+}
+
+// TestRepoMalformedShaIsRefused 🔍: create admits only forty hex characters,
+// but a stored row is read back here, and the commit fetch puts its sha into a
+// refspec. Anything else would reach the remote as a branch name (`abc`) or
+// break the refspec (`a:b`), so it is refused first, as the caller's.
+func TestRepoMalformedShaIsRefused(t *testing.T) {
+	for _, sha := range []string{"abc", strings.Repeat("a", 39), strings.Repeat("g", 40), "a:" + strings.Repeat("b", 38), strings.Repeat("c", 39) + "*"} {
+		t.Run(sha, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: sha}}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if got := cloneReason(err); err == nil || got != repoOutcomeCheckout {
+				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeCheckout, err)
+			}
+			if n := fx.requests.Load(); n != 0 {
+				t.Errorf("the remote was asked %d time(s)", n)
+			}
+		})
 	}
 }
 
@@ -1096,25 +1175,36 @@ func TestCloneReasonBlamesOurselvesForCancellation(t *testing.T) {
 // or packs for hours holds the executor for as long as it likes, and
 // EXECUTOR_REPO_CLONE_TIMEOUT bounds nothing but the fetch.
 //
-// The three re-checks that bound those phases are deliberately redundant — each
-// one downstream catches what the one before it would have — so no single
-// check's removal changes the outcome, and what this row pins is the bound
-// rather than any one of them. Measured rather than assumed: the row goes red
-// with all three gone, and with the first and the last gone together; each one
-// alone is invisible. The middle check guards the commit checkout, an arm this
-// row does not take, so only the all-three run covers it.
+// The re-checks that bound those phases are deliberately redundant — each one
+// downstream catches what the one before it would have — so no single check's
+// removal changes the outcome, and what each row pins is the bound rather than
+// any one of them. Measured rather than assumed: the default arm passes two,
+// the one after the clone and the tar walk's, and goes red with both gone; each
+// alone is invisible. The commit arm passes fetchCommit's, before its
+// checkout, as well, and goes red with all three gone.
 func TestRepoCloneStopsOnASpentBudgetAfterTheFetch(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-	ctx := spentAfterFetch{Context: context.Background(), fetched: &fx.clones}
-
-	tarPath, size, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
-	defer cleanup()
-	if err == nil {
-		t.Fatalf("a clone whose budget expired after the fetch ran to completion, packing %s (%d bytes)",
-			tarPath, size)
+	head, err := fx.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
 	}
-	if got := cloneReason(err); got != repoOutcomeTimeout {
-		t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
+	for arm, checkout := range map[string]*repoCheckout{
+		"default branch": nil,
+		"commit":         {Type: "commit", Sha: head.Hash().String()},
+	} {
+		t.Run(arm, func(t *testing.T) {
+			fx.clones.Store(0) // the other row's fetch would spend this one up front
+			ctx := spentAfterFetch{Context: context.Background(), fetched: &fx.clones}
+			tarPath, size, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url(), Checkout: checkout}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if err == nil {
+				t.Fatalf("a clone whose budget expired after the fetch ran to completion, packing %s (%d bytes)",
+					tarPath, size)
+			}
+			if got := cloneReason(err); got != repoOutcomeTimeout {
+				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
+			}
+		})
 	}
 }
 
@@ -1144,18 +1234,77 @@ func (c spentAfterFetch) Err() error {
 // something that is not a git response, which is what a captive portal, an
 // outage page, or a proxy that swallowed the repository does.
 func TestCloneReasonBlamesTheRightSide(t *testing.T) {
-	t.Run("malformed branch name", func(t *testing.T) {
+	// A wildcard would build a refspec that fetches every branch's tree before
+	// the checkout fails, so each name is refused before the remote is asked.
+	for _, name := range []string{"foo:bar", "*", "feature/*"} {
+		t.Run("malformed branch name "+name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: name}},
+				"ghp_fixture", 1<<30)
+			defer cleanup()
+			if err == nil {
+				t.Fatalf("branch %q cloned successfully", name)
+			}
+			if got := cloneReason(err); got != repoOutcomeCheckout {
+				t.Errorf("cloneReason = %q, want %q — the ref is the caller's, not ours: %v",
+					got, repoOutcomeCheckout, err)
+			}
+			if n := fx.requests.Load(); n != 0 {
+				t.Errorf("the remote was asked %d time(s) about branch %q", n, name)
+			}
+		})
+	}
+
+	// A name git admits but go-git cannot carry is our limit, not the caller's
+	// mistake, so it is refused before the remote is asked, as `internal`.
+	// go-git builds a branch's refspec from Short(), which stops at a non-ASCII
+	// space and would fetch another branch's tree. `EOF` in a name must not
+	// read as the network's.
+	nbsp, emsp := string(rune(0x00a0)), string(rune(0x2003))
+	for _, name := range []string{"feat" + nbsp + "x", "feat" + emsp + "x", "fix/EOF" + nbsp + "crash"} {
+		t.Run("branch name go-git cannot carry "+name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			fx.branch(t, "feat", map[string]string{"feat.txt": "x\n"})
+			head, err := fx.repo.Head()
+			if err != nil {
+				t.Fatalf("Head: %v", err)
+			}
+			if err := fx.repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(name), head.Hash())); err != nil {
+				t.Fatalf("SetReference: %v", err)
+			}
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: name}}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
+				t.Errorf("cloneReason = %q, want %q — the limit is go-git's: %v", got, repoOutcomeInternal, err)
+			}
+			if n := fx.requests.Load(); n != 0 {
+				t.Errorf("the remote was asked %d time(s)", n)
+			}
+		})
+	}
+	// The caller named no branch at all, so go-git refusing the remote's
+	// default branch name, which git admits, cannot be the caller's checkout.
+	t.Run("default branch go-git refuses", func(t *testing.T) {
 		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-		_, _, cleanup, err := cloneToTar(context.Background(),
-			repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: "foo:bar"}},
-			"ghp_fixture", 1<<30)
-		defer cleanup()
-		if err == nil {
-			t.Fatal("a branch name with a refspec separator cloned successfully")
+		head, err := fx.repo.Head()
+		if err != nil {
+			t.Fatalf("Head: %v", err)
 		}
-		if got := cloneReason(err); got != repoOutcomeCheckout {
-			t.Errorf("cloneReason = %q, want %q — the ref is the caller's, not ours: %v",
-				got, repoOutcomeCheckout, err)
+		at := plumbing.ReferenceName("refs/heads/feature/@/topic")
+		for _, ref := range []*plumbing.Reference{
+			plumbing.NewHashReference(at, head.Hash()),
+			plumbing.NewSymbolicReference(plumbing.HEAD, at),
+		} {
+			if err := fx.repo.Storer.SetReference(ref); err != nil {
+				t.Fatalf("SetReference: %v", err)
+			}
+		}
+		_, _, cleanup, err := cloneToTar(context.Background(), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if got := cloneReason(err); err == nil || got != repoOutcomeInternal {
+			t.Errorf("cloneReason = %q, want %q — no checkout was named: %v", got, repoOutcomeInternal, err)
 		}
 	})
 

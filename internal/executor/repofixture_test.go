@@ -1,12 +1,16 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 
 	"net/http"
+	"net/http/cgi"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -18,20 +22,19 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
-	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
-	"github.com/go-git/go-git/v5/plumbing/transport"
-	"github.com/go-git/go-git/v5/plumbing/transport/server"
-	"github.com/go-git/go-git/v5/storage"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 )
 
 // gitFixture is a real repository served over real smart-HTTP, so the clone
 // path under test is the production one end to end: go-git's own client speaks
-// to go-git's own server-side transport through a hand-written pkt-line shim
-// (the library ships the server as a transport.Transport, not an http.Handler,
-// and its own ServeUploadPack lives in an internal package).
+// to git's own `git http-backend`, the upload-pack GitHub runs, behind
+// net/http/cgi. go-git's server-side transport would be the dependency-free
+// choice, but it refuses a shallow request outright and cannot answer one
+// (#582), and every clone asks for depth 1. `make test` already needs git
+// (tools/sdkref asks it which files are tracked); this needs its http-backend
+// helper too, which some distributions package apart from git, and without
+// it these tests fail rather than skip.
 //
 // Failure modes are handler-level, which is what lets one fixture drive every
 // adversarial row: status answers the auth and not-found reasons, a stall
@@ -40,15 +43,16 @@ type gitFixture struct {
 	srv  *httptest.Server
 	dir  string
 	repo *git.Repository
-	// storer is the repository's own object store, handed straight to the
-	// server-side transport: the filesystem loader would want a bare layout
-	// under a chroot of the endpoint's path, and this fixture keeps a working
-	// tree so it can commit.
-	storer storage.Storer
+	// backend serves the repository's gitdir, which sits at the URL's path
+	// under the backend's project root, so the two need no mapping.
+	backend *cgi.Handler
 
 	// clones counts POSTs to the upload-pack endpoint — one per real clone,
 	// which is how m-idempotence proves a second pass fetched nothing.
 	clones atomic.Int64
+	// requests counts every request, the ref advertisement's included — how a
+	// row proves the remote was never asked.
+	requests atomic.Int64
 	// status, when non-zero, is answered instead of serving the repository.
 	status atomic.Int64
 	// echoAuth makes the refusal body quote the credentials it was given, both
@@ -74,13 +78,36 @@ func newGitFixture(t *testing.T, files map[string]string) *gitFixture {
 	// nested, so handing the storer to git.Init does not collide with the
 	// gitdir link it writes into the worktree.
 	base := t.TempDir()
-	storer := filesystem.NewStorage(osfs.New(filepath.Join(base, "git")), cache.NewObjectLRUDefault())
+	storer := filesystem.NewStorage(osfs.New(filepath.Join(base, "o", "r.git")), cache.NewObjectLRUDefault())
 	dir := filepath.Join(base, "tree")
 	repo, err := git.Init(storer, osfs.New(dir))
 	if err != nil {
 		t.Fatalf("git.Init: %v", err)
 	}
-	f := &gitFixture{dir: dir, repo: repo, storer: storer}
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("the fixture serves through git http-backend: %v", err)
+	}
+	env := []string{
+		"GIT_PROJECT_ROOT=" + base, "GIT_HTTP_EXPORT_ALL=1",
+		"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1",
+	}
+	// Some distributions package the helper apart from git. Without it every
+	// request answers 500, which would read as the network's failure. It is
+	// asked for the way the handler runs it, so git finds it, or does not,
+	// exactly as it then will.
+	probe := exec.Command(gitBin, "http-backend")
+	probe.Env = env
+	if out, _ := probe.CombinedOutput(); bytes.Contains(out, []byte("is not a git command")) {
+		t.Fatalf("the fixture serves through git's http-backend helper, which is not installed: %s", out)
+	}
+	f := &gitFixture{dir: dir, repo: repo, backend: &cgi.Handler{
+		// GitHub answers a want for a commit no ref names; git's own
+		// upload-pack does only when told to. `-c` reaches the upload-pack the
+		// backend runs, on any git version.
+		Path: gitBin, Args: []string{"-c", "uploadpack.allowReachableSHA1InWant=true", "http-backend"},
+		Env: env,
+	}}
 	f.commit(t, "initial", files)
 
 	mux := http.NewServeMux()
@@ -145,14 +172,20 @@ func (f *gitFixture) branch(t *testing.T, name string, files map[string]string) 
 	}
 }
 
-// serve is the smart-HTTP shim: the two requests a clone makes, and the
-// handler-level failure modes the adversarial rows drive.
+// serve is git http-backend behind the handler-level failure modes the
+// adversarial rows drive.
 func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
+	f.requests.Add(1)
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		f.sawAuth.Store(auth)
 	}
 	if d := f.stall.Load(); d > 0 {
-		time.Sleep(time.Duration(d))
+		// Until the client gives up, so a long stall holds up no test's cleanup.
+		select {
+		case <-time.After(time.Duration(d)):
+		case <-r.Context().Done():
+			return
+		}
 	}
 	if want, _ := f.wantAuth.Load().(string); want != "" && r.Header.Get("Authorization") != want {
 		http.Error(w, "bad credentials", http.StatusUnauthorized)
@@ -172,47 +205,15 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ep, err := transport.NewEndpoint(f.srv.URL + "/o/r.git")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	sess, err := server.NewServer(server.MapLoader{ep.String(): f.storer}).NewUploadPackSession(ep, nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	ctx := r.Context()
-
-	switch {
-	case strings.HasSuffix(r.URL.Path, "/info/refs"):
-		ar, err := sess.AdvertisedReferencesContext(ctx)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		// The advertisement's service prefix — without it the client's
-		// decodePrefix cannot parse a smart-HTTP response.
-		ar.Prefix = [][]byte{[]byte("# service=git-upload-pack\n"), pktline.Flush}
-		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
-		_ = ar.Encode(w)
-	case strings.HasSuffix(r.URL.Path, "/git-upload-pack"):
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-upload-pack") {
 		f.clones.Add(1)
-		req := packp.NewUploadPackRequest()
-		if err := req.Decode(r.Body); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		resp, err := sess.UploadPack(ctx, req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
-		_ = resp.Encode(w)
-	default:
-		http.NotFound(w, r)
 	}
+	// The suffix-less spelling a github_repository resource carries names the
+	// same repository, as it does on GitHub.
+	if rest, ok := strings.CutPrefix(r.URL.Path, "/o/r/"); ok {
+		r.URL.Path = "/o/r.git/" + rest
+	}
+	f.backend.ServeHTTP(w, r)
 }
 
 // seedRepoResource stores a github_repository resource on the harness session

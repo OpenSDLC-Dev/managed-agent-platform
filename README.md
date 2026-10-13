@@ -92,9 +92,11 @@ search tests start a `postgres:16-alpine` one too, and one built from
 that drive the daemon through the `docker` CLI rather than its HTTP API — the
 storage, API, sandbox and toolset ones — need that binary on PATH as well. The Kubernetes
 sandbox provider's contract test additionally needs a cluster — a local
-[kind](https://kind.sigs.k8s.io) cluster works, and CI provisions one. A missing
-daemon, binary or cluster is a hard test failure, not a skip, so the coverage
-gate cannot be hollowed out.
+[kind](https://kind.sigs.k8s.io) cluster works, and CI provisions one. The
+executor's repository tests serve a real repository through git's
+`http-backend` helper, which some distributions package apart from git. A
+missing daemon, binary or cluster is a hard test failure, not a skip, so the
+coverage gate cannot be hollowed out.
 
 The executor and the worker embed the static ripgrep their `grep` tool runs in
 a sandbox. It is fetched, not committed: `make ripgrep` downloads the pinned

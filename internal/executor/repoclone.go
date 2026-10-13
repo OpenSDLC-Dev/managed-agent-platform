@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/filesystem"
@@ -30,6 +31,18 @@ import (
 // post-hoc size check: an adversarial repository would otherwise be free to
 // blow far past the cap before anyone measured it (plan 25 decision 1).
 var errCloneTooLarge = errors.New("clone exceeded the byte budget")
+
+// errBranchName marks a branch checkout refused before the remote is asked,
+// for a name go-git's ref-name check refuses: git's rules, a leading `-`, which
+// git's branch-name check refuses too, and a lone `@` component, which git
+// admits. The caller named the branch and can rename it, so it reads as the
+// caller's; go-git's own ErrInvalidReferenceName does not, since it also
+// refuses a default branch the caller never named.
+var errBranchName = errors.New("invalid branch name")
+
+// errBranchUnsupported marks a branch checkout refused before the remote is
+// asked, for a name git admits but go-git cannot carry. The limit is ours.
+var errBranchUnsupported = errors.New("go-git cannot carry the branch name")
 
 // tokenUsername is the username GitHub expects beside a personal access token
 // in HTTP basic auth. The token rides the Authorization header of each request
@@ -51,7 +64,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	// Every error out of here is logged by the caller, and the ones go-git
 	// builds from a refusing host's response body can quote the credential
 	// straight back at us. Scrubbed once, at the boundary, rather than at each
-	// of the seven returns below.
+	// return below.
 	defer func() { err = scrubTokenErr(err, token) }()
 
 	spool, err := os.MkdirTemp("", "map-repo-clone-")
@@ -59,6 +72,15 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		return "", 0, func() {}, err
 	}
 	cleanup = func() { _ = os.RemoveAll(spool) }
+	// BoundOS refuses a path that resolves outside its root, and a file whose
+	// parent is not yet made resolves only partway. Under a temp dir reached
+	// through a symlink, as macOS's is, every nested file of a checkout read as
+	// outside, so the root is the resolved spool.
+	resolved, err := filepath.EvalSymlinks(spool)
+	if err != nil {
+		return "", 0, cleanup, err
+	}
+	spool = resolved
 
 	var spent atomic.Int64
 	tree := newCloneFS(filepath.Join(spool, "tree"), &spent, maxBytes)
@@ -68,52 +90,54 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	}
 	storer := filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault())
 
-	opts := &git.CloneOptions{
-		URL:  r.URL,
-		Auth: &githttp.BasicAuth{Username: tokenUsername, Password: token},
+	// Every checkout is depth 1 (plan 63): the requested commit and its tree
+	// travel, with the tag objects an id that names a tag goes through, and no
+	// history. The reference's default-branch checkout was
+	// recorded shallow (#582); the branch and commit forms follow it by our
+	// choice. A branch checkout fetches that branch; omitted means the remote's
+	// own HEAD — the default branch, resolved here rather than at create (plan
+	// 25 decisions 3 and 7); a commit is fetched by its exact SHA (fetchCommit).
+	auth := &githttp.BasicAuth{Username: tokenUsername, Password: token}
+	var repo *git.Repository
+	var defaultBranch bool
+	if r.Checkout != nil && r.Checkout.Type == "commit" {
+		repo, err = fetchCommit(ctx, storer, tree, r.URL, auth, r.Checkout.Sha)
+	} else {
+		// No tags: go-git's default fetches every one, each with the tree of its
+		// commit, which would bring back the history depth 1 leaves out.
+		opts := &git.CloneOptions{URL: r.URL, Auth: auth, Depth: 1, SingleBranch: true, Tags: git.NoTags}
+		if r.Checkout != nil && r.Checkout.Type == "branch" {
+			opts.ReferenceName = plumbing.NewBranchReferenceName(r.Checkout.Name)
+			// A name go-git's ref-name check refuses is the caller's to rename
+			// (errBranchName), and one with a wildcard would fetch every
+			// branch's tree before the checkout failed, so it is refused before
+			// the remote is asked.
+			if err := opts.ReferenceName.Validate(); err != nil {
+				return "", 0, cleanup, fmt.Errorf("%w %q: %w", errBranchName, r.Checkout.Name, err)
+			}
+			// git admits a non-ASCII space, but go-git builds the refspec from
+			// Short(), which stops at one and would fetch another branch's tree.
+			if opts.ReferenceName.Short() != r.Checkout.Name {
+				return "", 0, cleanup, fmt.Errorf("%w %q", errBranchUnsupported, r.Checkout.Name)
+			}
+		}
+		defaultBranch = opts.ReferenceName == ""
+		repo, err = git.CloneContext(ctx, storer, tree, opts)
 	}
-	// A branch checkout fetches only that branch; a commit checkout needs
-	// arbitrary history, so it clones fully and detaches afterwards. Omitted
-	// means the remote's own HEAD — the default branch, resolved here rather
-	// than at create (plan 25 decisions 3 and 7).
-	if r.Checkout != nil && r.Checkout.Type == "branch" {
-		opts.ReferenceName = plumbing.NewBranchReferenceName(r.Checkout.Name)
-		opts.SingleBranch = true
-	}
-	repo, err := git.CloneContext(ctx, storer, tree, opts)
 	if err != nil {
 		return "", 0, cleanup, err
 	}
 	// go-git applies the context to transport only — its post-fetch worktree
-	// reset runs to completion whatever the deadline says — so the phases after
-	// it are bounded here instead. Without this a repository that downloads
-	// inside the deadline and then checks out or packs for hours would hold the
-	// executor indefinitely, and the deadline would bound nothing but the fetch.
+	// reset and a commit's checkout run to completion whatever the deadline
+	// says — so the phases after it are bounded here instead. Without this a
+	// repository that downloads inside the deadline and then checks out or
+	// packs for hours would hold the executor indefinitely, and the deadline
+	// would bound nothing but the fetch.
 	if err := ctx.Err(); err != nil {
 		return "", 0, cleanup, err
 	}
-	if r.Checkout != nil && r.Checkout.Type == "commit" {
-		hash := plumbing.NewHash(r.Checkout.Sha)
-		// The null object id is forty hex characters, so it passes the create
-		// endpoint's sha validation — and go-git's CheckoutOptions.Validate
-		// substitutes `master` for a zero hash rather than refusing it. Left
-		// alone, a session asking for 000…0 would be told its clone succeeded
-		// while the mount held a branch nobody named. (GitHub's webhooks put
-		// forty zeros in `before`/`after` on branch create and delete, so a
-		// forwarding app reaches this without inventing anything.)
-		if hash.IsZero() {
-			return "", 0, cleanup, fmt.Errorf("%w: the null commit id %s", plumbing.ErrObjectNotFound, r.Checkout.Sha)
-		}
-		wt, werr := repo.Worktree()
-		if werr != nil {
-			return "", 0, cleanup, werr
-		}
-		if werr := wt.Checkout(&git.CheckoutOptions{Hash: hash}); werr != nil {
-			return "", 0, cleanup, werr
-		}
-		if err := ctx.Err(); err != nil {
-			return "", 0, cleanup, err
-		}
+	if err := shapeCheckout(repo, r.URL, defaultBranch); err != nil {
+		return "", 0, cleanup, err
 	}
 
 	tarPath = filepath.Join(spool, "repo.tar")
@@ -122,6 +146,162 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		return "", 0, cleanup, err
 	}
 	return tarPath, size, cleanup, nil
+}
+
+// fetchCommit fetches the one commit sha names, at depth 1, into a fresh
+// repository and checks it out detached. GitHub answers a want for any commit
+// in the repository's fork network, a fork's own included (plan 63), so a
+// commit needs no more history than a branch does. The
+// commit lands under a scratch ref, removed once HEAD holds it, so the checkout
+// carries no ref beside its detached HEAD.
+func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Filesystem,
+	url string, auth transport.AuthMethod, sha string) (*git.Repository, error) {
+	// Create admits forty hex characters only, but the row is read back here
+	// and the sha goes into a refspec: anything else would reach the remote as
+	// a branch name, or break the refspec.
+	if !plumbing.IsHash(sha) {
+		return nil, fmt.Errorf("%w: %q is not a commit id", plumbing.ErrObjectNotFound, sha)
+	}
+	hash := plumbing.NewHash(sha)
+	// The null object id is forty hex characters, so it passes the create
+	// endpoint's sha validation. go-git's CheckoutOptions.Validate substitutes
+	// `master` for a zero hash rather than refusing it, and the remote refuses
+	// a want for it; refused here first, the reason rests on neither and costs
+	// no round trip. (GitHub's webhooks put forty zeros in `before`/`after` on
+	// branch create and delete, so a forwarding app reaches this without
+	// inventing anything.)
+	if hash.IsZero() {
+		return nil, fmt.Errorf("%w: the null commit id %s", plumbing.ErrObjectNotFound, sha)
+	}
+	repo, err := git.Init(storer, tree)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{url}}); err != nil {
+		return nil, err
+	}
+	// Directly under refs/, which Init made, so removing the ref leaves no
+	// directory of ours behind.
+	const scratch = plumbing.ReferenceName("refs/map-checkout")
+	err = repo.FetchContext(ctx, &git.FetchOptions{
+		RemoteName: "origin", Auth: auth, Depth: 1,
+		RefSpecs: []config.RefSpec{config.RefSpec(hash.String() + ":" + scratch.String())},
+	})
+	// The remote refuses a commit it does not have in words go-git carries as
+	// plain text, with no sentinel to match. The sha is the caller's.
+	if err != nil && strings.Contains(err.Error(), "not our ref") {
+		return nil, fmt.Errorf("%w: %w", plumbing.ErrObjectNotFound, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// The id may name an annotated tag, at any depth of tags, which git peels
+	// to what it names; go-git's checkout peels one level only, so the chain
+	// is peeled here. The remote serves a tree or a blob by its id as readily
+	// as a commit, and a tag of one: such an id is the caller's, and names no
+	// commit, where go-git's checkout would refuse it with an error that reads
+	// as ours.
+	obj, err := repo.Object(plumbing.AnyObject, hash)
+	for err == nil && obj.Type() == plumbing.TagObject {
+		// A chain of tags is as long as the byte budget lets it be.
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		obj, err = obj.(*object.Tag).Object()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if t := obj.Type(); t == plumbing.TreeObject || t == plumbing.BlobObject {
+		return nil, fmt.Errorf("%w: %s names a %s, not a commit", plumbing.ErrObjectNotFound, sha, t)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		return nil, err
+	}
+	if err := wt.Checkout(&git.CheckoutOptions{Hash: obj.ID()}); err != nil {
+		return nil, err
+	}
+	return repo, repo.Storer.RemoveReference(scratch)
+}
+
+// shapeCheckout gives a checkout the .git/config and refs the reference's
+// carried (#582): `origin` and GitHub CLI's base remote `github`, both at the
+// URL's `.git` spelling and fetching every branch, automatic gc off, and the
+// core keys `git init` writes. A branch checkout keeps the upstream and the
+// remote-tracking ref go-git's clone gives it, as `git clone --branch` leaves
+// them; a default-branch checkout (defaultBranch) gets trackDefaultBranch's.
+// No credential is written: the token only ever rides a request header.
+func shapeCheckout(repo *git.Repository, url string, defaultBranch bool) error {
+	if !strings.HasSuffix(url, ".git") {
+		url += ".git"
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		return err
+	}
+	cfg.Remotes = map[string]*config.RemoteConfig{}
+	for _, name := range []string{"origin", "github"} {
+		cfg.Remotes[name] = &config.RemoteConfig{Name: name, URLs: []string{url},
+			Fetch: []config.RefSpec{config.RefSpec(fmt.Sprintf(config.DefaultFetchRefSpec, name))}}
+	}
+	cfg.Raw.Section("gc").SetOption("auto", "0")
+	core := cfg.Raw.Section("core")
+	core.SetOption("repositoryformatversion", "0")
+	core.SetOption("filemode", "true")
+	core.SetOption("logallrefupdates", "true")
+	if defaultBranch {
+		if err := trackDefaultBranch(repo); err != nil {
+			return err
+		}
+	}
+	if err := repo.SetConfig(cfg); err != nil {
+		return err
+	}
+	// A remote's subsection is rebuilt from its typed fields on every write,
+	// so the one key go-git has no field for goes in a second write, after the
+	// first has made the subsection raw configuration go-git keeps.
+	if cfg, err = repo.Config(); err != nil {
+		return err
+	}
+	cfg.Raw.Section("remote").Subsection("github").SetOption("gh-resolved", "base")
+	return repo.SetConfig(cfg)
+}
+
+// trackDefaultBranch leaves a default-branch checkout's refs as `git clone`
+// does: the branch's remote-tracking ref, and origin/HEAD naming it as the
+// remote's default. go-git's clone leaves origin/HEAD a plain ref instead,
+// which goes first. `git clone` leaves no origin/HEAD at all when the remote's
+// HEAD names no branch, which leaves the checkout detached, or for a branch
+// named HEAD/<x>, whose tracking ref needs origin/HEAD's name as a directory.
+// A branch named HEAD would track as origin/HEAD itself, which git 2.54
+// leaves naming itself; this writes neither ref for it instead.
+func trackDefaultBranch(repo *git.Repository) error {
+	remoteHEAD := plumbing.NewRemoteHEADReferenceName("origin")
+	if err := repo.Storer.RemoveReference(remoteHEAD); err != nil {
+		return err
+	}
+	head, err := repo.Head()
+	if err != nil || !head.Name().IsBranch() {
+		return err
+	}
+	// Not Short(), which scans the name and stops at any space a branch name
+	// may hold, a non-breaking one included.
+	branch := strings.TrimPrefix(head.Name().String(), "refs/heads/")
+	if branch == "HEAD" {
+		return nil
+	}
+	tracking := plumbing.NewRemoteReferenceName("origin", branch)
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(tracking, head.Hash())); err != nil {
+		return err
+	}
+	if strings.HasPrefix(branch, "HEAD/") {
+		return nil
+	}
+	return repo.Storer.SetReference(plumbing.NewSymbolicReference(remoteHEAD, tracking))
 }
 
 // packTree writes dir's contents to a tar file with paths relative to dir, so
@@ -223,6 +403,10 @@ func cloneReason(err error) string {
 	// would otherwise be counted and logged as the git host's failure.
 	case errors.Is(err, context.Canceled):
 		return repoOutcomeInternal
+	// Its message quotes the caller's branch name, which the network arm's
+	// text match below could take for the host's failure.
+	case errors.Is(err, errBranchUnsupported):
+		return repoOutcomeInternal
 	case errors.Is(err, transport.ErrAuthenticationRequired),
 		errors.Is(err, transport.ErrAuthorizationFailed):
 		return repoOutcomeAuth
@@ -232,12 +416,10 @@ func cloneReason(err error) string {
 	case errors.Is(err, plumbing.ErrObjectNotFound),
 		errors.Is(err, plumbing.ErrReferenceNotFound),
 		errors.Is(err, git.NoMatchingRefSpecError{}),
-		// A checkout descriptor go-git will not even build a refspec from —
-		// `foo:bar` as a branch name, say. It is the caller's ref that is
-		// wrong, so `internal` would send the operator to read our logs over
-		// their own typo.
-		errors.Is(err, config.ErrRefSpecMalformedSeparator),
-		errors.Is(err, config.ErrRefSpecMalformedWildcard):
+		// A branch name go-git's ref-name check refuses — `foo:bar`, say. It
+		// is the caller's ref that is wrong, so `internal` would send the
+		// operator to read our logs over their own typo.
+		errors.Is(err, errBranchName):
 		return repoOutcomeCheckout
 	case isRemoteStatusError(err), isNetworkError(err), isProtocolError(err):
 		return repoOutcomeNetwork
@@ -370,6 +552,10 @@ func newMeteredFS(inner billy.Filesystem, spent *atomic.Int64, limit int64) bill
 // reported success, which the `.git` probe then trusts forever. BoundOS keeps
 // the target verbatim while still refusing to escape the root, which is what
 // git does and what the sandbox needs to resolve the link in its own namespace.
+//
+// root must hold no symlink: BoundOS resolves a path only as far as it exists,
+// so under a symlinked root a file in a directory not yet made reads as
+// outside it. cloneToTar resolves its spool first.
 func newCloneFS(root string, spent *atomic.Int64, limit int64) billy.Filesystem {
 	return newMeteredFS(osfs.New(root, osfs.WithBoundOS()), spent, limit)
 }
