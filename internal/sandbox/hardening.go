@@ -171,10 +171,11 @@ const ShellStateRoot = "/var/lib/map-shell"
 // docs/self-hosted-security.md §4 states rather than guessing at here.
 const sessionResourceRoot = "/mnt"
 
-// repositoryRoot is where every repository mounts: since #922 create roots
-// each mount_path under it, whatever the workdir. Under the default workdir
-// it is the workdir, and the dedupe below folds the two.
-const repositoryRoot = "/workspace"
+// RepositoryRoot is where every repository mounts: since #922 create roots
+// each mount_path under it (internal/api's defaultRepoMountRoot, which a test
+// holds to this), whatever the workdir. Under the default workdir it is the
+// workdir, and the dedupe below folds the two.
+const RepositoryRoot = "/workspace"
 
 // WritablePaths are the mount points a read-only-rootfs sandbox still needs to
 // write, in the order a backend should mount them. Both backends take the list
@@ -189,7 +190,9 @@ func WritablePaths(workdir string) []string {
 		workdir = DefaultWorkdir
 	}
 	out := make([]string, 0, 5)
-	for _, p := range []string{gopath.Clean(workdir), "/tmp", ShellStateRoot, sessionResourceRoot, repositoryRoot} {
+	// RepositoryRoot leads, so a workdir below it is mounted after it rather
+	// than hidden by it.
+	for _, p := range []string{RepositoryRoot, gopath.Clean(workdir), "/tmp", ShellStateRoot, sessionResourceRoot} {
 		if !slices.Contains(out, p) {
 			out = append(out, p)
 		}

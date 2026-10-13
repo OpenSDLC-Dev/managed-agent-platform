@@ -272,8 +272,8 @@ func (h *harness) repoErrors(t *testing.T) []map[string]any {
 	return out
 }
 
-// runPass drives one whole work item — provision, materialize (skills, then
-// repositories, then files), run the tool — so every repository row observes
+// runPass drives one whole work item — provision, materialize (repositories,
+// then skills, then files), run the tool — so every repository row observes
 // the production sequence rather than a materializer called in isolation.
 func (h *harness) runPass(t *testing.T) {
 	t.Helper()

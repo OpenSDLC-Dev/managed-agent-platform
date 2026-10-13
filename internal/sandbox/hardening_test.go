@@ -254,6 +254,10 @@ func TestWritablePaths(t *testing.T) {
 	if got := sandbox.WritablePaths("/srv/work"); !slices.Contains(got, "/workspace") {
 		t.Errorf("WritablePaths(%q) = %v, want /workspace, where repositories mount", "/srv/work", got)
 	}
+	// A workdir below /workspace is mounted after it, not hidden by it.
+	if got := sandbox.WritablePaths("/workspace/agent"); slices.Index(got, "/workspace") > slices.Index(got, "/workspace/agent") {
+		t.Errorf("WritablePaths(%q) = %v, want /workspace before the workdir below it", "/workspace/agent", got)
+	}
 	// An empty workdir is the same default the providers resolve.
 	if got := sandbox.WritablePaths(""); !slices.Contains(got, sandbox.DefaultWorkdir) {
 		t.Errorf("WritablePaths(\"\") = %v, want the default workdir", got)

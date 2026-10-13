@@ -18,6 +18,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
@@ -39,11 +40,19 @@ const repoMount = "/workspace/fixture"
 // provider, a session already running, and the container torn down afterwards.
 func dockerRepoHarness(t *testing.T) (*harness, *docker.Provider) {
 	t.Helper()
+	return wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider { return p })
+}
+
+// wrappedRepoHarness is dockerRepoHarness with the executor's provider wrapped,
+// so a test can stand between the executor and the sandbox; the Docker
+// provider comes back unwrapped, for reading what a pass left.
+func wrappedRepoHarness(t *testing.T, wrap func(sandbox.Provider) sandbox.Provider) (*harness, *docker.Provider) {
+	t.Helper()
 	provider, err := docker.New(docker.Config{})
 	if err != nil {
 		t.Fatalf("this test requires Docker: %v", err)
 	}
-	h := newHarnessWith(t, provider, Config{Image: testImage})
+	h := newHarnessWith(t, wrap(provider), Config{Image: testImage})
 	t.Cleanup(func() {
 		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
 		if err == nil {
@@ -854,11 +863,11 @@ func writeTo(t *testing.T, fs billy.Filesystem, name string, n int) (string, err
 // TestRepoRefusesADestructiveMountPath 🔍: the executor validates the mount
 // path itself before building a command that runs `rm -rf` on it.
 //
-// Create-time validation never yields any of these, since it roots every path
-// under /workspace (#922), so reaching the executor means the stored row came
-// from another route or was tampered with — which is exactly when the second
-// check earns its place, because the operation on the other side is
-// destructive and irreversible. `/workspace/repo/..` cleans to `/workspace` and
+// Create-time validation never yields the first six, since it roots every
+// path under /workspace (#922): reaching the executor, they come from another
+// route or a tampered row. The rest are paths create accepts and only the
+// executor knows to refuse. Either way the second check earns its place,
+// because the operation on the other side is destructive and irreversible. `/workspace/repo/..` cleans to `/workspace` and
 // would delete the whole workspace; `/tmp` is the platform's own sandbox
 // staging root and would take every in-flight tar with it.
 func TestRepoRefusesADestructiveMountPath(t *testing.T) {
@@ -872,8 +881,10 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 		// Another repository's staging path, which this one's extraction
 		// removes twice.
 		"/workspace/.x.map-repo-staging",
-		// The skills sentinel, which the skills step writes as a file.
+		// The materialization sentinels, which the skills and files steps
+		// write as files.
 		"/workspace/skills/.materialized", "/workspace/skills/.materialized/x",
+		"/workspace/.files_materialized", "/workspace/.files_materialized/x",
 	} {
 		t.Run(mount, func(t *testing.T) {
 			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
@@ -941,68 +952,89 @@ func TestRepoSharesTheSkillsDirectory(t *testing.T) {
 	}
 }
 
-// TestRepoClonesUnderSkillsOnlyOnceTheSentinelIsGone 🔍: a clone at a skill's
-// own directory goes ahead only once the skills sentinel is gone. Landed
-// first, a clone whose executor died, or whose drop failed, before the
-// sentinel went would leave the checkout's SKILL.md vouched for, and the
-// skill lost for good (#922). A run with no skills has no sentinel to drop.
-func TestRepoClonesUnderSkillsOnlyOnceTheSentinelIsGone(t *testing.T) {
-	const mount = "/workspace/skills/pdf"
-	setup := func(t *testing.T, skilled bool) (*harness, *docker.Provider, *sentinelProvider, *gitFixture) {
+// TestRepoDropsTheSkillsSentinelWithTheTreeItReplaces 🔍: a clone at or below
+// the skills directory drops the skills sentinel inside the extraction that
+// replaces the old tree, just before the old tree goes (#922). So a removal
+// that fails stops the extraction with nothing lost, and the client sees a
+// clone failure; a clone that fails before the extraction leaves the sentinel,
+// and the agent's edits to its skills, alone; a checkout's own
+// `.materialized` never lands as the marker; and a run with no skills drops
+// nothing.
+func TestRepoDropsTheSkillsSentinelWithTheTreeItReplaces(t *testing.T) {
+	setup := func(t *testing.T, skill, repo map[string]string, mount string, checkout map[string]any) (*harness, sandbox.Sandbox, *sentinelProvider, *gitFixture) {
 		t.Helper()
-		provider, err := docker.New(docker.Config{})
-		if err != nil {
-			t.Fatalf("this test requires Docker: %v", err)
-		}
-		wrapped := &sentinelProvider{Provider: provider}
-		h := newHarnessWith(t, wrapped, Config{Image: testImage})
-		t.Cleanup(func() {
-			sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
-			if err == nil {
-				_ = sb.Destroy(context.Background())
-			}
+		wrapped := &sentinelProvider{}
+		h, provider := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+			wrapped.Provider = p
+			return wrapped
 		})
-		fx := newGitFixture(t, map[string]string{"README.md": "repo\n", "SKILL.md": "the checkout's\n"})
-		if skilled {
-			h.seedSkill(t, "skill_root", "1", "pdf", map[string]string{"SKILL.md": "# pdf"})
+		if skill != nil {
+			h.seedSkill(t, "skill_root", "1", "pdf", skill)
 			h.refSkills(t, [2]string{"skill_root", "1"})
 		}
-		h.seedRepoResource(t, "sesrsc_skills", fx.url(), mount, "ghp_fixture", nil)
-		return h, provider, wrapped, fx
+		fx := newGitFixture(t, repo)
+		h.seedRepoResource(t, "sesrsc_skills", fx.url(), mount, "ghp_fixture", checkout)
+		h.runPass(t)
+		return h, adopt(t, provider, h), wrapped, fx
 	}
+	exec := func(t *testing.T, sb sandbox.Sandbox, command string) {
+		t.Helper()
+		if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: command}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("%s: %+v, %v", command, res, err)
+		}
+	}
+	pdf := map[string]string{"SKILL.md": "# pdf", "ref.md": "ref"}
+	checkout := map[string]string{"README.md": "repo\n", "SKILL.md": "the checkout's\n"}
 
-	t.Run("refused drops", func(t *testing.T) {
-		h, provider, wrapped, fx := setup(t, true)
+	t.Run("a refused drop", func(t *testing.T) {
+		const mount = "/workspace/skills/pdf"
+		h, sb, wrapped, _ := setup(t, pdf, checkout, mount, nil)
+		// The agent removes the checkout; the re-clone's drop fails.
+		exec(t, sb, "rm -rf "+shellQuote(mount))
+		wrapped.refuse.Store(true)
 		h.runPass(t)
-		sb := adopt(t, provider, h)
-		for _, refusal := range []string{"exit", "error"} {
-			// The agent removes the checkout; the drop the re-clone needs fails.
-			if _, err := sb.Exec(context.Background(), sandbox.ExecRequest{
-				Command: "rm -rf " + shellQuote(mount)}); err != nil {
-				t.Fatalf("remove the checkout: %v", err)
-			}
-			wrapped.refusal.Store(refusal)
-			h.runPass(t)
-			if got := fx.clones.Load(); got != 1 {
-				t.Fatalf("%s: clones = %d, want 1: no clone while the sentinel stays", refusal, got)
-			}
+		if n := h.cloneErrors(t); n != 1 {
+			t.Fatalf("clone errors = %d, want 1: a drop that fails fails the clone where the client sees it", n)
 		}
-		wrapped.refusal.Store("")
+		wrapped.refuse.Store(false)
 		h.runPass(t)
-		if got := fx.clones.Load(); got != 2 {
-			t.Fatalf("clones = %d, want 2 once the drop succeeds", got)
+		for file, want := range map[string]string{"SKILL.md": "# pdf", "ref.md": "ref", "README.md": "repo\n"} {
+			if got := readSandboxFile(t, sb, mount+"/"+file); got != want {
+				t.Errorf("%s = %q, want %q", file, got, want)
+			}
 		}
-		if got := readSandboxFile(t, sb, mount+"/SKILL.md"); got != "# pdf" {
-			t.Errorf("skills/pdf/SKILL.md = %q, want the skill's", got)
+	})
+
+	t.Run("a clone that fails first", func(t *testing.T) {
+		const edited = "/workspace/skills/pdf/SKILL.md"
+		h, sb, _, _ := setup(t, pdf, checkout, "/workspace/skills/other",
+			map[string]any{"type": "branch", "name": "no-such-branch"})
+		if n := h.cloneErrors(t); n != 1 {
+			t.Fatalf("clone errors = %d, want 1 from the missing branch", n)
 		}
-		if got := readSandboxFile(t, sb, mount+"/README.md"); got != "repo\n" {
-			t.Errorf("README.md = %q, want the checkout's", got)
+		exec(t, sb, "echo edited > "+shellQuote(edited))
+		h.runPass(t)
+		if got := readSandboxFile(t, sb, edited); got != "edited\n" {
+			t.Errorf("SKILL.md = %q, want the agent's edit: a clone that never reached the sandbox drops nothing", got)
+		}
+	})
+
+	t.Run("a checkout's own marker", func(t *testing.T) {
+		forged := map[string]string{
+			"README.md":     "repo\n",
+			".materialized": string(skills.Sentinel([]skills.Resolved{{ID: "skill_root", Version: "1"}})),
+			"pdf/SKILL.md":  "the checkout's\n",
+		}
+		_, sb, _, _ := setup(t, pdf, forged, "/workspace/skills", nil)
+		for file, want := range map[string]string{"pdf/SKILL.md": "# pdf", "pdf/ref.md": "ref", "README.md": "repo\n"} {
+			if got := readSandboxFile(t, sb, "/workspace/skills/"+file); got != want {
+				t.Errorf("%s = %q, want %q", file, got, want)
+			}
 		}
 	})
 
 	t.Run("skill-free", func(t *testing.T) {
-		h, _, wrapped, fx := setup(t, false)
-		h.runPass(t)
+		_, _, wrapped, fx := setup(t, nil, checkout, "/workspace/skills/pdf", nil)
 		if fx.clones.Load() != 1 {
 			t.Fatal("the repository was not cloned")
 		}
@@ -1012,13 +1044,13 @@ func TestRepoClonesUnderSkillsOnlyOnceTheSentinelIsGone(t *testing.T) {
 	})
 }
 
-// sentinelProvider's sandboxes count the executor's skills sentinel drops,
-// and can answer one with a failed exit ("exit") or a backend fault
-// ("error") without running it.
+// sentinelProvider's sandboxes count the commands that name the skills
+// sentinel and, while refuse is set, run each with its removal replaced by
+// `false`, as a removal that fails would.
 type sentinelProvider struct {
 	sandbox.Provider
-	refusal atomic.Value
-	drops   atomic.Int32
+	refuse atomic.Bool
+	drops  atomic.Int32
 }
 
 func (p *sentinelProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -1035,13 +1067,12 @@ type sentinelSandbox struct {
 }
 
 func (s *sentinelSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if strings.Contains(req.Command, "rm -rf "+shellQuote("/workspace/skills/.materialized")) {
+	sentinel := shellQuote("/workspace/skills/.materialized")
+	drop := "rm -rf " + sentinel
+	if strings.Contains(req.Command, sentinel) {
 		s.p.drops.Add(1)
-		switch r, _ := s.p.refusal.Load().(string); r {
-		case "exit":
-			return sandbox.ExecResult{ExitCode: 1, Stderr: "rm: refused"}, nil
-		case "error":
-			return sandbox.ExecResult{}, errors.New("sandbox gone")
+		if s.p.refuse.Load() {
+			req.Command = strings.Replace(req.Command, drop, "false", 1)
 		}
 	}
 	return s.Sandbox.Exec(ctx, req)
@@ -1132,7 +1163,7 @@ func TestRepoCancelledCloneSweepsTheSandbox(t *testing.T) {
 	var reports int
 	_, err := h.exec.materializeRepo(ctx, sb, h.sid, repoRef{
 		ID: "sesrsc_sweep", Type: "github_repository", URL: fx.url(), MountPath: repoMount,
-	}, func() { reports++ })
+	}, "", func() { reports++ })
 	if err == nil {
 		t.Fatal("the materialization reported success after its context was cancelled")
 	}

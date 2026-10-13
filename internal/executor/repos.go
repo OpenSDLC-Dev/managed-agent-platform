@@ -143,27 +143,18 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 				"a secrets cipher is not configured on this executor")
 			continue
 		}
-		// A clone at or below the skills directory replaces skill files the
-		// skills sentinel still vouches for (#922). The sentinel goes first, so
-		// an executor that dies before the skills step leaves nothing stale to
-		// trust; one that cannot be dropped means no clone this pass. A run
-		// with no skills has no sentinel to drop.
-		if skilled {
-			if err := e.dropSkillsSentinel(ctx, sb, m.MountPath); err != nil {
-				unprobed++
-				recordRepoMaterialized(ctx, repoOutcomeUnprobed)
-				slog.WarnContext(ctx, "skills sentinel not dropped; clone skipped this pass",
-					"session_id", sid, "resource_id", m.ID, "mount_path", m.MountPath, "err", err)
-				continue
-			}
-		}
-		// The probe, the two guards and the drop are behind us; what follows is the
+		// The probe and the two guards above are behind us; what follows is the
 		// clone, whose own deadline is the floor's anchor. Reported here so that
 		// deadline is the whole of this interval rather than its tail — a slow
 		// presence exec ahead of a full-length clone would otherwise overrun a
 		// budget floored on the clone alone (#383).
 		progress()
-		bytes, err := e.materializeRepo(ctx, sb, sid, m, progress)
+		// A run with no skills has no skills sentinel to drop.
+		var sentinel string
+		if skilled {
+			sentinel = e.skillsSentinel(m.MountPath)
+		}
+		bytes, err := e.materializeRepo(ctx, sb, sid, m, sentinel, progress)
 		if err != nil {
 			failed++
 			reason := cloneReason(err)
@@ -196,8 +187,9 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 // the clone's own HTTP requests, and never written anywhere: the executor
 // sends it as an Authorization header, so the tar that reaches the sandbox
 // carries a clean .git/config and the sandbox never sees the secret in any
-// form (plan 25 decision 1).
-func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m repoRef, progress func()) (int64, error) {
+// form (plan 25 decision 1). sentinel, when set, is the skills sentinel the
+// extraction drops (extractRepo).
+func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m repoRef, sentinel string, progress func()) (int64, error) {
 	token, err := e.repoToken(ctx, sid, m.ID)
 	if err != nil {
 		return 0, err
@@ -246,7 +238,7 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "err", err)
 		}
 	}()
-	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar); err != nil {
+	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar, sentinel); err != nil {
 		return 0, err
 	}
 	return size, nil
@@ -275,8 +267,9 @@ const repoStagingRoot = "/tmp"
 //
 //   - the workdir or a directory holding it. Create never yields one under
 //     the default workdir (#922), but the workdir is configurable.
-//   - the skills sentinel, `<workdir>/skills/.materialized`, or a path below
-//     it: the skills step writes it as a file after the repositories land.
+//   - a materialization sentinel, `<workdir>/skills/.materialized` or
+//     `<workdir>/.files_materialized`, or a path below one: the skills and
+//     files steps write them as files after the repositories land.
 //   - another repository's staging path. `/workspace/.x.map-repo-staging` is a
 //     mount path the API accepts, and cloning `/workspace/x` removes it twice.
 //
@@ -302,8 +295,10 @@ func (e *Executor) safeRepoMount(mount string) error {
 	if wd := path.Clean(workdir); mount == wd || strings.HasPrefix(wd, mount+"/") {
 		return fmt.Errorf("mount path %q is the sandbox workdir or holds it", mount)
 	}
-	if s := path.Join(workdir, "skills", skills.SentinelName); mount == s || strings.HasPrefix(mount, s+"/") {
-		return fmt.Errorf("mount path %q is the skills sentinel or below it", mount)
+	for _, s := range []string{path.Join(workdir, "skills", skills.SentinelName), path.Join(workdir, filesSentinelName)} {
+		if mount == s || strings.HasPrefix(mount, s+"/") {
+			return fmt.Errorf("mount path %q is a materialization sentinel or below one", mount)
+		}
 	}
 	if strings.HasPrefix(path.Base(mount), ".") && strings.HasSuffix(mount, stagingSuffix) {
 		return fmt.Errorf("mount path %q is a repository staging path", mount)
@@ -311,26 +306,18 @@ func (e *Executor) safeRepoMount(mount string) error {
 	return nil
 }
 
-// dropSkillsSentinel removes the skills sentinel before a clone at or below
-// the skills directory, which a repository may share with the run's skills
-// (#922). The clone replaces its mount whole, skill files with it, and the
-// sentinel's probe reads only each skill's SKILL.md, which the checkout may
-// bring itself; without the sentinel, the skills step that follows the
-// repositories writes them all again. A mount anywhere else needs nothing.
-func (e *Executor) dropSkillsSentinel(ctx context.Context, sb sandbox.Sandbox, mount string) error {
+// skillsSentinel is the skills sentinel a clone at mount must drop, or "" for
+// a mount outside the skills directory. A repository may share that directory
+// with the run's skills (#922), and a clone at or below it replaces skill
+// files the sentinel still vouches for: its probe reads only each skill's
+// SKILL.md, which the checkout may bring itself. Without the drop, the skills
+// step after the repositories would trust them.
+func (e *Executor) skillsSentinel(mount string) string {
 	root := path.Join(e.checkpointWorkdir(), "skills")
 	if mount != root && !strings.HasPrefix(mount, root+"/") {
-		return nil
+		return ""
 	}
-	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{
-		Command: "rm -rf " + shellQuote(path.Join(root, skills.SentinelName))})
-	if err != nil {
-		return err
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("rm exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
-	}
-	return nil
+	return path.Join(root, skills.SentinelName)
 }
 
 // stagingPath is where a mount's tree is unpacked before being renamed into
@@ -354,18 +341,35 @@ const stagingSuffix = ".map-repo-staging"
 // can never leave a partial tree for a later pass to trust. Staging is a
 // sibling of the mount so the rename stays within one filesystem.
 //
+// sentinel, when set, is the skills sentinel this mount shares a directory
+// with (skillsSentinel). It goes in the same script, once the new tree is
+// staged and before the old one is removed: a clone that failed before the
+// script leaves it, and the skills, alone; an executor that dies after it
+// leaves the skills to be written again; and a removal that fails stops the
+// script with nothing lost. A checkout at the skills directory itself has
+// its own copy of the name removed from the staged tree, so the skills step
+// never reads the checkout's file as its marker.
+//
 // Every path is shell-quoted: mount_path is request-controlled text, and
 // unquoted interpolation would be command injection inside the sandbox.
 // Cleanup runs unconditionally — after a `;`, never sequenced behind an `&&` —
 // so a failed extraction still removes the tar and any partial staging.
-func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath string) error {
+func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentinel string) error {
 	clean := path.Clean(mount)
 	staging := stagingPath(mount)
 	q := shellQuote
+	var drop string
+	if sentinel != "" {
+		drop = " && rm -rf " + q(sentinel)
+		if path.Dir(sentinel) == clean {
+			drop += " " + q(path.Join(staging, path.Base(sentinel)))
+		}
+	}
 	cmd := strings.Join([]string{
 		"rm -rf " + q(staging),
 		" && mkdir -p " + q(staging),
 		" && tar -xf " + q(tarPath) + " -C " + q(staging),
+		drop,
 		" && rm -rf " + q(clean),
 		" && mkdir -p " + q(path.Dir(clean)),
 		" && mv " + q(staging) + " " + q(clean),

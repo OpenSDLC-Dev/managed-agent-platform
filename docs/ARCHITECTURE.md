@@ -368,7 +368,8 @@ tombstone a delete wrote, `archived_at` for an archive — so losing a wake cost
 interval and never a sandbox. It is also not free: each wake sweeps everything every
 listening executor owns, so its cost follows the rate at which sessions end. None of it is observable on the wire, which exposes no
 sandbox. Before the idle tier destroys a sandbox the
-checkpoint engine captures the session's durable state — workdir, the persistent shell's
+checkpoint engine captures the session's durable state — workdir, `/workspace` where every
+repository mounts (one root under the default workdir), the persistent shell's
 cwd/env, the published deliverables — as one gzipped tar in object storage, and the next
 provision restores it into a fresh sandbox, so an idle-reaped session resumes where it
 left off. Both halves run under the session advisory lock. Without an object store

@@ -68,17 +68,19 @@ var errCaptureSessionDeleted = errors.New("session deleted during capture")
 // deliberately not part of the checkpoint itself.
 const restoreTarPath = "/tmp/.map-restore.tar"
 
-// checkpointRoots are the three roots plan 24 D5 preserves: the workdir, the
+// checkpointRoots are the roots plan 24 D5 preserves: the workdir, the
 // persistent shell's per-session state (cwd/env survive a resume), and the
 // published deliverables (a resumed session's next harvest must not erase
-// them). /tmp is explicitly not preserved; file-resource mounts re-materialize
-// from their own store.
+// them). /workspace is preserved too, since every repository mounts there
+// whatever the workdir (#922): a workdir below it is captured with it, and
+// any other is a root of its own. /tmp is explicitly not preserved;
+// file-resource mounts re-materialize from their own store.
 func (e *Executor) checkpointRoots(sid domain.ID) []string {
-	return []string{
-		e.checkpointWorkdir(),
-		sandbox.ShellStateRoot + "/" + sid.String(),
-		outputsDir,
+	roots := []string{sandbox.RepositoryRoot}
+	if wd := e.checkpointWorkdir(); wd != sandbox.RepositoryRoot && !strings.HasPrefix(wd, sandbox.RepositoryRoot+"/") {
+		roots = []string{wd, sandbox.RepositoryRoot}
 	}
+	return append(roots, sandbox.ShellStateRoot+"/"+sid.String(), outputsDir)
 }
 
 // checkpointWorkdir resolves the workdir the way every other consumer does:
@@ -155,7 +157,7 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 		if err != nil {
 			return fmt.Errorf("%w: export %s: %w", errCaptureDegradable, root, err)
 		}
-		err = rerootInto(tw, rc, root, root == workdir)
+		err = rerootInto(tw, rc, root, workdirSentinels(root, workdir))
 		if err == nil {
 			// The export stream's own failure can arrive only AFTER the
 			// archive's end-of-archive blocks: tar.Reader stops reading at
@@ -256,7 +258,7 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 // trusting a restored, agent-writable marker. Export's contract puts every
 // member under one top-level directory named after the root's base name; this
 // strips that prefix and re-roots the member at the root's real path.
-func rerootInto(tw *tar.Writer, rc io.Reader, root string, stripSentinels bool) error {
+func rerootInto(tw *tar.Writer, rc io.Reader, root string, strip func(rest string) bool) error {
 	prefix := strings.TrimPrefix(gopath.Clean(root), "/")
 	base := gopath.Base(prefix)
 	tr := tar.NewReader(rc)
@@ -286,7 +288,7 @@ func rerootInto(tw *tar.Writer, rc io.Reader, root string, stripSentinels bool) 
 		default:
 			return fmt.Errorf("member %q outside the export's top-level directory", hdr.Name)
 		}
-		if stripSentinels && isSentinel(rest) {
+		if strip != nil && strip(rest) {
 			continue
 		}
 		out := *hdr // shallow copy; Name is rewritten, everything else carried
@@ -315,6 +317,23 @@ func rerootInto(tw *tar.Writer, rc io.Reader, root string, stripSentinels bool) 
 			}
 		}
 	}
+}
+
+// workdirSentinels reports, for a member's path relative to root, whether it
+// is one of the workdir's materialization sentinels (isSentinel). It is nil
+// for a root that does not hold the workdir, where a same-named file is
+// state.
+func workdirSentinels(root, workdir string) func(rest string) bool {
+	if root == workdir {
+		return isSentinel
+	}
+	if rel, ok := strings.CutPrefix(workdir, root+"/"); ok {
+		return func(rest string) bool {
+			r, ok := strings.CutPrefix(rest, rel+"/")
+			return ok && isSentinel(r)
+		}
+	}
+	return nil
 }
 
 // isSentinel reports whether a workdir-relative member is one of the two

@@ -299,27 +299,22 @@ func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourc
 	if repos > maxReposPerSession {
 		return nil, errInvalid("a session can mount at most %d github_repository resources", maxReposPerSession)
 	}
-	for ri, r := range out {
+	for _, r := range out {
 		if r.kind != resourceKindRepo {
 			continue
 		}
-		for pi, p := range out {
-			if p.kind == resourceKindMemory {
+		for _, p := range out {
+			// Only a repository can sit above one: files root under the uploads
+			// directory, and memory stores under /mnt/memory (#922).
+			if p.kind != resourceKindRepo || !properPathAncestor(path.Clean(p.mountPath), path.Clean(r.mountPath)) {
 				continue
 			}
-			if properPathAncestor(path.Clean(p.mountPath), path.Clean(r.mountPath)) {
-				// out holds every element at its request index, so the later
-				// of the pair is the one the reference's sentence is about.
-				if f == resourceForSession && out[max(pi, ri)].kind == resourceKindRepo {
-					return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
-				}
+			if f == resourceForDeployment {
 				// Both named as the caller spelled them (#849). r is never a
 				// default, whose only ancestors, /workspace and "/", no mount takes.
-				if f == resourceForDeployment {
-					return nil, errInvalid("%s is an ancestor of repository %s", p.mountWords(true), r.mountWords(true))
-				}
-				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
+				return nil, errInvalid("%s is an ancestor of repository %s", p.mountWords(true), r.mountWords(true))
 			}
+			return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
 		}
 	}
 	return out, nil
@@ -603,9 +598,9 @@ func parseGitHubRepoURL(raw string) (string, error) {
 	if len(segs) != 2 || !validRepoURLSegment(segs[0]) || !validRepoURLSegment(segs[1]) {
 		return "", bad()
 	}
-	// The repo name becomes the default mount path's last element, so the
-	// names path.Clean would rewrite are refused here — "acme/.." would
-	// otherwise derive /workspace/.., the reserved "/" in disguise.
+	// The repo name becomes the default mount path's last element, which is
+	// not cleaned, so the names path.Clean would rewrite are refused here —
+	// "acme/.." would otherwise derive /workspace/.., which is "/".
 	name := strings.TrimSuffix(segs[1], ".git")
 	if name == "" || name == "." || name == ".." {
 		return "", bad()

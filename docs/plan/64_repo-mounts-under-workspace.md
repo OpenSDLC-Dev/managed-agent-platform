@@ -61,21 +61,30 @@ Every recorded `mount_path`, all on session create:
    refuses the pair (#584), and the executor's guard drops its skills clause.
    The executor clones repositories before it writes skills, so a clone never
    removes a skill written in the same pass. In a run with skills, a clone at
-   or below the skills directory first drops the skills sentinel, so the
-   skills are written again after it, even if the executor dies in between.
-   A sentinel that cannot be dropped means no clone that pass. Where both
-   write one file, the skill's wins. Where a checkout puts a directory at a
-   path a skill writes as a file, that skill is skipped each pass, as any
-   skill that cannot be written is. The executor refuses a mount at or below
-   the sentinel itself. The reference's behaviour there is unrecorded, so
-   that part is ours.
+   or below the skills directory drops the skills sentinel inside the
+   extraction, after the new tree is staged and before the old one goes:
+   - a clone that fails before the extraction keeps the sentinel, and so the
+     agent's edits to its skills;
+   - an executor that dies after the drop leaves the skills to be written
+     again;
+   - a drop that fails stops the extraction with nothing lost, and the
+     client sees a clone failure;
+   - a checkout at the skills directory itself has its own `.materialized`
+     removed before it lands, so the skills step never reads it as its marker.
+
+   Where both write one file, the skill's wins. Where a checkout puts a
+   directory at a path a skill writes as a file, that skill is skipped each
+   pass, as any skill that cannot be written is. The executor refuses a
+   mount at or below either materialization sentinel. The reference's
+   behaviour there is unrecorded, so that part is ours.
 5. **Stored deployments keep the path they resolved.** A fire never
    re-resolves a stored path (#849). A deployment stored before this plan
    mounts its literal path until its resources are sent again.
-6. **`/workspace` stays writable.** Every repository mounts there whatever
-   the executor's workdir, so a read-only root filesystem keeps it writable
-   beside the workdir (`sandbox.WritablePaths`). Under the default workdir
-   the two are one mount.
+6. **`/workspace` stays writable and checkpointed.** Every repository mounts
+   there whatever the executor's workdir. So a read-only root filesystem
+   keeps it writable beside the workdir (`sandbox.WritablePaths`), and an
+   idle checkpoint keeps it as a root (`checkpointRoots`). A workdir below it
+   is one mount and one root with it.
 
 ## Not settled here
 
