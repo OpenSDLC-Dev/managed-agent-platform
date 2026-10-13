@@ -313,10 +313,10 @@ func parseResources(obj map[string]json.RawMessage, f resourceFlavor) ([]resourc
 				if f == resourceForSession && out[max(pi, ri)].kind == resourceKindRepo {
 					return nil, errRepoMountOverlap(p.mountPath, r.mountPath)
 				}
-				// r's mount is the caller's own: a default one sits directly
-				// under /workspace, and nothing may take that or "/".
+				// Both named as the caller spelled them (#849). r is never a
+				// default, whose only ancestors, /workspace and "/", no mount takes.
 				if f == resourceForDeployment {
-					return nil, errInvalid("%s is an ancestor of repository mount_path %q", p.mountWords(true), r.mountPath)
+					return nil, errInvalid("%s is an ancestor of repository %s", p.mountWords(true), r.mountWords(true))
 				}
 				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
 			}
@@ -741,7 +741,9 @@ func resolveRepoMountPath(p, repoName string, f resourceFlavor) (string, error) 
 	}
 	rel = strings.TrimPrefix(rel, "/")
 	if rel == ".." || strings.HasPrefix(rel, "../") {
-		if f == resourceForSession {
+		// The recorded sentence quotes the path as sent, so it is said only of
+		// one short enough to quote.
+		if f == resourceForSession && len(p) <= maxMountPathBytes {
 			return "", errInvalid("Invalid `github_repository` resource: mount path %q escapes %s", p, defaultRepoMountRoot)
 		}
 		return "", errInvalid("mount_path must resolve to a path under %s", root)
@@ -751,7 +753,7 @@ func resolveRepoMountPath(p, repoName string, f resourceFlavor) (string, error) 
 		resolved = defaultRepoMountRoot + repoName
 	}
 	if len(resolved) > maxMountPathBytes {
-		return "", errInvalid("mount_path must be at most %d bytes", maxMountPathBytes)
+		return "", errInvalid("mount_path must be at most %d bytes once rooted under %s", maxMountPathBytes, root)
 	}
 	if !storableText(resolved) {
 		return "", errInvalid("mount_path must be storable text")
@@ -1418,8 +1420,9 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 	if rm := repoMountBelow(resources, in.mountPath); rm != "" {
 		// The same ancestor rule create enforces (parseResourceInputs): a
 		// resource above a repository's mount is a non-directory where the
-		// clone needs a directory. A file inside the repo's tree — the
-		// supported overlay — stays legal.
+		// clone needs a directory. A file inside the repo's tree stays legal:
+		// the overlay plan 25 supports, which since #922 only a repository
+		// stored before it can meet, as files root under the uploads directory.
 		return fileResourceJSON{}, errInvalid("mount_path %q is an ancestor of repository mount_path %q", in.mountPath, rm)
 	}
 	copyID, err := mountFileCopy(ctx, tx, id, in.fileID)

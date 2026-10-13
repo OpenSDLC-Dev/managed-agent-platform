@@ -657,7 +657,10 @@ in the code (`sandbox.WritablePaths`) precisely so neither backend can forget on
 - **`/mnt`**, the parent of the mount point for a session's file resources
   (`/mnt/session/uploads/…`, and `/mnt/session/uploads/<file_id>` when the
   caller supplies no `mount_path`) — since #323 every resolved mount path is
-  under it, not just the default-placed ones.
+  under it, not just the default-placed ones;
+- **`/workspace`**, where every repository mounts whatever the workdir
+  (#922) — the workdir itself by default, and a mount of its own only when
+  the workdir is configured elsewhere.
 
 Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
 existing container removal takes away with the container.

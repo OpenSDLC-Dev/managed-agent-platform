@@ -60,13 +60,22 @@ Every recorded `mount_path`, all on session create:
 4. **Skills and a repository share `/workspace/skills`.** Create no longer
    refuses the pair (#584), and the executor's guard drops its skills clause.
    The executor clones repositories before it writes skills, so a clone never
-   removes a skill written in the same pass. A clone at or below the skills
-   directory drops the skills sentinel, so a re-clone in a later pass writes
-   them again. Where both write one path, the skill's file wins. The
-   reference's behaviour there is unrecorded, so that part is ours.
+   removes a skill written in the same pass. In a run with skills, a clone at
+   or below the skills directory first drops the skills sentinel, so the
+   skills are written again after it, even if the executor dies in between.
+   A sentinel that cannot be dropped means no clone that pass. Where both
+   write one file, the skill's wins. Where a checkout puts a directory at a
+   path a skill writes as a file, that skill is skipped each pass, as any
+   skill that cannot be written is. The executor refuses a mount at or below
+   the sentinel itself. The reference's behaviour there is unrecorded, so
+   that part is ours.
 5. **Stored deployments keep the path they resolved.** A fire never
    re-resolves a stored path (#849). A deployment stored before this plan
-   mounts its literal path until it is updated.
+   mounts its literal path until its resources are sent again.
+6. **`/workspace` stays writable.** Every repository mounts there whatever
+   the executor's workdir, so a read-only root filesystem keeps it writable
+   beside the workdir (`sandbox.WritablePaths`). Under the default workdir
+   the two are one mount.
 
 ## Not settled here
 

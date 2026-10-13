@@ -1621,6 +1621,10 @@ func TestDeploymentRefusesResolvedMountOverlapsUpFront(t *testing.T) {
 			[]any{repoBody("g", map[string]any{"mount_path": "/tmp"}), repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/tmp"})},
 			overlap("/workspace/tmp", "/workspace/tmp"),
 			`mount_path "/tmp" and mount_path "/workspace/tmp" both resolve to "/workspace/tmp"`},
+		"a repository above another by two spellings": {
+			[]any{repoBody("g", map[string]any{"mount_path": "/x"}), repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "x/y"})},
+			overlap("/workspace/x", "/workspace/x/y"),
+			`mount_path "/x" (resolves to "/workspace/x") is an ancestor of repository mount_path "x/y" (resolves to "/workspace/x/y")`},
 		"a repository above another once rooted": {
 			[]any{repoBody("g", map[string]any{"mount_path": "/tmp"}), repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/tmp/sub"})},
 			overlap("/workspace/tmp", "/workspace/tmp/sub"),

@@ -55,11 +55,31 @@ The rooting rule waited on a recording. The owner chose to record the edges the 
 
 Tests came before code. `TestSessionRepoMountPathRootsUnderWorkspace` failed on the literal-path code at its first row (`/tmp` reserved). `TestRepoSharesTheSkillsDirectory`, on a Docker sandbox, failed in two steps: with the skills clause gone and the old order, both mounts lost the skill on the first pass; with repositories first, the `/workspace/skills/pdf` mount, whose checkout brings a `SKILL.md` of its own, still lost it on a re-clone, because the sentinel's probe found that file. Dropping the sentinel after such a clone made it pass.
 
-Each new guard was then broken on its own in an overlay copy, and a test failed each time (10 of 10): a string-prefix match on `/workspace`, no `workspace/` strip, no climb refusal, no default for `/workspace` itself, rooting before cleaning, the session's words on a deployment, no bound on a deployment's stored spelling, skills written before repositories, no sentinel drop, and a drop only at the directory itself.
+Each new guard was then broken on its own in an overlay copy, and a test failed each time (20 of 20):
+
+- the rule: a string-prefix match on `/workspace`, no `workspace/` strip, no climb refusal, a climb read as any name led by two dots, no default for `/workspace` itself, and rooting before cleaning;
+- the refusals: the session's words on a deployment, an over-long path quoted in them, no bound on a deployment's stored spelling, and an ancestor refusal naming the rooted path;
+- the executor: skills written before repositories, a sentinel drop in a run with no skills, no drop, a drop after the clone, a failed drop ignored, its exit status ignored, a drop only at the directory itself, and a mount at or below the sentinel admitted;
+- the sandbox: `/workspace` left out of the read-only root's writable paths.
+
+The verifier passed the first commit with findings, after `make verify` (91.49% coverage) and a live control plane that echoed every recorded input byte for byte. Codex (`gpt-6.1-sol`, xhigh) found three defects and `/code-review` (`claude-opus-5-5`, xhigh) fifteen findings, the two overlapping. Fixed in the PR:
+
+- **The sentinel dropped after the clone.** An executor that died between the two left the checkout's `SKILL.md` vouched for, and the skill lost for good. The drop now comes first and its exit status is read; a drop that fails skips the clone.
+- **A drop in a run with no skills**, which removed a checkout's own tracked `.materialized`.
+- **A mount at the sentinel**, which made every pass rewrite every skill. The executor refuses one at or below it.
+- **`/workspace` unwritable** under a read-only root with a configured workdir, so no repository could land.
+- **Refusal words:** a deployment's ancestor refusal named a path the caller never sent, the climb refusal quoted a path of any length, and the length refusal did not say it bounds the rooted path.
+- **Docs:** two registry entries and two comments still described #584's refusal, the changelog fragment misdescribed the release before it, and a test row cited a deployment recording for a session echo.
+
+Declined:
+
+- **A flag from the clone to the skills step** in place of the sentinel drop. A flag dies with the executor between the two, which is the case the drop must cover.
+- **Repairing a session whose skill a checkout replaced before this change.** Nothing in the sandbox tells that checkout from the agent's own edit.
+- **Refusing at create a mount where a skill writes a file.** The owner chose to share the directory, and the outcome is one skipped skill, as for any skill that cannot be written. The plan and the registry say so.
 
 Superseded on the way: #584's changelog fragment, unreleased, whose refusal and `/workspace` reservation this plan removes. The release note says the net change once, in #922's fragment.
 
-**Plan 64 progress summary (archived).** Delivered in one PR: every `mount_path` rooted under `/workspace` as recorded, a climb refused and overlaps judged once rooted, in the reference's words on session create, no reserved targets, a deployment's spelling bounded as sent, and a repository sharing the skills directory, cloned before skills are written.
+**Plan 64 progress summary (archived).** Delivered in one PR: every `mount_path` rooted under `/workspace` as recorded, a climb refused and overlaps judged once rooted, in the reference's words on session create, no reserved targets, a deployment's spelling bounded as sent, a repository sharing the skills directory, cloned before skills are written, and `/workspace` kept writable under a read-only root.
 
 ---
 

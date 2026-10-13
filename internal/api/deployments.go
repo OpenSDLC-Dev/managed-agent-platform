@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -630,26 +631,19 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		}
 	}
 	// Judged on what the row will hold, so moving a repository onto a
-	// self_hosted environment is refused as surely as bringing it there. An
-	// update that touches neither leaves a row stored before the refusal
-	// alone: its fire records the refusal instead.
-	_, envSet := obj["environment_id"]
-	if envSet || resourcesSet {
-		final := resourceInputs
+	// self_hosted environment is refused as surely as bringing one there. An
+	// update that touches neither leaves a row stored before the refusal alone:
+	// its fire records the refusal instead.
+	if _, envSet := obj["environment_id"]; envSet || resourcesSet {
+		repo := resourceInputsHaveRepo(resourceInputs)
 		if !resourcesSet {
-			// Kept resources matter here only as repository mounts.
 			var kept []deploymentResource
 			if err := json.Unmarshal(resourcesJSON, &kept); err != nil {
 				return nil, err
 			}
-			final = nil
-			for _, r := range kept {
-				if r.Type == "github_repository" {
-					final = append(final, resourceInput{kind: resourceKindRepo, mountPath: r.MountPath})
-				}
-			}
+			repo = slices.ContainsFunc(kept, func(r deploymentResource) bool { return r.Type == "github_repository" })
 		}
-		if resourceInputsHaveRepo(final) {
+		if repo {
 			if err := refuseSelfHostedRepository(ctx, tx, envID); err != nil {
 				return nil, err
 			}

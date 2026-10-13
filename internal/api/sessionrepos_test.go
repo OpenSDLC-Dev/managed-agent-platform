@@ -177,13 +177,16 @@ func TestSessionRepoMountPathRootsUnderWorkspace(t *testing.T) {
 		{"/workspaceX/repo", "/workspace/workspaceX/repo"}, // setup[8]
 		{"/opt/repo", "/workspace/opt/repo"},               // setup[10]
 		{"/workspace/../etc", "/workspace/etc"},            // setup[12]
-		{"/workspace/sdk", "/workspace/sdk"},               // 2026-09-05 batch3 idx 20
+		{"/workspace/sdk", "/workspace/sdk"},               // kept, as setup[18] kept /workspace/skills
 		{".", def},
 		{"opt/repo", "/workspace/opt/repo"},
 		{"/workspace/./r", "/workspace/r"},
 		{"/workspace//r/", "/workspace/r"},
 		{"workspace/../x", "/workspace/x"},
 		{"/mnt/session/uploads/r", "/workspace/mnt/session/uploads/r"},
+		// A name that only starts with two dots climbs nowhere.
+		{"..x", "/workspace/..x"},
+		{"/workspace/..hidden", "/workspace/..hidden"},
 	} {
 		sess := createRepoSession(t, s, repoBody("g", map[string]any{"mount_path": tc.sent}))
 		if got := resourcesOf(t, sess)[0]["mount_path"]; got != tc.want {
@@ -210,6 +213,9 @@ func TestSessionRepoMountPathRootsUnderWorkspace(t *testing.T) {
 			"Invalid `github_repository` resource: mount path \"../x\" escapes /workspace/"},
 		"a deeper climb": {[]any{repoBody("g", map[string]any{"mount_path": "workspace/../../x"})},
 			"Invalid `github_repository` resource: mount path \"workspace/../../x\" escapes /workspace/"},
+		// The recorded sentence quotes the path; one too long to quote takes ours.
+		"a climb too long to quote": {[]any{repoBody("g", map[string]any{"mount_path": "../" + strings.Repeat("x", 1024)})},
+			"mount_path must resolve to a path under /workspace"},
 		// setup[15] and [16]: judged on the rooted paths.
 		"one path after rooting": {[]any{
 			repoBody("g", map[string]any{"mount_path": "/tmp"}),

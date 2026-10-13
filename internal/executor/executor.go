@@ -583,7 +583,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// may share the skills directory (#922), so skills are written after it.
 	// Files come after too, so a file mount may overlay into a checkout (plan 25
 	// decision 5), which since #922 only a resource stored before it can do.
-	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, progress)
+	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, len(sess.skills) > 0, progress)
 	progress()
 	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
 	progress()
