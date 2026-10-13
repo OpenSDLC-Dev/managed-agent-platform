@@ -3,6 +3,7 @@ package events_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -230,13 +231,25 @@ func TestAppendConcurrentSeqIntegrity(t *testing.T) {
 		if ev.Seq != int64(i+1) {
 			t.Fatalf("seq at %d = %d: sequence has gaps or duplicates", i, ev.Seq)
 		}
-		// created_at is taken under the session lock (clock_timestamp, not
-		// transaction-start now()), so it can never run backwards against
-		// seq — the created_at[gt] watermark pattern depends on this.
+		// created_at is taken under the session lock and floored past the
+		// last row, so it can never run backwards against seq, neither under
+		// this lock contention nor a stepping clock
+		// (TestAppendCreatedAtOutrunsABackwardsClock) — the created_at[gt]
+		// watermark pattern depends on this.
 		if i > 0 && ev.CreatedAt.Before(got[i-1].CreatedAt) {
 			t.Fatalf("created_at at seq %d precedes seq %d: %v < %v",
 				ev.Seq, got[i-1].Seq, ev.CreatedAt, got[i-1].CreatedAt)
 		}
+	}
+	// A healthy clock is already past the floor, so the stamps are its own
+	// readings: the last is not ahead of the database clock read after it.
+	// The second of slack absorbs a small backwards step.
+	var dbNow time.Time
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbNow); err != nil {
+		t.Fatal(err)
+	}
+	if last := got[len(got)-1].CreatedAt; last.After(dbNow.Add(time.Second)) {
+		t.Errorf("last created_at %v is ahead of the database clock %v: the floor moved a healthy clock's stamps", last, dbNow.UTC())
 	}
 
 	// Other sessions allocate independently, starting at 1.
@@ -246,6 +259,63 @@ func TestAppendConcurrentSeqIntegrity(t *testing.T) {
 	}
 	if ev[0].Seq != 1 {
 		t.Errorf("other session first seq = %d, want 1", ev[0].Seq)
+	}
+}
+
+// A database clock that steps backwards, as an NTP correction or a VM
+// resuming after host sleep can make it, must not date an append before the
+// one ahead of it (#411). The step is simulated: the session's last row is
+// dated an hour ahead, which is what the log holds once the clock has fallen
+// an hour behind it. Every later append must still land strictly past the
+// rows before it, so a created_at[gt] bound taken off any of them lists
+// every append after it.
+func TestAppendCreatedAtOutrunsABackwardsClock(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	first, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("before")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ahead time.Time
+	if err := pool.QueryRow(ctx,
+		`UPDATE events SET created_at = created_at + interval '1 hour' WHERE id = $1 RETURNING created_at`,
+		first[0].ID.String()).Scan(&ahead); err != nil {
+		t.Fatal(err)
+	}
+	ahead = ahead.UTC()
+
+	batch, err := log.Append(ctx, sid, []events.NewEvent{
+		{Type: domain.EventUserMessage, Payload: text("batch-1")},
+		{Type: domain.EventUserMessage, Payload: text("batch-2")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("next")}}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, poll := range []struct {
+		name  string
+		after time.Time
+		want  []int64
+	}{
+		{"the dated row", ahead, []int64{2, 3, 4}},
+		{"the batch's last row", batch[1].CreatedAt, []int64{4}},
+	} {
+		got, err := log.List(ctx, sid, events.ListQuery{CreatedGT: &poll.after})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var seqs []int64
+		for _, ev := range got {
+			seqs = append(seqs, ev.Seq)
+		}
+		if !slices.Equal(seqs, poll.want) {
+			t.Errorf("created_at[gt] %s (%v) listed seqs %v, want %v", poll.name, poll.after, seqs, poll.want)
+		}
 	}
 }
 

@@ -709,15 +709,15 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	// or in the walk below needs the clock. The created_at comparators further
 	// down do: they take a boundary off one event and count both sides, which
 	// holds only while created_at rises with seq across the settlements that
-	// wrote these ten. Each row takes its own clock_timestamp() as it is
-	// inserted, so what would break that is the same backwards step of the
-	// database clock as everywhere else here (#411), answered the same way
-	// (#561).
+	// wrote these ten. The emitter guarantees that whatever the database clock
+	// does (#411); the stamp keeps this test on the filters rather than on how
+	// the rows were dated, as #561 keeps every list here.
 	//
 	// Stamping costs the emitter's own guarantee no coverage: that created_at
-	// never runs backwards against seq is pinned where it is engineered, by
-	// TestAppendConcurrentSeqIntegrity in internal/events, under lock
-	// contention this test does not produce.
+	// never runs backwards against seq is pinned where it is engineered, in
+	// internal/events — under lock contention this test does not produce by
+	// TestAppendConcurrentSeqIntegrity, and under a backwards step of the
+	// clock by TestAppendCreatedAtOutrunsABackwardsClock.
 	seqOrder := make([]string, 0, len(all))
 	for _, ev := range all {
 		seqOrder = append(seqOrder, ev["id"].(string))
