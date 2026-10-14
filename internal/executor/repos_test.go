@@ -346,7 +346,7 @@ func TestRepoUnansweredOnAFreshSandboxClonesNextPass(t *testing.T) {
 // stats of a .git (sandbox.StatPresence) failing as a transient exec does.
 type floodingProvider struct {
 	sandbox.Provider
-	failExec, failStat atomic.Int32
+	failExec, failStat, failVacate atomic.Int32
 }
 
 func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -364,6 +364,10 @@ type floodingSandbox struct {
 
 func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"test -e ") && s.p.failExec.Add(-1) >= 0 {
+		_, _ = s.Sandbox.Exec(ctx, req)
+		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	}
+	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"{ { [ ! -e ") && s.p.failVacate.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
@@ -749,27 +753,32 @@ func TestRepoExtractFailureIsTolerated(t *testing.T) {
 // TestRepoKeepsWhatALegacyMountPathHolds 🔍: a repository stored before #922
 // keeps its literal path (#930), and a clone there must not take what the
 // image ships at it. At /usr on a merged-/usr image, that is the shell itself.
-// Outside /workspace a clone replaces only an empty directory. At a path that
-// holds files, at a file, or at a symlink it fails as a clone error and
-// removes nothing, while at an absent path or an empty directory it clones.
-// Under /workspace a tree without its .git is still replaced whole.
+// Outside the platform's directories a clone takes only an absent path or an
+// empty directory. At a path that holds files, at a file, or at a symlink it
+// fails as a clone error, fetches nothing and removes nothing. Inside them,
+// where the files and skills steps write too, a tree without its .git is
+// still replaced whole.
 func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	h, provider := dockerRepoHarness(t)
 	sb := adopt(t, provider, h)
 	plant, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: strings.Join([]string{
-		"mkdir -p /opt/full /opt/empty /workspace/stale",
-		"echo image > /opt/full/keep",
+		"mkdir -p /opt/EOF /opt/empty /workspace/stale /tmp/stale /mnt/session/uploads/repo",
+		"echo image > /opt/EOF/keep",
 		"echo image > /opt/file",
 		"ln -s /usr/share /opt/link",
 		"ln -s /nonexistent /opt/dangling",
 		"echo old > /workspace/stale/old",
+		"echo old > /tmp/stale/old",
+		"echo old > /mnt/session/uploads/repo/old",
 	}, " && ")})
 	if err != nil || plant.ExitCode != 0 {
 		t.Fatalf("plant the paths: %v %+v", err, plant)
 	}
-	kept := []string{"/opt/dangling", "/opt/file", "/opt/full", "/opt/link"}
-	cloned := []string{"/opt/absent", "/opt/empty", "/workspace/stale"}
+	// /opt/EOF is a path the network arm's text match would read as the git
+	// host's failure, had the refusal reached it.
+	kept := []string{"/opt/EOF", "/opt/dangling", "/opt/file", "/opt/link"}
+	cloned := []string{"/mnt/session/uploads/repo", "/opt/absent", "/opt/empty", "/tmp/stale", "/workspace/stale"}
 	for i, mount := range append(append([]string(nil), kept...), cloned...) {
 		h.seedRepoResource(t, "sesrsc_legacy"+string(rune('a'+i)), fx.url(), mount, "ghp_fixture", nil)
 	}
@@ -779,10 +788,16 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 	var failed []string
 	for _, e := range h.repoErrors(t) {
 		failed = append(failed, e["mount_path"].(string))
+		if e["reason"] != repoOutcomeInternal {
+			t.Errorf("clone error at %v has reason %v, want %s", e["mount_path"], e["reason"], repoOutcomeInternal)
+		}
 	}
 	sort.Strings(failed)
 	if strings.Join(failed, " ") != strings.Join(kept, " ") {
 		t.Errorf("clone errors at %v, want exactly %v", failed, kept)
+	}
+	if got := fx.clones.Load(); got != int64(len(cloned)) {
+		t.Errorf("clones = %d, want %d — a refused path still fetched the repository", got, len(cloned))
 	}
 	for _, mount := range cloned {
 		if got := readSandboxFile(t, sb, mount+"/README.md"); got != "x\n" {
@@ -790,7 +805,7 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 		}
 	}
 	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
-		Command: "cat /opt/full/keep /opt/file; readlink /opt/link /opt/dangling; ls -A /workspace/stale /opt /tmp"})
+		Command: "cat /opt/EOF/keep /opt/file; readlink /opt/link /opt/dangling; ls -A /opt /workspace /workspace/stale /tmp /tmp/stale /mnt/session/uploads /mnt/session/uploads/repo"})
 	if err != nil {
 		t.Fatalf("inspect the sandbox: %v", err)
 	}
@@ -801,6 +816,42 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 		if strings.Contains(res.Stdout, gone) {
 			t.Errorf("%q is left in the sandbox:\n%s", gone, res.Stdout)
 		}
+	}
+}
+
+// TestRepoVacatesThroughAFloodedStatus: an image's startup can push the exit
+// status of vacateMount's script out of the output (#860). What the script
+// left is then what a stat reads: a path it emptied clones, and a path that
+// still holds something is refused without a fetch.
+func TestRepoVacatesThroughAFloodedStatus(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, provider, flooding := floodingRepoHarness(t)
+	sb := adopt(t, provider, h)
+	if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+		Command: "mkdir -p /opt/full /opt/empty && echo image > /opt/full/keep"}); err != nil || res.ExitCode != 0 {
+		t.Fatalf("plant the paths: %v %+v", err, res)
+	}
+	h.seedRepoResource(t, "sesrsc_vfull", fx.url(), "/opt/full", "ghp_fixture", nil)
+	h.seedRepoResource(t, "sesrsc_vempty", fx.url(), "/opt/empty", "ghp_fixture", nil)
+
+	flooding.failVacate.Store(2)
+	h.runPass(t)
+
+	if n := flooding.failVacate.Load(); n > 0 {
+		t.Fatalf("%d flooded vacate probes left unused: the probe never ran through the flood", n)
+	}
+	errs := h.repoErrors(t)
+	if len(errs) != 1 || errs[0]["mount_path"] != "/opt/full" {
+		t.Fatalf("clone errors = %v, want exactly one, at /opt/full", errs)
+	}
+	if got := fx.clones.Load(); got != 1 {
+		t.Errorf("clones = %d, want 1 — the occupied path fetched the repository", got)
+	}
+	if got := readSandboxFile(t, sb, "/opt/empty/README.md"); got != "x\n" {
+		t.Errorf("/opt/empty/README.md = %q, want the checkout", got)
+	}
+	if got := readSandboxFile(t, sb, "/opt/full/keep"); got != "image\n" {
+		t.Errorf("/opt/full/keep = %q, want what the image put there", got)
 	}
 }
 

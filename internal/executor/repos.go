@@ -108,10 +108,10 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			continue
 		case sandbox.PresenceUnknown:
 			// The sandbox answered neither probe, twice (repoPresence). That
-			// is no sign the checkout is gone, and a clone replaces the mount
-			// whole (extractRepo's rm -rf), the agent's work in it with it
-			// (#860); nor that it is there, so no clone error either — the
-			// next pass asks again.
+			// is no sign the checkout is gone, and a clone in the platform's
+			// directories replaces the mount whole (extractRepo's rm -rf), the
+			// agent's work in it with it (#860); nor that it is there, so no
+			// clone error either — the next pass asks again.
 			unprobed++
 			recordRepoMaterialized(ctx, repoOutcomeUnprobed)
 			slog.WarnContext(ctx, "repository presence not answered; clone skipped this pass",
@@ -119,8 +119,8 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			continue
 		}
 		// Judged again here, having already been judged at create. The
-		// duplication is deliberate and narrow: what follows builds an `rm -rf`
-		// on this path inside the session's sandbox, and a row that reached the
+		// duplication is deliberate and narrow: what follows can build an
+		// `rm -rf` on this path inside the session's sandbox, and a row that reached the
 		// database by any route other than the create endpoint would otherwise
 		// have that command built for it. `/workspace/repo/..` cleans to
 		// `/workspace`; `/tmp` is the platform's own staging root.
@@ -194,6 +194,14 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 // form (plan 25 decision 1). sentinel, when set, is the skills sentinel the
 // extraction drops (extractRepo).
 func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m repoRef, sentinel string, progress func()) (int64, error) {
+	// A mount the clone may not replace whole is cleared before the clone, so
+	// a path that holds something costs one exec a pass rather than a fetch.
+	whole := e.replacesWhole(m.MountPath)
+	if !whole {
+		if err := vacateMount(ctx, sb, m.MountPath); err != nil {
+			return 0, err
+		}
+	}
 	token, err := e.repoToken(ctx, sid, m.ID)
 	if err != nil {
 		return 0, err
@@ -242,7 +250,7 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "err", err)
 		}
 	}()
-	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar, sentinel); err != nil {
+	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar, sentinel, whole); err != nil {
 		return 0, err
 	}
 	return size, nil
@@ -266,7 +274,8 @@ const repoStagingRoot = "/tmp"
 //
 // It is deliberately not a second copy of the API's full grammar (nesting,
 // per-session caps, the URL-derived default). Those decide what a caller may
-// ask for; this decides only what may be destroyed. Three of the refusals are
+// ask for; this decides only where a clone may go, and replacesWhole what it
+// may destroy there. Three of the refusals are
 // things the control plane cannot know, which is why they live here:
 //
 //   - the workdir or a directory holding it. Create never yields one under
@@ -287,7 +296,7 @@ const repoStagingRoot = "/tmp"
 // one since #922, but a repository stored before keeps its literal path,
 // and `/mnt` was one create accepted. Below one, a re-clone removes only
 // the checkout's own tree, as anywhere. What the image ships at a path is
-// extractRepo's to keep (#930).
+// replacesWhole's to keep (#930).
 func (e *Executor) safeRepoMount(mount string) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
@@ -354,6 +363,61 @@ func stagingPath(mount string) string {
 // extraction will remove it.
 const stagingSuffix = ".map-repo-staging"
 
+// replacesWhole reports whether a clone may replace what is at mount whole.
+// It may below a directory the platform keeps writable (sandbox.WritablePaths:
+// the repository root, the workdir, /tmp, the shell state root and /mnt),
+// where what it replaces is the platform's or the agent's. Anywhere else is
+// the image's own filesystem, which only a repository stored before #922 can
+// name (#930). There a clone takes only an absent path or an empty directory,
+// so a row at /usr cannot remove what the image ships. A row at a path the
+// image leaves absent, such as /opt/repo, clones as before; one whose
+// checkout lost its .git there now fails instead of being replaced.
+func (e *Executor) replacesWhole(mount string) bool {
+	for _, root := range sandbox.WritablePaths(e.cfg.Workdir) {
+		if strings.HasPrefix(mount, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// vacateScript clears a mount that replacesWhole refuses: it succeeds on an
+// absent path, removing nothing, and on an empty directory, which it removes.
+// It fails on anything else: a directory with content, a file, or a symlink,
+// dangling or not.
+func vacateScript(mount string) string {
+	q := shellQuote(mount)
+	return "{ { [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || rmdir " + q + "; }"
+}
+
+// errMountOccupied is a clone refused before it starts, because its mount
+// path holds something replacesWhole may not replace.
+var errMountOccupied = errors.New("the mount path holds something outside the platform's directories")
+
+// vacateMount runs vacateScript before the clone.
+func vacateMount(ctx context.Context, sb sandbox.Sandbox, mount string) error {
+	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: vacateScript(mount)})
+	var startup *sandbox.StartupOutputError
+	if errors.As(err, &startup) {
+		// The script ran, and the image's startup pushed its exit status out
+		// of the output (#860). What it left is what a stat reads.
+		switch sandbox.StatPresence(ctx, sb, mount) {
+		case sandbox.Absent:
+			return nil
+		case sandbox.Present:
+			return errMountOccupied
+		}
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("%w: %s", errMountOccupied, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
 // extractRepo unpacks the shipped tar into a staging directory beside the
 // mount and renames it into place, so `<mount>` — and therefore the
 // `<mount>/.git` the idempotence probe reads — exists only once the tree is
@@ -370,20 +434,15 @@ const stagingSuffix = ".map-repo-staging"
 // its own copy of the name removed from the staged tree, so the skills step
 // never reads the checkout's file as its marker.
 //
-// A mount outside sandbox.RepositoryRoot is a repository stored before #922,
-// which keeps its literal path (#930). There the old tree is removed only if
-// it is an empty directory, through `rmdir`. A path that holds anything, such
-// as `/usr`, fails as a clone error instead of losing what the image ships
-// there. A dangling symlink reads as absent, and the rename onto it fails
-// instead: POSIX rename refuses a directory over a non-directory. A working
-// row is unaffected, because a fresh sandbox has nothing at its path. Under
-// RepositoryRoot, a checkout that lost its .git is still replaced whole.
+// whole is replacesWhole's verdict on the mount. Without it the script
+// removes no old tree at all: materializeRepo's vacateMount has just left the
+// path absent, and nothing writes there before this script runs.
 //
 // Every path is shell-quoted: mount_path is request-controlled text, and
 // unquoted interpolation would be command injection inside the sandbox.
 // Cleanup runs unconditionally — after a `;`, never sequenced behind an `&&` —
 // so a failed extraction still removes the tar and any partial staging.
-func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentinel string) error {
+func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentinel string, whole bool) error {
 	clean := path.Clean(mount)
 	staging := stagingPath(mount)
 	q := shellQuote
@@ -394,16 +453,16 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 			drop += " " + q(path.Join(staging, path.Base(sentinel)))
 		}
 	}
-	remove := "rm -rf " + q(clean)
-	if !strings.HasPrefix(clean, sandbox.RepositoryRoot+"/") {
-		remove = "{ [ ! -e " + q(clean) + " ] || rmdir " + q(clean) + "; }"
+	remove := " && rm -rf " + q(clean)
+	if !whole {
+		remove = ""
 	}
 	cmd := strings.Join([]string{
 		"rm -rf " + q(staging),
 		" && mkdir -p " + q(staging),
 		" && tar -xf " + q(tarPath) + " -C " + q(staging),
 		drop,
-		" && " + remove,
+		remove,
 		" && mkdir -p " + q(path.Dir(clean)),
 		" && mv " + q(staging) + " " + q(clean),
 		"; rc=$?; rm -rf " + q(staging) + " " + q(tarPath) + "; exit $rc",
@@ -514,7 +573,9 @@ func (e *Executor) emitRepoCloneError(ctx context.Context, sid domain.ID, m repo
 			// `retrying` for all reasons, including auth: the next work item
 			// probes the mount, finds no .git, and clones again — so no clone
 			// failure is ever the last attempt, and `exhausted` would tell a
-			// client this repository is finished when it is not.
+			// client this repository is finished when it is not. An occupied
+			// mount path (errMountOccupied) is tried again too, and clones
+			// once the path is empty.
 			"retry_status": map[string]any{"type": "retrying"},
 		},
 	})

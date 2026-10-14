@@ -676,9 +676,10 @@ in the code (`sandbox.WritablePaths`) precisely so neither backend can forget on
   literal path it was given, which can fall outside every path here. The
   executor refuses to clone one at `/workspace`, the uploads or outputs
   directory, `/mnt/memory` or the shell state root, or at a directory
-  holding one. Elsewhere outside `/workspace`, a clone replaces only an
-  empty directory (#930). At a path that holds anything, such as `/usr`, it
-  fails with a clone error and removes nothing.
+  holding one. Below a path here, a clone replaces what it finds whole.
+  Outside every path here, it takes only an absent path or an empty
+  directory (#930). At a path that holds anything, such as `/usr`, it fails
+  with a clone error and leaves the path as it was.
 
 Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
 existing container removal takes away with the container.
