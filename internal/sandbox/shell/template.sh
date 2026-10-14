@@ -219,8 +219,9 @@ __map_main() {
 # trap on, and the prologue's first read fails on a call with no snapshot yet,
 # so an exiting trap ended every call there. The command runs without it, as
 # without the image's errexit; each call is a fresh exec, so the startup sets it
-# again and it goes again. With no snapshot to restore, the shell simply stays where the exec
-# put it — the sandbox's own workdir — rather than assuming a path.
+# again and it goes again. With no snapshot to restore, the shell simply stays
+# where the exec put it — the sandbox's own workdir — rather than assuming a
+# path.
 #
 # This whole group is parsed as one compound command before any of it runs, so the
 # aliases it sources cannot be expanded over its own later lines. Its words still

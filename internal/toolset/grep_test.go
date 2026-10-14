@@ -870,8 +870,8 @@ func TestGlobThroughAStartupsGlobOptions(t *testing.T) {
 // whose startup sets -euo pipefail and an exiting ERR trap
 // (docs/self-hosted-security.md): errexit and the trap do not reach them, the
 // bash tool's shell turning both off before the first command, while nounset
-// and pipefail do — and a `set -e` the model runs itself carries to its next
-// call.
+// and pipefail do — and an ERR trap the model sets itself fires within its
+// call, and a `set -e` the model runs itself carries to its next call.
 func TestTheBashToolUnderAnErrexitStartup(t *testing.T) {
 	r := runner(t, fromImage(hookedtest.DockerImage(t, "set -euo pipefail\ntrap 'exit 42' ERR\n")))
 	if out := ok(t, r, "bash", `{"command":"false; echo after"}`); !strings.Contains(out, "after") {
@@ -880,6 +880,9 @@ func TestTheBashToolUnderAnErrexitStartup(t *testing.T) {
 	if out := ok(t, r, "bash", `{"command":"set -o | grep -E '^(nounset|pipefail|errexit)' | tr -s ' \\t' ' '"}`); !strings.Contains(out, "nounset on") ||
 		!strings.Contains(out, "pipefail on") || !strings.Contains(out, "errexit off") {
 		t.Errorf("options = %q, want nounset and pipefail on, errexit off", out)
+	}
+	if out := ok(t, r, "bash", `{"command":"trap 'echo caught' ERR; false; echo after"}`); !strings.Contains(out, "caught\nafter") {
+		t.Errorf("the model's own ERR trap = %q, want it to fire within its call and the call to go on", out)
 	}
 	ok(t, r, "bash", `{"command":"set -e"}`)
 	if out := ok(t, r, "bash", `{"command":"set -o | grep '^errexit' | tr -s ' \\t' ' '"}`); !strings.Contains(out, "errexit on") {
