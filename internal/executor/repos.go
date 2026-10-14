@@ -425,8 +425,9 @@ func vacateScript(mount string) string {
 
 // occupiedStatus is the extraction's exit status when vacateScript refuses
 // the mount, so the refusal is reported as errMountOccupied and not as a
-// failed extraction. No platform command in the script exits with it; one
-// the image wraps could, and would read as an occupied path.
+// failed extraction. No platform command in the script exits with it; an
+// image's startup that ends the shell first, or a command the image wraps,
+// could, and would read as an occupied path.
 const occupiedStatus = 75
 
 // errMountOccupied is a clone refused because its mount path is outside the

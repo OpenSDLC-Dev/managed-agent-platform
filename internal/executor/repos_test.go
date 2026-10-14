@@ -855,9 +855,9 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 	}
 }
 
-// TestRepoProbesThroughAFloodedStatus: an image's startup can push the exit
-// status of mountOccupied's probe out of the output (#860). That is no answer,
-// so the clone goes ahead, and the extraction judges the path itself: an
+// TestRepoProbesThroughAFloodedStatus: an image's startup can push
+// mountOccupied's framed answer, and the probe exec's exit record with it,
+// out of the output (#860). That is no answer, so the clone goes ahead, and the extraction judges the path itself: an
 // empty directory clones, and one that holds a file is refused and kept, as
 // is a dangling symlink. Each refusal reads as the probe's would, with the
 // mount path's message.
@@ -1048,8 +1048,8 @@ func TestRepoProbeThatCannotAnswerGoesAhead(t *testing.T) {
 // TestRepoProbeAnswersOnlyInItsFrame: the probe reads a path as occupied only
 // when its framed answer says so. A shell that an image's startup ends first
 // gives no answer, whatever its exit status, the extraction's own refusal
-// status included, and whatever it printed before the frame. The probe names no variable, so a readonly name the
-// startup leaves does not silence it.
+// status included, and whatever it printed before the frame. The probe names
+// no variable, so a readonly name the startup leaves does not silence it.
 func TestRepoProbeAnswersOnlyInItsFrame(t *testing.T) {
 	h, provider := dockerRepoHarness(t)
 	sb := adopt(t, provider, h)
@@ -1073,6 +1073,23 @@ func TestRepoProbeAnswersOnlyInItsFrame(t *testing.T) {
 	readonlyE := &hookedSandbox{Sandbox: sb, p: &hookedProvider{startup: "readonly e=hook; "}}
 	if !mountOccupied(ctx, readonlyE, "/opt/full") {
 		t.Error("a startup's readonly e silenced the probe: /opt/full read as vacant")
+	}
+}
+
+// TestRepoVacancyProbeIsBounded: the probe runs before the clone's deadline is
+// set, so it carries a timeout of its own, and an answer from a probe that
+// timed out is no answer.
+func TestRepoVacancyProbeIsBounded(t *testing.T) {
+	for _, timedOut := range []bool{false, true} {
+		sb := &fakeSandbox{execHook: func(sandbox.ExecRequest) *sandbox.ExecResult {
+			return &sandbox.ExecResult{Stdout: "occupied\n", TimedOut: timedOut}
+		}}
+		if got := mountOccupied(context.Background(), sb, "/opt/repo"); got == timedOut {
+			t.Errorf("timed out %v: occupied = %v, want %v", timedOut, got, !timedOut)
+		}
+		if len(sb.execTimeouts) != 1 || sb.execTimeouts[0] != repoVacancyTimeout {
+			t.Errorf("probe timeouts = %v, want [%s]", sb.execTimeouts, repoVacancyTimeout)
+		}
 	}
 }
 
