@@ -516,17 +516,22 @@ func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 // description naming its directory, or with readErr's error for its path. A
 // framed listing gets its answer framed, so the banner falls outside it; an
 // unframed one gets the banner glued to the first name, as a real image would
-// print it.
+// print it. The first failExecs listings exit 1.
 type listingSandbox struct {
 	sandbox.Sandbox
 	stdout    string
 	truncated bool
 	readErr   map[string]error
+	failExecs int
 }
 
 func (s *listingSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	const banner = "welcome to the image "
 	res := sandbox.ExecResult{Stdout: s.stdout, StdoutTruncated: s.truncated}
+	if s.failExecs > 0 {
+		s.failExecs--
+		res = sandbox.ExecResult{ExitCode: 1}
+	}
 	if _, f, ok := sandboxtest.Unwrap(req.Command); ok {
 		res = sandboxtest.Framed(f, res)
 	}

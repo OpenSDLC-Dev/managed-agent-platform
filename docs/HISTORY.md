@@ -74,6 +74,8 @@ All 9 of my mutants were killed. The verifier's 10 left one survivor, the apostr
 
 **The close-out, nested discovery.** The listing now takes several roots in one framed exec, and prints each name after its root's index. The Docker test reads below a fixture checkout as the recording did. A write, and a read that failed, scan nothing. The read after them records the two skills on its path, nearest first, and a later read in the same run or a later one records only what is new to its thread. A child thread is told on its own. A stub-sandbox test pins the cap's room and that only whole scans count, and a second Docker test pins that the root scans' skills count against the cap.
 
+Each of 37 guards, the listing's included, was broken on its own in an overlay copy, and a test failed each time. The first run left two survivors, and each gained a test: a read's findings did not use up the room for the reads after it, and a failed listing was kept as an empty directory for the rest of the run.
+
 **Plan 65 progress summary (archived).** Delivered in three PRs. #931 landed decision 1: the recorded template for the attached block and absolute cloud locations, closing #581. #933 landed decisions 2, 3, 4, 6 and 7: the hold before the first request, the scan of each checkout (migration 0053), the repository list and the trust note. The close-out landed decision 5, nested discovery on `read` (migration 0054), and closes #921. What the recordings leave open is registered and tracked on #78, and managed-agents-wire-recordings#26 asks for it.
 
 ## Repository mounts rooted under /workspace (plan 64, #922) — archived 2026-10-13, delivered in one PR

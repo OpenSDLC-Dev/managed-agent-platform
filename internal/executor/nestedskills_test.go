@@ -171,9 +171,10 @@ func TestNestedSkillsCountTheRootScans(t *testing.T) {
 
 // TestNestedSkillsRoomAndWholeScans pins what a thread's room is and when a
 // scan counts. Room is the cap less the root scans' skills and what the
-// thread was told already, another thread's not counted; a scan in which a
-// read failed for a reason a later read may not meet records nothing, so the
-// next read below the same directories records all of it.
+// thread was told already, another thread's not counted, and a read's
+// findings use it up for the reads after it. A scan whose listing or one of
+// whose reads failed, for a reason a later read may not meet, records
+// nothing, so the next read below the same directories records all of it.
 func TestNestedSkillsRoomAndWholeScans(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	ctx := context.Background()
@@ -201,9 +202,15 @@ func TestNestedSkillsRoomAndWholeScans(t *testing.T) {
 	if want := map[domain.ID][]skills.RepoSkill{id: {a}}; id == "" || !reflect.DeepEqual(n.found, want) {
 		t.Errorf("found = %+v, want a alone: the cap less two root skills and one told", n.found)
 	}
+	if again := h.exec.afterRead(ctx, n, "", "/workspace/r/q/f.txt", func() {}); again != "" {
+		t.Errorf("a read after the room was used recorded %+v", n.found[again])
+	}
 
-	sb = &listingSandbox{stdout: "0/a\x001/b\x00", readErr: map[string]error{b.Location: errors.New("transient")}}
+	sb = &listingSandbox{stdout: "0/a\x001/b\x00", readErr: map[string]error{b.Location: errors.New("transient")}, failExecs: 1}
 	n = newNestedSkills(sb, h.sid, repos, 0)
+	if id := h.exec.afterRead(ctx, n, "sthr_fresh", file, func() {}); id != "" || len(n.found) != 0 {
+		t.Fatalf("a scan whose listing failed recorded %+v", n.found)
+	}
 	if id := h.exec.afterRead(ctx, n, "sthr_fresh", file, func() {}); id != "" || len(n.found) != 0 {
 		t.Fatalf("a scan with a failed read recorded %+v", n.found)
 	}
