@@ -43,6 +43,11 @@ func PendingApprovalThreads(ctx context.Context, q Querier, sid domain.ID) ([]do
 
 // ClearedApprovalWait measures a gate that was pending before the transaction's
 // processing step. The caller records the returned reading only after commit.
+// A negative interval is no wait at all, so it is no reading: the suspension's
+// created_at ran ahead of the clock, either because the clock stepped back
+// during the wait or because the append floor stamped it past a clock still
+// behind (AppendInTx). A floor that has not yet unwound can also shorten a
+// wait that stays positive, by what is left of the step.
 func ClearedApprovalWait(ctx context.Context, q Querier, sid, tid domain.ID) (*float64, error) {
 	pending, err := PendingThreadApprovals(ctx, q, sid, tid)
 	if err != nil || pending {
@@ -54,7 +59,7 @@ func ClearedApprovalWait(ctx context.Context, q Querier, sid, tid domain.ID) (*f
  OR(type=$4 AND $3::text IS NULL)) AND payload->'stop_reason'->>'type'='requires_action'
  ORDER BY(type=$2) DESC,seq DESC LIMIT 1`, sid.String(), string(domain.EventSessionThreadStatusIdle),
 		nullableID(tid), string(domain.EventSessionStatusIdle)).Scan(&seconds)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && seconds < 0) {
 		return nil, nil
 	}
 	return &seconds, err
@@ -62,9 +67,9 @@ func ClearedApprovalWait(ctx context.Context, q Querier, sid, tid domain.ID) (*f
 
 // RecordApprovalWait records one approval wait, in seconds. The interval is
 // measured in the database (clock_timestamp() minus the requires_action idle
-// event's created_at) so both ends read the same clock, and recorded here after
-// the resuming transaction commits — a confirmation whose commit rolled back did
-// not resume anything.
+// event's created_at) so both ends read the same clock, bar the append floor
+// (ClearedApprovalWait), and recorded here after the resuming transaction
+// commits — a confirmation whose commit rolled back did not resume anything.
 //
 // It resolves the meter per call rather than caching an instrument that would pin
 // whichever MeterProvider was installed first, and never fails the caller: a

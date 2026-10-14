@@ -149,8 +149,10 @@ type AppendOptions struct {
 	// clock says. A stamp another process writes — created_at, from the
 	// database, or an answer's processed_at, from whichever process took it —
 	// can still skew against these by the difference between the two hosts'
-	// clocks, as it could before #793. Only a span.model_request_start
-	// leading the batch may set it; AppendInTx refuses any other batch.
+	// clocks, as it could before #793, and created_at also by what is left of
+	// a backwards step of its clock (the INSERT's floor, #411). Only a
+	// span.model_request_start leading the batch may set it; AppendInTx
+	// refuses any other batch.
 	Consume bool
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
@@ -239,8 +241,14 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		agentName = new(string)
 	}
 
-	var seq int64
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = $1`, sessionID.String()).Scan(&seq); err != nil {
+	// The session's last row, read under the lock: the batch continues its
+	// seq and is stamped past its created_at (the INSERT below).
+	var (
+		seq         int64
+		lastCreated *time.Time
+	)
+	if err := tx.QueryRow(ctx, `SELECT seq, created_at FROM events WHERE session_id = $1 ORDER BY seq DESC LIMIT 1`,
+		sessionID.String()).Scan(&seq, &lastCreated); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
 	// Under the lock, on this process's clock (the option's comment).
@@ -250,14 +258,31 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	}
 
 	// One multi-row INSERT: the session row lock is held for a single round
-	// trip however large the batch. created_at is clock_timestamp() — real
-	// time AFTER the lock was acquired — never the column default now(),
-	// which Postgres freezes at BEGIN and would let a transaction that
-	// waited on the lock write a higher seq with an earlier timestamp,
-	// breaking the seq/created_at agreement the list filters rely on.
+	// trip however large the batch. created_at is statement_timestamp() —
+	// the INSERT's own start, real time AFTER the lock was acquired — never
+	// the column default now(), which Postgres freezes at BEGIN and so would
+	// date a transaction that waited on the lock before the wait. It is one
+	// reading for the whole batch, so the batch's rows share a stamp and a
+	// clock step inside the statement cannot reorder them, as per-row
+	// clock_timestamp() readings could. It is floored a microsecond past the
+	// session's last row, which a healthy clock is already past, so created_at
+	// never falls back along seq whatever the database clock does (#411):
+	// every created_at bound the list filters take cuts the log at one seq,
+	// and once a row is past a created_at[gt] bound every later append is
+	// too. While a clock that stepped backwards is behind — a forward jump
+	// the clock later corrects is such a step, however long — each append
+	// advances a microsecond, and created_at runs ahead of the clock by what
+	// is left of the step, so a reader subtracting it from the clock reads
+	// short: the reason ClearedApprovalWait drops a negative wait. Past the
+	// last row rather than at it, so no two appends share a stamp, and a
+	// bound taken off one append's last row lists every later append. The
+	// floor reads the last row by seq, as the (session_id, seq) index serves
+	// it: where a row an older binary wrote, before or during a rolling
+	// deploy, sits below the row before it, a new append can still sit below
+	// that earlier row until the clock passes it.
 	var (
 		sb        strings.Builder
-		args      []any
+		args      = []any{lastCreated}
 		out       = make([]domain.Event, 0, len(evs))
 		lastStamp time.Time
 	)
@@ -317,7 +342,8 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			sb.WriteString(", ")
 		}
 		n := len(args)
-		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d, $%d, clock_timestamp(), $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6, n+7, n+8)
+		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d, $%d, GREATEST(statement_timestamp(), $1::timestamptz + interval '1 microsecond'), $%d, $%d)",
+			n+1, n+2, n+3, n+4, n+5, n+6, n+7, n+8)
 		args = append(args, id.String(), sessionID.String(), seq, string(ev.Type), payload, utcOrNil(ev.ProcessedAt),
 			nullableID(ev.ThreadID), ev.CrossPosted)
 		out = append(out, domain.Event{
@@ -519,8 +545,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 }
 
 // ListQuery narrows and pages a session's event log. AfterSeq is a keyset
-// position (exclusive) in the direction of the sort; seq order and
-// created_at order agree because appends serialize per session.
+// position (exclusive) in the direction of the sort; created_at never falls
+// back along seq because appends serialize per session and each is stamped
+// past the last, one stamp per append (AppendInTx, which also names the rows
+// an older binary can have left out of order).
 type ListQuery struct {
 	Types                                        []string
 	CreatedGT, CreatedGTE, CreatedLT, CreatedLTE *time.Time
