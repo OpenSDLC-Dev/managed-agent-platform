@@ -370,6 +370,31 @@ func TestCoordinatorSpawnsThreeAgentsAndParksInOneCommit(t *testing.T) {
 	}
 }
 
+// A database clock that steps backwards must not date a spawn before a thread
+// the session already holds (#411): threads are listed in creation order, on
+// created_at. The step is simulated: a planted child is dated an hour ahead,
+// which is what the session holds once the clock has fallen an hour behind it.
+// The spawn must still sort after it.
+func TestSpawnOutrunsABackwardsClock(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"find the papers"}`),
+		done("tool_use", 1),
+	}}, nil)
+	h.roster(t, "researcher")
+	planted := pgtest.NewChildThread(t, h.pool, h.sessionID)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET created_at = created_at + interval '1 hour' WHERE id = $1`, planted.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "coordinate the work")
+	h.runOnce(t)
+
+	kids := h.children(t)
+	if len(kids) != 2 || kids[0].id != planted || kids[1].name != "researcher" {
+		t.Fatalf("children in creation order = %v, want the planted child, then the researcher", kids)
+	}
+}
+
 // A turn whose calls were all settlement-executed and none of them a wait or
 // a report has nothing left to wait for, so the same commit hands the item
 // back for the caller's next turn — the executor's rule after its last answer.

@@ -243,12 +243,13 @@ func TestAppendConcurrentSeqIntegrity(t *testing.T) {
 	}
 	// A healthy clock is already past the floor, so the stamps are its own
 	// readings: the last is not ahead of the database clock read after it.
-	// The second of slack absorbs a small backwards step.
+	// The minute of slack absorbs a backwards step of the clock during the
+	// test; a floor a second or more wide still carries 200 appends past it.
 	var dbNow time.Time
 	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbNow); err != nil {
 		t.Fatal(err)
 	}
-	if last := got[len(got)-1].CreatedAt; last.After(dbNow.Add(time.Second)) {
+	if last := got[len(got)-1].CreatedAt; last.After(dbNow.Add(time.Minute)) {
 		t.Errorf("last created_at %v is ahead of the database clock %v: the floor moved a healthy clock's stamps", last, dbNow.UTC())
 	}
 
@@ -315,6 +316,56 @@ func TestAppendCreatedAtOutrunsABackwardsClock(t *testing.T) {
 		}
 		if !slices.Equal(seqs, poll.want) {
 			t.Errorf("created_at[gt] %s (%v) listed seqs %v, want %v", poll.name, poll.after, seqs, poll.want)
+		}
+	}
+}
+
+// Past the floor, the stamp is a healthy clock's own reading, one per batch.
+// An append to a session whose last row is an hour old is dated between
+// database clock readings taken around it, not a microsecond past that row,
+// and every row of the batch carries the same stamp, so a clock step inside
+// the INSERT cannot reorder them. The minute of slack absorbs a backwards
+// step of the clock during the test.
+func TestAppendCreatedAtFollowsAHealthyClock(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	first, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("old")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE events SET created_at = created_at - interval '1 hour' WHERE id = $1`,
+		first[0].ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	clock := func() time.Time {
+		t.Helper()
+		var now time.Time
+		if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+			t.Fatal(err)
+		}
+		return now.UTC()
+	}
+
+	before := clock()
+	batch := make([]events.NewEvent, 50)
+	for i := range batch {
+		batch[i] = events.NewEvent{Type: domain.EventUserMessage, Payload: text("new")}
+	}
+	got, err := log.Append(ctx, sid, batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := clock()
+
+	stamp := got[0].CreatedAt
+	if stamp.Before(before.Add(-time.Minute)) || stamp.After(after.Add(time.Minute)) {
+		t.Errorf("batch stamped %v, want the clock's reading, between %v and %v", stamp, before, after)
+	}
+	for _, ev := range got[1:] {
+		if !ev.CreatedAt.Equal(stamp) {
+			t.Fatalf("seq %d stamped %v, want the batch's one stamp %v", ev.Seq, ev.CreatedAt, stamp)
 		}
 	}
 }

@@ -156,3 +156,25 @@ func TestApprovalWaitMeasuresFromTheThreadSuspension(t *testing.T) {
 		t.Errorf("approval wait = count %d / %vs, want one reading measuring the ten-minute-old thread suspension, not the fresh session idle", pts[0].Count, pts[0].Sum)
 	}
 }
+
+// A suspension dated ahead of the clock, as the append floor dates one while
+// the database clock is behind a backwards step (#411), makes the interval
+// negative. That is no wait, so nothing is recorded, rather than a negative
+// reading that would drag the histogram's sum and minimum down.
+func TestApprovalWaitDropsANegativeInterval(t *testing.T) {
+	collect := collectMetrics(t)
+	s := newTestServer(t)
+	sessionID, askID := suspendViaBrain(t, s)
+	tag, err := s.pool.Exec(context.Background(),
+		`UPDATE events SET created_at = created_at + interval '1 hour'
+		 WHERE session_id = $1 AND payload->'stop_reason'->>'type' = 'requires_action'`, sessionID)
+	if err != nil || tag.RowsAffected() == 0 {
+		t.Fatalf("dating the suspension ahead: %v (%d rows)", err, tag.RowsAffected())
+	}
+
+	sendEvents(t, s, sessionID, confirm(askID, "allow", nil))
+
+	if pts := apiFloatPoints(t, collect(), events.MetricApprovalWait); len(pts) != 0 {
+		t.Errorf("recorded %d approval wait point(s) for a suspension dated ahead of the clock, want 0", len(pts))
+	}
+}
