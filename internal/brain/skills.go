@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
+	"path"
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
@@ -42,12 +45,13 @@ type skillMeta struct {
 // resolveSkillsBlock resolves the agent's skills[] into the Level-1 system-prompt
 // block: per skill, resolve the version at request-assembly time (see
 // resolveSkillMeta for the three addressing forms) and read name+description
-// from the resolved version, then render the block. A reference
+// from the resolved version, then render the block under the session's skills
+// root (skillsRoot). A reference
 // that cannot be resolved — a dangling id/version, or a store blip — is logged
 // and skipped, never fatal to the turn (the same late-bound tolerance
 // materialization applies, plan design decision 7). Returns the rendered block,
 // the number of skills injected, and the number of misses.
-func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAgent) (string, int, int) {
+func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAgent, envKind string) (string, int, int) {
 	if len(agent.Skills) == 0 {
 		return "", 0, 0
 	}
@@ -84,7 +88,24 @@ func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAge
 			Name: name, Description: desc, Dir: skills.TargetDir(name, ref.SkillID),
 		})
 	}
-	return renderSkillsBlock(metas), len(metas), misses
+	return renderSkillsBlock(metas, b.skillsRoot(envKind)), len(metas), misses
+}
+
+// skillsRoot is the directory the block says holds the skills. On a cloud
+// session it is absolute, the executor's workdir (Config.Workdir) joined with
+// "skills", as the reference names /workspace/skills/. A self-hosted worker's
+// workdir is the customer's (WORKER_WORKDIR), so no value here can name it:
+// that root stays relative. The file tools resolve it against the workdir, and
+// so does bash until the agent changes directory (plan 65 decision 1).
+func (b *Brain) skillsRoot(envKind string) string {
+	if envKind != string(domain.EnvCloud) {
+		return "skills"
+	}
+	workdir := b.cfg.Workdir
+	if workdir == "" {
+		workdir = sandbox.DefaultWorkdir
+	}
+	return path.Join(workdir, "skills")
 }
 
 // resolveSkillMeta resolves one reference to the resolved version's name and
@@ -142,29 +163,47 @@ func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (
 	return name, description, nil
 }
 
+// skillsLead opens the skills block: what a skill is, and the order the agent
+// works in when one applies.
+const skillsLead = "**Using skills**\n\n" +
+	"A skill is a set of instructions, and often code, for one kind of task. " +
+	"Before you write code or run a tool for a task:\n" +
+	"- check the task against each skill's description below;\n" +
+	"- when one matches, read that skill's SKILL.md first;\n" +
+	"- then follow its instructions and use its code, rather than writing your own from scratch.\n\n" +
+	"<system-reminder>Read the matching SKILL.md before you act. " +
+	"A skill's instructions and code take precedence over a generic approach.</system-reminder>\n"
+
 // renderSkillsBlock formats the resolved skills into the Level-1 block appended
-// to the system prompt. The exact reference template is captured by no source;
-// this format — a short lead line plus one "name - description (path)" bullet
-// per skill, the path being where materialization lands the files — is an
-// inference recorded in docs/DIVERGENCES.md. Empty input yields an empty block,
-// so nothing is appended.
-func renderSkillsBlock(metas []skillMeta) string {
+// to the system prompt, in the template a 2026-09-03 recording captured (#581):
+// a lead, then an <available_skills> list with one <skill> per skill, carrying
+// its name, its description and the location of its SKILL.md under root. The
+// list and the sentence naming the root are the reference's. The lead gives the
+// recorded lead's directions and its reminder in our own words, not its text.
+// A name and a description are escaped as html.EscapeString does, which writes
+// `"` as &#34;, as the recording shows. Paths are written as they are: the
+// model copies them into its tools, and an escaped path names no file. They
+// hold only the root, which is operator configuration, and a materialization
+// directory, which upload validation keeps to [a-z0-9-] or a skill id. Empty
+// input yields an empty block, so nothing is appended.
+func renderSkillsBlock(metas []skillMeta, root string) string {
 	if len(metas) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Available skills. Each skill's full instructions live in its SKILL.md file; read it with your file tools before using the skill.\n")
+	b.WriteString(skillsLead)
+	b.WriteString("- Skills are available under `" + root + "/`.\n\n")
+	b.WriteString("<available_skills>\n")
 	for _, m := range metas {
-		b.WriteString("\n- ")
-		b.WriteString(m.Name)
-		if m.Description != "" {
-			b.WriteString(" - ")
-			b.WriteString(m.Description)
-		}
-		b.WriteString(" (skills/")
-		b.WriteString(m.Dir)
-		b.WriteString("/SKILL.md)")
+		b.WriteString("<skill>\n  <name>")
+		b.WriteString(html.EscapeString(m.Name))
+		b.WriteString("</name>\n  <description>")
+		b.WriteString(html.EscapeString(m.Description))
+		b.WriteString("</description>\n  <location>")
+		b.WriteString(path.Join(root, m.Dir, "SKILL.md"))
+		b.WriteString("</location>\n</skill>\n")
 	}
+	b.WriteString("</available_skills>")
 	return b.String()
 }
 

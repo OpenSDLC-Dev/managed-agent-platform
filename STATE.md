@@ -4,10 +4,12 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 64](./docs/plan/64_repo-mounts-under-workspace.md) (#922), repository
-mounts rooted under `/workspace` as the reference roots them, archived 2026-10-13 in one
-PR; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
+[Plan 65](./docs/plan/65_repo-skill-discovery.md) (#921): skills discovered in a mounted
+repository and announced to the agent, as the reference announces them, after both skills
+blocks take the reference's `<available_skills>` template (#581).
 
 ## Tasks
 
-None in flight.
+- [x] Slice 1, the template (#581): the attached block's XML list and absolute cloud locations.
+- [ ] Slice 2, root discovery: scan before the first request, the repository block, the trust note.
+- [ ] Slice 3, nested discovery on `read`; archives the plan and closes #921.

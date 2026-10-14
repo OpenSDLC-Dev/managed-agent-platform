@@ -13,6 +13,9 @@
 //	                      against the bytes; without it they are graded from
 //	                      the description alone
 //	BRAIN_LEASE_TTL       work-item lease, Go duration (default "2m")
+//	EXECUTOR_WORKDIR      the executor's sandbox working directory (default
+//	                      "/workspace"); set it to the executor's value, since
+//	                      the skills block names the skills under it
 //	BRAIN_POLL_INTERVAL   idle queue poll, Go duration (default "250ms")
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
@@ -24,6 +27,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path"
 	"syscall"
 	"time"
 
@@ -70,6 +74,13 @@ func run(ctx context.Context) error {
 			}
 			*dst = d
 		}
+	}
+	// Read under the executor's own name, so one setting serves both binaries.
+	if w := os.Getenv("EXECUTOR_WORKDIR"); w != "" {
+		if !path.IsAbs(w) {
+			return errors.New("EXECUTOR_WORKDIR must be an absolute path")
+		}
+		cfg.Workdir = path.Clean(w)
 	}
 
 	routes, err := provider.LoadRoutes(providersPath)

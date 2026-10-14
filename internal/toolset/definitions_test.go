@@ -206,8 +206,8 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 // Two of the keywords a 2026-09-02 recording showed the reference closing its
 // six sandbox tools with are adopted (#822, an owner decision):
 // additionalProperties:false on all six, and minLength:1 on edit's old_string.
-// The recording's ^\/ pattern on file_path is not: paths stay relative, as the
-// skills block hands the model one (docs/DIVERGENCES.md).
+// The recording's ^\/ pattern on file_path is not: paths stay relative, as a
+// self-hosted session's skills block hands the model one (docs/DIVERGENCES.md).
 func TestSandboxToolSchemasCarryTheAdoptedRecordedKeywords(t *testing.T) {
 	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`), time.Now())
 	if err != nil {

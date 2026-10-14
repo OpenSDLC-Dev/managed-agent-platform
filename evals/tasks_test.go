@@ -308,8 +308,9 @@ func fileAnswer() Task {
 // not the model's own knowledge.
 //
 // The turn names no skill and no path: it asks only for the passphrase. The
-// injected Level-1 block ("eval-secret - Reveals this task's passphrase.
-// (skills/eval-secret/SKILL.md)") is the only thing that reveals a skill can
+// injected Level-1 block (an <available_skills> entry naming eval-secret, its
+// description and /workspace/skills/eval-secret/SKILL.md) is the only thing
+// that reveals a skill can
 // answer and where it lives, so injection is the discovery mechanism under test —
 // a prompt that announced the skill would let the model succeed by exploring the
 // filesystem even if injection regressed. Perfect isolation is impossible
