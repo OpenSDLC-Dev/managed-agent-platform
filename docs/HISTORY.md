@@ -90,7 +90,7 @@ BigModel's chat-completion reference lists `auto` as `tool_choice`'s only option
 
 **Gitee's `Qwen3-VL-Embedding-8B`** answers one vector for each input, 1024 values each: two for a text and an image, three for a text and two images. Past 1000 inputs it gives the same 400 as before. So the knowledge-base client's multimodal health check, one text and one image, now gets the two vectors it asks for.
 
-**The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu` passed every test it ran in 207 seconds: 182 tests and subtests passed and none failed. Gemini was not named and skipped. On Moonshot:
+**The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu` passed every test it ran in 233 seconds: 186 tests and subtests passed and none failed. Each of the eight chat models had its Chat Completions refusals asked, of the gateway and of the vendor directly. The run before it failed one `MiniMax-M3.1-Flash-Preview` round trip on MiniMax's own 529 `overloaded_error`. Gemini was not named and skipped. On Moonshot:
 
 - Each model's round trip got one unsigned thinking block and sent none back.
 - `count_tokens` relayed Kimi's 404.
