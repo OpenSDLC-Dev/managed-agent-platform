@@ -264,16 +264,20 @@ func TestShell(t *testing.T) {
 					t.Errorf("stdout = %q, want [1][/tmp] — an alias on %q hijacked the template's own lines",
 						got.Stdout, tc.alias)
 				}
+				// A command that returns normally ends on the template's last line instead.
+				if got := sh("false", 0); got.ExitCode != 1 {
+					t.Errorf("exit code = %d, want 1 — an alias on %q hijacked the template's last line",
+						got.ExitCode, tc.alias)
+				}
 			})
 		}
 	})
 
-	// Every word the template's last lines and `__map_main` run is a builtin a
-	// command can shadow with a function of the same name — `.` above all,
-	// which is a legal function name, is snapshotted like any other, and once
-	// restored makes the template source nothing: every later call returns exit
-	// 0 with no output, forever. `trap` is the same shape and costs the next
-	// call its snapshot.
+	// Every word the template's last lines run is a builtin a command can shadow
+	// with a function of the same name — `.` above all, which is a legal
+	// function name, is snapshotted like any other, and once restored makes the
+	// template source nothing: every later call returns exit 0 with no output,
+	// forever. `trap` is the same shape and costs the next call its snapshot.
 	t.Run("AFunctionCannotHijackTheTemplatesOwnWords", func(t *testing.T) {
 		for _, tc := range []struct{ name, fn string }{
 			{"Dot", `.() { echo HIJACKED_DOT; }`},
@@ -354,23 +358,19 @@ greet
 	// The namespace filter is `case $name in __map_*) continue`, and it is only as
 	// good as the tool that reads the name back. A function or alias CAN be named
 	// like an option — `-p`, `--` — and `declare -f "-p"` / `alias "-p"` then read
-	// the name as the print-everything flag and dump the WHOLE table, the template's
-	// own `__map_main` among it, straight past the filter; the next call restores
-	// that `__map_main` over the template's and runs it, stripping the session. The
-	// save passes every snapshotted name after `--` so a name is only ever a name.
+	// the name as the print-everything flag and dump the WHOLE table straight past
+	// the filter: a `__map_save` of the command's own among it, which the next
+	// call restores over the template's and runs. The save passes every
+	// snapshotted name after `--` so a name is only ever a name.
 	t.Run("AnOptionLikeNameCannotDumpTheWholeTablePastTheFilter", func(t *testing.T) {
 		t.Run("Function", func(t *testing.T) {
 			sh, _ := newShell(t, sb)
-			sh(`export KEEP=yes; f(){ echo fn; }; cd /var`, 0)
-			// `-p` as a function name; a user __map_main that would strip the session
-			// if `declare -f -p` dumped it into the snapshot. The call ends by
-			// calling `exit`, so its own end never runs that __map_main; a carried
-			// one would run at the end of the next call.
-			sh("function -p { :; }\n__map_main() { set +e; unset KEEP; cd /workspace; __map_save 0; builtin exit 0; }\nexit 0", 0)
-			sh(":", 0)
-			got := sh(`\builtin echo "[${KEEP:-LOST}][$(pwd)]"`, 0)
-			if strings.TrimSpace(got.Stdout) != "[yes][/var]" {
-				t.Errorf("stdout = %q, want [yes][/var] — a `-p` function dumped the table past the filter", got.Stdout)
+			// `-p` as a function name, beside a function in the template's
+			// namespace, which the filter must drop.
+			sh("function -p { :; }\n__map_probe() { :; }", 0)
+			got := sh(`\builtin declare -F __map_probe || \builtin echo DROPPED`, 0)
+			if strings.TrimSpace(got.Stdout) != "DROPPED" {
+				t.Errorf("stdout = %q, want DROPPED — a `-p` function dumped the table past the filter", got.Stdout)
 			}
 		})
 		t.Run("Alias", func(t *testing.T) {
@@ -408,8 +408,8 @@ greet
 	// aborts, and the call silently loses everything it did. `set -E; trap … ERR`
 	// is an ordinary script idiom.
 	// The `exit` variants matter on their own: the command exits THROUGH the EXIT
-	// trap, so __map_main's post-command trap clearing never runs and __map_save
-	// has to drop the traps itself.
+	// trap, so the template's post-command trap clearing never runs and
+	// __map_save has to drop the traps itself.
 	t.Run("AnErrOrDebugTrapThatPrintsDoesNotCostTheCallItsSnapshot", func(t *testing.T) {
 		for _, tc := range []struct{ name, setup, ending string }{
 			{"ErrTrap", `set -E; trap 'echo boom' ERR`, ""},
@@ -432,12 +432,12 @@ greet
 	// The save runs in the command's shell, so every name it declares can collide
 	// with one the command exported. They are all __map_*; `code` was not, and an
 	// exported `code` came back as the previous call's exit status.
-	// __map_main drops the command's DEBUG/ERR/RETURN traps as soon as the command
-	// is done. __map_save clears them again on entry, and THAT is what protects the
-	// snapshot (a command exiting through the EXIT trap never reaches __map_main's
-	// line) — this earlier clear protects the tool RESULT: without it the template's
-	// own remaining commands each fire the command's trap, and the model reads six
-	// lines of `TICK` it did not print.
+	// The template's last line drops the command's DEBUG/ERR/RETURN traps as soon
+	// as the command is done. __map_save clears them again on entry, and THAT is
+	// what protects the snapshot (a command exiting through the EXIT trap never
+	// reaches that line) — this earlier clear protects the tool RESULT: without it
+	// the template's own remaining commands each fire the command's trap, and the
+	// model reads six lines of `TICK` it did not print.
 	t.Run("TheTemplatesOwnLinesDoNotFireTheCommandsDebugTrap", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		got := sh(`set -T; trap 'echo TICK' DEBUG; echo HELLO`, 0)
@@ -456,14 +456,37 @@ greet
 	// context torn down: the save's `local` failed, the call lost its snapshot,
 	// and the errors landed on the command's stderr.
 	t.Run("ACallItsOwnErrexitEndsKeepsItsState", func(t *testing.T) {
-		sh, _ := newShell(t, sb)
-		got := sh("cd /tmp; export MARK=1; set -e; false; echo unreached", 0)
-		if got.ExitCode != 1 || got.Stdout != "" || got.Stderr != "" {
-			t.Errorf("result = %+v, want exit 1 with no output", got.ExecResult)
+		for _, tc := range []struct{ name, cmd string }{
+			{"AtTheTopLevel", "cd /tmp; export MARK=1; set -e; false; echo unreached"},
+			{"InsideItsOwnFunction", "set -e; f() { cd /tmp; export MARK=1; false; echo unreached; }; f"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sh, _ := newShell(t, sb)
+				got := sh(tc.cmd, 0)
+				if got.ExitCode != 1 || got.Stdout != "" || got.Stderr != "" {
+					t.Errorf("result = %+v, want exit 1 with no output", got.ExecResult)
+				}
+				after := sh(`echo "[${MARK:-LOST}][$(pwd)][$-]"`, 0)
+				if out := strings.TrimSpace(after.Stdout); !strings.HasPrefix(out, "[1][/tmp][") || !strings.Contains(out[len("[1][/tmp]"):], "e") {
+					t.Errorf("stdout = %q, want [1][/tmp] and errexit still on — the call lost its snapshot", after.Stdout)
+				}
+			})
 		}
-		after := sh(`echo "[${MARK:-LOST}][$(pwd)][$-]"`, 0)
-		if out := strings.TrimSpace(after.Stdout); !strings.HasPrefix(out, "[1][/tmp][") || !strings.Contains(out[len("[1][/tmp]"):], "e") {
-			t.Errorf("stdout = %q, want [1][/tmp] and errexit still on — the call lost its snapshot", after.Stdout)
+	})
+
+	// A command's DEBUG trap fires on the template's last line before that line
+	// clears it. The status must not ride where the trap can reach it: under
+	// functrace a function's $1 could be rewritten, or emptied under nounset so
+	// that the call ends before its save.
+	t.Run("ADebugTrapCannotRewriteTheStatus", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		if got := sh("set -T; trap 'set -- 0' DEBUG; false", 0); got.ExitCode != 1 {
+			t.Errorf("exit code = %d, want 1 — the command's DEBUG trap rewrote the status", got.ExitCode)
+		}
+		sh2, _ := newShell(t, sb)
+		sh2("set -uT; trap 'set --' DEBUG; export MARK=1; cd /tmp; false", 0)
+		if after := sh2(`echo "[${MARK:-LOST}][$(pwd)]"`, 0); strings.TrimSpace(after.Stdout) != "[1][/tmp]" {
+			t.Errorf("stdout = %q, want [1][/tmp] — the call lost its snapshot", after.Stdout)
 		}
 	})
 
