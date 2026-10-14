@@ -221,6 +221,26 @@ func renderSkillsBlock(metas []skillMeta, root string, repo []skills.RepoSkill) 
 	return b.String()
 }
 
+// nestedSkillsLead opens the block a read's nested skills are announced in.
+// The reference's own text is unrecorded: the agent described it as another
+// source="repo" list after the read (docs/DIVERGENCES.md), so the lead is ours.
+const nestedSkillsLead = "Reading that file found skills in the directories above it. " +
+	"Before you act on a task one of them matches, read its SKILL.md.\n\n"
+
+// renderNestedSkills formats what a read found below a repository's root as
+// the text block replay places after its result: the lead, then a
+// source="repo" list, everything in it escaped, as the repository list is.
+func renderNestedSkills(found []skills.RepoSkill) string {
+	var b strings.Builder
+	b.WriteString(nestedSkillsLead)
+	b.WriteString("<available_skills source=\"repo\">\n")
+	for _, s := range found {
+		writeSkill(&b, s.Name, s.Description, html.EscapeString(s.Location))
+	}
+	b.WriteString("</available_skills>")
+	return b.String()
+}
+
 // writeSkill writes one <skill> entry, escaping its name and description and
 // writing location as given.
 func writeSkill(b *strings.Builder, name, description, location string) {

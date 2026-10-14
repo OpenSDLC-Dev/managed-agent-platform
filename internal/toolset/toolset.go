@@ -290,6 +290,10 @@ func (r Runner) workdir() string {
 	return r.Workdir
 }
 
+// ResolvePath is the path a file tool's model-supplied path names, as the
+// tool resolves it.
+func (r Runner) ResolvePath(p string) string { return r.resolve(p) }
+
 // resolve roots a model-supplied path. Slash paths, not filepath: the sandbox is
 // a Linux container whatever the executor runs on.
 func (r Runner) resolve(p string) string {

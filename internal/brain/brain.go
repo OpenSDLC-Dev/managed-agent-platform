@@ -427,6 +427,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// it is still valid (#67).
 		kept, err = b.log.ThinkingBlocks(kctx, sid, item.ThreadID)
 	}
+	var nested map[domain.ID]string
+	if err == nil {
+		// What this thread's reads found below a repository's root (plan 65
+		// decision 5), announced after the results that found it.
+		nested, err = b.nestedSkillBlocks(kctx, sid, item.ThreadID)
+	}
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)
@@ -446,7 +452,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return nil
 	}
 	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock,
-		replayThinking{model: desc.Model, route: desc.Route, blocks: kept})
+		nested, replayThinking{model: desc.Model, route: desc.Route, blocks: kept})
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)

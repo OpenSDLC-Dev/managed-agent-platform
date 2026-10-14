@@ -15,7 +15,7 @@ import (
 // tools and history.
 func keptUnder(t *testing.T, id domain.ID, tools []json.RawMessage, history []domain.Event) events.ThinkingBlock {
 	t.Helper()
-	req, _, err := buildRequest("sys", tools, history, "", "", "", "", replayThinking{})
+	req, _, err := buildRequest("sys", tools, history, "", "", "", "", nil, replayThinking{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func keptUnder(t *testing.T, id domain.ID, tools []json.RawMessage, history []do
 // renders from tools and history with kept stored, for model "m" over route.
 func assistantTypes(t *testing.T, route string, tools []json.RawMessage, history []domain.Event, kept events.ThinkingBlock) []string {
 	t.Helper()
-	req, _, err := buildRequest("sys", tools, history, "", "", "", "",
+	req, _, err := buildRequest("sys", tools, history, "", "", "", "", nil,
 		replayThinking{model: "m", route: route, blocks: map[domain.ID]events.ThinkingBlock{kept.EventID: kept}})
 	if err != nil {
 		t.Fatal(err)

@@ -1483,8 +1483,9 @@ daemon and every container on it as one trust domain.
 ### Mounted-repository skills
 
 A session that mounts a `github_repository` gets the skills in the
-checkout's `.claude/skills` directory. The agent is told of each one, and it
-reads and follows a skill's `SKILL.md` as an instruction. The reference does
+checkout's `.claude/skills` directory, and those in a subdirectory's
+`.claude/skills` once the agent reads a file below it. The agent is told of
+each one, and it reads and follows a skill's `SKILL.md` as an instruction. The reference does
 the same, and neither asks anyone to review those skills first (plan 65).
 
 So mounting a repository trusts its skills. Anyone who can push to the

@@ -49,6 +49,33 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Skills discovered in a mounted repository (plan 65, #921, #581) — archived 2026-10-14, delivered in three PRs (#931, #933 and this close-out)
+
+The owner settled four questions on 2026-10-14, before any code. Discovery runs before the first request. Both skills blocks take the recorded XML template, which brought #581 into the plan. Nested skills are discovered on `read` too. Repository skills are trusted as the reference trusts them. Two recordings were the ground truth: the 2026-09-03 attached-skills block, and managed-agents-wire-recordings#23's repository lists. managed-agents-wire-recordings#26 asks for the four points they leave open.
+
+The verifier ran on `claude-opus-5-5` by override in every round of all three PRs: its pinned model's quota returned HTTP 429 each time. Codex ran `gpt-6.1-sol` at `xhigh`, and `/code-review` ran `claude-opus-5-5` at `xhigh` with no cap.
+
+**#931, the template.** The verifier passed it with findings, with `make verify` green at 91.51% coverage. After our lead, the block was byte-identical to the recording over 1,729 bytes. Codex raised five P3 findings and `/code-review` eleven. One reversal is worth keeping. Codex asked to escape the skills root, so that a hostile workdir could not forge a tag. `/code-review` showed that this gave the model paths that do not exist (`/home/o'brien` became `o&#39;brien`), and the workdir is operator configuration, so paths went back to verbatim. Declined:
+
+- escaping control characters, since nothing parses the block as XML;
+- a test of the brain's `EXECUTOR_WORKDIR` read, which is `cmd/` glue and was run on the real binary instead;
+- the brain refusing every workdir the executor refuses;
+- the executor persisting its workdir for the brain.
+
+All 9 of my mutants were killed. The verifier's 10 left one survivor, the apostrophe's escape, which a test then pinned.
+
+**#933, root discovery.** It took five rounds.
+
+- **Round 1.** The verifier failed it on two blockers. An image's `BASH_ENV` banner became part of the first skill name, so the listing now runs framed. A new brain with an old executor held one session 36 times in 20 seconds, so the brain now holds a session once. Codex found four P2 and three P3 defects, among them a claimant that lost its lease publishing its scan, and a symbolic-link `SKILL.md` announced though a read refuses it.
+- **Round 2.** `/code-review` raised 17 findings. The record moved into the settle transaction: it had read the lease under the keeper, and locked `work_items` before `sessions`. It became per repository, with whole scans only. The listing turned off the image's glob options and globs in byte order. Declined: a bound on the list's total size (500 skills of 1,024 characters at most), a fresh list after a re-clone (the reference scans once), one read per `SKILL.md`, a wake before the whole run ends, a sandbox that never provisions, scanning when no agent has `read`, and one more session read per turn.
+- **After the PR opened.** The Codex bot found that a `BASH_ENV` running `set -f` made the listing expand nothing, and the empty scan was recorded for good. The listing now runs `set +f` and unsets `GLOBIGNORE`, and then `GLOBSORT`, which bash 5.3 adds. That last line was proven by hand on `bash:5.3`, because the gate's bash is 5.2. The outputs harvest and the `glob` tool share the `noglob` exposure on main, and are left to a follow-up.
+
+36 of 37 mutants were killed. The survivor ignores a failed record write inside the settle transaction, and is equivalent: a failed statement aborts the transaction, and the commit then fails.
+
+**The close-out, nested discovery.** The listing now takes several roots in one framed exec, and prints each name after its root's index. The Docker test reads below a fixture checkout as the recording did. A write, and a read that failed, scan nothing. The read after them records the two skills on its path, nearest first, and a later read in the same run or a later one records only what is new to its thread. A child thread is told on its own. A stub-sandbox test pins the cap's room and that only whole scans count, and a second Docker test pins that the root scans' skills count against the cap.
+
+**Plan 65 progress summary (archived).** Delivered in three PRs. #931 landed decision 1: the recorded template for the attached block and absolute cloud locations, closing #581. #933 landed decisions 2, 3, 4, 6 and 7: the hold before the first request, the scan of each checkout (migration 0053), the repository list and the trust note. The close-out landed decision 5, nested discovery on `read` (migration 0054), and closes #921. What the recordings leave open is registered and tracked on #78, and managed-agents-wire-recordings#26 asks for it.
+
 ## Repository mounts rooted under /workspace (plan 64, #922) — archived 2026-10-13, delivered in one PR
 
 The rooting rule waited on a recording. The owner chose to record the edges the 2026-09-03 probes left open rather than infer them, and managed-agents-wire-recordings#22 and #23 recorded them the same day (`2026-10-13-repo-mount-skills`). One finding reversed #584, merged the day before: the reference accepted a repository at `/workspace/skills` beside an attached skill, and the two shared the directory. Asked again with that evidence, the owner chose to share it too.

@@ -390,7 +390,7 @@ func (s *failListSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sa
 // cap cut short is dropped; and the cap's room is shared across repositories.
 func TestScanRepoSkillsListsOnlyAnnounceableNames(t *testing.T) {
 	refs := []repoRef{{ID: "sesrsc_a", Type: "github_repository", URL: "https://github.com/o/r", MountPath: "/workspace/r"}}
-	sb := &listingSandbox{stdout: "zeta\x00alpha\x00new\nline\x00bad\xff\x00cut-sho", truncated: true}
+	sb := &listingSandbox{stdout: "0/zeta\x000/alpha\x000/new\nline\x000/bad\xff\x009/stray\x00nonsense\x000/cut-sho", truncated: true}
 	got := (&Executor{}).scanRepoSkills(context.Background(), sb, "sesn_x", refs, maxRepoSkills, func() {})
 	want := map[string][]skills.RepoSkill{"sesrsc_a": {
 		{Name: "alpha", Description: "From alpha.", Location: "/workspace/r/.claude/skills/alpha/SKILL.md"},
@@ -402,14 +402,14 @@ func TestScanRepoSkillsListsOnlyAnnounceableNames(t *testing.T) {
 
 	var many strings.Builder
 	for i := 0; i < maxRepoSkills+5; i++ {
-		fmt.Fprintf(&many, "s%04d\x00", i)
+		fmt.Fprintf(&many, "0/s%04d\x00", i)
 	}
 	if got := (&Executor{}).scanRepoSkills(context.Background(), &listingSandbox{stdout: many.String()}, "sesn_x", refs, maxRepoSkills, func() {}); len(got["sesrsc_a"]) != maxRepoSkills {
 		t.Errorf("scan kept %d skills, want the cap of %d", len(got["sesrsc_a"]), maxRepoSkills)
 	}
 
 	two := append(refs, repoRef{ID: "sesrsc_b", Type: "github_repository", URL: "https://github.com/o/s", MountPath: "/workspace/s"})
-	got = (&Executor{}).scanRepoSkills(context.Background(), &listingSandbox{stdout: "a\x00b\x00"}, "sesn_x", two, 3, func() {})
+	got = (&Executor{}).scanRepoSkills(context.Background(), &listingSandbox{stdout: "0/a\x000/b\x00"}, "sesn_x", two, 3, func() {})
 	if n, m := len(got["sesrsc_a"]), len(got["sesrsc_b"]); n != 2 || m != 1 {
 		t.Errorf("with room for 3 the repositories kept %d and %d, want 2 and 1", n, m)
 	}
@@ -424,7 +424,7 @@ func TestScanRepoSkillsReadFailures(t *testing.T) {
 		{ID: "sesrsc_a", Type: "github_repository", URL: "https://github.com/o/r", MountPath: "/workspace/r"},
 		{ID: "sesrsc_b", Type: "github_repository", URL: "https://github.com/o/s", MountPath: "/workspace/s"},
 	}
-	sb := &listingSandbox{stdout: "big\x00dir\x00gone\x00ok\x00special\x00", readErr: map[string]error{
+	sb := &listingSandbox{stdout: "0/big\x000/dir\x000/gone\x000/ok\x000/special\x00", readErr: map[string]error{
 		"/workspace/r/.claude/skills/big/SKILL.md":     fmt.Errorf("big: %w", sandbox.ErrFileTooLarge),
 		"/workspace/r/.claude/skills/dir/SKILL.md":     fmt.Errorf("dir: %w", sandbox.ErrIsDirectory),
 		"/workspace/r/.claude/skills/gone/SKILL.md":    fmt.Errorf("gone: %w", sandbox.ErrFileNotExist),
@@ -449,9 +449,9 @@ func TestScanRepoSkillsReadFailures(t *testing.T) {
 // image's startup may leave on: noglob would list nothing, GLOBIGNORE would
 // hide "a", dotglob would list a hidden directory, failglob would fail an
 // empty skills directory, and a locale's collation, or on bash 5.3 GLOBSORT,
-// would put "a" before "B".
-// The listing undoes each, so it names the same skills, in byte order,
-// whatever the image set.
+// would put "a" before "B". The listing undoes each, so it names the same
+// skills, in byte order, whatever the image set. Several roots list in one
+// run, each name after its root's index, and an absent root lists nothing.
 func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -463,8 +463,8 @@ func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 		"set -f\nGLOBIGNORE=a\nGLOBSORT=-name\nshopt -s dotglob failglob nocaseglob\nexport LC_ALL=en_US.UTF-8\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(dir, "skills")
-	for _, d := range []string{".hidden", "a", "B"} {
+	skill := func(root, d string) {
+		t.Helper()
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -472,14 +472,20 @@ func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	root := filepath.Join(dir, "skills")
+	for _, d := range []string{".hidden", "a", "B"} {
+		skill(root, d)
+	}
+	other := filepath.Join(dir, "other")
+	skill(other, "c")
 	empty := filepath.Join(dir, "empty")
 	if err := os.MkdirAll(empty, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	list := func(root string) sandbox.ExecResult {
+	list := func(roots ...string) sandbox.ExecResult {
 		t.Helper()
 		f := sandbox.NewFrame("reposkills")
-		cmd := exec.Command(bash, "-c", f.Wrap(listRepoSkillsScript(root)))
+		cmd := exec.Command(bash, "-c", f.Wrap(listSkillsScript(roots)))
 		cmd.Env = append(os.Environ(), "BASH_ENV="+hook)
 		var stdout, stderr strings.Builder
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -497,8 +503,8 @@ func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 		}
 		return res
 	}
-	if res := list(root); res.ExitCode != 0 || res.Stdout != "B\x00a\x00" {
-		t.Errorf("listing = %q (exit %d), want %q", res.Stdout, res.ExitCode, "B\x00a\x00")
+	if res, want := list(root, filepath.Join(dir, "missing"), other), "0/B\x000/a\x002/c\x00"; res.ExitCode != 0 || res.Stdout != want {
+		t.Errorf("listing = %q (exit %d), want %q", res.Stdout, res.ExitCode, want)
 	}
 	if res := list(empty); res.ExitCode != 0 || res.Stdout != "" {
 		t.Errorf("empty listing = %q (exit %d), want nothing and exit 0", res.Stdout, res.ExitCode)

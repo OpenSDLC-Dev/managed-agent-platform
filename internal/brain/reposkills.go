@@ -80,6 +80,41 @@ func mountedRepositories(resourcesJSON []byte) []string {
 	return ids
 }
 
+// nestedSkillBlocks renders, by result event id, the skills each of the
+// thread's reads found below a repository's root (plan 65 decision 5), for
+// replay to place after that result. They are read from Postgres on every
+// turn, so a replayed brain renders the same blocks. A row whose skills do
+// not decode was not written by the executor, and is passed over.
+func (b *Brain) nestedSkillBlocks(ctx context.Context, sid, thread domain.ID) (map[domain.ID]string, error) {
+	rows, err := b.pool.Query(ctx,
+		`SELECT n.result_event_id, n.skills FROM session_nested_skills n JOIN events ev ON ev.id = n.result_event_id
+		  WHERE n.session_id = $1 AND ev.thread_id IS NOT DISTINCT FROM $2`,
+		sid.String(), events.NullableThread(thread))
+	if err != nil {
+		return nil, fmt.Errorf("nested skills: %w", err)
+	}
+	defer rows.Close()
+	var blocks map[domain.ID]string
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, fmt.Errorf("nested skills: %w", err)
+		}
+		var list []skills.RepoSkill
+		if err := json.Unmarshal(raw, &list); err != nil {
+			slog.WarnContext(ctx, "nested repository skills not injected",
+				"session_id", sid.String(), "result_event_id", id, "err", err)
+			continue
+		}
+		if blocks == nil {
+			blocks = map[domain.ID]string{}
+		}
+		blocks[domain.ID(id)] = renderNestedSkills(list)
+	}
+	return blocks, rows.Err()
+}
+
 // suspendForRepoSkills holds a turn until the session's repositories are
 // scanned for skills, as suspendForDiscovery holds one for an MCP listing: in
 // one commit it marks the session held, completes the model turn and enqueues
