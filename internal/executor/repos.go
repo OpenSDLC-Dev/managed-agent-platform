@@ -60,6 +60,10 @@ const (
 // rather than a user-visible reason of its own.
 var errRepoNoCredential = errors.New("repository credential row missing")
 
+// errRepoToken marks a failure to read the resource's sealed token: the row
+// in Postgres, or its decrypt through the cipher's backend. Both are ours.
+var errRepoToken = errors.New("reading the repository's token failed")
+
 // materializeRepos clones each mounted repository into the sandbox before the
 // tools run, first of the passes (provisionAndRun says why). Idempotence is
 // the probe alone — a repo
@@ -216,7 +220,7 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	}
 	token, err := e.repoToken(ctx, sid, m.ID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", errRepoToken, err)
 	}
 	// The row read and the cipher's decrypt are their own round trips — a KMS
 	// among them — and the clone below is what the stall floor is measured
@@ -245,10 +249,19 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	// cleanup tail, which runs only if the extraction script does. An upload
 	// that breaks off, an extraction whose exec never starts, or a context
 	// cancelled between the two — the clone deadline, or a lost lease — would
-	// strand a file the size of the repository inside the session's sandbox
-	// for its whole life. So every failure from here is swept, on a context the
-	// cancellation cannot reach. A script that ran and failed has already
-	// cleaned up, and sweeping again costs one exec on a pass that failed.
+	// strand a file the size of the repository in the session's sandbox until
+	// a later pass lands the same repository. So every failure from here
+	// sweeps the tar, on a context the cancellation cannot reach. A script
+	// that ran has removed it already, and sweeping again costs one exec on a
+	// pass that failed.
+	//
+	// The tar alone, and without -r. The upload writes a file, and a directory
+	// at that path is not ours: the upload refuses to write onto one and
+	// leaves it as it was (sandbox.ErrIsDirectory). The staging directory is
+	// left to the next extraction, which removes it first. An exec can return
+	// while its script runs on — a dropped stream, a cancelled context — and
+	// removing the staging directory under that script, or under the next
+	// lease holder's, would break a landing that was going to succeed.
 	landed := false
 	defer func() {
 		if landed {
@@ -256,11 +269,10 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 		}
 		sweep, stop := context.WithTimeout(context.WithoutCancel(ctx), repoSweepTimeout)
 		defer stop()
-		if _, err := sandbox.ExecScript(sweep, sb, sandbox.ExecRequest{
-			Command: "rm -rf " + shellQuote(sandboxTar) + " " + shellQuote(stagingPath(m.MountPath)),
-		}); err != nil {
-			slog.WarnContext(ctx, "the failed clone's sandbox staging was not swept",
-				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "err", err)
+		res, err := sandbox.ExecScript(sweep, sb, sandbox.ExecRequest{Command: "rm -f " + shellQuote(sandboxTar)})
+		if err != nil || res.ExitCode != 0 {
+			slog.WarnContext(ctx, "the failed clone's sandbox tar was not swept",
+				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "exit_code", res.ExitCode, "err", err)
 		}
 	}()
 	if err := sb.WriteFileStream(ctx, sandboxTar, f, size); err != nil {
@@ -273,9 +285,9 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	return size, nil
 }
 
-// repoSweepTimeout bounds the post-cancellation sweep. Short on purpose: the
-// work item is already over, and a sandbox that will not answer a `rm` will not
-// answer a longer one either.
+// repoSweepTimeout bounds the sweep after a failed landing. Short on purpose:
+// a sandbox that will not answer a `rm` will not answer a longer one either,
+// and the pass, or the work item it belonged to, is waiting on it.
 const repoSweepTimeout = 15 * time.Second
 
 // repoStagingRoot is where a clone's tar lands inside the sandbox on its way
@@ -367,9 +379,7 @@ func (e *Executor) skillsSentinel(mount string) string {
 }
 
 // stagingPath is where a mount's tree is unpacked before being renamed into
-// place — a sibling of the mount, so the rename stays on one filesystem. Named
-// once because the cancellation sweep has to remove the same directory the
-// extraction would have.
+// place — a sibling of the mount, so the rename stays on one filesystem.
 func stagingPath(mount string) string {
 	clean := path.Clean(mount)
 	return path.Join(path.Dir(clean), "."+path.Base(clean)+stagingSuffix)
@@ -442,7 +452,7 @@ var errMountOccupied = errors.New("the mount path is neither absent nor an empty
 // tar there, or the extraction script. It is the sandbox's, never the git
 // host's, though its text can read like the host's: a dropped exec stream says
 // EOF, and a script's stderr quotes the mount path, such as /opt/EOF. It never
-// carries errFetch, so cloneReason does not read that text.
+// carries errClone, so cloneReason does not read that text.
 var errExtraction = errors.New("landing the repository in the sandbox failed")
 
 // repoVacancyTimeout bounds mountOccupied's probe, which runs before the
