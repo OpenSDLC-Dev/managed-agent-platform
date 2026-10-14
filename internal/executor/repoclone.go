@@ -527,18 +527,27 @@ func cloneReason(err error) string {
 // for an address family it lacks — before anything reached the host, or a
 // local port it could not assign. So does a call on the connection that this
 // machine's memory or buffers ran out for, whatever the call. A name lookup
-// that could not open its own socket keeps that only as text, in the
-// net.DNSError's Err.
+// keeps the same failures only as text, in the net.DNSError's Err: a socket
+// it could not open, or a port, memory or buffers it ran out of.
 func isLocalError(err error) bool {
 	var pathErr *fs.PathError
 	var linkErr *os.LinkError
 	var sysErr *os.SyscallError
+	if errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
+		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, errPathRefused) {
+		return true
+	}
 	var dnsErr *net.DNSError
-	return errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
-		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, syscall.EADDRNOTAVAIL) ||
-		errors.Is(err, syscall.ENOMEM) || errors.Is(err, syscall.ENOBUFS) ||
-		(errors.As(err, &dnsErr) && strings.Contains(dnsErr.Err, "socket: ")) ||
-		errors.Is(err, errPathRefused)
+	lookup := ""
+	if errors.As(err, &dnsErr) {
+		lookup = dnsErr.Err
+	}
+	for _, errno := range []syscall.Errno{syscall.EADDRNOTAVAIL, syscall.ENOMEM, syscall.ENOBUFS} {
+		if errors.Is(err, errno) || strings.Contains(lookup, errno.Error()) {
+			return true
+		}
+	}
+	return strings.Contains(lookup, "socket: ")
 }
 
 // isRemoteStatusError reports whether the remote answered with an HTTP status

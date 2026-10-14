@@ -114,6 +114,11 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		return &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs",
 			Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError(call, errno)}}
 	}
+	// The pure-Go resolver keeps its own dial's failure only as text.
+	lookup := func(text string) error {
+		return &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: text, Name: "github.com", Server: "10.96.0.10:53"}}}
+	}
 	packDial := func(call string, errno syscall.Errno) error {
 		return plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://github.com/o/r.git/git-upload-pack",
 			Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError(call, errno)}})
@@ -141,9 +146,10 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		{"the executor has no buffer for a write to the host", &net.OpError{
 			Op: "write", Net: "tcp", Err: os.NewSyscallError("write", syscall.ENOBUFS)}},
 		{"go-git cannot lock a ref file on the spool", syscall.ENOLCK},
-		{"the executor has no descriptor left for the name lookup", &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs",
-			Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
-				Err: "dial udp 10.96.0.10:53: socket: too many open files", Name: "github.com", Server: "10.96.0.10:53"}}}},
+		{"the executor has no descriptor left for the name lookup", lookup("dial udp 10.96.0.10:53: socket: too many open files")},
+		{"the executor has no port left for the name lookup", lookup("dial udp 10.96.0.10:53: connect: " + syscall.EADDRNOTAVAIL.Error())},
+		{"the executor has no memory for the name lookup", lookup("dial udp 10.96.0.10:53: connect: " + syscall.ENOMEM.Error())},
+		{"the executor has no buffer for the name lookup", lookup("write udp 10.0.0.5:41234->10.96.0.10:53: write: " + syscall.ENOBUFS.Error())},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := fmt.Errorf("%w: %w", errClone, tc.err)
