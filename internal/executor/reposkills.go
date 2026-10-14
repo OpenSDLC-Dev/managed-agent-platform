@@ -48,9 +48,9 @@ func unscannedRepos(present []repoRef, recorded map[string][]skills.RepoSkill) [
 // Only a whole scan of a checkout is returned. One whose listing failed, or
 // whose run was cancelled under it, or a SKILL.md read that failed for a
 // reason the next run may not meet, leaves that checkout out, so a later run
-// scans it again. A SKILL.md the sandbox refuses to read for good, too large
-// or not a regular file, is listed with an empty description, as the agent's
-// own read of it would fail.
+// scans it again. A SKILL.md the sandbox refuses to read for good, too large,
+// not a regular file, a directory or gone since the listing, is listed with an
+// empty description, as the agent's own read of it would fail.
 func (e *Executor) scanRepoSkills(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, room int, progress func()) map[string][]skills.RepoSkill {
 	found := map[string][]skills.RepoSkill{}
 	for _, r := range refs {

@@ -187,6 +187,63 @@ func TestRepoSkillsScannedWhenTheCloneLands(t *testing.T) {
 	}
 }
 
+// TestRepoSkillsRecordedOnAFaultedRun: a run whose tool hit a backend fault
+// settles down the fault path, which commits the results that did run and
+// leaves the item live; the scan it took before the tools commits there too,
+// so the turn the brain held finds the list when it next runs.
+func TestRepoSkillsRecordedOnAFaultedRun(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{
+		".claude/skills/alpha/SKILL.md": "---\ndescription: Alpha marker.\n---\n",
+	})
+	h, _ := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+		return &faultMarkerProvider{Provider: p, marker: "# checkpoint-shell template"}
+	})
+	h.seedRepoResource(t, "sesrsc_skills", fx.url(), repoMount, "ghp_fixture", nil)
+
+	use, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": "true"}})
+	h.suspend(t, string(use))
+	h.stepOnce(t)
+
+	got, _ := h.repoSkillsRecord(t)
+	want := map[string][]skills.RepoSkill{"sesrsc_skills": {
+		{Name: "alpha", Description: "Alpha marker.", Location: repoMount + "/.claude/skills/alpha/SKILL.md"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("after a faulted run repo_skills = %+v\nwant %+v", got, want)
+	}
+	if n := h.liveOf(t, queue.ToolExec); n != 1 {
+		t.Errorf("live tool_exec items = %d, want 1: a faulted run leaves its item for the retry", n)
+	}
+}
+
+// faultMarkerProvider fails, as a lost exec stream would, every exec whose
+// command carries marker, and nothing else: the bash tool's own exec, by its
+// checkpoint shell's header (internal/sandbox/shell/template.sh).
+type faultMarkerProvider struct {
+	sandbox.Provider
+	marker string
+}
+
+func (p *faultMarkerProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
+	sb, err := p.Provider.Provision(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return &faultMarkerSandbox{Sandbox: sb, marker: p.marker}, nil
+}
+
+type faultMarkerSandbox struct {
+	sandbox.Sandbox
+	marker string
+}
+
+func (s *faultMarkerSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if strings.Contains(req.Command, s.marker) {
+		return sandbox.ExecResult{}, errors.New("exec stream lost")
+	}
+	return s.Sandbox.Exec(ctx, req)
+}
+
 // TestRepoSkillsCapCountsRecorded: the session's cap counts what earlier runs
 // recorded, so a repository scanned once the cap is spent gets an empty entry.
 func TestRepoSkillsCapCountsRecorded(t *testing.T) {
@@ -358,22 +415,29 @@ func TestScanRepoSkillsListsOnlyAnnounceableNames(t *testing.T) {
 	}
 }
 
-// TestScanRepoSkillsReadFailures: a SKILL.md the sandbox refuses for good is
-// listed with an empty description, while a read that failed for a reason the
-// next run may not meet leaves the whole repository unscanned, for a later run.
+// TestScanRepoSkillsReadFailures: a SKILL.md the sandbox refuses for good, too
+// large, not a regular file, a directory or gone since the listing, is listed
+// with an empty description, while a read that failed for a reason the next
+// run may not meet leaves the whole repository unscanned, for a later run.
 func TestScanRepoSkillsReadFailures(t *testing.T) {
 	refs := []repoRef{
 		{ID: "sesrsc_a", Type: "github_repository", URL: "https://github.com/o/r", MountPath: "/workspace/r"},
 		{ID: "sesrsc_b", Type: "github_repository", URL: "https://github.com/o/s", MountPath: "/workspace/s"},
 	}
-	sb := &listingSandbox{stdout: "big\x00ok\x00", readErr: map[string]error{
-		"/workspace/r/.claude/skills/big/SKILL.md": fmt.Errorf("big: %w", sandbox.ErrFileTooLarge),
-		"/workspace/s/.claude/skills/ok/SKILL.md":  errors.New("exec stream lost"),
+	sb := &listingSandbox{stdout: "big\x00dir\x00gone\x00ok\x00special\x00", readErr: map[string]error{
+		"/workspace/r/.claude/skills/big/SKILL.md":     fmt.Errorf("big: %w", sandbox.ErrFileTooLarge),
+		"/workspace/r/.claude/skills/dir/SKILL.md":     fmt.Errorf("dir: %w", sandbox.ErrIsDirectory),
+		"/workspace/r/.claude/skills/gone/SKILL.md":    fmt.Errorf("gone: %w", sandbox.ErrFileNotExist),
+		"/workspace/r/.claude/skills/special/SKILL.md": fmt.Errorf("special: %w", sandbox.ErrNotRegularFile),
+		"/workspace/s/.claude/skills/ok/SKILL.md":      errors.New("exec stream lost"),
 	}}
 	got := (&Executor{}).scanRepoSkills(context.Background(), sb, "sesn_x", refs, maxRepoSkills, func() {})
 	want := map[string][]skills.RepoSkill{"sesrsc_a": {
 		{Name: "big", Description: "", Location: "/workspace/r/.claude/skills/big/SKILL.md"},
+		{Name: "dir", Description: "", Location: "/workspace/r/.claude/skills/dir/SKILL.md"},
+		{Name: "gone", Description: "", Location: "/workspace/r/.claude/skills/gone/SKILL.md"},
 		{Name: "ok", Description: "From ok.", Location: "/workspace/r/.claude/skills/ok/SKILL.md"},
+		{Name: "special", Description: "", Location: "/workspace/r/.claude/skills/special/SKILL.md"},
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("scan = %+v\nwant %+v", got, want)

@@ -130,8 +130,9 @@ API exposes no raw prompt):
      The listing runs in byte order, so what the cap keeps does not depend on
      the image's locale.
    - **Description reads**: a `SKILL.md` the sandbox refuses to read for good
-     (too large, not a regular file) is listed with an empty description. Any
-     other failed read leaves the repository unscanned for a later run.
+     (too large, not a regular file, a directory, or gone since the listing)
+     is listed with an empty description. Any other failed read leaves the
+     repository unscanned for a later run.
    - **Names** (ours): a directory whose name is not UTF-8 or holds a control
      character is passed over, and a hidden directory is not listed. A linked
      directory is followed. A `SKILL.md` that is itself a symbolic link is
@@ -154,8 +155,9 @@ API exposes no raw prompt):
      upgrade gains it at its next turn. An agent whose `read` is enabled by a
      session update gains it at the next request. A turn that went ahead
      without a record gains it once a run records one. A repository scanned
-     after the first request, its clone or listing having failed before,
-     joins it then. Kept thinking produced before the change is then
+     after the first request joins it then: one whose earlier scan was not
+     whole, because its clone failed, the sandbox did not answer whether its
+     checkout was there, or its listing or a read failed or was cancelled. Kept thinking produced before the change is then
      dropped, as for any change of the system prompt.
    - Entries come in the session's resource order, each repository's by
      name.
