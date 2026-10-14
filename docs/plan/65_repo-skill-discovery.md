@@ -83,31 +83,36 @@ API exposes no raw prompt):
 2. **Discovery runs before the first request, as a run with no tool.** Before
    building a request, the brain suspends the turn when all of these hold:
    the environment is cloud, the session mounts a repository, the thread's
-   agent has `read` enabled, and the session has no scan record. The
+   agent has `read` enabled, and the session has no scan record and was
+   never held. The
    suspension is MCP discovery's (`suspendForDiscovery`): in one commit it
    completes the model turn and enqueues the session's `tool_exec`. It writes
    no event, and the session stays `running`.
    - The executor runs that item as any run: it provisions, installs packages,
      materializes repositories, skills, files and memory, finds no tool to run,
      and commits. `settleDrain` then wakes the thread.
-   - After the repositories land, the executor scans each one whose checkout
-     is present, and writes a scan record and the skills found, once per
-     session. A later re-clone does not scan again: the reference scans once.
-     A session that mounts no repository records an empty scan at its first
-     run, so no brain can wait on a scan that never comes.
+   - After the repositories land, the executor scans each repository whose
+     checkout this run found or landed and that has no entry yet. The entries
+     are recorded by repository, in the transaction that settles the run and
+     wakes the thread, so a claimant that lost its lease records nothing. A
+     repository is scanned once: a later re-clone does not scan it again, as
+     the reference scans once.
+   - A repository whose clone failed has no checkout to scan and gets no
+     entry; the repositories block already marks it unavailable. A later run
+     whose clone lands scans it then. A checkout whose listing failed, or
+     whose scan a cancellation cut short, gets no entry either, and a later
+     run scans it again.
    - A session in flight across the upgrade is held once, at its next turn,
      and gains the block there.
-   - A repository whose clone failed contributes no skill; the repositories
-     block already marks it unavailable. The scan record is still written, so
-     the brain does not wait again.
    - A sandbox that cannot provision holds the first turn, retried each lease
      period, as it already holds a tool call.
    - The brain holds a session once (`sessions.repo_skills_held_at`). A turn
-     woken with no scan recorded goes ahead without the list, which joins the
-     prompt at the first request after a run records it. A run that stalled
-     wakes the turn that way, and so does an executor older than this change
-     during an upgrade; holding again would cycle the turn through the
-     executor for as long as either lasts.
+     woken with nothing recorded goes ahead without the list, which joins the
+     prompt at the first request after a run records it. That happens when
+     the run stalled, when every clone failed, when an interrupt stopped the
+     held run, and when an executor older than this change ran it during an
+     upgrade. Holding again would cycle the turn through the executor for as
+     long as any of them lasts.
 
 3. **What a scan finds.** One framed sandbox command per repository lists
    the directories under `<mount>/.claude/skills` whose `SKILL.md` is a
@@ -122,6 +127,11 @@ API exposes no raw prompt):
      that cannot.
    - **Bounds** (both ours): at most 500 repository skills a session, the
      attached cap; a description cut at 1,024 characters, the upload cap.
+     The listing runs in byte order, so what the cap keeps does not depend on
+     the image's locale.
+   - **Description reads**: a `SKILL.md` the sandbox refuses to read for good
+     (too large, not a regular file) is listed with an empty description. Any
+     other failed read leaves the repository unscanned for a later run.
    - **Names** (ours): a directory whose name is not UTF-8 or holds a control
      character is passed over, and a hidden directory is not listed. A linked
      directory is followed. A `SKILL.md` that is itself a symbolic link is
@@ -140,12 +150,15 @@ API exposes no raw prompt):
    - The block is rendered from Postgres on every request, as the other blocks
      are, so a replayed brain builds the same one. It is present from the
      first request, so it does not move the prompt prefix that kept thinking
-     is keyed on, with three exceptions. A session in flight across the
+     is keyed on, with four exceptions. A session in flight across the
      upgrade gains it at its next turn. An agent whose `read` is enabled by a
      session update gains it at the next request. A turn that went ahead
-     without a record gains it once a run records one. Kept thinking produced
-     before the change is then dropped, as for any change of the system
-     prompt.
+     without a record gains it once a run records one. A repository scanned
+     after the first request, its clone or listing having failed before,
+     joins it then. Kept thinking produced before the change is then
+     dropped, as for any change of the system prompt.
+   - Entries come in the session's resource order, each repository's by
+     name.
 
 5. **Nested skills are discovered on `read`.** When the executor runs a `read`
    of a file below a repository's root, it scans each directory between the

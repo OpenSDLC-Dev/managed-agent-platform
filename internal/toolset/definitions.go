@@ -2,6 +2,7 @@ package toolset
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -674,4 +675,29 @@ func Policies(raw json.RawMessage) (map[string]domain.PermissionPolicyType, erro
 		out[r.def.name] = r.policy
 	}
 	return out, nil
+}
+
+// ReadUsable says an agent's tools[] offers the read tool: an
+// agent_toolset_20260401 entry that enables it. An entry whose policies no
+// longer resolve offers no tool, read included; its error comes back beside
+// the answer, for the caller to log.
+func ReadUsable(tools []json.RawMessage) (bool, error) {
+	var unresolved []error
+	for _, t := range tools {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(t, &head) != nil || head.Type != agentToolsetType {
+			continue
+		}
+		policies, err := Policies(t)
+		if err != nil {
+			unresolved = append(unresolved, err)
+			continue
+		}
+		if _, ok := policies["read"]; ok {
+			return true, errors.Join(unresolved...)
+		}
+	}
+	return false, errors.Join(unresolved...)
 }

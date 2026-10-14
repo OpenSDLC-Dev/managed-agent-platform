@@ -66,6 +66,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
@@ -476,7 +477,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// losing the lease cancels the work.
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
 
-	results, ms, faultErr, runErr := e.provisionAndRun(kctx, item, sess, keeper.Progress)
+	results, repoSkills, ms, faultErr, runErr := e.provisionAndRun(kctx, item, sess, keeper.Progress)
 	// Whatever the paths below decide, the sync's span ends once.
 	defer ms.end(ctx)
 	if kerr := keeper.Close(); kerr != nil {
@@ -526,9 +527,14 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	//
 	// The memory sync's settle phase rides the same transaction (plan 36
 	// decision 11): the store's rows and the run's results commit together,
-	// and the apply phase writes the sandbox only from what committed.
+	// and the apply phase writes the sandbox only from what committed. So does
+	// the record of the repositories' skills this run scanned (plan 65), which
+	// lands with the wake of the turn the brain held for it.
 	if err := e.commitResults(ctx, item.SessionID, results, func(ctx context.Context, tx pgx.Tx) error {
 		if err := e.settleDrain(ctx, tx, item, queue.ToolExec, faultErr != nil); err != nil {
+			return err
+		}
+		if err := recordRepoSkills(ctx, tx, item.SessionID, repoSkills); err != nil {
 			return err
 		}
 		return e.settleMemory(ctx, tx, ms)
@@ -565,13 +571,14 @@ func consumerSpan(ctx context.Context, item *queue.Item, name string) (context.C
 
 // provisionAndRun provisions the session's sandbox and runs its unanswered
 // tools under ctx (the lease-kept context). It returns the result events to
-// append, the first backend fault a tool hit (nil if every tool ran), and a
-// setup error from provisioning or reading the log — which stops the item with
-// nothing committed, distinct from a tool fault, which commits what did run.
-func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) ([]events.NewEvent, *memorySync, error, error) {
+// append, the repositories' skills this run scanned, the first backend fault a
+// tool hit (nil if every tool ran), and a setup error from provisioning or
+// reading the log — which stops the item with nothing committed, distinct from
+// a tool fault, which commits what did run.
+func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) ([]events.NewEvent, map[string][]skills.RepoSkill, *memorySync, error, error) {
 	sb, err := e.provisionSandbox(ctx, item.SessionID, sess, progress)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// Each step this run finishes tells the keeper the run is alive (#383).
 	// Reported at the boundaries a wedged sandbox call stops the run from
@@ -583,20 +590,16 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// may share the skills directory (#922), so skills are written after it.
 	// Files come after too, so a file mount may overlay into a checkout (plan 25
 	// decision 5), which since #922 only a resource stored before it can do.
-	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, len(sess.skills) > 0, progress)
+	present := e.materializeRepos(ctx, sb, item.SessionID, sess.repos, len(sess.skills) > 0, progress)
 	progress()
-	// The checkouts are now what the session will see, so their skills are
-	// scanned here, once per session (plan 65 decision 2). The brain holds a
-	// session's first turn until this record lands. A failure to store it
-	// stops the item for a retry with nothing committed, so nothing wakes the
-	// turn. A run that stalls before it gets here settles as any stalled run
-	// does, which wakes the held turn: the brain holds a session once, so that
-	// turn goes ahead without the list, and a later run records it.
-	if !sess.repoSkillsScanned {
-		if err := e.recordRepoSkills(ctx, item, e.scanRepoSkills(ctx, sb, item.SessionID, sess.repos, progress)); err != nil {
-			return nil, nil, nil, fmt.Errorf("record repository skills: %w", err)
-		}
-	}
+	// The checkouts are now what the session will see, so the skills of each
+	// one not yet scanned are scanned here, once per repository (plan 65
+	// decision 2), and recorded when the run settles. The brain holds a
+	// session's first turn for this; a run that settles without a record,
+	// stalled or with every clone failed, wakes it all the same, and the brain
+	// holds a session once.
+	repoSkills := e.scanRepoSkills(ctx, sb, item.SessionID,
+		unscannedRepos(present, sess.repoSkills), repoSkillsRoom(sess.repoSkills), progress)
 	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
@@ -622,7 +625,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	progress()
 	uses, err := e.runnableToolUses(ctx, item.SessionID)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// The web tools are the web driver's (webwork.go), never this sandbox
 	// pass's — and normally never even seen here: a tool_exec is enqueued only
@@ -643,7 +646,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	if faultErr == nil {
 		ms = e.readMemory(ctx, sb, item.SessionID, synced, progress)
 	}
-	return results, ms, faultErr, nil
+	return results, repoSkills, ms, faultErr, nil
 }
 
 // provisionSandbox resolves the session's credential env and gate spec and
@@ -964,9 +967,9 @@ type sessionRun struct {
 	memories   []memoryRef
 	vaultIDs   []string
 	mcpServers []mcpServerRef
-	// repoSkillsScanned says the session's repositories were scanned for
-	// skills already (sessions.repo_skills is set), which happens once.
-	repoSkillsScanned bool
+	// repoSkills is the skills recorded for each repository already scanned
+	// (sessions.repo_skills), which is scanned once.
+	repoSkills map[string][]skills.RepoSkill
 }
 
 // sessionForRun loads the session's egress policy, the skill references its
@@ -991,14 +994,14 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	var archivedAt *time.Time
 	var configJSON, agentJSON, resourcesJSON []byte
 	var vaultIDs []string
-	var repoSkillsScanned bool
+	var repoSkillsJSON []byte
 	err = tx.QueryRow(ctx,
 		`SELECT s.status, s.archived_at, e.config, s.resolved_agent, s.resources, s.vault_ids,
-		        s.repo_skills IS NOT NULL
+		        s.repo_skills
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
 		  WHERE s.id = $1 FOR UPDATE OF s`,
 		item.SessionID.String()).Scan(&status, &archivedAt, &configJSON, &agentJSON, &resourcesJSON, &vaultIDs,
-		&repoSkillsScanned)
+		&repoSkillsJSON)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sessionRun{}, false, nil
 	}
@@ -1111,6 +1114,10 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	if err := json.Unmarshal(resourcesJSON, &memories); err != nil {
 		return sessionRun{}, false, err
 	}
+	repoSkills, err := recordedRepoSkills(repoSkillsJSON)
+	if err != nil {
+		return sessionRun{}, false, err
+	}
 	return sessionRun{
 		envConfig:  cfg,
 		networking: cfg.Networking,
@@ -1122,7 +1129,7 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 		vaultIDs:   vaultIDs,
 		mcpServers: agent.MCPServers,
 
-		repoSkillsScanned: repoSkillsScanned,
+		repoSkills: repoSkills,
 	}, true, tx.Commit(ctx)
 }
 

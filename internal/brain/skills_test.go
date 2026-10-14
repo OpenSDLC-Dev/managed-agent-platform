@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -73,7 +74,7 @@ func TestRenderSkillsBlock(t *testing.T) {
 // too. With no attached skill, the lead precedes the repository list alone.
 func TestRenderSkillsBlockRepositoryList(t *testing.T) {
 	attached := []skillMeta{{Name: "pdf", Description: "Attached PDF.", Dir: "pdf"}}
-	repo := []repoSkill{
+	repo := []skills.RepoSkill{
 		{Name: "pdf", Description: "Repository PDF.", Location: "/workspace/r/.claude/skills/pdf/SKILL.md"},
 		{Name: "a&b", Description: "", Location: "/workspace/r/.claude/skills/a&b/SKILL.md"},
 	}

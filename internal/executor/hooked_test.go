@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
 // The executor's own scripts answer through an image whose BASH_ENV file
@@ -112,9 +113,9 @@ func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
 				t.Fatalf("seed the skill: %v", err)
 			}
 			found := h.exec.scanRepoSkills(ctx, sb, h.sid,
-				[]repoRef{{ID: "sesrsc_hooked", Type: "github_repository", MountPath: checkout}}, func() {})
-			want := []repoSkill{{Name: "alpha", Description: "Alpha skill", Location: checkout + "/.claude/skills/alpha/SKILL.md"}}
-			if !slices.Equal(found, want) {
+				[]repoRef{{ID: "sesrsc_hooked", Type: "github_repository", MountPath: checkout}}, maxRepoSkills, func() {})
+			want := []skills.RepoSkill{{Name: "alpha", Description: "Alpha skill", Location: checkout + "/.claude/skills/alpha/SKILL.md"}}
+			if !slices.Equal(found["sesrsc_hooked"], want) || len(found) != 1 {
 				t.Errorf("repository skills = %+v; want %+v", found, want)
 			}
 		})

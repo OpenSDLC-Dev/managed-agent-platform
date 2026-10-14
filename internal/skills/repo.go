@@ -7,6 +7,16 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// RepoSkill is one skill found in a mounted repository, as the brain announces
+// it (plan 65 decision 3). sessions.repo_skills maps each scanned repository
+// resource's id to its skills: internal/executor writes it, internal/brain
+// reads it.
+type RepoSkill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Location    string `json:"location"`
+}
+
 // RepoDescription is the description of a skill found in a mounted
 // repository's .claude/skills directory (plan 65 decision 3). Upload holds a
 // SKILL.md to the rules parseFrontmatter enforces; a repository's is what was

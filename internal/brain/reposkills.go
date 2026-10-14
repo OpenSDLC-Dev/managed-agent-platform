@@ -9,32 +9,35 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 )
-
-// repoSkill is one skill a mounted repository holds, as the executor recorded
-// it in sessions.repo_skills (internal/executor/reposkills.go).
-type repoSkill struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Location    string `json:"location"`
-}
 
 // repoSkillsFor returns the repository skills this turn's agent is told about
 // (plan 65 decisions 2 and 4), and whether the turn must first wait for the
 // executor to scan for them. None are told on a self-hosted session, which
 // mounts no repository, on a session that mounts none, or to an agent whose
-// read tool is off, as the reference announces none then. The record is read
-// from Postgres on every turn, so a replayed brain renders the same block.
+// read tool is off, as the reference announces none then (toolset.ReadUsable,
+// the test the API applies to a file added to a session). The record is read
+// from Postgres on every turn, so a replayed brain renders the same block;
+// its entries come in the session's resource order.
 //
-// A session is held once. A turn woken with no scan recorded goes ahead
+// A session is held once. A turn woken with nothing recorded goes ahead
 // without the list, which joins the prompt at the first request after a run
-// records it: an executor that predates the scan wakes the turn without one,
-// and so does a run that stalled, and holding again would cycle the turn
-// through the executor for as long as either lasts.
-func (b *Brain) repoSkillsFor(ctx context.Context, sid domain.ID, resourcesJSON []byte, envKind string, agent domain.ResolvedAgent) (skills []repoSkill, wait bool, err error) {
-	if envKind != string(domain.EnvCloud) || !mountsRepository(resourcesJSON) || !readEnabled(agent) {
+// records it: a run that stalled wakes the turn without a record, and so do
+// an interrupt that stopped the held run and an executor that predates the
+// scan, and holding again would cycle the turn through the executor for as
+// long as any of them lasts.
+func (b *Brain) repoSkillsFor(ctx context.Context, sid domain.ID, resourcesJSON []byte, envKind string, agent domain.ResolvedAgent) (found []skills.RepoSkill, wait bool, err error) {
+	if envKind != string(domain.EnvCloud) {
+		return nil, false, nil
+	}
+	ids := mountedRepositories(resourcesJSON)
+	if len(ids) == 0 {
+		return nil, false, nil
+	}
+	if usable, _ := toolset.ReadUsable(agent.Tools); !usable {
 		return nil, false, nil
 	}
 	var raw []byte
@@ -47,49 +50,34 @@ func (b *Brain) repoSkillsFor(ctx context.Context, sid domain.ID, resourcesJSON 
 	if raw == nil {
 		return nil, !held, nil
 	}
-	if err := json.Unmarshal(raw, &skills); err != nil {
+	var recorded map[string][]skills.RepoSkill
+	if err := json.Unmarshal(raw, &recorded); err != nil {
 		// The executor wrote this, so a decode failure is corruption, and
 		// waiting would not cure it: the turn runs without the block.
 		slog.WarnContext(ctx, "repository skills not injected", "session_id", sid.String(), "err", err)
 		return nil, false, nil
 	}
-	return skills, false, nil
+	for _, id := range ids {
+		found = append(found, recorded[id]...)
+	}
+	return found, false, nil
 }
 
-// mountsRepository says the session mounts a github_repository, by the same
-// test the repositories block applies (resolveReposBlock).
-func mountsRepository(resourcesJSON []byte) bool {
+// mountedRepositories is the ids of the github_repository resources the
+// session mounts, in resource order, by the test the repositories block
+// applies (resolveReposBlock) and the one the executor clones by.
+func mountedRepositories(resourcesJSON []byte) []string {
 	var mounts []repoMount
 	if len(resourcesJSON) == 0 || json.Unmarshal(resourcesJSON, &mounts) != nil {
-		return false
+		return nil
 	}
+	var ids []string
 	for _, m := range mounts {
-		if m.Type == "github_repository" && m.URL != "" && m.MountPath != "" {
-			return true
+		if m.Type == "github_repository" && m.ID != "" && m.URL != "" && m.MountPath != "" {
+			ids = append(ids, m.ID)
 		}
 	}
-	return false
-}
-
-// readEnabled says the agent can use the read tool: an agent_toolset entry that
-// leaves read enabled, the test the API applies to a file added to a session
-// (internal/api's requireReadTool). The reference needs read to load a
-// repository's skills, and announces none without it.
-func readEnabled(agent domain.ResolvedAgent) bool {
-	for _, t := range agent.Tools {
-		var head struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(t, &head) != nil || head.Type != "agent_toolset_20260401" {
-			continue
-		}
-		if policies, err := toolset.Policies(t); err == nil {
-			if _, ok := policies["read"]; ok {
-				return true
-			}
-		}
-	}
-	return false
+	return ids
 }
 
 // suspendForRepoSkills holds a turn until the session's repositories are

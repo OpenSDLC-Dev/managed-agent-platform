@@ -51,7 +51,7 @@ type skillMeta struct {
 // and skipped, never fatal to the turn (the same late-bound tolerance
 // materialization applies, plan design decision 7). Returns the rendered block,
 // the number of attached skills injected, and the number of misses.
-func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAgent, envKind string, repo []repoSkill) (string, int, int) {
+func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAgent, envKind string, repo []skills.RepoSkill) (string, int, int) {
 	if len(agent.Skills) == 0 {
 		return renderSkillsBlock(nil, "", repo), 0, 0
 	}
@@ -194,7 +194,7 @@ const skillsLead = "**Using skills**\n\n" +
 // attached skill the lead precedes the repository list alone, without the
 // sentence naming the root (ours: the reference's text there is unrecorded).
 // Empty input yields an empty block, so nothing is appended.
-func renderSkillsBlock(metas []skillMeta, root string, repo []repoSkill) string {
+func renderSkillsBlock(metas []skillMeta, root string, repo []skills.RepoSkill) string {
 	if len(metas) == 0 && len(repo) == 0 {
 		return ""
 	}

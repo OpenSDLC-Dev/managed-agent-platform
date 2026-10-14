@@ -16,11 +16,19 @@ import (
 const (
 	repoSkillsResources = `[{"id":"sesrsc_a","type":"github_repository",` +
 		`"url":"https://github.com/example-org/widget","mount_path":"/workspace/widget","checkout":null,` +
+		`"created_at":"2026-08-07T00:00:00Z","updated_at":"2026-08-07T00:00:00Z"},` +
+		`{"id":"sesrsc_b","type":"github_repository",` +
+		`"url":"https://github.com/example-org/gadget","mount_path":"/workspace/gadget","checkout":null,` +
 		`"created_at":"2026-08-07T00:00:00Z","updated_at":"2026-08-07T00:00:00Z"}]`
 
-	repoSkillsRecord = `[{"name":"alpha","description":"Alpha marker.",` +
+	// Keyed by resource, in no particular order, with an entry for a
+	// resource the session no longer mounts.
+	repoSkillsRecord = `{"sesrsc_b":[{"name":"beta","description":"Beta marker.",` +
+		`"location":"/workspace/gadget/.claude/skills/beta/SKILL.md"}],` +
+		`"sesrsc_gone":[{"name":"ghost","description":"","location":"/workspace/gone/.claude/skills/ghost/SKILL.md"}],` +
+		`"sesrsc_a":[{"name":"alpha","description":"Alpha marker.",` +
 		`"location":"/workspace/widget/.claude/skills/alpha/SKILL.md"},` +
-		`{"name":"nodesc","description":"","location":"/workspace/widget/.claude/skills/nodesc/SKILL.md"}]`
+		`{"name":"nodesc","description":"","location":"/workspace/widget/.claude/skills/nodesc/SKILL.md"}]}`
 )
 
 // repoSkillsAgent is a resolved agent snapshot whose toolset is the given
@@ -54,7 +62,8 @@ func seedRepoSkillsSession(t *testing.T, h *harness, agent string) {
 // TestRepoSkillsHoldTheFirstTurn: the first turn of a cloud session mounting a
 // repository is held, not sent, and hands the session to the executor. Once
 // the scan is recorded and the executor wakes the turn, the first request the
-// model sees already lists the repository's skills.
+// model sees already lists the repositories' skills, in resource order, and
+// none for a resource the session does not mount.
 func TestRepoSkillsHoldTheFirstTurn(t *testing.T) {
 	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{textChunk(0, "ok"), done("end_turn", 1)}}, nil)
 	seedRepoSkillsSession(t, h, repoSkillsAgent(`{"type":"agent_toolset_20260401"}`))
@@ -96,6 +105,8 @@ func TestRepoSkillsHoldTheFirstTurn(t *testing.T) {
 		"  <location>/workspace/widget/.claude/skills/alpha/SKILL.md</location>\n</skill>\n" +
 		"<skill>\n  <name>nodesc</name>\n  <description></description>\n" +
 		"  <location>/workspace/widget/.claude/skills/nodesc/SKILL.md</location>\n</skill>\n" +
+		"<skill>\n  <name>beta</name>\n  <description>Beta marker.</description>\n" +
+		"  <location>/workspace/gadget/.claude/skills/beta/SKILL.md</location>\n</skill>\n" +
 		"</available_skills>"
 	if !strings.Contains(sys, want) {
 		t.Errorf("system prompt lacks the repository skills:\n%s", sys)
@@ -105,9 +116,10 @@ func TestRepoSkillsHoldTheFirstTurn(t *testing.T) {
 	}
 }
 
-// TestRepoSkillsHeldOnce: a turn woken with no scan recorded, as an executor
-// that predates the scan wakes it, is not held again: it goes ahead without
-// the list, and the list joins the prompt once a run records it.
+// TestRepoSkillsHeldOnce: a turn woken with nothing recorded, as a stalled run,
+// an interrupt or an executor that predates the scan wakes it, is not held
+// again: it goes ahead without the list, and the list joins the prompt once a
+// run records it.
 func TestRepoSkillsHeldOnce(t *testing.T) {
 	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
 		{textChunk(0, "ok"), done("end_turn", 1)},
