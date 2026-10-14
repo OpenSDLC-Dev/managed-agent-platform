@@ -69,15 +69,16 @@ func TestLiveBrainThinkingThroughTheGateway(t *testing.T) {
 		return map[profile.Protocol]string{profile.Anthropic: proxy}
 	}
 	for _, v := range vendors {
-		// DeepSeek thinks unasked, and GLM-5.3 whatever it is asked.
-		model, thinks := v.models[0], v.name == "deepseek" || v.name == "zhipu"
+		// DeepSeek thinks unasked, and GLM-5.3 whatever it is asked; DeepSeek
+		// alone is known to refuse the continuation that lost its thinking.
+		model, thinks, refused := v.models[0], v.name == "deepseek" || v.name == "zhipu", v.name == "deepseek"
 		flagged, _ := profile.Lookup(v.name)
 		if !v.openAIOnly {
 			add(brainRoute{name: v.name + "/passthrough", alias: "brain-pass-" + v.name, rec: &recorder{},
-				unchecked: flagged.ThinkingAnyPrefix, refused: thinks, thinks: thinks}, v.name, model, anth, v.base)
+				unchecked: flagged.ThinkingAnyPrefix, refused: refused, thinks: thinks}, v.name, model, anth, v.base)
 		}
 		if host := openAIHost(v); host != "" {
-			add(brainRoute{name: v.name + "/converted", alias: "brain-conv-" + v.name, rec: &recorder{}, unchecked: true, refused: thinks, thinks: thinks}, v.name, model,
+			add(brainRoute{name: v.name + "/converted", alias: "brain-conv-" + v.name, rec: &recorder{}, unchecked: true, refused: refused, thinks: thinks}, v.name, model,
 				func(proxy string) map[profile.Protocol]string {
 					return map[profile.Protocol]string{profile.OpenAI: proxy}
 				}, host)

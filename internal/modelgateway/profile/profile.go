@@ -8,7 +8,8 @@
 // The hosts are the vendors' own (Ground truth, "Vendors", verified
 // 2026-10-04): DeepSeek's API docs (api-docs.deepseek.com, guides/anthropic_api),
 // MiniMax's CN and international API references, Zhipu's BigModel and Z.ai
-// docs, Kimi's platform docs (platform.kimi.ai, api/messages), and the API
+// docs, Kimi's platform docs (platform.kimi.ai, api/messages; its CN OpenAI
+// host from platform.kimi.com, 2026-10-14), and the API
 // definition Gitee AI publishes at ai.gitee.com/v1/yaml, and Google's Gemini
 // API reference. A host here is a base URL: the Anthropic SDKs append
 // /v1/messages to one, the OpenAI SDKs /chat/completions and /embeddings, a
@@ -26,6 +27,7 @@ import (
 	"encoding/json"
 	"maps"
 	"regexp"
+	"strings"
 )
 
 // Protocol is an upstream wire protocol.
@@ -167,7 +169,9 @@ var profiles = []Profile{
 	}, BearerAuth: true, FlattenSearchResults: true, Ignores: moonshotIgnores, ChatIgnores: moonshotChatIgnores,
 		// Kimi's thinking-models guide: thinking.type enabled (the default) or
 		// disabled, for kimi-k2.6, the models without the toggle answering
-		// for themselves.
+		// for themselves. kimi-k3 honors disabled as kimi-k2.6 does: no
+		// thinking in 6 of 6 answers across both endpoints (docs/HISTORY.md,
+		// 2026-10-14), so neither refuses it.
 		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
 	// Gitee AI is v1's embeddings and rerank vendor, the knowledge-base
 	// client's default for both. It drops idle keep-alive connections in the
@@ -333,24 +337,25 @@ func moonshotChatIgnores(model string, req map[string]json.RawMessage) string {
 // the call that required or a named function forces in all 12 asks,
 // glm-5.3-flash called the tool in all 3 asks under none, and both called it
 // twice in all 6 answers with parallel_tool_calls false. So every tool_choice
-// but auto, or null, which sets nothing, is refused — except none on glm-5.3
-// itself, which answered all 3 asks without the tool, saying it had none.
+// but auto, or null, which sets nothing, is refused where the request offers
+// a tool — except none on glm-5.3 itself, not glm-5.3-flash, which answered
+// all 3 asks without the tool, saying it had none.
 func zhipuChatIgnores(model string, req map[string]json.RawMessage) string {
 	if f := parallelBanned(req); f != "" {
 		return f
 	}
 	var choice any
+	var tools []json.RawMessage
 	if json.Unmarshal(req["tool_choice"], &choice) == nil && choice != nil && choice != "auto" &&
-		(choice != "none" || !glm53.MatchString(model)) {
+		(choice != "none" || !strings.EqualFold(model, "glm-5.3")) &&
+		json.Unmarshal(req["tools"], &tools) == nil && len(tools) > 0 {
 		return "tool_choice"
 	}
 	return ""
 }
 
-// glm53 matches glm-5.3 alone, in any case: not glm-5.3-flash.
-var glm53 = regexp.MustCompile(`(?i)^glm-5\.3$`)
-
-// kimiK3 matches kimi-k3 and the variants named after it, in any case.
+// kimiK3 matches kimi-k3 and the ids named after it, its snapshots among
+// them, in any case.
 var kimiK3 = regexp.MustCompile(`(?i)^kimi-k3([.-]|$)`)
 
 // The ChatIgnores hooks rest on the live probes of the vendors' OpenAI

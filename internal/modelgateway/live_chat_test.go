@@ -49,10 +49,9 @@ func TestLiveChatCompletions(t *testing.T) {
 		e.alias(r.alias, target(e.deployment(p, model), 0))
 		return r
 	}
-	var routes []route
-	// Each vendor's refusals have a route of their own, so the calls the
+	// Each model's refusals have a route of their own, so the calls the
 	// model's own subtests make beside them never land in their count.
-	refusals := map[string]route{}
+	var routes, refusals []route
 	for _, v := range vendors {
 		host := openAIHost(v)
 		if host == "" {
@@ -60,8 +59,8 @@ func TestLiveChatCompletions(t *testing.T) {
 		}
 		for _, model := range v.models {
 			routes = append(routes, newRoute(v, host, model, "chat-"+model))
+			refusals = append(refusals, newRoute(v, host, model, "refuse-"+model))
 		}
-		refusals[v.name] = newRoute(v, host, v.models[0], "refuse-"+v.models[0])
 	}
 	key := e.key(everyAlias)
 	e.start()
@@ -170,13 +169,12 @@ func TestLiveChatCompletions(t *testing.T) {
 		})
 	}
 
-	// The refusals, on each vendor's first model: the gateway sends nothing,
-	// and the vendor asked directly still ignores what is refused.
-	for _, v := range vendors {
-		r := refusals[v.name]
-		t.Run(v.name+" refusals", func(t *testing.T) {
+	// The refusals, on each model: the gateway sends nothing, and the vendor
+	// asked directly still ignores what is refused.
+	for _, r := range refusals {
+		t.Run(r.model+" refusals", func(t *testing.T) {
 			t.Parallel()
-			model := r.model
+			v, model := r.v, r.model
 			for _, c := range chatRefusals(v.name, model) {
 				n := r.rec.count()
 				resp, b := e.do("POST", "/v1/chat/completions", string(c.body(r.alias)), map[string]string{"Authorization": "Bearer " + key})
@@ -252,8 +250,7 @@ func chatRefusals(vendor, model string) []chatRefusal {
 		return m.Choices[0].FinishReason == "stop" && len(m.Choices[0].Message.ToolCalls) == 0
 	}
 	parallel := chatRefusal{"parallel_tool_calls false", "parallel_tool_calls",
-		request("What time is it right now in UTC and in Asia/Tokyo? Call the tool once for each timezone, both at once.",
-			map[string]any{"tools": []any{timeTool}, "parallel_tool_calls": false}),
+		request(twoTimezones, map[string]any{"tools": []any{timeTool}, "parallel_tool_calls": false}),
 		func(m *openai.ChatCompletion) bool { return len(m.Choices[0].Message.ToolCalls) > 1 }}
 	required := chatRefusal{"tool_choice required", "tool_choice", request(noToolNeeded, map[string]any{"tools": []any{timeTool}, "tool_choice": "required"}), finishedWithoutTool}
 	named := chatRefusal{"tool_choice naming a function", "tool_choice", request(noToolNeeded, map[string]any{"tools": []any{timeTool},

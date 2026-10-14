@@ -241,6 +241,7 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 			[]string{tools + `,"tool_choice":{"type":"tool","name":"t"}`, tools + `,"tool_choice":{"type":"tool","name":"t"},"thinking":{"type":"enabled","budget_tokens":1024}`,
 				tools + `,"tool_choice":{"type":"any"},"thinking":{"type":"disabled"}`, tools + `,"tool_choice":{"Type":"tool","name":"t"},"thinking":{"type":"disabled"}`,
 				tools + `,"tool_choice":{"type":"tool","name":"t"},"thinking":{"Type":"disabled"}`}},
+		{"moonshot", "Kimi-K3", "tool_choice.type", tools + `,"tool_choice":{"type":"tool","name":"t"},"thinking":{"type":"disabled"}`, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model+" "+tc.field, func(t *testing.T) {

@@ -64,6 +64,7 @@ The user put a Kimi key (`KIMI_API_KEY`) and a GLM key (`GLM_API_KEY`) in `.env`
 - A `search_result` in a `tool_result` gets a 400: "cannot unmarshal string into Go struct field ContentBlockParamUnion.content.source of type anthropic.ImageSource". The profile now flattens it.
 - `count_tokens` on the Anthropic host is a 404 `url.not_found` in Kimi's own envelope. The gateway relays it.
 - `stop_sequences` and Chat Completions' `stop` are honored. The Messages answer says `end_turn`, not `stop_sequence`.
+- `thinking: {"type": "disabled"}` is honored by both models on both endpoints: no thinking in 6 of 6 answers each, where every answer with thinking enabled thought. So the profile refuses it on neither.
 - The CN site documents `https://api.moonshot.cn/v1` as its OpenAI host, which the profile lacked.
 
 | Field (Messages · Chat Completions) | `kimi-k2.6` | `kimi-k3` |
@@ -83,7 +84,7 @@ The gateway now refuses what Kimi ignores: `disable_parallel_tool_use` and `para
 | `tool_choice` `none`, a question asking for the tool | no call in all 3, each saying it has no tools | **a call in all 3** |
 | `stop: [" 5"]`, counting to ten | an empty answer in all 3, finished `stop` | empty in 2, "1 2 3 4" in 1 |
 
-BigModel's chat-completion reference lists `auto` as `tool_choice`'s only option, and defines no `parallel_tool_calls`. So the profile now refuses `parallel_tool_calls: false` and every `tool_choice` but `auto`, except `none` on `glm-5.3`, which honored it. The empty answers suggest that the stop sequence also stops the reasoning, which counts to five first. `stop` is honored, so it passes through.
+BigModel's chat-completion reference lists `auto` as `tool_choice`'s only option, and defines no `parallel_tool_calls`. So the profile now refuses `parallel_tool_calls: false` and, where the request offers a tool, every `tool_choice` but `auto`, except `none` on `glm-5.3`, which honored it. The empty answers suggest that the stop sequence also stops the reasoning, which counts to five first. `stop` is honored, so it passes through.
 
 **Zhipu's embeddings, plan 59's open question 1.** `embedding-3` accepts `encoding_format: "base64"` and answers in floats, as Gitee does. The OpenAI Python SDK keeps a float array as it is, so the gateway edits nothing. Zhipu's vectors for one input vary from call to call by up to 2.4e-4 a value (cosine 0.999999), whatever the encoding: two float asks in a row agreed in one probe and differed in the next. The tier compares them within 1e-3. Zhipu's `rerank` model answered 200 with `results: []` for three documents; the issue does not cover rerank, so this was not pursued.
 
@@ -101,7 +102,7 @@ On Zhipu, every row reached its OpenAI endpoint and passed: Chat Completions wit
 
 An earlier run of Moonshot alone found two of the tier's own assumptions wrong, and both are fixed. A model list of one alias has no second page. A prompt read whole from the cache counts no `input_tokens`.
 
-**Mutants.** Twenty-one mutants of the profile's new guards, each in a scratch copy injected with `go test -overlay`, were all caught by the unit tests. They dropped the flattening, each hook, each of the three conditions of each `kimi-k3` refusal, Zhipu's parallel check, and its `none` exception for `glm-5.3`. They widened the `kimi-k3` match, the thinking check, and the `none` exception to every model. They made the `glm-5.3` match case-sensitive and unanchored. And Zhipu's `tool_choice` check was made to refuse `auto`, to refuse `null`, and to refuse `required` alone. A mutant that does not compile proved the overlay was read.
+**Mutants.** Twenty-four mutants of the profile's new guards, each in a scratch copy injected with `go test -overlay`, were all caught by the unit tests, each by a failing test rather than a failed build. They dropped the flattening, each hook, each of the three conditions of each `kimi-k3` refusal, Zhipu's parallel check, its tools gate, and its `none` exception for `glm-5.3`. They widened the `kimi-k3` match, the thinking check, and the `none` exception to every model. They made the `kimi-k3` and `glm-5.3` matches case-sensitive, matched `glm-5.3` as a prefix, and counted an empty `tools` list as a tool. And Zhipu's `tool_choice` check was made to refuse `auto`, to refuse `null`, and to refuse `required` alone. A mutant that does not compile proved the overlay was read.
 
 **Gemini.** #903 had taken on plan 62's Gemini generation rows, which wait on a key that can pay: the Gemini key answers every billable call 402. On 2026-10-14 the user dropped those rows, so the PR this section records closes #903. The gateway's Gemini protocol stays, and so do the live tier's free `countTokens` rows.
 

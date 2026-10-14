@@ -46,6 +46,7 @@ type liveVendor struct {
 	models   []string                           // its chat models
 	thinking anthropic.ThinkingConfigParamUnion // what asks its models to think
 	quiet    []string                           // its models that return no signed thinking even so
+	unsigned bool                               // its quiet models return thinking all the same, unsigned
 	noCount  bool                               // its Anthropic endpoint has no count_tokens, and answers a 404 of its own
 	// openAIOnly is a vendor whose key serves its OpenAI endpoint alone: its
 	// chat is checked on Chat Completions and through the gateway's
@@ -73,7 +74,7 @@ var liveVendors = []liveVendor{
 	// count_tokens (probed 2026-10-14).
 	{name: "moonshot", keyEnv: "KIMI_API_KEY", base: "https://api.moonshot.cn/anthropic",
 		models: []string{"kimi-k3", "kimi-k2.6"}, thinking: anthropic.ThinkingConfigParamOfEnabled(1024),
-		quiet: []string{"kimi-k3", "kimi-k2.6"}, noCount: true},
+		quiet: []string{"kimi-k3", "kimi-k2.6"}, unsigned: true, noCount: true},
 	// Gitee AI serves this tier's embeddings and rerank, and no chat.
 	{name: "gitee", keyEnv: "GITEE_API_KEY", base: "https://ai.gitee.com/v1"},
 	// Zhipu, on BigModel's CN site, serves this tier's chat on its OpenAI
@@ -448,6 +449,7 @@ type liveRoute struct {
 	rec        *recorder
 	thinking   anthropic.ThinkingConfigParamUnion
 	thinks     bool // the model is expected to return signed thinking
+	unsigned   bool // ...or, where it is not, unsigned thinking
 }
 
 // TestLiveThinkingRoundTrip runs, for every model of every named vendor,
@@ -477,14 +479,14 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 			d := e.deployment(p, model)
 			e.alias(model, target(d, 0))
 			thinks := !slices.Contains(v.quiet, model)
-			routes[v.name] = append(routes[v.name], liveRoute{model, d.ID, rec, v.thinking, thinks})
+			routes[v.name] = append(routes[v.name], liveRoute{model, d.ID, rec, v.thinking, thinks, v.unsigned && !thinks})
 			// The fallback's continuation finds its way back by its thinking,
 			// so it falls back to a model that thinks.
 			if fallback.alias == "" && thinks {
 				dp := e.provider(down.URL, func(p *store.Provider) { p.Name = "down" })
 				e.credential(dp, "sk-down-key1", 1)
 				e.alias("fallback", target(e.deployment(dp, "down"), 0), target(d, 1))
-				fallback = liveRoute{"fallback", d.ID, rec, v.thinking, true}
+				fallback = liveRoute{"fallback", d.ID, rec, v.thinking, true, false}
 			}
 		}
 	}
@@ -688,7 +690,7 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRou
 		_, raw := one(t, r.rec, n).answer()
 		up, interleaved = vendorAnswer(raw)
 		vend = provenance(&up)
-		if _, back := expected(vend, r.dep); len(back) > 0 || !r.thinks {
+		if _, back := expected(vend, r.dep); len(back) > 0 || !r.thinks && (!r.unsigned || len(vend) > 0) {
 			break
 		}
 	}
@@ -698,6 +700,9 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRou
 	want, back := expected(vend, r.dep)
 	if len(back) == 0 && r.thinks {
 		liveFatalf(t, "%s: the vendor returned no signed thinking in %d answers (%q), so there is nothing to round-trip", mode, tries, abbreviate(vend))
+	}
+	if len(vend) == 0 && r.unsigned {
+		liveFatalf(t, "%s: the vendor returned no thinking in %d answers, so its unsigned thinking went unchecked", mode, tries)
 	}
 	if got := provenance(m); !slices.Equal(got, want) || string(m.Model) != r.alias || m.Usage.OutputTokens == 0 {
 		liveFatalf(t, "%s: model %q, %d output tokens, thinking %q, want %q", mode, m.Model, m.Usage.OutputTokens, abbreviate(got), abbreviate(want))
