@@ -1043,6 +1043,36 @@ func TestRepoProbeThatCannotAnswerGoesAhead(t *testing.T) {
 	}
 }
 
+// TestRepoProbeRefusesOnlyOnItsStatus: the probe reads a path as occupied
+// only when it exits with occupiedStatus. A shell that fails for another
+// reason, as when an image's startup exits non-zero, is no answer, so the
+// clone goes ahead and the extraction judges the path. The probe names no
+// variable, so a readonly name the startup leaves does not silence it, and
+// an occupied path is refused before the fetch.
+func TestRepoProbeRefusesOnlyOnItsStatus(t *testing.T) {
+	h, provider := dockerRepoHarness(t)
+	sb := adopt(t, provider, h)
+	ctx := context.Background()
+	if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "echo image > /opt/file && mkdir -p /opt/full && echo image > /opt/full/keep"}); err != nil || res.ExitCode != 0 {
+		t.Fatalf("plant the paths: %v %+v", err, res)
+	}
+	for _, mount := range []string{"/opt/file", "/opt/full"} {
+		if !mountOccupied(ctx, sb, mount) {
+			t.Errorf("the probe read %s, which holds something, as vacant", mount)
+		}
+	}
+	failing := &hookedSandbox{Sandbox: sb, p: &hookedProvider{startup: "exit 3; "}}
+	for _, mount := range []string{"/opt/absent", "/opt/file"} {
+		if mountOccupied(ctx, failing, mount) {
+			t.Errorf("a probe whose shell exits 3 read %s as occupied", mount)
+		}
+	}
+	readonlyE := &hookedSandbox{Sandbox: sb, p: &hookedProvider{startup: "readonly e=hook; "}}
+	if !mountOccupied(ctx, readonlyE, "/opt/full") {
+		t.Error("a startup's readonly e silenced the probe: /opt/full read as vacant")
+	}
+}
+
 // TestRepoSandboxFailureIsNotTheHosts: a failure after the fetch is the
 // sandbox's, never the git host's, though its text can read like one: a
 // sandbox transport that drops reports an unexpected EOF, whether it was
@@ -1068,8 +1098,8 @@ func TestRepoSandboxFailureIsNotTheHosts(t *testing.T) {
 
 			h.runPass(t)
 
-			if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != tc.want {
-				t.Errorf("clone errors = %v, want exactly one, with reason %s", errs, tc.want)
+			if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != tc.want || errs[0]["message"] != repoCloneFailedMessage {
+				t.Errorf("clone errors = %v, want exactly one, with reason %s and the generic message", errs, tc.want)
 			}
 		})
 	}

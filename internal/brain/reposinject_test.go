@@ -124,10 +124,10 @@ func TestReposBlockMarksAFailedClone(t *testing.T) {
 // TestReposBlockNamesTheLatestFailure 🔍: the reason the block reports is the
 // last one recorded for a repository, not the first one.
 //
-// The executor's dedupe is per (resource, reason, message), so it
-// deliberately re-emits when the reason changes: a repository that first
-// failed to authenticate and then failed to reach its host has two clone
-// errors on the log, in that order.
+// The executor's dedupe is per (resource, reason, message) over the session's
+// history, so a reason the repository has not had before is emitted: a
+// repository that first failed to authenticate and then failed to reach its
+// host has two clone errors on the log, in that order.
 // Reading the older one sends the model — and the operator reading the prompt
 // back — after a credential that stopped being the problem, while the block
 // still claims to describe "the last clone attempt".

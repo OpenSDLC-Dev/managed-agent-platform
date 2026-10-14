@@ -396,15 +396,17 @@ func (e *Executor) replacesWhole(mount string) bool {
 }
 
 // vacantScript asks, and changes nothing, whether a clone may take mount:
-// whether it is absent, or an empty directory that is not a symlink. A
-// listing that fails, as on a directory the sandbox user may not read, prints
-// nothing and so reads as empty: that is no answer, and the rmdir in
-// vacateScript decides. It names no variable, because an image's startup can
-// leave attributes on any name it might take.
+// whether it is absent, or an empty directory that is not a symlink. When
+// neither holds it exits with occupiedStatus, so a shell that fails for
+// another reason, as an image's startup can make it, is no answer. A listing
+// that fails, as on a directory the sandbox user may not read, prints nothing
+// and so reads as empty: that too is no answer, and the rmdir in vacateScript
+// decides. It names no variable, because an image's startup can leave
+// attributes on any name it might take.
 func vacantScript(mount string) string {
 	q := shellQuote(mount)
 	return "{ [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || { [ -d " + q + " ] && [ ! -L " + q +
-		" ] && [ -z \"$(ls -A " + q + " 2>/dev/null)\" ]; }"
+		" ] && [ -z \"$(ls -A " + q + " 2>/dev/null)\" ]; } || (exit " + strconv.Itoa(occupiedStatus) + ")"
 }
 
 // vacateScript clears a mount that replacesWhole refuses, in place of the
@@ -420,10 +422,11 @@ func vacateScript(mount string) string {
 		strconv.Itoa(occupiedStatus) + "); }"
 }
 
-// occupiedStatus is the extraction's exit status when vacateScript refuses
-// the mount, so the refusal is reported as errMountOccupied and not as a
-// failed extraction. No platform command in the script exits with it; one
-// the image wraps could, and would read as an occupied path.
+// occupiedStatus is vacantScript's exit status for an occupied path, and the
+// extraction's when vacateScript refuses the mount, so the refusal is reported
+// as errMountOccupied and not as a failed probe or extraction. No platform
+// command in either script exits with it; an image's startup, or a command
+// the image wraps, could, and would read as an occupied path.
 const occupiedStatus = 75
 
 // errMountOccupied is a clone refused because its mount path is outside the
@@ -439,14 +442,14 @@ var errMountOccupied = errors.New("the mount path is neither absent nor an empty
 // path, such as /opt/EOF.
 var errExtraction = errors.New("landing the repository in the sandbox failed")
 
-// mountOccupied asks vacantScript before the fetch. A probe that exits
-// non-zero refuses. One that does not answer, because its exec failed, timed
-// out, or lost its exit status to an image's startup (#860), reads as vacant:
-// vacateScript judges the path again in the extraction, and that judgment is
-// the one that holds.
+// mountOccupied asks vacantScript before the fetch, and only occupiedStatus
+// refuses. Any other answer reads as vacant: an exec that failed or timed
+// out, an exit status an image's startup pushed out of the output (#860), or
+// a shell the startup ended first. vacateScript judges the path again in the
+// extraction, and that judgment is the one that holds.
 func mountOccupied(ctx context.Context, sb sandbox.Sandbox, mount string) bool {
 	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: vacantScript(mount)})
-	return err == nil && !res.TimedOut && res.ExitCode != 0
+	return err == nil && !res.TimedOut && res.ExitCode == occupiedStatus
 }
 
 // extractRepo unpacks the shipped tar into a staging directory beside the
@@ -574,14 +577,15 @@ func (e *Executor) repoToken(ctx context.Context, sid domain.ID, resourceID stri
 }
 
 // emitRepoCloneError appends the session.error variant for a failed clone,
-// deduped on (resource_id, reason, message) over the session's history — two
-// failing repositories are two events, and a reason or message flip re-emits,
-// while a repeated identical failure does not. The message counts because
-// one reason carries several: an occupied mount path's refusal must reach the
-// client after a generic `internal` failure. The key spans the history, not
-// only the resource's latest event, so a session polling a failing clone
-// cannot flood its own log: a resource emits once per pair at most. The cost
-// is that a return to an earlier failure is not emitted again.
+// deduped on (resource_id, reason, message) over the session's history. Two
+// failing repositories are two events. A failure with a (reason, message)
+// pair the resource has not had yet is emitted; one it has had is not,
+// however long ago. The message counts because one reason carries several:
+// an occupied mount path's refusal must reach the client after a generic
+// `internal` failure. Spanning the history bounds the log, so a session
+// polling a failing clone emits once per pair at most. The cost is that a
+// return to an earlier failure is not emitted again, so the latest event can
+// name a failure that is no longer current.
 // The work item's lease already makes this executor the session's single
 // writer, so the check-then-append needs no further guarding. Emission is
 // best effort: a failure to record the error must not turn a tolerated clone
