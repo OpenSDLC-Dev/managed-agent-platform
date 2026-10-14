@@ -151,8 +151,8 @@ type AppendOptions struct {
 	// can still skew against these by the difference between the two hosts'
 	// clocks, as it could before #793, and created_at also by what is left of
 	// a backwards step of its clock (the INSERT's floor, #411). Only a
-	// span.model_request_start
-	// leading the batch may set it; AppendInTx refuses any other batch.
+	// span.model_request_start leading the batch may set it; AppendInTx
+	// refuses any other batch.
 	Consume bool
 	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
 	// same row lock (the AddUsage pattern): the projection changes atomically
@@ -265,21 +265,21 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	// reading for the whole batch, so the batch's rows share a stamp and a
 	// clock step inside the statement cannot reorder them, as per-row
 	// clock_timestamp() readings could. It is floored a microsecond past the
-	// session's last row, which a healthy clock is already past, so seq and
-	// created_at agree whatever the database clock does (#411): every
-	// created_at bound the list filters take cuts the log at one seq, and
-	// once a row is past a created_at[gt] bound every later append is too.
-	// While a clock that stepped backwards is behind — a forward jump the
-	// clock later corrects is such a step, however long — each append
+	// session's last row, which a healthy clock is already past, so created_at
+	// never falls back along seq whatever the database clock does (#411):
+	// every created_at bound the list filters take cuts the log at one seq,
+	// and once a row is past a created_at[gt] bound every later append is
+	// too. While a clock that stepped backwards is behind — a forward jump
+	// the clock later corrects is such a step, however long — each append
 	// advances a microsecond, and created_at runs ahead of the clock by what
 	// is left of the step, so a reader subtracting it from the clock reads
 	// short: the reason ClearedApprovalWait drops a negative wait. Past the
 	// last row rather than at it, so no two appends share a stamp, and a
 	// bound taken off one append's last row lists every later append. The
 	// floor reads the last row by seq, as the (session_id, seq) index serves
-	// it: where a row an older binary wrote sits below the row before it, a
-	// new append can still sit below that earlier row until the clock passes
-	// it.
+	// it: where a row an older binary wrote, before or during a rolling
+	// deploy, sits below the row before it, a new append can still sit below
+	// that earlier row until the clock passes it.
 	var (
 		sb        strings.Builder
 		args      = []any{lastCreated}
@@ -545,9 +545,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 }
 
 // ListQuery narrows and pages a session's event log. AfterSeq is a keyset
-// position (exclusive) in the direction of the sort; seq order and
-// created_at order agree because appends serialize per session and each is
-// stamped past the last (AppendInTx).
+// position (exclusive) in the direction of the sort; created_at never falls
+// back along seq because appends serialize per session and each is stamped
+// past the last, one stamp per append (AppendInTx, which also names the rows
+// an older binary can have left out of order).
 type ListQuery struct {
 	Types                                        []string
 	CreatedGT, CreatedGTE, CreatedLT, CreatedLTE *time.Time

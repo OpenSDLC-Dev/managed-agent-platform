@@ -68,9 +68,8 @@ func ClearedApprovalWait(ctx context.Context, q Querier, sid, tid domain.ID) (*f
 // RecordApprovalWait records one approval wait, in seconds. The interval is
 // measured in the database (clock_timestamp() minus the requires_action idle
 // event's created_at) so both ends read the same clock, bar the append floor
-// (ClearedApprovalWait), and recorded here after
-// the resuming transaction commits — a confirmation whose commit rolled back did
-// not resume anything.
+// (ClearedApprovalWait), and recorded here after the resuming transaction
+// commits — a confirmation whose commit rolled back did not resume anything.
 //
 // It resolves the meter per call rather than caching an instrument that would pin
 // whichever MeterProvider was installed first, and never fails the caller: a

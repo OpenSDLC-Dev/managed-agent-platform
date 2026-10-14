@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func text(s string) json.RawMessage {
@@ -245,12 +246,9 @@ func TestAppendConcurrentSeqIntegrity(t *testing.T) {
 	// readings: the last is not ahead of the database clock read after it.
 	// The minute of slack absorbs a backwards step of the clock during the
 	// test; a floor a second or more wide still carries 200 appends past it.
-	var dbNow time.Time
-	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbNow); err != nil {
-		t.Fatal(err)
-	}
-	if last := got[len(got)-1].CreatedAt; last.After(dbNow.Add(time.Minute)) {
-		t.Errorf("last created_at %v is ahead of the database clock %v: the floor moved a healthy clock's stamps", last, dbNow.UTC())
+	if last, now := got[len(got)-1].CreatedAt, dbClock(t, pool); last.After(now.Add(time.Minute)) {
+		t.Errorf("last created_at %v is ahead of the database clock %v: the floor moved a healthy clock's stamps,"+
+			" unless the clock stepped back over a minute during the test", last, now)
 	}
 
 	// Other sessions allocate independently, starting at 1.
@@ -297,6 +295,9 @@ func TestAppendCreatedAtOutrunsABackwardsClock(t *testing.T) {
 	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("next")}}); err != nil {
 		t.Fatal(err)
 	}
+	if want := ahead.Add(time.Microsecond); !batch[0].CreatedAt.Equal(want) {
+		t.Errorf("batch behind the clock stamped %v, want a microsecond past the dated row, %v", batch[0].CreatedAt, want)
+	}
 
 	for _, poll := range []struct {
 		name  string
@@ -339,16 +340,7 @@ func TestAppendCreatedAtFollowsAHealthyClock(t *testing.T) {
 		first[0].ID.String()); err != nil {
 		t.Fatal(err)
 	}
-	clock := func() time.Time {
-		t.Helper()
-		var now time.Time
-		if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
-			t.Fatal(err)
-		}
-		return now.UTC()
-	}
-
-	before := clock()
+	before := dbClock(t, pool)
 	batch := make([]events.NewEvent, 50)
 	for i := range batch {
 		batch[i] = events.NewEvent{Type: domain.EventUserMessage, Payload: text("new")}
@@ -357,17 +349,72 @@ func TestAppendCreatedAtFollowsAHealthyClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	after := clock()
+	after := dbClock(t, pool)
 
 	stamp := got[0].CreatedAt
 	if stamp.Before(before.Add(-time.Minute)) || stamp.After(after.Add(time.Minute)) {
-		t.Errorf("batch stamped %v, want the clock's reading, between %v and %v", stamp, before, after)
+		t.Errorf("batch stamped %v, want the clock's reading, between %v and %v,"+
+			" unless the clock stepped back over a minute during the test", stamp, before, after)
 	}
 	for _, ev := range got[1:] {
 		if !ev.CreatedAt.Equal(stamp) {
 			t.Fatalf("seq %d stamped %v, want the batch's one stamp %v", ev.Seq, ev.CreatedAt, stamp)
 		}
 	}
+}
+
+// The stamp is the INSERT's own start, after the session row lock, not the
+// BEGIN of a transaction that then waited on the lock. The floor hides a
+// BEGIN stamp from every ordering check, so the wait itself is measured: the
+// append waits behind a lock held for two seconds, half of which is slack for
+// a backwards step of the clock.
+func TestAppendCreatedAtIsTakenAfterTheLock(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	locked := dbClock(t, pool)
+
+	type result struct {
+		evs []domain.Event
+		err error
+	}
+	appended := make(chan result, 1)
+	go func() {
+		evs, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("waited")}})
+		appended <- result{evs, err}
+	}()
+	time.Sleep(2 * time.Second)
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r := <-appended
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if got := r.evs[0].CreatedAt; got.Before(locked.Add(time.Second)) {
+		t.Errorf("an append that waited two seconds on the lock is stamped %v after the lock was taken,"+
+			" want the time it got the lock, not its BEGIN", got.Sub(locked))
+	}
+}
+
+// dbClock reads the database's own clock, the one created_at is stamped on.
+func dbClock(t *testing.T, pool *pgxpool.Pool) time.Time {
+	t.Helper()
+	var now time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		t.Fatal(err)
+	}
+	return now.UTC()
 }
 
 func TestListFiltersAndKeyset(t *testing.T) {

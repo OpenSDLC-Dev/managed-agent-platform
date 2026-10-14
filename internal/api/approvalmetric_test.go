@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
@@ -174,6 +175,11 @@ func TestApprovalWaitDropsANegativeInterval(t *testing.T) {
 
 	sendEvents(t, s, sessionID, confirm(askID, "allow", nil))
 
+	// The confirmation still cleared the gate, as TestConfirmationClosedLoopAllow
+	// reads it, so the reading was measured and dropped rather than never taken.
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 1 {
+		t.Fatalf("tool_exec after the confirmation = %d, want 1: the gate did not clear", n)
+	}
 	if pts := apiFloatPoints(t, collect(), events.MetricApprovalWait); len(pts) != 0 {
 		t.Errorf("recorded %d approval wait point(s) for a suspension dated ahead of the clock, want 0", len(pts))
 	}

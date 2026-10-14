@@ -331,9 +331,8 @@ func TestCoordinatorSpawnsThreeAgentsAndParksInOneCommit(t *testing.T) {
 			t.Errorf("answer %d is an error: %s", i, a.text)
 		}
 	}
-	// Each spawn is answered with its own thread's id. The three rows share a
-	// created_at — one transaction — so they come back ordered by id rather
-	// than by spawn order, and the ids are compared as a set.
+	// Each spawn is answered with its own thread's id; the ids are compared as
+	// a set.
 	answered := map[string]bool{}
 	for _, a := range got[:3] {
 		answered[a.text] = true
@@ -374,13 +373,15 @@ func TestCoordinatorSpawnsThreeAgentsAndParksInOneCommit(t *testing.T) {
 // the session already holds (#411): threads are listed in creation order, on
 // created_at. The step is simulated: a planted child is dated an hour ahead,
 // which is what the session holds once the clock has fallen an hour behind it.
-// The spawn must still sort after it.
+// Two spawns in one turn must each land strictly past the thread before them,
+// not tie with it and fall back on the random id.
 func TestSpawnOutrunsABackwardsClock(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{{
 		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"find the papers"}`),
-		done("tool_use", 1),
+		toolCall("t2", "create_agent", `{"agent_name":"writer","message":"draft the summary"}`),
+		done("tool_use", 2),
 	}}, nil)
-	h.roster(t, "researcher")
+	h.roster(t, "researcher", "writer")
 	planted := pgtest.NewChildThread(t, h.pool, h.sessionID)
 	if _, err := h.pool.Exec(context.Background(),
 		`UPDATE session_threads SET created_at = created_at + interval '1 hour' WHERE id = $1`, planted.String()); err != nil {
@@ -389,9 +390,35 @@ func TestSpawnOutrunsABackwardsClock(t *testing.T) {
 	h.wake(t, "coordinate the work")
 	h.runOnce(t)
 
-	kids := h.children(t)
-	if len(kids) != 2 || kids[0].id != planted || kids[1].name != "researcher" {
-		t.Fatalf("children in creation order = %v, want the planted child, then the researcher", kids)
+	rows, err := h.pool.Query(context.Background(),
+		`SELECT agent_name, created_at FROM session_threads
+		  WHERE session_id = $1 AND parent_thread_id IS NOT NULL ORDER BY created_at, id`, h.sessionID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var (
+		names []string
+		prev  time.Time
+	)
+	for rows.Next() {
+		var (
+			name string
+			at   time.Time
+		)
+		if err := rows.Scan(&name, &at); err != nil {
+			t.Fatal(err)
+		}
+		if len(names) > 0 && !at.After(prev) {
+			t.Errorf("%s created at %v, want strictly past %s at %v", name, at, names[len(names)-1], prev)
+		}
+		names, prev = append(names, name), at
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !slicesEq(names, []string{"worker", "researcher", "writer"}) {
+		t.Errorf("children in creation order = %v, want the planted worker, then the two spawns in turn", names)
 	}
 }
 

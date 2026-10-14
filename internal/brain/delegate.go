@@ -354,7 +354,7 @@ func (d *delegate) createAgent(ctx context.Context, tx pgx.Tx, call delegatedCal
 	// floored a microsecond past the session's newest thread as events/log.go
 	// floors an append (#411): the session row lock this settlement holds
 	// serializes spawns, so a database clock that steps backwards cannot date a
-	// child before one the session already holds. updated_at starts equal.
+	// child before one the session already holds.
 	//
 	// The scope columns are copied from the session rather than left to their
 	// defaults: a session in a non-default org would otherwise spawn its
@@ -365,11 +365,11 @@ func (d *delegate) createAgent(ctx context.Context, tx pgx.Tx, call delegatedCal
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_threads (id, session_id, parent_thread_id, org_id, workspace_id, project_id,
 		                              agent, agent_name, status, created_at, updated_at)
-		 SELECT $1, s.id, $2, s.org_id, s.workspace_id, s.project_id, $3::jsonb, $4, 'running', t.at, t.at
-		   FROM sessions s,
-		        LATERAL (SELECT GREATEST(clock_timestamp(),
-		                   (SELECT max(created_at) FROM session_threads WHERE session_id = s.id) + interval '1 microsecond') AS at) t
-		  WHERE s.id = $5`,
+		 SELECT $1, s.id, $2, s.org_id, s.workspace_id, s.project_id, $3::jsonb, $4, 'running',
+		        GREATEST(clock_timestamp(),
+		                 (SELECT max(created_at) FROM session_threads WHERE session_id = s.id) + interval '1 microsecond'),
+		        clock_timestamp()
+		   FROM sessions s WHERE s.id = $5`,
 		child.String(), domain.PrimaryThreadID(d.sid).String(), []byte(member), name, d.sid.String()); err != nil {
 		return "", false, err
 	}
