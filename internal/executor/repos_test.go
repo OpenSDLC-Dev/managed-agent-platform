@@ -710,7 +710,9 @@ exit 2
 // regular file, so the staging directory cannot be created — surfaces as a
 // clone error, cleans up, and leaves the run to continue.
 func TestRepoExtractFailureIsTolerated(t *testing.T) {
-	const blocked = "/workspace/blocked"
+	// A path the network arm's text match would read as the git host's
+	// failure, were the extraction's error not classified before it.
+	const blocked = "/workspace/EOF"
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	h, provider := dockerRepoHarness(t)
 	h.seedRepoResource(t, "sesrsc_partial", fx.url(), blocked+"/repo", "ghp_fixture", nil)
@@ -725,8 +727,8 @@ func TestRepoExtractFailureIsTolerated(t *testing.T) {
 	h.runPass(t)
 
 	errs := h.repoErrors(t)
-	if len(errs) != 1 {
-		t.Fatalf("recorded %d clone errors, want exactly 1 (%v)", len(errs), errs)
+	if len(errs) != 1 || errs[0]["reason"] != repoOutcomeInternal {
+		t.Fatalf("clone errors = %v, want exactly 1, with reason %s", errs, repoOutcomeInternal)
 	}
 	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
 		Command: "ls -a " + shellQuote("/workspace") + "; test ! -e " + shellQuote(blocked+"/repo")})
@@ -874,8 +876,9 @@ func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 // hookedProvider provisions sandboxes that run hook just before each
 // repository extraction, as an image's startup hook runs before every
 // script (#860), after mountOccupied has looked at the mount. startup, when
-// set, opens every platform script instead, in the script's own shell, as an
-// image's BASH_ENV would.
+// set, is put at the head of every script that opens with
+// sandbox.ScriptPreamble, just after the preamble, in that script's own
+// shell: a stand-in for what an image's BASH_ENV leaves there.
 type hookedProvider struct {
 	sandbox.Provider
 	hook, startup string
@@ -900,7 +903,7 @@ func (s *hookedSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sand
 	}
 	if s.hook != "" && strings.Contains(req.Command, " && tar -xf ") {
 		if res, err := s.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: s.hook}); err != nil || res.ExitCode != 0 {
-			return sandbox.ExecResult{}, errors.New("the hook did not run: " + res.Stderr)
+			return sandbox.ExecResult{}, errors.Join(err, errors.New("the hook did not run: "+res.Stderr))
 		}
 	}
 	return s.Sandbox.Exec(ctx, req)

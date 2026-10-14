@@ -393,6 +393,10 @@ func packTree(ctx context.Context, dir, tarPath string, spent *atomic.Int64, max
 // sentinels rather than string matching over messages.
 func cloneReason(err error) string {
 	switch {
+	// Their messages quote the sandbox's stderr, and so the mount path, which
+	// the network arm's text match below could take for the host's failure.
+	case errors.Is(err, errMountOccupied), errors.Is(err, errExtraction):
+		return repoOutcomeInternal
 	case errors.Is(err, errCloneTooLarge):
 		return repoOutcomeTooLarge
 	case errors.Is(err, context.DeadlineExceeded):
