@@ -365,11 +365,13 @@ func TestAppendCreatedAtFollowsAHealthyClock(t *testing.T) {
 
 // The stamp is the INSERT's own start, after the session row lock, not the
 // BEGIN of a transaction that then waited on the lock. The floor hides a
-// BEGIN stamp from every ordering check, so the wait itself is measured: the
-// append waits behind a lock held for two seconds, half of which is slack for
-// a backwards step of the clock.
+// BEGIN stamp from every ordering check, so the wait itself is measured. The
+// lock is held for two seconds from the moment the append is seen blocked on
+// it, when its BEGIN is already behind it; half of the two is slack for a
+// backwards step of the clock.
 func TestAppendCreatedAtIsTakenAfterTheLock(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
@@ -378,11 +380,12 @@ func TestAppendCreatedAtIsTakenAfterTheLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = holder.Rollback(ctx) }()
-	if _, err := holder.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+	defer func() { _ = holder.Rollback(context.Background()) }()
+	var holderPID int
+	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid() FROM sessions WHERE id = $1 FOR UPDATE`,
+		sid.String()).Scan(&holderPID); err != nil {
 		t.Fatal(err)
 	}
-	locked := dbClock(t, pool)
 
 	type result struct {
 		evs []domain.Event
@@ -393,6 +396,19 @@ func TestAppendCreatedAtIsTakenAfterTheLock(t *testing.T) {
 		evs, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("waited")}})
 		appended <- result{evs, err}
 	}()
+	for blocked := false; !blocked; {
+		select {
+		case r := <-appended:
+			t.Fatalf("the append finished without waiting on the lock: %v", r.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+		if err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)))`,
+			holderPID).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waiting := dbClock(t, pool)
 	time.Sleep(2 * time.Second)
 	if err := holder.Rollback(ctx); err != nil {
 		t.Fatal(err)
@@ -401,9 +417,9 @@ func TestAppendCreatedAtIsTakenAfterTheLock(t *testing.T) {
 	if r.err != nil {
 		t.Fatal(r.err)
 	}
-	if got := r.evs[0].CreatedAt; got.Before(locked.Add(time.Second)) {
-		t.Errorf("an append that waited two seconds on the lock is stamped %v after the lock was taken,"+
-			" want the time it got the lock, not its BEGIN", got.Sub(locked))
+	if got := r.evs[0].CreatedAt; got.Before(waiting.Add(time.Second)) {
+		t.Errorf("an append that waited two seconds on the lock is stamped %v after it was seen waiting,"+
+			" want the time it got the lock, not its BEGIN", got.Sub(waiting))
 	}
 }
 
