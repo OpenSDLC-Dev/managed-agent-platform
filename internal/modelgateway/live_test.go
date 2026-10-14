@@ -42,10 +42,15 @@ type liveVendor struct {
 	name     string // the profile, and the name RUN_LIVE_MODELGATEWAY uses
 	keyEnv   string
 	baseEnv  string                             // configures the base URL where the vendor has more than one
-	base     string                             // its Anthropic base URL; for a vendor without chat, its OpenAI one
+	base     string                             // its Anthropic base URL; its OpenAI one for a vendor without chat, or openAIOnly
 	models   []string                           // its chat models
 	thinking anthropic.ThinkingConfigParamUnion // what asks its models to think
-	quiet    []string                           // its models that return no thinking even so
+	quiet    []string                           // its models that return no signed thinking even so
+	noCount  bool                               // its Anthropic endpoint has no count_tokens, and answers a 404 of its own
+	// openAIOnly is a vendor whose key serves its OpenAI endpoint alone: its
+	// chat is checked on Chat Completions and through the gateway's
+	// conversion, and never on its Anthropic endpoint.
+	openAIOnly bool
 }
 
 var liveVendors = []liveVendor{
@@ -61,8 +66,24 @@ var liveVendors = []liveVendor{
 		// its round trip is checked without one, and any it returns is
 		// checked like any other.
 		quiet: []string{"MiniMax-M3.1-Flash-Preview"}},
+	// A Kimi key works on its own site's hosts only, and this tier's is the
+	// CN site's (probed 2026-10-14). Kimi signs none of its thinking — every
+	// thinking block comes back with an empty signature, whole or streamed —
+	// so its round trip is checked as an unsigned one, and it has no
+	// count_tokens (probed 2026-10-14).
+	{name: "moonshot", keyEnv: "KIMI_API_KEY", base: "https://api.moonshot.cn/anthropic",
+		models: []string{"kimi-k3", "kimi-k2.6"}, thinking: anthropic.ThinkingConfigParamOfEnabled(1024),
+		quiet: []string{"kimi-k3", "kimi-k2.6"}, noCount: true},
 	// Gitee AI serves this tier's embeddings and rerank, and no chat.
 	{name: "gitee", keyEnv: "GITEE_API_KEY", base: "https://ai.gitee.com/v1"},
+	// Zhipu, on BigModel's CN site, serves this tier's chat on its OpenAI
+	// endpoint alone, and embeddings. An account that ever subscribed to its
+	// GLM Coding Plan, expired included, calls the model API on the OpenAI
+	// protocol only (docs.bigmodel.cn, the GLM-5.3 guide), and its Anthropic
+	// hosts answer this tier's key 429, code 1309 (probed 2026-10-14).
+	// GLM-5.3 thinks whatever it is asked, and refuses thinking disabled.
+	{name: "zhipu", keyEnv: "GLM_API_KEY", base: "https://open.bigmodel.cn/api/paas/v4",
+		models: []string{"glm-5.3", "glm-5.3-flash"}, thinking: anthropic.ThinkingConfigParamOfEnabled(1024), openAIOnly: true},
 	// The Gemini API counts this tier's converted requests, and no chat: the
 	// key it runs under answers every billable call 402 (#903).
 	{name: "gemini", keyEnv: "GEMINI_API_KEY", base: "https://generativelanguage.googleapis.com/v1beta"},
@@ -112,6 +133,22 @@ func chatVendors(t *testing.T) []liveVendor {
 	}
 	if len(out) == 0 {
 		t.Skipf("%s names no chat vendor", liveEnv)
+	}
+	return out
+}
+
+// anthropicVendors is the named chat vendors whose key serves their Anthropic
+// endpoint; a run naming none skips the tests of that endpoint.
+func anthropicVendors(t *testing.T) []liveVendor {
+	t.Helper()
+	var out []liveVendor
+	for _, v := range chatVendors(t) {
+		if !v.openAIOnly {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		t.Skipf("%s names no chat vendor on its Anthropic endpoint", liveEnv)
 	}
 	return out
 }
@@ -378,8 +415,10 @@ func liveText(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool) {
 		}
 		_, raw := one(t, r.rec, n).answer()
 		up, _ := vendorAnswer(raw)
+		// A prompt read whole from the cache counts no input_tokens, as
+		// Kimi's does once it has seen it.
 		if kindsOf(m) != kindsOf(&up) || textOf(m) != textOf(&up) || m.StopReason != up.StopReason || string(m.Model) != r.alias ||
-			m.Usage.InputTokens == 0 || m.Usage.OutputTokens == 0 || !sameUsage(m.Usage, up.Usage) {
+			m.Usage.InputTokens+m.Usage.CacheReadInputTokens+m.Usage.CacheCreationInputTokens == 0 || m.Usage.OutputTokens == 0 || !sameUsage(m.Usage, up.Usage) {
 			liveFatalf(t, "%s text: the gateway answered [%s] %q (stop %q) from model %q, usage %s; the vendor sent [%s] %q (stop %q), usage %s",
 				mode, kindsOf(m), masked(textOf(m)), m.StopReason, m.Model, counts(m.Usage), kindsOf(&up), masked(textOf(&up)), up.StopReason, counts(up.Usage))
 		}
@@ -422,7 +461,7 @@ type liveRoute struct {
 // MiniMax opens, continued at DeepSeek, gets DeepSeek's refusal relayed. And the SDK lists,
 // a page at a time, every chat alias a key may use and no other, and gets each.
 func TestLiveThinkingRoundTrip(t *testing.T) {
-	vendors := chatVendors(t)
+	vendors := anthropicVendors(t)
 	e := newEnv(t)
 	routes := map[string][]liveRoute{}
 	var fallback liveRoute
@@ -488,7 +527,7 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 			t.Fatalf("listed %q (%v), want %q", got, err, want)
 		}
 		if page, err := nc.Models.List(liveCtx(t), anthropic.ModelListParams{Limit: anthropic.Int(1)}); err != nil ||
-			len(page.Data) != 1 || page.Data[0].ID != want[0] || !page.HasMore || page.LastID != want[0] {
+			len(page.Data) != 1 || page.Data[0].ID != want[0] || page.HasMore != (len(want) > 1) || page.LastID != want[0] {
 			t.Errorf("the first page: %+v, %v", page, err)
 		}
 		for _, id := range want {
@@ -527,6 +566,9 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 	})
 
 	t.Run("fallback", func(t *testing.T) {
+		if fallback.alias == "" {
+			t.Skip("no named model returns signed thinking, by which a fallback's continuation finds its way back")
+		}
 		tries := liveRoundTrip(t, cl, e.s, fallback, false)
 		if n := len(down.recorded()); n != tries {
 			liveErrorf(t, "the first choice was called %d times, want %d: once by each first turn, for its one credential, and never by the continuation", n, tries)

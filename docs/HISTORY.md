@@ -49,6 +49,60 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Model gateway live tier: Moonshot, Zhipu and Qwen3-VL-Embedding-8B (#903), run 2026-10-14 — ✅ passed
+
+The user put a Kimi key (`KIMI_API_KEY`) and a GLM key (`GLM_API_KEY`) in `.env`, for the vendors' Anthropic endpoints, and the Gitee key's resource package now covers `Qwen3-VL-Embedding-8B`.
+
+**The keys.**
+
+- The Kimi key is the CN site's. `api.moonshot.cn` answers it, and `api.moonshot.ai` answers 401. It lists `kimi-k3`, `kimi-k2.6`, `kimi-k2.7-code` and `kimi-k2.7-code-highspeed`; the tier runs the first two.
+- The GLM key lists models on BigModel and on Z.ai. Every Messages call on either Anthropic host answers 429 `rate_limit_error`, code 1309, naming an expired GLM Coding Plan. Zhipu's GLM-5.3 guide explains it: an account that ever subscribed to the Coding Plan, expired included, calls the model API on the OpenAI Chat Completion protocol only. The key works on BigModel's OpenAI endpoint, billed to the account. The user chose to run Zhipu's chat there, without waiting for its Anthropic endpoint. The tier runs `glm-5.3` and `glm-5.3-flash`, which think whatever they are asked.
+
+**Kimi, asked directly.** Each row below is three asks, unless a 400 ended them.
+
+- Thinking comes back unsigned, whole or streamed: the block starts with an empty signature, and no `signature_delta` follows. Both models answered a tool loop continued with that thinking, without it, and with a made-up signature. So the gateway's rule, that an unsigned block names no producer and goes back to no upstream, costs Kimi nothing.
+- A `search_result` in a `tool_result` gets a 400: "cannot unmarshal string into Go struct field ContentBlockParamUnion.content.source of type anthropic.ImageSource". The profile now flattens it.
+- `count_tokens` on the Anthropic host is a 404 `url.not_found` in Kimi's own envelope. The gateway relays it.
+- `stop_sequences` and Chat Completions' `stop` are honored. The Messages answer says `end_turn`, not `stop_sequence`.
+- The CN site documents `https://api.moonshot.cn/v1` as its OpenAI host, which the profile lacked.
+
+| Field (Messages · Chat Completions) | `kimi-k2.6` | `kimi-k3` |
+| --- | --- | --- |
+| `disable_parallel_tool_use: true` · `parallel_tool_calls: false`, two timezones asked at once | two calls in all 12 answers, thinking on and off | two calls in all 12 |
+| `tool_choice` `any` · `required`, a fun-fact question | thinking on: Kimi's 400; off: a call in 6 of 6 | a call in all 12 |
+| `tool_choice` `tool` · a named function | thinking on: Kimi's 400; off: a call in 6 of 6 | thinking on: Kimi's 400; off: **no call in 6 of 6** |
+
+The gateway now refuses what Kimi ignores: `disable_parallel_tool_use` and `parallel_tool_calls: false`, and on `kimi-k3` with thinking disabled a named tool or function. The rest passes through.
+
+**Zhipu's OpenAI endpoint, asked directly.** Each row is three asks of each model:
+
+| Field | `glm-5.3` | `glm-5.3-flash` |
+| --- | --- | --- |
+| `parallel_tool_calls: false`, two timezones asked at once | two calls in all 3 | two calls in all 3 |
+| `tool_choice` `required` or a named function, a fun-fact question | no call in all 6 | no call in all 6 |
+| `tool_choice` `none`, a question asking for the tool | no call in all 3, each saying it has no tools | **a call in all 3** |
+| `stop: [" 5"]`, counting to ten | an empty answer in all 3, finished `stop` | empty in 2, "1 2 3 4" in 1 |
+
+BigModel's chat-completion reference has `tool_choice` "默认auto且仅支持auto" (auto by default, and auto alone), and defines no `parallel_tool_calls`. So the profile now refuses `parallel_tool_calls: false` and every `tool_choice` but `auto`. The empty answers suggest that the stop sequence also stops the reasoning, which counts to five first. `stop` is honored, so it passes through.
+
+**Zhipu's embeddings, plan 59's open question 1.** `embedding-3` accepts `encoding_format: "base64"` and answers in floats, as Gitee does. The OpenAI Python SDK keeps a float array as it is, so the gateway edits nothing. Zhipu's vectors for one input vary from call to call by up to 2.4e-4 a value (cosine 0.999999), whatever the encoding: two float asks in a row agreed in one probe and differed in the next. The tier compares them within 1e-3. Zhipu's `rerank` model answered 200 with `results: []` for three documents; the issue does not cover rerank, so this was not pursued.
+
+**Gitee's `Qwen3-VL-Embedding-8B`** answers one vector for each input, 1024 values each: two for a text and an image, three for a text and two images. Past 1000 inputs it gives the same 400 as before. So the knowledge-base client's multimodal health check, one text and one image, now gets the two vectors it asks for.
+
+**The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu` passed every test it ran in 175 seconds: 182 tests and subtests passed and none failed. Gemini was not named and skipped. On Moonshot:
+
+- Each model's round trip got one unsigned thinking block and sent none back.
+- `count_tokens` relayed Kimi's 404.
+- The cache sums held: 87 input and 3328 written, then 87 input and 3328 read.
+- The converted routes, Messages and Responses, sent Kimi its own reasoning back.
+- The brain's passthrough loop stored no thinking to replay, and its converted loop sent its one block back after the `system.message` and was answered.
+
+On Zhipu, every row reached its OpenAI endpoint and passed: Chat Completions with its three refusals asked directly, the conversion, Responses, and the brain's converted loop. The rows of the Anthropic endpoint left Zhipu out, and a run naming Zhipu alone skips them.
+
+An earlier run of Moonshot alone found two of the tier's own assumptions wrong, and both are fixed. A model list of one alias has no second page. A prompt read whole from the cache counts no `input_tokens`.
+
+**Mutants.** Seventeen mutants of the profile's new guards, each in a scratch copy injected with `go test -overlay`, were all caught by the unit tests. They dropped the flattening, each hook, each of the three conditions of each `kimi-k3` refusal, and Zhipu's parallel check; they widened the model match and the thinking check; and Zhipu's `tool_choice` check was made to refuse `auto`, to refuse `null`, and to refuse `required` alone. A mutant that does not compile proved the overlay was read.
+
 ## Skills discovered in a mounted repository (plan 65, #921, #581) — archived 2026-10-14, delivered in three PRs (#931, #933 and this close-out)
 
 The owner settled four questions on 2026-10-14, before any code. Discovery runs before the first request. Both skills blocks take the recorded XML template, which brought #581 into the plan. Nested skills are discovered on `read` too. Repository skills are trusted as the reference trusts them. Two recordings were the ground truth: the 2026-09-03 attached-skills block, and managed-agents-wire-recordings#23's repository lists. managed-agents-wire-recordings#26 asks for the four points they leave open.

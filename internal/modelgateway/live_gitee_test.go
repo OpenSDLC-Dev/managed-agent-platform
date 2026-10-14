@@ -28,7 +28,9 @@ import (
 //   - text embeddings through openai-go with dimensions, asked as float and
 //     as base64, decode to vectors of that length that agree, and the
 //     encoding Gitee answers a base64 request in is logged;
-//   - a multimodal request, a text and an image, is answered with vectors;
+//   - a multimodal request, a text and an image, and one with two images
+//     beside the text, are answered with one vector for each input, as the
+//     knowledge-base client's health check and its image batches need;
 //   - rerank, through a plain HTTP client since no SDK covers it, ranks the
 //     document that answers the query first, its scores mapped back by
 //     index;
@@ -52,74 +54,48 @@ func TestLiveGiteeEmbeddingsAndRerank(t *testing.T) {
 	// Gitee serves Qwen3-Embedding-0.6B free, so the thousand-input cap run
 	// costs the resource package nothing.
 	e.alias("text", target(e.deployment(p, "Qwen3-Embedding-0.6B", embedding), 0))
-	// Qwen3-VL-Embedding-8B, the knowledge-base client's choice, is outside the resource
-	// package of the key this tier ran under on 2026-10-08.
-	e.alias("vision", target(e.deployment(p, "Qwen3-VL-Embedding-2B", embedding), 0))
-	// So is Qwen3-Reranker-0.6B, free on Gitee, on 2026-10-09 (#903).
+	// Qwen3-VL-Embedding-8B is the knowledge-base client's multimodal model.
+	// Qwen3-VL-Embedding-2B, which this tier used while the key's resource
+	// package left 8B out (#903), answers one vector for any request holding
+	// an image (probed 2026-10-08).
+	e.alias("vision", target(e.deployment(p, "Qwen3-VL-Embedding-8B", embedding), 0))
+	// Qwen3-Reranker-0.6B, free on Gitee, is outside the key's resource
+	// package (#903, probed 2026-10-09).
 	e.alias("ranker", target(e.deployment(p, "bge-reranker-v2-m3", func(d *store.Deployment) { d.Kind = store.KindRerank }), 0))
 	key := e.key(everyAlias)
 	e.start()
 	bearer := map[string]string{"Authorization": "Bearer " + key, "Content-Type": "application/json"}
 
-	t.Run("text", func(t *testing.T) {
-		const dims = 512
-		cl := e.oaClient(key, "/v1")
-		in := []string{"Jupiter is the largest planet in the solar system.", "Octopuses have three hearts."}
-		got := map[openai.EmbeddingNewParamsEncodingFormat][][]float64{}
-		for _, format := range []openai.EmbeddingNewParamsEncodingFormat{openai.EmbeddingNewParamsEncodingFormatFloat, openai.EmbeddingNewParamsEncodingFormatBase64} {
-			var resp *http.Response
-			n := rec.count()
-			res, err := cl.Embeddings.New(liveCtx(t), openai.EmbeddingNewParams{Model: "text", Dimensions: openai.Int(dims), EncodingFormat: format,
-				Input: openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: in}}, oaoption.WithResponseInto(&resp))
-			if err != nil {
-				liveFatalf(t, "%s: %v", format, err)
-			}
-			_, raw := one(t, rec, n).answer()
-			relayed(t, raw, []byte(res.RawJSON()), "text")
-			vecs := make([][]float64, len(in))
-			for _, d := range res.Data {
-				vec, encoding, err := embeddingOf(d.JSON.Embedding.Raw())
-				if err != nil || d.Index < 0 || d.Index >= int64(len(in)) || len(vec) != dims {
-					liveFatalf(t, "%s: vector %d of %d values, %v", format, d.Index, len(vec), err)
-				}
-				if format == openai.EmbeddingNewParamsEncodingFormatBase64 && d.Index == 0 {
-					t.Logf("Gitee answers a base64 request with %s vectors", encoding)
-				}
-				vecs[d.Index] = vec
-			}
-			if res.Model != "text" || len(res.Data) != len(in) {
-				liveFatalf(t, "%s: answered %q with %d vectors", format, res.Model, len(res.Data))
-			}
-			got[format] = vecs
-			liveUsageLedger(t, e, resp, raw, "embeddings")
-		}
-		for i, f := range got[openai.EmbeddingNewParamsEncodingFormatFloat] {
-			for j, x := range f {
-				// A base64 vector is float32; a float one as Gitee rounds it.
-				if y := got[openai.EmbeddingNewParamsEncodingFormatBase64][i][j]; math.Abs(x-y) > 1e-6 {
-					liveFatalf(t, "vector %d differs at %d: %g as float, %g as base64", i, j, x, y)
-				}
-			}
-		}
-	})
+	// A base64 vector is float32; a float one as Gitee rounds it.
+	t.Run("text", func(t *testing.T) { liveTextEmbeddings(t, e, key, rec, "Gitee", 512, 1e-6) })
 
 	t.Run("multimodal", func(t *testing.T) {
-		body := fmt.Sprintf(`{"model":"vision","input":[{"text":"a red square"},{"image":%q}]}`, redSquare())
-		n := rec.count()
-		resp, b := e.do("POST", "/v1/embeddings", body, bearer)
-		_, raw := one(t, rec, n).answer()
-		if resp.StatusCode != 200 {
-			liveFatalf(t, "%d %s", resp.StatusCode, b)
+		// Two images in one request: the client sends up to 16.
+		for _, images := range []int{1, 2} {
+			inputs := []string{`{"text":"a red square"}`}
+			for range images {
+				inputs = append(inputs, fmt.Sprintf(`{"image":%q}`, redSquare()))
+			}
+			body := `{"model":"vision","input":[` + strings.Join(inputs, ",") + `]}`
+			n := rec.count()
+			resp, b := e.do("POST", "/v1/embeddings", body, bearer)
+			_, raw := one(t, rec, n).answer()
+			if resp.StatusCode != 200 {
+				liveFatalf(t, "%d images: %d %s", images, resp.StatusCode, b)
+			}
+			relayed(t, raw, b, "vision")
+			var res openai.CreateEmbeddingResponse
+			if err := json.Unmarshal(b, &res); err != nil || len(res.Data) != len(inputs) {
+				liveFatalf(t, "%d inputs answered %s (%v), want a vector for each", len(inputs), abbreviated(b), err)
+			}
+			for i, d := range res.Data {
+				if d.Index != int64(i) || len(d.Embedding) == 0 || len(d.Embedding) != len(res.Data[0].Embedding) {
+					liveFatalf(t, "%d images: vector %d at index %d of %d values", images, i, d.Index, len(d.Embedding))
+				}
+			}
+			t.Logf("a text and %d images: %d vectors of %d values, usage %s", images, len(res.Data), len(res.Data[0].Embedding), res.Usage.RawJSON())
+			liveUsageLedger(t, e, resp, raw, "embeddings")
 		}
-		relayed(t, raw, b, "vision")
-		// How many vectors is Gitee's to say: Qwen3-VL-Embedding-2B answers
-		// one for a request holding an image (probed 2026-10-08).
-		var res openai.CreateEmbeddingResponse
-		if err := json.Unmarshal(b, &res); err != nil || len(res.Data) == 0 || len(res.Data[0].Embedding) == 0 {
-			liveFatalf(t, "answered %s (%v)", abbreviated(b), err)
-		}
-		t.Logf("a text and an image: %d vectors of %d values, usage %s", len(res.Data), len(res.Data[0].Embedding), res.Usage.RawJSON())
-		liveUsageLedger(t, e, resp, raw, "embeddings")
 	})
 
 	t.Run("rerank", func(t *testing.T) {
@@ -198,6 +174,75 @@ func TestLiveGiteeEmbeddingsAndRerank(t *testing.T) {
 			t.Logf("%s: past %d inputs Gitee answers %s", c.name, c.cap, b)
 		}
 	})
+}
+
+// TestLiveZhipuEmbeddings drives Zhipu's embeddings through the gateway, its
+// provider on BigModel's OpenAI endpoint behind a recording proxy: text
+// embeddings through openai-go with dimensions, asked as float and as base64
+// — the OpenAI Python SDK's default — decode to vectors of that length that
+// agree, and the encoding Zhipu answers a base64 request in is logged
+// (docs/plan/59_model-gateway.md, open question 1).
+func TestLiveZhipuEmbeddings(t *testing.T) {
+	v := namedVendor(t, "zhipu")
+	e := newEnv(t)
+	rec := &recorder{}
+	proxy := recordingProxy(t, v.base, rec)
+	p := e.provider(proxy, func(p *store.Provider) {
+		p.Name, p.Profile, p.Endpoints = "zhipu", "zhipu", map[profile.Protocol]string{profile.OpenAI: proxy}
+	})
+	e.credential(p, v.keyEnv, 1)
+	e.alias("text", target(e.deployment(p, "embedding-3", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
+	key := e.key(everyAlias)
+	e.start()
+	// Zhipu's answers to one input differ from call to call, whatever the
+	// encoding asked, by up to 2.4e-4 a value (cosine 0.999999; probed
+	// 2026-10-14); a vector decoded wrong differs by far more.
+	liveTextEmbeddings(t, e, key, rec, "Zhipu", 256, 1e-3)
+}
+
+// liveTextEmbeddings asks the alias "text" for two texts' embeddings of dims
+// values through openai-go, as float and as base64: each answer is the
+// vendor's but for model, its vectors decode to dims values, the two agree
+// within tol a value, and the ledger counts the usage the vendor reported.
+func liveTextEmbeddings(t *testing.T, e *env, key string, rec *recorder, vendor string, dims int, tol float64) {
+	t.Helper()
+	cl := e.oaClient(key, "/v1")
+	in := []string{"Jupiter is the largest planet in the solar system.", "Octopuses have three hearts."}
+	got := map[openai.EmbeddingNewParamsEncodingFormat][][]float64{}
+	for _, format := range []openai.EmbeddingNewParamsEncodingFormat{openai.EmbeddingNewParamsEncodingFormatFloat, openai.EmbeddingNewParamsEncodingFormatBase64} {
+		var resp *http.Response
+		n := rec.count()
+		res, err := cl.Embeddings.New(liveCtx(t), openai.EmbeddingNewParams{Model: "text", Dimensions: openai.Int(int64(dims)), EncodingFormat: format,
+			Input: openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: in}}, oaoption.WithResponseInto(&resp))
+		if err != nil {
+			liveFatalf(t, "%s: %v", format, err)
+		}
+		_, raw := one(t, rec, n).answer()
+		relayed(t, raw, []byte(res.RawJSON()), "text")
+		vecs := make([][]float64, len(in))
+		for _, d := range res.Data {
+			vec, encoding, err := embeddingOf(d.JSON.Embedding.Raw())
+			if err != nil || d.Index < 0 || d.Index >= int64(len(in)) || len(vec) != dims {
+				liveFatalf(t, "%s: vector %d of %d values, %v", format, d.Index, len(vec), err)
+			}
+			if format == openai.EmbeddingNewParamsEncodingFormatBase64 && d.Index == 0 {
+				t.Logf("%s answers a base64 request with %s vectors", vendor, encoding)
+			}
+			vecs[d.Index] = vec
+		}
+		if res.Model != "text" || len(res.Data) != len(in) {
+			liveFatalf(t, "%s: answered %q with %d vectors", format, res.Model, len(res.Data))
+		}
+		got[format] = vecs
+		liveUsageLedger(t, e, resp, raw, "embeddings")
+	}
+	for i, f := range got[openai.EmbeddingNewParamsEncodingFormatFloat] {
+		for j, x := range f {
+			if y := got[openai.EmbeddingNewParamsEncodingFormatBase64][i][j]; math.Abs(x-y) > tol {
+				liveFatalf(t, "vector %d differs at %d: %g as float, %g as base64", i, j, x, y)
+			}
+		}
+	}
 }
 
 // namedVendor is the vendor of that name when it is consented to; a test
