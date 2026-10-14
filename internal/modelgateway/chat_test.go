@@ -378,9 +378,9 @@ func TestChatErrors(t *testing.T) {
 // its forcing tool_choice values and parallel_tool_calls false, and
 // DeepSeek's parallel_tool_calls false (docs/HISTORY.md, 2026-10-08);
 // Moonshot's parallel_tool_calls false, and a tool_choice naming a function
-// on kimi-k3 with thinking disabled; Zhipu's parallel_tool_calls false, and
-// every tool_choice but auto, bar none on glm-5.3 (docs/HISTORY.md,
-// 2026-10-14). The rest passes through.
+// on kimi-k3 with thinking disabled; Zhipu's parallel_tool_calls false, and,
+// where the request offers a tool, every tool_choice but auto, bar none on
+// glm-5.3 (docs/HISTORY.md, 2026-10-14). The rest passes through.
 func TestAChatRequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 	const tools = `"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object"}}}]`
 	cases := []struct {
