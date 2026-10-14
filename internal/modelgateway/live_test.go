@@ -701,8 +701,8 @@ func liveRoundTrip(t *testing.T, cl *anthropic.Client, s *store.Store, r liveRou
 	if len(back) == 0 && r.thinks {
 		liveFatalf(t, "%s: the vendor returned no signed thinking in %d answers (%q), so there is nothing to round-trip", mode, tries, abbreviate(vend))
 	}
-	if len(vend) == 0 && r.unsigned {
-		liveFatalf(t, "%s: the vendor returned no thinking in %d answers, so its unsigned thinking went unchecked", mode, tries)
+	if r.unsigned && (len(vend) == 0 || slices.ContainsFunc(vend, func(v string) bool { return v != "" })) {
+		liveFatalf(t, "%s: the vendor returned thinking %q in %d answers, where this tier records it as unsigned", mode, abbreviate(vend), tries)
 	}
 	if got := provenance(m); !slices.Equal(got, want) || string(m.Model) != r.alias || m.Usage.OutputTokens == 0 {
 		liveFatalf(t, "%s: model %q, %d output tokens, thinking %q, want %q", mode, m.Model, m.Usage.OutputTokens, abbreviate(got), abbreviate(want))
