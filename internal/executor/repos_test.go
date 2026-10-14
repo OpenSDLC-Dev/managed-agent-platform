@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -515,12 +516,11 @@ func TestRepoCloneErrorDedupe(t *testing.T) {
 	}
 }
 
-// TestRepoCloneErrorDedupeFollowsTheLatest: a clone error is deduped against
-// the resource's latest one, on its reason and message. One reason with two
-// messages is two events, so a mount path's refusal reaches the client after
-// a generic failure. A return to the generic failure is emitted again, so the
-// latest event names the current failure.
-func TestRepoCloneErrorDedupeFollowsTheLatest(t *testing.T) {
+// TestRepoCloneErrorDedupeKeysOnTheMessage: one reason with two messages is
+// two events, so an occupied mount path's refusal reaches the client after a
+// generic failure with the same reason. A return to the generic failure is
+// not emitted again: the dedupe spans the history, which bounds the log.
+func TestRepoCloneErrorDedupeKeysOnTheMessage(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	m := repoRef{ID: "sesrsc_flip", MountPath: "/opt/repo", Type: "github_repository", URL: "https://example.invalid/o/r.git"}
 	for _, message := range []string{repoCloneFailedMessage, repoCloneFailedMessage, repoMountOccupiedMessage, repoCloneFailedMessage} {
@@ -528,10 +528,10 @@ func TestRepoCloneErrorDedupeFollowsTheLatest(t *testing.T) {
 	}
 	var got []string
 	for _, e := range h.repoErrors(t) {
-		got = append(got, e["message"].(string))
+		message, _ := e["message"].(string)
+		got = append(got, message)
 	}
-	want := []string{repoCloneFailedMessage, repoMountOccupiedMessage, repoCloneFailedMessage}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
+	if want := []string{repoCloneFailedMessage, repoMountOccupiedMessage}; !slices.Equal(got, want) {
 		t.Errorf("clone error messages = %q, want %q", got, want)
 	}
 }
@@ -880,7 +880,7 @@ func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 	got := map[string]bool{}
 	for _, e := range h.repoErrors(t) {
 		got[e["mount_path"].(string)] = e["reason"] == repoOutcomeInternal &&
-			strings.Contains(e["message"].(string), "mount path")
+			e["message"] == repoMountOccupiedMessage
 	}
 	if want := map[string]bool{"/opt/EOF": true, "/opt/dangling": true}; !maps.Equal(got, want) {
 		t.Fatalf("clone errors (mount: reason %s with the mount path's message) = %v, want %v",
@@ -986,7 +986,7 @@ func TestRepoVacatesAgainAtTheExtraction(t *testing.T) {
 				}
 				return
 			}
-			if len(errs) != 1 || !strings.Contains(errs[0]["message"].(string), "mount path") {
+			if len(errs) != 1 || errs[0]["message"] != repoMountOccupiedMessage {
 				t.Errorf("clone errors = %v, want exactly one, with the mount path's message", errs)
 			}
 			if got := readSandboxFile(t, sb, "/opt/hooked/keep"); got != "hook\n" {
@@ -1033,7 +1033,7 @@ func TestRepoProbeThatCannotAnswerGoesAhead(t *testing.T) {
 				}
 				return
 			}
-			if len(errs) != 1 || !strings.Contains(errs[0]["message"].(string), "mount path") {
+			if len(errs) != 1 || errs[0]["message"] != repoMountOccupiedMessage {
 				t.Errorf("clone errors = %v, want exactly one, with the mount path's message", errs)
 			}
 			if got := readSandboxFile(t, sb, "/opt/unlisted/keep"); got != "image\n" {

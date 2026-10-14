@@ -574,27 +574,27 @@ func (e *Executor) repoToken(ctx context.Context, sid domain.ID, resourceID stri
 }
 
 // emitRepoCloneError appends the session.error variant for a failed clone,
-// unless the resource's latest clone error has the same reason and message.
-// Two failing repositories are two events. A failure that differs from the
-// latest one is emitted, a return to an earlier failure included, and so is
-// each change of a failure that alternates; a repeated identical failure is
-// not. So the latest event, which the brain's Mounted-repositories block
-// reads, names the current failure. The message counts because one reason
-// carries several: a mount path's refusal must reach the client after a
-// generic `internal` failure.
+// deduped on (resource_id, reason, message) over the session's history — two
+// failing repositories are two events, and a reason or message flip re-emits,
+// while a repeated identical failure does not. The message counts because
+// one reason carries several: an occupied mount path's refusal must reach the
+// client after a generic `internal` failure. The key spans the history, not
+// only the resource's latest event, so a session polling a failing clone
+// cannot flood its own log: a resource emits once per pair at most. The cost
+// is that a return to an earlier failure is not emitted again.
 // The work item's lease already makes this executor the session's single
 // writer, so the check-then-append needs no further guarding. Emission is
 // best effort: a failure to record the error must not turn a tolerated clone
 // failure into a failed run.
 func (e *Executor) emitRepoCloneError(ctx context.Context, sid domain.ID, m repoRef, reason, message string) {
 	var already bool
-	err := e.pool.QueryRow(ctx, `SELECT COALESCE((
-		SELECT payload->'error'->>'reason' = $4 AND payload->'error'->>'message' = $5
-		  FROM events
+	err := e.pool.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM events
 		 WHERE session_id = $1 AND type = 'session.error'
 		   AND payload->'error'->>'type' = $2
 		   AND payload->'error'->>'resource_id' = $3
-		 ORDER BY seq DESC LIMIT 1), false)`,
+		   AND payload->'error'->>'reason' = $4
+		   AND payload->'error'->>'message' = $5)`,
 		sid.String(), repoCloneErrorType, m.ID, reason, message).Scan(&already)
 	if err != nil {
 		slog.WarnContext(ctx, "checking for an existing repository clone error failed",
