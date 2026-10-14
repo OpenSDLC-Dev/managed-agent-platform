@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -20,10 +21,14 @@ import (
 // path only begins the file's is not its checkout, and of two mounts that
 // hold the file, the innermost is.
 func TestNestedSkillDirs(t *testing.T) {
+	// One inner mount comes before its outer one, the other after it, so
+	// neither the first match nor the last is the innermost by order alone.
 	repos := []repoRef{
+		{ID: "sesrsc_inner", MountPath: "/workspace/r/inner/"},
 		{ID: "sesrsc_r", MountPath: "/workspace/r"},
 		{ID: "sesrsc_rx", MountPath: "/workspace/rx"},
-		{ID: "sesrsc_inner", MountPath: "/workspace/r/inner/"},
+		{ID: "sesrsc_s", MountPath: "/workspace/s"},
+		{ID: "sesrsc_s_inner", MountPath: "/workspace/s/inner"},
 	}
 	for _, c := range []struct {
 		file string
@@ -36,6 +41,7 @@ func TestNestedSkillDirs(t *testing.T) {
 		{"/workspace/ry/a/c.txt", nil},
 		{"/workspace/r/inner/a/c.txt", []string{"/workspace/r/inner/a"}},
 		{"/workspace/r/innerx/c.txt", []string{"/workspace/r/innerx"}},
+		{"/workspace/s/inner/a/c.txt", []string{"/workspace/s/inner/a"}},
 		{"/etc/hosts", nil},
 	} {
 		if got := nestedSkillDirs(c.file, repos); !reflect.DeepEqual(got, c.want) {
@@ -248,6 +254,7 @@ func TestRootScanLeavesRoomForNestedSkills(t *testing.T) {
 	}
 	h.told(t, "", string(raw))
 	h.told(t, "", `"not a list"`)
+	h.told(t, "sthr_corrupt", "["+strings.Repeat("1,", maxRepoSkills)+"1]")
 	h.told(t, "sthr_small", `[{"name":"s","description":"","location":"`+repoMount+`/s/.claude/skills/s/SKILL.md"}]`)
 
 	h.suspend(t, readUse(repoMount+"/README.md"))
@@ -277,6 +284,7 @@ func TestNestedSkillsRoomAndWholeScans(t *testing.T) {
 	b := skills.RepoSkill{Name: "b", Description: "From b.", Location: "/workspace/r/x/.claude/skills/b/SKILL.md"}
 	h.told(t, "", `[{"name":"z","description":"","location":"/workspace/r/q/.claude/skills/z/SKILL.md"}]`)
 	h.told(t, "", `{"not":"a list"}`)
+	h.told(t, "", `[1,2,3]`)
 	h.told(t, "sthr_other", `[{"name":"a","description":"","location":"`+a.Location+`"}]`)
 
 	sb := &listingSandbox{stdout: "0/a\x001/b\x00"}

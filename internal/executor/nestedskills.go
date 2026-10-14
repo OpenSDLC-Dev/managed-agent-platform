@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/jackc/pgx/v5"
@@ -27,7 +26,7 @@ type nestedSkills struct {
 	repos    []repoRef // the checkouts this run found present
 	recorded int       // the skills the root scans announce, which the cap counts
 	// known is, by thread, the location of every nested skill the thread was
-	// told of, read from the log at the thread's first read in the run.
+	// told of, read from the log at the run's first read (toldNestedSkills).
 	known map[domain.ID]map[string]bool
 	// listed is the skill names under each directory listed since the run's
 	// last tool other than a read, so a batch of reads in one directory lists
@@ -40,7 +39,7 @@ type nestedSkills struct {
 // session's repositories announce from their roots.
 func newNestedSkills(sb sandbox.Sandbox, sid domain.ID, repos []repoRef, recorded int) *nestedSkills {
 	return &nestedSkills{sb: sb, sid: sid, repos: repos, recorded: recorded,
-		known: map[domain.ID]map[string]bool{}, listed: map[string][]string{}, found: map[domain.ID][]skills.RepoSkill{}}
+		listed: map[string][]string{}, found: map[domain.ID][]skills.RepoSkill{}}
 }
 
 // forgetListings drops the run's listings, after a tool that may have made
@@ -58,13 +57,17 @@ func (e *Executor) afterRead(ctx context.Context, n *nestedSkills, thread domain
 		return ""
 	}
 	logger := slog.With("session_id", n.sid, "thread_id", thread)
-	known, ok := n.known[thread]
-	if !ok {
-		var err error
-		if known, err = e.announcedNestedSkills(ctx, n.sid, thread); err != nil {
+	if n.known == nil {
+		told, err := e.toldNestedSkills(ctx, n.sid)
+		if err != nil {
 			logger.WarnContext(ctx, "nested repository skills not scanned", "err", err)
 			return ""
 		}
+		n.known = told
+	}
+	known := n.known[thread]
+	if known == nil {
+		known = map[string]bool{}
 		n.known[thread] = known
 	}
 	// The cap counts the root scans' skills and the thread's nested ones.
@@ -132,24 +135,26 @@ func nestedSkillDirs(file string, repos []repoRef) []string {
 	return dirs
 }
 
-// announcedNestedSkills is the location of every nested skill the thread was
-// told of already, so a later read below the same directories does not tell
-// it again. A row whose skills do not decode was not written by the executor,
-// and is passed over, as the brain passes it over.
-func (e *Executor) announcedNestedSkills(ctx context.Context, sid, thread domain.ID) (map[string]bool, error) {
+// toldNestedSkills is, by thread (the primary's id empty), the location of
+// every nested skill the thread was told of, so a later read below the same
+// directories does not tell it again. A row whose skills do not decode was
+// not written by the executor, and is passed over, as the brain passes it
+// over: it tells no thread anything, so it counts for nothing.
+func (e *Executor) toldNestedSkills(ctx context.Context, sid domain.ID) (map[domain.ID]map[string]bool, error) {
 	rows, err := e.pool.Query(ctx,
-		`SELECT n.result_event_id, n.skills FROM session_nested_skills n JOIN events ev ON ev.id = n.result_event_id
-		  WHERE n.session_id = $1 AND ev.thread_id IS NOT DISTINCT FROM $2`,
-		sid.String(), events.NullableThread(thread))
+		`SELECT n.result_event_id, COALESCE(ev.thread_id, ''), n.skills
+		   FROM session_nested_skills n JOIN events ev ON ev.id = n.result_event_id
+		  WHERE n.session_id = $1`,
+		sid.String())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	known := map[string]bool{}
+	told := map[domain.ID]map[string]bool{}
 	for rows.Next() {
-		var id string
+		var id, thread string
 		var raw []byte
-		if err := rows.Scan(&id, &raw); err != nil {
+		if err := rows.Scan(&id, &thread, &raw); err != nil {
 			return nil, err
 		}
 		var list []skills.RepoSkill
@@ -158,24 +163,30 @@ func (e *Executor) announcedNestedSkills(ctx context.Context, sid, thread domain
 				"session_id", sid, "result_event_id", id, "err", err)
 			continue
 		}
+		known := told[domain.ID(thread)]
+		if known == nil {
+			known = map[string]bool{}
+			told[domain.ID(thread)] = known
+		}
 		for _, s := range list {
 			known[s.Location] = true
 		}
 	}
-	return known, rows.Err()
+	return told, rows.Err()
 }
 
 // mostNestedSkills is how many nested skills the thread told of the most was
 // told of, for the room a root scan leaves them.
 func (e *Executor) mostNestedSkills(ctx context.Context, sid domain.ID) (int, error) {
-	var n int
-	err := e.pool.QueryRow(ctx,
-		`SELECT COALESCE(MAX(c), 0) FROM (
-		   SELECT SUM(CASE WHEN jsonb_typeof(n.skills) = 'array' THEN jsonb_array_length(n.skills) ELSE 0 END) AS c
-		     FROM session_nested_skills n JOIN events ev ON ev.id = n.result_event_id
-		    WHERE n.session_id = $1 GROUP BY ev.thread_id) t`,
-		sid.String()).Scan(&n)
-	return n, err
+	told, err := e.toldNestedSkills(ctx, sid)
+	if err != nil {
+		return 0, err
+	}
+	most := 0
+	for _, known := range told {
+		most = max(most, len(known))
+	}
+	return most, nil
 }
 
 // recordNestedSkills stores what the run's reads found, inside the
