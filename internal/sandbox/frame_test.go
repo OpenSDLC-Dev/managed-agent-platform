@@ -354,8 +354,9 @@ func TestFrameClosesUnderErrexit(t *testing.T) {
 // An image's startup file can turn on what changes what a glob matches, or
 // its order (sandboxtest.GlobHook), and the platform's scripts are written for
 // bash's defaults: the preamble puts each back, and says nothing as it does,
-// whatever the bash has. Unsetting GLOBIGNORE turns dotglob off by itself, so
-// a startup that turns on dotglob alone is run too.
+// whatever the bash has. Unsetting GLOBIGNORE is what turns dotglob off,
+// whether or not the startup set GLOBIGNORE, so a startup that turns on
+// dotglob alone is run too.
 func TestScriptPreambleUndoesAStartupsGlobOptions(t *testing.T) {
 	const probe = `printf '%s\n' "$-" "${GLOBIGNORE-unset}" "${GLOBSORT-unset}"
 for o in dotglob extglob failglob globstar nocaseglob nullglob; do
@@ -372,13 +373,19 @@ done
 }
 
 // Open and Wrap are POSIX shell, so a script `sh -c` runs is framed the same
-// way, the preamble's one bash line passed over without a word. sh reads no
-// BASH_ENV, so nothing prints around it here.
+// way. sh reads no BASH_ENV, so nothing prints around it here. A script the
+// preamble alone opens (Script) runs there too, and as the frame does not
+// hide what the preamble prints, the check reads its stderr whole: the
+// preamble's one bash line passes over without a word, as on a bash without
+// one of its options.
 func TestFrameWrapIsPOSIXShell(t *testing.T) {
 	f := sandbox.NewFrame("test")
 	raw := run(t, "/bin/sh", f.Wrap(`if [ -e "$1" ]; then echo P; exit 0; fi; echo M`), "", "/")
-	if res, ok := f.Unframe(raw); !ok || res.Stdout != "P\n" || res.Stderr != "" || res.ExitCode != 0 {
-		t.Errorf("sh: Unframe = %+v, %v; want P, and nothing on stderr", res, ok)
+	if res, ok := f.Unframe(raw); !ok || res.Stdout != "P\n" || res.ExitCode != 0 {
+		t.Errorf("sh: Unframe = %+v, %v; want P", res, ok)
+	}
+	if raw := run(t, "/bin/sh", sandbox.Script("echo P"), ""); raw.Stdout != "P\n" || raw.Stderr != "" || raw.ExitCode != 0 {
+		t.Errorf("sh: Script = %+v; want P, and nothing on stderr", raw)
 	}
 }
 

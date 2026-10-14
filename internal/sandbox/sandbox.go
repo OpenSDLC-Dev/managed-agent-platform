@@ -412,10 +412,11 @@ func CheckCommand(command string) error {
 //     before it reports what it left, a rename refusing a directory with the
 //     `rm`'s exit and not its own (#860).
 //   - What changes what a glob matches, or its order: noglob, GLOBIGNORE,
-//     GLOBSORT (bash 5.3) and the shopt glob options. Under noglob the outputs
-//     harvest lists nothing and the glob tool finds nothing; under failglob a
-//     glob that matches nothing is an error. A script that wants dotglob,
-//     nullglob or globstar turns it on itself.
+//     GLOBSORT (bash 5.3) and the shopt glob options. Unsetting GLOBIGNORE
+//     turns dotglob off as well, whether or not GLOBIGNORE was set. Under
+//     noglob the outputs harvest lists nothing and the glob tool finds
+//     nothing; under failglob a glob that matches nothing is an error. A
+//     script that wants dotglob, nullglob or globstar turns it on itself.
 //
 // The shopt line is bash's: a POSIX sh, or a bash without one of its options,
 // passes over it without a word. A script framed by Frame.Open has the
@@ -428,7 +429,7 @@ func CheckCommand(command string) error {
 // A bash the model starts itself (`bash -c`, a `#!/bin/bash` script) reads
 // the startup file again, and runs under the image's errexit.
 const ScriptPreamble = "set +e +f\nunset GLOBIGNORE GLOBSORT\n" +
-	"shopt -u dotglob extglob failglob globstar nocaseglob nullglob 2>/dev/null\n"
+	"shopt -u extglob failglob globstar nocaseglob nullglob 2>/dev/null\n"
 
 // Script is script as the platform runs it in a sandbox's shell, its preamble
 // first (ScriptPreamble).
