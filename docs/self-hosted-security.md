@@ -184,16 +184,16 @@ in that shell runs without the image's errexit, while its `nounset` and
 `pipefail` carry (and a `set -e` the model runs there carries from call to
 call). A bash the model starts itself — `bash -c`, a `#!/bin/bash` script —
 reads the startup file again, as every non-interactive bash does, and runs
-under the image's errexit. The options that change what a glob matches, or
-its order, are a second exception, for the platform's scripts alone. Those
-scripts put bash's defaults back as they start for noglob (`set -f`),
-`GLOBIGNORE`, `GLOBSORT` and the `shopt` options `dotglob`, `extglob`,
+under the image's errexit. A second exception, for the platform's scripts
+alone, is a set of settings that change what a glob matches, or its order.
+Those scripts put bash's defaults back as they start for noglob (`set -f`),
+`GLOBIGNORE`, `GLOBSORT`, privileged mode (`set -p`, in which bash keeps a
+`GLOBIGNORE`'s ignore list) and the `shopt` options `dotglob`, `extglob`,
 `failglob`, `globstar`, `nocaseglob` and `nullglob`. So none of these
 settings changes what the outputs harvest, `glob` or the repository-skills
 listing finds, while the model's commands run under what the file set. Job
-control
-(`monitor`) is the third exception: a
-command's deadline is enforced by killing its process group, and a shell with
+control (`monitor`) is the third exception: a command's deadline is enforced
+by killing its process group, and a shell with
 job control forks each of its jobs into a group of its own, so both backends'
 exec wrappers turn it off before the command starts, whatever `SHELLOPTS`
 says, and the rest of `SHELLOPTS` carries
@@ -215,6 +215,8 @@ of which turns it off as it starts, nor the Kubernetes exec wrapper before it
 records a command's exit code, nor either backend's watchdog before it kills
 a command past its deadline
 ([#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860)).
+Nor does an `ERR` trap in the file end a platform script at a command it lets
+fail: each script clears the trap as it starts.
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the
