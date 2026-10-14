@@ -419,7 +419,7 @@ func liveText(t *testing.T, cl *anthropic.Client, r liveRoute, stream bool) {
 		up, _ := vendorAnswer(raw)
 		// A prompt read whole from the cache counts no input_tokens, as
 		// Kimi's does once it has seen it.
-		if kindsOf(m) != kindsOf(&up) || textOf(m) != textOf(&up) || m.StopReason != up.StopReason || string(m.Model) != r.alias ||
+		if kindsOf(m) != kindsOf(&up) || textOf(m) != textOf(&up) || m.StopReason != up.StopReason || m.Model != r.alias ||
 			m.Usage.InputTokens+m.Usage.CacheReadInputTokens+m.Usage.CacheCreationInputTokens == 0 || m.Usage.OutputTokens == 0 || !sameUsage(m.Usage, up.Usage) {
 			liveFatalf(t, "%s text: the gateway answered [%s] %q (stop %q) from model %q, usage %s; the vendor sent [%s] %q (stop %q), usage %s",
 				mode, kindsOf(m), masked(textOf(m)), m.StopReason, m.Model, counts(m.Usage), kindsOf(&up), masked(textOf(&up)), up.StopReason, counts(up.Usage))
