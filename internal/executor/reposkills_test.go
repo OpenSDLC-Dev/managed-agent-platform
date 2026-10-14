@@ -448,7 +448,8 @@ func TestScanRepoSkillsReadFailures(t *testing.T) {
 // exec would, framed and under bash, with a BASH_ENV file that sets what an
 // image's startup may leave on: noglob would list nothing, GLOBIGNORE would
 // hide "a", dotglob would list a hidden directory, failglob would fail an
-// empty skills directory, and a locale's collation would put "a" before "B".
+// empty skills directory, and a locale's collation, or on bash 5.3 GLOBSORT,
+// would put "a" before "B".
 // The listing undoes each, so it names the same skills, in byte order,
 // whatever the image set.
 func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
@@ -459,7 +460,7 @@ func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 	dir := t.TempDir()
 	hook := filepath.Join(dir, "hook.sh")
 	if err := os.WriteFile(hook, []byte(sandboxtest.BannerHook+
-		"set -f\nGLOBIGNORE=a\nshopt -s dotglob failglob nocaseglob\nexport LC_ALL=en_US.UTF-8\n"), 0o644); err != nil {
+		"set -f\nGLOBIGNORE=a\nGLOBSORT=-name\nshopt -s dotglob failglob nocaseglob\nexport LC_ALL=en_US.UTF-8\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(dir, "skills")

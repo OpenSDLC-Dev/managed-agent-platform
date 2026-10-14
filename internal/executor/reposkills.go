@@ -125,13 +125,13 @@ func (e *Executor) scanRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.
 // scan nor the agent could load it; a linked directory is followed. Hidden
 // directories are not listed, and an absent root prints nothing. The glob
 // runs in byte order, and what an image's startup may set that changes what it
-// matches is undone: noglob (set -f), GLOBIGNORE, and the shopt options,
-// dotglob among them.
+// matches, or its order, is undone: noglob (set -f), GLOBIGNORE, GLOBSORT
+// (bash 5.3), and the shopt options, dotglob among them.
 func listRepoSkillsScript(root string) string {
 	return "cd -- " + shellQuote(root) + " 2>/dev/null || exit 0\n" +
 		"LC_ALL=C; export LC_ALL\n" +
 		"set +f\n" +
-		"unset GLOBIGNORE\n" +
+		"unset GLOBIGNORE GLOBSORT\n" +
 		"shopt -u dotglob failglob nullglob nocaseglob 2>/dev/null\n" +
 		"for d in *; do\n" +
 		"  if [ -f \"$d/SKILL.md\" ] && [ ! -h \"$d/SKILL.md\" ]; then printf '%s\\000' \"$d\"; fi\n" +
