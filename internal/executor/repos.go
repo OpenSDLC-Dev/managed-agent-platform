@@ -431,7 +431,7 @@ var errMountOccupied = errors.New("the mount path is neither absent nor an empty
 // host's, though its text can read like the host's to cloneReason's network
 // arm: a dropped exec stream says EOF, and a script's stderr quotes the mount
 // path, such as /opt/EOF.
-var errExtraction = errors.New("extracting the repository into the sandbox failed")
+var errExtraction = errors.New("landing the repository in the sandbox failed")
 
 // mountOccupied asks vacantScript before the fetch. A probe that exits
 // non-zero refuses. One that does not answer, because its exec failed, timed
@@ -511,11 +511,6 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 		return fmt.Errorf("%w: %w", errExtraction, err)
 	}
 	if !whole && res.ExitCode == occupiedStatus {
-		// rmdir's own word on why, which an image's startup can only precede.
-		stderr := strings.TrimSpace(res.Stderr)
-		if why := stderr[strings.LastIndexByte(stderr, '\n')+1:]; why != "" {
-			return fmt.Errorf("%w: %s", errMountOccupied, why)
-		}
 		return errMountOccupied
 	}
 	if res.ExitCode != 0 {
