@@ -83,7 +83,7 @@ The gateway now refuses what Kimi ignores: `disable_parallel_tool_use` and `para
 | `tool_choice` `none`, a question asking for the tool | no call in all 3, each saying it has no tools | **a call in all 3** |
 | `stop: [" 5"]`, counting to ten | an empty answer in all 3, finished `stop` | empty in 2, "1 2 3 4" in 1 |
 
-BigModel's chat-completion reference has `tool_choice` "默认auto且仅支持auto" (auto by default, and auto alone), and defines no `parallel_tool_calls`. So the profile now refuses `parallel_tool_calls: false` and every `tool_choice` but `auto`, except `none` on `glm-5.3`, which honored it. The empty answers suggest that the stop sequence also stops the reasoning, which counts to five first. `stop` is honored, so it passes through.
+BigModel's chat-completion reference lists `auto` as `tool_choice`'s only option, and defines no `parallel_tool_calls`. So the profile now refuses `parallel_tool_calls: false` and every `tool_choice` but `auto`, except `none` on `glm-5.3`, which honored it. The empty answers suggest that the stop sequence also stops the reasoning, which counts to five first. `stop` is honored, so it passes through.
 
 **Zhipu's embeddings, plan 59's open question 1.** `embedding-3` accepts `encoding_format: "base64"` and answers in floats, as Gitee does. The OpenAI Python SDK keeps a float array as it is, so the gateway edits nothing. Zhipu's vectors for one input vary from call to call by up to 2.4e-4 a value (cosine 0.999999), whatever the encoding: two float asks in a row agreed in one probe and differed in the next. The tier compares them within 1e-3. Zhipu's `rerank` model answered 200 with `results: []` for three documents; the issue does not cover rerank, so this was not pursued.
 

@@ -326,10 +326,10 @@ func moonshotChatIgnores(model string, req map[string]json.RawMessage) string {
 	return ""
 }
 
-// zhipuChatIgnores: BigModel's chat-completion reference has tool_choice
-// "默认auto且仅支持auto" — auto by default, and auto alone — and defines no
-// parallel_tool_calls. Its live probes bear both out (docs/HISTORY.md,
-// 2026-10-14): glm-5.3 and glm-5.3-flash answered a fun-fact question without
+// zhipuChatIgnores: BigModel's chat-completion reference lists auto as
+// tool_choice's only option, and defines no parallel_tool_calls. Its live
+// probes bear both out (docs/HISTORY.md, 2026-10-14): glm-5.3 and
+// glm-5.3-flash answered a fun-fact question without
 // the call that required or a named function forces in all 12 asks,
 // glm-5.3-flash called the tool in all 3 asks under none, and both called it
 // twice in all 6 answers with parallel_tool_calls false. So every tool_choice
