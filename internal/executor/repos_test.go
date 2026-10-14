@@ -1080,6 +1080,9 @@ func TestRepoProbeAnswersOnlyInItsFrame(t *testing.T) {
 // set, so it carries a timeout of its own, and an answer from a probe that
 // timed out is no answer.
 func TestRepoVacancyProbeIsBounded(t *testing.T) {
+	if repoVacancyTimeout <= 0 {
+		t.Fatalf("repoVacancyTimeout = %s, want a bound: zero means no limit", repoVacancyTimeout)
+	}
 	for _, timedOut := range []bool{false, true} {
 		sb := &fakeSandbox{execHook: func(sandbox.ExecRequest) *sandbox.ExecResult {
 			return &sandbox.ExecResult{Stdout: "occupied\n", TimedOut: timedOut}

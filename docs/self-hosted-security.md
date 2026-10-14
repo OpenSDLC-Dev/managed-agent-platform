@@ -204,7 +204,7 @@ of that kill's reach, as a `setsid` does. What the startup file
 *prints* does not corrupt the scripts whose answers the platform parses —
 a bulk write's report aside, below:
 `glob` and `grep`, the outputs harvest's listing, the repository-skills
-listing, the memory sync's tree hash, the package-install probe, a repository's vacancy probe, Docker's refused-write reasons and, on
+listing, the memory sync's tree hash, the package-install probe, a file mount's presence probe, a repository's vacancy probe, Docker's refused-write reasons and, on
 Kubernetes, every file read, an exec's exit record and liveness probe, a
 refused write's reason and the checkpoint's root probe each print their
 answer between a begin and an end line carrying a nonce of its own, and only
