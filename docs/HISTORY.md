@@ -81,7 +81,7 @@ All 9 of my mutants were killed. The verifier's 10 left one survivor, the apostr
 - a mount whose clone failed announced nothing, though the agent wrote a skill under its path;
 - the cap held both ways: root skills recorded before a read left it room for one, and nested skills told before a root scan left that scan room for one.
 
-After the reviews' fixes, each of 53 guards was broken on its own in an overlay copy, and a test failed for 50. The other three are equivalent: a loop's early stop that only spares a warning; the brain's type test on a mount, which its URL test already covers, since only a repository carries a URL; and the brain's skip of the query when nothing is mounted, where its filter would drop every skill anyway. A first run, before the reviews, left two survivors, and each gained a test. After the second round, the ten mutants of the code it changed, the verifier's two survivors among them, were all killed.
+After the reviews' fixes, each of 53 guards was broken on its own in an overlay copy, and a test failed for 50. The other three are equivalent: a loop's early stop that only spares a warning; the brain's type test on a mount, which its URL test already covers, since only a repository carries a URL; and the brain's skip of the query when nothing is mounted, where its filter would drop every skill anyway. A first run, before the reviews, left two survivors, and each gained a test.
 
 Review hardening, the close-out. The verifier's pinned model returned HTTP 429, so it ran on `claude-opus-5-5` by override; a run on the first commit was stopped when the reviews below changed the code, and it ran again on the fixed tip, af315e09, and passed it with findings, with `make verify` green at 91.53% coverage. Codex (`gpt-6.1-sol`, `xhigh`) found two P2 defects and one P3, all fixed:
 
@@ -98,8 +98,10 @@ The second round. Codex's second pass found no P1 or P2 defect and one P3, fixed
 
 - no brain test told a child thread of its own read's skills, so a turn given the primary's rows passed; a child thread's turn is now run;
 - the registry cited the scan's directory function by an old name;
-- the innermost-mount test listed each inner mount in one place only, so the first or the last match passed for the innermost; it now lists one before its outer mount and one after;
+- the innermost-mount test listed its inner mount last, so the last match passed for the innermost; it now lists one inner mount before its outer mount and one after, so neither the first nor the last match passes;
 - the counting mismatch Codex found.
+
+The ten mutants of the code the second round changed, the verifier's two survivors among them, were all killed. The verifier then passed the round, scoped to its commit, 2c3ca60b, with findings, on `claude-opus-5-5` by override, and `make verify` green at 91.52% coverage. Its own mutant of the session filter in the executor's query survived, a gap the commit inherited, and a test with a second session now kills it. Two of its notes are left as they are: the brain query's thread filter is equivalent, since a thread's replay reads only its own rows; and a row that decodes with no locations counts one for its thread, a row the executor never writes.
 
 **Plan 65 progress summary (archived).** Delivered in three PRs. #931 landed decision 1: the recorded template for the attached block and absolute cloud locations, closing #581. #933 landed decisions 2, 3, 4, 6 and 7: the hold before the first request, the scan of each checkout (migration 0053), the repository list and the trust note. The close-out landed decision 5, nested discovery on `read` (migration 0054), and closes #921. What the recordings leave open is registered and tracked on #78, and managed-agents-wire-recordings#26 asks for it.
 

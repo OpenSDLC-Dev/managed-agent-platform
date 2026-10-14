@@ -12,6 +12,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
@@ -270,8 +271,8 @@ func TestRootScanLeavesRoomForNestedSkills(t *testing.T) {
 
 // TestNestedSkillsRoomAndWholeScans pins what a thread's room is and when a
 // scan counts. Room is the cap less the root scans' skills and what the
-// thread was told already, another thread's not counted, and a read's
-// findings use it up for the reads after it. A row the executor did not
+// thread was told already, another thread's and another session's not
+// counted, and a read's findings use it up for the reads after it. A row the executor did not
 // write counts for nothing. A scan whose listing failed or was cut short, or
 // one of whose reads failed for a reason a later read may not meet, records
 // nothing, so the next read below the same directories records all of it.
@@ -286,6 +287,17 @@ func TestNestedSkillsRoomAndWholeScans(t *testing.T) {
 	h.told(t, "", `{"not":"a list"}`)
 	h.told(t, "", `[1,2,3]`)
 	h.told(t, "sthr_other", `[{"name":"a","description":"","location":"`+a.Location+`"}]`)
+	// Another session's primary thread, keyed as this one's, was told of a.
+	other := pgtest.NewSessionInEnv(t, h.pool, h.envID)
+	otherResult := domain.NewID(domain.PrefixEvent)
+	if _, err := h.log.Append(ctx, other, []events.NewEvent{{ID: otherResult, Type: domain.EventAgentToolResult,
+		Payload: json.RawMessage(`{"tool_use_id":"sevt_x","content":[{"type":"text","text":"ok"}]}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(ctx, `INSERT INTO session_nested_skills (result_event_id, session_id, skills) VALUES ($1, $2, $3)`,
+		otherResult.String(), other.String(), `[{"name":"a","description":"","location":"`+a.Location+`"}]`); err != nil {
+		t.Fatal(err)
+	}
 
 	sb := &listingSandbox{stdout: "0/a\x001/b\x00"}
 	n := newNestedSkills(sb, h.sid, repos, maxRepoSkills-2)
