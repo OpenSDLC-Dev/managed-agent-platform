@@ -248,6 +248,11 @@ func TestShell(t *testing.T) {
 		for _, tc := range []struct{ name, alias string }{
 			{"OnTrap", "trap=true"},
 			{"OnExit", "exit=true"},
+			// The template's last lines are parsed after the restore, so their
+			// `builtin` is quoted; an unquoted one would drop the EXIT trap.
+			{"OnBuiltin", "builtin=true"},
+			// A `{ ...; }` group in the template's last lines would be one.
+			{"OnBrace", "'{'='echo HIJACKED;'"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				sh, _ := newShell(t, sb)
@@ -263,11 +268,12 @@ func TestShell(t *testing.T) {
 		}
 	})
 
-	// Every word `__map_main` runs is a builtin a command can shadow with a
-	// function of the same name — `.` above all, which is a legal function name,
-	// is snapshotted like any other, and once restored makes the template source
-	// nothing: every later call returns exit 0 with no output, forever. `trap` is
-	// the same shape and costs the next call its snapshot.
+	// Every word the template's last lines and `__map_main` run is a builtin a
+	// command can shadow with a function of the same name — `.` above all,
+	// which is a legal function name, is snapshotted like any other, and once
+	// restored makes the template source nothing: every later call returns exit
+	// 0 with no output, forever. `trap` is the same shape and costs the next
+	// call its snapshot.
 	t.Run("AFunctionCannotHijackTheTemplatesOwnWords", func(t *testing.T) {
 		for _, tc := range []struct{ name, fn string }{
 			{"Dot", `.() { echo HIJACKED_DOT; }`},
@@ -357,8 +363,11 @@ greet
 			sh, _ := newShell(t, sb)
 			sh(`export KEEP=yes; f(){ echo fn; }; cd /var`, 0)
 			// `-p` as a function name; a user __map_main that would strip the session
-			// if `declare -f -p` dumped it into the snapshot.
-			sh("function -p { :; }\n__map_main() { set +e; unset KEEP; cd /workspace; __map_save 0; builtin exit 0; }", 0)
+			// if `declare -f -p` dumped it into the snapshot. The call ends by
+			// calling `exit`, so its own end never runs that __map_main; a carried
+			// one would run at the end of the next call.
+			sh("function -p { :; }\n__map_main() { set +e; unset KEEP; cd /workspace; __map_save 0; builtin exit 0; }\nexit 0", 0)
+			sh(":", 0)
 			got := sh(`\builtin echo "[${KEEP:-LOST}][$(pwd)]"`, 0)
 			if strings.TrimSpace(got.Stdout) != "[yes][/var]" {
 				t.Errorf("stdout = %q, want [yes][/var] — a `-p` function dumped the table past the filter", got.Stdout)
@@ -367,8 +376,10 @@ greet
 		t.Run("Alias", func(t *testing.T) {
 			sh, _ := newShell(t, sb)
 			sh(`export KEEP=yes; shopt -s expand_aliases; alias saved='echo a'; cd /var`, 0)
-			sh("alias -- -p=':'\nalias __map_main='unset KEEP; __map_save 0; exit 0'", 0)
-			got := sh(`\builtin echo "[${KEEP:-LOST}][$(pwd)]"`, 0)
+			// The EXIT trap's `__map_save` is the one template word an alias
+			// can reach: the trap's text is parsed when the call exits.
+			sh("alias -- -p=':'\nalias __map_save='echo HIJACKED_SAVE'", 0)
+			got := sh(`\builtin echo "[${KEEP:-LOST}][$(pwd)]"; \builtin exit 0`, 0)
 			if strings.TrimSpace(got.Stdout) != "[yes][/var]" {
 				t.Errorf("stdout = %q, want [yes][/var] — a `-p` alias dumped the table past the filter", got.Stdout)
 			}
@@ -377,13 +388,14 @@ greet
 
 	// A carried alias on the template's own names must not survive either: the
 	// alias table is namespace-filtered exactly as the exports and functions are.
-	// Without that, `alias __map_main=...` replaces the whole call.
+	// Without that, `alias __map_save=...` replaces the save of every later
+	// call that ends by calling `exit`.
 	t.Run("AnAliasOnTheTemplatesOwnNamesIsNotSnapshotted", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
-		sh(`shopt -s expand_aliases; alias __map_main='echo HIJACKED_MAIN'; export KEEP=yes`, 0)
-		got := sh(`echo "[${KEEP:-LOST}]"`, 0)
-		if strings.Contains(got.Stdout, "HIJACKED_MAIN") {
-			t.Errorf("stdout = %q — an alias on __map_main was carried and ran instead of the command", got.Stdout)
+		sh(`shopt -s expand_aliases; alias __map_save='echo HIJACKED_SAVE'; export KEEP=yes`, 0)
+		got := sh(`echo "[${KEEP:-LOST}]"; exit 0`, 0)
+		if strings.Contains(got.Stdout, "HIJACKED_SAVE") {
+			t.Errorf("stdout = %q — an alias on __map_save was carried and ran instead of the save", got.Stdout)
 		}
 		if strings.TrimSpace(got.Stdout) != "[yes]" {
 			t.Errorf("stdout = %q, want [yes]", got.Stdout)
@@ -436,6 +448,22 @@ greet
 		// happen is the whole save running under it.
 		if n := strings.Count(got.Stdout, "TICK"); n > 4 {
 			t.Errorf("stdout = %q — %d DEBUG-trap ticks: the template ran its save under the command's trap", got.Stdout, n)
+		}
+	})
+
+	// The command is sourced at the top level. Sourced inside a function, a call
+	// that its own `set -e` ended ran the EXIT trap with bash 5's variable
+	// context torn down: the save's `local` failed, the call lost its snapshot,
+	// and the errors landed on the command's stderr.
+	t.Run("ACallItsOwnErrexitEndsKeepsItsState", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		got := sh("cd /tmp; export MARK=1; set -e; false; echo unreached", 0)
+		if got.ExitCode != 1 || got.Stdout != "" || got.Stderr != "" {
+			t.Errorf("result = %+v, want exit 1 with no output", got.ExecResult)
+		}
+		after := sh(`echo "[${MARK:-LOST}][$(pwd)][$-]"`, 0)
+		if out := strings.TrimSpace(after.Stdout); !strings.HasPrefix(out, "[1][/tmp][") || !strings.Contains(out[len("[1][/tmp]"):], "e") {
+			t.Errorf("stdout = %q, want [1][/tmp] and errexit still on — the call lost its snapshot", after.Stdout)
 		}
 	})
 
