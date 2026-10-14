@@ -224,7 +224,7 @@ func renderSkillsBlock(metas []skillMeta, root string, repo []skills.RepoSkill) 
 // nestedSkillsLead opens the block a read's nested skills are announced in.
 // The reference's own text is unrecorded: the agent described it as another
 // source="repo" list after the read (docs/DIVERGENCES.md), so the lead is ours.
-const nestedSkillsLead = "Reading that file found skills in the directories above it. " +
+const nestedSkillsLead = "Skills were found in the directories above a file you read. " +
 	"Before you act on a task one of them matches, read its SKILL.md.\n\n"
 
 // renderNestedSkills formats what a read found below a repository's root as

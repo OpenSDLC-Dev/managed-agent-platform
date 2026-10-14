@@ -29,7 +29,7 @@ type editInput struct {
 	ReplaceAll bool   `json:"replace_all"`
 }
 
-func (r Runner) read(ctx context.Context, raw json.RawMessage) (Result, error) {
+func (r Runner) read(ctx context.Context, raw json.RawMessage) (res Result, err error) {
 	var in readInput
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return failf("invalid read input: %v", err)
@@ -48,6 +48,11 @@ func (r Runner) read(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if err != nil {
 		return fileFault("read", in.FilePath, err)
 	}
+	defer func() {
+		if err == nil && !res.IsError {
+			res.ReadPath = p
+		}
+	}()
 	if len(in.ViewRange) == 0 {
 		return succeed(string(data))
 	}

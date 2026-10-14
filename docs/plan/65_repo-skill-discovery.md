@@ -162,26 +162,31 @@ API exposes no raw prompt):
    - Entries come in the session's resource order, each repository's by
      name.
 
-5. **Nested skills are discovered on `read`.** When a `read` of a file below a
-   repository's root succeeds, the executor scans each directory between the
-   file's and the root, excluding the root, for `.claude/skills/*/SKILL.md`,
-   nearest first. One framed listing covers them all, and decision 3's rules
-   apply.
+5. **Nested skills are discovered on `read`.** When a `read` of a file in a
+   checkout the run found present succeeds, the executor scans each directory
+   between the file's and the checkout's root, excluding the root, for
+   `.claude/skills/*/SKILL.md`, nearest first. The checkout is the innermost
+   mount that holds the file. One framed listing walks the directories, and
+   decision 3's rules apply.
    - It records each skill the thread was not told of already, keyed by the
      read's result event, whose id it allocates. The record
      (`session_nested_skills`) commits in the transaction that commits the
      result, so a result the settlement drops, its call answered already,
      records nothing.
-   - The cap counts the root scans' skills and what the thread was told: 500
-     a thread.
+   - The cap is 500 a thread, root and nested skills together. A read adds
+     what the root scans and the thread's earlier reads leave, and a root
+     scan adds what the root scans and the most-told thread leave.
    - A scan that is not whole records nothing, and a later read below the same
-     directories scans them again. A failed read scans nothing.
+     directories scans them again. A listing the output cap cut short is not
+     whole. A failed read scans nothing.
    - When building history, the brain appends one text block to the user
      turn that carries the result, after the turn's results: a lead of ours,
      then an `<available_skills source="repo">` list of those skills. It
      renders the block from Postgres, so replay rebuilds it, and it writes no
      event.
-   - Only the thread whose read found the skills sees them.
+   - Only the thread whose read found the skills sees them, and only under
+     the repository list's conditions: a cloud session, an agent whose `read`
+     is on, and a repository the session still mounts.
    - The reference's mechanism is the agent's account, so the placement and
      the text are inferred and registered.
 
@@ -195,8 +200,7 @@ API exposes no raw prompt):
 
 ## Slices
 
-Each slice is one PR, each through the full review ritual. Delivered in #931,
-#933 and the close-out; docs/HISTORY.md holds the record.
+Each slice is one PR, each through the full review ritual.
 
 1. **The template** (#581): decision 1, with Helm's brain workdir wiring and
    the registry entry. Closes #581.

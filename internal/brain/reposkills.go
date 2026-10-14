@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path"
+	"slices"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -14,14 +17,34 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// repoSkillsFor returns the repository skills this turn's agent is told about
-// (plan 65 decisions 2 and 4), and whether the turn must first wait for the
-// executor to scan for them. None are told on a self-hosted session, which
-// mounts no repository, on a session that mounts none, or to an agent whose
-// read tool is off, as the reference announces none then (toolset.ReadUsable,
-// the test the API applies to a file added to a session). The record is read
-// from Postgres on every turn, so a replayed brain renders the same block;
-// its entries come in the session's resource order.
+// repoSkillMounts is the repositories whose skills this turn's agent is told
+// about (plan 65 decisions 4 and 5): the github_repository resources the
+// session mounts, in resource order, by the test the repositories block
+// applies (resolveReposBlock) and the one the executor clones by. None are
+// told on a self-hosted session, which mounts no repository, or to an agent
+// whose read tool is off, as the reference announces none then
+// (toolset.ReadUsable, the test the API applies to a file added to a session).
+func repoSkillMounts(resourcesJSON []byte, envKind string, agent domain.ResolvedAgent) []repoMount {
+	if envKind != string(domain.EnvCloud) {
+		return nil
+	}
+	if usable, _ := toolset.ReadUsable(agent.Tools); !usable {
+		return nil
+	}
+	var mounts []repoMount
+	if len(resourcesJSON) == 0 || json.Unmarshal(resourcesJSON, &mounts) != nil {
+		return nil
+	}
+	return slices.DeleteFunc(mounts, func(m repoMount) bool {
+		return m.Type != "github_repository" || m.ID == "" || m.URL == "" || m.MountPath == ""
+	})
+}
+
+// repoSkillsFor returns the skills the root scans of mounts found (plan 65
+// decisions 2 and 4), and whether the turn must first wait for the executor
+// to scan for them. The record is read from Postgres on every turn, so a
+// replayed brain renders the same block; its entries come in the session's
+// resource order.
 //
 // A session is held once. A turn woken with nothing recorded goes ahead
 // without the list, which joins the prompt at the first request after a run
@@ -29,15 +52,8 @@ import (
 // an interrupt that stopped the held run and an executor that predates the
 // scan, and holding again would cycle the turn through the executor for as
 // long as any of them lasts.
-func (b *Brain) repoSkillsFor(ctx context.Context, sid domain.ID, resourcesJSON []byte, envKind string, agent domain.ResolvedAgent) (found []skills.RepoSkill, wait bool, err error) {
-	if envKind != string(domain.EnvCloud) {
-		return nil, false, nil
-	}
-	ids := mountedRepositories(resourcesJSON)
-	if len(ids) == 0 {
-		return nil, false, nil
-	}
-	if usable, _ := toolset.ReadUsable(agent.Tools); !usable {
+func (b *Brain) repoSkillsFor(ctx context.Context, sid domain.ID, mounts []repoMount) (found []skills.RepoSkill, wait bool, err error) {
+	if len(mounts) == 0 {
 		return nil, false, nil
 	}
 	var raw []byte
@@ -57,35 +73,23 @@ func (b *Brain) repoSkillsFor(ctx context.Context, sid domain.ID, resourcesJSON 
 		slog.WarnContext(ctx, "repository skills not injected", "session_id", sid.String(), "err", err)
 		return nil, false, nil
 	}
-	for _, id := range ids {
-		found = append(found, recorded[id]...)
+	for _, m := range mounts {
+		found = append(found, recorded[m.ID]...)
 	}
 	return found, false, nil
 }
 
-// mountedRepositories is the ids of the github_repository resources the
-// session mounts, in resource order, by the test the repositories block
-// applies (resolveReposBlock) and the one the executor clones by.
-func mountedRepositories(resourcesJSON []byte) []string {
-	var mounts []repoMount
-	if len(resourcesJSON) == 0 || json.Unmarshal(resourcesJSON, &mounts) != nil {
-		return nil
-	}
-	var ids []string
-	for _, m := range mounts {
-		if m.Type == "github_repository" && m.ID != "" && m.URL != "" && m.MountPath != "" {
-			ids = append(ids, m.ID)
-		}
-	}
-	return ids
-}
-
 // nestedSkillBlocks renders, by result event id, the skills each of the
-// thread's reads found below a repository's root (plan 65 decision 5), for
-// replay to place after that result. They are read from Postgres on every
-// turn, so a replayed brain renders the same blocks. A row whose skills do
-// not decode was not written by the executor, and is passed over.
-func (b *Brain) nestedSkillBlocks(ctx context.Context, sid, thread domain.ID) (map[domain.ID]string, error) {
+// thread's reads found below the root of one of mounts (plan 65 decision 5,
+// repoSkillMounts), for replay to place after that result. They are read
+// from Postgres on every turn, so a replayed brain renders the same blocks.
+// A skill of a repository the session no longer mounts is not told, as the
+// root list drops it. A row whose skills do not decode was not written by the
+// executor, and is passed over.
+func (b *Brain) nestedSkillBlocks(ctx context.Context, sid, thread domain.ID, mounts []repoMount) (map[domain.ID]string, error) {
+	if len(mounts) == 0 {
+		return nil, nil
+	}
 	rows, err := b.pool.Query(ctx,
 		`SELECT n.result_event_id, n.skills FROM session_nested_skills n JOIN events ev ON ev.id = n.result_event_id
 		  WHERE n.session_id = $1 AND ev.thread_id IS NOT DISTINCT FROM $2`,
@@ -105,6 +109,14 @@ func (b *Brain) nestedSkillBlocks(ctx context.Context, sid, thread domain.ID) (m
 		if err := json.Unmarshal(raw, &list); err != nil {
 			slog.WarnContext(ctx, "nested repository skills not injected",
 				"session_id", sid.String(), "result_event_id", id, "err", err)
+			continue
+		}
+		list = slices.DeleteFunc(list, func(s skills.RepoSkill) bool {
+			return !slices.ContainsFunc(mounts, func(m repoMount) bool {
+				return strings.HasPrefix(s.Location, path.Clean(m.MountPath)+"/")
+			})
+		})
+		if len(list) == 0 {
 			continue
 		}
 		if blocks == nil {

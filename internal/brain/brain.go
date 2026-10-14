@@ -297,7 +297,8 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// the reference announces them, so a turn the executor has not yet scanned
 	// for is held the same way, once per session, and above the span start for
 	// the same reason (plan 65 decision 2).
-	repoSkills, waitRepoSkills, err := b.repoSkillsFor(ctx, sid, resourcesJSON, envKind, agent)
+	skillMounts := repoSkillMounts(resourcesJSON, envKind, agent)
+	repoSkills, waitRepoSkills, err := b.repoSkillsFor(ctx, sid, skillMounts)
 	if err != nil {
 		return fmt.Errorf("repository skills: %w", err)
 	}
@@ -431,7 +432,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if err == nil {
 		// What this thread's reads found below a repository's root (plan 65
 		// decision 5), announced after the results that found it.
-		nested, err = b.nestedSkillBlocks(kctx, sid, item.ThreadID)
+		nested, err = b.nestedSkillBlocks(kctx, sid, item.ThreadID, skillMounts)
 	}
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {

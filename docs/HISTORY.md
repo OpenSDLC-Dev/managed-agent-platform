@@ -53,7 +53,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 The owner settled four questions on 2026-10-14, before any code. Discovery runs before the first request. Both skills blocks take the recorded XML template, which brought #581 into the plan. Nested skills are discovered on `read` too. Repository skills are trusted as the reference trusts them. Two recordings were the ground truth: the 2026-09-03 attached-skills block, and managed-agents-wire-recordings#23's repository lists. managed-agents-wire-recordings#26 asks for the four points they leave open.
 
-The verifier ran on `claude-opus-5-5` by override in every round of all three PRs: its pinned model's quota returned HTTP 429 each time. Codex ran `gpt-6.1-sol` at `xhigh`, and `/code-review` ran `claude-opus-5-5` at `xhigh` with no cap.
+In #931 and #933 the verifier ran on `claude-opus-5-5` by override in every round: its pinned model's quota returned HTTP 429 each time. Codex ran `gpt-6.1-sol` at `xhigh`, and `/code-review` ran `claude-opus-5-5` at `xhigh` with no cap.
 
 **#931, the template.** The verifier passed it with findings, with `make verify` green at 91.51% coverage. After our lead, the block was byte-identical to the recording over 1,729 bytes. Codex raised five P3 findings and `/code-review` eleven. One reversal is worth keeping. Codex asked to escape the skills root, so that a hostile workdir could not forge a tag. `/code-review` showed that this gave the model paths that do not exist (`/home/o'brien` became `o&#39;brien`), and the workdir is operator configuration, so paths went back to verbatim. Declined:
 
@@ -72,9 +72,27 @@ All 9 of my mutants were killed. The verifier's 10 left one survivor, the apostr
 
 36 of 37 mutants were killed. The survivor ignores a failed record write inside the settle transaction, and is equivalent: a failed statement aborts the transaction, and the commit then fails.
 
-**The close-out, nested discovery.** The listing now takes several roots in one framed exec, and prints each name after its root's index. The Docker test reads below a fixture checkout as the recording did. A write, and a read that failed, scan nothing. The read after them records the two skills on its path, nearest first, and a later read in the same run or a later one records only what is new to its thread. A child thread is told on its own. A stub-sandbox test pins the cap's room and that only whole scans count, and a second Docker test pins that the root scans' skills count against the cap.
+**The close-out, nested discovery.** Acceptance on Docker, against a fixture checkout laid out as the recording's, with reads in one run and in later ones:
 
-Each of 37 guards, the listing's included, was broken on its own in an overlay copy, and a test failed each time. The first run left two survivors, and each gained a test: a read's findings did not use up the room for the reads after it, and a failed listing was kept as an empty directory for the rest of the run.
+- a read of a file two levels down recorded the two skills on its path, nearest first, and none of the root's;
+- a `write`, and a read that failed, recorded nothing;
+- a later read below the same directories recorded only what its thread had not been told, a skill another tool wrote in the same run among it;
+- a child thread was told on its own;
+- a mount whose clone failed announced nothing, though the agent wrote a skill under its path;
+- the cap held both ways: root skills recorded before a read left it room for one, and nested skills told before a root scan left that scan room for one.
+
+After the reviews' fixes, each of 53 guards was broken on its own in an overlay copy, and a test failed for 50. The other three are equivalent: a loop's early stop that only spares a warning; the brain's type test on a mount, which its URL test already covers, since only a repository carries a URL; and the brain's skip of the query when nothing is mounted, where its filter would drop every skill anyway. A first run, before the reviews, left two survivors, and each gained a test.
+
+Review hardening, the close-out. The verifier's pinned model returned HTTP 429, so it ran on `claude-opus-5-5` by override; a run on the first commit was stopped when the reviews below changed the code, and it ran again on the fixed tip. Codex (`gpt-6.1-sol`, `xhigh`) found two P2 defects and one P3, all fixed:
+
+- the cap held one way only: a root scan that landed after a thread was told of nested skills could take that thread past 500, so a root scan now leaves out what the most-told thread was told;
+- a nested listing the output cap cut short counted as whole, and its farther directories were kept as empty for the run; it now records nothing and is not kept;
+- the listing named every directory on the path, so its command grew with the path times its depth, and a deep path passed the sandbox's command cap on every read; the script now walks from the nearest directory up to the last and names only those two.
+
+`/code-review` (`claude-opus-5-5`, `xhigh`, no cap) raised nineteen findings, two of them Codex's first two.
+
+- **Fixed (seventeen):** nested lists take the repository list's conditions (a cloud session, `read` on, a repository still mounted), which also spares sessions with no repository a query each turn; the executor passes over a record that does not decode, as the brain does; only checkouts the run found present are scanned, so skills the agent wrote under a mount whose clone failed are not announced; the innermost mount holding the file is its checkout; a tool other than a read clears the run's listings, so a skill it made is found by the reads after it; the lead no longer says "that file", since a turn's lists all follow its results; a thread at the cap lists nothing more, which ends a warning per read; the root scan's warnings name the resource again; the room is computed rather than kept; the read tool reports the path it read, so the executor neither parses its input again nor names it; and four docs and test-name corrections.
+- **Declined (two):** one listing per read below a subdirectory, which decision 5 requires and the run's cache keeps to one per directory chain; and one query helper for both sides, which need different shapes, with no package both use for queries that owns the table.
 
 **Plan 65 progress summary (archived).** Delivered in three PRs. #931 landed decision 1: the recorded template for the attached block and absolute cloud locations, closing #581. #933 landed decisions 2, 3, 4, 6 and 7: the hold before the first request, the scan of each checkout (migration 0053), the repository list and the trust note. The close-out landed decision 5, nested discovery on `read` (migration 0054), and closes #921. What the recordings leave open is registered and tracked on #78, and managed-agents-wire-recordings#26 asks for it.
 

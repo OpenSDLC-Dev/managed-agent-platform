@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"testing"
 
@@ -13,31 +14,32 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
-// TestNestedSkillRoots pins which directories a read scans (plan 65 decision
-// 5): each between the file's and its repository's root, nearest first, the
-// root's own left out; none for a file at the root or in no repository. A
-// mount whose path only begins the file's is not its repository, so the
-// search goes on to the one that is.
-func TestNestedSkillRoots(t *testing.T) {
+// TestNestedSkillDirs pins which directories a read scans (plan 65 decision
+// 5): each between the file's and its checkout's root, nearest first, the
+// root left out; none for a file at the root or in no checkout. A mount whose
+// path only begins the file's is not its checkout, and of two mounts that
+// hold the file, the innermost is.
+func TestNestedSkillDirs(t *testing.T) {
 	repos := []repoRef{
-		{ID: "sesrsc_r", Type: "github_repository", MountPath: "/workspace/r"},
-		{ID: "sesrsc_f", Type: "file", MountPath: "/workspace/f"},
-		{ID: "sesrsc_rx", Type: "github_repository", MountPath: "/workspace/rx"},
+		{ID: "sesrsc_r", MountPath: "/workspace/r"},
+		{ID: "sesrsc_rx", MountPath: "/workspace/rx"},
+		{ID: "sesrsc_inner", MountPath: "/workspace/r/inner/"},
 	}
 	for _, c := range []struct {
 		file string
 		want []string
 	}{
-		{"/workspace/r/a/b/c.txt", []string{"/workspace/r/a/b/.claude/skills", "/workspace/r/a/.claude/skills"}},
-		{"/workspace/r/a/c.txt", []string{"/workspace/r/a/.claude/skills"}},
+		{"/workspace/r/a/b/c.txt", []string{"/workspace/r/a/b", "/workspace/r/a"}},
+		{"/workspace/r/a/c.txt", []string{"/workspace/r/a"}},
 		{"/workspace/r/c.txt", nil},
-		{"/workspace/rx/a/c.txt", []string{"/workspace/rx/a/.claude/skills"}},
+		{"/workspace/rx/a/c.txt", []string{"/workspace/rx/a"}},
 		{"/workspace/ry/a/c.txt", nil},
-		{"/workspace/f/a/c.txt", nil},
+		{"/workspace/r/inner/a/c.txt", []string{"/workspace/r/inner/a"}},
+		{"/workspace/r/innerx/c.txt", []string{"/workspace/r/innerx"}},
 		{"/etc/hosts", nil},
 	} {
-		if got := nestedSkillRoots(c.file, repos); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("nestedSkillRoots(%s) = %v, want %v", c.file, got, c.want)
+		if got := nestedSkillDirs(c.file, repos); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("nestedSkillDirs(%s) = %v, want %v", c.file, got, c.want)
 		}
 	}
 }
@@ -46,7 +48,8 @@ func TestNestedSkillRoots(t *testing.T) {
 func (h *harness) nestedSkillsRecord(t *testing.T) map[string][]skills.RepoSkill {
 	t.Helper()
 	rows, err := h.pool.Query(context.Background(),
-		`SELECT result_event_id, skills FROM session_nested_skills WHERE session_id = $1`, h.sid.String())
+		`SELECT result_event_id, skills FROM session_nested_skills WHERE session_id = $1 AND jsonb_typeof(skills) = 'array'`,
+		h.sid.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,14 +85,43 @@ func (h *harness) resultEventID(t *testing.T, use domain.ID) string {
 	return id
 }
 
+// told plants a result on thread's log and records skills as what it found:
+// a JSON array of skills, or, to stand for a row the executor did not write,
+// anything else.
+func (h *harness) told(t *testing.T, thread domain.ID, skillsJSON string) {
+	t.Helper()
+	ctx := context.Background()
+	id := domain.NewID(domain.PrefixEvent)
+	if _, err := h.log.Append(ctx, h.sid, []events.NewEvent{{ID: id, Type: domain.EventAgentToolResult, ThreadID: thread,
+		Payload: json.RawMessage(`{"tool_use_id":"sevt_x","content":[{"type":"text","text":"ok"}]}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(ctx, `INSERT INTO session_nested_skills (result_event_id, session_id, skills) VALUES ($1, $2, $3)`,
+		id.String(), h.sid.String(), skillsJSON); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// resultIsError is whether the result answering use is an error.
+func (h *harness) resultIsError(t *testing.T, use domain.ID) bool {
+	t.Helper()
+	var isError bool
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT COALESCE((payload->>'is_error')::boolean, false) FROM events WHERE id = $1`, h.resultEventID(t, use)).Scan(&isError); err != nil {
+		t.Fatal(err)
+	}
+	return isError
+}
+
 // TestNestedSkillsFoundByARead is decision 5 on a real checkout, after the
 // recording's subtree read: a read of a file deep in the repository records
 // the skills of the directories between it and the root, nearest first, by
 // its result event, and leaves the root's own to the root scan. A write, and
-// a read that failed, scan nothing, so the read after them is the one told.
-// A thread is told of a skill once: a later read below the same directories,
-// in the same run or a later one, records only what is new to it, and another
-// thread is told on its own.
+// a read that failed, scan nothing, so the read after them is the one told. A
+// thread is told of a skill once: a later read below the same directories,
+// in the same run or a later one, records only what is new to it, a skill
+// another tool made in the run among it, and another thread is told on its
+// own.
 func TestNestedSkillsFoundByARead(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{
 		".claude/skills/alpha/SKILL.md":                  "---\ndescription: Root marker.\n---\n",
@@ -105,13 +137,18 @@ func TestNestedSkillsFoundByARead(t *testing.T) {
 	h.seedRepoResource(t, "sesrsc_skills", fx.url(), repoMount, "ghp_fixture", nil)
 	inner := skills.RepoSkill{Name: "inner", Description: "Inner marker.", Location: repoMount + "/packages/x/.claude/skills/inner/SKILL.md"}
 	mid := skills.RepoSkill{Name: "mid", Description: "Mid marker.", Location: repoMount + "/packages/.claude/skills/mid/SKILL.md"}
+	fresh := skills.RepoSkill{Name: "fresh", Description: "Fresh marker.", Location: repoMount + "/packages/x/.claude/skills/fresh/SKILL.md"}
 	why := skills.RepoSkill{Name: "why", Description: "Why marker.", Location: repoMount + "/packages/y/.claude/skills/why/SKILL.md"}
 
 	evs := h.suspend(t, writeUse(repoMount+"/packages/x/new.txt", "new"),
 		readUse(repoMount+"/packages/x/missing.txt"), readUse(repoMount+"/packages/x/probe.txt"),
+		writeUse(fresh.Location, "---\ndescription: Fresh marker.\n---\n"),
 		readUse(repoMount+"/packages/x/other.txt"))
 	h.stepOnce(t)
-	want := map[string][]skills.RepoSkill{h.resultEventID(t, evs[2].ID): {inner, mid}}
+	want := map[string][]skills.RepoSkill{
+		h.resultEventID(t, evs[2].ID): {inner, mid},
+		h.resultEventID(t, evs[4].ID): {fresh},
+	}
 	if got := h.nestedSkillsRecord(t); !reflect.DeepEqual(got, want) {
 		t.Errorf("first run: nested skills = %+v\nwant %+v", got, want)
 	}
@@ -128,9 +165,29 @@ func TestNestedSkillsFoundByARead(t *testing.T) {
 	use := h.appendOn(t, child, domain.EventAgentToolUse, withPerm(readUse(repoMount+"/packages/x/probe.txt"), "allow"))
 	h.enqueueToolExec(t)
 	h.stepOnce(t)
-	want[h.resultEventID(t, use)] = []skills.RepoSkill{inner, mid}
+	want[h.resultEventID(t, use)] = []skills.RepoSkill{fresh, inner, mid}
 	if got := h.nestedSkillsRecord(t); !reflect.DeepEqual(got, want) {
 		t.Errorf("another thread: nested skills = %+v\nwant %+v", got, want)
+	}
+}
+
+// TestNestedSkillsOnlyInAPresentCheckout: a mount whose clone failed holds no
+// repository, so skills the agent wrote under its path are none of its, and a
+// read there announces nothing.
+func TestNestedSkillsOnlyInAPresentCheckout(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "readme\n"})
+	fx.status.Store(http.StatusUnauthorized)
+	h, _ := dockerRepoHarness(t)
+	h.seedRepoResource(t, "sesrsc_fail", fx.url(), repoMount, "ghp_wrong", nil)
+
+	evs := h.suspend(t, writeUse(repoMount+"/x/.claude/skills/foo/SKILL.md", "---\ndescription: Foo.\n---\n"),
+		writeUse(repoMount+"/x/f.txt", "f"), readUse(repoMount+"/x/f.txt"))
+	h.stepOnce(t)
+	if h.resultIsError(t, evs[2].ID) {
+		t.Fatal("the read failed; it must reach the file for the scan to be in question")
+	}
+	if got := h.nestedSkillsRecord(t); len(got) != 0 {
+		t.Errorf("nested skills = %+v, want none: no repository is checked out there", got)
 	}
 }
 
@@ -169,11 +226,47 @@ func TestNestedSkillsCountTheRootScans(t *testing.T) {
 	}
 }
 
+// TestRootScanLeavesRoomForNestedSkills is the cap the other way: the root
+// list reaches every thread, so a checkout scanned after a thread was told of
+// nested skills is scanned into what the cap leaves that thread, the one told
+// of the most. A row the executor did not write counts for nothing.
+func TestRootScanLeavesRoomForNestedSkills(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{
+		".claude/skills/alpha/SKILL.md": "---\ndescription: Alpha marker.\n---\n",
+		".claude/skills/beta/SKILL.md":  "---\ndescription: Beta marker.\n---\n",
+		"README.md":                     "readme\n",
+	})
+	h, _ := dockerRepoHarness(t)
+	h.seedRepoResource(t, "sesrsc_skills", fx.url(), repoMount, "ghp_fixture", nil)
+	nested := make([]skills.RepoSkill, maxRepoSkills-1)
+	for i := range nested {
+		nested[i] = skills.RepoSkill{Name: fmt.Sprintf("n%03d", i), Location: fmt.Sprintf(repoMount+"/n/.claude/skills/n%03d/SKILL.md", i)}
+	}
+	raw, err := json.Marshal(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.told(t, "", string(raw))
+	h.told(t, "", `"not a list"`)
+	h.told(t, "sthr_small", `[{"name":"s","description":"","location":"`+repoMount+`/s/.claude/skills/s/SKILL.md"}]`)
+
+	h.suspend(t, readUse(repoMount+"/README.md"))
+	h.stepOnce(t)
+	got, ok := h.repoSkillsRecord(t)
+	want := map[string][]skills.RepoSkill{"sesrsc_skills": {
+		{Name: "alpha", Description: "Alpha marker.", Location: repoMount + "/.claude/skills/alpha/SKILL.md"},
+	}}
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Errorf("repository skills = %+v (recorded %v)\nwant %+v", got, ok, want)
+	}
+}
+
 // TestNestedSkillsRoomAndWholeScans pins what a thread's room is and when a
 // scan counts. Room is the cap less the root scans' skills and what the
 // thread was told already, another thread's not counted, and a read's
-// findings use it up for the reads after it. A scan whose listing or one of
-// whose reads failed, for a reason a later read may not meet, records
+// findings use it up for the reads after it. A row the executor did not
+// write counts for nothing. A scan whose listing failed or was cut short, or
+// one of whose reads failed for a reason a later read may not meet, records
 // nothing, so the next read below the same directories records all of it.
 func TestNestedSkillsRoomAndWholeScans(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
@@ -182,19 +275,9 @@ func TestNestedSkillsRoomAndWholeScans(t *testing.T) {
 	const file = "/workspace/r/x/y/f.txt"
 	a := skills.RepoSkill{Name: "a", Description: "From a.", Location: "/workspace/r/x/y/.claude/skills/a/SKILL.md"}
 	b := skills.RepoSkill{Name: "b", Description: "From b.", Location: "/workspace/r/x/.claude/skills/b/SKILL.md"}
-	told := func(thread domain.ID, loc string) {
-		t.Helper()
-		id := domain.NewID(domain.PrefixEvent)
-		if _, err := h.log.Append(ctx, h.sid, []events.NewEvent{{ID: id, Type: domain.EventAgentToolResult, ThreadID: thread,
-			Payload: json.RawMessage(`{"tool_use_id":"sevt_x","content":[{"type":"text","text":"ok"}]}`)}}); err != nil {
-			t.Fatal(err)
-		}
-		if err := recordNestedSkillsNow(ctx, h, id, []skills.RepoSkill{{Name: "z", Location: loc}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	told("", "/workspace/r/q/.claude/skills/z/SKILL.md")
-	told("sthr_other", a.Location)
+	h.told(t, "", `[{"name":"z","description":"","location":"/workspace/r/q/.claude/skills/z/SKILL.md"}]`)
+	h.told(t, "", `{"not":"a list"}`)
+	h.told(t, "sthr_other", `[{"name":"a","description":"","location":"`+a.Location+`"}]`)
 
 	sb := &listingSandbox{stdout: "0/a\x001/b\x00"}
 	n := newNestedSkills(sb, h.sid, repos, maxRepoSkills-2)
@@ -202,37 +285,29 @@ func TestNestedSkillsRoomAndWholeScans(t *testing.T) {
 	if want := map[domain.ID][]skills.RepoSkill{id: {a}}; id == "" || !reflect.DeepEqual(n.found, want) {
 		t.Errorf("found = %+v, want a alone: the cap less two root skills and one told", n.found)
 	}
-	if again := h.exec.afterRead(ctx, n, "", "/workspace/r/q/f.txt", func() {}); again != "" {
-		t.Errorf("a read after the room was used recorded %+v", n.found[again])
+	execs := sb.execs
+	if again := h.exec.afterRead(ctx, n, "", "/workspace/r/q/f.txt", func() {}); again != "" || sb.execs != execs {
+		t.Errorf("a read after the room was used recorded %+v, listing %d times", n.found[again], sb.execs-execs)
 	}
 
-	sb = &listingSandbox{stdout: "0/a\x001/b\x00", readErr: map[string]error{b.Location: errors.New("transient")}, failExecs: 1}
+	sb = &listingSandbox{stdout: "0/a\x00", truncated: true, failExecs: 1,
+		readErr: map[string]error{b.Location: errors.New("transient")}}
 	n = newNestedSkills(sb, h.sid, repos, 0)
 	if id := h.exec.afterRead(ctx, n, "sthr_fresh", file, func() {}); id != "" || len(n.found) != 0 {
 		t.Fatalf("a scan whose listing failed recorded %+v", n.found)
 	}
+	if id := h.exec.afterRead(ctx, n, "sthr_fresh", file, func() {}); id != "" || len(n.found) != 0 {
+		t.Fatalf("a scan whose listing was cut short recorded %+v", n.found)
+	}
+	sb.stdout, sb.truncated = "0/a\x001/b\x00", false
 	if id := h.exec.afterRead(ctx, n, "sthr_fresh", file, func() {}); id != "" || len(n.found) != 0 {
 		t.Fatalf("a scan with a failed read recorded %+v", n.found)
 	}
 	delete(sb.readErr, b.Location)
 	id = h.exec.afterRead(ctx, n, "sthr_fresh", file, func() {})
 	if want := map[domain.ID][]skills.RepoSkill{id: {a, b}}; id == "" || !reflect.DeepEqual(n.found, want) {
-		t.Errorf("after the failed scan, found = %+v, want a and b", n.found)
+		t.Errorf("after the failed scans, found = %+v, want a and b", n.found)
 	}
-}
-
-// recordNestedSkillsNow records list by result event id in its own
-// transaction, as a settlement would.
-func recordNestedSkillsNow(ctx context.Context, h *harness, id domain.ID, list []skills.RepoSkill) error {
-	tx, err := h.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := recordNestedSkills(ctx, tx, h.sid, map[domain.ID][]skills.RepoSkill{id: list}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
 }
 
 // TestRecordNestedSkillsNeedsItsResult pins the write's guard: what a read

@@ -599,8 +599,19 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// session's first turn for this; a run that settles without a record,
 	// stalled or with every clone failed, wakes it all the same, and the brain
 	// holds a session once.
-	repoSkills := e.scanRepoSkills(ctx, sb, item.SessionID,
-		unscannedRepos(present, sess.repoSkills), repoSkillsRoom(sess.repoSkills), progress)
+	var repoSkills map[string][]skills.RepoSkill
+	if unscanned := unscannedRepos(present, sess.repoSkills); len(unscanned) > 0 {
+		// The root list reaches every thread, so its room leaves out what the
+		// thread told of the most nested skills was told of: no thread passes
+		// the cap.
+		if most, err := e.mostNestedSkills(ctx, item.SessionID); err != nil {
+			slog.WarnContext(ctx, "repository skills not scanned; a later run scans them",
+				"session_id", item.SessionID, "err", err)
+		} else {
+			repoSkills = e.scanRepoSkills(ctx, sb, item.SessionID, unscanned,
+				max(repoSkillsRoom(sess.repoSkills)-most, 0), progress)
+		}
+	}
 	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
@@ -639,7 +650,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	uses = slices.DeleteFunc(uses, func(u toolUse) bool {
 		return toolset.IsWebTool(u.name) || toolset.IsDelegationTool(u.name)
 	})
-	nested := newNestedSkills(sb, item.SessionID, sess.repos, countRepoSkills(sess.repoSkills)+countRepoSkills(repoSkills))
+	nested := newNestedSkills(sb, item.SessionID, present, countRepoSkills(sess.repoSkills)+countRepoSkills(repoSkills))
 	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses, sess.memories, nested, progress)
 	// The memory sync's read phase (plan 36 decision 11) closes every run
 	// whose tools all answered — a run that faulted or stalled has a sandbox
@@ -905,6 +916,11 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 		}
 		cctx, stop := e.answeredWatch(ctx, sid, u.id, e.cfg.LeaseTTL/3)
 		res, err := runner.Run(cctx, u.id, u.name, u.input)
+		if res.ReadPath == "" {
+			// Any tool but a read that succeeded may have made or removed a
+			// skill, so the reads after it list their directories again.
+			nested.forgetListings()
+		}
 		if stop() {
 			// Answered under it: whatever it returned, or failed with, is a
 			// late result for a call the log already closed.
@@ -925,13 +941,8 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 		// A read below a repository's root announces the skills of the
 		// directories it passed through (plan 65 decision 5), after its
 		// result, so the result carries the id their record is kept by.
-		if u.name == "read" && !res.IsError {
-			var in struct {
-				FilePath string `json:"file_path"`
-			}
-			if json.Unmarshal(u.input, &in) == nil {
-				ev.ID = e.afterRead(ctx, nested, u.thread, runner.ResolvePath(in.FilePath), progress)
-			}
+		if res.ReadPath != "" {
+			ev.ID = e.afterRead(ctx, nested, u.thread, res.ReadPath, progress)
 		}
 		results = append(results, ev)
 		// A tool answered: the run is moving, however long the next one takes.

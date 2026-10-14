@@ -376,7 +376,9 @@ type failListSandbox struct {
 }
 
 func (s *failListSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if s.p.fail.Load() && strings.Contains(req.Command, repoMount+"/.claude/skills") {
+	// The listing names the directory it starts from, quoted, and the
+	// .claude/skills it lists under each.
+	if s.p.fail.Load() && strings.Contains(req.Command, shellQuote(repoMount)) && strings.Contains(req.Command, ".claude/skills") {
 		return sandbox.ExecResult{}, errors.New("exec stream lost")
 	}
 	return s.Sandbox.Exec(ctx, req)
@@ -444,15 +446,17 @@ func TestScanRepoSkillsReadFailures(t *testing.T) {
 	}
 }
 
-// TestListRepoSkillsScriptUnderImageShellOptions runs the listing as a sandbox
+// TestListSkillsScriptUnderImageShellOptions runs the listing as a sandbox
 // exec would, framed and under bash, with a BASH_ENV file that sets what an
 // image's startup may leave on: noglob would list nothing, GLOBIGNORE would
 // hide "a", dotglob would list a hidden directory, failglob would fail an
 // empty skills directory, and a locale's collation, or on bash 5.3 GLOBSORT,
 // would put "a" before "B". The listing undoes each, so it names the same
-// skills, in byte order, whatever the image set. Several roots list in one
-// run, each name after its root's index, and an absent root lists nothing.
-func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
+// skills, in byte order, whatever the image set. It walks from the first
+// directory up to the last, each name after its step's index, and a
+// directory with no .claude/skills lists nothing, and none above the last is
+// listed.
+func TestListSkillsScriptUnderImageShellOptions(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Fatalf("the listing runs under bash in a sandbox: %v", err)
@@ -463,29 +467,31 @@ func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 		"set -f\nGLOBIGNORE=a\nGLOBSORT=-name\nshopt -s dotglob failglob nocaseglob\nexport LC_ALL=en_US.UTF-8\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	skill := func(root, d string) {
+	skill := func(d, name string) {
 		t.Helper()
-		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+		at := filepath.Join(d, ".claude", "skills", name)
+		if err := os.MkdirAll(at, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(root, d, "SKILL.md"), []byte("---\n---\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(at, "SKILL.md"), []byte("---\n---\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	root := filepath.Join(dir, "skills")
+	repo := filepath.Join(dir, "repo")
+	deep := filepath.Join(repo, "a", "b")
 	for _, d := range []string{".hidden", "a", "B"} {
-		skill(root, d)
+		skill(deep, d)
 	}
-	other := filepath.Join(dir, "other")
-	skill(other, "c")
+	skill(repo, "c")
+	skill(dir, "above")
 	empty := filepath.Join(dir, "empty")
-	if err := os.MkdirAll(empty, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(empty, ".claude", "skills"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	list := func(roots ...string) sandbox.ExecResult {
+	list := func(first, last string) sandbox.ExecResult {
 		t.Helper()
 		f := sandbox.NewFrame("reposkills")
-		cmd := exec.Command(bash, "-c", f.Wrap(listSkillsScript(roots)))
+		cmd := exec.Command(bash, "-c", f.Wrap(listSkillsScript(first, last)))
 		cmd.Env = append(os.Environ(), "BASH_ENV="+hook)
 		var stdout, stderr strings.Builder
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -503,10 +509,13 @@ func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 		}
 		return res
 	}
-	if res, want := list(root, filepath.Join(dir, "missing"), other), "0/B\x000/a\x002/c\x00"; res.ExitCode != 0 || res.Stdout != want {
+	if res, want := list(deep, repo), "0/B\x000/a\x002/c\x00"; res.ExitCode != 0 || res.Stdout != want {
 		t.Errorf("listing = %q (exit %d), want %q", res.Stdout, res.ExitCode, want)
 	}
-	if res := list(empty); res.ExitCode != 0 || res.Stdout != "" {
+	if res, want := list(repo, repo), "0/c\x00"; res.ExitCode != 0 || res.Stdout != want {
+		t.Errorf("one directory's listing = %q (exit %d), want %q", res.Stdout, res.ExitCode, want)
+	}
+	if res := list(empty, empty); res.ExitCode != 0 || res.Stdout != "" {
 		t.Errorf("empty listing = %q (exit %d), want nothing and exit 0", res.Stdout, res.ExitCode)
 	}
 }
@@ -516,17 +525,19 @@ func TestListRepoSkillsScriptUnderImageShellOptions(t *testing.T) {
 // description naming its directory, or with readErr's error for its path. A
 // framed listing gets its answer framed, so the banner falls outside it; an
 // unframed one gets the banner glued to the first name, as a real image would
-// print it. The first failExecs listings exit 1.
+// print it. The first failExecs listings exit 1; execs counts them all.
 type listingSandbox struct {
 	sandbox.Sandbox
 	stdout    string
 	truncated bool
 	readErr   map[string]error
 	failExecs int
+	execs     int
 }
 
 func (s *listingSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	const banner = "welcome to the image "
+	s.execs++
 	res := sandbox.ExecResult{Stdout: s.stdout, StdoutTruncated: s.truncated}
 	if s.failExecs > 0 {
 		s.failExecs--
