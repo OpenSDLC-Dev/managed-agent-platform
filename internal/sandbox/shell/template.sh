@@ -215,8 +215,13 @@ __map_main() {
 # a directory alone is not, because every call creates its own the moment it
 # starts. errexit is forced off for the prologue so a snapshot that turned it on
 # cannot abort the restore; options are applied last so the command still runs
-# under them. With no snapshot to restore, the shell simply stays where the exec
-# put it — the sandbox's own workdir — rather than assuming a path.
+# under them. An ERR trap the image's startup set goes with it: set +e leaves a
+# trap on, and the prologue's first read fails on a call with no snapshot yet,
+# so an exiting trap ended every call there. The command runs without it, as
+# without the image's errexit; each call is a fresh exec, so the startup sets it
+# again and it goes again. With no snapshot to restore, the shell simply stays
+# where the exec put it — the sandbox's own workdir — rather than assuming a
+# path.
 #
 # This whole group is parsed as one compound command before any of it runs, so the
 # aliases it sources cannot be expanded over its own later lines. Its words still
@@ -225,6 +230,7 @@ __map_main() {
 # are live, over the rest of the group and over the files it has yet to source.
 # `[[` and `case` are keywords and cannot be shadowed at all.
 set +e
+builtin trap - ERR
 {
   # `$(<file)` reads the file with bash's own redirection — no `cat`, no command
   # word at all, so nothing to shadow. `cat` here would be the one external in the

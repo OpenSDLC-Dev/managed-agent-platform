@@ -177,15 +177,24 @@ BusyBox its listing of a store that holds files fails. What the image's
 environment sets for a shell — an `ENV BASH_ENV` startup file, exported
 functions, `SHELLOPTS` — applies to every script that runs in the sandbox,
 the model's commands and the platform's own alike, so an image whose `PATH`
-or options come from that file works for both — errexit (`set -e`) aside:
-the platform's scripts turn it off as they start, and the `bash` tool's own
-shell turns it off before the model's first command, so what the model runs
-in that shell runs without the image's errexit, while its `nounset` and
-`pipefail` carry (and a `set -e` the model runs there carries from call to
-call). A bash the model starts itself — `bash -c`, a `#!/bin/bash` script —
-reads the startup file again, as every non-interactive bash does, and runs
-under the image's errexit. Job control (`monitor`) is the other exception: a
-command's deadline is enforced by killing its process group, and a shell with
+or options come from that file works for both — errexit (`set -e`) and an
+`ERR` trap aside: the platform's scripts turn both off as they start, and the
+`bash` tool's own shell turns them off before the model's first command, so
+what the model runs in that shell runs without the image's errexit or `ERR`
+trap, while its `nounset` and `pipefail` carry (and a `set -e` the model runs
+there carries from call to call). A bash the model starts itself — `bash -c`,
+a `#!/bin/bash` script — reads the startup file again, as every
+non-interactive bash does, and runs under the image's errexit and `ERR` trap.
+A second exception, for the platform's scripts
+alone, is a set of settings that change what a glob matches, or its order.
+Those scripts put bash's defaults back as they start for noglob (`set -f`),
+`GLOBIGNORE`, `GLOBSORT`, privileged mode (`set -p`, in which bash keeps a
+`GLOBIGNORE`'s ignore list) and the `shopt` options `dotglob`, `extglob`,
+`failglob`, `globstar`, `nocaseglob` and `nullglob`. So none of these
+settings changes what the outputs harvest, `glob` or the repository-skills
+listing finds, while the model's commands run under what the file set. Job
+control (`monitor`) is the third exception: a command's deadline is enforced
+by killing its process group, and a shell with
 job control forks each of its jobs into a group of its own, so both backends'
 exec wrappers turn it off before the command starts, whatever `SHELLOPTS`
 says, and the rest of `SHELLOPTS` carries

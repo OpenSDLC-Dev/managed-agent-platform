@@ -351,13 +351,48 @@ func TestFrameClosesUnderErrexit(t *testing.T) {
 	}
 }
 
+// An image's startup file can turn on settings that change what a glob
+// matches, or its order (sandboxtest.GlobHook); turn on privileged mode, in
+// which bash 5 keeps the ignore list of a GLOBIGNORE set before it, and
+// dotglob with it; and set an ERR trap, which set +e leaves on. The platform's
+// scripts are written for bash's defaults: the preamble puts each back,
+// whatever the bash has, and says nothing as it does, so a command the script
+// lets fail and a glob in it run as on any image. The glob lists the test's
+// directory, which holds the startup file alone.
+func TestScriptPreambleUndoesAStartupsGlobOptions(t *testing.T) {
+	const probe = `false
+printf '%s\n' "$-" "${GLOBIGNORE-unset}" "${GLOBSORT-unset}" *
+for o in dotglob extglob failglob globstar nocaseglob nullglob; do
+  if shopt -q "$o" 2>/dev/null; then echo "$o on"; fi
+done
+`
+	for _, hook := range []string{
+		sandboxtest.GlobHook,
+		"GLOBIGNORE='*'\nshopt -s dotglob\nset -p\n",
+		sandboxtest.GlobHook + "trap 'exit 42' ERR\n",
+	} {
+		res := runHooked(t, hook, "/bin/bash", sandbox.Script(probe), "")
+		flags, rest, _ := strings.Cut(res.Stdout, "\n")
+		if strings.ContainsAny(flags, "fp") || rest != "unset\nunset\nhook.sh\n" || res.Stderr != "" || res.ExitCode != 0 {
+			t.Errorf("under %q: %+v; want no f or p in $-, GLOBIGNORE and GLOBSORT unset, the glob matching hook.sh, "+
+				"every glob option off, and no stderr", hook, res)
+		}
+	}
+}
+
 // Open and Wrap are POSIX shell, so a script `sh -c` runs is framed the same
-// way. sh reads no BASH_ENV, so nothing prints around it here.
+// way. sh reads no BASH_ENV, so nothing prints around it here. A script the
+// preamble alone opens (Script) runs there too, and as the frame does not
+// hide what the preamble prints, the check reads its stderr whole: the
+// preamble's bash-only lines pass over without a word.
 func TestFrameWrapIsPOSIXShell(t *testing.T) {
 	f := sandbox.NewFrame("test")
 	raw := run(t, "/bin/sh", f.Wrap(`if [ -e "$1" ]; then echo P; exit 0; fi; echo M`), "", "/")
 	if res, ok := f.Unframe(raw); !ok || res.Stdout != "P\n" || res.ExitCode != 0 {
 		t.Errorf("sh: Unframe = %+v, %v; want P", res, ok)
+	}
+	if raw := run(t, "/bin/sh", sandbox.Script("echo P"), ""); raw.Stdout != "P\n" || raw.Stderr != "" || raw.ExitCode != 0 {
+		t.Errorf("sh: Script = %+v; want P, and nothing on stderr", raw)
 	}
 }
 

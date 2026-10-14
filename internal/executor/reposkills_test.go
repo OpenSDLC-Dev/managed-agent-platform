@@ -451,8 +451,9 @@ func TestScanRepoSkillsReadFailures(t *testing.T) {
 // image's startup may leave on: noglob would list nothing, GLOBIGNORE would
 // hide "a", dotglob would list a hidden directory, failglob would fail an
 // empty skills directory, and a locale's collation, or on bash 5.3 GLOBSORT,
-// would put "a" before "B". The listing undoes each, so it names the same
-// skills, in byte order, whatever the image set. It walks from the first
+// would put "a" before "B". The listing's frame (sandbox.ScriptPreamble) and
+// its own LC_ALL undo each, so it names the same skills, in byte order,
+// whatever the image set. It walks from the first
 // directory up to the last, each name after its step's index, and a
 // directory with no .claude/skills lists nothing, and none above the last is
 // listed.
