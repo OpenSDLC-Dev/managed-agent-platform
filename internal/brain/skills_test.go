@@ -21,7 +21,7 @@ func TestRenderSkillsBlock(t *testing.T) {
 	// is escaped as recorded (`"` is &#34;), an empty one keeps its tags, and a
 	// location follows the materialization directory, not the name.
 	got := renderSkillsBlock([]skillMeta{
-		{Name: "alpha", Description: `Use for "alpha" <tasks> & more`, Dir: "alpha"},
+		{Name: "alpha", Description: `Use for "alpha" <tasks> & more, it's fine`, Dir: "alpha"},
 		{Name: "beta", Description: "", Dir: "beta-skill_b"},
 	}, "/workspace/skills")
 	want := "**Using skills**\n\n" +
@@ -35,7 +35,7 @@ func TestRenderSkillsBlock(t *testing.T) {
 		"- Skills are available under `/workspace/skills/`.\n\n" +
 		"<available_skills>\n" +
 		"<skill>\n  <name>alpha</name>\n" +
-		"  <description>Use for &#34;alpha&#34; &lt;tasks&gt; &amp; more</description>\n" +
+		"  <description>Use for &#34;alpha&#34; &lt;tasks&gt; &amp; more, it&#39;s fine</description>\n" +
 		"  <location>/workspace/skills/alpha/SKILL.md</location>\n</skill>\n" +
 		"<skill>\n  <name>beta</name>\n  <description></description>\n" +
 		"  <location>/workspace/skills/beta-skill_b/SKILL.md</location>\n</skill>\n" +
