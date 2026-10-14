@@ -54,10 +54,11 @@ const (
 	repoMountOccupiedMessage = "the repository's mount path lies outside the platform's directories, where a clone takes only an absent path or an empty directory it can remove"
 )
 
-// errRepoNoCredential classifies a repo resource whose sealed token row is
-// gone. It cannot happen through the API (the row is written in the create
+// errRepoNoCredential marks a repo resource whose sealed token row is gone.
+// It cannot happen through the API (the row is written in the create
 // transaction and dies only with the session), so it is an internal fault
-// rather than a user-visible reason of its own.
+// rather than a user-visible reason of its own: errRepoToken carries it to
+// cloneReason's internal arm.
 var errRepoNoCredential = errors.New("repository credential row missing")
 
 // errRepoToken marks a failure to read the resource's sealed token: the row

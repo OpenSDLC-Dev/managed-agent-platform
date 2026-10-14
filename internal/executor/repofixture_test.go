@@ -163,6 +163,53 @@ func (f *gitFixture) commit(t *testing.T, msg string, files map[string]string) p
 	return h
 }
 
+// commitRawTree commits, on the default branch, a tree holding one file under
+// name. It writes the objects itself: go-git's own commit refuses a name its
+// checkout would refuse, and git's upload-pack serves one as it is.
+func (f *gitFixture) commitRawTree(t *testing.T, name string) {
+	t.Helper()
+	st := f.repo.Storer
+	put := func(o plumbing.EncodedObject) plumbing.Hash {
+		h, err := st.SetEncodedObject(o)
+		if err != nil {
+			t.Fatalf("store object: %v", err)
+		}
+		return h
+	}
+	raw := func(typ plumbing.ObjectType, parts ...[]byte) plumbing.Hash {
+		o := st.NewEncodedObject()
+		o.SetType(typ)
+		w, err := o.Writer()
+		if err != nil {
+			t.Fatalf("object writer: %v", err)
+		}
+		for _, p := range parts {
+			if _, err := w.Write(p); err != nil {
+				t.Fatalf("write object: %v", err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("close object: %v", err)
+		}
+		return put(o)
+	}
+	blob := raw(plumbing.BlobObject, []byte("x\n"))
+	tree := raw(plumbing.TreeObject, []byte("100644 "+name+"\x00"), blob[:])
+	head, err := f.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	sig := object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}
+	o := st.NewEncodedObject()
+	commit := &object.Commit{Author: sig, Committer: sig, Message: "raw tree\n", TreeHash: tree, ParentHashes: []plumbing.Hash{head.Hash()}}
+	if err := commit.Encode(o); err != nil {
+		t.Fatalf("encode commit: %v", err)
+	}
+	if err := st.SetReference(plumbing.NewHashReference(head.Name(), put(o))); err != nil {
+		t.Fatalf("set %s: %v", head.Name(), err)
+	}
+}
+
 // links commits symbolic links, each path to its target.
 func (f *gitFixture) links(t *testing.T, links map[string]string) {
 	t.Helper()

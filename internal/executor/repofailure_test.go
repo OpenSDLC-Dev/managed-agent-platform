@@ -130,13 +130,17 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			Op: "symlink", Old: "connection reset", New: "/tmp/map-repo-clone-1/tree/link", Err: syscall.ENOSPC}},
 		{"the spool's disk fills during a checkout of a file named for a pkt-line refusal", &fs.PathError{
 			Op: "open", Path: "/tmp/map-repo-clone-1/tree/" + pktline.ErrInvalidPktLen.Error(), Err: syscall.ENOSPC}},
-		{"go-git refuses a tracked name with a control character", fmt.Errorf(
-			"invalid path %q: contains control character", "EOF\r")},
+		{"a network filesystem under the spool fails a pack read", fmt.Errorf("zlib reset error: %s", &fs.PathError{
+			Op: "read", Path: "/tmp/map-repo-clone-1/tree/.git/objects/pack/tmp_pack_1", Err: syscall.EHOSTDOWN})},
 		{"the executor has no descriptor left", dial("socket", syscall.EMFILE)},
 		{"the system has no descriptor left", dial("socket", syscall.ENFILE)},
 		{"the executor has no memory for the pack request's socket", packDial("socket", syscall.ENOMEM)},
 		{"the executor has no buffer for the pack request's socket", packDial("socket", syscall.ENOBUFS)},
 		{"the executor has no port left", dial("connect", syscall.EADDRNOTAVAIL)},
+		{"the executor has no memory for a connect", dial("connect", syscall.ENOMEM)},
+		{"the executor has no buffer for a write to the host", &net.OpError{
+			Op: "write", Net: "tcp", Err: os.NewSyscallError("write", syscall.ENOBUFS)}},
+		{"go-git cannot lock a ref file on the spool", syscall.ENOLCK},
 		{"the executor has no descriptor left for the name lookup", &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs",
 			Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
 				Err: "dial udp 10.96.0.10:53: socket: too many open files", Name: "github.com", Server: "10.96.0.10:53"}}}},
@@ -145,6 +149,40 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			err := fmt.Errorf("%w: %w", errClone, tc.err)
 			if got := cloneReason(err); got != repoOutcomeInternal {
 				t.Errorf("cloneReason = %q, want %q — this executor is ours: %v", got, repoOutcomeInternal, err)
+			}
+		})
+	}
+
+	// go-git refuses a path the repository holds in plain text, which quotes
+	// the path. cloneFailed marks the refusal by where its text starts, so a
+	// host's text that holds the same words stays the host's.
+	t.Run("go-git refuses a tracked name with a control character", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		fx.commitRawTree(t, "EOF\r")
+		_, _, cleanup, err := cloneToTar(context.Background(), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("invalid path %q", "EOF\r")) {
+			t.Fatalf("err = %v, want go-git's refusal of the path", err)
+		}
+		if got := cloneReason(err); got != repoOutcomeInternal {
+			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeInternal, err)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"go-git refuses a symlinked parent", fmt.Errorf("chroot: invalid path %q: is a symlink", "GOAWAY/x"), repoOutcomeInternal},
+		{"go-git's change adaptor refuses a path", fmt.Errorf("to field: %s",
+			fmt.Errorf("invalid path %q: cannot use %q", "EOF/..", "..")), repoOutcomeInternal},
+		{"the host's GOAWAY quotes a path refusal", fmt.Errorf("error decoding upload-pack response: %s",
+			"http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=\"invalid path\""),
+			repoOutcomeNetwork},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cloneReason(cloneFailed(context.Background(), tc.err)); got != tc.want {
+				t.Errorf("cloneReason = %q, want %q: %v", got, tc.want, tc.err)
 			}
 		})
 	}
@@ -172,12 +210,17 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 	}
 
 	// The same transport errors, met while go-git decodes the pack response,
-	// lose their types to its %s: only the errno's own text is left.
+	// lose their types to its %s: only the socket's op and the errno's own
+	// text are left.
 	for _, errno := range []syscall.Errno{syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.EPIPE, syscall.ECONNABORTED,
 		syscall.ENETDOWN, syscall.ENETRESET, syscall.EHOSTDOWN} {
-		t.Run("a read of the pack response fails: "+errno.Error(), func(t *testing.T) {
+		op := "read"
+		if errno == syscall.EPIPE {
+			op = "write"
+		}
+		t.Run("a "+op+" on the pack's connection fails: "+errno.Error(), func(t *testing.T) {
 			err := fmt.Errorf("%w: %w", errClone, fmt.Errorf("error decoding upload-pack response: %s",
-				&net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errno)}))
+				&net.OpError{Op: op, Net: "tcp", Err: os.NewSyscallError(op, errno)}))
 			if got := cloneReason(err); got != repoOutcomeNetwork {
 				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
 			}

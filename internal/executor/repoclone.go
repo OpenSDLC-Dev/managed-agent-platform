@@ -12,6 +12,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -241,7 +242,8 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	return repo, repo.Storer.RemoveReference(scratch)
 }
 
-// cloneFailed marks err as go-git's clone's (errClone). go-git formats some
+// cloneFailed marks err as go-git's clone's (errClone), and as go-git's
+// refusal of a path where it is one (errPathRefused). go-git formats some
 // errors with %s, among them a deadline that fires while it decodes the pack
 // response. So the context's error joins the chain where the context has
 // fired, the message names that error, and nothing else explains the
@@ -251,6 +253,9 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // Nor does a name that quotes the context's error decide the reason: a file
 // the repository named so, or a host's message.
 func cloneFailed(ctx context.Context, err error) error {
+	if pathRefusal.MatchString(err.Error()) {
+		err = withCause{err, errPathRefused}
+	}
 	err = fmt.Errorf("%w: %w", errClone, err)
 	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) && strings.Contains(err.Error(), cerr.Error()) &&
 		!isLocalError(err) && cloneReason(err) == repoOutcomeInternal {
@@ -258,6 +263,18 @@ func cloneFailed(ctx context.Context, err error) error {
 	}
 	return err
 }
+
+// errPathRefused marks go-git's refusal of a path the repository holds — a
+// control character, a .. or .git component, a symlinked parent. go-git
+// reports it as plain text with no type: worktree_fs.go's validPath, and
+// pathutil's check, which its tree walk flattens with %s.
+var errPathRefused = errors.New("go-git refused a path the repository holds")
+
+// pathRefusal matches that text at the start of go-git's message, after the
+// prefixes its tree walk adds: merkletrie's "from: " and "to: ", the change
+// adaptor's "from field: " and "to field: ", the worktree's "chroot: ". A
+// host's text, such as an HTTP/2 GOAWAY's debug data, never starts it.
+var pathRefusal = regexp.MustCompile(`^(?:(?:from|to)(?: field)?: |chroot: )*invalid path`)
 
 // shapeCheckout gives a checkout the .git/config and refs the reference's
 // carried (#582): `origin` and GitHub CLI's base remote `github`, both at the
@@ -484,12 +501,12 @@ func cloneReason(err error) string {
 // go-git's clone, which the network arm's types and text would read as the
 // host's. A file error on the spool quotes a name the repository chose: a
 // tracked file named EOF, or a symlink whose target reads "connection
-// reset". So does go-git's refusal of a path it will not check out — a
-// control character, a .. or .git component, a symlinked parent — which is
-// plain text (worktree_fs.go's validPath). A dial it could not make carries the
-// transport's types: a socket it could not create — out of descriptors,
-// memory or buffers, or for an address family it lacks — before anything
-// reached the host, or a local port it could not assign. A name lookup
+// reset". So does go-git's refusal of a path it will not check out, which
+// cloneFailed marks (errPathRefused). A dial it could not make carries the
+// transport's types: a socket it could not create — out of descriptors, or
+// for an address family it lacks — before anything reached the host, or a
+// local port it could not assign. So does a call on the connection that this
+// machine's memory or buffers ran out for, whatever the call. A name lookup
 // that could not open its own socket keeps that only as text, in the
 // net.DNSError's Err.
 func isLocalError(err error) bool {
@@ -499,8 +516,9 @@ func isLocalError(err error) bool {
 	var dnsErr *net.DNSError
 	return errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
 		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, syscall.EADDRNOTAVAIL) ||
+		errors.Is(err, syscall.ENOMEM) || errors.Is(err, syscall.ENOBUFS) ||
 		(errors.As(err, &dnsErr) && strings.Contains(dnsErr.Err, "socket: ")) ||
-		strings.Contains(err.Error(), "invalid path")
+		errors.Is(err, errPathRefused)
 }
 
 // isRemoteStatusError reports whether the remote answered with an HTTP status
@@ -549,14 +567,24 @@ func isNetworkError(err error) bool {
 		return true
 	}
 	// go-git formats some of the transport's errors with %s, which leaves
-	// only their text: a transport's errno among them, in its own words.
+	// only their text.
 	msg := err.Error()
 	for _, s := range []string{"connection refused", "no such host", "network is unreachable",
-		"connection reset", "EOF", "TLS handshake", "i/o timeout", "stream error", "GOAWAY",
-		syscall.ETIMEDOUT.Error(), syscall.EHOSTUNREACH.Error(), syscall.EPIPE.Error(), syscall.ECONNABORTED.Error(),
-		syscall.ENETDOWN.Error(), syscall.ENETRESET.Error(), syscall.EHOSTDOWN.Error()} {
+		"connection reset", "EOF", "TLS handshake", "i/o timeout", "stream error", "GOAWAY"} {
 		if strings.Contains(msg, s) {
 			return true
+		}
+	}
+	// A socket's errno, so left, follows the "read tcp" or "write tcp" its
+	// *net.OpError begins with. A file's errno reads the same words without
+	// it: a network filesystem under the spool can fail a pack read with
+	// "host is down", and go-git's scanner formats that with %s too.
+	if strings.Contains(msg, "read tcp") || strings.Contains(msg, "write tcp") {
+		for _, errno := range []syscall.Errno{syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.EPIPE,
+			syscall.ECONNABORTED, syscall.ENETDOWN, syscall.ENETRESET, syscall.EHOSTDOWN} {
+			if strings.Contains(msg, errno.Error()) {
+				return true
+			}
 		}
 	}
 	return false
