@@ -539,6 +539,12 @@ greet
 		if got := sh("set -v", 0); got.Stderr != "" {
 			t.Errorf("stderr = %q, want none — the template's last line was read after the command", got.Stderr)
 		}
+		// Carried, it echoes the template's last line and the command: nothing
+		// else may follow the restore.
+		got := sh(":", 0)
+		if lines := strings.Split(strings.TrimRight(got.Stderr, "\n"), "\n"); len(lines) != 2 || lines[1] != ":" {
+			t.Errorf("stderr = %q, want the template's last line, then `:`", got.Stderr)
+		}
 	})
 
 	// The template sources the command, so a RETURN trap the command sets fires
