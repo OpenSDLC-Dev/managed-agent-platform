@@ -93,6 +93,10 @@ API exposes no raw prompt):
    - After the repositories land, the executor scans each one whose checkout
      is present, and writes a scan record and the skills found, once per
      session. A later re-clone does not scan again: the reference scans once.
+     A session that mounts no repository records an empty scan at its first
+     run, so no brain can wait on a scan that never comes.
+   - A session in flight across the upgrade is held once, at its next turn,
+     and gains the block there.
    - A repository whose clone failed contributes no skill; the repositories
      block already marks it unavailable. The scan record is still written, so
      the brain does not wait again.
@@ -109,13 +113,18 @@ API exposes no raw prompt):
    - **Description:** the frontmatter `description`, or empty when the
      frontmatter is missing, invalid or has no description.
    - **Bounds** (both ours): at most 500 repository skills a session, the
-     attached cap; a description cut at 1,024 bytes, the upload cap.
+     attached cap; a description cut at 1,024 characters, the upload cap.
+   - **Names** (ours): a directory whose name is not UTF-8 or holds a control
+     character is passed over, and a hidden directory is not listed. A
+     symbolic link is followed.
 
 4. **The repository block** follows the attached block in the system prompt,
    in the thread whose agent has `read` enabled.
    - Entries are ordered by resource, then by name, as recorded within one
      repository.
    - Same-named skills are all listed.
+   - Everything in the list is the repository's, so its locations are escaped
+     too (ours).
    - With no attached skill, the lead and the reminder precede the repository
      block without the "available under" sentence. The reference's text there
      is unrecorded, so this is ours.

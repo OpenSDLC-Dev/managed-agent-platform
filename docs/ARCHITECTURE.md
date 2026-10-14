@@ -277,6 +277,13 @@ that directory is named, by path); for repositories, a
 "Mounted repositories" block naming each one. A resource that has gone missing costs its
 own mount and a log line, never the turn.
 
+A repository's skills (plan 65) take one more step, because they exist only once the
+clone has landed. The brain holds a cloud session's first turn, as it holds one for an
+MCP listing, and enqueues a `tool_exec` with no tool to run. That run clones the
+repositories, scans each checkout's `.claude/skills` once, records what it found in
+`sessions.repo_skills`, and wakes the turn. The brain then lists those skills after the
+attached ones, from Postgres on every turn, to an agent whose `read` tool is on.
+
 **Memory stores** (plan 36) ride the same array as an id-less element that snapshots
 the store's name and its `/mnt/memory/<slug>` mount. The sandbox lands the store's
 memories there before the tools run — `0666` files beside a marker naming the store and

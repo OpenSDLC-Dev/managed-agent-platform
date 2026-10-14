@@ -46,14 +46,14 @@ type skillMeta struct {
 // block: per skill, resolve the version at request-assembly time (see
 // resolveSkillMeta for the three addressing forms) and read name+description
 // from the resolved version, then render the block under the session's skills
-// root (skillsRoot). A reference
+// root (skillsRoot), with the repository skills after them. A reference
 // that cannot be resolved — a dangling id/version, or a store blip — is logged
 // and skipped, never fatal to the turn (the same late-bound tolerance
 // materialization applies, plan design decision 7). Returns the rendered block,
-// the number of skills injected, and the number of misses.
-func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAgent, envKind string) (string, int, int) {
+// the number of attached skills injected, and the number of misses.
+func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAgent, envKind string, repo []repoSkill) (string, int, int) {
 	if len(agent.Skills) == 0 {
-		return "", 0, 0
+		return renderSkillsBlock(nil, "", repo), 0, 0
 	}
 	var metas []skillMeta
 	misses := 0
@@ -88,7 +88,7 @@ func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAge
 			Name: name, Description: desc, Dir: skills.TargetDir(name, ref.SkillID),
 		})
 	}
-	return renderSkillsBlock(metas, b.skillsRoot(envKind)), len(metas), misses
+	return renderSkillsBlock(metas, b.skillsRoot(envKind), repo), len(metas), misses
 }
 
 // skillsRoot is the directory the block says holds the skills. On a cloud
@@ -184,27 +184,53 @@ const skillsLead = "**Using skills**\n\n" +
 // `"` as &#34;, as the recording shows. Paths are written as they are: the
 // model copies them into its tools, and an escaped path names no file. They
 // hold only the root, which is operator configuration, and a materialization
-// directory, which upload validation keeps to [a-z0-9-] or a skill id. Empty
-// input yields an empty block, so nothing is appended.
-func renderSkillsBlock(metas []skillMeta, root string) string {
-	if len(metas) == 0 {
+// directory, which upload validation keeps to [a-z0-9-] or a skill id.
+//
+// The skills a mounted repository holds follow in their own list,
+// <available_skills source="repo">, as the reference was recorded announcing
+// them (plan 65 decision 4). Everything in that list is the repository's, so
+// its locations are escaped too: a directory name that needed it names a path
+// the model cannot copy, which is the cost of keeping the list's shape. With no
+// attached skill the lead precedes the repository list alone, without the
+// sentence naming the root (ours: the reference's text there is unrecorded).
+// Empty input yields an empty block, so nothing is appended.
+func renderSkillsBlock(metas []skillMeta, root string, repo []repoSkill) string {
+	if len(metas) == 0 && len(repo) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString(skillsLead)
-	b.WriteString("- Skills are available under `" + root + "/`.\n\n")
-	b.WriteString("<available_skills>\n")
-	for _, m := range metas {
-		b.WriteString("<skill>\n  <name>")
-		b.WriteString(html.EscapeString(m.Name))
-		b.WriteString("</name>\n  <description>")
-		b.WriteString(html.EscapeString(m.Description))
-		b.WriteString("</description>\n  <location>")
-		b.WriteString(path.Join(root, m.Dir, "SKILL.md"))
-		b.WriteString("</location>\n</skill>\n")
+	if len(metas) > 0 {
+		b.WriteString("- Skills are available under `" + root + "/`.\n\n")
+		b.WriteString("<available_skills>\n")
+		for _, m := range metas {
+			writeSkill(&b, m.Name, m.Description, path.Join(root, m.Dir, "SKILL.md"))
+		}
+		b.WriteString("</available_skills>")
 	}
-	b.WriteString("</available_skills>")
+	if len(repo) > 0 {
+		if len(metas) > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n<available_skills source=\"repo\">\n")
+		for _, s := range repo {
+			writeSkill(&b, s.Name, s.Description, html.EscapeString(s.Location))
+		}
+		b.WriteString("</available_skills>")
+	}
 	return b.String()
+}
+
+// writeSkill writes one <skill> entry, escaping its name and description and
+// writing location as given.
+func writeSkill(b *strings.Builder, name, description, location string) {
+	b.WriteString("<skill>\n  <name>")
+	b.WriteString(html.EscapeString(name))
+	b.WriteString("</name>\n  <description>")
+	b.WriteString(html.EscapeString(description))
+	b.WriteString("</description>\n  <location>")
+	b.WriteString(location)
+	b.WriteString("</location>\n</skill>\n")
 }
 
 // recordResolveMisses adds to the resolve-miss counter. Like the brain's other

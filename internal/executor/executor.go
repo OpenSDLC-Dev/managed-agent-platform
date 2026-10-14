@@ -585,6 +585,16 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// decision 5), which since #922 only a resource stored before it can do.
 	e.materializeRepos(ctx, sb, item.SessionID, sess.repos, len(sess.skills) > 0, progress)
 	progress()
+	// The checkouts are now what the session will see, so their skills are
+	// scanned here, once per session (plan 65 decision 2). The brain holds a
+	// session's first turn until this record lands, so a failure to store it
+	// stops the item for a retry rather than waking a brain that would wait
+	// again.
+	if !sess.repoSkillsScanned {
+		if err := e.recordRepoSkills(ctx, item.SessionID, e.scanRepoSkills(ctx, sb, item.SessionID, sess.repos, progress)); err != nil {
+			return nil, nil, nil, fmt.Errorf("record repository skills: %w", err)
+		}
+	}
 	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
@@ -952,6 +962,9 @@ type sessionRun struct {
 	memories   []memoryRef
 	vaultIDs   []string
 	mcpServers []mcpServerRef
+	// repoSkillsScanned says the session's repositories were scanned for
+	// skills already (sessions.repo_skills is set), which happens once.
+	repoSkillsScanned bool
 }
 
 // sessionForRun loads the session's egress policy, the skill references its
@@ -976,11 +989,14 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	var archivedAt *time.Time
 	var configJSON, agentJSON, resourcesJSON []byte
 	var vaultIDs []string
+	var repoSkillsScanned bool
 	err = tx.QueryRow(ctx,
-		`SELECT s.status, s.archived_at, e.config, s.resolved_agent, s.resources, s.vault_ids
+		`SELECT s.status, s.archived_at, e.config, s.resolved_agent, s.resources, s.vault_ids,
+		        s.repo_skills IS NOT NULL
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
 		  WHERE s.id = $1 FOR UPDATE OF s`,
-		item.SessionID.String()).Scan(&status, &archivedAt, &configJSON, &agentJSON, &resourcesJSON, &vaultIDs)
+		item.SessionID.String()).Scan(&status, &archivedAt, &configJSON, &agentJSON, &resourcesJSON, &vaultIDs,
+		&repoSkillsScanned)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sessionRun{}, false, nil
 	}
@@ -1103,6 +1119,8 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 		memories:   memories,
 		vaultIDs:   vaultIDs,
 		mcpServers: agent.MCPServers,
+
+		repoSkillsScanned: repoSkillsScanned,
 	}, true, tx.Commit(ctx)
 }
 

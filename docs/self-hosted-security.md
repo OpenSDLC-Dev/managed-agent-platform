@@ -35,6 +35,7 @@ deliberate divergences from the reference are in
 | **Model / tool credentials** | Never enter the sandbox; redacted from error events | Securing the brain's provider config and any egress-time secrets |
 | **Auth transport** | Hashes `x-api-key` and environment keys at rest; scopes each | Terminating TLS; keeping keys off logs and out of images |
 | **Single-tenant daemon trust** | The `ours` label guards *accidents*, not a hostile co-tenant | Treating the Docker daemon / cluster as a single trust domain |
+| **Mounted-repository skills** | Announces the skills in a mounted repository's `.claude/skills` to the agent, as the reference does, with no review step | Deciding which repositories and branches sessions may mount |
 
 The rest of this document expands each row: first what the platform enforces,
 then what you own.
@@ -1478,6 +1479,20 @@ name collision, a container left by an earlier deployment); it is explicitly
 **not** a trust boundary against a hostile actor with daemon access, who already
 controls every sandbox on the host. If you run the Docker backend, treat the
 daemon and every container on it as one trust domain.
+
+### Mounted-repository skills
+
+A session that mounts a `github_repository` gets the skills in the
+checkout's `.claude/skills` directory. The agent is told of each one, and it
+reads and follows a skill's `SKILL.md` as an instruction. The reference does
+the same, and neither asks anyone to review those skills first (plan 65).
+
+So mounting a repository trusts its skills. Anyone who can push to the
+mounted branch can change what the agent does in the sessions that mount it.
+The platform adds no gate here: what a session mounts is its creator's
+choice. You own that choice. Mount repositories whose push access you
+control, and pin a commit when a session must not follow a branch that
+moves.
 
 ## Reserved seams and tracked gaps
 
