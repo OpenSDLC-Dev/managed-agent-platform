@@ -979,8 +979,8 @@ func writePackageSentinel(ctx context.Context, sb sandbox.Sandbox, sid domain.ID
 // changed — the sentinel compares the list as written — and says so, and a
 // changed list is emitted without consulting the history at all.
 //
-// Otherwise the list identity is the digest, mirroring the clone error's
-// (resource_id, reason) key. The work item's lease already makes this executor
+// Otherwise the list identity is the digest, as a clone error's is its
+// resource_id. The work item's lease already makes this executor
 // the session's single writer, so the check-then-append needs no further
 // guarding, and emission is best effort:
 // failing to record the error must not turn a tolerated install failure into a

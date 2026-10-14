@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +46,14 @@ type repoCheckout struct {
 // the credential_host_unreachable_error twin (plan 25 decision 4).
 const repoCloneErrorType = "github_repository_clone_error"
 
+// The messages a github_repository_clone_error carries, a small fixed set:
+// emitRepoCloneError dedupes on them.
+const (
+	repoCloneFailedMessage   = "the repository could not be cloned into the sandbox"
+	repoNoCipherMessage      = "a secrets cipher is not configured on this executor"
+	repoMountOccupiedMessage = "the repository's mount path lies outside the platform's directories, where a clone takes only an absent path or an empty directory it can remove"
+)
+
 // errRepoNoCredential classifies a repo resource whose sealed token row is
 // gone. It cannot happen through the API (the row is written in the create
 // transaction and dies only with the session), so it is an internal fault
@@ -55,7 +64,8 @@ var errRepoNoCredential = errors.New("repository credential row missing")
 // tools run, first of the passes (provisionAndRun says why). Idempotence is
 // the probe alone — a repo
 // materializes iff the probe answers that `<mount>/.git` is absent, and a pass
-// whose probe does not answer clones nothing (#860, repoPresence) — deliberately without a sentinel:
+// whose probe does not answer clones nothing (#860, repoPresence); outside the
+// platform's directories the mount must also be vacant (replacesWhole) — deliberately without a sentinel:
 // the mounted set is fixed at create, so a marker would have no drift to
 // detect, and plan 24 strips agent-writable markers from checkpoints at
 // capture, which would make a restored workspace re-clone over the agent's own
@@ -108,10 +118,10 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			continue
 		case sandbox.PresenceUnknown:
 			// The sandbox answered neither probe, twice (repoPresence). That
-			// is no sign the checkout is gone, and a clone replaces the mount
-			// whole (extractRepo's rm -rf), the agent's work in it with it
-			// (#860); nor that it is there, so no clone error either — the
-			// next pass asks again.
+			// is no sign the checkout is gone, and a clone in the platform's
+			// directories replaces the mount whole (extractRepo's rm -rf), the
+			// agent's work in it with it (#860); nor that it is there, so no
+			// clone error either — the next pass asks again.
 			unprobed++
 			recordRepoMaterialized(ctx, repoOutcomeUnprobed)
 			slog.WarnContext(ctx, "repository presence not answered; clone skipped this pass",
@@ -119,8 +129,8 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			continue
 		}
 		// Judged again here, having already been judged at create. The
-		// duplication is deliberate and narrow: what follows builds an `rm -rf`
-		// on this path inside the session's sandbox, and a row that reached the
+		// duplication is deliberate and narrow: what follows can build an
+		// `rm -rf` on this path inside the session's sandbox, and a row that reached the
 		// database by any route other than the create endpoint would otherwise
 		// have that command built for it. `/workspace/repo/..` cleans to
 		// `/workspace`; `/tmp` is the platform's own staging root.
@@ -129,8 +139,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			recordRepoMaterialized(ctx, repoOutcomeInternal)
 			slog.WarnContext(ctx, "repository mount path refused by the executor",
 				"session_id", sid, "resource_id", m.ID, "mount_path", m.MountPath, "err", err)
-			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal,
-				"the repository could not be cloned into the sandbox")
+			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal, repoCloneFailedMessage)
 			continue
 		}
 		// Asked after the probe, not before it: a mount that already carries a
@@ -141,8 +150,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		if e.cipher == nil {
 			failed++
 			recordRepoMaterialized(ctx, repoOutcomeInternal)
-			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal,
-				"a secrets cipher is not configured on this executor")
+			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal, repoNoCipherMessage)
 			continue
 		}
 		// The probe and the two guards above are behind us; what follows is the
@@ -167,7 +175,11 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			slog.WarnContext(ctx, "repository not materialized",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath,
 				"reason", reason, "err", err)
-			e.emitRepoCloneError(ctx, sid, m, reason, "the repository could not be cloned into the sandbox")
+			message := repoCloneFailedMessage
+			if errors.Is(err, errMountOccupied) {
+				message = repoMountOccupiedMessage
+			}
+			e.emitRepoCloneError(ctx, sid, m, reason, message)
 			continue
 		}
 		landed++
@@ -194,6 +206,17 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 // form (plan 25 decision 1). sentinel, when set, is the skills sentinel the
 // extraction drops (extractRepo).
 func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m repoRef, sentinel string, progress func()) (int64, error) {
+	// A mount the clone may not replace whole is probed before the fetch, so
+	// a path that visibly holds something costs one exec a pass rather than a
+	// clone. One the probe gives no answer for, or cannot list, is fetched,
+	// and the extraction judges it.
+	whole := e.replacesWhole(m.MountPath)
+	if !whole {
+		if mountOccupied(ctx, sb, m.MountPath) {
+			return 0, errMountOccupied
+		}
+		progress()
+	}
 	token, err := e.repoToken(ctx, sid, m.ID)
 	if err != nil {
 		return 0, err
@@ -221,7 +244,7 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	// safeRepoMount refuses it for a row from any other route.
 	sandboxTar := path.Join(repoStagingRoot, "repo-"+m.ID+".tar")
 	if err := sb.WriteFileStream(ctx, sandboxTar, f, size); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", errExtraction, err)
 	}
 	// From here the sandbox holds up to the whole byte budget in /tmp, and the
 	// only thing that removes it is the extraction command's own cleanup tail.
@@ -242,7 +265,7 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "err", err)
 		}
 	}()
-	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar, sentinel); err != nil {
+	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar, sentinel, whole); err != nil {
 		return 0, err
 	}
 	return size, nil
@@ -266,7 +289,8 @@ const repoStagingRoot = "/tmp"
 //
 // It is deliberately not a second copy of the API's full grammar (nesting,
 // per-session caps, the URL-derived default). Those decide what a caller may
-// ask for; this decides only what may be destroyed. Three of the refusals are
+// ask for; this decides only where a clone may go, and replacesWhole what it
+// may destroy there. Three of the refusals are
 // things the control plane cannot know, which is why they live here:
 //
 //   - the workdir or a directory holding it. Create never yields one under
@@ -286,7 +310,8 @@ const repoStagingRoot = "/tmp"
 // the memory stores' root and the shell state root. Create never yields
 // one since #922, but a repository stored before keeps its literal path,
 // and `/mnt` was one create accepted. Below one, a re-clone removes only
-// the checkout's own tree, as anywhere. Paths the image ships are #930.
+// the checkout's own tree. What the image ships at a path is replacesWhole's
+// to keep (#930).
 func (e *Executor) safeRepoMount(mount string) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
@@ -353,6 +378,87 @@ func stagingPath(mount string) string {
 // extraction will remove it.
 const stagingSuffix = ".map-repo-staging"
 
+// replacesWhole reports whether a clone may replace what is at mount whole.
+// It may below a directory the platform keeps writable (sandbox.WritablePaths:
+// the repository root, the workdir, /tmp, the shell state root and /mnt),
+// the directories the platform writes and the agent works in. Anywhere else is
+// the image's own filesystem, which only a repository stored before #922 can
+// name (#930). There a clone takes only an absent path or an empty directory,
+// so a row at /usr cannot remove what the image ships. A row at a path the
+// image leaves absent, such as /opt/repo, clones as before; one whose
+// checkout lost its .git there now fails instead of being replaced.
+func (e *Executor) replacesWhole(mount string) bool {
+	for _, root := range sandbox.WritablePaths(e.cfg.Workdir) {
+		if strings.HasPrefix(mount, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// vacantScript asks, and changes nothing, whether a clone may take mount:
+// whether it is absent, or an empty directory that is not a symlink. It
+// prints vacant or occupied, and mountOccupied reads the answer framed, so a
+// shell that an image's startup ends first gives no answer, whatever its exit
+// status. A listing that fails, as on a directory the sandbox user may not
+// read, prints nothing and so reads as empty: the probe answers vacant, and
+// the rmdir in vacateScript decides. It names no variable, because an
+// image's startup can leave attributes on any name it might take.
+func vacantScript(mount string) string {
+	q := shellQuote(mount)
+	return "if { [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || { [ -d " + q + " ] && [ ! -L " + q +
+		" ] && [ -z \"$(ls -A " + q + " 2>/dev/null)\" ]; }; then echo vacant; else echo occupied; fi"
+}
+
+// vacateScript clears a mount that replacesWhole refuses, in place of the
+// `rm -rf` right before the rename. It leaves an absent path alone, removes
+// an empty directory, and refuses whatever rmdir refuses: a directory with
+// content, a file, a symlink, dangling or not, and an empty directory the
+// sandbox user cannot remove. A refusal ends the extraction with
+// occupiedStatus. It can refuse a path vacantScript let through, such as one
+// the probe could not list; the fetch is then spent, and nothing is lost.
+func vacateScript(mount string) string {
+	q := shellQuote(mount)
+	return "{ { [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || rmdir " + q + " || (exit " +
+		strconv.Itoa(occupiedStatus) + "); }"
+}
+
+// occupiedStatus is the extraction's exit status when vacateScript refuses
+// the mount, so the refusal is reported as errMountOccupied and not as a
+// failed extraction. No platform command in the script exits with it; an
+// image's startup that ends the shell first, or a command the image wraps,
+// could, and would read as an occupied path.
+const occupiedStatus = 75
+
+// errMountOccupied is a clone refused because its mount path is outside the
+// platform's directories and is neither absent nor an empty directory the
+// clone can remove: by mountOccupied before the fetch, or by vacateScript at
+// the extraction.
+var errMountOccupied = errors.New("the mount path is neither absent nor an empty directory the clone can remove")
+
+// errExtraction is a failure after the fetch, in the sandbox: shipping the
+// tar there, or the extraction script. It is the sandbox's, never the git
+// host's, though its text can read like the host's to cloneReason's network
+// arm: a dropped exec stream says EOF, and a script's stderr quotes the mount
+// path, such as /opt/EOF.
+var errExtraction = errors.New("landing the repository in the sandbox failed")
+
+// repoVacancyTimeout bounds mountOccupied's probe, which runs before the
+// clone's own deadline is set.
+const repoVacancyTimeout = 30 * time.Second
+
+// mountOccupied asks vacantScript before the fetch, framed
+// (sandbox.ExecFramed), and only the answer occupied refuses. Anything else
+// reads as vacant: an exec that failed or timed out, or an answer that never
+// reached the output because an image's startup ended the shell first or
+// printed past the cap (#860). vacateScript judges the path again in the
+// extraction, and that judgment is the one that holds.
+func mountOccupied(ctx context.Context, sb sandbox.Sandbox, mount string) bool {
+	res, framed, err := sandbox.ExecFramed(ctx, sb, "repovacancy",
+		sandbox.ExecRequest{Command: vacantScript(mount), Timeout: repoVacancyTimeout})
+	return err == nil && framed && !res.TimedOut && strings.TrimSpace(res.Stdout) == "occupied"
+}
+
 // extractRepo unpacks the shipped tar into a staging directory beside the
 // mount and renames it into place, so `<mount>` — and therefore the
 // `<mount>/.git` the idempotence probe reads — exists only once the tree is
@@ -369,11 +475,18 @@ const stagingSuffix = ".map-repo-staging"
 // its own copy of the name removed from the staged tree, so the skills step
 // never reads the checkout's file as its marker.
 //
+// whole is replacesWhole's verdict on the mount. Without it, vacateScript
+// takes the place of the `rm -rf`. It runs here, right before the rename,
+// rather than only in mountOccupied's look before the fetch, because each
+// script can run an image's startup hook first (#860). A hook that makes the
+// directory again would otherwise have `mv` put the checkout inside it. A
+// refusal there ends the script with occupiedStatus.
+//
 // Every path is shell-quoted: mount_path is request-controlled text, and
 // unquoted interpolation would be command injection inside the sandbox.
 // Cleanup runs unconditionally — after a `;`, never sequenced behind an `&&` —
 // so a failed extraction still removes the tar and any partial staging.
-func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentinel string) error {
+func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentinel string, whole bool) error {
 	clean := path.Clean(mount)
 	staging := stagingPath(mount)
 	q := shellQuote
@@ -384,12 +497,16 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 			drop += " " + q(path.Join(staging, path.Base(sentinel)))
 		}
 	}
+	remove := " && rm -rf " + q(clean)
+	if !whole {
+		remove = " && " + vacateScript(clean)
+	}
 	cmd := strings.Join([]string{
 		"rm -rf " + q(staging),
 		" && mkdir -p " + q(staging),
 		" && tar -xf " + q(tarPath) + " -C " + q(staging),
 		drop,
-		" && rm -rf " + q(clean),
+		remove,
 		" && mkdir -p " + q(path.Dir(clean)),
 		" && mv " + q(staging) + " " + q(clean),
 		"; rc=$?; rm -rf " + q(staging) + " " + q(tarPath) + "; exit $rc",
@@ -404,13 +521,16 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 		if sandbox.StatPresence(ctx, sb, path.Join(clean, ".git")) == sandbox.Present {
 			return nil
 		}
-		return err
+		return fmt.Errorf("%w: %w", errExtraction, err)
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errExtraction, err)
+	}
+	if !whole && res.ExitCode == occupiedStatus {
+		return errMountOccupied
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("extracting the repository into the sandbox failed with exit %d: %s",
+		return fmt.Errorf("%w with exit %d: %s", errExtraction,
 			res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return nil
@@ -464,8 +584,15 @@ func (e *Executor) repoToken(ctx context.Context, sid domain.ID, resourceID stri
 }
 
 // emitRepoCloneError appends the session.error variant for a failed clone,
-// deduped on (resource_id, reason) — two failing repositories are two events,
-// and a reason flip re-emits, while a repeated identical failure does not.
+// deduped on (resource_id, reason, message) over the session's history. Two
+// failing repositories are two events. A failure with a (reason, message)
+// pair the resource has not had yet is emitted; one it has had is not,
+// however long ago. The message counts because one reason carries several:
+// an occupied mount path's refusal must reach the client after a generic
+// `internal` failure. Spanning the history bounds the log, so a session
+// polling a failing clone emits once per pair at most. The cost is that a
+// return to an earlier failure is not emitted again, so the latest event can
+// name a failure that is no longer current.
 // The work item's lease already makes this executor the session's single
 // writer, so the check-then-append needs no further guarding. Emission is
 // best effort: a failure to record the error must not turn a tolerated clone
@@ -477,8 +604,9 @@ func (e *Executor) emitRepoCloneError(ctx context.Context, sid domain.ID, m repo
 		 WHERE session_id = $1 AND type = 'session.error'
 		   AND payload->'error'->>'type' = $2
 		   AND payload->'error'->>'resource_id' = $3
-		   AND payload->'error'->>'reason' = $4)`,
-		sid.String(), repoCloneErrorType, m.ID, reason).Scan(&already)
+		   AND payload->'error'->>'reason' = $4
+		   AND payload->'error'->>'message' = $5)`,
+		sid.String(), repoCloneErrorType, m.ID, reason, message).Scan(&already)
 	if err != nil {
 		slog.WarnContext(ctx, "checking for an existing repository clone error failed",
 			"session_id", sid, "resource_id", m.ID, "err", err)
@@ -500,7 +628,10 @@ func (e *Executor) emitRepoCloneError(ctx context.Context, sid domain.ID, m repo
 			// `retrying` for all reasons, including auth: the next work item
 			// probes the mount, finds no .git, and clones again — so no clone
 			// failure is ever the last attempt, and `exhausted` would tell a
-			// client this repository is finished when it is not.
+			// client this repository is finished when it is not. An occupied
+			// mount path (errMountOccupied) is probed again on every pass too,
+			// and clones if the path is ever emptied; one the image ships, such
+			// as /usr, never is.
 			"retry_status": map[string]any{"type": "retrying"},
 		},
 	})

@@ -204,7 +204,7 @@ of that kill's reach, as a `setsid` does. What the startup file
 *prints* does not corrupt the scripts whose answers the platform parses —
 a bulk write's report aside, below:
 `glob` and `grep`, the outputs harvest's listing, the repository-skills
-listing, the memory sync's tree hash, the package-install probe, Docker's refused-write reasons and, on
+listing, the memory sync's tree hash, the package-install probe, a file mount's presence probe, a repository's vacancy probe, Docker's refused-write reasons and, on
 Kubernetes, every file read, an exec's exit record and liveness probe, a
 refused write's reason and the checkpoint's root probe each print their
 answer between a begin and an end line carrying a nonce of its own, and only
@@ -228,7 +228,9 @@ installs nothing. A file mount the sandbox already holds is kept when its
 presence probe's answer is pushed out, not re-streamed over the agent's
 edits; a repository's presence, and whether its clone landed, are read from
 a stat whose answer is the read exec's own exit status, so it is cloned once
-and then kept. A memory store works in neither direction: its listing pushed
+and then kept. A repository mounted outside the platform's directories, its
+vacancy probe's answer pushed out, is fetched, and the extraction's `rmdir`
+decides whether it lands. A memory store works in neither direction: its listing pushed
 out, it neither lands in the sandbox nor syncs back, logged only. On either
 backend the outputs harvest, its listing pushed out, settles without a new
 snapshot, as one that finds no sandbox does. Not every script is framed. A bulk write's reports — the member it
@@ -676,7 +678,11 @@ in the code (`sandbox.WritablePaths`) precisely so neither backend can forget on
   literal path it was given, which can fall outside every path here. The
   executor refuses to clone one at `/workspace`, the uploads or outputs
   directory, `/mnt/memory` or the shell state root, or at a directory
-  holding one.
+  holding one. Below a path here, a clone replaces what it finds whole.
+  Outside every path here, it takes only an absent path or an empty
+  directory the sandbox user can remove (#930). At a path that holds
+  anything, such as `/usr`, it fails with a clone error and leaves the path
+  as it was.
 
 Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
 existing container removal takes away with the container.

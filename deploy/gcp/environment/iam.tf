@@ -125,9 +125,9 @@ resource "google_kms_crypto_key_iam_member" "controlplane" {
 # worth stating: the cipher's startup probe only encrypts, so the controlplane
 # and the executor go Ready and a deploy is green. The loss appears per session —
 # a clone ends in session.error github_repository_clone_error with reason
-# "internal", once per repository and reason and best-effort at that, and the
-# session carries on without the checkout; a vault-credentialed MCP server
-# reads as an authentication failure.
+# "internal", once per repository, reason and message and best-effort at
+# that, and the session carries on without the checkout; a vault-credentialed
+# MCP server reads as an authentication failure.
 #
 # The post-compromise cost this grant carries is real and is the consequence of
 # where the code decrypts: an executor holding the shared database connection

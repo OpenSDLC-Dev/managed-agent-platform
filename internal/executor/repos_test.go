@@ -5,11 +5,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -341,11 +344,12 @@ func TestRepoUnansweredOnAFreshSandboxClonesNextPass(t *testing.T) {
 
 // floodingProvider hands out its sandboxes with the next failExec presence
 // execs answering an image's startup flood (sandbox.StartupOutputError), as
-// one that prints past the cap does on Kubernetes, and the next failStat
-// stats of a .git (sandbox.StatPresence) failing as a transient exec does.
+// one that prints past the cap does on Kubernetes, the next failStat stats of
+// a .git (sandbox.StatPresence) failing as a transient exec does, and the
+// next failVacant of mountOccupied's probes answering the flood too.
 type floodingProvider struct {
 	sandbox.Provider
-	failExec, failStat atomic.Int32
+	failExec, failStat, failVacant atomic.Int32
 }
 
 func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -363,6 +367,10 @@ type floodingSandbox struct {
 
 func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"test -e ") && s.p.failExec.Add(-1) >= 0 {
+		_, _ = s.Sandbox.Exec(ctx, req)
+		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	}
+	if strings.Contains(req.Command, "; then echo vacant; else echo occupied; fi") && s.p.failVacant.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
@@ -497,7 +505,8 @@ func TestRepoCloneErrorDedupe(t *testing.T) {
 		t.Fatalf("recorded %d clone errors after two identical failures, want 1 (%v)", len(errs), errs)
 	}
 
-	// A reason flip re-emits: the client learns the failure changed.
+	// A flip to a reason the resource has not had re-emits: the client learns
+	// the failure changed.
 	fx.status.Store(http.StatusNotFound)
 	h.runPass(t)
 	errs := h.repoErrors(t)
@@ -506,6 +515,26 @@ func TestRepoCloneErrorDedupe(t *testing.T) {
 	}
 	if errs[0]["reason"] != repoOutcomeAuth || errs[1]["reason"] != repoOutcomeNotFound {
 		t.Errorf("reasons = %v/%v, want auth then not_found", errs[0]["reason"], errs[1]["reason"])
+	}
+}
+
+// TestRepoCloneErrorDedupeKeysOnTheMessage: one reason with two messages is
+// two events, so an occupied mount path's refusal reaches the client after a
+// generic failure with the same reason. A return to the generic failure is
+// not emitted again: the dedupe spans the history, which bounds the log.
+func TestRepoCloneErrorDedupeKeysOnTheMessage(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	m := repoRef{ID: "sesrsc_flip", MountPath: "/opt/repo", Type: "github_repository", URL: "https://example.invalid/o/r.git"}
+	for _, message := range []string{repoCloneFailedMessage, repoCloneFailedMessage, repoMountOccupiedMessage, repoCloneFailedMessage} {
+		h.exec.emitRepoCloneError(context.Background(), h.sid, m, repoOutcomeInternal, message)
+	}
+	var got []string
+	for _, e := range h.repoErrors(t) {
+		message, _ := e["message"].(string)
+		got = append(got, message)
+	}
+	if want := []string{repoCloneFailedMessage, repoMountOccupiedMessage}; !slices.Equal(got, want) {
+		t.Errorf("clone error messages = %q, want %q", got, want)
 	}
 }
 
@@ -704,7 +733,9 @@ exit 2
 // regular file, so the staging directory cannot be created — surfaces as a
 // clone error, cleans up, and leaves the run to continue.
 func TestRepoExtractFailureIsTolerated(t *testing.T) {
-	const blocked = "/workspace/blocked"
+	// A path the network arm's text match would read as the git host's
+	// failure, were the extraction's error not classified before it.
+	const blocked = "/workspace/EOF"
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	h, provider := dockerRepoHarness(t)
 	h.seedRepoResource(t, "sesrsc_partial", fx.url(), blocked+"/repo", "ghp_fixture", nil)
@@ -719,8 +750,8 @@ func TestRepoExtractFailureIsTolerated(t *testing.T) {
 	h.runPass(t)
 
 	errs := h.repoErrors(t)
-	if len(errs) != 1 {
-		t.Fatalf("recorded %d clone errors, want exactly 1 (%v)", len(errs), errs)
+	if len(errs) != 1 || errs[0]["reason"] != repoOutcomeInternal {
+		t.Fatalf("clone errors = %v, want exactly 1, with reason %s", errs, repoOutcomeInternal)
 	}
 	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
 		Command: "ls -a " + shellQuote("/workspace") + "; test ! -e " + shellQuote(blocked+"/repo")})
@@ -742,6 +773,379 @@ func TestRepoExtractFailureIsTolerated(t *testing.T) {
 	h.runPass(t)
 	if got := readSandboxFile(t, sb, blocked+"/repo/README.md"); got != "x\n" {
 		t.Errorf("README.md = %q, want the retry to have materialized", got)
+	}
+}
+
+// TestRepoKeepsWhatALegacyMountPathHolds 🔍: a repository stored before #922
+// keeps its literal path (#930), and a clone there must not take what the
+// image ships at it. At /usr on a merged-/usr image, that is the shell itself.
+// Outside the platform's directories a clone takes only an absent path or an
+// empty directory. At a path that holds files, at a file, or at a symlink it
+// fails as a clone error, fetches nothing and removes nothing. An empty
+// directory whose fetch fails is left as it was. Inside the platform's
+// directories, where the files and skills steps write too, a tree without its
+// .git is still replaced whole.
+func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	missing := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	missing.status.Store(http.StatusNotFound)
+	h, provider := dockerRepoHarness(t)
+	sb := adopt(t, provider, h)
+	plant, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: strings.Join([]string{
+		"mkdir -p /opt/EOF /opt/empty /opt/etarget /opt/gone /workspace/stale /tmp/stale /mnt/session/uploads/repo",
+		"echo image > /opt/EOF/keep",
+		"echo image > /opt/file",
+		"ln -s /usr/share /opt/link",
+		"ln -s /nonexistent /opt/dangling",
+		"ln -s /opt/etarget /opt/elink",
+		"echo old > /workspace/stale/old",
+		"echo old > /tmp/stale/old",
+		"echo old > /mnt/session/uploads/repo/old",
+	}, " && ")})
+	if err != nil || plant.ExitCode != 0 {
+		t.Fatalf("plant the paths: %v %+v", err, plant)
+	}
+	// /opt/EOF is a name the network arm's text match reads as the git host's
+	// failure. The refusal quotes no path, so the name guards only a refusal
+	// that would.
+	kept := []string{"/opt/EOF", "/opt/dangling", "/opt/elink", "/opt/file", "/opt/link"}
+	cloned := []string{"/mnt/session/uploads/repo", "/opt/absent", "/opt/empty", "/tmp/stale", "/workspace/stale"}
+	for i, mount := range append(append([]string(nil), kept...), cloned...) {
+		h.seedRepoResource(t, "sesrsc_legacy"+string(rune('a'+i)), fx.url(), mount, "ghp_fixture", nil)
+	}
+	h.seedRepoResource(t, "sesrsc_legacygone", missing.url(), "/opt/gone", "ghp_fixture", nil)
+
+	h.runPass(t)
+
+	want := map[string]any{"/opt/gone": repoOutcomeNotFound}
+	for _, mount := range kept {
+		want[mount] = repoOutcomeInternal
+	}
+	got := map[string]any{}
+	for _, e := range h.repoErrors(t) {
+		got[e["mount_path"].(string)] = e["reason"]
+		if e["reason"] == repoOutcomeInternal && e["message"] != repoMountOccupiedMessage {
+			t.Errorf("%s: message = %q, want the mount path's", e["mount_path"], e["message"])
+		}
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("clone errors (mount: reason) = %v, want %v", got, want)
+	}
+	if n := fx.clones.Load(); n != int64(len(cloned)) {
+		t.Errorf("clones = %d, want %d — a refused path still fetched the repository", n, len(cloned))
+	}
+	for _, mount := range cloned {
+		if got := readSandboxFile(t, sb, mount+"/README.md"); got != "x\n" {
+			t.Errorf("%s/README.md = %q, want the checkout", mount, got)
+		}
+	}
+	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+		Command: "cat /opt/EOF/keep /opt/file; readlink /opt/link /opt/dangling /opt/elink; test -d /opt/gone && echo gone-kept; " +
+			"ls -A /opt /workspace /workspace/stale /tmp /tmp/stale /mnt/session/uploads /mnt/session/uploads/repo"})
+	if err != nil {
+		t.Fatalf("inspect the sandbox: %v", err)
+	}
+	if want := "image\nimage\n/usr/share\n/nonexistent\n/opt/etarget\ngone-kept\n"; !strings.HasPrefix(res.Stdout, want) {
+		t.Errorf("what the refused paths held = %q, want it to start %q", res.Stdout, want)
+	}
+	for _, gone := range []string{"old", "map-repo-staging", "repo-sesrsc_legacy"} {
+		if strings.Contains(res.Stdout, gone) {
+			t.Errorf("%q is left in the sandbox:\n%s", gone, res.Stdout)
+		}
+	}
+}
+
+// TestRepoProbesThroughAFloodedStatus: an image's startup can push
+// mountOccupied's framed answer, and the probe exec's exit record with it,
+// out of the output (#860). That is no answer, so the clone goes ahead, and the extraction judges the path itself: an
+// empty directory clones, and one that holds a file is refused and kept, as
+// is a dangling symlink. Each refusal reads as the probe's would, with the
+// mount path's message.
+func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, provider, flooding := floodingRepoHarness(t)
+	sb := adopt(t, provider, h)
+	if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+		Command: "mkdir -p /opt/EOF /opt/empty && echo image > /opt/EOF/keep && ln -s /nonexistent /opt/dangling"}); err != nil || res.ExitCode != 0 {
+		t.Fatalf("plant the paths: %v %+v", err, res)
+	}
+	h.seedRepoResource(t, "sesrsc_vfull", fx.url(), "/opt/EOF", "ghp_fixture", nil)
+	h.seedRepoResource(t, "sesrsc_vempty", fx.url(), "/opt/empty", "ghp_fixture", nil)
+	h.seedRepoResource(t, "sesrsc_vlink", fx.url(), "/opt/dangling", "ghp_fixture", nil)
+
+	flooding.failVacant.Store(3)
+	h.runPass(t)
+
+	if n := flooding.failVacant.Load(); n > 0 {
+		t.Fatalf("%d flooded probes left unused: the probe never ran through the flood", n)
+	}
+	got := map[string]bool{}
+	for _, e := range h.repoErrors(t) {
+		got[e["mount_path"].(string)] = e["reason"] == repoOutcomeInternal &&
+			e["message"] == repoMountOccupiedMessage
+	}
+	if want := map[string]bool{"/opt/EOF": true, "/opt/dangling": true}; !maps.Equal(got, want) {
+		t.Fatalf("clone errors (mount: reason %s with the mount path's message) = %v, want %v",
+			repoOutcomeInternal, got, want)
+	}
+	if got := readSandboxFile(t, sb, "/opt/empty/README.md"); got != "x\n" {
+		t.Errorf("/opt/empty/README.md = %q, want the checkout", got)
+	}
+	if got := readSandboxFile(t, sb, "/opt/EOF/keep"); got != "image\n" {
+		t.Errorf("/opt/EOF/keep = %q, want what the image put there", got)
+	}
+	if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "readlink /opt/dangling"}); err != nil ||
+		res.Stdout != "/nonexistent\n" {
+		t.Errorf("readlink /opt/dangling = %+v %v, want the link kept", res, err)
+	}
+}
+
+// hookedProvider provisions sandboxes that run hook just before each
+// repository extraction, as an image's startup hook runs before every
+// script (#860), after mountOccupied has looked at the mount. startup, when
+// set, is put just after the first sandbox.ScriptPreamble in every platform
+// script, which a framed script carries too, in that script's own shell: a
+// stand-in for what an image's BASH_ENV leaves there.
+type hookedProvider struct {
+	sandbox.Provider
+	hook, startup string
+	// streamErr and extractErr, when set, fail the tar's upload and the
+	// extraction's exec, as a sandbox whose transport drops does.
+	streamErr, extractErr error
+}
+
+func (p *hookedProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
+	sb, err := p.Provider.Provision(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return &hookedSandbox{Sandbox: sb, p: p}, nil
+}
+
+type hookedSandbox struct {
+	sandbox.Sandbox
+	p *hookedProvider
+}
+
+func (s *hookedSandbox) WriteFileStream(ctx context.Context, p string, src io.Reader, size int64) error {
+	if s.p.streamErr != nil {
+		return s.p.streamErr
+	}
+	return s.Sandbox.WriteFileStream(ctx, p, src, size)
+}
+
+func (s *hookedSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if s.p.startup != "" {
+		req.Command = strings.Replace(req.Command, sandbox.ScriptPreamble, sandbox.ScriptPreamble+s.p.startup, 1)
+	}
+	if s.p.extractErr != nil && strings.Contains(req.Command, " && tar -xf ") {
+		return sandbox.ExecResult{}, s.p.extractErr
+	}
+	if s.p.hook != "" && strings.Contains(req.Command, " && tar -xf ") {
+		if res, err := s.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: s.p.hook}); err != nil || res.ExitCode != 0 {
+			return sandbox.ExecResult{}, errors.Join(err, errors.New("the hook did not run: "+res.Stderr))
+		}
+	}
+	return s.Sandbox.Exec(ctx, req)
+}
+
+// TestRepoVacatesAgainAtTheExtraction: a hook that makes the mount again
+// between mountOccupied's look and the extraction is judged by the extraction
+// itself. Without that, `mv` puts the checkout inside the directory and
+// reports success, and every later pass refuses the path.
+func TestRepoVacatesAgainAtTheExtraction(t *testing.T) {
+	for _, tc := range []struct {
+		name, hook string
+		lands      bool
+	}{
+		{"AnEmptyDirectoryIsReplaced", "mkdir -p /opt/hooked", true},
+		{"AFileInItIsKept", "mkdir -p /opt/hooked && echo hook > /opt/hooked/keep", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			h, provider := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+				return &hookedProvider{Provider: p, hook: tc.hook}
+			})
+			sb := adopt(t, provider, h)
+			h.seedRepoResource(t, "sesrsc_hooked", fx.url(), "/opt/hooked", "ghp_fixture", nil)
+
+			h.runPass(t)
+
+			errs := h.repoErrors(t)
+			res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "ls -A /opt /opt/hooked"})
+			if err != nil {
+				t.Fatalf("inspect the sandbox: %v", err)
+			}
+			if strings.Contains(res.Stdout, "map-repo-staging") {
+				t.Errorf("staging is left in the sandbox:\n%s", res.Stdout)
+			}
+			if tc.lands {
+				if len(errs) != 0 {
+					t.Errorf("clone errors = %v, want none", errs)
+				}
+				if got := readSandboxFile(t, sb, "/opt/hooked/README.md"); got != "x\n" {
+					t.Errorf("/opt/hooked/README.md = %q, want the checkout at the mount", got)
+				}
+				return
+			}
+			if len(errs) != 1 || errs[0]["message"] != repoMountOccupiedMessage {
+				t.Errorf("clone errors = %v, want exactly one, with the mount path's message", errs)
+			}
+			if got := readSandboxFile(t, sb, "/opt/hooked/keep"); got != "hook\n" {
+				t.Errorf("/opt/hooked/keep = %q, want what the hook put there", got)
+			}
+		})
+	}
+}
+
+// TestRepoProbeThatCannotAnswerGoesAhead: a listing can fail, as on a
+// directory the sandbox user may not read, and an image's startup can leave
+// attributes on any variable name. Neither says the path holds something, so
+// the clone goes ahead and the extraction's rmdir decides. Here the startup
+// makes `ls` fail and leaves a readonly `e` in every platform script: an
+// empty directory clones, and one holding a file is refused and kept.
+func TestRepoProbeThatCannotAnswerGoesAhead(t *testing.T) {
+	for _, tc := range []struct {
+		name, plant string
+		lands       bool
+	}{
+		{"AnEmptyDirectoryClones", "mkdir -p /opt/unlisted", true},
+		{"AFileInItIsKept", "mkdir -p /opt/unlisted && echo image > /opt/unlisted/keep", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			h, provider := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+				return &hookedProvider{Provider: p, startup: "ls() { return 2; }; readonly e=hook; "}
+			})
+			sb := adopt(t, provider, h)
+			if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: tc.plant}); err != nil || res.ExitCode != 0 {
+				t.Fatalf("plant the directory: %v %+v", err, res)
+			}
+			h.seedRepoResource(t, "sesrsc_unlisted", fx.url(), "/opt/unlisted", "ghp_fixture", nil)
+
+			h.runPass(t)
+
+			errs := h.repoErrors(t)
+			if tc.lands {
+				if len(errs) != 0 {
+					t.Errorf("clone errors = %v, want none: the probe gave no answer", errs)
+				}
+				if got := readSandboxFile(t, sb, "/opt/unlisted/README.md"); got != "x\n" {
+					t.Errorf("/opt/unlisted/README.md = %q, want the checkout", got)
+				}
+				return
+			}
+			if len(errs) != 1 || errs[0]["message"] != repoMountOccupiedMessage {
+				t.Errorf("clone errors = %v, want exactly one, with the mount path's message", errs)
+			}
+			if got := readSandboxFile(t, sb, "/opt/unlisted/keep"); got != "image\n" {
+				t.Errorf("/opt/unlisted/keep = %q, want what the image put there", got)
+			}
+		})
+	}
+}
+
+// TestRepoProbeAnswersOnlyInItsFrame: the probe reads a path as occupied only
+// when its framed answer says so. A shell that an image's startup ends first
+// gives no answer, whatever its exit status, the extraction's own refusal
+// status included, and whatever it printed before the frame. The probe names
+// no variable, so a readonly name the startup leaves does not silence it.
+func TestRepoProbeAnswersOnlyInItsFrame(t *testing.T) {
+	h, provider := dockerRepoHarness(t)
+	sb := adopt(t, provider, h)
+	ctx := context.Background()
+	if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "echo image > /opt/file && mkdir -p /opt/full && echo image > /opt/full/keep"}); err != nil || res.ExitCode != 0 {
+		t.Fatalf("plant the paths: %v %+v", err, res)
+	}
+	for _, mount := range []string{"/opt/file", "/opt/full"} {
+		if !mountOccupied(ctx, sb, mount) {
+			t.Errorf("the probe read %s, which holds something, as vacant", mount)
+		}
+	}
+	for _, startup := range []string{"exit 3; ", "exit " + strconv.Itoa(occupiedStatus) + "; ", "echo occupied; exit 3; "} {
+		failing := &hookedSandbox{Sandbox: sb, p: &hookedProvider{startup: startup}}
+		for _, mount := range []string{"/opt/absent", "/opt/file"} {
+			if mountOccupied(ctx, failing, mount) {
+				t.Errorf("a probe whose startup ran %q read %s as occupied", startup, mount)
+			}
+		}
+	}
+	readonlyE := &hookedSandbox{Sandbox: sb, p: &hookedProvider{startup: "readonly e=hook; "}}
+	if !mountOccupied(ctx, readonlyE, "/opt/full") {
+		t.Error("a startup's readonly e silenced the probe: /opt/full read as vacant")
+	}
+}
+
+// TestRepoVacancyProbeIsBounded: the probe runs before the clone's deadline is
+// set, so it carries a timeout of its own, and an answer from a probe that
+// timed out is no answer.
+func TestRepoVacancyProbeIsBounded(t *testing.T) {
+	if repoVacancyTimeout <= 0 {
+		t.Fatalf("repoVacancyTimeout = %s, want a bound: zero means no limit", repoVacancyTimeout)
+	}
+	for _, timedOut := range []bool{false, true} {
+		sb := &fakeSandbox{execHook: func(sandbox.ExecRequest) *sandbox.ExecResult {
+			return &sandbox.ExecResult{Stdout: "occupied\n", TimedOut: timedOut}
+		}}
+		if got := mountOccupied(context.Background(), sb, "/opt/repo"); got == timedOut {
+			t.Errorf("timed out %v: occupied = %v, want %v", timedOut, got, !timedOut)
+		}
+		if len(sb.execTimeouts) != 1 || sb.execTimeouts[0] != repoVacancyTimeout {
+			t.Errorf("probe timeouts = %v, want [%s]", sb.execTimeouts, repoVacancyTimeout)
+		}
+	}
+}
+
+// TestRepoProbeWithNoAnswerFetches: under an image's startup that ends every
+// shell first, the probe gives no answer, so an absent path is fetched and
+// the extraction's failure is reported with the generic message, not refused
+// before the fetch as an occupied path.
+func TestRepoProbeWithNoAnswerFetches(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, _ := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+		return &hookedProvider{Provider: p, startup: "exit 3; "}
+	})
+	h.seedRepoResource(t, "sesrsc_noanswer", fx.url(), "/opt/absent", "ghp_fixture", nil)
+
+	h.runPass(t)
+
+	if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != repoOutcomeInternal || errs[0]["message"] != repoCloneFailedMessage {
+		t.Errorf("clone errors = %v, want exactly one, with reason %s and the generic message", errs, repoOutcomeInternal)
+	}
+	if n := fx.clones.Load(); n != 1 {
+		t.Errorf("clones = %d, want 1: a probe with no answer must not refuse before the fetch", n)
+	}
+}
+
+// TestRepoSandboxFailureIsNotTheHosts: a failure after the fetch is the
+// sandbox's, never the git host's, though its text can read like one: a
+// sandbox transport that drops reports an unexpected EOF, whether it was
+// shipping the tar or running the extraction. A deadline that ends the
+// extraction is still a timeout.
+func TestRepoSandboxFailureIsNotTheHosts(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		prov       hookedProvider
+	}{
+		{"ShippingTheTar", repoOutcomeInternal, hookedProvider{streamErr: io.ErrUnexpectedEOF}},
+		{"RunningTheExtraction", repoOutcomeInternal, hookedProvider{extractErr: io.ErrUnexpectedEOF}},
+		{"TimingOutInTheExtraction", repoOutcomeTimeout, hookedProvider{extractErr: context.DeadlineExceeded}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			h, _ := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+				prov := tc.prov
+				prov.Provider = p
+				return &prov
+			})
+			h.seedRepoResource(t, "sesrsc_transport", fx.url(), repoMount, "ghp_fixture", nil)
+
+			h.runPass(t)
+
+			if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != tc.want || errs[0]["message"] != repoCloneFailedMessage {
+				t.Errorf("clone errors = %v, want exactly one, with reason %s and the generic message", errs, tc.want)
+			}
+		})
 	}
 }
 
