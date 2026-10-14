@@ -237,7 +237,7 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	// safeRepoMount refuses it for a row from any other route.
 	sandboxTar := path.Join(repoStagingRoot, "repo-"+m.ID+".tar")
 	if err := sb.WriteFileStream(ctx, sandboxTar, f, size); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", errExtraction, err)
 	}
 	// From here the sandbox holds up to the whole byte budget in /tmp, and the
 	// only thing that removes it is the extraction command's own cleanup tail.
@@ -402,20 +402,22 @@ func vacantScript(mount string) string {
 }
 
 // vacateScript clears a mount that replacesWhole refuses, in place of the
-// `rm -rf` right before the rename. It leaves an absent path alone and
-// removes an empty directory. rmdir refuses everything else, a directory
-// with content, a file and a symlink alike, dangling or not, and so does
-// vacantScript; a refusal ends the extraction with occupiedStatus.
+// `rm -rf` right before the rename. It leaves an absent path alone, removes
+// an empty directory, and refuses whatever rmdir refuses: a directory with
+// content, a file, a symlink, dangling or not, and an empty directory the
+// sandbox user cannot remove. A refusal ends the extraction with
+// occupiedStatus. It can refuse a path vacantScript let through, such as one
+// the probe could not list; the fetch is then spent, and nothing is lost.
 func vacateScript(mount string) string {
 	q := shellQuote(mount)
-	return "{ { { [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || rmdir " + q + "; } || (exit " +
+	return "{ { [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || rmdir " + q + " || (exit " +
 		strconv.Itoa(occupiedStatus) + "); }"
 }
 
 // occupiedStatus is the extraction's exit status when vacateScript refuses
 // the mount, so the refusal is reported as errMountOccupied and not as a
-// failed extraction. No platform command in the script exits with it; a tar
-// or mv the image wraps could, and would read as an occupied path.
+// failed extraction. No platform command in the script exits with it; one
+// the image wraps could, and would read as an occupied path.
 const occupiedStatus = 75
 
 // errMountOccupied is a clone refused because its mount path is outside the
@@ -424,10 +426,11 @@ const occupiedStatus = 75
 // the extraction.
 var errMountOccupied = errors.New("the mount path is neither absent nor an empty directory the clone can remove")
 
-// errExtraction is an extraction script that failed. Its message quotes the
-// script's stderr, and so the mount path: cloneReason classifies it before
-// the network arm's text match, to which a path like /opt/EOF reads as the
-// git host's failure.
+// errExtraction is a failure after the fetch, in the sandbox: shipping the
+// tar there, or the extraction script. It is the sandbox's, never the git
+// host's, though its text can read like the host's to cloneReason's network
+// arm: a dropped exec stream says EOF, and a script's stderr quotes the mount
+// path, such as /opt/EOF.
 var errExtraction = errors.New("extracting the repository into the sandbox failed")
 
 // mountOccupied asks vacantScript before the fetch. A probe that exits
@@ -502,13 +505,18 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 		if sandbox.StatPresence(ctx, sb, path.Join(clean, ".git")) == sandbox.Present {
 			return nil
 		}
-		return err
+		return fmt.Errorf("%w: %w", errExtraction, err)
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errExtraction, err)
 	}
 	if !whole && res.ExitCode == occupiedStatus {
-		return fmt.Errorf("%w: %s", errMountOccupied, strings.TrimSpace(res.Stderr))
+		// rmdir's own word on why, which an image's startup can only precede.
+		stderr := strings.TrimSpace(res.Stderr)
+		if why := stderr[strings.LastIndexByte(stderr, '\n')+1:]; why != "" {
+			return fmt.Errorf("%w: %s", errMountOccupied, why)
+		}
+		return errMountOccupied
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("%w with exit %d: %s", errExtraction,

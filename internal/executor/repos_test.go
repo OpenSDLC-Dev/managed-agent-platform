@@ -882,6 +882,9 @@ func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 type hookedProvider struct {
 	sandbox.Provider
 	hook, startup string
+	// streamErr and extractErr, when set, fail the tar's upload and the
+	// extraction's exec, as a sandbox whose transport drops does.
+	streamErr, extractErr error
 }
 
 func (p *hookedProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -889,20 +892,30 @@ func (p *hookedProvider) Provision(ctx context.Context, spec sandbox.Spec) (sand
 	if err != nil {
 		return nil, err
 	}
-	return &hookedSandbox{Sandbox: sb, hook: p.hook, startup: p.startup}, nil
+	return &hookedSandbox{Sandbox: sb, p: p}, nil
 }
 
 type hookedSandbox struct {
 	sandbox.Sandbox
-	hook, startup string
+	p *hookedProvider
+}
+
+func (s *hookedSandbox) WriteFileStream(ctx context.Context, p string, src io.Reader, size int64) error {
+	if s.p.streamErr != nil {
+		return s.p.streamErr
+	}
+	return s.Sandbox.WriteFileStream(ctx, p, src, size)
 }
 
 func (s *hookedSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if script, ok := strings.CutPrefix(req.Command, sandbox.ScriptPreamble); ok && s.startup != "" {
-		req.Command = sandbox.ScriptPreamble + s.startup + script
+	if script, ok := strings.CutPrefix(req.Command, sandbox.ScriptPreamble); ok && s.p.startup != "" {
+		req.Command = sandbox.ScriptPreamble + s.p.startup + script
 	}
-	if s.hook != "" && strings.Contains(req.Command, " && tar -xf ") {
-		if res, err := s.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: s.hook}); err != nil || res.ExitCode != 0 {
+	if s.p.extractErr != nil && strings.Contains(req.Command, " && tar -xf ") {
+		return sandbox.ExecResult{}, s.p.extractErr
+	}
+	if s.p.hook != "" && strings.Contains(req.Command, " && tar -xf ") {
+		if res, err := s.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: s.p.hook}); err != nil || res.ExitCode != 0 {
 			return sandbox.ExecResult{}, errors.Join(err, errors.New("the hook did not run: "+res.Stderr))
 		}
 	}
@@ -1000,6 +1013,38 @@ func TestRepoProbeThatCannotAnswerGoesAhead(t *testing.T) {
 			}
 			if got := readSandboxFile(t, sb, "/opt/unlisted/keep"); got != "image\n" {
 				t.Errorf("/opt/unlisted/keep = %q, want what the image put there", got)
+			}
+		})
+	}
+}
+
+// TestRepoSandboxFailureIsNotTheHosts: a failure after the fetch is the
+// sandbox's, never the git host's, though its text can read like one: a
+// sandbox transport that drops reports an unexpected EOF, whether it was
+// shipping the tar or running the extraction. A deadline that ends the
+// extraction is still a timeout.
+func TestRepoSandboxFailureIsNotTheHosts(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		prov       hookedProvider
+	}{
+		{"ShippingTheTar", repoOutcomeInternal, hookedProvider{streamErr: io.ErrUnexpectedEOF}},
+		{"RunningTheExtraction", repoOutcomeInternal, hookedProvider{extractErr: io.ErrUnexpectedEOF}},
+		{"TimingOutInTheExtraction", repoOutcomeTimeout, hookedProvider{extractErr: context.DeadlineExceeded}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			h, _ := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+				prov := tc.prov
+				prov.Provider = p
+				return &prov
+			})
+			h.seedRepoResource(t, "sesrsc_transport", fx.url(), repoMount, "ghp_fixture", nil)
+
+			h.runPass(t)
+
+			if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != tc.want {
+				t.Errorf("clone errors = %v, want exactly one, with reason %s", errs, tc.want)
 			}
 		})
 	}
