@@ -245,21 +245,22 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // cloneFailed marks err as go-git's clone's (errClone), and as go-git's
 // refusal of a path where it is one (errPathRefused). go-git formats some
 // errors with %s, among them a deadline that fires while it decodes the pack
-// response. So the context's error joins the chain where the context has
-// fired, the message names that error, and nothing else explains the
+// response. So the deadline's error joins the chain where the clone's
+// deadline has passed, the message names it, and nothing else explains the
 // failure: cloneReason reads it as internal, and it is not this executor's
 // own (isLocalError). A failure with a reason of its own keeps it, though
 // the deadline passed while go-git ran on: its checkout ignores the context.
-// Nor does a name that quotes the context's error decide the reason: a file
-// the repository named so, or a host's message.
+// Nor does a name that quotes the deadline's error decide the reason: a file
+// the repository named so, or a host's message. A cancellation needs no
+// join, as it reads as internal either way.
 func cloneFailed(ctx context.Context, err error) error {
-	if pathRefusal.MatchString(err.Error()) {
+	if isPathRefusal(err) {
 		err = withCause{err, errPathRefused}
 	}
 	err = fmt.Errorf("%w: %w", errClone, err)
-	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) && strings.Contains(err.Error(), cerr.Error()) &&
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) && strings.Contains(err.Error(), context.DeadlineExceeded.Error()) &&
 		!isLocalError(err) && cloneReason(err) == repoOutcomeInternal {
-		err = withCause{err, cerr}
+		err = withCause{err, context.DeadlineExceeded}
 	}
 	return err
 }
@@ -270,11 +271,30 @@ func cloneFailed(ctx context.Context, err error) error {
 // pathutil's check, which its tree walk flattens with %s.
 var errPathRefused = errors.New("go-git refused a path the repository holds")
 
-// pathRefusal matches that text at the start of go-git's message, after the
-// prefixes its tree walk adds: merkletrie's "from: " and "to: ", the change
-// adaptor's "from field: " and "to field: ", the worktree's "chroot: ". A
-// host's text, such as an HTTP/2 GOAWAY's debug data, never starts it.
-var pathRefusal = regexp.MustCompile(`^(?:(?:from|to)(?: field)?: |chroot: )*invalid path`)
+// pathRefusal matches that text at the start of a message, after the
+// prefixes go-git's tree walk adds with %s, which keep only the text:
+// merkletrie's "from: " and "to: ". The worktree's "chroot: " begins one
+// refusal's own text. A host's text starts an error only as an ERR pkt-line,
+// whose message is that text alone (isPathRefusal skips it). Elsewhere it
+// follows go-git's own words, as an HTTP/2 GOAWAY's debug data does.
+var pathRefusal = regexp.MustCompile(`^(?:(?:from|to): |chroot: )*invalid path`)
+
+// isPathRefusal reports whether an error in err's chain starts with go-git's
+// refusal of a path (pathRefusal). The worktree's filesystem wraps the
+// refusal with %w after its operation's name ("lstat: ", "create: ", and the
+// rest), so the refusal itself is a link of the chain.
+func isPathRefusal(err error) bool {
+	var errLine *pktline.ErrorLine
+	if errors.As(err, &errLine) {
+		return false
+	}
+	for ; err != nil; err = errors.Unwrap(err) {
+		if pathRefusal.MatchString(err.Error()) {
+			return true
+		}
+	}
+	return false
+}
 
 // shapeCheckout gives a checkout the .git/config and refs the reference's
 // carried (#582): `origin` and GitHub CLI's base remote `github`, both at the

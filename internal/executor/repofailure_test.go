@@ -155,27 +155,32 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 
 	// go-git refuses a path the repository holds in plain text, which quotes
 	// the path. cloneFailed marks the refusal by where its text starts, so a
-	// host's text that holds the same words stays the host's.
-	t.Run("go-git refuses a tracked name with a control character", func(t *testing.T) {
-		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-		fx.commitRawTree(t, "EOF\r")
-		_, _, cleanup, err := cloneToTar(context.Background(), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
-		defer cleanup()
-		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("invalid path %q", "EOF\r")) {
-			t.Fatalf("err = %v, want go-git's refusal of the path", err)
-		}
-		if got := cloneReason(err); got != repoOutcomeInternal {
-			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeInternal, err)
-		}
-	})
+	// host's text that holds the same words stays the host's. go-git's tree
+	// walk refuses a control character with %s, after "to: "; its worktree
+	// refuses a Windows device name with %w, after "lstat: ".
+	for _, tc := range []struct{ why, name string }{
+		{"a control character", "EOF\r"},
+		{"a Windows device name", "NUL.EOF"},
+	} {
+		t.Run("go-git refuses a tracked name with "+tc.why, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			fx.commitRawTree(t, tc.name)
+			_, _, cleanup, err := cloneToTar(context.Background(), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+			defer cleanup()
+			if err == nil || !strings.Contains(err.Error(), "invalid path") || !strings.Contains(err.Error(), fmt.Sprintf("%q", tc.name)) {
+				t.Fatalf("err = %v, want go-git's refusal of the path", err)
+			}
+			if got := cloneReason(err); got != repoOutcomeInternal {
+				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeInternal, err)
+			}
+		})
+	}
 	for _, tc := range []struct {
 		name string
 		err  error
 		want string
 	}{
 		{"go-git refuses a symlinked parent", fmt.Errorf("chroot: invalid path %q: is a symlink", "GOAWAY/x"), repoOutcomeInternal},
-		{"go-git's change adaptor refuses a path", fmt.Errorf("to field: %s",
-			fmt.Errorf("invalid path %q: cannot use %q", "EOF/..", "..")), repoOutcomeInternal},
 		{"the host's GOAWAY quotes a path refusal", fmt.Errorf("error decoding upload-pack response: %s",
 			"http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=\"invalid path\""),
 			repoOutcomeNetwork},
@@ -186,6 +191,14 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			}
 		})
 	}
+	// An ERR pkt-line's message is the host's text alone, which can start as
+	// a path refusal does; it is not go-git's.
+	t.Run("the host's ERR line starts as a path refusal", func(t *testing.T) {
+		err := cloneFailed(context.Background(), &pktline.ErrorLine{Text: "invalid path: upstream connection reset"})
+		if errors.Is(err, errPathRefused) {
+			t.Errorf("cloneFailed marked the host's ERR line as go-git's refusal of a path: %v", err)
+		}
+	})
 
 	// A read of the response body fails outside the client's *url.Error, and
 	// an alert the host's TLS sent, whose text matches none of the network
