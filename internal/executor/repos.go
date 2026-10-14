@@ -208,7 +208,8 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m repoRef, sentinel string, progress func()) (int64, error) {
 	// A mount the clone may not replace whole is probed before the fetch, so
 	// a path that visibly holds something costs one exec a pass rather than a
-	// clone. One the probe cannot list is fetched, and the extraction judges it.
+	// clone. One the probe gives no answer for, or cannot list, is fetched,
+	// and the extraction judges it.
 	whole := e.replacesWhole(m.MountPath)
 	if !whole {
 		if mountOccupied(ctx, sb, m.MountPath) {
@@ -396,17 +397,17 @@ func (e *Executor) replacesWhole(mount string) bool {
 }
 
 // vacantScript asks, and changes nothing, whether a clone may take mount:
-// whether it is absent, or an empty directory that is not a symlink. When
-// neither holds it exits with occupiedStatus, so a shell that fails for
-// another reason, as an image's startup can make it, is no answer. A listing
-// that fails, as on a directory the sandbox user may not read, prints nothing
-// and so reads as empty: that too is no answer, and the rmdir in vacateScript
-// decides. It names no variable, because an image's startup can leave
-// attributes on any name it might take.
+// whether it is absent, or an empty directory that is not a symlink. It
+// prints vacant or occupied, and mountOccupied reads the answer framed, so a
+// shell that an image's startup ends first gives no answer, whatever its exit
+// status. A listing that fails, as on a directory the sandbox user may not
+// read, prints nothing and so reads as empty: the probe answers vacant, and
+// the rmdir in vacateScript decides. It names no variable, because an
+// image's startup can leave attributes on any name it might take.
 func vacantScript(mount string) string {
 	q := shellQuote(mount)
-	return "{ [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || { [ -d " + q + " ] && [ ! -L " + q +
-		" ] && [ -z \"$(ls -A " + q + " 2>/dev/null)\" ]; } || (exit " + strconv.Itoa(occupiedStatus) + ")"
+	return "if { [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || { [ -d " + q + " ] && [ ! -L " + q +
+		" ] && [ -z \"$(ls -A " + q + " 2>/dev/null)\" ]; }; then echo vacant; else echo occupied; fi"
 }
 
 // vacateScript clears a mount that replacesWhole refuses, in place of the
@@ -422,11 +423,10 @@ func vacateScript(mount string) string {
 		strconv.Itoa(occupiedStatus) + "); }"
 }
 
-// occupiedStatus is vacantScript's exit status for an occupied path, and the
-// extraction's when vacateScript refuses the mount, so the refusal is reported
-// as errMountOccupied and not as a failed probe or extraction. No platform
-// command in either script exits with it; an image's startup, or a command
-// the image wraps, could, and would read as an occupied path.
+// occupiedStatus is the extraction's exit status when vacateScript refuses
+// the mount, so the refusal is reported as errMountOccupied and not as a
+// failed extraction. No platform command in the script exits with it; one
+// the image wraps could, and would read as an occupied path.
 const occupiedStatus = 75
 
 // errMountOccupied is a clone refused because its mount path is outside the
@@ -442,14 +442,20 @@ var errMountOccupied = errors.New("the mount path is neither absent nor an empty
 // path, such as /opt/EOF.
 var errExtraction = errors.New("landing the repository in the sandbox failed")
 
-// mountOccupied asks vacantScript before the fetch, and only occupiedStatus
-// refuses. Any other answer reads as vacant: an exec that failed or timed
-// out, an exit status an image's startup pushed out of the output (#860), or
-// a shell the startup ended first. vacateScript judges the path again in the
+// repoVacancyTimeout bounds mountOccupied's probe, which runs before the
+// clone's own deadline is set.
+const repoVacancyTimeout = 30 * time.Second
+
+// mountOccupied asks vacantScript before the fetch, framed
+// (sandbox.ExecFramed), and only the answer occupied refuses. Anything else
+// reads as vacant: an exec that failed or timed out, or an answer that never
+// reached the output because an image's startup ended the shell first or
+// printed past the cap (#860). vacateScript judges the path again in the
 // extraction, and that judgment is the one that holds.
 func mountOccupied(ctx context.Context, sb sandbox.Sandbox, mount string) bool {
-	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: vacantScript(mount)})
-	return err == nil && !res.TimedOut && res.ExitCode == occupiedStatus
+	res, framed, err := sandbox.ExecFramed(ctx, sb, "repovacancy",
+		sandbox.ExecRequest{Command: vacantScript(mount), Timeout: repoVacancyTimeout})
+	return err == nil && framed && !res.TimedOut && strings.TrimSpace(res.Stdout) == "occupied"
 }
 
 // extractRepo unpacks the shipped tar into a staging directory beside the

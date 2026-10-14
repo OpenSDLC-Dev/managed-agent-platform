@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -369,7 +370,7 @@ func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sa
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
-	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"{ [ ! -e ") && s.p.failVacant.Add(-1) >= 0 {
+	if strings.Contains(req.Command, "; then echo vacant; else echo occupied; fi") && s.p.failVacant.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
@@ -504,7 +505,8 @@ func TestRepoCloneErrorDedupe(t *testing.T) {
 		t.Fatalf("recorded %d clone errors after two identical failures, want 1 (%v)", len(errs), errs)
 	}
 
-	// A reason flip re-emits: the client learns the failure changed.
+	// A flip to a reason the resource has not had re-emits: the client learns
+	// the failure changed.
 	fx.status.Store(http.StatusNotFound)
 	h.runPass(t)
 	errs := h.repoErrors(t)
@@ -901,9 +903,9 @@ func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 // hookedProvider provisions sandboxes that run hook just before each
 // repository extraction, as an image's startup hook runs before every
 // script (#860), after mountOccupied has looked at the mount. startup, when
-// set, is put at the head of every script that opens with
-// sandbox.ScriptPreamble, just after the preamble, in that script's own
-// shell: a stand-in for what an image's BASH_ENV leaves there.
+// set, is put just after the first sandbox.ScriptPreamble in every platform
+// script, which a framed script carries too, in that script's own shell: a
+// stand-in for what an image's BASH_ENV leaves there.
 type hookedProvider struct {
 	sandbox.Provider
 	hook, startup string
@@ -933,8 +935,8 @@ func (s *hookedSandbox) WriteFileStream(ctx context.Context, p string, src io.Re
 }
 
 func (s *hookedSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if script, ok := strings.CutPrefix(req.Command, sandbox.ScriptPreamble); ok && s.p.startup != "" {
-		req.Command = sandbox.ScriptPreamble + s.p.startup + script
+	if s.p.startup != "" {
+		req.Command = strings.Replace(req.Command, sandbox.ScriptPreamble, sandbox.ScriptPreamble+s.p.startup, 1)
 	}
 	if s.p.extractErr != nil && strings.Contains(req.Command, " && tar -xf ") {
 		return sandbox.ExecResult{}, s.p.extractErr
@@ -1043,13 +1045,12 @@ func TestRepoProbeThatCannotAnswerGoesAhead(t *testing.T) {
 	}
 }
 
-// TestRepoProbeRefusesOnlyOnItsStatus: the probe reads a path as occupied
-// only when it exits with occupiedStatus. A shell that fails for another
-// reason, as when an image's startup exits non-zero, is no answer, so the
-// clone goes ahead and the extraction judges the path. The probe names no
-// variable, so a readonly name the startup leaves does not silence it, and
-// an occupied path is refused before the fetch.
-func TestRepoProbeRefusesOnlyOnItsStatus(t *testing.T) {
+// TestRepoProbeAnswersOnlyInItsFrame: the probe reads a path as occupied only
+// when its framed answer says so. A shell that an image's startup ends first
+// gives no answer, whatever its exit status, the extraction's own refusal
+// status included, and whatever it printed before the frame. The probe names no variable, so a readonly name the
+// startup leaves does not silence it.
+func TestRepoProbeAnswersOnlyInItsFrame(t *testing.T) {
 	h, provider := dockerRepoHarness(t)
 	sb := adopt(t, provider, h)
 	ctx := context.Background()
@@ -1061,15 +1062,38 @@ func TestRepoProbeRefusesOnlyOnItsStatus(t *testing.T) {
 			t.Errorf("the probe read %s, which holds something, as vacant", mount)
 		}
 	}
-	failing := &hookedSandbox{Sandbox: sb, p: &hookedProvider{startup: "exit 3; "}}
-	for _, mount := range []string{"/opt/absent", "/opt/file"} {
-		if mountOccupied(ctx, failing, mount) {
-			t.Errorf("a probe whose shell exits 3 read %s as occupied", mount)
+	for _, startup := range []string{"exit 3; ", "exit " + strconv.Itoa(occupiedStatus) + "; ", "echo occupied; exit 3; "} {
+		failing := &hookedSandbox{Sandbox: sb, p: &hookedProvider{startup: startup}}
+		for _, mount := range []string{"/opt/absent", "/opt/file"} {
+			if mountOccupied(ctx, failing, mount) {
+				t.Errorf("a probe whose startup ran %q read %s as occupied", startup, mount)
+			}
 		}
 	}
 	readonlyE := &hookedSandbox{Sandbox: sb, p: &hookedProvider{startup: "readonly e=hook; "}}
 	if !mountOccupied(ctx, readonlyE, "/opt/full") {
 		t.Error("a startup's readonly e silenced the probe: /opt/full read as vacant")
+	}
+}
+
+// TestRepoProbeWithNoAnswerFetches: under an image's startup that ends every
+// shell first, the probe gives no answer, so an absent path is fetched and
+// the extraction's failure is reported with the generic message, not refused
+// before the fetch as an occupied path.
+func TestRepoProbeWithNoAnswerFetches(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, _ := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+		return &hookedProvider{Provider: p, startup: "exit 3; "}
+	})
+	h.seedRepoResource(t, "sesrsc_noanswer", fx.url(), "/opt/absent", "ghp_fixture", nil)
+
+	h.runPass(t)
+
+	if errs := h.repoErrors(t); len(errs) != 1 || errs[0]["reason"] != repoOutcomeInternal || errs[0]["message"] != repoCloneFailedMessage {
+		t.Errorf("clone errors = %v, want exactly one, with reason %s and the generic message", errs, repoOutcomeInternal)
+	}
+	if n := fx.clones.Load(); n != 1 {
+		t.Errorf("clones = %d, want 1: a probe with no answer must not refuse before the fetch", n)
 	}
 }
 
