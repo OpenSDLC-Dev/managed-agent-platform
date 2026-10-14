@@ -5,12 +5,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -367,7 +367,7 @@ func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sa
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
-	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"{ { [ ! -e ") && s.p.failVacate.Add(-1) >= 0 {
+	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"{ [ ! -e ") && s.p.failVacate.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
@@ -755,19 +755,23 @@ func TestRepoExtractFailureIsTolerated(t *testing.T) {
 // image ships at it. At /usr on a merged-/usr image, that is the shell itself.
 // Outside the platform's directories a clone takes only an absent path or an
 // empty directory. At a path that holds files, at a file, or at a symlink it
-// fails as a clone error, fetches nothing and removes nothing. Inside them,
-// where the files and skills steps write too, a tree without its .git is
-// still replaced whole.
+// fails as a clone error, fetches nothing and removes nothing. An empty
+// directory whose fetch fails is left as it was. Inside the platform's
+// directories, where the files and skills steps write too, a tree without its
+// .git is still replaced whole.
 func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	missing := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	missing.status.Store(http.StatusNotFound)
 	h, provider := dockerRepoHarness(t)
 	sb := adopt(t, provider, h)
 	plant, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: strings.Join([]string{
-		"mkdir -p /opt/EOF /opt/empty /workspace/stale /tmp/stale /mnt/session/uploads/repo",
+		"mkdir -p /opt/EOF /opt/empty /opt/etarget /opt/gone /workspace/stale /tmp/stale /mnt/session/uploads/repo",
 		"echo image > /opt/EOF/keep",
 		"echo image > /opt/file",
 		"ln -s /usr/share /opt/link",
 		"ln -s /nonexistent /opt/dangling",
+		"ln -s /opt/etarget /opt/elink",
 		"echo old > /workspace/stale/old",
 		"echo old > /tmp/stale/old",
 		"echo old > /mnt/session/uploads/repo/old",
@@ -777,27 +781,28 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 	}
 	// /opt/EOF is a path the network arm's text match would read as the git
 	// host's failure, had the refusal reached it.
-	kept := []string{"/opt/EOF", "/opt/dangling", "/opt/file", "/opt/link"}
+	kept := []string{"/opt/EOF", "/opt/dangling", "/opt/elink", "/opt/file", "/opt/link"}
 	cloned := []string{"/mnt/session/uploads/repo", "/opt/absent", "/opt/empty", "/tmp/stale", "/workspace/stale"}
 	for i, mount := range append(append([]string(nil), kept...), cloned...) {
 		h.seedRepoResource(t, "sesrsc_legacy"+string(rune('a'+i)), fx.url(), mount, "ghp_fixture", nil)
 	}
+	h.seedRepoResource(t, "sesrsc_legacygone", missing.url(), "/opt/gone", "ghp_fixture", nil)
 
 	h.runPass(t)
 
-	var failed []string
+	want := map[string]any{"/opt/gone": repoOutcomeNotFound}
+	for _, mount := range kept {
+		want[mount] = repoOutcomeInternal
+	}
+	got := map[string]any{}
 	for _, e := range h.repoErrors(t) {
-		failed = append(failed, e["mount_path"].(string))
-		if e["reason"] != repoOutcomeInternal {
-			t.Errorf("clone error at %v has reason %v, want %s", e["mount_path"], e["reason"], repoOutcomeInternal)
-		}
+		got[e["mount_path"].(string)] = e["reason"]
 	}
-	sort.Strings(failed)
-	if strings.Join(failed, " ") != strings.Join(kept, " ") {
-		t.Errorf("clone errors at %v, want exactly %v", failed, kept)
+	if !maps.Equal(got, want) {
+		t.Errorf("clone errors (mount: reason) = %v, want %v", got, want)
 	}
-	if got := fx.clones.Load(); got != int64(len(cloned)) {
-		t.Errorf("clones = %d, want %d — a refused path still fetched the repository", got, len(cloned))
+	if n := fx.clones.Load(); n != int64(len(cloned)) {
+		t.Errorf("clones = %d, want %d — a refused path still fetched the repository", n, len(cloned))
 	}
 	for _, mount := range cloned {
 		if got := readSandboxFile(t, sb, mount+"/README.md"); got != "x\n" {
@@ -805,11 +810,12 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 		}
 	}
 	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
-		Command: "cat /opt/EOF/keep /opt/file; readlink /opt/link /opt/dangling; ls -A /opt /workspace /workspace/stale /tmp /tmp/stale /mnt/session/uploads /mnt/session/uploads/repo"})
+		Command: "cat /opt/EOF/keep /opt/file; readlink /opt/link /opt/dangling /opt/elink; test -d /opt/gone && echo gone-kept; " +
+			"ls -A /opt /workspace /workspace/stale /tmp /tmp/stale /mnt/session/uploads /mnt/session/uploads/repo"})
 	if err != nil {
 		t.Fatalf("inspect the sandbox: %v", err)
 	}
-	if want := "image\nimage\n/usr/share\n/nonexistent\n"; !strings.HasPrefix(res.Stdout, want) {
+	if want := "image\nimage\n/usr/share\n/nonexistent\n/opt/etarget\ngone-kept\n"; !strings.HasPrefix(res.Stdout, want) {
 		t.Errorf("what the refused paths held = %q, want it to start %q", res.Stdout, want)
 	}
 	for _, gone := range []string{"old", "map-repo-staging", "repo-sesrsc_legacy"} {
@@ -819,11 +825,11 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 	}
 }
 
-// TestRepoVacatesThroughAFloodedStatus: an image's startup can push the exit
-// status of vacateMount's script out of the output (#860). What the script
-// left is then what a stat reads: a path it emptied clones, and a path that
-// still holds something is refused without a fetch.
-func TestRepoVacatesThroughAFloodedStatus(t *testing.T) {
+// TestRepoProbesThroughAFloodedStatus: an image's startup can push the exit
+// status of mountOccupied's probe out of the output (#860). That is no answer,
+// so the clone goes ahead, and the extraction judges the path itself: an
+// empty directory clones, and one that holds a file is refused and kept.
+func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	h, provider, flooding := floodingRepoHarness(t)
 	sb := adopt(t, provider, h)
@@ -838,20 +844,96 @@ func TestRepoVacatesThroughAFloodedStatus(t *testing.T) {
 	h.runPass(t)
 
 	if n := flooding.failVacate.Load(); n > 0 {
-		t.Fatalf("%d flooded vacate probes left unused: the probe never ran through the flood", n)
+		t.Fatalf("%d flooded probes left unused: the probe never ran through the flood", n)
 	}
 	errs := h.repoErrors(t)
-	if len(errs) != 1 || errs[0]["mount_path"] != "/opt/full" {
-		t.Fatalf("clone errors = %v, want exactly one, at /opt/full", errs)
-	}
-	if got := fx.clones.Load(); got != 1 {
-		t.Errorf("clones = %d, want 1 — the occupied path fetched the repository", got)
+	if len(errs) != 1 || errs[0]["mount_path"] != "/opt/full" || errs[0]["reason"] != repoOutcomeInternal {
+		t.Fatalf("clone errors = %v, want exactly one, at /opt/full, with reason %s", errs, repoOutcomeInternal)
 	}
 	if got := readSandboxFile(t, sb, "/opt/empty/README.md"); got != "x\n" {
 		t.Errorf("/opt/empty/README.md = %q, want the checkout", got)
 	}
 	if got := readSandboxFile(t, sb, "/opt/full/keep"); got != "image\n" {
 		t.Errorf("/opt/full/keep = %q, want what the image put there", got)
+	}
+}
+
+// hookedProvider provisions sandboxes that run hook just before each
+// repository extraction, as an image's startup hook runs before every
+// script (#860), after mountOccupied has looked at the mount.
+type hookedProvider struct {
+	sandbox.Provider
+	hook string
+}
+
+func (p *hookedProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
+	sb, err := p.Provider.Provision(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return &hookedSandbox{Sandbox: sb, hook: p.hook}, nil
+}
+
+type hookedSandbox struct {
+	sandbox.Sandbox
+	hook string
+}
+
+func (s *hookedSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if strings.Contains(req.Command, " && tar -xf ") {
+		if _, err := s.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: s.hook}); err != nil {
+			return sandbox.ExecResult{}, err
+		}
+	}
+	return s.Sandbox.Exec(ctx, req)
+}
+
+// TestRepoVacatesAgainAtTheExtraction: a hook that makes the mount again
+// between mountOccupied's look and the extraction is judged by the extraction
+// itself. Without that, `mv` puts the checkout inside the directory and
+// reports success, and every later pass refuses the path.
+func TestRepoVacatesAgainAtTheExtraction(t *testing.T) {
+	for _, tc := range []struct {
+		name, hook string
+		lands      bool
+	}{
+		{"AnEmptyDirectoryIsReplaced", "mkdir -p /opt/hooked", true},
+		{"AFileInItIsKept", "mkdir -p /opt/hooked && echo hook > /opt/hooked/keep", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			h, provider := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+				return &hookedProvider{Provider: p, hook: tc.hook}
+			})
+			sb := adopt(t, provider, h)
+			h.seedRepoResource(t, "sesrsc_hooked", fx.url(), "/opt/hooked", "ghp_fixture", nil)
+
+			h.runPass(t)
+
+			errs := h.repoErrors(t)
+			res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "ls -A /opt /opt/hooked"})
+			if err != nil {
+				t.Fatalf("inspect the sandbox: %v", err)
+			}
+			if strings.Contains(res.Stdout, "map-repo-staging") {
+				t.Errorf("staging is left in the sandbox:\n%s", res.Stdout)
+			}
+			if tc.lands {
+				if len(errs) != 0 {
+					t.Errorf("clone errors = %v, want none", errs)
+				}
+				if got := readSandboxFile(t, sb, "/opt/hooked/README.md"); got != "x\n" {
+					t.Errorf("/opt/hooked/README.md = %q, want the checkout at the mount", got)
+				}
+				return
+			}
+			if len(errs) != 1 {
+				t.Errorf("clone errors = %v, want exactly one", errs)
+			}
+			if got := readSandboxFile(t, sb, "/opt/hooked/keep"); got != "hook\n" {
+				t.Errorf("/opt/hooked/keep = %q, want what the hook put there", got)
+			}
+		})
 	}
 }
 

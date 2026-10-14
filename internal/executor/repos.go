@@ -167,7 +167,11 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			slog.WarnContext(ctx, "repository not materialized",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath,
 				"reason", reason, "err", err)
-			e.emitRepoCloneError(ctx, sid, m, reason, "the repository could not be cloned into the sandbox")
+			message := "the repository could not be cloned into the sandbox"
+			if errors.Is(err, errMountOccupied) {
+				message = "the repository's mount path holds files outside the platform's directories, where a clone takes only an absent path or an empty directory"
+			}
+			e.emitRepoCloneError(ctx, sid, m, reason, message)
 			continue
 		}
 		landed++
@@ -194,13 +198,14 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 // form (plan 25 decision 1). sentinel, when set, is the skills sentinel the
 // extraction drops (extractRepo).
 func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, m repoRef, sentinel string, progress func()) (int64, error) {
-	// A mount the clone may not replace whole is cleared before the clone, so
-	// a path that holds something costs one exec a pass rather than a fetch.
+	// A mount the clone may not replace whole is probed before the fetch, so
+	// a path that holds something costs one exec a pass rather than a clone.
 	whole := e.replacesWhole(m.MountPath)
 	if !whole {
-		if err := vacateMount(ctx, sb, m.MountPath); err != nil {
-			return 0, err
+		if mountOccupied(ctx, sb, m.MountPath) {
+			return 0, errMountOccupied
 		}
+		progress()
 	}
 	token, err := e.repoToken(ctx, sid, m.ID)
 	if err != nil {
@@ -295,8 +300,8 @@ const repoStagingRoot = "/tmp"
 // the memory stores' root and the shell state root. Create never yields
 // one since #922, but a repository stored before keeps its literal path,
 // and `/mnt` was one create accepted. Below one, a re-clone removes only
-// the checkout's own tree, as anywhere. What the image ships at a path is
-// replacesWhole's to keep (#930).
+// the checkout's own tree. What the image ships at a path is replacesWhole's
+// to keep (#930).
 func (e *Executor) safeRepoMount(mount string) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
@@ -366,7 +371,7 @@ const stagingSuffix = ".map-repo-staging"
 // replacesWhole reports whether a clone may replace what is at mount whole.
 // It may below a directory the platform keeps writable (sandbox.WritablePaths:
 // the repository root, the workdir, /tmp, the shell state root and /mnt),
-// where what it replaces is the platform's or the agent's. Anywhere else is
+// the directories the platform writes and the agent works in. Anywhere else is
 // the image's own filesystem, which only a repository stored before #922 can
 // name (#930). There a clone takes only an absent path or an empty directory,
 // so a row at /usr cannot remove what the image ships. A row at a path the
@@ -381,41 +386,36 @@ func (e *Executor) replacesWhole(mount string) bool {
 	return false
 }
 
-// vacateScript clears a mount that replacesWhole refuses: it succeeds on an
-// absent path, removing nothing, and on an empty directory, which it removes.
-// It fails on anything else: a directory with content, a file, or a symlink,
-// dangling or not.
+// vacateScript clears a mount that replacesWhole refuses, in place of the
+// `rm -rf` right before the rename: it succeeds on an absent path, removing
+// nothing, and on an empty directory, which it removes. It fails on anything
+// else: a directory with content, a file, or a symlink to a directory. A
+// dangling symlink reads as absent here, and the rename onto it fails
+// instead, because POSIX rename refuses a directory over a non-directory.
 func vacateScript(mount string) string {
 	q := shellQuote(mount)
-	return "{ { [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || rmdir " + q + "; }"
+	return "{ [ ! -e " + q + " ] || rmdir " + q + "; }"
 }
 
-// errMountOccupied is a clone refused before it starts, because its mount
+// vacantScript asks, and changes nothing, whether a clone may take mount:
+// whether it is absent, or an empty directory that is not a symlink.
+func vacantScript(mount string) string {
+	q := shellQuote(mount)
+	return "{ [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || { [ -d " + q + " ] && [ ! -L " + q +
+		" ] && e=$(ls -A " + q + ") && [ -z \"$e\" ]; }"
+}
+
+// errMountOccupied is a clone refused before its fetch, because its mount
 // path holds something replacesWhole may not replace.
 var errMountOccupied = errors.New("the mount path holds something outside the platform's directories")
 
-// vacateMount runs vacateScript before the clone.
-func vacateMount(ctx context.Context, sb sandbox.Sandbox, mount string) error {
-	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: vacateScript(mount)})
-	var startup *sandbox.StartupOutputError
-	if errors.As(err, &startup) {
-		// The script ran, and the image's startup pushed its exit status out
-		// of the output (#860). What it left is what a stat reads.
-		switch sandbox.StatPresence(ctx, sb, mount) {
-		case sandbox.Absent:
-			return nil
-		case sandbox.Present:
-			return errMountOccupied
-		}
-		return err
-	}
-	if err != nil {
-		return err
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("%w: %s", errMountOccupied, strings.TrimSpace(res.Stderr))
-	}
-	return nil
+// mountOccupied asks vacantScript before the fetch. Only a clean "no" counts:
+// an exec that fails, times out, or loses its exit status to an image's
+// startup (#860) reads as vacant, because vacateScript judges the path again
+// in the extraction, and that judgment is the one that holds.
+func mountOccupied(ctx context.Context, sb sandbox.Sandbox, mount string) bool {
+	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: vacantScript(mount)})
+	return err == nil && !res.TimedOut && res.ExitCode != 0
 }
 
 // extractRepo unpacks the shipped tar into a staging directory beside the
@@ -434,9 +434,11 @@ func vacateMount(ctx context.Context, sb sandbox.Sandbox, mount string) error {
 // its own copy of the name removed from the staged tree, so the skills step
 // never reads the checkout's file as its marker.
 //
-// whole is replacesWhole's verdict on the mount. Without it the script
-// removes no old tree at all: materializeRepo's vacateMount has just left the
-// path absent, and nothing writes there before this script runs.
+// whole is replacesWhole's verdict on the mount. Without it, vacateScript
+// takes the place of the `rm -rf`. It runs here, right before the rename,
+// rather than only in mountOccupied's look before the fetch, because each
+// script can run an image's startup hook first (#860). A hook that makes the
+// directory again would otherwise have `mv` put the checkout inside it.
 //
 // Every path is shell-quoted: mount_path is request-controlled text, and
 // unquoted interpolation would be command injection inside the sandbox.
@@ -455,7 +457,7 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 	}
 	remove := " && rm -rf " + q(clean)
 	if !whole {
-		remove = ""
+		remove = " && " + vacateScript(clean)
 	}
 	cmd := strings.Join([]string{
 		"rm -rf " + q(staging),
@@ -574,8 +576,9 @@ func (e *Executor) emitRepoCloneError(ctx context.Context, sid domain.ID, m repo
 			// probes the mount, finds no .git, and clones again — so no clone
 			// failure is ever the last attempt, and `exhausted` would tell a
 			// client this repository is finished when it is not. An occupied
-			// mount path (errMountOccupied) is tried again too, and clones
-			// once the path is empty.
+			// mount path (errMountOccupied) is probed again on every pass too,
+			// and clones if the path is ever emptied; one the image ships, such
+			// as /usr, never is.
 			"retry_status": map[string]any{"type": "retrying"},
 		},
 	})
