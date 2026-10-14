@@ -55,9 +55,10 @@ __map_save() {
   # in the snapshot so it cannot. If it carried, the restore would re-enable it and
   # every LATER call — one that never asked for it — would run this whole function
   # and the template's last line under it, tracing the internal state path and
-  # the tool-call id into the tool result's stderr. The command that itself ran `set -x` still traces
-  # its own call's prologue (it asked for tracing); nothing after it does. errexit
-  # is untouched and still captured on, so it carries as an option should.
+  # the tool-call id into the tool result's stderr. The command that itself ran
+  # `set -x` still traces its own call's prologue (it asked for tracing); nothing
+  # after it does. errexit is untouched and still captured on, so it carries as
+  # an option should.
   builtin set +x
 
   # The command's traps go first, before this function does anything else. Traps
@@ -144,11 +145,11 @@ __map_save() {
     done < <(builtin compgen -A function)
 
     # Aliases, one at a time and filtered the same way — NOT a bare `alias -p`.
-    # The template's own trailing lines are parsed after the restore has sourced
-    # this file, so an alias that survives into the next call is expanded over
-    # them: `alias trap=true` alone turned `trap '__map_save' EXIT` into a no-op
-    # and silently dropped the state of every call that ended by calling `exit`,
-    # for the rest of the session. The template's last line closes that from the
+    # The template's own last line is parsed after the restore has sourced this
+    # file, so an alias that survives into the next call is expanded over it:
+    # `alias trap=true` alone turned `trap '__map_save' EXIT` into a no-op and
+    # silently dropped the state of every call that ended by calling `exit`, for
+    # the rest of the session. The template's last line closes that from the
     # other side; the filter keeps a command from aliasing the template's own
     # names.
     #
@@ -194,8 +195,9 @@ __map_save() {
 # `alias exit=true` would cost the call its exit code, and an assignment word
 # holds `=`, which no alias name can. `builtin` guards the same words against a
 # snapshotted *function* of the same name. The line holds plain commands, not
-# a `{ ...; }` group, because `{` can be an alias. No comment follows the
-# restore: a carried `set -v` echoes every line read after it.
+# a `{ ...; }` group, because `{` can be an alias. Neither a comment nor a
+# blank line follows the restore: a carried `set -v` echoes every line read
+# after it.
 #
 # The EXIT trap catches a command that calls `exit` or that `set -e` ends. It
 # drops the command's DEBUG/ERR/RETURN traps before it calls __map_save, as the
@@ -204,7 +206,10 @@ __map_save() {
 # it puts back the ERR trap the function cleared: the command's trap would fire
 # once more, on the template's own line. After the clear, __map_save returns
 # the clear's 0, which costs nothing: bash keeps the exit status across an EXIT
-# trap.
+# trap. The trap's text is parsed when the call exits, after the command: a
+# `set -v` the command turns on echoes it, and an alias the command defines
+# reaches its bare `__map_save`, as either always could. The alias tests rely
+# on that word to catch a namespace filter that would let such an alias carry.
 #
 # The commands after the source catch a command that returns normally having
 # replaced the EXIT trap with one of its own. They keep the status in
@@ -218,7 +223,8 @@ __map_save() {
 # What is left is narrow and documented: a command that BOTH installs its own
 # EXIT trap AND exits through it skips this call's snapshot, and so does one
 # that replaces this shell with `exec` or has it killed outright. A command
-# that defines its own __map_save replaces this call's save. None of them lose
+# that defines its own __map_save, as a function or an alias, replaces this
+# call's save. None of them lose
 # more than their own call: an uncommitted snapshot leaves `head` alone, and
 # the snapshot's namespace filter keeps a __map_save of the command's own from
 # being carried.
@@ -311,5 +317,4 @@ builtin trap - ERR
   fi
   builtin unset __map_head __map_prev __map_l
 } >/dev/null 2>&1
-
 \builtin trap '\builtin trap - DEBUG ERR RETURN; __map_save' EXIT; \builtin . "$__map_state/cmd/$__map_id"; __map_status=$?; \builtin trap - DEBUG ERR RETURN EXIT; \__map_save "$__map_status"; \builtin exit "$__map_status"

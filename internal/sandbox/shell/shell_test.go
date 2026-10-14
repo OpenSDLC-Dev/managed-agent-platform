@@ -239,11 +239,11 @@ func TestShell(t *testing.T) {
 		}
 	})
 
-	// The template's trailing lines are parsed AFTER the restore has sourced the
-	// snapshot's aliases, so a carried alias is expanded over them. `alias
+	// The template's last line is parsed AFTER the restore has sourced the
+	// snapshot's aliases, so a carried alias is expanded over it. `alias
 	// trap=true` alone turned `trap '__map_save' EXIT` into a no-op, and every
 	// later call that ended by calling `exit` lost its state, silently, for the
-	// rest of the session. Aliases on `exit` and `.` reach the same lines.
+	// rest of the session. Aliases on `exit` and `.` reach the same line.
 	t.Run("AnAliasCannotHijackTheTemplatesOwnLines", func(t *testing.T) {
 		for _, tc := range []struct{ name, alias string }{
 			{"OnTrap", "trap=true"},
@@ -494,7 +494,7 @@ greet
 	// status does not ride in a function's positional parameters, which the trap
 	// could rewrite, or empty under nounset so that the call ends before its
 	// save.
-	t.Run("ADebugTrapCannotRewriteTheStatus", func(t *testing.T) {
+	t.Run("ADebugTrapThatResetsThePositionalParametersKeepsTheStatus", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		if got := sh("set -T; trap 'set -- 0' DEBUG; false", 0); got.ExitCode != 1 {
 			t.Errorf("exit code = %d, want 1 — the command's DEBUG trap rewrote the status", got.ExitCode)
@@ -532,11 +532,22 @@ greet
 	// The template's last line is read before the command runs, so a `set -v`
 	// the command turns on does not echo the template's own words into its
 	// result. A carried one echoes that line in later calls, as it echoes
-	// whatever else it reads.
+	// whatever else it reads, and a call that turns it on and then exits echoes
+	// the EXIT trap's text, which bash parses at exit.
 	t.Run("ACallsOwnVerboseDoesNotEchoTheTemplate", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		if got := sh("set -v", 0); got.Stderr != "" {
 			t.Errorf("stderr = %q, want none — the template's last line was read after the command", got.Stderr)
+		}
+	})
+
+	// The template sources the command, so a RETURN trap the command sets fires
+	// once as the command itself finishes. It is a divergence, listed in the
+	// package doc.
+	t.Run("ACommandsReturnTrapFiresAsTheCommandFinishes", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		if got := sh("trap 'echo RET' RETURN; true", 0); strings.TrimSpace(got.Stdout) != "RET" {
+			t.Errorf("stdout = %q, want RET once — the divergence changed; update the package doc", got.Stdout)
 		}
 	})
 

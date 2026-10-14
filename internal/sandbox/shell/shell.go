@@ -31,6 +31,9 @@
 //     session-long shell for a trap to fire at the end of either way. A command
 //     that both installs its own EXIT trap and exits through it also skips that
 //     call's snapshot — see the next divergence for what that costs.
+//   - A RETURN trap the command sets fires once more, as the command itself
+//     finishes: the template runs the command with `.`, and bash runs a RETURN
+//     trap when a sourced file finishes. A resident shell has no file to finish.
 //   - A call whose shell never finishes its snapshot keeps the PREVIOUS call's
 //     state. Replacing the shell (`exec`), having it killed outright (`kill -9
 //     $$`, an OOM kill), and exiting through an EXIT trap of one's own all skip
