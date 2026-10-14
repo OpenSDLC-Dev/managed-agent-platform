@@ -51,12 +51,18 @@ func TestRenderSkillsBlock(t *testing.T) {
 		t.Errorf("relative-root block = %q", rel)
 	}
 
-	// The root is configuration, but it is escaped wherever it appears, so no
-	// value can close a tag or open one.
-	odd := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "/a&b/<x>/skills")
-	if !strings.Contains(odd, "available under `/a&amp;b/&lt;x&gt;/skills/`.") ||
-		!strings.Contains(odd, "<location>/a&amp;b/&lt;x&gt;/skills/alpha/SKILL.md</location>") {
-		t.Errorf("an odd root is not escaped: %q", odd)
+	// Paths are written as they are, so the model can copy them into its tools:
+	// an escaped root would name a directory that does not exist.
+	odd := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "/home/o'brien&co/skills")
+	if !strings.Contains(odd, "available under `/home/o'brien&co/skills/`.") ||
+		!strings.Contains(odd, "<location>/home/o'brien&co/skills/alpha/SKILL.md</location>") {
+		t.Errorf("a root with characters an escaper touches is not verbatim: %q", odd)
+	}
+
+	// A name is data, escaped like the description. Upload validation keeps it
+	// to [a-z0-9-], so this guards the block's shape, not a reachable name.
+	if named := renderSkillsBlock([]skillMeta{{Name: "a<b", Dir: "x"}}, "skills"); !strings.Contains(named, "<name>a&lt;b</name>") {
+		t.Errorf("a name is not escaped: %q", named)
 	}
 }
 

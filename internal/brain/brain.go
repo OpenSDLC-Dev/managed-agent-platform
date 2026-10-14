@@ -37,7 +37,7 @@ import (
 // tracerName is the brain's OTel instrumentation scope.
 const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 
-// Config sizes the loop.
+// Config sizes the loop and names the executor's sandbox workdir.
 type Config struct {
 	// LeaseTTL is the work-item lease; the lease keeper re-extends it at
 	// TTL/3 for as long as the turn is streaming.

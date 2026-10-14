@@ -98,7 +98,7 @@ func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAge
 // that root stays relative. The file tools resolve it against the workdir, and
 // so does bash until the agent changes directory (plan 65 decision 1).
 func (b *Brain) skillsRoot(envKind string) string {
-	if envKind != "cloud" {
+	if envKind != string(domain.EnvCloud) {
 		return "skills"
 	}
 	workdir := b.cfg.Workdir
@@ -180,16 +180,19 @@ const skillsLead = "**Using skills**\n\n" +
 // its name, its description and the location of its SKILL.md under root. The
 // list and the sentence naming the root are the reference's. The lead gives the
 // recorded lead's directions and its reminder in our own words, not its text.
-// Every value is escaped as html.EscapeString does, which writes `"` as &#34;,
-// as the recording shows. Empty input yields an empty block, so nothing is
-// appended.
+// A name and a description are escaped as html.EscapeString does, which writes
+// `"` as &#34;, as the recording shows. Paths are written as they are: the
+// model copies them into its tools, and an escaped path names no file. They
+// hold only the root, which is operator configuration, and a materialization
+// directory, which upload validation keeps to [a-z0-9-] or a skill id. Empty
+// input yields an empty block, so nothing is appended.
 func renderSkillsBlock(metas []skillMeta, root string) string {
 	if len(metas) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString(skillsLead)
-	b.WriteString("- Skills are available under `" + html.EscapeString(root) + "/`.\n\n")
+	b.WriteString("- Skills are available under `" + root + "/`.\n\n")
 	b.WriteString("<available_skills>\n")
 	for _, m := range metas {
 		b.WriteString("<skill>\n  <name>")
@@ -197,7 +200,7 @@ func renderSkillsBlock(metas []skillMeta, root string) string {
 		b.WriteString("</name>\n  <description>")
 		b.WriteString(html.EscapeString(m.Description))
 		b.WriteString("</description>\n  <location>")
-		b.WriteString(html.EscapeString(path.Join(root, m.Dir, "SKILL.md")))
+		b.WriteString(path.Join(root, m.Dir, "SKILL.md"))
 		b.WriteString("</location>\n</skill>\n")
 	}
 	b.WriteString("</available_skills>")

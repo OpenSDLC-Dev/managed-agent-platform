@@ -66,8 +66,10 @@ API exposes no raw prompt):
 ## Decisions
 
 1. **The attached block takes the recorded template** (#581). The XML list
-   renders as recorded. Names, descriptions and locations are escaped as
+   renders as recorded. Names and descriptions are escaped as
    `html.EscapeString` does, which writes `"` as `&#34;`, as recorded.
+   Locations are written verbatim, since the model copies them into its
+   tools.
    - The lead gives the recorded lead's directions and its reminder in our own
      words, not its text. This is ours, registered. The "available under"
      sentence follows it, as recorded.
