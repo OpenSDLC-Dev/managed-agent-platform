@@ -1241,25 +1241,16 @@ func requireReadTool(ctx context.Context, tx pgx.Tx, id string) error {
 		`SELECT COALESCE(resolved_agent->'tools', '[]') FROM sessions WHERE id = $1`, id).Scan(&tools); err != nil {
 		return err
 	}
-	for _, t := range tools {
-		var head struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(t, &head) != nil || head.Type != "agent_toolset_20260401" {
-			continue
-		}
-		// An entry stored before a policy it carries stopped resolving offers
-		// no tool this platform can run, read included: it is skipped, so
-		// the add gets the refusal rather than a 500.
-		policies, err := toolset.Policies(t)
-		if err != nil {
-			slog.WarnContext(ctx, "session agent toolset does not resolve; read not usable",
-				"request_id", requestIDFrom(ctx), "session_id", id, "err", err)
-			continue
-		}
-		if _, ok := policies["read"]; ok {
-			return nil
-		}
+	// An entry stored before a policy it carries stopped resolving offers no
+	// tool this platform can run, read included: it is skipped, so the add
+	// gets the refusal rather than a 500.
+	usable, err := toolset.ReadUsable(tools)
+	if err != nil {
+		slog.WarnContext(ctx, "session agent toolset does not resolve; read not usable",
+			"request_id", requestIDFrom(ctx), "session_id", id, "err", err)
+	}
+	if usable {
+		return nil
 	}
 	return errInvalid("Missing required tool: file resources require the read tool to be usable (enabled and not always_deny) on the session's `agent_toolset`")
 }

@@ -9,11 +9,12 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestRenderSkillsBlock(t *testing.T) {
-	if got := renderSkillsBlock(nil, "/workspace/skills"); got != "" {
+	if got := renderSkillsBlock(nil, "/workspace/skills", nil); got != "" {
 		t.Errorf("empty set = %q, want empty", got)
 	}
 	// The whole block, so the template is pinned rather than sampled (#581):
@@ -23,7 +24,7 @@ func TestRenderSkillsBlock(t *testing.T) {
 	got := renderSkillsBlock([]skillMeta{
 		{Name: "alpha", Description: `Use for "alpha" <tasks> & more, it's fine`, Dir: "alpha"},
 		{Name: "beta", Description: "", Dir: "beta-skill_b"},
-	}, "/workspace/skills")
+	}, "/workspace/skills", nil)
 	want := "**Using skills**\n\n" +
 		"A skill is a set of instructions, and often code, for one kind of task. " +
 		"Before you write code or run a tool for a task:\n" +
@@ -45,7 +46,7 @@ func TestRenderSkillsBlock(t *testing.T) {
 	}
 
 	// A self-hosted root is relative, in the sentence and in every location.
-	rel := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "skills")
+	rel := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "skills", nil)
 	if !strings.Contains(rel, "available under `skills/`.") ||
 		!strings.Contains(rel, "<location>skills/alpha/SKILL.md</location>") {
 		t.Errorf("relative-root block = %q", rel)
@@ -53,7 +54,7 @@ func TestRenderSkillsBlock(t *testing.T) {
 
 	// Paths are written as they are, so the model can copy them into its tools:
 	// an escaped root would name a directory that does not exist.
-	odd := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "/home/o'brien&co/skills")
+	odd := renderSkillsBlock([]skillMeta{{Name: "alpha", Description: "a", Dir: "alpha"}}, "/home/o'brien&co/skills", nil)
 	if !strings.Contains(odd, "available under `/home/o'brien&co/skills/`.") ||
 		!strings.Contains(odd, "<location>/home/o'brien&co/skills/alpha/SKILL.md</location>") {
 		t.Errorf("a root with characters an escaper touches is not verbatim: %q", odd)
@@ -61,8 +62,41 @@ func TestRenderSkillsBlock(t *testing.T) {
 
 	// A name is data, escaped like the description. Upload validation keeps it
 	// to [a-z0-9-], so this guards the block's shape, not a reachable name.
-	if named := renderSkillsBlock([]skillMeta{{Name: "a<b", Dir: "x"}}, "skills"); !strings.Contains(named, "<name>a&lt;b</name>") {
+	if named := renderSkillsBlock([]skillMeta{{Name: "a<b", Dir: "x"}}, "skills", nil); !strings.Contains(named, "<name>a&lt;b</name>") {
 		t.Errorf("a name is not escaped: %q", named)
+	}
+}
+
+// TestRenderSkillsBlockRepositoryList pins plan 65 decision 4: a mounted
+// repository's skills follow the attached ones in their own source="repo"
+// list, both lists keeping a skill whose name the other uses, as recorded.
+// Everything in that list is the repository's, so its location is escaped
+// too. With no attached skill, the lead precedes the repository list alone.
+func TestRenderSkillsBlockRepositoryList(t *testing.T) {
+	attached := []skillMeta{{Name: "pdf", Description: "Attached PDF.", Dir: "pdf"}}
+	repo := []skills.RepoSkill{
+		{Name: "pdf", Description: "Repository PDF.", Location: "/workspace/r/.claude/skills/pdf/SKILL.md"},
+		{Name: "a&b", Description: "", Location: "/workspace/r/.claude/skills/a&b/SKILL.md"},
+	}
+	repoList := "<available_skills source=\"repo\">\n" +
+		"<skill>\n  <name>pdf</name>\n  <description>Repository PDF.</description>\n" +
+		"  <location>/workspace/r/.claude/skills/pdf/SKILL.md</location>\n</skill>\n" +
+		"<skill>\n  <name>a&amp;b</name>\n  <description></description>\n" +
+		"  <location>/workspace/r/.claude/skills/a&amp;b/SKILL.md</location>\n</skill>\n" +
+		"</available_skills>"
+
+	both := renderSkillsBlock(attached, "/workspace/skills", repo)
+	wantBoth := skillsLead + "- Skills are available under `/workspace/skills/`.\n\n" +
+		"<available_skills>\n" +
+		"<skill>\n  <name>pdf</name>\n  <description>Attached PDF.</description>\n" +
+		"  <location>/workspace/skills/pdf/SKILL.md</location>\n</skill>\n" +
+		"</available_skills>\n\n" + repoList
+	if both != wantBoth {
+		t.Errorf("both lists =\n%s\nwant\n%s", both, wantBoth)
+	}
+
+	if only, want := renderSkillsBlock(nil, "/workspace/skills", repo), skillsLead+"\n"+repoList; only != want {
+		t.Errorf("repository list alone =\n%s\nwant\n%s", only, want)
 	}
 }
 
@@ -122,7 +156,7 @@ func TestResolveSkillsBlock(t *testing.T) {
 	b := &Brain{pool: pool}
 	ctx := context.Background()
 
-	if block, injected, misses := b.resolveSkillsBlock(ctx, domain.ResolvedAgent{}, "cloud"); block != "" || injected != 0 || misses != 0 {
+	if block, injected, misses := b.resolveSkillsBlock(ctx, domain.ResolvedAgent{}, "cloud", nil); block != "" || injected != 0 || misses != 0 {
 		t.Errorf("no skills = %q,%d,%d", block, injected, misses)
 	}
 
@@ -138,7 +172,7 @@ func TestResolveSkillsBlock(t *testing.T) {
 		json.RawMessage(`not json`),    // malformed -> miss
 	}}}
 
-	block, injected, misses := b.resolveSkillsBlock(ctx, agent, "cloud")
+	block, injected, misses := b.resolveSkillsBlock(ctx, agent, "cloud", nil)
 	if injected != 2 {
 		t.Errorf("injected = %d, want 2", injected)
 	}
@@ -165,7 +199,7 @@ func TestResolveSkillsBlock(t *testing.T) {
 	}
 	_, injected, misses = b.resolveSkillsBlock(ctx, domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
 		Skills: []json.RawMessage{ref(t, "skill_b", "latest")},
-	}}, "cloud")
+	}}, "cloud", nil)
 	if injected != 0 || misses != 1 {
 		t.Errorf("versionless latest = injected %d misses %d, want 0/1", injected, misses)
 	}
@@ -293,7 +327,7 @@ func TestResolveSkillsBlockInjectsIDPinnedVersion(t *testing.T) {
 
 	block, injected, misses := b.resolveSkillsBlock(ctx, domain.ResolvedAgent{
 		AgentSpec: domain.AgentSpec{Skills: []json.RawMessage{ref(t, "skill_inj", "skver_ver100")}},
-	}, "cloud")
+	}, "cloud", nil)
 	if injected != 1 || misses != 0 {
 		t.Fatalf("id pin = injected %d misses %d, want 1/0", injected, misses)
 	}
@@ -306,7 +340,7 @@ func TestResolveSkillsBlockInjectsIDPinnedVersion(t *testing.T) {
 
 	_, injected, misses = b.resolveSkillsBlock(ctx, domain.ResolvedAgent{
 		AgentSpec: domain.AgentSpec{Skills: []json.RawMessage{ref(t, "skill_inj", "skver_absent")}},
-	}, "cloud")
+	}, "cloud", nil)
 	if injected != 0 || misses != 1 {
 		t.Errorf("dangling id pin = injected %d misses %d, want 0/1", injected, misses)
 	}

@@ -11,5 +11,5 @@ blocks take the reference's `<available_skills>` template (#581).
 ## Tasks
 
 - [x] Slice 1, the template (#581): the attached block's XML list and absolute cloud locations.
-- [ ] Slice 2, root discovery: scan before the first request, the repository block, the trust note.
+- [x] Slice 2, root discovery: scan before the first request, the repository block, the trust note.
 - [ ] Slice 3, nested discovery on `read`; archives the plan and closes #921.

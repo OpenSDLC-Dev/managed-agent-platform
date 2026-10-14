@@ -64,8 +64,9 @@ var errRepoNoCredential = errors.New("repository credential row missing")
 // Per-repository failure is tolerated exactly like a file's: the run continues
 // and the agent sees an absent path. Unlike a file's, it also surfaces as a
 // session.error the client can see (decision 4). refs come from the same
-// locked session read that gated the run (sessionForRun).
-func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, skilled bool, progress func()) {
+// locked session read that gated the run (sessionForRun). It returns the
+// repositories whose checkout this pass found or landed, in resource order.
+func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, skilled bool, progress func()) (present []repoRef) {
 	mounts := make([]repoRef, 0, len(refs))
 	for _, r := range refs {
 		if r.Type == "github_repository" && r.ID != "" && r.URL != "" && r.MountPath != "" {
@@ -73,7 +74,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		}
 	}
 	if len(mounts) == 0 {
-		return
+		return nil
 	}
 
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "repos_materialize")
@@ -100,6 +101,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		switch repoPresence(ctx, sb, m) {
 		case sandbox.Present:
 			unchanged++
+			present = append(present, m)
 			recordRepoMaterialized(ctx, repoOutcomeUnchanged)
 			slog.InfoContext(ctx, "repository already present, skipping clone",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath)
@@ -169,6 +171,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			continue
 		}
 		landed++
+		present = append(present, m)
 		recordRepoMaterialized(ctx, repoOutcomeOK)
 		recordRepoMaterializeBytes(ctx, bytes)
 		slog.InfoContext(ctx, "repository materialized",
@@ -180,6 +183,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		attribute.Int("repos.unprobed", unprobed),
 		attribute.Int("repos.failed", failed),
 	)
+	return present
 }
 
 // materializeRepo clones one repository and lands it at its mount path,

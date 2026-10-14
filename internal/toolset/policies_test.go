@@ -396,3 +396,40 @@ func TestPoliciesValidatesLazily(t *testing.T) {
 		}
 	}
 }
+
+// TestReadUsable: read is usable when an agent_toolset entry enables it; an
+// entry that disables it, another tool type, or an entry that no longer
+// resolves offers none, and the unresolved entry's error comes back beside
+// the answer either way.
+func TestReadUsable(t *testing.T) {
+	const (
+		bare       = `{"type":"agent_toolset_20260401"}`
+		noRead     = `{"type":"agent_toolset_20260401","configs":[{"name":"read","enabled":false}]}`
+		other      = `{"type":"custom","name":"read"}`
+		unresolved = `{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"sometimes"}}}`
+	)
+	for _, c := range []struct {
+		name    string
+		tools   []string
+		usable  bool
+		wantErr bool
+	}{
+		{"bare entry", []string{bare}, true, false},
+		{"read disabled", []string{noRead}, false, false},
+		{"no toolset", []string{other}, false, false},
+		{"none at all", nil, false, false},
+		{"unresolved alone", []string{unresolved}, false, true},
+		{"unresolved beside a usable entry", []string{unresolved, bare}, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := make([]json.RawMessage, len(c.tools))
+			for i, s := range c.tools {
+				raw[i] = json.RawMessage(s)
+			}
+			usable, err := toolset.ReadUsable(raw)
+			if usable != c.usable || (err != nil) != c.wantErr {
+				t.Errorf("ReadUsable = %v, %v; want %v, error %v", usable, err, c.usable, c.wantErr)
+			}
+		})
+	}
+}

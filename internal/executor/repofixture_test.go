@@ -149,6 +149,28 @@ func (f *gitFixture) commit(t *testing.T, msg string, files map[string]string) p
 	return h
 }
 
+// links commits symbolic links, each path to its target.
+func (f *gitFixture) links(t *testing.T, links map[string]string) {
+	t.Helper()
+	wt, err := f.repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	for name, target := range links {
+		if err := wt.Filesystem.Symlink(target, name); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+		if _, err := wt.Add(name); err != nil {
+			t.Fatalf("add %s: %v", name, err)
+		}
+	}
+	if _, err := wt.Commit("links", &git.CommitOptions{
+		Author: &object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)},
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
 // branch creates a branch at HEAD, commits files on it, and switches back to
 // the default branch — so the branch tip differs from the default's.
 func (f *gitFixture) branch(t *testing.T, name string, files map[string]string) {

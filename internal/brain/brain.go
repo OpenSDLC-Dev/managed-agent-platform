@@ -293,11 +293,22 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if len(undiscovered) > 0 {
 		return b.suspendForDiscovery(ctx, sid, item, undiscovered)
 	}
+	// A mounted repository's skills are announced from the first request, as
+	// the reference announces them, so a turn the executor has not yet scanned
+	// for is held the same way, once per session, and above the span start for
+	// the same reason (plan 65 decision 2).
+	repoSkills, waitRepoSkills, err := b.repoSkillsFor(ctx, sid, resourcesJSON, envKind, agent)
+	if err != nil {
+		return fmt.Errorf("repository skills: %w", err)
+	}
+	if waitRepoSkills {
+		return b.suspendForRepoSkills(ctx, sid, item)
+	}
 
 	// Level-1 skill injection: resolve the agent's skills[] to a system-prompt
 	// block at request-assembly time (plan design decision 5). Best-effort — an
 	// unresolvable reference is a logged miss, not a failed turn.
-	skillsBlock, skillsInjected, skillsMisses := b.resolveSkillsBlock(ctx, agent, envKind)
+	skillsBlock, skillsInjected, skillsMisses := b.resolveSkillsBlock(ctx, agent, envKind, repoSkills)
 	// Count the misses now, before any early return below (a replay error, an
 	// unrouted model, a failed span start) can abandon them: a resolve miss is a
 	// fact of request assembly, independent of whether the turn later fails for
@@ -393,6 +404,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// the miss counter was already flushed above, before the early returns.
 	span.SetAttributes(
 		attribute.Int("skills.injected", skillsInjected),
+		attribute.Int("skills.repo_injected", len(repoSkills)),
 		attribute.Int("skills.block_chars", len(skillsBlock)),
 		attribute.Int("files.injected", filesInjected),
 		attribute.Int("files.block_chars", len(filesBlock)),
