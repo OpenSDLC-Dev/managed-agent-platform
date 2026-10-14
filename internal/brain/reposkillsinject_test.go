@@ -31,6 +31,17 @@ func repoSkillsAgent(toolset string) string {
 		`"tools":[` + toolset + `],"mcp_servers":[],"skills":[],"multiagent":null}`
 }
 
+// eventCount is the number of events the session's log holds.
+func (h *harness) eventCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM events WHERE session_id = $1`, h.sessionID.String()).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func seedRepoSkillsSession(t *testing.T, h *harness, agent string) {
 	t.Helper()
 	if _, err := h.pool.Exec(context.Background(),
@@ -50,9 +61,15 @@ func TestRepoSkillsHoldTheFirstTurn(t *testing.T) {
 	ctx := context.Background()
 
 	h.wake(t, "hi")
+	before := h.eventCount(t)
 	h.runOnce(t)
 	if n := len(h.provider.calls); n != 0 {
 		t.Fatalf("the model was called %d times before the scan", n)
+	}
+	// Held above the span start: the turn never began, so nothing was written,
+	// no span.model_request_start among it.
+	if n := h.eventCount(t); n != before {
+		t.Errorf("the held turn appended %d events, want none", n-before)
 	}
 	if n := h.liveOf(t, queue.ToolExec); n != 1 {
 		t.Errorf("live tool_exec items = %d, want 1: the scan is the executor's", n)
@@ -88,24 +105,75 @@ func TestRepoSkillsHoldTheFirstTurn(t *testing.T) {
 	}
 }
 
-// TestRepoSkillsNeedRead: an agent whose read tool is off is told of no
-// repository skill and so does not wait for a scan, as the reference
-// announces none then.
-func TestRepoSkillsNeedRead(t *testing.T) {
-	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{textChunk(0, "ok"), done("end_turn", 1)}}, nil)
-	seedRepoSkillsSession(t, h, repoSkillsAgent(
-		`{"type":"agent_toolset_20260401","configs":[{"name":"read","enabled":false}]}`))
-	if _, err := h.pool.Exec(context.Background(), `UPDATE sessions SET repo_skills = $1 WHERE id = $2`,
+// TestRepoSkillsHeldOnce: a turn woken with no scan recorded, as an executor
+// that predates the scan wakes it, is not held again: it goes ahead without
+// the list, and the list joins the prompt once a run records it.
+func TestRepoSkillsHeldOnce(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		{textChunk(0, "ok"), done("end_turn", 1)},
+		{textChunk(0, "ok"), done("end_turn", 1)},
+	}, nil)
+	seedRepoSkillsSession(t, h, repoSkillsAgent(`{"type":"agent_toolset_20260401"}`))
+	ctx := context.Background()
+
+	h.wake(t, "hi")
+	h.runOnce(t)
+	if len(h.provider.calls) != 0 {
+		t.Fatal("the first turn was not held")
+	}
+	// An old executor's run: no record, but the turn is woken.
+	if _, err := h.queue.Enqueue(ctx, h.pool, h.envID, h.sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	h.runOnce(t)
+	if len(h.provider.calls) != 1 {
+		t.Fatalf("model calls = %d, want 1: a session is held once", len(h.provider.calls))
+	}
+	if sys := h.provider.calls[0].System; strings.Contains(sys, "available_skills") {
+		t.Errorf("a list was rendered with no scan recorded:\n%s", sys)
+	}
+
+	if _, err := h.pool.Exec(ctx, `UPDATE sessions SET repo_skills = $1 WHERE id = $2`,
 		repoSkillsRecord, h.sessionID.String()); err != nil {
 		t.Fatal(err)
 	}
+	h.wake(t, "again")
+	h.runOnce(t)
+	if len(h.provider.calls) != 2 {
+		t.Fatalf("model calls = %d, want 2", len(h.provider.calls))
+	}
+	if sys := h.provider.calls[1].System; !strings.Contains(sys, `<available_skills source="repo">`) {
+		t.Errorf("the recorded list did not join the prompt:\n%s", sys)
+	}
+}
+
+// TestRepoSkillsNeedRead: an agent whose read tool is off is told of no
+// repository skill, as the reference announces none then, so its turn is not
+// held for a scan that has not happened, nor told of one that has.
+func TestRepoSkillsNeedRead(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		{textChunk(0, "ok"), done("end_turn", 1)},
+		{textChunk(0, "ok"), done("end_turn", 1)},
+	}, nil)
+	seedRepoSkillsSession(t, h, repoSkillsAgent(
+		`{"type":"agent_toolset_20260401","configs":[{"name":"read","enabled":false}]}`))
 
 	h.wake(t, "hi")
 	h.runOnce(t)
 	if len(h.provider.calls) != 1 {
 		t.Fatalf("model calls = %d, want 1: a turn without read is not held", len(h.provider.calls))
 	}
-	if sys := h.provider.calls[0].System; strings.Contains(sys, "available_skills") {
+
+	if _, err := h.pool.Exec(context.Background(), `UPDATE sessions SET repo_skills = $1 WHERE id = $2`,
+		repoSkillsRecord, h.sessionID.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "again")
+	h.runOnce(t)
+	if len(h.provider.calls) != 2 {
+		t.Fatalf("model calls = %d, want 2", len(h.provider.calls))
+	}
+	if sys := h.provider.calls[1].System; strings.Contains(sys, "available_skills") {
 		t.Errorf("an agent without read was told of repository skills:\n%s", sys)
 	}
 }

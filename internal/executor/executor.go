@@ -587,11 +587,13 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	progress()
 	// The checkouts are now what the session will see, so their skills are
 	// scanned here, once per session (plan 65 decision 2). The brain holds a
-	// session's first turn until this record lands, so a failure to store it
-	// stops the item for a retry rather than waking a brain that would wait
-	// again.
+	// session's first turn until this record lands. A failure to store it
+	// stops the item for a retry with nothing committed, so nothing wakes the
+	// turn. A run that stalls before it gets here settles as any stalled run
+	// does, which wakes the held turn: the brain holds a session once, so that
+	// turn goes ahead without the list, and a later run records it.
 	if !sess.repoSkillsScanned {
-		if err := e.recordRepoSkills(ctx, item.SessionID, e.scanRepoSkills(ctx, sb, item.SessionID, sess.repos, progress)); err != nil {
+		if err := e.recordRepoSkills(ctx, item, e.scanRepoSkills(ctx, sb, item.SessionID, sess.repos, progress)); err != nil {
 			return nil, nil, nil, fmt.Errorf("record repository skills: %w", err)
 		}
 	}

@@ -295,8 +295,8 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	}
 	// A mounted repository's skills are announced from the first request, as
 	// the reference announces them, so a turn the executor has not yet scanned
-	// for is held the same way, and above the span start for the same reason
-	// (plan 65 decision 2).
+	// for is held the same way, once per session, and above the span start for
+	// the same reason (plan 65 decision 2).
 	repoSkills, waitRepoSkills, err := b.repoSkillsFor(ctx, sid, resourcesJSON, envKind, agent)
 	if err != nil {
 		return fmt.Errorf("repository skills: %w", err)

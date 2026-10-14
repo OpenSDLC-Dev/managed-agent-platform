@@ -8,10 +8,13 @@ import (
 	"path"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
 
 // repoSkillsRecord reads the session's recorded repository skills; ok is false
@@ -38,7 +41,9 @@ func (h *harness) repoSkillsRecord(t *testing.T) (skills []repoSkill, ok bool) {
 // its .claude/skills holds, and wakes the turn. The fixture is recording #23's:
 // a skill with no frontmatter and one with no description are listed with an
 // empty description, while a lowercase skill.md, a SKILL.md two levels down
-// and a hidden directory are not found.
+// and a hidden directory are not found. Of the two links, a linked skill
+// directory is followed and a SKILL.md that is itself a link, which a read
+// refuses, is not listed.
 func TestRepoSkillsScannedBeforeTheFirstTurn(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{
 		"README.md":                          "fixture\n",
@@ -49,7 +54,12 @@ func TestRepoSkillsScannedBeforeTheFirstTurn(t *testing.T) {
 		".claude/skills/deep/inner/SKILL.md": "---\ndescription: two levels\n---\n",
 		".claude/skills/.hidden/SKILL.md":    "---\ndescription: hidden\n---\n",
 	})
-	h, _ := dockerRepoHarness(t)
+	fx.links(t, map[string]string{
+		".claude/skills/viadir":          "alpha",
+		".claude/skills/linked/SKILL.md": "../alpha/SKILL.md",
+	})
+	counter := &countListProvider{}
+	h, _ := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider { counter.Provider = p; return counter })
 	h.seedRepoResource(t, "sesrsc_skills", fx.url(), repoMount, "ghp_fixture", nil)
 
 	h.suspend(t)
@@ -64,6 +74,7 @@ func TestRepoSkillsScannedBeforeTheFirstTurn(t *testing.T) {
 		{Name: "alpha", Description: "Alpha marker.", Location: root + "alpha/SKILL.md"},
 		{Name: "broken", Description: "", Location: root + "broken/SKILL.md"},
 		{Name: "nodesc", Description: "", Location: root + "nodesc/SKILL.md"},
+		{Name: "viadir", Description: "Alpha marker.", Location: root + "viadir/SKILL.md"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("repo_skills = %+v\nwant %+v", got, want)
@@ -81,7 +92,10 @@ func TestRepoSkillsScannedBeforeTheFirstTurn(t *testing.T) {
 	h.suspend(t)
 	h.stepOnce(t)
 	if got, _ := h.repoSkillsRecord(t); len(got) != 0 {
-		t.Errorf("a second run scanned again: %+v", got)
+		t.Errorf("a second run overwrote the record: %+v", got)
+	}
+	if n := counter.listings.Load(); n != 1 {
+		t.Errorf("listings = %d over two runs, want 1: a recorded scan is not taken again", n)
 	}
 }
 
@@ -126,21 +140,82 @@ func TestRepoSkillsListingFailureStillRecords(t *testing.T) {
 	}
 }
 
-// TestRecordRepoSkillsFirstWins pins the write's guard: two claimants that
-// both scanned store the first record, and the second changes nothing.
+// TestRepoSkillsRecordFailureWakesNothing: a run that cannot store its scan
+// stops for a retry with nothing committed, so the held turn stays held rather
+// than waking to find no record.
+func TestRepoSkillsRecordFailureWakesNothing(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	if _, err := h.pool.Exec(context.Background(),
+		`ALTER TABLE sessions ADD CONSTRAINT test_no_repo_skills CHECK (repo_skills IS NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	h.suspend(t)
+	h.stepOnce(t)
+	if _, ok := h.repoSkillsRecord(t); ok {
+		t.Fatal("the record landed despite the constraint")
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("live model turns = %d, want 0: a run that stored no scan must not wake the turn", n)
+	}
+}
+
+// TestRecordRepoSkillsFirstWins pins the write's two guards: a claimant that
+// has lost its lease stores nothing, and of two that hold one in turn, the
+// first record stands.
 func TestRecordRepoSkillsFirstWins(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	ctx := context.Background()
+	h.suspend(t)
+	item, err := h.queue.Claim(ctx, queue.ToolExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %v, %v", item, err)
+	}
+
+	lost := *item
+	lost.Lease = lost.Lease.Add(-time.Hour)
+	if err := h.exec.recordRepoSkills(ctx, &lost, []repoSkill{{Name: "stale"}}); err == nil {
+		t.Error("a claimant without the lease stored its scan")
+	}
+	if _, ok := h.repoSkillsRecord(t); ok {
+		t.Fatal("a claimant without the lease stored its scan")
+	}
+
 	first := []repoSkill{{Name: "first", Location: "/workspace/r/.claude/skills/first/SKILL.md"}}
-	if err := h.exec.recordRepoSkills(ctx, h.sid, first); err != nil {
+	if err := h.exec.recordRepoSkills(ctx, item, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.exec.recordRepoSkills(ctx, h.sid, []repoSkill{{Name: "second"}}); err != nil {
+	if err := h.exec.recordRepoSkills(ctx, item, []repoSkill{{Name: "second"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := h.repoSkillsRecord(t); !reflect.DeepEqual(got, first) {
 		t.Errorf("repo_skills = %+v, want the first record", got)
 	}
+}
+
+// countListProvider counts the repository-skills listings its sandboxes run.
+type countListProvider struct {
+	sandbox.Provider
+	listings atomic.Int32
+}
+
+func (p *countListProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
+	sb, err := p.Provider.Provision(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return &countListSandbox{Sandbox: sb, p: p}, nil
+}
+
+type countListSandbox struct {
+	sandbox.Sandbox
+	p *countListProvider
+}
+
+func (s *countListSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if strings.Contains(req.Command, "/.claude/skills") {
+		s.p.listings.Add(1)
+	}
+	return s.Sandbox.Exec(ctx, req)
 }
 
 // failListProvider fails the repository-skills listing of the checkout at
@@ -165,7 +240,8 @@ func (s *failListSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sa
 }
 
 // TestScanRepoSkillsListsOnlyAnnounceableNames pins the scan's own rules on a
-// stub listing a real checkout cannot produce: names come back sorted; one
+// stub listing a real checkout cannot produce: an image's startup banner is no
+// name, since the listing is framed; names come back sorted; one
 // holding a control character, a newline among them, or one that is not UTF-8
 // is passed over, since it would break the list or name no path; the entry the
 // output cap cut short is dropped; and at most maxRepoSkills are kept.
@@ -190,16 +266,25 @@ func TestScanRepoSkillsListsOnlyAnnounceableNames(t *testing.T) {
 	}
 }
 
-// listingSandbox answers the skills listing with a fixed output and each
-// SKILL.md read with a description naming its directory.
+// listingSandbox answers the skills listing with a fixed output, behind an
+// image's startup banner that ends no line, and each SKILL.md read with a
+// description naming its directory. A framed listing gets its answer framed,
+// so the banner falls outside it; an unframed one gets the banner glued to the
+// first name, as a real image would print it.
 type listingSandbox struct {
 	sandbox.Sandbox
 	stdout    string
 	truncated bool
 }
 
-func (s *listingSandbox) Exec(_ context.Context, _ sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	return sandbox.ExecResult{Stdout: s.stdout, StdoutTruncated: s.truncated}, nil
+func (s *listingSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	const banner = "welcome to the image "
+	res := sandbox.ExecResult{Stdout: s.stdout, StdoutTruncated: s.truncated}
+	if _, f, ok := sandboxtest.Unwrap(req.Command); ok {
+		res = sandboxtest.Framed(f, res)
+	}
+	res.Stdout = banner + res.Stdout
+	return res, nil
 }
 
 func (s *listingSandbox) ReadFile(_ context.Context, p string) ([]byte, error) {

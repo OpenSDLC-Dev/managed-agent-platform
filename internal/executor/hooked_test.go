@@ -21,6 +21,7 @@ import (
 // across two runs (the listing parsed, the marker and baseline read), the
 // file mounts' probe lists the one mount the agent moved away and that one
 // alone lands again, the outputs harvest publishes exactly the deliverables,
+// the repository-skills listing names the checkout's one skill and no banner,
 // and the packages probe reads a read-only root as one rather than as an
 // answer it does not know.
 func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
@@ -103,6 +104,18 @@ func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
 			rows := slices.DeleteFunc(h.fileRows(t), func(r fileRow) bool { return r.scopeType != "session" })
 			if len(rows) != 2 || rows[0].filename != "a.txt" || rows[1].filename != "sub/b.txt" {
 				t.Errorf("harvested %+v; want a.txt and sub/b.txt", rows)
+			}
+
+			const checkout = "/workspace/hooked"
+			if err := sb.WriteFile(ctx, checkout+"/.claude/skills/alpha/SKILL.md",
+				[]byte("---\nname: alpha\ndescription: Alpha skill\n---\n")); err != nil {
+				t.Fatalf("seed the skill: %v", err)
+			}
+			found := h.exec.scanRepoSkills(ctx, sb, h.sid,
+				[]repoRef{{ID: "sesrsc_hooked", Type: "github_repository", MountPath: checkout}}, func() {})
+			want := []repoSkill{{Name: "alpha", Description: "Alpha skill", Location: checkout + "/.claude/skills/alpha/SKILL.md"}}
+			if !slices.Equal(found, want) {
+				t.Errorf("repository skills = %+v; want %+v", found, want)
 			}
 		})
 	}

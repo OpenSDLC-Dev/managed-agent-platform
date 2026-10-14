@@ -27,17 +27,25 @@ type repoSkill struct {
 // mounts no repository, on a session that mounts none, or to an agent whose
 // read tool is off, as the reference announces none then. The record is read
 // from Postgres on every turn, so a replayed brain renders the same block.
+//
+// A session is held once. A turn woken with no scan recorded goes ahead
+// without the list, which joins the prompt at the first request after a run
+// records it: an executor that predates the scan wakes the turn without one,
+// and so does a run that stalled, and holding again would cycle the turn
+// through the executor for as long as either lasts.
 func (b *Brain) repoSkillsFor(ctx context.Context, sid domain.ID, resourcesJSON []byte, envKind string, agent domain.ResolvedAgent) (skills []repoSkill, wait bool, err error) {
 	if envKind != string(domain.EnvCloud) || !mountsRepository(resourcesJSON) || !readEnabled(agent) {
 		return nil, false, nil
 	}
 	var raw []byte
+	var held bool
 	if err := b.pool.QueryRow(ctx,
-		`SELECT repo_skills FROM sessions WHERE id = $1`, sid.String()).Scan(&raw); err != nil {
+		`SELECT repo_skills, repo_skills_held_at IS NOT NULL FROM sessions WHERE id = $1`,
+		sid.String()).Scan(&raw, &held); err != nil {
 		return nil, false, err
 	}
 	if raw == nil {
-		return nil, true, nil
+		return nil, !held, nil
 	}
 	if err := json.Unmarshal(raw, &skills); err != nil {
 		// The executor wrote this, so a decode failure is corruption, and
@@ -86,16 +94,21 @@ func readEnabled(agent domain.ResolvedAgent) bool {
 
 // suspendForRepoSkills holds a turn until the session's repositories are
 // scanned for skills, as suspendForDiscovery holds one for an MCP listing: in
-// one commit it completes the model turn and enqueues the session's tool_exec,
-// whose run provisions the sandbox, clones, records the scan, finds no tool to
-// run and wakes the thread (internal/executor's settleDrain). It appends no
-// event: the reference leaves no trace of the scan, and waiting for it is not
-// part of the conversation.
+// one commit it marks the session held, completes the model turn and enqueues
+// the session's tool_exec, whose run provisions the sandbox, clones, records
+// the scan, finds no tool to run and wakes the thread (internal/executor's
+// settleDrain). It appends no event: the reference leaves no trace of the
+// scan, and waiting for it is not part of the conversation.
 func (b *Brain) suspendForRepoSkills(ctx context.Context, sid domain.ID, item *queue.Item) error {
 	slog.InfoContext(ctx, "brain: turn suspended for repository skill discovery", "session_id", sid.String())
 	_, err := b.log.AppendWith(ctx, sid, nil, events.AppendOptions{
 		Then: func(ctx context.Context, tx pgx.Tx) error {
 			if err := b.queue.Complete(ctx, tx, item); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE sessions SET repo_skills_held_at = now() WHERE id = $1 AND repo_skills_held_at IS NULL`,
+				sid.String()); err != nil {
 				return err
 			}
 			_, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, queue.ToolExec)

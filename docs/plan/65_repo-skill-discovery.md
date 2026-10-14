@@ -102,21 +102,30 @@ API exposes no raw prompt):
      the brain does not wait again.
    - A sandbox that cannot provision holds the first turn, retried each lease
      period, as it already holds a tool call.
+   - The brain holds a session once (`sessions.repo_skills_held_at`). A turn
+     woken with no scan recorded goes ahead without the list, which joins the
+     prompt at the first request after a run records it. A run that stalled
+     wakes the turn that way, and so does an executor older than this change
+     during an upgrade; holding again would cycle the turn through the
+     executor for as long as either lasts.
 
-3. **What a scan finds.** One sandbox command per repository lists
-   `<mount>/.claude/skills/*/SKILL.md`, matching the filename exactly and one
-   level deep, and prints each file's frontmatter. The executor then applies
-   three rules:
+3. **What a scan finds.** One framed sandbox command per repository lists
+   the directories under `<mount>/.claude/skills` whose `SKILL.md` is a
+   regular file, matching the filename exactly and one level deep. The
+   executor then reads each `SKILL.md` and applies these rules:
    - **Name:** the directory's name. A file with no frontmatter was listed under
      its directory's name. Whether a frontmatter `name` would win is
      unrecorded, so this is ours.
    - **Description:** the frontmatter `description`, or empty when the
-     frontmatter is missing, invalid or has no description.
+     frontmatter is missing, invalid or has no description, or when the file
+     cannot be read. A `SKILL.md` over 4 MiB, the sandbox's read cap, is one
+     that cannot.
    - **Bounds** (both ours): at most 500 repository skills a session, the
      attached cap; a description cut at 1,024 characters, the upload cap.
    - **Names** (ours): a directory whose name is not UTF-8 or holds a control
-     character is passed over, and a hidden directory is not listed. A
-     symbolic link is followed.
+     character is passed over, and a hidden directory is not listed. A linked
+     directory is followed. A `SKILL.md` that is itself a symbolic link is
+     passed over, since a read refuses one.
 
 4. **The repository block** follows the attached block in the system prompt,
    in the thread whose agent has `read` enabled.
@@ -130,8 +139,13 @@ API exposes no raw prompt):
      is unrecorded, so this is ours.
    - The block is rendered from Postgres on every request, as the other blocks
      are, so a replayed brain builds the same one. It is present from the
-     first request, so it never moves the prompt prefix that kept thinking is
-     keyed on.
+     first request, so it does not move the prompt prefix that kept thinking
+     is keyed on, with three exceptions. A session in flight across the
+     upgrade gains it at its next turn. An agent whose `read` is enabled by a
+     session update gains it at the next request. A turn that went ahead
+     without a record gains it once a run records one. Kept thinking produced
+     before the change is then dropped, as for any change of the system
+     prompt.
 
 5. **Nested skills are discovered on `read`.** When the executor runs a `read`
    of a file below a repository's root, it scans each directory between the

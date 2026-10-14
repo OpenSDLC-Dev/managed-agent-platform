@@ -3,3 +3,7 @@
 -- found, and the brain announces it. NULL until that scan; an empty array is a
 -- scan that found none.
 ALTER TABLE sessions ADD COLUMN repo_skills jsonb;
+
+-- When the brain first held a turn for that scan. It holds a session once:
+-- a turn woken with no scan recorded goes ahead without the skills.
+ALTER TABLE sessions ADD COLUMN repo_skills_held_at timestamptz;

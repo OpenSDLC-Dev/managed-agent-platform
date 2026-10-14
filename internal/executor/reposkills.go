@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
@@ -39,9 +40,9 @@ const repoSkillsListTimeout = 30 * time.Second
 // (skills.RepoDescription). Entries come in resource order, then by name.
 //
 // Best effort, like the clone before it: a checkout that is absent lists
-// nothing, and one that cannot be listed or a SKILL.md that cannot be read is
-// logged and passed over, so a broken repository costs the session its skills,
-// never its run.
+// nothing, one that cannot be listed is logged and passed over, and a SKILL.md
+// that cannot be read is logged and listed with an empty description, so a
+// broken repository costs the session its skills, never its run.
 func (e *Executor) scanRepoSkills(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, refs []repoRef, progress func()) []repoSkill {
 	found := []repoSkill{}
 	for _, r := range refs {
@@ -50,10 +51,14 @@ func (e *Executor) scanRepoSkills(ctx context.Context, sb sandbox.Sandbox, sid d
 		}
 		progress()
 		root := path.Join(r.MountPath, ".claude", "skills")
-		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: sandbox.Script(listRepoSkillsScript(root)), Timeout: repoSkillsListTimeout})
-		if err != nil || res.ExitCode != 0 || res.TimedOut {
+		// Framed (sandbox.ExecFramed), so what an image's startup prints
+		// around the listing, a BASH_ENV file's banner, is no name of it.
+		res, framed, err := sandbox.ExecFramed(ctx, sb, "reposkills",
+			sandbox.ExecRequest{Command: listRepoSkillsScript(root), Timeout: repoSkillsListTimeout})
+		if err != nil || !framed || res.ExitCode != 0 || res.TimedOut {
 			slog.WarnContext(ctx, "repository skills not listed",
-				"session_id", sid, "resource_id", r.ID, "err", err, "exit_code", res.ExitCode, "timed_out", res.TimedOut)
+				"session_id", sid, "resource_id", r.ID, "err", err, "framed", framed,
+				"exit_code", res.ExitCode, "timed_out", res.TimedOut)
 			continue
 		}
 		// Each name ends in a NUL, so whatever follows the last one is a name
@@ -89,25 +94,40 @@ func (e *Executor) scanRepoSkills(ctx context.Context, sb sandbox.Sandbox, sid d
 }
 
 // listRepoSkillsScript prints, each followed by a NUL, the name of every
-// directory under root whose SKILL.md is a file. Hidden directories are not
-// listed, and an absent root prints nothing.
+// directory under root whose SKILL.md is a regular file. A SKILL.md that is a
+// symbolic link is passed over, since a read refuses one, and so neither the
+// scan nor the agent could load it; a linked directory is followed. Hidden
+// directories are not listed, and an absent root prints nothing.
 func listRepoSkillsScript(root string) string {
 	return "cd -- " + shellQuote(root) + " 2>/dev/null || exit 0\n" +
 		"for d in *; do\n" +
-		"  if [ -f \"$d/SKILL.md\" ]; then printf '%s\\000' \"$d\"; fi\n" +
+		"  if [ -f \"$d/SKILL.md\" ] && [ ! -h \"$d/SKILL.md\" ]; then printf '%s\\000' \"$d\"; fi\n" +
 		"done\n"
 }
 
 // recordRepoSkills stores a scan as the session's repository skills, once:
-// the first scan to land wins, and any later one is the same checkout read
-// again, so this write needs no lease proof. A session with no repository
-// records an empty scan, which keeps the brain from waiting on one.
-func (e *Executor) recordRepoSkills(ctx context.Context, sid domain.ID, found []repoSkill) error {
+// the first scan to land wins. The write proves the claimant still holds the
+// item (queue.Assert), as every state write of a run does: a claimant that
+// lost its lease may have read a sandbox the reclaim has since replaced, and
+// its scan must not become the session's for good. A session with no
+// repository records an empty scan, which keeps the brain from waiting on one.
+func (e *Executor) recordRepoSkills(ctx context.Context, item *queue.Item, found []repoSkill) error {
 	b, err := json.Marshal(found)
 	if err != nil {
 		return err
 	}
-	_, err = e.pool.Exec(ctx,
-		`UPDATE sessions SET repo_skills = $2 WHERE id = $1 AND repo_skills IS NULL`, sid.String(), b)
-	return err
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := e.queue.Assert(ctx, tx, item); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions SET repo_skills = $2 WHERE id = $1 AND repo_skills IS NULL`,
+		item.SessionID.String(), b); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
