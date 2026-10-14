@@ -431,12 +431,13 @@ func CheckCommand(command string) error {
 // globstar), passes over it without a word. A script framed by Frame.Open
 // has the preamble already. It is the platform's scripts' alone: the model's
 // commands do not run through it, and run under the image's glob options —
-// though in the bash tool's own shell they run without the image's errexit,
-// that shell turning it off before it restores its option snapshot
-// (internal/sandbox/shell's template), while the image's nounset and pipefail
-// carry there, and a `set -e` the model runs there carries from call to call.
-// A bash the model starts itself (`bash -c`, a `#!/bin/bash` script) reads
-// the startup file again, and runs under the image's errexit.
+// though in the bash tool's own shell they run without the image's errexit
+// and ERR trap, that shell turning both off before it restores its option
+// snapshot (internal/sandbox/shell's template), while the image's nounset and
+// pipefail carry there, and a `set -e` the model runs there carries from call
+// to call. A bash the model starts itself (`bash -c`, a `#!/bin/bash` script)
+// reads the startup file again, and runs under the image's errexit and ERR
+// trap.
 const ScriptPreamble = "set +e +f\n" +
 	"if [ -n \"${BASH_VERSION-}\" ]; then trap - ERR; set +p; fi\n" +
 	"unset GLOBIGNORE GLOBSORT\n" +

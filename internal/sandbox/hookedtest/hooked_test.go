@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
@@ -309,5 +310,34 @@ func TestADeadlineKillsTheCommandsChildrenUnderAnImagesShellopts(t *testing.T) {
 				t.Errorf("%d child(ren) of the command outlived its deadline: its shell was killed, its work was not", n)
 			})
 		}
+	}
+}
+
+// The preamble opens scripts a POSIX sh runs too — the Kubernetes export
+// probe's `sh -c` — so its bash-only lines are skipped there: BusyBox's sh,
+// an Alpine image's /bin/sh, exits on `set +p`. A script the preamble opens
+// runs to its end under it, with nothing on stderr.
+func TestScriptPreambleUnderBusyBoxSh(t *testing.T) {
+	dp, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("this test requires Docker: %v", err)
+	}
+	image := dockertest.ImageFrom(t, "busyboxsh", "FROM bash:3.2\nRUN ln -s /usr/local/bin/bash /bin/bash\n", "--host", docker.DaemonHost())
+	sb, _ := hookedtest.Backend{Name: "docker", Provider: dp, Image: image}.Provision(t, sandbox.Hardening{})
+	ctx := context.Background()
+	exec := func(command string) sandbox.ExecResult {
+		t.Helper()
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: command, Timeout: 30 * time.Second})
+		if err != nil {
+			t.Fatalf("%s: %v", command, err)
+		}
+		return res
+	}
+	if res := exec("readlink -f /bin/sh"); strings.TrimSpace(res.Stdout) != "/bin/busybox" {
+		t.Fatalf("/bin/sh = %+v; want BusyBox's", res)
+	}
+	script := "'" + strings.ReplaceAll(sandbox.Script("echo P"), "'", `'\''`) + "'"
+	if res := exec("sh -c " + script); res.Stdout != "P\n" || res.Stderr != "" || res.ExitCode != 0 {
+		t.Errorf("sh -c of a script the preamble opens = %+v; want P, nothing on stderr, exit 0", res)
 	}
 }

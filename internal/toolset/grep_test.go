@@ -867,12 +867,13 @@ func TestGlobThroughAStartupsGlobOptions(t *testing.T) {
 }
 
 // What the image contract says of the model's own commands under an image
-// whose startup sets -euo pipefail (docs/self-hosted-security.md): errexit
-// does not reach them, the bash tool's shell turning it off before the first
-// command, while nounset and pipefail do — and a `set -e` the model runs
-// itself carries to its next call.
+// whose startup sets -euo pipefail and an exiting ERR trap
+// (docs/self-hosted-security.md): errexit and the trap do not reach them, the
+// bash tool's shell turning both off before the first command, while nounset
+// and pipefail do — and a `set -e` the model runs itself carries to its next
+// call.
 func TestTheBashToolUnderAnErrexitStartup(t *testing.T) {
-	r := runner(t, fromImage(hookedtest.DockerImage(t, "set -euo pipefail\n")))
+	r := runner(t, fromImage(hookedtest.DockerImage(t, "set -euo pipefail\ntrap 'exit 42' ERR\n")))
 	if out := ok(t, r, "bash", `{"command":"false; echo after"}`); !strings.Contains(out, "after") {
 		t.Errorf("false; echo after = %q, want errexit off for the model's command", out)
 	}
