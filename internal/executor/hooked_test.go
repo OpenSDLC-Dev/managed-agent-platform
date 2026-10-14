@@ -37,13 +37,7 @@ func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
 			}
 
 			h := newHarnessWith(t, b.Provider, Config{Image: b.Image})
-			t.Cleanup(func() {
-				if sb, err := b.Provider.Attach(context.Background(), h.sid); err == nil {
-					_ = sb.Destroy(context.Background())
-				} else if !errors.Is(err, sandbox.ErrNotFound) {
-					t.Errorf("attach the session's sandbox to destroy it: %v", err)
-				}
-			})
+			destroySessionSandbox(t, b.Provider, h)
 			h.seedMemoryStore(t, memStoreID, "Notes")
 			h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
 			h.refMemory(t, memStoreID, memMount, "read_write")
@@ -59,11 +53,6 @@ func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
 			if _, err := h.pool.Exec(ctx, `UPDATE sessions SET resources = resources || $2::jsonb WHERE id = $1`, h.sid.String(), mounts); err != nil {
 				t.Fatalf("add the file mounts: %v", err)
 			}
-			bash := func(command string) string {
-				use, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": command}})
-				return string(use)
-			}
-
 			h.suspend(t, bash("mkdir -p /mnt/session/outputs/sub "+memMount+"/log && printf a > /mnt/session/outputs/a.txt"+
 				" && printf b > /mnt/session/outputs/sub/b.txt && printf hello > "+memMount+"/log/b.md"+
 				" && mv "+mountA+" /tmp/a.csv && printf edited > "+mountB))
@@ -135,16 +124,9 @@ func TestHarvestThroughAStartupsGlobOptions(t *testing.T) {
 		t.Fatalf("this test requires Docker: %v", err)
 	}
 	h := newHarnessWith(t, provider, Config{Image: hookedtest.DockerImage(t, sandboxtest.GlobHook)})
-	t.Cleanup(func() {
-		if sb, err := provider.Attach(context.Background(), h.sid); err == nil {
-			_ = sb.Destroy(context.Background())
-		} else if !errors.Is(err, sandbox.ErrNotFound) {
-			t.Errorf("attach the session's sandbox to destroy it: %v", err)
-		}
-	})
-	use, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": "mkdir -p " + outputsDir + "/sub" +
-		" && printf a > " + outputsDir + "/a.txt && printf b > " + outputsDir + "/sub/b.txt && printf c > " + outputsDir + "/.c"}})
-	h.suspend(t, string(use))
+	destroySessionSandbox(t, provider, h)
+	h.suspend(t, bash("mkdir -p "+outputsDir+"/sub && printf a > "+outputsDir+"/a.txt"+
+		" && printf b > "+outputsDir+"/sub/b.txt && printf c > "+outputsDir+"/.c"))
 	h.stepOnce(t)
 	h.seedOutcome(t, domain.OutcomeResultEvaluating)
 	h.enqueueHarvest(t)
@@ -153,7 +135,27 @@ func TestHarvestThroughAStartupsGlobOptions(t *testing.T) {
 	for _, r := range h.fileRows(t) {
 		got = append(got, r.filename)
 	}
+	slices.Sort(got)
 	if want := []string{".c", "a.txt", "sub/b.txt"}; !slices.Equal(got, want) {
 		t.Errorf("harvested %q; want %q", got, want)
 	}
+}
+
+// destroySessionSandbox destroys the harness session's sandbox when the test
+// is done.
+func destroySessionSandbox(t *testing.T, provider sandbox.Provider, h *harness) {
+	t.Helper()
+	t.Cleanup(func() {
+		if sb, err := provider.Attach(context.Background(), h.sid); err == nil {
+			_ = sb.Destroy(context.Background())
+		} else if !errors.Is(err, sandbox.ErrNotFound) {
+			t.Errorf("attach the session's sandbox to destroy it: %v", err)
+		}
+	})
+}
+
+// bash is a bash tool use that runs command.
+func bash(command string) string {
+	use, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": command}})
+	return string(use)
 }

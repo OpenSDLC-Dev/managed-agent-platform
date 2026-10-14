@@ -411,16 +411,20 @@ func CheckCommand(command string) error {
 //     instead — a bulk write at its first `chmod` as a non-root user, a shed
 //     before it reports what it left, a rename refusing a directory with the
 //     `rm`'s exit and not its own (#860).
-//   - What changes what a glob matches, or its order: noglob, GLOBIGNORE,
-//     GLOBSORT (bash 5.3) and the shopt glob options. Unsetting GLOBIGNORE
-//     turns dotglob off as well, whether or not GLOBIGNORE was set. Under
-//     noglob the outputs harvest lists nothing and the glob tool finds
-//     nothing; under failglob a glob that matches nothing is an error. A
-//     script that wants dotglob, nullglob or globstar turns it on itself.
+//   - Settings that change what a glob matches, or its order: noglob,
+//     GLOBIGNORE, GLOBSORT (bash 5.3), and the shopt options dotglob,
+//     extglob, failglob, globstar, nocaseglob and nullglob. Under noglob the
+//     outputs harvest lists nothing and the glob tool finds nothing; under
+//     failglob a glob that matches nothing is an error. A script that wants
+//     dotglob, nullglob or globstar turns it on itself. Other settings that
+//     bear on a match stay as the image left them: the locale, which a script
+//     whose order depends on it sets itself, and the options bash turns on by
+//     default (globskipdots, globasciiranges).
 //
-// The shopt line is bash's: a POSIX sh, or a bash without one of its options,
-// passes over it without a word. A script framed by Frame.Open has the
-// preamble already. It is the platform's scripts' alone: the model's commands
+// The shopt line is bash's: a POSIX sh, or a bash without one of its options
+// (bash 3.2 has no globstar), passes over it without a word. Where it fails,
+// `|| :` keeps the failure from an ERR trap the startup set, which set +e
+// does not turn off. A script framed by Frame.Open has the preamble already. It is the platform's scripts' alone: the model's commands
 // do not run through it, and run under the image's glob options — though in
 // the bash tool's own shell they run without the image's errexit, that shell
 // turning it off before it restores its option snapshot
@@ -429,7 +433,7 @@ func CheckCommand(command string) error {
 // A bash the model starts itself (`bash -c`, a `#!/bin/bash` script) reads
 // the startup file again, and runs under the image's errexit.
 const ScriptPreamble = "set +e +f\nunset GLOBIGNORE GLOBSORT\n" +
-	"shopt -u extglob failglob globstar nocaseglob nullglob 2>/dev/null\n"
+	"shopt -u dotglob extglob failglob globstar nocaseglob nullglob 2>/dev/null || :\n"
 
 // Script is script as the platform runs it in a sandbox's shell, its preamble
 // first (ScriptPreamble).

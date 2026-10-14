@@ -186,10 +186,12 @@ call). A bash the model starts itself — `bash -c`, a `#!/bin/bash` script —
 reads the startup file again, as every non-interactive bash does, and runs
 under the image's errexit. The options that change what a glob matches, or
 its order, are a second exception, for the platform's scripts alone. Those
-scripts put bash's defaults back as they start: noglob (`set -f`),
-`GLOBIGNORE`, `GLOBSORT` and the `shopt` glob options. So the outputs
-harvest, `glob` and the repository-skills listing find the same files on any
-image, while the model's commands run under what the file set. Job control
+scripts put bash's defaults back as they start for noglob (`set -f`),
+`GLOBIGNORE`, `GLOBSORT` and the `shopt` options `dotglob`, `extglob`,
+`failglob`, `globstar`, `nocaseglob` and `nullglob`. So none of these
+settings changes what the outputs harvest, `glob` or the repository-skills
+listing finds, while the model's commands run under what the file set. Job
+control
 (`monitor`) is the third exception: a
 command's deadline is enforced by killing its process group, and a shell with
 job control forks each of its jobs into a group of its own, so both backends'

@@ -16,11 +16,11 @@ import (
 const BannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2; cd /; ` +
 	`trap "printf 'exit banner '; printf 'exit stderr ' >&2" EXIT` + "\n"
 
-// GlobHook is an image's `ENV BASH_ENV` file that turns on what a startup can
-// turn on that changes what a glob matches, or its order: noglob, a GLOBIGNORE
-// that ignores every match, GLOBSORT (bash 5.3), and the shopt options. The
-// platform's scripts are written for bash's defaults, which
-// sandbox.ScriptPreamble puts back; a bash without an option passes over it.
+// GlobHook is an image's `ENV BASH_ENV` file that turns on each setting
+// sandbox.ScriptPreamble puts back to bash's default, all of which change what
+// a glob matches, or its order: noglob, a GLOBIGNORE that ignores every match,
+// GLOBSORT (bash 5.3), and the shopt options dotglob, extglob, failglob,
+// globstar, nocaseglob and nullglob. A bash without an option passes over it.
 const GlobHook = "set -f\nGLOBIGNORE='*'\nGLOBSORT=-name\n" +
 	"shopt -s dotglob extglob failglob globstar nocaseglob nullglob 2>/dev/null\n"
 

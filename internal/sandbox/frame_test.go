@@ -351,19 +351,22 @@ func TestFrameClosesUnderErrexit(t *testing.T) {
 	}
 }
 
-// An image's startup file can turn on what changes what a glob matches, or
-// its order (sandboxtest.GlobHook), and the platform's scripts are written for
-// bash's defaults: the preamble puts each back, and says nothing as it does,
-// whatever the bash has. Unsetting GLOBIGNORE is what turns dotglob off,
-// whether or not the startup set GLOBIGNORE, so a startup that turns on
-// dotglob alone is run too.
+// An image's startup file can turn on settings that change what a glob
+// matches, or its order (sandboxtest.GlobHook), and the platform's scripts are
+// written for bash's defaults: the preamble puts each back, and says nothing
+// as it does, whatever the bash has. Unsetting GLOBIGNORE turns dotglob off
+// too, except in privileged mode on bash 5, so a startup that turns on dotglob
+// and then privileged mode is run as well. An ERR trap, which set +e leaves
+// on, ends the script at any line of the preamble that fails, as the shopt
+// line does on a bash without one of its options: the macOS /bin/bash, 3.2,
+// has no globstar.
 func TestScriptPreambleUndoesAStartupsGlobOptions(t *testing.T) {
 	const probe = `printf '%s\n' "$-" "${GLOBIGNORE-unset}" "${GLOBSORT-unset}"
 for o in dotglob extglob failglob globstar nocaseglob nullglob; do
   if shopt -q "$o" 2>/dev/null; then echo "$o on"; fi
 done
 `
-	for _, hook := range []string{sandboxtest.GlobHook, "shopt -s dotglob\n"} {
+	for _, hook := range []string{sandboxtest.GlobHook, "shopt -s dotglob\nset -p\n", sandboxtest.GlobHook + "trap 'exit 42' ERR\n"} {
 		res := runHooked(t, hook, "/bin/bash", sandbox.Script(probe), "")
 		flags, rest, _ := strings.Cut(res.Stdout, "\n")
 		if strings.Contains(flags, "f") || rest != "unset\nunset\n" || res.Stderr != "" || res.ExitCode != 0 {
