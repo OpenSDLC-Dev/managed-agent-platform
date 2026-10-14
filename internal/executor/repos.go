@@ -568,8 +568,11 @@ func (e *Executor) repoToken(ctx context.Context, sid domain.ID, resourceID stri
 }
 
 // emitRepoCloneError appends the session.error variant for a failed clone,
-// deduped on (resource_id, reason) — two failing repositories are two events,
-// and a reason flip re-emits, while a repeated identical failure does not.
+// deduped on (resource_id, reason, message) — two failing repositories are
+// two events, and a reason or message flip re-emits, while a repeated
+// identical failure does not. The message counts because one reason carries
+// several: a mount path's refusal must reach the client after a generic
+// `internal` failure.
 // The work item's lease already makes this executor the session's single
 // writer, so the check-then-append needs no further guarding. Emission is
 // best effort: a failure to record the error must not turn a tolerated clone
@@ -581,8 +584,9 @@ func (e *Executor) emitRepoCloneError(ctx context.Context, sid domain.ID, m repo
 		 WHERE session_id = $1 AND type = 'session.error'
 		   AND payload->'error'->>'type' = $2
 		   AND payload->'error'->>'resource_id' = $3
-		   AND payload->'error'->>'reason' = $4)`,
-		sid.String(), repoCloneErrorType, m.ID, reason).Scan(&already)
+		   AND payload->'error'->>'reason' = $4
+		   AND payload->'error'->>'message' = $5)`,
+		sid.String(), repoCloneErrorType, m.ID, reason, message).Scan(&already)
 	if err != nil {
 		slog.WarnContext(ctx, "checking for an existing repository clone error failed",
 			"session_id", sid, "resource_id", m.ID, "err", err)

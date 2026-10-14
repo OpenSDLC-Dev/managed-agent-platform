@@ -397,12 +397,12 @@ func cloneReason(err error) string {
 		return repoOutcomeTooLarge
 	case errors.Is(err, context.DeadlineExceeded):
 		return repoOutcomeTimeout
-	// Each is ours, and each could pass the network arm's match below for the
-	// git host's failure. Nothing but this platform cancels a clone without a
-	// deadline — a lost lease, or an executor shutting down — and go-git
-	// surfaces that as a *url.Error. The others' text can read like the
-	// host's: the caller's branch name, a sandbox transport's EOF, or a
-	// script's stderr quoting the mount path.
+	// Each is ours, never the git host's, so none may reach the network arm's
+	// match below, which reads an error's type and text. Nothing but this
+	// platform cancels a clone without a deadline — a lost lease, or an
+	// executor shutting down — and go-git surfaces that as a *url.Error. A
+	// branch name, a sandbox transport's EOF, or a script's stderr quoting the
+	// mount path can read like the host's failure too.
 	case errors.Is(err, context.Canceled), errors.Is(err, errBranchUnsupported),
 		errors.Is(err, errMountOccupied), errors.Is(err, errExtraction):
 		return repoOutcomeInternal

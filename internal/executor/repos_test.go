@@ -515,6 +515,21 @@ func TestRepoCloneErrorDedupe(t *testing.T) {
 	}
 }
 
+// TestRepoCloneErrorDedupeKeepsAMessageFlip: one reason with two messages is
+// two events, so a mount path's refusal reaches the client after a generic
+// failure with the same reason.
+func TestRepoCloneErrorDedupeKeepsAMessageFlip(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	m := repoRef{ID: "sesrsc_flip", MountPath: "/opt/repo", Type: "github_repository", URL: "https://example.invalid/o/r.git"}
+	for _, message := range []string{"generic", "generic", "occupied"} {
+		h.exec.emitRepoCloneError(context.Background(), h.sid, m, repoOutcomeInternal, message)
+	}
+	errs := h.repoErrors(t)
+	if len(errs) != 2 || errs[0]["message"] != "generic" || errs[1]["message"] != "occupied" {
+		t.Errorf("clone errors = %v, want the generic message once, then the occupied one", errs)
+	}
+}
+
 // TestRepoPartialFailure is m-partial 🔍: one repository failing leaves the
 // others and the file mounts to materialize normally.
 func TestRepoPartialFailure(t *testing.T) {
@@ -782,8 +797,9 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 	if err != nil || plant.ExitCode != 0 {
 		t.Fatalf("plant the paths: %v %+v", err, plant)
 	}
-	// /opt/EOF is a path the network arm's text match would read as the git
-	// host's failure, had the refusal reached it.
+	// /opt/EOF is a name the network arm's text match reads as the git host's
+	// failure. The refusal quotes no path, so the name guards only a refusal
+	// that would.
 	kept := []string{"/opt/EOF", "/opt/dangling", "/opt/elink", "/opt/file", "/opt/link"}
 	cloned := []string{"/mnt/session/uploads/repo", "/opt/absent", "/opt/empty", "/tmp/stale", "/workspace/stale"}
 	for i, mount := range append(append([]string(nil), kept...), cloned...) {
@@ -832,8 +848,8 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 // status of mountOccupied's probe out of the output (#860). That is no answer,
 // so the clone goes ahead, and the extraction judges the path itself: an
 // empty directory clones, and one that holds a file is refused and kept, as
-// is a dangling symlink. Each refusal reads as the probe's would: /opt/EOF,
-// quoted in an error's text, would read as the git host's failure.
+// is a dangling symlink. Each refusal reads as the probe's would, with the
+// mount path's message.
 func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	h, provider, flooding := floodingRepoHarness(t)
