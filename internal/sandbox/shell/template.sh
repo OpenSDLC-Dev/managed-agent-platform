@@ -54,10 +54,11 @@ __map_save() {
   # and turning it off HERE, before the opts capture below, is what records it off
   # in the snapshot so it cannot. If it carried, the restore would re-enable it and
   # every LATER call — one that never asked for it — would run this whole function
-  # and __map_main under it, tracing the internal state path and the tool-call id
-  # into the tool result's stderr. The command that itself ran `set -x` still traces
-  # its own call's prologue (it asked for tracing); nothing after it does. errexit
-  # is untouched and still captured on, so it carries as an option should.
+  # and the template's last line under it, tracing the internal state path and
+  # the tool-call id into the tool result's stderr. The command that itself ran
+  # `set -x` still traces its own call's prologue (it asked for tracing); nothing
+  # after it does. errexit is untouched and still captured on, so it carries as
+  # an option should.
   builtin set +x
 
   # The command's traps go first, before this function does anything else. Traps
@@ -125,8 +126,8 @@ __map_save() {
     # variable cannot be named like an option, but a FUNCTION or ALIAS can: bash
     # accepts `-p` and `--` as names, and `declare -f "-p"` or `alias "-p"` then
     # reads `-p` as the *print-everything* option and dumps the WHOLE table past
-    # the `__map_*` filter — a snapshotted `__map_main` among it, which the next
-    # call restores over the template's own and runs. `--` makes the name a name.
+    # the `__map_*` filter — a `__map_save` of the command's own among it, which the
+    # next call restores over the template's own and runs. `--` makes the name a name.
     builtin : >"$__map_snap/env"
     builtin : >"$__map_snap/names"
     while IFS= builtin read -r __map_n; do
@@ -144,12 +145,13 @@ __map_save() {
     done < <(builtin compgen -A function)
 
     # Aliases, one at a time and filtered the same way — NOT a bare `alias -p`.
-    # The template's own trailing lines are parsed after the restore has sourced
-    # this file, so an alias that survives into the next call is expanded over
-    # them: `alias trap=true` alone turned `trap '__map_save' EXIT` into a no-op
-    # and silently dropped the state of every call that ended by calling `exit`,
-    # for the rest of the session. __map_main below closes that from the other
-    # side; the filter keeps a command from aliasing the template's own names.
+    # The template's own last line is parsed after the restore has sourced this
+    # file, so an alias that survives into the next call is expanded over it:
+    # `alias trap=true` alone turned `trap '__map_save' EXIT` into a no-op and
+    # silently dropped the state of every call that ended by calling `exit`, for
+    # the rest of the session. The template's last line closes that from the
+    # other side; the filter keeps a command from aliasing the template's own
+    # names.
     #
     # Each record is written as `\builtin alias name='value'`, because the restore
     # sources this file with the command's own FUNCTIONS already live: a command
@@ -177,38 +179,55 @@ __map_save() {
   builtin return $__map_code
 }
 
-# Everything that runs AFTER the restore lives in this function, and that is the
-# point: a function body is parsed when it is DEFINED — here, before the restore
-# has sourced a single alias — so the plain words below cannot be alias-expanded.
-# Left at the top level they are parsed after the restore, where `alias trap=true`
-# turns the EXIT trap into a no-op and `alias exit=true` costs the call its exit
-# code. `builtin` guards the same words against a snapshotted *function* of the
-# same name, which the restore has already installed by then. (Being inside a
-# function body is no protection for a command or process substitution: those are
-# re-parsed every time they run, which is what __map_save must switch alias
-# expansion off for. There are none here.)
+# The template ends with the line after the restore below. It runs at the top
+# level, and the command is sourced there, never inside a function. When a call
+# that its own `set -e` ends was sourced inside a function, bash 5 ran the EXIT
+# trap with that function's variable context torn down: __map_save's `local`
+# failed, the call lost its snapshot, and the errors landed on the command's
+# stderr (bash 5.2 added `pop_var_context`). Bash still prints that line itself
+# when `set -e` fires inside a `.` or `eval` that runs in the command's own
+# function; the save is not affected.
 #
-# The EXIT trap catches a command that calls `exit`; the explicit save after it
-# catches a command that returns normally having replaced the EXIT trap with one
-# of its own. Clearing the EXIT trap first keeps an untouched one from saving
-# twice. Clearing DEBUG/ERR/RETURN here does not protect the snapshot — __map_save
-# clears them again on entry, and that is the clear that matters, because a command
-# exiting THROUGH the EXIT trap never reaches this line. This one protects the tool
-# RESULT: without it, each line of the template below fires the command's own DEBUG
-# or ERR trap, and the model reads output its command never printed.
+# It is one line because bash reads a whole line before it runs any of it: the
+# line is read before the command runs, so neither the command's own aliases
+# nor a `set -v` it turns on reach it. It is read after the restore, though, so
+# every command word is quoted. A quoted word is never alias-expanded, where
+# `alias exit=true` would cost the call its exit code, and an assignment word
+# holds `=`, which no alias name can. `builtin` guards the same words against a
+# snapshotted *function* of the same name. The line holds plain commands, not
+# a `{ ...; }` group, because `{` can be an alias. Neither a comment nor a
+# blank line follows the restore: a carried `set -v` echoes every line read
+# after it.
 #
-# What is left is narrow and documented: a command that BOTH installs its own EXIT
-# trap AND exits through it skips this call's snapshot — and so, therefore, does
-# one that replaces this shell with `exec` or has it killed outright. None of them
-# lose more than their own call: an uncommitted snapshot leaves `head` alone.
-__map_main() {
-  builtin trap '__map_save' EXIT
-  builtin . "$__map_state/cmd/$__map_id"
-  __map_status=$?
-  builtin trap - DEBUG ERR RETURN EXIT
-  __map_save "$__map_status"
-  builtin exit "$__map_status"
-}
+# The EXIT trap catches a command that calls `exit` or that `set -e` ends. It
+# drops the command's DEBUG/ERR/RETURN traps before it calls __map_save, as the
+# commands after the source do. Called first, __map_save would return the
+# command's own status, and bash runs the ERR trap when a function fails, after
+# it puts back the ERR trap the function cleared: the command's trap would fire
+# once more, on the template's own line. After the clear, __map_save returns
+# the clear's 0, which costs nothing: bash keeps the exit status across an EXIT
+# trap. The trap's text is parsed when the call exits, after the command: a
+# `set -v` the command turns on echoes it, and an alias the command defines
+# reaches its bare `__map_save`, as either always could. The alias tests rely
+# on that word to catch a namespace filter that would let such an alias carry.
+#
+# The commands after the source catch a command that returns normally having
+# replaced the EXIT trap with one of its own. They keep the status in
+# __map_status before the clear resets `$?`, and clear the EXIT trap first so
+# that an untouched one does not save twice. Clearing DEBUG/ERR/RETURN there
+# does not protect the snapshot, because __map_save clears them again on entry.
+# It protects the tool RESULT: without it, each command after it fires the
+# command's own DEBUG or ERR trap, and the model reads output its command never
+# printed.
+#
+# What is left is narrow and documented: a command that BOTH installs its own
+# EXIT trap AND exits through it skips this call's snapshot, and so does one
+# that replaces this shell with `exec` or has it killed outright. A command
+# that defines its own __map_save, as a function or an alias, replaces this
+# call's save. None of them lose
+# more than their own call: an uncommitted snapshot leaves `head` alone, and
+# the snapshot's namespace filter keeps a __map_save of the command's own from
+# being carried.
 
 # Restore the committed snapshot (the first call, and the first call after a
 # restart, have none). The `done` marker is the judge of whether there is one:
@@ -298,5 +317,4 @@ builtin trap - ERR
   fi
   builtin unset __map_head __map_prev __map_l
 } >/dev/null 2>&1
-
-__map_main
+\builtin trap '\builtin trap - DEBUG ERR RETURN; __map_save' EXIT; \builtin . "$__map_state/cmd/$__map_id"; __map_status=$?; \builtin trap - DEBUG ERR RETURN EXIT; \__map_save "$__map_status"; \builtin exit "$__map_status"
