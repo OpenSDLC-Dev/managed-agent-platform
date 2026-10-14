@@ -286,7 +286,8 @@ const repoStagingRoot = "/tmp"
 // the memory stores' root and the shell state root. Create never yields
 // one since #922, but a repository stored before keeps its literal path,
 // and `/mnt` was one create accepted. Below one, a re-clone removes only
-// the checkout's own tree, as anywhere. Paths the image ships are #930.
+// the checkout's own tree, as anywhere. What the image ships at a path is
+// extractRepo's to keep (#930).
 func (e *Executor) safeRepoMount(mount string) error {
 	if mount == "" || !path.IsAbs(mount) {
 		return fmt.Errorf("mount path %q is not absolute", mount)
@@ -369,6 +370,15 @@ const stagingSuffix = ".map-repo-staging"
 // its own copy of the name removed from the staged tree, so the skills step
 // never reads the checkout's file as its marker.
 //
+// A mount outside sandbox.RepositoryRoot is a repository stored before #922,
+// which keeps its literal path (#930). There the old tree is removed only if
+// it is an empty directory, through `rmdir`. A path that holds anything, such
+// as `/usr`, fails as a clone error instead of losing what the image ships
+// there. A dangling symlink reads as absent, and the rename onto it fails
+// instead: POSIX rename refuses a directory over a non-directory. A working
+// row is unaffected, because a fresh sandbox has nothing at its path. Under
+// RepositoryRoot, a checkout that lost its .git is still replaced whole.
+//
 // Every path is shell-quoted: mount_path is request-controlled text, and
 // unquoted interpolation would be command injection inside the sandbox.
 // Cleanup runs unconditionally — after a `;`, never sequenced behind an `&&` —
@@ -384,12 +394,16 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 			drop += " " + q(path.Join(staging, path.Base(sentinel)))
 		}
 	}
+	remove := "rm -rf " + q(clean)
+	if !strings.HasPrefix(clean, sandbox.RepositoryRoot+"/") {
+		remove = "{ [ ! -e " + q(clean) + " ] || rmdir " + q(clean) + "; }"
+	}
 	cmd := strings.Join([]string{
 		"rm -rf " + q(staging),
 		" && mkdir -p " + q(staging),
 		" && tar -xf " + q(tarPath) + " -C " + q(staging),
 		drop,
-		" && rm -rf " + q(clean),
+		" && " + remove,
 		" && mkdir -p " + q(path.Dir(clean)),
 		" && mv " + q(staging) + " " + q(clean),
 		"; rc=$?; rm -rf " + q(staging) + " " + q(tarPath) + "; exit $rc",

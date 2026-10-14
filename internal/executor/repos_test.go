@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -742,6 +743,64 @@ func TestRepoExtractFailureIsTolerated(t *testing.T) {
 	h.runPass(t)
 	if got := readSandboxFile(t, sb, blocked+"/repo/README.md"); got != "x\n" {
 		t.Errorf("README.md = %q, want the retry to have materialized", got)
+	}
+}
+
+// TestRepoKeepsWhatALegacyMountPathHolds 🔍: a repository stored before #922
+// keeps its literal path (#930), and a clone there must not take what the
+// image ships at it. At /usr on a merged-/usr image, that is the shell itself.
+// Outside /workspace a clone replaces only an empty directory. At a path that
+// holds files, at a file, or at a symlink it fails as a clone error and
+// removes nothing, while at an absent path or an empty directory it clones.
+// Under /workspace a tree without its .git is still replaced whole.
+func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, provider := dockerRepoHarness(t)
+	sb := adopt(t, provider, h)
+	plant, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: strings.Join([]string{
+		"mkdir -p /opt/full /opt/empty /workspace/stale",
+		"echo image > /opt/full/keep",
+		"echo image > /opt/file",
+		"ln -s /usr/share /opt/link",
+		"ln -s /nonexistent /opt/dangling",
+		"echo old > /workspace/stale/old",
+	}, " && ")})
+	if err != nil || plant.ExitCode != 0 {
+		t.Fatalf("plant the paths: %v %+v", err, plant)
+	}
+	kept := []string{"/opt/dangling", "/opt/file", "/opt/full", "/opt/link"}
+	cloned := []string{"/opt/absent", "/opt/empty", "/workspace/stale"}
+	for i, mount := range append(append([]string(nil), kept...), cloned...) {
+		h.seedRepoResource(t, "sesrsc_legacy"+string(rune('a'+i)), fx.url(), mount, "ghp_fixture", nil)
+	}
+
+	h.runPass(t)
+
+	var failed []string
+	for _, e := range h.repoErrors(t) {
+		failed = append(failed, e["mount_path"].(string))
+	}
+	sort.Strings(failed)
+	if strings.Join(failed, " ") != strings.Join(kept, " ") {
+		t.Errorf("clone errors at %v, want exactly %v", failed, kept)
+	}
+	for _, mount := range cloned {
+		if got := readSandboxFile(t, sb, mount+"/README.md"); got != "x\n" {
+			t.Errorf("%s/README.md = %q, want the checkout", mount, got)
+		}
+	}
+	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+		Command: "cat /opt/full/keep /opt/file; readlink /opt/link /opt/dangling; ls -A /workspace/stale /opt /tmp"})
+	if err != nil {
+		t.Fatalf("inspect the sandbox: %v", err)
+	}
+	if want := "image\nimage\n/usr/share\n/nonexistent\n"; !strings.HasPrefix(res.Stdout, want) {
+		t.Errorf("what the refused paths held = %q, want it to start %q", res.Stdout, want)
+	}
+	for _, gone := range []string{"old", "map-repo-staging", "repo-sesrsc_legacy"} {
+		if strings.Contains(res.Stdout, gone) {
+			t.Errorf("%q is left in the sandbox:\n%s", gone, res.Stdout)
+		}
 	}
 }
 
