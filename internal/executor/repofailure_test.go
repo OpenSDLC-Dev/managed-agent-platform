@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 )
@@ -103,11 +104,16 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 	// go-git's clone checks the tree out onto the spool, so the phase alone
 	// does not decide it: a file error must not read as the network's, by
 	// its type or by its text, which quotes a name the repository chose. Nor
-	// may a dial this executor could not make for want of its own
-	// descriptors or ports.
-	dial := func(errno syscall.Errno) error {
+	// may a dial this executor could not make: a socket it could not create,
+	// or a local port it could not assign. The pack request's dial comes
+	// inside go-git's UnexpectedError.
+	dial := func(call string, errno syscall.Errno) error {
 		return &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs",
-			Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("socket", errno)}}
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError(call, errno)}}
+	}
+	packDial := func(call string, errno syscall.Errno) error {
+		return plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://github.com/o/r.git/git-upload-pack",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError(call, errno)}})
 	}
 	for _, tc := range []struct {
 		name string
@@ -119,9 +125,11 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			Op: "open", Path: "/tmp/map-repo-clone-1/tree/EOF", Err: syscall.ENOSPC}},
 		{"the spool's disk fills during a checkout of a symlink to `connection reset`", &os.LinkError{
 			Op: "symlink", Old: "connection reset", New: "/tmp/map-repo-clone-1/tree/link", Err: syscall.ENOSPC}},
-		{"the executor has no descriptor left", dial(syscall.EMFILE)},
-		{"the system has no descriptor left", dial(syscall.ENFILE)},
-		{"the executor has no port left", dial(syscall.EADDRNOTAVAIL)},
+		{"the executor has no descriptor left", dial("socket", syscall.EMFILE)},
+		{"the system has no descriptor left", dial("socket", syscall.ENFILE)},
+		{"the executor has no memory for the pack request's socket", packDial("socket", syscall.ENOMEM)},
+		{"the executor has no buffer for the pack request's socket", packDial("socket", syscall.ENOBUFS)},
+		{"the executor has no port left", dial("connect", syscall.EADDRNOTAVAIL)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := fmt.Errorf("%w: %w", errClone, tc.err)
@@ -132,9 +140,38 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 	}
 
 	// A read of the response body fails outside the client's *url.Error, and
-	// a timed-out one matches none of the network texts.
-	t.Run("a read from the remote times out", func(t *testing.T) {
-		err := fmt.Errorf("%w: %w", errClone, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ETIMEDOUT})
+	// a lost route matches none of the network texts. go-git formats the
+	// pack response's errors with %s (transport/internal/common), and the
+	// host's own message on its error band likewise (sideband/demux.go):
+	// only their text is left.
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"the route to the remote is lost mid-read", &net.OpError{
+			Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.EHOSTUNREACH)}},
+		{"a read of the pack response times out", fmt.Errorf("error decoding upload-pack response: %s",
+			&net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ETIMEDOUT)})},
+		{"the host's pack-objects dies", fmt.Errorf("unexpected error: %s", "fatal: pack-objects died of signal 9")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := fmt.Errorf("%w: %w", errClone, tc.err)
+			if got := cloneReason(err); got != repoOutcomeNetwork {
+				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
+			}
+		})
+	}
+
+	// A page that is not git's, in place of the pack response, is refused by
+	// the pkt-line scanner, and go-git formats that refusal with %s.
+	t.Run("the pack response is not git's", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		fx.packPage.Store(true)
+		_, _, cleanup, err := cloneToTar(context.Background(), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if err == nil || errors.Is(err, pktline.ErrInvalidPktLen) || !strings.Contains(err.Error(), pktline.ErrInvalidPktLen.Error()) {
+			t.Fatalf("err = %v, want go-git's pkt-line refusal as text alone", err)
+		}
 		if got := cloneReason(err); got != repoOutcomeNetwork {
 			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
 		}
@@ -188,13 +225,27 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 	// repository's name, as `network`.
 	t.Run("the clone's deadline passes while the pack is requested", func(t *testing.T) {
 		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-		fx.stallPack.Store(int64(time.Minute))
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, _, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+		fx.stallPack.Store(true)
+		_, _, cleanup, err := cloneToTar(deadlineAtHold(t, fx), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
 		defer cleanup()
 		if n := fx.clones.Load(); n != 1 {
 			t.Fatalf("pack requests = %d, want 1: the deadline must pass during the pack request", n)
+		}
+		if got := cloneReason(err); got != repoOutcomeTimeout {
+			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
+		}
+	})
+	// Once the pack response has begun, go-git formats the deadline's error
+	// with %s as it decodes the response, and only the clone's context still
+	// names it.
+	t.Run("the clone's deadline passes while the pack is read", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		fx.stallPack.Store(true)
+		fx.stallPackBody.Store(true)
+		_, _, cleanup, err := cloneToTar(deadlineAtHold(t, fx), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if err == nil || !strings.Contains(err.Error(), "upload-pack response") {
+			t.Fatalf("err = %v, want a failure decoding the pack response", err)
 		}
 		if got := cloneReason(err); got != repoOutcomeTimeout {
 			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
@@ -229,4 +280,38 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			t.Errorf("cloneReason = %q, want %q for a refused dial: %v", got, repoOutcomeNetwork, err)
 		}
 	})
+}
+
+// deadlineAtHold is a context whose deadline passes once fx holds a pack
+// request, so a slow ref advertisement on a loaded runner cannot spend it
+// before the pack request is made.
+func deadlineAtHold(t *testing.T, fx *gitFixture) context.Context {
+	c := &passedDeadline{Context: context.Background(), done: make(chan struct{})}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		select {
+		case <-fx.holding:
+			close(c.done)
+		case <-stop:
+		}
+	}()
+	return c
+}
+
+// passedDeadline is a context whose deadline passes when done is closed.
+type passedDeadline struct {
+	context.Context
+	done chan struct{}
+}
+
+func (c *passedDeadline) Done() <-chan struct{} { return c.done }
+
+func (c *passedDeadline) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
 }

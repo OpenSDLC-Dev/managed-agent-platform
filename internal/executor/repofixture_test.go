@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cgi"
@@ -12,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,9 +65,17 @@ type gitFixture struct {
 	echoAuth atomic.Bool
 	// stall delays every request, for the deadline row.
 	stall atomic.Int64
-	// stallPack delays only the pack request, the POST to upload-pack, whose
-	// error go-git reports in a wrapper of its own.
-	stallPack atomic.Int64
+	// stallPack holds the pack request, the POST to upload-pack, until the
+	// client gives up: before its response, whose error go-git reports in a
+	// wrapper of its own, or, with stallPackBody, after the response's first
+	// pkt-line, as a host that stalls partway through the pack does.
+	stallPack, stallPackBody atomic.Bool
+	// holding is closed once the fixture holds a pack request.
+	holding     chan struct{}
+	holdingOnce sync.Once
+	// packPage answers the pack request with a page that is not git's, as a
+	// proxy that replaced the response does.
+	packPage atomic.Bool
 	// wantAuth, when set, is the Authorization header the fixture requires;
 	// it is also what proves the token travels as a header and nothing else.
 	wantAuth atomic.Value
@@ -104,7 +115,7 @@ func newGitFixture(t *testing.T, files map[string]string) *gitFixture {
 	if out, _ := probe.CombinedOutput(); bytes.Contains(out, []byte("is not a git command")) {
 		t.Fatalf("the fixture serves through git's http-backend helper, which is not installed: %s", out)
 	}
-	f := &gitFixture{dir: dir, repo: repo, backend: &cgi.Handler{
+	f := &gitFixture{dir: dir, repo: repo, holding: make(chan struct{}), backend: &cgi.Handler{
 		// GitHub answers a want for a commit no ref names; git's own
 		// upload-pack does only when told to. `-c` reaches the upload-pack the
 		// backend runs, on any git version.
@@ -197,6 +208,34 @@ func (f *gitFixture) branch(t *testing.T, name string, files map[string]string) 
 	}
 }
 
+// hold marks that the fixture is holding a pack request.
+func (f *gitFixture) hold() { f.holdingOnce.Do(func() { close(f.holding) }) }
+
+// firstPktThenHold writes the response's first pkt-line and then nothing
+// more until done is closed.
+type firstPktThenHold struct {
+	http.ResponseWriter
+	f    *gitFixture
+	done <-chan struct{}
+}
+
+func (s *firstPktThenHold) Write(p []byte) (int, error) {
+	n := len(p)
+	if l, err := strconv.ParseUint(string(p[:min(4, len(p))]), 16, 16); err == nil && l >= 4 && int(l) <= len(p) {
+		n = int(l)
+	}
+	if _, err := s.ResponseWriter.Write(p[:n]); err != nil {
+		return 0, err
+	}
+	s.ResponseWriter.(http.Flusher).Flush()
+	// Held only once the client has the response's headers, so what it
+	// fails on is the read of the pack response, not the wait for it.
+	time.Sleep(500 * time.Millisecond)
+	s.f.hold()
+	<-s.done
+	return 0, errors.New("fixture: the client gave up")
+}
+
 // serve is git http-backend behind the handler-level failure modes the
 // adversarial rows drive.
 func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
@@ -232,16 +271,21 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-upload-pack") {
 		f.clones.Add(1)
-		if d := f.stallPack.Load(); d > 0 {
+		if f.packPage.Load() {
+			_, _ = w.Write([]byte("<html><body>Service unavailable</body></html>"))
+			return
+		}
+		if f.stallPack.Load() {
 			// The server notices a client that gave up only once the request
 			// body is read, so it is read first and handed on whole.
 			body, _ := io.ReadAll(r.Body)
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			select {
-			case <-time.After(time.Duration(d)):
-			case <-r.Context().Done():
+			if !f.stallPackBody.Load() {
+				f.hold()
+				<-r.Context().Done()
 				return
 			}
+			w = &firstPktThenHold{ResponseWriter: w, f: f, done: r.Context().Done()}
 		}
 	}
 	// The suffix-less spelling a github_repository resource carries names the

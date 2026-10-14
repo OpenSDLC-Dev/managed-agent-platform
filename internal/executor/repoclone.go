@@ -137,6 +137,12 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		repo, err = git.CloneContext(ctx, storer, tree, opts)
 	}
 	if err != nil {
+		// go-git formats some errors with %s, among them a deadline that
+		// fires while it decodes the pack response, so the context, which
+		// says what fired, joins the chain.
+		if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
+			err = withCause{err, cerr}
+		}
 		return "", 0, cleanup, fmt.Errorf("%w: %w", errClone, err)
 	}
 	// go-git applies the context to transport only — its post-fetch worktree
@@ -434,10 +440,10 @@ func cloneReason(err error) string {
 		return repoOutcomeCheckout
 	// Only go-git's clone speaks to the git host, so only its errors may blame
 	// the host, or, beside the branch name above, the caller's ref. What
-	// surrounds it is ours: the packing of
-	// the tree on this executor's disk, the sandbox's transport and scripts.
-	// Their errors can read like the host's — an EOF, a script's stderr
-	// quoting the mount path — and the network arm reads an error's text.
+	// surrounds it is ours: the packing of the tree on this executor's disk,
+	// the sandbox's transport and scripts. Their errors can read like the
+	// host's — an EOF, a script's stderr quoting the mount path — and the
+	// network arm reads an error's text.
 	case !errors.Is(err, errClone):
 		return repoOutcomeInternal
 	case errors.Is(err, transport.ErrAuthenticationRequired),
@@ -461,26 +467,21 @@ func cloneReason(err error) string {
 // go-git had no sentinel for — a 5xx, a 429, anything but the 401/403/404 the
 // arms above already claim. It is the remote's failure, not ours, so reporting
 // it as `internal` would send the operator to read our logs over an outage at
-// the git host.
-//
-// The unwrapping is manual because go-git's UnexpectedError implements no
-// Unwrap, so errors.As cannot reach the transport error it holds.
+// the git host. go-git carries the status in an UnexpectedError, which
+// cloneReason has joined into the chain.
 func isRemoteStatusError(err error) bool {
-	var unexpected *plumbing.UnexpectedError
-	if !errors.As(err, &unexpected) {
-		return false
-	}
 	var httpErr *githttp.Err
-	return errors.As(unexpected.Err, &httpErr)
+	return errors.As(err, &httpErr)
 }
 
 // isProtocolError reports whether the remote answered but did not speak git:
 // a 200 carrying an outage page, a captive portal, or a proxy that replaced the
 // response. The bytes arrived, so nothing above matches and no HTTP status
-// betrays it — only the pkt-line scanner refusing what it was handed. The
-// remote's failure, not ours.
+// betrays it — only the pkt-line scanner refusing what it was handed. go-git
+// keeps that sentinel for the ref advertisement and formats it with %s for
+// the pack response, so its text is read too. The remote's failure, not ours.
 func isProtocolError(err error) bool {
-	return errors.Is(err, pktline.ErrInvalidPktLen)
+	return errors.Is(err, pktline.ErrInvalidPktLen) || strings.Contains(err.Error(), pktline.ErrInvalidPktLen.Error())
 }
 
 // isNetworkError reports whether err looks like a failure to reach or speak to
@@ -495,9 +496,12 @@ func isNetworkError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// A dial this executor could not make for want of its own descriptors or
-	// ports is ours, though the transport reports it as its own.
-	if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.EADDRNOTAVAIL) {
+	// A dial this executor could not make is ours, though the transport
+	// reports it as its own: a socket it could not create — out of
+	// descriptors, memory or buffers — before anything reached the host, or
+	// a local port it could not assign.
+	var sysErr *os.SyscallError
+	if errors.As(err, &sysErr) && sysErr.Syscall == "socket" || errors.Is(err, syscall.EADDRNOTAVAIL) {
 		return false
 	}
 	// A *neturl.Error is what the HTTP client returns for a request; a
@@ -518,9 +522,14 @@ func isNetworkError(err error) bool {
 	if errors.As(err, &pathErr) || errors.As(err, &linkErr) {
 		return false
 	}
+	// go-git formats some of the transport's errors with %s, which leaves
+	// their text: a kernel's timeout, in its errno's own words, among them.
+	// "unexpected error: " is go-git's prefix for what the host sent on its
+	// error band (sideband/demux.go).
 	msg := err.Error()
 	for _, s := range []string{"connection refused", "no such host", "network is unreachable",
-		"connection reset", "EOF", "TLS handshake", "i/o timeout", "stream error", "GOAWAY"} {
+		"connection reset", "EOF", "TLS handshake", "i/o timeout", "stream error", "GOAWAY",
+		syscall.ETIMEDOUT.Error(), "unexpected error: "} {
 		if strings.Contains(msg, s) {
 			return true
 		}
@@ -568,6 +577,13 @@ func scrubTokenErr(err error, token string) error {
 	}
 	return &scrubbedError{err: err, msg: scrubbed}
 }
+
+// withCause keeps err's message and adds cause to its chain, for an error
+// go-git built with %s from one the classification must still find.
+type withCause struct{ err, cause error }
+
+func (e withCause) Error() string   { return e.err.Error() }
+func (e withCause) Unwrap() []error { return []error{e.err, e.cause} }
 
 type scrubbedError struct {
 	err error
