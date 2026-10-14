@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +45,10 @@ var errBranchName = errors.New("invalid branch name")
 // errBranchUnsupported marks a branch checkout refused before the remote is
 // asked, for a name git admits but go-git cannot carry. The limit is ours.
 var errBranchUnsupported = errors.New("go-git cannot carry the branch name")
+
+// errFetch marks an error from the fetch, the one phase that speaks to the git
+// host. cloneReason blames the host only for an error that carries it.
+var errFetch = errors.New("fetching the repository failed")
 
 // tokenUsername is the username GitHub expects beside a personal access token
 // in HTTP basic auth. The token rides the Authorization header of each request
@@ -125,7 +131,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		repo, err = git.CloneContext(ctx, storer, tree, opts)
 	}
 	if err != nil {
-		return "", 0, cleanup, err
+		return "", 0, cleanup, fmt.Errorf("%w: %w", errFetch, err)
 	}
 	// go-git applies the context to transport only — its post-fetch worktree
 	// reset and a commit's checkout run to completion whatever the deadline
@@ -397,14 +403,23 @@ func cloneReason(err error) string {
 		return repoOutcomeTooLarge
 	case errors.Is(err, context.DeadlineExceeded):
 		return repoOutcomeTimeout
-	// Each is ours, never the git host's, so none may reach the network arm's
-	// match below, which reads an error's type and text. Nothing but this
-	// platform cancels a clone without a deadline — a lost lease, or an
-	// executor shutting down — and go-git surfaces that as a *url.Error. A
-	// branch name, a sandbox transport's EOF, or a script's stderr quoting the
-	// mount path can read like the host's failure too.
-	case errors.Is(err, context.Canceled), errors.Is(err, errBranchUnsupported),
-		errors.Is(err, errMountOccupied), errors.Is(err, errExtraction):
+	// Nothing but this platform cancels a clone without a deadline — a lost
+	// lease, or an executor shutting down — and go-git surfaces that inside
+	// the fetch as a *url.Error, which the network arm below would match.
+	case errors.Is(err, context.Canceled):
+		return repoOutcomeInternal
+	// A branch name go-git's ref-name check refuses — `foo:bar`, say — is
+	// refused before the fetch. It is the caller's ref that is wrong, so
+	// `internal` would send the operator to read our logs over their own typo.
+	case errors.Is(err, errBranchName):
+		return repoOutcomeCheckout
+	// Only the fetch speaks to the git host, so only its errors may blame it.
+	// What surrounds the fetch is ours: the credential row in Postgres, the
+	// token's decrypt through a key service, the spool on this executor's
+	// disk, the sandbox's transport and scripts. Their errors can read like
+	// the host's — a refused dial, an EOF, a script's stderr quoting the mount
+	// path — and the network arm reads an error's type and text.
+	case !errors.Is(err, errFetch):
 		return repoOutcomeInternal
 	case errors.Is(err, transport.ErrAuthenticationRequired),
 		errors.Is(err, transport.ErrAuthorizationFailed):
@@ -414,11 +429,7 @@ func cloneReason(err error) string {
 		return repoOutcomeNotFound
 	case errors.Is(err, plumbing.ErrObjectNotFound),
 		errors.Is(err, plumbing.ErrReferenceNotFound),
-		errors.Is(err, git.NoMatchingRefSpecError{}),
-		// A branch name go-git's ref-name check refuses — `foo:bar`, say. It
-		// is the caller's ref that is wrong, so `internal` would send the
-		// operator to read our logs over their own typo.
-		errors.Is(err, errBranchName):
+		errors.Is(err, git.NoMatchingRefSpecError{}):
 		return repoOutcomeCheckout
 	case isRemoteStatusError(err), isNetworkError(err), isProtocolError(err):
 		return repoOutcomeNetwork
@@ -457,13 +468,20 @@ func isProtocolError(err error) bool {
 // the remote at all, as opposed to a repository-level refusal. go-git returns
 // the transport's own error here (a *url.Error, a dial failure), which carries
 // no sentinel of its own, so this is the one classification that must read the
-// message — and it is the fallback arm, never a guard.
+// message — and it is the fallback arm, never a guard. It asks for the
+// transport's own types, not for any error with a Timeout method: the
+// syscall.Errno inside a *fs.PathError has one too, and the fetch writes to
+// the spool on this executor's disk.
 func isNetworkError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var netErr interface{ Timeout() bool }
-	if errors.As(err, &netErr) {
+	// A *url.Error is what the HTTP client returns for a request; a
+	// *net.OpError is what a read of the response body returns once the
+	// headers have arrived.
+	var urlErr *url.Error
+	var opErr *net.OpError
+	if errors.As(err, &urlErr) || errors.As(err, &opErr) {
 		return true
 	}
 	msg := err.Error()

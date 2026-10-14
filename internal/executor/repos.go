@@ -168,9 +168,6 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		if err != nil {
 			failed++
 			reason := cloneReason(err)
-			if errors.Is(err, errRepoNoCredential) {
-				reason = repoOutcomeInternal
-			}
 			recordRepoMaterialized(ctx, reason)
 			slog.WarnContext(ctx, "repository not materialized",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath,
@@ -243,17 +240,18 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	// mounted over: create roots every mount under /workspace (#922), and
 	// safeRepoMount refuses it for a row from any other route.
 	sandboxTar := path.Join(repoStagingRoot, "repo-"+m.ID+".tar")
-	if err := sb.WriteFileStream(ctx, sandboxTar, f, size); err != nil {
-		return 0, fmt.Errorf("%w: %w", errExtraction, err)
-	}
-	// From here the sandbox holds up to the whole byte budget in /tmp, and the
-	// only thing that removes it is the extraction command's own cleanup tail.
-	// A context cancelled between the two — the clone deadline, or a lost lease
-	// — makes Exec return without ever running that tail, stranding a file the
-	// size of the repository inside the session's sandbox for its whole life.
-	// Swept here instead, on a context the cancellation cannot reach.
+	// From the upload on, the sandbox can hold up to the whole byte budget in
+	// /tmp, and the only thing that removes it is the extraction command's own
+	// cleanup tail, which runs only if the extraction script does. An upload
+	// that breaks off, an extraction whose exec never starts, or a context
+	// cancelled between the two — the clone deadline, or a lost lease — would
+	// strand a file the size of the repository inside the session's sandbox
+	// for its whole life. So every failure from here is swept, on a context the
+	// cancellation cannot reach. A script that ran and failed has already
+	// cleaned up, and sweeping again costs one exec on a pass that failed.
+	landed := false
 	defer func() {
-		if ctx.Err() == nil {
+		if landed {
 			return
 		}
 		sweep, stop := context.WithTimeout(context.WithoutCancel(ctx), repoSweepTimeout)
@@ -261,13 +259,17 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 		if _, err := sandbox.ExecScript(sweep, sb, sandbox.ExecRequest{
 			Command: "rm -rf " + shellQuote(sandboxTar) + " " + shellQuote(stagingPath(m.MountPath)),
 		}); err != nil {
-			slog.WarnContext(ctx, "the cancelled clone's sandbox staging was not swept",
+			slog.WarnContext(ctx, "the failed clone's sandbox staging was not swept",
 				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "err", err)
 		}
 	}()
+	if err := sb.WriteFileStream(ctx, sandboxTar, f, size); err != nil {
+		return 0, fmt.Errorf("%w: %w", errExtraction, err)
+	}
 	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar, sentinel, whole); err != nil {
 		return 0, err
 	}
+	landed = true
 	return size, nil
 }
 
@@ -438,9 +440,9 @@ var errMountOccupied = errors.New("the mount path is neither absent nor an empty
 
 // errExtraction is a failure after the fetch, in the sandbox: shipping the
 // tar there, or the extraction script. It is the sandbox's, never the git
-// host's, though its text can read like the host's to cloneReason's network
-// arm: a dropped exec stream says EOF, and a script's stderr quotes the mount
-// path, such as /opt/EOF.
+// host's, though its text can read like the host's: a dropped exec stream says
+// EOF, and a script's stderr quotes the mount path, such as /opt/EOF. It never
+// carries errFetch, so cloneReason does not read that text.
 var errExtraction = errors.New("landing the repository in the sandbox failed")
 
 // repoVacancyTimeout bounds mountOccupied's probe, which runs before the

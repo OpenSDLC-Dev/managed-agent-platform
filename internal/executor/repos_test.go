@@ -1575,12 +1575,15 @@ func TestRepoRefusesADirectoryHoldingTheWorkdir(t *testing.T) {
 
 // sweepSandbox records the commands the executor issues and can cancel the run
 // at the one moment that matters: after the tar has landed in the sandbox and
-// before the extraction that would remove it.
+// before the extraction that would remove it. writeErr fails the upload after
+// its bytes landed, and execErr fails a command before it runs.
 type sweepSandbox struct {
 	*fakeSandbox
-	mu      sync.Mutex
-	cmds    []string
-	onWrite func()
+	mu       sync.Mutex
+	cmds     []string
+	onWrite  func()
+	writeErr error
+	execErr  func(cmd string) error
 }
 
 // Exec records only what it actually runs. The distinction is the row: a real
@@ -1591,8 +1594,14 @@ func (s *sweepSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandb
 	if err := ctx.Err(); err != nil {
 		return sandbox.ExecResult{}, err
 	}
+	cmd := strings.TrimPrefix(req.Command, sandbox.ScriptPreamble)
+	if s.execErr != nil {
+		if err := s.execErr(cmd); err != nil {
+			return sandbox.ExecResult{}, err
+		}
+	}
 	s.mu.Lock()
-	s.cmds = append(s.cmds, strings.TrimPrefix(req.Command, sandbox.ScriptPreamble))
+	s.cmds = append(s.cmds, cmd)
 	s.mu.Unlock()
 	return s.fakeSandbox.Exec(ctx, req)
 }
@@ -1601,6 +1610,9 @@ func (s *sweepSandbox) WriteFileStream(ctx context.Context, p string, src io.Rea
 	err := s.fakeSandbox.WriteFileStream(ctx, p, src, size)
 	if s.onWrite != nil {
 		s.onWrite()
+	}
+	if err == nil {
+		err = s.writeErr
 	}
 	return err
 }
