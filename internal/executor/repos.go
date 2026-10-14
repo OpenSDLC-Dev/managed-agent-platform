@@ -46,6 +46,14 @@ type repoCheckout struct {
 // the credential_host_unreachable_error twin (plan 25 decision 4).
 const repoCloneErrorType = "github_repository_clone_error"
 
+// The messages a github_repository_clone_error carries, a small fixed set:
+// emitRepoCloneError dedupes on them.
+const (
+	repoCloneFailedMessage   = "the repository could not be cloned into the sandbox"
+	repoNoCipherMessage      = "a secrets cipher is not configured on this executor"
+	repoMountOccupiedMessage = "the repository's mount path lies outside the platform's directories, where a clone takes only an absent path or an empty directory it can remove"
+)
+
 // errRepoNoCredential classifies a repo resource whose sealed token row is
 // gone. It cannot happen through the API (the row is written in the create
 // transaction and dies only with the session), so it is an internal fault
@@ -131,8 +139,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			recordRepoMaterialized(ctx, repoOutcomeInternal)
 			slog.WarnContext(ctx, "repository mount path refused by the executor",
 				"session_id", sid, "resource_id", m.ID, "mount_path", m.MountPath, "err", err)
-			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal,
-				"the repository could not be cloned into the sandbox")
+			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal, repoCloneFailedMessage)
 			continue
 		}
 		// Asked after the probe, not before it: a mount that already carries a
@@ -143,8 +150,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		if e.cipher == nil {
 			failed++
 			recordRepoMaterialized(ctx, repoOutcomeInternal)
-			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal,
-				"a secrets cipher is not configured on this executor")
+			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal, repoNoCipherMessage)
 			continue
 		}
 		// The probe and the two guards above are behind us; what follows is the
@@ -169,9 +175,9 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			slog.WarnContext(ctx, "repository not materialized",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath,
 				"reason", reason, "err", err)
-			message := "the repository could not be cloned into the sandbox"
+			message := repoCloneFailedMessage
 			if errors.Is(err, errMountOccupied) {
-				message = "the repository's mount path lies outside the platform's directories, where a clone takes only an absent path or an empty directory it can remove"
+				message = repoMountOccupiedMessage
 			}
 			e.emitRepoCloneError(ctx, sid, m, reason, message)
 			continue
@@ -568,24 +574,27 @@ func (e *Executor) repoToken(ctx context.Context, sid domain.ID, resourceID stri
 }
 
 // emitRepoCloneError appends the session.error variant for a failed clone,
-// deduped on (resource_id, reason, message) — two failing repositories are
-// two events, and a reason or message flip re-emits, while a repeated
-// identical failure does not. The message counts because one reason carries
-// several: a mount path's refusal must reach the client after a generic
-// `internal` failure.
+// unless the resource's latest clone error has the same reason and message.
+// Two failing repositories are two events. A failure that differs from the
+// latest one is emitted, a return to an earlier failure included, and so is
+// each change of a failure that alternates; a repeated identical failure is
+// not. So the latest event, which the brain's Mounted-repositories block
+// reads, names the current failure. The message counts because one reason
+// carries several: a mount path's refusal must reach the client after a
+// generic `internal` failure.
 // The work item's lease already makes this executor the session's single
 // writer, so the check-then-append needs no further guarding. Emission is
 // best effort: a failure to record the error must not turn a tolerated clone
 // failure into a failed run.
 func (e *Executor) emitRepoCloneError(ctx context.Context, sid domain.ID, m repoRef, reason, message string) {
 	var already bool
-	err := e.pool.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1 FROM events
+	err := e.pool.QueryRow(ctx, `SELECT COALESCE((
+		SELECT payload->'error'->>'reason' = $4 AND payload->'error'->>'message' = $5
+		  FROM events
 		 WHERE session_id = $1 AND type = 'session.error'
 		   AND payload->'error'->>'type' = $2
 		   AND payload->'error'->>'resource_id' = $3
-		   AND payload->'error'->>'reason' = $4
-		   AND payload->'error'->>'message' = $5)`,
+		 ORDER BY seq DESC LIMIT 1), false)`,
 		sid.String(), repoCloneErrorType, m.ID, reason, message).Scan(&already)
 	if err != nil {
 		slog.WarnContext(ctx, "checking for an existing repository clone error failed",

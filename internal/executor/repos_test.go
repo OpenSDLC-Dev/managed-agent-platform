@@ -515,18 +515,24 @@ func TestRepoCloneErrorDedupe(t *testing.T) {
 	}
 }
 
-// TestRepoCloneErrorDedupeKeepsAMessageFlip: one reason with two messages is
-// two events, so a mount path's refusal reaches the client after a generic
-// failure with the same reason.
-func TestRepoCloneErrorDedupeKeepsAMessageFlip(t *testing.T) {
+// TestRepoCloneErrorDedupeFollowsTheLatest: a clone error is deduped against
+// the resource's latest one, on its reason and message. One reason with two
+// messages is two events, so a mount path's refusal reaches the client after
+// a generic failure. A return to the generic failure is emitted again, so the
+// latest event names the current failure.
+func TestRepoCloneErrorDedupeFollowsTheLatest(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	m := repoRef{ID: "sesrsc_flip", MountPath: "/opt/repo", Type: "github_repository", URL: "https://example.invalid/o/r.git"}
-	for _, message := range []string{"generic", "generic", "occupied"} {
+	for _, message := range []string{repoCloneFailedMessage, repoCloneFailedMessage, repoMountOccupiedMessage, repoCloneFailedMessage} {
 		h.exec.emitRepoCloneError(context.Background(), h.sid, m, repoOutcomeInternal, message)
 	}
-	errs := h.repoErrors(t)
-	if len(errs) != 2 || errs[0]["message"] != "generic" || errs[1]["message"] != "occupied" {
-		t.Errorf("clone errors = %v, want the generic message once, then the occupied one", errs)
+	var got []string
+	for _, e := range h.repoErrors(t) {
+		got = append(got, e["message"].(string))
+	}
+	want := []string{repoCloneFailedMessage, repoMountOccupiedMessage, repoCloneFailedMessage}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("clone error messages = %q, want %q", got, want)
 	}
 }
 
@@ -816,6 +822,9 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 	got := map[string]any{}
 	for _, e := range h.repoErrors(t) {
 		got[e["mount_path"].(string)] = e["reason"]
+		if e["reason"] == repoOutcomeInternal && e["message"] != repoMountOccupiedMessage {
+			t.Errorf("%s: message = %q, want the mount path's", e["mount_path"], e["message"])
+		}
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("clone errors (mount: reason) = %v, want %v", got, want)
