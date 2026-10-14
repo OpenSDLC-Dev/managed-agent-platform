@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,7 +56,8 @@ var errRepoNoCredential = errors.New("repository credential row missing")
 // tools run, first of the passes (provisionAndRun says why). Idempotence is
 // the probe alone — a repo
 // materializes iff the probe answers that `<mount>/.git` is absent, and a pass
-// whose probe does not answer clones nothing (#860, repoPresence) — deliberately without a sentinel:
+// whose probe does not answer clones nothing (#860, repoPresence); outside the
+// platform's directories the mount must also be vacant (replacesWhole) — deliberately without a sentinel:
 // the mounted set is fixed at create, so a marker would have no drift to
 // detect, and plan 24 strips agent-writable markers from checkpoints at
 // capture, which would make a restored workspace re-clone over the agent's own
@@ -169,7 +171,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 				"reason", reason, "err", err)
 			message := "the repository could not be cloned into the sandbox"
 			if errors.Is(err, errMountOccupied) {
-				message = "the repository's mount path holds files outside the platform's directories, where a clone takes only an absent path or an empty directory"
+				message = "the repository's mount path lies outside the platform's directories, where a clone takes only an absent path or an empty directory it can remove"
 			}
 			e.emitRepoCloneError(ctx, sid, m, reason, message)
 			continue
@@ -386,33 +388,44 @@ func (e *Executor) replacesWhole(mount string) bool {
 	return false
 }
 
-// vacateScript clears a mount that replacesWhole refuses, in place of the
-// `rm -rf` right before the rename: it succeeds on an absent path, removing
-// nothing, and on an empty directory, which it removes. It fails on anything
-// else: a directory with content, a file, or a symlink to a directory. A
-// dangling symlink reads as absent here, and the rename onto it fails
-// instead, because POSIX rename refuses a directory over a non-directory.
-func vacateScript(mount string) string {
-	q := shellQuote(mount)
-	return "{ [ ! -e " + q + " ] || rmdir " + q + "; }"
-}
-
 // vacantScript asks, and changes nothing, whether a clone may take mount:
-// whether it is absent, or an empty directory that is not a symlink.
+// whether it is absent, or an empty directory that is not a symlink. A
+// listing that fails, as on a directory the sandbox user may not read, prints
+// nothing and so reads as empty: that is no answer, and the rmdir in
+// vacateScript decides. It names no variable, because an image's startup can
+// leave attributes on any name it might take.
 func vacantScript(mount string) string {
 	q := shellQuote(mount)
 	return "{ [ ! -e " + q + " ] && [ ! -L " + q + " ]; } || { [ -d " + q + " ] && [ ! -L " + q +
-		" ] && e=$(ls -A " + q + ") && [ -z \"$e\" ]; }"
+		" ] && [ -z \"$(ls -A " + q + " 2>/dev/null)\" ]; }"
 }
 
-// errMountOccupied is a clone refused before its fetch, because its mount
-// path holds something replacesWhole may not replace.
+// vacateScript clears a mount that replacesWhole refuses, in place of the
+// `rm -rf` right before the rename. Where vacantScript holds, it removes an
+// empty directory and leaves an absent path alone. Anything else ends the
+// extraction with occupiedStatus.
+func vacateScript(mount string) string {
+	q := shellQuote(mount)
+	return "{ { " + vacantScript(mount) + "; } && { [ ! -e " + q + " ] || rmdir " + q + "; } || (exit " +
+		strconv.Itoa(occupiedStatus) + "); }"
+}
+
+// occupiedStatus is the extraction's exit status when vacateScript refuses
+// the mount, so the refusal is reported as errMountOccupied and not as a
+// failed extraction. None of the script's other commands exits with it.
+const occupiedStatus = 75
+
+// errMountOccupied is a clone refused because its mount path is outside the
+// platform's directories and is neither absent nor an empty directory the
+// clone can remove: by mountOccupied before the fetch, or by vacateScript at
+// the extraction.
 var errMountOccupied = errors.New("the mount path holds something outside the platform's directories")
 
-// mountOccupied asks vacantScript before the fetch. Only a clean "no" counts:
-// an exec that fails, times out, or loses its exit status to an image's
-// startup (#860) reads as vacant, because vacateScript judges the path again
-// in the extraction, and that judgment is the one that holds.
+// mountOccupied asks vacantScript before the fetch. A probe that exits
+// non-zero refuses. One that does not answer, because its exec failed, timed
+// out, or lost its exit status to an image's startup (#860), reads as vacant:
+// vacateScript judges the path again in the extraction, and that judgment is
+// the one that holds.
 func mountOccupied(ctx context.Context, sb sandbox.Sandbox, mount string) bool {
 	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: vacantScript(mount)})
 	return err == nil && !res.TimedOut && res.ExitCode != 0
@@ -438,7 +451,8 @@ func mountOccupied(ctx context.Context, sb sandbox.Sandbox, mount string) bool {
 // takes the place of the `rm -rf`. It runs here, right before the rename,
 // rather than only in mountOccupied's look before the fetch, because each
 // script can run an image's startup hook first (#860). A hook that makes the
-// directory again would otherwise have `mv` put the checkout inside it.
+// directory again would otherwise have `mv` put the checkout inside it. A
+// refusal there ends the script with occupiedStatus.
 //
 // Every path is shell-quoted: mount_path is request-controlled text, and
 // unquoted interpolation would be command injection inside the sandbox.
@@ -483,6 +497,9 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 	}
 	if err != nil {
 		return err
+	}
+	if !whole && res.ExitCode == occupiedStatus {
+		return errMountOccupied
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("extracting the repository into the sandbox failed with exit %d: %s",

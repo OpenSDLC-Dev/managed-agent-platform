@@ -342,11 +342,12 @@ func TestRepoUnansweredOnAFreshSandboxClonesNextPass(t *testing.T) {
 
 // floodingProvider hands out its sandboxes with the next failExec presence
 // execs answering an image's startup flood (sandbox.StartupOutputError), as
-// one that prints past the cap does on Kubernetes, and the next failStat
-// stats of a .git (sandbox.StatPresence) failing as a transient exec does.
+// one that prints past the cap does on Kubernetes, the next failStat stats of
+// a .git (sandbox.StatPresence) failing as a transient exec does, and the
+// next failVacant of mountOccupied's probes answering the flood too.
 type floodingProvider struct {
 	sandbox.Provider
-	failExec, failStat, failVacate atomic.Int32
+	failExec, failStat, failVacant atomic.Int32
 }
 
 func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -367,7 +368,7 @@ func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sa
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
-	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"{ [ ! -e ") && s.p.failVacate.Add(-1) >= 0 {
+	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"{ [ ! -e ") && s.p.failVacant.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
@@ -828,42 +829,56 @@ func TestRepoKeepsWhatALegacyMountPathHolds(t *testing.T) {
 // TestRepoProbesThroughAFloodedStatus: an image's startup can push the exit
 // status of mountOccupied's probe out of the output (#860). That is no answer,
 // so the clone goes ahead, and the extraction judges the path itself: an
-// empty directory clones, and one that holds a file is refused and kept.
+// empty directory clones, and one that holds a file is refused and kept, as
+// is a dangling symlink. Each refusal reads as the probe's would: /opt/EOF,
+// quoted in an error's text, would read as the git host's failure.
 func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	h, provider, flooding := floodingRepoHarness(t)
 	sb := adopt(t, provider, h)
 	if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
-		Command: "mkdir -p /opt/full /opt/empty && echo image > /opt/full/keep"}); err != nil || res.ExitCode != 0 {
+		Command: "mkdir -p /opt/EOF /opt/empty && echo image > /opt/EOF/keep && ln -s /nonexistent /opt/dangling"}); err != nil || res.ExitCode != 0 {
 		t.Fatalf("plant the paths: %v %+v", err, res)
 	}
-	h.seedRepoResource(t, "sesrsc_vfull", fx.url(), "/opt/full", "ghp_fixture", nil)
+	h.seedRepoResource(t, "sesrsc_vfull", fx.url(), "/opt/EOF", "ghp_fixture", nil)
 	h.seedRepoResource(t, "sesrsc_vempty", fx.url(), "/opt/empty", "ghp_fixture", nil)
+	h.seedRepoResource(t, "sesrsc_vlink", fx.url(), "/opt/dangling", "ghp_fixture", nil)
 
-	flooding.failVacate.Store(2)
+	flooding.failVacant.Store(3)
 	h.runPass(t)
 
-	if n := flooding.failVacate.Load(); n > 0 {
+	if n := flooding.failVacant.Load(); n > 0 {
 		t.Fatalf("%d flooded probes left unused: the probe never ran through the flood", n)
 	}
-	errs := h.repoErrors(t)
-	if len(errs) != 1 || errs[0]["mount_path"] != "/opt/full" || errs[0]["reason"] != repoOutcomeInternal {
-		t.Fatalf("clone errors = %v, want exactly one, at /opt/full, with reason %s", errs, repoOutcomeInternal)
+	got := map[string]bool{}
+	for _, e := range h.repoErrors(t) {
+		got[e["mount_path"].(string)] = e["reason"] == repoOutcomeInternal &&
+			strings.Contains(e["message"].(string), "mount path")
+	}
+	if want := map[string]bool{"/opt/EOF": true, "/opt/dangling": true}; !maps.Equal(got, want) {
+		t.Fatalf("clone errors (mount: reason %s with the mount path's message) = %v, want %v",
+			repoOutcomeInternal, got, want)
 	}
 	if got := readSandboxFile(t, sb, "/opt/empty/README.md"); got != "x\n" {
 		t.Errorf("/opt/empty/README.md = %q, want the checkout", got)
 	}
-	if got := readSandboxFile(t, sb, "/opt/full/keep"); got != "image\n" {
-		t.Errorf("/opt/full/keep = %q, want what the image put there", got)
+	if got := readSandboxFile(t, sb, "/opt/EOF/keep"); got != "image\n" {
+		t.Errorf("/opt/EOF/keep = %q, want what the image put there", got)
+	}
+	if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "readlink /opt/dangling"}); err != nil ||
+		res.Stdout != "/nonexistent\n" {
+		t.Errorf("readlink /opt/dangling = %+v %v, want the link kept", res, err)
 	}
 }
 
 // hookedProvider provisions sandboxes that run hook just before each
 // repository extraction, as an image's startup hook runs before every
-// script (#860), after mountOccupied has looked at the mount.
+// script (#860), after mountOccupied has looked at the mount. startup, when
+// set, opens every platform script instead, in the script's own shell, as an
+// image's BASH_ENV would.
 type hookedProvider struct {
 	sandbox.Provider
-	hook string
+	hook, startup string
 }
 
 func (p *hookedProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -871,18 +886,21 @@ func (p *hookedProvider) Provision(ctx context.Context, spec sandbox.Spec) (sand
 	if err != nil {
 		return nil, err
 	}
-	return &hookedSandbox{Sandbox: sb, hook: p.hook}, nil
+	return &hookedSandbox{Sandbox: sb, hook: p.hook, startup: p.startup}, nil
 }
 
 type hookedSandbox struct {
 	sandbox.Sandbox
-	hook string
+	hook, startup string
 }
 
 func (s *hookedSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if strings.Contains(req.Command, " && tar -xf ") {
-		if _, err := s.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: s.hook}); err != nil {
-			return sandbox.ExecResult{}, err
+	if script, ok := strings.CutPrefix(req.Command, sandbox.ScriptPreamble); ok && s.startup != "" {
+		req.Command = sandbox.ScriptPreamble + s.startup + script
+	}
+	if s.hook != "" && strings.Contains(req.Command, " && tar -xf ") {
+		if res, err := s.Sandbox.Exec(ctx, sandbox.ExecRequest{Command: s.hook}); err != nil || res.ExitCode != 0 {
+			return sandbox.ExecResult{}, errors.New("the hook did not run: " + res.Stderr)
 		}
 	}
 	return s.Sandbox.Exec(ctx, req)
@@ -927,11 +945,58 @@ func TestRepoVacatesAgainAtTheExtraction(t *testing.T) {
 				}
 				return
 			}
-			if len(errs) != 1 {
-				t.Errorf("clone errors = %v, want exactly one", errs)
+			if len(errs) != 1 || !strings.Contains(errs[0]["message"].(string), "mount path") {
+				t.Errorf("clone errors = %v, want exactly one, with the mount path's message", errs)
 			}
 			if got := readSandboxFile(t, sb, "/opt/hooked/keep"); got != "hook\n" {
 				t.Errorf("/opt/hooked/keep = %q, want what the hook put there", got)
+			}
+		})
+	}
+}
+
+// TestRepoProbeThatCannotAnswerGoesAhead: a listing can fail, as on a
+// directory the sandbox user may not read, and an image's startup can leave
+// attributes on any variable name. Neither says the path holds something, so
+// the clone goes ahead and the extraction's rmdir decides. Here the startup
+// makes `ls` fail and leaves a readonly `e` in every platform script: an
+// empty directory clones, and one holding a file is refused and kept.
+func TestRepoProbeThatCannotAnswerGoesAhead(t *testing.T) {
+	for _, tc := range []struct {
+		name, plant string
+		lands       bool
+	}{
+		{"AnEmptyDirectoryClones", "mkdir -p /opt/unlisted", true},
+		{"AFileInItIsKept", "mkdir -p /opt/unlisted && echo image > /opt/unlisted/keep", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			h, provider := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+				return &hookedProvider{Provider: p, startup: "ls() { return 2; }; readonly e=hook; "}
+			})
+			sb := adopt(t, provider, h)
+			if res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: tc.plant}); err != nil || res.ExitCode != 0 {
+				t.Fatalf("plant the directory: %v %+v", err, res)
+			}
+			h.seedRepoResource(t, "sesrsc_unlisted", fx.url(), "/opt/unlisted", "ghp_fixture", nil)
+
+			h.runPass(t)
+
+			errs := h.repoErrors(t)
+			if tc.lands {
+				if len(errs) != 0 {
+					t.Errorf("clone errors = %v, want none: the probe gave no answer", errs)
+				}
+				if got := readSandboxFile(t, sb, "/opt/unlisted/README.md"); got != "x\n" {
+					t.Errorf("/opt/unlisted/README.md = %q, want the checkout", got)
+				}
+				return
+			}
+			if len(errs) != 1 || !strings.Contains(errs[0]["message"].(string), "mount path") {
+				t.Errorf("clone errors = %v, want exactly one, with the mount path's message", errs)
+			}
+			if got := readSandboxFile(t, sb, "/opt/unlisted/keep"); got != "image\n" {
+				t.Errorf("/opt/unlisted/keep = %q, want what the image put there", got)
 			}
 		})
 	}
