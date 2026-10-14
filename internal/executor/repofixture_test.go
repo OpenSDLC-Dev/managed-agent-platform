@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-
+	"io"
 	"net/http"
 	"net/http/cgi"
 	"net/http/httptest"
@@ -62,6 +62,9 @@ type gitFixture struct {
 	echoAuth atomic.Bool
 	// stall delays every request, for the deadline row.
 	stall atomic.Int64
+	// stallPack delays only the pack request, the POST to upload-pack, whose
+	// error go-git reports in a wrapper of its own.
+	stallPack atomic.Int64
 	// wantAuth, when set, is the Authorization header the fixture requires;
 	// it is also what proves the token travels as a header and nothing else.
 	wantAuth atomic.Value
@@ -229,6 +232,17 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-upload-pack") {
 		f.clones.Add(1)
+		if d := f.stallPack.Load(); d > 0 {
+			// The server notices a client that gave up only once the request
+			// body is read, so it is read first and handed on whole.
+			body, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			select {
+			case <-time.After(time.Duration(d)):
+			case <-r.Context().Done():
+				return
+			}
+		}
 	}
 	// The suffix-less spelling a github_repository resource carries names the
 	// same repository, as it does on GitHub.

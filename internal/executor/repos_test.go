@@ -1649,7 +1649,7 @@ func TestRepoCancelledCloneSweepsTheSandbox(t *testing.T) {
 	const tar = repoStagingRoot + "/repo-sesrsc_sweep.tar"
 	var swept bool
 	for _, c := range sb.issued() {
-		if c == "rm -f "+shellQuote(tar) {
+		if strings.HasPrefix(c, "rm -rf ") && strings.Contains(c, tar) {
 			swept = true
 		}
 	}

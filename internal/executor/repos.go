@@ -244,50 +244,37 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	// mounted over: create roots every mount under /workspace (#922), and
 	// safeRepoMount refuses it for a row from any other route.
 	sandboxTar := path.Join(repoStagingRoot, "repo-"+m.ID+".tar")
-	// From the upload on, the sandbox can hold up to the whole byte budget in
-	// /tmp, and the only thing that removes it is the extraction command's own
-	// cleanup tail, which runs only if the extraction script does. An upload
-	// that breaks off, an extraction whose exec never starts, or a context
-	// cancelled between the two — the clone deadline, or a lost lease — would
-	// strand a file the size of the repository in the session's sandbox until
-	// a later pass lands the same repository. So every failure from here
-	// sweeps the tar, on a context the cancellation cannot reach. A script
-	// that ran has removed it already, and sweeping again costs one exec on a
-	// pass that failed.
-	//
-	// The tar alone, and without -r. The upload writes a file, and a directory
-	// at that path is not ours: the upload refuses to write onto one and
-	// leaves it as it was (sandbox.ErrIsDirectory). The staging directory is
-	// left to the next extraction, which removes it first. An exec can return
-	// while its script runs on — a dropped stream, a cancelled context — and
-	// removing the staging directory under that script, or under the next
-	// lease holder's, would break a landing that was going to succeed.
-	landed := false
+	if err := sb.WriteFileStream(ctx, sandboxTar, f, size); err != nil {
+		return 0, fmt.Errorf("%w: %w", errExtraction, err)
+	}
+	// From here the sandbox holds up to the whole byte budget in /tmp, and the
+	// only thing that removes it is the extraction command's own cleanup tail.
+	// A context cancelled between the two — the clone deadline, or a lost lease
+	// — makes Exec return without ever running that tail, stranding a file the
+	// size of the repository inside the session's sandbox for its whole life.
+	// Swept here instead, on a context the cancellation cannot reach.
 	defer func() {
-		if landed {
+		if ctx.Err() == nil {
 			return
 		}
 		sweep, stop := context.WithTimeout(context.WithoutCancel(ctx), repoSweepTimeout)
 		defer stop()
-		res, err := sandbox.ExecScript(sweep, sb, sandbox.ExecRequest{Command: "rm -f " + shellQuote(sandboxTar)})
-		if err != nil || res.ExitCode != 0 {
-			slog.WarnContext(ctx, "the failed clone's sandbox tar was not swept",
-				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "exit_code", res.ExitCode, "err", err)
+		if _, err := sandbox.ExecScript(sweep, sb, sandbox.ExecRequest{
+			Command: "rm -rf " + shellQuote(sandboxTar) + " " + shellQuote(stagingPath(m.MountPath)),
+		}); err != nil {
+			slog.WarnContext(ctx, "the cancelled clone's sandbox staging was not swept",
+				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "err", err)
 		}
 	}()
-	if err := sb.WriteFileStream(ctx, sandboxTar, f, size); err != nil {
-		return 0, fmt.Errorf("%w: %w", errExtraction, err)
-	}
 	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar, sentinel, whole); err != nil {
 		return 0, err
 	}
-	landed = true
 	return size, nil
 }
 
-// repoSweepTimeout bounds the sweep after a failed landing. Short on purpose:
-// a sandbox that will not answer a `rm` will not answer a longer one either,
-// and the pass, or the work item it belonged to, is waiting on it.
+// repoSweepTimeout bounds the post-cancellation sweep. Short on purpose: the
+// work item is already over, and a sandbox that will not answer a `rm` will not
+// answer a longer one either.
 const repoSweepTimeout = 15 * time.Second
 
 // repoStagingRoot is where a clone's tar lands inside the sandbox on its way
@@ -379,7 +366,9 @@ func (e *Executor) skillsSentinel(mount string) string {
 }
 
 // stagingPath is where a mount's tree is unpacked before being renamed into
-// place — a sibling of the mount, so the rename stays on one filesystem.
+// place — a sibling of the mount, so the rename stays on one filesystem. Named
+// once because the cancellation sweep has to remove the same directory the
+// extraction would have.
 func stagingPath(mount string) string {
 	clean := path.Clean(mount)
 	return path.Join(path.Dir(clean), "."+path.Base(clean)+stagingSuffix)

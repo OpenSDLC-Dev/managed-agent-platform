@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
@@ -49,8 +50,9 @@ var errBranchUnsupported = errors.New("go-git cannot carry the branch name")
 // errClone marks an error from go-git's clone of the repository: its fetch,
 // the one step that speaks to the git host; the checkout go-git runs on what
 // it fetched, which writes to this executor's disk; and fetchCommit's refusal
-// of an id that names no commit. cloneReason blames the host or the caller's
-// ref only for an error that carries it, and isNetworkError tells the
+// of an id that names no commit. cloneReason blames the host only for an
+// error that carries it, and the caller's ref only for one that carries it or
+// a branch name refused before it (errBranchName); isNetworkError tells the
 // checkout's file errors apart by their type.
 var errClone = errors.New("cloning the repository failed")
 
@@ -402,6 +404,14 @@ func packTree(ctx context.Context, dir, tarPath string, spent *atomic.Int64, max
 // transport sentinels with %w, so the classification is errors.Is over
 // sentinels rather than string matching over messages.
 func cloneReason(err error) string {
+	// go-git carries the pack request's transport error in an
+	// UnexpectedError, which implements no Unwrap: a deadline or a
+	// cancellation inside it is out of errors.Is's reach, and only its text
+	// is left to read. Joined to the chain for the arms below, it is not.
+	var unexpected *plumbing.UnexpectedError
+	if errors.As(err, &unexpected) {
+		err = errors.Join(err, unexpected.Err)
+	}
 	switch {
 	case errors.Is(err, errCloneTooLarge):
 		return repoOutcomeTooLarge
@@ -423,7 +433,8 @@ func cloneReason(err error) string {
 	case errors.Is(err, errBranchName):
 		return repoOutcomeCheckout
 	// Only go-git's clone speaks to the git host, so only its errors may blame
-	// the host or the caller's ref. What surrounds it is ours: the packing of
+	// the host, or, beside the branch name above, the caller's ref. What
+	// surrounds it is ours: the packing of
 	// the tree on this executor's disk, the sandbox's transport and scripts.
 	// Their errors can read like the host's — an EOF, a script's stderr
 	// quoting the mount path — and the network arm reads an error's text.
@@ -484,10 +495,16 @@ func isNetworkError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A dial this executor could not make for want of its own descriptors or
+	// ports is ours, though the transport reports it as its own.
+	if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return false
+	}
 	// A *neturl.Error is what the HTTP client returns for a request; a
 	// *net.OpError is what a read of the response body returns once the
 	// headers have arrived, over HTTP/1.1. HTTP/2 names neither: a dropped
-	// connection reads "unexpected EOF", and a reset stream "stream error".
+	// connection reads "unexpected EOF", a reset stream "stream error", and a
+	// connection the host shut down "GOAWAY".
 	var urlErr *neturl.Error
 	var opErr *net.OpError
 	if errors.As(err, &urlErr) || errors.As(err, &opErr) {
@@ -503,7 +520,7 @@ func isNetworkError(err error) bool {
 	}
 	msg := err.Error()
 	for _, s := range []string{"connection refused", "no such host", "network is unreachable",
-		"connection reset", "EOF", "TLS handshake", "i/o timeout", "stream error"} {
+		"connection reset", "EOF", "TLS handshake", "i/o timeout", "stream error", "GOAWAY"} {
 		if strings.Contains(msg, s) {
 			return true
 		}

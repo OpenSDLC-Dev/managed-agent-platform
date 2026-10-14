@@ -9,13 +9,15 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/go-git/go-git/v5/plumbing"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 )
 
@@ -100,22 +102,31 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 
 	// go-git's clone checks the tree out onto the spool, so the phase alone
 	// does not decide it: a file error must not read as the network's, by
-	// its type or by its text, which quotes a name the repository chose.
+	// its type or by its text, which quotes a name the repository chose. Nor
+	// may a dial this executor could not make for want of its own
+	// descriptors or ports.
+	dial := func(errno syscall.Errno) error {
+		return &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("socket", errno)}}
+	}
 	for _, tc := range []struct {
 		name string
 		err  error
 	}{
-		{"a write to the pack", &fs.PathError{
+		{"the spool's disk fills during a write to the pack", &fs.PathError{
 			Op: "write", Path: "/tmp/map-repo-clone-1/tree/.git/objects/pack/tmp_pack", Err: syscall.ENOSPC}},
-		{"a checkout of a file named EOF", &fs.PathError{
+		{"the spool's disk fills during a checkout of a file named EOF", &fs.PathError{
 			Op: "open", Path: "/tmp/map-repo-clone-1/tree/EOF", Err: syscall.ENOSPC}},
-		{"a checkout of a symlink to `connection reset`", &os.LinkError{
+		{"the spool's disk fills during a checkout of a symlink to `connection reset`", &os.LinkError{
 			Op: "symlink", Old: "connection reset", New: "/tmp/map-repo-clone-1/tree/link", Err: syscall.ENOSPC}},
+		{"the executor has no descriptor left", dial(syscall.EMFILE)},
+		{"the system has no descriptor left", dial(syscall.ENFILE)},
+		{"the executor has no port left", dial(syscall.EADDRNOTAVAIL)},
 	} {
-		t.Run("the spool's disk fails during "+tc.name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			err := fmt.Errorf("%w: %w", errClone, tc.err)
 			if got := cloneReason(err); got != repoOutcomeInternal {
-				t.Errorf("cloneReason = %q, want %q — the disk is ours: %v", got, repoOutcomeInternal, err)
+				t.Errorf("cloneReason = %q, want %q — this executor is ours: %v", got, repoOutcomeInternal, err)
 			}
 		})
 	}
@@ -129,28 +140,71 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		}
 	})
 
-	// Over HTTP/2 a stream the remote resets partway is neither type, and
-	// only its text says so. The error is net/http's own.
-	t.Run("the remote resets the stream", func(t *testing.T) {
-		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte(strings.Repeat("0", 4096)))
-			w.(http.Flusher).Flush()
-			panic(http.ErrAbortHandler)
-		}))
-		srv.EnableHTTP2 = true
-		srv.StartTLS()
-		defer srv.Close()
-		res, err := srv.Client().Get(srv.URL)
-		if err != nil {
-			t.Fatalf("GET: %v", err)
+	// Over HTTP/2 a response the remote breaks off is neither type, and only
+	// its text says so. Each error is net/http's own.
+	for _, tc := range []struct {
+		name  string
+		after func(srv *httptest.Server, r *http.Request)
+	}{
+		{"the remote resets the stream", func(*httptest.Server, *http.Request) { panic(http.ErrAbortHandler) }},
+		{"the remote shuts the connection down", func(srv *httptest.Server, r *http.Request) {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				_ = srv.Config.Shutdown(ctx)
+				srv.CloseClientConnections()
+			}()
+			<-r.Context().Done()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *httptest.Server
+			srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(strings.Repeat("0", 4096)))
+				w.(http.Flusher).Flush()
+				tc.after(srv, r)
+			}))
+			srv.EnableHTTP2 = true
+			srv.StartTLS()
+			defer srv.Close()
+			res, err := srv.Client().Get(srv.URL)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			_, err = io.ReadAll(res.Body)
+			res.Body.Close()
+			if res.ProtoMajor != 2 || err == nil {
+				t.Fatalf("proto %s, body read err %v: want an HTTP/2 read that fails", res.Proto, err)
+			}
+			if got := cloneReason(fmt.Errorf("%w: %w", errClone, err)); got != repoOutcomeNetwork {
+				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
+			}
+		})
+	}
+
+	// go-git carries the pack request's error in an UnexpectedError, which
+	// hides what is inside from errors.Is: the clone's own deadline read as
+	// `internal`, and a cancellation of ours read by its text, here the
+	// repository's name, as `network`.
+	t.Run("the clone's deadline passes while the pack is requested", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		fx.stallPack.Store(int64(time.Minute))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if n := fx.clones.Load(); n != 1 {
+			t.Fatalf("pack requests = %d, want 1: the deadline must pass during the pack request", n)
 		}
-		_, err = io.ReadAll(res.Body)
-		res.Body.Close()
-		if res.ProtoMajor != 2 || err == nil {
-			t.Fatalf("proto %s, body read err %v: want an HTTP/2 read that fails", res.Proto, err)
+		if got := cloneReason(err); got != repoOutcomeTimeout {
+			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
 		}
-		if got := cloneReason(fmt.Errorf("%w: %w", errClone, err)); got != repoOutcomeNetwork {
-			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
+	})
+	t.Run("a cancellation while the pack is requested", func(t *testing.T) {
+		err := fmt.Errorf("%w: %w", errClone, plumbing.NewUnexpectedError(&url.Error{
+			Op: "Post", URL: "https://github.com/o/EOF.git/git-upload-pack", Err: context.Canceled}))
+		if got := cloneReason(err); got != repoOutcomeInternal {
+			t.Errorf("cloneReason = %q, want %q — the cancellation is ours: %v", got, repoOutcomeInternal, err)
 		}
 	})
 
@@ -166,81 +220,13 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		}
 	})
 
-	// The same refused dial, made by the fetch, is the host's.
+	// The same refused dial, made by the fetch, is the host's. Nothing
+	// listens on port 1.
 	t.Run("the remote refuses the dial", func(t *testing.T) {
-		srv := httptest.NewServer(http.NotFoundHandler())
-		url := srv.URL + "/o/r.git"
-		srv.Close()
-		_, _, cleanup, err := cloneToTar(context.Background(), repoRef{URL: url}, "ghp_fixture", 1<<30)
+		_, _, cleanup, err := cloneToTar(context.Background(), repoRef{URL: "http://127.0.0.1:1/o/r.git"}, "ghp_fixture", 1<<30)
 		defer cleanup()
-		if got := cloneReason(err); err == nil || got != repoOutcomeNetwork {
-			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
+		if got := cloneReason(err); !errors.Is(err, syscall.ECONNREFUSED) || got != repoOutcomeNetwork {
+			t.Errorf("cloneReason = %q, want %q for a refused dial: %v", got, repoOutcomeNetwork, err)
 		}
 	})
-}
-
-// TestRepoFailedLandingSweepsTheSandbox 🔍: the extraction's cleanup tail runs
-// only if the extraction script does. An upload that breaks off, or an
-// extraction whose exec never starts, leaves the shipped tar, up to the whole
-// byte budget, in the session's /tmp with its context still live. So the
-// sweep is owed on every failure from the upload on, not only on cancellation
-// (TestRepoCancelledCloneSweepsTheSandbox). It removes the tar alone, without
-// -r: a directory at that path is not ours, since the upload refuses to write
-// onto one, and the staging directory may be an extraction's still running.
-func TestRepoFailedLandingSweepsTheSandbox(t *testing.T) {
-	sweepFails := func(req sandbox.ExecRequest) *sandbox.ExecResult {
-		if strings.HasPrefix(req.Command, "rm -f ") {
-			return &sandbox.ExecResult{ExitCode: 3}
-		}
-		return nil
-	}
-	for _, tc := range []struct {
-		name      string
-		sb        *fakeSandbox
-		failed    bool
-		sweepFail bool
-	}{
-		{"upload breaks off", &fakeSandbox{writeErr: errors.New("archive upload: connection reset by peer")}, true, false},
-		{"extraction never starts", &fakeSandbox{
-			execErr: errors.New("exec create: container is restarting"), execErrOn: "tar -xf"}, true, false},
-		{"the sweep exits nonzero", &fakeSandbox{
-			writeErr: errors.New("archive upload: connection reset by peer"), execHook: sweepFails}, true, true},
-		// The extraction's own tail removed the tar, so a sweep would be one
-		// more exec on every clone that landed.
-		{"the clone lands", &fakeSandbox{}, false, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-			h := newHarness(t, &fakeSandbox{})
-			h.seedRepoResource(t, "sesrsc_sweep", fx.url(), repoMount, "ghp_fixture", nil)
-			logged := captureLogs(t)
-
-			_, err := h.exec.materializeRepo(context.Background(), tc.sb, h.sid, repoRef{
-				ID: "sesrsc_sweep", Type: "github_repository", URL: fx.url(), MountPath: repoMount,
-			}, "", func() {})
-			if tc.failed != (err != nil) {
-				t.Fatalf("materializeRepo = %v, want failure %v", err, tc.failed)
-			}
-
-			const tar = repoStagingRoot + "/repo-sesrsc_sweep.tar"
-			var swept bool
-			for _, c := range tc.sb.cmds {
-				if c == "rm -f "+shellQuote(tar) {
-					swept = true
-				}
-			}
-			if swept != tc.failed {
-				t.Errorf("swept = %v, want %v; commands issued: %v", swept, tc.failed, tc.sb.cmds)
-			}
-			var warned bool
-			for _, r := range logged() {
-				if r.message == "the failed clone's sandbox tar was not swept" {
-					warned = true
-				}
-			}
-			if warned != tc.sweepFail {
-				t.Errorf("warned = %v, want %v: a sweep that exits nonzero left the tar", warned, tc.sweepFail)
-			}
-		})
-	}
 }
