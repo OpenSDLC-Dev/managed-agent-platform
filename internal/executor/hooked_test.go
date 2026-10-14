@@ -11,7 +11,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/hookedtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
@@ -119,5 +121,39 @@ func TestPlatformScriptsAnswerThroughAnImageHook(t *testing.T) {
 				t.Errorf("repository skills = %+v; want %+v", found, want)
 			}
 		})
+	}
+}
+
+// An image whose startup file turns on what changes what a glob matches, or
+// its order (sandboxtest.GlobHook), leaves the outputs harvest's listing as it
+// was written, since it opens with the platform's preamble
+// (sandbox.ScriptPreamble): every deliverable is published, a dotfile and a
+// nested one among them.
+func TestHarvestThroughAStartupsGlobOptions(t *testing.T) {
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("this test requires Docker: %v", err)
+	}
+	h := newHarnessWith(t, provider, Config{Image: hookedtest.DockerImage(t, sandboxtest.GlobHook)})
+	t.Cleanup(func() {
+		if sb, err := provider.Attach(context.Background(), h.sid); err == nil {
+			_ = sb.Destroy(context.Background())
+		} else if !errors.Is(err, sandbox.ErrNotFound) {
+			t.Errorf("attach the session's sandbox to destroy it: %v", err)
+		}
+	})
+	use, _ := json.Marshal(map[string]any{"name": "bash", "input": map[string]string{"command": "mkdir -p " + outputsDir + "/sub" +
+		" && printf a > " + outputsDir + "/a.txt && printf b > " + outputsDir + "/sub/b.txt && printf c > " + outputsDir + "/.c"}})
+	h.suspend(t, string(use))
+	h.stepOnce(t)
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+	var got []string
+	for _, r := range h.fileRows(t) {
+		got = append(got, r.filename)
+	}
+	if want := []string{".c", "a.txt", "sub/b.txt"}; !slices.Equal(got, want) {
+		t.Errorf("harvested %q; want %q", got, want)
 	}
 }

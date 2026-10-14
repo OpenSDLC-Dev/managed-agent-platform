@@ -840,6 +840,32 @@ func TestSearchesThroughAnErrexitStartup(t *testing.T) {
 	fails(t, r, "glob", `{"pattern":"*","path":"ee/absent"}`, "no such directory")
 }
 
+// An image whose startup file turns on what changes what a glob matches, or
+// its order (sandboxtest.GlobHook), leaves the glob tool matching as on any
+// other image, since its script opens with the platform's preamble
+// (sandbox.ScriptPreamble): a match is case-sensitive, `(` is a plain
+// character and no extended pattern's, a dotfile is an ordinary name, and a
+// pattern that matches nothing is "no matches", not an error. The model's own
+// commands run under the image's options, noglob among them.
+func TestGlobThroughAStartupsGlobOptions(t *testing.T) {
+	r := runner(t, fromImage(hookedtest.DockerImage(t, sandboxtest.GlobHook)))
+	ok(t, r, "bash", `{"command":"mkdir -p gh && touch -d '2020-01-01' gh/a.txt && touch -d '2021-01-01' gh/B.TXT && `+
+		`touch -d '2022-01-01' 'gh/x(1).txt' && touch -d '2023-01-01' gh/1.txt && touch -d '2024-01-01' gh/.c.txt"}`)
+	for in, want := range map[string]string{
+		`{"pattern":"*.txt","path":"gh"}`:    "/workspace/gh/.c.txt\n/workspace/gh/1.txt\n/workspace/gh/x(1).txt\n/workspace/gh/a.txt",
+		`{"pattern":"*(1).txt","path":"gh"}`: "/workspace/gh/x(1).txt",
+		`{"pattern":"**/a.txt"}`:             "/workspace/gh/a.txt",
+		`{"pattern":"none*","path":"gh"}`:    "no matches",
+	} {
+		if got := ok(t, r, "glob", in); got != want {
+			t.Errorf("glob(%s) = %q, want %q", in, got, want)
+		}
+	}
+	if out := ok(t, r, "bash", `{"command":"echo gh/*.txt"}`); strings.TrimSpace(out) != "gh/*.txt" {
+		t.Errorf("echo gh/*.txt = %q, want the pattern unexpanded: the model's command runs under the image's noglob", out)
+	}
+}
+
 // What the image contract says of the model's own commands under an image
 // whose startup sets -euo pipefail (docs/self-hosted-security.md): errexit
 // does not reach them, the bash tool's shell turning it off before the first

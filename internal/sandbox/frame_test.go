@@ -351,13 +351,34 @@ func TestFrameClosesUnderErrexit(t *testing.T) {
 	}
 }
 
+// An image's startup file can turn on what changes what a glob matches, or
+// its order (sandboxtest.GlobHook), and the platform's scripts are written for
+// bash's defaults: the preamble puts each back, and says nothing as it does,
+// whatever the bash has. Unsetting GLOBIGNORE turns dotglob off by itself, so
+// a startup that turns on dotglob alone is run too.
+func TestScriptPreambleUndoesAStartupsGlobOptions(t *testing.T) {
+	const probe = `printf '%s\n' "$-" "${GLOBIGNORE-unset}" "${GLOBSORT-unset}"
+for o in dotglob extglob failglob globstar nocaseglob nullglob; do
+  if shopt -q "$o" 2>/dev/null; then echo "$o on"; fi
+done
+`
+	for _, hook := range []string{sandboxtest.GlobHook, "shopt -s dotglob\n"} {
+		res := runHooked(t, hook, "/bin/bash", sandbox.Script(probe), "")
+		flags, rest, _ := strings.Cut(res.Stdout, "\n")
+		if strings.Contains(flags, "f") || rest != "unset\nunset\n" || res.Stderr != "" || res.ExitCode != 0 {
+			t.Errorf("under %q: %+v; want no f in $-, GLOBIGNORE and GLOBSORT unset, every glob option off, and no stderr", hook, res)
+		}
+	}
+}
+
 // Open and Wrap are POSIX shell, so a script `sh -c` runs is framed the same
-// way. sh reads no BASH_ENV, so nothing prints around it here.
+// way, the preamble's one bash line passed over without a word. sh reads no
+// BASH_ENV, so nothing prints around it here.
 func TestFrameWrapIsPOSIXShell(t *testing.T) {
 	f := sandbox.NewFrame("test")
 	raw := run(t, "/bin/sh", f.Wrap(`if [ -e "$1" ]; then echo P; exit 0; fi; echo M`), "", "/")
-	if res, ok := f.Unframe(raw); !ok || res.Stdout != "P\n" || res.ExitCode != 0 {
-		t.Errorf("sh: Unframe = %+v, %v; want P", res, ok)
+	if res, ok := f.Unframe(raw); !ok || res.Stdout != "P\n" || res.Stderr != "" || res.ExitCode != 0 {
+		t.Errorf("sh: Unframe = %+v, %v; want P, and nothing on stderr", res, ok)
 	}
 }
 

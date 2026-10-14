@@ -87,7 +87,9 @@ func (f Frame) Lines() (begin, end string) {
 // line on both streams and exits with its argument — the one way the script
 // may exit — then ScriptPreamble, and then the begin line on both. Each line is
 // printed after a newline of its own, so it is a line however what came before
-// it ended. It is POSIX shell, so a script `sh -c` runs can open with it too.
+// it ended. It is POSIX shell, but for the preamble's one bash line, which a
+// POSIX sh passes over without a word, so a script `sh -c` runs can open with
+// it too.
 //
 // The script inherits the shell options an image's startup set, and errexit
 // among them would end it at the first command that fails — rg finding no

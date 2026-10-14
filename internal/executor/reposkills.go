@@ -163,14 +163,11 @@ func readSkills(ctx context.Context, sb sandbox.Sandbox, logger *slog.Logger, ro
 // symbolic link is passed over, since a read refuses one, and so neither the
 // scan nor the agent could load it; a linked directory is followed. Hidden
 // directories are not listed, and an absent .claude/skills lists nothing. The
-// glob runs in byte order, and what an image's startup may set that changes
-// what it matches, or its order, is undone: noglob (set -f), GLOBIGNORE,
-// GLOBSORT (bash 5.3), and the shopt options, dotglob among them.
+// glob runs in byte order (LC_ALL=C), and the listing's frame undoes what an
+// image's startup may set that changes what it matches, or its order
+// (sandbox.ScriptPreamble).
 func listSkillsScript(first, last string) string {
 	return "LC_ALL=C; export LC_ALL\n" +
-		"set +f\n" +
-		"unset GLOBIGNORE GLOBSORT\n" +
-		"shopt -u dotglob failglob nullglob nocaseglob 2>/dev/null\n" +
 		"d=" + shellQuote(first) + "; i=0\n" +
 		"while :; do\n" +
 		"  if cd -- \"$d/.claude/skills\" 2>/dev/null; then\n" +

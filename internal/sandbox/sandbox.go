@@ -402,21 +402,33 @@ func CheckCommand(command string) error {
 
 // ScriptPreamble opens every script the platform itself runs in a sandbox's
 // shell. That shell is `bash -c`, so an image's BASH_ENV file runs in it first
-// and can leave errexit on, which the platform's scripts are not written for:
-// a `chmod` or an `rm` they let fail on purpose, a status they read after the
-// command that set it, would end the script there instead — a bulk write at its
-// first `chmod` as a non-root user, a shed before it reports what it left, a
-// rename refusing a directory with the `rm`'s exit and not its own (#860). So
-// it turns errexit off, and touches nothing else. A script framed by Frame.Open
-// has it already. It is the platform's scripts' alone: the model's commands do
-// not run through it — though in the bash tool's own shell they run without
-// the image's errexit too, that shell turning it off before it restores its
-// option snapshot (internal/sandbox/shell's template), while the image's
-// nounset and pipefail carry there, and a `set -e` the model runs there
-// carries from call to call. A bash the model starts itself (`bash -c`, a
-// `#!/bin/bash` script) reads the startup file again, and runs under the
-// image's errexit.
-const ScriptPreamble = "set +e\n"
+// and can leave options on that the platform's scripts are not written for.
+// The preamble puts bash's defaults back for two kinds of option, and touches
+// nothing else:
+//
+//   - errexit. A `chmod` or an `rm` the scripts let fail on purpose, a status
+//     they read after the command that set it, would end the script there
+//     instead — a bulk write at its first `chmod` as a non-root user, a shed
+//     before it reports what it left, a rename refusing a directory with the
+//     `rm`'s exit and not its own (#860).
+//   - What changes what a glob matches, or its order: noglob, GLOBIGNORE,
+//     GLOBSORT (bash 5.3) and the shopt glob options. Under noglob the outputs
+//     harvest lists nothing and the glob tool finds nothing; under failglob a
+//     glob that matches nothing is an error. A script that wants dotglob,
+//     nullglob or globstar turns it on itself.
+//
+// The shopt line is bash's: a POSIX sh, or a bash without one of its options,
+// passes over it without a word. A script framed by Frame.Open has the
+// preamble already. It is the platform's scripts' alone: the model's commands
+// do not run through it, and run under the image's glob options — though in
+// the bash tool's own shell they run without the image's errexit, that shell
+// turning it off before it restores its option snapshot
+// (internal/sandbox/shell's template), while the image's nounset and pipefail
+// carry there, and a `set -e` the model runs there carries from call to call.
+// A bash the model starts itself (`bash -c`, a `#!/bin/bash` script) reads
+// the startup file again, and runs under the image's errexit.
+const ScriptPreamble = "set +e +f\nunset GLOBIGNORE GLOBSORT\n" +
+	"shopt -u dotglob extglob failglob globstar nocaseglob nullglob 2>/dev/null\n"
 
 // Script is script as the platform runs it in a sandbox's shell, its preamble
 // first (ScriptPreamble).
