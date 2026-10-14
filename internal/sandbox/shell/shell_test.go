@@ -248,10 +248,10 @@ func TestShell(t *testing.T) {
 		for _, tc := range []struct{ name, alias string }{
 			{"OnTrap", "trap=true"},
 			{"OnExit", "exit=true"},
-			// The template's last lines are parsed after the restore, so their
+			// The template's last line is parsed after the restore, so its
 			// `builtin` is quoted; an unquoted one would drop the EXIT trap.
 			{"OnBuiltin", "builtin=true"},
-			// A `{ ...; }` group in the template's last lines would be one.
+			// A `{ ...; }` group in the template's last line would be one.
 			{"OnBrace", "'{'='echo HIJACKED;'"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -264,7 +264,7 @@ func TestShell(t *testing.T) {
 					t.Errorf("stdout = %q, want [1][/tmp] — an alias on %q hijacked the template's own lines",
 						got.Stdout, tc.alias)
 				}
-				// A command that returns normally ends on the template's last line instead.
+				// A command that returns normally reaches the line's own save and exit.
 				if got := sh("false", 0); got.ExitCode != 1 {
 					t.Errorf("exit code = %d, want 1 — an alias on %q hijacked the template's last line",
 						got.ExitCode, tc.alias)
@@ -273,7 +273,7 @@ func TestShell(t *testing.T) {
 		}
 	})
 
-	// Every word the template's last lines run is a builtin a command can shadow
+	// Every word the template's last line runs is a builtin a command can shadow
 	// with a function of the same name — `.` above all, which is a legal
 	// function name, is snapshotted like any other, and once restored makes the
 	// template source nothing: every later call returns exit 0 with no output,
@@ -439,15 +439,30 @@ greet
 	// the template's own remaining commands each fire the command's trap, and the
 	// model reads six lines of `TICK` it did not print.
 	t.Run("TheTemplatesOwnLinesDoNotFireTheCommandsDebugTrap", func(t *testing.T) {
-		sh, _ := newShell(t, sb)
-		got := sh(`set -T; trap 'echo TICK' DEBUG; echo HELLO`, 0)
-		if !strings.Contains(got.Stdout, "HELLO") {
-			t.Fatalf("stdout = %q, want the command's own output in it", got.Stdout)
-		}
-		// The trap unavoidably fires on the very lines that clear it; what must not
-		// happen is the whole save running under it.
-		if n := strings.Count(got.Stdout, "TICK"); n > 4 {
-			t.Errorf("stdout = %q — %d DEBUG-trap ticks: the template ran its save under the command's trap", got.Stdout, n)
+		for _, tc := range []struct{ name, setup, ending string }{
+			{"Returns", "", ""},
+			// The EXIT trap clears the command's traps before its save.
+			{"Exits", "", "; exit 0"},
+			// Both clears are parsed after the restore, so their `builtin` is
+			// quoted against a carried alias.
+			{"ReturnsUnderABuiltinAlias", "shopt -s expand_aliases; alias builtin=true", ""},
+			{"ExitsUnderABuiltinAlias", "shopt -s expand_aliases; alias builtin=true", "; exit 0"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sh, _ := newShell(t, sb)
+				if tc.setup != "" {
+					sh(tc.setup, 0)
+				}
+				got := sh(`set -T; trap 'echo TICK' DEBUG; echo HELLO`+tc.ending, 0)
+				if !strings.Contains(got.Stdout, "HELLO") {
+					t.Fatalf("stdout = %q, want the command's own output in it", got.Stdout)
+				}
+				// The trap unavoidably fires on the very lines that clear it; what must
+				// not happen is the whole save running under it.
+				if n := strings.Count(got.Stdout, "TICK"); n > 4 {
+					t.Errorf("stdout = %q — %d DEBUG-trap ticks: the template ran its save under the command's trap", got.Stdout, n)
+				}
+			})
 		}
 	})
 
@@ -475,9 +490,10 @@ greet
 	})
 
 	// A command's DEBUG trap fires on the template's last line before that line
-	// clears it. The status must not ride where the trap can reach it: under
-	// functrace a function's $1 could be rewritten, or emptied under nounset so
-	// that the call ends before its save.
+	// clears it, and under functrace it fires inside a function too. So the
+	// status does not ride in a function's positional parameters, which the trap
+	// could rewrite, or empty under nounset so that the call ends before its
+	// save.
 	t.Run("ADebugTrapCannotRewriteTheStatus", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		if got := sh("set -T; trap 'set -- 0' DEBUG; false", 0); got.ExitCode != 1 {
@@ -487,6 +503,50 @@ greet
 		sh2("set -uT; trap 'set --' DEBUG; export MARK=1; cd /tmp; false", 0)
 		if after := sh2(`echo "[${MARK:-LOST}][$(pwd)]"`, 0); strings.TrimSpace(after.Stdout) != "[1][/tmp]" {
 			t.Errorf("stdout = %q, want [1][/tmp] — the call lost its snapshot", after.Stdout)
+		}
+	})
+
+	// An ERR trap fires for the command's own failures only. The EXIT trap's
+	// save returns the command's status, and bash puts an ERR trap back when a
+	// function returns and runs it when the function fails: unless the EXIT trap
+	// drops the command's traps first, the trap fires once more, on the
+	// template's own line.
+	t.Run("AnErrTrapFiresOnlyForTheCommandsOwnFailures", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, cmd, stderr string
+			code              int
+		}{
+			{"ErrexitEndsTheCall", "trap 'echo ERR >&2' ERR; set -e; false", "ERR", 1},
+			{"ExitEndsTheCall", "trap 'echo ERR >&2' ERR; exit 3", "", 3},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sh, _ := newShell(t, sb)
+				got := sh(tc.cmd, 0)
+				if got.ExitCode != tc.code || strings.TrimSpace(got.Stderr) != tc.stderr {
+					t.Errorf("result = %+v, want exit %d and stderr %q", got.ExecResult, tc.code, tc.stderr)
+				}
+			})
+		}
+	})
+
+	// The template's last line is read before the command runs, so a `set -v`
+	// the command turns on does not echo the template's own words into its
+	// result. A carried one echoes that line in later calls, as it echoes
+	// whatever else it reads.
+	t.Run("ACallsOwnVerboseDoesNotEchoTheTemplate", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		if got := sh("set -v", 0); got.Stderr != "" {
+			t.Errorf("stderr = %q, want none — the template's last line was read after the command", got.Stderr)
+		}
+	})
+
+	// The command runs at the top level, as a script does, so `local` outside a
+	// function fails there.
+	t.Run("LocalOutsideAFunctionFailsAsInAnyScript", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		got := sh(`local x=1; echo "[${x-unset}]"`, 0)
+		if strings.TrimSpace(got.Stdout) != "[unset]" || !strings.Contains(got.Stderr, "can only be used in a function") {
+			t.Errorf("result = %+v, want [unset] and bash's `local` error", got.ExecResult)
 		}
 	})
 

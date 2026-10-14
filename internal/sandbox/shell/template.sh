@@ -54,8 +54,8 @@ __map_save() {
   # and turning it off HERE, before the opts capture below, is what records it off
   # in the snapshot so it cannot. If it carried, the restore would re-enable it and
   # every LATER call — one that never asked for it — would run this whole function
-  # and the template's last line under it, tracing the internal state path and the tool-call id
-  # into the tool result's stderr. The command that itself ran `set -x` still traces
+  # and the template's last line under it, tracing the internal state path and
+  # the tool-call id into the tool result's stderr. The command that itself ran `set -x` still traces
   # its own call's prologue (it asked for tracing); nothing after it does. errexit
   # is untouched and still captured on, so it carries as an option should.
   builtin set +x
@@ -148,7 +148,7 @@ __map_save() {
     # this file, so an alias that survives into the next call is expanded over
     # them: `alias trap=true` alone turned `trap '__map_save' EXIT` into a no-op
     # and silently dropped the state of every call that ended by calling `exit`,
-    # for the rest of the session. The template's last lines close that from the
+    # for the rest of the session. The template's last line closes that from the
     # other side; the filter keeps a command from aliasing the template's own
     # names.
     #
@@ -178,31 +178,42 @@ __map_save() {
   builtin return $__map_code
 }
 
-# The template ends with the two lines after the restore below. They run at the
-# top level, and the command is sourced there, never inside a function. When a
-# call that its own `set -e` ends was sourced inside a function, bash 5 ran the
-# EXIT trap with that function's variable context torn down: __map_save's
-# `local` failed, the call lost its snapshot, and the errors landed on the
-# command's stderr (bash 5.2 added `pop_var_context`).
+# The template ends with the line after the restore below. It runs at the top
+# level, and the command is sourced there, never inside a function. When a call
+# that its own `set -e` ends was sourced inside a function, bash 5 ran the EXIT
+# trap with that function's variable context torn down: __map_save's `local`
+# failed, the call lost its snapshot, and the errors landed on the command's
+# stderr (bash 5.2 added `pop_var_context`). Bash still prints that line itself
+# when `set -e` fires inside a `.` or `eval` that runs in the command's own
+# function; the save is not affected.
 #
-# Both lines are parsed after the restore, so every command word is quoted. A
-# quoted word is never alias-expanded, where `alias exit=true` would cost the
-# call its exit code, and an assignment word holds `=`, which no alias name
-# can. `builtin` guards the same words against a snapshotted *function* of the
-# same name. They are plain commands rather than a `{ ...; }` group, because
-# `{` can be an alias. No comment follows the restore: a carried `set -v`
-# echoes every line read after it into the call's stderr.
+# It is one line because bash reads a whole line before it runs any of it: the
+# line is read before the command runs, so neither the command's own aliases
+# nor a `set -v` it turns on reach it. It is read after the restore, though, so
+# every command word is quoted. A quoted word is never alias-expanded, where
+# `alias exit=true` would cost the call its exit code, and an assignment word
+# holds `=`, which no alias name can. `builtin` guards the same words against a
+# snapshotted *function* of the same name. The line holds plain commands, not
+# a `{ ...; }` group, because `{` can be an alias. No comment follows the
+# restore: a carried `set -v` echoes every line read after it.
 #
-# The EXIT trap catches a command that calls `exit` or that `set -e` ends. The
-# second line catches a command that returns normally having replaced the EXIT
-# trap with one of its own. It keeps the status in __map_status before the
-# clear resets `$?`, and clears the EXIT trap first so that an untouched one
-# does not save twice. Clearing DEBUG/ERR/RETURN there does not protect the
-# snapshot: __map_save clears them again on entry, and that is the clear that
-# matters, because a command exiting THROUGH the EXIT trap never reaches the
-# second line. This one protects the tool RESULT: without it, each command
-# after it fires the command's own DEBUG or ERR trap, and the model reads
-# output its command never printed.
+# The EXIT trap catches a command that calls `exit` or that `set -e` ends. It
+# drops the command's DEBUG/ERR/RETURN traps before it calls __map_save, as the
+# commands after the source do. Called first, __map_save would return the
+# command's own status, and bash runs the ERR trap when a function fails, after
+# it puts back the ERR trap the function cleared: the command's trap would fire
+# once more, on the template's own line. After the clear, __map_save returns
+# the clear's 0, which costs nothing: bash keeps the exit status across an EXIT
+# trap.
+#
+# The commands after the source catch a command that returns normally having
+# replaced the EXIT trap with one of its own. They keep the status in
+# __map_status before the clear resets `$?`, and clear the EXIT trap first so
+# that an untouched one does not save twice. Clearing DEBUG/ERR/RETURN there
+# does not protect the snapshot, because __map_save clears them again on entry.
+# It protects the tool RESULT: without it, each command after it fires the
+# command's own DEBUG or ERR trap, and the model reads output its command never
+# printed.
 #
 # What is left is narrow and documented: a command that BOTH installs its own
 # EXIT trap AND exits through it skips this call's snapshot, and so does one
@@ -301,5 +312,4 @@ builtin trap - ERR
   builtin unset __map_head __map_prev __map_l
 } >/dev/null 2>&1
 
-\builtin trap '__map_save' EXIT; \builtin . "$__map_state/cmd/$__map_id"
-__map_status=$?; \builtin trap - DEBUG ERR RETURN EXIT; \__map_save "$__map_status"; \builtin exit "$__map_status"
+\builtin trap '\builtin trap - DEBUG ERR RETURN; __map_save' EXIT; \builtin . "$__map_state/cmd/$__map_id"; __map_status=$?; \builtin trap - DEBUG ERR RETURN EXIT; \__map_save "$__map_status"; \builtin exit "$__map_status"
