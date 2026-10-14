@@ -52,7 +52,7 @@ var errBranchUnsupported = errors.New("go-git cannot carry the branch name")
 // it fetched, which writes to this executor's disk; and fetchCommit's refusal
 // of an id that names no commit. cloneReason blames the host only for an
 // error that carries it, and the caller's ref only for one that carries it or
-// a branch name refused before it (errBranchName); isNetworkError tells the
+// a branch name refused before it (errBranchName); isLocalError tells the
 // checkout's file errors apart by their type.
 var errClone = errors.New("cloning the repository failed")
 
@@ -137,13 +137,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 		repo, err = git.CloneContext(ctx, storer, tree, opts)
 	}
 	if err != nil {
-		// go-git formats some errors with %s, among them a deadline that
-		// fires while it decodes the pack response, so the context, which
-		// says what fired, joins the chain.
-		if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
-			err = withCause{err, cerr}
-		}
-		return "", 0, cleanup, fmt.Errorf("%w: %w", errClone, err)
+		return "", 0, cleanup, cloneFailed(ctx, err)
 	}
 	// go-git applies the context to transport only — its post-fetch worktree
 	// reset and a commit's checkout run to completion whatever the deadline
@@ -244,6 +238,19 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 		return nil, err
 	}
 	return repo, repo.Storer.RemoveReference(scratch)
+}
+
+// cloneFailed marks err as go-git's clone's (errClone). go-git formats some
+// errors with %s, among them a deadline that fires while it decodes the pack
+// response, so where the context has fired and the message names its error,
+// that error joins the chain. A failure the message does not tie to the
+// context keeps its own reason, though the deadline passed while go-git ran
+// on: its checkout ignores the context.
+func cloneFailed(ctx context.Context, err error) error {
+	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) && strings.Contains(err.Error(), cerr.Error()) {
+		err = withCause{err, cerr}
+	}
+	return fmt.Errorf("%w: %w", errClone, err)
 }
 
 // shapeCheckout gives a checkout the .git/config and refs the reference's
@@ -407,8 +414,10 @@ func packTree(ctx context.Context, dir, tarPath string, spent *atomic.Int64, max
 
 // cloneReason maps a clone failure to the machine-readable reason the
 // session.error variant carries (plan 25 decision 4). go-git wraps its
-// transport sentinels with %w, so the classification is errors.Is over
-// sentinels rather than string matching over messages.
+// transport sentinels with %w, so most of the classification is errors.Is
+// over sentinels. The network arm reads the transport's types too, and its
+// text where go-git kept only the text (isNetworkError, isProtocolError);
+// isLocalError keeps what this executor's machine refused out of that arm.
 func cloneReason(err error) string {
 	// go-git carries the pack request's transport error in an
 	// UnexpectedError, which implements no Unwrap: a deadline or a
@@ -456,11 +465,33 @@ func cloneReason(err error) string {
 		errors.Is(err, plumbing.ErrReferenceNotFound),
 		errors.Is(err, git.NoMatchingRefSpecError{}):
 		return repoOutcomeCheckout
+	case isLocalError(err):
+		return repoOutcomeInternal
 	case isRemoteStatusError(err), isNetworkError(err), isProtocolError(err):
 		return repoOutcomeNetwork
 	default:
 		return repoOutcomeInternal
 	}
+}
+
+// isLocalError reports whether err is this executor's own machine refusing
+// a step of go-git's clone, which the network arm's types and text would
+// read as the host's. A file error on the spool quotes a name the
+// repository chose: a tracked file named EOF, or a symlink whose target
+// reads "connection reset". A dial it could not make carries the
+// transport's types: a socket it could not create — out of descriptors,
+// memory or buffers, or for an address family it lacks — before anything
+// reached the host, or a local port it could not assign. A name lookup
+// that could not open its own socket keeps that only as text, in the
+// net.DNSError's Err.
+func isLocalError(err error) bool {
+	var pathErr *fs.PathError
+	var linkErr *os.LinkError
+	var sysErr *os.SyscallError
+	var dnsErr *net.DNSError
+	return errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
+		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, syscall.EADDRNOTAVAIL) ||
+		(errors.As(err, &dnsErr) && strings.Contains(dnsErr.Err, "socket: "))
 }
 
 // isRemoteStatusError reports whether the remote answered with an HTTP status
@@ -487,21 +518,13 @@ func isProtocolError(err error) bool {
 // isNetworkError reports whether err looks like a failure to reach or speak to
 // the remote at all, as opposed to a repository-level refusal. go-git returns
 // the transport's own error here (a *url.Error, a dial failure), which carries
-// no sentinel of its own, so this is the one classification that must read the
-// message — and it is the fallback arm, never a guard. It asks for the
-// transport's own types, not for any error with a Timeout method: the
-// syscall.Errno inside a *fs.PathError has one too, and go-git's clone writes
-// to the spool on this executor's disk.
+// no sentinel of its own, so this classification reads the type and then the
+// message, as isProtocolError does — and it is the fallback arm, never a
+// guard. It asks for the transport's own types, not for any error with a
+// Timeout method: the syscall.Errno inside a *fs.PathError has one too, and
+// go-git's clone writes to the spool on this executor's disk.
 func isNetworkError(err error) bool {
 	if err == nil {
-		return false
-	}
-	// A dial this executor could not make is ours, though the transport
-	// reports it as its own: a socket it could not create — out of
-	// descriptors, memory or buffers — before anything reached the host, or
-	// a local port it could not assign.
-	var sysErr *os.SyscallError
-	if errors.As(err, &sysErr) && sysErr.Syscall == "socket" || errors.Is(err, syscall.EADDRNOTAVAIL) {
 		return false
 	}
 	// A *neturl.Error is what the HTTP client returns for a request; a
@@ -514,22 +537,12 @@ func isNetworkError(err error) bool {
 	if errors.As(err, &urlErr) || errors.As(err, &opErr) {
 		return true
 	}
-	// A file error is this executor's own disk, and its text quotes a name
-	// the repository chose: a tracked file named EOF, or a symlink whose
-	// target reads "connection reset", as go-git checks them out.
-	var pathErr *fs.PathError
-	var linkErr *os.LinkError
-	if errors.As(err, &pathErr) || errors.As(err, &linkErr) {
-		return false
-	}
 	// go-git formats some of the transport's errors with %s, which leaves
-	// their text: a kernel's timeout, in its errno's own words, among them.
-	// "unexpected error: " is go-git's prefix for what the host sent on its
-	// error band (sideband/demux.go).
+	// only their text: a transport's errno among them, in its own words.
 	msg := err.Error()
 	for _, s := range []string{"connection refused", "no such host", "network is unreachable",
 		"connection reset", "EOF", "TLS handshake", "i/o timeout", "stream error", "GOAWAY",
-		syscall.ETIMEDOUT.Error(), "unexpected error: "} {
+		syscall.ETIMEDOUT.Error(), syscall.EHOSTUNREACH.Error(), syscall.EPIPE.Error(), syscall.ECONNABORTED.Error()} {
 		if strings.Contains(msg, s) {
 			return true
 		}

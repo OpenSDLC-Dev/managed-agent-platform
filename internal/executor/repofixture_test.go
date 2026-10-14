@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/cgi"
@@ -13,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,10 +64,9 @@ type gitFixture struct {
 	// stall delays every request, for the deadline row.
 	stall atomic.Int64
 	// stallPack holds the pack request, the POST to upload-pack, until the
-	// client gives up: before its response, whose error go-git reports in a
-	// wrapper of its own, or, with stallPackBody, after the response's first
-	// pkt-line, as a host that stalls partway through the pack does.
-	stallPack, stallPackBody atomic.Bool
+	// client gives up, before its response: go-git reports that request's
+	// error in a wrapper of its own.
+	stallPack atomic.Bool
 	// holding is closed once the fixture holds a pack request.
 	holding     chan struct{}
 	holdingOnce sync.Once
@@ -211,31 +208,6 @@ func (f *gitFixture) branch(t *testing.T, name string, files map[string]string) 
 // hold marks that the fixture is holding a pack request.
 func (f *gitFixture) hold() { f.holdingOnce.Do(func() { close(f.holding) }) }
 
-// firstPktThenHold writes the response's first pkt-line and then nothing
-// more until done is closed.
-type firstPktThenHold struct {
-	http.ResponseWriter
-	f    *gitFixture
-	done <-chan struct{}
-}
-
-func (s *firstPktThenHold) Write(p []byte) (int, error) {
-	n := len(p)
-	if l, err := strconv.ParseUint(string(p[:min(4, len(p))]), 16, 16); err == nil && l >= 4 && int(l) <= len(p) {
-		n = int(l)
-	}
-	if _, err := s.ResponseWriter.Write(p[:n]); err != nil {
-		return 0, err
-	}
-	s.ResponseWriter.(http.Flusher).Flush()
-	// Held only once the client has the response's headers, so what it
-	// fails on is the read of the pack response, not the wait for it.
-	time.Sleep(500 * time.Millisecond)
-	s.f.hold()
-	<-s.done
-	return 0, errors.New("fixture: the client gave up")
-}
-
 // serve is git http-backend behind the handler-level failure modes the
 // adversarial rows drive.
 func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
@@ -277,15 +249,11 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if f.stallPack.Load() {
 			// The server notices a client that gave up only once the request
-			// body is read, so it is read first and handed on whole.
-			body, _ := io.ReadAll(r.Body)
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			if !f.stallPackBody.Load() {
-				f.hold()
-				<-r.Context().Done()
-				return
-			}
-			w = &firstPktThenHold{ResponseWriter: w, f: f, done: r.Context().Done()}
+			// body is read.
+			_, _ = io.Copy(io.Discard, r.Body)
+			f.hold()
+			<-r.Context().Done()
+			return
 		}
 	}
 	// The suffix-less spelling a github_repository resource carries names the

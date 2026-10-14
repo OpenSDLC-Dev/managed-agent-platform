@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 )
@@ -58,6 +59,7 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		}
 		return err
 	}()
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -67,7 +69,6 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		{"key service stalls", stalled},
 	} {
 		t.Run("decrypt fails: "+tc.name, func(t *testing.T) {
-			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 			h := newHarness(t, &fakeSandbox{})
 			h.seedRepoResource(t, "sesrsc_kms", fx.url(), repoMount, "ghp_fixture", nil)
 			h.exec.cipher = cipherThatFails{Cipher: h.cipher, err: fmt.Errorf("decrypt: %w", tc.err)}
@@ -85,7 +86,6 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 	}
 
 	t.Run("credential row gone", func(t *testing.T) {
-		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 		h := newHarness(t, &fakeSandbox{})
 		h.seedRepoResource(t, "sesrsc_gone", fx.url(), repoMount, "ghp_fixture", nil)
 		if _, err := h.pool.Exec(context.Background(),
@@ -125,11 +125,16 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			Op: "open", Path: "/tmp/map-repo-clone-1/tree/EOF", Err: syscall.ENOSPC}},
 		{"the spool's disk fills during a checkout of a symlink to `connection reset`", &os.LinkError{
 			Op: "symlink", Old: "connection reset", New: "/tmp/map-repo-clone-1/tree/link", Err: syscall.ENOSPC}},
+		{"the spool's disk fills during a checkout of a file named for a pkt-line refusal", &fs.PathError{
+			Op: "open", Path: "/tmp/map-repo-clone-1/tree/" + pktline.ErrInvalidPktLen.Error(), Err: syscall.ENOSPC}},
 		{"the executor has no descriptor left", dial("socket", syscall.EMFILE)},
 		{"the system has no descriptor left", dial("socket", syscall.ENFILE)},
 		{"the executor has no memory for the pack request's socket", packDial("socket", syscall.ENOMEM)},
 		{"the executor has no buffer for the pack request's socket", packDial("socket", syscall.ENOBUFS)},
 		{"the executor has no port left", dial("connect", syscall.EADDRNOTAVAIL)},
+		{"the executor has no descriptor left for the name lookup", &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
+				Err: "dial udp 10.96.0.10:53: socket: too many open files", Name: "github.com", Server: "10.96.0.10:53"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := fmt.Errorf("%w: %w", errClone, tc.err)
@@ -140,22 +145,33 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 	}
 
 	// A read of the response body fails outside the client's *url.Error, and
-	// a lost route matches none of the network texts. go-git formats the
-	// pack response's errors with %s (transport/internal/common), and the
-	// host's own message on its error band likewise (sideband/demux.go):
-	// only their text is left.
+	// a network gone down, whose text matches none of the network texts, is
+	// read by that type. A name the resolver does not know is the host's,
+	// though the lookup is a net.DNSError as an exhausted one is.
 	for _, tc := range []struct {
 		name string
 		err  error
 	}{
-		{"the route to the remote is lost mid-read", &net.OpError{
-			Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.EHOSTUNREACH)}},
-		{"a read of the pack response times out", fmt.Errorf("error decoding upload-pack response: %s",
-			&net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ETIMEDOUT)})},
-		{"the host's pack-objects dies", fmt.Errorf("unexpected error: %s", "fatal: pack-objects died of signal 9")},
+		{"the network goes down mid-read", &net.OpError{
+			Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ENETDOWN)}},
+		{"the host's name is not found", &url.Error{Op: "Get", URL: "https://github.invalid/o/r.git/info/refs",
+			Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
+				Err: "no such host", Name: "github.invalid", IsNotFound: true}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := fmt.Errorf("%w: %w", errClone, tc.err)
+			if got := cloneReason(err); got != repoOutcomeNetwork {
+				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
+			}
+		})
+	}
+
+	// The same transport errors, met while go-git decodes the pack response,
+	// lose their types to its %s: only the errno's own text is left.
+	for _, errno := range []syscall.Errno{syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.EPIPE, syscall.ECONNABORTED} {
+		t.Run("a read of the pack response fails: "+errno.Error(), func(t *testing.T) {
+			err := fmt.Errorf("%w: %w", errClone, fmt.Errorf("error decoding upload-pack response: %s",
+				&net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errno)}))
 			if got := cloneReason(err); got != repoOutcomeNetwork {
 				t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
 			}
@@ -235,22 +251,40 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
 		}
 	})
-	// Once the pack response has begun, go-git formats the deadline's error
-	// with %s as it decodes the response, and only the clone's context still
-	// names it.
-	t.Run("the clone's deadline passes while the pack is read", func(t *testing.T) {
-		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
-		fx.stallPack.Store(true)
-		fx.stallPackBody.Store(true)
-		_, _, cleanup, err := cloneToTar(deadlineAtHold(t, fx), repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
-		defer cleanup()
-		if err == nil || !strings.Contains(err.Error(), "upload-pack response") {
-			t.Fatalf("err = %v, want a failure decoding the pack response", err)
-		}
-		if got := cloneReason(err); got != repoOutcomeTimeout {
-			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
-		}
-	})
+	// Once the pack response has begun, go-git formats the context's error
+	// with %s as it decodes the response (transport/internal/common), and
+	// only the clone's context, which fired, still names it. A failure the
+	// message does not tie to the context keeps its own reason, though the
+	// deadline passed while go-git ran on.
+	passed, stop := context.WithDeadline(context.Background(), time.Now())
+	defer stop()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want string
+	}{
+		{"the clone's deadline passes while the pack is read", passed,
+			fmt.Errorf("error decoding upload-pack response: %s", context.DeadlineExceeded), repoOutcomeTimeout},
+		{"a cancellation while the pack is read", cancelled,
+			fmt.Errorf("error decoding upload-pack response: %s", context.Canceled), repoOutcomeInternal},
+		{"the spool's disk fills after the deadline passed", passed, &fs.PathError{
+			Op: "write", Path: "/tmp/map-repo-clone-1/tree/README.md", Err: syscall.ENOSPC}, repoOutcomeInternal},
+		{"the host refuses the token as the deadline passes", passed,
+			fmt.Errorf("%w: %s", transport.ErrAuthenticationRequired, "Invalid username or token"), repoOutcomeAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := cloneFailed(tc.ctx, tc.err)
+			if got := cloneReason(err); got != tc.want {
+				t.Errorf("cloneReason = %q, want %q: %v", got, tc.want, err)
+			}
+			if err.Error() != errClone.Error()+": "+tc.err.Error() {
+				t.Errorf("message = %q, want go-git's own after the marker", err)
+			}
+		})
+	}
 	t.Run("a cancellation while the pack is requested", func(t *testing.T) {
 		err := fmt.Errorf("%w: %w", errClone, plumbing.NewUnexpectedError(&url.Error{
 			Op: "Post", URL: "https://github.com/o/EOF.git/git-upload-pack", Err: context.Canceled}))

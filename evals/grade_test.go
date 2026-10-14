@@ -60,7 +60,9 @@ type Grader struct {
 // was unwell", and nothing else. The executor's taxonomy (internal/executor's
 // cloneReason) also has auth, not_found, checkout, too_large and internal — a
 // bad token, the wrong repository, a bad ref, a runaway clone, and this
-// platform's own failures: a bug, or its database, key service, disk or sandbox.
+// platform's own failures: a bug, or its database, key service, disk or
+// sandbox failing. A stall of the disk or the sandbox that outlasts the
+// clone's deadline reads as timeout.
 // Every one of those is actionable and most are ours, so none is tolerated here.
 var transientCloneReasons = map[string]bool{"network": true, "timeout": true}
 
