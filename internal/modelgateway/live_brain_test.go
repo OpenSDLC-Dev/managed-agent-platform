@@ -69,7 +69,8 @@ func TestLiveBrainThinkingThroughTheGateway(t *testing.T) {
 		return map[profile.Protocol]string{profile.Anthropic: proxy}
 	}
 	for _, v := range vendors {
-		model, thinks := v.models[0], v.name == "deepseek"
+		// DeepSeek thinks unasked, and GLM-5.3 whatever it is asked.
+		model, thinks := v.models[0], v.name == "deepseek" || v.name == "zhipu"
 		flagged, _ := profile.Lookup(v.name)
 		if !v.openAIOnly {
 			add(brainRoute{name: v.name + "/passthrough", alias: "brain-pass-" + v.name, rec: &recorder{},
@@ -81,7 +82,7 @@ func TestLiveBrainThinkingThroughTheGateway(t *testing.T) {
 					return map[profile.Protocol]string{profile.OpenAI: proxy}
 				}, host)
 		}
-		if thinks {
+		if v.name == "deepseek" {
 			r := brainRoute{name: "deepseek/generic", alias: "brain-generic-deepseek", rec: &recorder{}, refused: true, thinks: true}
 			proxy := recordingProxy(t, v.base, r.rec)
 			p := e.provider(proxy, func(p *store.Provider) { p.Name = r.alias })

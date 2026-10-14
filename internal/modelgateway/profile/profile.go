@@ -333,17 +333,22 @@ func moonshotChatIgnores(model string, req map[string]json.RawMessage) string {
 // the call that required or a named function forces in all 12 asks,
 // glm-5.3-flash called the tool in all 3 asks under none, and both called it
 // twice in all 6 answers with parallel_tool_calls false. So every tool_choice
-// but auto, or null, which sets nothing, is refused.
-func zhipuChatIgnores(_ string, req map[string]json.RawMessage) string {
+// but auto, or null, which sets nothing, is refused — except none on glm-5.3
+// itself, which answered all 3 asks without the tool, saying it had none.
+func zhipuChatIgnores(model string, req map[string]json.RawMessage) string {
 	if f := parallelBanned(req); f != "" {
 		return f
 	}
 	var choice any
-	if json.Unmarshal(req["tool_choice"], &choice) == nil && choice != nil && choice != "auto" {
+	if json.Unmarshal(req["tool_choice"], &choice) == nil && choice != nil && choice != "auto" &&
+		(choice != "none" || !glm53.MatchString(model)) {
 		return "tool_choice"
 	}
 	return ""
 }
+
+// glm53 matches glm-5.3 alone, in any case: not glm-5.3-flash.
+var glm53 = regexp.MustCompile(`(?i)^glm-5\.3$`)
 
 // kimiK3 matches kimi-k3 and the variants named after it, in any case.
 var kimiK3 = regexp.MustCompile(`(?i)^kimi-k3([.-]|$)`)

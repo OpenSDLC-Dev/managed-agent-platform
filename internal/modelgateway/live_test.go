@@ -85,7 +85,8 @@ var liveVendors = []liveVendor{
 	{name: "zhipu", keyEnv: "GLM_API_KEY", base: "https://open.bigmodel.cn/api/paas/v4",
 		models: []string{"glm-5.3", "glm-5.3-flash"}, thinking: anthropic.ThinkingConfigParamOfEnabled(1024), openAIOnly: true},
 	// The Gemini API counts this tier's converted requests, and no chat: the
-	// key it runs under answers every billable call 402 (#903).
+	// key it runs under answers every billable call 402, and the user dropped
+	// the generation rows (2026-10-14).
 	{name: "gemini", keyEnv: "GEMINI_API_KEY", base: "https://generativelanguage.googleapis.com/v1beta"},
 }
 

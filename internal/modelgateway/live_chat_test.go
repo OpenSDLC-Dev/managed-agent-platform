@@ -262,9 +262,13 @@ func chatRefusals(vendor, model string) []chatRefusal {
 	case "deepseek":
 		return []chatRefusal{parallel}
 	case "zhipu":
-		// Its none rests on its reference and glm-5.3-flash, while glm-5.3
-		// honored it, so it is not asked here.
-		return []chatRefusal{parallel, required, named}
+		if model == "glm-5.3" { // which honors none
+			return []chatRefusal{parallel, required, named}
+		}
+		return []chatRefusal{parallel, required, named,
+			{"tool_choice none", "tool_choice", request("What time is it right now in UTC? Use the tool.", map[string]any{"tools": []any{timeTool}, "tool_choice": "none"}),
+				func(m *openai.ChatCompletion) bool { return len(m.Choices[0].Message.ToolCalls) > 0 }},
+		}
 	case "moonshot":
 		if model != "kimi-k3" {
 			return []chatRefusal{parallel}

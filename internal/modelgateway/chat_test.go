@@ -379,8 +379,8 @@ func TestChatErrors(t *testing.T) {
 // DeepSeek's parallel_tool_calls false (docs/HISTORY.md, 2026-10-08);
 // Moonshot's parallel_tool_calls false, and a tool_choice naming a function
 // on kimi-k3 with thinking disabled; Zhipu's parallel_tool_calls false, and
-// every tool_choice but auto (docs/HISTORY.md, 2026-10-14). The rest passes
-// through.
+// every tool_choice but auto, bar none on glm-5.3 (docs/HISTORY.md,
+// 2026-10-14). The rest passes through.
 func TestAChatRequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 	const tools = `"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object"}}}]`
 	cases := []struct {
@@ -409,7 +409,8 @@ func TestAChatRequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 		{"zhipu", "parallel_tool_calls", tools + `,"parallel_tool_calls":false`,
 			[]string{tools + `,"parallel_tool_calls":true`, tools + `,"parallel_tool_calls":null`, `"stop":["END"]`}, "glm-5.3"},
 		{"zhipu", "tool_choice", tools + `,"tool_choice":"required"`,
-			[]string{tools + `,"tool_choice":"auto"`, tools + `,"tool_choice":null`, tools + `,"Tool_Choice":"required"`}, "glm-5.3"},
+			[]string{tools + `,"tool_choice":"auto"`, tools + `,"tool_choice":null`, tools + `,"Tool_Choice":"required"`, tools + `,"tool_choice":"none"`}, "glm-5.3"},
+		{"zhipu", "tool_choice", tools + `,"tool_choice":{"type":"function","function":{"name":"t"}}`, []string{tools + `,"tool_choice":"none"`}, "GLM-5.3"},
 		{"zhipu", "tool_choice", tools + `,"tool_choice":"none"`, nil, "glm-5.3-flash"},
 		{"zhipu", "tool_choice", tools + `,"tool_choice":{"type":"function","function":{"name":"t"}}`, nil, ""},
 		{"zhipu", "tool_choice", tools + `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"t"}}]}}`, nil, ""},

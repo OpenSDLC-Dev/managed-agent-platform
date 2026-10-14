@@ -83,13 +83,13 @@ The gateway now refuses what Kimi ignores: `disable_parallel_tool_use` and `para
 | `tool_choice` `none`, a question asking for the tool | no call in all 3, each saying it has no tools | **a call in all 3** |
 | `stop: [" 5"]`, counting to ten | an empty answer in all 3, finished `stop` | empty in 2, "1 2 3 4" in 1 |
 
-BigModel's chat-completion reference has `tool_choice` "默认auto且仅支持auto" (auto by default, and auto alone), and defines no `parallel_tool_calls`. So the profile now refuses `parallel_tool_calls: false` and every `tool_choice` but `auto`. The empty answers suggest that the stop sequence also stops the reasoning, which counts to five first. `stop` is honored, so it passes through.
+BigModel's chat-completion reference has `tool_choice` "默认auto且仅支持auto" (auto by default, and auto alone), and defines no `parallel_tool_calls`. So the profile now refuses `parallel_tool_calls: false` and every `tool_choice` but `auto`, except `none` on `glm-5.3`, which honored it. The empty answers suggest that the stop sequence also stops the reasoning, which counts to five first. `stop` is honored, so it passes through.
 
 **Zhipu's embeddings, plan 59's open question 1.** `embedding-3` accepts `encoding_format: "base64"` and answers in floats, as Gitee does. The OpenAI Python SDK keeps a float array as it is, so the gateway edits nothing. Zhipu's vectors for one input vary from call to call by up to 2.4e-4 a value (cosine 0.999999), whatever the encoding: two float asks in a row agreed in one probe and differed in the next. The tier compares them within 1e-3. Zhipu's `rerank` model answered 200 with `results: []` for three documents; the issue does not cover rerank, so this was not pursued.
 
 **Gitee's `Qwen3-VL-Embedding-8B`** answers one vector for each input, 1024 values each: two for a text and an image, three for a text and two images. Past 1000 inputs it gives the same 400 as before. So the knowledge-base client's multimodal health check, one text and one image, now gets the two vectors it asks for.
 
-**The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu` passed every test it ran in 175 seconds: 182 tests and subtests passed and none failed. Gemini was not named and skipped. On Moonshot:
+**The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu` passed every test it ran in 207 seconds: 182 tests and subtests passed and none failed. Gemini was not named and skipped. On Moonshot:
 
 - Each model's round trip got one unsigned thinking block and sent none back.
 - `count_tokens` relayed Kimi's 404.
@@ -97,11 +97,13 @@ BigModel's chat-completion reference has `tool_choice` "默认auto且仅支持au
 - The converted routes, Messages and Responses, sent Kimi its own reasoning back.
 - The brain's passthrough loop stored no thinking to replay, and its converted loop sent its one block back after the `system.message` and was answered.
 
-On Zhipu, every row reached its OpenAI endpoint and passed: Chat Completions with its three refusals asked directly, the conversion, Responses, and the brain's converted loop. The rows of the Anthropic endpoint left Zhipu out, and a run naming Zhipu alone skips them.
+On Zhipu, every row reached its OpenAI endpoint and passed: Chat Completions with its refusals asked directly, the conversion, Responses, and the brain's converted loop. The rows of the Anthropic endpoint left Zhipu out, and a run naming Zhipu alone skips them.
 
 An earlier run of Moonshot alone found two of the tier's own assumptions wrong, and both are fixed. A model list of one alias has no second page. A prompt read whole from the cache counts no `input_tokens`.
 
-**Mutants.** Seventeen mutants of the profile's new guards, each in a scratch copy injected with `go test -overlay`, were all caught by the unit tests. They dropped the flattening, each hook, each of the three conditions of each `kimi-k3` refusal, and Zhipu's parallel check; they widened the model match and the thinking check; and Zhipu's `tool_choice` check was made to refuse `auto`, to refuse `null`, and to refuse `required` alone. A mutant that does not compile proved the overlay was read.
+**Mutants.** Twenty-one mutants of the profile's new guards, each in a scratch copy injected with `go test -overlay`, were all caught by the unit tests. They dropped the flattening, each hook, each of the three conditions of each `kimi-k3` refusal, Zhipu's parallel check, and its `none` exception for `glm-5.3`. They widened the `kimi-k3` match, the thinking check, and the `none` exception to every model. They made the `glm-5.3` match case-sensitive and unanchored. And Zhipu's `tool_choice` check was made to refuse `auto`, to refuse `null`, and to refuse `required` alone. A mutant that does not compile proved the overlay was read.
+
+**Gemini.** #903 had taken on plan 62's Gemini generation rows, which wait on a key that can pay: the Gemini key answers every billable call 402. On 2026-10-14 the user dropped those rows, so the PR this section records closes #903. The gateway's Gemini protocol stays, and so do the live tier's free `countTokens` rows.
 
 ## Skills discovered in a mounted repository (plan 65, #921, #581) — archived 2026-10-14, delivered in three PRs (#931, #933 and this close-out)
 

@@ -222,7 +222,7 @@ func liveTextEmbeddings(t *testing.T, e *env, key string, rec *recorder, vendor 
 		vecs := make([][]float64, len(in))
 		for _, d := range res.Data {
 			vec, encoding, err := embeddingOf(d.JSON.Embedding.Raw())
-			if err != nil || d.Index < 0 || d.Index >= int64(len(in)) || len(vec) != dims {
+			if err != nil || d.Index < 0 || d.Index >= int64(len(in)) || vecs[d.Index] != nil || len(vec) != dims {
 				liveFatalf(t, "%s: vector %d of %d values, %v", format, d.Index, len(vec), err)
 			}
 			if format == openai.EmbeddingNewParamsEncodingFormatBase64 && d.Index == 0 {
