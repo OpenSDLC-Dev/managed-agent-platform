@@ -17,8 +17,8 @@ import (
 // it as generateContent does, at no cost, so each shape the conversion
 // sends is checked against Gemini's own parser while the key this tier runs
 // under cannot generate (docs/plan/62_gemini-upstream-protocol.md,
-// Verification; the generation rows wait on #903): a system prompt in two
-// blocks; tools whose schemas carry $defs, type unions and
+// Verification; the user dropped the generation rows, 2026-10-14): a system
+// prompt in two blocks; tools whose schemas carry $defs, type unions and
 // additionalProperties, and a tool_choice naming one; a tool loop's history,
 // its calls under their ids, the first carrying a Gemini signature and the
 // second the sentinel, its results an error with an image and a

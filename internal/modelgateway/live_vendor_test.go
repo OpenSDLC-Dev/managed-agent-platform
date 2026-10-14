@@ -21,23 +21,22 @@ import (
 // "Vendor behavior"; the findings are in docs/HISTORY.md), and holds the
 // gateway to what that evidence decided:
 //   - count_tokens reaches the vendor's own route and its count comes back
-//     unchanged;
+//     unchanged, or, where the vendor has none, its 404 does;
 //   - a search_result replayed in a tool result reaches the vendor flattened
 //     to text, which the model then answers from;
 //   - the cache usage fields come back as the vendor reported them, a
 //     repeated prompt reading from the cache, and input_tokens, cache write
 //     and cache read add up to the same prompt on every call, as the Messages
 //     API's do;
-//   - tool_choice auto and none reach the vendor exactly as asked; a choice
-//     forcing a tool call that the vendor ignores (any on both, tool on
-//     MiniMax) is refused with no upstream call, and the vendor asked
-//     directly still ignores it, which is the evidence the refusal rests
-//     on; DeepSeek's tool is honored with thinking disabled and refused by
-//     DeepSeek with it on;
+//   - tool_choice auto and none reach the vendor exactly as asked; what
+//     the vendor ignores (vendorRefusals) is refused with no upstream call,
+//     and the vendor asked directly still ignores it, which is the evidence
+//     the refusal rests on; DeepSeek's tool is honored with thinking
+//     disabled and refused by DeepSeek with it on;
 //   - a MiniMax key on its other region's host is a credential the vendor
 //     refuses, which the gateway answers as its own failure.
 func TestLiveVendorBehavior(t *testing.T) {
-	vendors := chatVendors(t)
+	vendors := anthropicVendors(t)
 	e := newEnv(t)
 	type route struct {
 		v     liveVendor
@@ -72,16 +71,26 @@ func TestLiveVendorBehavior(t *testing.T) {
 				n := r.rec.count()
 				ct, err := cl.Messages.CountTokens(liveCtx(t), anthropic.MessageCountTokensParams{Model: model, Messages: []anthropic.MessageParam{liveAsk()}})
 				xs := r.rec.since(n)
-				if err != nil || len(xs) != 1 {
+				if len(xs) != 1 {
 					liveFatalf(t, "count_tokens: %v, %d upstream calls, want one", err, len(xs))
 				}
 				status, raw := xs[0].answer()
+				// The vendor's 404 goes to the caller in the vendor's own
+				// envelope, and the SDK reads its status.
+				if r.v.noCount {
+					var apiErr *anthropic.Error
+					if status != 404 || !errors.As(err, &apiErr) || apiErr.StatusCode != 404 || !strings.HasSuffix(xs[0].path, "/v1/messages/count_tokens") {
+						liveFatalf(t, "count_tokens: %v; the vendor answered %d %s at %s; want its 404 relayed", err, status, raw, xs[0].path)
+					}
+					t.Logf("count_tokens: the vendor's 404 relayed")
+					return
+				}
 				var up struct {
 					InputTokens int64 `json:"input_tokens"`
 				}
 				_ = json.Unmarshal(raw, &up)
-				if status != 200 || ct.InputTokens <= 0 || ct.InputTokens != up.InputTokens || !strings.HasSuffix(xs[0].path, "/v1/messages/count_tokens") {
-					liveFatalf(t, "count_tokens: %+v; the vendor answered %d %s at %s", ct, status, raw, xs[0].path)
+				if err != nil || status != 200 || ct.InputTokens <= 0 || ct.InputTokens != up.InputTokens || !strings.HasSuffix(xs[0].path, "/v1/messages/count_tokens") {
+					liveFatalf(t, "count_tokens: %+v (%v); the vendor answered %d %s at %s", ct, err, status, raw, xs[0].path)
 				}
 				t.Logf("count_tokens: %d input tokens", ct.InputTokens)
 			})
@@ -223,10 +232,12 @@ func TestLiveVendorBehavior(t *testing.T) {
 						t.Logf("tool_choice none: the model called the tool anyway")
 					}
 				}
-				for _, name := range forcedIgnored(r.v.name) {
-					_, xs, err := ask(forcing(name), none, noToolNeeded)
-					if statusOf(err) != 400 || len(xs) != 0 || !strings.Contains(err.Error(), "tool_choice.type") {
-						liveErrorf(t, "tool_choice %s: %v, %d upstream calls; want the gateway's 400 naming tool_choice.type, and none", name, err, len(xs))
+				for _, rf := range vendorRefusals(r.v.name, r.alias) {
+					n := r.rec.count()
+					_, err := cl.Messages.New(liveCtx(t), rf.params(model))
+					xs := r.rec.since(n)
+					if statusOf(err) != 400 || len(xs) != 0 || !strings.Contains(err.Error(), rf.field) {
+						liveErrorf(t, "%s: %v, %d upstream calls; want the gateway's 400 naming %s, and none", rf.name, err, len(xs), rf.field)
 					}
 				}
 				if r.v.name == "deepseek" {
@@ -246,24 +257,26 @@ func TestLiveVendorBehavior(t *testing.T) {
 			})
 
 			t.Run("the refused choices asked directly", func(t *testing.T) {
-				// The refusals rest on the vendor ignoring these choices. Asked
+				// The refusals rest on the vendor ignoring what they name. Asked
 				// directly, a question needing no tool is answered in full without
-				// a call while a choice is ignored, and never once it is honored;
-				// a vendor that starts honoring one leaves its refusal stale. An
-				// answer cut short proves neither, so up to three are asked for.
-				for _, name := range forcedIgnored(r.v.name) {
+				// a call while a forcing choice is ignored, and never once it is
+				// honored, and a question asking for two calls at once gets both
+				// while disable_parallel_tool_use is ignored; a vendor that starts
+				// honoring one leaves its refusal stale. An answer cut short proves
+				// neither, so up to three are asked for.
+				for _, rf := range vendorRefusals(r.v.name, r.alias) {
 					ignored := false
-					var stops []string
+					var seen []string
 					for try := 0; try < 3 && !ignored; try++ {
-						m, err := askVendor(r.v, r.alias, forcing(name), noToolNeeded)
+						m, err := askVendor(r.v, rf.params(model))
 						if err != nil {
-							liveFatalf(t, "tool_choice %s, asked directly: %v", name, err)
+							liveFatalf(t, "%s, asked directly: %v", rf.name, err)
 						}
-						ignored = m.StopReason == anthropic.StopReasonEndTurn && !hasToolUse(m)
-						stops = append(stops, fmt.Sprintf("%s/tool=%v", m.StopReason, hasToolUse(m)))
+						ignored = rf.ignored(m)
+						seen = append(seen, fmt.Sprintf("%s/%d calls", m.StopReason, toolUses(m)))
 					}
 					if !ignored {
-						liveErrorf(t, "asked directly with tool_choice %s, %s never answered in full without the tool (%v): the vendor may now honor it, so its refusal in profile.go wants re-measuring", name, r.alias, stops)
+						liveErrorf(t, "asked directly with %s, %s never ignored it (%v): the vendor may now honor it, so its refusal in profile.go wants re-measuring", rf.name, r.alias, seen)
 					}
 				}
 			})
@@ -295,14 +308,54 @@ func TestLiveVendorBehavior(t *testing.T) {
 // to it was forced.
 const noToolNeeded = "Hello! Tell me a fun fact about the number seven, in one sentence."
 
-// forcedIgnored is the forcing tool_choice values the vendor's profile
-// refuses, because the vendor ignores them.
-func forcedIgnored(vendor string) []string {
-	if vendor == "minimax" {
-		return []string{"any", "tool"}
-	}
-	return []string{"any"}
+// vendorRefusal is one request the gateway refuses for a vendor's model,
+// because the vendor ignores what it asks for: the field the refusal names,
+// the request, and how an answer shows the vendor ignored it.
+type vendorRefusal struct {
+	name, field string
+	params      func(model anthropic.Model) anthropic.MessageNewParams
+	ignored     func(m *anthropic.Message) bool
 }
+
+// vendorRefusals is what the vendor's profile refuses for model, a model of
+// the vendor's: the forcing tool_choice values its models ignore, and on
+// Moonshot disable_parallel_tool_use too.
+func vendorRefusals(vendor, model string) []vendorRefusal {
+	forced := func(choice string, thinking anthropic.ThinkingConfigParamUnion) vendorRefusal {
+		name := "tool_choice " + choice
+		if thinking.OfDisabled != nil {
+			name += ", thinking disabled"
+		}
+		return vendorRefusal{name, "tool_choice.type", func(m anthropic.Model) anthropic.MessageNewParams {
+			return anthropic.MessageNewParams{Model: m, MaxTokens: 2048, Tools: []anthropic.ToolUnionParam{liveTool}, ToolChoice: forcing(choice), Thinking: thinking,
+				Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(noToolNeeded))}}
+		}, func(m *anthropic.Message) bool { return m.StopReason == anthropic.StopReasonEndTurn && !hasToolUse(m) }}
+	}
+	none := anthropic.ThinkingConfigParamUnion{}
+	switch vendor {
+	case "deepseek":
+		return []vendorRefusal{forced("any", none)}
+	case "minimax":
+		return []vendorRefusal{forced("any", none), forced("tool", none)}
+	case "moonshot":
+		out := []vendorRefusal{{"disable_parallel_tool_use", "tool_choice.disable_parallel_tool_use", func(m anthropic.Model) anthropic.MessageNewParams {
+			return anthropic.MessageNewParams{Model: m, MaxTokens: 2048, Tools: []anthropic.ToolUnionParam{timezoneTool},
+				ToolChoice: anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{DisableParallelToolUse: anthropic.Bool(true)}},
+				Messages:   []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(twoTimezones))}}
+		}, func(m *anthropic.Message) bool { return toolUses(m) > 1 }}}
+		if model == "kimi-k3" {
+			out = append(out, forced("tool", anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}}))
+		}
+		return out
+	}
+	return nil
+}
+
+// twoTimezones asks for two calls of timezoneTool at once.
+const twoTimezones = "What time is it right now in UTC and in Asia/Tokyo? Call the tool once for each timezone, both at once."
+
+var timezoneTool = anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{Name: "get_time", Description: anthropic.String("Returns the current time in one timezone."),
+	InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{"timezone": map[string]any{"type": "string"}}, Required: []string{"timezone"}}}}
 
 // forcing is the tool_choice forcing a call by name: any, or tool (get_time).
 func forcing(name string) anthropic.ToolChoiceUnionParam {
@@ -312,13 +365,12 @@ func forcing(name string) anthropic.ToolChoiceUnionParam {
 	return anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
 }
 
-// askVendor asks v's model directly, without the gateway, with the tier's
-// tool offered under choice and the key sent as v's profile sends it, and
-// returns the answer. It follows no redirect, which would carry the key to
-// another host, as the gateway's own client follows none.
-func askVendor(v liveVendor, model string, choice anthropic.ToolChoiceUnionParam, prompt string) (*anthropic.Message, error) {
-	body, err := json.Marshal(anthropic.MessageNewParams{Model: anthropic.Model(model), MaxTokens: 2048, Tools: []anthropic.ToolUnionParam{liveTool},
-		ToolChoice: choice, Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))}})
+// askVendor sends p to v directly, without the gateway, with the key sent as
+// v's profile sends it, and returns the answer. It follows no redirect, which
+// would carry the key to another host, as the gateway's own client follows
+// none.
+func askVendor(v liveVendor, p anthropic.MessageNewParams) (*anthropic.Message, error) {
+	body, err := json.Marshal(p)
 	if err != nil {
 		return nil, err
 	}
@@ -373,13 +425,19 @@ func otherRegion(v liveVendor) string {
 }
 
 func hasToolUse(m *anthropic.Message) bool {
+	return toolUses(m) > 0
+}
+
+// toolUses is how many tool calls m makes.
+func toolUses(m *anthropic.Message) int {
 	if m == nil {
-		return false
+		return 0
 	}
+	n := 0
 	for _, c := range m.Content {
 		if c.Type == "tool_use" {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }

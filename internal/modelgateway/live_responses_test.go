@@ -23,7 +23,8 @@ import (
 // behind a recording proxy: its vendor's Anthropic endpoint, which the
 // Messages request a Responses one converts to passes through to, and its
 // OpenAI endpoint alone, which that Messages request reaches converted once
-// more, to Chat Completions:
+// more, to Chat Completions — the second route alone for a vendor whose key
+// serves only that endpoint:
 //   - a text answer, whole and streamed, is the vendor's, item for block —
 //     its thinking a reasoning item, its text a message — under the alias,
 //     its usage the vendor's in the Responses API's meaning, which the
@@ -53,6 +54,9 @@ func TestLiveResponses(t *testing.T) {
 		}
 		for _, model := range v.models {
 			for _, openAI := range []bool{false, true} {
+				if !openAI && v.openAIOnly {
+					continue
+				}
 				r := route{v: v, model: model, alias: "resp-" + model, openAI: openAI, rec: &recorder{}}
 				base := v.base
 				if openAI {

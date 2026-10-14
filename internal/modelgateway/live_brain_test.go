@@ -44,7 +44,8 @@ type brainRoute struct {
 // TestLiveBrainThinkingThroughTheGateway is #883 end to end
 // (docs/plan/61_thinking-replay-via-gateway.md): the brain drives a real tool
 // loop through the gateway to each named chat vendor — passthrough on its
-// Anthropic endpoint, and converted on its OpenAI one — and a system.message
+// Anthropic endpoint, and converted on its OpenAI one, the converted loop
+// alone where the vendor's key serves only that endpoint — and a system.message
 // folds into its prompt between the tool call and its result, which moves the
 // prefix every block was produced under. The gateway's word must reach the
 // brain, which stores the call's thinking under its route alone and sends it
@@ -68,17 +69,21 @@ func TestLiveBrainThinkingThroughTheGateway(t *testing.T) {
 		return map[profile.Protocol]string{profile.Anthropic: proxy}
 	}
 	for _, v := range vendors {
-		model, thinks := v.models[0], v.name == "deepseek"
+		// DeepSeek thinks unasked, and GLM-5.3 whatever it is asked; DeepSeek
+		// alone is known to refuse the continuation that lost its thinking.
+		model, thinks, refused := v.models[0], v.name == "deepseek" || v.name == "zhipu", v.name == "deepseek"
 		flagged, _ := profile.Lookup(v.name)
-		add(brainRoute{name: v.name + "/passthrough", alias: "brain-pass-" + v.name, rec: &recorder{},
-			unchecked: flagged.ThinkingAnyPrefix, refused: thinks, thinks: thinks}, v.name, model, anth, v.base)
+		if !v.openAIOnly {
+			add(brainRoute{name: v.name + "/passthrough", alias: "brain-pass-" + v.name, rec: &recorder{},
+				unchecked: flagged.ThinkingAnyPrefix, refused: refused, thinks: thinks}, v.name, model, anth, v.base)
+		}
 		if host := openAIHost(v); host != "" {
-			add(brainRoute{name: v.name + "/converted", alias: "brain-conv-" + v.name, rec: &recorder{}, unchecked: true, refused: thinks, thinks: thinks}, v.name, model,
+			add(brainRoute{name: v.name + "/converted", alias: "brain-conv-" + v.name, rec: &recorder{}, unchecked: true, refused: refused, thinks: thinks}, v.name, model,
 				func(proxy string) map[profile.Protocol]string {
 					return map[profile.Protocol]string{profile.OpenAI: proxy}
 				}, host)
 		}
-		if thinks {
+		if v.name == "deepseek" {
 			r := brainRoute{name: "deepseek/generic", alias: "brain-generic-deepseek", rec: &recorder{}, refused: true, thinks: true}
 			proxy := recordingProxy(t, v.base, r.rec)
 			p := e.provider(proxy, func(p *store.Provider) { p.Name = r.alias })

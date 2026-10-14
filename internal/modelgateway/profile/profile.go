@@ -8,7 +8,8 @@
 // The hosts are the vendors' own (Ground truth, "Vendors", verified
 // 2026-10-04): DeepSeek's API docs (api-docs.deepseek.com, guides/anthropic_api),
 // MiniMax's CN and international API references, Zhipu's BigModel and Z.ai
-// docs, Kimi's platform docs (platform.kimi.ai, api/messages), and the API
+// docs, Kimi's platform docs (platform.kimi.ai, api/messages; its CN OpenAI
+// host from platform.kimi.com, 2026-10-14), and the API
 // definition Gitee AI publishes at ai.gitee.com/v1/yaml, and Google's Gemini
 // API reference. A host here is a base URL: the Anthropic SDKs append
 // /v1/messages to one, the OpenAI SDKs /chat/completions and /embeddings, a
@@ -26,6 +27,7 @@ import (
 	"encoding/json"
 	"maps"
 	"regexp"
+	"strings"
 )
 
 // Protocol is an upstream wire protocol.
@@ -148,18 +150,28 @@ var profiles = []Profile{
 	},
 		// Z.ai's thinking guide: thinking.type enabled (the default) or
 		// disabled, from GLM-4.5; GLM-5.3 refuses disabled itself.
-		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
-	// Kimi documents its OpenAI-compatible host on the international site
-	// only, and a Bearer token as the one way to send a key: its Claude Code
-	// guide says to remove ANTHROPIC_API_KEY, which sends x-api-key.
+		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"},
+		ChatIgnores:  zhipuChatIgnores},
+	// Kimi documents a Bearer token as the one way to send a key: its Claude
+	// Code guide says to remove ANTHROPIC_API_KEY, which sends x-api-key. Its
+	// CN site documents the OpenAI-compatible host api.moonshot.cn/v1
+	// (platform.kimi.com, "发起第一次调用"), and a CN key works there and on
+	// api.moonshot.cn/anthropic, and is refused with a 401 on the
+	// international hosts (probed 2026-10-14). Its Anthropic endpoint refuses
+	// a search_result block in a tool_result with a 400, "cannot unmarshal
+	// string into Go struct field ContentBlockParamUnion.content.source of
+	// type anthropic.ImageSource" (probed 2026-10-14).
 	{Name: "moonshot", DisplayName: "Moonshot (Kimi)", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://api.moonshot.cn/anthropic"},
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.moonshot.ai/anthropic"},
+		{Protocol: OpenAI, Region: RegionCN, BaseURL: "https://api.moonshot.cn/v1"},
 		{Protocol: OpenAI, Region: RegionInternational, BaseURL: "https://api.moonshot.ai/v1"},
-	}, BearerAuth: true,
+	}, BearerAuth: true, FlattenSearchResults: true, Ignores: moonshotIgnores, ChatIgnores: moonshotChatIgnores,
 		// Kimi's thinking-models guide: thinking.type enabled (the default) or
 		// disabled, for kimi-k2.6, the models without the toggle answering
-		// for themselves.
+		// for themselves. kimi-k3 honors disabled as kimi-k2.6 does: no
+		// thinking in 6 of 6 answers across both endpoints (docs/HISTORY.md,
+		// 2026-10-14), so neither refuses it.
 		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
 	// Gitee AI is v1's embeddings and rerank vendor, the knowledge-base
 	// client's default for both. It drops idle keep-alive connections in the
@@ -260,18 +272,91 @@ func minimaxIgnores(model string, req map[string]json.RawMessage) string {
 // m2ThinkingDisabled names thinking.type when it is disabled for one of
 // MiniMax's M2.x models, which think regardless.
 func m2ThinkingDisabled(model string, req map[string]json.RawMessage) string {
-	var thinking map[string]json.RawMessage
-	var typ string
-	if minimaxM2.MatchString(model) && json.Unmarshal(req["thinking"], &thinking) == nil &&
-		json.Unmarshal(thinking["type"], &typ) == nil && typ == "disabled" {
+	if minimaxM2.MatchString(model) && thinkingDisabled(req) {
 		return "thinking.type"
 	}
 	return ""
 }
 
+// thinkingDisabled reports whether a request's thinking.type, read by its
+// exact keys, is disabled.
+func thinkingDisabled(req map[string]json.RawMessage) bool {
+	var thinking map[string]json.RawMessage
+	var typ string
+	return json.Unmarshal(req["thinking"], &thinking) == nil && json.Unmarshal(thinking["type"], &typ) == nil && typ == "disabled"
+}
+
 // minimaxM2 matches MiniMax's M2.x model ids, MiniMax-M2 and MiniMax-M2.7
 // alike, in any case.
 var minimaxM2 = regexp.MustCompile(`(?i)^minimax-m2([.-]|$)`)
+
+// moonshotIgnores: Kimi's Anthropic endpoint ignores disable_parallel_tool_use
+// — asked for the time in two timezones at once with it set, kimi-k3 and
+// kimi-k2.6 called the tool twice in all 12 answers, thinking on and off — and
+// kimi-k3 ignores tool_choice tool with thinking disabled, answering a fun-fact
+// question in full without the call it forces in all 3 asks, where kimi-k2.6
+// honored it in all 3 (docs/HISTORY.md, 2026-10-14). Its any they honored with
+// thinking disabled, and with thinking on each either honored a forcing choice
+// or refused it with a 400 of its own, so those pass through; Kimi's Messages
+// reference lists tool_choice auto, any and none.
+func moonshotIgnores(model string, req map[string]json.RawMessage) string {
+	var choice map[string]json.RawMessage
+	if json.Unmarshal(req["tool_choice"], &choice) != nil {
+		return ""
+	}
+	var ban bool
+	if json.Unmarshal(choice["disable_parallel_tool_use"], &ban) == nil && ban {
+		return "tool_choice.disable_parallel_tool_use"
+	}
+	if kimiK3.MatchString(model) && choiceType(choice) == "tool" && thinkingDisabled(req) {
+		return "tool_choice.type"
+	}
+	return ""
+}
+
+// moonshotChatIgnores: the same on Kimi's OpenAI endpoint (docs/HISTORY.md,
+// 2026-10-14) — parallel_tool_calls false, which both models ignored in all
+// 12 answers, and on kimi-k3 with thinking disabled a tool_choice naming a
+// function, which it answered without calling in all 3 asks; required it
+// honored, as kimi-k2.6 honored both.
+func moonshotChatIgnores(model string, req map[string]json.RawMessage) string {
+	if f := parallelBanned(req); f != "" {
+		return f
+	}
+	var named map[string]json.RawMessage
+	if kimiK3.MatchString(model) && json.Unmarshal(req["tool_choice"], &named) == nil && choiceType(named) == "function" && thinkingDisabled(req) {
+		return "tool_choice"
+	}
+	return ""
+}
+
+// zhipuChatIgnores: BigModel's chat-completion reference lists auto as
+// tool_choice's only option, and defines no parallel_tool_calls. Its live
+// probes bear both out (docs/HISTORY.md, 2026-10-14): glm-5.3 and
+// glm-5.3-flash answered a fun-fact question without
+// the call that required or a named function forces in all 12 asks,
+// glm-5.3-flash called the tool in all 3 asks under none, and both called it
+// twice in all 6 answers with parallel_tool_calls false. So every tool_choice
+// but auto, or null, which sets nothing, is refused where the request offers
+// a tool — except none on glm-5.3 itself, not glm-5.3-flash, which answered
+// all 3 asks without the tool, saying it had none.
+func zhipuChatIgnores(model string, req map[string]json.RawMessage) string {
+	if f := parallelBanned(req); f != "" {
+		return f
+	}
+	var choice any
+	var tools []json.RawMessage
+	if json.Unmarshal(req["tool_choice"], &choice) == nil && choice != nil && choice != "auto" &&
+		(choice != "none" || !strings.EqualFold(model, "glm-5.3")) &&
+		json.Unmarshal(req["tools"], &tools) == nil && len(tools) > 0 {
+		return "tool_choice"
+	}
+	return ""
+}
+
+// kimiK3 matches kimi-k3 and the ids named after it, its snapshots among
+// them, in any case.
+var kimiK3 = regexp.MustCompile(`(?i)^kimi-k3([.-]|$)`)
 
 // The ChatIgnores hooks rest on the live probes of the vendors' OpenAI
 // endpoints (docs/HISTORY.md, 2026-10-08), under the same rule as Ignores.

@@ -60,7 +60,8 @@ func decoded(t *testing.T, raw []byte) any {
 
 // A vendor that refuses search_result blocks — DeepSeek's and MiniMax's
 // Anthropic endpoints both do, in a tool_result and at the top level alike
-// (probed 2026-10-07), as their fakes do here — is sent each one in a
+// (probed 2026-10-07), and Moonshot's in a tool_result (probed 2026-10-14),
+// as their fakes do here — is sent each one in a
 // tool_result as text, in the rendering the brain's flatten_search_results
 // uses, from its fields' exact keys and keeping its cache_control. Every
 // other block and field goes as sent, for the vendor to refuse — a block
@@ -97,10 +98,12 @@ func TestASearchResultReachesARefusingVendorAsText(t *testing.T) {
 		"deepseek": {422, `{"error":{"message":"Failed to deserialize the JSON body into the target type: messages[0].content: unknown variant ` +
 			"`search_result`" + `","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}`},
 		"minimax": {400, `{"type":"error","error":{"type":"invalid_request_error","message":"invalid params, invalid tool_result content (2013)"}}`},
+		"moonshot": {400, `{"error":{"type":"invalid_request_error","message":"Invalid request: json: cannot unmarshal string into Go struct field ` +
+			`ContentBlockParamUnion.content.source of type anthropic.ImageSource"},"type":"error"}`},
 	}
 	e := newEnv(t)
 	fakes := map[string]*fake{}
-	for _, prof := range []string{"deepseek", "minimax", "anthropic-generic"} {
+	for _, prof := range []string{"deepseek", "minimax", "moonshot", "anthropic-generic"} {
 		answer, refusal := message("ok"), refusals[prof]
 		fakes[prof] = newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
 			if refusal.status != 0 && holdsSearchResult(c.Body["messages"]) {
@@ -119,7 +122,7 @@ func TestASearchResultReachesARefusingVendorAsText(t *testing.T) {
 	for prof, want := range map[string]struct {
 		status   int
 		messages string
-	}{"deepseek": {422, flattened}, "minimax": {400, flattened}, "anthropic-generic": {200, messages}} {
+	}{"deepseek": {422, flattened}, "minimax": {400, flattened}, "moonshot": {400, flattened}, "anthropic-generic": {200, messages}} {
 		for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
 			body := fmt.Sprintf(`{"model":%q,"max_tokens":64,"messages":%s}`, prof, messages)
 			if resp, b := e.do("POST", path, body, map[string]string{"x-api-key": key}); resp.StatusCode != want.status {
@@ -202,8 +205,9 @@ func TestEachProfileSendsTheKeyAsItsVendorDocuments(t *testing.T) {
 
 // A vendor that ignores something bounding the answer — DeepSeek tool_choice's
 // disable_parallel_tool_use and its type any, MiniMax stop_sequences, its
-// tool_choice types any and tool and its disable_parallel_tool_use, and
-// thinking disabled on MiniMax's M2.x — is
+// tool_choice types any and tool and its disable_parallel_tool_use,
+// thinking disabled on MiniMax's M2.x, Moonshot's disable_parallel_tool_use,
+// and its tool_choice type tool on kimi-k3 with thinking disabled — is
 // never sent a request that sets it:
 // another of the model's deployments serves it, and where there is none the
 // gateway refuses it, naming the field. A count is routed alike, but made
@@ -228,6 +232,16 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 			[]string{tools + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":false}`, tools + `,"tool_choice":{"type":"auto","Disable_Parallel_Tool_Use":true}`}},
 		{"minimax", "MiniMax-M2.7", "thinking.type", `"thinking":{"type":"disabled"}`,
 			[]string{`"thinking":{"type":"adaptive"}`, `"thinking":{"Type":"disabled"}`, `"Thinking":{"type":"disabled"}`}},
+		// kimi-k2.6 honors a named tool with thinking disabled.
+		{"moonshot", "kimi-k2.6", "tool_choice.disable_parallel_tool_use", tools + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`,
+			[]string{tools + `,"tool_choice":{"type":"auto","disable_parallel_tool_use":false}`, tools + `,"tool_choice":{"type":"auto","Disable_Parallel_Tool_Use":true}`,
+				tools + `,"tool_choice":{"type":"tool","name":"t"},"thinking":{"type":"disabled"}`}},
+		// With thinking on, Kimi refuses a named tool itself.
+		{"moonshot", "kimi-k3", "tool_choice.type", tools + `,"tool_choice":{"type":"tool","name":"t"},"thinking":{"type":"disabled"}`,
+			[]string{tools + `,"tool_choice":{"type":"tool","name":"t"}`, tools + `,"tool_choice":{"type":"tool","name":"t"},"thinking":{"type":"enabled","budget_tokens":1024}`,
+				tools + `,"tool_choice":{"type":"any"},"thinking":{"type":"disabled"}`, tools + `,"tool_choice":{"Type":"tool","name":"t"},"thinking":{"type":"disabled"}`,
+				tools + `,"tool_choice":{"type":"tool","name":"t"},"thinking":{"Type":"disabled"}`}},
+		{"moonshot", "Kimi-K3", "tool_choice.type", tools + `,"tool_choice":{"type":"tool","name":"t"},"thinking":{"type":"disabled"}`, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model+" "+tc.field, func(t *testing.T) {
