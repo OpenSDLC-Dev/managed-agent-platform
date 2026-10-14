@@ -24,6 +24,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/filesystem"
@@ -242,15 +243,20 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 
 // cloneFailed marks err as go-git's clone's (errClone). go-git formats some
 // errors with %s, among them a deadline that fires while it decodes the pack
-// response, so where the context has fired and the message names its error,
-// that error joins the chain. A failure the message does not tie to the
-// context keeps its own reason, though the deadline passed while go-git ran
-// on: its checkout ignores the context.
+// response. So the context's error joins the chain where the context has
+// fired, the message names that error, and nothing else explains the
+// failure: cloneReason reads it as internal, and it is not this executor's
+// own (isLocalError). A failure with a reason of its own keeps it, though
+// the deadline passed while go-git ran on: its checkout ignores the context.
+// Nor does a name that quotes the context's error decide the reason: a file
+// the repository named so, or a host's message.
 func cloneFailed(ctx context.Context, err error) error {
-	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) && strings.Contains(err.Error(), cerr.Error()) {
+	err = fmt.Errorf("%w: %w", errClone, err)
+	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) && strings.Contains(err.Error(), cerr.Error()) &&
+		!isLocalError(err) && cloneReason(err) == repoOutcomeInternal {
 		err = withCause{err, cerr}
 	}
-	return fmt.Errorf("%w: %w", errClone, err)
+	return err
 }
 
 // shapeCheckout gives a checkout the .git/config and refs the reference's
@@ -474,11 +480,13 @@ func cloneReason(err error) string {
 	}
 }
 
-// isLocalError reports whether err is this executor's own machine refusing
-// a step of go-git's clone, which the network arm's types and text would
-// read as the host's. A file error on the spool quotes a name the
-// repository chose: a tracked file named EOF, or a symlink whose target
-// reads "connection reset". A dial it could not make carries the
+// isLocalError reports whether err is this executor refusing a step of
+// go-git's clone, which the network arm's types and text would read as the
+// host's. A file error on the spool quotes a name the repository chose: a
+// tracked file named EOF, or a symlink whose target reads "connection
+// reset". So does go-git's refusal of a path it will not check out — a
+// control character, a .. or .git component, a symlinked parent — which is
+// plain text (worktree_fs.go's validPath). A dial it could not make carries the
 // transport's types: a socket it could not create — out of descriptors,
 // memory or buffers, or for an address family it lacks — before anything
 // reached the host, or a local port it could not assign. A name lookup
@@ -491,7 +499,8 @@ func isLocalError(err error) bool {
 	var dnsErr *net.DNSError
 	return errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
 		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, syscall.EADDRNOTAVAIL) ||
-		(errors.As(err, &dnsErr) && strings.Contains(dnsErr.Err, "socket: "))
+		(errors.As(err, &dnsErr) && strings.Contains(dnsErr.Err, "socket: ")) ||
+		strings.Contains(err.Error(), "invalid path")
 }
 
 // isRemoteStatusError reports whether the remote answered with an HTTP status
@@ -506,13 +515,15 @@ func isRemoteStatusError(err error) bool {
 }
 
 // isProtocolError reports whether the remote answered but did not speak git:
-// a 200 carrying an outage page, a captive portal, or a proxy that replaced the
-// response. The bytes arrived, so nothing above matches and no HTTP status
-// betrays it — only the pkt-line scanner refusing what it was handed. go-git
-// keeps that sentinel for the ref advertisement and formats it with %s for
-// the pack response, so its text is read too. The remote's failure, not ours.
+// a 200 carrying an outage page or nothing at all, a captive portal, or a
+// proxy that replaced the response. The bytes arrived, so nothing above
+// matches and no HTTP status betrays it — only go-git's decoder refusing what
+// it was handed. go-git returns an empty ref advertisement's ErrEmptyInput as
+// it is, and formats the pkt-line scanner's refusal with %s for the pack
+// response, so that refusal is read by its text. The remote's failure, not
+// ours.
 func isProtocolError(err error) bool {
-	return errors.Is(err, pktline.ErrInvalidPktLen) || strings.Contains(err.Error(), pktline.ErrInvalidPktLen.Error())
+	return errors.Is(err, packp.ErrEmptyInput) || strings.Contains(err.Error(), pktline.ErrInvalidPktLen.Error())
 }
 
 // isNetworkError reports whether err looks like a failure to reach or speak to
@@ -542,7 +553,8 @@ func isNetworkError(err error) bool {
 	msg := err.Error()
 	for _, s := range []string{"connection refused", "no such host", "network is unreachable",
 		"connection reset", "EOF", "TLS handshake", "i/o timeout", "stream error", "GOAWAY",
-		syscall.ETIMEDOUT.Error(), syscall.EHOSTUNREACH.Error(), syscall.EPIPE.Error(), syscall.ECONNABORTED.Error()} {
+		syscall.ETIMEDOUT.Error(), syscall.EHOSTUNREACH.Error(), syscall.EPIPE.Error(), syscall.ECONNABORTED.Error(),
+		syscall.ENETDOWN.Error(), syscall.ENETRESET.Error(), syscall.EHOSTDOWN.Error()} {
 		if strings.Contains(msg, s) {
 			return true
 		}

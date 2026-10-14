@@ -73,6 +73,9 @@ type gitFixture struct {
 	// packPage answers the pack request with a page that is not git's, as a
 	// proxy that replaced the response does.
 	packPage atomic.Bool
+	// emptyRefs answers the ref advertisement with an empty 200, as a proxy
+	// that swallowed the response does.
+	emptyRefs atomic.Bool
 	// wantAuth, when set, is the Authorization header the fixture requires;
 	// it is also what proves the token travels as a header and nothing else.
 	wantAuth atomic.Value
@@ -241,6 +244,9 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if f.emptyRefs.Load() && strings.HasSuffix(r.URL.Path, "/info/refs") {
+		return
+	}
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-upload-pack") {
 		f.clones.Add(1)
 		if f.packPage.Load() {
