@@ -34,7 +34,9 @@ import (
 //   - agent.*tool_use        → assistant tool_use block, id = the EVENT id
 //     (the provider-side tool id was discarded at emission; the event id is
 //     the durable name results reference)
-//   - *.tool_result          → user tool_result block
+//   - *.tool_result          → user tool_result block, followed in its turn
+//     by the nested-skills text block its read found, if any (nested, keyed
+//     by the result event's id)
 //   - session.*/span.*/user.interrupt/user.tool_confirmation → not
 //     conversation material; skipped
 //
@@ -45,7 +47,7 @@ import (
 // (#67, docs/plan/60_thinking-replay.md) — or under any prefix over the route
 // it came over, when the endpoint said its producer checks none (#883,
 // docs/plan/61_thinking-replay-via-gateway.md). Any other replays as nothing.
-func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock, memoryBlock string, thinking replayThinking) (provider.Request, int64, error) {
+func buildRequest(system string, tools []json.RawMessage, history []domain.Event, skillsBlock, filesBlock, reposBlock, memoryBlock string, nested map[domain.ID]string, thinking replayThinking) (provider.Request, int64, error) {
 	req := provider.Request{System: system, Tools: tools}
 	// Startup metadata blocks sit after the agent's own system prompt and before
 	// any runtime system.message text (systemTail), which is appended at the end:
@@ -411,6 +413,15 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				return req, 0, err
 			}
 			results = append(results, answer)
+			// The skills the read found below a repository's root follow
+			// in the same turn; flush keeps every result ahead of them.
+			if text, ok := nested[ev.ID]; ok {
+				blk, err := json.Marshal(map[string]any{"type": "text", "text": text})
+				if err != nil {
+					return req, 0, err
+				}
+				blocks = append(blocks, blk)
+			}
 
 		default:
 			// Lifecycle, spans, interrupts, confirmations: state, not

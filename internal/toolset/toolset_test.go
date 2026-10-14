@@ -249,6 +249,24 @@ func TestReadWriteEdit(t *testing.T) {
 		}
 	})
 
+	t.Run("a read that succeeded reports the path it read, as resolved", func(t *testing.T) {
+		for _, c := range []struct{ tool, input, want string }{
+			{"read", `{"file_path":"rw/deep/a.txt"}`, "/workspace/rw/deep/a.txt"},
+			{"read", `{"file_path":"/workspace/rw/./deep/a.txt","view_range":[3,1]}`, "/workspace/rw/deep/a.txt"},
+			{"read", `{"file_path":"rw/deep/missing.txt"}`, ""},
+			{"read", `{"file_path":"rw/deep/a.txt","view_range":[1]}`, ""},
+			{"write", `{"file_path":"rw/deep/b.txt","content":"b"}`, ""},
+		} {
+			res, err := r.Run(context.Background(), domain.NewID("sevt"), c.tool, json.RawMessage(c.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.ReadPath != c.want {
+				t.Errorf("%s %s: ReadPath = %q, want %q", c.tool, c.input, res.ReadPath, c.want)
+			}
+		}
+	})
+
 	t.Run("an inverted view_range selects nothing and reads empty", func(t *testing.T) {
 		// The reference toolset stopped answering [3,1] with an error ("An
 		// inverted range selects nothing", since anthropic-sdk-go v1.63.0 —

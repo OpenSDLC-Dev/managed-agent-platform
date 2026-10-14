@@ -477,7 +477,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// losing the lease cancels the work.
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL, e.cfg.StallTimeout)
 
-	results, repoSkills, ms, faultErr, runErr := e.provisionAndRun(kctx, item, sess, keeper.Progress)
+	results, found, ms, faultErr, runErr := e.provisionAndRun(kctx, item, sess, keeper.Progress)
 	// Whatever the paths below decide, the sync's span ends once.
 	defer ms.end(ctx)
 	if kerr := keeper.Close(); kerr != nil {
@@ -527,14 +527,15 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	//
 	// The memory sync's settle phase rides the same transaction (plan 36
 	// decision 11): the store's rows and the run's results commit together,
-	// and the apply phase writes the sandbox only from what committed. So does
-	// the record of the repositories' skills this run scanned (plan 65), which
-	// lands with the wake of the turn the brain held for it.
+	// and the apply phase writes the sandbox only from what committed. So do
+	// the repositories' skills this run found (plan 65): the record of a
+	// checkout's lands with the wake of the turn the brain held for it, and
+	// what a read found lands with that read's result.
 	if err := e.commitResults(ctx, item.SessionID, results, func(ctx context.Context, tx pgx.Tx) error {
 		if err := e.settleDrain(ctx, tx, item, queue.ToolExec, faultErr != nil); err != nil {
 			return err
 		}
-		if err := recordRepoSkills(ctx, tx, item.SessionID, repoSkills); err != nil {
+		if err := found.record(ctx, tx, item.SessionID); err != nil {
 			return err
 		}
 		return e.settleMemory(ctx, tx, ms)
@@ -571,14 +572,14 @@ func consumerSpan(ctx context.Context, item *queue.Item, name string) (context.C
 
 // provisionAndRun provisions the session's sandbox and runs its unanswered
 // tools under ctx (the lease-kept context). It returns the result events to
-// append, the repositories' skills this run scanned, the first backend fault a
+// append, the repositories' skills this run found, the first backend fault a
 // tool hit (nil if every tool ran), and a setup error from provisioning or
 // reading the log — which stops the item with nothing committed, distinct from
 // a tool fault, which commits what did run.
-func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) ([]events.NewEvent, map[string][]skills.RepoSkill, *memorySync, error, error) {
+func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun, progress func()) ([]events.NewEvent, skillRecords, *memorySync, error, error) {
 	sb, err := e.provisionSandbox(ctx, item.SessionID, sess, progress)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, skillRecords{}, nil, nil, err
 	}
 	// Each step this run finishes tells the keeper the run is alive (#383).
 	// Reported at the boundaries a wedged sandbox call stops the run from
@@ -598,8 +599,19 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	// session's first turn for this; a run that settles without a record,
 	// stalled or with every clone failed, wakes it all the same, and the brain
 	// holds a session once.
-	repoSkills := e.scanRepoSkills(ctx, sb, item.SessionID,
-		unscannedRepos(present, sess.repoSkills), repoSkillsRoom(sess.repoSkills), progress)
+	var repoSkills map[string][]skills.RepoSkill
+	if unscanned := unscannedRepos(present, sess.repoSkills); len(unscanned) > 0 {
+		// The root list reaches every thread, so its room leaves out what the
+		// thread told of the most nested skills was told of: no thread passes
+		// the cap.
+		if most, err := e.mostNestedSkills(ctx, item.SessionID); err != nil {
+			slog.WarnContext(ctx, "repository skills not scanned; a later run scans them",
+				"session_id", item.SessionID, "err", err)
+		} else {
+			repoSkills = e.scanRepoSkills(ctx, sb, item.SessionID, unscanned,
+				max(repoSkillsRoom(sess.repoSkills)-most, 0), progress)
+		}
+	}
 	e.materializeSkills(ctx, sb, item.SessionID, sess.skills, progress)
 	progress()
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files, progress)
@@ -625,7 +637,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	progress()
 	uses, err := e.runnableToolUses(ctx, item.SessionID)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, skillRecords{}, nil, nil, err
 	}
 	// The web tools are the web driver's (webwork.go), never this sandbox
 	// pass's — and normally never even seen here: a tool_exec is enqueued only
@@ -638,7 +650,8 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	uses = slices.DeleteFunc(uses, func(u toolUse) bool {
 		return toolset.IsWebTool(u.name) || toolset.IsDelegationTool(u.name)
 	})
-	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses, sess.memories, progress)
+	nested := newNestedSkills(sb, item.SessionID, present, countRepoSkills(sess.repoSkills)+countRepoSkills(repoSkills))
+	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses, sess.memories, nested, progress)
 	// The memory sync's read phase (plan 36 decision 11) closes every run
 	// whose tools all answered — a run that faulted or stalled has a sandbox
 	// nothing here should wait on, and the next run, or the reaper, syncs it.
@@ -646,7 +659,23 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	if faultErr == nil {
 		ms = e.readMemory(ctx, sb, item.SessionID, synced, progress)
 	}
-	return results, repoSkills, ms, faultErr, nil
+	return results, skillRecords{repo: repoSkills, nested: nested.found}, ms, faultErr, nil
+}
+
+// skillRecords is what a run found of its repositories' skills: each newly
+// scanned checkout's, by resource id, and what each read found below a
+// repository's root, by the read's result event id.
+type skillRecords struct {
+	repo   map[string][]skills.RepoSkill
+	nested map[domain.ID][]skills.RepoSkill
+}
+
+// record stores the run's findings inside the transaction that settles it.
+func (r skillRecords) record(ctx context.Context, tx pgx.Tx, sid domain.ID) error {
+	if err := recordRepoSkills(ctx, tx, sid, r.repo); err != nil {
+		return err
+	}
+	return recordNestedSkills(ctx, tx, sid, r.nested)
 }
 
 // provisionSandbox resolves the session's credential env and gate spec and
@@ -857,7 +886,7 @@ func GateTokenRevoker(pool *pgxpool.Pool) sandbox.GateTokenRevoker {
 // because the keeper itself cannot tell the driver), so an interrupted
 // `sleep 3600` costs one beat, not toolset.MaxTimeout, and the sibling calls
 // queued behind it are not held hostage.
-func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse, memories []memoryRef, progress func()) ([]events.NewEvent, error) {
+func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse, memories []memoryRef, nested *nestedSkills, progress func()) ([]events.NewEvent, error) {
 	// Workdir must match the one the sandbox was provisioned with, so the file
 	// tools resolve a relative path against the same directory bash runs in.
 	// Empty resolves to sandbox.DefaultWorkdir on both sides.
@@ -887,6 +916,11 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 		}
 		cctx, stop := e.answeredWatch(ctx, sid, u.id, e.cfg.LeaseTTL/3)
 		res, err := runner.Run(cctx, u.id, u.name, u.input)
+		if res.ReadPath == "" {
+			// Any tool but a read that succeeded may have made or removed a
+			// skill, so the reads after it list their directories again.
+			nested.forgetListings()
+		}
 		if stop() {
 			// Answered under it: whatever it returned, or failed with, is a
 			// late result for a call the log already closed.
@@ -904,6 +938,12 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 			return results, err
 		}
 		ev.ThreadID, ev.CrossPosted = u.thread, u.crossPosted
+		// A read below a repository's root announces the skills of the
+		// directories it passed through (plan 65 decision 5), after its
+		// result, so the result carries the id their record is kept by.
+		if res.ReadPath != "" {
+			ev.ID = e.afterRead(ctx, nested, u.thread, res.ReadPath, progress)
+		}
 		results = append(results, ev)
 		// A tool answered: the run is moving, however long the next one takes.
 		progress()

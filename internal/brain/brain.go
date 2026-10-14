@@ -297,7 +297,8 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// the reference announces them, so a turn the executor has not yet scanned
 	// for is held the same way, once per session, and above the span start for
 	// the same reason (plan 65 decision 2).
-	repoSkills, waitRepoSkills, err := b.repoSkillsFor(ctx, sid, resourcesJSON, envKind, agent)
+	skillMounts := repoSkillMounts(resourcesJSON, envKind, agent)
+	repoSkills, waitRepoSkills, err := b.repoSkillsFor(ctx, sid, skillMounts)
 	if err != nil {
 		return fmt.Errorf("repository skills: %w", err)
 	}
@@ -427,6 +428,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// it is still valid (#67).
 		kept, err = b.log.ThinkingBlocks(kctx, sid, item.ThreadID)
 	}
+	var nested map[domain.ID]string
+	if err == nil {
+		// What this thread's reads found below a repository's root (plan 65
+		// decision 5), announced after the results that found it.
+		nested, err = b.nestedSkillBlocks(kctx, sid, item.ThreadID, skillMounts)
+	}
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)
@@ -446,7 +453,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return nil
 	}
 	req, watermark, err := buildRequest(agent.System, toolDefs, history, skillsBlock, filesBlock, reposBlock, memoryBlock,
-		replayThinking{model: desc.Model, route: desc.Route, blocks: kept})
+		nested, replayThinking{model: desc.Model, route: desc.Route, blocks: kept})
 	if err != nil {
 		if cerr := keeper.Close(); cerr != nil {
 			span.Finish(sctx, true, cerr)

@@ -285,7 +285,12 @@ each checkout's `.claude/skills` once, and records what it found in
 `sessions.repo_skills`, by repository, in the transaction that wakes the turn. The brain
 then lists those skills after the attached ones, from Postgres on every turn. It holds a
 session once: a turn woken with nothing recorded goes ahead without the list, which
-joins the prompt once a run records it.
+joins the prompt once a run records it. A skill deeper in the checkout is announced
+when the agent reads a file below it. The executor scans the directories between that
+file and the checkout's root, and records what the thread was not yet told of in
+`session_nested_skills`, keyed by the read's result event, in the transaction that
+commits the result. Replay places the list after that result, in the thread that read
+it.
 
 **Memory stores** (plan 36) ride the same array as an id-less element that snapshots
 the store's name and its `/mnt/memory/<slug>` mount. The sandbox lands the store's

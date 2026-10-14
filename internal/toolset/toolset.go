@@ -95,6 +95,10 @@ type Result struct {
 	// text shape byte-identical.
 	SearchResults []domain.SearchResultBlock
 	IsError       bool
+	// ReadPath is the path a read that succeeded read, as the tool resolved
+	// it, for the executor's scan of the skills above it (plan 65 decision
+	// 5). No result event carries it.
+	ReadPath string
 }
 
 // NoOutput is the text block posted for a Result whose Content is empty — a

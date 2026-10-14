@@ -49,6 +49,62 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Skills discovered in a mounted repository (plan 65, #921, #581) — archived 2026-10-14, delivered in three PRs (#931, #933 and this close-out)
+
+The owner settled four questions on 2026-10-14, before any code. Discovery runs before the first request. Both skills blocks take the recorded XML template, which brought #581 into the plan. Nested skills are discovered on `read` too. Repository skills are trusted as the reference trusts them. Two recordings were the ground truth: the 2026-09-03 attached-skills block, and managed-agents-wire-recordings#23's repository lists. managed-agents-wire-recordings#26 asks for the four points they leave open.
+
+In #931 and #933 the verifier ran on `claude-opus-5-5` by override in every round: its pinned model's quota returned HTTP 429 each time. Codex ran `gpt-6.1-sol` at `xhigh`, and `/code-review` ran `claude-opus-5-5` at `xhigh` with no cap.
+
+**#931, the template.** The verifier passed it with findings, with `make verify` green at 91.51% coverage. After our lead, the block was byte-identical to the recording over 1,729 bytes. Codex raised five P3 findings and `/code-review` eleven. One reversal is worth keeping. Codex asked to escape the skills root, so that a hostile workdir could not forge a tag. `/code-review` showed that this gave the model paths that do not exist (`/home/o'brien` became `o&#39;brien`), and the workdir is operator configuration, so paths went back to verbatim. Declined:
+
+- escaping control characters, since nothing parses the block as XML;
+- a test of the brain's `EXECUTOR_WORKDIR` read, which is `cmd/` glue and was run on the real binary instead;
+- the brain refusing every workdir the executor refuses;
+- the executor persisting its workdir for the brain.
+
+All 9 of my mutants were killed. The verifier's 10 left one survivor, the apostrophe's escape, which a test then pinned.
+
+**#933, root discovery.** It took five rounds.
+
+- **Round 1.** The verifier failed it on two blockers. An image's `BASH_ENV` banner became part of the first skill name, so the listing now runs framed. A new brain with an old executor held one session 36 times in 20 seconds, so the brain now holds a session once. Codex found four P2 and three P3 defects, among them a claimant that lost its lease publishing its scan, and a symbolic-link `SKILL.md` announced though a read refuses it.
+- **Round 2.** `/code-review` raised 17 findings. The record moved into the settle transaction: it had read the lease under the keeper, and locked `work_items` before `sessions`. It became per repository, with whole scans only. The listing turned off the image's glob options and globs in byte order. Declined: a bound on the list's total size (500 skills of 1,024 characters at most), a fresh list after a re-clone (the reference scans once), one read per `SKILL.md`, a wake before the whole run ends, a sandbox that never provisions, scanning when no agent has `read`, and one more session read per turn.
+- **After the PR opened.** The Codex bot found that a `BASH_ENV` running `set -f` made the listing expand nothing, and the empty scan was recorded for good. The listing now runs `set +f` and unsets `GLOBIGNORE`, and then `GLOBSORT`, which bash 5.3 adds. That last line was proven by hand on `bash:5.3`, because the gate's bash is 5.2. The outputs harvest and the `glob` tool share the `noglob` exposure on main, and are left to a follow-up.
+
+36 of 37 mutants were killed. The survivor ignores a failed record write inside the settle transaction, and is equivalent: a failed statement aborts the transaction, and the commit then fails.
+
+**The close-out, nested discovery.** Acceptance on Docker, against a fixture checkout laid out as the recording's, with reads in one run and in later ones:
+
+- a read of a file two levels down recorded the two skills on its path, nearest first, and none of the root's;
+- a `write`, and a read that failed, recorded nothing;
+- a later read below the same directories recorded only what its thread had not been told, a skill another tool wrote in the same run among it;
+- a child thread was told on its own;
+- a mount whose clone failed announced nothing, though the agent wrote a skill under its path;
+- the cap held both ways: root skills recorded before a read left it room for one, and nested skills told before a root scan left that scan room for one.
+
+After the reviews' fixes, each of 53 guards was broken on its own in an overlay copy, and a test failed for 50. The other three are equivalent: a loop's early stop that only spares a warning; the brain's type test on a mount, which its URL test already covers, since only a repository carries a URL; and the brain's skip of the query when nothing is mounted, where its filter would drop every skill anyway. A first run, before the reviews, left two survivors, and each gained a test.
+
+Review hardening, the close-out. The verifier's pinned model returned HTTP 429, so it ran on `claude-opus-5-5` by override; a run on the first commit was stopped when the reviews below changed the code, and it ran again on the fixed tip, af315e09, and passed it with findings, with `make verify` green at 91.53% coverage. Codex (`gpt-6.1-sol`, `xhigh`) found two P2 defects and one P3, all fixed:
+
+- the cap held one way only: a root scan that landed after a thread was told of nested skills could take that thread past 500, so a root scan now leaves out what the most-told thread was told;
+- a nested listing the output cap cut short counted as whole, and its farther directories were kept as empty for the run; it now records nothing and is not kept;
+- the listing named every directory on the path, so its command grew with the path times its depth, and a deep path passed the sandbox's command cap on every read; the script now walks from the nearest directory up to the last and names only those two.
+
+`/code-review` (`claude-opus-5-5`, `xhigh`, no cap) raised nineteen findings, two of them Codex's first two.
+
+- **Fixed (seventeen):** the two Codex also found, above; nested lists take the repository list's conditions (a cloud session, `read` on, a repository still mounted), which also spares sessions with no repository a query each turn; the executor passes over a record that does not decode, as the brain does; only checkouts the run found present are scanned, so skills the agent wrote under a mount whose clone failed are not announced; the innermost mount holding the file is its checkout; a tool other than a read clears the run's listings, so a skill it made is found by the reads after it; the lead no longer says "that file", since a turn's lists all follow its results; a thread at the cap lists nothing more, which ends a warning per read; the root scan's warnings name the resource again; the room is computed rather than kept; the read tool reports the path it read, so the executor neither parses its input again nor names it; and four docs and test-name corrections. The query the conditions spare and the conditions themselves were two findings.
+- **Declined (two):** one listing per read below a subdirectory, which decision 5 requires and the run's cache keeps to one per directory chain; and one query helper for both sides, which need different shapes, with no package both use for queries that owns the table.
+
+The second round. Codex's second pass found no P1 or P2 defect and one P3, fixed: the root scan's room counted a row of any JSON array, though the executor and the brain pass over one that does not decode as skills, so a hand-written row could leave a root scan no room for good. The room now counts what decodes, by location, through the decode the executor's dedupe uses. The verifier's findings, all fixed:
+
+- no brain test told a child thread of its own read's skills, so a turn given the primary's rows passed; a child thread's turn is now run;
+- the registry cited the scan's directory function by an old name;
+- the innermost-mount test listed its inner mount last, so the last match passed for the innermost; it now lists one inner mount before its outer mount and one after, so neither the first nor the last match passes;
+- the counting mismatch Codex found.
+
+The ten mutants of the code the second round changed, the verifier's two survivors among them, were all killed. The verifier then passed the round, scoped to its commit, 2c3ca60b, with findings, on `claude-opus-5-5` by override, and `make verify` green at 91.52% coverage. Its own mutant of the session filter in the executor's query survived, a gap the commit inherited, and a test with a second session now kills it. Two of its notes are left as they are: the brain query's thread filter is equivalent, since a thread's replay reads only its own rows; and a row that decodes with no locations counts one for its thread, a row the executor never writes.
+
+**Plan 65 progress summary (archived).** Delivered in three PRs. #931 landed decision 1: the recorded template for the attached block and absolute cloud locations, closing #581. #933 landed decisions 2, 3, 4, 6 and 7: the hold before the first request, the scan of each checkout (migration 0053), the repository list and the trust note. The close-out landed decision 5, nested discovery on `read` (migration 0054), and closes #921. What the recordings leave open is registered and tracked on #78, and managed-agents-wire-recordings#26 asks for it.
+
 ## Repository mounts rooted under /workspace (plan 64, #922) — archived 2026-10-13, delivered in one PR
 
 The rooting rule waited on a recording. The owner chose to record the edges the 2026-09-03 probes left open rather than infer them, and managed-agents-wire-recordings#22 and #23 recorded them the same day (`2026-10-13-repo-mount-skills`). One finding reversed #584, merged the day before: the reference accepted a repository at `/workspace/skills` beside an attached skill, and the two shared the directory. Asked again with that evidence, the owner chose to share it too.
