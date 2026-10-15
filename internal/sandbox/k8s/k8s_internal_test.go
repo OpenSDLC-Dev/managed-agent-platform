@@ -1230,6 +1230,47 @@ func BenchmarkReadStdout(b *testing.B) {
 	}
 }
 
+// readAnswer takes a classifying exit for the path's answer only where the
+// read script began: an image's startup that ends the shell first, with the
+// status readScript gives a missing path, says nothing of the path, and read
+// as missing it had a present .git cloned over (#941). A flood the cap cut is
+// what the exit status is trusted through, so it still classifies.
+func TestReadAnswerTrustsAClassifyingExitOnlyOnceTheScriptBegan(t *testing.T) {
+	f := sandbox.NewFrame("read")
+	begin, end := f.Lines()
+	buf := func(s string, truncated bool) *cappedBuffer {
+		out := &cappedBuffer{limit: readRoom, truncated: truncated}
+		out.buf.WriteString(s)
+		return out
+	}
+	for _, c := range []struct {
+		name string
+		out  *cappedBuffer
+		code int
+		want error
+	}{
+		{"the script found nothing there", buf("welcome to the image "+begin+end+"exit banner ", false), readNotExist, sandbox.ErrFileNotExist},
+		{"the script found a file in the way", buf(begin+end, false), sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory},
+		{"a flood pushed the frame out", buf(strings.Repeat("x", readRoom), true), readNotExist, sandbox.ErrFileNotExist},
+	} {
+		if _, err := readAnswer("/w/r/.git", f, 0, c.code, c.out); !errors.Is(err, c.want) {
+			t.Errorf("%s: readAnswer = %v, want %v", c.name, err, c.want)
+		}
+	}
+	answers := []error{sandbox.ErrFileNotExist, sandbox.ErrNotDirectory, sandbox.ErrIsDirectory, sandbox.ErrNotRegularFile, sandbox.ErrFileTooLarge}
+	for _, code := range []int{readNotExist, sandbox.ExitPathNotDirectory, readIsDir, readNotRegular, readTooLarge} {
+		_, err := readAnswer("/w/r/.git", f, 0, code, buf("welcome to the image ", false))
+		if err == nil {
+			t.Errorf("a startup that ended the shell with %d: readAnswer read the file", code)
+		}
+		for _, answer := range answers {
+			if errors.Is(err, answer) {
+				t.Errorf("a startup that ended the shell with %d: readAnswer = %v, want no answer about the path", code, err)
+			}
+		}
+	}
+}
+
 // classifier is a pod handle with Exec's default slop and probe lead and
 // nothing else: all classifyTimeout reads off its receiver.
 var classifier = &pod{overrunSlop: defaultOverrunSlop, probeLead: defaultProbeLead}

@@ -14,6 +14,20 @@ var probeEachLine = regexp.MustCompile(`test -e '((?:[^']|'\\'')*)' \|\| echo ([
 // probeEachScript is a script of those lines and nothing else.
 var probeEachScript = regexp.MustCompile(`^(?:test -e '(?:[^']|'\\'')*' \|\| echo [0-9]+\n)+$`)
 
+// ProbeEachPaths is the paths command — an exec a fake sandbox was handed,
+// frame and all — asks about where it is a batch of sandbox.ProbeEach's, in
+// the batch's order; ok is false where it is not one.
+func ProbeEachPaths(command string) (paths []string, ok bool) {
+	script, _, framed := Unwrap(command)
+	if !framed || !probeEachScript.MatchString(script) {
+		return nil, false
+	}
+	for _, m := range probeEachLine.FindAllStringSubmatch(script, -1) {
+		paths = append(paths, strings.ReplaceAll(m[1], `'\''`, "'"))
+	}
+	return paths, true
+}
+
 // AnswerProbeEach answers script — what a fake sandbox was handed, its frame
 // taken off (Unwrap) — as a sandbox would where it is a batch of
 // sandbox.ProbeEach's: the index of every path exists says is not there, a

@@ -122,6 +122,9 @@ func TestProbeEachTakesAnUnreadableAnswerForNone(t *testing.T) {
 		// the status `test -e` gives a path not there.
 		{"the startup ended the shell with 1", sandbox.ExecResult{ExitCode: 1}, false, nil, none},
 		{"cut short", sandbox.ExecResult{Stdout: "1\n", StdoutTruncated: true}, true, nil, none},
+		// The startup's output filled the cap but for the begin line: the
+		// script's answer is lost whole, and nothing listed is not "all there".
+		{"cut right after the begin line", sandbox.ExecResult{StdoutTruncated: true}, true, nil, none},
 		{"timed out", sandbox.ExecResult{Stdout: "1\n", TimedOut: true}, true, nil, none},
 		{"another exit", sandbox.ExecResult{Stdout: "1\n", ExitCode: 2}, true, nil, none},
 		{"a line that is no index", sandbox.ExecResult{Stdout: "banner\n1\n"}, true, nil, none},

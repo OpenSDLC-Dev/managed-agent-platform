@@ -31,10 +31,10 @@ const probeEachLabel = "presence"
 // bound on one command allows (MaxCommandBytes) and lists, by index, the ones
 // not there — so a set is asked in as many execs as its tests' bytes fill
 // commands, never one per path (5,000 paths of 1 KB take 44). A path is
-// Absent where its batch listed it, Present where its batch
-// answered without it, and PresenceUnknown where its batch's answer could not
-// be read: an exec error (the answer an image's startup pushed out,
-// *StartupOutputError, among them), output the frame did not carry whole, a
+// Absent where its batch listed it, Present where its batch answered without
+// it, and PresenceUnknown where its batch's answer could not be read: an exec
+// error (the answer an image's startup pushed out, *StartupOutputError, among
+// them), output the frame did not carry whole or the cap cut short, a
 // timeout, an exit other than 0, a line that is no index of the batch's. That
 // is no answer about the batch's paths, and a caller must not take it for
 // Absent (#860).
@@ -74,7 +74,10 @@ func ProbeEach(ctx context.Context, sb Sandbox, batched func(), paths ...string)
 // line each; it leaves answer PresenceUnknown where it cannot read them.
 func probeEachBatch(ctx context.Context, sb Sandbox, script string, from int, answer []Presence) {
 	res, framed, err := ExecFramed(ctx, sb, probeEachLabel, ExecRequest{Command: script})
-	if err != nil || !framed || res.TimedOut || res.ExitCode != 0 {
+	// A stdout the output cap cut short lost the lines past the cut, and
+	// lost them all where the cut met the begin line: what is left would
+	// read their paths as there.
+	if err != nil || !framed || res.TimedOut || res.ExitCode != 0 || res.StdoutTruncated {
 		return
 	}
 	// echo ends every line it prints, so output that does not end in a

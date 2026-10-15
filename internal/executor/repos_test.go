@@ -21,6 +21,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
@@ -360,13 +361,20 @@ func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sa
 	return &floodingSandbox{Sandbox: sb, p: p}, nil
 }
 
+// isGitProbe reports whether command is the repository presence probe: a
+// batch of sandbox.ProbeEach's asking after a .git alone.
+func isGitProbe(command string) bool {
+	paths, ok := sandboxtest.ProbeEachPaths(command)
+	return ok && len(paths) == 1 && strings.HasSuffix(paths[0], "/.git")
+}
+
 type floodingSandbox struct {
 	sandbox.Sandbox
 	p *floodingProvider
 }
 
 func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if strings.Contains(req.Command, "/.git' || echo 0\n") && s.p.failExec.Add(-1) >= 0 {
+	if isGitProbe(req.Command) && s.p.failExec.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
@@ -909,9 +917,9 @@ func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 type hookedProvider struct {
 	sandbox.Provider
 	hook, startup string
-	// startupOn, when set, runs startup only in a command that contains it,
-	// as a startup file that fails now and then does.
-	startupOn string
+	// startupOn, when set, runs startup only in a command it accepts, as a
+	// startup file that fails now and then does.
+	startupOn func(command string) bool
 	// streamErr and extractErr, when set, fail the tar's upload and the
 	// extraction's exec, as a sandbox whose transport drops does.
 	streamErr, extractErr error
@@ -938,7 +946,7 @@ func (s *hookedSandbox) WriteFileStream(ctx context.Context, p string, src io.Re
 }
 
 func (s *hookedSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if s.p.startup != "" && (s.p.startupOn == "" || strings.Contains(req.Command, s.p.startupOn)) {
+	if s.p.startup != "" && (s.p.startupOn == nil || s.p.startupOn(req.Command)) {
 		req.Command = strings.Replace(req.Command, sandbox.ScriptPreamble, sandbox.ScriptPreamble+s.p.startup, 1)
 	}
 	if s.p.extractErr != nil && strings.Contains(req.Command, " && tar -xf ") {
@@ -1140,11 +1148,22 @@ func TestRepoProbeAStartupEndsKeepsTheCheckout(t *testing.T) {
 	}
 
 	// Only the probe's shell ends: the extraction would run whole.
-	prov.startup, prov.startupOn = "exit 1; ", "test -e"
+	var ended atomic.Int32
+	prov.startup = "exit 1; "
+	prov.startupOn = func(command string) bool {
+		if !isGitProbe(command) {
+			return false
+		}
+		ended.Add(1)
+		return true
+	}
 	h.runPass(t)
+	if ended.Load() == 0 {
+		t.Fatal("the startup ended no probe: the test asked nothing")
+	}
 
-	if got := readSandboxFile(t, sb, repoMount+"/edit.txt"); got != "mine" {
-		t.Errorf("the agent's edit = %q, want %q: the checkout was replaced", got, "mine")
+	if got, err := sb.ReadFile(context.Background(), repoMount+"/edit.txt"); err != nil || string(got) != "mine" {
+		t.Errorf("the agent's edit = %q, %v; want %q: the checkout was replaced", got, err, "mine")
 	}
 	if n := fx.clones.Load(); n != 1 {
 		t.Errorf("clones = %d, want 1: a probe the startup ended must not read as absent", n)

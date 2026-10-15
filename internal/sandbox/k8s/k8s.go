@@ -1524,9 +1524,24 @@ func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]
 	if err != nil {
 		return nil, pd.execErr(ctx, err)
 	}
-	switch res.code {
-	case 0:
-		return readStdout(path, f, maxBytes, &out)
+	return readAnswer(path, f, maxBytes, res.code, &out)
+}
+
+// readAnswer is what the read's exit code and stdout say of path. readScript
+// prints its begin line before it classifies the path and exits only through
+// close_frame, so a classifying exit with no frame in a stdout the cap did not
+// cut came from an image's startup that ended the shell before the script
+// began, and says nothing of the path: read as missing, a present .git would
+// be cloned over (#941). A cut stdout is the flood the exit status is trusted
+// through, so its code still classifies.
+func readAnswer(path string, f sandbox.Frame, maxBytes int64, code int, out *cappedBuffer) ([]byte, error) {
+	if code == 0 {
+		return readStdout(path, f, maxBytes, out)
+	}
+	if _, framed, _ := f.CutBytesWithin(out.Bytes(), out.truncated, readRoom); !framed && !out.truncated {
+		return nil, fmt.Errorf("k8s: read %s: exit %d before the read script began", path, code)
+	}
+	switch code {
 	case readNotExist:
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
 	case readIsDir:
@@ -1538,7 +1553,7 @@ func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]
 	case sandbox.ExitPathNotDirectory:
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrNotDirectory)
 	default:
-		return nil, fmt.Errorf("k8s: read %s: exit %d", path, res.code)
+		return nil, fmt.Errorf("k8s: read %s: exit %d", path, code)
 	}
 }
 
