@@ -248,30 +248,15 @@ func (f *fakeSandbox) exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		}
 		return sandbox.ExecResult{}, nil
 	}
-	// Reflect real file presence for the file mounts' probe (sandbox.ProbeEach),
-	// so a deleted mount is listed absent and lands again — an Exec that
-	// listed nothing would make every mount look kept.
+	// Reflect real file presence for the presence probe (sandbox.ProbeEach) of
+	// the file mounts and the repositories' .git, so a deleted mount is listed
+	// absent and lands again — an Exec that listed nothing would make every
+	// mount look kept.
 	if res, ok := sandboxtest.AnswerProbeEach(req.Command, func(p string) bool {
 		_, ok := f.files[p]
 		return ok
 	}); ok {
 		return res, nil
-	}
-	// And for the repository probe (sandbox.ProbePaths: `test -e '<p1>' &&
-	// test -e '<p2>' && true`). The exact shape match keeps ordinary tool
-	// commands on the unconditional exit-0 path.
-	if strings.HasPrefix(req.Command, "test -e ") && strings.HasSuffix(req.Command, "&& true") {
-		for _, tok := range strings.Split(req.Command, " && ") {
-			if tok == "true" {
-				continue
-			}
-			p := strings.TrimPrefix(tok, "test -e ")
-			p = strings.TrimSuffix(strings.TrimPrefix(p, "'"), "'")
-			p = strings.ReplaceAll(p, `'\''`, "'") // reverse shellQuote
-			if _, ok := f.files[p]; !ok {
-				return sandbox.ExecResult{ExitCode: 1}, nil
-			}
-		}
 	}
 	return sandbox.ExecResult{}, nil
 }
