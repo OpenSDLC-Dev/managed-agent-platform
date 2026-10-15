@@ -54,11 +54,16 @@ const (
 	repoMountOccupiedMessage = "the repository's mount path lies outside the platform's directories, where a clone takes only an absent path or an empty directory it can remove"
 )
 
-// errRepoNoCredential classifies a repo resource whose sealed token row is
-// gone. It cannot happen through the API (the row is written in the create
+// errRepoNoCredential marks a repo resource whose sealed token row is gone.
+// It cannot happen through the API (the row is written in the create
 // transaction and dies only with the session), so it is an internal fault
-// rather than a user-visible reason of its own.
+// rather than a user-visible reason of its own: errRepoToken carries it to
+// cloneReason's internal arm.
 var errRepoNoCredential = errors.New("repository credential row missing")
+
+// errRepoToken marks a failure to read the resource's sealed token: the row
+// in Postgres, or its decrypt through the cipher's backend. Both are ours.
+var errRepoToken = errors.New("reading the repository's token failed")
 
 // materializeRepos clones each mounted repository into the sandbox before the
 // tools run, first of the passes (provisionAndRun says why). Idempotence is
@@ -168,9 +173,6 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 		if err != nil {
 			failed++
 			reason := cloneReason(err)
-			if errors.Is(err, errRepoNoCredential) {
-				reason = repoOutcomeInternal
-			}
 			recordRepoMaterialized(ctx, reason)
 			slog.WarnContext(ctx, "repository not materialized",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath,
@@ -219,7 +221,7 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	}
 	token, err := e.repoToken(ctx, sid, m.ID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", errRepoToken, err)
 	}
 	// The row read and the cipher's decrypt are their own round trips — a KMS
 	// among them — and the clone below is what the stall floor is measured
@@ -438,9 +440,9 @@ var errMountOccupied = errors.New("the mount path is neither absent nor an empty
 
 // errExtraction is a failure after the fetch, in the sandbox: shipping the
 // tar there, or the extraction script. It is the sandbox's, never the git
-// host's, though its text can read like the host's to cloneReason's network
-// arm: a dropped exec stream says EOF, and a script's stderr quotes the mount
-// path, such as /opt/EOF.
+// host's, though its text can read like the host's: a dropped exec stream says
+// EOF, and a script's stderr quotes the mount path, such as /opt/EOF. It never
+// carries errClone, so cloneReason does not read that text.
 var errExtraction = errors.New("landing the repository in the sandbox failed")
 
 // repoVacancyTimeout bounds mountOccupied's probe, which runs before the

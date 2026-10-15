@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-
+	"io"
 	"net/http"
 	"net/http/cgi"
 	"net/http/httptest"
@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,6 +63,19 @@ type gitFixture struct {
 	echoAuth atomic.Bool
 	// stall delays every request, for the deadline row.
 	stall atomic.Int64
+	// stallPack holds the pack request, the POST to upload-pack, until the
+	// client gives up, before its response: go-git reports that request's
+	// error in a wrapper of its own.
+	stallPack atomic.Bool
+	// holding is closed once the fixture holds a pack request.
+	holding     chan struct{}
+	holdingOnce sync.Once
+	// packPage answers the pack request with a page that is not git's, as a
+	// proxy that replaced the response does.
+	packPage atomic.Bool
+	// emptyRefs answers the ref advertisement with an empty 200, as a proxy
+	// that swallowed the response does.
+	emptyRefs atomic.Bool
 	// wantAuth, when set, is the Authorization header the fixture requires;
 	// it is also what proves the token travels as a header and nothing else.
 	wantAuth atomic.Value
@@ -101,7 +115,7 @@ func newGitFixture(t *testing.T, files map[string]string) *gitFixture {
 	if out, _ := probe.CombinedOutput(); bytes.Contains(out, []byte("is not a git command")) {
 		t.Fatalf("the fixture serves through git's http-backend helper, which is not installed: %s", out)
 	}
-	f := &gitFixture{dir: dir, repo: repo, backend: &cgi.Handler{
+	f := &gitFixture{dir: dir, repo: repo, holding: make(chan struct{}), backend: &cgi.Handler{
 		// GitHub answers a want for a commit no ref names; git's own
 		// upload-pack does only when told to. `-c` reaches the upload-pack the
 		// backend runs, on any git version.
@@ -149,6 +163,53 @@ func (f *gitFixture) commit(t *testing.T, msg string, files map[string]string) p
 	return h
 }
 
+// commitRawTree commits, on the default branch, a tree holding one file under
+// name. It writes the objects itself: go-git's own commit refuses a name its
+// checkout would refuse, and git's upload-pack serves one as it is.
+func (f *gitFixture) commitRawTree(t *testing.T, name string) {
+	t.Helper()
+	st := f.repo.Storer
+	put := func(o plumbing.EncodedObject) plumbing.Hash {
+		h, err := st.SetEncodedObject(o)
+		if err != nil {
+			t.Fatalf("store object: %v", err)
+		}
+		return h
+	}
+	raw := func(typ plumbing.ObjectType, parts ...[]byte) plumbing.Hash {
+		o := st.NewEncodedObject()
+		o.SetType(typ)
+		w, err := o.Writer()
+		if err != nil {
+			t.Fatalf("object writer: %v", err)
+		}
+		for _, p := range parts {
+			if _, err := w.Write(p); err != nil {
+				t.Fatalf("write object: %v", err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("close object: %v", err)
+		}
+		return put(o)
+	}
+	blob := raw(plumbing.BlobObject, []byte("x\n"))
+	tree := raw(plumbing.TreeObject, []byte("100644 "+name+"\x00"), blob[:])
+	head, err := f.repo.Head()
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	sig := object.Signature{Name: "fixture", Email: "fixture@example.invalid", When: time.Unix(1700000000, 0)}
+	o := st.NewEncodedObject()
+	commit := &object.Commit{Author: sig, Committer: sig, Message: "raw tree\n", TreeHash: tree, ParentHashes: []plumbing.Hash{head.Hash()}}
+	if err := commit.Encode(o); err != nil {
+		t.Fatalf("encode commit: %v", err)
+	}
+	if err := st.SetReference(plumbing.NewHashReference(head.Name(), put(o))); err != nil {
+		t.Fatalf("set %s: %v", head.Name(), err)
+	}
+}
+
 // links commits symbolic links, each path to its target.
 func (f *gitFixture) links(t *testing.T, links map[string]string) {
 	t.Helper()
@@ -194,6 +255,9 @@ func (f *gitFixture) branch(t *testing.T, name string, files map[string]string) 
 	}
 }
 
+// hold marks that the fixture is holding a pack request.
+func (f *gitFixture) hold() { f.holdingOnce.Do(func() { close(f.holding) }) }
+
 // serve is git http-backend behind the handler-level failure modes the
 // adversarial rows drive.
 func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
@@ -227,8 +291,23 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if f.emptyRefs.Load() && strings.HasSuffix(r.URL.Path, "/info/refs") {
+		return
+	}
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-upload-pack") {
 		f.clones.Add(1)
+		if f.packPage.Load() {
+			_, _ = w.Write([]byte("<html><body>Service unavailable</body></html>"))
+			return
+		}
+		if f.stallPack.Load() {
+			// The server notices a client that gave up only once the request
+			// body is read.
+			_, _ = io.Copy(io.Discard, r.Body)
+			f.hold()
+			<-r.Context().Done()
+			return
+		}
 	}
 	// The suffix-less spelling a github_repository resource carries names the
 	// same repository, as it does on GitHub.
