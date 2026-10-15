@@ -1230,6 +1230,45 @@ func BenchmarkReadStdout(b *testing.B) {
 	}
 }
 
+// readAnswer marks a classifying exit that came with no frame of the read
+// script's (sandbox.ErrUnframedStatus): an image's startup that ends the
+// shell first, with the status readScript gives a missing path, says nothing
+// of the path, and read as missing it had a present .git cloned over (#941).
+// The refusal itself is kept for every other caller. A framed exit is the
+// script's own, and a flood the cap cut is what the exit status is trusted
+// through, so neither is marked.
+func TestReadAnswerMarksAClassifyingExitWithNoFrame(t *testing.T) {
+	f := sandbox.NewFrame("read")
+	begin, end := f.Lines()
+	buf := func(s string, truncated bool) *cappedBuffer {
+		out := &cappedBuffer{limit: readRoom, truncated: truncated}
+		out.buf.WriteString(s)
+		return out
+	}
+	banner := "welcome to the image "
+	for _, c := range []struct {
+		name     string
+		out      *cappedBuffer
+		code     int
+		want     error
+		unframed bool
+	}{
+		{"the script found nothing there", buf(banner+begin+end+"exit banner ", false), readNotExist, sandbox.ErrFileNotExist, false},
+		{"the script found a file in the way", buf(begin+end, false), sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory, false},
+		{"a flood pushed the frame out", buf(strings.Repeat("x", readRoom), true), readNotExist, sandbox.ErrFileNotExist, false},
+		{"the startup ended the shell: not there", buf(banner, false), readNotExist, sandbox.ErrFileNotExist, true},
+		{"the startup ended the shell: a directory", buf(banner, false), readIsDir, sandbox.ErrIsDirectory, true},
+		{"the startup ended the shell: not regular", buf(banner, false), readNotRegular, sandbox.ErrNotRegularFile, true},
+		{"the startup ended the shell: too large", buf(banner, false), readTooLarge, sandbox.ErrFileTooLarge, true},
+		{"the startup ended the shell: a file in the way", buf("", false), sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory, true},
+	} {
+		_, err := readAnswer("/w/r/.git", f, 0, c.code, c.out)
+		if !errors.Is(err, c.want) || errors.Is(err, sandbox.ErrUnframedStatus) != c.unframed {
+			t.Errorf("%s: readAnswer = %v; want %v, marked %v", c.name, err, c.want, c.unframed)
+		}
+	}
+}
+
 // classifier is a pod handle with Exec's default slop and probe lead and
 // nothing else: all classifyTimeout reads off its receiver.
 var classifier = &pod{overrunSlop: defaultOverrunSlop, probeLead: defaultProbeLead}

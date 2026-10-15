@@ -204,7 +204,7 @@ of that kill's reach, as a `setsid` does. What the startup file
 *prints* does not corrupt the scripts whose answers the platform parses —
 a bulk write's report aside, below:
 `glob` and `grep`, the outputs harvest's listing, the repository-skills
-listing, the memory sync's tree hash, the package-install probe, a file mount's presence probe, a repository's vacancy probe, Docker's refused-write reasons and, on
+listing, the memory sync's tree hash, the package-install probe, a file mount's presence probe, a repository's presence and vacancy probes, Docker's refused-write reasons and, on
 Kubernetes, every file read, an exec's exit record and liveness probe, a
 refused write's reason and the checkpoint's root probe each print their
 answer between a begin and an end line carrying a nonce of its own, and only
@@ -216,6 +216,14 @@ of which turns it off as it starts, nor the Kubernetes exec wrapper before it
 records a command's exit code, nor either backend's watchdog before it kills
 a command past its deadline
 ([#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860)).
+A startup file that ends a presence probe's shell before the begin line
+leaves the probe unanswered, whatever status it exits with
+([#941](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/941)). A
+repository's presence probe then asks through the file API. On Kubernetes
+that read takes its exit status as an answer only where its own lines reached
+the output, or a flood pushed them out. Other scripts still read such a
+shell's exit status as their answer
+([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)).
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the

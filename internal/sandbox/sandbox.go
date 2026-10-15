@@ -104,6 +104,14 @@ var (
 	// one — a download with no Content-Length, which Go reports as -1 (#386) —
 	// was blaming the stream for a number it had chosen itself.
 	ErrSizeNotALength = errors.New("sandbox: size is not a length")
+	// ErrUnframedStatus marks a refusal that a script's exit status alone
+	// carried: its frame (Frame) is missing from an output the cap did not
+	// cut, so an image's startup that ended the shell before the script began
+	// could have chosen the status. It travels beside the refusal's own
+	// sentinel, so a caller that only reports the refusal is unchanged; one
+	// that would act on it takes it for no answer — StatPresence, whose
+	// Absent clones over a checkout (#941). Other scripts' exits are #942.
+	ErrUnframedStatus = errors.New("sandbox: the exit status came with no frame of the script's")
 )
 
 // CheckWriteSize refuses a declared size that is not a byte count, and is the

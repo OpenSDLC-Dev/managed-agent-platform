@@ -1524,21 +1524,43 @@ func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]
 	if err != nil {
 		return nil, pd.execErr(ctx, err)
 	}
-	switch res.code {
-	case 0:
-		return readStdout(path, f, maxBytes, &out)
+	return readAnswer(path, f, maxBytes, res.code, &out)
+}
+
+// readAnswer is what the read's exit code and stdout say of path. readScript
+// prints its begin line before it classifies the path and exits only through
+// close_frame, so a non-zero exit with no frame in a stdout the cap did not
+// cut may be an image's startup that ended the shell before the script began,
+// or a stream lost on its way (#105). Either way the status alone carried the
+// failure, which is marked (sandbox.ErrUnframedStatus) for a caller that would
+// act on it: read as missing, a present .git was cloned over (#941). A cut
+// stdout is the flood the exit status is trusted through, so it is not marked.
+func readAnswer(path string, f sandbox.Frame, maxBytes int64, code int, out *cappedBuffer) ([]byte, error) {
+	if code == 0 {
+		return readStdout(path, f, maxBytes, out)
+	}
+	err := readRefusal(path, code)
+	if _, framed, _ := f.CutBytesWithin(out.Bytes(), out.truncated, readRoom); !framed && !out.truncated {
+		err = fmt.Errorf("%w; %w", err, sandbox.ErrUnframedStatus)
+	}
+	return nil, err
+}
+
+// readRefusal is the refusal readScript's exit code names.
+func readRefusal(path string, code int) error {
+	switch code {
 	case readNotExist:
-		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
+		return fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
 	case readIsDir:
-		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
+		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
 	case readNotRegular:
-		return nil, fmt.Errorf("%s is not a regular file: %w", path, sandbox.ErrNotRegularFile)
+		return fmt.Errorf("%s is not a regular file: %w", path, sandbox.ErrNotRegularFile)
 	case readTooLarge:
-		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
+		return fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
 	case sandbox.ExitPathNotDirectory:
-		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrNotDirectory)
+		return fmt.Errorf("%s: %w", path, sandbox.ErrNotDirectory)
 	default:
-		return nil, fmt.Errorf("k8s: read %s: exit %d", path, res.code)
+		return fmt.Errorf("k8s: read %s: exit %d", path, code)
 	}
 }
 

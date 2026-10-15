@@ -299,7 +299,7 @@ func TestFilesUnreadableSentinelStillLandsANewMount(t *testing.T) {
 // TestFilesRematerializeAMountDeletedFromASetTooLongForOneProbe: 130 mounts
 // of 1 KB paths make a presence probe past the bound on one exec. Refused
 // unasked, it read as unknown and kept a deleted mount out for good; the
-// probe is asked in batches (sandbox.ProbePaths), and the deleted mount is
+// probe is asked in batches (sandbox.ProbeEach), and the deleted mount is
 // absent and lands again.
 func TestFilesRematerializeAMountDeletedFromASetTooLongForOneProbe(t *testing.T) {
 	sb := &fakeSandbox{}

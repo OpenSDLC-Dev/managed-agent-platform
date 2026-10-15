@@ -21,6 +21,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
@@ -360,13 +361,24 @@ func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sa
 	return &floodingSandbox{Sandbox: sb, p: p}, nil
 }
 
+// isGitProbe reports whether command is the repository presence probe: a
+// batch of sandbox.ProbeEach's asking after a .git alone.
+func isGitProbe(command string) bool {
+	script, _, framed := sandboxtest.Unwrap(command)
+	if !framed {
+		return false
+	}
+	paths, ok := sandboxtest.ProbeEachPaths(script)
+	return ok && len(paths) == 1 && strings.HasSuffix(paths[0], "/.git")
+}
+
 type floodingSandbox struct {
 	sandbox.Sandbox
 	p *floodingProvider
 }
 
 func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if strings.HasPrefix(req.Command, sandbox.ScriptPreamble+"test -e ") && s.p.failExec.Add(-1) >= 0 {
+	if isGitProbe(req.Command) && s.p.failExec.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	}
@@ -909,6 +921,9 @@ func TestRepoProbesThroughAFloodedStatus(t *testing.T) {
 type hookedProvider struct {
 	sandbox.Provider
 	hook, startup string
+	// startupOn, when set, runs startup only in a command it accepts, as a
+	// startup file that fails now and then does.
+	startupOn func(command string) bool
 	// streamErr and extractErr, when set, fail the tar's upload and the
 	// extraction's exec, as a sandbox whose transport drops does.
 	streamErr, extractErr error
@@ -935,7 +950,7 @@ func (s *hookedSandbox) WriteFileStream(ctx context.Context, p string, src io.Re
 }
 
 func (s *hookedSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
-	if s.p.startup != "" {
+	if s.p.startup != "" && (s.p.startupOn == nil || s.p.startupOn(req.Command)) {
 		req.Command = strings.Replace(req.Command, sandbox.ScriptPreamble, sandbox.ScriptPreamble+s.p.startup, 1)
 	}
 	if s.p.extractErr != nil && strings.Contains(req.Command, " && tar -xf ") {
@@ -1114,6 +1129,52 @@ func TestRepoProbeWithNoAnswerFetches(t *testing.T) {
 	}
 	if n := fx.clones.Load(); n != 1 {
 		t.Errorf("clones = %d, want 1: a probe with no answer must not refuse before the fetch", n)
+	}
+}
+
+// TestRepoProbeAStartupEndsKeepsTheCheckout 🔍: the repository probe read an
+// exit of 1 as `test -e` saying the .git is not there. An image's startup
+// that ends the shell first with 1 — a `set -e` startup whose command failed
+// — says nothing of the path, but read as absent: the pass cloned again and
+// the extraction replaced the checkout, the agent's edits with it.
+func TestRepoProbeAStartupEndsKeepsTheCheckout(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	prov := &hookedProvider{}
+	h, provider := wrappedRepoHarness(t, func(p sandbox.Provider) sandbox.Provider {
+		prov.Provider = p
+		return prov
+	})
+	h.seedRepoResource(t, "sesrsc_kept", fx.url(), repoMount, "ghp_fixture", nil)
+	h.runPass(t)
+	sb := adopt(t, provider, h)
+	if err := sb.WriteFile(context.Background(), repoMount+"/edit.txt", []byte("mine")); err != nil {
+		t.Fatalf("the agent's edit: %v", err)
+	}
+
+	// Only the shell of the .git's probe ends, whatever shape the probe
+	// takes: the extraction would run whole.
+	var ended atomic.Int32
+	prov.startup = "exit 1; "
+	prov.startupOn = func(command string) bool {
+		if !strings.Contains(command, "test -e '"+repoMount+"/.git'") {
+			return false
+		}
+		ended.Add(1)
+		return true
+	}
+	h.runPass(t)
+	if ended.Load() == 0 {
+		t.Fatal("the startup ended no probe: the test asked nothing")
+	}
+
+	if got, err := sb.ReadFile(context.Background(), repoMount+"/edit.txt"); err != nil || string(got) != "mine" {
+		t.Errorf("the agent's edit = %q, %v; want %q: the checkout was replaced", got, err, "mine")
+	}
+	if n := fx.clones.Load(); n != 1 {
+		t.Errorf("clones = %d, want 1: a probe the startup ended must not read as absent", n)
+	}
+	if errs := h.repoErrors(t); len(errs) != 0 {
+		t.Errorf("clone errors = %v, want none", errs)
 	}
 }
 
