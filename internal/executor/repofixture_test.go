@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cgi"
@@ -76,6 +77,10 @@ type gitFixture struct {
 	// emptyRefs answers the ref advertisement with an empty 200, as a proxy
 	// that swallowed the response does.
 	emptyRefs atomic.Bool
+	// refsAnswer and packAnswer, when set, answer the ref advertisement and
+	// the pack request in place of the repository: the bytes, or the broken
+	// connection, of a host that fails partway through the protocol.
+	refsAnswer, packAnswer atomic.Pointer[hostAnswer]
 	// wantAuth, when set, is the Authorization header the fixture requires;
 	// it is also what proves the token travels as a header and nothing else.
 	wantAuth atomic.Value
@@ -255,6 +260,40 @@ func (f *gitFixture) branch(t *testing.T, name string, files map[string]string) 
 	}
 }
 
+// hostAnswer is a response a failing host gives in place of the repository.
+type hostAnswer func(w http.ResponseWriter, r *http.Request)
+
+// answer sets a in p, where the fixture reads it on each request.
+func answer(p *atomic.Pointer[hostAnswer], a hostAnswer) { p.Store(&a) }
+
+// pkt is s as one pkt-line: its length, in four hex digits that count
+// themselves, then s.
+func pkt(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
+
+// gitBody answers with body under service's content type, as a host that
+// speaks HTTP and starts to speak git does.
+func gitBody(service, body string) hostAnswer {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-"+service)
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+// brokenAnswer writes raw to the connection itself and closes it: a
+// response whose framing breaks, which net/http's server will not write.
+func brokenAnswer(t *testing.T, raw string) hostAnswer {
+	return func(w http.ResponseWriter, r *http.Request) {
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString(raw)
+		_ = buf.Flush()
+	}
+}
+
 // hold marks that the fixture is holding a pack request.
 func (f *gitFixture) hold() { f.holdingOnce.Do(func() { close(f.holding) }) }
 
@@ -294,8 +333,17 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 	if f.emptyRefs.Load() && strings.HasSuffix(r.URL.Path, "/info/refs") {
 		return
 	}
+	if a := f.refsAnswer.Load(); a != nil && strings.HasSuffix(r.URL.Path, "/info/refs") {
+		(*a)(w, r)
+		return
+	}
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-upload-pack") {
 		f.clones.Add(1)
+		if a := f.packAnswer.Load(); a != nil {
+			_, _ = io.Copy(io.Discard, r.Body)
+			(*a)(w, r)
+			return
+		}
 		if f.packPage.Load() {
 			_, _ = w.Write([]byte("<html><body>Service unavailable</body></html>"))
 			return

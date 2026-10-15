@@ -23,6 +23,7 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/format/packfile"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
@@ -80,6 +81,8 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	// straight back at us. Scrubbed once, at the boundary, rather than at each
 	// return below.
 	defer func() { err = scrubTokenErr(err, token) }()
+	installCloneTransport()
+	ctx, _ = withCloneRecord(ctx)
 
 	spool, err := os.MkdirTemp("", "map-repo-clone-")
 	if err != nil {
@@ -244,23 +247,35 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 
 // cloneFailed marks err as go-git's clone's (errClone), and as go-git's
 // refusal of a path where it is one (errPathRefused). go-git formats some
-// errors with %s, among them a deadline that fires while it decodes the pack
-// response. So the deadline's error joins the chain where the clone's
-// deadline has passed, the message names it, and nothing else explains the
-// failure: cloneReason reads it as internal, and it is not this executor's
-// own (isLocalError). A failure with a reason of its own keeps it, though
-// the deadline passed while go-git ran on: its checkout ignores the context.
-// Nor does a name that quotes the deadline's error decide the reason: a file
-// the repository named so, or a host's message. A cancellation needs no
-// join, as it reads as internal either way.
+// errors with %s, among them the context's when the deadline or a
+// cancellation fires while it decodes the pack response, under the words its
+// decoder's refusals of the host's response carry too (isProtocolError). So
+// the context's error joins the chain where the clone's context has ended,
+// the message names it, and nothing else explains the failure: cloneReason
+// reads it as internal or network, and it is not this executor's own
+// (isLocalError). A failure with a reason of its own keeps it, though the
+// deadline passed while go-git ran on: its checkout ignores the context. Nor
+// does a name that quotes the context's error decide the reason: a file the
+// repository named so, or a host's message.
+//
+// A failure the clone's transport recorded (cloneRecord) is the host's where
+// neither it nor go-git's error is this executor's own. errHostTransport
+// marks it, and the message carries it for the log. cloneReason reads the
+// mark after every reason that came from what did arrive or from this
+// clone's context, so it decides only over internal and checkout: what go-git
+// concluded from what was missing.
 func cloneFailed(ctx context.Context, err error) error {
 	if isPathRefusal(err) {
 		err = withCause{err, errPathRefused}
 	}
 	err = fmt.Errorf("%w: %w", errClone, err)
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) && strings.Contains(err.Error(), context.DeadlineExceeded.Error()) &&
-		!isLocalError(err) && cloneReason(err) == repoOutcomeInternal {
-		err = withCause{err, context.DeadlineExceeded}
+	if cause := ctx.Err(); cause != nil && strings.Contains(err.Error(), cause.Error()) && !isLocalError(err) {
+		if r := cloneReason(err); r == repoOutcomeInternal || r == repoOutcomeNetwork {
+			err = withCause{err, cause}
+		}
+	}
+	if failed := cloneRecordFrom(ctx).failure(); failed != nil && !isLocalError(err) && !isLocalError(failed) {
+		err = fmt.Errorf("%w (%w: %w)", err, errHostTransport, failed)
 	}
 	return err
 }
@@ -504,6 +519,12 @@ func cloneReason(err error) string {
 	case errors.Is(err, transport.ErrRepositoryNotFound),
 		errors.Is(err, transport.ErrEmptyRemoteRepository):
 		return repoOutcomeNotFound
+	// A failure the clone's transport recorded (cloneFailed) is the host's,
+	// whatever go-git concluded from what was missing: an empty pack response
+	// is "already up to date" to go-git, and the checkout then misses the
+	// commit.
+	case errors.Is(err, errHostTransport):
+		return repoOutcomeNetwork
 	case errors.Is(err, plumbing.ErrObjectNotFound),
 		errors.Is(err, plumbing.ErrReferenceNotFound),
 		errors.Is(err, git.NoMatchingRefSpecError{}):
@@ -561,16 +582,32 @@ func isRemoteStatusError(err error) bool {
 	return errors.As(err, &httpErr)
 }
 
-// isProtocolError reports whether the remote answered but did not speak git:
-// a 200 carrying an outage page or nothing at all, a captive portal, or a
-// proxy that replaced the response. The bytes arrived, so nothing above
-// matches and no HTTP status betrays it — only go-git's decoder refusing what
-// it was handed. go-git returns an empty ref advertisement's ErrEmptyInput as
-// it is, and formats the pkt-line scanner's refusal with %s for the pack
-// response, so that refusal is read by its text. The remote's failure, not
-// ours.
+// isProtocolError reports whether the remote answered but did not speak git,
+// or spoke it only to fail in its own words (plan 66): a 200 carrying an
+// outage page or nothing at all, a captive portal, a proxy that replaced the
+// response; an ERR line, a message on the sideband's error band, a NAK with no
+// pack. The bytes arrived, so nothing above matches and no HTTP status
+// betrays it. go-git keeps a type or a sentinel for some: an empty ref
+// advertisement (ErrEmptyInput), an ERR line in it, one that is pkt-line but
+// not git's, a pack response that held no pack. It formats the rest with %s
+// under words of its own, which are read: the pkt-line scanner's refusal, its
+// decoder's refusal of the pack response, an ERR line there among them, and
+// the sideband's error band. The words read are go-git's, not a host's. The
+// remote's failure, not ours.
 func isProtocolError(err error) bool {
-	return errors.Is(err, packp.ErrEmptyInput) || strings.Contains(err.Error(), pktline.ErrInvalidPktLen.Error())
+	var errLine *pktline.ErrorLine
+	var notGit *packp.ErrUnexpectedData
+	if errors.Is(err, packp.ErrEmptyInput) || errors.Is(err, git.ErrFetching) || errors.Is(err, packfile.ErrEmptyPackfile) ||
+		errors.As(err, &errLine) || errors.As(err, &notGit) {
+		return true
+	}
+	msg := err.Error()
+	for _, s := range []string{pktline.ErrInvalidPktLen.Error(), "error decoding upload-pack response: ", "unexpected error: "} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // isNetworkError reports whether err looks like a failure to reach or speak to
