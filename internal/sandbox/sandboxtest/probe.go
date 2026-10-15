@@ -14,14 +14,11 @@ var probeEachLine = regexp.MustCompile(`test -e '((?:[^']|'\\'')*)' \|\| echo ([
 // probeEachScript is a script of those lines and nothing else.
 var probeEachScript = regexp.MustCompile(`^(?:test -e '(?:[^']|'\\'')*' \|\| echo [0-9]+\n)+$`)
 
-// ProbeEachPaths is the paths command — an exec a fake sandbox was handed,
-// frame and all — asks about where it is a batch of sandbox.ProbeEach's, in
-// the batch's order; ok is false where it is not one.
-func ProbeEachPaths(command string) (paths []string, ok bool) {
-	script, _, framed := Unwrap(command)
-	if !framed {
-		return nil, false
-	}
+// ProbeEachPaths is the paths script — what a fake sandbox was handed, its
+// frame taken off (Unwrap), as AnswerProbeEach takes it — asks about where it
+// is a batch of sandbox.ProbeEach's, in the batch's order; ok is false where
+// it is not one.
+func ProbeEachPaths(script string) (paths []string, ok bool) {
 	tests, ok := probeEachTests(script)
 	for _, t := range tests {
 		paths = append(paths, t.path)

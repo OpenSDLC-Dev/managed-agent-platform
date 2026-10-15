@@ -546,10 +546,12 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 // an exit of 1 read as absent would clone again over the agent's checkout.
 // Where that does not answer — that startup, one pushing the answer out of
 // the output, a lost exit stream (#105) — it is asked as a stat through the
-// file API (sandbox.StatPresence), whose Kubernetes answer is the read exec's
-// own exit status, which no output flood displaces; and the pair is asked
-// once more before it is left unanswered (PresenceUnknown), which is neither:
-// read as absent, it re-cloned over the agent's checkout.
+// file API (sandbox.StatPresence). On Docker that is the daemon's archive
+// endpoint, which runs no shell. On Kubernetes it is the read exec's own exit
+// status, which no output flood displaces, but which a startup that ends the
+// read's shell too leaves unanswered. The pair is asked once more before it
+// is left unanswered (PresenceUnknown), which is neither: read as absent, it
+// re-cloned over the agent's checkout.
 func repoPresence(ctx context.Context, sb sandbox.Sandbox, m repoRef) sandbox.Presence {
 	git := path.Join(path.Clean(m.MountPath), ".git")
 	for range 2 {

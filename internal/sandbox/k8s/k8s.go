@@ -1529,10 +1529,10 @@ func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]
 
 // readAnswer is what the read's exit code and stdout say of path. readScript
 // prints its begin line before it classifies the path and exits only through
-// close_frame, so a classifying exit with no frame in a stdout the cap did not
+// close_frame, so a non-zero exit with no frame in a stdout the cap did not
 // cut may be an image's startup that ended the shell before the script began,
 // or a stream lost on its way (#105). Either way the status alone carried the
-// refusal, which is marked (sandbox.ErrUnframedStatus) for a caller that would
+// failure, which is marked (sandbox.ErrUnframedStatus) for a caller that would
 // act on it: read as missing, a present .git was cloned over (#941). A cut
 // stdout is the flood the exit status is trusted through, so it is not marked.
 func readAnswer(path string, f sandbox.Frame, maxBytes int64, code int, out *cappedBuffer) ([]byte, error) {

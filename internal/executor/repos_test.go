@@ -364,7 +364,11 @@ func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sa
 // isGitProbe reports whether command is the repository presence probe: a
 // batch of sandbox.ProbeEach's asking after a .git alone.
 func isGitProbe(command string) bool {
-	paths, ok := sandboxtest.ProbeEachPaths(command)
+	script, _, framed := sandboxtest.Unwrap(command)
+	if !framed {
+		return false
+	}
+	paths, ok := sandboxtest.ProbeEachPaths(script)
 	return ok && len(paths) == 1 && strings.HasSuffix(paths[0], "/.git")
 }
 
@@ -1147,11 +1151,12 @@ func TestRepoProbeAStartupEndsKeepsTheCheckout(t *testing.T) {
 		t.Fatalf("the agent's edit: %v", err)
 	}
 
-	// Only the probe's shell ends: the extraction would run whole.
+	// Only the shell of the .git's probe ends, whatever shape the probe
+	// takes: the extraction would run whole.
 	var ended atomic.Int32
 	prov.startup = "exit 1; "
 	prov.startupOn = func(command string) bool {
-		if !isGitProbe(command) {
+		if !strings.Contains(command, "test -e '"+repoMount+"/.git'") {
 			return false
 		}
 		ended.Add(1)
