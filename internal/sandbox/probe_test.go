@@ -46,6 +46,10 @@ func TestStatPresenceReadsTheRefusal(t *testing.T) {
 		{sandbox.ErrNotRegularFile, sandbox.Present},
 		{fmt.Errorf("/w/.git: %w", sandbox.ErrFileNotExist), sandbox.Absent},
 		{sandbox.ErrNotDirectory, sandbox.Absent},
+		// A refusal no frame of the read's came with: an image's startup may
+		// have ended the shell with the status readScript gives it.
+		{fmt.Errorf("/w/.git: %w; %w", sandbox.ErrFileNotExist, sandbox.ErrUnframedStatus), sandbox.PresenceUnknown},
+		{fmt.Errorf("/w/.git: %w; %w", sandbox.ErrIsDirectory, sandbox.ErrUnframedStatus), sandbox.PresenceUnknown},
 		{&sandbox.StartupOutputError{What: "the read of /w/.git"}, sandbox.PresenceUnknown},
 		{errors.New("exec: stream lost"), sandbox.PresenceUnknown},
 	} {

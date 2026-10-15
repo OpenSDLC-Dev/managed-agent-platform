@@ -80,9 +80,8 @@ func probeEachBatch(ctx context.Context, sb Sandbox, script string, from int, an
 	if err != nil || !framed || res.TimedOut || res.ExitCode != 0 || res.StdoutTruncated {
 		return
 	}
-	// echo ends every line it prints, so output that does not end in a
-	// newline is no whole answer — a stdout the output cap cut short among
-	// it, whose last newline Cut takes for the start of the end line.
+	// echo ends every line it prints, so an answer that does not end in a
+	// newline is not one the script printed whole.
 	lines := strings.Split(res.Stdout, "\n")
 	if lines[len(lines)-1] != "" {
 		return
@@ -107,7 +106,8 @@ func probeEachBatch(ctx context.Context, sb Sandbox, script string, from int, an
 // than a probe exec: a read of it capped at no bytes at all
 // (ReadFileStream), whose refusal says what is there — a directory, no
 // regular file, or one too large for that cap is Present; nothing there, or a
-// parent no directory, Absent — and PresenceUnknown for any other failure. On
+// parent no directory, Absent — and PresenceUnknown for any other failure, or
+// for a refusal the read's exit status alone carried (ErrUnframedStatus). On
 // Kubernetes that answer is the read exec's own exit status, which no output
 // an image's startup prints displaces; on Docker it is the daemon's archive
 // endpoint, which starts tarring a directory it is asked for (measured: about
@@ -119,6 +119,8 @@ func StatPresence(ctx context.Context, sb Sandbox, path string) Presence {
 	case err == nil:
 		rc.Close()
 		return Present
+	case errors.Is(err, ErrUnframedStatus):
+		return PresenceUnknown
 	case errors.Is(err, ErrFileNotExist), errors.Is(err, ErrNotDirectory):
 		return Absent
 	case errors.Is(err, ErrIsDirectory), errors.Is(err, ErrNotRegularFile), errors.Is(err, ErrFileTooLarge):

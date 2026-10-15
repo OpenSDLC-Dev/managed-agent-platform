@@ -1230,12 +1230,14 @@ func BenchmarkReadStdout(b *testing.B) {
 	}
 }
 
-// readAnswer takes a classifying exit for the path's answer only where the
-// read script began: an image's startup that ends the shell first, with the
-// status readScript gives a missing path, says nothing of the path, and read
-// as missing it had a present .git cloned over (#941). A flood the cap cut is
-// what the exit status is trusted through, so it still classifies.
-func TestReadAnswerTrustsAClassifyingExitOnlyOnceTheScriptBegan(t *testing.T) {
+// readAnswer marks a classifying exit that came with no frame of the read
+// script's (sandbox.ErrUnframedStatus): an image's startup that ends the
+// shell first, with the status readScript gives a missing path, says nothing
+// of the path, and read as missing it had a present .git cloned over (#941).
+// The refusal itself is kept for every other caller. A framed exit is the
+// script's own, and a flood the cap cut is what the exit status is trusted
+// through, so neither is marked.
+func TestReadAnswerMarksAClassifyingExitWithNoFrame(t *testing.T) {
 	f := sandbox.NewFrame("read")
 	begin, end := f.Lines()
 	buf := func(s string, truncated bool) *cappedBuffer {
@@ -1243,30 +1245,26 @@ func TestReadAnswerTrustsAClassifyingExitOnlyOnceTheScriptBegan(t *testing.T) {
 		out.buf.WriteString(s)
 		return out
 	}
+	banner := "welcome to the image "
 	for _, c := range []struct {
-		name string
-		out  *cappedBuffer
-		code int
-		want error
+		name     string
+		out      *cappedBuffer
+		code     int
+		want     error
+		unframed bool
 	}{
-		{"the script found nothing there", buf("welcome to the image "+begin+end+"exit banner ", false), readNotExist, sandbox.ErrFileNotExist},
-		{"the script found a file in the way", buf(begin+end, false), sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory},
-		{"a flood pushed the frame out", buf(strings.Repeat("x", readRoom), true), readNotExist, sandbox.ErrFileNotExist},
+		{"the script found nothing there", buf(banner+begin+end+"exit banner ", false), readNotExist, sandbox.ErrFileNotExist, false},
+		{"the script found a file in the way", buf(begin+end, false), sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory, false},
+		{"a flood pushed the frame out", buf(strings.Repeat("x", readRoom), true), readNotExist, sandbox.ErrFileNotExist, false},
+		{"the startup ended the shell: not there", buf(banner, false), readNotExist, sandbox.ErrFileNotExist, true},
+		{"the startup ended the shell: a directory", buf(banner, false), readIsDir, sandbox.ErrIsDirectory, true},
+		{"the startup ended the shell: not regular", buf(banner, false), readNotRegular, sandbox.ErrNotRegularFile, true},
+		{"the startup ended the shell: too large", buf(banner, false), readTooLarge, sandbox.ErrFileTooLarge, true},
+		{"the startup ended the shell: a file in the way", buf("", false), sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory, true},
 	} {
-		if _, err := readAnswer("/w/r/.git", f, 0, c.code, c.out); !errors.Is(err, c.want) {
-			t.Errorf("%s: readAnswer = %v, want %v", c.name, err, c.want)
-		}
-	}
-	answers := []error{sandbox.ErrFileNotExist, sandbox.ErrNotDirectory, sandbox.ErrIsDirectory, sandbox.ErrNotRegularFile, sandbox.ErrFileTooLarge}
-	for _, code := range []int{readNotExist, sandbox.ExitPathNotDirectory, readIsDir, readNotRegular, readTooLarge} {
-		_, err := readAnswer("/w/r/.git", f, 0, code, buf("welcome to the image ", false))
-		if err == nil {
-			t.Errorf("a startup that ended the shell with %d: readAnswer read the file", code)
-		}
-		for _, answer := range answers {
-			if errors.Is(err, answer) {
-				t.Errorf("a startup that ended the shell with %d: readAnswer = %v, want no answer about the path", code, err)
-			}
+		_, err := readAnswer("/w/r/.git", f, 0, c.code, c.out)
+		if !errors.Is(err, c.want) || errors.Is(err, sandbox.ErrUnframedStatus) != c.unframed {
+			t.Errorf("%s: readAnswer = %v; want %v, marked %v", c.name, err, c.want, c.unframed)
 		}
 	}
 }

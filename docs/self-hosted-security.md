@@ -216,12 +216,14 @@ of which turns it off as it starts, nor the Kubernetes exec wrapper before it
 records a command's exit code, nor either backend's watchdog before it kills
 a command past its deadline
 ([#860](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/860)).
-A startup file that ends a script's shell before the begin line leaves that
-script unanswered, whatever status it exits with
+A startup file that ends a presence probe's shell before the begin line
+leaves the probe unanswered, whatever status it exits with
 ([#941](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/941)). A
 repository's presence probe then asks through the file API. On Kubernetes
 that read takes its exit status as an answer only where its own lines reached
-the output, or a flood pushed them out.
+the output, or a flood pushed them out. Other scripts still read such a
+shell's exit status as their answer
+([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)).
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the
