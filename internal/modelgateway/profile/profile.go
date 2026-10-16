@@ -188,6 +188,8 @@ var profiles = []Profile{
 	{Name: "gemini", DisplayName: "Google Gemini API", Protocols: []Protocol{Gemini}, Hosts: []Host{
 		{Protocol: Gemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"},
 	}},
+	// The generic profiles stay last: GET /admin/v1/profiles lists profiles in
+	// this order, and their names read "Other …" after the vendors above.
 	{Name: "anthropic-generic", DisplayName: "Other Anthropic-compatible Endpoint", Protocols: []Protocol{Anthropic}},
 	{Name: "openai-generic", DisplayName: "Other OpenAI-compatible Endpoint", Protocols: []Protocol{OpenAI}},
 }

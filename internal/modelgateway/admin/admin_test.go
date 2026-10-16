@@ -249,7 +249,7 @@ func TestProfiles(t *testing.T) {
 	if len(list) != 8 || list[0]["type"] != "profile" {
 		t.Fatalf("profiles = %v", list)
 	}
-	// The console's Add provider dialog shows these names (#943).
+	// The console's Add provider dialog shows display_name; #943 renamed these three.
 	shown := map[any]any{}
 	for _, p := range list {
 		shown[p["name"]] = p["display_name"]
