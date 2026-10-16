@@ -41,8 +41,9 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    `sideband.ErrMaxPackedExceeded` among them, and by go-git's own words where
    it kept only text: the pkt-line scanner's refusal,
    `error decoding upload-pack response: `, and the sideband's
-   `unexpected error: ` and `unknown channel `. Never by the host's. A pack that is corrupt past its signature is out of
-   this plan's scope and keeps its reason.
+   `unexpected error: ` and `unknown channel `. Never by the host's. A pack
+   that is corrupt past its signature is out of this plan's scope and keeps
+   its reason.
 2. **The clone's transport marks the host's failures where go-git reads
    them.** go-git's HTTP transport, installed for the process as the executor
    package initializes, answers a clone's failed body read with a marked
@@ -88,8 +89,8 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
 - The marks: on a marked clone's success bodies only, an empty pack response
   whatever the context, this machine's apart from the host's, a read the
   context or its cause ended marked as the context's, none on a failed
-  request or on the host's words go-git keeps in a type, and the first mark
-  in a message read as the transport's.
+  request, on the host's words go-git keeps in a type or on a 401, 403 or
+  404's body, and the first mark in a message read as the transport's.
 - The deadline and cancellation rows #939 pinned keep their reasons. A real
   clone whose deadline ends the pack response's read, before its first byte
   or after a `NAK`, reads `timeout`, and one cancelled after a `NAK` reads

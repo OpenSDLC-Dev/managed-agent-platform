@@ -47,14 +47,17 @@ var errContextRead = errors.New("the clone's deadline or cancellation ended the 
 // first in err's text. go-git keeps a mark's type only where it does not
 // format it with %s, and its words either way. A mark's own text begins with
 // its words, and what follows them is the error it wraps, which can quote the
-// host's words, a mark's among them. The transport marks only a response
-// body's reads that failed, so neither a failed request (a *url.Error, inside
-// go-git's UnexpectedError too) nor the host's words that go-git read and
-// kept in a type (hostWords) carries a mark, whatever its text quotes. It is
-// nil where err carries none.
+// host's words, a mark's among them. The transport marks only a success
+// body's reads that failed, so none of these carries a mark, whatever its text
+// quotes: a failed request (a *url.Error, inside go-git's UnexpectedError
+// too), the host's words that go-git read and kept in a type (hostWords), and
+// the 401, 403 or 404 that go-git refuses with a sentinel and the body's text.
+// It is nil where err carries none.
 func transportMark(err error) error {
 	var urlErr *url.Error
-	if hostWords(err) || errors.As(withUnexpected(err), &urlErr) {
+	if err == nil || hostWords(err) || errors.As(withUnexpected(err), &urlErr) ||
+		errors.Is(err, transport.ErrAuthenticationRequired) || errors.Is(err, transport.ErrAuthorizationFailed) ||
+		errors.Is(err, transport.ErrRepositoryNotFound) {
 		return nil
 	}
 	msg := err.Error()

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -295,8 +296,9 @@ func TestCloneTransportIsGoGitsForHTTPAndHTTPS(t *testing.T) {
 // A real clone whose deadline or cancellation ends the pack response's body
 // read reads the context's reason: go-git returns the read's mark as it is
 // before the first byte, and formats it with %s once it has decoded a NAK.
-// The host sends its headers at once, and each row leaves the request at least
-// 1.5 seconds before the context ends, so the read is what the context ends.
+// The context ends half a second after the host has sent the response's
+// headers, so the clone is reading the body when it does, however long the
+// ref advertisement took.
 func TestCloneReasonReadsAPackReadTheContextEnds(t *testing.T) {
 	nak := "0000" + pkt("NAK\n")
 	for _, tc := range []struct {
@@ -311,31 +313,58 @@ func TestCloneReasonReadsAPackReadTheContextEnds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			sent := make(chan struct{})
+			var once sync.Once
 			answer(&fx.packAnswer, func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(tc.first))
 				_ = http.NewResponseController(w).Flush()
+				once.Do(func() { close(sent) })
 				<-r.Context().Done()
 			})
-			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			deadline := &passedDeadline{Context: context.Background(), done: make(chan struct{})}
+			ctx, end := context.Context(deadline), func() { close(deadline.done) }
 			if tc.cancel {
+				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(context.Background())
-				time.AfterFunc(1500*time.Millisecond, cancel)
+				defer cancel()
+				end = cancel
 			}
-			defer cancel()
+			stop := make(chan struct{})
+			defer close(stop)
+			go func() {
+				select {
+				case <-sent:
+					time.Sleep(500 * time.Millisecond)
+					end()
+				case <-stop:
+				}
+			}()
 			_, _, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
 			defer cleanup()
 			if err == nil {
 				t.Fatal("the clone succeeded")
 			}
 			if transportMark(err) != errContextRead {
-				t.Fatalf("error = %v, want the pack response's read marked the context's; a request that outlasted the context fails before it", err)
+				t.Fatalf("error = %v, want the pack response's read marked the context's", err)
 			}
 			if got := cloneReason(err); got != tc.want {
 				t.Errorf("cloneReason = %q, want %q: %v", got, tc.want, err)
 			}
 		})
+	}
+}
+
+// No error carries no mark, and is not this executor's.
+func TestTransportMarkOfNoError(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("a classifier panicked on no error: %v", r)
+		}
+	}()
+	if transportMark(nil) != nil || isLocalError(nil) {
+		t.Error("no error carries a mark, or reads as this executor's")
 	}
 }
 
