@@ -224,8 +224,9 @@ leaves the probe unanswered, whatever status it exits with
 repository's presence probe then asks through the file API. The same holds
 for the sandbox's own scripts whose exit status is their answer
 ([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)):
-a file write and a batch write's steps on both backends, and a file read on
-Kubernetes. Each takes its status only where one stream carries its frame
+a file write and a batch write's steps on both backends, a file read on
+Kubernetes, and the `grep` tool's two ripgrep install steps. Each takes its
+status only where one stream carries its frame
 whole: stdout's, or stderr's under a flood that pushes stdout's out. Where
 neither stream shows the script began, the call fails with an error that
 names the image's startup. A script that began and whose output was lost on
@@ -234,9 +235,11 @@ cut is the startup's flood, as below. A refused-write probe on Docker that the
 startup ended answers nothing, so it gives the refusal no reason. On
 Kubernetes, an
 exec's exit record whose reader the startup ended fails with an error that
-names the image's startup, rather than read as no record. The scripts the executor and the
-worker run themselves, and the `grep` tool's ripgrep install, still read
-such a shell's exit status as their answer.
+names the image's startup, rather than read as no record. The ripgrep
+install's tool error relays only what a failed step printed inside its
+frame. The scripts the
+executor and the worker run themselves still read such a shell's exit status
+as their answer.
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the
@@ -263,8 +266,7 @@ misreporting a write in its own sandbox. One printing past the cap pushes
 them out too: on Docker a shed's report of what it left is then empty, and
 a failed write's temporaries are not emptied. What a few scripts print is relayed,
 not parsed, banner and all: the package install's output, as the session
-error's message; the `grep` tool's ripgrep install's, in its tool error when
-the install fails; the stderr of a checkpoint's restore and of a repository's
+error's message; the stderr of a checkpoint's restore and of a repository's
 extraction, in the error each fails with; and the memory sync's removals', in
 the warning when they fail. The `bash` tool's output is the model's own
 command's, which the startup file reaches as it reaches any command.

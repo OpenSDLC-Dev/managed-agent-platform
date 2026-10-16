@@ -526,7 +526,9 @@ func linuxArch(machine string) string {
 // checks it runs. A nil Result is success. A non-nil one is the tool error
 // grep answers with instead, naming why rg cannot run here — there is no
 // second implementation to fall back on (#827, an owner decision). An error is
-// the sandbox itself failing.
+// the sandbox itself failing, or the image's startup keeping a step from
+// answering (sandbox.ErrImageStartup), which the dispatch answers as a tool
+// error naming the image (#942).
 func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, error) {
 	fail := func(format string, a ...any) (*Result, error) {
 		res, _ := failf("grep: "+format, a...)
@@ -545,7 +547,10 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 	_, _ = rand.Read(nonce[:])
 	name := fmt.Sprintf("%s%d-%s", installPrefix, now.Unix(), hex.EncodeToString(nonce[:]))
 
-	res, err := sandbox.ExecScript(ctx, r.Sandbox, sandbox.ExecRequest{
+	// Both steps' statuses are their answers, read only where their frames
+	// arrived (sandbox.ExecStatus): a 0 an image's startup chose would carry the
+	// binary in, or take it as installed, with nothing done (#942).
+	res, err := sandbox.ExecStatus(ctx, r.Sandbox, "rgprepare", "the ripgrep install's preparation", sandbox.ExecRequest{
 		Command: fmt.Sprintf(prepareScript, singleQuote(ripgrepDir), singleQuote(name), now.Add(-staleInstall).Unix()),
 		Timeout: installTimeout,
 	})
@@ -570,7 +575,7 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 		}
 		return nil, err
 	}
-	res, err = sandbox.ExecScript(ctx, r.Sandbox, sandbox.ExecRequest{
+	res, err = sandbox.ExecStatus(ctx, r.Sandbox, "rginstall", "the ripgrep install", sandbox.ExecRequest{
 		Command: fmt.Sprintf(installScript, singleQuote(ripgrepDir), singleQuote(name), singleQuote(path.Base(ripgrepPath())),
 			singleQuote("ripgrep "+ripgrep.Pinned.Version+" ")),
 		Timeout: installTimeout,

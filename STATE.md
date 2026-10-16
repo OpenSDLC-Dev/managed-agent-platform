@@ -14,6 +14,7 @@ startup's, never the script's answer.
 - [x] PR 1 — the sandbox layer: `StartupExitError` and `ExecStatus`, every backend
       site on Docker and Kubernetes with a contract row, the image's EXIT trap
       cleared; the callers of `StartupOutputError` and the bash tool's `done` marker
-- [ ] PR 2 — the toolset: `fileFault`, ripgrep's install
+- [x] PR 2 — the toolset: ripgrep's install, its timeout answered before any
+      status; `fileFault` needed no change past PR 1
 - [ ] PR 3 — the executor and worker callers; the security guide's sentence
       that still names them as reading the status; the plan's close
