@@ -430,7 +430,7 @@ func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
 					absent(path)
 				}
 				for _, label := range []string{"bulkprepare", "bulkrename"} {
-					for _, status := range []int{0, 1} {
+					for _, status := range []int{0, sandbox.ExitPathIsDirectory, sandbox.ExitPathNotReplaceable, sandbox.ExitPathNotWritable} {
 						dir := fmt.Sprintf("/workspace/%s%d", label, status)
 						arm(sb, label, status)
 						ended(sb, label, status, sb.WriteFiles(ctx, batch(dir)))
