@@ -710,13 +710,27 @@ func TestABackendFaultDuringInstallFaultsTheItem(t *testing.T) {
 
 // TestAStartupFloodIsNoInstallFault: an image whose startup prints past the
 // output cap in every shell pushes the answer out of every exec
-// (sandbox.StartupOutputError), and every retry meets the same — so it never
-// faults the pass, whose reclaim would run it, the install included, forever.
-// Pushed out of the probe, no install is attempted, and nothing is said on the
-// wire the tools' own errors do not already say; pushed out of an install that
-// ran, it is that manager's failed attempt. Either way the turn commits.
+// (sandbox.StartupOutputError), and one whose startup ends the shell that
+// reads the answer gives none (sandbox.StartupExitError, #942); every retry
+// meets the same — so neither faults the pass, whose reclaim would run it, the
+// install included, forever. Kept from the probe, no install is attempted, and
+// nothing is said on the wire the tools' own errors do not already say; kept
+// from an install that ran, it is that manager's failed attempt. Either way
+// the turn commits.
 func TestAStartupFloodIsNoInstallFault(t *testing.T) {
-	flood := &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	for _, startup := range []struct {
+		name string
+		err  error
+		says string
+	}{
+		{"flood", &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}, "output cap"},
+		{"exit", &sandbox.StartupExitError{What: "the command's exit record", MayHaveRun: true}, "ended the shell"},
+	} {
+		t.Run(startup.name, func(t *testing.T) { startupIsNoInstallFault(t, startup.err, startup.says) })
+	}
+}
+
+func startupIsNoInstallFault(t *testing.T, flood error, says string) {
 	t.Run("out of the probe", func(t *testing.T) {
 		sb := &fakeSandbox{execErr: flood, execErrOn: "id -u"}
 		h := newHarness(t, sb)
@@ -747,8 +761,8 @@ func TestAStartupFloodIsNoInstallFault(t *testing.T) {
 		}
 		errs := h.packageErrors(t)
 		if len(errs) != 1 || errs[0]["reason"] != packageReasonFailed || errs[0]["manager"] != "apt" ||
-			!strings.Contains(fmt.Sprint(errs[0]["message"]), "output cap") {
-			t.Fatalf("package errors = %+v, want one failed attempt on apt naming the output cap", errs)
+			!strings.Contains(fmt.Sprint(errs[0]["message"]), says) {
+			t.Fatalf("package errors = %+v, want one failed attempt on apt saying %q", errs, says)
 		}
 		if rs, _ := errs[0]["retry_status"].(map[string]any); rs["type"] != "retrying" {
 			t.Errorf("retry_status = %+v, want retrying: an attempt, counted as any failed one is", rs)

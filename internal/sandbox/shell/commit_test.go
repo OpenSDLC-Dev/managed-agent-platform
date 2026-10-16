@@ -327,6 +327,44 @@ func TestCommit(t *testing.T) {
 	})
 }
 
+// A `done` read that got no answer — its output lost on its way after the
+// read began (sandbox.ErrOutputLost), or an image's startup that ended the
+// read's shell first (sandbox.StartupExitError) — says nothing of whether the
+// snapshot is whole, and a fault would leave the call for a reclaim that runs
+// the command again. It reads as not saved, as a missing marker does: the
+// result comes back, and head stays where it was (#942).
+func TestADoneReadWithNoAnswerIsNotSaved(t *testing.T) {
+	session := domain.NewID("sesn")
+	for name, readErr := range map[string]error{
+		"a lost stream":      fmt.Errorf("the read of /done: %w", sandbox.ErrOutputLost),
+		"the startup's exit": &sandbox.StartupExitError{What: "the read of /done", Status: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sb := &failOnDone{fakeSandbox: fakeSandbox{saves: true, execResult: sandbox.ExecResult{Stdout: "ran", ExitCode: 3}}, err: readErr}
+			res, err := shell.Run(context.Background(), sb, session, domain.NewID("sevt"), shell.Request{Command: "echo ran"})
+			if err != nil || res.Stdout != "ran" || res.ExitCode != 3 {
+				t.Fatalf("Run = %+v, %v; want the command's result", res, err)
+			}
+			if got := sb.committed(session); got != "" {
+				t.Errorf("head = %q, want nothing committed", got)
+			}
+		})
+	}
+}
+
+// failOnDone answers a read of the `done` marker with err.
+type failOnDone struct {
+	fakeSandbox
+	err error
+}
+
+func (f *failOnDone) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	if strings.HasSuffix(path, "/done") {
+		return nil, f.err
+	}
+	return f.fakeSandbox.ReadFile(ctx, path)
+}
+
 // A head pointer that cannot be written is a broken container, not a silent
 // loss of continuity: the call fails rather than reporting a result whose state
 // the next call will not see.

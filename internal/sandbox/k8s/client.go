@@ -160,7 +160,7 @@ func (c *client) exec(ctx context.Context, pod, container string, argv []string,
 }
 
 // execOutput runs argv and returns its stdout, for the provider's own probes
-// (liveness, the exit record, the export probe), whose own output is small:
+// (liveness, the export probe), whose own output is small:
 // kept up to the cap Exec keeps of a stream, since an image's startup prints
 // to it too, with truncated saying whether the cap cut it. Each probe frames
 // its script (sandbox.Frame) and reads its answer from between the lines.

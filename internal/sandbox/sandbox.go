@@ -104,14 +104,23 @@ var (
 	// one — a download with no Content-Length, which Go reports as -1 (#386) —
 	// was blaming the stream for a number it had chosen itself.
 	ErrSizeNotALength = errors.New("sandbox: size is not a length")
-	// ErrUnframedStatus marks a refusal that a script's exit status alone
-	// carried: its frame (Frame) is missing from an output the cap did not
-	// cut, so an image's startup that ended the shell before the script began
-	// could have chosen the status. It travels beside the refusal's own
-	// sentinel, so a caller that only reports the refusal is unchanged; one
-	// that would act on it takes it for no answer — StatPresence, whose
-	// Absent clones over a checkout (#941). Other scripts' exits are #942.
+	// ErrUnframedStatus marks an exit status that came with no frame of the
+	// script's (Frame) in an output the cap did not cut, so an image's startup
+	// that ended the shell before the script began could have chosen it. A
+	// *StartupExitError matches it (errors.Is), so a caller that would act on
+	// a refusal takes it for no answer: StatPresence, whose Absent clones over
+	// a checkout (#941).
 	ErrUnframedStatus = errors.New("sandbox: the exit status came with no frame of the script's")
+	// ErrOutputLost is a platform script that began, as its begin line on
+	// either stream shows, and whose frame no stream carried whole: a stream
+	// lost on its way, as client-go drops a failed stdout copy without a word
+	// (#105). It is the transport's fault, not the image's (Frame.Unanswered).
+	ErrOutputLost = errors.New("sandbox: the script began, and its output did not arrive whole")
+	// ErrImageStartup is matched (errors.Is) by each error that says the
+	// sandbox image's startup file kept a platform script from answering — a
+	// *StartupOutputError and a *StartupExitError — so a caller that takes
+	// either for the image's fault, never for an answer, asks once.
+	ErrImageStartup = errors.New("sandbox: the image's startup file kept a platform script from answering")
 )
 
 // CheckWriteSize refuses a declared size that is not a byte count, and is the
@@ -462,11 +471,12 @@ func Script(script string) string { return ScriptPreamble + script }
 func CheckScript(script string) error { return CheckCommand(Script(script)) }
 
 // ExecScript runs req's command in sb as a script of the platform's own
-// (Script) — ExecFramed's counterpart for a script whose answer is its exit
-// code, not its output — refusing one past the bound (CheckScript) before
-// anything runs, as Exec would. Every platform script a sandbox runs goes
-// through it or ExecFramed, so neither the preamble nor its bytes can be left
-// out of one.
+// (Script), refusing one past the bound (CheckScript) before anything runs, as
+// Exec would. Its status is no answer where an image's startup ended the shell
+// before the script began, which it does not ask (#942): a script whose
+// answer is its status belongs in ExecStatus, and one whose answer is its
+// output in ExecFramed, and this one in neither, so neither the preamble nor
+// its bytes can be left out of one.
 func ExecScript(ctx context.Context, sb Sandbox, req ExecRequest) (ExecResult, error) {
 	req.Command = Script(req.Command)
 	if err := CheckCommand(req.Command); err != nil {
@@ -491,12 +501,60 @@ type StartupOutputError struct {
 	Ran  bool
 }
 
+// Is matches ErrImageStartup: the image's startup kept the script from
+// answering.
+func (e *StartupOutputError) Is(target error) bool { return target == ErrImageStartup }
+
 func (e *StartupOutputError) Error() string {
 	s := fmt.Sprintf("sandbox: %s did not reach the output: the sandbox printed past the %d-byte output cap ahead of it, as an image's startup file printing in every shell does", e.What, MaxOutputBytes)
 	if e.Ran {
 		s += "; the command had run"
 	}
 	return s
+}
+
+// StartupExitError is a platform script that gave no answer because an
+// image's startup file — `ENV BASH_ENV`, which every shell the sandbox starts
+// runs first — ended the shell before the script began, or silenced the
+// script: neither stream carries the script's begin line (Frame.Unanswered),
+// so nothing shows the exec's status is the script's (#942). What names the
+// answer asked for, and Status the status the shell left, which answers
+// nothing. MayHaveRun says the call's command may have run before: an exit
+// record's reader the startup ended follows a command whose own shell that
+// startup ran first too, and may have ended as well.
+//
+// The image's startup does the same in every shell, so a retry meets the same:
+// the toolset answers it as a tool error, never a backend fault. It matches
+// ErrUnframedStatus and ErrImageStartup (errors.Is).
+type StartupExitError struct {
+	What       string
+	Status     int
+	MayHaveRun bool
+}
+
+func (e *StartupExitError) Error() string {
+	s := fmt.Sprintf("sandbox: %s got no answer: %s", e.What, e.Ended())
+	if e.MayHaveRun {
+		s += "; the command may have run"
+	}
+	return s
+}
+
+// Ended says what ended the shell: the image's startup file, with the status
+// it left — or, for a status past 128, a signal, which the startup sent or a
+// kill from outside did, as the OOM killer's does, unless the startup exited
+// with that status itself.
+func (e *StartupExitError) Ended() string {
+	if e.Status > 128 {
+		return fmt.Sprintf("the shell exited with status %d: killed by signal %d, by the sandbox image's startup file (BASH_ENV) or from outside, as the OOM killer kills, or ended by that file with the status", e.Status, e.Status-128)
+	}
+	return fmt.Sprintf("the sandbox image's startup file (BASH_ENV) ended the shell with status %d before the platform's script began, or silenced the script", e.Status)
+}
+
+// Is matches ErrUnframedStatus — the status came with no frame of the
+// script's — and ErrImageStartup.
+func (e *StartupExitError) Is(target error) bool {
+	return target == ErrUnframedStatus || target == ErrImageStartup
 }
 
 // ExecResult is a finished command. TimedOut means the command itself outlived

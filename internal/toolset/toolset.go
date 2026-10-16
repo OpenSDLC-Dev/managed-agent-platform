@@ -183,10 +183,13 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	// (sandbox.StartupOutputError): the image prints past the cap in every
 	// shell, so a reclaim would meet the same — and, for a command that had
 	// already run, run it again each time. The model is told the command ran,
-	// so it does not take a lost exit status for one that never started.
+	// so it does not take a lost exit status for one that never started. Nor,
+	// for the same reason, is a platform script the image's startup ended
+	// before it began (sandbox.StartupExitError).
 	var model *inputTooLong
 	var tooLong *sandbox.CommandTooLongError
 	var startup *sandbox.StartupOutputError
+	var startupExit *sandbox.StartupExitError
 	switch {
 	case errors.As(err, &model):
 		return failf("%s: %v; shorten them", name, model)
@@ -202,6 +205,16 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 			"that it fills the %d-byte output cap ahead of what the platform reads back.%s "+
 			"A fault in the image, not in this call: running it again meets the same.",
 			name, startup.What, sandbox.MaxOutputBytes, ran)
+	case errors.As(err, &startupExit):
+		ran, again := "", " A fault in the image, not in this call: running it again meets the same."
+		if startupExit.MayHaveRun {
+			ran = " The command may have run: whether it did, and how it went, is unknown."
+		}
+		if startupExit.Status > 128 {
+			again = " Running it again may meet the same."
+		}
+		return failf("%s: %s got no answer: %s.%s%s",
+			name, startupExit.What, startupExit.Ended(), ran, again)
 	}
 	if err != nil {
 		return Result{}, err

@@ -209,7 +209,9 @@ Kubernetes, every file read, an exec's exit record and liveness probe, a
 refused write's reason and the checkpoint's root probe each print their
 answer between a begin and an end line carrying a nonce of its own, and only
 what lies between them is read. A banner on either stream, ending its line or
-not, and what an `EXIT` trap prints after the script fall outside; the
+not, falls outside, and each script clears an `EXIT` trap the file set as its
+frame closes, so the trap neither prints after the script nor replaces its
+status ([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)); the
 scripts name every path whole, so a `cd` in the file moves none of them; and
 errexit (`set -e`) in the file ends none of the platform's own scripts, each
 of which turns it off as it starts, nor the Kubernetes exec wrapper before it
@@ -219,11 +221,22 @@ a command past its deadline
 A startup file that ends a presence probe's shell before the begin line
 leaves the probe unanswered, whatever status it exits with
 ([#941](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/941)). A
-repository's presence probe then asks through the file API. On Kubernetes
-that read takes its exit status as an answer only where its own lines reached
-the output, or a flood pushed them out. Other scripts still read such a
-shell's exit status as their answer
-([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)).
+repository's presence probe then asks through the file API. The same holds
+for the sandbox's own scripts whose exit status is their answer
+([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)):
+a file write and a batch write's steps on both backends, and a file read on
+Kubernetes. Each takes its status only where one stream carries its frame
+whole: stdout's, or stderr's under a flood that pushes stdout's out. Where
+neither stream shows the script began, the call fails with an error that
+names the image's startup. A script that began and whose output was lost on
+its way fails as a transport fault, which a retry can clear; a stdout the cap
+cut is the startup's flood, as below. A refused-write probe on Docker that the
+startup ended answers nothing, so it gives the refusal no reason. On
+Kubernetes, an
+exec's exit record whose reader the startup ended fails with an error that
+names the image's startup, rather than read as no record. The scripts the executor and the
+worker run themselves, and the `grep` tool's ripgrep install, still read
+such a shell's exit status as their answer.
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the

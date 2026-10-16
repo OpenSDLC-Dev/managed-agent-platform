@@ -11,7 +11,7 @@ import (
 // every test of a platform script's frame (sandbox.Frame, #860) runs under: it
 // prints on both streams without ending either line, leaves the directory the
 // shell started in, and sets an EXIT trap that prints on both after whatever
-// the shell ran. The hooked image (internal/sandbox/hookedtest) carries it, and
+// the shell ran — which a framed script clears as its frame closes (#942). The hooked image (internal/sandbox/hookedtest) carries it, and
 // the host-side script tests name it as their BASH_ENV file.
 const BannerHook = `printf 'welcome to the image '; printf 'stderr banner ' >&2; cd /; ` +
 	`trap "printf 'exit banner '; printf 'exit stderr ' >&2" EXIT` + "\n"
@@ -39,7 +39,7 @@ func Unbanner(s string) string {
 
 // wrapped matches the head of a command sandbox.Frame.Wrap made: its end
 // line, whose label and nonce name the frame.
-var wrapped = regexp.MustCompile(`^close_frame\(\) \{ printf '\\n%s\\n' 'map-([a-z0-9]+)-end-([0-9a-f]{16})'; `)
+var wrapped = regexp.MustCompile(`^close_frame\(\) \{ trap - EXIT; printf '\\n%s\\n' 'map-([a-z0-9]+)-end-([0-9a-f]{16})'; `)
 
 // Unwrap undoes sandbox.Frame.Wrap: the script a framed command carries, and
 // its frame. A fake sandbox answers the script as a sandbox would and frames

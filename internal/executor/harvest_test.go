@@ -634,8 +634,9 @@ func TestHarvestUnframedListingFaults(t *testing.T) {
 // A listing an image's startup pushed out of the output, printing past the
 // cap in every shell — on Kubernetes a sandbox.StartupOutputError, the exec's
 // exit record pushed out with it; on Docker a stdout the cap cut before any
-// begin line — no reclaim would read either: the harvest settles as one that
-// read no sandbox. The previous snapshot stays, grading chains, and the item
+// begin line — or kept from the output by ending the shell that reads it (a
+// sandbox.StartupExitError, #942): no reclaim would read any of them, so the
+// harvest settles as one that read no sandbox. The previous snapshot stays, grading chains, and the item
 // completes rather than reclaim-looping (#860).
 func TestHarvestAListingAStartupFloodPushedOutSettles(t *testing.T) {
 	for _, c := range []struct {
@@ -643,6 +644,7 @@ func TestHarvestAListingAStartupFloodPushedOutSettles(t *testing.T) {
 		sb   *fakeSandbox
 	}{
 		{"kubernetes", &fakeSandbox{execErr: &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}, execErrOn: "globstar"}},
+		{"kubernetes, the startup's exit", &fakeSandbox{execErr: &sandbox.StartupExitError{What: "the command's exit record", MayHaveRun: true}, execErrOn: "globstar"}},
 		{"docker", &fakeSandbox{unframed: true, execTruncated: true, execStdout: strings.Repeat("y\n", 1000)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

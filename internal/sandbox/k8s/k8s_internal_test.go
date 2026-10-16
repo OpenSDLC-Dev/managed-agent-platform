@@ -944,8 +944,8 @@ func TestReadScriptFramesWhatItSent(t *testing.T) {
 			}
 			code = ee.ExitCode()
 		}
-		if !bytes.HasPrefix(out.Bytes(), []byte("welcome to the image ")) || !bytes.HasSuffix(out.Bytes(), []byte("exit banner ")) {
-			t.Fatalf("stdout %q; want the hook's banner before the frame and its trap's words after it", out.Bytes())
+		if !bytes.HasPrefix(out.Bytes(), []byte("welcome to the image ")) || bytes.Contains(out.Bytes(), []byte("exit banner")) {
+			t.Fatalf("stdout %q; want the hook's banner before the frame, and its EXIT trap never run (close_frame clears it)", out.Bytes())
 		}
 		got, framed, short := f.CutBytes(out.Bytes(), false)
 		if !framed || short {
@@ -1057,12 +1057,12 @@ func TestReadScriptFramesWhatItSent(t *testing.T) {
 	})
 }
 
-// readStdout is where a short read is caught, and no cluster can stage one — a
-// stream cannot be told to lose bytes. Its branches are pinned against streams
-// fed byte-for-byte into the buffer ReadFile actually uses, so the cap
-// arithmetic is exercised rather than asserted: the frame and what an image's
-// startup prints around it ride in the same buffer as the content, in the room
-// beside the cap (readRoom).
+// A successful read (readAnswer, then readStdout) is where a short read is
+// caught, and no cluster can stage one — a stream cannot be told to lose
+// bytes. Its branches are pinned against streams fed byte-for-byte into the
+// buffer ReadFile actually uses, so the cap arithmetic is exercised rather than
+// asserted: the frame and what an image's startup prints around it ride in the
+// same buffer as the content, in the room beside the cap (readRoom).
 func TestReadStdoutRequiresTheFrame(t *testing.T) {
 	f := sandbox.NewFrame("read")
 	b, e := f.Lines()
@@ -1079,7 +1079,9 @@ func TestReadStdoutRequiresTheFrame(t *testing.T) {
 		}
 		return out
 	}
-	read := func(out *cappedBuffer) ([]byte, error) { return readStdout("/w/f", f, sandbox.MaxFileBytes, out) }
+	read := func(out *cappedBuffer) ([]byte, error) {
+		return readAnswer("/w/f", f, sandbox.MaxFileBytes, 0, out, &cappedBuffer{limit: sandbox.MaxOutputBytes})
+	}
 	body := func(n int) []byte { return bytes.Repeat([]byte{'x'}, n) }
 
 	// Bytes inside the frame are a complete read, and only the file's bytes come
@@ -1115,24 +1117,31 @@ func TestReadStdoutRequiresTheFrame(t *testing.T) {
 	})
 
 	// The #105 signature: the exec exited 0 and stdout stopped early. Each of
-	// these is, without the end line, indistinguishable from a shorter file.
+	// these is, without the end line, indistinguishable from a shorter file: a
+	// stream lost on its way where either stream shows the script began, and
+	// the startup's exit where neither does (sandbox.Frame.Unanswered).
 	t.Run("NothingArrived", func(t *testing.T) {
-		if got, err := read(recv()); err == nil {
-			t.Errorf("an empty stream read back as %d bytes", len(got))
+		var startup *sandbox.StartupExitError
+		if got, err := read(recv()); !errors.As(err, &startup) || startup.Status != 0 {
+			t.Errorf("an empty stream read back as %d bytes, %v; want the startup's exit", len(got), err)
+		}
+	})
+	t.Run("NothingArrivedOfAScriptThatBegan", func(t *testing.T) {
+		msg := &cappedBuffer{limit: sandbox.MaxOutputBytes}
+		_, _ = msg.Write(begin)
+		if got, err := readAnswer("/w/f", f, sandbox.MaxFileBytes, 0, recv(), msg); !errors.Is(err, sandbox.ErrOutputLost) {
+			t.Errorf("an empty stdout whose stderr began read back as %d bytes, %v; want a lost stream", len(got), err)
 		}
 	})
 	t.Run("TailLost", func(t *testing.T) {
 		got, err := read(recv(begin, body(100)))
-		if err == nil {
-			t.Fatalf("a stream that lost its tail read back as %d bytes", len(got))
-		}
-		if errors.Is(err, sandbox.ErrFileTooLarge) {
-			t.Errorf("err = %v, want a short read rather than a size fault", err)
+		if !errors.Is(err, sandbox.ErrOutputLost) {
+			t.Errorf("a stream that lost its tail read back as %d bytes, %v; want a lost stream", len(got), err)
 		}
 	})
 	t.Run("EndLineCutInHalf", func(t *testing.T) {
-		if _, err := read(recv(begin, body(100), end[:len(end)/2])); err == nil {
-			t.Error("a half-delivered end line read back as a whole file")
+		if _, err := read(recv(begin, body(100), end[:len(end)/2])); !errors.Is(err, sandbox.ErrOutputLost) {
+			t.Errorf("a half-delivered end line read back as %v; want a lost stream", err)
 		}
 	})
 
@@ -1222,7 +1231,7 @@ func BenchmarkReadStdout(b *testing.B) {
 		_, _ = out.Write([]byte(end + "exit banner "))
 		b.Run(strconv.Itoa(size>>20)+"MiB", func(b *testing.B) {
 			for b.Loop() {
-				if _, err := readStdout("/f", f, int64(size), out); err != nil {
+				if _, err := readAnswer("/f", f, int64(size), 0, out, &cappedBuffer{}); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -1230,14 +1239,16 @@ func BenchmarkReadStdout(b *testing.B) {
 	}
 }
 
-// readAnswer marks a classifying exit that came with no frame of the read
-// script's (sandbox.ErrUnframedStatus): an image's startup that ends the
-// shell first, with the status readScript gives a missing path, says nothing
-// of the path, and read as missing it had a present .git cloned over (#941).
-// The refusal itself is kept for every other caller. A framed exit is the
-// script's own, and a flood the cap cut is what the exit status is trusted
-// through, so neither is marked.
-func TestReadAnswerMarksAClassifyingExitWithNoFrame(t *testing.T) {
+// readAnswer takes no classifying exit that came with no frame of the read
+// script's for a refusal: an image's startup that ends the shell first, with
+// the status readScript gives a missing path, says nothing of the path, and
+// read as missing it had a present .git cloned over (#941). It answers the
+// startup's exit (sandbox.StartupExitError, which matches
+// sandbox.ErrUnframedStatus) and no refusal, a stream lost on its way where
+// stderr shows the script began, or the startup's flood where the cap cut
+// stdout and stderr carries no whole frame (#942). An exit framed on either
+// stream is the script's own.
+func TestReadAnswerTakesNoUnframedExitForARefusal(t *testing.T) {
 	f := sandbox.NewFrame("read")
 	begin, end := f.Lines()
 	buf := func(s string, truncated bool) *cappedBuffer {
@@ -1246,25 +1257,47 @@ func TestReadAnswerMarksAClassifyingExitWithNoFrame(t *testing.T) {
 		return out
 	}
 	banner := "welcome to the image "
+	refusals := []error{sandbox.ErrFileNotExist, sandbox.ErrIsDirectory, sandbox.ErrNotRegularFile, sandbox.ErrFileTooLarge, sandbox.ErrNotDirectory}
 	for _, c := range []struct {
-		name     string
-		out      *cappedBuffer
-		code     int
-		want     error
-		unframed bool
+		name string
+		out  *cappedBuffer
+		msg  string
+		code int
+		// want is the refusal the exit names, or the error no refusal is.
+		want error
 	}{
-		{"the script found nothing there", buf(banner+begin+end+"exit banner ", false), readNotExist, sandbox.ErrFileNotExist, false},
-		{"the script found a file in the way", buf(begin+end, false), sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory, false},
-		{"a flood pushed the frame out", buf(strings.Repeat("x", readRoom), true), readNotExist, sandbox.ErrFileNotExist, false},
-		{"the startup ended the shell: not there", buf(banner, false), readNotExist, sandbox.ErrFileNotExist, true},
-		{"the startup ended the shell: a directory", buf(banner, false), readIsDir, sandbox.ErrIsDirectory, true},
-		{"the startup ended the shell: not regular", buf(banner, false), readNotRegular, sandbox.ErrNotRegularFile, true},
-		{"the startup ended the shell: too large", buf(banner, false), readTooLarge, sandbox.ErrFileTooLarge, true},
-		{"the startup ended the shell: a file in the way", buf("", false), sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory, true},
+		{"the script found nothing there", buf(banner+begin+end+"exit banner ", false), "", readNotExist, sandbox.ErrFileNotExist},
+		{"the script found a file in the way", buf(begin+end, false), "", sandbox.ExitPathNotDirectory, sandbox.ErrNotDirectory},
+		{"a flood pushed the frame out, stderr framed", buf(strings.Repeat("x", readRoom), true), "stderr banner " + begin + end, readNotExist, sandbox.ErrFileNotExist},
+		{"a flood pushed the frame out, stderr bare", buf(strings.Repeat("x", readRoom), true), "", readNotExist, sandbox.ErrImageStartup},
+		{"stdout lost, stderr framed", buf("", false), begin + end, readNotExist, sandbox.ErrFileNotExist},
+		// A refusal prints only the frame, so one cut before its end line is a
+		// shell killed after the begin line, whose traps chose the status.
+		{"stdout's frame cut short, stderr began only", buf(banner+begin, true), begin, readNotExist, sandbox.ErrImageStartup},
+		{"stdout's frame cut short, stderr framed", buf(banner+begin, true), begin + end, readNotExist, sandbox.ErrFileNotExist},
+		{"the startup ended the shell: not there", buf(banner, false), "stderr banner ", readNotExist, sandbox.ErrUnframedStatus},
+		{"the startup ended the shell: a directory", buf(banner, false), "", readIsDir, sandbox.ErrUnframedStatus},
+		{"the startup ended the shell: not regular", buf(banner, false), "", readNotRegular, sandbox.ErrUnframedStatus},
+		{"the startup ended the shell: too large", buf(banner, false), "", readTooLarge, sandbox.ErrUnframedStatus},
+		{"the startup ended the shell: a file in the way", buf("", false), "", sandbox.ExitPathNotDirectory, sandbox.ErrUnframedStatus},
+		{"stdout lost, stderr began", buf("", false), "stderr banner " + begin, readNotExist, sandbox.ErrOutputLost},
 	} {
-		_, err := readAnswer("/w/r/.git", f, 0, c.code, c.out)
-		if !errors.Is(err, c.want) || errors.Is(err, sandbox.ErrUnframedStatus) != c.unframed {
-			t.Errorf("%s: readAnswer = %v; want %v, marked %v", c.name, err, c.want, c.unframed)
+		msg := &cappedBuffer{limit: sandbox.MaxOutputBytes}
+		msg.buf.WriteString(c.msg)
+		_, err := readAnswer("/w/r/.git", f, 0, c.code, c.out, msg)
+		if !errors.Is(err, c.want) {
+			t.Errorf("%s: readAnswer = %v; want %v", c.name, err, c.want)
+		}
+		var startup *sandbox.StartupExitError
+		if errors.As(err, &startup) && (startup.Status != c.code || startup.What != "the read of /w/r/.git") {
+			t.Errorf("%s: readAnswer = %#v; want the startup's exit %d naming the read", c.name, err, c.code)
+		}
+		if c.want == sandbox.ErrUnframedStatus || c.want == sandbox.ErrOutputLost || c.want == sandbox.ErrImageStartup {
+			for _, refusal := range refusals {
+				if errors.Is(err, refusal) {
+					t.Errorf("%s: readAnswer = %v; want no refusal, but it is %v", c.name, err, refusal)
+				}
+			}
 		}
 	}
 }
@@ -2078,8 +2111,8 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 			}
 			code = ee.ExitCode()
 		}
-		if shell == "/bin/bash" && (!strings.HasPrefix(out.String(), "welcome to the image ") || !strings.HasSuffix(out.String(), "exit banner ")) {
-			t.Fatalf("stdout %q; want the hook's banner before the frame and its trap's words after it", out.String())
+		if shell == "/bin/bash" && (!strings.HasPrefix(out.String(), "welcome to the image ") || strings.Contains(out.String(), "exit banner")) {
+			t.Fatalf("stdout %q; want the hook's banner before the frame, and its EXIT trap never run (close_frame clears it)", out.String())
 		}
 		return out.String(), code
 	}
@@ -2112,7 +2145,7 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 		}
 		f := sandbox.NewFrame("exit")
 		out, _ := run(t, f, "/bin/bash", exitScript, state)
-		code, killed, rec, err := readExitRecord(f, out, false, 0)
+		code, killed, rec, err := readExitRecord(f, out, "", false, false, 0)
 		if want := (runRecord{sinceLaunch: 2500 * time.Millisecond, sinceWatchdog: 2 * time.Second}); err != nil || code != 7 || !killed || rec != want {
 			t.Errorf("readExitRecord = %d, %v, %+v, %v; want 7, true, %+v", code, killed, rec, err, want)
 		}
@@ -2157,15 +2190,15 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 }
 
 // readExitRecord reads what reached the output of exitScript's frame: a record
-// whose end line a lost stream dropped reads as far as it got; a stream with
+// whose end line a lost stream dropped reads as far as it got; a stdout with
 // no begin line is a lost answer — no record, the kill's code, as an empty
-// stream always was — when nothing else reached it, or when it ends partway
-// through the begin line, past its newline, after a banner or not; one with
-// something else and no begin line — a banner's ended line among it — or of a
-// reader that exited non-zero with no frame is no record to parse; and one the
-// cap cut before the record's end line — before its begin line, whatever it
-// ends in, or inside the record, where it may have cut a number — is the
-// startup's failure, not a record.
+// stream always was — where it ends partway through the begin line, past its
+// newline, after a banner or not, or where stderr shows the script began; one
+// where neither stream does is a reader the image's startup ended (#942); one
+// of a reader that exited non-zero with no frame is no record to parse; and
+// one the cap cut before the record's end line — before its begin line,
+// whatever it ends in, or inside the record, where it may have cut a number —
+// is the startup's failure, not a record.
 func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 	f := sandbox.NewFrame("exit")
 	begin, end := f.Lines()
@@ -2188,43 +2221,58 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 		// startup is a failure the cap made: a *sandbox.StartupOutputError
 		// whose command had run.
 		startup bool
+		// msg is the reader's stderr, and exited says the reader is one the
+		// image's startup ended: a *sandbox.StartupExitError whose command
+		// may have run.
+		msg    string
+		exited bool
 	}{
-		{"whole, banner and trap around it", "welcome 3 " + begin + "K 0 1.0 1.5 2.0\n" + end + "exit 9", false, 0, 0, true, whole, false, false},
-		{"end line lost", begin + "K 0 1.0 1.5 2.0\n", false, 0, 0, true, whole, false, false},
-		{"end line half lost", begin + " 5 1.0 1.5 2.0\n" + end[:6], false, 0, 5, false, whole, false, false},
-		{"the record's tail lost", begin + " 5 1.0 1.5", false, 0, 5, false, runRecord{}, false, false},
-		{"nothing after the begin line", begin, false, 0, sigkillExit, false, runRecord{}, false, false},
+		{"whole, banner and trap around it", "welcome 3 " + begin + "K 0 1.0 1.5 2.0\n" + end + "exit 9", false, 0, 0, true, whole, false, false, "", false},
+		{"end line lost", begin + "K 0 1.0 1.5 2.0\n", false, 0, 0, true, whole, false, false, "", false},
+		{"end line half lost", begin + " 5 1.0 1.5 2.0\n" + end[:6], false, 0, 5, false, whole, false, false, "", false},
+		{"the record's tail lost", begin + " 5 1.0 1.5", false, 0, 5, false, runRecord{}, false, false, "", false},
+		{"nothing after the begin line", begin, false, 0, sigkillExit, false, runRecord{}, false, false, "", false},
 		// A reader the stream lost, framed or not, killed on its way out.
-		{"the record whole, the reader killed", begin + "K 0 1.0 1.5 2.0\n", false, 137, 0, true, whole, false, false},
-		{"nothing at all", "", false, 0, sigkillExit, false, runRecord{}, false, false},
-		{"cut inside the begin line", begin[:9], false, 0, sigkillExit, false, runRecord{}, false, false},
-		{"cut inside the begin line, after a banner", "welcome 0 1.0 1.5 2.0" + begin[:len(begin)-1], false, 0, sigkillExit, false, runRecord{}, false, false},
-		{"cut two bytes into the begin line, after a banner", "welcome 0 1.0 1.5 2.0" + begin[:2], false, 0, sigkillExit, false, runRecord{}, false, false},
-		{"something, but no begin line", "welcome 0 1.0 1.5 2.0", false, 0, 0, false, runRecord{}, true, false},
-		{"something, and another frame's begin line cut short", "welcome 0 1.0 1.5 2.0" + other, false, 0, 0, false, runRecord{}, true, false},
+		{"the record whole, the reader killed", begin + "K 0 1.0 1.5 2.0\n", false, 137, 0, true, whole, false, false, "", false},
+		{"nothing at all, stderr began", "", false, 0, sigkillExit, false, runRecord{}, false, false, begin, false},
+		{"nothing on either stream", "", false, 0, 0, false, runRecord{}, true, false, "", true},
+		{"cut inside the begin line's nonce", begin[:len(begin)-3], false, 0, sigkillExit, false, runRecord{}, false, false, "", false},
+		{"cut inside the begin line, after a banner", "welcome 0 1.0 1.5 2.0" + begin[:len(begin)-1], false, 0, sigkillExit, false, runRecord{}, false, false, "", false},
+		// A cut before the nonce shows is no evidence: a banner can end so.
+		{"cut before the begin line's nonce", begin[:9], false, 0, 0, false, runRecord{}, true, false, "", true},
+		{"cut two bytes into the begin line, after a banner", "welcome 0 1.0 1.5 2.0" + begin[:2], false, 0, 0, false, runRecord{}, true, false, "", true},
+		{"something, but no begin line", "welcome 0 1.0 1.5 2.0", false, 0, 0, false, runRecord{}, true, false, "", true},
+		{"something, and another frame's begin line cut short", "welcome 0 1.0 1.5 2.0" + other, false, 0, 0, false, runRecord{}, true, false, "", true},
 		// A banner that ended its line, then nothing: a newline alone is no
 		// part of a begin line, and the stream is the banner's.
-		{"a banner, its line ended, then nothing", "welcome 0 1.0 1.5 2.0\n", false, 0, 0, false, runRecord{}, true, false},
+		{"a banner, its line ended, then nothing", "welcome 0 1.0 1.5 2.0\n", false, 0, 0, false, runRecord{}, true, false, "", true},
 		// A reader that exited non-zero with no frame — a startup that failed
 		// under errexit before the script began — is no record, whatever it
 		// printed: not the kill's 137 for a command that may have exited 7.
-		{"a banner, then the reader exits 1", "welcome\n", false, 1, 0, false, runRecord{}, true, false},
-		{"nothing, the reader exits 1", "", false, 1, 0, false, runRecord{}, true, false},
-		{"partway into the begin line, the reader exits 1", "welcome" + begin[:9], false, 1, 0, false, runRecord{}, true, false},
+		{"a banner, then the reader exits 1", "welcome\n", false, 1, 0, false, runRecord{}, true, false, "", true},
+		{"nothing, the reader exits 1", "", false, 1, 0, false, runRecord{}, true, false, "", true},
+		{"partway into the begin line, the reader exits 1", "welcome" + begin[:len(begin)-3], false, 1, 0, false, runRecord{}, true, false, "", false},
 		// A startup that floods past the cap pushes the record out: the
 		// startup's failure, though its tail ends in a newline, as a lost
 		// begin line's would.
-		{"a flood the cap cut before any begin line", strings.Repeat("y\n", 1000), true, 0, 0, false, runRecord{}, true, true},
+		{"a flood the cap cut before any begin line", strings.Repeat("y\n", 1000), true, 0, 0, false, runRecord{}, true, true, "", false},
 		// One the cap cut after the begin line may have cut a number: a
 		// deadline's kill, K 137, kept as K 13 is no exit 13.
-		{"a record the cap cut inside its code", "flood " + begin + "K 13", true, 0, 0, false, runRecord{}, true, true},
-		{"a record the cap cut before its end line", "flood " + begin + "K 137 12.3 12.4 15.9\n", true, 0, 0, false, runRecord{}, true, true},
-		{"a record the cap cut inside its end line", "flood " + begin + "K 137 12.3 12.4 15.9\n" + end[:len(end)/2], true, 0, 0, false, runRecord{}, true, true},
-		// One the cap cut only past its end line is whole: an EXIT trap's flood.
-		{"a record the cap cut past its end line", begin + "K 137 12.3 12.4 15.9\n" + end + "exit flood", true, 0, sigkillExit, true, runRecord{sinceLaunch: 3600 * time.Millisecond, sinceWatchdog: 3500 * time.Millisecond}, false, false},
+		{"a record the cap cut inside its code", "flood " + begin + "K 13", true, 0, 0, false, runRecord{}, true, true, "", false},
+		{"a record the cap cut before its end line", "flood " + begin + "K 137 12.3 12.4 15.9\n", true, 0, 0, false, runRecord{}, true, true, "", false},
+		{"a record the cap cut inside its end line", "flood " + begin + "K 137 12.3 12.4 15.9\n" + end[:len(end)/2], true, 0, 0, false, runRecord{}, true, true, "", false},
+		// One the cap cut only past its end line is whole.
+		{"a record the cap cut past its end line", begin + "K 137 12.3 12.4 15.9\n" + end + "exit flood", true, 0, sigkillExit, true, runRecord{sinceLaunch: 3600 * time.Millisecond, sinceWatchdog: 3500 * time.Millisecond}, false, false, "", false},
+		// A reader whose stdout was lost after a banner, or before its begin
+		// line, while stderr shows the script began: the same loss, no record,
+		// for a command that has run. A reader that exited non-zero is still
+		// no record to parse.
+		{"something, but no begin line, stderr began", "welcome 0 1.0 1.5 2.0", false, 0, sigkillExit, false, runRecord{}, false, false, "stderr banner " + begin, false},
+		{"a banner, its line ended, stderr began", "welcome\n", false, 0, sigkillExit, false, runRecord{}, false, false, begin[:len(begin)-3], false},
+		{"a banner, then the reader exits 1, stderr began", "welcome\n", false, 1, 0, false, runRecord{}, true, false, begin, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			code, killed, rec, err := readExitRecord(f, c.out, c.truncated, c.exit)
+			code, killed, rec, err := readExitRecord(f, c.out, c.msg, c.truncated, false, c.exit)
 			if (err != nil) != c.fails || !c.fails && (code != c.code || killed != c.killed || rec != c.rec) {
 				t.Errorf("readExitRecord(%q) = %d, %v, %+v, %v; want %d, %v, %+v, failing %v", c.out, code, killed, rec, err, c.code, c.killed, c.rec, c.fails)
 			}
@@ -2232,7 +2280,20 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 			if got := errors.As(err, &startup) && startup.Ran; got != c.startup {
 				t.Errorf("readExitRecord(%q) = %v; a StartupOutputError of a command that ran: %v, want %v", c.out, err, got, c.startup)
 			}
+			var exited *sandbox.StartupExitError
+			if got := errors.As(err, &exited) && exited.MayHaveRun && exited.Status == c.exit; got != c.exited {
+				t.Errorf("readExitRecord(%q, stderr %q) = %v; the startup's exit of a command that may have run: %v, want %v", c.out, c.msg, err, got, c.exited)
+			}
 		})
+	}
+	// A stderr the cap cut, with neither stream showing the script began, was
+	// filled ahead of the script: the startup's flood, not its exit.
+	for _, out := range []string{"", "welcome"} {
+		_, _, _, err := readExitRecord(f, out, strings.Repeat("y\n", 64), false, true, 0)
+		var startup *sandbox.StartupOutputError
+		if !errors.As(err, &startup) || !startup.Ran || errors.Is(err, sandbox.ErrUnframedStatus) {
+			t.Errorf("readExitRecord(%q, a stderr the cap cut) = %v; want the startup's flood, of a command that ran", out, err)
+		}
 	}
 }
 
@@ -2765,7 +2826,8 @@ func TestBulkScriptsClassifyAnArchiveThatDidNotArrive(t *testing.T) {
 // seam to fake it whole: an API server that records the argv and refuses the
 // upgrade (refusedBulk then answers nil, and the caller keeps its own error),
 // and that same argv run under a real bash on a staged batch, standing in for
-// the pod. Its answer is the single write's: a target that is a directory.
+// the pod. Its answer is the single write's: a target that is a directory,
+// read inside the script's own frame (#942).
 func TestTheRefusedBulkScriptAnswersInTheSingleWritesTerms(t *testing.T) {
 	var mu sync.Mutex
 	var argvs [][]string
@@ -2820,14 +2882,19 @@ func TestTheRefusedBulkScriptAnswersInTheSingleWritesTerms(t *testing.T) {
 	if len(argvs) != 1 {
 		t.Fatalf("the pod was asked %d times, want once", len(argvs))
 	}
-	want := []string{"/bin/bash", "-c", sandbox.Script(bulkRefusedScript), "map-bulk-write", b.Manifest, b.DirList}
-	if !slices.Equal(argvs[0], want) {
-		t.Fatalf("the pod was asked to run %q, want the refused script over the batch's bookkeeping", argvs[0])
+	argv := argvs[0]
+	if len(argv) != 6 || !slices.Equal(argv[:2], []string{"/bin/bash", "-c"}) ||
+		!slices.Equal(argv[3:], []string{"map-bulk-write", b.Manifest, b.DirList}) {
+		t.Fatalf("the pod was asked to run %q, want a script over the batch's bookkeeping", argv)
+	}
+	script, f, ok := sandboxtest.Unwrap(argv[2])
+	if begin, _ := f.Lines(); !ok || script != bulkRefusedScript || !strings.HasPrefix(begin, "\nmap-bulkrefused-begin-") {
+		t.Fatalf("the pod was asked to run %q, want the refused script framed under its own label", argv[2])
 	}
 
-	var stderr bytes.Buffer
-	cmd := exec.Command(argvs[0][0], argvs[0][1:]...)
-	cmd.Stderr = &stderr
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	code := 0
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
@@ -2836,11 +2903,12 @@ func TestTheRefusedBulkScriptAnswersInTheSingleWritesTerms(t *testing.T) {
 		}
 		code = ee.ExitCode()
 	}
-	if code != sandbox.ExitPathIsDirectory {
-		t.Fatalf("the script exited %d, want ExitPathIsDirectory (%d); stderr: %s",
-			code, sandbox.ExitPathIsDirectory, stderr.String())
+	answer, framed := f.UnframeStatus(sandbox.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: code})
+	if !framed || answer.ExitCode != sandbox.ExitPathIsDirectory {
+		t.Fatalf("the script answered %+v (framed %v), want ExitPathIsDirectory (%d)",
+			answer, framed, sandbox.ExitPathIsDirectory)
 	}
-	if err := b.Refusal("k8s", code, stderr.String()); !errors.Is(err, sandbox.ErrIsDirectory) ||
+	if err := b.Refusal("k8s", answer.ExitCode, answer.Stderr); !errors.Is(err, sandbox.ErrIsDirectory) ||
 		!strings.Contains(err.Error(), dir+"/adir") {
 		t.Errorf("Refusal = %v, want ErrIsDirectory naming %s/adir", err, dir)
 	}

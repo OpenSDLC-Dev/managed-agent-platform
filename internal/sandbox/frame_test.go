@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -130,21 +132,27 @@ func TestFrameCutBytesWithinLooksNearTheEnds(t *testing.T) {
 	}
 }
 
-// CutInBegin answers whether a stream ends partway into the begin line — the
-// stream lost while the line was on its way, after whatever banner came first —
-// and only that: a stream whose begin line arrived whole, or that ends on
-// anything else — a newline alone, the end of any line, among them — does not.
+// CutInBegin answers whether a stream ends partway into the begin line, far
+// enough to reach frameNonceTrusted digits of its nonce — the stream lost
+// while the line was on its way, after whatever banner came first — and only
+// that: a stream whose begin line arrived whole, or that ends on anything else
+// — a newline alone, the end of any line, the line's first bytes, which a
+// banner can end in by itself, among them — does not.
 func TestFrameCutInBegin(t *testing.T) {
 	f := sandbox.NewFrame("test")
 	begin, _ := f.Lines()
+	// Up to the nonce, and 8 of its 16 digits.
+	least := len(begin) - 1 - 16 + 8
 	for s, want := range map[string]bool{
 		"":                          false,
 		"banner":                    false,
 		"banner\n":                  false,
 		"\n":                        false,
 		"banner" + begin[:1]:        false,
-		"banner" + begin[:2]:        true,
-		"banner" + begin[:10]:       true,
+		"banner" + begin[:2]:        false,
+		"banner" + begin[:10]:       false,
+		"banner" + begin[:least-1]:  false,
+		"banner" + begin[:least]:    true,
 		begin[:len(begin)-1]:        true,
 		"banner" + begin:            false,
 		"banner" + begin + "K 0":    false,
@@ -295,10 +303,10 @@ func TestFrameWrapAnswersThroughAStartupFile(t *testing.T) {
 			if !ok || res.Stdout != tc.stdout || res.Stderr != tc.stderr || res.ExitCode != tc.code || res.Truncated() {
 				t.Errorf("Unframe = %+v, %v; want stdout %q, stderr %q, exit %d\nraw: %+v", res, ok, tc.stdout, tc.stderr, tc.code, raw)
 			}
-			if !strings.HasPrefix(raw.Stdout, "welcome to the image ") || !strings.HasSuffix(raw.Stdout, "exit banner ") ||
-				!strings.HasPrefix(raw.Stderr, "stderr banner ") || !strings.HasSuffix(raw.Stderr, "exit stderr ") ||
-				strings.Count(raw.Stdout, "exit banner") != 1 {
-				t.Errorf("raw = %+v; want the startup file's banner before the frame and its trap's, once, after it", raw)
+			_, end := f.Lines()
+			if !strings.HasPrefix(raw.Stdout, "welcome to the image ") || !strings.HasSuffix(raw.Stdout, end) ||
+				!strings.HasPrefix(raw.Stderr, "stderr banner ") || !strings.HasSuffix(raw.Stderr, end) {
+				t.Errorf("raw = %+v; want the startup file's banner before the frame, and its EXIT trap never run (close_frame clears it)", raw)
 			}
 		})
 	}
@@ -476,6 +484,217 @@ type execOnly struct {
 
 func (s execOnly) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	return s.exec(req)
+}
+
+// A framed script whose stdout carries no frame gave no answer, and
+// Unanswered says why. The cap cut stdout before the frame: the startup's
+// flood (StartupOutputError). The begin line on either stream, or a stream
+// that ends partway through it, shows the script began and its output was lost
+// on the way (ErrOutputLost). Neither shows the image's startup ended the shell
+// first, with a status of its own choosing (StartupExitError), which a real
+// bash under a startup file that exits shows last.
+func TestFrameUnansweredSaysWhyNoAnswerCame(t *testing.T) {
+	f := sandbox.NewFrame("test")
+	begin, _ := f.Lines()
+	other, _ := sandbox.NewFrame("test").Lines()
+	for _, tc := range []struct {
+		name string
+		res  sandbox.ExecResult
+		want error
+	}{
+		{"nothing, and a status", sandbox.ExecResult{ExitCode: 16}, sandbox.ErrUnframedStatus},
+		{"a banner on each stream, and a status", sandbox.ExecResult{Stdout: "welcome", Stderr: "warning\n", ExitCode: 1}, sandbox.ErrUnframedStatus},
+		{"a banner, and a zero", sandbox.ExecResult{Stdout: "welcome\n"}, sandbox.ErrUnframedStatus},
+		{"another frame's begin line", sandbox.ExecResult{Stdout: other, Stderr: other, ExitCode: 15}, sandbox.ErrUnframedStatus},
+		{"stdout's begin line, and no end line", sandbox.ExecResult{Stdout: "welcome" + begin + "part"}, sandbox.ErrOutputLost},
+		{"stderr's begin line, and stdout lost", sandbox.ExecResult{Stderr: "warning" + begin, ExitCode: 16}, sandbox.ErrOutputLost},
+		{"stdout ending inside its begin line", sandbox.ExecResult{Stdout: "welcome" + begin[:len(begin)-3]}, sandbox.ErrOutputLost},
+		{"stderr ending inside its begin line", sandbox.ExecResult{Stderr: begin[:len(begin)-2], ExitCode: 1}, sandbox.ErrOutputLost},
+		{"a banner ending as a begin line starts", sandbox.ExecResult{Stdout: "welcome\nm", ExitCode: 10}, sandbox.ErrUnframedStatus},
+		{"the command, echoed", sandbox.ExecResult{Stderr: "blocked: " + f.Wrap("echo ran") + "\n", ExitCode: 126}, sandbox.ErrUnframedStatus},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := f.Unframe(tc.res); ok {
+				t.Fatalf("Unframe(%+v) answered", tc.res)
+			}
+			err := f.Unanswered("the probe of /w", tc.res)
+			if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "the probe of /w") {
+				t.Errorf("Unanswered = %v, want %v naming what was asked", err, tc.want)
+			}
+			var exit *sandbox.StartupExitError
+			if isExit := errors.As(err, &exit); isExit != (tc.want == sandbox.ErrUnframedStatus) ||
+				isExit && (exit.Status != tc.res.ExitCode || exit.What != "the probe of /w" || exit.MayHaveRun) {
+				t.Errorf("Unanswered = %#v, want the startup's exit with status %d only where neither stream began", err, tc.res.ExitCode)
+			}
+		})
+	}
+	var flood *sandbox.StartupOutputError
+	if err := f.Unanswered("the probe of /w", sandbox.ExecResult{Stdout: "welcome" + begin[:5], StdoutTruncated: true, Stderr: begin, ExitCode: 16}); !errors.As(err, &flood) ||
+		flood.What != "the probe of /w" || errors.Is(err, sandbox.ErrUnframedStatus) {
+		t.Errorf("Unanswered over a stdout the cap cut = %v, want the startup's flood", err)
+	}
+	if err := f.Unanswered("the probe of /w", sandbox.ExecResult{Stderr: strings.Repeat("y\n", 64), StderrTruncated: true, ExitCode: 16}); !errors.As(err, &flood) ||
+		errors.Is(err, sandbox.ErrUnframedStatus) {
+		t.Errorf("Unanswered over a stderr the cap cut before any begin line = %v, want the startup's flood", err)
+	}
+	for _, status := range []int{0, 1, 16} {
+		raw := runHooked(t, sandboxtest.BannerHook+"exit "+strconv.Itoa(status)+"\n", "/bin/bash", f.Wrap("echo ran"), "")
+		if _, ok := f.Unframe(raw); ok {
+			t.Fatalf("a startup that exits %d: the script answered: %+v", status, raw)
+		}
+		var exit *sandbox.StartupExitError
+		if err := f.Unanswered("the probe of /w", raw); !errors.As(err, &exit) || exit.Status != status {
+			t.Errorf("a startup that exits %d: Unanswered = %v over %+v, want the startup's exit", status, err, raw)
+		}
+	}
+}
+
+// Began is whether a stream shows the script began: its begin line, or an
+// end partway through it, which was on its way when the stream was lost.
+// Another frame's begin line is not this script's, and a newline alone is no
+// part of one.
+func TestFrameBegan(t *testing.T) {
+	f := sandbox.NewFrame("test")
+	begin, end := f.Lines()
+	other, _ := sandbox.NewFrame("test").Lines()
+	for s, want := range map[string]bool{
+		"": false, "welcome\n": false, other: false, "\n": false, end: false,
+		begin: true, "welcome" + begin + "part": true, begin[1:]: true, "welcome" + begin[:len(begin)-1]: true,
+		// The line's first bytes, which a banner can end in by itself.
+		begin[:4]: false, "welcome\nm": false,
+		// The command a startup echoes spells the line's words, never the line.
+		f.Wrap("echo ran"): false, "blocked: " + f.Wrap("echo ran") + "\n": false,
+	} {
+		if got := f.Began(s); got != want {
+			t.Errorf("Began(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// UnframeStatus answers a status where stdout carries the whole frame, as
+// Unframe does, and where stdout carries none, or a frame the cap cut before
+// its end line — the cap cut it, the transport lost it, a startup silenced it,
+// a shell was killed after the begin line — through a stderr that carries the
+// whole frame. Nowhere else: not on a stderr whose frame is missing or cut
+// short.
+func TestFrameUnframeStatus(t *testing.T) {
+	f := sandbox.NewFrame("test")
+	begin, end := f.Lines()
+	flood := strings.Repeat("y\n", 64)
+	for _, c := range []struct {
+		name string
+		res  sandbox.ExecResult
+		ok   bool
+		want sandbox.ExecResult
+	}{
+		{"stdout framed", sandbox.ExecResult{Stdout: "banner" + begin + "why" + end, Stderr: begin + "msg" + end, ExitCode: 20},
+			true, sandbox.ExecResult{Stdout: "why", Stderr: "msg", ExitCode: 20}},
+		{"stdout flooded, stderr framed", sandbox.ExecResult{Stdout: flood, StdoutTruncated: true, Stderr: "warn" + begin + "msg" + end + "trap", ExitCode: 16},
+			true, sandbox.ExecResult{Stdout: "", StdoutTruncated: true, Stderr: "msg", ExitCode: 16}},
+		{"stdout flooded, stderr bare", sandbox.ExecResult{Stdout: flood, StdoutTruncated: true, Stderr: "warn", ExitCode: 0}, false, sandbox.ExecResult{}},
+		{"stdout flooded, stderr began and lost its end", sandbox.ExecResult{Stdout: flood, StdoutTruncated: true, Stderr: begin + "msg", ExitCode: 0}, false, sandbox.ExecResult{}},
+		{"both flooded, stderr's end cut short", sandbox.ExecResult{Stdout: flood, StdoutTruncated: true, Stderr: begin + "msg" + end[:3], StderrTruncated: true, ExitCode: 0}, false, sandbox.ExecResult{}},
+		{"stdout whole and unframed, stderr framed", sandbox.ExecResult{Stdout: "banner", Stderr: begin + "msg" + end, ExitCode: 15},
+			true, sandbox.ExecResult{Stdout: "", Stderr: "msg", ExitCode: 15}},
+		{"stdout lost, stderr framed", sandbox.ExecResult{Stderr: begin + end, ExitCode: 0}, true, sandbox.ExecResult{}},
+		{"stdout cut only past its end line", sandbox.ExecResult{Stdout: begin + "why" + end + flood, StdoutTruncated: true, Stderr: begin + end, ExitCode: 3},
+			true, sandbox.ExecResult{Stdout: "why", ExitCode: 3}},
+		// A shell killed after the begin line, its status its traps' choice.
+		{"stdout's frame cut short, stderr began only", sandbox.ExecResult{Stdout: flood + begin + "wh", StdoutTruncated: true, Stderr: begin, ExitCode: 0},
+			false, sandbox.ExecResult{}},
+		{"stdout's frame cut short, stderr framed", sandbox.ExecResult{Stdout: flood + begin + "wh", StdoutTruncated: true, Stderr: begin + "msg" + end, ExitCode: 0},
+			true, sandbox.ExecResult{Stdout: "wh", StdoutTruncated: true, Stderr: "msg", ExitCode: 0}},
+	} {
+		got, ok := f.UnframeStatus(c.res)
+		if ok != c.ok || (ok && got != c.want) || (!ok && got != c.res) {
+			t.Errorf("%s: UnframeStatus = %+v, %v; want %+v, %v", c.name, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// ExecStatus runs the script framed under a frame of its own, keeps the rest
+// of the request, and answers the result only where stdout carries the frame:
+// its status is then the script's own. Elsewhere it answers why no answer came
+// (Unanswered), and Exec's own error as Exec returned it.
+func TestExecStatusAnswersOnlyAFramedStatus(t *testing.T) {
+	var got sandbox.ExecRequest
+	sb := execOnly{exec: func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+		got = req
+		script, f, ok := sandboxtest.Unwrap(req.Command)
+		if !ok || script != "exit 16" {
+			t.Fatalf("Exec got %q; want exit 16 wrapped", req.Command)
+		}
+		res := sandboxtest.Framed(f, sandbox.ExecResult{Stdout: "why\n", ExitCode: 16})
+		res.Stdout = "banner" + res.Stdout + "trap"
+		return res, nil
+	}}
+	res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "exit 16", Timeout: time.Second})
+	if err != nil || res != (sandbox.ExecResult{Stdout: "why\n", ExitCode: 16}) || got.Timeout != time.Second ||
+		!strings.Contains(got.Command, "'map-probe-begin-") {
+		t.Errorf("ExecStatus = %+v, %v (request %+v)", res, err, got)
+	}
+	sb.exec = func(sandbox.ExecRequest) (sandbox.ExecResult, error) {
+		return sandbox.ExecResult{Stdout: "welcome", ExitCode: 16}, nil
+	}
+	var exit *sandbox.StartupExitError
+	if _, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x"}); !errors.As(err, &exit) ||
+		exit.Status != 16 || exit.What != "the probe of /w" {
+		t.Errorf("ExecStatus over unframed output = %v; want the startup's exit", err)
+	}
+	sb.exec = func(sandbox.ExecRequest) (sandbox.ExecResult, error) {
+		return sandbox.ExecResult{Stdout: "partial"}, sandbox.ErrNotFound
+	}
+	if res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x"}); !errors.Is(err, sandbox.ErrNotFound) ||
+		res.Stdout != "partial" {
+		t.Errorf("ExecStatus over a failed Exec = %+v, %v; want Exec's own answer", res, err)
+	}
+}
+
+// StartupExitError names what got no answer, the status the startup left,
+// and whether the command had run; errors.Is matches it to ErrUnframedStatus,
+// so a caller that already refuses an unframed status (StatPresence) refuses
+// it too.
+func TestStartupExitErrorSaysWhoseTheStatusWas(t *testing.T) {
+	err := error(&sandbox.StartupExitError{What: "the read of /w/a", Status: 16})
+	if msg := err.Error(); !strings.Contains(msg, "the read of /w/a") || !strings.Contains(msg, "16") || !strings.Contains(msg, "BASH_ENV") ||
+		strings.Contains(msg, "had run") || !errors.Is(err, sandbox.ErrUnframedStatus) || errors.Is(err, sandbox.ErrFileNotExist) {
+		t.Errorf("StartupExitError = %q", msg)
+	}
+	if msg := (&sandbox.StartupExitError{What: "the command's exit record", MayHaveRun: true}).Error(); !strings.Contains(msg, "may have run") {
+		t.Errorf("StartupExitError with MayHaveRun = %q, want it to say the command may have run", msg)
+	}
+	if msg := (&sandbox.StartupExitError{What: "the write of /w/a", Status: 137}).Error(); !strings.Contains(msg, "status 137") ||
+		!strings.Contains(msg, "killed by signal 9") || !strings.Contains(msg, "OOM killer") || !strings.Contains(msg, "ended by that file") {
+		t.Errorf("StartupExitError of 137 = %q, want the status, a signal named — the startup's or a kill from outside — and the startup's own exit", msg)
+	}
+	for _, err := range []error{&sandbox.StartupExitError{}, &sandbox.StartupOutputError{}, fmt.Errorf("x: %w", &sandbox.StartupOutputError{})} {
+		if !errors.Is(err, sandbox.ErrImageStartup) {
+			t.Errorf("%T does not match ErrImageStartup", err)
+		}
+	}
+	if errors.Is(&sandbox.StartupOutputError{}, sandbox.ErrUnframedStatus) {
+		t.Error("a StartupOutputError matches ErrUnframedStatus; a flood says nothing of a status")
+	}
+}
+
+// An image's startup file that traps EXIT with an `exit` of its own would
+// replace the status a framed script left, after its frame closed; close_frame
+// clears the trap, so the status, and what the script printed, are the
+// script's, whether the subshell exits by `exit` or a script that routes its
+// exits through close_frame itself does (#942).
+func TestFrameClosesPastAnImagesExitTrap(t *testing.T) {
+	const hook = `trap "printf 'bye'; printf 'bye' >&2; exit 0" EXIT` + "\n"
+	f := sandbox.NewFrame("test")
+	for name, command := range map[string]string{
+		"wrapped": f.Wrap("echo why; exit 16"),
+		"opened":  f.Open() + "echo why; close_frame 16\n",
+	} {
+		raw := runHooked(t, hook, "/bin/bash", command, "")
+		res, ok := f.Unframe(raw)
+		if !ok || res.ExitCode != 16 || res.Stdout != "why\n" || strings.Contains(raw.Stdout+raw.Stderr, "bye") {
+			t.Errorf("%s: a script that exits 16 under a startup's EXIT trap = %+v (raw %+v), want 16 and the trap never run", name, res, raw)
+		}
+	}
 }
 
 // ExecFramed wraps the command under a frame of its own, keeps the rest of

@@ -31,7 +31,67 @@ import (
 // exercised deterministically, where the real-daemon contract suite cannot.
 func fakeDaemon(t *testing.T, handler http.HandlerFunc) *Provider {
 	t.Helper()
-	srv := httptest.NewServer(handler)
+	return startupEndsFakeDaemon(t, handler)
+}
+
+// startupEndsFakeDaemon serves handler as the daemon. The start of a framed
+// platform script (sandbox.ExecStatus) is answered with what the handler
+// writes inside the script's frame, as a real run prints what it printed: the
+// handler writes the script's output, not the frame's lines. One the handler
+// framed itself (framedOutput) passes as it is, and so does a start the
+// handler refuses. A script whose frame carries one of the ended labels is
+// answered with what the handler writes as it is, unframed: a shell the
+// image's startup ended before the script began (#942).
+func startupEndsFakeDaemon(t *testing.T, handler http.HandlerFunc, ended ...string) *Provider {
+	t.Helper()
+	var mu sync.Mutex
+	var last sandbox.Frame
+	var lastFramed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/exec"):
+			body, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var cfg execConfig
+			_ = json.Unmarshal(body, &cfg)
+			mu.Lock()
+			last, lastFramed = execFrame(cfg.Cmd)
+			for _, label := range ended {
+				lastFramed = lastFramed && !frameLabelled(last, label)
+			}
+			mu.Unlock()
+			handler(w, r)
+		case strings.HasPrefix(r.URL.Path, "/exec/") && strings.HasSuffix(r.URL.Path, "/start"):
+			mu.Lock()
+			f, framed := last, lastFramed
+			mu.Unlock()
+			if !framed {
+				handler(w, r)
+				return
+			}
+			rec := &startRecorder{header: w.Header()}
+			handler(rec, r)
+			if rec.status != 0 {
+				w.WriteHeader(rec.status)
+			}
+			if rec.status != 0 && rec.status != http.StatusOK {
+				w.Write(rec.body.Bytes())
+				return
+			}
+			stdout, stderr, _, err := demux(bytes.NewReader(rec.body.Bytes()), sandbox.MaxOutputBytes)
+			if err != nil {
+				t.Errorf("the handler's answer to a framed script is no attach stream: %v", err)
+			}
+			if f.Began(string(stdout)) {
+				w.Write(rec.body.Bytes())
+				return
+			}
+			res := sandboxtest.Framed(f, sandbox.ExecResult{Stdout: string(stdout), Stderr: string(stderr)})
+			w.Write(append(frame(streamStdout, res.Stdout), frame(streamStderr, res.Stderr)...))
+		default:
+			handler(w, r)
+		}
+	}))
 	t.Cleanup(srv.Close)
 	p, err := New(Config{Host: "tcp://" + strings.TrimPrefix(srv.URL, "http://")})
 	if err != nil {
@@ -39,6 +99,25 @@ func fakeDaemon(t *testing.T, handler http.HandlerFunc) *Provider {
 	}
 	return p
 }
+
+// frameLabelled says whether f is a frame NewFrame made for label.
+func frameLabelled(f sandbox.Frame, label string) bool {
+	begin, _ := f.Lines()
+	return strings.HasPrefix(begin, "\nmap-"+label+"-begin-")
+}
+
+// startRecorder is a ResponseWriter that keeps what a handler answers an
+// exec's start with, for the fake to frame.
+type startRecorder struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (r *startRecorder) Header() http.Header         { return r.header }
+func (r *startRecorder) WriteHeader(status int)      { r.status = status }
+func (r *startRecorder) Write(b []byte) (int, error) { return r.body.Write(b) }
+func (r *startRecorder) Flush()                      {}
 
 func spec() sandbox.Spec {
 	return sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img:1"}
@@ -96,9 +175,9 @@ const fakeExecPid = 4242
 // Every exec these fakes read the command of is the platform's own — the write
 // path's scripts — so each must carry the platform's script preamble
 // (sandbox.Script) or open a frame (sandboxtest.Scripted): what a fake reads
-// is the script after it, and a command without it fails the test, where
-// stripping it silently would let a platform exec that lost it run under an
-// image's errexit unnoticed (#860).
+// is the script inside the frame or after the preamble, and a command without
+// either fails the test, where stripping it silently would let a platform exec
+// that lost it run under an image's errexit unnoticed (#860).
 func wrapperCommand(t testing.TB, cmd []string) string {
 	const commandArg = 4
 	if len(cmd) <= commandArg {
@@ -107,7 +186,21 @@ func wrapperCommand(t testing.TB, cmd []string) string {
 	if !sandboxtest.Scripted(cmd[commandArg]) {
 		t.Errorf("a platform exec without the script preamble (sandbox.Script): %q", cmd[commandArg])
 	}
+	if script, _, ok := sandboxtest.Unwrap(cmd[commandArg]); ok {
+		return script
+	}
 	return strings.TrimPrefix(cmd[commandArg], sandbox.ScriptPreamble)
+}
+
+// execFrame is the frame a framed platform exec's command carries
+// (sandboxtest.Unwrap), and whether it carries one.
+func execFrame(cmd []string) (sandbox.Frame, bool) {
+	const commandArg = 4
+	if len(cmd) <= commandArg {
+		return sandbox.Frame{}, false
+	}
+	_, f, ok := sandboxtest.Unwrap(cmd[commandArg])
+	return f, ok
 }
 
 // framedOutput is what the daemon's attach stream carries for a framed
@@ -118,7 +211,7 @@ func wrapperCommand(t testing.TB, cmd []string) string {
 // words after.
 func framedOutput(t *testing.T, cmd []string, stdout, stderr string) []byte {
 	t.Helper()
-	_, f, ok := sandboxtest.Unwrap(wrapperCommand(t, cmd))
+	f, ok := execFrame(cmd)
 	if !ok {
 		t.Fatalf("exec %q is not a framed script", wrapperCommand(t, cmd))
 	}
@@ -1427,17 +1520,15 @@ func TestWriteFileStreamClassifiesAnUnmakeableParent(t *testing.T) {
 	}
 }
 
-// A probe whose output never carried its frame — a shell that died first, a
-// startup that filled the output cap — said nothing the platform reads, and
-// never a reason taken from a banner. The mkdir's exit 1 is no refusal then:
-// a shell that died before the script left it too, so the raw error stands.
-// The writability probe's exit is its own code, which still classifies the
-// write as one the path refuses, with no reason, as the k8s write script's
-// exit does.
+// A probe whose output never carried its frame — a shell the image's startup
+// ended before the script began — said nothing the platform reads: no reason
+// taken from a banner, and no status (#942). The mkdir answers the startup's
+// exit, which names the image as the fault; the writability probe answers
+// nothing, so the write keeps the daemon's own refusal.
 func TestWriteProbesReadNoReasonOutsideTheirFrame(t *testing.T) {
 	var execN int
 	kinds := map[string]string{}
-	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+	daemon := func(w http.ResponseWriter, r *http.Request) {
 		execID := func() string {
 			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
 		}
@@ -1482,15 +1573,99 @@ func TestWriteProbesReadNoReasonOutsideTheirFrame(t *testing.T) {
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
-	})
-	c := p.attach("abc", "/workspace", "", false)
-	if err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1); errors.Is(err, sandbox.ErrNotWritable) ||
-		err == nil || !strings.Contains(err.Error(), "mkdir -p /newtop: exit 1") {
-		t.Errorf("mkdir's unframed refusal = %v; want the raw error, unclassified", err)
 	}
-	var pnw *sandbox.PathNotWritableError
-	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); !errors.As(err, &pnw) || pnw.Reason != "" {
-		t.Errorf("the probe's unframed refusal = %v; want ErrNotWritable with no reason", err)
+	c := startupEndsFakeDaemon(t, daemon, "mkdir").attach("abc", "/workspace", "", false)
+	var startup *sandbox.StartupExitError
+	if err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1); errors.Is(err, sandbox.ErrNotWritable) ||
+		!errors.As(err, &startup) || startup.Status != 1 || startup.What != "the creation of /newtop" {
+		t.Errorf("mkdir's unframed refusal = %v; want the startup's exit, unclassified", err)
+	}
+	c = startupEndsFakeDaemon(t, daemon, "writable").attach("abc", "/workspace", "", false)
+	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); errors.Is(err, sandbox.ErrNotWritable) ||
+		err == nil || !strings.Contains(err.Error(), "container rootfs is marked read-only") {
+		t.Errorf("the probe's unframed refusal = %v; want the daemon's own refusal, unclassified", err)
+	}
+}
+
+// Docker's probes — whether a non-directory blocks a failed read, whether a
+// refused write's target is one a rename cannot replace or sits in a directory
+// that takes no create, which member a refused batch names — take no status an
+// image's startup chose by ending their shell first (#942). Each answers
+// nothing then, and the caller keeps the daemon's own refusal, never the
+// classification the status would have named.
+func TestDockerProbesTakeNoStatusAStartupChose(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		// label is the probe's frame label.
+		label  string
+		status int
+		// refuseFrom is the first archive PUT the daemon refuses.
+		refuseFrom int
+		call       func(c *container) error
+		wrong      error
+	}{
+		{"a failed read's path probe", "pathfault", sandbox.ExitPathNotDirectory, 1, func(c *container) error { _, err := c.ReadFile(ctx, "/workspace/f/x"); return err }, sandbox.ErrNotDirectory},
+		{"a refused write's replaceability probe", "replaceable", sandbox.ExitPathIsDirectory, 1, func(c *container) error { return c.WriteFile(ctx, "/etc/f", []byte("x")) }, sandbox.ErrIsDirectory},
+		{"a refused write's writability probe", "writable", sandbox.ExitPathNotWritable, 1, func(c *container) error { return c.WriteFile(ctx, "/etc/f", []byte("x")) }, sandbox.ErrNotWritable},
+		{"a refused batch's refusal probe", "bulkrefused", sandbox.ExitPathIsDirectory, 2, func(c *container) error {
+			return c.WriteFiles(ctx, []sandbox.FileWrite{{Path: "/etc/f", Data: []byte("x")}})
+		}, sandbox.ErrIsDirectory},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			ended := map[string]bool{}
+			var execN, puts, probes int
+			p := startupEndsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				execID := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+				switch {
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodGet:
+					w.WriteHeader(http.StatusInternalServerError)
+					io.WriteString(w, `{"message":"the daemon's own refusal"}`)
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+					w.WriteHeader(http.StatusNotFound)
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+					puts++
+					if puts >= tc.refuseFrom {
+						w.WriteHeader(http.StatusInternalServerError)
+						io.WriteString(w, `{"message":"the daemon's own refusal"}`)
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/exec"):
+					var body execConfig
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode exec create: %v", err)
+					}
+					execN++
+					id := fmt.Sprintf("e%d", execN)
+					if f, ok := execFrame(body.Cmd); ok && frameLabelled(f, tc.label) {
+						ended[id] = true
+						probes++
+					}
+					fmt.Fprintf(w, `{"Id":%q}`, id)
+				case strings.HasSuffix(r.URL.Path, "/start"):
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					code := 0
+					if ended[execID] {
+						code = tc.status
+					}
+					fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			}, tc.label)
+			err := tc.call(p.attach("abc", "/workspace", "", false))
+			if errors.Is(err, tc.wrong) || err == nil || !strings.Contains(err.Error(), "the daemon's own refusal") {
+				t.Errorf("err = %v; want the daemon's own refusal, not %v", err, tc.wrong)
+			}
+			if probes == 0 {
+				t.Error("the probe never ran")
+			}
+		})
 	}
 }
 
@@ -1730,6 +1905,62 @@ func TestARenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 	if heads != 0 || reclaimPuts != 0 {
 		t.Errorf("the emptying ran (%d HEADs, %d archives) where a mv may still be in flight; "+
 			"it would land zero bytes on the target the caller was told kept its own", heads, reclaimPuts)
+	}
+}
+
+// A rename the image's startup kept from answering answers the startup's
+// exit, whatever status it left — 0 here, which read as the script's would be
+// a write that never happened (#942). Nothing shows its script is not running
+// — a startup can silence it, or run it in the background — so the sandbox
+// user's `rm` alone sheds the temporary, as for any exec error: the daemon
+// emptying it under a live `mv` would land zero bytes on the target (#310).
+func TestARenameTheStartupKeptFromAnsweringIsShedByTheSandboxUser(t *testing.T) {
+	for _, status := range []int{0, 137} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var commands []string
+			var reclaimed []byte
+			var headed string
+			var renamed bool
+			p := startupEndsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+					headed = r.URL.Query().Get("path")
+					w.WriteHeader(http.StatusOK)
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+					if renamed {
+						reclaimed, _ = io.ReadAll(r.Body)
+					}
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/exec"):
+					var body execConfig
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode exec create: %v", err)
+					}
+					cmd := wrapperCommand(t, body.Cmd)
+					commands = append(commands, cmd)
+					renamed = renamed || strings.Contains(cmd, "mv -f")
+					fmt.Fprintf(w, `{"Id":"e%d"}`, len(commands))
+				case strings.HasSuffix(r.URL.Path, "/start"):
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, status)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			}, "rename")
+			c := p.attach("abc", "/workspace", "", false)
+			err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
+			var startup *sandbox.StartupExitError
+			if !errors.As(err, &startup) || startup.Status != status {
+				t.Fatalf("err = %v, want the startup's exit with status %d", err, status)
+			}
+			if last := commands[len(commands)-1]; !strings.Contains(last, "rm -f '/etc/"+sandbox.TempPrefix) {
+				t.Errorf("last exec = %q, want the sandbox user's own rm", last)
+			}
+			if headed != "" || reclaimed != nil {
+				t.Errorf("HEAD asked about %q and the daemon was handed %d bytes; want no emptying under a `mv` that may live on", headed, len(reclaimed))
+			}
+		})
 	}
 }
 
@@ -2691,6 +2922,74 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 	}
 }
 
+// The batch's half of TestARenameTheStartupKeptFromAnsweringIsShedByTheSandboxUser:
+// a bulk rename the image's startup kept from answering is shed by the
+// sandbox user's own pass alone, whatever its status and whatever that pass
+// reports it could not take — the daemon empties nothing under a `mv` that
+// may live on (#942).
+func TestABulkRenameTheStartupKeptFromAnsweringIsShedByTheSandboxUser(t *testing.T) {
+	for _, status := range []int{0, 137} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var commands []string
+			var puts [][]byte
+			kinds := map[string]string{}
+			p := startupEndsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				execID := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+				switch {
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+					body, _ := io.ReadAll(r.Body)
+					puts = append(puts, body)
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/exec"):
+					var body execConfig
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode exec create: %v", err)
+					}
+					cmd := wrapperCommand(t, body.Cmd)
+					commands = append(commands, cmd)
+					id := fmt.Sprintf("e%d", len(commands))
+					if strings.Contains(cmd, "__map_bulk_discard") {
+						kinds[id] = "discard"
+					}
+					if strings.Contains(cmd, "__map_bulk_rename ") {
+						kinds[id] = "rename"
+					}
+					fmt.Fprintf(w, `{"Id":%q}`, id)
+				case strings.HasSuffix(r.URL.Path, "/start"):
+					w.WriteHeader(http.StatusOK)
+					if kinds[execID] == "discard" {
+						// The sandbox user's `rm` could take neither member.
+						w.Write(frame(streamStdout, "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n"))
+					}
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					code := 0
+					if kinds[execID] == "rename" {
+						code = status
+					}
+					fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			}, "bulkrename")
+			c := p.attach("abc", "/workspace", "", false)
+			err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+				{Path: "/etc/a.txt", Data: []byte("AAAA")},
+				{Path: "/etc/b.txt", Data: []byte("BBBB")},
+			})
+			var startup *sandbox.StartupExitError
+			if !errors.As(err, &startup) || startup.Status != status {
+				t.Fatalf("err = %v, want the startup's exit with status %d", err, status)
+			}
+			if last := commands[len(commands)-1]; !strings.Contains(last, "__map_bulk_discard") {
+				t.Errorf("last exec = %q, want the sandbox user's own shed", last)
+			}
+			if len(puts) != 2 {
+				t.Errorf("%d archives delivered, want 2 (bookkeeping, members) and no emptying", len(puts))
+			}
+		})
+	}
+}
+
 // A failed move over a parent that can take a create keeps the raw error: the
 // failure was the transfer's, not the target's, and calling the path unwritable
 // would tell the model the path is bad when it is not.
@@ -2797,7 +3096,7 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 			cmd = body.Cmd
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
-			if _, _, framed := sandboxtest.Unwrap(wrapperCommand(t, cmd)); framed {
+			if _, framed := execFrame(cmd); framed {
 				w.Write(framedOutput(t, cmd, "", "mkdir: cannot create directory '/workspace/a': Read-only file system\n"))
 			}
 		case r.URL.Path == "/exec/e1/json":

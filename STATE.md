@@ -4,10 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 66](./docs/plan/66_clone-host-failures.md) (#940), a repository clone
-that the git host fails partway naming the host, archived 2026-10-17 in one PR; its
-delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
+**A status the image's startup chose is no answer**
+([plan 67](./docs/plan/67_startup-exit-status.md), #942): every platform script that
+reads its exit status runs framed, and a status that came with no frame is the image's
+startup's, never the script's answer.
 
 ## Tasks
 
-None in flight.
+- [x] PR 1 — the sandbox layer: `StartupExitError` and `ExecStatus`, every backend
+      site on Docker and Kubernetes with a contract row, the image's EXIT trap
+      cleared; the callers of `StartupOutputError` and the bash tool's `done` marker
+- [ ] PR 2 — the toolset: `fileFault`, ripgrep's install
+- [ ] PR 3 — the executor and worker callers; the security guide's sentence
+      that still names them as reading the status; the plan's close

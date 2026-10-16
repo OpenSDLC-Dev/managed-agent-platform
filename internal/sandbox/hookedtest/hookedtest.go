@@ -1,7 +1,8 @@
 // Package hookedtest provisions sandboxes from a hooked image — one whose
 // `ENV BASH_ENV` file is sandboxtest.BannerHook: it prints on both streams
 // without ending its lines, leaves the directory the shell started in, and
-// sets an EXIT trap that prints on both after whatever the shell ran — on both
+// sets an EXIT trap that prints on both after whatever the shell ran (which a
+// framed script clears as its frame closes, #942) — on both
 // sandbox backends: the Docker daemon and the Kubernetes cluster the tests run
 // against. It is how a platform script that parses an exec's output is held
 // to answer through an image's startup output on each (#860; sandbox.Frame).
