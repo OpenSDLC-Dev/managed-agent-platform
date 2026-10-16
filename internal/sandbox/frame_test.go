@@ -615,7 +615,9 @@ func TestFrameUnframeStatus(t *testing.T) {
 // ExecStatus runs the script framed under a frame of its own, keeps the rest
 // of the request, and answers the result only where stdout carries the frame:
 // its status is then the script's own. Elsewhere it answers why no answer came
-// (Unanswered), and Exec's own error as Exec returned it.
+// (Unanswered), and Exec's own error as Exec returned it — and a run its
+// deadline stopped as Exec gave it, frame or none, for the caller to answer
+// the timeout before the status the kill left.
 func TestExecStatusAnswersOnlyAFramedStatus(t *testing.T) {
 	var got sandbox.ExecRequest
 	sb := execOnly{exec: func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
@@ -647,6 +649,12 @@ func TestExecStatusAnswersOnlyAFramedStatus(t *testing.T) {
 	if res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x"}); !errors.Is(err, sandbox.ErrNotFound) ||
 		res.Stdout != "partial" {
 		t.Errorf("ExecStatus over a failed Exec = %+v, %v; want Exec's own answer", res, err)
+	}
+	killed := sandbox.ExecResult{Stdout: "welcome", ExitCode: 137, TimedOut: true}
+	sb.exec = func(sandbox.ExecRequest) (sandbox.ExecResult, error) { return killed, nil }
+	if res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x", Timeout: time.Second}); err != nil ||
+		res != killed {
+		t.Errorf("ExecStatus over a run its deadline stopped = %+v, %v; want the run as Exec gave it", res, err)
 	}
 }
 

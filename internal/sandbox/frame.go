@@ -382,12 +382,14 @@ func ExecFramed(ctx context.Context, sb Sandbox, label string, req ExecRequest) 
 // ExecStatus runs req's command in sb framed (Wrap), under a frame of its own
 // labelled label, for a script whose answer is its exit status, and answers
 // it (Answer), so a status an image's startup chose is never read as the
-// script's (#942). Exec's own error is returned as Exec returned it.
+// script's (#942). Exec's own error is returned as Exec returned it, and so is
+// a run its deadline stopped (TimedOut): the kill chose that status, not the
+// script, so a caller that sets req.Timeout answers TimedOut before it.
 func ExecStatus(ctx context.Context, sb Sandbox, label, what string, req ExecRequest) (ExecResult, error) {
 	f := NewFrame(label)
 	req.Command = f.Wrap(req.Command)
 	res, err := sb.Exec(ctx, req)
-	if err != nil {
+	if err != nil || res.TimedOut {
 		return res, err
 	}
 	return f.Answer(what, res)

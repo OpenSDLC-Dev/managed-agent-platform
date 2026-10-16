@@ -135,10 +135,12 @@ The callers that run a script of their own, or act on a backend's refusal:
      (`ErrImageStartup`): the toolset's dispatch, the package install, the
      harvest and the repository extraction;
    - `shell.Run`'s `done` marker, as decision 2 says.
-2. **The toolset.** `fileFault` and `installRipgrep`, as decision 2 says.
-   `installRipgrep` is the first exit-status script with a deadline, and
-   `Frame.Answer` does not read `TimedOut`: a timeout there must be answered
-   before the status is.
+2. **The toolset.** `installRipgrep`, as decision 2 says. It is the first
+   exit-status script with a deadline, so `ExecStatus` returns a run its
+   deadline stopped as `Exec` gave it, for the caller to answer the timeout
+   before the status. `fileFault` needs no change: after the first pull
+   request no backend hands it a refusal or a `0` that a startup chose, and
+   the dispatch answers the startup's errors as tool errors.
 3. **The executor and worker callers**, as decision 7 says.
 
 ## Verification

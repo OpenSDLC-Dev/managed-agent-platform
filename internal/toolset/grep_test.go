@@ -927,6 +927,24 @@ func TestASearchUnderAFloodingExitTrapSaysNothingOfTheCap(t *testing.T) {
 	}
 }
 
+// installEndsHook is an image's BASH_ENV file that ends the shell of grep's
+// ripgrep install step, with status 0, before the step's script begins: it
+// knows the step by its frame's label in the exec's command.
+const installEndsHook = `case "$BASH_EXECUTION_STRING $*" in *map-rginstall-begin-*) exit 0;; esac` + "\n"
+
+// On an image whose startup ends the ripgrep install's shell with status 0,
+// grep answers the startup's tool error and takes nothing as installed. Read
+// as the install's own, that 0 sent the search again to an rg never put there,
+// and the error blamed a binary gone again (#942).
+func TestGrepTakesNoInstallFromAStartupsExit(t *testing.T) {
+	r := runner(t, fromImage(hookedtest.DockerImage(t, installEndsHook)))
+	msg := fails(t, r, "grep", `{"pattern":"x"}`,
+		"grep: the ripgrep install got no answer: the sandbox image's startup file (BASH_ENV) ended the shell with status 0")
+	if strings.Contains(msg, "gone again") {
+		t.Errorf("grep = %q; want no word of an install that never happened", msg)
+	}
+}
+
 // glob expands `**` with bash's globstar, which bash 3.2 does not have: on a
 // 3.2 image every glob is a tool error naming the bash it needs, never a
 // search in which `**` quietly means `*`. grep, whose scripts stay within 3.2,
@@ -1078,8 +1096,23 @@ func (s *scripted) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.E
 	}
 	res := s.results[0]
 	s.results = s.results[1:]
+	// A status script (sandbox.ExecStatus) answers inside its own frame, as
+	// its run prints it — but for a result marked startupEnded, whose shell
+	// the image's startup ended before the script began: no frame at all.
+	if _, f, ok := sandboxtest.Unwrap(req.Command); ok {
+		if res.Stdout == startupEnded {
+			res.Stdout = ""
+			return res, nil
+		}
+		return sandboxtest.Framed(f, res), nil
+	}
 	return framed(req.Command, res), nil
 }
+
+// startupEnded, as a scripted result's whole stdout, is a status script's
+// run that the image's startup ended before the script began: its status is
+// the startup's, and no frame arrives (#942).
+const startupEnded = "\x00startup-ended\x00"
 
 func (s *scripted) WriteFileStream(_ context.Context, path string, src io.Reader, size int64) error {
 	if s.streamErr != nil {
@@ -1132,6 +1165,15 @@ func TestGrepInstallFaults(t *testing.T) {
 			want: "cannot install ripgrep under /tmp/.map-ripgrep: mkdir: cannot create directory '/tmp/.map-ripgrep': Read-only file system", noUpload: true},
 		{name: "a prepare that timed out", results: []sandbox.ExecResult{missing("x86_64"), {TimedOut: true}},
 			want: "installing ripgrep timed out", noUpload: true},
+		// A status the image's startup chose is no answer (#942): a 0 that
+		// came with no frame neither carries the binary in nor takes it as
+		// installed. Each is the startup's tool error.
+		{name: "a prepare the image's startup ended", results: []sandbox.ExecResult{missing("x86_64"), {Stdout: startupEnded}},
+			want: "the ripgrep install's preparation got no answer: the sandbox image's startup file (BASH_ENV) ended the shell with status 0", noUpload: true},
+		{name: "an install the image's startup ended", results: []sandbox.ExecResult{missing("x86_64"), {}, {Stdout: startupEnded}},
+			want: "the ripgrep install got no answer: the sandbox image's startup file (BASH_ENV) ended the shell with status 0"},
+		{name: "a timed-out install whose frame never closed", results: []sandbox.ExecResult{missing("x86_64"), {}, {TimedOut: true, ExitCode: 137, Stdout: startupEnded}},
+			want: "installing ripgrep timed out"},
 		{name: "a prepare whose exec failed", results: []sandbox.ExecResult{missing("aarch64")}, fault: sandbox.ErrNotFound, noUpload: true},
 		{name: "an upload the path refuses", results: []sandbox.ExecResult{missing("aarch64"), {}},
 			streamErr: fmt.Errorf("x: %w", sandbox.ErrNotDirectory), want: "cannot install ripgrep under /tmp/.map-ripgrep: x: sandbox: path is not a directory"},

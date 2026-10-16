@@ -545,7 +545,10 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 	_, _ = rand.Read(nonce[:])
 	name := fmt.Sprintf("%s%d-%s", installPrefix, now.Unix(), hex.EncodeToString(nonce[:]))
 
-	res, err := sandbox.ExecScript(ctx, r.Sandbox, sandbox.ExecRequest{
+	// Both steps' statuses are their answers, read only where their frames
+	// arrived (sandbox.ExecStatus): a 0 an image's startup chose would carry the
+	// binary in, or take it as installed, with nothing done (#942).
+	res, err := sandbox.ExecStatus(ctx, r.Sandbox, "rgprepare", "the ripgrep install's preparation", sandbox.ExecRequest{
 		Command: fmt.Sprintf(prepareScript, singleQuote(ripgrepDir), singleQuote(name), now.Add(-staleInstall).Unix()),
 		Timeout: installTimeout,
 	})
@@ -570,7 +573,7 @@ func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, er
 		}
 		return nil, err
 	}
-	res, err = sandbox.ExecScript(ctx, r.Sandbox, sandbox.ExecRequest{
+	res, err = sandbox.ExecStatus(ctx, r.Sandbox, "rginstall", "the ripgrep install", sandbox.ExecRequest{
 		Command: fmt.Sprintf(installScript, singleQuote(ripgrepDir), singleQuote(name), singleQuote(path.Base(ripgrepPath())),
 			singleQuote("ripgrep "+ripgrep.Pinned.Version+" ")),
 		Timeout: installTimeout,

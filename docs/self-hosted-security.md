@@ -234,9 +234,10 @@ cut is the startup's flood, as below. A refused-write probe on Docker that the
 startup ended answers nothing, so it gives the refusal no reason. On
 Kubernetes, an
 exec's exit record whose reader the startup ended fails with an error that
-names the image's startup, rather than read as no record. The scripts the executor and the
-worker run themselves, and the `grep` tool's ripgrep install, still read
-such a shell's exit status as their answer.
+names the image's startup, rather than read as no record. The `grep` tool's
+ripgrep install takes its two steps' statuses the same way. The scripts the
+executor and the worker run themselves still read such a shell's exit status
+as their answer.
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the
