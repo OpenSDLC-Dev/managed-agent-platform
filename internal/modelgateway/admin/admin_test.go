@@ -249,6 +249,17 @@ func TestProfiles(t *testing.T) {
 	if len(list) != 8 || list[0]["type"] != "profile" {
 		t.Fatalf("profiles = %v", list)
 	}
+	// The console's Add provider dialog shows display_name; #943 renamed these three.
+	shown := map[any]any{}
+	for _, p := range list {
+		shown[p["name"]] = p["display_name"]
+	}
+	for name, want := range map[string]string{"zhipu": "Zhipu (GLM)",
+		"anthropic-generic": "Other Anthropic-compatible Endpoint", "openai-generic": "Other OpenAI-compatible Endpoint"} {
+		if shown[name] != want {
+			t.Errorf("%s display_name = %v, want %q", name, shown[name], want)
+		}
+	}
 	p := e.ok(e.admin("GET", "/admin/v1/profiles/minimax", nil), "get minimax")
 	if p["name"] != "minimax" || len(p["hosts"].([]any)) != 4 {
 		t.Errorf("minimax = %v", p)

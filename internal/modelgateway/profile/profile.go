@@ -142,7 +142,7 @@ var profiles = []Profile{
 		// takes thinking.type disabled or adaptive, adaptive by default.
 		ChatThinking: map[string]string{"enabled": "adaptive", "adaptive": "adaptive", "disabled": "disabled"}},
 	// BigModel's Claude API compatibility guide sends the key as x-api-key.
-	{Name: "zhipu", DisplayName: "Zhipu (BigModel · Z.ai)", Protocols: both, Hosts: []Host{
+	{Name: "zhipu", DisplayName: "Zhipu (GLM)", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/anthropic"},
 		{Protocol: Anthropic, Region: RegionInternational, BaseURL: "https://api.z.ai/api/anthropic"},
 		{Protocol: OpenAI, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/paas/v4"},
@@ -188,8 +188,10 @@ var profiles = []Profile{
 	{Name: "gemini", DisplayName: "Google Gemini API", Protocols: []Protocol{Gemini}, Hosts: []Host{
 		{Protocol: Gemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"},
 	}},
-	{Name: "anthropic-generic", DisplayName: "Any Anthropic Messages endpoint", Protocols: []Protocol{Anthropic}},
-	{Name: "openai-generic", DisplayName: "Any OpenAI-compatible endpoint", Protocols: []Protocol{OpenAI}},
+	// The generic profiles stay last: GET /admin/v1/profiles lists profiles in
+	// this order, and their names read "Other …" after the vendors above.
+	{Name: "anthropic-generic", DisplayName: "Other Anthropic-compatible Endpoint", Protocols: []Protocol{Anthropic}},
+	{Name: "openai-generic", DisplayName: "Other OpenAI-compatible Endpoint", Protocols: []Protocol{OpenAI}},
 }
 
 // The Ignores hooks refuse only what bounds the answer itself, which a
