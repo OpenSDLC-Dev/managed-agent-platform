@@ -10,5 +10,5 @@ git host fails partway names the host, in one PR.
 ## Tasks
 
 - [x] A transport records each clone's transport failures; the fixture's host fails each way.
-- [x] The host's in-band messages and the decoder's refusals read `network`.
+- [x] The host's in-band messages and go-git's decoders' refusals read `network`.
 - [ ] Reviews, then the plan archives in the same PR.

@@ -364,6 +364,12 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			fmt.Errorf("%w: %s", transport.ErrAuthenticationRequired, "upstream: context deadline exceeded"), repoOutcomeAuth},
 		{"the host refuses the token as the deadline passes", passed,
 			fmt.Errorf("%w: %s", transport.ErrAuthenticationRequired, "Invalid username or token"), repoOutcomeAuth},
+		{"the host's ERR line quotes a cancellation as the clone's is cancelled", cancelled,
+			&pktline.ErrorLine{Text: "upstream: " + context.Canceled.Error()}, repoOutcomeNetwork},
+		{"the host's ERR line quotes a deadline as the clone's passes", passed,
+			&pktline.ErrorLine{Text: "upstream: " + context.DeadlineExceeded.Error()}, repoOutcomeNetwork},
+		{"a ref advertisement that is not git's quotes a cancellation as the clone's is cancelled", cancelled,
+			packp.NewErrUnexpectedData("pkt-line 1: invalid length", []byte("upstream: "+context.Canceled.Error())), repoOutcomeNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := cloneFailed(tc.ctx, tc.err)

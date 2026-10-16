@@ -76,15 +76,19 @@ func cloneRecordFrom(ctx context.Context) *cloneRecord {
 	return rec
 }
 
-// installCloneTransport makes go-git's HTTP client, for http and https alike,
-// the one it uses by default with its transport recording (recordingTransport).
-// go-git keeps one client per protocol for the process, so it is installed
-// once.
-var installCloneTransport = sync.OnceFunc(func() {
+// go-git's HTTP client, for http and https alike, is the one it uses by
+// default with its transport recording (recordingTransport). go-git keeps one
+// client per protocol for the process, in a map it does not lock, so the
+// client is installed as the package initializes, before any clone can read
+// the map. go-git asks a client's transport to be an *http.Transport only for
+// an endpoint that names its own proxy, CA bundle, client certificate or
+// InsecureSkipTLS, and refuses such an endpoint with this one; no clone here
+// names one, and nothing else in the process uses go-git.
+func init() {
 	c := githttp.NewClient(&http.Client{Transport: recordingTransport{base: http.DefaultTransport}})
 	client.InstallProtocol("http", c)
 	client.InstallProtocol("https", c)
-})
+}
 
 // recordingTransport is base, noting each failure into the record its
 // request's context carries. A request with no record passes through as
@@ -101,6 +105,12 @@ func (t recordingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if err != nil {
 		rec.note(ctx, err)
 		return res, err
+	}
+	// Only a success's body is what go-git reads the host's answer from. The
+	// client drains a redirect's body and ignores a failure there, and go-git
+	// reads a refusal by its status.
+	if res.StatusCode/100 != 2 {
+		return res, nil
 	}
 	pack := req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/git-upload-pack")
 	res.Body = &recordingBody{ReadCloser: res.Body, ctx: ctx, rec: rec, pack: pack}

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp/sideband"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 )
 
@@ -47,6 +48,12 @@ func TestCloneReasonReadsTheHostsFailures(t *testing.T) {
 		{name: "NAK and no pack", pack: func(*testing.T) hostAnswer { return gitBody(result, "0000"+pkt("NAK\n")) }},
 		{name: "a message on the sideband's error band", pack: func(*testing.T) hostAnswer {
 			return gitBody(result, "0000"+pkt("NAK\n")+pkt("\x03fatal: the host failed to build the pack\n"))
+		}},
+		{name: "a sideband packet on a band git has no use for", pack: func(*testing.T) hostAnswer {
+			return gitBody(result, "0000"+pkt("NAK\n")+pkt("\x05junk\n"))
+		}},
+		{name: "a pack band that carries no pack", pack: func(*testing.T) hostAnswer {
+			return gitBody(result, "0000"+pkt("NAK\n")+pkt("\x01JUNKJUNKJUNKJUNK"))
 		}},
 		{name: "an ERR line in the pack response", pack: func(*testing.T) hostAnswer {
 			return gitBody(result, pkt("ERR the host failed\n"))
@@ -99,6 +106,16 @@ func TestCloneReasonReadsTheHostsFailures(t *testing.T) {
 	}
 }
 
+// A packet too large for the plain side-band's size reads `network` by
+// go-git's words for it. The fixture's http-backend offers side-band-64k,
+// whose size no pkt-line passes, so no clone of it reaches this.
+func TestCloneReasonReadsAnOversizeSidebandPacket(t *testing.T) {
+	err := cloneFailed(context.Background(), fmt.Errorf("%s", sideband.ErrMaxPackedExceeded))
+	if got := cloneReason(err); got != repoOutcomeNetwork {
+		t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
+	}
+}
+
 // A clone's record holds its own transport's failures and no other clone's:
 // the transport is installed once per process, and the record travels in the
 // request's context. A request with no record passes through as before. A
@@ -110,14 +127,11 @@ func TestCloneRecordNotesItsOwnTransportsFailures(t *testing.T) {
 		case "/o/r.git/git-upload-pack", "/o/r.git/info/refs":
 			// An empty 200.
 		case "/cut":
-			conn, buf, err := http.NewResponseController(w).Hijack()
-			if err != nil {
-				t.Errorf("hijack: %v", err)
-				return
-			}
-			defer conn.Close()
-			_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
-			_ = buf.Flush()
+			brokenAnswer(t, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")(w, r)
+		case "/moved":
+			brokenAnswer(t, "HTTP/1.1 302 Found\r\nLocation: /whole\r\nContent-Length: 10\r\n\r\nabc")(w, r)
+		case "/refused":
+			w.WriteHeader(http.StatusUnauthorized)
 		case "/stall":
 			// Until the client gives up.
 			w.WriteHeader(http.StatusOK)
@@ -173,6 +187,22 @@ func TestCloneRecordNotesItsOwnTransportsFailures(t *testing.T) {
 		_ = get(ctx, http.MethodPost, "/o/r.git/git-upload-pack")
 		if !errors.Is(rec.failure(), io.ErrUnexpectedEOF) {
 			t.Errorf("record = %v, want the first failure kept", rec.failure())
+		}
+	})
+	t.Run("a redirect's body is the client's to drain", func(t *testing.T) {
+		ctx, rec := withCloneRecord(context.Background())
+		if err := get(ctx, http.MethodGet, "/moved"); err != nil {
+			t.Fatalf("the redirect was not followed: %v", err)
+		}
+		if rec.failure() != nil {
+			t.Errorf("record = %v, want nothing: the client drained the redirect's body and went on", rec.failure())
+		}
+	})
+	t.Run("a refusal's empty body is not an empty pack", func(t *testing.T) {
+		ctx, rec := withCloneRecord(context.Background())
+		_ = get(ctx, http.MethodPost, "/refused")
+		if rec.failure() != nil {
+			t.Errorf("record = %v, want nothing: go-git reads a refusal by its status", rec.failure())
 		}
 	})
 	t.Run("a refused request", func(t *testing.T) {
@@ -234,6 +264,11 @@ func TestCloneFailedReadsTheRecordOverWhatWasMissing(t *testing.T) {
 		{"the clone is too large", cutRead, errCloneTooLarge, repoOutcomeTooLarge},
 		{"the spool's disk fills", cutRead, &fs.PathError{Op: "write", Path: "/tmp/x", Err: syscall.ENOSPC}, repoOutcomeInternal},
 		{"this machine's buffers ran out", local, missing, repoOutcomeCheckout},
+		{"this machine's buffers ran out while go-git decoded the response", local,
+			fmt.Errorf("error decoding upload-pack response: %s", local), repoOutcomeInternal},
+		{"a ref the host's answer lacks", cutRead, fmt.Errorf("%w: refs/heads/no-such-branch", plumbing.ErrReferenceNotFound), repoOutcomeCheckout},
+		{"the host does not have the commit", cutRead,
+			withCause{fmt.Errorf("%w: not our ref", plumbing.ErrObjectNotFound), errCommitRefused}, repoOutcomeCheckout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, rec := withCloneRecord(context.Background())
