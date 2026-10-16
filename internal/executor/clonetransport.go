@@ -24,8 +24,7 @@ import (
 // with the error the clone ends with.
 
 // errHostTransport marks a read of the git host's response that failed on the
-// host's side; isProtocolError reads it by its words, which go-git's %w
-// carries and its %s keeps.
+// host's side; isProtocolError reads it (transportMark).
 var errHostTransport = errors.New("the git host's response broke off")
 
 // errEmptyPack is a pack response that ended before its first byte. A clone
@@ -33,9 +32,27 @@ var errHostTransport = errors.New("the git host's response broke off")
 var errEmptyPack = fmt.Errorf("%w: its pack response ended before its first byte", errHostTransport)
 
 // errOwnRead marks a read of the git host's response that this executor's
-// machine failed, out of buffers or memory; isLocalError reads it by its
-// words, as isProtocolError reads errHostTransport's.
+// machine failed, out of buffers or memory; isLocalError reads it
+// (transportMark).
 var errOwnRead = errors.New("this executor could not read the git host's response")
+
+// transportMark is the mark the clone's transport put on err, errHostTransport
+// or errOwnRead: whichever mark's words come first in err's text. go-git keeps
+// a mark's type only where it does not format it with %s, and its words
+// either way. A mark's own text begins with its words, and what follows them
+// is the error it wraps, which can quote the host's words, a mark's among
+// them. It is nil where err carries neither.
+func transportMark(err error) error {
+	msg := err.Error()
+	host, own := strings.Index(msg, errHostTransport.Error()), strings.Index(msg, errOwnRead.Error())
+	switch {
+	case own >= 0 && (host < 0 || own < host):
+		return errOwnRead
+	case host >= 0:
+		return errHostTransport
+	}
+	return nil
+}
 
 type cloneMarksKey struct{}
 
@@ -82,11 +99,12 @@ func (t hostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // markedBody is a response body whose failed read says whose it was: the
 // host's (errHostTransport), a pack response that ended before its first byte
-// among them (errEmptyPack), or this executor's (errOwnRead). A read that
-// failed once the clone's context was done is the deadline's or the
-// cancellation's, which cloneReason reads from go-git's own error, so it
-// keeps its error. A pack response that ended with no bytes is the host's
-// either way: the client returns such a body's end whatever the context.
+// among them (errEmptyPack), or this executor's (errOwnRead). A read that the
+// clone's deadline or cancellation ended fails with the context's own error,
+// which cloneReason reads from go-git's error, so it keeps it; any other
+// failure is marked, whenever it came. A read's own error carries no mark,
+// which only this body puts on, so a mark's words in it are the host's: an
+// HTTP/2 GOAWAY quotes the host's debug text.
 type markedBody struct {
 	io.ReadCloser
 	ctx  context.Context
@@ -105,10 +123,10 @@ func (b *markedBody) Read(p []byte) (int, error) {
 			return n, errEmptyPack
 		}
 		return n, err
-	case b.ctx.Err() != nil:
-		return n, err
-	case isLocalError(err):
+	case transportMark(err) == nil && isLocalError(err):
 		return n, fmt.Errorf("%w: %w", errOwnRead, err)
+	case b.ctx.Err() != nil && (errors.Is(err, b.ctx.Err()) || errors.Is(err, context.Cause(b.ctx))):
+		return n, err
 	default:
 		return n, fmt.Errorf("%w: %w", errHostTransport, err)
 	}

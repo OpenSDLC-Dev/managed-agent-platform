@@ -262,8 +262,7 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // does a name that quotes the context's error decide the reason: a file the
 // repository named so, or a host's words, which go-git keeps in a type
 // (hostWords), or a failed read the clone's transport marked as the host's
-// while the context was live (errHostTransport), where go-git kept the mark's
-// type. The host's words go-git keeps only as text, an ERR line in the pack
+// (transportMark), which is never the context's own error. The host's words go-git keeps only as text, an ERR line in the pack
 // response or the sideband's error band, cannot be told from go-git's own
 // formatting of the context's error there, so they join; the clone's context
 // had ended, which the reason then says.
@@ -273,7 +272,7 @@ func cloneFailed(ctx context.Context, err error) error {
 	}
 	err = fmt.Errorf("%w: %w", errClone, err)
 	if cause := ctx.Err(); cause != nil && strings.Contains(err.Error(), cause.Error()) && !isLocalError(err) && !hostWords(err) &&
-		!errors.Is(err, errHostTransport) {
+		transportMark(err) != errHostTransport {
 		if r := cloneReason(err); r == repoOutcomeInternal || r == repoOutcomeNetwork {
 			err = withCause{err, cause}
 		}
@@ -546,7 +545,7 @@ func cloneReason(err error) string {
 // keeps the same failures only as text, in the net.DNSError's Err: a socket
 // it could not open, or a port, memory or buffers it ran out of. So does a
 // read of the host's response that the clone's transport marked as this
-// machine's (errOwnRead), in words that go-git's %w carries and its %s keeps.
+// machine's (transportMark).
 // go-git formats a host's ERR line in the pack response the same way, so a
 // host that sends those words makes its failure read as this executor's; it
 // gains nothing by that, and no text tells the two apart. Where go-git keeps
@@ -557,7 +556,7 @@ func isLocalError(err error) bool {
 	var sysErr *os.SyscallError
 	if errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
 		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, errPathRefused) ||
-		(strings.Contains(err.Error(), errOwnRead.Error()) && !hostWords(err)) {
+		(transportMark(err) == errOwnRead && !hostWords(err)) {
 		return true
 	}
 	var dnsErr *net.DNSError
@@ -591,23 +590,23 @@ func isRemoteStatusError(err error) bool {
 // pack. The bytes arrived, so nothing above matches and no HTTP status
 // betrays it. go-git keeps a type or a sentinel for some: an empty ref
 // advertisement (ErrEmptyInput), an ERR line in it, one that is pkt-line but
-// not git's, a pack response that held no pack. It formats the rest with %s
-// under words of its own, which are read: the pkt-line scanner's refusal, its
-// decoder's refusal of the pack response, an ERR line there among them, and
-// the sideband's: its error band, a band git has no use for, a packet too
-// large for the band's size, and a pack band that carries no pack. The words
-// read are go-git's, not a host's, and the clone's transport's, which marks a
-// read of the host's response that failed on the host's side
-// (errHostTransport) in words that go-git's %w carries and its %s keeps. The
-// remote's failure, not ours.
+// not git's, a pack response that held no pack, a pack band that carries no
+// pack (ErrBadSignature). It formats the rest with %s under words of its own,
+// which are read: the pkt-line scanner's refusal, its decoder's refusal of the
+// pack response, an ERR line there among them, and the sideband's: its error
+// band, a band git has no use for, and a packet too large for the band's
+// size. The words
+// read are go-git's and the clone's transport's, not a host's: the transport
+// marks a read of the host's response that failed on the host's side
+// (transportMark). The remote's failure, not ours.
 func isProtocolError(err error) bool {
-	if hostWords(err) || errors.Is(err, packp.ErrEmptyInput) || errors.Is(err, git.ErrFetching) ||
-		errors.Is(err, packfile.ErrEmptyPackfile) {
+	if hostWords(err) || transportMark(err) == errHostTransport || errors.Is(err, packp.ErrEmptyInput) ||
+		errors.Is(err, git.ErrFetching) || errors.Is(err, packfile.ErrEmptyPackfile) || errors.Is(err, packfile.ErrBadSignature) {
 		return true
 	}
 	msg := err.Error()
 	for _, s := range []string{pktline.ErrInvalidPktLen.Error(), "error decoding upload-pack response: ", "unexpected error: ",
-		"unknown channel ", sideband.ErrMaxPackedExceeded.Error(), packfile.ErrBadSignature.Error(), errHostTransport.Error()} {
+		"unknown channel ", sideband.ErrMaxPackedExceeded.Error()} {
 		if strings.Contains(msg, s) {
 			return true
 		}

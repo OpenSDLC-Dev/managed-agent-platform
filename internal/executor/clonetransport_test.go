@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/format/packfile"
@@ -207,6 +208,26 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 			t.Errorf("read = %v, want the cancellation's own error", err)
 		}
 	})
+	t.Run("a read the deadline ends", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(clone, 100*time.Millisecond)
+		defer cancel()
+		if err := get(ctx, http.MethodGet, "/stall"); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errHostTransport) {
+			t.Errorf("read = %v, want the deadline's own error", err)
+		}
+	})
+	t.Run("a failure that is not the context's, once the context is done", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(clone)
+		cancel()
+		_, err := (&markedBody{ReadCloser: io.NopCloser(errReader{io.ErrUnexpectedEOF}), ctx: ctx}).Read(make([]byte, 8))
+		if !errors.Is(err, errHostTransport) {
+			t.Errorf("read = %v, want it marked the host's", err)
+		}
+		local := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ENOBUFS)}
+		_, err = (&markedBody{ReadCloser: io.NopCloser(errReader{local}), ctx: ctx}).Read(make([]byte, 8))
+		if !errors.Is(err, errOwnRead) {
+			t.Errorf("read = %v, want it marked this executor's", err)
+		}
+	})
 	t.Run("another request passes through", func(t *testing.T) {
 		if err := get(context.Background(), http.MethodPost, "/o/r.git/git-upload-pack"); err != nil {
 			t.Errorf("read = %v, want an empty pack response passed through", err)
@@ -217,6 +238,17 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 		_, err := (&markedBody{ReadCloser: io.NopCloser(errReader{local}), ctx: clone}).Read(make([]byte, 8))
 		if !errors.Is(err, errOwnRead) || errors.Is(err, errHostTransport) || !errors.Is(err, local) {
 			t.Errorf("read = %v, want it marked this executor's", err)
+		}
+	})
+	t.Run("a host's words that quote this machine's mark", func(t *testing.T) {
+		goaway := errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="` +
+			errOwnRead.Error() + `: no buffer space available"`)
+		_, err := (&markedBody{ReadCloser: io.NopCloser(errReader{goaway}), ctx: clone}).Read(make([]byte, 8))
+		if !errors.Is(err, errHostTransport) || errors.Is(err, errOwnRead) {
+			t.Errorf("read = %v, want it marked the host's", err)
+		}
+		if got := cloneReason(cloneFailed(context.Background(), err)); got != repoOutcomeNetwork {
+			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
 		}
 	})
 	t.Run("the bytes that came with a failure", func(t *testing.T) {
@@ -255,6 +287,10 @@ func TestCloneReasonReadsTheTransportsMarks(t *testing.T) {
 		{"a spool file named in the host's words", &fs.PathError{Op: "open",
 			Path: "/tmp/map-repo-clone-1/tree/" + errHostTransport.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
 		{"an ERR line in this machine's words", &pktline.ErrorLine{Text: errOwnRead.Error()}, repoOutcomeNetwork},
+		{"the host's mark, in go-git's decode words, quoting this machine's", fmt.Errorf("error decoding upload-pack response: %s",
+			fmt.Errorf("%w: %w", errHostTransport, errors.New(`debug="`+errOwnRead.Error()+`"`))), repoOutcomeNetwork},
+		{"this machine's mark, in go-git's decode words, quoting the host's", fmt.Errorf("error decoding upload-pack response: %s",
+			fmt.Errorf("%w: %w", errOwnRead, errors.New(errHostTransport.Error()))), repoOutcomeInternal},
 		{"a ref advertisement in this machine's words, not git's", packp.NewErrUnexpectedData("pkt-line 1: invalid length",
 			[]byte(errOwnRead.Error())), repoOutcomeNetwork},
 	} {

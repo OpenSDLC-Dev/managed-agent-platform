@@ -373,6 +373,10 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		{"the host's GOAWAY quotes a deadline before the clone's passes", passed, fmt.Errorf("%w: %w", errHostTransport,
 			errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`)),
 			repoOutcomeNetwork},
+		{"the host's GOAWAY, in go-git's decode words, quotes a deadline before the clone's passes", passed,
+			fmt.Errorf("error decoding upload-pack response: %s", fmt.Errorf("%w: %w", errHostTransport,
+				errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`))),
+			repoOutcomeNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := cloneFailed(tc.ctx, tc.err)

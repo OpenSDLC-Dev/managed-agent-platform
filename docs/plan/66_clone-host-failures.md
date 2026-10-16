@@ -55,10 +55,14 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    endpoint that names its own CA bundle, client certificate, proxy or
    `InsecureSkipTLS`, and no clone names one.
 3. **The marks decide by their words.** go-git formats a failed read with
-   `%s` inside its decode, so `cloneReason` reads a mark by its words where
-   go-git kept no type. A record kept beside the clone and matched to
-   go-git's error afterwards was this plan's first design: every review round
-   found another way the two failed to match, and the marks replaced it.
+   `%s` inside its decode, so `cloneReason` reads a mark by its words. The
+   first mark in a message is the transport's: what follows it is the error
+   it wraps, which can quote the host's words. A record kept beside the clone
+   and matched to go-git's error afterwards was this plan's first design:
+   every review round found another way the two failed to match, and the
+   marks replaced it. A random token in each mark's words would make them
+   unforgeable, but it would sit in every logged clone error, and the only
+   forgery left blames this platform for the host's own failure.
 4. **The context's error joins wherever its text was all go-git kept.** A
    decode refusal now reads `network`, and go-git formats a deadline or a
    cancellation inside the decode with the same words. So the context's
@@ -73,6 +77,8 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
 
 - The table above, one fixture row each, through `cloneToTar`: every row reads
   `network`; an unknown commit still reads `checkout`.
-- The marks: on a marked clone's success bodies only, none once the context is
-  done, this machine's apart from the host's, and read by their words.
+- The marks: on a marked clone's success bodies only, none on a read the
+  context's end failed, an empty pack response whatever the context, this
+  machine's apart from the host's, and the first mark in a message read as
+  the transport's.
 - The deadline and cancellation rows #939 pinned keep their reasons.
