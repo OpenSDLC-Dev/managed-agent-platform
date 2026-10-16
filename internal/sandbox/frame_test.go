@@ -616,8 +616,9 @@ func TestFrameUnframeStatus(t *testing.T) {
 // of the request, and answers the result only where stdout carries the frame:
 // its status is then the script's own. Elsewhere it answers why no answer came
 // (Unanswered), and Exec's own error as Exec returned it — and a run its
-// deadline stopped as Exec gave it, frame or none, for the caller to answer
-// the timeout before the status the kill left.
+// deadline stopped with no error, for the caller to answer the timeout before
+// any status: read inside its frame where the frame arrived whole, and as Exec
+// gave it where it did not, killed before or after its begin line.
 func TestExecStatusAnswersOnlyAFramedStatus(t *testing.T) {
 	var got sandbox.ExecRequest
 	sb := execOnly{exec: func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
@@ -650,11 +651,33 @@ func TestExecStatusAnswersOnlyAFramedStatus(t *testing.T) {
 		res.Stdout != "partial" {
 		t.Errorf("ExecStatus over a failed Exec = %+v, %v; want Exec's own answer", res, err)
 	}
-	killed := sandbox.ExecResult{Stdout: "welcome", ExitCode: 137, TimedOut: true}
-	sb.exec = func(sandbox.ExecRequest) (sandbox.ExecResult, error) { return killed, nil }
+	var killed sandbox.ExecResult
+	sb.exec = func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+		_, f, _ := sandboxtest.Unwrap(req.Command)
+		begin, _ := f.Lines()
+		killed = sandbox.ExecResult{Stdout: "welcome" + begin + "partial", Stderr: begin, ExitCode: 137, TimedOut: true}
+		return killed, nil
+	}
 	if res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x", Timeout: time.Second}); err != nil ||
 		res != killed {
-		t.Errorf("ExecStatus over a run its deadline stopped = %+v, %v; want the run as Exec gave it", res, err)
+		t.Errorf("ExecStatus over a run its deadline stopped after its begin line = %+v, %v; want the run as Exec gave it", res, err)
+	}
+	sb.exec = func(sandbox.ExecRequest) (sandbox.ExecResult, error) {
+		return sandbox.ExecResult{Stdout: "welcome", ExitCode: 137, TimedOut: true}, nil
+	}
+	if res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x", Timeout: time.Second}); err != nil ||
+		res != (sandbox.ExecResult{Stdout: "welcome", ExitCode: 137, TimedOut: true}) {
+		t.Errorf("ExecStatus over a run its deadline stopped before its begin line = %+v, %v; want the run as Exec gave it", res, err)
+	}
+	sb.exec = func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+		_, f, _ := sandboxtest.Unwrap(req.Command)
+		res := sandboxtest.Framed(f, sandbox.ExecResult{Stdout: "why\n", ExitCode: 3})
+		res.TimedOut = true
+		return res, nil
+	}
+	if res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x", Timeout: time.Second}); err != nil ||
+		res != (sandbox.ExecResult{Stdout: "why\n", ExitCode: 3, TimedOut: true}) {
+		t.Errorf("ExecStatus over a run that closed its frame past its deadline = %+v, %v; want what it printed inside the frame", res, err)
 	}
 }
 

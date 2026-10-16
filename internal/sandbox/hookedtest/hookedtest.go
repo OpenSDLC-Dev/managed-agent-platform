@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -34,6 +35,21 @@ import (
 // baseImage is the image the hooked one is built on: the image the backends'
 // contract tests run, /bin/bash and a GNU userland.
 const baseImage = "debian:stable-slim"
+
+// ExitHook is an image's `ENV BASH_ENV` file that ends one shell before the
+// platform's script in it begins: the first whose script carries the frame
+// label /tmp/map-startup-exit names, with the status written beside the label,
+// removing the file as it does. A test arms it (ExitArm) with a command of its
+// own, then calls the code whose script carries the label; the file gone
+// afterwards shows the hook fired.
+const ExitHook = `if [ -r /tmp/map-startup-exit ]; then read -r __map_l __map_s < /tmp/map-startup-exit; ` +
+	`case "$BASH_EXECUTION_STRING $*" in *"map-$__map_l-begin-"*) rm -f /tmp/map-startup-exit; exit "$__map_s";; esac; fi` + "\n"
+
+// ExitArm is the command that arms ExitHook: the next shell whose script
+// carries the frame label label ends with status before the script begins.
+func ExitArm(label string, status int) string {
+	return fmt.Sprintf("printf '%%s %%d\\n' %s %d > /tmp/map-startup-exit", label, status)
+}
 
 // Backend is one sandbox backend with the hooked image visible to it.
 type Backend struct {

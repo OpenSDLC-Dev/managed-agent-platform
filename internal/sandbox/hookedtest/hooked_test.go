@@ -343,14 +343,6 @@ func TestScriptPreambleUnderBusyBoxSh(t *testing.T) {
 	}
 }
 
-// exitHook is an image's `ENV BASH_ENV` file that ends one shell before the
-// platform's script in it begins: the first whose script carries the frame
-// label /tmp/map-startup-exit names, with the status written beside the label,
-// removing the file as it does. The test arms it with a command of its own,
-// then calls the primitive whose script carries the label.
-const exitHook = `if [ -r /tmp/map-startup-exit ]; then read -r __map_l __map_s < /tmp/map-startup-exit; ` +
-	`case "$BASH_EXECUTION_STRING $*" in *"map-$__map_l-begin-"*) rm -f /tmp/map-startup-exit; exit "$__map_s";; esac; fi` + "\n"
-
 // A platform script whose shell the image's startup ended before the script
 // began takes no answer from the status the startup left, whatever it is
 // (#942). Where the status was the primitive's answer, each status the script
@@ -365,7 +357,7 @@ const exitHook = `if [ -r /tmp/map-startup-exit ]; then read -r __map_l __map_s 
 // bulk refusal probe; on Kubernetes the bulk refusal probe. Each row checks that the startup ended the script it names,
 // so a row whose script never ran fails.
 func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
-	for _, b := range hookedtest.BackendsFor(t, sandboxtest.BannerHook+exitHook) {
+	for _, b := range hookedtest.BackendsFor(t, sandboxtest.BannerHook+hookedtest.ExitHook) {
 		t.Run(b.Name, func(t *testing.T) {
 			ctx := context.Background()
 			sb, _ := b.Provision(t, sandbox.Hardening{})
@@ -374,12 +366,9 @@ func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
 			sh := func(s sandbox.Sandbox, command string) (sandbox.ExecResult, error) {
 				return s.Exec(ctx, sandbox.ExecRequest{Command: command, Timeout: 30 * time.Second})
 			}
-			armCommand := func(label string, status int) string {
-				return fmt.Sprintf("printf '%%s %%d\\n' %s %d > /tmp/map-startup-exit", label, status)
-			}
 			arm := func(s sandbox.Sandbox, label string, status int) {
 				t.Helper()
-				if res, err := sh(s, armCommand(label, status)); err != nil || res.ExitCode != 0 {
+				if res, err := sh(s, hookedtest.ExitArm(label, status)); err != nil || res.ExitCode != 0 {
 					t.Fatalf("arm %s %d = %+v, %v", label, status, res, err)
 				}
 			}
@@ -504,7 +493,7 @@ func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
 				}
 				// The exec's own exit record: the command that arms it has run.
 				for _, status := range []int{0, 7} {
-					_, err := sh(sb, armCommand("exit", status))
+					_, err := sh(sb, hookedtest.ExitArm("exit", status))
 					var startup *sandbox.StartupExitError
 					if !errors.As(err, &startup) || !startup.MayHaveRun {
 						t.Errorf("exit record ended with %d: %v; want the startup's exit of a command that may have run", status, err)

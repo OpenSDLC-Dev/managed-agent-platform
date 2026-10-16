@@ -526,7 +526,9 @@ func linuxArch(machine string) string {
 // checks it runs. A nil Result is success. A non-nil one is the tool error
 // grep answers with instead, naming why rg cannot run here — there is no
 // second implementation to fall back on (#827, an owner decision). An error is
-// the sandbox itself failing.
+// the sandbox itself failing, or the image's startup keeping a step from
+// answering (sandbox.ErrImageStartup), which the dispatch answers as a tool
+// error naming the image (#942).
 func (r Runner) installRipgrep(ctx context.Context, machine string) (*Result, error) {
 	fail := func(format string, a ...any) (*Result, error) {
 		res, _ := failf("grep: "+format, a...)

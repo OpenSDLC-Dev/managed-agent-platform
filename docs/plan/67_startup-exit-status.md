@@ -137,8 +137,9 @@ The callers that run a script of their own, or act on a backend's refusal:
    - `shell.Run`'s `done` marker, as decision 2 says.
 2. **The toolset.** `installRipgrep`, as decision 2 says. It is the first
    exit-status script with a deadline, so `ExecStatus` returns a run its
-   deadline stopped as `Exec` gave it, for the caller to answer the timeout
-   before the status. `fileFault` needs no change: after the first pull
+   deadline stopped with no error, read inside its frame where the frame
+   arrived whole, for the caller to answer the timeout before any status.
+   `fileFault` needs no change: after the first pull
    request no backend hands it a refusal or a `0` that a startup chose, and
    the dispatch answers the startup's errors as tool errors.
 3. **The executor and worker callers**, as decision 7 says.
