@@ -373,6 +373,17 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		{"the host's GOAWAY quotes a deadline before the clone's passes", passed, fmt.Errorf("%w: %w", errHostTransport,
 			errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`)),
 			repoOutcomeNetwork},
+		{"the host's GOAWAY fails the ref advertisement's request, quoting a deadline as the clone's passes", passed,
+			&url.Error{Op: "Get", URL: "https://example.com/o/r.git/info/refs?service=git-upload-pack", Err: errors.New(
+				`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`)},
+			repoOutcomeNetwork},
+		{"the host's GOAWAY fails the pack request, quoting a deadline as the clone's passes", passed,
+			plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://example.com/o/r.git/git-upload-pack", Err: errors.New(
+				`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`)}),
+			repoOutcomeNetwork},
+		{"the clone's deadline passes during the pack request", passed,
+			plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://example.com/o/r.git/git-upload-pack", Err: context.DeadlineExceeded}),
+			repoOutcomeTimeout},
 		{"the host's GOAWAY, in go-git's decode words, quotes a deadline before the clone's passes", passed,
 			fmt.Errorf("error decoding upload-pack response: %s", fmt.Errorf("%w: %w", errHostTransport,
 				errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`))),

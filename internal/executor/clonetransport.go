@@ -102,7 +102,8 @@ func (t hostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // among them (errEmptyPack), or this executor's (errOwnRead). A read that the
 // clone's deadline or cancellation ended fails with the context's own error,
 // which cloneReason reads from go-git's error, so it keeps it; any other
-// failure is marked, whenever it came. A read's own error carries no mark,
+// failure is marked, whenever it came. The clone's context carries no cause
+// of its own (context.Cause), which net/http would return in its place. A read's own error carries no mark,
 // which only this body puts on, so a mark's words in it are the host's: an
 // HTTP/2 GOAWAY quotes the host's debug text.
 type markedBody struct {
@@ -125,7 +126,7 @@ func (b *markedBody) Read(p []byte) (int, error) {
 		return n, err
 	case transportMark(err) == nil && isLocalError(err):
 		return n, fmt.Errorf("%w: %w", errOwnRead, err)
-	case b.ctx.Err() != nil && (errors.Is(err, b.ctx.Err()) || errors.Is(err, context.Cause(b.ctx))):
+	case b.ctx.Err() != nil && errors.Is(err, b.ctx.Err()):
 		return n, err
 	default:
 		return n, fmt.Errorf("%w: %w", errHostTransport, err)

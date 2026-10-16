@@ -21,6 +21,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/sideband"
+	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
 // TestCloneReasonReadsTheHostsFailures 🔍: the host's failures that go-git
@@ -204,14 +206,20 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 		}
 		defer res.Body.Close()
 		cancel()
-		if _, err := io.ReadAll(res.Body); err == nil || errors.Is(err, errHostTransport) {
+		if _, err := io.ReadAll(res.Body); !errors.Is(err, context.Canceled) || transportMark(err) != nil {
 			t.Errorf("read = %v, want the cancellation's own error", err)
 		}
 	})
 	t.Run("a read the deadline ends", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(clone, 100*time.Millisecond)
+		ctx, cancel := context.WithTimeout(clone, 500*time.Millisecond)
 		defer cancel()
-		if err := get(ctx, http.MethodGet, "/stall"); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errHostTransport) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/stall", nil)
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("the request = %v, want its headers before the deadline, so the body's read meets it", err)
+		}
+		defer res.Body.Close()
+		if _, err := io.ReadAll(res.Body); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errHostTransport) {
 			t.Errorf("read = %v, want the deadline's own error", err)
 		}
 	})
@@ -257,6 +265,16 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 			t.Errorf("read = %d, %v; want 3 bytes and the failure marked the host's", n, err)
 		}
 	})
+}
+
+// Every go-git clone over http or https goes through the transport: go-git
+// holds its own default client for both until the package installs its own.
+func TestCloneTransportIsGoGitsForHTTPAndHTTPS(t *testing.T) {
+	for _, scheme := range []string{"http", "https"} {
+		if gitclient.Protocols[scheme] == githttp.DefaultClient {
+			t.Errorf("go-git's %s client is its own default, not the one that marks the host's failures", scheme)
+		}
+	}
 }
 
 // failingReader reads n bytes and err at once, which errReader, with no bytes,

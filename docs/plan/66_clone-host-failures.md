@@ -37,11 +37,11 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    wording. A refusal of the host's response by go-git's pkt-line, pack
    response and sideband decoders reads `network` by the same rule, and so
    does a pack band that carries no pack. They are matched by go-git's types
-   and sentinels, and by go-git's own words where it kept only text: the
-   pkt-line scanner's refusal, `error decoding upload-pack response: `, the
-   sideband's `unexpected error: `, `unknown channel ` and
-   `max. packed size exceeded`, and `malformed pack file signature`. Never
-   by the host's. A pack that is corrupt past its signature is out of
+   and sentinels, `packfile.ErrBadSignature` among them, and by go-git's own
+   words where it kept only text: the pkt-line scanner's refusal,
+   `error decoding upload-pack response: `, and the sideband's
+   `unexpected error: `, `unknown channel ` and `max. packed size exceeded`.
+   Never by the host's. A pack that is corrupt past its signature is out of
    this plan's scope and keeps its reason.
 2. **The clone's transport marks the host's failures where go-git reads
    them.** go-git's HTTP transport, installed for the process as the executor

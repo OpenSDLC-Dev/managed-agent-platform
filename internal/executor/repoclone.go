@@ -260,24 +260,45 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // (isLocalError). A failure with a reason of its own keeps it, though the
 // deadline passed while go-git ran on: its checkout ignores the context. Nor
 // does a name that quotes the context's error decide the reason: a file the
-// repository named so, or a host's words, which go-git keeps in a type
-// (hostWords), or a failed read the clone's transport marked as the host's
-// (transportMark), which is never the context's own error. The host's words go-git keeps only as text, an ERR line in the pack
-// response or the sideband's error band, cannot be told from go-git's own
-// formatting of the context's error there, so they join; the clone's context
-// had ended, which the reason then says.
+// repository named so, or a host's words whose place the error's types
+// already show (hostDecided, requestFailed). The host's words go-git keeps
+// only as text, an ERR line in the pack response or the sideband's error
+// band, cannot be told from go-git's own formatting of the context's error
+// there, so they join; the clone's context had ended, which the reason then
+// says.
 func cloneFailed(ctx context.Context, err error) error {
 	if isPathRefusal(err) {
 		err = withCause{err, errPathRefused}
 	}
 	err = fmt.Errorf("%w: %w", errClone, err)
-	if cause := ctx.Err(); cause != nil && strings.Contains(err.Error(), cause.Error()) && !isLocalError(err) && !hostWords(err) &&
-		transportMark(err) != errHostTransport {
+	if cause := ctx.Err(); cause != nil && strings.Contains(err.Error(), cause.Error()) &&
+		!isLocalError(err) && !hostDecided(err) && !requestFailed(err) {
 		if r := cloneReason(err); r == repoOutcomeInternal || r == repoOutcomeNetwork {
 			err = withCause{err, cause}
 		}
 	}
 	return err
+}
+
+// hostDecided reports whether err's types already say the git host failed:
+// the host's words in a type of go-git's (hostWords), or the clone's
+// transport's mark of a read that failed on the host's side (transportMark).
+func hostDecided(err error) bool {
+	return hostWords(err) || transportMark(err) == errHostTransport
+}
+
+// requestFailed reports whether err holds a request that failed, which
+// net/http reports as a *url.Error, looking through go-git's UnexpectedError
+// as cloneReason does. A context that ended during the request is in it by
+// its type, so the context's words in its text are the host's: an HTTP/2
+// GOAWAY quotes the host's debug text.
+func requestFailed(err error) bool {
+	var unexpected *plumbing.UnexpectedError
+	if errors.As(err, &unexpected) {
+		err = errors.Join(err, unexpected.Err)
+	}
+	var urlErr *neturl.Error
+	return errors.As(err, &urlErr)
 }
 
 // errPathRefused marks go-git's refusal of a path the repository holds — a
@@ -545,11 +566,11 @@ func cloneReason(err error) string {
 // keeps the same failures only as text, in the net.DNSError's Err: a socket
 // it could not open, or a port, memory or buffers it ran out of. So does a
 // read of the host's response that the clone's transport marked as this
-// machine's (transportMark).
-// go-git formats a host's ERR line in the pack response the same way, so a
-// host that sends those words makes its failure read as this executor's; it
-// gains nothing by that, and no text tells the two apart. Where go-git keeps
-// the host's words in a type (hostWords), they are the host's.
+// machine's (transportMark). go-git formats a host's ERR line in the pack
+// response the same way, so a host that sends those words makes its failure
+// read as this executor's; it gains nothing by that, and no text tells the
+// two apart. Where go-git keeps the host's words in a type (hostWords), they
+// are the host's.
 func isLocalError(err error) bool {
 	var pathErr *fs.PathError
 	var linkErr *os.LinkError
@@ -595,12 +616,11 @@ func isRemoteStatusError(err error) bool {
 // which are read: the pkt-line scanner's refusal, its decoder's refusal of the
 // pack response, an ERR line there among them, and the sideband's: its error
 // band, a band git has no use for, and a packet too large for the band's
-// size. The words
-// read are go-git's and the clone's transport's, not a host's: the transport
-// marks a read of the host's response that failed on the host's side
-// (transportMark). The remote's failure, not ours.
+// size. The words read are go-git's and the clone's transport's, not a
+// host's: the transport marks a read of the host's response that failed on
+// the host's side (transportMark). The remote's failure, not ours.
 func isProtocolError(err error) bool {
-	if hostWords(err) || transportMark(err) == errHostTransport || errors.Is(err, packp.ErrEmptyInput) ||
+	if hostDecided(err) || errors.Is(err, packp.ErrEmptyInput) ||
 		errors.Is(err, git.ErrFetching) || errors.Is(err, packfile.ErrEmptyPackfile) || errors.Is(err, packfile.ErrBadSignature) {
 		return true
 	}
