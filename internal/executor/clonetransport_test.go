@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -9,10 +10,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/sideband"
@@ -106,6 +109,49 @@ func TestCloneReasonReadsTheHostsFailures(t *testing.T) {
 	}
 }
 
+// A failure the transport recorded leaves a reason go-git's error has of its
+// own: the clone's deadline or its cancellation, which ended the read the
+// record failed, and a refused proxy, whose error go-git keeps. The message
+// then carries no mark.
+func TestCloneFailedLeavesAReasonOfItsOwn(t *testing.T) {
+	refused := &net.OpError{Op: "proxyconnect", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	for _, tc := range []struct {
+		name string
+		end  func() (context.Context, func())
+		err  error
+		want string
+	}{
+		{"the clone's deadline passes while the pack is read", func() (context.Context, func()) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			return ctx, func() { <-ctx.Done(); cancel() }
+		}, fmt.Errorf("error decoding upload-pack response: %s", context.DeadlineExceeded), repoOutcomeTimeout},
+		{"the clone is cancelled while the pack is read", func() (context.Context, func()) {
+			return context.WithCancel(context.Background())
+		}, fmt.Errorf("error decoding upload-pack response: %s", context.Canceled), repoOutcomeInternal},
+		{"a proxy refuses the connection", func() (context.Context, func()) {
+			return context.Background(), func() {}
+		}, &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs", Err: refused}, repoOutcomeNetwork},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, end := tc.end()
+			ctx, rec := withCloneRecord(parent)
+			if tc.want == repoOutcomeNetwork {
+				rec.note(ctx, refused)
+			} else {
+				rec.note(ctx, io.ErrUnexpectedEOF)
+			}
+			end()
+			err := cloneFailed(ctx, tc.err)
+			if got := cloneReason(err); got != tc.want {
+				t.Errorf("cloneReason = %q, want %q: %v", got, tc.want, err)
+			}
+			if strings.Contains(err.Error(), errHostTransport.Error()) {
+				t.Errorf("error = %q, want no mark: the reason is go-git's error's own", err)
+			}
+		})
+	}
+}
+
 // A packet too large for the plain side-band's size reads `network` by
 // go-git's words for it. The fixture's http-backend offers side-band-64k,
 // whose size no pkt-line passes, so no clone of it reaches this.
@@ -130,7 +176,7 @@ func TestCloneRecordNotesItsOwnTransportsFailures(t *testing.T) {
 			brokenAnswer(t, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")(w, r)
 		case "/moved":
 			brokenAnswer(t, "HTTP/1.1 302 Found\r\nLocation: /whole\r\nContent-Length: 10\r\n\r\nabc")(w, r)
-		case "/refused":
+		case "/refused/r.git/git-upload-pack":
 			w.WriteHeader(http.StatusUnauthorized)
 		case "/stall":
 			// Until the client gives up.
@@ -200,7 +246,7 @@ func TestCloneRecordNotesItsOwnTransportsFailures(t *testing.T) {
 	})
 	t.Run("a refusal's empty body is not an empty pack", func(t *testing.T) {
 		ctx, rec := withCloneRecord(context.Background())
-		_ = get(ctx, http.MethodPost, "/refused")
+		_ = get(ctx, http.MethodPost, "/refused/r.git/git-upload-pack")
 		if rec.failure() != nil {
 			t.Errorf("record = %v, want nothing: go-git reads a refusal by its status", rec.failure())
 		}
@@ -266,6 +312,9 @@ func TestCloneFailedReadsTheRecordOverWhatWasMissing(t *testing.T) {
 		{"this machine's buffers ran out", local, missing, repoOutcomeCheckout},
 		{"this machine's buffers ran out while go-git decoded the response", local,
 			fmt.Errorf("error decoding upload-pack response: %s", local), repoOutcomeInternal},
+		{"this machine's descriptors ran out for the pack request after a read go-git went past", gzip.ErrChecksum,
+			plumbing.NewUnexpectedError(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("socket", syscall.EMFILE)}),
+			repoOutcomeInternal},
 		{"a ref the host's answer lacks", cutRead, fmt.Errorf("%w: refs/heads/no-such-branch", plumbing.ErrReferenceNotFound), repoOutcomeCheckout},
 		{"the host does not have the commit", cutRead,
 			withCause{fmt.Errorf("%w: not our ref", plumbing.ErrObjectNotFound), errCommitRefused}, repoOutcomeCheckout},

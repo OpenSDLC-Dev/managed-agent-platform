@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/client"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
@@ -29,7 +30,7 @@ type cloneRecord struct {
 
 // errHostTransport marks a clone failure whose transport recorded a failure
 // of the host's (cloneFailed).
-var errHostTransport = errors.New("the git host's transport failed")
+var errHostTransport = errors.New("the transport to the git host failed")
 
 // errEmptyPack is a pack response that ended before its first byte. A clone
 // always asks for objects, so a host that sends none failed.
@@ -80,10 +81,13 @@ func cloneRecordFrom(ctx context.Context) *cloneRecord {
 // default with its transport recording (recordingTransport). go-git keeps one
 // client per protocol for the process, in a map it does not lock, so the
 // client is installed as the package initializes, before any clone can read
-// the map. go-git asks a client's transport to be an *http.Transport only for
-// an endpoint that names its own proxy, CA bundle, client certificate or
-// InsecureSkipTLS, and refuses such an endpoint with this one; no clone here
-// names one, and nothing else in the process uses go-git.
+// the map. Every go-git clone in a binary that imports this package goes
+// through it, the evals suite's among them. go-git asks a client's transport
+// to be an *http.Transport only for an endpoint that names its own proxy, CA
+// bundle, client certificate or InsecureSkipTLS, and refuses such an endpoint
+// with this one. None of those clones names one; the system's trust store
+// and the proxy environment variables, which http.DefaultTransport reads,
+// apply as before.
 func init() {
 	c := githttp.NewClient(&http.Client{Transport: recordingTransport{base: http.DefaultTransport}})
 	client.InstallProtocol("http", c)
@@ -112,7 +116,7 @@ func (t recordingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if res.StatusCode/100 != 2 {
 		return res, nil
 	}
-	pack := req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/git-upload-pack")
+	pack := req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/"+transport.UploadPackServiceName)
 	res.Body = &recordingBody{ReadCloser: res.Body, ctx: ctx, rec: rec, pack: pack}
 	return res, nil
 }

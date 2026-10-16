@@ -54,10 +54,14 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    reads no other body: the HTTP client drains a redirect's body and ignores
    a failure there, and go-git reads a refusal by its status. It notes nothing
    while the clone's context is done: those errors are the deadline's or the
-   cancellation's. go-git refuses an endpoint that names its own proxy, CA
-   bundle, client certificate or `InsecureSkipTLS` with this transport, which
-   is not an `*http.Transport`. No clone here names one, and nothing else in
-   the process uses go-git.
+   cancellation's. Every go-git clone in a binary that imports the executor
+   goes through it, the evals suite's among them. go-git refuses an endpoint
+   that names its own proxy, CA bundle, client certificate or
+   `InsecureSkipTLS` with this transport, which is not an `*http.Transport`.
+   None of those clones names one; the system's trust store and the proxy
+   environment variables apply as before. A transport that wraps the
+   connection instead would keep go-git's type, but under TLS it cannot see
+   a response's body, so it could not tell an empty pack response.
 3. **A recorded failure decides `network` only over `internal` and an object
    the checkout missed.** Those are what go-git concluded from what was
    missing. `auth`, `not_found`, `too_large` and `timeout` came from what did
@@ -65,7 +69,8 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    ref, as the answer that did arrive shows it: a branch the ref
    advertisement lacks, a commit the host says it does not have, an id that
    names a tree or a blob. So does an error this executor made
-   (`isLocalError`). A recorded failure that is this executor's own joins the
+   (`isLocalError`). The mark goes on only where it decides the reason, so a
+   refused proxy, whose error go-git keeps, is not named twice in the log. A recorded failure that is this executor's own joins the
    chain as it is, because go-git formats it with `%s` inside the decode.
 4. **The context's error joins wherever its text was all go-git kept.** A
    decode refusal now reads `network`, and go-git formats a deadline or a

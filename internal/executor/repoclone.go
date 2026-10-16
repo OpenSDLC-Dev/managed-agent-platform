@@ -263,12 +263,18 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // deadline passed while go-git ran on: its checkout ignores the context. Nor
 // does a name that quotes the context's error decide the reason: a file the
 // repository named so, or a host's words, which go-git keeps in a type
-// (hostWords).
+// (hostWords). The host's words go-git keeps only as text, an ERR line in the
+// pack response or the sideband's error band, cannot be told from go-git's own
+// formatting of the context's error there, so they join; the clone's context
+// had ended, which the reason then says.
 //
 // A failure the clone's transport recorded (cloneRecord) is the host's where
 // neither it nor go-git's error is this executor's own. errHostTransport
-// marks it, and the message carries it for the log. cloneReason reads the
-// mark after every reason that came from what did arrive or from this
+// marks it where the mark decides the reason, and the message then carries
+// it for the log. Where go-git's error has a reason of its own, a refused
+// proxy's among them, the mark would add only a second copy of what the error
+// says. cloneReason reads the mark after every reason that came from what
+// did arrive or from this
 // clone's context, or from the caller's ref, so it decides only over internal
 // and an object the checkout missed: what go-git concluded from what was
 // missing. A recorded failure that is this
@@ -280,6 +286,13 @@ func cloneFailed(ctx context.Context, err error) error {
 		err = withCause{err, errPathRefused}
 	}
 	err = fmt.Errorf("%w: %w", errClone, err)
+	// go-git carries the pack request's transport error in an UnexpectedError,
+	// which implements no Unwrap: joined to the chain, it is one the checks
+	// below can see is this executor's own, as cloneReason does.
+	var unexpected *plumbing.UnexpectedError
+	if errors.As(err, &unexpected) {
+		err = withCause{err, unexpected.Err}
+	}
 	if cause := ctx.Err(); cause != nil && strings.Contains(err.Error(), cause.Error()) && !isLocalError(err) && !hostWords(err) {
 		if r := cloneReason(err); r == repoOutcomeInternal || r == repoOutcomeNetwork {
 			err = withCause{err, cause}
@@ -288,8 +301,8 @@ func cloneFailed(ctx context.Context, err error) error {
 	if failed := cloneRecordFrom(ctx).failure(); failed != nil && !isLocalError(err) {
 		if isLocalError(failed) {
 			err = withCause{err, failed}
-		} else {
-			err = fmt.Errorf("%w (%w: %w)", err, errHostTransport, failed)
+		} else if marked := fmt.Errorf("%w (%w: %w)", err, errHostTransport, failed); cloneReason(marked) != cloneReason(err) {
+			err = marked
 		}
 	}
 	return err
