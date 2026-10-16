@@ -10,25 +10,21 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
-	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/sideband"
-	"github.com/go-git/go-git/v5/plumbing/transport"
 )
 
 // TestCloneReasonReadsTheHostsFailures 🔍: the host's failures that go-git
 // keeps too little of read `network` (#940, plan 66), each through a real
-// clone of a fixture whose host answers so. go-git takes an empty or cut pack
-// response for "already up to date", and its checkout then blamed the caller's
-// ref; the clone's transport record holds what happened. The host's in-band
-// messages and the responses go-git's decoder refuses read `network` by
-// go-git's own types and words. A row's `says` is what the log's error then
+// clone of a fixture whose host answers so. go-git took an empty or cut pack
+// response for "already up to date", and its checkout then blamed the
+// caller's ref; the clone's transport now marks what happened. The host's
+// in-band messages and the responses go-git's decoder refuses read `network`
+// by go-git's own types and words. A row's `says` is what the log's error then
 // carries.
 func TestCloneReasonReadsTheHostsFailures(t *testing.T) {
 	const result, advert = "git-upload-pack-result", "git-upload-pack-advertisement"
@@ -110,78 +106,19 @@ func TestCloneReasonReadsTheHostsFailures(t *testing.T) {
 	}
 }
 
-// A failure the transport recorded leaves a reason go-git's error has of its
-// own: the clone's deadline or its cancellation, which ended the read the
-// record failed, and a refused proxy, whose error go-git keeps. The message
-// then carries no mark.
-func TestCloneFailedLeavesAReasonOfItsOwn(t *testing.T) {
-	refused := &net.OpError{Op: "proxyconnect", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
-	for _, tc := range []struct {
-		name string
-		end  func() (context.Context, func())
-		err  error
-		want string
-	}{
-		{"the clone's deadline passes while the pack is read", func() (context.Context, func()) {
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			return ctx, func() { <-ctx.Done(); cancel() }
-		}, fmt.Errorf("error decoding upload-pack response: %s", context.DeadlineExceeded), repoOutcomeTimeout},
-		{"the clone is cancelled while the pack is read", func() (context.Context, func()) {
-			return context.WithCancel(context.Background())
-		}, fmt.Errorf("error decoding upload-pack response: %s", context.Canceled), repoOutcomeInternal},
-		{"a proxy refuses the connection", func() (context.Context, func()) {
-			return context.Background(), func() {}
-		}, &url.Error{Op: "Get", URL: "https://github.com/o/r.git/info/refs", Err: refused}, repoOutcomeNetwork},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			parent, end := tc.end()
-			ctx, rec := withCloneRecord(parent)
-			if tc.want == repoOutcomeNetwork {
-				rec.note(ctx, refused)
-			} else {
-				rec.note(ctx, io.ErrUnexpectedEOF)
-			}
-			if rec.failure() == nil {
-				t.Fatal("the note came after the clone's context ended")
-			}
-			end()
-			err := cloneFailed(ctx, tc.err)
-			if got := cloneReason(err); got != tc.want {
-				t.Errorf("cloneReason = %q, want %q: %v", got, tc.want, err)
-			}
-			if strings.Contains(err.Error(), errHostTransport.Error()) {
-				t.Errorf("error = %q, want no mark: the reason is go-git's error's own", err)
-			}
-		})
-	}
-}
-
-// A packet too large for the plain side-band's size reads `network` by
-// go-git's words for it. The fixture's http-backend offers side-band-64k,
-// whose size no pkt-line passes, so no clone of it reaches this.
-func TestCloneReasonReadsAnOversizeSidebandPacket(t *testing.T) {
-	err := cloneFailed(context.Background(), fmt.Errorf("%s", sideband.ErrMaxPackedExceeded))
-	if got := cloneReason(err); got != repoOutcomeNetwork {
-		t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
-	}
-}
-
-// A clone's record holds its own transport's failures and no other clone's:
-// the transport is installed once per process, and the record travels in the
-// request's context. A request with no record passes through as before. A
-// failure while the context is done is the deadline's or the cancellation's,
-// not the host's, and the first failure is the one kept.
-func TestCloneRecordNotesItsOwnTransportsFailures(t *testing.T) {
+// A clone's response bodies mark a read that failed with whose it was, and
+// leave every other read, request and response as they were.
+func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/o/r.git/git-upload-pack", "/o/r.git/info/refs":
 			// An empty 200.
-		case "/cut":
-			brokenAnswer(t, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")(w, r)
-		case "/moved":
-			brokenAnswer(t, "HTTP/1.1 302 Found\r\nLocation: /whole\r\nContent-Length: 10\r\n\r\nabc")(w, r)
 		case "/refused/r.git/git-upload-pack":
 			w.WriteHeader(http.StatusUnauthorized)
+		case "/whole/r.git/git-upload-pack":
+			_, _ = w.Write([]byte("0008NAK\n"))
+		case "/cut":
+			brokenAnswer(t, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")(w, r)
 		case "/stall":
 			// Until the client gives up.
 			w.WriteHeader(http.StatusOK)
@@ -192,7 +129,7 @@ func TestCloneRecordNotesItsOwnTransportsFailures(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	client := &http.Client{Transport: recordingTransport{base: http.DefaultTransport}}
+	client := &http.Client{Transport: hostTransport{base: http.DefaultTransport}}
 	get := func(ctx context.Context, method, path string) error {
 		req, err := http.NewRequestWithContext(ctx, method, srv.URL+path, nil)
 		if err != nil {
@@ -206,83 +143,41 @@ func TestCloneRecordNotesItsOwnTransportsFailures(t *testing.T) {
 		_, err = io.ReadAll(res.Body)
 		return err
 	}
+	clone := withCloneMarks(context.Background())
 
-	t.Run("an empty pack response is the clone's alone", func(t *testing.T) {
-		ctx, rec := withCloneRecord(context.Background())
-		other, quiet := withCloneRecord(context.Background())
-		_ = get(ctx, http.MethodPost, "/o/r.git/git-upload-pack")
-		_ = get(other, http.MethodGet, "/whole")
-		if !errors.Is(rec.failure(), errEmptyPack) {
-			t.Errorf("record = %v, want the empty pack response", rec.failure())
+	t.Run("an empty pack response", func(t *testing.T) {
+		if err := get(clone, http.MethodPost, "/o/r.git/git-upload-pack"); !errors.Is(err, errEmptyPack) {
+			t.Errorf("read = %v, want the empty pack response marked", err)
 		}
-		if quiet.failure() != nil {
-			t.Errorf("another clone's record = %v, want nothing", quiet.failure())
+	})
+	t.Run("a pack response that ends after its bytes", func(t *testing.T) {
+		if err := get(clone, http.MethodPost, "/whole/r.git/git-upload-pack"); err != nil {
+			t.Errorf("read = %v, want a clean end", err)
 		}
 	})
 	t.Run("an empty ref advertisement is not an empty pack", func(t *testing.T) {
-		ctx, rec := withCloneRecord(context.Background())
-		_ = get(ctx, http.MethodGet, "/o/r.git/info/refs")
-		if rec.failure() != nil {
-			t.Errorf("record = %v, want nothing: go-git's decoder reads that one", rec.failure())
-		}
-	})
-	t.Run("a body cut short", func(t *testing.T) {
-		ctx, rec := withCloneRecord(context.Background())
-		if err := get(ctx, http.MethodGet, "/cut"); err == nil {
-			t.Fatal("a cut body read whole")
-		}
-		if !errors.Is(rec.failure(), io.ErrUnexpectedEOF) {
-			t.Errorf("record = %v, want the cut body's read", rec.failure())
-		}
-		_ = get(ctx, http.MethodPost, "/o/r.git/git-upload-pack")
-		if !errors.Is(rec.failure(), io.ErrUnexpectedEOF) {
-			t.Errorf("record = %v, want the first failure kept", rec.failure())
-		}
-	})
-	t.Run("a local failure after a host's that go-git read past", func(t *testing.T) {
-		ctx, rec := withCloneRecord(context.Background())
-		local := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ENOBUFS)}
-		rec.note(ctx, gzip.ErrChecksum)
-		rec.note(ctx, local)
-		rec.note(ctx, io.ErrUnexpectedEOF)
-		if rec.failure() != local {
-			t.Errorf("record = %v, want this machine's failure", rec.failure())
-		}
-		err := cloneFailed(ctx, fmt.Errorf("error decoding upload-pack response: %s", local))
-		if got := cloneReason(err); got != repoOutcomeInternal {
-			t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeInternal, err)
-		}
-	})
-	t.Run("a redirect's body is the client's to drain", func(t *testing.T) {
-		ctx, rec := withCloneRecord(context.Background())
-		if err := get(ctx, http.MethodGet, "/moved"); err != nil {
-			t.Fatalf("the redirect was not followed: %v", err)
-		}
-		if rec.failure() != nil {
-			t.Errorf("record = %v, want nothing: the client drained the redirect's body and went on", rec.failure())
+		if err := get(clone, http.MethodGet, "/o/r.git/info/refs"); err != nil {
+			t.Errorf("read = %v, want a clean end: go-git's decoder reads that one", err)
 		}
 	})
 	t.Run("a refusal's empty body is not an empty pack", func(t *testing.T) {
-		ctx, rec := withCloneRecord(context.Background())
-		_ = get(ctx, http.MethodPost, "/refused/r.git/git-upload-pack")
-		if rec.failure() != nil {
-			t.Errorf("record = %v, want nothing: go-git reads a refusal by its status", rec.failure())
+		if err := get(clone, http.MethodPost, "/refused/r.git/git-upload-pack"); err != nil {
+			t.Errorf("read = %v, want a clean end: go-git reads a refusal by its status", err)
 		}
 	})
-	t.Run("a refused request", func(t *testing.T) {
-		ctx, rec := withCloneRecord(context.Background())
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:1/", nil)
-		if _, err := client.Do(req); err == nil {
-			t.Fatal("a dial to a closed port succeeded")
+	t.Run("a body cut short", func(t *testing.T) {
+		err := get(clone, http.MethodGet, "/cut")
+		if !errors.Is(err, errHostTransport) || !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("read = %v, want the cut marked the host's", err)
 		}
-		var opErr *net.OpError
-		if !errors.As(rec.failure(), &opErr) {
-			t.Errorf("record = %v, want the refused dial", rec.failure())
+		// go-git takes an io.ErrUnexpectedEOF it compares by == for an empty
+		// response.
+		if err == io.ErrUnexpectedEOF {
+			t.Error("read = io.ErrUnexpectedEOF itself, which go-git takes for \"already up to date\"")
 		}
 	})
-	t.Run("a failure once the context is done", func(t *testing.T) {
-		parent, cancel := context.WithCancel(context.Background())
-		ctx, rec := withCloneRecord(parent)
+	t.Run("a read once the context is done", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(clone)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/stall", nil)
 		res, err := client.Do(req)
 		if err != nil {
@@ -290,74 +185,71 @@ func TestCloneRecordNotesItsOwnTransportsFailures(t *testing.T) {
 		}
 		defer res.Body.Close()
 		cancel()
-		if _, err := io.ReadAll(res.Body); err == nil {
-			t.Fatal("a cancelled read finished")
-		}
-		if rec.failure() != nil {
-			t.Errorf("record = %v, want nothing: the cancellation is ours", rec.failure())
+		if _, err := io.ReadAll(res.Body); err == nil || errors.Is(err, errHostTransport) {
+			t.Errorf("read = %v, want the cancellation's own error", err)
 		}
 	})
-	t.Run("no record", func(t *testing.T) {
+	t.Run("another request passes through", func(t *testing.T) {
 		if err := get(context.Background(), http.MethodPost, "/o/r.git/git-upload-pack"); err != nil {
-			t.Errorf("an empty pack response with no record = %v, want it passed through", err)
+			t.Errorf("read = %v, want an empty pack response passed through", err)
 		}
-		if rec := cloneRecordFrom(context.Background()); rec.failure() != nil {
-			t.Errorf("no record holds %v", rec.failure())
+	})
+	t.Run("a read this machine failed", func(t *testing.T) {
+		local := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ENOBUFS)}
+		_, err := (&markedBody{ReadCloser: io.NopCloser(failingReader{0, local}), ctx: clone}).Read(make([]byte, 8))
+		if !errors.Is(err, errOwnRead) || errors.Is(err, errHostTransport) || !errors.Is(err, local) {
+			t.Errorf("read = %v, want it marked this executor's", err)
+		}
+	})
+	t.Run("the bytes that came with a failure", func(t *testing.T) {
+		n, err := (&markedBody{ReadCloser: io.NopCloser(failingReader{3, gzip.ErrChecksum}), ctx: clone}).Read(make([]byte, 8))
+		if n != 3 || !errors.Is(err, errHostTransport) || !errors.Is(err, gzip.ErrChecksum) {
+			t.Errorf("read = %d, %v; want 3 bytes and the failure marked the host's", n, err)
 		}
 	})
 }
 
-// A recorded failure decides `network` only where go-git's error would read
-// `internal` or `checkout`, the reasons go-git concludes from what was missing.
-// The rest came from what arrived, or from this machine.
-func TestCloneFailedReadsTheRecordOverWhatWasMissing(t *testing.T) {
-	cutRead := fmt.Errorf("read: %w", io.ErrUnexpectedEOF)
+// failingReader reads n bytes and err at once.
+type failingReader struct {
+	n   int
+	err error
+}
+
+func (r failingReader) Read(p []byte) (int, error) { return copy(p, make([]byte, r.n)), r.err }
+
+// The transport's marks decide the reason by their type, and by their words
+// where go-git kept only text; a file named in those words does not.
+func TestCloneReasonReadsTheTransportsMarks(t *testing.T) {
 	local := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ENOBUFS)}
-	missing := fmt.Errorf("invalid reset option: %w", plumbing.ErrObjectNotFound)
-	chunk := errors.New("invalid byte in chunk length")
+	host := fmt.Errorf("%w: %w", errHostTransport, errors.New("invalid byte in chunk length"))
+	own := fmt.Errorf("%w: %w", errOwnRead, local)
 	for _, tc := range []struct {
-		name     string
-		recorded error
-		err      error
-		want     string
+		name string
+		err  error
+		want string
 	}{
-		{"the checkout misses what an empty pack left out", errEmptyPack, missing, repoOutcomeNetwork},
-		{"go-git reads only text", chunk, fmt.Errorf("%s", chunk), repoOutcomeNetwork},
-		{"a failure go-git read past, before an object the checkout missed", gzip.ErrChecksum, missing, repoOutcomeCheckout},
-		{"a cut go-git read past, before a failure of go-git's own", cutRead,
-			errors.New("go-git cannot check out a file of this mode"), repoOutcomeInternal},
-		{"nothing recorded", nil, missing, repoOutcomeCheckout},
-		{"the host refused the token", cutRead, fmt.Errorf("%w: bad credentials", transport.ErrAuthenticationRequired), repoOutcomeAuth},
-		{"the repository is not there", cutRead, transport.ErrRepositoryNotFound, repoOutcomeNotFound},
-		{"the clone is too large", cutRead, errCloneTooLarge, repoOutcomeTooLarge},
-		{"the spool's disk fills", cutRead, &fs.PathError{Op: "write", Path: "/tmp/x", Err: syscall.ENOSPC}, repoOutcomeInternal},
-		{"the spool's disk fills, on a file named for the recorded failure", cutRead,
-			&fs.PathError{Op: "open", Path: "/tmp/map-repo-clone-1/tree/" + cutRead.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
-		{"this machine's buffers ran out", local, missing, repoOutcomeCheckout},
-		{"this machine's buffers ran out while go-git decoded the response", local,
-			fmt.Errorf("error decoding upload-pack response: %s", local), repoOutcomeInternal},
-		{"this machine's descriptors ran out for the pack request after a read go-git went past", gzip.ErrChecksum,
-			plumbing.NewUnexpectedError(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("socket", syscall.EMFILE)}),
-			repoOutcomeInternal},
-		{"a ref the host's answer lacks", cutRead, fmt.Errorf("%w: refs/heads/no-such-branch", plumbing.ErrReferenceNotFound), repoOutcomeCheckout},
-		{"the host does not have the commit", cutRead,
-			withCause{fmt.Errorf("%w: not our ref", plumbing.ErrObjectNotFound), errCommitRefused}, repoOutcomeCheckout},
+		{"an empty pack response", errEmptyPack, repoOutcomeNetwork},
+		{"a cut go-git returns as it is", fmt.Errorf("%w: %w", errHostTransport, io.ErrUnexpectedEOF), repoOutcomeNetwork},
+		{"a cut go-git kept only the words of", fmt.Errorf("reading the pack: %s", host), repoOutcomeNetwork},
+		{"this machine's read, typed", own, repoOutcomeInternal},
+		{"this machine's read, in go-git's decode words", fmt.Errorf("error decoding upload-pack response: %s", own), repoOutcomeInternal},
+		{"a spool file named in the host's words", &fs.PathError{Op: "open",
+			Path: "/tmp/map-repo-clone-1/tree/" + errHostTransport.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, rec := withCloneRecord(context.Background())
-			if tc.recorded != nil {
-				rec.note(ctx, tc.recorded)
-			}
-			err := cloneFailed(ctx, tc.err)
-			if got := cloneReason(err); got != tc.want {
-				t.Errorf("cloneReason = %q, want %q: %v", got, tc.want, err)
-			}
-			if tc.want == repoOutcomeNetwork && !strings.Contains(err.Error(), tc.recorded.Error()) {
-				t.Errorf("error = %q, want it to carry the recorded failure", err)
-			}
-			if marked := errors.Is(err, errHostTransport); marked != (tc.want == repoOutcomeNetwork) {
-				t.Errorf("marked = %v, want the mark only where the host's failure ended the clone: %v", marked, err)
+			if got := cloneReason(cloneFailed(context.Background(), tc.err)); got != tc.want {
+				t.Errorf("cloneReason = %q, want %q: %v", got, tc.want, tc.err)
 			}
 		})
+	}
+}
+
+// A packet too large for the plain side-band's size reads `network` by
+// go-git's words for it. The fixture's http-backend offers side-band-64k,
+// whose size no pkt-line passes, so no clone of it reaches this.
+func TestCloneReasonReadsAnOversizeSidebandPacket(t *testing.T) {
+	err := cloneFailed(context.Background(), fmt.Errorf("%s", sideband.ErrMaxPackedExceeded))
+	if got := cloneReason(err); got != repoOutcomeNetwork {
+		t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
 	}
 }

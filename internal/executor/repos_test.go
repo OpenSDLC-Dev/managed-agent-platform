@@ -1788,9 +1788,6 @@ func TestRepoNonCommitShaBlamesTheCheckout(t *testing.T) {
 			if got := cloneReason(err); err == nil || got != repoOutcomeCheckout {
 				t.Errorf("cloneReason = %q, want %q — a %s id names no commit: %v", got, repoOutcomeCheckout, kind, err)
 			}
-			if !errors.Is(err, errCommitRefused) {
-				t.Errorf("err = %v, want fetchCommit's ruling, which a failure the transport recorded does not unsay", err)
-			}
 		})
 	}
 }

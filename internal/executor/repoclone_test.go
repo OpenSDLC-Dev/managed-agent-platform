@@ -261,9 +261,6 @@ func TestRepoUnknownCommitBlamesTheCheckout(t *testing.T) {
 	if got := cloneReason(err); got != repoOutcomeCheckout {
 		t.Errorf("cloneReason = %q, want %q — the sha is the caller's: %v", got, repoOutcomeCheckout, err)
 	}
-	if !errors.Is(err, errCommitRefused) {
-		t.Errorf("err = %v, want fetchCommit's ruling, which a failure the transport recorded does not unsay", err)
-	}
 }
 
 // TestRepoAnnotatedTagShaMountsItsCommit 🔍: an annotated tag's id is what

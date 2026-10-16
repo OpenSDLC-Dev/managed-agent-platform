@@ -51,12 +51,6 @@ var errBranchName = errors.New("invalid branch name")
 // asked, for a name git admits but go-git cannot carry. The limit is ours.
 var errBranchUnsupported = errors.New("go-git cannot carry the branch name")
 
-// errCommitRefused marks fetchCommit's refusal of the caller's commit id after
-// the fetch: one the host says it does not have, or one that names a tree or
-// a blob. Each rests on what did arrive, so a failure the clone's transport
-// recorded besides does not unsay it (cloneReason).
-var errCommitRefused = errors.New("the commit id names no commit")
-
 // errClone marks an error from go-git's clone of the repository: its fetch,
 // the one step that speaks to the git host; the checkout go-git runs on what
 // it fetched, which writes to this executor's disk; and fetchCommit's refusal
@@ -88,7 +82,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	// straight back at us. Scrubbed once, at the boundary, rather than at each
 	// return below.
 	defer func() { err = scrubTokenErr(err, token) }()
-	ctx, _ = withCloneRecord(ctx)
+	ctx = withCloneMarks(ctx)
 
 	spool, err := os.MkdirTemp("", "map-repo-clone-")
 	if err != nil {
@@ -213,7 +207,7 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 	// The remote refuses a commit it does not have in words go-git carries as
 	// plain text, with no sentinel to match. The sha is the caller's.
 	if err != nil && strings.Contains(err.Error(), "not our ref") {
-		return nil, withCause{fmt.Errorf("%w: %w", plumbing.ErrObjectNotFound, err), errCommitRefused}
+		return nil, fmt.Errorf("%w: %w", plumbing.ErrObjectNotFound, err)
 	}
 	if err != nil {
 		return nil, err
@@ -239,7 +233,7 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 		return nil, err
 	}
 	if t := obj.Type(); t == plumbing.TreeObject || t == plumbing.BlobObject {
-		return nil, withCause{fmt.Errorf("%w: %s names a %s, not a commit", plumbing.ErrObjectNotFound, sha, t), errCommitRefused}
+		return nil, fmt.Errorf("%w: %s names a %s, not a commit", plumbing.ErrObjectNotFound, sha, t)
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
@@ -267,14 +261,6 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // pack response or the sideband's error band, cannot be told from go-git's own
 // formatting of the context's error there, so they join; the clone's context
 // had ended, which the reason then says.
-//
-// A failure the clone's transport recorded (cloneRecord) is the host's where
-// neither it nor go-git's error is this executor's own. errHostTransport marks
-// it where it is what ended the clone (hostFailed), and the message then
-// carries it for the log. A recorded failure that is this executor's own, out
-// of buffers or memory for a read, joins the chain as it is: go-git formats it
-// with %s while it decodes the response, where only the record still has its
-// type.
 func cloneFailed(ctx context.Context, err error) error {
 	if isPathRefusal(err) {
 		err = withCause{err, errPathRefused}
@@ -285,33 +271,7 @@ func cloneFailed(ctx context.Context, err error) error {
 			err = withCause{err, cause}
 		}
 	}
-	if failed := cloneRecordFrom(ctx).failure(); failed != nil && !isLocalError(err) {
-		if isLocalError(failed) {
-			err = withCause{err, failed}
-		} else if hostFailed(err, failed) {
-			err = fmt.Errorf("%w (%w: %w)", err, errHostTransport, failed)
-		}
-	}
 	return err
-}
-
-// hostFailed reports whether failed, the host's transport failure a clone's
-// record holds, is what ended the clone err reports. go-git takes an empty
-// pack response, or one cut short, for "already up to date", and its checkout
-// then misses an object it was never sent; a commit id fetchCommit rules on
-// is the caller's, not such an object (errCommitRefused). Any other failure
-// ended the clone only where go-git's error, which would read internal,
-// quotes it. A failure go-git read past is none of these, and neither is one
-// where go-git's error has a reason of its own, a refused proxy's among them.
-func hostFailed(err, failed error) bool {
-	switch cloneReason(err) {
-	case repoOutcomeCheckout:
-		return errors.Is(err, plumbing.ErrObjectNotFound) && !errors.Is(err, errCommitRefused) &&
-			(errors.Is(failed, errEmptyPack) || errors.Is(failed, io.ErrUnexpectedEOF))
-	case repoOutcomeInternal:
-		return strings.Contains(err.Error(), failed.Error())
-	}
-	return false
 }
 
 // errPathRefused marks go-git's refusal of a path the repository holds — a
@@ -553,20 +513,9 @@ func cloneReason(err error) string {
 	case errors.Is(err, transport.ErrRepositoryNotFound),
 		errors.Is(err, transport.ErrEmptyRemoteRepository):
 		return repoOutcomeNotFound
-	// The caller's ref, as the host's answer that did arrive shows it: a
-	// branch its ref advertisement lacks, or fetchCommit's ruling on a commit
-	// id. A failure the transport recorded besides does not unsay it.
-	case errors.Is(err, plumbing.ErrReferenceNotFound),
-		errors.Is(err, git.NoMatchingRefSpecError{}),
-		errors.Is(err, errCommitRefused):
-		return repoOutcomeCheckout
-	// A failure the clone's transport recorded (cloneFailed) is the host's,
-	// whatever go-git concluded from what was missing: an empty pack response
-	// is "already up to date" to go-git, and the checkout then misses the
-	// commit.
-	case errors.Is(err, errHostTransport):
-		return repoOutcomeNetwork
-	case errors.Is(err, plumbing.ErrObjectNotFound):
+	case errors.Is(err, plumbing.ErrObjectNotFound),
+		errors.Is(err, plumbing.ErrReferenceNotFound),
+		errors.Is(err, git.NoMatchingRefSpecError{}):
 		return repoOutcomeCheckout
 	case isLocalError(err):
 		return repoOutcomeInternal
@@ -588,13 +537,19 @@ func cloneReason(err error) string {
 // local port it could not assign. So does a call on the connection that this
 // machine's memory or buffers ran out for, whatever the call. A name lookup
 // keeps the same failures only as text, in the net.DNSError's Err: a socket
-// it could not open, or a port, memory or buffers it ran out of.
+// it could not open, or a port, memory or buffers it ran out of. So does a
+// read of the host's response that the clone's transport marked as this
+// machine's (errOwnRead), in words that go-git's %w carries and its %s keeps.
+// go-git formats a host's ERR line in the pack response the same way, so a
+// host that sends those words makes its failure read as this executor's; it
+// gains nothing by that, and no text tells the two apart.
 func isLocalError(err error) bool {
 	var pathErr *fs.PathError
 	var linkErr *os.LinkError
 	var sysErr *os.SyscallError
 	if errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
-		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, errPathRefused) {
+		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, errPathRefused) ||
+		strings.Contains(err.Error(), errOwnRead.Error()) {
 		return true
 	}
 	var dnsErr *net.DNSError
@@ -633,7 +588,10 @@ func isRemoteStatusError(err error) bool {
 // decoder's refusal of the pack response, an ERR line there among them, and
 // the sideband's: its error band, a band git has no use for, a packet too
 // large for the band's size, and a pack band that carries no pack. The words
-// read are go-git's, not a host's. The remote's failure, not ours.
+// read are go-git's, not a host's, and the clone's transport's, which marks a
+// read of the host's response that failed on the host's side
+// (errHostTransport) in words that go-git's %w carries and its %s keeps. The
+// remote's failure, not ours.
 func isProtocolError(err error) bool {
 	if hostWords(err) || errors.Is(err, packp.ErrEmptyInput) || errors.Is(err, git.ErrFetching) ||
 		errors.Is(err, packfile.ErrEmptyPackfile) {
@@ -641,7 +599,7 @@ func isProtocolError(err error) bool {
 	}
 	msg := err.Error()
 	for _, s := range []string{pktline.ErrInvalidPktLen.Error(), "error decoding upload-pack response: ", "unexpected error: ",
-		"unknown channel ", sideband.ErrMaxPackedExceeded.Error(), packfile.ErrBadSignature.Error()} {
+		"unknown channel ", sideband.ErrMaxPackedExceeded.Error(), packfile.ErrBadSignature.Error(), errHostTransport.Error()} {
 		if strings.Contains(msg, s) {
 			return true
 		}
