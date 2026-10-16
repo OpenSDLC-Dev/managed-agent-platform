@@ -702,17 +702,17 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		// than the entry's own bytes), and a row stored before that cap existed
 		// never passed it. This is the backstop, refused terminally here,
 		// before the probe, exactly like an invalid entry — and it measures
-		// the command as Exec is handed it (sandbox.CheckScript, the bound
-		// sandbox.ExecScript applies), the platform's script preamble
-		// included, or a list within those bytes of the limit would pass
-		// here and fault there.
+		// the command as Exec is handed it (sandbox.CheckStatusScript), the
+		// install's frame and the platform's script preamble included, or a
+		// list within those bytes of the limit would pass here and fault
+		// there.
 		credsDir := ""
 		if len(stripped.creds) > 0 {
 			credsDir = packagesCredsDir()
 		}
 		cmd := m.command(stripped.entries, credsDir)
 		var tooLong *sandbox.CommandTooLongError
-		if errors.As(sandbox.CheckScript(cmd), &tooLong) {
+		if errors.As(sandbox.CheckStatusScript(packageInstallLabel, cmd), &tooLong) {
 			failed++
 			recordPackageInstalled(ctx, m.name, packageOutcomeInvalid)
 			e.emitPackageInstallError(ctx, sid, m.name, packageReasonInvalid,
@@ -804,7 +804,7 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		// The install's status is its answer, read only where its frame
 		// arrived (sandbox.ExecStatus): a 0 an image's startup chose would
 		// record the packages as installed with nothing installed (#942).
-		res, err := sandbox.ExecStatus(ctx, sb, "pkginstall", "the package install", sandbox.ExecRequest{
+		res, err := sandbox.ExecStatus(ctx, sb, packageInstallLabel, "the package install", sandbox.ExecRequest{
 			Command: cmd,
 			Timeout: e.cfg.PackageInstallTimeout,
 		})
@@ -846,6 +846,10 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 	}
 	return nil
 }
+
+// packageInstallLabel labels the install's frame (sandbox.ExecStatus), which
+// the pass's bound measures before its probe (sandbox.CheckStatusScript).
+const packageInstallLabel = "pkginstall"
 
 // packageFailureReason classifies one settled install. TimedOut is the
 // authoritative field (sandbox.ExecResult), so it is asked first: a killed

@@ -494,13 +494,15 @@ func TestARefusedListIsOneEventHoweverManyToolCallsFollow(t *testing.T) {
 	}
 }
 
-// TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally: the backstop
-// measures the install command as Exec is handed it, the platform's script
-// preamble (sandbox.Script) included. A list whose bare command fits the limit
-// by fewer bytes than the preamble takes is past it once the preamble is on —
-// Exec would refuse it before it ran, a fault the item reclaim-loops on — so
-// it is the terminal invalid refusal instead, before any probe.
-func TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally(t *testing.T) {
+// TestACommandWithinTheFrameOfTheLimitIsRefusedTerminally: the backstop
+// measures the install command as Exec is handed it, its frame and the
+// platform's script preamble included (sandbox.ExecStatus). A list whose bare
+// command fits the limit by fewer bytes than the frame takes is past it once
+// the frame is on — Exec would refuse it before it ran, a fault the item
+// reclaim-loops on — so it is the terminal invalid refusal instead, before any
+// probe. Measured with the preamble alone, as before the install ran framed
+// (#942), such a list was let through.
+func TestACommandWithinTheFrameOfTheLimitIsRefusedTerminally(t *testing.T) {
 	var pip packageManager
 	for _, m := range packageManagers {
 		if m.name == "pip" {
@@ -508,10 +510,12 @@ func TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally(t *testing.T) {
 		}
 	}
 	// Enough names to come within a few bytes of the limit, then the last one
-	// stretched until the bare command lands in the window the preamble
-	// closes: over the limit with it, not without.
+	// stretched until the bare command lands in the window the frame closes:
+	// over the limit with it, not without — and within it with the preamble
+	// alone.
+	frame := len(sandbox.NewFrame(packageInstallLabel).Wrap(""))
 	var entries []string
-	for len(pip.command(entries, "")) < sandbox.MaxCommandBytes-200 {
+	for len(pip.command(entries, "")) < sandbox.MaxCommandBytes-frame-200 {
 		entries = append(entries, fmt.Sprintf("pkg%04d-%s", len(entries), strings.Repeat("x", 90)))
 	}
 	entries = append(entries, "last")
@@ -521,7 +525,10 @@ func TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally(t *testing.T) {
 		if bare > sandbox.MaxCommandBytes {
 			t.Fatalf("test setup: no name length puts the bare command in the window (it jumped to %d)", bare)
 		}
-		if bare > sandbox.MaxCommandBytes-len(sandbox.ScriptPreamble) {
+		if bare > sandbox.MaxCommandBytes-frame {
+			if bare > sandbox.MaxCommandBytes-len(sandbox.ScriptPreamble) {
+				t.Fatalf("test setup: the bare command %d is past the preamble's window too", bare)
+			}
 			break
 		}
 	}

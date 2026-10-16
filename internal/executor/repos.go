@@ -427,9 +427,10 @@ func vacateScript(mount string) string {
 
 // occupiedStatus is the extraction's exit status when vacateScript refuses
 // the mount, so the refusal is reported as errMountOccupied and not as a
-// failed extraction. No platform command in the script exits with it; an
-// image's startup that ends the shell first, or a command the image wraps,
-// could, and would read as an occupied path.
+// failed extraction. No platform command in the script exits with it; a
+// command the image wraps, which runs inside the frame, could, and would read
+// as an occupied path. An image's startup that ends the shell first could not:
+// that status comes with no frame, which is no answer (#942).
 const occupiedStatus = 75
 
 // errMountOccupied is a clone refused because its mount path is outside the
@@ -514,11 +515,12 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 		"; rc=$?; rm -rf " + q(staging) + " " + q(tarPath) + "; exit $rc",
 	}, "")
 	res, err := sandbox.ExecStatus(ctx, sb, "extract", "the repository's extraction", sandbox.ExecRequest{Command: cmd})
-	if errors.Is(err, sandbox.ErrImageStartup) {
+	if errors.Is(err, sandbox.ErrImageStartup) || errors.Is(err, sandbox.ErrOutputLost) {
 		// The extraction ran, or may have, and its exit status never reached
 		// the platform: the image's startup pushed it out of the output (#860),
-		// or ended its shell, or the shell that reads its status (#942); a 0
-		// the startup chose is no answer. What it did is what the probe
+		// or ended its shell, or the shell that reads its status (#942) — a 0
+		// the startup chose is no answer — or its output was lost on its way
+		// after it began. What it did is what the probe
 		// reads: a .git at the mount names a tree the rename put there whole,
 		// which a stat answers through the read exec's own status.
 		if sandbox.StatPresence(ctx, sb, path.Join(clean, ".git")) == sandbox.Present {

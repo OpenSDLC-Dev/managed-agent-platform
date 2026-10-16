@@ -235,10 +235,13 @@ Each takes its status only where one stream carries its frame
 whole: stdout's, or stderr's under a flood that pushes stdout's out. Where
 neither stream shows the script began, the call fails with an error that
 names the image's startup, and the step fails with it: a tool call answers a
-tool error, a checkpoint stays unconsumed, the packages are not recorded as
-installed, a repository does not land, and a memory store keeps its baseline
-for the next sync. A memory store whose marker read the startup ended does
-not sync that pass. A script that began and whose output was lost on
+tool error; the packages are not recorded as installed; a repository lands
+only where a stat then finds its checkout whole; a memory store keeps its
+baseline for the next sync; and a checkpoint stays unconsumed, its restore
+failing the sandbox's setup, which the work item's lease retries — without
+end, on an image whose startup does this to every shell, as for any restore
+that cannot succeed. A memory store whose marker read the startup ended is
+neither landed nor synced that pass. A script that began and whose output was lost on
 its way fails as a transport fault, which a retry can clear; a stdout the cap
 cut is the startup's flood, as below. A refused-write probe on Docker that the
 startup ended answers nothing, so it gives the refusal no reason. On
@@ -270,11 +273,14 @@ printing those exact lines, the platform's own markers verbatim, could,
 misreporting a write in its own sandbox. One printing past the cap pushes
 them out too: on Docker a shed's report of what it left is then empty, and
 a failed write's temporaries are not emptied. What a few scripts print is
-relayed, not parsed, and only from inside their frames: the package install's
-output, as the session error's message; the stderr of a checkpoint's restore
-and of a repository's extraction, in the error each fails with; the memory
-sync's removals', in the warning when they fail; and a failed ripgrep install
-step's, in its tool error. The `bash` tool's output is the model's own
+relayed, not parsed: the package install's output, as the session error's
+message; the stderr of a checkpoint's restore and of a repository's
+extraction, in the error each fails with; the memory sync's removals', in the
+warning when they fail; and a failed ripgrep install step's, in its tool
+error. It is what the script printed inside its frame, or, of a run its
+deadline stopped first, after the frame opened; only a memory removal the
+startup kept from answering logs its warning with what the exec printed,
+banner and all. The `bash` tool's output is the model's own
 command's, which the startup file reaches as it reaches any command.
 What the file *changes* still applies — a function an image exports under
 the name of a command the scripts call answers for that command — and one

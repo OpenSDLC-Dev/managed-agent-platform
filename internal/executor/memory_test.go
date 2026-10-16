@@ -1173,3 +1173,30 @@ func TestAMarkerReadTheStartupEndedSkipsTheStore(t *testing.T) {
 		t.Error("a baseline written for a directory whose marker read did not answer")
 	}
 }
+
+// TestAMarkerReadTheStartupEndedLandsNothing: a run whose marker read the
+// image's startup kept from answering lands nothing in a directory that lists
+// empty — here a landed store whose every file the agent removed — and leaves
+// its baseline. Taken for a fresh directory, it was claimed: an empty baseline
+// written, and the store's memories pulled back over the agent's deletions
+// (#942).
+func TestAMarkerReadTheStartupEndedLandsNothing(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	before, ok := sb.files[baselinePath(memStoreID)]
+	if !ok {
+		t.Fatal("the store landed no baseline")
+	}
+	for p := range sb.files {
+		if strings.HasPrefix(p, memMount+"/") && p != memMount+"/"+memsync.MarkerName {
+			delete(sb.files, p)
+		}
+	}
+	sb.readStartupOn = "/" + memsync.MarkerName
+	h.step(t)
+	if _, ok := sb.files[memMount+"/notes.md"]; ok {
+		t.Error("notes.md pulled back into a directory whose marker read did not answer")
+	}
+	if got := sb.files[baselinePath(memStoreID)]; got != before {
+		t.Errorf("baseline = %q, want it as it was: %q", got, before)
+	}
+}

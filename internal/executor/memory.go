@@ -113,8 +113,9 @@ func (e *Executor) archivedStores(ctx context.Context, mounts []memoryRef) (map[
 // many stores the sandbox already held, for the caller to reconcile before
 // the tools read them.
 //
-// unanswered names the stores whose directory's listing did not answer
-// (errListingUnanswered): nothing is known of such a directory, so it is
+// unanswered names the stores whose directory's listing, or marker's read,
+// did not answer (errListingUnanswered, errMarkerUnanswered): nothing is known
+// of such a directory, so it is
 // neither held nor landed, and the caller leaves it out of this run's syncs,
 // so the next run's materialization asks again. Since #867 a sync no longer
 // fills an empty unmarked directory without its marker, so this is no longer
@@ -139,12 +140,16 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 		outcome, err := e.materializeStore(ctx, sb, sid, m)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
-		case errors.Is(err, errListingUnanswered):
+		case errors.Is(err, errListingUnanswered), errors.Is(err, errMarkerUnanswered):
 			if unanswered == nil {
 				unanswered = map[string]bool{}
 			}
 			unanswered[m.MemoryStoreID] = true
-			slog.WarnContext(ctx, "memory store not materialized: its directory's listing did not answer; not synced this run, and asked again the next",
+			why := "memory store not materialized: its directory's listing did not answer; not synced this run, and asked again the next"
+			if errors.Is(err, errMarkerUnanswered) {
+				why = "memory store not materialized: its marker's read did not answer; not synced this run, and asked again the next"
+			}
+			slog.WarnContext(ctx, why,
 				"session_id", sid, "memory_store_id", m.MemoryStoreID, "mount_path", m.MountPath, "err", err)
 		case err != nil:
 			slog.WarnContext(ctx, "memory store not materialized",
@@ -175,6 +180,11 @@ func (e *Executor) materializeMemory(ctx context.Context, sb sandbox.Sandbox, si
 // filled the output cap. It says nothing of the directory (materializeMemory).
 var errListingUnanswered = errors.New("its listing did not reach the output whole")
 
+// errMarkerUnanswered is a store directory's marker read that the image's
+// startup kept from answering (sandbox.ErrImageStartup). It says nothing of
+// the directory either, and is answered as errListingUnanswered is.
+var errMarkerUnanswered = errors.New("its marker's read did not answer")
+
 // withoutStores is refs less the stores named in skip.
 func withoutStores(refs []memoryRef, skip map[string]bool) []memoryRef {
 	if len(skip) == 0 {
@@ -190,8 +200,17 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, sid
 	// The marker's bytes, not its presence: the directory is agent-writable,
 	// and a marker rewritten to name another store is the altered marker
 	// decision 12 stops trusting.
-	if prev, err := sb.ReadFile(ctx, marker); err == nil && bytes.Equal(prev, want) {
+	prev, err := sb.ReadFile(ctx, marker)
+	if err == nil && bytes.Equal(prev, want) {
 		return memoryOutcomeUnchanged, nil
+	}
+	if errors.Is(err, sandbox.ErrImageStartup) {
+		// The image's startup kept the read from answering (#942): the
+		// directory may be this store's, landed and synced, and a listing that
+		// reads it empty is then no ground for a claim, whose empty baseline
+		// and pull would undo the agent's deletions. As a listing that did
+		// not answer: not landed, not held, and not synced this run.
+		return memoryOutcomeFailed, fmt.Errorf("%w: %w", errMarkerUnanswered, err)
 	}
 	res, framed, err := sandbox.ExecFramed(ctx, sb, "memsync", sandbox.ExecRequest{Command: memsync.HashTreeCommand(m.MountPath)})
 	if err != nil {
@@ -370,9 +389,10 @@ func (e *Executor) readStore(ctx context.Context, sb sandbox.Sandbox, st *storeS
 	marker, err := sb.ReadFile(ctx, path.Join(mount, memsync.MarkerName))
 	if errors.Is(err, sandbox.ErrImageStartup) {
 		// The image's startup kept the read from answering (#942): the marker
-		// may be this store's, another's or none. Pull-only, as for a marker
-		// that could not be read, would still pull and write a baseline on
-		// that guess, so the store's sync stops for this pass.
+		// may be this store's, another's or none. Plan 67 (decision 7) stops
+		// the store's sync for the pass on that, before it pulls or writes a
+		// baseline. A marker that could not be read for another reason stays
+		// pull-only, as decision 12 makes it.
 		return fmt.Errorf("read the marker: %w", err)
 	}
 	st.markerOK = err == nil && bytes.Equal(marker, memsync.MarkerBytes(id))

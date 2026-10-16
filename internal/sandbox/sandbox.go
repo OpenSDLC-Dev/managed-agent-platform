@@ -464,14 +464,18 @@ const ScriptPreamble = "set +e +f\n" +
 // first (ScriptPreamble).
 func Script(script string) string { return ScriptPreamble + script }
 
-// CheckScript is CheckCommand of script as the platform runs it (Script): the
-// bound measured on the command Exec is handed, preamble and all, for a caller
-// that must know before it runs anything — the package-install pass refuses
-// a list past it terminally, before its probe.
-func CheckScript(script string) error { return CheckCommand(Script(script)) }
+// CheckStatusScript is CheckCommand of script as ExecStatus runs it under
+// label: the bound measured on the command Exec is handed, frame and preamble
+// and all, for a caller that must know before it runs anything — the
+// package-install pass refuses a list past it terminally, before its probe.
+// Every frame's nonce has the same length, so a frame of its own measures the
+// one ExecStatus makes.
+func CheckStatusScript(label, script string) error {
+	return CheckCommand(NewFrame(label).Wrap(script))
+}
 
 // ExecScript runs req's command in sb as a script of the platform's own
-// (Script), refusing one past the bound (CheckScript) before anything runs, as
+// (Script), refusing one past the bound (CheckCommand) before anything runs, as
 // Exec would. Its status is no answer where an image's startup ended the shell
 // before the script began, which it does not ask (#942): a script whose
 // answer is its status belongs in ExecStatus, and one whose answer is its

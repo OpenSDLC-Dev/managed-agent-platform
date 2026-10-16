@@ -129,7 +129,7 @@ type fakeSandbox struct {
 	// startupEnds answers, without running it, each platform script whose
 	// command contains a key, framed or not: a shell the image's startup
 	// ended before the script began (#942), its status the key's value and
-	// no frame. The command is recorded.
+	// no frame. The script is recorded, as any other's is.
 	startupEnds map[string]int
 	// readStartupOn, if set, fails every ReadFile of a path ending in it with
 	// the error a read the image's startup ended carries
@@ -161,13 +161,17 @@ func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbo
 		return sandbox.ExecResult{}, err
 	}
 	req.Command = strings.TrimPrefix(req.Command, sandbox.ScriptPreamble)
+	script, frame, framed := sandboxtest.Unwrap(req.Command)
 	for key, status := range f.startupEnds {
 		if strings.Contains(req.Command, key) {
+			if framed {
+				req.Command = script
+			}
 			f.cmds = append(f.cmds, req.Command)
+			f.execTimeouts = append(f.execTimeouts, req.Timeout)
 			return sandbox.ExecResult{ExitCode: status}, nil
 		}
 	}
-	script, frame, framed := sandboxtest.Unwrap(req.Command)
 	if !framed {
 		return f.exec(ctx, req)
 	}
