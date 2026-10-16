@@ -608,7 +608,7 @@ func TestAnUnrecognizedProbeAnswerInstallsAnyway(t *testing.T) {
 // never carried the frame — here one that would have refused the pass — is
 // no answer, and the pass proceeds as it does past an unrecognized one.
 func TestAnUnframedProbeAnswerInstallsAnyway(t *testing.T) {
-	sb := &fakeSandbox{probeOut: packageReasonNotRoot, unframed: true}
+	sb := &fakeSandbox{probeOut: packageReasonNotRoot, unframedNext: 1}
 	h := newHarness(t, sb)
 	h.setPackages(t, map[string][]string{"apt": {"jq"}})
 	h.suspend(t, writeUse("out.txt", "hello"))
@@ -878,5 +878,31 @@ func TestTheInstallRunsInsideProvisionSandbox(t *testing.T) {
 	}
 	if n := len(installCmds(sb)); n != 1 {
 		t.Errorf("install commands = %d, want provisionSandbox itself to have run the install", n)
+	}
+}
+
+// TestAnInstallTheStartupEndedIsNoInstall: an install whose shell the image's
+// startup ended before it began is a failed attempt the client reads, whatever
+// status the startup chose, and records nothing installed. Read as the
+// install's own, a 0 recorded the packages as installed, and a 100 told the
+// client the manager failed (#942).
+func TestAnInstallTheStartupEndedIsNoInstall(t *testing.T) {
+	for _, status := range []int{0, 100} {
+		sb := &fakeSandbox{startupEnds: map[string]int{"set -o pipefail; { ": status}}
+		h := newHarness(t, sb)
+		h.setPackages(t, map[string][]string{"apt": {"curl"}})
+		h.suspend(t, writeUse("out.txt", "hello"))
+		h.stepOnce(t)
+
+		errs := h.packageErrors(t)
+		if len(errs) != 1 || errs[0]["reason"] != packageReasonFailed {
+			t.Fatalf("status %d: package errors = %+v; want one, reason failed", status, errs)
+		}
+		if msg, _ := errs[0]["message"].(string); !strings.Contains(msg, "startup file (BASH_ENV)") {
+			t.Errorf("status %d: message = %q; want the image's startup named", status, msg)
+		}
+		if rec := sentinel(t, sb)["apt"]; rec.Installed {
+			t.Errorf("status %d: sentinel = %+v; want no install", status, rec)
+		}
 	}
 }

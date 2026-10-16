@@ -801,7 +801,10 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			}
 		}
 		progress()
-		res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{
+		// The install's status is its answer, read only where its frame
+		// arrived (sandbox.ExecStatus): a 0 an image's startup chose would
+		// record the packages as installed with nothing installed (#942).
+		res, err := sandbox.ExecStatus(ctx, sb, "pkginstall", "the package install", sandbox.ExecRequest{
 			Command: cmd,
 			Timeout: e.cfg.PackageInstallTimeout,
 		})
@@ -811,9 +814,9 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		case errors.Is(err, sandbox.ErrImageStartup):
 			// The install ran, or may have, and how it went never reached the
 			// platform: the image's startup pushed it out of the output, or
-			// ended the shell that reads it (#942). A failed attempt the client
-			// reads, not a fault, whose reclaim would run the install again and
-			// meet the same.
+			// ended its shell, or the shell that reads its status (#942). A
+			// failed attempt the client reads, not a fault, whose reclaim would
+			// run the install again and meet the same.
 			reason, message = packageReasonFailed, err.Error()
 		case err != nil:
 			return err

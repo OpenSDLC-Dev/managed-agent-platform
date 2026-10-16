@@ -1317,3 +1317,65 @@ func TestMemorySkippedRowsReportProgress(t *testing.T) {
 		t.Errorf("flush reported progress %d times over %d skipped rows", n, shadowed)
 	}
 }
+
+// TestMemoryDeletionTheStartupEndedKeepsTheBaseline: a store's deletion whose
+// shell the image's startup ended before it began, with status 0, leaves the
+// file and the baseline that names it, and the next sync removes the file.
+// Read as the removal's own, that 0 wrote a baseline without the file still on
+// disk, and the next sync pushed it back to the store (#942).
+func TestMemoryDeletionTheStartupEndedKeepsTheBaseline(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/facts/a.md", "alpha")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	token := h.sessionsToken(t)
+	h.runWith(t, token)
+	if sb.files[memMount+"/facts/a.md"] != "alpha" {
+		t.Fatalf("the store did not land: %v", sb.files)
+	}
+	if _, err := h.pool.Exec(context.Background(),
+		`DELETE FROM memories WHERE memory_store_id = $1 AND path = '/facts/a.md'`, memStoreID); err != nil {
+		t.Fatal(err)
+	}
+
+	sb.startupEnds = map[string]int{"; rm -f -- ": 0}
+	h.runWith(t, token)
+	if _, ok := sb.files[memMount+"/facts/a.md"]; !ok {
+		t.Fatal("/facts/a.md gone, though the startup ended its removal")
+	}
+	if _, ok := h.baseline(t, memStoreID).Synced["/facts/a.md"]; !ok {
+		t.Error("the baseline no longer names /facts/a.md, still on disk")
+	}
+
+	sb.startupEnds = nil
+	h.runWith(t, token)
+	if _, ok := sb.files[memMount+"/facts/a.md"]; ok {
+		t.Error("/facts/a.md still on disk after a sync the startup let run")
+	}
+	if _, ok := h.memoryContent(t, memStoreID, "/facts/a.md"); ok {
+		t.Error("/facts/a.md pushed back to the store it was deleted from")
+	}
+}
+
+// TestAMarkerReadTheStartupEndedSkipsTheStore: a marker read the image's
+// startup kept from answering says nothing of whose the directory is, so the
+// store's sync stops for the run: nothing is pulled and no baseline is
+// written. Pull-only, as for a marker that could not be read, pulled and
+// wrote a baseline on that guess (#942).
+func TestAMarkerReadTheStartupEndedSkipsTheStore(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{}, readStartupOn: "/" + memsync.MarkerName}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	h.refMemory(t, [3]string{memStoreID, memMount, "read_write"})
+	mem := newMemoryStores(h.client, h.sessionsToken(t), h.sid.String(), sb,
+		[]memoryRef{{Type: "memory_store", MemoryStoreID: memStoreID, Access: "read_write", MountPath: memMount}})
+	mem.sync(context.Background(), func() {})
+	if _, ok := sb.files[memMount+"/notes.md"]; ok {
+		t.Error("notes.md pulled into a directory whose marker read did not answer")
+	}
+	if _, ok := sb.files[baselinePath(memStoreID)]; ok {
+		t.Error("a baseline written for a directory whose marker read did not answer")
+	}
+}

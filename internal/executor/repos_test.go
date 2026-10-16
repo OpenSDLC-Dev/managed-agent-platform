@@ -2115,3 +2115,18 @@ func sbPaths(sb *fakeSandbox) []string {
 	}
 	return out
 }
+
+// TestRepoExtractionTakesNoStatusAStartupChose: an extraction whose shell the
+// image's startup ended before it began lands nothing, whatever status the
+// startup chose, and fails as the extraction, naming the image's startup.
+// Read as the extraction's own, a 0 counted the repository as landed with no
+// checkout, and a 75 refused the mount as occupied (#942).
+func TestRepoExtractionTakesNoStatusAStartupChose(t *testing.T) {
+	for _, status := range []int{0, occupiedStatus} {
+		sb := &fakeSandbox{files: map[string]string{}, startupEnds: map[string]int{" && tar -xf ": status}}
+		err := extractRepo(context.Background(), sb, "/opt/repo", "/tmp/repo.tar", "", false)
+		if !errors.Is(err, errExtraction) || !errors.Is(err, sandbox.ErrImageStartup) || errors.Is(err, errMountOccupied) {
+			t.Errorf("status %d: extractRepo = %v; want the extraction's failure, naming the image's startup", status, err)
+		}
+	}
+}

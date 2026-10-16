@@ -368,6 +368,13 @@ func (e *Executor) readMemory(ctx context.Context, sb sandbox.Sandbox, sid domai
 func (e *Executor) readStore(ctx context.Context, sb sandbox.Sandbox, st *storeSync) error {
 	mount, id := st.ref.MountPath, st.ref.MemoryStoreID
 	marker, err := sb.ReadFile(ctx, path.Join(mount, memsync.MarkerName))
+	if errors.Is(err, sandbox.ErrImageStartup) {
+		// The image's startup kept the read from answering (#942): the marker
+		// may be this store's, another's or none. Pull-only, as for a marker
+		// that could not be read, would still pull and write a baseline on
+		// that guess, so the store's sync stops for this pass.
+		return fmt.Errorf("read the marker: %w", err)
+	}
 	st.markerOK = err == nil && bytes.Equal(marker, memsync.MarkerBytes(id))
 	st.markerAbsent = errors.Is(err, sandbox.ErrFileNotExist)
 
@@ -781,7 +788,11 @@ func (e *Executor) applyMemory(ctx context.Context, ms *memorySync) {
 		}
 		removed := true
 		for _, cmd := range memsync.RemoveCommands(st.ref.MountPath, st.removals) {
-			res, err := sandbox.ExecScript(ctx, ms.sb, sandbox.ExecRequest{Command: cmd})
+			// Each removal's status is its answer, read only where its frame
+			// arrived (sandbox.ExecStatus): a 0 an image's startup chose would
+			// write a baseline without files still on disk, which the next
+			// sync pushes back (#942).
+			res, err := sandbox.ExecStatus(ctx, ms.sb, "memremove", "the memory deletion", sandbox.ExecRequest{Command: cmd})
 			if err != nil || res.ExitCode != 0 {
 				slog.WarnContext(ctx, "memory deletions not applied; the baseline is kept for the next sync",
 					"session_id", ms.sid, "memory_store_id", id, "err", err, "exit", res.ExitCode, "stderr", strings.TrimSpace(res.Stderr))

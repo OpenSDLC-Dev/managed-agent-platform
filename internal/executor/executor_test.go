@@ -126,6 +126,15 @@ type fakeSandbox struct {
 	// unframedNext answers that many of the next framed scripts bare, and
 	// frames the rest: a listing that lost its frame once.
 	unframedNext int
+	// startupEnds answers, without running it, each platform script whose
+	// command contains a key, framed or not: a shell the image's startup
+	// ended before the script began (#942), its status the key's value and
+	// no frame. The command is recorded.
+	startupEnds map[string]int
+	// readStartupOn, if set, fails every ReadFile of a path ending in it with
+	// the error a read the image's startup ended carries
+	// (sandbox.StartupExitError).
+	readStartupOn string
 	// unscripted records every exec that was neither a platform script with
 	// its preamble, nor a framed one, nor the bash tool's (sandboxtest.Scripted):
 	// Exec refuses it, and newHarnessWith fails the test on it (TestMain the
@@ -152,6 +161,12 @@ func (f *fakeSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbo
 		return sandbox.ExecResult{}, err
 	}
 	req.Command = strings.TrimPrefix(req.Command, sandbox.ScriptPreamble)
+	for key, status := range f.startupEnds {
+		if strings.Contains(req.Command, key) {
+			f.cmds = append(f.cmds, req.Command)
+			return sandbox.ExecResult{ExitCode: status}, nil
+		}
+	}
 	script, frame, framed := sandboxtest.Unwrap(req.Command)
 	if !framed {
 		return f.exec(ctx, req)
@@ -275,6 +290,9 @@ func hashTreeMount(cmd string) (string, bool) {
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 	if f.readErr != nil {
 		return nil, f.readErr
+	}
+	if f.readStartupOn != "" && strings.HasSuffix(path, f.readStartupOn) {
+		return nil, &sandbox.StartupExitError{What: "the read of " + path}
 	}
 	if f.readErrOn != "" && strings.HasSuffix(path, f.readErrOn) {
 		return nil, fmt.Errorf("fake: read %s: permission denied", path)
