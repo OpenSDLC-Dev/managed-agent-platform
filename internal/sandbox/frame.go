@@ -21,9 +21,9 @@ import (
 // startup shares the streams (#860, after #827 framed glob's and grep's).
 // `bash -c` sources an `ENV BASH_ENV` file before it runs anything, and that
 // file can print — on either stream, ending its line or not — leave the
-// directory the exec started in, and set an EXIT trap that prints after the
-// script is done. The frame keeps out what reaches the streams before the
-// begin line and after the end line. It keeps out what the startup prints, not
+// directory the exec started in, and set an EXIT trap, which close_frame
+// clears before it exits (Open). The frame keeps out what reaches the streams
+// before the begin line and after the end line. It keeps out what the startup prints, not
 // what it changes: the startup file still runs, as it runs for every exec, so
 // a framed script names every path whole rather than depend on the directory
 // the exec started in, and a function an image exports under a command's name
@@ -83,13 +83,19 @@ func (f Frame) Lines() (begin, end string) {
 	return "\n" + f.begin + "\n", "\n" + f.end + "\n"
 }
 
-// Open is what a framed script begins with: close_frame, which prints the end
-// line on both streams and exits with its argument — the one way the script
-// may exit — then ScriptPreamble, and then the begin line on both. Each line is
-// printed after a newline of its own, so it is a line however what came before
-// it ended. It is POSIX shell, but for the preamble's bash-only lines, which
-// a POSIX sh passes over without a word, so a script `sh -c` runs can open
-// with it too.
+// Open is what a framed script begins with: close_frame, which clears the
+// EXIT trap, prints the end line on both streams and exits with its argument —
+// the one way the script may exit — then ScriptPreamble, and then the begin
+// line on both. Each line is printed after a newline of its own, so it is a
+// line however what came before it ended. It is POSIX shell, but for the
+// preamble's bash-only lines, which a POSIX sh passes over without a word, so
+// a script `sh -c` runs can open with it too.
+//
+// The EXIT trap is an image's startup file's: left in place, it would run
+// after the end line, where an `exit` of its own replaces the status the
+// script left with one the image chose (#942). A script that sets an EXIT
+// trap of its own runs it in Wrap's subshell, which close_frame does not
+// touch.
 //
 // The script inherits the shell options an image's startup set, and errexit
 // among them would end it at the first command that fails — rg finding no
@@ -99,7 +105,7 @@ func (f Frame) Lines() (begin, end string) {
 // (ScriptPreamble). A script that cannot route each of its exits through
 // close_frame takes Wrap instead.
 func (f Frame) Open() string {
-	return fmt.Sprintf(`close_frame() { printf '\n%%s\n' '%[1]s'; printf '\n%%s\n' '%[1]s' >&2; exit "$1"; }
+	return fmt.Sprintf(`close_frame() { trap - EXIT; printf '\n%%s\n' '%[1]s'; printf '\n%%s\n' '%[1]s' >&2; exit "$1"; }
 `, f.end) + ScriptPreamble + fmt.Sprintf(`printf '\n%%s\n' '%[1]s'; printf '\n%%s\n' '%[1]s' >&2
 `, f.begin)
 }
@@ -113,9 +119,10 @@ const wrapClose = "\n) || close_frame \"$?\"\nclose_frame 0\n"
 // exits, an `exit` from inside one of its functions included, and an `exec`,
 // which replaces the subshell alone, still closes the frame, and the exec
 // exits as the script did. The subshell inherits the positional parameters,
-// stdin and the functions and variables the shell has, and not its traps, so
-// an EXIT trap an image's startup file set runs once, after the end line, as
-// the outer shell exits.
+// stdin and the functions and variables the shell has, and not its traps: an
+// EXIT trap an image's startup file set stays with the outer shell, where
+// close_frame clears it (Open), so it runs neither inside the frame nor after
+// it.
 //
 // It inherits the shell's options as well, errexit among them where the
 // startup set it. Open turns errexit off, and Wrap does not lean on that: the
@@ -138,16 +145,17 @@ func (f Frame) Wrap(script string) string {
 // a line that looks like one, nonce and all, having read the script from the
 // exec's argv; the script's own comes after it. That choice opens the other
 // side as far as it closes this one: what prints after the script's end line
-// — an EXIT trap the startup file set, which runs in the script's own shell
-// and reads the nonce there — can print a begin line, an answer and an end
-// line of its own, and that is what is read. Neither is a boundary the frame
+// — a process the startup left running, which can read the nonce from the
+// exec's argv — can print a begin line, an answer and an end line of its own,
+// and that is what is read. Neither is a boundary the frame
 // keeps: it keeps out what an image's startup prints by accident, not what a
 // process in the sandbox forges on purpose (Frame).
 //
 // A stream the sandbox's cap cut (truncated: that stream's own flag, never the
 // other's) before its end line is short: all that follows the begin line is
 // what there is, less any start of the end line the cap left at its tail. One
-// the cap cut only after its end line — an EXIT trap's flood — is whole, and
+// the cap cut only after its end line — what printed after the script — is
+// whole, and
 // not short; so is one it cut inside the end line, where what it left of it
 // carries at least 8 of the nonce's 16 digits: the script prints the end line
 // after all else it prints there, and a tail that carries that much of the
@@ -186,16 +194,17 @@ func (f Frame) CutBytesWithin(b []byte, truncated bool, room int) (text []byte, 
 // CutInBegin reports whether s ends partway through the frame's begin line —
 // a stream that lost its tail while the begin line was on its way, which
 // carries none of the script's output and no sign that anything else ended it.
-// The tail must hold some of the line past the newline it starts with: a
-// stream ending in a newline alone ends as every line does, a banner's that
-// was followed by nothing — the shell dying before the script began, which is
-// no loss in transit. One ending in the whole begin line is not either.
+// The tail must reach frameNonceTrusted digits into the line's nonce: what
+// comes before them — "\nm", "\nmap-" — a banner can end in by itself, the
+// shell dying after it before the script began, which is no loss in transit
+// (#942). One ending in the whole begin line is not either.
 func (f Frame) CutInBegin(s string) bool {
 	begin, _ := f.Lines()
 	if strings.HasSuffix(s, begin) {
 		return false
 	}
-	for k := min(len(begin)-1, len(s)); k > 1; k-- {
+	least := len(begin) - len("\n") - frameNonceDigits + frameNonceTrusted
+	for k := min(len(begin)-1, len(s)); k >= least; k-- {
 		if strings.HasSuffix(s, begin[:k]) {
 			return true
 		}
@@ -204,26 +213,34 @@ func (f Frame) CutInBegin(s string) bool {
 }
 
 // Began reports whether s, one stream of a run of the script f frames, shows
-// that the script began: it carries the begin line, or ends partway through it
+// that the script began: it carries the begin line as the script prints it, on
+// a line of its own — as Cut finds it, and as the exec's command text, which
+// spells the line's words too, never puts them, so a startup that echoes the
+// command it was handed shows nothing — or ends partway through it
 // (CutInBegin), which was on its way when the stream was lost.
 func (f Frame) Began(s string) bool {
-	return strings.Contains(s, f.begin) || f.CutInBegin(s)
+	begin, _ := f.Lines()
+	return strings.Contains(s, begin) || strings.HasPrefix(s, begin[1:]) || f.CutInBegin(s)
 }
 
-// Unanswered is why a run of the script f frames gave no answer, where its
-// stdout carries no frame (Unframe answered false); what names the answer
-// asked for. A stdout the cap cut before the frame was filled by what printed
-// ahead of the script: a *StartupOutputError. The begin line on either stream
-// (Began) shows the script began and its output was lost on its way:
-// ErrOutputLost, the transport's fault. Neither shows that the image's startup
-// ended the shell before the script began, with a status of its own choosing:
-// a *StartupExitError, which answers nothing whatever the status (#942).
+// Unanswered is why a run of the script f frames gave no answer, where no
+// stream carries its frame whole (UnframeStatus answered false); what names
+// the answer asked for. A stdout the cap cut before the frame was filled by
+// what printed ahead of the script: a *StartupOutputError. The begin line on
+// either stream (Began) shows the script began and its output was lost on its
+// way: ErrOutputLost, the transport's fault. A stderr the cap cut with no
+// begin line on either stream was filled ahead of the script too. Nothing of
+// the kind shows that the image's startup ended the shell before the script
+// began, with a status of its own choosing: a *StartupExitError, which answers
+// nothing whatever the status (#942).
 func (f Frame) Unanswered(what string, res ExecResult) error {
 	switch {
 	case res.StdoutTruncated:
 		return &StartupOutputError{What: what}
 	case f.Began(res.Stdout) || f.Began(res.Stderr):
 		return fmt.Errorf("%s: %w", what, ErrOutputLost)
+	case res.StderrTruncated:
+		return &StartupOutputError{What: what}
 	default:
 		return &StartupExitError{What: what, Status: res.ExitCode}
 	}
@@ -317,15 +334,15 @@ func (f Frame) Unframe(res ExecResult) (ExecResult, bool) {
 }
 
 // UnframeStatus is Unframe for a script whose answer is its exit status, its
-// stdout at most a detail of it. Where the cap cut stdout before the frame —
-// what printed ahead of the script filled it — a stderr that carries the whole
-// frame still shows the script ran to its end (Open prints both lines on both
-// streams), so the status answers, with nothing of stdout, which the flood
-// took (#860, #942). A stdout the cap did not cut is Unframe's alone: one with
-// no frame was lost on its way, or the script never began (Unanswered).
+// stdout at most a detail of it. Where stdout carries no frame — the cap cut
+// it before the frame, what printed ahead of the script filling it (#860), or
+// it was lost on its way (#105), or an image's startup silenced it — a stderr
+// that carries the whole frame still shows the script ran to its end: Open
+// prints both lines on both streams, and close_frame is the script's one way
+// out. So the status answers, with nothing of stdout (#942).
 func (f Frame) UnframeStatus(res ExecResult) (ExecResult, bool) {
-	if out, ok := f.Unframe(res); ok || !res.StdoutTruncated {
-		return out, ok
+	if out, ok := f.Unframe(res); ok {
+		return out, true
 	}
 	msg, framed, short := f.Cut(res.Stderr, res.StderrTruncated)
 	if !framed || short {
@@ -351,12 +368,9 @@ func ExecFramed(ctx context.Context, sb Sandbox, label string, req ExecRequest) 
 }
 
 // ExecStatus runs req's command in sb framed (Wrap), under a frame of its own
-// labelled label, for a script whose answer is its exit status. Where the
-// frame arrived it answers what the script printed (UnframeStatus), and the
-// status is the script's own; elsewhere it answers why no answer came
-// (Unanswered), what naming the answer asked for, so a status an image's
-// startup chose is never read as the script's (#942). Exec's own error is
-// returned as Exec returned it.
+// labelled label, for a script whose answer is its exit status, and answers
+// it (Answer), so a status an image's startup chose is never read as the
+// script's (#942). Exec's own error is returned as Exec returned it.
 func ExecStatus(ctx context.Context, sb Sandbox, label, what string, req ExecRequest) (ExecResult, error) {
 	f := NewFrame(label)
 	req.Command = f.Wrap(req.Command)
@@ -364,6 +378,14 @@ func ExecStatus(ctx context.Context, sb Sandbox, label, what string, req ExecReq
 	if err != nil {
 		return res, err
 	}
+	return f.Answer(what, res)
+}
+
+// Answer is a run of the script f frames, read as one whose answer is its exit
+// status: what the script printed, the status its own, where its frame arrived
+// (UnframeStatus), and elsewhere why no answer came (Unanswered), what naming
+// the answer asked for.
+func (f Frame) Answer(what string, res ExecResult) (ExecResult, error) {
 	if out, ok := f.UnframeStatus(res); ok {
 		return out, nil
 	}

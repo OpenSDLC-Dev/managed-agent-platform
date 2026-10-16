@@ -443,10 +443,10 @@ func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
 				arm(ro, "pathfault", sandbox.ExitPathNotDirectory)
 				_, err := ro.ReadFile(ctx, "/etc/passwd/x")
 				unclassified(ro, "pathfault", sandbox.ExitPathNotDirectory, err, sandbox.ErrNotDirectory)
-				for _, status := range []int{sandbox.ExitPathIsDirectory, sandbox.ExitPathNotReplaceable} {
+				for status, wrong := range map[int]error{sandbox.ExitPathIsDirectory: sandbox.ErrIsDirectory, sandbox.ExitPathNotReplaceable: sandbox.ErrNotReplaceable} {
 					arm(ro, "replaceable", status)
 					err := ro.WriteFile(ctx, "/etc/map-replaceable", x)
-					unclassified(ro, "replaceable", status, err, sandbox.ErrIsDirectory)
+					unclassified(ro, "replaceable", status, err, wrong)
 				}
 				arm(ro, "writable", sandbox.ExitPathNotWritable)
 				unclassified(ro, "writable", sandbox.ExitPathNotWritable, ro.WriteFile(ctx, "/etc/map-writable", x), sandbox.ErrNotWritable)
@@ -501,11 +501,37 @@ func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
 				for _, status := range []int{0, 7} {
 					_, err := sh(sb, armCommand("exit", status))
 					var startup *sandbox.StartupExitError
-					if !errors.As(err, &startup) || !startup.Ran {
-						t.Errorf("exit record ended with %d: %v; want the startup's exit of a command that ran", status, err)
+					if !errors.As(err, &startup) || !startup.MayHaveRun {
+						t.Errorf("exit record ended with %d: %v; want the startup's exit of a command that may have run", status, err)
 					}
 					ended(sb, "exit", status, err)
 				}
+			}
+		})
+	}
+}
+
+// An image's startup file whose EXIT trap exits 0 would replace the status
+// each framed platform script left, after its frame closed: a write onto a
+// directory, or under a path a file blocks, would read as done, and on
+// Kubernetes a missing file as an empty one. close_frame clears the trap, so
+// each answers its own status, on both backends (#942).
+func TestPlatformScriptsKeepTheirStatusPastAnImagesExitTrap(t *testing.T) {
+	for _, b := range hookedtest.BackendsFor(t, `trap "printf 'exit banner '; exit 0" EXIT`+"\n") {
+		t.Run(b.Name, func(t *testing.T) {
+			ctx := context.Background()
+			sb, _ := b.Provision(t, sandbox.Hardening{})
+			if err := sb.WriteFile(ctx, "/workspace/trap/a-file", []byte("x")); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if err := sb.WriteFile(ctx, "/workspace/trap", []byte("x")); !errors.Is(err, sandbox.ErrIsDirectory) {
+				t.Errorf("a write onto a directory = %v; want ErrIsDirectory", err)
+			}
+			if err := sb.WriteFile(ctx, "/workspace/trap/a-file/b", []byte("x")); !errors.Is(err, sandbox.ErrNotDirectory) {
+				t.Errorf("a write under a file = %v; want ErrNotDirectory", err)
+			}
+			if got, err := sb.ReadFile(ctx, "/workspace/trap/none"); !errors.Is(err, sandbox.ErrFileNotExist) {
+				t.Errorf("a read of a missing file = %q, %v; want ErrFileNotExist", got, err)
 			}
 		})
 	}

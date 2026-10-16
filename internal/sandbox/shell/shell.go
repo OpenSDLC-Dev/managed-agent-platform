@@ -189,11 +189,18 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	// would move `head` off the last good snapshot and take every earlier call's
 	// state with it. Leaving `head` alone costs the call its own mutations and
 	// nothing more.
+	//
+	// A read of the marker that got no answer is the same "not saved": its
+	// output lost on its way after the read began (sandbox.ErrOutputLost), or
+	// an image's startup that ended the read's shell first, its status the
+	// startup's (sandbox.ErrUnframedStatus). The command has run, and a fault
+	// would leave the call for a reclaim that runs it again (#942).
 	if res.TimedOut {
 		return res, nil
 	}
 	if _, err := sb.ReadFile(ctx, snap+"/done"); err != nil {
-		if errors.Is(err, sandbox.ErrFileNotExist) {
+		if errors.Is(err, sandbox.ErrFileNotExist) || errors.Is(err, sandbox.ErrOutputLost) ||
+			errors.Is(err, sandbox.ErrUnframedStatus) {
 			return res, nil
 		}
 		return Result{}, err

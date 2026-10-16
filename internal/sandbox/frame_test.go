@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -131,21 +132,27 @@ func TestFrameCutBytesWithinLooksNearTheEnds(t *testing.T) {
 	}
 }
 
-// CutInBegin answers whether a stream ends partway into the begin line — the
-// stream lost while the line was on its way, after whatever banner came first —
-// and only that: a stream whose begin line arrived whole, or that ends on
-// anything else — a newline alone, the end of any line, among them — does not.
+// CutInBegin answers whether a stream ends partway into the begin line, far
+// enough to reach frameNonceTrusted digits of its nonce — the stream lost
+// while the line was on its way, after whatever banner came first — and only
+// that: a stream whose begin line arrived whole, or that ends on anything else
+// — a newline alone, the end of any line, the line's first bytes, which a
+// banner can end in by itself, among them — does not.
 func TestFrameCutInBegin(t *testing.T) {
 	f := sandbox.NewFrame("test")
 	begin, _ := f.Lines()
+	// Up to the nonce, and 8 of its 16 digits.
+	least := len(begin) - 1 - 16 + 8
 	for s, want := range map[string]bool{
 		"":                          false,
 		"banner":                    false,
 		"banner\n":                  false,
 		"\n":                        false,
 		"banner" + begin[:1]:        false,
-		"banner" + begin[:2]:        true,
-		"banner" + begin[:10]:       true,
+		"banner" + begin[:2]:        false,
+		"banner" + begin[:10]:       false,
+		"banner" + begin[:least-1]:  false,
+		"banner" + begin[:least]:    true,
 		begin[:len(begin)-1]:        true,
 		"banner" + begin:            false,
 		"banner" + begin + "K 0":    false,
@@ -296,10 +303,10 @@ func TestFrameWrapAnswersThroughAStartupFile(t *testing.T) {
 			if !ok || res.Stdout != tc.stdout || res.Stderr != tc.stderr || res.ExitCode != tc.code || res.Truncated() {
 				t.Errorf("Unframe = %+v, %v; want stdout %q, stderr %q, exit %d\nraw: %+v", res, ok, tc.stdout, tc.stderr, tc.code, raw)
 			}
-			if !strings.HasPrefix(raw.Stdout, "welcome to the image ") || !strings.HasSuffix(raw.Stdout, "exit banner ") ||
-				!strings.HasPrefix(raw.Stderr, "stderr banner ") || !strings.HasSuffix(raw.Stderr, "exit stderr ") ||
-				strings.Count(raw.Stdout, "exit banner") != 1 {
-				t.Errorf("raw = %+v; want the startup file's banner before the frame and its trap's, once, after it", raw)
+			_, end := f.Lines()
+			if !strings.HasPrefix(raw.Stdout, "welcome to the image ") || !strings.HasSuffix(raw.Stdout, end) ||
+				!strings.HasPrefix(raw.Stderr, "stderr banner ") || !strings.HasSuffix(raw.Stderr, end) {
+				t.Errorf("raw = %+v; want the startup file's banner before the frame, and its EXIT trap never run (close_frame clears it)", raw)
 			}
 		})
 	}
@@ -501,8 +508,10 @@ func TestFrameUnansweredSaysWhyNoAnswerCame(t *testing.T) {
 		{"another frame's begin line", sandbox.ExecResult{Stdout: other, Stderr: other, ExitCode: 15}, sandbox.ErrUnframedStatus},
 		{"stdout's begin line, and no end line", sandbox.ExecResult{Stdout: "welcome" + begin + "part"}, sandbox.ErrOutputLost},
 		{"stderr's begin line, and stdout lost", sandbox.ExecResult{Stderr: "warning" + begin, ExitCode: 16}, sandbox.ErrOutputLost},
-		{"stdout ending inside its begin line", sandbox.ExecResult{Stdout: "welcome" + begin[:len(begin)/2]}, sandbox.ErrOutputLost},
-		{"stderr ending inside its begin line", sandbox.ExecResult{Stderr: begin[:5], ExitCode: 1}, sandbox.ErrOutputLost},
+		{"stdout ending inside its begin line", sandbox.ExecResult{Stdout: "welcome" + begin[:len(begin)-3]}, sandbox.ErrOutputLost},
+		{"stderr ending inside its begin line", sandbox.ExecResult{Stderr: begin[:len(begin)-2], ExitCode: 1}, sandbox.ErrOutputLost},
+		{"a banner ending as a begin line starts", sandbox.ExecResult{Stdout: "welcome\nm", ExitCode: 10}, sandbox.ErrUnframedStatus},
+		{"the command, echoed", sandbox.ExecResult{Stderr: "blocked: " + f.Wrap("echo ran") + "\n", ExitCode: 126}, sandbox.ErrUnframedStatus},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, ok := f.Unframe(tc.res); ok {
@@ -514,7 +523,7 @@ func TestFrameUnansweredSaysWhyNoAnswerCame(t *testing.T) {
 			}
 			var exit *sandbox.StartupExitError
 			if isExit := errors.As(err, &exit); isExit != (tc.want == sandbox.ErrUnframedStatus) ||
-				isExit && (exit.Status != tc.res.ExitCode || exit.What != "the probe of /w" || exit.Ran) {
+				isExit && (exit.Status != tc.res.ExitCode || exit.What != "the probe of /w" || exit.MayHaveRun) {
 				t.Errorf("Unanswered = %#v, want the startup's exit with status %d only where neither stream began", err, tc.res.ExitCode)
 			}
 		})
@@ -523,6 +532,10 @@ func TestFrameUnansweredSaysWhyNoAnswerCame(t *testing.T) {
 	if err := f.Unanswered("the probe of /w", sandbox.ExecResult{Stdout: "welcome" + begin[:5], StdoutTruncated: true, Stderr: begin, ExitCode: 16}); !errors.As(err, &flood) ||
 		flood.What != "the probe of /w" || errors.Is(err, sandbox.ErrUnframedStatus) {
 		t.Errorf("Unanswered over a stdout the cap cut = %v, want the startup's flood", err)
+	}
+	if err := f.Unanswered("the probe of /w", sandbox.ExecResult{Stderr: strings.Repeat("y\n", 64), StderrTruncated: true, ExitCode: 16}); !errors.As(err, &flood) ||
+		errors.Is(err, sandbox.ErrUnframedStatus) {
+		t.Errorf("Unanswered over a stderr the cap cut before any begin line = %v, want the startup's flood", err)
 	}
 	for _, status := range []int{0, 1, 16} {
 		raw := runHooked(t, sandboxtest.BannerHook+"exit "+strconv.Itoa(status)+"\n", "/bin/bash", f.Wrap("echo ran"), "")
@@ -546,7 +559,11 @@ func TestFrameBegan(t *testing.T) {
 	other, _ := sandbox.NewFrame("test").Lines()
 	for s, want := range map[string]bool{
 		"": false, "welcome\n": false, other: false, "\n": false, end: false,
-		begin: true, "welcome" + begin + "part": true, begin[1:]: true, begin[:4]: true, "welcome" + begin[:len(begin)-1]: true,
+		begin: true, "welcome" + begin + "part": true, begin[1:]: true, "welcome" + begin[:len(begin)-1]: true,
+		// The line's first bytes, which a banner can end in by itself.
+		begin[:4]: false, "welcome\nm": false,
+		// The command a startup echoes spells the line's words, never the line.
+		f.Wrap("echo ran"): false, "blocked: " + f.Wrap("echo ran") + "\n": false,
 	} {
 		if got := f.Began(s); got != want {
 			t.Errorf("Began(%q) = %v, want %v", s, got, want)
@@ -555,9 +572,10 @@ func TestFrameBegan(t *testing.T) {
 }
 
 // UnframeStatus answers a status where stdout carries the frame, as Unframe
-// does, and where the cap cut stdout before it, through a stderr that carries
-// the whole frame, with no stdout. Nowhere else: not on a stdout that arrived
-// whole and unframed, and not on a stderr whose frame is missing or cut short.
+// does, and where stdout carries none — the cap cut it, the transport lost it,
+// a startup silenced it — through a stderr that carries the whole frame, with
+// no stdout. Nowhere else: not on a stderr whose frame is missing or cut
+// short.
 func TestFrameUnframeStatus(t *testing.T) {
 	f := sandbox.NewFrame("test")
 	begin, end := f.Lines()
@@ -575,7 +593,9 @@ func TestFrameUnframeStatus(t *testing.T) {
 		{"stdout flooded, stderr bare", sandbox.ExecResult{Stdout: flood, StdoutTruncated: true, Stderr: "warn", ExitCode: 0}, false, sandbox.ExecResult{}},
 		{"stdout flooded, stderr began and lost its end", sandbox.ExecResult{Stdout: flood, StdoutTruncated: true, Stderr: begin + "msg", ExitCode: 0}, false, sandbox.ExecResult{}},
 		{"both flooded, stderr's end cut short", sandbox.ExecResult{Stdout: flood, StdoutTruncated: true, Stderr: begin + "msg" + end[:3], StderrTruncated: true, ExitCode: 0}, false, sandbox.ExecResult{}},
-		{"stdout whole and unframed, stderr framed", sandbox.ExecResult{Stdout: "banner", Stderr: begin + "msg" + end, ExitCode: 0}, false, sandbox.ExecResult{}},
+		{"stdout whole and unframed, stderr framed", sandbox.ExecResult{Stdout: "banner", Stderr: begin + "msg" + end, ExitCode: 15},
+			true, sandbox.ExecResult{Stdout: "", Stderr: "msg", ExitCode: 15}},
+		{"stdout lost, stderr framed", sandbox.ExecResult{Stderr: begin + end, ExitCode: 0}, true, sandbox.ExecResult{}},
 	} {
 		got, ok := f.UnframeStatus(c.res)
 		if ok != c.ok || (ok && got != c.want) || (!ok && got != c.res) {
@@ -632,8 +652,40 @@ func TestStartupExitErrorSaysWhoseTheStatusWas(t *testing.T) {
 		strings.Contains(msg, "had run") || !errors.Is(err, sandbox.ErrUnframedStatus) || errors.Is(err, sandbox.ErrFileNotExist) {
 		t.Errorf("StartupExitError = %q", msg)
 	}
-	if msg := (&sandbox.StartupExitError{What: "the command's exit record", Ran: true}).Error(); !strings.Contains(msg, "had run") {
-		t.Errorf("StartupExitError with Ran = %q, want it to say the command had run", msg)
+	if msg := (&sandbox.StartupExitError{What: "the command's exit record", MayHaveRun: true}).Error(); !strings.Contains(msg, "may have run") {
+		t.Errorf("StartupExitError with MayHaveRun = %q, want it to say the command may have run", msg)
+	}
+	if msg := (&sandbox.StartupExitError{What: "the write of /w/a", Status: 137}).Error(); !strings.Contains(msg, "killed by signal 9") ||
+		!strings.Contains(msg, "OOM killer") {
+		t.Errorf("StartupExitError of 137 = %q, want a signal named, the startup's or a kill from outside", msg)
+	}
+	for _, err := range []error{&sandbox.StartupExitError{}, &sandbox.StartupOutputError{}, fmt.Errorf("x: %w", &sandbox.StartupOutputError{})} {
+		if !errors.Is(err, sandbox.ErrImageStartup) {
+			t.Errorf("%T does not match ErrImageStartup", err)
+		}
+	}
+	if errors.Is(&sandbox.StartupOutputError{}, sandbox.ErrUnframedStatus) {
+		t.Error("a StartupOutputError matches ErrUnframedStatus; a flood says nothing of a status")
+	}
+}
+
+// An image's startup file that traps EXIT with an `exit` of its own would
+// replace the status a framed script left, after its frame closed; close_frame
+// clears the trap, so the status, and what the script printed, are the
+// script's, whether the subshell exits by `exit` or a script that routes its
+// exits through close_frame itself does (#942).
+func TestFrameClosesPastAnImagesExitTrap(t *testing.T) {
+	const hook = `trap "printf 'bye'; printf 'bye' >&2; exit 0" EXIT` + "\n"
+	f := sandbox.NewFrame("test")
+	for name, command := range map[string]string{
+		"wrapped": f.Wrap("echo why; exit 16"),
+		"opened":  f.Open() + "echo why; close_frame 16\n",
+	} {
+		raw := runHooked(t, hook, "/bin/bash", command, "")
+		res, ok := f.Unframe(raw)
+		if !ok || res.ExitCode != 16 || res.Stdout != "why\n" || strings.Contains(raw.Stdout+raw.Stderr, "bye") {
+			t.Errorf("%s: a script that exits 16 under a startup's EXIT trap = %+v (raw %+v), want 16 and the trap never run", name, res, raw)
+		}
 	}
 }
 

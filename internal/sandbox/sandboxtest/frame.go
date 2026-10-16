@@ -39,7 +39,7 @@ func Unbanner(s string) string {
 
 // wrapped matches the head of a command sandbox.Frame.Wrap made: its end
 // line, whose label and nonce name the frame.
-var wrapped = regexp.MustCompile(`^close_frame\(\) \{ printf '\\n%s\\n' 'map-([a-z0-9]+)-end-([0-9a-f]{16})'; `)
+var wrapped = regexp.MustCompile(`^close_frame\(\) \{ trap - EXIT; printf '\\n%s\\n' 'map-([a-z0-9]+)-end-([0-9a-f]{16})'; `)
 
 // Unwrap undoes sandbox.Frame.Wrap: the script a framed command carries, and
 // its frame. A fake sandbox answers the script as a sandbox would and frames

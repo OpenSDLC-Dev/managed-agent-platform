@@ -32,8 +32,8 @@ func newSearchFrame() sandbox.Frame { return sandbox.NewFrame("search") }
 // messages is what a search's script printed on stderr (Frame.Cut), trimmed,
 // and what the sandbox's cap took of it there. A stderr the cap cut between the
 // begin and end lines keeps what came before the cut, with the truncation
-// notice after it; one it cut only after the end line — an EXIT trap's flood
-// — took none of the script's, and says nothing of the cap. One the cap cut
+// notice after it; one it cut only after the end line took none of the
+// script's, and says nothing of the cap. One the cap cut
 // before the begin line — what an image's startup printed filled the cap
 // first — has lost all the script printed there: its messages are "", and
 // lost tells the caller to say the cap cut them (searchFailure, grepAnswer).

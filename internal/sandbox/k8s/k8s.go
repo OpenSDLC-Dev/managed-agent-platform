@@ -1386,9 +1386,10 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, runRecord
 // Where neither stream (msg is stderr) carries the begin line, the image's
 // startup ended the reader before the script began (#942): its status, and
 // what it printed, are the startup's, which is no record — a
-// *sandbox.StartupExitError whose command had run, where reading it as no
-// record would answer with the kill's 137 for a command that may have exited
-// 7, its state files left behind.
+// *sandbox.StartupExitError whose command may have run, where reading it as
+// no record would answer with the kill's 137 for a command that may have
+// exited 7, its state files left behind. Whether it ran is the startup's to
+// say too: the command's own shell ran it first.
 //
 // What a lost stream drops, short of the cap, is a suffix of whole writes
 // (exitScript prints its record in one), so an answer whose end line never
@@ -1405,7 +1406,7 @@ func readExitRecord(f sandbox.Frame, out, msg string, truncated bool, code int) 
 	case truncated && (!framed || short):
 		return 0, false, runRecord{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	case !framed && !f.Began(out) && !f.Began(msg):
-		return 0, false, runRecord{}, &sandbox.StartupExitError{What: "the command's exit record", Status: code, Ran: true}
+		return 0, false, runRecord{}, &sandbox.StartupExitError{What: "the command's exit record", Status: code, MayHaveRun: true}
 	case !framed && code != 0:
 		return 0, false, runRecord{}, fmt.Errorf("k8s: the exit record's reader exited %d before its frame began: %q", code, headOf(out))
 	}
@@ -1510,9 +1511,8 @@ func (pd *pod) ReadFileStream(ctx context.Context, path string, maxBytes int64) 
 }
 
 // readRoom is what a read's buffer holds beyond the file's own cap: the
-// frame's two lines, and what an image's startup prints around them — a
-// BASH_ENV file's banner before, an EXIT trap's words after — up to the cap
-// Exec keeps of a stream.
+// frame's two lines, and what an image's startup prints ahead of them — a
+// BASH_ENV file's banner — up to the cap Exec keeps of a stream.
 const readRoom = sandbox.MaxOutputBytes
 
 // readFileMax runs one probe-and-cat script: the exit code classifies the
@@ -1533,22 +1533,34 @@ func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]
 
 // readAnswer is what the read's exit code and streams (msg is stderr) say of
 // path. readScript prints its begin line before it classifies the path and
-// exits only through close_frame, so a stdout the cap did not cut that carries
-// no frame is no answer, whatever the status (sandbox.Frame.Unanswered): an
-// image's startup that ended the shell before the script began, whose status
-// is its own (#942) — read as missing, a present .git was cloned over (#941)
-// — or a stream lost on its way (#105). A stdout the cap cut before the frame
-// is the flood a refusal's status is trusted through, for StatPresence to
-// answer through it; what it pushed out of a success is readStdout's to say.
+// exits only through close_frame, so a stdout that carries no frame holds no
+// file, and its status is the script's only where stderr carries the whole
+// frame (sandbox.Frame.UnframeStatus): a refusal read through a stdout the cap
+// cut, which StatPresence answers through (#860). Elsewhere it is no answer,
+// whatever the status (sandbox.Frame.Unanswered): an image's startup that
+// flooded stdout, or ended the shell before the script began, its status its
+// own (#942) — read as missing, a present .git was cloned over (#941) — or a
+// stream lost on its way (#105).
 func readAnswer(path string, f sandbox.Frame, maxBytes int64, code int, out, msg *cappedBuffer) ([]byte, error) {
 	b, framed, short := f.CutBytesWithin(out.Bytes(), out.truncated, readRoom)
-	switch {
-	case !framed && !out.truncated:
-		return nil, f.Unanswered("the read of "+path, sandbox.ExecResult{Stdout: string(out.Bytes()), Stderr: msg.String(), ExitCode: code})
-	case code != 0:
+	if !framed {
+		raw := sandbox.ExecResult{Stdout: string(out.Bytes()), Stderr: msg.String(), ExitCode: code,
+			StdoutTruncated: out.truncated, StderrTruncated: msg.truncated}
+		answer, err := f.Answer("the read of "+path, raw)
+		if err == nil && answer.ExitCode != 0 {
+			return nil, readRefusal(path, answer.ExitCode)
+		}
+		if err == nil {
+			// The script ran to its end and read the file, and the file did not
+			// arrive: what the cap cut or the transport lost is in stdout.
+			err = f.Unanswered("the read of "+path, raw)
+		}
+		return nil, err
+	}
+	if code != 0 {
 		return nil, readRefusal(path, code)
 	}
-	return readStdout(path, maxBytes, b, framed, short)
+	return readStdout(path, maxBytes, b, short)
 }
 
 // readRefusal is the refusal readScript's exit code names.
@@ -1585,21 +1597,17 @@ func readArgv(f sandbox.Frame, path string, maxBytes int64) []string {
 // is byte-for-byte a shorter file (issue #105). The harm is why a hazard never
 // seen firing is still worth a guard — `edit` reads a file and writes back
 // what it read, so a truncation handed to the model is a truncation committed
-// to disk. readAnswer has answered a whole stream with no frame (Unanswered).
+// to disk. readAnswer has answered a stream with no frame (Unanswered).
 //
-// A stream the cap cut with no begin line is the startup's output filling the
-// read's room before the script printed. Size is decided next, by the length
-// of what the frame holds: past the cap, the file grew between readScript's
-// stat and its cat, whether the bytes arrived whole (the room beside the cap
-// took them) or the cap cut them. A stream the cap cut short that still holds
-// no more than the cap lost its end to what printed ahead of the script, not
-// to the file, and says so rather than guessing at a size. Both of the
-// startup's are a *sandbox.StartupOutputError, which every read on that image
-// meets again.
-func readStdout(path string, maxBytes int64, b []byte, framed, short bool) ([]byte, error) {
+// Size is decided by the length of what the frame holds: past the cap, the
+// file grew between readScript's stat and its cat, whether the bytes arrived
+// whole (the room beside the cap took them) or the cap cut them. A stream the
+// cap cut short that still holds no more than the cap lost its end to what
+// printed ahead of the script, not to the file, and says so rather than
+// guessing at a size: a *sandbox.StartupOutputError, which every read on that
+// image meets again.
+func readStdout(path string, maxBytes int64, b []byte, short bool) ([]byte, error) {
 	switch {
-	case !framed:
-		return nil, &sandbox.StartupOutputError{What: "the read of " + path}
 	case int64(len(b)) > maxBytes:
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
 	case short:
@@ -1683,16 +1691,15 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 		return pd.execErr(ctx, err)
 	}
 	// The status is the script's only where its frame arrived
-	// (sandbox.Frame.UnframeStatus): an image's startup that ended the shell
-	// first chose it, and its 0 would be a write that never happened (#942).
-	raw := sandbox.ExecResult{Stdout: out.String(), Stderr: msg.String(), ExitCode: res.code,
-		StdoutTruncated: out.truncated, StderrTruncated: msg.truncated}
-	answer, ok := f.UnframeStatus(raw)
-	if !ok {
-		return f.Unanswered("the write of "+path, raw)
+	// (sandbox.Frame.Answer): an image's startup that ended the shell first
+	// chose it, and its 0 would be a write that never happened (#942).
+	answer, err := f.Answer("the write of "+path, sandbox.ExecResult{Stdout: out.String(), Stderr: msg.String(),
+		ExitCode: res.code, StdoutTruncated: out.truncated, StderrTruncated: msg.truncated})
+	if err != nil {
+		return err
 	}
 	reason := answer.Stdout
-	switch res.code {
+	switch answer.ExitCode {
 	case 0:
 		return nil
 	case writeShort:
@@ -1853,7 +1860,7 @@ func (pd *pod) deliverBulk(ctx context.Context, b *sandbox.BulkWrite) (int, stri
 // whose preamble keeps an image's errexit from ending one at an `rm` or a
 // `chmod` it lets fail on purpose, and its status and stderr are the script's
 // only where its frame arrived: elsewhere it answers why no answer came
-// (sandbox.Frame.Unanswered), what naming the answer asked for (#942). Each
+// (sandbox.Frame.Answer), what naming the answer asked for (#942). Each
 // script's frame carries its own label, as the docker backend's do.
 func (pd *pod) bulkExec(ctx context.Context, script, label, what string, b *sandbox.BulkWrite, stdin io.Reader) (int, string, error) {
 	f := sandbox.NewFrame(label)
@@ -1864,11 +1871,10 @@ func (pd *pod) bulkExec(ctx context.Context, script, label, what string, b *sand
 	if err != nil {
 		return 0, "", pd.execErr(ctx, err)
 	}
-	raw := sandbox.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: res.code,
-		StdoutTruncated: stdout.truncated, StderrTruncated: stderr.truncated}
-	answer, ok := f.UnframeStatus(raw)
-	if !ok {
-		return 0, "", f.Unanswered(what, raw)
+	answer, err := f.Answer(what, sandbox.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: res.code,
+		StdoutTruncated: stdout.truncated, StderrTruncated: stderr.truncated})
+	if err != nil {
+		return 0, "", err
 	}
 	return answer.ExitCode, answer.Stderr, nil
 }

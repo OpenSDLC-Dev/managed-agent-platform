@@ -894,10 +894,11 @@ func TestTheBashToolUnderAnErrexitStartup(t *testing.T) {
 // sandbox's output cap on both streams, after whatever the shell ran.
 const floodHook = `trap "head -c 1100000 /dev/zero | tr '\0' x; head -c 1100000 /dev/zero | tr '\0' y >&2" EXIT` + "\n"
 
-// On an image whose EXIT trap floods both streams past the cap, every
-// search's script has printed its end line before the flood begins: the cap
-// cut nothing the search said, and no answer or failure says it did.
-func TestASearchCutOnlyPastItsEndLineSaysNothingOfTheCap(t *testing.T) {
+// On an image whose EXIT trap would flood both streams past the cap, a
+// search's script clears the trap as its frame closes (#942): the flood never
+// comes, the cap cuts nothing the search said, and no answer or failure says
+// it did.
+func TestAnImagesFloodingExitTrapNeverReachesASearch(t *testing.T) {
 	r := runner(t, fromImage(hookedtest.DockerImage(t, floodHook)))
 	ok(t, r, "write", `{"file_path":"fl/a.txt","content":"needle\n"}`)
 	ok(t, r, "write", `{"file_path":"fl/b.txt","content":"needle\n"}`)

@@ -165,9 +165,10 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 }
 
 // errOutputsUnreadable is a listing of the outputs tree the sandbox's own
-// startup pushed out of the output — an image's startup file printing past
-// the output cap in every shell (sandbox.StartupOutputError) — which no
-// retry reads, so processHarvest settles it as a pass that read no sandbox.
+// startup kept from answering — an image's startup file printing past the
+// output cap in every shell, or ending the shell that reads the answer
+// (sandbox.ErrImageStartup) — which no retry reads, so processHarvest settles
+// it as a pass that read no sandbox.
 var errOutputsUnreadable = errors.New("the sandbox's startup output filled the output cap ahead of the listing")
 
 // harvestSandbox obtains the sandbox this harvest reads, and reports whether
@@ -225,12 +226,10 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sb sand
 	}()
 
 	// Framed (sandbox.ExecFramed), so what an image's startup prints around
-	// the listing — a BASH_ENV file's banner, an EXIT trap's words — is no
-	// path of it (#860).
+	// the listing — a BASH_ENV file's banner — is no path of it (#860).
 	res, framed, err := sandbox.ExecFramed(ctx, sb, "harvest", sandbox.ExecRequest{Command: harvestListScript})
-	var startup *sandbox.StartupOutputError
 	switch {
-	case errors.As(err, &startup), err == nil && !framed && res.StdoutTruncated:
+	case errors.Is(err, sandbox.ErrImageStartup), err == nil && !framed && res.StdoutTruncated:
 		// The image's startup prints past the output cap in every shell,
 		// pushing the listing out — on Kubernetes with the exec's exit
 		// record, on Docker as a stdout the cap cut before any begin line.

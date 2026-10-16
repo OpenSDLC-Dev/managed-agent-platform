@@ -677,9 +677,9 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 // (messages); an answer the cap cut before its end line carries
 // it in front, and so does a failure whose output it cut (searchFailure);
 // and messages it took whole, begin line and all, are said after an answer
-// and in front of a failure. A stream it cut only after its end line — an
-// EXIT trap's flood — or inside the end line's nonce lost nothing of the
-// script's, and says nothing.
+// and in front of a failure. A stream it cut only after its end line, or
+// inside the end line's nonce, lost nothing of the script's, and says
+// nothing.
 func grepAnswer(res sandbox.ExecResult, f sandbox.Frame) (Result, error) {
 	out, framed, short := f.Cut(res.Stdout, res.StdoutTruncated)
 	if !framed {

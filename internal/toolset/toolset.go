@@ -206,13 +206,15 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 			"A fault in the image, not in this call: running it again meets the same.",
 			name, startup.What, sandbox.MaxOutputBytes, ran)
 	case errors.As(err, &startupExit):
-		ran := ""
-		if startupExit.Ran {
-			ran = " The command ran, but whether it succeeded is unknown."
+		ran, again := "", " A fault in the image, not in this call: running it again meets the same."
+		if startupExit.MayHaveRun {
+			ran = " The command may have run: whether it did, and how it went, is unknown."
 		}
-		return failf("%s: %s got no answer: the sandbox image's startup file (BASH_ENV) ended the shell, with status %d, "+
-			"before the platform's script began.%s A fault in the image, not in this call: running it again meets the same.",
-			name, startupExit.What, startupExit.Status, ran)
+		if startupExit.Status > 128 {
+			again = " Running it again may meet the same."
+		}
+		return failf("%s: %s got no answer: %s, before the platform's script began.%s%s",
+			name, startupExit.What, startupExit.Ended(), ran, again)
 	}
 	if err != nil {
 		return Result{}, err

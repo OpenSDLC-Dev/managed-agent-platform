@@ -570,6 +570,12 @@ func report(stdout string) []string {
 	return nil
 }
 
+// Reported answers whether the shed's report arrived: its opening marker is
+// in stdout. One that did not may be a shed that never ran — an image's
+// startup that ended its shell before the script began (#942) — which then
+// removed nothing.
+func (b *BulkWrite) Reported(stdout string) bool { return report(stdout) != nil }
+
 // LostItsList answers whether the shed could not read the manifest, and so
 // removed nothing and can name nothing — the sandbox having deleted it in the
 // window between the delivery and the exec that reads it. A caller that knows

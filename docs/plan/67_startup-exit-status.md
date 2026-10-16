@@ -60,7 +60,8 @@ The callers that run a script of their own, or act on a backend's refusal:
    naming the image's startup, as `sandbox.StartupOutputError` does, never a
    backend fault. At the bash tool's `done` marker it reads as "not saved":
    the result is returned, `head` stays where it was, and nothing replays the
-   command.
+   command. A `done` read whose stream was lost reads the same, since a
+   retry there would run the command again.
 3. **A lost stream is told apart from a startup's exit** (the owner). An exec
    that returned no exit status is a transport failure and stays a backend
    fault that a reclaim retries. An exec that returned a status with no
@@ -68,28 +69,36 @@ The callers that run a script of their own, or act on a backend's refusal:
 4. **The begin line on either stream shows the script began.** `Frame.Open`
    prints the begin line on stdout and on stderr. client-go does not report a
    failed stdout copy (#105), so on Kubernetes an exec can return a status
-   with its stdout lost. Where stderr carries the begin line, the script
-   began and the stream was lost: a backend fault, as in decision 3. Where
-   neither stream carries it, the startup ended the shell. Losing both
-   streams whole reads as the startup's: a tool error, not a retry. The
-   Kubernetes exit record is the one exception: its command has run, and a
-   retry would run it again, so a stream lost there still reads as no record,
-   which the liveness probes settle, as before.
+   with its stdout lost. Where stderr carries the whole frame, the script ran
+   to its end, and a script whose answer is its status answers through it.
+   Where stderr carries only the begin line, the script began and the stream
+   was lost: a backend fault, as in decision 3. Where neither stream carries
+   it, the startup ended the shell. Losing both streams whole reads as the
+   startup's: a tool error, not a retry. The begin line counts only as the
+   script prints it, on a line of its own, or cut short past 8 digits of its
+   nonce. The exec's command text spells the line's words too, and a banner
+   can end in its first bytes. The Kubernetes exit record is the one
+   exception: its command may have run, and a retry would run it again, so a
+   stream lost there still reads as no record, which the liveness probes
+   settle, as before.
 5. **One error says the startup ended the script.** `sandbox`'s new
    `StartupExitError` names what was asked and the status the startup left.
    `errors.Is` matches it to `ErrUnframedStatus`, so #941's `StatPresence`
    is unchanged. It replaces the refusal sentinel that an unframed
    Kubernetes read carries today. A reader that takes `ErrFileNotExist` for
-   "absent" then meets an error, not an absence.
+   "absent" then meets an error, not an absence. It and
+   `StartupOutputError` both match `ErrImageStartup`, so a caller that
+   takes the image's startup for the fault asks once. A status past 128 is
+   a signal, which a kill from outside can send too, and the error says so.
 6. **One helper runs every exit-status script.** It frames the script, returns
    Exec's own error as it is, and answers a `StartupExitError`, a lost
    stream or a `StartupOutputError` where the frame is missing. `ExecScript`
-   stays only for scripts whose status no one reads. Where the cap cut
-   stdout before the frame, a stderr that carries the whole frame still
-   answers the status (`Frame.UnframeStatus`), so writes keep working under
-   a startup that floods stdout (#860). The Kubernetes read still trusts a
-   refusal whose stdout the cap cut before the frame: #941's `StatPresence`
-   answers through that flood.
+   stays only for scripts whose status no one reads. Where stdout carries no
+   frame, a stderr that carries the whole frame still answers the status
+   (`Frame.UnframeStatus`). So writes keep working under a startup that
+   floods stdout (#860), and the Kubernetes read's refusal still answers
+   #941's `StatPresence` through that flood. A refusal through a stdout the
+   cap cut, with no whole frame on stderr, is the flood's, not an answer.
 7. **Each caller treats the error as a failure of its step.** None takes it
    for an answer:
    - the repository does not land (`errExtraction`);
@@ -99,25 +108,36 @@ The callers that run a script of their own, or act on a backend's refusal:
      a baseline;
    - the harvest fails rather than drop an output;
    - the skill is skipped as for any read that failed.
+8. **A framed script clears the image's EXIT trap as it closes.** The trap
+   runs after the end line, and an `exit` of its own there replaces the
+   status the script left. `close_frame` clears it before it exits. A script
+   that sets an EXIT trap of its own runs it in `Wrap`'s subshell, which
+   this does not touch.
 
 ## Pull requests
 
-1. **The sandbox layer.** `StartupExitError`, the helper, and every backend
-   site in the table on both backends, each with a contract row: an image
-   whose startup exits with each status the site reads answers the error,
-   never the status. The toolset answers the error as a tool error where it
-   answers `StartupOutputError`, so no reclaim retries it before the second
-   pull request.
-2. **The toolset.** `fileFault`, `shell.Run`'s `done` marker and
-   `installRipgrep`, as decision 2 says.
+1. **The sandbox layer.** `StartupExitError`, the helper, decision 8, and
+   every backend site in the table on both backends, each with a contract
+   row: an image whose startup exits with each status the site reads answers
+   the error, never the status. So that the new error causes no reclaim
+   before the later pull requests, two callers come forward:
+   - every caller that answers `StartupOutputError` answers it the same way
+     (`ErrImageStartup`): the toolset's dispatch, the package install, the
+     harvest and the repository extraction;
+   - `shell.Run`'s `done` marker, as decision 2 says.
+2. **The toolset.** `fileFault` and `installRipgrep`, as decision 2 says.
 3. **The executor and worker callers**, as decision 7 says.
 
 ## Verification
 
-- Each backend site, on Docker and on kind: a startup that exits with each
-  status the site reads gives `StartupExitError`.
-- On Kubernetes, a status with stdout lost and stderr framed is a backend
-  fault.
+- Each backend site whose status is its answer, on Docker and on kind: a
+  startup that exits with each status the site reads gives
+  `StartupExitError`. Each probe that only classifies a refusal the backend
+  already has answers nothing, and the refusal stays unclassified.
+- A status with stdout lost is a backend fault where stderr carries only the
+  begin line, and answers where stderr carries the whole frame.
+- An image whose EXIT trap exits 0 leaves each script its own status, on
+  Docker and on kind.
 - Under a startup that floods stdout past the cap, a write, a batch and a
   refused write still answer, on Docker and on kind.
 - Each caller in the table: a forged `0` and a forged refusal leave its state

@@ -514,10 +514,10 @@ func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath, sentin
 		"; rc=$?; rm -rf " + q(staging) + " " + q(tarPath) + "; exit $rc",
 	}, "")
 	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{Command: cmd})
-	var startup *sandbox.StartupOutputError
-	if errors.As(err, &startup) {
-		// The extraction ran, and its exit status was pushed out of the
-		// output by the image's startup (#860). What it did is what the probe
+	if errors.Is(err, sandbox.ErrImageStartup) {
+		// The extraction ran, or may have, and its exit status never reached
+		// the platform: the image's startup pushed it out of the output (#860),
+		// or ended the shell that reads it (#942). What it did is what the probe
 		// reads: a .git at the mount names a tree the rename put there whole,
 		// which a stat answers through the read exec's own status.
 		if sandbox.StatPresence(ctx, sb, path.Join(clean, ".git")) == sandbox.Present {

@@ -185,7 +185,9 @@ trap, while its `nounset` and `pipefail` carry (and a `set -e` the model runs
 there carries from call to call). A bash the model starts itself — `bash -c`,
 a `#!/bin/bash` script — reads the startup file again, as every
 non-interactive bash does, and runs under the image's errexit and `ERR` trap.
-A second exception, for the platform's scripts
+A platform script that answers through a frame also clears an `EXIT` trap
+the startup file set as it closes, so the trap cannot replace the status the
+script left (#942). A second exception, for the platform's scripts
 alone, is a set of settings that change what a glob matches, or its order.
 Those scripts put bash's defaults back as they start for noglob (`set -f`),
 `GLOBIGNORE`, `GLOBSORT`, privileged mode (`set -p`, in which bash keeps a

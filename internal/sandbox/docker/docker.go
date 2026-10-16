@@ -1563,10 +1563,19 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		// shed reports it could not take is deliberately dropped. But for a rename
 		// the image's startup ended before it began (sandbox.StartupExitError),
 		// as the single write's rename: no `mv` is in flight then, so the daemon
-		// takes back what the shed reports it could not.
+		// takes back what the shed reports it could not. Where no report arrives,
+		// the same startup most likely ended the shed too, which then removed
+		// nothing: every member is where the delivery put it, beside the
+		// bookkeeping, and the daemon empties them all. A shed whose report was
+		// lost on its way may have removed some, and those names come back as
+		// zero-byte files — this batch's own temporaries, never a target.
 		var startup *sandbox.StartupExitError
 		if errors.As(err, &startup) {
-			c.shedBulk(ctx, b)
+			if report := c.discardBulk(ctx, b); b.Reported(report) {
+				c.reclaimBulk(ctx, b, report)
+			} else {
+				c.reclaimBulkPaths(ctx, b, append(b.Delivered(), b.Manifest, b.DirList))
+			}
 			return err
 		}
 		_ = c.discardBulk(ctx, b)
@@ -1927,7 +1936,7 @@ func (c *container) unreplaceable(ctx context.Context, path string) error {
 //
 // The exit code and the reason are read only where the probe's frame arrived
 // (sandbox.ExecStatus), so what an image's startup prints around it — a
-// BASH_ENV file's banner, an EXIT trap's words — is no part of the reason
+// BASH_ENV file's banner — is no part of the reason
 // (#860), and a status the startup chose by ending the shell first is no
 // refusal (#942).
 func (c *container) notWritable(ctx context.Context, path string) error {

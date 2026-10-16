@@ -205,7 +205,8 @@ func TestAStartupFloodIsAToolErrorForEveryTool(t *testing.T) {
 // is a tool error naming the image's startup and the status it left, and
 // telling the model when the command ran.
 func TestAStartupExitIsAToolErrorForEveryTool(t *testing.T) {
-	ran := &sandbox.StartupExitError{What: "the command's exit record", Status: 0, Ran: true}
+	ran := &sandbox.StartupExitError{What: "the command's exit record", Status: 0, MayHaveRun: true}
+	killed := &sandbox.StartupExitError{What: "the write of /workspace/a.txt", Status: 137}
 	read := fmt.Errorf("probe: %w", &sandbox.StartupExitError{What: "the read of /workspace/a.txt", Status: 10})
 	cases := []struct {
 		name  string
@@ -218,6 +219,7 @@ func TestAStartupExitIsAToolErrorForEveryTool(t *testing.T) {
 		{"glob", &fakeSandbox{execErr: ran}, "glob", `{"pattern":"*.go"}`, true},
 		{"read", &fakeSandbox{readErr: read}, "read", `{"file_path":"a.txt"}`, false},
 		{"edit", &fakeSandbox{readErr: read}, "edit", `{"file_path":"a.txt","old_string":"a","new_string":"b"}`, false},
+		{"write", &fakeSandbox{writeErr: killed}, "write", `{"file_path":"a.txt","content":"x"}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -225,12 +227,15 @@ func TestAStartupExitIsAToolErrorForEveryTool(t *testing.T) {
 			if err != nil {
 				t.Fatalf("err = %v, want a tool result", err)
 			}
-			if !res.IsError || !strings.HasPrefix(res.Content, tc.tool+": ") || !strings.Contains(res.Content, "startup file (BASH_ENV)") ||
-				!strings.Contains(res.Content, "ended the shell") {
-				t.Errorf("result = %+v, want an error result naming the image's startup and the shell it ended", res)
+			if !res.IsError || !strings.HasPrefix(res.Content, tc.tool+": ") || !strings.Contains(res.Content, "startup file (BASH_ENV)") {
+				t.Errorf("result = %+v, want an error result naming the image's startup", res)
 			}
-			if got := strings.Contains(res.Content, "The command ran"); got != tc.ran {
-				t.Errorf("result = %q; says the command ran: %v, want %v", res.Content, got, tc.ran)
+			if got := strings.Contains(res.Content, "The command may have run"); got != tc.ran {
+				t.Errorf("result = %q; says the command may have run: %v, want %v", res.Content, got, tc.ran)
+			}
+			if signal := tc.tool == "write"; strings.Contains(res.Content, "killed by signal 9") != signal ||
+				strings.Contains(res.Content, "running it again meets the same") == signal {
+				t.Errorf("result = %q; want a signal named, and a retry that may meet the same, only for a status past 128", res.Content)
 			}
 		})
 	}

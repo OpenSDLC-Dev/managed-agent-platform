@@ -264,6 +264,29 @@ func (h *harness) cloneErrors(t *testing.T) int {
 	return n
 }
 
+// TestRepoExtractionTheStartupKeptFromAnsweringLands: an extraction whose exit
+// status the image's startup kept from the platform — here by ending the
+// shell that reads it (sandbox.StartupExitError, #942) — is read instead from
+// the stat of the .git it lands, as a flood's is: the checkout counts as
+// landed, and no clone error is said.
+func TestRepoExtractionTheStartupKeptFromAnsweringLands(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, provider, flooding := floodingRepoHarness(t)
+	h.seedRepoResource(t, "sesrsc_exit", fx.url(), repoMount, "ghp_fixture", nil)
+	flooding.failExtract.Store(1)
+
+	h.runPass(t)
+	if got := flooding.failExtract.Load(); got != 0 {
+		t.Fatalf("failExtract = %d, want the extraction to have met the startup's exit", got)
+	}
+	if n := h.cloneErrors(t); n != 0 {
+		t.Errorf("clone errors = %d, want none: the extraction landed", n)
+	}
+	if got := readSandboxFile(t, adopt(t, provider, h), repoMount+"/README.md"); got != "x\n" {
+		t.Errorf("README.md = %q, want the checkout", got)
+	}
+}
+
 // TestRepoUnansweredProbeKeepsTheCheckout: a presence probe that does not
 // answer — neither the probe exec, its answer an image's startup pushed out of
 // the output (sandbox.StartupOutputError), nor the stat after it, twice —
@@ -346,11 +369,14 @@ func TestRepoUnansweredOnAFreshSandboxClonesNextPass(t *testing.T) {
 // floodingProvider hands out its sandboxes with the next failExec presence
 // execs answering an image's startup flood (sandbox.StartupOutputError), as
 // one that prints past the cap does on Kubernetes, the next failStat stats of
-// a .git (sandbox.StatPresence) failing as a transient exec does, and the
-// next failVacant of mountOccupied's probes answering the flood too.
+// a .git (sandbox.StatPresence) failing as a transient exec does, the next
+// failVacant of mountOccupied's probes answering the flood too, and the next
+// failExtract extractions running and then answering the startup's exit
+// (sandbox.StartupExitError), as one whose startup ends the exit record's
+// reader does on Kubernetes.
 type floodingProvider struct {
 	sandbox.Provider
-	failExec, failStat, failVacant atomic.Int32
+	failExec, failStat, failVacant, failExtract atomic.Int32
 }
 
 func (p *floodingProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -385,6 +411,10 @@ func (s *floodingSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sa
 	if strings.Contains(req.Command, "; then echo vacant; else echo occupied; fi") && s.p.failVacant.Add(-1) >= 0 {
 		_, _ = s.Sandbox.Exec(ctx, req)
 		return sandbox.ExecResult{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
+	}
+	if strings.Contains(req.Command, " && tar -xf ") && s.p.failExtract.Add(-1) >= 0 {
+		_, _ = s.Sandbox.Exec(ctx, req)
+		return sandbox.ExecResult{}, &sandbox.StartupExitError{What: "the command's exit record", MayHaveRun: true}
 	}
 	return s.Sandbox.Exec(ctx, req)
 }

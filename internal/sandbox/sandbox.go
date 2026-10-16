@@ -112,11 +112,15 @@ var (
 	// a checkout (#941).
 	ErrUnframedStatus = errors.New("sandbox: the exit status came with no frame of the script's")
 	// ErrOutputLost is a platform script that began, as its begin line on
-	// either stream shows, and whose stdout did not carry its frame whole: a
-	// stream lost on its way, as client-go drops a failed stdout copy without
-	// a word (#105). It is the transport's fault, not the image's
-	// (Frame.Unanswered).
+	// either stream shows, and whose frame no stream carried whole: a stream
+	// lost on its way, as client-go drops a failed stdout copy without a word
+	// (#105). It is the transport's fault, not the image's (Frame.Unanswered).
 	ErrOutputLost = errors.New("sandbox: the script began, and its output did not arrive whole")
+	// ErrImageStartup is matched (errors.Is) by each error that says the
+	// sandbox image's startup file kept a platform script from answering — a
+	// *StartupOutputError and a *StartupExitError — so a caller that takes
+	// either for the image's fault, never for an answer, asks once.
+	ErrImageStartup = errors.New("sandbox: the image's startup file kept a platform script from answering")
 )
 
 // CheckWriteSize refuses a declared size that is not a byte count, and is the
@@ -467,11 +471,12 @@ func Script(script string) string { return ScriptPreamble + script }
 func CheckScript(script string) error { return CheckCommand(Script(script)) }
 
 // ExecScript runs req's command in sb as a script of the platform's own
-// (Script), for a script whose status no one reads — a cleanup's — refusing
-// one past the bound (CheckScript) before anything runs, as Exec would. A
-// script whose answer is its status runs through ExecStatus, and one whose
-// answer is its output through ExecFramed, so neither the preamble nor its
-// bytes can be left out of one.
+// (Script), refusing one past the bound (CheckScript) before anything runs, as
+// Exec would. Its status is no answer where an image's startup ended the shell
+// before the script began, which it does not ask (#942): a script whose
+// answer is its status belongs in ExecStatus, and one whose answer is its
+// output in ExecFramed, and this one in neither, so neither the preamble nor
+// its bytes can be left out of one.
 func ExecScript(ctx context.Context, sb Sandbox, req ExecRequest) (ExecResult, error) {
 	req.Command = Script(req.Command)
 	if err := CheckCommand(req.Command); err != nil {
@@ -496,6 +501,10 @@ type StartupOutputError struct {
 	Ran  bool
 }
 
+// Is matches ErrImageStartup: the image's startup kept the script from
+// answering.
+func (e *StartupOutputError) Is(target error) bool { return target == ErrImageStartup }
+
 func (e *StartupOutputError) Error() string {
 	s := fmt.Sprintf("sandbox: %s did not reach the output: the sandbox printed past the %d-byte output cap ahead of it, as an image's startup file printing in every shell does", e.What, MaxOutputBytes)
 	if e.Ran {
@@ -508,29 +517,43 @@ func (e *StartupOutputError) Error() string {
 // image's startup file — `ENV BASH_ENV`, which every shell the sandbox starts
 // runs first — ended the shell before the script began: neither stream carries
 // the script's begin line (Frame.Unanswered), so the exec's status is the
-// startup's (#942). What names the answer asked for, Status the status the
-// startup left, which answers nothing, and Ran says the call's command had
-// already run, as StartupOutputError's does.
+// startup's (#942). What names the answer asked for, and Status the status the
+// startup left, which answers nothing. MayHaveRun says the call's command may
+// have run before: an exit record's reader the startup ended follows a command
+// whose own shell that startup ran first too, and may have ended as well.
 //
 // The image's startup does the same in every shell, so a retry meets the same:
 // the toolset answers it as a tool error, never a backend fault. It matches
-// ErrUnframedStatus (errors.Is).
+// ErrUnframedStatus and ErrImageStartup (errors.Is).
 type StartupExitError struct {
-	What   string
-	Status int
-	Ran    bool
+	What       string
+	Status     int
+	MayHaveRun bool
 }
 
 func (e *StartupExitError) Error() string {
-	s := fmt.Sprintf("sandbox: %s got no answer: the sandbox image's startup file (BASH_ENV) ended the shell, with status %d, before the platform's script began", e.What, e.Status)
-	if e.Ran {
-		s += "; the command had run"
+	s := fmt.Sprintf("sandbox: %s got no answer: %s, before the platform's script began", e.What, e.Ended())
+	if e.MayHaveRun {
+		s += "; the command may have run"
 	}
 	return s
 }
 
-// Is matches ErrUnframedStatus: the status came with no frame of the script's.
-func (e *StartupExitError) Is(target error) bool { return target == ErrUnframedStatus }
+// Ended says what ended the shell: the image's startup file, with the status
+// it left — or, for a status past 128, a signal, which the startup sent or a
+// kill from outside did, as the OOM killer's does.
+func (e *StartupExitError) Ended() string {
+	if e.Status > 128 {
+		return fmt.Sprintf("the shell was killed by signal %d, by the sandbox image's startup file (BASH_ENV) or from outside, as the OOM killer kills", e.Status-128)
+	}
+	return fmt.Sprintf("the sandbox image's startup file (BASH_ENV) ended the shell, with status %d", e.Status)
+}
+
+// Is matches ErrUnframedStatus — the status came with no frame of the
+// script's — and ErrImageStartup.
+func (e *StartupExitError) Is(target error) bool {
+	return target == ErrUnframedStatus || target == ErrImageStartup
+}
 
 // ExecResult is a finished command. TimedOut means the command itself outlived
 // its deadline: the sandbox stopped it, or stopped waiting for it, or caught it

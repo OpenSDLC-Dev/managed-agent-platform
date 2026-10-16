@@ -726,14 +726,13 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 			probed = true
 			progress()
 			reason, err := probeSandboxForPackages(ctx, sb, e.cfg.PackageInstallTimeout)
-			var startup *sandbox.StartupOutputError
-			if errors.As(err, &startup) {
+			if errors.Is(err, sandbox.ErrImageStartup) {
 				// The image's startup prints past the output cap in every
-				// shell, so no install on it could report how it went: none
-				// is attempted. Not a fault, which would reclaim-loop the item
+				// shell, or ends the shell that reads the answer (#942), so no
+				// install on it could report how it went: none is attempted. Not a fault, which would reclaim-loop the item
 				// on a sandbox every retry meets the same way; the session
 				// runs on, and its tools' own errors name the image.
-				slog.WarnContext(ctx, "the sandbox's startup output pushed the package-install probe's answer out; installing nothing",
+				slog.WarnContext(ctx, "the sandbox image's startup kept the package-install probe from answering; installing nothing",
 					"session_id", sid, "err", err)
 				return nil
 			}
@@ -808,14 +807,14 @@ func (e *Executor) installPackages(ctx context.Context, sb sandbox.Sandbox, sid 
 		})
 		removeCreds()
 		var reason, message string
-		var startup *sandbox.StartupOutputError
 		switch {
-		case errors.As(err, &startup):
-			// The install ran, and how it went was pushed out of the output
-			// by the image's startup: a failed attempt the client reads, not
-			// a fault, whose reclaim would run the install again and meet
-			// the same.
-			reason, message = packageReasonFailed, startup.Error()
+		case errors.Is(err, sandbox.ErrImageStartup):
+			// The install ran, or may have, and how it went never reached the
+			// platform: the image's startup pushed it out of the output, or
+			// ended the shell that reads it (#942). A failed attempt the client
+			// reads, not a fault, whose reclaim would run the install again and
+			// meet the same.
+			reason, message = packageReasonFailed, err.Error()
 		case err != nil:
 			return err
 		default:
@@ -903,7 +902,7 @@ var anySchemeUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/
 // probeSandboxForPackages answers decision 7's question, returning the reason the pass
 // must be refused or "" to proceed. The probe is framed (sandbox.ExecFramed),
 // so what an image's startup prints around its answer — a BASH_ENV file's
-// banner, an EXIT trap's words — is not read as one (#860). An answer the
+// banner — is not read as one (#860). An answer the
 // probe cannot have produced — a shell so broken it printed something else,
 // or no answer that reached the output whole — proceeds with a log line
 // rather than inventing a reason for the wire: the install's own failure is

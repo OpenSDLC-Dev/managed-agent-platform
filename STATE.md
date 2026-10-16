@@ -12,8 +12,8 @@ startup's, never the script's answer.
 ## Tasks
 
 - [x] PR 1 — the sandbox layer: `StartupExitError` and `ExecStatus`, every backend
-      site on Docker and Kubernetes with a contract row; the toolset answers the error
-      as a tool error
-- [ ] PR 2 — the toolset: `fileFault`, the bash tool's `done` marker, ripgrep's install
+      site on Docker and Kubernetes with a contract row, the image's EXIT trap
+      cleared; the callers of `StartupOutputError` and the bash tool's `done` marker
+- [ ] PR 2 — the toolset: `fileFault`, ripgrep's install
 - [ ] PR 3 — the executor and worker callers; the image contract in
       docs/self-hosted-security.md; the plan's close
