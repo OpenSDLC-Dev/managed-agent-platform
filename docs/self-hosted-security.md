@@ -235,7 +235,8 @@ startup ended answers nothing, so it gives the refusal no reason. On
 Kubernetes, an
 exec's exit record whose reader the startup ended fails with an error that
 names the image's startup, rather than read as no record. The `grep` tool's
-ripgrep install takes its two steps' statuses the same way. The scripts the
+ripgrep install takes its two steps' statuses the same way, and its tool
+error relays only what a failed step printed inside its frame. The scripts the
 executor and the worker run themselves still read such a shell's exit status
 as their answer.
 The room for what the file prints is 1 MiB a stream around each script: the
@@ -264,8 +265,7 @@ misreporting a write in its own sandbox. One printing past the cap pushes
 them out too: on Docker a shed's report of what it left is then empty, and
 a failed write's temporaries are not emptied. What a few scripts print is relayed,
 not parsed, banner and all: the package install's output, as the session
-error's message; the `grep` tool's ripgrep install's, in its tool error when
-the install fails; the stderr of a checkpoint's restore and of a repository's
+error's message; the stderr of a checkpoint's restore and of a repository's
 extraction, in the error each fails with; and the memory sync's removals', in
 the warning when they fail. The `bash` tool's output is the model's own
 command's, which the startup file reaches as it reaches any command.
