@@ -359,10 +359,10 @@ const exitHook = `if [ -r /tmp/map-startup-exit ]; then read -r __map_l __map_s 
 // would have said it did: on Docker the single write's mkdir and rename and the
 // bulk write's prepare and rename; on Kubernetes the read, the write, the bulk
 // write and its prepare, and the exec's exit record. Where the script only
-// classifies a refusal the backend already has, it answers nothing, and the
-// refusal stays unclassified: on Docker the path, replaceability and
-// writability probes and the bulk refusal probe; on Kubernetes the bulk
-// refusal probe. Each row checks that the startup ended the script it names,
+// classifies a refusal the backend already has, it answers nothing, and gives
+// the refusal no reason — a later probe the startup did not end may still
+// give one: on Docker the path, replaceability and writability probes and the
+// bulk refusal probe; on Kubernetes the bulk refusal probe. Each row checks that the startup ended the script it names,
 // so a row whose script never ran fails.
 func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
 	for _, b := range hookedtest.BackendsFor(t, sandboxtest.BannerHook+exitHook) {

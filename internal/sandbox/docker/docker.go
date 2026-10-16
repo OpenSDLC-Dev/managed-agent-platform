@@ -1560,26 +1560,9 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		// source under it would let that `mv` put zero bytes onto a target the
 		// caller was just told it had not touched. A payload under a parent the
 		// sandbox user cannot write survives here, as it does there — so what the
-		// shed reports it could not take is deliberately dropped. But a rename
-		// the image's startup kept from answering (sandbox.StartupExitError)
-		// whose shell exited by itself has no script still running (Exited), so
-		// shedBulk's precondition holds and the daemon takes back what the shed
-		// reports it could not, as the single write's rename does. Where no
-		// report arrives — the same startup most likely ended the shed too —
-		// nothing is emptied, as reclaimBulk says of any shed that sent none. A
-		// shell a signal killed may have left a `mv` running, and sheds as any
-		// other exec error does.
-		var startup *sandbox.StartupExitError
-		if !errors.As(err, &startup) {
-			_ = c.discardBulk(ctx, b)
-			return c.wrap(err)
-		}
-		if startup.Exited() {
-			c.shedBulk(ctx, b)
-		} else {
-			_ = c.discardBulk(ctx, b)
-		}
-		return err
+		// shed reports it could not take is deliberately dropped.
+		_ = c.discardBulk(ctx, b)
+		return c.wrap(err)
 	}
 	// The script has run to an exit code, so nothing of it is still moving: what
 	// its own `rm` could not take, the daemon that landed it can. A batch refused
@@ -1837,17 +1820,16 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// caller's old data was, while the caller is being told the write failed.
 		// So the shed here is the one the sandbox user can do, and a payload under
 		// a parent that user cannot write survives on this branch (#310) — but
-		// for two errors that say no script is still running: a command Exec
+		// for the one error that says the script never ran: a command Exec
 		// refused as too long (sandbox.CommandTooLongError), which a path the
-		// script quotes eleven times can make, and a shell the image's startup
-		// kept from answering (sandbox.StartupExitError) that exited by itself
-		// (Exited). No `mv` is in flight then, so the daemon takes back what the
-		// sandbox user's `rm` could not, as on every failure below. A shell a
-		// signal killed may have left one running, and is shed as above.
+		// script quotes eleven times can make. No `mv` is in flight then, so the
+		// daemon takes back what the sandbox user's `rm` could not, as on every
+		// failure below. A shell the image's startup kept from answering
+		// (sandbox.StartupExitError) does not say so: a startup can silence the
+		// script, or run it in the background, and leave no frame either (#942).
 		c.discard(ctx, tmp)
 		var tooLong *sandbox.CommandTooLongError
-		var startup *sandbox.StartupExitError
-		if errors.As(err, &tooLong) || errors.As(err, &startup) && startup.Exited() {
+		if errors.As(err, &tooLong) {
 			c.reclaim(ctx, tmp)
 		}
 		return err

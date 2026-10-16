@@ -76,7 +76,9 @@ The callers that run a script of their own, or act on a backend's refusal:
    traps chose. So there too the status answers only through stderr's whole
    frame.
    Where stderr carries only the begin line, the script began and the stream
-   was lost: a backend fault, as in decision 3. Where neither stream carries
+   was lost: a backend fault, as in decision 3. A stdout the cap cut is the
+   startup's flood instead, whatever else shows: a status script prints only
+   marker lines, so a retry would meet the same flood. Where neither stream carries
    it, the startup ended the shell. Losing both streams whole reads as the
    startup's: a tool error, not a retry. The begin line counts only as the
    script prints it, on a line of its own, or cut short past 8 digits of its
@@ -92,8 +94,12 @@ The callers that run a script of their own, or act on a backend's refusal:
    Kubernetes read carries today. A reader that takes `ErrFileNotExist` for
    "absent" then meets an error, not an absence. It and
    `StartupOutputError` both match `ErrImageStartup`, so a caller that
-   takes the image's startup for the fault asks once. A status past 128 is
-   a signal, which a kill from outside can send too, and the error says so.
+   takes the image's startup for the fault asks once. A status past 128
+   may be a signal, which a kill from outside can send too, and the error
+   says so. Nothing shows the script did not run: a startup can silence it,
+   or run it in the background. So no cleanup takes the error for a script
+   that is not running, and a Docker rename sheds it with the sandbox user's
+   `rm` alone, as any exec error.
 6. **One helper runs every exit-status script.** It frames the script, returns
    Exec's own error as it is, and answers a `StartupExitError`, a lost
    stream or a `StartupOutputError` where the frame is missing. `ExecScript`
@@ -140,7 +146,7 @@ The callers that run a script of their own, or act on a backend's refusal:
 - Each backend site whose status is its answer, on Docker and on kind: a
   startup that exits with each status the site reads gives
   `StartupExitError`. Each probe that only classifies a refusal the backend
-  already has answers nothing, and the refusal stays unclassified.
+  already has answers nothing, and gives the refusal no reason.
 - A status with stdout lost is a backend fault where stderr carries only the
   begin line, and answers where stderr carries the whole frame.
 - An image whose EXIT trap exits 0 leaves each script its own status, on

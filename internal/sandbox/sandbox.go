@@ -542,20 +542,14 @@ func (e *StartupExitError) Error() string {
 
 // Ended says what ended the shell: the image's startup file, with the status
 // it left — or, for a status past 128, a signal, which the startup sent or a
-// kill from outside did, as the OOM killer's does.
+// kill from outside did, as the OOM killer's does, unless the startup exited
+// with that status itself.
 func (e *StartupExitError) Ended() string {
 	if e.Status > 128 {
-		return fmt.Sprintf("the shell was killed by signal %d, by the sandbox image's startup file (BASH_ENV) or from outside, as the OOM killer kills", e.Status-128)
+		return fmt.Sprintf("the shell exited with status %d: killed by signal %d, by the sandbox image's startup file (BASH_ENV) or from outside, as the OOM killer kills, or ended by that file with the status", e.Status, e.Status-128)
 	}
 	return fmt.Sprintf("the sandbox image's startup file (BASH_ENV) ended the shell with status %d before the platform's script began, or silenced the script", e.Status)
 }
-
-// Exited says the shell exited by itself, with a status of 0 to 128, rather
-// than by a signal. Nothing it ran in the foreground is still running then:
-// the startup ended it before the script began, or the script ran to its end,
-// since a shell waits for its foreground subshell before it exits, whatever
-// trap it runs. A shell a signal killed can leave a child running on.
-func (e *StartupExitError) Exited() bool { return e.Status >= 0 && e.Status <= 128 }
 
 // Is matches ErrUnframedStatus — the status came with no frame of the
 // script's — and ErrImageStartup.

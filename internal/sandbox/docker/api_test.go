@@ -1910,12 +1910,12 @@ func TestARenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 
 // A rename the image's startup kept from answering answers the startup's
 // exit, whatever status it left — 0 here, which read as the script's would be
-// a write that never happened (#942). A shell that exited by itself has no
-// `mv` in flight, so after the sandbox user's `rm` the daemon empties the
-// temporary that `rm` could not take, as it does for a refused rename. A shell
-// a signal killed (137) may have left one running: the `rm` alone sheds it.
-func TestARenameTheStartupEndedReclaimsItsTempThroughTheDaemon(t *testing.T) {
-	for status, reclaims := range map[int]bool{0: true, 137: false} {
+// a write that never happened (#942). Nothing shows its script is not running
+// — a startup can silence it, or run it in the background — so the sandbox
+// user's `rm` alone sheds the temporary, as for any exec error: the daemon
+// emptying it under a live `mv` would land zero bytes on the target (#310).
+func TestARenameTheStartupKeptFromAnsweringIsShedByTheSandboxUser(t *testing.T) {
+	for _, status := range []int{0, 137} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			var commands []string
 			var reclaimed []byte
@@ -1957,17 +1957,8 @@ func TestARenameTheStartupEndedReclaimsItsTempThroughTheDaemon(t *testing.T) {
 			if last := commands[len(commands)-1]; !strings.Contains(last, "rm -f '/etc/"+sandbox.TempPrefix) {
 				t.Errorf("last exec = %q, want the sandbox user's own rm", last)
 			}
-			if !reclaims {
-				if headed != "" || reclaimed != nil {
-					t.Errorf("HEAD asked about %q and the daemon was handed %d bytes; want no emptying under a `mv` that may live on", headed, len(reclaimed))
-				}
-				return
-			}
-			if !strings.HasPrefix(headed, "/etc/"+sandbox.TempPrefix) || reclaimed == nil {
-				t.Fatalf("HEAD asked about %q and the daemon was handed %d bytes; want the temporary emptied", headed, len(reclaimed))
-			}
-			if name, size := tarEntry(t, reclaimed); !strings.HasPrefix(name, sandbox.TempPrefix) || size != 0 {
-				t.Errorf("the emptying archive carries %q of %d bytes, want the temporary's own name at 0", name, size)
+			if headed != "" || reclaimed != nil {
+				t.Errorf("HEAD asked about %q and the daemon was handed %d bytes; want no emptying under a `mv` that may live on", headed, len(reclaimed))
 			}
 		})
 	}
@@ -2931,27 +2922,14 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 	}
 }
 
-// The batch's half of TestARenameTheStartupEndedReclaimsItsTempThroughTheDaemon:
-// a rename the image's startup ended before it began left no `mv` in flight,
-// so after the sandbox user's shed the daemon empties what the shed reports it
-// could not take, in one archive. A shed that sends no report — the same
-// startup ended its shell too — has the daemon empty nothing, and so does a
-// rename a signal killed (137), which may have left a `mv` running (#942).
-func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		// shed is what the discard exec prints.
-		shed string
-		// status is the rename's.
-		status int
-		// emptied says the daemon empties what the shed reported.
-		emptied bool
-	}{
-		{"the shed reports", "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", 0, true},
-		{"the startup ended the shed too", "welcome to the image ", 0, false},
-		{"a signal killed the rename", "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", 137, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+// The batch's half of TestARenameTheStartupKeptFromAnsweringIsShedByTheSandboxUser:
+// a bulk rename the image's startup kept from answering is shed by the
+// sandbox user's own pass alone, whatever its status and whatever that pass
+// reports it could not take — the daemon empties nothing under a `mv` that
+// may live on (#942).
+func TestABulkRenameTheStartupKeptFromAnsweringIsShedByTheSandboxUser(t *testing.T) {
+	for _, status := range []int{0, 137} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			var commands []string
 			var puts [][]byte
 			kinds := map[string]string{}
@@ -2980,14 +2958,15 @@ func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
 				case strings.HasSuffix(r.URL.Path, "/start"):
 					w.WriteHeader(http.StatusOK)
 					if kinds[execID] == "discard" {
-						w.Write(frame(streamStdout, tc.shed))
+						// The sandbox user's `rm` could take neither member.
+						w.Write(frame(streamStdout, "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n"))
 					}
 				case strings.HasSuffix(r.URL.Path, "/json"):
-					status := 0
+					code := 0
 					if kinds[execID] == "rename" {
-						status = tc.status
+						code = status
 					}
-					fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, status)
+					fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
 				default:
 					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 				}
@@ -2998,29 +2977,14 @@ func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
 				{Path: "/etc/b.txt", Data: []byte("BBBB")},
 			})
 			var startup *sandbox.StartupExitError
-			if !errors.As(err, &startup) || startup.Status != tc.status {
-				t.Fatalf("err = %v, want the startup's exit with status %d", err, tc.status)
+			if !errors.As(err, &startup) || startup.Status != status {
+				t.Fatalf("err = %v, want the startup's exit with status %d", err, status)
 			}
 			if last := commands[len(commands)-1]; !strings.Contains(last, "__map_bulk_discard") {
 				t.Errorf("last exec = %q, want the sandbox user's own shed", last)
 			}
-			if !tc.emptied {
-				if len(puts) != 2 {
-					t.Fatalf("%d archives delivered, want 2 (bookkeeping, members) and no emptying", len(puts))
-				}
-				return
-			}
-			if len(puts) != 3 {
-				t.Fatalf("%d archives delivered, want 3 (bookkeeping, members, emptying)", len(puts))
-			}
-			members, emptying := tarEntries(t, puts[1]), tarEntries(t, puts[2])
-			if len(emptying) != len(members) {
-				t.Fatalf("the emptying archive carries %d entries, want the %d members the shed left", len(emptying), len(members))
-			}
-			for i, e := range emptying {
-				if e.name != members[i].name || e.size != 0 {
-					t.Errorf("emptying entry %d is %q of %d bytes, want the member's own temporary %q at 0", i, e.name, e.size, members[i].name)
-				}
+			if len(puts) != 2 {
+				t.Errorf("%d archives delivered, want 2 (bookkeeping, members) and no emptying", len(puts))
 			}
 		})
 	}

@@ -663,9 +663,9 @@ func TestStartupExitErrorSaysWhoseTheStatusWas(t *testing.T) {
 	if msg := (&sandbox.StartupExitError{What: "the command's exit record", MayHaveRun: true}).Error(); !strings.Contains(msg, "may have run") {
 		t.Errorf("StartupExitError with MayHaveRun = %q, want it to say the command may have run", msg)
 	}
-	if msg := (&sandbox.StartupExitError{What: "the write of /w/a", Status: 137}).Error(); !strings.Contains(msg, "killed by signal 9") ||
-		!strings.Contains(msg, "OOM killer") {
-		t.Errorf("StartupExitError of 137 = %q, want a signal named, the startup's or a kill from outside", msg)
+	if msg := (&sandbox.StartupExitError{What: "the write of /w/a", Status: 137}).Error(); !strings.Contains(msg, "status 137") ||
+		!strings.Contains(msg, "killed by signal 9") || !strings.Contains(msg, "OOM killer") || !strings.Contains(msg, "ended by that file") {
+		t.Errorf("StartupExitError of 137 = %q, want the status, a signal named — the startup's or a kill from outside — and the startup's own exit", msg)
 	}
 	for _, err := range []error{&sandbox.StartupExitError{}, &sandbox.StartupOutputError{}, fmt.Errorf("x: %w", &sandbox.StartupOutputError{})} {
 		if !errors.Is(err, sandbox.ErrImageStartup) {

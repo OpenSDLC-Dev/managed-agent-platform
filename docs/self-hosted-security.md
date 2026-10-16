@@ -228,9 +228,11 @@ a file write and a batch write's steps on both backends, and a file read on
 Kubernetes. Each takes its status only where one stream carries its frame
 whole: stdout's, or stderr's under a flood that pushes stdout's out. Where
 neither stream shows the script began, the call fails with an error that
-names the image's startup. A script that began and lost its output fails as
-a transport fault, which a retry can clear. A refused-write probe on Docker
-that the startup ended answers nothing, so the refusal stays unclassified. On Kubernetes, an
+names the image's startup. A script that began and whose output was lost on
+its way fails as a transport fault, which a retry can clear; a stdout the cap
+cut is the startup's flood, as below. A refused-write probe on Docker that the
+startup ended answers nothing, so it gives the refusal no reason. On
+Kubernetes, an
 exec's exit record whose reader the startup ended fails with an error that
 names the image's startup, rather than read as no record. The scripts the executor and the
 worker run themselves, and the `grep` tool's ripgrep install, still read
