@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#940"
 ---
 
@@ -37,10 +37,11 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    wording. A refusal of the host's response by go-git's pkt-line, pack
    response and sideband decoders reads `network` by the same rule, and so
    does a pack band that carries no pack. They are matched by go-git's types
-   and sentinels, and by go-git's own words where it kept only text
-   (`error decoding upload-pack response: `, the sideband's
-   `unexpected error: `, `unknown channel ` and `max. packed size exceeded`),
-   never by the host's. A pack that is corrupt past its signature is out of
+   and sentinels, and by go-git's own words where it kept only text: the
+   pkt-line scanner's refusal, `error decoding upload-pack response: `, the
+   sideband's `unexpected error: `, `unknown channel ` and
+   `max. packed size exceeded`, and `malformed pack file signature`. Never
+   by the host's. A pack that is corrupt past its signature is out of
    this plan's scope and keeps its reason.
 2. **A transport records each clone's failures.** go-git's HTTP transport is
    installed as the executor package initializes (`client.InstallProtocol`,
@@ -62,16 +63,22 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    environment variables apply as before. A transport that wraps the
    connection instead would keep go-git's type, but under TLS it cannot see
    a response's body, so it could not tell an empty pack response.
-3. **A recorded failure decides `network` only over `internal` and an object
-   the checkout missed.** Those are what go-git concluded from what was
-   missing. `auth`, `not_found`, `too_large` and `timeout` came from what did
-   arrive or from this machine, and keep their reasons. So does the caller's
-   ref, as the answer that did arrive shows it: a branch the ref
-   advertisement lacks, a commit the host says it does not have, an id that
-   names a tree or a blob. So does an error this executor made
-   (`isLocalError`). The mark goes on only where it decides the reason, so a
-   refused proxy, whose error go-git keeps, is not named twice in the log. A recorded failure that is this executor's own joins the
-   chain as it is, because go-git formats it with `%s` inside the decode.
+3. **A recorded failure decides `network` only where it ended the clone.**
+   go-git takes an empty pack response, or one cut short
+   (`io.ErrUnexpectedEOF`), for "already up to date", and its checkout then
+   misses an object it was never sent: a recorded failure of those two kinds
+   decides over that missing object. Any other recorded failure decides only
+   over `internal`, and only where go-git's error quotes it. A failure go-git
+   read past, a body read that failed after the bytes go-git needed, decides
+   nothing. `auth`, `not_found`, `too_large` and `timeout` keep their
+   reasons. So does the caller's ref, as the answer that did arrive shows
+   it: a branch the ref advertisement lacks, a commit the host says it does
+   not have, an id that names a tree or a blob. So does an error this
+   executor made (`isLocalError`), and a refused proxy, whose error go-git
+   keeps, is not named twice in the log. A recorded failure that is this
+   executor's own joins the chain as it is, because go-git formats it with
+   `%s` inside the decode. For the same reason it takes the place of a
+   host's failure that go-git read past.
 4. **The context's error joins wherever its text was all go-git kept.** A
    decode refusal now reads `network`, and go-git formats a deadline or a
    cancellation inside the decode with the same words. So the clone's context
@@ -89,6 +96,6 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
 - The table above, one fixture row each, through `cloneToTar`: every row reads
   `network`; an unknown commit still reads `checkout`.
 - The record: per clone, silent without one, silent once the context is done,
-  silent for a redirect's and a refusal's body, and only over `internal` and
-  an object the checkout missed.
+  silent for a redirect's and a refusal's body, and deciding only where it
+  ended the clone.
 - The deadline and cancellation rows #939 pinned keep their reasons.

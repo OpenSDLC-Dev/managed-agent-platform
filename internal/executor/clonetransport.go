@@ -38,14 +38,17 @@ var errEmptyPack = errors.New("the git host's pack response ended before its fir
 
 // note keeps err as the record's failure unless one came before it, or ctx
 // is done: then a failure is the deadline's or the cancellation's, which
-// cloneReason reads from go-git's own error.
+// cloneReason reads from go-git's own error. A failure of this executor's own
+// (isLocalError) takes the place of a host's that came before it, which
+// go-git read past: go-git formats the local one with %s while it decodes the
+// response, so only the record keeps its type (cloneFailed).
 func (r *cloneRecord) note(ctx context.Context, err error) {
 	if r == nil || ctx.Err() != nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.failed == nil {
+	if r.failed == nil || (isLocalError(err) && !isLocalError(r.failed)) {
 		r.failed = err
 	}
 }

@@ -269,30 +269,17 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // had ended, which the reason then says.
 //
 // A failure the clone's transport recorded (cloneRecord) is the host's where
-// neither it nor go-git's error is this executor's own. errHostTransport
-// marks it where the mark decides the reason, and the message then carries
-// it for the log. Where go-git's error has a reason of its own, a refused
-// proxy's among them, the mark would add only a second copy of what the error
-// says. cloneReason reads the mark after every reason that came from what
-// did arrive or from this
-// clone's context, or from the caller's ref, so it decides only over internal
-// and an object the checkout missed: what go-git concluded from what was
-// missing. A recorded failure that is this
-// executor's own, out of buffers or memory for a read, joins the chain as it
-// is: go-git formats it with %s while it decodes the response, where only
-// the record still has its type.
+// neither it nor go-git's error is this executor's own. errHostTransport marks
+// it where it is what ended the clone (hostFailed), and the message then
+// carries it for the log. A recorded failure that is this executor's own, out
+// of buffers or memory for a read, joins the chain as it is: go-git formats it
+// with %s while it decodes the response, where only the record still has its
+// type.
 func cloneFailed(ctx context.Context, err error) error {
 	if isPathRefusal(err) {
 		err = withCause{err, errPathRefused}
 	}
 	err = fmt.Errorf("%w: %w", errClone, err)
-	// go-git carries the pack request's transport error in an UnexpectedError,
-	// which implements no Unwrap: joined to the chain, it is one the checks
-	// below can see is this executor's own, as cloneReason does.
-	var unexpected *plumbing.UnexpectedError
-	if errors.As(err, &unexpected) {
-		err = withCause{err, unexpected.Err}
-	}
 	if cause := ctx.Err(); cause != nil && strings.Contains(err.Error(), cause.Error()) && !isLocalError(err) && !hostWords(err) {
 		if r := cloneReason(err); r == repoOutcomeInternal || r == repoOutcomeNetwork {
 			err = withCause{err, cause}
@@ -301,11 +288,30 @@ func cloneFailed(ctx context.Context, err error) error {
 	if failed := cloneRecordFrom(ctx).failure(); failed != nil && !isLocalError(err) {
 		if isLocalError(failed) {
 			err = withCause{err, failed}
-		} else if marked := fmt.Errorf("%w (%w: %w)", err, errHostTransport, failed); cloneReason(marked) != cloneReason(err) {
-			err = marked
+		} else if hostFailed(err, failed) {
+			err = fmt.Errorf("%w (%w: %w)", err, errHostTransport, failed)
 		}
 	}
 	return err
+}
+
+// hostFailed reports whether failed, the host's transport failure a clone's
+// record holds, is what ended the clone err reports. go-git takes an empty
+// pack response, or one cut short, for "already up to date", and its checkout
+// then misses an object it was never sent; a commit id fetchCommit rules on
+// is the caller's, not such an object (errCommitRefused). Any other failure
+// ended the clone only where go-git's error, which would read internal,
+// quotes it. A failure go-git read past is none of these, and neither is one
+// where go-git's error has a reason of its own, a refused proxy's among them.
+func hostFailed(err, failed error) bool {
+	switch cloneReason(err) {
+	case repoOutcomeCheckout:
+		return errors.Is(err, plumbing.ErrObjectNotFound) && !errors.Is(err, errCommitRefused) &&
+			(errors.Is(failed, errEmptyPack) || errors.Is(failed, io.ErrUnexpectedEOF))
+	case repoOutcomeInternal:
+		return strings.Contains(err.Error(), failed.Error())
+	}
+	return false
 }
 
 // errPathRefused marks go-git's refusal of a path the repository holds — a

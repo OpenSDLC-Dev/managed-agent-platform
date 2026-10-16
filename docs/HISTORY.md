@@ -49,6 +49,28 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The git host's failures that go-git hides (plan 66, #940) — archived 2026-10-16, delivered in one PR
+
+#939 made a failed clone's `session.error` name whose fault it was, and left #940 open for the host failures go-git keeps too little of. A fixture behind `git http-backend` measured ten of them with go-git v5.19.2 before any code. go-git took an empty pack response, or one cut after its headers, for "already up to date", so the checkout then blamed the caller's ref (`checkout`). The rest read `internal`. The owner settled the one open question on 2026-10-15: the host's in-band messages read `network`, all of them, with no split by their text.
+
+Tests came first. The first fixture rows failed with the measured reasons before any wiring, and each row added in review failed on the code before its fix.
+
+Review took three rounds, each with the verifier (`claude-fable-5-1`), Codex (`gpt-6.1-sol`, xhigh) and `/code-review` (`claude-opus-5-5`, xhigh, no cap). The verifier passed every round with findings: `make verify` at 91.56%, 91.57% and 91.56%, with the before and after table reproduced on both code states each time. Codex raised five findings, then two, then one. `/code-review` raised ten, ten and twelve.
+
+- **Round 1.** The lazy install raced go-git's unlocked protocol map, so the transport moved to package init. A redirect's and a refusal's body were recorded as the host's failure. A recorded failure overrode the caller's ref, so `fetchCommit`'s rulings gained a mark (`errCommitRefused`). A local read failure that go-git flattened into its decode text read `network`. The context's error joined over the host's typed words. Three sideband and pack refusals still read `internal`.
+- **Round 2.** `cloneFailed` did not see a local error inside go-git's `UnexpectedError`. The mark named a refused proxy's error a second time. No test pinned that the deadline and cancellation keep their reasons over a record. One subtest could not fail, because it did not POST to an upload-pack path.
+- **Round 3.** A local failure after a host's that go-git read past lost its type. The deeper finding was that nothing tied a recorded failure to the error the clone ended with. A failure go-git read past could turn an unrelated `internal` into `network`. The mark had been placed by asking whether it changed the reason. It now goes on only where the failure ended the clone (`hostFailed`): an empty or cut pack response before an object the checkout missed, or a failure go-git's `internal` error quotes. That made `cloneFailed`'s own look through `UnexpectedError` dead code, and it was removed.
+
+Declined, with the reasons given on the PR:
+
+- a connection-level recorder that keeps go-git's `*http.Transport` type, because under TLS it cannot see a response's body;
+- the host's text-only words that quote the context's error, which go-git formats like the context's own (documented beside `cloneFailed`);
+- a record that keeps the latest failure;
+- forwarding `CloseIdleConnections`, which nothing calls;
+- reading a decode refusal of a valid response go-git cannot parse as `internal`, which #939 had already decided against for pkt-line refusals.
+
+The final code's 34 mutants, each in a scratch copy, all failed a test: 33 by an assertion, and one that does not compile as the sanity check. Three arm-order mutants of earlier rounds became equivalent once `hostFailed` marked only an error those arms never decide, and were dropped.
+
 ## Model gateway live tier: Moonshot, Zhipu and Qwen3-VL-Embedding-8B (#903), run 2026-10-14 — ✅ passed
 
 The user put a Kimi key (`KIMI_API_KEY`) and a GLM key (`GLM_API_KEY`) in `.env`, for the vendors' Anthropic endpoints, and the Gitee key's resource package now covers `Qwen3-VL-Embedding-8B`.

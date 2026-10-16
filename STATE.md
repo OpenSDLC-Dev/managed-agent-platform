@@ -4,11 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 66](./docs/plan/66_clone-host-failures.md) (#940): a repository clone that the
-git host fails partway names the host, in one PR.
+**None.** [Plan 66](./docs/plan/66_clone-host-failures.md) (#940), a repository clone
+that the git host fails partway naming the host, archived 2026-10-16 in one PR; its
+delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 
-- [x] A transport records each clone's transport failures; the fixture's host fails each way.
-- [x] The host's in-band messages and go-git's decoders' refusals read `network`.
-- [ ] Reviews, then the plan archives in the same PR.
+None in flight.
