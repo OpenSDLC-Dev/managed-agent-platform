@@ -82,6 +82,10 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	// straight back at us. Scrubbed once, at the boundary, rather than at each
 	// return below.
 	defer func() { err = scrubTokenErr(err, token) }()
+	// The host's failed reads come back marked (clonetransport.go). go-git's
+	// transport for that is not an *http.Transport, so go-git refuses an
+	// endpoint that names its own CA bundle, client certificate, proxy or
+	// InsecureSkipTLS.
 	ctx = withCloneMarks(ctx)
 
 	spool, err := os.MkdirTemp("", "map-repo-clone-")
@@ -257,8 +261,10 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // deadline passed while go-git ran on: its checkout ignores the context. Nor
 // does a name that quotes the context's error decide the reason: a file the
 // repository named so, or a host's words, which go-git keeps in a type
-// (hostWords). The host's words go-git keeps only as text, an ERR line in the
-// pack response or the sideband's error band, cannot be told from go-git's own
+// (hostWords), or a failed read the clone's transport marked as the host's
+// while the context was live (errHostTransport), where go-git kept the mark's
+// type. The host's words go-git keeps only as text, an ERR line in the pack
+// response or the sideband's error band, cannot be told from go-git's own
 // formatting of the context's error there, so they join; the clone's context
 // had ended, which the reason then says.
 func cloneFailed(ctx context.Context, err error) error {
@@ -266,7 +272,8 @@ func cloneFailed(ctx context.Context, err error) error {
 		err = withCause{err, errPathRefused}
 	}
 	err = fmt.Errorf("%w: %w", errClone, err)
-	if cause := ctx.Err(); cause != nil && strings.Contains(err.Error(), cause.Error()) && !isLocalError(err) && !hostWords(err) {
+	if cause := ctx.Err(); cause != nil && strings.Contains(err.Error(), cause.Error()) && !isLocalError(err) && !hostWords(err) &&
+		!errors.Is(err, errHostTransport) {
 		if r := cloneReason(err); r == repoOutcomeInternal || r == repoOutcomeNetwork {
 			err = withCause{err, cause}
 		}
@@ -542,14 +549,15 @@ func cloneReason(err error) string {
 // machine's (errOwnRead), in words that go-git's %w carries and its %s keeps.
 // go-git formats a host's ERR line in the pack response the same way, so a
 // host that sends those words makes its failure read as this executor's; it
-// gains nothing by that, and no text tells the two apart.
+// gains nothing by that, and no text tells the two apart. Where go-git keeps
+// the host's words in a type (hostWords), they are the host's.
 func isLocalError(err error) bool {
 	var pathErr *fs.PathError
 	var linkErr *os.LinkError
 	var sysErr *os.SyscallError
 	if errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
 		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, errPathRefused) ||
-		strings.Contains(err.Error(), errOwnRead.Error()) {
+		(strings.Contains(err.Error(), errOwnRead.Error()) && !hostWords(err)) {
 		return true
 	}
 	var dnsErr *net.DNSError

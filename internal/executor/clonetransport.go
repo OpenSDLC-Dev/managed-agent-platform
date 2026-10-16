@@ -85,7 +85,8 @@ func (t hostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // among them (errEmptyPack), or this executor's (errOwnRead). A read that
 // failed once the clone's context was done is the deadline's or the
 // cancellation's, which cloneReason reads from go-git's own error, so it
-// keeps its error.
+// keeps its error. A pack response that ended with no bytes is the host's
+// either way: the client returns such a body's end whatever the context.
 type markedBody struct {
 	io.ReadCloser
 	ctx  context.Context
@@ -97,12 +98,14 @@ func (b *markedBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	b.read = b.read || n > 0
 	switch {
-	case err == nil, b.ctx.Err() != nil:
+	case err == nil:
 		return n, err
 	case err == io.EOF:
 		if b.pack && !b.read {
 			return n, errEmptyPack
 		}
+		return n, err
+	case b.ctx.Err() != nil:
 		return n, err
 	case isLocalError(err):
 		return n, fmt.Errorf("%w: %w", errOwnRead, err)

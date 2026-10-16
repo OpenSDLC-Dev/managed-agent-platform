@@ -15,6 +15,10 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/format/packfile"
+	"github.com/go-git/go-git/v5/plumbing/format/pktline"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/sideband"
 )
 
@@ -25,7 +29,7 @@ import (
 // caller's ref; the clone's transport now marks what happened. The host's
 // in-band messages and the responses go-git's decoder refuses read `network`
 // by go-git's own types and words. A row's `says` is what the log's error then
-// carries.
+// carries, which shows the fixture served the row's answer.
 func TestCloneReasonReadsTheHostsFailures(t *testing.T) {
 	const result, advert = "git-upload-pack-result", "git-upload-pack-advertisement"
 	service := pkt("# service=git-upload-pack\n") + "0000"
@@ -45,35 +49,36 @@ func TestCloneReasonReadsTheHostsFailures(t *testing.T) {
 			return brokenAnswer(t, "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-result\r\n"+
 				"Transfer-Encoding: chunked\r\n\r\nzz\r\nabc")
 		}, says: "invalid byte in chunk length"},
-		{name: "NAK and no pack", pack: func(*testing.T) hostAnswer { return gitBody(result, "0000"+pkt("NAK\n")) }},
+		{name: "NAK and no pack", pack: func(*testing.T) hostAnswer { return gitBody(result, "0000"+pkt("NAK\n")) },
+			says: git.ErrFetching.Error()},
 		{name: "a message on the sideband's error band", pack: func(*testing.T) hostAnswer {
 			return gitBody(result, "0000"+pkt("NAK\n")+pkt("\x03fatal: the host failed to build the pack\n"))
-		}},
+		}, says: "unexpected error: fatal: the host failed to build the pack"},
 		{name: "a sideband packet on a band git has no use for", pack: func(*testing.T) hostAnswer {
 			return gitBody(result, "0000"+pkt("NAK\n")+pkt("\x05junk\n"))
-		}},
+		}, says: "unknown channel \x05junk"},
 		{name: "a pack band that carries no pack", pack: func(*testing.T) hostAnswer {
 			return gitBody(result, "0000"+pkt("NAK\n")+pkt("\x01JUNKJUNKJUNKJUNK"))
-		}},
+		}, says: packfile.ErrBadSignature.Error()},
 		{name: "an ERR line in the pack response", pack: func(*testing.T) hostAnswer {
 			return gitBody(result, pkt("ERR the host failed\n"))
-		}},
+		}, says: "error decoding upload-pack response: the host failed"},
 		{name: "a pack response the decoder refuses", pack: func(*testing.T) hostAnswer {
 			return gitBody(result, "0000"+pkt("unexpected\n"))
-		}},
+		}, says: "error decoding upload-pack response: unexpected content"},
 		{name: "an ERR line in the ref advertisement", refs: func(*testing.T) hostAnswer {
 			return gitBody(advert, service+pkt("ERR access denied\n"))
-		}},
+		}, says: "access denied"},
 		{name: "a ref advertisement that is not git's", refs: func(*testing.T) hostAnswer {
 			return gitBody(advert, service+pkt("hello, this is not git\n")+"0000")
-		}},
+		}, says: "hello, this is not git"},
 		{name: "a commit's empty pack response", commit: true, pack: func(*testing.T) hostAnswer { return gitBody(result, "") },
 			says: errEmptyPack.Error()},
 		{name: "a commit's pack response cut after its headers", commit: true,
 			pack: func(t *testing.T) hostAnswer { return brokenAnswer(t, cut) }, says: io.ErrUnexpectedEOF.Error()},
 		{name: "a commit's NAK and no pack", commit: true, pack: func(*testing.T) hostAnswer {
 			return gitBody(result, "0000"+pkt("NAK\n"))
-		}},
+		}, says: packfile.ErrEmptyPackfile.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
@@ -150,6 +155,19 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 			t.Errorf("read = %v, want the empty pack response marked", err)
 		}
 	})
+	t.Run("an empty pack response once the context is done", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(clone)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/o/r.git/git-upload-pack", nil)
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		cancel()
+		if _, err := io.ReadAll(res.Body); !errors.Is(err, errEmptyPack) {
+			t.Errorf("read = %v, want the empty pack response marked: go-git takes a bare end for \"already up to date\"", err)
+		}
+	})
 	t.Run("a pack response that ends after its bytes", func(t *testing.T) {
 		if err := get(clone, http.MethodPost, "/whole/r.git/git-upload-pack"); err != nil {
 			t.Errorf("read = %v, want a clean end", err)
@@ -196,7 +214,7 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 	})
 	t.Run("a read this machine failed", func(t *testing.T) {
 		local := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ENOBUFS)}
-		_, err := (&markedBody{ReadCloser: io.NopCloser(failingReader{0, local}), ctx: clone}).Read(make([]byte, 8))
+		_, err := (&markedBody{ReadCloser: io.NopCloser(errReader{local}), ctx: clone}).Read(make([]byte, 8))
 		if !errors.Is(err, errOwnRead) || errors.Is(err, errHostTransport) || !errors.Is(err, local) {
 			t.Errorf("read = %v, want it marked this executor's", err)
 		}
@@ -209,7 +227,8 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 	})
 }
 
-// failingReader reads n bytes and err at once.
+// failingReader reads n bytes and err at once, which errReader, with no bytes,
+// does not.
 type failingReader struct {
 	n   int
 	err error
@@ -235,6 +254,9 @@ func TestCloneReasonReadsTheTransportsMarks(t *testing.T) {
 		{"this machine's read, in go-git's decode words", fmt.Errorf("error decoding upload-pack response: %s", own), repoOutcomeInternal},
 		{"a spool file named in the host's words", &fs.PathError{Op: "open",
 			Path: "/tmp/map-repo-clone-1/tree/" + errHostTransport.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
+		{"an ERR line in this machine's words", &pktline.ErrorLine{Text: errOwnRead.Error()}, repoOutcomeNetwork},
+		{"a ref advertisement in this machine's words, not git's", packp.NewErrUnexpectedData("pkt-line 1: invalid length",
+			[]byte(errOwnRead.Error())), repoOutcomeNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := cloneReason(cloneFailed(context.Background(), tc.err)); got != tc.want {

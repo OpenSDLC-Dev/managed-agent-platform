@@ -370,6 +370,9 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			&pktline.ErrorLine{Text: "upstream: " + context.DeadlineExceeded.Error()}, repoOutcomeNetwork},
 		{"a ref advertisement that is not git's quotes a cancellation as the clone's is cancelled", cancelled,
 			packp.NewErrUnexpectedData("pkt-line 1: invalid length", []byte("upstream: "+context.Canceled.Error())), repoOutcomeNetwork},
+		{"the host's GOAWAY quotes a deadline before the clone's passes", passed, fmt.Errorf("%w: %w", errHostTransport,
+			errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`)),
+			repoOutcomeNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := cloneFailed(tc.ctx, tc.err)

@@ -44,45 +44,27 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    by the host's. A pack that is corrupt past its signature is out of
    this plan's scope and keeps its reason.
 2. **The clone's transport marks the host's failures where go-git reads
-   them.** go-git's HTTP transport is installed as the executor package
-   initializes (`client.InstallProtocol`, for `http` and `https`), because
-   go-git's protocol map has no lock: `http.DefaultTransport`, as go-git's own
-   client uses, wrapped by a `RoundTripper`. For a request whose context the
-   clone marked, a success's body answers a failed read with an error of its
-   own: an empty pack response as `errEmptyPack`, any other failure on the
-   host's side as `errHostTransport`, and one of this machine's, out of
-   buffers or memory, as `errOwnRead`. go-git compares only a bare `io.EOF`
-   and `io.ErrUnexpectedEOF` for "already up to date", so it returns these as
-   they are, and their words outlast the decode's `%s`. The failure then
-   travels with the error the clone ends with, so a failure go-git read past
-   cannot be taken for the one that ended the clone. A read once the clone's
-   context is done keeps its error: it is the deadline's or the
-   cancellation's. No other body is marked: the HTTP client drains a
-   redirect's body and ignores a failure there, and go-git reads a refusal by
-   its status. Every other request passes through as before. Every go-git
-   clone in a binary that imports the executor goes through the transport,
-   the evals suite's among them. go-git refuses an endpoint that names its
-   own proxy, CA bundle, client certificate or `InsecureSkipTLS` with this
-   transport, which is not an `*http.Transport`. None of those clones names
-   one; the system's trust store and the proxy environment variables apply
-   as before. A transport that wraps the connection instead would keep
-   go-git's type, but under TLS it cannot see a response's body, so it could
-   not tell an empty pack response.
-3. **The marks decide by their words.** `isProtocolError` reads
-   `errHostTransport`'s words as the network's, and `isLocalError` reads
-   `errOwnRead`'s as this executor's, which `cloneReason` asks first. So a
-   spool file named in the host's words still reads `internal`. A record
-   kept beside the clone and matched to go-git's error afterwards was this
-   plan's first design: every review round found another way the two failed
-   to match, and the marks replaced it.
+   them.** go-git's HTTP transport, installed for the process as the executor
+   package initializes, answers a clone's failed body read with a marked
+   error of its own, which go-git returns with the clone's error. go-git
+   compares only a bare `io.EOF` and `io.ErrUnexpectedEOF` for "already up
+   to date" (`upload_pack.go:64`), so the marks pass through it. A transport
+   that wraps the connection instead would keep go-git's
+   `*http.Transport` type, but under TLS it cannot see a response's body, so
+   it could not tell an empty pack response. The cost: go-git refuses an
+   endpoint that names its own CA bundle, client certificate, proxy or
+   `InsecureSkipTLS`, and no clone names one.
+3. **The marks decide by their words.** go-git formats a failed read with
+   `%s` inside its decode, so `cloneReason` reads a mark by its words where
+   go-git kept no type. A record kept beside the clone and matched to
+   go-git's error afterwards was this plan's first design: every review round
+   found another way the two failed to match, and the marks replaced it.
 4. **The context's error joins wherever its text was all go-git kept.** A
    decode refusal now reads `network`, and go-git formats a deadline or a
-   cancellation inside the decode with the same words. So the clone's context
-   error joins the chain when the context has ended, the message names it,
-   and the reason would otherwise be `internal` or `network`. Before, only a
-   deadline joined, and only over `internal`. It does not join where go-git
-   keeps the host's words in a type, an `ERR` line or a response that is not
-   git's: those words are the host's, though they quote the context's.
+   cancellation inside the decode with the same words. So the context's
+   error now joins over `network` as well as `internal`; before, only a
+   deadline joined, and only over `internal`. Where go-git keeps the host's
+   words, or the transport's mark, in a type, they stay the host's.
 5. **A commit the host does not have still reads `checkout`.** The host
    refuses it with an `ERR` line, and `fetchCommit` already marks that refusal
    as the caller's sha before `cloneReason` reads it.
