@@ -1547,7 +1547,7 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		}
 		return err
 	}
-	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.BulkRenameShell +
+	res, err := sandbox.ExecStatus(ctx, c, "bulkrename", "the bulk write's rename", sandbox.ExecRequest{Command: sandbox.BulkRenameShell +
 		fmt.Sprintf("__map_bulk_rename %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
@@ -1560,7 +1560,15 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		// source under it would let that `mv` put zero bytes onto a target the
 		// caller was just told it had not touched. A payload under a parent the
 		// sandbox user cannot write survives here, as it does there — so what the
-		// shed reports it could not take is deliberately dropped.
+		// shed reports it could not take is deliberately dropped. But for a rename
+		// the image's startup ended before it began (sandbox.StartupExitError),
+		// as the single write's rename: no `mv` is in flight then, so the daemon
+		// takes back what the shed reports it could not.
+		var startup *sandbox.StartupExitError
+		if errors.As(err, &startup) {
+			c.shedBulk(ctx, b)
+			return err
+		}
 		_ = c.discardBulk(ctx, b)
 		return c.wrap(err)
 	}
@@ -1630,10 +1638,11 @@ func (c *container) putExtraction(ctx context.Context, x sandbox.Extraction) err
 // a refused PUT — is the target a directory, one a rename cannot replace, or in
 // a directory the sandbox user cannot create a file in — for each member, in the
 // manifest's order (sandbox.BulkRefusedShell). Nil when no member answers yes,
-// or when the question could not be asked, and the caller keeps the daemon's own
-// error then, as WriteFile does.
+// or when the question could not be asked — an image's startup that ended the
+// shell first among them (sandbox.ExecStatus) — and the caller keeps the
+// daemon's own error then, as WriteFile does.
 func (c *container) refusedBulk(ctx context.Context, b *sandbox.BulkWrite) error {
-	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.BulkRefusedShell +
+	res, err := sandbox.ExecStatus(ctx, c, "bulkrefused", "the bulk write's refusal probe", sandbox.ExecRequest{Command: sandbox.BulkRefusedShell +
 		fmt.Sprintf("__map_bulk_refused %s", shellQuote(b.Manifest))})
 	if err != nil {
 		return nil
@@ -1645,7 +1654,7 @@ func (c *container) refusedBulk(ctx context.Context, b *sandbox.BulkWrite) error
 // where a path blocked by a non-directory is named, and a directory that cannot
 // be made is a PathNotWritableError, as the single write's mkdirAll makes it.
 func (c *container) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error {
-	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.BulkPrepareShell +
+	res, err := sandbox.ExecStatus(ctx, c, "bulkprepare", "the bulk write's directories", sandbox.ExecRequest{Command: sandbox.BulkPrepareShell +
 		fmt.Sprintf("__map_bulk_prepare %s", shellQuote(b.DirList))})
 	if err != nil {
 		return c.wrap(err)
@@ -1794,7 +1803,7 @@ func emptyingDeadline() time.Duration { return 6 * cleanupBudget }
 // the shared __map_preserve_mode carries them onto the temporary file first — the
 // k8s backend's write script calls the same function at the same point (#204).
 func (c *container) rename(ctx context.Context, tmp, path string) error {
-	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.PreserveModeShell + sandbox.UnreplaceableShell + fmt.Sprintf(
+	res, err := sandbox.ExecStatus(ctx, c, "rename", "the rename onto "+path, sandbox.ExecRequest{Command: sandbox.PreserveModeShell + sandbox.UnreplaceableShell + fmt.Sprintf(
 		"if [ -d %[2]s ]; then rm -f %[1]s; exit %[3]d; fi\n"+
 			"if __map_unreplaceable %[2]s; then rm -f %[1]s; exit %[5]d; fi\n"+
 			"__map_preserve_mode %[2]s %[1]s\n"+
@@ -1819,14 +1828,16 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// caller's old data was, while the caller is being told the write failed.
 		// So the shed here is the one the sandbox user can do, and a payload under
 		// a parent that user cannot write survives on this branch (#310) — but
-		// for the one error that says the script never ran: a command Exec
+		// for the two errors that say the script never ran: a command Exec
 		// refused as too long (sandbox.CommandTooLongError), which a path the
-		// script quotes eleven times can make. No `mv` is in flight then, so the
-		// daemon takes back what the sandbox user's `rm` could not, as on every
-		// failure below.
+		// script quotes eleven times can make, and a shell the image's startup
+		// ended before the script began (sandbox.StartupExitError), whose status
+		// is no answer. No `mv` is in flight then, so the daemon takes back what
+		// the sandbox user's `rm` could not, as on every failure below.
 		c.discard(ctx, tmp)
 		var tooLong *sandbox.CommandTooLongError
-		if errors.As(err, &tooLong) {
+		var startup *sandbox.StartupExitError
+		if errors.As(err, &tooLong) || errors.As(err, &startup) {
 			c.reclaim(ctx, tmp)
 		}
 		return err
@@ -1865,10 +1876,12 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 
 // pathFault asks the sandbox whether a non-directory is what blocked path,
 // returning ErrNotDirectory when it is and nil when it is not. Nil is also what a
-// probe that could not run itself returns: the caller has a real failure to report
-// already, and a guess about it would be worse than the daemon's own message.
+// probe that could not run itself returns — an image's startup that ended the
+// shell first among them (sandbox.ExecStatus): the caller has a real failure to
+// report already, and a guess about it would be worse than the daemon's own
+// message.
 func (c *container) pathFault(ctx context.Context, path string) error {
-	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.PathFaultShell +
+	res, err := sandbox.ExecStatus(ctx, c, "pathfault", "the path probe of "+path, sandbox.ExecRequest{Command: sandbox.PathFaultShell +
 		fmt.Sprintf("__map_path_fault %s\nexit 0", shellQuote(path))})
 	if err == nil && res.ExitCode == sandbox.ExitPathNotDirectory {
 		return sandbox.ErrNotDirectory
@@ -1885,7 +1898,7 @@ func (c *container) pathFault(ctx context.Context, path string) error {
 // on the PUT landing (#303). Nil is also what a probe that could not run itself
 // returns, for pathFault's reason.
 func (c *container) unreplaceable(ctx context.Context, path string) error {
-	res, err := sandbox.ExecScript(ctx, c, sandbox.ExecRequest{Command: sandbox.UnreplaceableShell + fmt.Sprintf(
+	res, err := sandbox.ExecStatus(ctx, c, "replaceable", "the replaceability probe of "+path, sandbox.ExecRequest{Command: sandbox.UnreplaceableShell + fmt.Sprintf(
 		"if [ -d %[1]s ]; then exit %[2]d; fi\nif __map_unreplaceable %[1]s; then exit %[3]d; fi\nexit 0",
 		shellQuote(path), sandbox.ExitPathIsDirectory, sandbox.ExitPathNotReplaceable)})
 	if err != nil {
@@ -1912,24 +1925,20 @@ func (c *container) unreplaceable(ctx context.Context, path string) error {
 // A failed rename asks it too: the daemon extracts as root, so a parent the
 // sandbox user cannot write takes the PUT and refuses only the move.
 //
-// The reason is read from inside the probe's frame (sandbox.ExecFramed), so
-// what an image's startup prints around it — a BASH_ENV file's banner, an EXIT
-// trap's words — is no part of it (#860). A reason that did not reach the
-// output whole is none: the refusal stands on the exit code, and says only
-// that the path cannot be written, as the k8s write script's does.
+// The exit code and the reason are read only where the probe's frame arrived
+// (sandbox.ExecStatus), so what an image's startup prints around it — a
+// BASH_ENV file's banner, an EXIT trap's words — is no part of the reason
+// (#860), and a status the startup chose by ending the shell first is no
+// refusal (#942).
 func (c *container) notWritable(ctx context.Context, path string) error {
 	probe := gopath.Join(gopath.Dir(path), sandbox.TempName())
-	res, framed, err := sandbox.ExecFramed(ctx, c, "writable", sandbox.ExecRequest{Command: fmt.Sprintf(
+	res, err := sandbox.ExecStatus(ctx, c, "writable", "the writability probe of "+path, sandbox.ExecRequest{Command: fmt.Sprintf(
 		"export LC_ALL=C\nmsg=$({ : > %[1]s; } 2>&1) || { printf '%%s' \"${msg##*: }\"; exit %[2]d; }\nrm -f %[1]s\nexit 0",
 		shellQuote(probe), sandbox.ExitPathNotWritable)})
 	if err != nil || res.ExitCode != sandbox.ExitPathNotWritable {
 		return nil
 	}
-	reason := ""
-	if framed {
-		reason = strings.TrimSpace(res.Stdout)
-	}
-	return &sandbox.PathNotWritableError{Path: path, Reason: reason}
+	return &sandbox.PathNotWritableError{Path: path, Reason: strings.TrimSpace(res.Stdout)}
 }
 
 // cleanupBudget bounds a cleanup that has to outlive the write it cleans up
@@ -2026,12 +2035,13 @@ func (c *container) reclaim(ctx context.Context, tmp string) {
 // non-directory is named: `mkdir -p` fails there, and the shared shell says
 // whether that is why (both backends embed it, so both answer alike).
 //
-// mkdir's message is read from inside the script's frame (sandbox.ExecFramed),
-// so what an image's startup prints on stderr ahead of it — a BASH_ENV file's
-// banner, which would otherwise be the first line the reason is taken from —
-// is no part of it (#860).
+// mkdir's message and its exit code are read only where the script's frame
+// arrived (sandbox.ExecStatus), so what an image's startup prints on stderr
+// ahead of it — a BASH_ENV file's banner, which would otherwise be the first
+// line the reason is taken from — is no part of it (#860), and a status the
+// startup chose by ending the shell first is no answer (#942).
 func (c *container) mkdirAll(ctx context.Context, dir string) error {
-	res, framed, err := sandbox.ExecFramed(ctx, c, "mkdir", sandbox.ExecRequest{Command: sandbox.PathFaultShell +
+	res, err := sandbox.ExecStatus(ctx, c, "mkdir", "the creation of "+dir, sandbox.ExecRequest{Command: sandbox.PathFaultShell +
 		fmt.Sprintf("export LC_ALL=C\nmkdir -p %[1]s || { __map_path_fault %[1]s; exit 1; }", shellQuote(dir))})
 	if err != nil {
 		return err
@@ -2046,16 +2056,11 @@ func (c *container) mkdirAll(ctx context.Context, dir string) error {
 		// root, a root-owned parent, a full disk — as the k8s write script's
 		// mkdir branch reports with its exit 20 (plan 23, #306), and mkdir's
 		// own stderr names why: its strerror tail is the reason the classified
-		// refusal carries. Only a script whose frame arrived said so, though:
-		// exit 1 is also what a shell that died before the script began — an
-		// image's startup gone wrong — leaves, which is the sandbox's fault and
-		// not the path's, so output with no frame keeps the raw error.
-		if framed {
-			return &sandbox.PathNotWritableError{Path: dir, Reason: strerrorTail(res.Stderr)}
-		}
+		// refusal carries.
+		return &sandbox.PathNotWritableError{Path: dir, Reason: strerrorTail(res.Stderr)}
 	}
 	// The script exits 0, 1 or the path fault's code; anything else is the
-	// shell's own end — killed, or never started — and keeps the raw error.
+	// shell's own end, killed partway, and keeps the raw error.
 	return fmt.Errorf("docker: mkdir -p %s: exit %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
 }
 

@@ -199,6 +199,43 @@ func TestAStartupFloodIsAToolErrorForEveryTool(t *testing.T) {
 	}
 }
 
+// A platform script the image's startup ended before it began
+// (sandbox.StartupExitError) is no backend fault either, for any tool: every
+// shell on that image ends the same way, so a reclaim would meet it again. It
+// is a tool error naming the image's startup and the status it left, and
+// telling the model when the command ran.
+func TestAStartupExitIsAToolErrorForEveryTool(t *testing.T) {
+	ran := &sandbox.StartupExitError{What: "the command's exit record", Status: 0, Ran: true}
+	read := fmt.Errorf("probe: %w", &sandbox.StartupExitError{What: "the read of /workspace/a.txt", Status: 10})
+	cases := []struct {
+		name  string
+		sb    *fakeSandbox
+		tool  string
+		input string
+		ran   bool
+	}{
+		{"bash", &fakeSandbox{execErr: ran}, "bash", `{"command":"echo hi"}`, true},
+		{"glob", &fakeSandbox{execErr: ran}, "glob", `{"pattern":"*.go"}`, true},
+		{"read", &fakeSandbox{readErr: read}, "read", `{"file_path":"a.txt"}`, false},
+		{"edit", &fakeSandbox{readErr: read}, "edit", `{"file_path":"a.txt","old_string":"a","new_string":"b"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := run(t, tc.sb, tc.tool, tc.input)
+			if err != nil {
+				t.Fatalf("err = %v, want a tool result", err)
+			}
+			if !res.IsError || !strings.HasPrefix(res.Content, tc.tool+": ") || !strings.Contains(res.Content, "startup file (BASH_ENV)") ||
+				!strings.Contains(res.Content, "ended the shell") {
+				t.Errorf("result = %+v, want an error result naming the image's startup and the shell it ended", res)
+			}
+			if got := strings.Contains(res.Content, "The command ran"); got != tc.ran {
+				t.Errorf("result = %q; says the command ran: %v, want %v", res.Content, got, tc.ran)
+			}
+		})
+	}
+}
+
 // A destroyed sandbox is a backend fault too — the session survives, this tool
 // call does not, and the executor decides what happens next.
 func TestDestroyedSandboxIsABackendFault(t *testing.T) {

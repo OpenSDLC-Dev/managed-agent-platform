@@ -104,14 +104,19 @@ var (
 	// one — a download with no Content-Length, which Go reports as -1 (#386) —
 	// was blaming the stream for a number it had chosen itself.
 	ErrSizeNotALength = errors.New("sandbox: size is not a length")
-	// ErrUnframedStatus marks a refusal that a script's exit status alone
-	// carried: its frame (Frame) is missing from an output the cap did not
-	// cut, so an image's startup that ended the shell before the script began
-	// could have chosen the status. It travels beside the refusal's own
-	// sentinel, so a caller that only reports the refusal is unchanged; one
-	// that would act on it takes it for no answer — StatPresence, whose
-	// Absent clones over a checkout (#941). Other scripts' exits are #942.
+	// ErrUnframedStatus marks an exit status that came with no frame of the
+	// script's (Frame) in an output the cap did not cut, so an image's startup
+	// that ended the shell before the script began could have chosen it. A
+	// *StartupExitError matches it (errors.Is), so a caller that would act on
+	// a refusal takes it for no answer: StatPresence, whose Absent clones over
+	// a checkout (#941).
 	ErrUnframedStatus = errors.New("sandbox: the exit status came with no frame of the script's")
+	// ErrOutputLost is a platform script that began, as its begin line on
+	// either stream shows, and whose stdout did not carry its frame whole: a
+	// stream lost on its way, as client-go drops a failed stdout copy without
+	// a word (#105). It is the transport's fault, not the image's
+	// (Frame.Unanswered).
+	ErrOutputLost = errors.New("sandbox: the script began, and its output did not arrive whole")
 )
 
 // CheckWriteSize refuses a declared size that is not a byte count, and is the
@@ -462,11 +467,11 @@ func Script(script string) string { return ScriptPreamble + script }
 func CheckScript(script string) error { return CheckCommand(Script(script)) }
 
 // ExecScript runs req's command in sb as a script of the platform's own
-// (Script) — ExecFramed's counterpart for a script whose answer is its exit
-// code, not its output — refusing one past the bound (CheckScript) before
-// anything runs, as Exec would. Every platform script a sandbox runs goes
-// through it or ExecFramed, so neither the preamble nor its bytes can be left
-// out of one.
+// (Script), for a script whose status no one reads — a cleanup's — refusing
+// one past the bound (CheckScript) before anything runs, as Exec would. A
+// script whose answer is its status runs through ExecStatus, and one whose
+// answer is its output through ExecFramed, so neither the preamble nor its
+// bytes can be left out of one.
 func ExecScript(ctx context.Context, sb Sandbox, req ExecRequest) (ExecResult, error) {
 	req.Command = Script(req.Command)
 	if err := CheckCommand(req.Command); err != nil {
@@ -498,6 +503,34 @@ func (e *StartupOutputError) Error() string {
 	}
 	return s
 }
+
+// StartupExitError is a platform script that gave no answer because an
+// image's startup file — `ENV BASH_ENV`, which every shell the sandbox starts
+// runs first — ended the shell before the script began: neither stream carries
+// the script's begin line (Frame.Unanswered), so the exec's status is the
+// startup's (#942). What names the answer asked for, Status the status the
+// startup left, which answers nothing, and Ran says the call's command had
+// already run, as StartupOutputError's does.
+//
+// The image's startup does the same in every shell, so a retry meets the same:
+// the toolset answers it as a tool error, never a backend fault. It matches
+// ErrUnframedStatus (errors.Is).
+type StartupExitError struct {
+	What   string
+	Status int
+	Ran    bool
+}
+
+func (e *StartupExitError) Error() string {
+	s := fmt.Sprintf("sandbox: %s got no answer: the sandbox image's startup file (BASH_ENV) ended the shell, with status %d, before the platform's script began", e.What, e.Status)
+	if e.Ran {
+		s += "; the command had run"
+	}
+	return s
+}
+
+// Is matches ErrUnframedStatus: the status came with no frame of the script's.
+func (e *StartupExitError) Is(target error) bool { return target == ErrUnframedStatus }
 
 // ExecResult is a finished command. TimedOut means the command itself outlived
 // its deadline: the sandbox stopped it, or stopped waiting for it, or caught it

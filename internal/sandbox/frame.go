@@ -203,6 +203,32 @@ func (f Frame) CutInBegin(s string) bool {
 	return false
 }
 
+// Began reports whether s, one stream of a run of the script f frames, shows
+// that the script began: it carries the begin line, or ends partway through it
+// (CutInBegin), which was on its way when the stream was lost.
+func (f Frame) Began(s string) bool {
+	return strings.Contains(s, f.begin) || f.CutInBegin(s)
+}
+
+// Unanswered is why a run of the script f frames gave no answer, where its
+// stdout carries no frame (Unframe answered false); what names the answer
+// asked for. A stdout the cap cut before the frame was filled by what printed
+// ahead of the script: a *StartupOutputError. The begin line on either stream
+// (Began) shows the script began and its output was lost on its way:
+// ErrOutputLost, the transport's fault. Neither shows that the image's startup
+// ended the shell before the script began, with a status of its own choosing:
+// a *StartupExitError, which answers nothing whatever the status (#942).
+func (f Frame) Unanswered(what string, res ExecResult) error {
+	switch {
+	case res.StdoutTruncated:
+		return &StartupOutputError{What: what}
+	case f.Began(res.Stdout) || f.Began(res.Stderr):
+		return fmt.Errorf("%s: %w", what, ErrOutputLost)
+	default:
+		return &StartupExitError{What: what, Status: res.ExitCode}
+	}
+}
+
 // cutFrame is Cut, with room > 0 bounding where the lines are looked for
 // first (CutBytesWithin).
 func cutFrame[T string | []byte](f Frame, s T, truncated bool, room int) (T, bool, bool) {
@@ -290,6 +316,25 @@ func (f Frame) Unframe(res ExecResult) (ExecResult, bool) {
 	return res, framed
 }
 
+// UnframeStatus is Unframe for a script whose answer is its exit status, its
+// stdout at most a detail of it. Where the cap cut stdout before the frame —
+// what printed ahead of the script filled it — a stderr that carries the whole
+// frame still shows the script ran to its end (Open prints both lines on both
+// streams), so the status answers, with nothing of stdout, which the flood
+// took (#860, #942). A stdout the cap did not cut is Unframe's alone: one with
+// no frame was lost on its way, or the script never began (Unanswered).
+func (f Frame) UnframeStatus(res ExecResult) (ExecResult, bool) {
+	if out, ok := f.Unframe(res); ok || !res.StdoutTruncated {
+		return out, ok
+	}
+	msg, framed, short := f.Cut(res.Stderr, res.StderrTruncated)
+	if !framed || short {
+		return res, false
+	}
+	res.Stdout, res.Stderr, res.StderrTruncated = "", msg, false
+	return res, true
+}
+
 // ExecFramed runs req's command in sb framed (Wrap), under a frame of its own
 // labelled label, and answers what the script printed (Unframe): the result,
 // and whether its stdout was framed. Exec's own error is returned as Exec
@@ -303,4 +348,24 @@ func ExecFramed(ctx context.Context, sb Sandbox, label string, req ExecRequest) 
 	}
 	res, framed := f.Unframe(res)
 	return res, framed, nil
+}
+
+// ExecStatus runs req's command in sb framed (Wrap), under a frame of its own
+// labelled label, for a script whose answer is its exit status. Where the
+// frame arrived it answers what the script printed (UnframeStatus), and the
+// status is the script's own; elsewhere it answers why no answer came
+// (Unanswered), what naming the answer asked for, so a status an image's
+// startup chose is never read as the script's (#942). Exec's own error is
+// returned as Exec returned it.
+func ExecStatus(ctx context.Context, sb Sandbox, label, what string, req ExecRequest) (ExecResult, error) {
+	f := NewFrame(label)
+	req.Command = f.Wrap(req.Command)
+	res, err := sb.Exec(ctx, req)
+	if err != nil {
+		return res, err
+	}
+	if out, ok := f.UnframeStatus(res); ok {
+		return out, nil
+	}
+	return res, f.Unanswered(what, res)
 }
