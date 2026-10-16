@@ -213,7 +213,7 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 		if startupExit.Status > 128 {
 			again = " Running it again may meet the same."
 		}
-		return failf("%s: %s got no answer: %s, before the platform's script began.%s%s",
+		return failf("%s: %s got no answer: %s.%s%s",
 			name, startupExit.What, startupExit.Ended(), ran, again)
 	}
 	if err != nil {

@@ -130,6 +130,9 @@ The callers that run a script of their own, or act on a backend's refusal:
      harvest and the repository extraction;
    - `shell.Run`'s `done` marker, as decision 2 says.
 2. **The toolset.** `fileFault` and `installRipgrep`, as decision 2 says.
+   `installRipgrep` is the first exit-status script with a deadline, and
+   `Frame.Answer` does not read `TimedOut`: a timeout there must be answered
+   before the status is.
 3. **The executor and worker callers**, as decision 7 says.
 
 ## Verification

@@ -1560,24 +1560,26 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		// source under it would let that `mv` put zero bytes onto a target the
 		// caller was just told it had not touched. A payload under a parent the
 		// sandbox user cannot write survives here, as it does there — so what the
-		// shed reports it could not take is deliberately dropped. But for a rename
-		// the image's startup kept from answering (sandbox.StartupExitError), as
-		// the single write's rename, the daemon takes back what the shed reports
-		// it could not: the shed's report names only regular files the sandbox
-		// user could not remove, which a `mv` of that user's cannot move either.
-		// Where no report arrives — the same startup most likely ended the shed
-		// too — nothing is emptied, as reclaimBulk says of any shed that sent
-		// none. The delivered names are not all known to be this batch's regular
-		// files still, and a status past 128 is a shell killed while a `mv` of
-		// its may live on: emptying them all could put zero bytes under that `mv`,
-		// or a file over a directory made at a temporary's name.
+		// shed reports it could not take is deliberately dropped. But a rename
+		// the image's startup kept from answering (sandbox.StartupExitError)
+		// whose shell exited by itself has no script still running (Exited), so
+		// shedBulk's precondition holds and the daemon takes back what the shed
+		// reports it could not, as the single write's rename does. Where no
+		// report arrives — the same startup most likely ended the shed too —
+		// nothing is emptied, as reclaimBulk says of any shed that sent none. A
+		// shell a signal killed may have left a `mv` running, and sheds as any
+		// other exec error does.
 		var startup *sandbox.StartupExitError
-		if errors.As(err, &startup) {
-			c.reclaimBulk(ctx, b, c.discardBulk(ctx, b))
-			return err
+		if !errors.As(err, &startup) {
+			_ = c.discardBulk(ctx, b)
+			return c.wrap(err)
 		}
-		_ = c.discardBulk(ctx, b)
-		return c.wrap(err)
+		if startup.Exited() {
+			c.shedBulk(ctx, b)
+		} else {
+			_ = c.discardBulk(ctx, b)
+		}
+		return err
 	}
 	// The script has run to an exit code, so nothing of it is still moving: what
 	// its own `rm` could not take, the daemon that landed it can. A batch refused
@@ -1835,19 +1837,17 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// caller's old data was, while the caller is being told the write failed.
 		// So the shed here is the one the sandbox user can do, and a payload under
 		// a parent that user cannot write survives on this branch (#310) — but
-		// for two errors. A command Exec refused as too long
-		// (sandbox.CommandTooLongError), which a path the script quotes eleven
-		// times can make, never ran. A shell the image's startup kept from
-		// answering (sandbox.StartupExitError) most likely never ran the script
-		// either; one killed while a `mv` of its lives on is answered by the `rm`
-		// that goes first, which leaves that `mv` nothing to move. What the daemon
-		// then takes back, as on every failure below, is only what that `rm`
-		// could not: the temporary sits in the target's own directory, so the
-		// sandbox user's `mv` cannot move it either.
+		// for two errors that say no script is still running: a command Exec
+		// refused as too long (sandbox.CommandTooLongError), which a path the
+		// script quotes eleven times can make, and a shell the image's startup
+		// kept from answering (sandbox.StartupExitError) that exited by itself
+		// (Exited). No `mv` is in flight then, so the daemon takes back what the
+		// sandbox user's `rm` could not, as on every failure below. A shell a
+		// signal killed may have left one running, and is shed as above.
 		c.discard(ctx, tmp)
 		var tooLong *sandbox.CommandTooLongError
 		var startup *sandbox.StartupExitError
-		if errors.As(err, &tooLong) || errors.As(err, &startup) {
+		if errors.As(err, &tooLong) || errors.As(err, &startup) && startup.Exited() {
 			c.reclaim(ctx, tmp)
 		}
 		return err

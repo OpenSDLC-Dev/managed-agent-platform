@@ -1908,57 +1908,68 @@ func TestARenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 	}
 }
 
-// A rename the image's startup ended before it began answers the startup's
-// exit, whatever status it left — 0 here, which read as the script's would be a
-// write that never happened (#942). No `mv` is in flight then, so after the
-// sandbox user's `rm` the daemon empties the temporary that `rm` could not
-// take, as it does for a refused rename.
+// A rename the image's startup kept from answering answers the startup's
+// exit, whatever status it left — 0 here, which read as the script's would be
+// a write that never happened (#942). A shell that exited by itself has no
+// `mv` in flight, so after the sandbox user's `rm` the daemon empties the
+// temporary that `rm` could not take, as it does for a refused rename. A shell
+// a signal killed (137) may have left one running: the `rm` alone sheds it.
 func TestARenameTheStartupEndedReclaimsItsTempThroughTheDaemon(t *testing.T) {
-	var commands []string
-	var reclaimed []byte
-	var headed string
-	var renamed bool
-	p := startupEndsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
-			headed = r.URL.Query().Get("path")
-			w.WriteHeader(http.StatusOK)
-		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
-			if renamed {
-				reclaimed, _ = io.ReadAll(r.Body)
+	for status, reclaims := range map[int]bool{0: true, 137: false} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var commands []string
+			var reclaimed []byte
+			var headed string
+			var renamed bool
+			p := startupEndsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+					headed = r.URL.Query().Get("path")
+					w.WriteHeader(http.StatusOK)
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+					if renamed {
+						reclaimed, _ = io.ReadAll(r.Body)
+					}
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/exec"):
+					var body execConfig
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode exec create: %v", err)
+					}
+					cmd := wrapperCommand(t, body.Cmd)
+					commands = append(commands, cmd)
+					renamed = renamed || strings.Contains(cmd, "mv -f")
+					fmt.Fprintf(w, `{"Id":"e%d"}`, len(commands))
+				case strings.HasSuffix(r.URL.Path, "/start"):
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, status)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			}, "rename")
+			c := p.attach("abc", "/workspace", "", false)
+			err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
+			var startup *sandbox.StartupExitError
+			if !errors.As(err, &startup) || startup.Status != status {
+				t.Fatalf("err = %v, want the startup's exit with status %d", err, status)
 			}
-			w.WriteHeader(http.StatusOK)
-		case strings.HasSuffix(r.URL.Path, "/exec"):
-			var body execConfig
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Errorf("decode exec create: %v", err)
+			if last := commands[len(commands)-1]; !strings.Contains(last, "rm -f '/etc/"+sandbox.TempPrefix) {
+				t.Errorf("last exec = %q, want the sandbox user's own rm", last)
 			}
-			cmd := wrapperCommand(t, body.Cmd)
-			commands = append(commands, cmd)
-			renamed = renamed || strings.Contains(cmd, "mv -f")
-			fmt.Fprintf(w, `{"Id":"e%d"}`, len(commands))
-		case strings.HasSuffix(r.URL.Path, "/start"):
-			w.WriteHeader(http.StatusOK)
-		case strings.HasSuffix(r.URL.Path, "/json"):
-			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
-		default:
-			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-		}
-	}, "rename")
-	c := p.attach("abc", "/workspace", "", false)
-	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
-	var startup *sandbox.StartupExitError
-	if !errors.As(err, &startup) || startup.Status != 0 {
-		t.Fatalf("err = %v, want the startup's exit with status 0", err)
-	}
-	if last := commands[len(commands)-1]; !strings.Contains(last, "rm -f '/etc/"+sandbox.TempPrefix) {
-		t.Errorf("last exec = %q, want the sandbox user's own rm", last)
-	}
-	if !strings.HasPrefix(headed, "/etc/"+sandbox.TempPrefix) || reclaimed == nil {
-		t.Fatalf("HEAD asked about %q and the daemon was handed %d bytes; want the temporary emptied", headed, len(reclaimed))
-	}
-	if name, size := tarEntry(t, reclaimed); !strings.HasPrefix(name, sandbox.TempPrefix) || size != 0 {
-		t.Errorf("the emptying archive carries %q of %d bytes, want the temporary's own name at 0", name, size)
+			if !reclaims {
+				if headed != "" || reclaimed != nil {
+					t.Errorf("HEAD asked about %q and the daemon was handed %d bytes; want no emptying under a `mv` that may live on", headed, len(reclaimed))
+				}
+				return
+			}
+			if !strings.HasPrefix(headed, "/etc/"+sandbox.TempPrefix) || reclaimed == nil {
+				t.Fatalf("HEAD asked about %q and the daemon was handed %d bytes; want the temporary emptied", headed, len(reclaimed))
+			}
+			if name, size := tarEntry(t, reclaimed); !strings.HasPrefix(name, sandbox.TempPrefix) || size != 0 {
+				t.Errorf("the emptying archive carries %q of %d bytes, want the temporary's own name at 0", name, size)
+			}
+		})
 	}
 }
 
@@ -2924,19 +2935,21 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 // a rename the image's startup ended before it began left no `mv` in flight,
 // so after the sandbox user's shed the daemon empties what the shed reports it
 // could not take, in one archive. A shed that sends no report — the same
-// startup ended its shell too — has the daemon empty nothing: which delivered
-// names are still this batch's regular files is not known, and a `mv` of a
-// killed rename may still be moving one (#942).
+// startup ended its shell too — has the daemon empty nothing, and so does a
+// rename a signal killed (137), which may have left a `mv` running (#942).
 func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// shed is what the discard exec prints.
 		shed string
+		// status is the rename's.
+		status int
 		// emptied says the daemon empties what the shed reported.
 		emptied bool
 	}{
-		{"the shed reports", "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", true},
-		{"the startup ended the shed too", "welcome to the image ", false},
+		{"the shed reports", "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", 0, true},
+		{"the startup ended the shed too", "welcome to the image ", 0, false},
+		{"a signal killed the rename", "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", 137, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var commands []string
@@ -2960,6 +2973,9 @@ func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
 					if strings.Contains(cmd, "__map_bulk_discard") {
 						kinds[id] = "discard"
 					}
+					if strings.Contains(cmd, "__map_bulk_rename ") {
+						kinds[id] = "rename"
+					}
 					fmt.Fprintf(w, `{"Id":%q}`, id)
 				case strings.HasSuffix(r.URL.Path, "/start"):
 					w.WriteHeader(http.StatusOK)
@@ -2967,7 +2983,11 @@ func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
 						w.Write(frame(streamStdout, tc.shed))
 					}
 				case strings.HasSuffix(r.URL.Path, "/json"):
-					io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+					status := 0
+					if kinds[execID] == "rename" {
+						status = tc.status
+					}
+					fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, status)
 				default:
 					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 				}
@@ -2978,8 +2998,8 @@ func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
 				{Path: "/etc/b.txt", Data: []byte("BBBB")},
 			})
 			var startup *sandbox.StartupExitError
-			if !errors.As(err, &startup) || startup.Status != 0 {
-				t.Fatalf("err = %v, want the startup's exit with status 0", err)
+			if !errors.As(err, &startup) || startup.Status != tc.status {
+				t.Fatalf("err = %v, want the startup's exit with status %d", err, tc.status)
 			}
 			if last := commands[len(commands)-1]; !strings.Contains(last, "__map_bulk_discard") {
 				t.Errorf("last exec = %q, want the sandbox user's own shed", last)

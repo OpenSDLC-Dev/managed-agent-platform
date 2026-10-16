@@ -400,7 +400,7 @@ func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
 			unclassified := func(s sandbox.Sandbox, label string, status int, err, wrong error) {
 				t.Helper()
 				if err == nil || errors.Is(err, wrong) {
-					t.Errorf("%s ended with %d: %v; want the backend's own refusal, not %v", label, status, err, wrong)
+					t.Errorf("%s ended with %d: %v; want an error, and not %v from a probe the startup ended", label, status, err, wrong)
 				}
 				fired(s, label, status)
 			}
@@ -447,6 +447,11 @@ func TestPlatformScriptsTakeNoStatusAStartupChose(t *testing.T) {
 					arm(ro, "replaceable", status)
 					err := ro.WriteFile(ctx, "/etc/map-replaceable", x)
 					unclassified(ro, "replaceable", status, err, wrong)
+					// The replaceability probe answered nothing, so the writability
+					// probe after it, unarmed, names the read-only root.
+					if !errors.Is(err, sandbox.ErrNotWritable) {
+						t.Errorf("replaceable ended with %d: %v; want the writability probe's answer", status, err)
+					}
 				}
 				arm(ro, "writable", sandbox.ExitPathNotWritable)
 				unclassified(ro, "writable", sandbox.ExitPathNotWritable, ro.WriteFile(ctx, "/etc/map-writable", x), sandbox.ErrNotWritable)

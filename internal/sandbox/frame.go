@@ -225,13 +225,16 @@ func (f Frame) Began(s string) bool {
 
 // Unanswered is why a run of the script f frames gave no answer, where no
 // stream carries its frame whole (UnframeStatus answered false); what names
-// the answer asked for. A stdout the cap cut before the frame was filled by
-// what printed ahead of the script: a *StartupOutputError. The begin line on
-// either stream (Began) shows the script began and its output was lost on its
-// way: ErrOutputLost, the transport's fault. A stderr the cap cut with no
-// begin line on either stream was filled ahead of the script too. Nothing of
-// the kind shows that the image's startup ended the shell before the script
-// began, with a status of its own choosing: a *StartupExitError, which answers
+// the answer asked for. A stdout the cap cut — before the frame, or inside it
+// before the end line — was filled by what printed ahead of the script: a
+// script whose answer is its status prints a few marker lines of its own, so
+// a cap it reached is the startup's, which a retry meets again: a
+// *StartupOutputError. The begin line on either stream (Began) shows the
+// script began and its output was lost on its way: ErrOutputLost, the
+// transport's fault. A stderr the cap cut with no begin line on either stream
+// was filled ahead of the script too. Nothing of the kind shows that the
+// image's startup ended the shell before the script began, with a status of
+// its own choosing, or silenced the script: a *StartupExitError, which answers
 // nothing whatever the status (#942).
 func (f Frame) Unanswered(what string, res ExecResult) error {
 	switch {

@@ -1367,7 +1367,7 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, runRecord
 	if err != nil {
 		return 0, false, runRecord{}, err
 	}
-	return readExitRecord(f, out.String(), msg.String(), out.truncated, res.code)
+	return readExitRecord(f, out.String(), msg.String(), out.truncated, msg.truncated, res.code)
 }
 
 // readExitRecord reads exitScript's answer from inside its frame (f), so what
@@ -1389,7 +1389,9 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, runRecord
 // *sandbox.StartupExitError whose command may have run, where reading it as
 // no record would answer with the kill's 137 for a command that may have
 // exited 7, its state files left behind. Whether it ran is the startup's to
-// say too: the command's own shell ran it first.
+// say too: the command's own shell ran it first. Where the cap cut stderr
+// (msgCut) there, a startup filled it ahead of the script: a
+// *sandbox.StartupOutputError, as Frame.Unanswered says.
 //
 // What a lost stream drops, short of the cap, is a suffix of whole writes
 // (exitScript prints its record in one), so an answer whose end line never
@@ -1400,10 +1402,10 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, runRecord
 // loss as a fault the executor retries would run it again (plan 67). But a
 // reader that exited non-zero (code) is no record to parse: an error naming
 // what reached the output.
-func readExitRecord(f sandbox.Frame, out, msg string, truncated bool, code int) (int, bool, runRecord, error) {
+func readExitRecord(f sandbox.Frame, out, msg string, truncated, msgCut bool, code int) (int, bool, runRecord, error) {
 	line, framed, short := f.Cut(out, true)
 	switch {
-	case truncated && (!framed || short):
+	case truncated && (!framed || short), msgCut && !framed && !f.Began(out) && !f.Began(msg):
 		return 0, false, runRecord{}, &sandbox.StartupOutputError{What: "the command's exit record", Ran: true}
 	case !framed && !f.Began(out) && !f.Began(msg):
 		return 0, false, runRecord{}, &sandbox.StartupExitError{What: "the command's exit record", Status: code, MayHaveRun: true}
@@ -1547,18 +1549,14 @@ func readAnswer(path string, f sandbox.Frame, maxBytes int64, code int, out, msg
 	// before the end line shows the script began, not that it chose the status:
 	// it answers as an unframed one does, through stderr's whole frame.
 	if !framed || (short && code != 0) {
-		raw := sandbox.ExecResult{Stdout: string(out.Bytes()), Stderr: msg.String(), ExitCode: code,
-			StdoutTruncated: out.truncated, StderrTruncated: msg.truncated}
-		answer, err := f.Answer("the read of "+path, raw)
-		if err == nil && answer.ExitCode != 0 {
+		raw := streams(out, msg, code)
+		if answer, ok := f.UnframeStatus(raw); ok && answer.ExitCode != 0 {
 			return nil, readRefusal(path, answer.ExitCode)
 		}
-		if err == nil {
-			// The script ran to its end and read the file, and the file did not
-			// arrive: what the cap cut or the transport lost is in stdout.
-			err = f.Unanswered("the read of "+path, raw)
-		}
-		return nil, err
+		// No refusal: the script gave no answer, or ran to its end and read the
+		// file, which did not arrive — what the cap cut or the transport lost
+		// is in stdout.
+		return nil, f.Unanswered("the read of "+path, raw)
 	}
 	if code != 0 {
 		return nil, readRefusal(path, code)
@@ -1696,8 +1694,7 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 	// The status is the script's only where its frame arrived
 	// (sandbox.Frame.Answer): an image's startup that ended the shell first
 	// chose it, and its 0 would be a write that never happened (#942).
-	answer, err := f.Answer("the write of "+path, sandbox.ExecResult{Stdout: out.String(), Stderr: msg.String(),
-		ExitCode: res.code, StdoutTruncated: out.truncated, StderrTruncated: msg.truncated})
+	answer, err := f.Answer("the write of "+path, streams(out, msg, res.code))
 	if err != nil {
 		return err
 	}
@@ -1874,8 +1871,7 @@ func (pd *pod) bulkExec(ctx context.Context, script, label, what string, b *sand
 	if err != nil {
 		return 0, "", pd.execErr(ctx, err)
 	}
-	answer, err := f.Answer(what, sandbox.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: res.code,
-		StdoutTruncated: stdout.truncated, StderrTruncated: stderr.truncated})
+	answer, err := f.Answer(what, streams(stdout, stderr, res.code))
 	if err != nil {
 		return 0, "", err
 	}
@@ -2195,6 +2191,13 @@ if [ -d "$1" ]; then rm -f "$1/${4##*/}"; exit 16; fi
 // cappedBuffer keeps at most limit bytes and records whether more arrived. A
 // command that writes past the cap still runs to completion — the tail is
 // discarded, never blocked on a full pipe.
+// streams is what an exec printed into out and msg, beside the status it
+// exited with, as Exec answers them.
+func streams(out, msg *cappedBuffer, code int) sandbox.ExecResult {
+	return sandbox.ExecResult{Stdout: out.String(), Stderr: msg.String(), ExitCode: code,
+		StdoutTruncated: out.truncated, StderrTruncated: msg.truncated}
+}
+
 type cappedBuffer struct {
 	buf       bytes.Buffer
 	limit     int

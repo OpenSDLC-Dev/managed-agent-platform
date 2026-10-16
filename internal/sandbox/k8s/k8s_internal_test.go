@@ -2145,7 +2145,7 @@ func TestProbesReadTheirAnswersThroughAStartupFile(t *testing.T) {
 		}
 		f := sandbox.NewFrame("exit")
 		out, _ := run(t, f, "/bin/bash", exitScript, state)
-		code, killed, rec, err := readExitRecord(f, out, "", false, 0)
+		code, killed, rec, err := readExitRecord(f, out, "", false, false, 0)
 		if want := (runRecord{sinceLaunch: 2500 * time.Millisecond, sinceWatchdog: 2 * time.Second}); err != nil || code != 7 || !killed || rec != want {
 			t.Errorf("readExitRecord = %d, %v, %+v, %v; want 7, true, %+v", code, killed, rec, err, want)
 		}
@@ -2272,7 +2272,7 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 		{"a banner, then the reader exits 1, stderr began", "welcome\n", false, 1, 0, false, runRecord{}, true, false, begin, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			code, killed, rec, err := readExitRecord(f, c.out, c.msg, c.truncated, c.exit)
+			code, killed, rec, err := readExitRecord(f, c.out, c.msg, c.truncated, false, c.exit)
 			if (err != nil) != c.fails || !c.fails && (code != c.code || killed != c.killed || rec != c.rec) {
 				t.Errorf("readExitRecord(%q) = %d, %v, %+v, %v; want %d, %v, %+v, failing %v", c.out, code, killed, rec, err, c.code, c.killed, c.rec, c.fails)
 			}
@@ -2285,6 +2285,15 @@ func TestReadExitRecordReadsInsideTheFrame(t *testing.T) {
 				t.Errorf("readExitRecord(%q, stderr %q) = %v; the startup's exit of a command that may have run: %v, want %v", c.out, c.msg, err, got, c.exited)
 			}
 		})
+	}
+	// A stderr the cap cut, with neither stream showing the script began, was
+	// filled ahead of the script: the startup's flood, not its exit.
+	for _, out := range []string{"", "welcome"} {
+		_, _, _, err := readExitRecord(f, out, strings.Repeat("y\n", 64), false, true, 0)
+		var startup *sandbox.StartupOutputError
+		if !errors.As(err, &startup) || !startup.Ran || errors.Is(err, sandbox.ErrUnframedStatus) {
+			t.Errorf("readExitRecord(%q, a stderr the cap cut) = %v; want the startup's flood, of a command that ran", out, err)
+		}
 	}
 }
 

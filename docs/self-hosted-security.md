@@ -185,9 +185,7 @@ trap, while its `nounset` and `pipefail` carry (and a `set -e` the model runs
 there carries from call to call). A bash the model starts itself — `bash -c`,
 a `#!/bin/bash` script — reads the startup file again, as every
 non-interactive bash does, and runs under the image's errexit and `ERR` trap.
-A platform script that answers through a frame also clears an `EXIT` trap
-the startup file set as it closes, so the trap cannot replace the status the
-script left (#942). A second exception, for the platform's scripts
+A second exception, for the platform's scripts
 alone, is a set of settings that change what a glob matches, or its order.
 Those scripts put bash's defaults back as they start for noglob (`set -f`),
 `GLOBIGNORE`, `GLOBSORT`, privileged mode (`set -p`, in which bash keeps a
@@ -211,7 +209,9 @@ Kubernetes, every file read, an exec's exit record and liveness probe, a
 refused write's reason and the checkpoint's root probe each print their
 answer between a begin and an end line carrying a nonce of its own, and only
 what lies between them is read. A banner on either stream, ending its line or
-not, and what an `EXIT` trap prints after the script fall outside; the
+not, falls outside, and each script clears an `EXIT` trap the file set as its
+frame closes, so the trap neither prints after the script nor replaces its
+status ([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)); the
 scripts name every path whole, so a `cd` in the file moves none of them; and
 errexit (`set -e`) in the file ends none of the platform's own scripts, each
 of which turns it off as it starts, nor the Kubernetes exec wrapper before it
@@ -224,16 +224,17 @@ leaves the probe unanswered, whatever status it exits with
 repository's presence probe then asks through the file API. The same holds
 for the sandbox's own scripts whose exit status is their answer
 ([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)):
-- a file write and a batch write's steps, on both backends;
-- on Kubernetes, a file read and an exec's exit record.
-
-Each takes its status only where one stream carries its frame whole, and
-fails otherwise with an error that names the image's startup. Docker's
-refused-write probes then answer nothing, so the refusal stays unclassified.
-Under a flood that pushes stdout's frame out, a status still answers through
-stderr's. The scripts the executor and the worker run themselves, and the
-`grep` tool's ripgrep install, still read such a shell's exit status as
-their answer.
+a file write and a batch write's steps on both backends, and a file read on
+Kubernetes. Each takes its status only where one stream carries its frame
+whole: stdout's, or stderr's under a flood that pushes stdout's out. Where
+neither stream shows the script began, the call fails with an error that
+names the image's startup. A script that began and lost its output fails as
+a transport fault, which a retry can clear. A refused-write probe on Docker
+that the startup ended answers nothing, so the refusal stays unclassified. On Kubernetes, an
+exec's exit record whose reader the startup ended fails with an error that
+names the image's startup, rather than read as no record. The scripts the executor and the
+worker run themselves, and the `grep` tool's ripgrep install, still read
+such a shell's exit status as their answer.
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the

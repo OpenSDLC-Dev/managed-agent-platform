@@ -150,7 +150,7 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 		// none to walk: the previous snapshot stays, a grading cycle chains
 		// its turn, and the item completes, where a fault would reclaim it
 		// to list again, meet the same, and wedge the session (#860).
-		slog.WarnContext(ctx, "executor: the sandbox's startup output pushed the outputs listing out; harvest skipped",
+		slog.WarnContext(ctx, "executor: the sandbox image's startup kept the outputs listing from answering; harvest skipped",
 			"session", item.SessionID, "err", runErr)
 		return e.settleHarvest(ctx, item, nil, false)
 	}
@@ -169,7 +169,7 @@ func (e *Executor) processHarvest(ctx context.Context, item *queue.Item) (err er
 // output cap in every shell, or ending the shell that reads the answer
 // (sandbox.ErrImageStartup) — which no retry reads, so processHarvest settles
 // it as a pass that read no sandbox.
-var errOutputsUnreadable = errors.New("the sandbox's startup output filled the output cap ahead of the listing")
+var errOutputsUnreadable = errors.New("the sandbox image's startup kept the outputs listing from answering")
 
 // harvestSandbox obtains the sandbox this harvest reads, and reports whether
 // there is one to walk (docs/plan/38 decision 8). A grading harvest provisions;
@@ -229,11 +229,14 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sb sand
 	// the listing — a BASH_ENV file's banner — is no path of it (#860).
 	res, framed, err := sandbox.ExecFramed(ctx, sb, "harvest", sandbox.ExecRequest{Command: harvestListScript})
 	switch {
-	case errors.Is(err, sandbox.ErrImageStartup), err == nil && !framed && res.StdoutTruncated:
+	case errors.Is(err, sandbox.ErrImageStartup):
 		// The image's startup prints past the output cap in every shell,
-		// pushing the listing out — on Kubernetes with the exec's exit
-		// record, on Docker as a stdout the cap cut before any begin line.
-		// Every reclaim would meet the same (errOutputsUnreadable).
+		// pushing the listing out with the exec's exit record on Kubernetes,
+		// or ends the shell that reads that record. Every reclaim would meet
+		// the same (errOutputsUnreadable).
+		return nil, fmt.Errorf("list outputs: %w: %w", errOutputsUnreadable, err)
+	case err == nil && !framed && res.StdoutTruncated:
+		// The same flood on Docker: a stdout the cap cut before any begin line.
 		return nil, fmt.Errorf("list outputs: %w", errOutputsUnreadable)
 	case err != nil:
 		return nil, fmt.Errorf("list outputs: %w", err)

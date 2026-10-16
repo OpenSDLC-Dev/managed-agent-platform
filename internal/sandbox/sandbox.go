@@ -515,12 +515,13 @@ func (e *StartupOutputError) Error() string {
 
 // StartupExitError is a platform script that gave no answer because an
 // image's startup file — `ENV BASH_ENV`, which every shell the sandbox starts
-// runs first — ended the shell before the script began: neither stream carries
-// the script's begin line (Frame.Unanswered), so the exec's status is the
-// startup's (#942). What names the answer asked for, and Status the status the
-// startup left, which answers nothing. MayHaveRun says the call's command may
-// have run before: an exit record's reader the startup ended follows a command
-// whose own shell that startup ran first too, and may have ended as well.
+// runs first — ended the shell before the script began, or silenced the
+// script: neither stream carries the script's begin line (Frame.Unanswered),
+// so nothing shows the exec's status is the script's (#942). What names the
+// answer asked for, and Status the status the shell left, which answers
+// nothing. MayHaveRun says the call's command may have run before: an exit
+// record's reader the startup ended follows a command whose own shell that
+// startup ran first too, and may have ended as well.
 //
 // The image's startup does the same in every shell, so a retry meets the same:
 // the toolset answers it as a tool error, never a backend fault. It matches
@@ -532,7 +533,7 @@ type StartupExitError struct {
 }
 
 func (e *StartupExitError) Error() string {
-	s := fmt.Sprintf("sandbox: %s got no answer: %s, before the platform's script began", e.What, e.Ended())
+	s := fmt.Sprintf("sandbox: %s got no answer: %s", e.What, e.Ended())
 	if e.MayHaveRun {
 		s += "; the command may have run"
 	}
@@ -546,8 +547,15 @@ func (e *StartupExitError) Ended() string {
 	if e.Status > 128 {
 		return fmt.Sprintf("the shell was killed by signal %d, by the sandbox image's startup file (BASH_ENV) or from outside, as the OOM killer kills", e.Status-128)
 	}
-	return fmt.Sprintf("the sandbox image's startup file (BASH_ENV) ended the shell, with status %d", e.Status)
+	return fmt.Sprintf("the sandbox image's startup file (BASH_ENV) ended the shell with status %d before the platform's script began, or silenced the script", e.Status)
 }
+
+// Exited says the shell exited by itself, with a status of 0 to 128, rather
+// than by a signal. Nothing it ran in the foreground is still running then:
+// the startup ended it before the script began, or the script ran to its end,
+// since a shell waits for its foreground subshell before it exits, whatever
+// trap it runs. A shell a signal killed can leave a child running on.
+func (e *StartupExitError) Exited() bool { return e.Status >= 0 && e.Status <= 128 }
 
 // Is matches ErrUnframedStatus — the status came with no frame of the
 // script's — and ErrImageStartup.
