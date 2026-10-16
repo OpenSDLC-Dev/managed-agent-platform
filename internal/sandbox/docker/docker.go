@@ -1561,21 +1561,19 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		// caller was just told it had not touched. A payload under a parent the
 		// sandbox user cannot write survives here, as it does there — so what the
 		// shed reports it could not take is deliberately dropped. But for a rename
-		// the image's startup ended before it began (sandbox.StartupExitError),
-		// as the single write's rename: no `mv` is in flight then, so the daemon
-		// takes back what the shed reports it could not. Where no report arrives,
-		// the same startup most likely ended the shed too, which then removed
-		// nothing: every member is where the delivery put it, beside the
-		// bookkeeping, and the daemon empties them all. A shed whose report was
-		// lost on its way may have removed some, and those names come back as
-		// zero-byte files — this batch's own temporaries, never a target.
+		// the image's startup kept from answering (sandbox.StartupExitError), as
+		// the single write's rename, the daemon takes back what the shed reports
+		// it could not: the shed's report names only regular files the sandbox
+		// user could not remove, which a `mv` of that user's cannot move either.
+		// Where no report arrives — the same startup most likely ended the shed
+		// too — nothing is emptied, as reclaimBulk says of any shed that sent
+		// none. The delivered names are not all known to be this batch's regular
+		// files still, and a status past 128 is a shell killed while a `mv` of
+		// its may live on: emptying them all could put zero bytes under that `mv`,
+		// or a file over a directory made at a temporary's name.
 		var startup *sandbox.StartupExitError
 		if errors.As(err, &startup) {
-			if report := c.discardBulk(ctx, b); b.Reported(report) {
-				c.reclaimBulk(ctx, b, report)
-			} else {
-				c.reclaimBulkPaths(ctx, b, append(b.Delivered(), b.Manifest, b.DirList))
-			}
+			c.reclaimBulk(ctx, b, c.discardBulk(ctx, b))
 			return err
 		}
 		_ = c.discardBulk(ctx, b)
@@ -1837,12 +1835,15 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// caller's old data was, while the caller is being told the write failed.
 		// So the shed here is the one the sandbox user can do, and a payload under
 		// a parent that user cannot write survives on this branch (#310) — but
-		// for the two errors that say the script never ran: a command Exec
-		// refused as too long (sandbox.CommandTooLongError), which a path the
-		// script quotes eleven times can make, and a shell the image's startup
-		// ended before the script began (sandbox.StartupExitError), whose status
-		// is no answer. No `mv` is in flight then, so the daemon takes back what
-		// the sandbox user's `rm` could not, as on every failure below.
+		// for two errors. A command Exec refused as too long
+		// (sandbox.CommandTooLongError), which a path the script quotes eleven
+		// times can make, never ran. A shell the image's startup kept from
+		// answering (sandbox.StartupExitError) most likely never ran the script
+		// either; one killed while a `mv` of its lives on is answered by the `rm`
+		// that goes first, which leaves that `mv` nothing to move. What the daemon
+		// then takes back, as on every failure below, is only what that `rm`
+		// could not: the temporary sits in the target's own directory, so the
+		// sandbox user's `mv` cannot move it either.
 		c.discard(ctx, tmp)
 		var tooLong *sandbox.CommandTooLongError
 		var startup *sandbox.StartupExitError

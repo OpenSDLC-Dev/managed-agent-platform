@@ -1271,6 +1271,10 @@ func TestReadAnswerTakesNoUnframedExitForARefusal(t *testing.T) {
 		{"a flood pushed the frame out, stderr framed", buf(strings.Repeat("x", readRoom), true), "stderr banner " + begin + end, readNotExist, sandbox.ErrFileNotExist},
 		{"a flood pushed the frame out, stderr bare", buf(strings.Repeat("x", readRoom), true), "", readNotExist, sandbox.ErrImageStartup},
 		{"stdout lost, stderr framed", buf("", false), begin + end, readNotExist, sandbox.ErrFileNotExist},
+		// A refusal prints only the frame, so one cut before its end line is a
+		// shell killed after the begin line, whose traps chose the status.
+		{"stdout's frame cut short, stderr began only", buf(banner+begin, true), begin, readNotExist, sandbox.ErrImageStartup},
+		{"stdout's frame cut short, stderr framed", buf(banner+begin, true), begin + end, readNotExist, sandbox.ErrFileNotExist},
 		{"the startup ended the shell: not there", buf(banner, false), "stderr banner ", readNotExist, sandbox.ErrUnframedStatus},
 		{"the startup ended the shell: a directory", buf(banner, false), "", readIsDir, sandbox.ErrUnframedStatus},
 		{"the startup ended the shell: not regular", buf(banner, false), "", readNotRegular, sandbox.ErrUnframedStatus},

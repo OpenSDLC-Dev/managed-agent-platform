@@ -2924,19 +2924,19 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 // a rename the image's startup ended before it began left no `mv` in flight,
 // so after the sandbox user's shed the daemon empties what the shed reports it
 // could not take, in one archive. A shed that sends no report — the same
-// startup ended its shell too, so it removed nothing — leaves every member
-// where the delivery put it, beside the bookkeeping, and the daemon empties
-// them all (#942).
+// startup ended its shell too — has the daemon empty nothing: which delivered
+// names are still this batch's regular files is not known, and a `mv` of a
+// killed rename may still be moving one (#942).
 func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// shed is what the discard exec prints.
 		shed string
-		// bookkeeping says the emptying takes the bookkeeping too.
-		bookkeeping bool
+		// emptied says the daemon empties what the shed reported.
+		emptied bool
 	}{
-		{"the shed reports", "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", false},
-		{"the startup ended the shed too", "welcome to the image ", true},
+		{"the shed reports", "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", true},
+		{"the startup ended the shed too", "welcome to the image ", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var commands []string
@@ -2984,20 +2984,22 @@ func TestABulkRenameTheStartupEndedShedsBothWays(t *testing.T) {
 			if last := commands[len(commands)-1]; !strings.Contains(last, "__map_bulk_discard") {
 				t.Errorf("last exec = %q, want the sandbox user's own shed", last)
 			}
+			if !tc.emptied {
+				if len(puts) != 2 {
+					t.Fatalf("%d archives delivered, want 2 (bookkeeping, members) and no emptying", len(puts))
+				}
+				return
+			}
 			if len(puts) != 3 {
 				t.Fatalf("%d archives delivered, want 3 (bookkeeping, members, emptying)", len(puts))
 			}
-			want := tarEntries(t, puts[1])
-			if tc.bookkeeping {
-				want = append(want, tarEntries(t, puts[0])...)
-			}
-			emptying := tarEntries(t, puts[2])
-			if len(emptying) != len(want) {
-				t.Fatalf("the emptying archive carries %d entries, want %d", len(emptying), len(want))
+			members, emptying := tarEntries(t, puts[1]), tarEntries(t, puts[2])
+			if len(emptying) != len(members) {
+				t.Fatalf("the emptying archive carries %d entries, want the %d members the shed left", len(emptying), len(members))
 			}
 			for i, e := range emptying {
-				if e.name != want[i].name || e.size != 0 || want[i].size == 0 {
-					t.Errorf("emptying entry %d is %q of %d bytes, want %q, delivered with bytes, at 0", i, e.name, e.size, want[i].name)
+				if e.name != members[i].name || e.size != 0 {
+					t.Errorf("emptying entry %d is %q of %d bytes, want the member's own temporary %q at 0", i, e.name, e.size, members[i].name)
 				}
 			}
 		})

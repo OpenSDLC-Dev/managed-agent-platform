@@ -221,11 +221,19 @@ a command past its deadline
 A startup file that ends a presence probe's shell before the begin line
 leaves the probe unanswered, whatever status it exits with
 ([#941](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/941)). A
-repository's presence probe then asks through the file API. On Kubernetes
-that read takes its exit status as an answer only where its own lines reached
-the output, or a flood pushed them out. Other scripts still read such a
-shell's exit status as their answer
-([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)).
+repository's presence probe then asks through the file API. The same holds
+for the sandbox's own scripts whose exit status is their answer
+([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)):
+- a file write and a batch write's steps, on both backends;
+- on Kubernetes, a file read and an exec's exit record.
+
+Each takes its status only where one stream carries its frame whole, and
+fails otherwise with an error that names the image's startup. Docker's
+refused-write probes then answer nothing, so the refusal stays unclassified.
+Under a flood that pushes stdout's frame out, a status still answers through
+stderr's. The scripts the executor and the worker run themselves, and the
+`grep` tool's ripgrep install, still read such a shell's exit status as
+their answer.
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the

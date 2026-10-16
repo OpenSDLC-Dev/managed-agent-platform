@@ -71,6 +71,10 @@ The callers that run a script of their own, or act on a backend's refusal:
    failed stdout copy (#105), so on Kubernetes an exec can return a status
    with its stdout lost. Where stderr carries the whole frame, the script ran
    to its end, and a script whose answer is its status answers through it.
+   A stdout whose frame the cap cut before the end line shows only that the
+   script began: a shell killed after the begin line exits with a status its
+   traps chose. So there too the status answers only through stderr's whole
+   frame.
    Where stderr carries only the begin line, the script began and the stream
    was lost: a backend fault, as in decision 3. Where neither stream carries
    it, the startup ended the shell. Losing both streams whole reads as the
@@ -94,7 +98,7 @@ The callers that run a script of their own, or act on a backend's refusal:
    Exec's own error as it is, and answers a `StartupExitError`, a lost
    stream or a `StartupOutputError` where the frame is missing. `ExecScript`
    stays only for scripts whose status no one reads. Where stdout carries no
-   frame, a stderr that carries the whole frame still answers the status
+   whole frame, a stderr that carries the whole frame still answers the status
    (`Frame.UnframeStatus`). So writes keep working under a startup that
    floods stdout (#860), and the Kubernetes read's refusal still answers
    #941's `StatPresence` through that flood. A refusal through a stdout the

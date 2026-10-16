@@ -571,10 +571,11 @@ func TestFrameBegan(t *testing.T) {
 	}
 }
 
-// UnframeStatus answers a status where stdout carries the frame, as Unframe
-// does, and where stdout carries none — the cap cut it, the transport lost it,
-// a startup silenced it — through a stderr that carries the whole frame, with
-// no stdout. Nowhere else: not on a stderr whose frame is missing or cut
+// UnframeStatus answers a status where stdout carries the whole frame, as
+// Unframe does, and where stdout carries none, or a frame the cap cut before
+// its end line — the cap cut it, the transport lost it, a startup silenced it,
+// a shell was killed after the begin line — through a stderr that carries the
+// whole frame. Nowhere else: not on a stderr whose frame is missing or cut
 // short.
 func TestFrameUnframeStatus(t *testing.T) {
 	f := sandbox.NewFrame("test")
@@ -596,6 +597,13 @@ func TestFrameUnframeStatus(t *testing.T) {
 		{"stdout whole and unframed, stderr framed", sandbox.ExecResult{Stdout: "banner", Stderr: begin + "msg" + end, ExitCode: 15},
 			true, sandbox.ExecResult{Stdout: "", Stderr: "msg", ExitCode: 15}},
 		{"stdout lost, stderr framed", sandbox.ExecResult{Stderr: begin + end, ExitCode: 0}, true, sandbox.ExecResult{}},
+		{"stdout cut only past its end line", sandbox.ExecResult{Stdout: begin + "why" + end + flood, StdoutTruncated: true, Stderr: begin + end, ExitCode: 3},
+			true, sandbox.ExecResult{Stdout: "why", ExitCode: 3}},
+		// A shell killed after the begin line, its status its traps' choice.
+		{"stdout's frame cut short, stderr began only", sandbox.ExecResult{Stdout: flood + begin + "wh", StdoutTruncated: true, Stderr: begin, ExitCode: 0},
+			false, sandbox.ExecResult{}},
+		{"stdout's frame cut short, stderr framed", sandbox.ExecResult{Stdout: flood + begin + "wh", StdoutTruncated: true, Stderr: begin + "msg" + end, ExitCode: 0},
+			true, sandbox.ExecResult{Stdout: "wh", StdoutTruncated: true, Stderr: "msg", ExitCode: 0}},
 	} {
 		got, ok := f.UnframeStatus(c.res)
 		if ok != c.ok || (ok && got != c.want) || (!ok && got != c.res) {

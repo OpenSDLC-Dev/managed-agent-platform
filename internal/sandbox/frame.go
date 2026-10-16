@@ -334,19 +334,28 @@ func (f Frame) Unframe(res ExecResult) (ExecResult, bool) {
 }
 
 // UnframeStatus is Unframe for a script whose answer is its exit status, its
-// stdout at most a detail of it. Where stdout carries no frame — the cap cut
-// it before the frame, what printed ahead of the script filling it (#860), or
-// it was lost on its way (#105), or an image's startup silenced it — a stderr
-// that carries the whole frame still shows the script ran to its end: Open
-// prints both lines on both streams, and close_frame is the script's one way
-// out. So the status answers, with nothing of stdout (#942).
+// stdout at most a detail of it. The status answers only where one stream
+// carries the whole frame, its end line included: close_frame is the script's
+// one way out, and prints that line on both streams just before it exits. A
+// stdout whose frame the cap cut short shows the script began, not that it
+// ended — a shell killed in between exits with a status its traps chose — so
+// there too, as where stdout carries no frame at all (the cap cut it before
+// the frame, what printed ahead of the script filling it, #860; it was lost
+// on its way, #105; an image's startup silenced it), the status answers only
+// through a stderr that carries the whole frame (#942). A short stdout's
+// output still comes back, marked cut; a missing one comes back empty.
 func (f Frame) UnframeStatus(res ExecResult) (ExecResult, bool) {
-	if out, ok := f.Unframe(res); ok {
+	out, ok := f.Unframe(res)
+	if ok && !out.StdoutTruncated {
 		return out, true
 	}
 	msg, framed, short := f.Cut(res.Stderr, res.StderrTruncated)
 	if !framed || short {
 		return res, false
+	}
+	if ok {
+		out.Stderr, out.StderrTruncated = msg, false
+		return out, true
 	}
 	res.Stdout, res.Stderr, res.StderrTruncated = "", msg, false
 	return res, true

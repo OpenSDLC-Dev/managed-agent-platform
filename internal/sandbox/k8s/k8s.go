@@ -1543,7 +1543,10 @@ func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]
 // stream lost on its way (#105).
 func readAnswer(path string, f sandbox.Frame, maxBytes int64, code int, out, msg *cappedBuffer) ([]byte, error) {
 	b, framed, short := f.CutBytesWithin(out.Bytes(), out.truncated, readRoom)
-	if !framed {
+	// A refusal prints nothing but the frame, so one whose stdout the cap cut
+	// before the end line shows the script began, not that it chose the status:
+	// it answers as an unframed one does, through stderr's whole frame.
+	if !framed || (short && code != 0) {
 		raw := sandbox.ExecResult{Stdout: string(out.Bytes()), Stderr: msg.String(), ExitCode: code,
 			StdoutTruncated: out.truncated, StderrTruncated: msg.truncated}
 		answer, err := f.Answer("the read of "+path, raw)
