@@ -278,10 +278,11 @@ message; the stderr of a checkpoint's restore and of a repository's
 extraction, in the error each fails with; the memory sync's removals', in the
 warning when they fail; and a failed ripgrep install step's, in its tool
 error. It is what the script printed inside its frame, or, of a run its
-deadline stopped first, after the frame opened; only a memory removal the
-startup kept from answering logs its warning with what the exec printed,
-banner and all. The `bash` tool's output is the model's own
-command's, which the startup file reaches as it reaches any command.
+deadline stopped first, after the frame opened. Only a memory removal that
+got no answer — the startup kept it from answering, or its output was lost
+on its way — logs its warning with what the exec printed, banner and all.
+The `bash` tool's output is the model's own command's, which the startup
+file reaches as it reaches any command.
 What the file *changes* still applies — a function an image exports under
 the name of a command the scripts call answers for that command — and one
 channel prints inside the frame, where no line can keep it out: a library an
