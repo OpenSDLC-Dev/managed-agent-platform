@@ -252,15 +252,17 @@ func fetchCommit(ctx context.Context, storer *filesystem.Storage, tree billy.Fil
 // read of the host's response with %s as it decodes it, so where the clone's
 // deadline or cancellation ended the read, only the transport's mark says so
 // (errContextRead, transportMark): there the context's error joins the chain,
-// for cloneReason to read. Nowhere else does the context decide the reason,
-// though its words appear: in a file the repository named so, or in the
-// host's words that quote them.
+// for cloneReason to read, unless the failure is this executor's own
+// (isLocalError), whose type the mark's words in a name the repository chose
+// cannot override. Nowhere else does the context decide the reason, though
+// its words appear: in a file the repository named so, or in the host's words
+// that quote them.
 func cloneFailed(ctx context.Context, err error) error {
 	if isPathRefusal(err) {
 		err = withCause{err, errPathRefused}
 	}
 	err = fmt.Errorf("%w: %w", errClone, err)
-	if cause := ctx.Err(); cause != nil && transportMark(err) == errContextRead {
+	if cause := ctx.Err(); cause != nil && transportMark(err) == errContextRead && !isLocalError(err) {
 		err = withCause{err, cause}
 	}
 	return err
@@ -538,18 +540,19 @@ func cloneReason(err error) string {
 // keeps the same failures only as text, in the net.DNSError's Err: a socket
 // it could not open, or a port, memory or buffers it ran out of. So does a
 // read of the host's response that the clone's transport marked as this
-// machine's (transportMark). go-git formats a host's ERR line in the pack
-// response the same way, so a host that sends those words makes its failure
-// read as this executor's; it gains nothing by that, and no text tells the
-// two apart. Where go-git keeps the host's words in a type (hostWords), they
-// are the host's.
+// machine's (transportMark). go-git keeps some of the host's messages only as
+// text the same way: an ERR line in the pack response, a message on the
+// sideband's error band, a server response it cannot parse. A host that sends
+// those words there makes its failure read as this executor's; it gains
+// nothing by that, and no text tells the two apart. Where go-git keeps the
+// host's words in a type (hostWords), they carry no mark.
 func isLocalError(err error) bool {
 	var pathErr *fs.PathError
 	var linkErr *os.LinkError
 	var sysErr *os.SyscallError
 	if errors.As(err, &pathErr) || errors.As(err, &linkErr) ||
 		(errors.As(err, &sysErr) && sysErr.Syscall == "socket") || errors.Is(err, errPathRefused) ||
-		(transportMark(err) == errOwnRead && !hostWords(err)) {
+		transportMark(err) == errOwnRead {
 		return true
 	}
 	var dnsErr *net.DNSError

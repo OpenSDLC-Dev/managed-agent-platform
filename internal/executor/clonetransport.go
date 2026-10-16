@@ -48,12 +48,13 @@ var errContextRead = errors.New("the clone's deadline or cancellation ended the 
 // format it with %s, and its words either way. A mark's own text begins with
 // its words, and what follows them is the error it wraps, which can quote the
 // host's words, a mark's among them. The transport marks only a response
-// body's reads, so a failed request (a *url.Error, inside go-git's
-// UnexpectedError too) carries no mark, whatever its text quotes. It is nil
-// where err carries none.
+// body's reads that failed, so neither a failed request (a *url.Error, inside
+// go-git's UnexpectedError too) nor the host's words that go-git read and
+// kept in a type (hostWords) carries a mark, whatever its text quotes. It is
+// nil where err carries none.
 func transportMark(err error) error {
 	var urlErr *url.Error
-	if errors.As(withUnexpected(err), &urlErr) {
+	if hostWords(err) || errors.As(withUnexpected(err), &urlErr) {
 		return nil
 	}
 	msg := err.Error()
@@ -114,10 +115,10 @@ func (t hostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // host's (errHostTransport), a pack response that ended before its first byte
 // among them (errEmptyPack), this executor's (errOwnRead), or the clone's
 // deadline's or cancellation's (errContextRead), which net/http reports as
-// the context's own error. The clone's context carries no cause of its own
-// (context.Cause), which net/http would return in its place. A read's own
-// error carries no mark, which only this body puts on, so a mark's words in
-// it are the host's: an HTTP/2 GOAWAY quotes the host's debug text.
+// the context's own error: its cause (context.Cause) over HTTP/1.1, its Err
+// over HTTP/2. A read's own error carries no mark, which only this body puts
+// on, so a mark's words in it are the host's: an HTTP/2 GOAWAY quotes the
+// host's debug text.
 type markedBody struct {
 	io.ReadCloser
 	ctx  context.Context
@@ -138,7 +139,7 @@ func (b *markedBody) Read(p []byte) (int, error) {
 		return n, err
 	case transportMark(err) == nil && isLocalError(err):
 		return n, fmt.Errorf("%w: %w", errOwnRead, err)
-	case b.ctx.Err() != nil && errors.Is(err, b.ctx.Err()):
+	case b.ctx.Err() != nil && (errors.Is(err, b.ctx.Err()) || errors.Is(err, context.Cause(b.ctx))):
 		return n, fmt.Errorf("%w: %w", errContextRead, err)
 	default:
 		return n, fmt.Errorf("%w: %w", errHostTransport, err)

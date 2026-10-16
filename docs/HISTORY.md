@@ -55,7 +55,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 Tests came first. The first fixture rows failed with the measured reasons before any wiring, and each row added in review failed on the code before its fix.
 
-Review took eight rounds, each with the verifier (`claude-fable-5-1`), Codex (`gpt-6.1-sol`, xhigh) and `/code-review` (`claude-opus-5-5`, xhigh, no cap). The verifier passed every round with findings: `make verify` at 91.56%, 91.57%, 91.56%, 91.58%, 91.57%, 91.55%, 91.55% and 91.55%, with the before and after table reproduced on both code states each time. Codex raised five findings, then two, one, one, two, two, one and one. `/code-review` raised ten, ten, twelve, twelve, ten, nine, ten and fifteen.
+Review took nine rounds, each with the verifier (`claude-fable-5-1`), Codex (`gpt-6.1-sol`, xhigh) and `/code-review` (`claude-opus-5-5`, xhigh, no cap). The verifier passed every round with findings: `make verify` at 91.56%, 91.57%, 91.56%, 91.58%, 91.57%, 91.55%, 91.55%, 91.55% and 91.56%, with the before and after table reproduced on both code states each time. Codex raised five findings, then two, one, one, two, two, one, one and one. `/code-review` raised ten, ten, twelve, twelve, ten, nine, ten, fifteen and eleven.
 
 - **Round 1.** The lazy install raced go-git's unlocked protocol map, so the transport moved to package init. A redirect's and a refusal's body were recorded as the host's failure. A recorded failure overrode the caller's ref, so `fetchCommit`'s rulings gained a mark. A local read failure that go-git flattened into its decode text read `network`. The context's error joined over the host's typed words. Three sideband and pack refusals still read `internal`.
 - **Round 2.** `cloneFailed` did not see a local error inside go-git's `UnexpectedError`. The mark named a refused proxy's error a second time. No test pinned that the deadline and cancellation keep their reasons over a record. One subtest could not fail, because it did not POST to an upload-pack path.
@@ -65,16 +65,16 @@ Review took eight rounds, each with the verifier (`claude-fable-5-1`), Codex (`g
 - **Round 6.** Codex found two more ways a host's own text could carry a mark's words: an HTTP/2 GOAWAY's debug text that quotes the deadline, once go-git flattened the mark, and one that quotes this executor's mark. The transport's mark is now the first mark in a message (`transportMark`). `/code-review` found that the transport left unmarked any failure once the context was done, not only the context's own error, and that a pack band that carries no pack arrives typed. The package doc now names the process-wide install.
 - **Round 7.** The verifier and `/code-review` found the same case on the request's side: a request that failed with the host's GOAWAY quoting the deadline read `timeout` once the deadline passed. A failed request keeps the context's error by its type, so the context's error no longer joins one (`requestFailed`). `/code-review` found that no test covered the https install, which every real clone uses, and that the transport and the reason disagreed on a context's cause; the clone's context sets none, and the transport now reads only its error. Codex found a deadline subtest that could pass before the body's read began.
 - **Round 8.** `/code-review` found that a request the host's GOAWAY failed, quoting this executor's mark, read `internal`; the transport marks only a body's reads, so a failed request now carries no mark. It also named the cause behind rounds 5 to 7: the context's error joined by its text, and each round had added an exception for the host's words that quote it. The transport now marks a read the deadline or a cancellation ended (`errContextRead`), and the context's error joins only where that mark comes first; `hostDecided` and `requestFailed` went away. A host's message that quotes the deadline as it passes now reads `network`, which the changelog says. Codex found an https test that an unmarked client would pass.
+- **Round 9.** Codex found that a host's `ERR` line carrying the context mark's words read `timeout` once the deadline passed; go-git keeps that line typed, so the host's typed words now carry no mark. `/code-review` found that round 8 dropped the join's guard for this executor's own failure, so a spool file named with the mark's words read `timeout`; the guard is back. A read the context's cause ended, which HTTP/1.1 returns in place of the context's error, is now marked the context's too. A fixture clone now covers a deadline and a cancellation that end the pack response's read.
 
 Declined, with the reasons given on the PR:
 
 - a connection-level transport that keeps go-git's `*http.Transport` type, because under TLS it cannot see a response's body;
-- the host's text-only words that quote the context's error, which go-git formats like the context's own (documented beside `cloneFailed`);
 - forwarding `CloseIdleConnections`, which nothing calls;
 - reading a decode refusal of a valid response go-git cannot parse as `internal`, which #939 had already decided against for pkt-line refusals;
 - telling this executor's failed read from a host's `ERR` line with the same words, which no text can (documented beside `isLocalError`);
 - reading every object a branch clone misses as the host's, which decision 1 leaves out with a pack that is corrupt past its signature;
-- anchoring go-git's words to their prefix, for which no go-git path that needs it was found;
+- anchoring a mark's words to the start of a wrapped error or to go-git's decode prefix, which needs every go-git site that formats a message with `%s` listed, and misreads one missed; what it would stop needs a host to send a mark's exact words (plan 66 decision 3);
 - dropping the oversize-packet arm, which a host that offers only plain side-band reaches;
 - folding #939's `emptyRefs` and `packPage` fixture flags into the new hooks;
 - a random token in each mark's words, which would make the marks unforgeable but sit in every logged clone error (plan 66 decision 3);
@@ -83,7 +83,7 @@ Declined, with the reasons given on the PR:
 - blaming this executor, not the host, for a body's read failure that no type names, which needs this executor to close a connection it never closes;
 - reading an empty pack response to a commit fetch as the caller's, a refusal git's protocol does not have (plan 66 decision 5).
 
-The final code's 35 mutants were each run in a scratch copy. All 34 that compile failed a test by an assertion, and the 35th, which does not compile, was the sanity check.
+The final code's 37 mutants were each run in a scratch copy. All 36 that compile failed a test by an assertion, and the 37th, which does not compile, was the sanity check.
 
 ## Model gateway live tier: Moonshot, Zhipu and Qwen3-VL-Embedding-8B (#903), run 2026-10-14 — ✅ passed
 

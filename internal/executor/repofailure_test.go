@@ -187,8 +187,7 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		want string
 	}{
 		{"go-git refuses a symlinked parent", fmt.Errorf("chroot: invalid path %q: is a symlink", "GOAWAY/x"), repoOutcomeInternal},
-		{"the host's GOAWAY quotes a path refusal", fmt.Errorf("error decoding upload-pack response: %s",
-			"http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=\"invalid path\""),
+		{"the host's GOAWAY quotes a path refusal", fmt.Errorf("error decoding upload-pack response: %s", goaway("invalid path")),
 			repoOutcomeNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -354,10 +353,14 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			fmt.Errorf("%w: %w", errContextRead, context.DeadlineExceeded)), repoOutcomeTimeout},
 		{"a cancellation while the pack is read", cancelled, fmt.Errorf("error decoding upload-pack response: %s",
 			fmt.Errorf("%w: %w", errContextRead, context.Canceled)), repoOutcomeInternal},
+		{"the host's ERR line quotes the transport's context mark as the clone's passes", passed,
+			&pktline.ErrorLine{Text: errContextRead.Error() + ": " + context.DeadlineExceeded.Error()}, repoOutcomeNetwork},
 		{"the host's ERR line in the pack response quotes a deadline as the clone's passes", passed,
 			fmt.Errorf("error decoding upload-pack response: %s", "upstream: "+context.DeadlineExceeded.Error()), repoOutcomeNetwork},
 		{"the spool's disk fills after the deadline passed", passed, &fs.PathError{
 			Op: "write", Path: "/tmp/map-repo-clone-1/tree/README.md", Err: syscall.ENOSPC}, repoOutcomeInternal},
+		{"the spool's disk fills after the deadline passed, on a file named for the context's mark", passed, &fs.PathError{
+			Op: "write", Path: "/tmp/map-repo-clone-1/tree/" + errContextRead.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
 		{"the spool's disk fills after the deadline passed, on a file named for it", passed, &fs.PathError{
 			Op: "write", Path: "/tmp/map-repo-clone-1/tree/" + context.DeadlineExceeded.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
 		{"the pack is corrupt as the deadline passes", passed,
@@ -373,22 +376,20 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		{"a ref advertisement that is not git's quotes a cancellation as the clone's is cancelled", cancelled,
 			packp.NewErrUnexpectedData("pkt-line 1: invalid length", []byte("upstream: "+context.Canceled.Error())), repoOutcomeNetwork},
 		{"the host's GOAWAY quotes a deadline before the clone's passes", passed, fmt.Errorf("%w: %w", errHostTransport,
-			errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`)),
+			goaway(context.DeadlineExceeded.Error())),
 			repoOutcomeNetwork},
 		{"the host's GOAWAY fails the ref advertisement's request, quoting a deadline as the clone's passes", passed,
-			&url.Error{Op: "Get", URL: "https://example.com/o/r.git/info/refs?service=git-upload-pack", Err: errors.New(
-				`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`)},
+			&url.Error{Op: "Get", URL: "https://example.com/o/r.git/info/refs?service=git-upload-pack", Err: goaway(context.DeadlineExceeded.Error())},
 			repoOutcomeNetwork},
 		{"the host's GOAWAY fails the pack request, quoting a deadline as the clone's passes", passed,
-			plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://example.com/o/r.git/git-upload-pack", Err: errors.New(
-				`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`)}),
+			plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://example.com/o/r.git/git-upload-pack", Err: goaway(context.DeadlineExceeded.Error())}),
 			repoOutcomeNetwork},
 		{"the clone's deadline passes during the pack request", passed,
 			plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://example.com/o/r.git/git-upload-pack", Err: context.DeadlineExceeded}),
 			repoOutcomeTimeout},
 		{"the host's GOAWAY, in go-git's decode words, quotes a deadline before the clone's passes", passed,
 			fmt.Errorf("error decoding upload-pack response: %s", fmt.Errorf("%w: %w", errHostTransport,
-				errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="context deadline exceeded"`))),
+				goaway(context.DeadlineExceeded.Error()))),
 			repoOutcomeNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

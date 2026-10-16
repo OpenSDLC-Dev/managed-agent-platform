@@ -37,11 +37,11 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    wording. A refusal of the host's response by go-git's pkt-line, pack
    response and sideband decoders reads `network` by the same rule, and so
    does a pack band that carries no pack. They are matched by go-git's types
-   and sentinels, `packfile.ErrBadSignature` among them, and by go-git's own
-   words where it kept only text: the pkt-line scanner's refusal,
+   and sentinels, `packfile.ErrBadSignature` and
+   `sideband.ErrMaxPackedExceeded` among them, and by go-git's own words where
+   it kept only text: the pkt-line scanner's refusal,
    `error decoding upload-pack response: `, and the sideband's
-   `unexpected error: `, `unknown channel ` and `max. packed size exceeded`.
-   Never by the host's. A pack that is corrupt past its signature is out of
+   `unexpected error: ` and `unknown channel `. Never by the host's. A pack that is corrupt past its signature is out of
    this plan's scope and keeps its reason.
 2. **The clone's transport marks the host's failures where go-git reads
    them.** go-git's HTTP transport, installed for the process as the executor
@@ -61,18 +61,20 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    and matched to go-git's error afterwards was this plan's first design:
    every review round found another way the two failed to match, and the
    marks replaced it. A random token in each mark's words would make them
-   unforgeable, but it would sit in every logged clone error, and the only
-   forgery left blames this platform for the host's own failure.
+   unforgeable, but it would sit in every logged clone error. The forgery it
+   would stop needs a host to send a mark's exact words in a message go-git
+   keeps only as text, and it blames this platform, or a deadline that passed
+   meanwhile, for the host's own failure.
 4. **The context's error joins where the transport saw it end a read.**
    go-git formats a failed read with `%s` inside its decode, the context's
    among them, under the words a decode refusal carries, which now read
    `network`. So the transport marks a read that the deadline or a
    cancellation ended (`errContextRead`), and the context's error joins the
-   chain where that mark comes first in the message. Before, a deadline
-   joined by its text, and only over `internal`. Text cannot tell go-git's
-   formatting of the context's error from a host's words that quote it, so a
-   host's message that quotes the deadline now reads `network`, as the host's
-   failure.
+   chain where that mark comes first in the message and the failure is not
+   this executor's own. Before, a deadline joined by its text, and only over
+   `internal`. Text cannot tell go-git's formatting of the context's error
+   from a host's words that quote it, so a host's message that quotes the
+   deadline now reads `network`, as the host's failure.
 5. **A commit the host does not have still reads `checkout`.** The host
    refuses it with an `ERR` line, as git's own server does, and `fetchCommit`
    already marks that refusal as the caller's sha before `cloneReason` reads
@@ -85,6 +87,10 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
   `network`; an unknown commit still reads `checkout`.
 - The marks: on a marked clone's success bodies only, an empty pack response
   whatever the context, this machine's apart from the host's, a read the
-  context ended marked as the context's, none on a failed request, and the
-  first mark in a message read as the transport's.
-- The deadline and cancellation rows #939 pinned keep their reasons.
+  context or its cause ended marked as the context's, none on a failed
+  request or on the host's words go-git keeps in a type, and the first mark
+  in a message read as the transport's.
+- The deadline and cancellation rows #939 pinned keep their reasons. A real
+  clone whose deadline ends the pack response's read, before its first byte
+  or after a `NAK`, reads `timeout`, and one cancelled after a `NAK` reads
+  `internal`.
