@@ -336,10 +336,10 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 	})
 	// Once the pack response has begun, go-git formats the context's error
 	// with %s as it decodes the response (transport/internal/common), and
-	// only the clone's context, which fired, still names it. A failure with a
-	// reason of its own keeps it, though the deadline passed while go-git ran
-	// on, and so does one the message does not tie to the context; a name
-	// that quotes the context's error does not tie it.
+	// only the transport's mark of the read the context ended still says so
+	// (errContextRead). A failure the transport did not see the context end
+	// keeps its reason, though the deadline passed while go-git ran on, and
+	// so do the context's words in a name or in the host's text.
 	passed, stop := context.WithDeadline(context.Background(), time.Now())
 	defer stop()
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -350,10 +350,12 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"the clone's deadline passes while the pack is read", passed,
-			fmt.Errorf("error decoding upload-pack response: %s", context.DeadlineExceeded), repoOutcomeTimeout},
-		{"a cancellation while the pack is read", cancelled,
-			fmt.Errorf("error decoding upload-pack response: %s", context.Canceled), repoOutcomeInternal},
+		{"the clone's deadline passes while the pack is read", passed, fmt.Errorf("error decoding upload-pack response: %s",
+			fmt.Errorf("%w: %w", errContextRead, context.DeadlineExceeded)), repoOutcomeTimeout},
+		{"a cancellation while the pack is read", cancelled, fmt.Errorf("error decoding upload-pack response: %s",
+			fmt.Errorf("%w: %w", errContextRead, context.Canceled)), repoOutcomeInternal},
+		{"the host's ERR line in the pack response quotes a deadline as the clone's passes", passed,
+			fmt.Errorf("error decoding upload-pack response: %s", "upstream: "+context.DeadlineExceeded.Error()), repoOutcomeNetwork},
 		{"the spool's disk fills after the deadline passed", passed, &fs.PathError{
 			Op: "write", Path: "/tmp/map-repo-clone-1/tree/README.md", Err: syscall.ENOSPC}, repoOutcomeInternal},
 		{"the spool's disk fills after the deadline passed, on a file named for it", passed, &fs.PathError{

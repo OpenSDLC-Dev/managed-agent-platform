@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/packfile"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
@@ -206,12 +208,12 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 		}
 		defer res.Body.Close()
 		cancel()
-		if _, err := io.ReadAll(res.Body); !errors.Is(err, context.Canceled) || transportMark(err) != nil {
-			t.Errorf("read = %v, want the cancellation's own error", err)
+		if _, err := io.ReadAll(res.Body); !errors.Is(err, context.Canceled) || transportMark(err) != errContextRead {
+			t.Errorf("read = %v, want the cancellation's own error, marked the context's", err)
 		}
 	})
 	t.Run("a read the deadline ends", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(clone, 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(clone, 2*time.Second)
 		defer cancel()
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/stall", nil)
 		res, err := client.Do(req)
@@ -219,8 +221,8 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 			t.Fatalf("the request = %v, want its headers before the deadline, so the body's read meets it", err)
 		}
 		defer res.Body.Close()
-		if _, err := io.ReadAll(res.Body); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errHostTransport) {
-			t.Errorf("read = %v, want the deadline's own error", err)
+		if _, err := io.ReadAll(res.Body); !errors.Is(err, context.DeadlineExceeded) || transportMark(err) != errContextRead {
+			t.Errorf("read = %v, want the deadline's own error, marked the context's", err)
 		}
 	})
 	t.Run("a failure that is not the context's, once the context is done", func(t *testing.T) {
@@ -269,11 +271,14 @@ func TestCloneTransportMarksTheHostsFailures(t *testing.T) {
 
 // Every go-git clone over http or https goes through the transport: go-git
 // holds its own default client for both until the package installs its own.
+// The fixture's clones prove the http one marks the host's failures, so https
+// must hold the same client.
 func TestCloneTransportIsGoGitsForHTTPAndHTTPS(t *testing.T) {
-	for _, scheme := range []string{"http", "https"} {
-		if gitclient.Protocols[scheme] == githttp.DefaultClient {
-			t.Errorf("go-git's %s client is its own default, not the one that marks the host's failures", scheme)
-		}
+	if gitclient.Protocols["http"] == githttp.DefaultClient {
+		t.Error("go-git's http client is its own default, not the one that marks the host's failures")
+	}
+	if gitclient.Protocols["https"] != gitclient.Protocols["http"] {
+		t.Error("go-git's https client is not the one its http clones use, which marks the host's failures")
 	}
 }
 
@@ -305,6 +310,14 @@ func TestCloneReasonReadsTheTransportsMarks(t *testing.T) {
 		{"a spool file named in the host's words", &fs.PathError{Op: "open",
 			Path: "/tmp/map-repo-clone-1/tree/" + errHostTransport.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
 		{"an ERR line in this machine's words", &pktline.ErrorLine{Text: errOwnRead.Error()}, repoOutcomeNetwork},
+		{"a request the host's GOAWAY failed, in this machine's words", &url.Error{Op: "Get",
+			URL: "https://example.com/o/r.git/info/refs?service=git-upload-pack", Err: errors.New(
+				`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="` + errOwnRead.Error() + `"`)},
+			repoOutcomeNetwork},
+		{"the pack request the host's GOAWAY failed, in this machine's words", plumbing.NewUnexpectedError(&url.Error{Op: "Post",
+			URL: "https://example.com/o/r.git/git-upload-pack", Err: errors.New(
+				`http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug="` + errOwnRead.Error() + `"`)}),
+			repoOutcomeNetwork},
 		{"the host's mark, in go-git's decode words, quoting this machine's", fmt.Errorf("error decoding upload-pack response: %s",
 			fmt.Errorf("%w: %w", errHostTransport, errors.New(`debug="`+errOwnRead.Error()+`"`))), repoOutcomeNetwork},
 		{"this machine's mark, in go-git's decode words, quoting the host's", fmt.Errorf("error decoding upload-pack response: %s",
@@ -321,10 +334,10 @@ func TestCloneReasonReadsTheTransportsMarks(t *testing.T) {
 }
 
 // A packet too large for the plain side-band's size reads `network` by
-// go-git's words for it. The fixture's http-backend offers side-band-64k,
+// go-git's sentinel for it. The fixture's http-backend offers side-band-64k,
 // whose size no pkt-line passes, so no clone of it reaches this.
 func TestCloneReasonReadsAnOversizeSidebandPacket(t *testing.T) {
-	err := cloneFailed(context.Background(), fmt.Errorf("%s", sideband.ErrMaxPackedExceeded))
+	err := cloneFailed(context.Background(), fmt.Errorf("reading the pack: %w", sideband.ErrMaxPackedExceeded))
 	if got := cloneReason(err); got != repoOutcomeNetwork {
 		t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeNetwork, err)
 	}

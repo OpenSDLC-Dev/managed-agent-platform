@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/transport"
@@ -36,22 +37,34 @@ var errEmptyPack = fmt.Errorf("%w: its pack response ended before its first byte
 // (transportMark).
 var errOwnRead = errors.New("this executor could not read the git host's response")
 
-// transportMark is the mark the clone's transport put on err, errHostTransport
-// or errOwnRead: whichever mark's words come first in err's text. go-git keeps
-// a mark's type only where it does not format it with %s, and its words
-// either way. A mark's own text begins with its words, and what follows them
-// is the error it wraps, which can quote the host's words, a mark's among
-// them. It is nil where err carries neither.
+// errContextRead marks a read of the git host's response that the clone's
+// deadline or cancellation ended, and wraps the context's own error;
+// cloneFailed reads it (transportMark).
+var errContextRead = errors.New("the clone's deadline or cancellation ended the read of the git host's response")
+
+// transportMark is the mark the clone's transport put on err,
+// errHostTransport, errOwnRead or errContextRead: whichever mark's words come
+// first in err's text. go-git keeps a mark's type only where it does not
+// format it with %s, and its words either way. A mark's own text begins with
+// its words, and what follows them is the error it wraps, which can quote the
+// host's words, a mark's among them. The transport marks only a response
+// body's reads, so a failed request (a *url.Error, inside go-git's
+// UnexpectedError too) carries no mark, whatever its text quotes. It is nil
+// where err carries none.
 func transportMark(err error) error {
-	msg := err.Error()
-	host, own := strings.Index(msg, errHostTransport.Error()), strings.Index(msg, errOwnRead.Error())
-	switch {
-	case own >= 0 && (host < 0 || own < host):
-		return errOwnRead
-	case host >= 0:
-		return errHostTransport
+	var urlErr *url.Error
+	if errors.As(withUnexpected(err), &urlErr) {
+		return nil
 	}
-	return nil
+	msg := err.Error()
+	var first error
+	at := -1
+	for _, mark := range []error{errHostTransport, errOwnRead, errContextRead} {
+		if i := strings.Index(msg, mark.Error()); i >= 0 && (at < 0 || i < at) {
+			first, at = mark, i
+		}
+	}
+	return first
 }
 
 type cloneMarksKey struct{}
@@ -99,13 +112,12 @@ func (t hostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // markedBody is a response body whose failed read says whose it was: the
 // host's (errHostTransport), a pack response that ended before its first byte
-// among them (errEmptyPack), or this executor's (errOwnRead). A read that the
-// clone's deadline or cancellation ended fails with the context's own error,
-// which cloneReason reads from go-git's error, so it keeps it; any other
-// failure is marked, whenever it came. The clone's context carries no cause
-// of its own (context.Cause), which net/http would return in its place. A read's own error carries no mark,
-// which only this body puts on, so a mark's words in it are the host's: an
-// HTTP/2 GOAWAY quotes the host's debug text.
+// among them (errEmptyPack), this executor's (errOwnRead), or the clone's
+// deadline's or cancellation's (errContextRead), which net/http reports as
+// the context's own error. The clone's context carries no cause of its own
+// (context.Cause), which net/http would return in its place. A read's own
+// error carries no mark, which only this body puts on, so a mark's words in
+// it are the host's: an HTTP/2 GOAWAY quotes the host's debug text.
 type markedBody struct {
 	io.ReadCloser
 	ctx  context.Context
@@ -127,7 +139,7 @@ func (b *markedBody) Read(p []byte) (int, error) {
 	case transportMark(err) == nil && isLocalError(err):
 		return n, fmt.Errorf("%w: %w", errOwnRead, err)
 	case b.ctx.Err() != nil && errors.Is(err, b.ctx.Err()):
-		return n, err
+		return n, fmt.Errorf("%w: %w", errContextRead, err)
 	default:
 		return n, fmt.Errorf("%w: %w", errHostTransport, err)
 	}

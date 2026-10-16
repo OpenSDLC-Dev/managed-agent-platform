@@ -63,22 +63,28 @@ pack response for "already up to date" (`transport.ErrEmptyUploadPackRequest`,
    marks replaced it. A random token in each mark's words would make them
    unforgeable, but it would sit in every logged clone error, and the only
    forgery left blames this platform for the host's own failure.
-4. **The context's error joins wherever its text was all go-git kept.** A
-   decode refusal now reads `network`, and go-git formats a deadline or a
-   cancellation inside the decode with the same words. So the context's
-   error now joins over `network` as well as `internal`; before, only a
-   deadline joined, and only over `internal`. Where go-git keeps the host's
-   words, or the transport's mark, in a type, they stay the host's.
+4. **The context's error joins where the transport saw it end a read.**
+   go-git formats a failed read with `%s` inside its decode, the context's
+   among them, under the words a decode refusal carries, which now read
+   `network`. So the transport marks a read that the deadline or a
+   cancellation ended (`errContextRead`), and the context's error joins the
+   chain where that mark comes first in the message. Before, a deadline
+   joined by its text, and only over `internal`. Text cannot tell go-git's
+   formatting of the context's error from a host's words that quote it, so a
+   host's message that quotes the deadline now reads `network`, as the host's
+   failure.
 5. **A commit the host does not have still reads `checkout`.** The host
-   refuses it with an `ERR` line, and `fetchCommit` already marks that refusal
-   as the caller's sha before `cloneReason` reads it.
+   refuses it with an `ERR` line, as git's own server does, and `fetchCommit`
+   already marks that refusal as the caller's sha before `cloneReason` reads
+   it. A host that answers with an empty pack response instead failed
+   (decision 2).
 
 ## Verification
 
 - The table above, one fixture row each, through `cloneToTar`: every row reads
   `network`; an unknown commit still reads `checkout`.
-- The marks: on a marked clone's success bodies only, none on a read the
-  context's end failed, an empty pack response whatever the context, this
-  machine's apart from the host's, and the first mark in a message read as
-  the transport's.
+- The marks: on a marked clone's success bodies only, an empty pack response
+  whatever the context, this machine's apart from the host's, a read the
+  context ended marked as the context's, none on a failed request, and the
+  first mark in a message read as the transport's.
 - The deadline and cancellation rows #939 pinned keep their reasons.
