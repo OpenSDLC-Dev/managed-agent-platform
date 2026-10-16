@@ -4,9 +4,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 65](./docs/plan/65_repo-skill-discovery.md) (#921, #581), skills in a
-mounted repository announced to the agent as the reference announces them, archived
-2026-10-14 in three PRs; its delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
+**None.** [Plan 66](./docs/plan/66_clone-host-failures.md) (#940), a repository clone
+that the git host fails partway naming the host, archived 2026-10-17 in one PR; its
+delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 

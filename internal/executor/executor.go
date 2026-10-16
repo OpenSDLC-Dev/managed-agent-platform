@@ -17,7 +17,12 @@
 // an outcome-grading cycle, or simply because the session went idle
 // (docs/plan/38) — and a self_hosted sandbox has no file lane to read.
 // What goes INTO a sandbox lives beside them — skills.go, files.go, repos.go
-// and repoclone.go (go-git, so no git binary is a runtime dependency).
+// and repoclone.go (go-git, so no git binary is a runtime dependency). As the
+// package initializes, clonetransport.go installs go-git's HTTP client for the
+// whole process, so a clone can tell the git host's failures (plan 66): every
+// binary that imports the package gets it, and go-git then refuses an
+// endpoint that names its own CA bundle, client certificate, proxy or
+// InsecureSkipTLS.
 //
 // This package also owns the sandbox's lifecycle, which no work item triggers.
 // reaper.go is the single owner of sandbox destruction on four tiers (a session

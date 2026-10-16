@@ -187,8 +187,7 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		want string
 	}{
 		{"go-git refuses a symlinked parent", fmt.Errorf("chroot: invalid path %q: is a symlink", "GOAWAY/x"), repoOutcomeInternal},
-		{"the host's GOAWAY quotes a path refusal", fmt.Errorf("error decoding upload-pack response: %s",
-			"http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=\"invalid path\""),
+		{"the host's GOAWAY quotes a path refusal", fmt.Errorf("error decoding upload-pack response: %s", goaway("invalid path")),
 			repoOutcomeNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -336,10 +335,10 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 	})
 	// Once the pack response has begun, go-git formats the context's error
 	// with %s as it decodes the response (transport/internal/common), and
-	// only the clone's context, which fired, still names it. A failure with a
-	// reason of its own keeps it, though the deadline passed while go-git ran
-	// on, and so does one the message does not tie to the context; a name
-	// that quotes the context's error does not tie it.
+	// only the transport's mark of the read the context ended still says so
+	// (errContextRead). A failure the transport did not see the context end
+	// keeps its reason, though the deadline passed while go-git ran on, and
+	// so do the context's words in a name or in the host's text.
 	passed, stop := context.WithDeadline(context.Background(), time.Now())
 	defer stop()
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -350,12 +349,24 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"the clone's deadline passes while the pack is read", passed,
-			fmt.Errorf("error decoding upload-pack response: %s", context.DeadlineExceeded), repoOutcomeTimeout},
-		{"a cancellation while the pack is read", cancelled,
-			fmt.Errorf("error decoding upload-pack response: %s", context.Canceled), repoOutcomeInternal},
+		{"the clone's deadline passes while the pack is read", passed, fmt.Errorf("error decoding upload-pack response: %s",
+			fmt.Errorf("%w: %w", errContextRead, context.DeadlineExceeded)), repoOutcomeTimeout},
+		{"a cancellation while the pack is read", cancelled, fmt.Errorf("error decoding upload-pack response: %s",
+			fmt.Errorf("%w: %w", errContextRead, context.Canceled)), repoOutcomeInternal},
+		{"a 401's body carries the transport's context mark as the clone's deadline passes", passed,
+			fmt.Errorf("%w: %s", transport.ErrAuthenticationRequired, errContextRead), repoOutcomeAuth},
+		{"a 403's body carries the transport's context mark as the clone's deadline passes", passed,
+			fmt.Errorf("%w: %s", transport.ErrAuthorizationFailed, errContextRead), repoOutcomeAuth},
+		{"a 404's body carries the transport's context mark as the clone's deadline passes", passed,
+			fmt.Errorf("%w: %s", transport.ErrRepositoryNotFound, errContextRead), repoOutcomeNotFound},
+		{"the host's ERR line quotes the transport's context mark as the clone's passes", passed,
+			&pktline.ErrorLine{Text: errContextRead.Error() + ": " + context.DeadlineExceeded.Error()}, repoOutcomeNetwork},
+		{"the host's ERR line in the pack response quotes a deadline as the clone's passes", passed,
+			fmt.Errorf("error decoding upload-pack response: %s", "upstream: "+context.DeadlineExceeded.Error()), repoOutcomeNetwork},
 		{"the spool's disk fills after the deadline passed", passed, &fs.PathError{
 			Op: "write", Path: "/tmp/map-repo-clone-1/tree/README.md", Err: syscall.ENOSPC}, repoOutcomeInternal},
+		{"the spool's disk fills after the deadline passed, on a file named for the context's mark", passed, &fs.PathError{
+			Op: "write", Path: "/tmp/map-repo-clone-1/tree/" + errContextRead.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
 		{"the spool's disk fills after the deadline passed, on a file named for it", passed, &fs.PathError{
 			Op: "write", Path: "/tmp/map-repo-clone-1/tree/" + context.DeadlineExceeded.Error(), Err: syscall.ENOSPC}, repoOutcomeInternal},
 		{"the pack is corrupt as the deadline passes", passed,
@@ -364,6 +375,28 @@ func TestCloneReasonBlamesTheRemoteOnlyForTheFetch(t *testing.T) {
 			fmt.Errorf("%w: %s", transport.ErrAuthenticationRequired, "upstream: context deadline exceeded"), repoOutcomeAuth},
 		{"the host refuses the token as the deadline passes", passed,
 			fmt.Errorf("%w: %s", transport.ErrAuthenticationRequired, "Invalid username or token"), repoOutcomeAuth},
+		{"the host's ERR line quotes a cancellation as the clone's is cancelled", cancelled,
+			&pktline.ErrorLine{Text: "upstream: " + context.Canceled.Error()}, repoOutcomeNetwork},
+		{"the host's ERR line quotes a deadline as the clone's passes", passed,
+			&pktline.ErrorLine{Text: "upstream: " + context.DeadlineExceeded.Error()}, repoOutcomeNetwork},
+		{"a ref advertisement that is not git's quotes a cancellation as the clone's is cancelled", cancelled,
+			packp.NewErrUnexpectedData("pkt-line 1: invalid length", []byte("upstream: "+context.Canceled.Error())), repoOutcomeNetwork},
+		{"the host's GOAWAY quotes a deadline before the clone's passes", passed, fmt.Errorf("%w: %w", errHostTransport,
+			goaway(context.DeadlineExceeded.Error())),
+			repoOutcomeNetwork},
+		{"the host's GOAWAY fails the ref advertisement's request, quoting a deadline as the clone's passes", passed,
+			&url.Error{Op: "Get", URL: "https://example.com/o/r.git/info/refs?service=git-upload-pack", Err: goaway(context.DeadlineExceeded.Error())},
+			repoOutcomeNetwork},
+		{"the host's GOAWAY fails the pack request, quoting a deadline as the clone's passes", passed,
+			plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://example.com/o/r.git/git-upload-pack", Err: goaway(context.DeadlineExceeded.Error())}),
+			repoOutcomeNetwork},
+		{"the clone's deadline passes during the pack request", passed,
+			plumbing.NewUnexpectedError(&url.Error{Op: "Post", URL: "https://example.com/o/r.git/git-upload-pack", Err: context.DeadlineExceeded}),
+			repoOutcomeTimeout},
+		{"the host's GOAWAY, in go-git's decode words, quotes a deadline before the clone's passes", passed,
+			fmt.Errorf("error decoding upload-pack response: %s", fmt.Errorf("%w: %w", errHostTransport,
+				goaway(context.DeadlineExceeded.Error()))),
+			repoOutcomeNetwork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := cloneFailed(tc.ctx, tc.err)
