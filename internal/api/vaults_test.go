@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
@@ -533,6 +534,14 @@ func TestCredentialValidationRules(t *testing.T) {
 			map[string]any{"display_name": "rec79", "auth": c.auth})
 		wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", c.msg)
 	}
+	// The recorded 200 arm of the same probes: an expiry 30 seconds ahead is
+	// stored (batch2 #105), so the refusal keeps no margin such as the dial's
+	// refresh leeway.
+	soon := time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339)
+	if status, resp := s.do("POST", "/v1/vaults/"+vaultID+"/credentials", map[string]any{"auth": map[string]any{
+		"type": "mcp_oauth", "access_token": "at", "mcp_server_url": "https://mcp.deepwiki.com/mcp", "expires_at": soon}}); status != http.StatusOK {
+		t.Fatalf("an expiry 30s ahead: status %d (%v), want 200", status, resp)
+	}
 
 	// 16 allowed hosts pass; 17 fail. Wildcards and IPv4 literals pass.
 	hosts := []string{"10.0.0.1", "*.example.com"}
@@ -850,7 +859,6 @@ func TestCredentialUpdateErrors(t *testing.T) {
 	envID := createCredential(t, s, vaultID, envVarAuth("K"))["id"].(string)
 	oauthID := createCredential(t, s, vaultID, map[string]any{
 		"type": "mcp_oauth", "mcp_server_url": "https://m.example.com", "access_token": "at",
-		"expires_at": "2099-01-01T00:00:00Z",
 		"refresh": map[string]any{"client_id": "c", "refresh_token": "rt",
 			"token_endpoint":      "https://a.example.com/t",
 			"token_endpoint_auth": map[string]any{"type": "none"}},
@@ -888,15 +896,13 @@ func TestCredentialUpdateErrors(t *testing.T) {
 			t.Fatalf("auth %v: status %d (%v), want 400", c.auth, status, resp)
 		}
 	}
-	// A past expires_at is refused on update as on create (#589), and the
-	// stored credential keeps its expiry. Only the create was recorded, so the
-	// update answers with the create's sentence.
+	// A past expires_at is no error on update, unlike on create (#589): the
+	// console resends the stored expiry with every save, and a stored expiry
+	// passes with time. This is the shape of a rename after the token's hour.
 	status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, map[string]any{
-		"auth": map[string]any{"type": "mcp_oauth", "expires_at": "2020-01-01T00:00:00Z"}})
-	wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", "auth.expires_at must be in the future.")
-	if status, got := s.do("GET", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, nil); status != http.StatusOK ||
-		got["auth"].(map[string]any)["expires_at"] != "2099-01-01T00:00:00Z" {
-		t.Fatalf("a refused update changed the credential: status %d (%v)", status, got)
+		"display_name": "renamed", "auth": map[string]any{"type": "mcp_oauth", "expires_at": "2020-01-01T00:00:00Z"}})
+	if status != http.StatusOK || resp["auth"].(map[string]any)["expires_at"] != "2020-01-01T00:00:00Z" {
+		t.Fatalf("an update resending a past expiry: status %d (%v), want 200 storing it", status, resp)
 	}
 	// display_name too long on update.
 	if status, _ := s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+envID, map[string]any{

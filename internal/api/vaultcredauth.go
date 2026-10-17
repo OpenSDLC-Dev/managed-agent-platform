@@ -448,12 +448,15 @@ func timeField(obj map[string]json.RawMessage, key string) (*time.Time, error) {
 	return &t, nil
 }
 
-// requireFutureExpiry refuses an mcp_oauth expires_at that is already past, in
-// the reference's words (2026-09-03 batch2 `cred.create.oauth-te-*`; #589). A
-// credential stored already expired is an input nobody can have meant, and
-// accepting it only buys a refresh on the first dial. The update applies the
-// same rule by inference: only the create was recorded, and an update that
-// could backdate the field would store what the create refuses.
+// requireFutureExpiry refuses an mcp_oauth create whose expires_at is already
+// past, in the reference's words (2026-09-03 batch2 `cred.create.oauth-te-*`;
+// #589). It judges by the host clock, as vaultresolve's refresh does when it
+// reads the value.
+//
+// Only the create is refused, the half that was recorded. A stored expiry
+// passes with time anyway, and a client may echo one back on update: the
+// managed-agent console resends the stored expires_at on every save, so an
+// update refusal would turn a rename into a 400 once the token's hour is up.
 func requireFutureExpiry(t *time.Time) error {
 	if t != nil && !t.After(time.Now()) {
 		return errInvalid("auth.expires_at must be in the future.")
@@ -553,9 +556,6 @@ func applyMCPOAuthUpdate(obj map[string]json.RawMessage, existingDoc []byte, sec
 		} else {
 			t, err := timeField(obj, "expires_at")
 			if err != nil {
-				return nil, err
-			}
-			if err := requireFutureExpiry(t); err != nil {
 				return nil, err
 			}
 			doc.ExpiresAt = t
