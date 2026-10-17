@@ -292,6 +292,11 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 				if !res.IsError || !strings.Contains(res.Content, tc.want) {
 					t.Fatalf("%s: result = %+v, want an error result mentioning %q", tool.name, res, tc.want)
 				}
+				// A session may have bash disabled, and these results reach
+				// it all the same (#634).
+				if strings.Contains(res.Content, "bash") {
+					t.Errorf("%s: result %q advises bash", tool.name, res.Content)
+				}
 			}
 
 			// The write side answers the same way. Two of these sentinels reach the

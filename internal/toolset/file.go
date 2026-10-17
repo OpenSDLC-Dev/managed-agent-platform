@@ -227,13 +227,16 @@ func fileFault(verb, display string, err error) (Result, error) {
 		return failf("%s: %s is not a regular file", verb, display)
 	case errors.Is(err, sandbox.ErrNotDirectory):
 		return failf("%s %s: not a directory", verb, display)
+	// These two state the constraint and name no tool to use instead: the
+	// runner does not know which tools the session was offered, and one with
+	// bash disabled would be sent to a tool it does not have (#634).
 	case errors.Is(err, sandbox.ErrNotReplaceable):
-		return failf("%s: %s cannot be replaced by an atomic write (a device node, or a file bind-mounted into the sandbox). Use bash redirection to write through it.",
+		return failf("%s: %s cannot be replaced by an atomic write (a device node, or a file bind-mounted into the sandbox), the only write the file tools make.",
 			verb, display)
 	case errors.Is(err, sandbox.ErrNotWritable):
 		return failf("%s %s: %s", verb, display, notWritableReason(err))
 	case errors.Is(err, sandbox.ErrFileTooLarge):
-		return failf("%s: %s exceeds the %d-byte limit. Use bash (head/tail/sed) to work on a slice.",
+		return failf("%s: %s exceeds the %d-byte limit on a file the file tools read.",
 			verb, display, sandbox.MaxFileBytes)
 	default:
 		return Result{}, err
