@@ -128,7 +128,7 @@ type repoResourceJSON struct {
 	Type      string        `json:"type"`
 	UpdatedAt time.Time     `json:"updated_at"`
 	URL       string        `json:"url"`
-	Checkout  *checkoutJSON `json:"checkout,omitempty"` // as given (plan 25 decision 3), no key when omitted
+	Checkout  *checkoutJSON `json:"checkout,omitempty"` // as given, and no key when omitted or null
 }
 
 // checkoutJSON is the branch|commit checkout union (the SDK registers exactly
@@ -404,9 +404,12 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 		}
 		return resourceInput{}, errInvalid("file_id must be a valid file id")
 	}
-	given, _, _, err := stringField(obj, "mount_path")
+	given, set, null, err := stringField(obj, "mount_path")
 	if err != nil {
 		return resourceInput{}, err
+	}
+	if set && !null && given == "" {
+		return resourceInput{}, errEmptyMountPath()
 	}
 	if f == resourceForDeployment && len(given) > maxMountPathBytes {
 		// The spelling is stored and echoed there (#849), and resolution
@@ -414,7 +417,7 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 		// /mnt/session/uploads/x. A repository's spelling is held the same way.
 		return resourceInput{}, errInvalid("mount_path must be at most %d bytes as sent", maxMountPathBytes)
 	}
-	mountPath := defaultMountRoot + fileID // omitted, or null or ""
+	mountPath := defaultMountRoot + fileID // omitted or null
 	if given != "" {
 		if mountPath, err = resolveMountPath(given, fileID); err != nil {
 			return resourceInput{}, err
@@ -560,12 +563,12 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 	if err != nil {
 		return resourceInput{}, err
 	}
-	if f == resourceForSession && set && !null && given == "" {
-		// The SDK's schema bounds a session's mount_path to at least 1
-		// character, and the reference refuses an empty one in these words
-		// (2026-10-15 repo-followups setup[9]). A deployment's config has no
-		// such bound, so there an empty one is taken as omitted.
-		return resourceInput{}, errInvalid("resources.%d.github_repository.mount_path: must be at least 1 character", i)
+	if set && !null && given == "" {
+		if f == resourceForSession {
+			// 2026-10-15 repo-followups setup[9].
+			return resourceInput{}, errInvalid("resources.%d.github_repository.mount_path: must be at least 1 character", i)
+		}
+		return resourceInput{}, errEmptyMountPath()
 	}
 	if f == resourceForDeployment && len(given) > maxMountPathBytes {
 		// Stored and echoed there (#849); parseFileResource says why.
@@ -579,6 +582,20 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 		kind: resourceKindRepo, mountPath: mountPath, givenMountPath: given,
 		url: rawURL, token: token, checkout: checkout,
 	}, nil
+}
+
+// errEmptyMountPath refuses a mount_path sent as the empty string. The spec
+// bounds a resource's mount_path to at least 1 character on every route that
+// takes one (checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsGitHubRepositoryResourceParams.properties.mount_path,
+// checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsFileResourceParams.properties.mount_path):
+// session create, deployment create and update, and a session's resource add
+// all take those params. Only session create's refusal of a
+// repository's was recorded, and parseRepoResource words that one as the
+// reference does; every other route and arm takes this sentence of ours.
+func errEmptyMountPath() error {
+	return errInvalid("mount_path must be at least 1 character")
 }
 
 // parseGitHubRepoURL enforces the exact canonical repository URL
@@ -640,8 +657,9 @@ func validRepoURLSegment(s string) bool {
 // {type:"commit", sha} (the SDK registers exactly these two, checked against
 // anthropic-sdk-go v1.70.1 — betasession.go
 // BetaManagedAgentsGitHubRepositoryResourceParamsCheckoutUnion). Omitted or
-// null means the repository's default branch, resolved at clone time — stored
-// and rendered as null (as-given, INFERRED, plan 25 decision 3).
+// null means the repository's default branch, resolved at clone time, and is
+// stored and rendered as no key, as the reference renders an omitted one
+// (2026-10-15 repo-followups setup[3]; a null one is unrecorded).
 func parseCheckout(obj map[string]json.RawMessage) (*checkoutJSON, error) {
 	raw, ok := obj["checkout"]
 	if !ok || isNull(raw) {
@@ -701,8 +719,8 @@ func isFullCommitSHA(s string) bool {
 }
 
 // resolveRepoMountPath maps a github_repository mount_path to the container
-// path the repository is cloned into, "" (omitted, null, or empty on a
-// deployment) taking the default /workspace/<repoName>. Every path is rooted
+// path the repository is cloned into, "" (omitted or null; the parser refuses
+// an empty one) taking the default /workspace/<repoName>. Every path is rooted
 // under /workspace, as the docs put it ("the directory under /workspace to
 // clone the repository into") and the reference was recorded doing (#922,
 // plan 64 lists each probe). The path is cleaned first, so its ".." resolves

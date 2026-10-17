@@ -83,9 +83,7 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 	if res["mount_path"] != "/workspace/example-repo" {
 		t.Errorf("default mount_path = %v, want /workspace/example-repo", res["mount_path"])
 	}
-	if co, present := res["checkout"]; present {
-		t.Errorf("omitted checkout renders %v, want no key", co)
-	}
+	wantNoFields(t, res, "checkout")
 	// A session stored while an omitted checkout rendered null keeps its null:
 	// resources are echoed as stored.
 	if _, err := s.pool.Exec(t.Context(),
@@ -203,14 +201,6 @@ func TestSessionRepoMountPathRootsUnderWorkspace(t *testing.T) {
 		{"/workspace/..hidden", "/workspace/..hidden"},
 	} {
 		sess := createRepoSession(t, s, repoBody("g", map[string]any{"mount_path": tc.sent}))
-		if tc.sent == "workspace/.." {
-			// A null one takes the default as an omitted one does (ours: the
-			// reference's answer to null is unrecorded).
-			null := createRepoSession(t, s, repoBody("g", map[string]any{"mount_path": nil}))
-			if got := resourcesOf(t, null)[0]["mount_path"]; got != def {
-				t.Errorf("null mount_path: echoed %v, want %q", got, def)
-			}
-		}
 		if got := resourcesOf(t, sess)[0]["mount_path"]; got != tc.want {
 			t.Errorf("mount_path %q: echoed %v, want %q", tc.sent, got, tc.want)
 		}
@@ -219,6 +209,13 @@ func TestSessionRepoMountPathRootsUnderWorkspace(t *testing.T) {
 			data[0].(map[string]any)["mount_path"] != tc.want {
 			t.Errorf("mount_path %q: listed %d %v, want %q", tc.sent, status, list["data"], tc.want)
 		}
+	}
+
+	// A null one takes the default as an omitted one does (ours: the
+	// reference's answer to a null is unrecorded).
+	null := createRepoSession(t, s, repoBody("g", map[string]any{"mount_path": nil}))
+	if got := resourcesOf(t, null)[0]["mount_path"]; got != def {
+		t.Errorf("null mount_path: echoed %v, want %q", got, def)
 	}
 
 	agentID, envID := fixture(t, s)
@@ -746,19 +743,40 @@ func TestDeploymentRepoResourceWording(t *testing.T) {
 	}
 }
 
-// TestDeploymentRepoTakesAnEmptyMountPath: the SDK's schema bounds a session's
-// mount_path to at least 1 character, which session create enforces, but puts
-// no bound on a deployment's (checked against anthropic-sdk-go v1.70.1 — spec
-// components.schemas.BetaManagedAgentsGitHubRepositoryResourceConfig), so a
-// deployment takes an empty one as omitted, and its session mounts the default.
-func TestDeploymentRepoTakesAnEmptyMountPath(t *testing.T) {
+// TestAnEmptyMountPathIsRefusedOnEveryRoute: the spec bounds a resource's
+// mount_path to at least 1 character on every route that takes one (checked
+// against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsGitHubRepositoryResourceParams.properties.mount_path,
+// checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsFileResourceParams.properties.mount_path).
+// Session create's refusal of a
+// repository's is the reference's recorded sentence
+// (TestSessionRepoCreateValidation); every other route and arm takes ours, as
+// no recording holds theirs.
+func TestAnEmptyMountPathIsRefusedOnEveryRoute(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	body := deploymentBody(agentID, envID)
-	body["resources"] = []any{repoBody("g", map[string]any{"mount_path": ""})}
-	if status, res := s.do(http.MethodPost, "/v1/deployments", body); status != http.StatusOK {
-		t.Fatalf("deployment with an empty mount_path: %d %v, want 200", status, res)
+	const want = "mount_path must be at least 1 character"
+	file := map[string]any{"type": "file", "file_id": uploadOneFile(t, s, "f.txt"), "mount_path": ""}
+	repo := repoBody("g", map[string]any{"mount_path": ""})
+	deplID := createDeployment(t, s, deploymentBody(agentID, envID))["id"].(string)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+
+	for name, resource := range map[string]map[string]any{"a repository": repo, "a file": file} {
+		t.Run("deployment, "+name, func(t *testing.T) {
+			body := deploymentBody(agentID, envID)
+			body["resources"] = []any{resource}
+			status, res := s.do(http.MethodPost, "/v1/deployments", body)
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+			status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": []any{resource}})
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+		})
 	}
+	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "resources": []any{file}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sess["id"].(string)+"/resources", file)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
 }
 
 // TestSessionRepoCreateWithoutCipher is w-no-cipher 🔍: a deployment with no

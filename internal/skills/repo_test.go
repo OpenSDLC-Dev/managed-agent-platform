@@ -40,9 +40,9 @@ func TestRepoDescription(t *testing.T) {
 }
 
 // TestRepoName pins the name a repository skill is announced under: its
-// frontmatter's, as the reference was recorded announcing `other-name` from a
-// directory named dir-name (managed-agents-wire-recordings
-// 2026-10-15-repo-followups, setup[14]), and "" for the caller to take the
+// frontmatter's, as the agent in a reference session reported `other-name`
+// announced from a directory named dir-name (managed-agents-wire-recordings
+// 2026-10-15-repo-followups, setup[47]), and "" for the caller to take the
 // directory's where the frontmatter gives none usable (ours: unrecorded).
 func TestRepoName(t *testing.T) {
 	for _, c := range []struct {
@@ -53,10 +53,14 @@ func TestRepoName(t *testing.T) {
 		{"spaces kept", "---\nname: My Skill\n---\n", "My Skill"},
 		{"at the upload cap", "---\nname: " + strings.Repeat("n", 64) + "\n---\n", strings.Repeat("n", 64)},
 		{"over the upload cap", "---\nname: " + strings.Repeat("n", 65) + "\n---\n", ""},
+		{"the cap in characters", "---\nname: " + strings.Repeat("名", 64) + "\n---\n", strings.Repeat("名", 64)},
+		{"blank", "---\nname: \"   \"\n---\n", ""},
 		{"no frontmatter", "# Broken\n", ""},
 		{"no name", "---\ndescription: Nameless.\n---\n", ""},
 		{"empty name", "---\nname: \"\"\n---\n", ""},
 		{"non-string name", "---\nname:\n  - a\n---\n", ""},
+		{"a scalar read as its text", "---\nname: 123\n---\n", "123"},
+		{"binary, not UTF-8", "---\nname: !!binary /w==\n---\n", ""},
 		{"newline", "---\nname: \"a\\nb\"\n---\n", ""},
 		{"nul", "---\nname: \"a\\0b\"\n---\n", ""},
 		{"invalid yaml", "---\nname: [unclosed\n---\n", ""},
