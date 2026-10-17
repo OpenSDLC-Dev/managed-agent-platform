@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -90,11 +91,11 @@ func (h *harness) memoryContent(t *testing.T, storeID, path string) (content str
 
 // versionsOf lists a path's versions as a sorted list of "operation/actor-type",
 // so a want literal is written sorted too. Sorted rather than in write order,
-// because memory_versions carries no write-order key: created_at defaults to
-// now(), which Postgres freezes at BEGIN, so a settlement's own versions tie
-// exactly, and the tiebreak behind a tie is 120 random bits of memver_ id.
-// Across transactions the wall clock alone separates them, and #525 is one such
-// pair that came back reversed. Sorting costs no coverage: a settlement plans at
+// because memory_versions carries no write-order key: created_at is the
+// database's clock_timestamp() at each insert (#552), and that clock can step
+// backwards (#411), so even a settlement's own versions are separated by
+// the wall clock alone. #525 is a pair that came back reversed across two
+// transactions. Sorting costs no coverage: a settlement plans at
 // most one action per path (internal/memsync's Plan), so a path's versions are
 // the test's own script, never an order the sync decides.
 func (h *harness) versionsOf(t *testing.T, storeID, path string) []string {
@@ -574,6 +575,21 @@ func TestMemorySyncReplacesADirectoryWithAFile(t *testing.T) {
 	}
 	if got := h.versionsOf(t, memStoreID, "/a/b.md"); !slices.Equal(got, []string{"created/none", "deleted/session_actor"}) {
 		t.Errorf("versions of /a/b.md = %v", got)
+	}
+	// One settlement wrote both versions, and each is stamped when it was
+	// written, not when the settlement began (#552), where now() would tie
+	// them. Distinct, not ordered: the database clock can step backwards
+	// (#411), and #525 was a test that asserted an order the schema does
+	// not guarantee.
+	var deleted, created time.Time
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT max(created_at) FILTER (WHERE path = '/a/b.md' AND operation = 'deleted'),
+		        max(created_at) FILTER (WHERE path = '/a' AND operation = 'created')
+		   FROM memory_versions WHERE memory_store_id = $1`, memStoreID).Scan(&deleted, &created); err != nil {
+		t.Fatal(err)
+	}
+	if deleted.Equal(created) {
+		t.Errorf("the settlement's deletion and create are both stamped %v", created)
 	}
 }
 

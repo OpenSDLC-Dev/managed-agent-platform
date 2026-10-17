@@ -271,6 +271,12 @@ func occupiedBy(ctx context.Context, tx pgx.Tx, storeID, path, except string) (i
 // writes. A `deleted` version carries its path and nothing else: "content …
 // `null` when … `operation` is `deleted`", and the same for the digest and the
 // size — so content is a pointer, nil for that one operation.
+//
+// created_at is clock_timestamp(), the time of this insert, never the column
+// default now(), which Postgres freezes at BEGIN (#552). Every caller begins
+// before it takes the store lock, so now() would stamp a write that waited on
+// the lock earlier than rows committed while it waited; internal/events/log.go
+// stamps an event the same way for the same reason.
 func insertMemoryVersion(ctx context.Context, tx pgx.Tx, storeID, memoryID, operation, path string,
 	content *string, actor map[string]string) (string, error) {
 	id := domain.NewID(domain.PrefixMemoryVersion).String()
@@ -284,8 +290,8 @@ func insertMemoryVersion(ctx context.Context, tx pgx.Tx, storeID, memoryID, oper
 	_, err := tx.Exec(ctx,
 		`INSERT INTO memory_versions
 		   (id, memory_store_id, memory_id, operation, path, content, content_sha256,
-		    content_size_bytes, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		    content_size_bytes, created_by, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp())`,
 		id, storeID, memoryID, operation, path, body, sha, size, createdBy)
 	return id, err
 }

@@ -105,13 +105,12 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 // survive, so the lineage a client lists is never empty. Its `deleted` marker
 // is normally among them, because no version is ever *inserted* for a memory
 // id after that one — ids are random and never reused, and a re-create at the
-// same path mints a new memory. That is insert order, not timestamp order:
-// created_at defaults to now(), which is transaction start, and deleteMemory
-// begins before it takes the store lock, so an update that begins later and
-// wins the lock first commits a `modified` row stamped after the marker.
-// Ordering the marker out of the window would take keep such interleavings
-// inside one delete's begin-to-lock gap; the listable promise does not depend
-// on it either way. The reference's own wording, that versions "persist after
+// same path mints a new memory. That is insert order, and timestamp order too
+// as far as the database clock keeps it: created_at is clock_timestamp() at
+// the insert, which every writer reaches only after the store lock (#552), so
+// the marker is stamped after every earlier version of its memory unless the
+// clock steps backwards between them (#411). The listable promise does not
+// depend on it either way. The reference's own wording, that versions "persist after
 // the memory is deleted", is about the delete not cascading rather than about
 // exemption from retention, and its retention rule names no exception. A
 // redacted version is no exception either, so the record of who erased what
