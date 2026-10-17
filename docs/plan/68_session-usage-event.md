@@ -81,8 +81,9 @@ The recordings in `managed-agents-wire-recordings` add the shape and the order
 5. **Migration 0055 backfills both columns** from each session's stored
    session-level status events. A session's history keeps its time, and a
    session running at deploy time keeps its open interval.
-6. **The session resource renders the stored sum, to the millisecond.** While
-   the session runs it reads as of the last idle. The reference's GET read
+6. **The session resource renders the stored sum, to the millisecond.** It
+   counts closed intervals only: while the session runs, the open one is left
+   out, so the value moves at an idle or a reschedule. The reference's GET read
    0.1–0.23 s above its last event's value (recorded), and its value while
    running is unobserved, so this is an inference.
 7. **`domain.Usage` stays the stored token shape.** The session resource
