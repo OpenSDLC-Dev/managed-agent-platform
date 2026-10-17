@@ -285,7 +285,11 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		}
 	}
 	if badInput != nil {
-		return nil, fmt.Errorf("%w (%s)", badInput, provider.StopNote(turn.stopReason, turn.usage))
+		note := provider.StopNote(turn.stopReason, turn.usage)
+		if err := stream.Err(); err != nil {
+			note += "; model stream: " + err.Error()
+		}
+		return nil, fmt.Errorf("%w (%s)", badInput, note)
 	}
 	if err := stream.Err(); err != nil {
 		return nil, fmt.Errorf("model stream: %w", err)

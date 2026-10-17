@@ -1495,6 +1495,7 @@ func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
 	cut := &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: json.RawMessage(`{"query":"batch 9`)}
 	for name, tc := range map[string]struct {
 		tail []provider.Chunk
+		err  error
 		want string
 	}{
 		"cut at the cap": {
@@ -1503,17 +1504,27 @@ func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
 				textChunk(2, "after the cut"),
 				done("max_tokens", 8192),
 			},
+			nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
 		},
 		"no done chunk": {
 			nil,
+			nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason)`,
+		},
+		// The stream's own failure is part of how it ended, so it is named
+		// beside the bad block rather than hidden behind it.
+		"stream failed after the cut": {
+			nil,
+			fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
+			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason; model stream: ` +
+				provider.ErrStalled.Error(),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{
 				append([]provider.Chunk{{Kind: provider.KindToolUse, ToolUse: cut}}, tc.tail...),
-			}, nil)
+			}, []error{tc.err})
 			h.wake(t, "use the tool")
 			h.runOnce(t)
 

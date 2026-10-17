@@ -656,7 +656,7 @@ func TestDreamPipelineHundred(t *testing.T) {
 		t.Errorf("the pipeline session %s ran %d digest threads, want at least %d (%d transcripts in batches of %d)",
 			sessionID, threads, batches, transcripts, batch)
 	case threads > batches:
-		t.Logf("the pipeline session %s ran %d digest threads for %d batches: %d spawned again",
+		t.Logf("the pipeline session %s ran %d digest threads for %d batches, %d more than the batches",
 			sessionID, threads, batches, threads-batches)
 	}
 	after := s.storeMemories(t, outputStoreID(t, dream))
