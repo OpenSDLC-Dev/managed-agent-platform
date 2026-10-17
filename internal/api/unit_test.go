@@ -283,6 +283,35 @@ func TestRenderSessionDefaultsNilCollections(t *testing.T) {
 	}
 }
 
+// The session's running time is the stored sum plus, while the stored status
+// is running, the open interval up to the read's database time (plan 68
+// decision 6) — exact arithmetic on fixed stamps, which the HTTP test cannot
+// pin against its own timing.
+func TestRenderSessionActiveSecondsAddsTheOpenInterval(t *testing.T) {
+	since := time.Date(2026, 10, 17, 1, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name, status string
+		readAt       time.Time
+		want         float64
+	}{
+		{"running", "running", since.Add(10*time.Second + 250*time.Millisecond), 14.5},
+		{"idle with an interval open", "idle", since.Add(10 * time.Second), 4.25},
+		{"a read before the stamp", "running", since.Add(-time.Second), 4.25},
+	} {
+		out, err := renderSession(sessionRow{
+			id: "sesn_x", agentJSON: []byte(`{}`), metaJSON: []byte(`{}`),
+			usageJSON: []byte(`{}`), resourcesJSON: []byte(`[]`), status: c.status,
+			activeSeconds: 4.2504, runningSince: &since, readAt: c.readAt,
+		})
+		if err != nil {
+			t.Fatalf("%s: renderSession: %v", c.name, err)
+		}
+		if out.Usage.ActiveSeconds != c.want {
+			t.Errorf("%s: active_seconds = %v, want %v", c.name, out.Usage.ActiveSeconds, c.want)
+		}
+	}
+}
+
 // TestTracingMiddlewareContinuesRemoteTrace: the server span must join the
 // caller's W3C trace context rather than start a fresh trace.
 func TestTracingMiddlewareContinuesRemoteTrace(t *testing.T) {

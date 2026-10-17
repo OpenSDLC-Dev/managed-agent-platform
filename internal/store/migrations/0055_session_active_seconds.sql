@@ -15,11 +15,17 @@
 -- because a close it did not see was written by a replica on the earlier
 -- build.
 --
--- The scan of events runs first, into a temporary table, before anything
--- locks sessions: reading events blocks no append. The ALTER then takes an
--- ACCESS EXCLUSIVE lock on sessions, held until the migration commits, so
--- every read and write of a session waits while each session row is updated —
--- one pass over sessions, not over events.
+-- The scan of events runs first, into a scratch table dropped at the end,
+-- before this migration locks sessions: reading events blocks no append. An
+-- ordinary unlogged table, not a temporary one, so the migration needs no
+-- privilege beyond the CREATE every migration here needs. The ALTER then
+-- takes an ACCESS EXCLUSIVE lock on sessions, held until the migration
+-- commits, so every read and write of a session waits while each session row
+-- is updated — one pass over sessions, not over events. That holds when 0055
+-- is the only migration pending. The migrator runs every pending migration in
+-- one transaction, so on a database further behind, a lock an earlier one
+-- took is held through the scan too: 0053's ALTER locks sessions, and 0054's
+-- foreign key to it blocks appends.
 --
 -- A rolling upgrade can miscount a session that changes status while replicas
 -- on the earlier build are serving, or while the scan runs, since those status
@@ -27,7 +33,7 @@
 -- open is lost, and one they close stays open until this build's next status
 -- event — a running restarts it, dropping that turn's time; an idle closes it,
 -- counting the gap between.
-CREATE TEMPORARY TABLE session_clock ON COMMIT DROP AS
+CREATE UNLOGGED TABLE session_clock_0055 AS
 WITH status AS (
     SELECT session_id, seq, processed_at,
            type = 'session.status_running' AS running,
@@ -61,5 +67,7 @@ ALTER TABLE sessions
 
 UPDATE sessions
    SET active_seconds = clock.active, running_since = clock.since
-  FROM session_clock clock
+  FROM session_clock_0055 clock
  WHERE sessions.id = clock.session_id;
+
+DROP TABLE session_clock_0055;

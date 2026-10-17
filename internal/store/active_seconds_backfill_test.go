@@ -95,6 +95,14 @@ func TestSessionActiveSecondsBackfill(t *testing.T) {
 			t.Errorf("%s: active_seconds = %v running_since = %v, want %v and %v", want.id, active, since, want.active, want.since)
 		}
 	}
+	// The scratch table the scan fills is the migration's own, dropped with it.
+	var leftover bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('session_clock_0055') IS NOT NULL`).Scan(&leftover); err != nil {
+		t.Fatal(err)
+	}
+	if leftover {
+		t.Error("migration 0055 left its scratch table session_clock_0055 behind")
+	}
 }
 
 func ptr[T any](v T) *T { return &v }
