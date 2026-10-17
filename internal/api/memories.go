@@ -708,6 +708,12 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		if !storableText(v) {
 			return nil, errInvalid("path_prefix must be valid text")
 		}
+		// The reference's words for a prefix that does not end with "/"
+		// (2026-09-02 free_batch1 `mem.list.prefix/x`; #549). Matched
+		// literally, /notes would reach /notes-archive/.
+		if !strings.HasSuffix(v, "/") {
+			return nil, errInvalid("path_prefix must be segment-aligned and end with /")
+		}
 		prefix = v
 	}
 	depth := 0

@@ -791,12 +791,22 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		[]string{"/notes/a.md", "/notes/deep/b.md", "/notes/deep/c.md"}) {
 		t.Errorf("path_prefix=/notes/ = %v", got)
 	}
-	// Literal metacharacters: neither `_` nor `%` is a wildcard.
-	if got := list(t, "path_prefix="+url.QueryEscape("/a_b")); !slices.Equal(got, []string{"/a_b"}) {
-		t.Errorf("path_prefix=/a_b = %v", got)
+	// Literal metacharacters: neither `_` nor `%` is a wildcard. As patterns,
+	// /a_b/ would reach /acb/x and /100%/ would reach /1000/x.
+	if got := list(t, "path_prefix="+url.QueryEscape("/a_b/")); len(got) != 0 {
+		t.Errorf("path_prefix=/a_b/ = %v, want none", got)
 	}
-	if got := list(t, "path_prefix="+url.QueryEscape("/100%")); !slices.Equal(got, []string{"/100%/x"}) {
-		t.Errorf("path_prefix=/100%% = %v", got)
+	if got := list(t, "path_prefix="+url.QueryEscape("/100%/")); !slices.Equal(got, []string{"/100%/x"}) {
+		t.Errorf("path_prefix=/100%%/ = %v", got)
+	}
+	// A prefix that does not end with "/" is refused in the reference's words
+	// (2026-09-02 free_batch1 `mem.list.prefix/x`; #549), at either depth, so
+	// /notes cannot reach /notes-archive/ by matching bytes.
+	for _, q := range []string{"path_prefix=%2Fx", "path_prefix=%2Fnotes", "depth=1&path_prefix=%2Fnotes",
+		"path_prefix=" + url.QueryEscape("/a_b")} {
+		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
+		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+			"path_prefix must be segment-aligned and end with /")
 	}
 	// An omitted prefix means "/", which is every path.
 	if got := list(t, "depth=0"); len(got) != 9 {
