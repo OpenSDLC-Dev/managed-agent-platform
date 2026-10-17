@@ -1502,6 +1502,7 @@ func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
 		}, end...)
 	}
 	for name, tc := range map[string]struct {
+		lead   []provider.Chunk // complete chunks ahead of the bad block
 		input  json.RawMessage
 		tail   []provider.Chunk
 		err    error
@@ -1509,30 +1510,39 @@ func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
 		output int64 // the output tokens the token metric records
 	}{
 		"cut at the cap": {
-			cut, after(done("max_tokens", 8192)), nil,
+			nil, cut, after(done("max_tokens", 8192)), nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
 			8192,
 		},
 		// Cut after nothing but whitespace, before the object began.
 		"cut before the object": {
-			json.RawMessage("\n"), after(done("max_tokens", 8192)), nil,
+			nil, json.RawMessage("\n"), after(done("max_tokens", 8192)), nil,
 			`tool "lookup": input must be a JSON object: EOF (stop_reason max_tokens, 8192 output tokens)`,
 			8192,
 		},
 		"no done chunk": {
-			cut, nil, nil,
+			nil, cut, nil, nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason)`,
 			0,
 		},
 		// The stream's own failure is part of how it ended, so it is named
 		// beside the bad block rather than hidden behind it.
 		"stream failed after the cut": {
-			cut, nil, fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
+			nil, cut, nil, fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
 			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason; model stream: model endpoint stalled: no data for 10m0s)`,
 			0,
 		},
+		// The turn goes back with its error, holding the complete call ahead
+		// of the cut one; failing the turn must still dispatch neither.
+		"a complete call before the cut": {
+			[]provider.Chunk{{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_a", Name: "lookup", Input: json.RawMessage(`{"query":"batch 8"}`)}}},
+			cut, after(done("max_tokens", 8192)), nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
+			8192,
+		},
 		"malformed, not cut": {
-			json.RawMessage(`"oops"`), after(done("tool_use", 12)), nil,
+			nil, json.RawMessage(`"oops"`), after(done("tool_use", 12)), nil,
 			`tool "lookup": input must be a JSON object: json: cannot unmarshal string into Go value of type map[string]interface {}`,
 			0,
 		},
@@ -1540,8 +1550,8 @@ func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			collect := collectBrainMetrics(t)
 			h := newHarness(t, [][]provider.Chunk{
-				append([]provider.Chunk{{Kind: provider.KindToolUse,
-					ToolUse: &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: tc.input}}}, tc.tail...),
+				append(append(append([]provider.Chunk(nil), tc.lead...), provider.Chunk{Kind: provider.KindToolUse,
+					ToolUse: &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: tc.input}}), tc.tail...),
 			}, []error{tc.err})
 			h.wake(t, "use the tool")
 			frames := drainFrames(t, h)
@@ -1563,6 +1573,11 @@ func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
 			}
 			if n := h.countType(t, "agent.thinking"); n != 0 {
 				t.Errorf("agent.thinking events = %d, want 0: thinking after the bad block was kept", n)
+			}
+			for _, typ := range []string{"agent.tool_use", "agent.custom_tool_use", "agent.mcp_tool_use"} {
+				if n := h.countType(t, typ); n != 0 {
+					t.Errorf("%s events = %d, want 0: a call of the failed turn was dispatched", typ, n)
+				}
 			}
 			for _, f := range frames {
 				if raw, _ := json.Marshal(f); strings.Contains(string(raw), "after the cut") {
