@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Runs the `retry` helper the CD notifiers define, instead of reading it.
+"""Runs the `retry` helper the notifiers define, instead of reading it.
 
 `make retry-test`.
 
-`deploy-alert.yml` and `staging-parked.yml` each define a three-attempt `retry`
-and wrap their READ calls in it — every one in `deploy-alert.yml`, and all but
-`staging-parked.yml`'s issue lookup, which sits in an earlier step that defines
-no `retry` at all. Every value `retry` prints lands in a command substitution,
+`deploy-alert.yml`, `staging-parked.yml` and `evals-alert.yml` each define a
+three-attempt `retry` and wrap their READ calls in it — every one in
+`deploy-alert.yml` and `evals-alert.yml`, and all but `staging-parked.yml`'s
+issue lookup, which sits in an earlier step that defines no `retry` at all. Every value `retry` prints lands in a command substitution,
 either directly or by way of `open_issue_with`, which forwards it to one. The
 obvious
 spelling of the helper — `until "$@"` — runs each attempt with stdout already
@@ -53,7 +53,7 @@ one behind `!` or `time`, one inlined into a single-line `run:` value, and
 anything assembled by `eval`. They are written down rather than chased, because
 the chase has no end and each round of it has cost more than the hole it closed.
 If you are adding a helper and this file refuses it, the fix is to spell it the
-way the other two are spelled, or to teach `DEFN` the new shape — not to quietly
+way the others are spelled, or to teach `DEFN` the new shape — not to quietly
 narrow `LOOKS_LIKE` until the refusal stops.
 """
 

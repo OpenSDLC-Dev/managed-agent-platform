@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
+	openbao-init-test cd-outcome-test parked-test retry-test evals-alert-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -345,14 +345,22 @@ parked-test:
 	shellcheck .github/scripts/parked.sh
 	python3 .github/scripts/parked_test.py
 
-# And the third: the `retry` wrapper around both notifiers' READ calls. It is
-# NOT a checked-in script — the two copies were kept separate deliberately (see
+# And the third: the `retry` wrapper around the notifiers' READ calls. It is
+# NOT a checked-in script — the copies were kept separate deliberately (see
 # the test's header) — so this lifts each definition out of its workflow and
 # runs it, which is why there is no shellcheck line above it. #507 is what it
 # would have caught: a failed attempt's partial stdout landing in the caller's
 # capture, joined to the attempt that worked.
 retry-test:
 	python3 .github/scripts/retry_test.py
+
+# The classifier evals-alert.yml keys on: whether the nightly eval suite is
+# passing, failing, or has stopped reaching a verdict. A scheduled workflow
+# first runs against real issues on `main`, so this is where its decision runs
+# before that.
+evals-alert-test:
+	shellcheck .github/scripts/evals-health.sh
+	python3 .github/scripts/evals_health_test.py
 
 # The one that checks a rule rather than a script: #355/#356 parameterised the
 # operator's coordinates out of the repository by hand, the sweep stopped at

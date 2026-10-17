@@ -1,0 +1,186 @@
+name: evals-alert
+
+# The nightly eval suite can fail, or stop running, without telling anyone. This
+# workflow is the notification.
+#
+# evals.yml reports only in its own run list, and two failures go unseen there.
+# A red run is one row among many. A run that never finishes is not even that:
+# from 2026-10-07 one run sat in `waiting` and held the `evals` concurrency
+# group. Every later scheduled run queued behind it and was cancelled by the
+# next one, so no eval ran for ten days and nothing said so (#30).
+#
+# WHY A SCHEDULE AND NOT `workflow_run`. deploy-alert.yml listens for `deploy`
+# to complete. A listener cannot see the second failure, because a run that
+# never completes never fires the event. So this job reads the run history on a
+# schedule, and the age of the newest verdict tells a stalled suite from a
+# quiet one. The decision is .github/scripts/evals-health.sh, behind `make
+# evals-alert-test`, because a scheduled workflow first runs against real
+# issues on `main`. The API calls and issue edits below are the part no test
+# reaches.
+#
+# WHAT IT CANNOT TELL YOU. It has no notifier of its own: if it breaks, it goes
+# red on its own schedule and leaves the issue as it is. Every run re-derives
+# its answer from the history, so a missed run loses nothing. And GitHub
+# disables a scheduled workflow after 60 days with no activity in the
+# repository, which stops this workflow together with evals.yml.
+on:
+  schedule:
+    # Every six hours, at :37. evals.yml is scheduled for 04:17 and has started
+    # up to seven hours late, so one fixed daily time would race it. Four checks
+    # a day report a failure within six hours of the run that found it, and a
+    # stall within six hours of the threshold below.
+    - cron: '37 */6 * * *'
+  workflow_dispatch:
+
+# Nothing at the workflow level, per deploy.yml: a permission granted here would
+# be inherited by any job added later.
+permissions: {}
+
+# Serialised so that two runs cannot both open the issue. Correctness does not
+# rest on it: each run reads the whole history again.
+concurrency:
+  group: evals-alert
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    name: notify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # actions/checkout, for the classifier
+      actions: read # the evals run history
+      issues: write # the tracking issue and its label
+    timeout-minutes: 10
+    steps:
+      # Nothing here pushes, so the token has no reason to outlive the step.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reconcile the evals tracking issue with the newest verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVALS_WORKFLOW: evals.yml
+          # How old the newest verdict may be. The suite runs once a day, and a
+          # scheduled run can start hours late or be dropped, so one missed day
+          # passes unremarked and two do not.
+          STALE_HOURS: 48
+          TITLE: "evals: the nightly eval suite is not passing on main"
+          # The lookup is by LABEL, not by title: anyone reading the issue can
+          # edit a title.
+          LABEL: evals-failure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Three attempts on the READ calls, for deploy-alert.yml's reason, and
+          # deliberately not on the mutating ones: retrying a create that in
+          # fact succeeded files the same thing twice.
+          #
+          # Each attempt's output is CAPTURED and only the successful one is
+          # printed. Run bare inside a command substitution, a failed attempt
+          # would leave its partial stdout in the capture, joined to the next
+          # attempt's (#507). `make retry-test` runs this copy with the other
+          # two.
+          retry() {
+            local n=0 out
+            until out="$("$@")"; do
+              n=$((n + 1))
+              [ "$n" -lt 3 ] || return 1
+              sleep $((n * 5))
+            done
+            printf '%s\n' "$out"
+          }
+
+          # THE QUERY GOES IN THE PATH: `gh api` switches to POST as soon as one
+          # `-f` is present, and this route has no POST (deploy-alert.yml).
+          # Only the fields the classifier reads are kept.
+          runs="$(retry gh api \
+            "repos/$REPO/actions/workflows/$EVALS_WORKFLOW/runs?branch=main&status=completed&per_page=100" \
+            --jq '[.workflow_runs[] | {id, run_attempt, conclusion, updated_at}]')"
+          verdict="$(bash .github/scripts/evals-health.sh "$(date -u +%s)" "$STALE_HOURS" <<<"$runs")"
+          read -r state RUN_ID RUN_ATTEMPT RUN_CONCLUSION FINISHED <<<"$verdict"
+          echo "newest verdict: run $RUN_ID attempt $RUN_ATTEMPT, $RUN_CONCLUSION at $FINISHED -> $state"
+
+          RUN_URL="https://github.com/$REPO/actions/runs/$RUN_ID"
+          LIST_URL="https://github.com/$REPO/actions/workflows/$EVALS_WORKFLOW"
+
+          # Ensured before the lookup, so the query does not depend on how `gh`
+          # answers a filter naming a label that does not exist yet.
+          gh label create "$LABEL" --repo "$REPO" --color B60205 \
+            --description "Open while the nightly eval suite is failing or has stopped (evals-alert.yml)" \
+            >/dev/null 2>&1 || true
+          num="$(retry gh issue list --repo "$REPO" --state open --label "$LABEL" \
+            --limit 10 --json number --jq 'first | .number // empty')"
+
+          # Filed unassigned, for staging-parked.yml's reason: `github.actor` on
+          # a scheduled run is whoever last edited the cron, which is the wrong
+          # person to page. Opening the issue is the notification; it reaches
+          # everyone watching the repository.
+          open_or_comment() {
+            local body="$1"$'\n\n'"$MARK"
+            if [ -n "$num" ]; then
+              # Never say the same thing twice: every run until the next
+              # verdict settles on the same answer. The body is searched as
+              # well as the comments, because the first report is the body.
+              local said
+              said="$(retry gh issue view "$num" --repo "$REPO" --json body,comments \
+                --jq '([.body] + [.comments[].body]) | map(select(contains(env.MARK))) | length')"
+              if [ "$said" != "0" ]; then echo "already reported on #$num"; return; fi
+              gh issue comment "$num" --repo "$REPO" --body "$body"
+              echo "commented on #$num"
+              return
+            fi
+            local url
+            url="$(gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body "$body")"
+            echo "opened $url"
+          }
+
+          case "$state" in
+            healthy)
+              # Every open issue carrying the label, not just the first: a
+              # second one, filed by hand, would otherwise stay open forever.
+              numbers="$(retry gh issue list --repo "$REPO" --state open --label "$LABEL" \
+                --limit 50 --json number --jq '.[].number')"
+              for n in $numbers; do
+                gh issue close "$n" --repo "$REPO" --comment \
+                  "The nightly eval suite passed: $RUN_URL (finished $FINISHED)."
+                echo "closed #$n"
+              done
+              [ -n "$numbers" ] || echo "nothing to close"
+              ;;
+            failing)
+              # Keyed on the attempt as well as the run: a re-run that fails
+              # again is a second report, not a repeat of the first.
+              export MARK="<!-- evals-alert failing run:$RUN_ID attempt:$RUN_ATTEMPT -->"
+              open_or_comment "$(printf '%s\n' \
+                "The nightly eval suite finished **$RUN_CONCLUSION** on \`main\` at $FINISHED." \
+                "" \
+                "Run: $RUN_URL (attempt $RUN_ATTEMPT)" \
+                "" \
+                "The run's summary and its \`eval-artifacts\` artifact say which trials failed. The artifact expires after seven days." \
+                "" \
+                "This issue closes automatically when a later run passes.")"
+              ;;
+            stale)
+              # Keyed on the newest verdict, so one stall is reported once, and
+              # a stall that follows a reported failure is still news.
+              export MARK="<!-- evals-alert stale since run:$RUN_ID -->"
+              if [ "$RUN_ID" = "-" ]; then
+                newest="None of the newest 100 completed runs on \`main\` reached a verdict."
+              else
+                newest="The newest verdict is $RUN_URL, which finished **$RUN_CONCLUSION** at $FINISHED."
+              fi
+              open_or_comment "$(printf '%s\n' \
+                "No run of the nightly eval suite has passed or failed on \`main\` in the last $STALE_HOURS hours. $newest" \
+                "" \
+                "A run that ends \`cancelled\` carries no verdict. Look in $LIST_URL for a run that has not completed. Until it completes it holds the \`evals\` concurrency group, and each later scheduled run is cancelled by the next one. If it is stuck, cancel it. Also check that the workflow is enabled." \
+                "" \
+                "This issue closes automatically when a later run passes.")"
+              ;;
+            *)
+              echo "::error::evals-health.sh answered '$verdict', which this workflow does not handle"
+              exit 1
+              ;;
+          esac

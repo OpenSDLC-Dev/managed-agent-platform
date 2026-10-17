@@ -1287,7 +1287,7 @@ jobs:
   # runs that actually touch GCP, and the first symptom would be a failed apply
   # halfway through provisioning a cluster. The job has since collected the rest
   # of the deploy-side tooling that is checked by RUNNING it rather than reading
-  # it — the bootstrap, database-init, power and CD-notifier scripts — because
+  # it — the bootstrap, database-init, power and notifier scripts — because
   # they share that property and nothing else in CI would execute them.
   terraform:
     name: terraform
@@ -1370,13 +1370,17 @@ jobs:
       # `;` away from also matching a label VALUE.
       - name: the parked-cluster signal reads what it claims
         run: make parked-test
-      # Both notifiers retry their READ calls, and both callers capture the
-      # result. The bare spelling of that wrapper feeds a failed attempt's
-      # partial output into the capture (#507), which is a wrong VALUE rather
-      # than an error — and the two copies are deliberately not shared, so
-      # nothing but running each of them keeps them from drifting apart again.
-      - name: neither notifier's retry leaks a failed attempt's output
+      # Every notifier retries its READ calls and captures the result. The
+      # bare spelling of that wrapper feeds a failed attempt's partial output
+      # into the capture (#507), which is a wrong VALUE rather than an error —
+      # and the copies are deliberately not shared, so nothing but running
+      # each of them keeps them from drifting apart again.
+      - name: no notifier's retry leaks a failed attempt's output
         run: make retry-test
+      # Whether the nightly eval suite is passing, failing or has stopped is
+      # one script's decision, and its scheduled caller first runs on `main`.
+      - name: the eval notifier's classifier decides what it claims
+        run: make evals-alert-test
       # The repository is public, so the operator's coordinates belong in Actions
       # variables and nowhere else. #356 enforced that by hand and stopped at
       # `deploy/`; #514 found a project id, two project numbers, a registry path

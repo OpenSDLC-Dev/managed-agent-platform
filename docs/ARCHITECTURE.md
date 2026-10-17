@@ -811,6 +811,10 @@ dispatch cannot borrow the credential onto an unreviewed ref — and a break in 
 whole-session path therefore surfaces on the next scheduled run instead of at whoever's next
 manual one. That job carries the same fail-not-skip rule: with the secrets unset it is red,
 never green-and-silent — a green job means the suite ran and passed, never that it was skipped.
+A second workflow, `.github/workflows/evals-alert.yml`, reads that job's run history every six
+hours. It keeps one issue labelled `evals-failure` open while the newest verdict is a failure or
+is more than 48 hours old, and closes it when a run passes. The age is the half a red job cannot
+report: from 2026-10-07 one stuck run blocked every scheduled run for ten days, and nothing said so (#30).
 
 Beside the evals sits the top-level `acceptance/` suite (plan 21): the define-outcomes
 doc example driven end-to-end through the latest Go SDK. Its deterministic rehearsal —
