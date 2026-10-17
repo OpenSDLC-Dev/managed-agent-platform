@@ -19,11 +19,12 @@ import (
 // outcome is what one admitted request reports to the ledger, filled in as
 // it is served.
 type outcome struct {
-	at      *catalog.Attempt // the attempt that answered, or the last one made
-	status  int              // the HTTP status the caller was given
-	errType string           // the error the caller was given, "" when none
-	tokens  *store.Tokens    // as the upstream reported them; nil when it did not
-	ttft    time.Duration    // until a stream's first event that is not a keep-alive; zero for a whole answer
+	at       *catalog.Attempt // the attempt that answered, or the last one made
+	status   int              // the HTTP status the caller was given
+	upstream int              // the HTTP status the last attempt's upstream answered, zero when it answered none
+	errType  string           // the error the caller was given, "" when none
+	tokens   *store.Tokens    // as the upstream reported them; nil when it did not
+	ttft     time.Duration    // until a stream's first event that is not a keep-alive; zero for a whole answer
 }
 
 // recordTimeout bounds the ledger write a finished request makes.

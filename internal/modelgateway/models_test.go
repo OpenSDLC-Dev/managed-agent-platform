@@ -11,7 +11,6 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -147,11 +146,7 @@ func TestTheBrainKey(t *testing.T) {
 		resp, _ := e.do("POST", "/v1/messages", `{"model":"`+model+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": brain})
 		return resp.StatusCode
 	}
-	adminAPI, err := admin.New(admin.Config{Store: e.s, Cipher: e.cipher, BootstrapKey: bootstrap})
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.start(func(c *modelgateway.Config) { c.BrainKey = brain; c.Admin = adminAPI })
+	e.startProbing(func(c *modelgateway.Config) { c.BrainKey = brain })
 	if s := call("fast"); s != 401 {
 		t.Errorf("no row: %d", s)
 	}

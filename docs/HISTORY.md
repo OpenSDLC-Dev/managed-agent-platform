@@ -49,6 +49,32 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Model gateway credential check and deployment test (#953), run 2026-10-18 — ✅ passed
+
+The owner settled #953's four open questions on 2026-10-18, before any code. A test is written to the ledger, marked as a test. Neither route stores its result. Neither runs on create. The check needs the admin role, as the test does.
+
+**The list-models routes.** #953's keyless probe of 2026-10-17 left five rows unknown. A request with each live-tier key and with a made-up key settled them on 2026-10-18. The keyless probe was also run again, and it filled two gaps: MiniMax's international Anthropic host, and Moonshot's.
+
+| Profile | Protocol | The tier's key | A made-up key | Recorded |
+| --- | --- | --- | --- | --- |
+| `deepseek` | Anthropic | 404 | 401 | no route |
+| `deepseek` | OpenAI | 200, 2 models | 401 | lists |
+| `minimax` | both, CN | 200, 9 models | 401 | lists |
+| `zhipu` | OpenAI, CN | 200, 11 models | 401 | lists |
+| `zhipu` | Anthropic, CN | 200, 11 models | 200, body `{"code":401,…}` | lists |
+| `moonshot` | OpenAI, CN | 200, 4 models | 401 | lists |
+| `moonshot` | Anthropic, CN | 404 `url.not_found` | 404 | no route |
+| `gitee` | OpenAI | 200, 208 models | 401 | lists |
+| `gemini` | Gemini | 200, 63 models | 400 `API key not valid` | lists |
+
+Two rows changed from #953's reading. Gitee lists its public catalogue to a request without a key, but it refuses a bad key, so a check with the provider's key does show that the key works. Zhipu's Anthropic host refuses a bad key with a 200 that holds no list, so a check reads the list, not the status. Without a key, the international hosts of MiniMax, Zhipu and Moonshot answer as the CN ones do. The GLM key lists models on Zhipu's Anthropic host, where every Messages call it makes answers 429, code 1309. A listing does not show that a model answers.
+
+**The smallest chat request.** On 2026-10-18 each chat model of the tier was asked for `max_tokens: 1`, with one user message, directly. Every one answered 200, on both endpoints where it has two. The answers stopped at `max_tokens` or `length`. DeepSeek, Kimi and GLM, which think by default, answered with one token of thinking. MiniMax-M3.1-Flash-Preview answered with `content: null`. Gitee's and Zhipu's embeddings of one short input, and Gitee's rerank of one document, answered 200 too.
+
+**The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu,gemini go test -run TestLiveProbes` passed all 23 subtests in 18 seconds. Each vendor's check listed models on each protocol its profile records a listing for, with the tier's chat models among them. On DeepSeek's and Moonshot's Anthropic endpoints it answered from the profile, with no status. Each listing refused the made-up key, and the check reported each refusal's status and message. MiniMax's and Zhipu's Anthropic hosts took `limit=1000`. Each of the 17 tests answered 200. Fourteen tested the eight chat models: on the Anthropic endpoint by passthrough wherever the tier's key serves one, and on the OpenAI endpoint through the conversion. Three tested the vectors deployments. Each chat test reported one to four output tokens, and the ledger held one test row for each test.
+
+---
+
 ## The `session.usage` event and `usage.active_seconds` (plan 68, #432) — archived 2026-10-17, delivered in one PR
 
 #432 registered the reference's session-budget surface at anthropic-sdk-go v1.62.0. Checked on 2026-10-17, the surface was unchanged from v1.63.1 to v1.82.0, and the public docs now define it. The owner chose one slice that day: the `session.usage` event before every session idle, and `active_seconds`, with no price table. Budgets, `list_cost`, `server_tool_use` and `session.budget_reached` stay registered under #432, which stays open.

@@ -1,6 +1,7 @@
 package profile_test
 
 import (
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -94,6 +95,39 @@ func TestGeminiProfile(t *testing.T) {
 	}
 }
 
+// A credential check calls a vendor's list-models route only on the
+// profile's record of it, so every vendor profile records each protocol it
+// speaks, and a profile added without one fails here rather than have its
+// route called on a guess. The generic profiles record none: their endpoints
+// are the operator's, so a check tries them.
+func TestEveryVendorProtocolRecordsItsModelList(t *testing.T) {
+	want := map[string]map[profile.Protocol]bool{
+		"deepseek":          {profile.Anthropic: false, profile.OpenAI: true},
+		"minimax":           {profile.Anthropic: true, profile.OpenAI: true},
+		"zhipu":             {profile.Anthropic: true, profile.OpenAI: true},
+		"moonshot":          {profile.Anthropic: false, profile.OpenAI: true},
+		"gitee":             {profile.OpenAI: true},
+		"gemini":            {profile.Gemini: true},
+		"anthropic-generic": nil,
+		"openai-generic":    nil,
+	}
+	for _, p := range profile.All() {
+		w, ok := want[p.Name]
+		if !ok {
+			t.Errorf("%s: no expected model list; add the profile's here", p.Name)
+			continue
+		}
+		if !maps.Equal(p.ModelList, w) {
+			t.Errorf("%s: ModelList = %v, want %v", p.Name, p.ModelList, w)
+		}
+		for proto := range p.ModelList {
+			if !p.Supports(proto) {
+				t.Errorf("%s records a model list on %s, which it does not speak", p.Name, proto)
+			}
+		}
+	}
+}
+
 // All returns a copy: a caller that edits what it got cannot change the
 // profiles every other caller reads.
 func TestAllReturnsACopy(t *testing.T) {
@@ -101,7 +135,9 @@ func TestAllReturnsACopy(t *testing.T) {
 	ps[0].Hosts[0].BaseURL = "https://evil.example"
 	ps[0].Name = "changed"
 	ps[0].ChatThinking["enabled"] = "changed"
-	if got := profile.All(); got[0].Name == "changed" || got[0].Hosts[0].BaseURL == "https://evil.example" || got[0].ChatThinking["enabled"] == "changed" {
+	ps[0].ModelList[profile.OpenAI] = false
+	if got := profile.All(); got[0].Name == "changed" || got[0].Hosts[0].BaseURL == "https://evil.example" ||
+		got[0].ChatThinking["enabled"] == "changed" || !got[0].ModelList[profile.OpenAI] {
 		t.Error("All shares its backing data with callers")
 	}
 }

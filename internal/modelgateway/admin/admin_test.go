@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,7 @@ type env struct {
 	cipher *local.Cipher
 	idp    *identitytest.IdP
 	clock  *identitytest.Clock
+	prober *stubProber
 }
 
 func newEnv(t *testing.T, withIdentity bool) *env {
@@ -46,8 +48,8 @@ func newEnv(t *testing.T, withIdentity bool) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, pool: pool, store: store.New(pool), cipher: cipher}
-	cfg := admin.Config{Store: e.store, Cipher: cipher, BootstrapKey: bootstrap}
+	e := &env{t: t, pool: pool, store: store.New(pool), cipher: cipher, prober: &stubProber{}}
+	cfg := admin.Config{Store: e.store, Cipher: cipher, BootstrapKey: bootstrap, Prober: e.prober}
 	if withIdentity {
 		e.idp = identitytest.NewIdP(t)
 		e.clock = identitytest.NewClock(time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
@@ -263,6 +265,17 @@ func TestProfiles(t *testing.T) {
 	p := e.ok(e.admin("GET", "/admin/v1/profiles/minimax", nil), "get minimax")
 	if p["name"] != "minimax" || len(p["hosts"].([]any)) != 4 {
 		t.Errorf("minimax = %v", p)
+	}
+	// list_models tells the console where a credential check can be made:
+	// not on a protocol whose route the vendor does not serve, and tried on
+	// a generic profile, which names none.
+	for name, want := range map[string]map[string]any{
+		"deepseek":          {"anthropic": false, "openai": true},
+		"anthropic-generic": {},
+	} {
+		if got := e.ok(e.admin("GET", "/admin/v1/profiles/"+name, nil), name)["list_models"]; !reflect.DeepEqual(got, any(want)) {
+			t.Errorf("%s list_models = %#v, want %v", name, got, want)
+		}
 	}
 	if p := e.ok(e.admin("GET", "/admin/v1/profiles/gitee", nil), "get gitee"); len(p["hosts"].([]any)) != 1 || len(p["protocols"].([]any)) != 1 {
 		t.Errorf("gitee = %v", p)
@@ -602,9 +615,10 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	cipher, _ := local.New(local.Config{KeyID: "k", Key: bytes.Repeat([]byte{1}, 32)})
 	for name, cfg := range map[string]admin.Config{
-		"no store":         {Cipher: cipher, BootstrapKey: bootstrap},
-		"no cipher":        {Store: store.New(pool), BootstrapKey: bootstrap},
-		"no bootstrap key": {Store: store.New(pool), Cipher: cipher},
+		"no store":         {Cipher: cipher, BootstrapKey: bootstrap, Prober: &stubProber{}},
+		"no cipher":        {Store: store.New(pool), BootstrapKey: bootstrap, Prober: &stubProber{}},
+		"no bootstrap key": {Store: store.New(pool), Cipher: cipher, Prober: &stubProber{}},
+		"no prober":        {Store: store.New(pool), Cipher: cipher, BootstrapKey: bootstrap},
 	} {
 		if _, err := admin.New(cfg); err == nil {
 			t.Errorf("%s: New accepted it", name)
@@ -628,7 +642,7 @@ func TestAuthBehindAProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := admin.New(admin.Config{Store: store.New(pool), Cipher: cipher, Verifier: v, BootstrapKey: bootstrap})
+	h, err := admin.New(admin.Config{Store: store.New(pool), Cipher: cipher, Verifier: v, BootstrapKey: bootstrap, Prober: &stubProber{}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -79,7 +79,7 @@ func (s *Snapshot) Plan(a store.Alias, proto profile.Protocol, session string, d
 			}
 			var creds []store.Credential
 			for _, c := range s.credentials[prov.ID] {
-				if c.Enabled && upstreamProtocol(prov, c, proto) != "" {
+				if c.Enabled && UpstreamProtocol(prov, c, proto) != "" {
 					creds = append(creds, c)
 				}
 			}
@@ -92,7 +92,7 @@ func (s *Snapshot) Plan(a store.Alias, proto profile.Protocol, session string, d
 		for _, t := range group {
 			weighted(t.creds, session, draw, func(c store.Credential) (string, int) { return c.ID, c.Weight })
 			for _, c := range t.creds {
-				up := upstreamProtocol(t.prov, c, proto)
+				up := UpstreamProtocol(t.prov, c, proto)
 				out = append(out, Attempt{Deployment: t.d, Provider: t.prov, Credential: c, Endpoint: t.prov.Endpoints[up], Protocol: up})
 			}
 		}
@@ -100,12 +100,12 @@ func (s *Snapshot) Plan(a store.Alias, proto profile.Protocol, session string, d
 	return out
 }
 
-// upstreamProtocol is the protocol a request on proto reaches its provider
+// UpstreamProtocol is the protocol a request on proto reaches its provider
 // on with credential c: proto itself where the provider has an endpoint on it
 // and c is allowed there, else, for a Messages request, OpenAI's, then
 // Gemini's, which the gateway converts to (docs/plan/62_gemini-upstream-protocol.md);
 // "" when c cannot serve the request.
-func upstreamProtocol(prov store.Provider, c store.Credential, proto profile.Protocol) profile.Protocol {
+func UpstreamProtocol(prov store.Provider, c store.Credential, proto profile.Protocol) profile.Protocol {
 	on := func(p profile.Protocol) bool { return prov.Endpoints[p] != "" && slices.Contains(c.Protocols, p) }
 	switch {
 	case on(proto):

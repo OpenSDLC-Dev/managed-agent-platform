@@ -97,6 +97,15 @@ type Profile struct {
 	// Chat Completions request to the vendor's OpenAI endpoint.
 	Ignores     func(model string, request map[string]json.RawMessage) string `json:"-"`
 	ChatIgnores func(model string, request map[string]json.RawMessage) string `json:"-"`
+	// ModelList is, for each protocol a vendor profile speaks, what a
+	// credential check (the admin API's check route) may learn from the
+	// vendor's list-models route there: true where the route lists models
+	// and refuses a bad key, so a listing shows the key works; false where
+	// the vendor serves no such route, so no check is made. Every vendor
+	// profile records each of its protocols, citing the evidence. A generic
+	// profile records none: its endpoint is the operator's, so a check tries
+	// the route and reads a 404 as its having none.
+	ModelList map[Protocol]bool `json:"list_models"`
 }
 
 // Supports reports whether a provider of this profile may have an endpoint on
@@ -127,7 +136,11 @@ var profiles = []Profile{
 		// signature, or none, and one under a changed prefix, but refuses a
 		// tool loop whose thinking is gone unless the tool ids are its own
 		// (#883, probed 2026-10-04).
-		ThinkingAnyPrefix: true},
+		ThinkingAnyPrefix: true,
+		// Its API docs list models on the OpenAI host (List Models), which
+		// answers a bad key 401; its Anthropic host answers the account's own
+		// key 404 on /v1/models (probed 2026-10-18).
+		ModelList: map[Protocol]bool{OpenAI: true, Anthropic: false}},
 	// MiniMax's Messages API reference takes either header and says
 	// "Authorization: Bearer <API_KEY> is recommended". It refuses a
 	// search_result block in a tool_result with a 400, "invalid tool_result
@@ -140,7 +153,11 @@ var profiles = []Profile{
 	}, BearerAuth: true, FlattenSearchResults: true, Ignores: minimaxIgnores, ChatIgnores: minimaxChatIgnores,
 		// MiniMax's OpenAI Chat Completions reference (text-chat-openai)
 		// takes thinking.type disabled or adaptive, adaptive by default.
-		ChatThinking: map[string]string{"enabled": "adaptive", "adaptive": "adaptive", "disabled": "disabled"}},
+		ChatThinking: map[string]string{"enabled": "adaptive", "adaptive": "adaptive", "disabled": "disabled"},
+		// Every host answers /v1/models or /models without a key 401 and a
+		// made-up path 404 (#953, probed 2026-10-17 and 2026-10-18); a CN
+		// key lists models on both protocols, and a bad key gets a 401.
+		ModelList: map[Protocol]bool{Anthropic: true, OpenAI: true}},
 	// BigModel's Claude API compatibility guide sends the key as x-api-key.
 	{Name: "zhipu", DisplayName: "Zhipu (GLM)", Protocols: both, Hosts: []Host{
 		{Protocol: Anthropic, Region: RegionCN, BaseURL: "https://open.bigmodel.cn/api/anthropic"},
@@ -151,7 +168,13 @@ var profiles = []Profile{
 		// Z.ai's thinking guide: thinking.type enabled (the default) or
 		// disabled, from GLM-4.5; GLM-5.3 refuses disabled itself.
 		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"},
-		ChatIgnores:  zhipuChatIgnores},
+		ChatIgnores:  zhipuChatIgnores,
+		// A BigModel key lists models on both protocols (probed 2026-10-18).
+		// A bad key gets a 401 on the OpenAI host and, on the Anthropic one,
+		// a 200 whose body is {"code":401,...} and holds no list, which a
+		// check reads as the refusal it is. The Z.ai hosts answer a request
+		// without a key as BigModel's do.
+		ModelList: map[Protocol]bool{Anthropic: true, OpenAI: true}},
 	// Kimi documents a Bearer token as the one way to send a key: its Claude
 	// Code guide says to remove ANTHROPIC_API_KEY, which sends x-api-key. Its
 	// CN site documents the OpenAI-compatible host api.moonshot.cn/v1
@@ -172,7 +195,11 @@ var profiles = []Profile{
 		// for themselves. kimi-k3 honors disabled as kimi-k2.6 does: no
 		// thinking in 6 of 6 answers across both endpoints (docs/HISTORY.md,
 		// 2026-10-14), so neither refuses it.
-		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"}},
+		ChatThinking: map[string]string{"enabled": "enabled", "adaptive": "enabled", "disabled": "disabled"},
+		// Its OpenAI hosts list models for a CN key and answer a bad key 401;
+		// its Anthropic hosts answer /v1/models 404 url.not_found, the CN key
+		// included (#953, probed 2026-10-17 and 2026-10-18).
+		ModelList: map[Protocol]bool{OpenAI: true, Anthropic: false}},
 	// Gitee AI is v1's embeddings and rerank vendor, the knowledge-base
 	// client's default for both. It drops idle keep-alive connections in the
 	// middle of a batch, which that client works around with a fresh
@@ -180,14 +207,21 @@ var profiles = []Profile{
 	// (probed 2026-10-08).
 	{Name: "gitee", DisplayName: "Gitee AI", Protocols: []Protocol{OpenAI}, Hosts: []Host{
 		{Protocol: OpenAI, BaseURL: "https://ai.gitee.com/v1"},
-	}, CloseConnections: true},
+	}, CloseConnections: true,
+		// /models lists Gitee's public catalogue to a request without a key,
+		// but answers a bad key 401 (#953, probed 2026-10-17 and 2026-10-18),
+		// so a listing with the provider's key shows the key works.
+		ModelList: map[Protocol]bool{OpenAI: true}},
 	// Google's Gemini API (AI Studio), reached with an API key sent as
 	// x-goog-api-key; a Messages request to it is converted
 	// (docs/plan/62_gemini-upstream-protocol.md). Its host is the base the
 	// gateway appends /models/{model}:generateContent to.
 	{Name: "gemini", DisplayName: "Google Gemini API", Protocols: []Protocol{Gemini}, Hosts: []Host{
 		{Protocol: Gemini, BaseURL: "https://generativelanguage.googleapis.com/v1beta"},
-	}},
+	},
+		// models lists the key's models, and answers a bad key 400
+		// API_KEY_INVALID (probed 2026-10-18).
+		ModelList: map[Protocol]bool{Gemini: true}},
 	// The generic profiles stay last: GET /admin/v1/profiles lists profiles in
 	// this order, and their names read "Other …" after the vendors above.
 	{Name: "anthropic-generic", DisplayName: "Other Anthropic-compatible Endpoint", Protocols: []Protocol{Anthropic}},
@@ -441,5 +475,6 @@ func clone(p Profile) Profile {
 	p.Protocols = append([]Protocol(nil), p.Protocols...)
 	p.Hosts = append([]Host(nil), p.Hosts...)
 	p.ChatThinking = maps.Clone(p.ChatThinking)
+	p.ModelList = maps.Clone(p.ModelList)
 	return p
 }

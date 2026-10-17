@@ -29,7 +29,10 @@ type Tokens struct {
 // "Cache-aware ITPM", read 2026-10-07).
 func (t Tokens) limited() int64 { return t.Input + t.CacheWrite + t.Output }
 
-// Usage is one request in the ledger.
+// Usage is one request in the ledger. A deployment test's attempt (the admin
+// API's test route) is one too, under the key id "admin" and the endpoint
+// "deployment_test", with the deployment's upstream id for its model and no
+// alias: no API key made it, and its tokens cost what a call's do.
 type Usage struct {
 	ID           int64
 	RequestID    string
@@ -41,7 +44,7 @@ type Usage struct {
 	CredentialID string
 	SessionID    string // "" when the caller sent none
 	Protocol     string // the inbound protocol
-	Endpoint     string // the route's: "messages", "count_tokens", "chat_completions", "responses", "embeddings", "rerank"
+	Endpoint     string // the route's: "messages", "count_tokens", "chat_completions", "responses", "embeddings", "rerank", "deployment_test"
 	Status       int    // the HTTP status the caller was given
 	ErrorType    string // the error the caller was given, "" when none
 	Tokens       *Tokens

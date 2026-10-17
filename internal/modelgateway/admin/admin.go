@@ -30,11 +30,13 @@
 //	GET    /admin/v1/providers/{id}/credentials/{cid}   one
 //	POST   /admin/v1/providers/{id}/credentials/{cid}   update
 //	DELETE /admin/v1/providers/{id}/credentials/{cid}   delete
+//	POST   /admin/v1/providers/{id}/credentials/{cid}/check  list the vendor's models with its key
 //	POST   /admin/v1/deployments                        create
 //	GET    /admin/v1/deployments                        list
 //	GET    /admin/v1/deployments/{id}                   one
 //	POST   /admin/v1/deployments/{id}                   update
 //	DELETE /admin/v1/deployments/{id}                   delete (off every alias first)
+//	POST   /admin/v1/deployments/{id}/test              one minimal request with each credential
 //	POST   /admin/v1/aliases                            create
 //	GET    /admin/v1/aliases                            list
 //	GET    /admin/v1/aliases/{name...}                  one (a name may hold a slash)
@@ -55,6 +57,13 @@
 // unpaginated: a configuration is tens of rows, not thousands. The ledger is
 // the exception, millions of rows, read a page at a time. Errors answer
 // in the platform's envelope, {"type":"error","error":{"type","message"}}.
+//
+// Two routes call the vendor, on demand alone, and need the admin role: a
+// credential check costs no tokens, and shows the vendor's list-models route
+// takes the key; a deployment test costs a few, and shows the whole path
+// answers — endpoint, key, upstream model id, the account's access and
+// balance. Each answers 200 with a result per protocol or per credential,
+// whatever the vendor said (probes.go).
 package admin
 
 import (
@@ -82,6 +91,7 @@ type Config struct {
 	Cipher       secrets.Cipher     // seals credential keys
 	Verifier     *identity.Verifier // nil: no operator identity, the bootstrap key alone
 	BootstrapKey string             // CONTROLPLANE_API_KEY
+	Prober       Prober             // calls vendors for the check and test routes (modelgateway.NewProber)
 }
 
 type handler struct {
@@ -99,6 +109,8 @@ func New(cfg Config) (http.Handler, error) {
 		return nil, errors.New("modelgateway admin: a secrets cipher is required to seal credential keys")
 	case cfg.BootstrapKey == "":
 		return nil, errors.New("modelgateway admin: the bootstrap key is required")
+	case cfg.Prober == nil:
+		return nil, errors.New("modelgateway admin: a prober is required for the check and test routes")
 	}
 	h := &handler{cfg: cfg, bootstrap: sha256.Sum256([]byte(cfg.BootstrapKey)), mux: http.NewServeMux()}
 	h.routes()
@@ -115,9 +127,11 @@ func (h *handler) routes() {
 	h.route("/admin/v1/providers/{id}/credentials", ep("GET", read, h.listCredentials), ep("POST", write, h.createCredential))
 	h.route("/admin/v1/providers/{id}/credentials/{cid}",
 		ep("GET", read, h.getCredential), ep("POST", write, h.updateCredential), ep("DELETE", write, h.deleteCredential))
+	h.route("/admin/v1/providers/{id}/credentials/{cid}/check", ep("POST", write, h.checkCredential))
 	h.route("/admin/v1/deployments", ep("GET", read, h.listDeployments), ep("POST", write, h.createDeployment))
 	h.route("/admin/v1/deployments/{id}",
 		ep("GET", read, h.getDeployment), ep("POST", write, h.updateDeployment), ep("DELETE", write, h.deleteDeployment))
+	h.route("/admin/v1/deployments/{id}/test", ep("POST", write, h.testDeployment))
 	h.route("/admin/v1/aliases", ep("GET", read, h.listAliases), ep("POST", write, h.createAlias))
 	h.route("/admin/v1/aliases/{name...}",
 		ep("GET", read, h.getAlias), ep("POST", write, h.updateAlias), ep("DELETE", write, h.deleteAlias))

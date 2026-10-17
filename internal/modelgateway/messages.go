@@ -480,7 +480,7 @@ func streamFlag(top map[string]json.RawMessage) (bool, *apiError) {
 }
 
 // protocolNames names each protocol for a caller.
-var protocolNames = map[profile.Protocol]string{profile.Anthropic: "Anthropic", profile.OpenAI: "OpenAI"}
+var protocolNames = map[profile.Protocol]string{profile.Anthropic: "Anthropic", profile.OpenAI: "OpenAI", profile.Gemini: "Gemini"}
 
 // call is what every attempt of one request sends.
 type call struct {
@@ -544,6 +544,7 @@ type failure struct {
 	body   []byte      // an upstream's body, its credential removed
 	typ    string      // for a failure with no upstream body
 	err    error
+	detail []byte // a vendor's refusal of the credential, its credential removed, which a caller is not given (refusedCredential)
 }
 
 // refusesThinking reports whether the failure is an upstream's 400 refusing
@@ -599,14 +600,14 @@ func retryable(status int, h http.Header) bool {
 // key, one without access to the model, or an empty balance (DeepSeek's 402).
 // It is not the caller's to read as its own authentication failing, and
 // another credential may serve, so it is a retryable 502 whose detail goes to
-// the log.
+// the log, and to a deployment test (probes.go).
 // The refusal is named by its HTTP status, in a stream its error type, or
 // Gemini's reason where it refuses a key with a 400 (geminiKeyRefused).
 func refusedCredential(ctx context.Context, at catalog.Attempt, refusal string, detail []byte, red provider.Redactor) (*failure, bool) {
 	slog.WarnContext(ctx, "modelgateway: upstream refused a credential", "credential", at.Credential.ID,
 		"deployment", at.Deployment.ID, "refusal", refusal, "detail", red.String(string(detail)))
 	return &failure{status: http.StatusBadGateway, typ: "api_error",
-		err: fmt.Errorf("upstream refused the gateway's credential (%s)", refusal)}, true
+		err: fmt.Errorf("upstream refused the gateway's credential (%s)", refusal), detail: redactJSON(red, detail)}, true
 }
 
 // errorStatus is the HTTP status an Anthropic error type answers with
@@ -717,29 +718,15 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			req.Header[k] = vs
 		}
 	}
-	for k, v := range at.Provider.Headers {
-		req.Header.Set(k, v)
-	}
-	propagate(ctx, at.Provider, req.Header)
+	vendorHeaders(ctx, req.Header, at.Provider, prof, up, key)
 	req.Header.Set("Content-Type", "application/json")
-	switch {
-	case up == profile.Gemini:
-		req.Header.Set("x-goog-api-key", string(key))
-	case prof.BearerAuth || up == profile.OpenAI: // every OpenAI-compatible API takes a Bearer token
-		req.Header.Set("Authorization", "Bearer "+string(key))
-	default:
-		req.Header.Set("x-api-key", string(key))
-	}
 
-	client := h.client
-	if prof.CloseConnections {
-		client = h.fresh
-	}
-	resp, err := client.Do(req)
+	resp, err := h.clientFor(prof).Do(req)
 	if err != nil {
 		return noAnswer(guard, red, err)
 	}
 	answered(ctx, resp.StatusCode)
+	c.out.upstream = resp.StatusCode
 	resp.Body = provider.ProgressBody(ctx, resp.Body)
 	defer resp.Body.Close()
 	switch s := resp.StatusCode; {
@@ -904,6 +891,35 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	_, _ = w.Write(answer)
 	c.out.status = resp.StatusCode
 	return nil, false
+}
+
+// vendorHeaders gives a request to a provider of prof on up the provider's
+// headers, its trace context where the provider opted in (propagate), and
+// key in the header its protocol takes: x-goog-api-key on Gemini's; a Bearer
+// on the OpenAI protocol, which every OpenAI-compatible API takes, and on an
+// Anthropic endpoint whose profile asks for one; x-api-key, Anthropic's own,
+// otherwise.
+func vendorHeaders(ctx context.Context, h http.Header, p store.Provider, prof profile.Profile, up profile.Protocol, key []byte) {
+	for k, v := range p.Headers {
+		h.Set(k, v)
+	}
+	propagate(ctx, p, h)
+	switch {
+	case up == profile.Gemini:
+		h.Set("x-goog-api-key", string(key))
+	case prof.BearerAuth || up == profile.OpenAI:
+		h.Set("Authorization", "Bearer "+string(key))
+	default:
+		h.Set("x-api-key", string(key))
+	}
+}
+
+// clientFor is the client a request to a provider of prof rides.
+func (h *handler) clientFor(prof profile.Profile) *http.Client {
+	if prof.CloseConnections {
+		return h.fresh
+	}
+	return h.client
 }
 
 // noAnswer is an attempt whose upstream gave no usable answer: a stall, or a
