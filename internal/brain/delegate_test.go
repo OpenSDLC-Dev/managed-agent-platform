@@ -455,6 +455,190 @@ func TestAllSettlementTurnChainsTheCallersNextTurn(t *testing.T) {
 	}
 }
 
+// A cut call to the other half's tool is answered as any call to it is, not
+// as a cut: making it again would only meet the role gate, and it was never
+// work this thread could do, so a report beside it goes through.
+func TestACutCallToTheOtherHalfIsAnsweredWrongRole(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "submit_result", `{"result":"done"}`),
+		toolCall("t2", "create_agent", `{"agent_name":"researcher","message":"dig`),
+		done("max_tokens", 8192),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 2 {
+		t.Fatalf("answers = %v, want both calls answered", got)
+	}
+	if got[0].isErr || got[0].text != "Result reported." {
+		t.Errorf("answer 0 = %+v, want the report to succeed", got[0])
+	}
+	if !got[1].isErr || !strings.Contains(got[1].text, "belongs to your coordinator") {
+		t.Errorf("answer 1 = %+v, want the role gate's answer", got[1])
+	}
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle — it reported", s)
+	}
+}
+
+// A run of turns made of nothing but cut calls is a chain nobody feeds, so the
+// shared cap stops it, and both notices it leaves — the child's own
+// session.error and the coordinator's — name what the run was made of.
+func TestARunOfCutCallsIsStoppedByTheChainCap(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "send_to_parent", `{"message":"still wor`),
+		done("max_tokens", 8192),
+	}}, nil)
+	child := h.childTurn(t, "work on it")
+	h.setChainCount(t, child, 24) // this turn is the 25th — maxSettlementChain
+	h.runOnce(t)
+
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle once its chain is cut", s)
+	}
+	evs, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errs, notices int
+	for _, ev := range evs {
+		if !strings.Contains(string(ev.Body), "calls the output cap cut off") {
+			continue
+		}
+		if ev.Type == domain.EventSessionError {
+			errs++
+		} else {
+			notices++
+		}
+	}
+	if errs != 1 || notices != 1 {
+		t.Errorf("events naming cut calls: %d session.error, %d other, want one of each", errs, notices)
+	}
+}
+
+// A child may own a custom tool that shares a name with the coordinator's half
+// (TestACustomToolNamedLikeTheOtherHalfKeepsItsName). Cut, it is the child's
+// own call: answered as cut, not by the role gate, and a report beside it is
+// refused as it is beside any cut call the child could run.
+func TestACutCustomToolNamedLikeTheOtherHalfIsTheChildsOwn(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
+		toolCall("t1", "submit_result", `{"result":"done"}`),
+		toolCall("t2", "create_agent", `{"name":"report.m`),
+		done("max_tokens", 8192),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET agent = jsonb_set(agent, '{tools}',
+		   '[{"type":"custom","name":"create_agent","description":"d","input_schema":{"type":"object"}}]'::jsonb)
+		 WHERE id = $1`, child.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 2 || !got[0].isErr || !strings.Contains(got[0].text, "after your tool calls") ||
+		!got[1].isErr || !strings.Contains(got[1].text, "cut off") {
+		t.Fatalf("answers = %+v, want the report refused and the custom call answered as cut", got)
+	}
+	if n := h.countType(t, "agent.thread_message_sent"); n != 0 {
+		t.Errorf("a refused report still messaged the coordinator")
+	}
+}
+
+// A wait beside a cut call does not park the coordinator: the cut spawn is
+// still to be made, so the next turn is chained rather than left until some
+// child reports.
+func TestAWaitBesideACutCallDoesNotPark(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"digest batch 12"}`),
+		toolCall("t2", "wait_for_agents", `{}`),
+		toolCall("t3", "create_agent", `{"agent_name":"researcher","message":"digest ba`),
+		done("max_tokens", 8192),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "spawn and wait")
+	h.runOnce(t)
+
+	if kids := h.children(t); len(kids) != 1 {
+		t.Fatalf("children = %v, want the one the complete call spawned", kids)
+	}
+	if got := h.answers(t); len(got) != 3 || !got[2].isErr || !strings.Contains(got[2].text, "cut off") {
+		t.Fatalf("answers = %+v, want the cut spawn answered", got)
+	}
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want running with its next turn queued, not parked", s)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1", n)
+	}
+}
+
+// The dream coordinator's failure in #951: a reply spawning children whose
+// last create_agent the output cap cut off. The complete call spawns its
+// child, the cut one is answered with how the stream ended rather than run
+// with no arguments, and the coordinator's next turn is queued, so it can
+// make the cut call again.
+func TestACutCreateAgentIsAnsweredAndTheTurnGoesOn(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"digest batch 12"}`),
+		toolCall("t2", "create_agent", `{"agent_name":"researcher","message":"digest ba`),
+		done("max_tokens", 8192),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "spawn the batches")
+	h.runOnce(t)
+
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("session.error events = %d, want 0", n)
+	}
+	if kids := h.children(t); len(kids) != 1 {
+		t.Errorf("children = %v, want the one the complete call spawned", kids)
+	}
+	got := h.answers(t)
+	if len(got) != 2 {
+		t.Fatalf("answers = %v, want one per call", got)
+	}
+	if got[0].isErr {
+		t.Errorf("complete call answered %+v, want a spawn", got[0])
+	}
+	if !got[1].isErr || !strings.Contains(got[1].text, "cut off") || !strings.Contains(got[1].text, "stop_reason max_tokens") {
+		t.Errorf("cut call answered %+v, want an is_error saying it was cut off and how the stream ended", got[1])
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1", n)
+	}
+	if n := h.delegationTurns(t); n != 1 {
+		t.Errorf("delegation turns = %d, want 1: the complete call", n)
+	}
+}
+
+// A turn whose only call the output cap cut off ran nothing, so it spends no
+// delegation budget, and it chains the caller's next turn like any turn the
+// settlement answered whole.
+func TestACutCallAloneSpendsNoDelegationBudget(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"digest ba`),
+		done("max_tokens", 8192),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "spawn one")
+	h.runOnce(t)
+
+	if got := h.answers(t); len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "cut off") {
+		t.Errorf("answers = %+v, want the cut call answered", got)
+	}
+	if n := len(h.children(t)); n != 0 {
+		t.Errorf("children = %d, want none", n)
+	}
+	if n := h.delegationTurns(t); n != 0 {
+		t.Errorf("delegation turns = %d, want 0: the cut call ran nothing", n)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1", n)
+	}
+}
+
 // A wait with no child running and no report unread would park a thread
 // nothing can wake, so it times out in-commit and the turn continues.
 func TestWaitWithNothingToWaitForDoesNotPark(t *testing.T) {
@@ -641,6 +825,40 @@ func TestSubmitResultSharingItsTurnWithAToolCallReportsNothing(t *testing.T) {
 	}
 	if n := h.countType(t, "agent.thread_message_sent"); n != 0 {
 		t.Errorf("a refused report still messaged the coordinator")
+	}
+}
+
+// A call the output cap cut off is answered in the same commit as a report
+// beside it, but its work was never done, so the report is refused as it is
+// beside a call that runs: the child makes the call again, then reports.
+func TestSubmitResultBesideACutCallReportsNothing(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
+		toolCall("t1", "submit_result", `{"result":"done, wrote report.md"}`),
+		toolCall("t2", "lookup", `{"q":"write report.m`),
+		done("max_tokens", 8192),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET agent = jsonb_set(agent, '{tools}',
+		   '[{"type":"custom","name":"lookup","description":"d","input_schema":{"type":"object"}}]'::jsonb)
+		 WHERE id = $1`, child.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 2 || !got[0].isErr || !strings.Contains(got[0].text, "after your tool calls") ||
+		!got[1].isErr || !strings.Contains(got[1].text, "cut off") {
+		t.Fatalf("answers = %+v, want the report refused and the cut call answered", got)
+	}
+	if n := h.countType(t, "agent.thread_message_sent"); n != 0 {
+		t.Errorf("a refused report still messaged the coordinator")
+	}
+	if s := h.threadStatus(t, child); s != "running" {
+		t.Errorf("child = %q, want running with its next turn queued", s)
+	}
+	if n := h.liveTurns(t, child); n != 1 {
+		t.Errorf("child turns queued = %d, want 1", n)
 	}
 }
 

@@ -126,7 +126,9 @@ const (
 	// KindRedactedThinking is one complete redacted_thinking block at Index, its
 	// opaque payload in Data. Like a signed block, it goes back verbatim.
 	KindRedactedThinking ChunkKind = "redacted_thinking"
-	// KindToolUse is one complete tool invocation (input fully accumulated).
+	// KindToolUse is one tool invocation, its input fully accumulated. A block
+	// the output cap cut off arrives with the input as far as it got, which
+	// need not be valid JSON (#951).
 	KindToolUse ChunkKind = "tool_use"
 	// KindDone closes the turn with stop reason and usage.
 	KindDone ChunkKind = "done"
@@ -156,14 +158,19 @@ type Chunk struct {
 	ThinkingAnyPrefix bool
 }
 
-// StopNote says how a stream ended, for the error about a stream that ended
-// early or a tool call that arrived incomplete. The output count tells a call
-// the output cap cut off from one the model malformed (#951), and so does the
-// stop reason where the adapter passes max_tokens through; provider/openai
-// reports tool_use for any turn that called a tool. A nil usage is an endpoint
-// that reported none. Without a stop reason the count is left out: the
-// message_delta that carries both never came, so any count is message_start's
-// opening snapshot.
+// CutOff reports whether a stop reason says the output cap cut the response
+// off, so a block still open when it was reached may be incomplete: the two
+// the SDK's own tool loop treats so (#951).
+func CutOff(stopReason string) bool {
+	return stopReason == "max_tokens" || stopReason == "model_context_window_exceeded"
+}
+
+// StopNote says how far a stream got, for the error that ends it early and for
+// the answer to a call the output cap cut off: the stop reason and the output
+// count tell a stream the output cap ended from one that failed on its own
+// (#951). A nil usage is an endpoint that reported
+// none. Without a stop reason the count is left out: the message_delta that
+// carries both never came, so any count is message_start's opening snapshot.
 func StopNote(reason string, usage *domain.ModelUsage) string {
 	switch {
 	case reason == "":
@@ -174,7 +181,8 @@ func StopNote(reason string, usage *domain.ModelUsage) string {
 	return fmt.Sprintf("stop_reason %s, %d output tokens", reason, usage.OutputTokens)
 }
 
-// ToolUse is a complete tool call emitted by the model.
+// ToolUse is a tool call emitted by the model (KindToolUse says when Input may
+// be incomplete).
 type ToolUse struct {
 	ID    string
 	Name  string

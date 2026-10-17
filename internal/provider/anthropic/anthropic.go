@@ -201,7 +201,8 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 
 // stream translates the Messages API event stream into provider chunks:
 // text/thinking deltas pass through as they arrive; tool_use inputs
-// accumulate and emit once complete; message_delta carries stop reason and
+// accumulate and emit when their block ends (message_stop ends a cut one);
+// message_delta carries stop reason and
 // output usage, emitted as the final done chunk.
 type stream struct {
 	events *ssestream.Stream[sdk.MessageStreamEventUnion]
@@ -254,6 +255,25 @@ func (s *stream) Close() error {
 	// cancellation that releases the guard.
 	s.guard.Stop()
 	return err
+}
+
+// endTool closes the open tool block and returns its chunk. Streamed deltas
+// are authoritative; the start-block seed covers endpoints that sent the input
+// up front instead. The emitted input must be a copy — s.toolJSON's backing
+// array is reused by the next tool block, and an aliased slice would corrupt
+// an already-delivered chunk.
+func (s *stream) endTool() provider.Chunk {
+	s.inTool = false
+	input := json.RawMessage(append([]byte(nil), s.toolJSON...))
+	if len(input) == 0 {
+		input = s.toolSeed
+	}
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
+	return provider.Chunk{Kind: provider.KindToolUse, Index: s.toolIndex, ToolUse: &provider.ToolUse{
+		ID: s.toolID, Name: s.toolName, Input: input,
+	}}
 }
 
 // stopNote is provider.StopNote over what message_delta has reported so far,
@@ -366,22 +386,7 @@ func (s *stream) Next() bool {
 
 		case "content_block_stop":
 			if s.inTool && ev.Index == s.toolIndex {
-				s.inTool = false
-				// Streamed deltas are authoritative; the start-block seed
-				// covers endpoints that sent the input up front instead.
-				// The emitted input must be a copy — s.toolJSON's backing
-				// array is reused by the next tool block, and an aliased
-				// slice would corrupt an already-delivered chunk.
-				input := json.RawMessage(append([]byte(nil), s.toolJSON...))
-				if len(input) == 0 {
-					input = s.toolSeed
-				}
-				if len(input) == 0 {
-					input = json.RawMessage("{}")
-				}
-				s.cur = provider.Chunk{Kind: provider.KindToolUse, Index: ev.Index, ToolUse: &provider.ToolUse{
-					ID: s.toolID, Name: s.toolName, Input: input,
-				}}
+				s.cur = s.endTool()
 				return true
 			}
 
@@ -409,7 +414,16 @@ func (s *stream) Next() bool {
 			}
 
 		case "message_stop":
-			if s.inTool {
+			// An endpoint that stops at its output cap mid-input can skip the
+			// cut block's content_block_stop (#951). Under a stop reason that
+			// says the turn was cut off — the two the SDK's own tool loop
+			// treats so — message_stop ends the block as surely: it goes out
+			// as it stands, ahead of the done chunk, and the brain reads its
+			// unfinished input as a cut one, whatever streamed beside it:
+			// blocks may interleave, and a block open at the end was open
+			// when the cap was reached. Any other stop reason, or none,
+			// leaves an open block unexplained.
+			if s.inTool && !provider.CutOff(s.stopReason) {
 				s.err = fmt.Errorf("message_stop with tool_use block %d still open (%s)",
 					s.toolIndex, s.stopNote())
 				return false
@@ -427,8 +441,13 @@ func (s *stream) Next() bool {
 				u := s.usage
 				usage = &u
 			}
-			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: usage,
+			done := provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: usage,
 				ThinkingAnyPrefix: s.word.unchecked}
+			if s.inTool {
+				s.cur, s.pending = s.endTool(), append(s.pending, done)
+				return true
+			}
+			s.cur = done
 			return true
 		}
 	}

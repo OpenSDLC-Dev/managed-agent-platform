@@ -877,33 +877,170 @@ func TestGenerateTruncatedStream(t *testing.T) {
 	}
 }
 
-// An endpoint that stops with a tool block still open fails the stream. This
-// is the output cap reached mid-input on an endpoint that sends no
-// content_block_stop for the cut block, so the error carries what
-// message_delta said: the stop reason and the output count (#951). The same
-// holds for an endpoint that drops the stream before message_stop.
-func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
+// openToolHead is a stream that opens a tool block and sends part of its input:
+// what an endpoint has sent when its output cap cuts the call off.
+var openToolHead = []string{
+	`{"type":"message_start","message":{"id":"msg_5","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
+	`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"create_agent","input":{}}}`,
+	`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"agent_name\":\"dre"}}`,
+}
+
+// An endpoint that stops at its output cap mid-input can skip the cut block's
+// content_block_stop (#951). Under a stop reason that says the turn was cut
+// off, message_stop ends the block as surely, so the block is emitted as it
+// stands, ahead of the done chunk, and the brain reads its unfinished input as
+// a cut one.
+func TestGenerateEndsAToolBlockOpenAtMessageStop(t *testing.T) {
+	for _, reason := range []string{"max_tokens", "model_context_window_exceeded"} {
+		t.Run(reason, func(t *testing.T) {
+			p := start(t, &fakeServer{sse: append(append([]string(nil), openToolHead...),
+				`{"type":"message_delta","delta":{"stop_reason":"`+reason+`","stop_sequence":null},"usage":{"output_tokens":8192}}`,
+				`{"type":"message_stop"}`,
+			)})
+			stream, err := p.Generate(context.Background(), provider.Request{
+				Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"spawn them"`)}},
+			})
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			got := collect(t, stream)
+			if len(got) != 2 || got[0].Kind != provider.KindToolUse || got[1].Kind != provider.KindDone {
+				t.Fatalf("chunks = %+v, want the tool block, then done", got)
+			}
+			if tu := got[0].ToolUse; got[0].Index != 0 || tu.ID != "toolu_1" || tu.Name != "create_agent" ||
+				string(tu.Input) != `{"agent_name":"dre` {
+				t.Errorf("tool chunk = index %d, %+v, want block 0 with its input as sent", got[0].Index, tu)
+			}
+			if d := got[1]; d.StopReason != reason || d.Usage == nil || d.Usage.OutputTokens != 8192 {
+				t.Errorf("done chunk = %+v, want %s with 8192 output tokens", d, reason)
+			}
+		})
+	}
+}
+
+// Blocks may interleave: the SDK accumulates deltas and stops by index
+// (messageutil.go checkContentBlockIndex). A tool block is emitted when it
+// closes, after the text that streamed beside it, so the brain reads what came
+// after the call as what the model generated after its block closed (#951).
+func TestGenerateInterleavedBlocks(t *testing.T) {
 	head := []string{
-		`{"type":"message_start","message":{"id":"msg_5","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
-		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"create_agent","input":{}}}`,
-		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"agent_name\":\"dre"}}`,
+		`{"type":"message_start","message":{"id":"msg_6","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_id","name":"get_weather","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\": "}}`,
 	}
 	for name, tc := range map[string]struct {
-		tail []string
-		want []string
+		tail  []string
+		input string
+		stop  string
 	}{
-		"with message_delta": {
+		// The SDK's own interleaved fixture, ended with a stop reason.
+		"whole": {
+			[]string{
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"!"}}`,
+				`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Los Angeles\"}"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"content_block_stop","index":1}`,
+				`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":30}}`,
+				`{"type":"message_stop"}`,
+			},
+			`{"city": "Los Angeles"}`, "tool_use",
+		},
+		"cut with the text": {
 			[]string{
 				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
 				`{"type":"message_stop"}`,
 			},
-			[]string{"message_stop with tool_use block 0 still open (stop_reason max_tokens, 8192 output tokens)"},
+			`{"city": `, "max_tokens",
 		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := start(t, &fakeServer{sse: append(append([]string(nil), head...), tc.tail...)})
+			stream, err := p.Generate(context.Background(), provider.Request{
+				Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"weather?"`)}},
+			})
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			got := collect(t, stream)
+			n := len(got)
+			if n < 3 || got[n-2].Kind != provider.KindToolUse || got[n-1].Kind != provider.KindDone {
+				t.Fatalf("chunks = %+v, want the text, then the tool block, then done", got)
+			}
+			var text string
+			for _, c := range got[:n-2] {
+				if c.Kind != provider.KindTextDelta || c.Index != 0 {
+					t.Fatalf("chunk %+v before the tool block, want text of block 0", c)
+				}
+				text += c.Text
+			}
+			if want := map[bool]string{true: "Hello world!", false: "Hello world"}[tc.stop == "tool_use"]; text != want {
+				t.Errorf("text = %q, want %q", text, want)
+			}
+			if tu := got[n-2].ToolUse; got[n-2].Index != 1 || string(tu.Input) != tc.input {
+				t.Errorf("tool chunk = index %d, %+v, want block 1 with input %s", got[n-2].Index, tu, tc.input)
+			}
+			if got[n-1].StopReason != tc.stop {
+				t.Errorf("stop = %q, want %q", got[n-1].StopReason, tc.stop)
+			}
+		})
+	}
+}
+
+// A block may also begin inside an open tool block. Its text goes out as it
+// streams; the tool block, still open at a cut-off message_stop, goes out after
+// it, so the brain answers the call as one the cap cut (#951).
+func TestGenerateABlockBegunInsideAnOpenToolBlock(t *testing.T) {
+	p := start(t, &fakeServer{sse: append(append([]string(nil), openToolHead...),
+		`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"beside it"}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
+		`{"type":"message_stop"}`,
+	)})
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"spawn them"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	got := collect(t, stream)
+	if len(got) != 3 || got[0].Kind != provider.KindTextDelta || got[0].Text != "beside it" ||
+		got[1].Kind != provider.KindToolUse || string(got[1].ToolUse.Input) != `{"agent_name":"dre` ||
+		got[2].Kind != provider.KindDone || got[2].StopReason != "max_tokens" {
+		t.Fatalf("chunks = %+v, want the text, then the open tool block as it stands, then done", got)
+	}
+}
+
+// A stream that ends with a tool block open, and without what message_stop
+// would have settled, fails. The error says how far the stream got: the stop
+// reason and the output count, when message_delta sent them (#951).
+func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
+	for name, tc := range map[string]struct {
+		tail []string
+		want []string
+	}{
 		"without message_delta": {
 			[]string{`{"type":"message_stop"}`},
 			[]string{"message_stop with tool_use block 0 still open (no stop reason)"},
 		},
-		// A stream that drops before message_stop says how far it got too,
+		// No cut explains a block left open under any other stop reason.
+		"stopped for tool_use": {
+			[]string{
+				`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":50}}`,
+				`{"type":"message_stop"}`,
+			},
+			[]string{"message_stop with tool_use block 0 still open (stop_reason tool_use, 50 output tokens)"},
+		},
+		"stopped at end_turn": {
+			[]string{
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":50}}`,
+				`{"type":"message_stop"}`,
+			},
+			[]string{"message_stop with tool_use block 0 still open (stop_reason end_turn, 50 output tokens)"},
+		},
+		// A stream that drops before message_stop says how far it got,
 		// whether it ends cleanly or on an error.
 		"without message_stop": {
 			[]string{`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`},
@@ -918,7 +1055,7 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			p := start(t, &fakeServer{sse: append(append([]string(nil), head...), tc.tail...)})
+			p := start(t, &fakeServer{sse: append(append([]string(nil), openToolHead...), tc.tail...)})
 			stream, err := p.Generate(context.Background(), provider.Request{
 				Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"spawn them"`)}},
 			})

@@ -317,10 +317,11 @@ func (s *stream) Next() bool {
 }
 
 // complete queues the terminal done chunk exactly once. stop_reason is tool_use
-// whenever the stream carried any tool call — the single signal the brain acts
-// on to run tools — regardless of the server's finish_reason, since some
-// OpenAI-compatible servers end a tool turn with "stop"/"length". Otherwise it
-// is the mapped finish_reason (or end_turn when none arrived).
+// whenever the stream carried any tool call, since some OpenAI-compatible
+// servers end a tool turn with "stop" or no finish_reason at all — except a
+// "length" finish, which stays max_tokens: the brain reads it to tell a call
+// the output cap cut off from one the model sent malformed (#951). Otherwise
+// it is the mapped finish_reason (or end_turn when none arrived).
 func (s *stream) complete() {
 	if s.completed {
 		return
@@ -328,7 +329,7 @@ func (s *stream) complete() {
 	s.completed = true
 	s.flushTools()
 	stop := s.stopReason
-	if s.sawTools {
+	if s.sawTools && !provider.CutOff(stop) {
 		stop = "tool_use"
 	} else if stop == "" {
 		stop = "end_turn"
@@ -462,8 +463,9 @@ func (s *stream) process(payload string) error {
 			acc.args = append(acc.args, tc.Function.Arguments...)
 		}
 		if ch.FinishReason != nil && *ch.FinishReason != "" {
-			// Record the non-tool stop reason; complete() decides the final
-			// value (tool_use wins whenever the stream carried tool calls).
+			// Record the mapped stop reason; complete() decides the final
+			// value (tool_use wins whenever the stream carried tool calls,
+			// unless the output cap cut the turn off).
 			s.stopReason = mapFinishReason(*ch.FinishReason)
 			s.sawFinish = true
 		}
@@ -505,13 +507,12 @@ func (s *stream) flushTools() {
 }
 
 // mapFinishReason maps an OpenAI finish_reason onto the Anthropic stop_reason
-// vocabulary for a turn that carried NO tool calls (tool_use is decided in
-// complete() from whether the stream carried tool calls, not from
-// finish_reason). "length" is a genuine truncation; every other reason —
-// "stop", "content_filter", a "tool_calls"/"function_call" that produced no
-// tool call, and unknowns — is a completed turn. The brain treats all of these
-// (max_tokens included) as a completed turn in v1, so the distinction is only
-// preserved for telemetry.
+// vocabulary (tool_use is decided in complete() from whether the stream carried
+// tool calls, not from finish_reason). "length" is a genuine truncation; every
+// other reason — "stop", "content_filter", a "tool_calls"/"function_call" that
+// produced no tool call, and unknowns — is a completed turn. The brain settles
+// a turn with no tool call the same either way, and reads max_tokens only to
+// tell a tool call the output cap cut off (#951).
 func mapFinishReason(finish string) string {
 	if finish == "length" {
 		return "max_tokens"

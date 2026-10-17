@@ -90,6 +90,9 @@ func renderAnthropicTurn(s providertest.Script) []string {
 		}
 		frames = append(frames, `{"type":"content_block_stop","index":1}`)
 	}
+	if s.Cut {
+		stop = "max_tokens"
+	}
 	frames = append(frames, fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":%s,"stop_sequence":null}}`, jsonString(stop)))
 	frames = append(frames, `{"type":"message_stop"}`)
 	return frames

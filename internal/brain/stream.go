@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -25,7 +26,10 @@ type turnResult struct {
 	// must be appended under (zero when the turn produced no text).
 	messageEventID domain.ID
 	toolUses       []provider.ToolUse
-	stopReason     string
+	// cut is set when the output cap cut off the last of toolUses. That call
+	// holds {} as its input and is answered rather than run (turnEvents).
+	cut        bool
+	stopReason string
 	// usage is what the model reported, or nil when the endpoint reported
 	// nothing — the two are different facts and only the first belongs in
 	// the token metric (#90). A turn that never reached its done chunk also
@@ -157,22 +161,41 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		return nil
 	}
 
-	// badInput is a tool input that stops before its JSON object is complete,
-	// or before it began: the one shape a cut leaves (io.ErrUnexpectedEOF, or
-	// io.EOF for whitespace alone). The turn fails on it, but only once the
-	// stream has ended: the stop reason and the output count arrive after the
-	// tool block, and they are what tells a call the output cap cut off from
-	// one the model closed early (#951). Reading on is bounded as every turn's
-	// reading is, by the route's stall guard, and nothing else the stream
-	// carries after the block is kept.
-	var badInput error
+	// unfinished is a tool input that stops before its JSON object is
+	// complete, or before it began (io.ErrUnexpectedEOF, or io.EOF for
+	// whitespace alone). Whether the output cap cut it off is known only once
+	// the stream has ended: the cap cuts what is still open when it is
+	// reached, under a stop reason that arrives after it (#951). An adapter
+	// hands a tool call on when its block closes, so the call holds {} until
+	// then, and anything generated after it (passed) makes its input the
+	// model's own malformation. When the turn fails on it, nothing of the
+	// response is kept but how the stream ended, and reading on is bounded as
+	// every turn's reading is, by the route's stall guard.
+	var unfinished error
+	// notObject marks an unfinished string or array: only an object, or
+	// nothing yet, can be a cut one, so its turn fails whatever ended it.
+	notObject := false
+	// passed is set when the stream carried content after its last tool call,
+	// whose block is lastTool: the cap then cut that content, not the call.
+	// A later call clears it, unless an unfinished input came first.
+	passed := false
+	var lastTool int64
 	for stream.Next() {
 		c := stream.Chunk()
-		if badInput != nil {
-			if c.Kind == provider.KindDone {
-				turn.stopReason, turn.usage = c.StopReason, copyUsage(c.Usage)
+		switch {
+		case c.Kind == provider.KindToolUse && unfinished == nil:
+			passed = false
+		case len(turn.toolUses) > 0 && generated(c, lastTool):
+			passed = true
+		}
+		if unfinished != nil {
+			if c.Kind != provider.KindDone {
+				continue
 			}
-			continue
+			if passed || !provider.CutOff(c.StopReason) {
+				turn.stopReason, turn.usage = c.StopReason, copyUsage(c.Usage)
+				continue
+			}
 		}
 		switch c.Kind {
 		case provider.KindThinkingDelta:
@@ -262,16 +285,18 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			// input is `"oops"` or a truncated `{` would either abort every
 			// settlement (a silent reclaim loop) or make the model reject
 			// every future replay of this session.
+			lastTool = c.Index
 			tu := *c.ToolUse
 			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+				unfinished = fmt.Errorf("tool %q: %w", tu.Name, err)
+				start := bytes.TrimLeft(tu.Input, " \t\r\n")
+				notObject = len(start) > 0 && start[0] != '{'
+				input, err = json.RawMessage("{}"), nil
+			}
 			if err != nil {
-				err = fmt.Errorf("tool %q: %w", tu.Name, err)
-				if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-					return nil, err
-				}
-				badInput = err
-				continue
+				return nil, fmt.Errorf("tool %q: %w", tu.Name, err)
 			}
 			tu.Input = input
 			turn.toolUses = append(turn.toolUses, tu)
@@ -287,14 +312,28 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			turn.usage = copyUsage(c.Usage)
 		}
 	}
-	if badInput != nil {
-		// The turn goes back with the error, because what the call spent is
-		// a fact of the call: runTurn records it for a failed turn too.
+	// The cap cut the last tool call if nothing generated followed it and its
+	// input was unfinished or empty: an adapter hands on a block cut before
+	// any input as {}, which a stop reason saying the turn was cut off tells
+	// from a call the model meant to make with no arguments. The call is
+	// answered, not run (#951): {} would be a broader call for a tool whose
+	// arguments are all optional (turnEvents; docs/DIVERGENCES.md, turn
+	// classification).
+	n := len(turn.toolUses)
+	cut := provider.CutOff(turn.stopReason) && n > 0 && !passed && string(turn.toolUses[n-1].Input) == "{}"
+	if unfinished != nil && (notObject || !cut || stream.Err() != nil) {
+		// An unfinished input the cap did not cut is the model's own
+		// malformation, and never goes out. The turn goes back with the
+		// error, because what the call spent is a fact of the call: runTurn
+		// records it for a failed turn too.
 		note := provider.StopNote(turn.stopReason, turn.usage)
-		if err := stream.Err(); err != nil {
-			return turn, fmt.Errorf("%w (%s; model stream: %w)", badInput, note, err)
+		if passed {
+			note += "; the response went on past it"
 		}
-		return turn, fmt.Errorf("%w (%s)", badInput, note)
+		if err := stream.Err(); err != nil {
+			return turn, fmt.Errorf("%w (%s; model stream: %w)", unfinished, note, err)
+		}
+		return turn, fmt.Errorf("%w (%s)", unfinished, note)
 	}
 	if err := stream.Err(); err != nil {
 		return nil, fmt.Errorf("model stream: %w", err)
@@ -302,7 +341,30 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	if turn.stopReason == "" {
 		return nil, fmt.Errorf("model stream ended without a stop reason")
 	}
+	if cut {
+		turn.cut = true
+		slog.WarnContext(ctx, "brain: the output cap cut off a tool call; it is answered, not run",
+			"session_id", sid.String(), "tool", noteLabel(turn.toolUses[n-1].Name),
+			"stop", provider.StopNote(turn.stopReason, turn.usage))
+	}
 	return turn, nil
+}
+
+// generated reports whether a chunk carries something the model generated
+// after the tool call whose block is lastTool (#951). An empty or NUL-only text
+// or thinking delta carries nothing, and neither does an empty signature or
+// one that seals a thinking block begun before that call. A signature on a
+// later block is that block, on a model that sends no thinking text.
+func generated(c provider.Chunk, lastTool int64) bool {
+	switch c.Kind {
+	case provider.KindDone:
+		return false
+	case provider.KindTextDelta, provider.KindThinkingDelta:
+		return toolset.SanitizeText(c.Text) != ""
+	case provider.KindThinkingSignature:
+		return c.Signature != "" && c.Index > lastTool
+	}
+	return true
 }
 
 // digestThinking gives each block a finished response kept the digest it is

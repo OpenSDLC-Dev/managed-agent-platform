@@ -145,12 +145,27 @@ type delegate struct {
 	// (decision 6): reporting and working at once would end the turn with work
 	// outstanding.
 	settlementOnly bool
+	// cut is set when the turn holds a call the output cap cut off to a tool
+	// this thread can run (#951). The settlement answers it, but the work the
+	// model asked of it was never done, so a submit_result sharing the turn
+	// is an is_error as it is beside a call that runs. A name the thread was
+	// not offered, or the other half's, was never work it could do, which is
+	// why a report beside one still goes through (#567).
+	cut bool
 	// waited caches the first wait_for_agents' verdict: the calls run in model
 	// order, so the first wait sees the spawns this turn already made, and a
 	// second wait in the same turn must not answer differently from the first.
 	waited *waitVerdict
 
 	out delegation
+}
+
+// foreign reports a call that is not this thread's to make: a name the model
+// was not offered, or one of the six that belongs to the other half. d.run
+// answers it as any call to that name, cut or not, and it spends no delegation
+// budget nor leaves work owed (#567, #951).
+func (d *delegate) foreign(call delegatedCall) bool {
+	return call.unoffered || (call.six && d.wrongRole(call.name) != "")
 }
 
 // wrongRole reports why this thread may not call name, or "" when it may. A
@@ -183,14 +198,25 @@ type waitVerdict struct {
 // events and then its answer, so the batch reads as the turn happened.
 func (d *delegate) run(ctx context.Context, tx pgx.Tx, calls []delegatedCall) error {
 	for _, call := range calls {
-		if call.unoffered {
-			// Not one of the six: the model called a name nothing offered it
+		var text string
+		switch {
+		case call.unoffered:
+			text = unknownToolAnswer(call.name)
+		case call.cut != "" && !d.foreign(call):
+			text = cutCallAnswer(call.cut)
+		}
+		if text != "" {
+			// An unoffered name is not one of the six: nothing offered it
 			// at all (#567). wrongRole and the switch below both assume a
 			// genuine delegation call, so this is answered here instead of
 			// either — otherwise a hallucinated "create_agent" in a
 			// single-agent session would attempt to spawn a roster member
 			// that does not exist rather than being told the name is unknown.
-			ev, err := delegationAnswer(call.eventID, unknownToolAnswer(call.name), true)
+			// A call the output cap cut off is answered here too, never run,
+			// whichever tool it named (#951; turnEvents says why) — unless it
+			// is the other half's, which wrongRole below answers as it would
+			// any call to it.
+			ev, err := delegationAnswer(call.eventID, text, true)
 			if err != nil {
 				return err
 			}
@@ -295,6 +321,15 @@ func unknownToolAnswer(name string) string {
 		text = toolset.TruncateRunes(text, maxDelegationText-len(suffix)) + suffix
 	}
 	return text
+}
+
+// cutCallAnswer is the is_error text answering a call the output cap cut off
+// (#951). note is provider.StopNote's account of how the stream ended. Its stop
+// reason is one of the two streamTurn calls a cut, never an endpoint's free
+// text, so the note needs no sanitizing or bound.
+func cutCallAnswer(note string) string {
+	return "this call was cut off before its arguments were complete (" + note +
+		"), so it was not run: make it again with shorter arguments, or split the work across several calls"
 }
 
 // createAgent spawns a roster member as a new thread. The order of the writes
@@ -649,9 +684,10 @@ func (d *delegate) submitResult(ctx context.Context, tx pgx.Tx, call delegatedCa
 	if result == "" {
 		return "submit_result needs a result.", true, nil
 	}
-	if !d.settlementOnly {
+	if !d.settlementOnly || d.cut {
 		// Ending the turn here would strand the calls sharing it: they commit
-		// with this event and nothing would ever answer them.
+		// with this event and nothing would ever answer them. A cut call is
+		// answered, but the work it was to do is not done.
 		return "report after your tool calls have returned.", true, nil
 	}
 	if err := d.report(ctx, tx, result); err != nil {
@@ -707,8 +743,9 @@ func (d *delegate) deliver(ctx context.Context, tx pgx.Tx, received events.NewEv
 }
 
 // commitDelegatedTurn settles a turn that called at least one delegation
-// tool, or a name the model was not offered at all (#567 — delegated carries
-// both). The calls run inside the append transaction and are answered there,
+// tool, a name the model was not offered at all (#567), or a call the output
+// cap cut off (#951) — delegated carries all three. The calls run inside the
+// append transaction and are answered there,
 // whatever else the turn holds; what the commit schedules is decided by the
 // turn's own shape, in this order:
 //
@@ -742,8 +779,9 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			caller: events.ThreadPeer{ThreadID: item.ThreadID, AgentName: agent.Name}}
 		// Whether this turn made at least one genuine delegation call — the
 		// session-wide delegation budget's own distinction (#567): a turn whose
-		// delegated set is entirely names the model was not offered spent no
-		// delegation budget, whatever else it did. !dc.unoffered alone is not
+		// delegated set is entirely names the model was not offered, or calls
+		// the output cap cut off (#951), spent no delegation budget, whatever
+		// else it did. !dc.unoffered alone is not
 		// enough: resolveTools classes the *other* half's names too (so a
 		// cross-half call is answered wrongRole rather than "unknown"), so a
 		// child calling create_agent is !unoffered but was never offered
@@ -751,14 +789,17 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		// call with, so a call this budget counts is exactly a call d.run will
 		// actually dispatch to one of the six handlers. The per-thread chain cap
 		// below makes neither distinction — item.Chain counts a turn of any of
-		// the three kinds, and so does its cut — because that count exists for a
+		// these kinds, and so does its cut — because that count exists for a
 		// thread nobody is feeding, which every one of them is equally; only the
 		// session-wide count is scoped to delegation specifically.
 		genuine := false
 		for _, dc := range delegated {
-			if !dc.unoffered && d.wrongRole(dc.name) == "" {
+			switch {
+			case d.foreign(dc):
+			case dc.cut != "":
+				d.cut = true
+			default:
 				genuine = true
-				break
 			}
 		}
 		if err := d.run(ctx, tx, delegated); err != nil {
@@ -772,7 +813,9 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		// without it a parking end_turn would hide the remaining external wait.
 		// Mixed turns use the shared tool flow, which advertises requires_action
 		// or schedules the next platform call before the model can continue.
-		park := d.out.park && !gated && settlementOnly
+		// Nor does a wait park beside a call the output cap cut off: the model
+		// has that call to make again, so its next turn is chained (#951).
+		park := d.out.park && !gated && settlementOnly && !d.cut
 		chain := !gated && settlementOnly && !park && !d.out.ended
 		idle := !gated && (park || d.out.ended)
 		// A chain the settlement took on its own answers is the one nobody
@@ -836,7 +879,8 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			// then the idle below, so the session never folds idle in between.
 			notice, nerr := childEndedNotice(ctx, tx, sid, item.ThreadID, func(agentName string) string {
 				return fmt.Sprintf("[agent %s stopped: %d consecutive turns resolved entirely by "+
-					"settlement-owned answers — delegation calls, names it was never offered — with "+
+					"settlement-owned answers — delegation calls, names it was never offered, calls the output "+
+					"cap cut off — with "+
 					"no external input and no newly woken thread]\n\nNothing was reported on them; "+
 					"anything it reported earlier stands. It is idle until you message it — send it "+
 					"what is missing, or archive it to free the slot.", agentName, maxSettlementChain)
@@ -1000,15 +1044,17 @@ func chainInput(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, waterma
 func chainCapped(threadID domain.ID, agentName string) (events.NewEvent, error) {
 	payload, err := json.Marshal(map[string]any{"error": map[string]any{
 		"type": "delegation_chain_exhausted_error",
-		// Names no kind, because the chain this counts is either kind and a run
-		// can mix them turn to turn (#567): "delegation calls" alone would
-		// misdescribe a chain an unoffered name built any part of. Nor does it
+		// Names no single kind, because the chain this counts is any of them
+		// and a run can mix them turn to turn (#567, #951): "delegation calls"
+		// alone would misdescribe a chain an unoffered name or a cut call built
+		// any part of. Nor does it
 		// say "ran no tool": every one of these turns did run a tool —
 		// list_agents, wait_for_agents and the rest are real calls the
 		// settlement itself answers — what none of them did is leave anything
 		// running outside this thread's own settlement to wait for.
 		"message": fmt.Sprintf("%s ran %d consecutive turns resolved entirely by settlement-owned "+
-			"answers — delegation calls, names it was never offered — with no external input and "+
+			"answers — delegation calls, names it was never offered, calls the output cap cut off — with "+
+			"no external input and "+
 			"no newly woken thread. The thread is idle; a message, or a report from a child it "+
 			"spawned, resumes it.",
 			agentName, maxSettlementChain),

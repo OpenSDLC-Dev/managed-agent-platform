@@ -488,12 +488,12 @@ func TestFinishReasonExtras(t *testing.T) {
 	}
 }
 
-// The critical invariant: whenever the stream carried a tool call, the turn's
-// stop_reason MUST be tool_use — the only signal the brain acts on to run the
-// tool — even when an OpenAI-compatible server ends the turn with "stop",
-// "length", or just [DONE] instead of "tool_calls". Getting this wrong drops
-// the tool (finish "stop") or durably commits an unanswered tool_use that
-// poisons session replay (finish "length").
+// Whenever the stream carried a tool call, the turn's stop_reason is tool_use,
+// even when an OpenAI-compatible server ends the turn with "stop" or just
+// [DONE] instead of "tool_calls". "length" is the exception: it says the
+// output cap cut the turn off, which the brain needs to tell a call the cap
+// cut from one the model sent malformed (#951), so it maps to max_tokens as
+// it does on a turn with no tool call.
 func TestToolCallForcesToolUse(t *testing.T) {
 	toolDeltas := []string{
 		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":null}]}`,
@@ -526,8 +526,12 @@ func TestToolCallForcesToolUse(t *testing.T) {
 			if !sawToolUse {
 				t.Errorf("finish %q: no tool_use chunk emitted", finish)
 			}
-			if done := chunks[len(chunks)-1]; done.StopReason != "tool_use" {
-				t.Errorf("finish %q: stop_reason = %q, want tool_use (tools were called)", finish, done.StopReason)
+			want := "tool_use"
+			if finish == "length" {
+				want = "max_tokens"
+			}
+			if done := chunks[len(chunks)-1]; done.StopReason != want {
+				t.Errorf("finish %q: stop_reason = %q, want %s", finish, done.StopReason, want)
 			}
 		})
 	}
