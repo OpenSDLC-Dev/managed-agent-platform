@@ -427,7 +427,9 @@ func TestSessionCreateWithAgentString(t *testing.T) {
 
 // usage.active_seconds is the session's stored running time (plan 68),
 // rendered to the millisecond as the reference renders it, on GET and in the
-// list; stats keeps its zeroed shape.
+// list; stats keeps its zeroed shape. A running session adds its open
+// interval up to the read; an idle one ignores an interval left open on its
+// row.
 func TestSessionUsageRendersActiveSeconds(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -451,6 +453,26 @@ func TestSessionUsageRendersActiveSeconds(t *testing.T) {
 	}
 	if usage, _ := entries[0]["usage"].(map[string]any); usage["active_seconds"] != 4.25 {
 		t.Errorf("listed usage.active_seconds = %v, want 4.25", usage["active_seconds"])
+	}
+
+	// The stamp comes from this process's clock, as AppendInTx's do, not the
+	// database's.
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET running_since = $2 WHERE id = $1`, id, time.Now().Add(-10*time.Second)); err != nil {
+		t.Fatalf("set running_since: %v", err)
+	}
+	_, got = s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+	if usage, _ := got["usage"].(map[string]any); usage["active_seconds"] != 4.25 {
+		t.Errorf("idle with an interval open: active_seconds = %v, want 4.25", usage["active_seconds"])
+	}
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'running' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+	_, got = s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+	usage, _ = got["usage"].(map[string]any)
+	if v, _ := usage["active_seconds"].(float64); v < 14.25 || v > 74.25 {
+		t.Errorf("running: active_seconds = %v, want 4.25 plus the open interval of about 10 s", usage["active_seconds"])
 	}
 }
 

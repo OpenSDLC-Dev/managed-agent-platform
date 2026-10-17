@@ -204,6 +204,10 @@ func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEven
 // that must decide the batch under the session row lock (the API's state
 // machine reads the current status FOR UPDATE, builds the batch, and appends
 // — all one commit). The NOTIFY still fires only on the caller's commit.
+//
+// It places a session.usage immediately before each session.status_idle in
+// evs (plan 68), so the events it returns can outnumber evs: match them to
+// the batch by ID, never by index.
 func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, evs []NewEvent, opts AppendOptions) ([]domain.Event, error) {
 	// An empty batch is allowed when the options carry side effects (a turn
 	// that suspends on tool use changes state without saying anything new).
@@ -223,12 +227,15 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	}
 
 	var (
-		archivedAt *time.Time
-		agentName  *string
+		archivedAt  *time.Time
+		agentName   *string
+		storedUsage []byte
+		stored      sessionClock
 	)
 	err := tx.QueryRow(ctx,
-		`SELECT archived_at, resolved_agent->>'name' FROM sessions WHERE id = $1 FOR UPDATE`,
-		sessionID.String()).Scan(&archivedAt, &agentName)
+		`SELECT archived_at, resolved_agent->>'name', usage, active_seconds, running_since
+		   FROM sessions WHERE id = $1 FOR UPDATE`,
+		sessionID.String()).Scan(&archivedAt, &agentName, &storedUsage, &stored.active, &stored.since)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -243,15 +250,18 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	}
 
 	// A session.usage before each session idle, and the session's running
-	// time from its status events (plan 68, usage.go) — both under the lock,
-	// so the stamps they take and read are this append's.
+	// time from its status events (plan 68, usage.go) — both from the row read
+	// under the lock above, so the stamps they take and read are this append's.
 	evs = withUsageSnapshots(evs)
 	var (
 		clock     *sessionClock
 		snapUsage domain.Usage
 	)
 	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return sessionStatusTypes[ev.Type] }) {
-		if clock, snapUsage, err = readSessionClock(ctx, tx, sessionID, opts.AddUsage); err != nil {
+		clock = &stored
+	}
+	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return ev.Type == domain.EventSessionUsage }) {
+		if snapUsage, err = snapshotUsage(storedUsage, opts.AddUsage); err != nil {
 			return nil, err
 		}
 	}

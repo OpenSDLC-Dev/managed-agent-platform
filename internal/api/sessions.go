@@ -80,6 +80,7 @@ type sessionRow struct {
 	status, title        string
 	metaJSON, usageJSON  []byte
 	activeSeconds        float64
+	runningSince         *time.Time
 	resourcesJSON        []byte
 	outcomesJSON         []byte
 	vaultIDs             []string
@@ -97,12 +98,12 @@ type sessionRow struct {
 const sessionStatusExpr = `CASE WHEN archived_at IS NOT NULL THEN 'terminated' ELSE status END`
 
 const sessionColumns = `id, resolved_agent, environment_id, status, title,
-	metadata, usage, active_seconds, resources, outcome_evaluations, vault_ids, deployment_id, created_at, updated_at, archived_at`
+	metadata, usage, active_seconds, running_since, resources, outcome_evaluations, vault_ids, deployment_id, created_at, updated_at, archived_at`
 
 func scanSession(row pgx.Row) (sessionRow, error) {
 	var r sessionRow
 	err := row.Scan(&r.id, &r.agentJSON, &r.environmentID, &r.status, &r.title,
-		&r.metaJSON, &r.usageJSON, &r.activeSeconds, &r.resourcesJSON, &r.outcomesJSON, &r.vaultIDs,
+		&r.metaJSON, &r.usageJSON, &r.activeSeconds, &r.runningSince, &r.resourcesJSON, &r.outcomesJSON, &r.vaultIDs,
 		&r.deploymentID, &r.createdAt, &r.updatedAt, &r.archivedAt)
 	return r, err
 }
@@ -220,9 +221,18 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	if r.archivedAt != nil {
 		status = string(domain.SessionTerminated)
 	}
+	// The running time counts the open interval up to this read, so a session
+	// that runs reports time as it spends it (plan 68 decision 6) — but only
+	// while the stored status says running: an interval a replica on the
+	// earlier build closed stays open on the row, and an idle session must not
+	// keep counting it.
+	active := r.activeSeconds
+	if r.runningSince != nil && r.status == string(domain.SessionRunning) {
+		active += max(0, time.Since(*r.runningSince).Seconds())
+	}
 	return sessionJSON{
 		ID: r.id, Type: "session", Agent: agent, EnvironmentID: r.environmentID,
-		Status: status, Title: r.title, Metadata: metadata, Usage: domain.NewSessionUsage(usage, r.activeSeconds),
+		Status: status, Title: r.title, Metadata: metadata, Usage: domain.NewSessionUsage(usage, active),
 		Stats: statsJSON{}, OutcomeEvaluations: outcomes,
 		Resources: resources, VaultIDs: r.vaultIDs, DeploymentID: r.deploymentID,
 		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),

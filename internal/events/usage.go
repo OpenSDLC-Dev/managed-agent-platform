@@ -68,16 +68,19 @@ type sessionClock struct {
 }
 
 // step folds one of the session's status events, at its stamp. Running opens
-// an interval when none is open, so a reclaim's running inside one does not
-// restart it; idle, rescheduled and terminated close it. An interval that
+// an interval; idle, rescheduled and terminated close it. An interval that
 // reads negative — two hosts' clocks — adds nothing.
+//
+// No batch this build writes runs a running session again without closing
+// first: the reclaim's forced pair closes with its rescheduled. So an interval
+// already open at a running means a close went unseen, written by a replica
+// on the earlier build, and the running restarts it: the count drops that
+// turn's time rather than adding the idle that followed it.
 func (c *sessionClock) step(typ domain.EventType, at time.Time) {
 	switch typ {
 	case domain.EventSessionStatusRunning:
-		if c.since == nil {
-			c.since = &at
-			c.changed = true
-		}
+		c.since = &at
+		c.changed = true
 	case domain.EventSessionStatusIdle, domain.EventSessionStatusRescheduled, domain.EventSessionStatusTerminated:
 		if c.since != nil {
 			c.active += max(0, at.Sub(*c.since).Seconds())
@@ -95,28 +98,18 @@ func (c *sessionClock) through(at time.Time) float64 {
 	return c.active + max(0, at.Sub(*c.since).Seconds())
 }
 
-// readSessionClock reads what a batch carrying the session's status events
-// needs, under the row lock the append holds: the running time, and the token
-// totals an idle's snapshot reports, with the append's own turn folded in,
-// since AppendInTx folds AddUsage only after its insert.
-func readSessionClock(ctx context.Context, tx pgx.Tx, sessionID domain.ID, addUsage *domain.ModelUsage) (*sessionClock, domain.Usage, error) {
-	var (
-		clock sessionClock
-		raw   []byte
-		usage domain.Usage
-	)
-	if err := tx.QueryRow(ctx,
-		`SELECT usage, active_seconds, running_since FROM sessions WHERE id = $1`,
-		sessionID.String()).Scan(&raw, &clock.active, &clock.since); err != nil {
-		return nil, usage, err
-	}
-	if err := json.Unmarshal(raw, &usage); err != nil {
-		return nil, usage, fmt.Errorf("decode stored session usage: %w", err)
+// snapshotUsage is the token totals an idle's snapshot reports: the stored
+// usage, read under the row lock, with the append's own turn folded in, since
+// AppendInTx folds AddUsage only after its insert.
+func snapshotUsage(stored []byte, addUsage *domain.ModelUsage) (domain.Usage, error) {
+	var usage domain.Usage
+	if err := json.Unmarshal(stored, &usage); err != nil {
+		return usage, fmt.Errorf("decode stored session usage: %w", err)
 	}
 	if addUsage != nil {
 		usage.Add(*addUsage)
 	}
-	return &clock, usage, nil
+	return usage, nil
 }
 
 // writeSessionClock stores the running time a batch moved.

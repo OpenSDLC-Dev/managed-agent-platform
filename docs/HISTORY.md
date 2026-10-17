@@ -49,6 +49,24 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The `session.usage` event and `usage.active_seconds` (plan 68, #432) — archived 2026-10-17, delivered in one PR
+
+#432 registered the reference's session-budget surface at anthropic-sdk-go v1.62.0. Checked on 2026-10-17, the surface was unchanged from v1.63.1 to v1.82.0, and the public docs now define it. The owner chose one slice that day: the `session.usage` event before every session idle, and `active_seconds`, with no price table. Budgets, `list_cost`, `server_tool_use` and `session.budget_reached` stay registered under #432, which stays open.
+
+Review, round 1. Codex (`gpt-6.1-sol`, `xhigh`) found one P3, fixed: the docs said a running session's resource read "as of the last idle", where a reclaim's reschedule moves it too. `/code-review` (`claude-opus-5-5`, `xhigh`, no cap) raised nine findings. Fixed:
+
+- a running session's resource left out its open interval, so a long turn showed no time until it idled; it now adds the interval up to the read, while the stored status is running;
+- a running that found an interval open kept it, which no batch this build writes produces; after a close that a replica on the earlier build wrote, that counted the idle that followed, so a running now restarts the interval;
+- the clock's columns and the stored usage are read in the append's `FOR UPDATE`, not in a second query;
+- migration 0055's comment and the changelog said the upgrade blocks appends; its lock blocks every read of a session too;
+- the transition tests' helper dropped every `session.usage` unchecked; it now checks that each sits immediately before a session idle;
+- `AppendInTx`'s doc comment now says it returns more events than it was given;
+- the plan archives in this PR.
+
+Declined: bumping `updated_at` when the clock moves, because with the open interval counted at read time the rendered value no longer jumps at a write that moves no status; and building the clock's event set from `sessionStatusOf`, because a new session status needs a decision in `sessionClock.step` — open, close or neither — that the built set would not make.
+
+**Plan 68 progress summary (archived).** Delivered in one PR: migration 0055, the event in `Log.AppendInTx`, and `usage.active_seconds` on the session resource.
+
 ## A status the image's startup chose is no answer (plan 67, #942) — archived 2026-10-17, delivered in three PRs (#946, #947 and this close-out)
 
 #941 fixed the one case that destroyed data, the repository presence probe, and left the rest to #942. The owner settled three questions on 2026-10-16, before any code: every exit-status script runs framed; a tool call answers a tool error; and an exec that returned no status is a transport fault, where one that returned a status with no frame had its script ended by the startup.

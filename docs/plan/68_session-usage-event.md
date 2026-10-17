@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#432"
 ---
 
@@ -69,9 +69,15 @@ The recordings in `managed-agents-wire-recordings` add the shape and the order
    it: `active_seconds` and `running_since` (null while not running).
    `AppendInTx` updates them from the batch's session-level status events, at
    their `processed_at`:
-   - `session.status_running` opens an interval when none is open;
+   - `session.status_running` opens an interval;
    - `session.status_idle`, `_rescheduled` and `_terminated` close it;
    - an interval that reads negative, across two hosts' clocks, adds zero.
+
+   No batch this build writes runs a running session again without a close
+   first. A running that finds an interval open therefore means a close went
+   unseen, written by a replica on the earlier build, and it restarts the
+   interval: the count drops that turn's time rather than adding the idle
+   after it.
 
    The session's status is the fold over its threads, running while any thread
    runs, so overlap counts once by construction. Rescheduling does not count:
@@ -80,12 +86,14 @@ The recordings in `managed-agents-wire-recordings` add the shape and the order
    renders many sessions.
 5. **Migration 0055 backfills both columns** from each session's stored
    session-level status events. A session's history keeps its time, and a
-   session running at deploy time keeps its open interval.
-6. **The session resource renders the stored sum, to the millisecond.** It
-   counts closed intervals only: while the session runs, the open one is left
-   out, so the value moves at an idle or a reschedule. The reference's GET read
-   0.1–0.23 s above its last event's value (recorded), and its value while
-   running is unobserved, so this is an inference.
+   session running at deploy time keeps its open interval. There a running
+   inside an open interval keeps it open: the stored log holds every close.
+6. **The session resource renders the running time to the millisecond.**
+   While the stored status is running, it adds the open interval up to the
+   read, so a long turn reports time as it spends it. An idle session ignores
+   an interval left open on its row. The reference's GET read 0.1–0.23 s
+   above its last event's value (recorded), and its value while running is
+   unobserved, so this is an inference.
 7. **`domain.Usage` stays the stored token shape.** The session resource
    renders a wider struct that adds `active_seconds`; the thread resource's
    usage is unchanged, since the slice does not cover it.

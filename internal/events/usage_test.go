@@ -176,10 +176,11 @@ func TestUsageSnapshotOnlyBeforeASessionIdle(t *testing.T) {
 }
 
 // active_seconds is the time the session spent running, counted from its own
-// status events: running opens an interval when none is open, and idle,
-// rescheduled or terminated closes it. A reclaim's running inside an open
-// interval does not restart it, an idle with nothing open adds nothing, and an
-// interval two hosts' clocks make negative adds zero.
+// status events: running opens an interval, and idle, rescheduled or
+// terminated closes it. A running inside an open interval — a close an
+// earlier build's replica wrote went unseen — restarts it, an idle with
+// nothing open adds nothing, and an interval two hosts' clocks make negative
+// adds zero.
 func TestUsageActiveSecondsCountsRunningIntervals(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
@@ -201,19 +202,19 @@ func TestUsageActiveSecondsCountsRunningIntervals(t *testing.T) {
 		status(domain.EventSessionStatusRunning, at(12*s+500*time.Millisecond)),
 	}, events.AppendOptions{})
 	got = mustAppend(t, log, sid, []events.NewEvent{idleAt(at(15 * s))}, events.AppendOptions{})
-	if v := activeSeconds(t, got[0]); v != 6 {
-		t.Errorf("second idle active_seconds = %v, want 6 (2 + 1 rescheduled + 3)", v)
+	if v := activeSeconds(t, got[0]); v != 5.5 {
+		t.Errorf("second idle active_seconds = %v, want 5.5 (2 + 1 rescheduled + 2.5 after the restart)", v)
 	}
 
 	got = mustAppend(t, log, sid, []events.NewEvent{idleAt(at(20 * s))}, events.AppendOptions{})
-	if v := activeSeconds(t, got[0]); v != 6 {
-		t.Errorf("re-idle active_seconds = %v, want 6 (no interval open)", v)
+	if v := activeSeconds(t, got[0]); v != 5.5 {
+		t.Errorf("re-idle active_seconds = %v, want 5.5 (no interval open)", v)
 	}
 
 	mustAppend(t, log, sid, []events.NewEvent{status(domain.EventSessionStatusRunning, at(30*s))}, events.AppendOptions{})
 	got = mustAppend(t, log, sid, []events.NewEvent{idleAt(at(29 * s))}, events.AppendOptions{})
-	if v := activeSeconds(t, got[0]); v != 6 {
-		t.Errorf("skewed idle active_seconds = %v, want 6 (a negative interval adds zero)", v)
+	if v := activeSeconds(t, got[0]); v != 5.5 {
+		t.Errorf("skewed idle active_seconds = %v, want 5.5 (a negative interval adds zero)", v)
 	}
 
 	// One batch that runs and idles, to the millisecond.
@@ -221,14 +222,14 @@ func TestUsageActiveSecondsCountsRunningIntervals(t *testing.T) {
 		status(domain.EventSessionStatusRunning, at(40*s)),
 		idleAt(at(41*s + 234567*time.Microsecond)),
 	}, events.AppendOptions{})
-	if v := activeSeconds(t, got[1]); v != 7.235 {
-		t.Errorf("one-batch idle active_seconds = %v, want 7.235", v)
+	if v := activeSeconds(t, got[1]); v != 6.735 {
+		t.Errorf("one-batch idle active_seconds = %v, want 6.735", v)
 	}
 
 	mustAppend(t, log, sid, []events.NewEvent{status(domain.EventSessionStatusRunning, at(50*s))}, events.AppendOptions{})
 	active, since := storedActive(t, pool, sid)
-	if active < 7.234 || active > 7.235 || since == nil || !since.Equal(*at(50 * s)) {
-		t.Errorf("stored = %v since %v, want 7.234567 and an interval open at %v", active, since, *at(50 * s))
+	if active < 6.734 || active > 6.735 || since == nil || !since.Equal(*at(50 * s)) {
+		t.Errorf("stored = %v since %v, want 6.734567 and an interval open at %v", active, since, *at(50 * s))
 	}
 }
 

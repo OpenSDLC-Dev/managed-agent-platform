@@ -45,8 +45,17 @@ func transition(t *testing.T, pool *pgxpool.Pool, log *events.Log, sid domain.ID
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// The append puts a session.usage before a session idle (usage_test.go);
-	// these tests read the fold's own events, so it is left out here.
+	// The append puts a session.usage immediately before each session idle
+	// and nowhere else (usage_test.go). Every fold shape here checks that,
+	// then leaves it out: these tests read the fold's own events.
+	for i, ev := range appended {
+		if ev.Type == domain.EventSessionStatusIdle && (i == 0 || appended[i-1].Type != domain.EventSessionUsage) {
+			t.Errorf("session idle at %d does not follow a session.usage: %v", i, types(appended))
+		}
+		if ev.Type == domain.EventSessionUsage && (i+1 == len(appended) || appended[i+1].Type != domain.EventSessionStatusIdle) {
+			t.Errorf("session.usage at %d does not precede a session idle: %v", i, types(appended))
+		}
+	}
 	appended = slices.DeleteFunc(appended, func(ev domain.Event) bool { return ev.Type == domain.EventSessionUsage })
 	return appended, moved
 }
