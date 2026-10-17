@@ -54,12 +54,13 @@ func createRepoSession(t *testing.T, s *tserver, resources ...any) map[string]an
 }
 
 // wantRepoResourceFields asserts the rendered github_repository wire shape —
-// {id, created_at, mount_path, type, updated_at, url, checkout}, checkout
-// nullable, and NEVER an authorization_token (checked against anthropic-sdk-go
-// v1.70.1 — betasessionresource.go BetaManagedAgentsGitHubRepositoryResource).
+// {id, created_at, mount_path, type, updated_at, url}, a checkout only when one
+// was given, and NEVER an authorization_token (checked against
+// anthropic-sdk-go v1.70.1 — betasessionresource.go
+// BetaManagedAgentsGitHubRepositoryResource).
 func wantRepoResourceFields(t *testing.T, res map[string]any) {
 	t.Helper()
-	wantFields(t, res, "id", "created_at", "mount_path", "type", "updated_at", "url", "checkout")
+	wantFields(t, res, "id", "created_at", "mount_path", "type", "updated_at", "url")
 	if id, _ := res["id"].(string); !strings.HasPrefix(id, "sesrsc_") {
 		t.Errorf("resource id = %q, want a sesrsc_ id", res["id"])
 	}
@@ -70,7 +71,8 @@ func wantRepoResourceFields(t *testing.T, res map[string]any) {
 
 // TestSessionRepoCreateRendersWireShape is w-create-minimal, w-create-full,
 // w-create-commit, and w-multi: the rendered union shape, the defaulted mount
-// path, checkout echoed as given (null when omitted).
+// path, checkout echoed as given (no key when omitted, as the reference
+// renders it: 2026-10-15 repo-followups setup[3]).
 func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 	s := newTestServer(t)
 
@@ -81,8 +83,18 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 	if res["mount_path"] != "/workspace/example-repo" {
 		t.Errorf("default mount_path = %v, want /workspace/example-repo", res["mount_path"])
 	}
-	if co, present := res["checkout"]; !present || co != nil {
-		t.Errorf("omitted checkout renders %v (present=%v), want explicit null", co, present)
+	if co, present := res["checkout"]; present {
+		t.Errorf("omitted checkout renders %v, want no key", co)
+	}
+	// A session stored while an omitted checkout rendered null keeps its null:
+	// resources are echoed as stored.
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE sessions SET resources = jsonb_set(resources, '{0,checkout}', 'null') WHERE id = $1`, sess["id"]); err != nil {
+		t.Fatal(err)
+	}
+	status, stored := s.do(http.MethodGet, "/v1/sessions/"+sess["id"].(string), nil)
+	if co, present := resourcesOf(t, stored)[0]["checkout"]; status != http.StatusOK || !present || co != nil {
+		t.Errorf("a stored null checkout renders %v (present=%v, status %d), want the null kept", co, present, status)
 	}
 	if res["created_at"] != res["updated_at"] {
 		t.Errorf("created_at %v != updated_at %v on create", res["created_at"], res["updated_at"])
@@ -178,17 +190,27 @@ func TestSessionRepoMountPathRootsUnderWorkspace(t *testing.T) {
 		{"/opt/repo", "/workspace/opt/repo"},               // setup[10]
 		{"/workspace/../etc", "/workspace/etc"},            // setup[12]
 		{"/workspace/sdk", "/workspace/sdk"},               // kept, as setup[18] kept /workspace/skills
-		{".", def},
+		{"workspace/..", def},                              // 2026-10-15 setup[3]
+		{"workspace/../x", "/workspace/x"},                 // setup[5]
+		{"workspace/", "/workspace/workspace"},             // setup[7]
+		{".", def},                                         // setup[10]
 		{"opt/repo", "/workspace/opt/repo"},
 		{"/workspace/./r", "/workspace/r"},
 		{"/workspace//r/", "/workspace/r"},
-		{"workspace/../x", "/workspace/x"},
 		{"/mnt/session/uploads/r", "/workspace/mnt/session/uploads/r"},
 		// A name that only starts with two dots climbs nowhere.
 		{"..x", "/workspace/..x"},
 		{"/workspace/..hidden", "/workspace/..hidden"},
 	} {
 		sess := createRepoSession(t, s, repoBody("g", map[string]any{"mount_path": tc.sent}))
+		if tc.sent == "workspace/.." {
+			// A null one takes the default as an omitted one does (ours: the
+			// reference's answer to null is unrecorded).
+			null := createRepoSession(t, s, repoBody("g", map[string]any{"mount_path": nil}))
+			if got := resourcesOf(t, null)[0]["mount_path"]; got != def {
+				t.Errorf("null mount_path: echoed %v, want %q", got, def)
+			}
+		}
 		if got := resourcesOf(t, sess)[0]["mount_path"]; got != tc.want {
 			t.Errorf("mount_path %q: echoed %v, want %q", tc.sent, got, tc.want)
 		}
@@ -419,6 +441,9 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 			"resources.0.github_repository.authorization_token: value is required"},
 		"empty token": {[]any{repoBody("g", map[string]any{"url": other}), repoBody("", nil)},
 			"resources.1.github_repository.authorization_token: value is required"},
+		// 2026-10-15 repo-followups setup[9].
+		"empty mount path": {[]any{repoBody("g", map[string]any{"url": other}), repoBody("g", map[string]any{"mount_path": ""})},
+			"resources.1.github_repository.mount_path: must be at least 1 character"},
 		// 2026-09-03 batch1 `session.create.repo-userinfo`, `repo-explicit-port`,
 		// `repo-query-string` and `repo-tree-path`. The same session's
 		// `repo-dot-git` is refused there too, and accepted here.
@@ -718,6 +743,21 @@ func TestDeploymentRepoResourceWording(t *testing.T) {
 			status, res = s.do(http.MethodPost, "/v1/deployments/"+deplID, map[string]any{"resources": resources})
 			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tc.want)
 		})
+	}
+}
+
+// TestDeploymentRepoTakesAnEmptyMountPath: the SDK's schema bounds a session's
+// mount_path to at least 1 character, which session create enforces, but puts
+// no bound on a deployment's (checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsGitHubRepositoryResourceConfig), so a
+// deployment takes an empty one as omitted, and its session mounts the default.
+func TestDeploymentRepoTakesAnEmptyMountPath(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	body := deploymentBody(agentID, envID)
+	body["resources"] = []any{repoBody("g", map[string]any{"mount_path": ""})}
+	if status, res := s.do(http.MethodPost, "/v1/deployments", body); status != http.StatusOK {
+		t.Fatalf("deployment with an empty mount_path: %d %v, want 200", status, res)
 	}
 }
 

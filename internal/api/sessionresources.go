@@ -115,10 +115,12 @@ type fileResourceJSON struct {
 // (checked against anthropic-sdk-go v1.70.1 — betasessionresource.go
 // BetaManagedAgentsGitHubRepositoryResource): {id, created_at, mount_path,
 // type, updated_at, url, checkout} — every field api:"required" except checkout
-// (api:"nullable"). The authorization_token is write-only on the wire and
-// deliberately absent from this type: what lands in the verbatim-echoed
-// sessions.resources jsonb is token-free by construction (plan 25 decision 2);
-// the secret seals into session_resource_credentials.
+// (api:"nullable"), which is left out when none was given, as the reference
+// renders it (2026-10-15 repo-followups setup[3]); a session stored before
+// keeps the null it was stored with. The authorization_token is write-only on
+// the wire and deliberately absent from this type: what lands in the
+// verbatim-echoed sessions.resources jsonb is token-free by construction (plan
+// 25 decision 2); the secret seals into session_resource_credentials.
 type repoResourceJSON struct {
 	ID        string        `json:"id"`
 	CreatedAt time.Time     `json:"created_at"`
@@ -126,7 +128,7 @@ type repoResourceJSON struct {
 	Type      string        `json:"type"`
 	UpdatedAt time.Time     `json:"updated_at"`
 	URL       string        `json:"url"`
-	Checkout  *checkoutJSON `json:"checkout"` // nullable: renders null when omitted (as-given, plan 25 decision 3)
+	Checkout  *checkoutJSON `json:"checkout,omitempty"` // as given (plan 25 decision 3), no key when omitted
 }
 
 // checkoutJSON is the branch|commit checkout union (the SDK registers exactly
@@ -554,9 +556,16 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 	if err != nil {
 		return resourceInput{}, err
 	}
-	given, _, _, err := stringField(obj, "mount_path")
+	given, set, null, err := stringField(obj, "mount_path")
 	if err != nil {
 		return resourceInput{}, err
+	}
+	if f == resourceForSession && set && !null && given == "" {
+		// The SDK's schema bounds a session's mount_path to at least 1
+		// character, and the reference refuses an empty one in these words
+		// (2026-10-15 repo-followups setup[9]). A deployment's config has no
+		// such bound, so there an empty one is taken as omitted.
+		return resourceInput{}, errInvalid("resources.%d.github_repository.mount_path: must be at least 1 character", i)
 	}
 	if f == resourceForDeployment && len(given) > maxMountPathBytes {
 		// Stored and echoed there (#849); parseFileResource says why.
@@ -692,11 +701,12 @@ func isFullCommitSHA(s string) bool {
 }
 
 // resolveRepoMountPath maps a github_repository mount_path to the container
-// path the repository is cloned into, "" (omitted, null or empty) taking the
-// default /workspace/<repoName>. Every path is rooted under /workspace, as
-// the docs put it ("the directory under /workspace to clone the repository
-// into") and the reference was recorded doing (#922, plan 64 lists each
-// probe). The path is cleaned first, so its ".." resolves before rooting:
+// path the repository is cloned into, "" (omitted, null, or empty on a
+// deployment) taking the default /workspace/<repoName>. Every path is rooted
+// under /workspace, as the docs put it ("the directory under /workspace to
+// clone the repository into") and the reference was recorded doing (#922,
+// plan 64 lists each probe). The path is cleaned first, so its ".." resolves
+// before rooting:
 //
 //   - /workspace, or a path below it, keeps its place, matched as a
 //     directory: /workspaceX/repo is rooted like any other path.
@@ -708,7 +718,7 @@ func isFullCommitSHA(s string) bool {
 //     /workspace/etc.
 //
 // A path that lands on /workspace itself — "/", "/workspace", "." — takes the
-// default, as "/" and "/workspace" did there. A cleaned relative path still
+// default, as each did there (`.` on 2026-10-15). A cleaned relative path still
 // led by ".." climbs out, and is refused, in the reference's words on session
 // create (2026-10-13 setup[14], `../x`) and in ours elsewhere (#540). The rule
 // fits every recorded input; what it does with any other is ours.
