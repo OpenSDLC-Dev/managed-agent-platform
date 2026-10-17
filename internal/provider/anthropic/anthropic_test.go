@@ -903,13 +903,7 @@ func TestGenerateEndsAToolBlockOpenAtMessageStop(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate: %v", err)
 			}
-			var got []provider.Chunk
-			for stream.Next() {
-				got = append(got, stream.Chunk())
-			}
-			if err := stream.Err(); err != nil {
-				t.Fatalf("stream error = %v, want none", err)
-			}
+			got := collect(t, stream)
 			if len(got) != 2 || got[0].Kind != provider.KindToolUse || got[1].Kind != provider.KindDone {
 				t.Fatalf("chunks = %+v, want the tool block, then done", got)
 			}
@@ -934,7 +928,7 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 	}{
 		"without message_delta": {
 			[]string{`{"type":"message_stop"}`},
-			[]string{"message_stop without a stop reason (missing message_delta)"},
+			[]string{"message_stop with tool_use block 0 still open (no stop reason)"},
 		},
 		// No cut explains a block left open under any other stop reason.
 		"stopped for tool_use": {
@@ -943,6 +937,13 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 				`{"type":"message_stop"}`,
 			},
 			[]string{"message_stop with tool_use block 0 still open (stop_reason tool_use, 50 output tokens)"},
+		},
+		"stopped at end_turn": {
+			[]string{
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":50}}`,
+				`{"type":"message_stop"}`,
+			},
+			[]string{"message_stop with tool_use block 0 still open (stop_reason end_turn, 50 output tokens)"},
 		},
 		// A stream that drops before message_stop says how far it got,
 		// whether it ends cleanly or on an error.

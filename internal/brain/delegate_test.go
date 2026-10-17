@@ -455,6 +455,71 @@ func TestAllSettlementTurnChainsTheCallersNextTurn(t *testing.T) {
 	}
 }
 
+// The dream coordinator's failure in #951: a reply spawning children whose
+// last create_agent the output cap cut off. The complete call spawns its
+// child, the cut one is answered with how the stream ended rather than run
+// with no arguments, and the coordinator's next turn is queued, so it can
+// make the cut call again.
+func TestACutCreateAgentIsAnsweredAndTheTurnGoesOn(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"digest batch 12"}`),
+		toolCall("t2", "create_agent", `{"agent_name":"researcher","message":"digest ba`),
+		done("max_tokens", 8192),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "spawn the batches")
+	h.runOnce(t)
+
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("session.error events = %d, want 0", n)
+	}
+	if kids := h.children(t); len(kids) != 1 {
+		t.Errorf("children = %v, want the one the complete call spawned", kids)
+	}
+	got := h.answers(t)
+	if len(got) != 2 {
+		t.Fatalf("answers = %v, want one per call", got)
+	}
+	if got[0].isErr {
+		t.Errorf("complete call answered %+v, want a spawn", got[0])
+	}
+	if !got[1].isErr || !strings.Contains(got[1].text, "cut off") || !strings.Contains(got[1].text, "stop_reason max_tokens") {
+		t.Errorf("cut call answered %+v, want an is_error saying it was cut off and how the stream ended", got[1])
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1", n)
+	}
+	if n := h.delegationTurns(t); n != 1 {
+		t.Errorf("delegation turns = %d, want 1: the complete call", n)
+	}
+}
+
+// A turn whose only call the output cap cut off ran nothing, so it spends no
+// delegation budget, and it chains the caller's next turn like any turn the
+// settlement answered whole.
+func TestACutCallAloneSpendsNoDelegationBudget(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"digest ba`),
+		done("max_tokens", 8192),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "spawn one")
+	h.runOnce(t)
+
+	if got := h.answers(t); len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "cut off") {
+		t.Errorf("answers = %+v, want the cut call answered", got)
+	}
+	if n := len(h.children(t)); n != 0 {
+		t.Errorf("children = %d, want none", n)
+	}
+	if n := h.delegationTurns(t); n != 0 {
+		t.Errorf("delegation turns = %d, want 0: the cut call ran nothing", n)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1", n)
+	}
+}
+
 // A wait with no child running and no report unread would park a thread
 // nothing can wake, so it times out in-commit and the turn continues.
 func TestWaitWithNothingToWaitForDoesNotPark(t *testing.T) {

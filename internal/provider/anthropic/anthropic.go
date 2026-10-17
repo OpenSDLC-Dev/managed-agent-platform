@@ -201,7 +201,8 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 
 // stream translates the Messages API event stream into provider chunks:
 // text/thinking deltas pass through as they arrive; tool_use inputs
-// accumulate and emit once complete; message_delta carries stop reason and
+// accumulate and emit when their block ends (message_stop ends a cut one);
+// message_delta carries stop reason and
 // output usage, emitted as the final done chunk.
 type stream struct {
 	events *ssestream.Stream[sdk.MessageStreamEventUnion]
@@ -413,24 +414,24 @@ func (s *stream) Next() bool {
 			}
 
 		case "message_stop":
-			if s.stopReason == "" {
-				// Without message_delta there is no stop reason and no
-				// output usage; a hollow done chunk would silently corrupt
-				// session state downstream.
-				s.err = fmt.Errorf("message_stop without a stop reason (missing message_delta)")
-				return false
-			}
 			// An endpoint that stops at its output cap mid-input can skip the
 			// cut block's content_block_stop (#951). Under a stop reason that
 			// says the turn was cut off — the two the SDK's own tool loop
 			// treats so — message_stop ends the block as surely: it goes out
 			// as it stands, ahead of the done chunk, and the brain reads its
-			// unfinished input as a cut one. Any other stop reason leaves an
-			// open block unexplained.
+			// unfinished input as a cut one. Any other stop reason, or none,
+			// leaves an open block unexplained.
 			cut := s.stopReason == "max_tokens" || s.stopReason == "model_context_window_exceeded"
 			if s.inTool && !cut {
 				s.err = fmt.Errorf("message_stop with tool_use block %d still open (%s)",
 					s.toolIndex, s.stopNote())
+				return false
+			}
+			if s.stopReason == "" {
+				// Without message_delta there is no stop reason and no
+				// output usage; a hollow done chunk would silently corrupt
+				// session state downstream.
+				s.err = fmt.Errorf("message_stop without a stop reason (missing message_delta)")
 				return false
 			}
 			s.done = true

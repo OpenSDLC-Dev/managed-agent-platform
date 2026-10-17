@@ -126,7 +126,9 @@ const (
 	// KindRedactedThinking is one complete redacted_thinking block at Index, its
 	// opaque payload in Data. Like a signed block, it goes back verbatim.
 	KindRedactedThinking ChunkKind = "redacted_thinking"
-	// KindToolUse is one complete tool invocation (input fully accumulated).
+	// KindToolUse is one tool invocation, its input fully accumulated. A block
+	// the output cap cut off arrives with the input as far as it got, which
+	// need not be valid JSON (#951).
 	KindToolUse ChunkKind = "tool_use"
 	// KindDone closes the turn with stop reason and usage.
 	KindDone ChunkKind = "done"
@@ -171,7 +173,8 @@ func StopNote(reason string, usage *domain.ModelUsage) string {
 	return fmt.Sprintf("stop_reason %s, %d output tokens", reason, usage.OutputTokens)
 }
 
-// ToolUse is a complete tool call emitted by the model.
+// ToolUse is a tool call emitted by the model (KindToolUse says when Input may
+// be incomplete).
 type ToolUse struct {
 	ID    string
 	Name  string

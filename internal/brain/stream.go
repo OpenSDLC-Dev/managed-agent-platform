@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -26,7 +25,11 @@ type turnResult struct {
 	// must be appended under (zero when the turn produced no text).
 	messageEventID domain.ID
 	toolUses       []provider.ToolUse
-	stopReason     string
+	// cut marks, by index into toolUses, the calls whose input was cut off
+	// before its object closed. Each holds {} as its input and is answered
+	// rather than run (turnEvents).
+	cut        map[int]bool
+	stopReason string
 	// usage is what the model reported, or nil when the endpoint reported
 	// nothing — the two are different facts and only the first belongs in
 	// the token metric (#90). A turn that never reached its done chunk also
@@ -251,14 +254,19 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			tu := *c.ToolUse
 			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
-			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-				// Cut off before its object closed, or before it began: the
-				// one shape the output cap leaves. The call goes out with no
-				// arguments, as the reference sends it, and the tool answers
-				// with its own error, which tells the model what went
-				// missing (#951; docs/DIVERGENCES.md, turn classification).
-				slog.WarnContext(ctx, "brain: a tool input was cut off; the call goes out with no arguments",
-					"session_id", sid.String(), "tool", tu.Name, "error", err)
+			if errors.Is(err, io.ErrUnexpectedEOF) && bytes.HasPrefix(bytes.TrimSpace(tu.Input), []byte("{")) {
+				// An object cut off before it closed: the shape the output
+				// cap leaves (#951), and whatever else ended one early is
+				// treated alike. It is answered, not run — {} would be a
+				// broader call for a tool whose arguments are all optional —
+				// so it holds {} only to keep the log storable (turnEvents;
+				// docs/DIVERGENCES.md, turn classification). A cut that is
+				// not an object, or more input after a closed one, is a
+				// malformation and fails the turn below.
+				if turn.cut == nil {
+					turn.cut = map[int]bool{}
+				}
+				turn.cut[len(turn.toolUses)] = true
 				input, err = json.RawMessage("{}"), nil
 			}
 			if err != nil {
@@ -364,7 +372,7 @@ func copyUsage(u *domain.ModelUsage) *domain.ModelUsage {
 	return &c
 }
 
-// normalizeToolInput accepts an absent or null input as the empty object,
+// normalizeToolInput accepts an absent, blank or null input as the empty object,
 // rejects anything that is not a JSON object, and re-encodes what it accepts
 // through Go rather than passing the model's bytes along. The rewrite is what
 // makes the payload storable: the input is the one model-produced value that
@@ -378,7 +386,7 @@ func copyUsage(u *domain.ModelUsage) *domain.ModelUsage {
 // padded with whitespace or not — into a map leaves it nil and reports no
 // error, so a byte comparison would wave ` null ` through as a valid object.
 func normalizeToolInput(raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 {
+	if len(bytes.TrimSpace(raw)) == 0 {
 		return json.RawMessage("{}"), nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))

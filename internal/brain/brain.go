@@ -781,12 +781,19 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 			ID: turn.messageEventID, Type: domain.EventAgentMessage, Payload: content,
 		})
 	}
-	for _, tu := range turn.toolUses {
+	for i, tu := range turn.toolUses {
 		fields := map[string]any{
 			"name": tu.Name, "input": tu.Input, "session_thread_id": nil,
 		}
 		c, offered := class[tu.Name]
-		if !offered {
+		// A call the output cap cut off takes the same inline shape, whatever
+		// tool it named: nothing runs it, because {} would be a broader call
+		// for a tool whose arguments are all optional, and the settlement
+		// answers it with how the stream ended so the model makes it again,
+		// shorter (#951). The reference sends it to the tool with {} instead
+		// (docs/DIVERGENCES.md, turn classification).
+		cut := offered && turn.cut[i]
+		if !offered || cut {
 			// A name the model was not offered: not a declared custom tool (a
 			// client would answer that one), not a platform tool this thread's
 			// role owns. The platform must still never run it, but parking it as
@@ -828,7 +835,7 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		if gated {
 			perm := domain.EvalPermAllow
 			switch {
-			case !offered:
+			case !offered || cut:
 				// #567: a name the model was not offered was denied, not
 				// allowed — the settlement answers it "unknown" in this same
 				// commit, but that answer is only this platform's own; a
@@ -840,7 +847,8 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 				// user.tool_result/user.custom_tool_result alone). An "allow"
 				// stamp would tell such a worker to run what this platform
 				// already refused; "deny" is the value the reference
-				// documents such a worker never executes but still yields.
+				// documents such a worker never executes but still yields. A
+				// cut call is refused for the same reason.
 				perm = domain.EvalPermDeny
 			case c.policy == domain.PolicyAlwaysAsk:
 				perm = domain.EvalPermAsk
@@ -850,9 +858,11 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		}
 		if c.settlement {
 			// Inline settlement uses the same preallocated event identity.
-			delegated = append(delegated, delegatedCall{
-				eventID: id, name: tu.Name, input: tu.Input, unoffered: !offered,
-			})
+			dc := delegatedCall{eventID: id, name: tu.Name, input: tu.Input, unoffered: !offered}
+			if cut {
+				dc.cut = provider.StopNote(turn.stopReason, turn.usage)
+			}
+			delegated = append(delegated, dc)
 		}
 		payload, err := json.Marshal(fields)
 		if err != nil {
@@ -877,6 +887,9 @@ type delegatedCall struct {
 	// delegation call, and dispatching an arbitrary hallucinated name into
 	// createAgent or the rest on their say-so is not what either promises.
 	unoffered bool
+	// cut is set for a call the output cap cut off: how the stream ended,
+	// which d.run answers it with instead of running it (#951).
+	cut string
 }
 
 // escalate picks the work kind a turn's whole set of platform calls settles to.
@@ -983,8 +996,8 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// included (since anthropic-sdk-go v1.62.0 — betatoolrunner.go
 	// betaToolRunnerBase.executeTools), and it runs tools on a tool_use stop
 	// alone (since anthropic-sdk-go v1.67.0 — betatoolrunner.go
-	// determineNextStepFromStopReason). Here a truncated block never reaches
-	// this point (below), so the complete ones run (docs/DIVERGENCES.md, #181).
+	// determineNextStepFromStopReason). Here the complete ones run and a cut
+	// one is answered (below; docs/DIVERGENCES.md, #181).
 	// The intents commit either way (turnEvents emits one tool-intent event per
 	// block), so classifying on the label would idle the session with calls
 	// nothing ever enqueues and leave every later replay carrying a tool_use no
@@ -992,14 +1005,16 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// tool turns: a tool_use stop with no blocks fails, and a refusal arrives
 	// here with its blocks dropped.
 	//
-	// A block cut mid-input, or before its first input delta, arrives here
-	// with {} as its input (streamTurn sees to it) and runs, as the reference
-	// runs it: the tool answers with its own required-argument error,
-	// recoverable where a stranded call is not (docs/DIVERGENCES.md; #951).
+	// A block cut mid-input arrives here with {} as its input, marked cut
+	// (streamTurn), and turnEvents hands it to the settlement to answer with
+	// how the stream ended: recoverable, where a stranded call is not, and
+	// never run (docs/DIVERGENCES.md; #951). A block cut before its first
+	// input delta is indistinguishable from a call with no arguments, and runs.
 	if len(turn.toolUses) > 0 {
 		if len(delegated) > 0 {
 			// A delegation call — or a name the model was not offered at all
-			// (#567) — is answered in the commit that emits it, whatever else
+			// (#567), or a call the output cap cut off (#951) — is answered in
+			// the commit that emits it, whatever else
 			// the turn holds — no driver can run either — so this branch owns
 			// every shape a turn with one takes, the ask gate and the mixed exec
 			// turn included (plan 35 decision 6). The turn is settlement-only

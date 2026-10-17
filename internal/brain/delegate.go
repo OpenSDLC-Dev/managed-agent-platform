@@ -198,6 +198,17 @@ func (d *delegate) run(ctx context.Context, tx pgx.Tx, calls []delegatedCall) er
 			d.out.events = append(d.out.events, ev)
 			continue
 		}
+		if call.cut != "" {
+			// The output cap cut the call off (#951): it is answered, never
+			// run, whichever tool it named (turnEvents says why).
+			ev, err := delegationAnswer(call.eventID, cutCallAnswer(call.cut), true)
+			if err != nil {
+				return err
+			}
+			ev.ThreadID = d.caller.ThreadID
+			d.out.events = append(d.out.events, ev)
+			continue
+		}
 		var answer string
 		var isErr bool
 		var err error
@@ -291,6 +302,20 @@ func delegationText(s string) string {
 func unknownToolAnswer(name string) string {
 	const suffix = "[truncated]"
 	text := fmt.Sprintf("unknown tool %q: not offered to this agent", toolset.SanitizeText(name))
+	if len(text) > maxDelegationText {
+		text = toolset.TruncateRunes(text, maxDelegationText-len(suffix)) + suffix
+	}
+	return text
+}
+
+// cutCallAnswer is the is_error text answering a call the output cap cut off
+// (#951). note is provider.StopNote's account of how the stream ended, which
+// quotes the endpoint's own stop reason, so it is sanitized and the text
+// bounded as unknownToolAnswer's is.
+func cutCallAnswer(note string) string {
+	const suffix = "[truncated]"
+	text := "this call was cut off before its arguments were complete (" + toolset.SanitizeText(note) +
+		"), so it was not run: make it again with shorter arguments, or split the work across several calls"
 	if len(text) > maxDelegationText {
 		text = toolset.TruncateRunes(text, maxDelegationText-len(suffix)) + suffix
 	}
@@ -742,8 +767,9 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 			caller: events.ThreadPeer{ThreadID: item.ThreadID, AgentName: agent.Name}}
 		// Whether this turn made at least one genuine delegation call — the
 		// session-wide delegation budget's own distinction (#567): a turn whose
-		// delegated set is entirely names the model was not offered spent no
-		// delegation budget, whatever else it did. !dc.unoffered alone is not
+		// delegated set is entirely names the model was not offered, or calls
+		// the output cap cut off (#951), spent no delegation budget, whatever
+		// else it did. !dc.unoffered alone is not
 		// enough: resolveTools classes the *other* half's names too (so a
 		// cross-half call is answered wrongRole rather than "unknown"), so a
 		// child calling create_agent is !unoffered but was never offered
@@ -756,7 +782,7 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		// session-wide count is scoped to delegation specifically.
 		genuine := false
 		for _, dc := range delegated {
-			if !dc.unoffered && d.wrongRole(dc.name) == "" {
+			if !dc.unoffered && dc.cut == "" && d.wrongRole(dc.name) == "" {
 				genuine = true
 				break
 			}

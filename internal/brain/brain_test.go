@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1462,10 +1461,12 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 	// A tool_use whose input is not a JSON object must never reach the log:
 	// a valid non-object would replay into a request the model rejects,
 	// wedging the session forever on an append-only log, and malformed JSON
-	// would abort every settlement (a silent reclaim loop). A cut input is
-	// the one exception, and it reaches the log as {} instead
-	// (TestCutToolInputRunsWithNoArguments).
-	for _, bad := range []string{`"oops"`, `[1,2]`, `42`, `{"a" 1}`} {
+	// would abort every settlement (a silent reclaim loop). An object cut off
+	// before it closed is the one exception: it reaches the log as {},
+	// answered rather than run (TestCutToolCallIsAnsweredNotRun). A cut that
+	// is not an object, or one followed by more input, is the model's own
+	// malformation.
+	for _, bad := range []string{`"oops"`, `[1,2]`, `42`, `{"a" 1}`, `{"a":1}{`, `[1,`, `"oo`} {
 		t.Run(bad, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{{
 				provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
@@ -1491,31 +1492,27 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 	}
 }
 
-// A tool input cut off before its JSON object is complete, or before it began,
-// runs with no arguments, as the reference runs it: the call goes out with {}
-// and the tool answers it with its own error (docs/DIVERGENCES.md, turn
-// classification; #951). A complete call ahead of the cut one keeps its input.
-func TestCutToolInputRunsWithNoArguments(t *testing.T) {
+// A tool call cut off before its arguments were complete is answered, not run:
+// {} would be a broader call for a tool whose arguments are all optional, and
+// a tool's own required-argument error would not tell the model what
+// happened. The call commits as agent.tool_use with {} as its input, stamped
+// deny, and the settlement answers it in the same commit with how the stream
+// ended (docs/DIVERGENCES.md, turn classification; #951). A complete call
+// ahead of it goes out as usual.
+func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 	call := func(id, input string) provider.Chunk {
 		return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 			ID: id, Name: "lookup", Input: json.RawMessage(input)}}
 	}
 	for name, tc := range map[string]struct {
 		chunks []provider.Chunk
-		want   []map[string]any // each intent's stored input, in order
+		asked  int // custom tool calls the client is asked to run
 	}{
 		"cut at the cap": {
-			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)},
-			[]map[string]any{{}},
-		},
-		// Cut after nothing but whitespace, before the object began.
-		"cut before the object": {
-			[]provider.Chunk{call("toolu_x", "\n"), done("max_tokens", 8192)},
-			[]map[string]any{{}},
+			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)}, 0,
 		},
 		"a complete call before the cut": {
-			[]provider.Chunk{call("toolu_a", `{"query":"batch 8"}`), call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)},
-			[]map[string]any{{"query": "batch 8"}, {}},
+			[]provider.Chunk{call("toolu_a", `{"query":"batch 8"}`), call("toolu_x", ` {"query":"batch 9`), done("max_tokens", 8192)}, 1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1527,32 +1524,76 @@ func TestCutToolInputRunsWithNoArguments(t *testing.T) {
 			if n := h.countType(t, "session.error"); n != 0 {
 				t.Errorf("session.error events = %d, want 0: the cut call failed its turn", n)
 			}
-			evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
-			if len(evs) != len(tc.want) {
-				t.Fatalf("tool intents = %d, want %d", len(evs), len(tc.want))
+			if n := h.countType(t, "agent.custom_tool_use"); n != tc.asked {
+				t.Errorf("agent.custom_tool_use events = %d, want %d: the client was asked to run the cut call", n, tc.asked)
 			}
-			for i, ev := range evs {
-				var p struct {
-					Input map[string]any `json:"input"`
-				}
-				if err := json.Unmarshal(ev.Body, &p); err != nil {
-					t.Fatalf("intent %d: %v (%s)", i, err, ev.Body)
-				}
-				if p.Input == nil || !reflect.DeepEqual(p.Input, tc.want[i]) {
-					t.Errorf("intent %d input = %v, want %v (payload %s)", i, p.Input, tc.want[i], ev.Body)
-				}
+			evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.tool_use"}})
+			if len(evs) != 1 {
+				t.Fatalf("agent.tool_use events = %d, want 1: the cut call", len(evs))
+			}
+			var p struct {
+				Name       string         `json:"name"`
+				Input      map[string]any `json:"input"`
+				Permission string         `json:"evaluated_permission"`
+			}
+			if err := json.Unmarshal(evs[0].Body, &p); err != nil {
+				t.Fatal(err)
+			}
+			if p.Name != "lookup" || p.Input == nil || len(p.Input) != 0 || p.Permission != "deny" {
+				t.Errorf("cut call = %s, want lookup with input {}, stamped deny", evs[0].Body)
+			}
+			got := h.answers(t)
+			if len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "cut off") ||
+				!strings.Contains(got[0].text, "(stop_reason max_tokens, 8192 output tokens)") {
+				t.Errorf("answers = %+v, want one is_error saying the call was cut off and how the stream ended", got)
 			}
 		})
 	}
 }
 
+// A cut call is answered whatever routing its tool would take and whatever
+// stop reason came with it: an ask-gated built-in asks nobody and queues no
+// tool work, and an object left open under a tool_use stop is answered with
+// that stop reason, so the model reads what actually ended the stream.
+func TestACutCallIsNeitherAskedNorQueued(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_x", Name: "bash", Input: json.RawMessage(`{"command":"ls -la /tm`)}},
+		done("tool_use", 40),
+	}}, nil)
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"do the task","description":"",
+		"tools":[{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_ask"}}}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "list the files")
+	h.runOnce(t)
+
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("session.error events = %d, want 0", n)
+	}
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "(stop_reason tool_use, 40 output tokens)") {
+		t.Errorf("answers = %+v, want one is_error naming the tool_use stop", got)
+	}
+	if s := h.status(t); s != "running" {
+		t.Errorf("status = %q, want running with the next turn queued, not waiting on a confirmation", s)
+	}
+	if live, turns := h.liveWork(t), h.liveTurns(t, ""); live != 1 || turns != 1 {
+		t.Errorf("live work = %d, model turns = %d, want only the next model turn", live, turns)
+	}
+}
+
 func TestNullToolInputBecomesEmptyObject(t *testing.T) {
-	// An absent or null input is legal and means "no arguments"; it lands
-	// as {} so the emitted event carries a JSON object. Whitespace-padded
+	// An absent, blank or null input is legal and means "no arguments"; it
+	// lands as {} so the emitted event carries a JSON object. Whitespace-padded
 	// null counts: unmarshalling any JSON null into a map reports no error,
 	// so a byte comparison against "null" would let ` null ` through and
 	// emit a null input.
-	for _, in := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("null"), json.RawMessage(" null ")} {
+	for _, in := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("null"), json.RawMessage(" null "), json.RawMessage("\n"), json.RawMessage("  ")} {
 		t.Run(fmt.Sprintf("%q", string(in)), func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{
 				{
