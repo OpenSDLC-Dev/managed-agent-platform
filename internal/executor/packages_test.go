@@ -494,13 +494,15 @@ func TestARefusedListIsOneEventHoweverManyToolCallsFollow(t *testing.T) {
 	}
 }
 
-// TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally: the backstop
-// measures the install command as Exec is handed it, the platform's script
-// preamble (sandbox.Script) included. A list whose bare command fits the limit
-// by fewer bytes than the preamble takes is past it once the preamble is on —
-// Exec would refuse it before it ran, a fault the item reclaim-loops on — so
-// it is the terminal invalid refusal instead, before any probe.
-func TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally(t *testing.T) {
+// TestACommandWithinTheFrameOfTheLimitIsRefusedTerminally: the backstop
+// measures the install command as Exec is handed it, its frame and the
+// platform's script preamble included (sandbox.ExecStatus). A list whose bare
+// command fits the limit by fewer bytes than the frame takes is past it once
+// the frame is on — Exec would refuse it before it ran, a fault the item
+// reclaim-loops on — so it is the terminal invalid refusal instead, before any
+// probe. Measured with the preamble alone, as before the install ran framed
+// (#942), such a list was let through.
+func TestACommandWithinTheFrameOfTheLimitIsRefusedTerminally(t *testing.T) {
 	var pip packageManager
 	for _, m := range packageManagers {
 		if m.name == "pip" {
@@ -508,10 +510,12 @@ func TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally(t *testing.T) {
 		}
 	}
 	// Enough names to come within a few bytes of the limit, then the last one
-	// stretched until the bare command lands in the window the preamble
-	// closes: over the limit with it, not without.
+	// stretched until the bare command lands in the window the frame closes:
+	// over the limit with it, not without — and within it with the preamble
+	// alone.
+	frame := len(sandbox.NewFrame(packageInstallLabel).Wrap(""))
 	var entries []string
-	for len(pip.command(entries, "")) < sandbox.MaxCommandBytes-200 {
+	for len(pip.command(entries, "")) < sandbox.MaxCommandBytes-frame-200 {
 		entries = append(entries, fmt.Sprintf("pkg%04d-%s", len(entries), strings.Repeat("x", 90)))
 	}
 	entries = append(entries, "last")
@@ -521,7 +525,10 @@ func TestACommandWithinThePreambleOfTheLimitIsRefusedTerminally(t *testing.T) {
 		if bare > sandbox.MaxCommandBytes {
 			t.Fatalf("test setup: no name length puts the bare command in the window (it jumped to %d)", bare)
 		}
-		if bare > sandbox.MaxCommandBytes-len(sandbox.ScriptPreamble) {
+		if bare > sandbox.MaxCommandBytes-frame {
+			if bare > sandbox.MaxCommandBytes-len(sandbox.ScriptPreamble) {
+				t.Fatalf("test setup: the bare command %d is past the preamble's window too", bare)
+			}
 			break
 		}
 	}
@@ -608,7 +615,7 @@ func TestAnUnrecognizedProbeAnswerInstallsAnyway(t *testing.T) {
 // never carried the frame — here one that would have refused the pass — is
 // no answer, and the pass proceeds as it does past an unrecognized one.
 func TestAnUnframedProbeAnswerInstallsAnyway(t *testing.T) {
-	sb := &fakeSandbox{probeOut: packageReasonNotRoot, unframed: true}
+	sb := &fakeSandbox{probeOut: packageReasonNotRoot, unframedNext: 1}
 	h := newHarness(t, sb)
 	h.setPackages(t, map[string][]string{"apt": {"jq"}})
 	h.suspend(t, writeUse("out.txt", "hello"))
@@ -878,5 +885,31 @@ func TestTheInstallRunsInsideProvisionSandbox(t *testing.T) {
 	}
 	if n := len(installCmds(sb)); n != 1 {
 		t.Errorf("install commands = %d, want provisionSandbox itself to have run the install", n)
+	}
+}
+
+// TestAnInstallTheStartupEndedIsNoInstall: an install whose shell the image's
+// startup ended before it began is a failed attempt the client reads, whatever
+// status the startup chose, and records nothing installed. Read as the
+// install's own, a 0 recorded the packages as installed, and a 100 told the
+// client the manager failed (#942).
+func TestAnInstallTheStartupEndedIsNoInstall(t *testing.T) {
+	for _, status := range []int{0, 100} {
+		sb := &fakeSandbox{startupEnds: map[string]int{"set -o pipefail; { ": status}}
+		h := newHarness(t, sb)
+		h.setPackages(t, map[string][]string{"apt": {"curl"}})
+		h.suspend(t, writeUse("out.txt", "hello"))
+		h.stepOnce(t)
+
+		errs := h.packageErrors(t)
+		if len(errs) != 1 || errs[0]["reason"] != packageReasonFailed {
+			t.Fatalf("status %d: package errors = %+v; want one, reason failed", status, errs)
+		}
+		if msg, _ := errs[0]["message"].(string); !strings.Contains(msg, "startup file (BASH_ENV)") {
+			t.Errorf("status %d: message = %q; want the image's startup named", status, msg)
+		}
+		if rec := sentinel(t, sb)["apt"]; rec.Installed {
+			t.Errorf("status %d: sentinel = %+v; want no install", status, rec)
+		}
 	}
 }

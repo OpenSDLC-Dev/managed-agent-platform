@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#942"
 ---
 
@@ -142,7 +142,12 @@ The callers that run a script of their own, or act on a backend's refusal:
    `fileFault` needs no change: after the first pull
    request no backend hands it a refusal or a `0` that a startup chose, and
    the dispatch answers the startup's errors as tool errors.
-3. **The executor and worker callers**, as decision 7 says.
+3. **The executor and worker callers**, as decision 7 says. A memory store
+   whose marker read the startup ended, as it lands or as it syncs, is left
+   alone for the pass: not landed and not synced, where a marker that cannot
+   be read otherwise makes the sync pull-only. The
+   worker's withdrawal after a 404 runs framed too, though its status only
+   chooses a log line. It archives this plan and closes #942.
 
 ## Verification
 

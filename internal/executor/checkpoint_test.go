@@ -807,3 +807,22 @@ func TestRestoreReportsBetweenItsSteps(t *testing.T) {
 		t.Errorf("provision-with-restore reports = %d, want 8 (4 provisioning steps + 4 restore steps)", reports)
 	}
 }
+
+// TestRestoreTheStartupEndedLeavesTheMarkerReady: an extraction whose shell
+// the image's startup ended before it began, with status 0, fails the restore
+// and leaves `ready` standing. Read as the extraction's own, that 0 consumed
+// the marker with nothing restored (#942).
+func TestRestoreTheStartupEndedLeavesTheMarkerReady(t *testing.T) {
+	sb := &fakeSandbox{startupEnds: map[string]int{"tar -xf " + restoreTarPath: 0}}
+	h := newHarness(t, sb)
+	setMarker(t, h, "ready", checkpointBlob(t, h, map[string]string{"workspace/prev.txt": "x"}))
+
+	_, err := h.exec.provisionSandbox(context.Background(), h.sid,
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}, func() {})
+	if !errors.Is(err, sandbox.ErrImageStartup) {
+		t.Fatalf("provision = %v; want the restore failed, naming the image's startup", err)
+	}
+	if state, _ := markerState(t, h); state != "ready" {
+		t.Errorf("marker = %q, want ready", state)
+	}
+}

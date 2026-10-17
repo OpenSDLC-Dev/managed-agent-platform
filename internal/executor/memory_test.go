@@ -1121,3 +1121,82 @@ func TestMemoryShadowingTheMarkerIsSkipped(t *testing.T) {
 		}
 	})
 }
+
+// TestMemoryDeletionTheStartupEndedKeepsTheBaseline: a store's deletion whose
+// shell the image's startup ended before it began, with status 0, leaves the
+// file and the baseline that names it, and the next sync removes the file.
+// Read as the removal's own, that 0 wrote a baseline without the file still on
+// disk, and the next sync pushed it back to the store (#942).
+func TestMemoryDeletionTheStartupEndedKeepsTheBaseline(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	if _, err := h.pool.Exec(context.Background(),
+		`DELETE FROM memories WHERE memory_store_id = $1 AND path = '/a/b.md'`, memStoreID); err != nil {
+		t.Fatal(err)
+	}
+	sb.startupEnds = map[string]int{"; rm -f -- ": 0}
+	h.step(t)
+	if _, ok := sb.files[memMount+"/a/b.md"]; !ok {
+		t.Fatal("/a/b.md gone, though the startup ended its removal")
+	}
+	if _, ok := baselineOf(t, sb, memStoreID).Synced["/a/b.md"]; !ok {
+		t.Error("the baseline no longer names /a/b.md, still on disk")
+	}
+
+	sb.startupEnds = nil
+	h.step(t)
+	if _, ok := sb.files[memMount+"/a/b.md"]; ok {
+		t.Error("/a/b.md still on disk after a sync the startup let run")
+	}
+	if _, ok := h.memoryContent(t, memStoreID, "/a/b.md"); ok {
+		t.Error("/a/b.md pushed back to the store it was deleted from")
+	}
+}
+
+// TestAMarkerReadTheStartupEndedSkipsTheStore: a marker read the image's
+// startup kept from answering says nothing of whose the directory is, so the
+// store's sync stops for the run: nothing is pulled and no baseline is
+// written. Pull-only, as for a marker that could not be read, pulled and
+// wrote a baseline on that guess (#942).
+func TestAMarkerReadTheStartupEndedSkipsTheStore(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{}, readStartupOn: "/" + memsync.MarkerName}
+	h := newHarness(t, sb)
+	h.seedMemoryStore(t, memStoreID, "Notes")
+	h.seedMemory(t, memStoreID, "/notes.md", "hello")
+	refs := []memoryRef{{Type: "memory_store", MemoryStoreID: memStoreID, Access: "read_write", MountPath: memMount}}
+	if err := h.exec.syncMemoryNow(context.Background(), sb, h.sid, refs, func() {}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, ok := sb.files[memMount+"/notes.md"]; ok {
+		t.Error("notes.md pulled into a directory whose marker read did not answer")
+	}
+	if _, ok := sb.files[baselinePath(memStoreID)]; ok {
+		t.Error("a baseline written for a directory whose marker read did not answer")
+	}
+}
+
+// TestAMarkerReadTheStartupEndedLandsNothing: a run whose marker read the
+// image's startup kept from answering lands nothing in a directory that lists
+// empty — here a landed store whose every file the agent removed — and leaves
+// its baseline. Taken for a fresh directory, it was claimed: an empty baseline
+// written, and the store's memories pulled back over the agent's deletions
+// (#942).
+func TestAMarkerReadTheStartupEndedLandsNothing(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	before, ok := sb.files[baselinePath(memStoreID)]
+	if !ok {
+		t.Fatal("the store landed no baseline")
+	}
+	for p := range sb.files {
+		if strings.HasPrefix(p, memMount+"/") && p != memMount+"/"+memsync.MarkerName {
+			delete(sb.files, p)
+		}
+	}
+	sb.readStartupOn = "/" + memsync.MarkerName
+	h.step(t)
+	if _, ok := sb.files[memMount+"/notes.md"]; ok {
+		t.Error("notes.md pulled back into a directory whose marker read did not answer")
+	}
+	if got := sb.files[baselinePath(memStoreID)]; got != before {
+		t.Errorf("baseline = %q, want it as it was: %q", got, before)
+	}
+}

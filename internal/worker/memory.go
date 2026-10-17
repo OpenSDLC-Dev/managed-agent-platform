@@ -118,8 +118,9 @@ type memoryStores struct {
 	sessionID string
 	sb        sandbox.Sandbox
 	mounts    []memoryRef
-	// unanswered names the stores whose directory's listing did not answer
-	// at materialize (errListingUnanswered), which this run's syncs leave
+	// unanswered names the stores whose directory's listing, or marker's
+	// read, did not answer at materialize (errListingUnanswered,
+	// errMarkerUnanswered), which this run's syncs leave
 	// alone; the next run's materialize asks again. Since #867 a sync no
 	// longer fills an empty unmarked directory without its marker, so this
 	// is no longer what keeps one trusted (#860 added it as that); it stays
@@ -218,12 +219,16 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 		outcome, err := m.materializeStore(ctx, ref, progress)
 		recordMemoryMaterialized(ctx, outcome)
 		switch {
-		case errors.Is(err, errListingUnanswered):
+		case errors.Is(err, errListingUnanswered), errors.Is(err, errMarkerUnanswered):
 			if m.unanswered == nil {
 				m.unanswered = map[string]bool{}
 			}
 			m.unanswered[ref.MemoryStoreID] = true
-			slog.WarnContext(ctx, "memory store not materialized: its directory's listing did not answer; not synced this run, and asked again the next",
+			why := "memory store not materialized: its directory's listing did not answer; not synced this run, and asked again the next"
+			if errors.Is(err, errMarkerUnanswered) {
+				why = "memory store not materialized: its marker's read did not answer; not synced this run, and asked again the next"
+			}
+			slog.WarnContext(ctx, why,
 				"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "mount_path", ref.MountPath, "err", err)
 		case err != nil:
 			slog.WarnContext(ctx, "memory store not materialized",
@@ -254,6 +259,11 @@ func (m *memoryStores) materialize(ctx context.Context, progress func()) (existi
 // filled the output cap. It says nothing of the directory (unanswered).
 var errListingUnanswered = errors.New("its listing did not reach the output whole")
 
+// errMarkerUnanswered is a store directory's marker read that the image's
+// startup kept from answering (sandbox.ErrImageStartup). It says nothing of
+// the directory either, and is answered as errListingUnanswered is.
+var errMarkerUnanswered = errors.New("its marker's read did not answer")
+
 // materializeStore lands one store, answering with its outcome.
 func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, progress func()) (string, error) {
 	marker := path.Join(ref.MountPath, memsync.MarkerName)
@@ -261,8 +271,17 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 	// The marker's bytes, not its presence: the directory is agent-writable,
 	// and a marker rewritten to name another store is the altered marker
 	// decision 12 stops trusting.
-	if prev, err := m.sb.ReadFile(ctx, marker); err == nil && bytes.Equal(prev, want) {
+	prev, err := m.sb.ReadFile(ctx, marker)
+	if err == nil && bytes.Equal(prev, want) {
 		return memoryOutcomeUnchanged, nil
+	}
+	if errors.Is(err, sandbox.ErrImageStartup) {
+		// The image's startup kept the read from answering (#942): the
+		// directory may be this store's, landed and synced, and a listing that
+		// reads it empty is then no ground for a claim, whose empty baseline
+		// and pull would undo the agent's deletions. As a listing that did
+		// not answer: not landed, not held, and not synced this run.
+		return memoryOutcomeFailed, fmt.Errorf("%w: %w", errMarkerUnanswered, err)
 	}
 	res, framed, err := sandbox.ExecFramed(ctx, m.sb, "memsync", sandbox.ExecRequest{Command: memsync.HashTreeCommand(ref.MountPath)})
 	if err != nil {
@@ -327,7 +346,7 @@ func (m *memoryStores) materializeStore(ctx context.Context, ref memoryRef, prog
 		withdraw := append(memsync.RemoveCommands(ref.MountPath, []string{"/" + memsync.MarkerName}),
 			memsync.RemoveCommands(memorySyncDir, []string{"/" + ref.MemoryStoreID})...)
 		for _, cmd := range withdraw {
-			if res, rerr := sandbox.ExecScript(ctx, m.sb, sandbox.ExecRequest{Command: cmd}); rerr != nil || res.ExitCode != 0 {
+			if res, rerr := sandbox.ExecStatus(ctx, m.sb, "memwithdraw", "the memory marker's withdrawal", sandbox.ExecRequest{Command: cmd}); rerr != nil || res.ExitCode != 0 {
 				slog.WarnContext(ctx, "memory store's marker not withdrawn after a 404",
 					"session_id", m.sessionID, "memory_store_id", ref.MemoryStoreID, "err", rerr, "exit", res.ExitCode)
 			}
@@ -566,6 +585,14 @@ func (m *memoryStores) flushStore(ctx context.Context, st *storeSync, progress f
 func (m *memoryStores) readStore(ctx context.Context, st *storeSync, progress func()) error {
 	mount, id := st.ref.MountPath, st.ref.MemoryStoreID
 	marker, err := m.sb.ReadFile(ctx, path.Join(mount, memsync.MarkerName))
+	if errors.Is(err, sandbox.ErrImageStartup) {
+		// The image's startup kept the read from answering (#942): the marker
+		// may be this store's, another's or none. Plan 67 (decision 7) stops
+		// the store's sync for the pass on that, before it pulls or writes a
+		// baseline. A marker that could not be read for another reason stays
+		// pull-only, as decision 12 makes it.
+		return fmt.Errorf("read the marker: %w", err)
+	}
 	st.markerOK = err == nil && bytes.Equal(marker, memsync.MarkerBytes(id))
 	st.markerAbsent = errors.Is(err, sandbox.ErrFileNotExist)
 
@@ -953,7 +980,11 @@ func refusalKind(err error) string {
 func (m *memoryStores) applyStore(ctx context.Context, st *storeSync) {
 	id := st.ref.MemoryStoreID
 	for _, cmd := range memsync.RemoveCommands(st.ref.MountPath, st.removals) {
-		res, err := sandbox.ExecScript(ctx, m.sb, sandbox.ExecRequest{Command: cmd})
+		// Each removal's status is its answer, read only where its frame
+		// arrived (sandbox.ExecStatus): a 0 an image's startup chose would
+		// write a baseline without files still on disk, which the next
+		// sync pushes back (#942).
+		res, err := sandbox.ExecStatus(ctx, m.sb, "memremove", "the memory deletion", sandbox.ExecRequest{Command: cmd})
 		if err != nil || res.ExitCode != 0 {
 			slog.WarnContext(ctx, "memory deletions not applied; the baseline is kept for the next sync",
 				"session_id", m.sessionID, "memory_store_id", id, "err", err, "exit", res.ExitCode, "stderr", strings.TrimSpace(res.Stderr))

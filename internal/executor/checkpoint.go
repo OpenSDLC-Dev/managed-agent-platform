@@ -432,7 +432,12 @@ func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.I
 		return fmt.Errorf("ship checkpoint: %w", err)
 	}
 	progress()
-	res, err := sandbox.ExecScript(ctx, sb, sandbox.ExecRequest{
+	// The extraction's status is its answer, read only where its frame
+	// arrived (sandbox.ExecStatus): a 0 an image's startup chose would mark
+	// the checkpoint consumed with nothing extracted (#942). The startup's
+	// error fails the restore and leaves the marker as it was, as any failed
+	// restore does.
+	res, err := sandbox.ExecStatus(ctx, sb, "restore", "the checkpoint's extraction", sandbox.ExecRequest{
 		Command: "tar -xf " + restoreTarPath + " -C / && rm -f " + restoreTarPath,
 	})
 	if err != nil {

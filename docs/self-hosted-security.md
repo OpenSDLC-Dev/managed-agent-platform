@@ -222,24 +222,32 @@ A startup file that ends a presence probe's shell before the begin line
 leaves the probe unanswered, whatever status it exits with
 ([#941](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/941)). A
 repository's presence probe then asks through the file API. The same holds
-for the sandbox's own scripts whose exit status is their answer
+for every platform script whose exit status is its answer
 ([#942](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/942)):
-a file write and a batch write's steps on both backends, a file read on
-Kubernetes, and the `grep` tool's two ripgrep install steps. Each takes its
-status only where one stream carries its frame
+
+- a file write and a batch write's steps, on both backends;
+- a file read, on Kubernetes;
+- the `grep` tool's two ripgrep install steps;
+- a checkpoint's restore, the package install, a repository's extraction,
+  and the memory sync's removals.
+
+Each takes its status only where one stream carries its frame
 whole: stdout's, or stderr's under a flood that pushes stdout's out. Where
 neither stream shows the script began, the call fails with an error that
-names the image's startup. A script that began and whose output was lost on
+names the image's startup, and the step fails with it: a tool call answers a
+tool error; the packages are not recorded as installed; a repository lands
+only where a stat then finds its checkout whole; a memory store keeps its
+baseline for the next sync; and a checkpoint stays unconsumed, its restore
+failing the sandbox's setup, which the work item's lease retries — without
+end, on an image whose startup does this to every shell, as for any restore
+that cannot succeed. A memory store whose marker read the startup ended is
+neither landed nor synced that pass. A script that began and whose output was lost on
 its way fails as a transport fault, which a retry can clear; a stdout the cap
 cut is the startup's flood, as below. A refused-write probe on Docker that the
 startup ended answers nothing, so it gives the refusal no reason. On
 Kubernetes, an
 exec's exit record whose reader the startup ended fails with an error that
-names the image's startup, rather than read as no record. The ripgrep
-install's tool error relays only what a failed step printed inside its
-frame. The scripts the
-executor and the worker run themselves still read such a shell's exit status
-as their answer.
+names the image's startup, rather than read as no record.
 The room for what the file prints is 1 MiB a stream around each script: the
 cap an exec keeps of a stream, and the room a Kubernetes read keeps beside
 the file. A file that prints more pushes the scripts' answers out of the
@@ -264,12 +272,17 @@ last one read, which a banner around them does not displace; a startup
 printing those exact lines, the platform's own markers verbatim, could,
 misreporting a write in its own sandbox. One printing past the cap pushes
 them out too: on Docker a shed's report of what it left is then empty, and
-a failed write's temporaries are not emptied. What a few scripts print is relayed,
-not parsed, banner and all: the package install's output, as the session
-error's message; the stderr of a checkpoint's restore and of a repository's
-extraction, in the error each fails with; and the memory sync's removals', in
-the warning when they fail. The `bash` tool's output is the model's own
-command's, which the startup file reaches as it reaches any command.
+a failed write's temporaries are not emptied. What a few scripts print is
+relayed, not parsed: the package install's output, as the session error's
+message; the stderr of a checkpoint's restore and of a repository's
+extraction, in the error each fails with; the memory sync's removals', in the
+warning when they fail; and a failed ripgrep install step's, in its tool
+error. It is what the script printed inside its frame, or, of a run its
+deadline stopped first, after the frame opened. Only a memory removal that
+got no answer — the startup kept it from answering, or its output was lost
+on its way — logs its warning with what the exec printed, banner and all.
+The `bash` tool's output is the model's own command's, which the startup
+file reaches as it reaches any command.
 What the file *changes* still applies — a function an image exports under
 the name of a command the scripts call answers for that command — and one
 channel prints inside the frame, where no line can keep it out: a library an

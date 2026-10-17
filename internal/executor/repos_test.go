@@ -2115,3 +2115,54 @@ func sbPaths(sb *fakeSandbox) []string {
 	}
 	return out
 }
+
+// lostExtraction is a sandbox whose extraction runs and then answers as an
+// exec whose streams were lost after the script's begin line
+// (sandbox.ErrOutputLost): its status came, its frame did not.
+type lostExtraction struct{ *fakeSandbox }
+
+func (s lostExtraction) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	res, err := s.fakeSandbox.Exec(ctx, req)
+	_, f, framed := sandboxtest.Unwrap(req.Command)
+	if err != nil || !framed || !strings.Contains(req.Command, " && tar -xf ") {
+		return res, err
+	}
+	begin, _ := f.Lines()
+	return sandbox.ExecResult{Stdout: begin, Stderr: begin, ExitCode: 0}, nil
+}
+
+// TestRepoExtractionWhoseAnswerWasLostIsReadFromItsCheckout: an extraction
+// whose answer was lost after it began is read, as one the image's startup
+// kept from answering is, from the stat of the .git it lands: present, the
+// checkout landed; absent, the extraction failed. Failed outright, a
+// checkout that landed whole was reported to the client as a failed clone.
+func TestRepoExtractionWhoseAnswerWasLostIsReadFromItsCheckout(t *testing.T) {
+	for _, landed := range []bool{true, false} {
+		sb := &fakeSandbox{files: map[string]string{}}
+		if landed {
+			sb.files["/opt/repo/.git"] = ""
+		}
+		err := extractRepo(context.Background(), lostExtraction{sb}, "/opt/repo", "/tmp/repo.tar", "", false)
+		if landed && err != nil {
+			t.Errorf("landed: extractRepo = %v; want the checkout counted", err)
+		}
+		if !landed && (!errors.Is(err, errExtraction) || !errors.Is(err, sandbox.ErrOutputLost)) {
+			t.Errorf("not landed: extractRepo = %v; want the extraction's failure, the lost answer named", err)
+		}
+	}
+}
+
+// TestRepoExtractionTakesNoStatusAStartupChose: an extraction whose shell the
+// image's startup ended before it began lands nothing, whatever status the
+// startup chose, and fails as the extraction, naming the image's startup.
+// Read as the extraction's own, a 0 counted the repository as landed with no
+// checkout, and a 75 refused the mount as occupied (#942).
+func TestRepoExtractionTakesNoStatusAStartupChose(t *testing.T) {
+	for _, status := range []int{0, occupiedStatus} {
+		sb := &fakeSandbox{files: map[string]string{}, startupEnds: map[string]int{" && tar -xf ": status}}
+		err := extractRepo(context.Background(), sb, "/opt/repo", "/tmp/repo.tar", "", false)
+		if !errors.Is(err, errExtraction) || !errors.Is(err, sandbox.ErrImageStartup) || errors.Is(err, errMountOccupied) {
+			t.Errorf("status %d: extractRepo = %v; want the extraction's failure, naming the image's startup", status, err)
+		}
+	}
+}

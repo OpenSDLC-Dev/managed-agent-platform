@@ -617,8 +617,9 @@ func TestFrameUnframeStatus(t *testing.T) {
 // its status is then the script's own. Elsewhere it answers why no answer came
 // (Unanswered), and Exec's own error as Exec returned it — and a run its
 // deadline stopped with no error, for the caller to answer the timeout before
-// any status: read inside its frame where the frame arrived whole, and as Exec
-// gave it where it did not, killed before or after its begin line.
+// any status: read inside its frame where the frame arrived whole, and
+// elsewhere as what followed its begin line, nothing where it never began, so
+// no banner and no frame line comes back.
 func TestExecStatusAnswersOnlyAFramedStatus(t *testing.T) {
 	var got sandbox.ExecRequest
 	sb := execOnly{exec: func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
@@ -659,15 +660,15 @@ func TestExecStatusAnswersOnlyAFramedStatus(t *testing.T) {
 		return killed, nil
 	}
 	if res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x", Timeout: time.Second}); err != nil ||
-		res != killed {
-		t.Errorf("ExecStatus over a run its deadline stopped after its begin line = %+v, %v; want the run as Exec gave it", res, err)
+		res != (sandbox.ExecResult{Stdout: "partial", ExitCode: 137, TimedOut: true}) {
+		t.Errorf("ExecStatus over a run its deadline stopped after its begin line = %+v, %v (Exec gave %+v); want what followed the begin line", res, err, killed)
 	}
 	sb.exec = func(sandbox.ExecRequest) (sandbox.ExecResult, error) {
 		return sandbox.ExecResult{Stdout: "welcome", ExitCode: 137, TimedOut: true}, nil
 	}
 	if res, err := sandbox.ExecStatus(context.Background(), sb, "probe", "the probe of /w", sandbox.ExecRequest{Command: "x", Timeout: time.Second}); err != nil ||
-		res != (sandbox.ExecResult{Stdout: "welcome", ExitCode: 137, TimedOut: true}) {
-		t.Errorf("ExecStatus over a run its deadline stopped before its begin line = %+v, %v; want the run as Exec gave it", res, err)
+		res != (sandbox.ExecResult{ExitCode: 137, TimedOut: true}) {
+		t.Errorf("ExecStatus over a run its deadline stopped before its begin line = %+v, %v; want no output: the banner is not the script's", res, err)
 	}
 	sb.exec = func(req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 		_, f, _ := sandboxtest.Unwrap(req.Command)

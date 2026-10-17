@@ -384,9 +384,12 @@ func ExecFramed(ctx context.Context, sb Sandbox, label string, req ExecRequest) 
 // it (Answer), so a status an image's startup chose is never read as the
 // script's (#942). Exec's own error is returned as Exec returned it. A run
 // its deadline stopped (TimedOut, which is authoritative whatever status came
-// with it) comes back with no error, its output read as UnframeStatus reads
-// it where a frame arrived whole: a caller that sets req.Timeout answers
-// TimedOut before any status.
+// with it) comes back with no error, for a caller that sets req.Timeout to
+// answer TimedOut before any status. Its output is what the script printed:
+// inside its frame where a frame arrived whole (UnframeStatus), and
+// elsewhere what each stream carries after its begin line, as a stream cut
+// short is read — nothing where the script never began. Neither what the
+// image's startup printed before it nor the frame's own lines come back.
 func ExecStatus(ctx context.Context, sb Sandbox, label, what string, req ExecRequest) (ExecResult, error) {
 	f := NewFrame(label)
 	req.Command = f.Wrap(req.Command)
@@ -395,8 +398,12 @@ func ExecStatus(ctx context.Context, sb Sandbox, label, what string, req ExecReq
 		return res, err
 	}
 	if res.TimedOut {
-		out, _ := f.UnframeStatus(res)
-		return out, nil
+		if out, ok := f.UnframeStatus(res); ok {
+			return out, nil
+		}
+		res.Stdout, _, _ = f.Cut(res.Stdout, true)
+		res.Stderr, _, _ = f.Cut(res.Stderr, true)
+		return res, nil
 	}
 	return f.Answer(what, res)
 }
