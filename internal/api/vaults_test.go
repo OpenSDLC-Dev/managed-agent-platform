@@ -850,6 +850,7 @@ func TestCredentialUpdateErrors(t *testing.T) {
 	envID := createCredential(t, s, vaultID, envVarAuth("K"))["id"].(string)
 	oauthID := createCredential(t, s, vaultID, map[string]any{
 		"type": "mcp_oauth", "mcp_server_url": "https://m.example.com", "access_token": "at",
+		"expires_at": "2099-01-01T00:00:00Z",
 		"refresh": map[string]any{"client_id": "c", "refresh_token": "rt",
 			"token_endpoint":      "https://a.example.com/t",
 			"token_endpoint_auth": map[string]any{"type": "none"}},
@@ -894,7 +895,7 @@ func TestCredentialUpdateErrors(t *testing.T) {
 		"auth": map[string]any{"type": "mcp_oauth", "expires_at": "2020-01-01T00:00:00Z"}})
 	wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", "auth.expires_at must be in the future.")
 	if status, got := s.do("GET", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, nil); status != http.StatusOK ||
-		got["auth"].(map[string]any)["expires_at"] != nil {
+		got["auth"].(map[string]any)["expires_at"] != "2099-01-01T00:00:00Z" {
 		t.Fatalf("a refused update changed the credential: status %d (%v)", status, got)
 	}
 	// display_name too long on update.
