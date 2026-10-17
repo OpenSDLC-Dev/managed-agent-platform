@@ -225,9 +225,14 @@ jobs:
               # filter out. The BODY is searched as well as the comments — the
               # first report of a run is the issue body, so checking only
               # comments would let the next invocation restate it verbatim.
+              # Only this workflow's comments count: anyone can comment on a
+              # public issue, and a copied marker would silence the next report.
+              # The body is trusted, because the issue is found by its label,
+              # which only someone with triage access can apply.
               local said
               said="$(retry gh issue view "$num" --repo "$REPO" --json body,comments \
-                --jq '([.body] + [.comments[].body]) | map(select(contains(env.MARK))) | length')"
+                --jq '([.body] + [.comments[] | select(.author.login == "github-actions") | .body])
+                      | map(select(contains(env.MARK))) | length')"
               if [ "$said" != "0" ]; then echo "already reported $RUN_ID on #$num"; return; fi
               gh issue comment "$num" --repo "$REPO" --body "$body"
               echo "commented on #$num"
