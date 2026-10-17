@@ -898,11 +898,14 @@ func TestCredentialUpdateErrors(t *testing.T) {
 	}
 	// A past expires_at is no error on update, unlike on create (#589): the
 	// console resends the stored expiry with every save, and a stored expiry
-	// passes with time. This is the shape of a rename after the token's hour.
-	status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, map[string]any{
-		"display_name": "renamed", "auth": map[string]any{"type": "mcp_oauth", "expires_at": "2020-01-01T00:00:00Z"}})
-	if status != http.StatusOK || resp["auth"].(map[string]any)["expires_at"] != "2020-01-01T00:00:00Z" {
-		t.Fatalf("an update resending a past expiry: status %d (%v), want 200 storing it", status, resp)
+	// passes with time. A rename beside a past expiry is the body it sends
+	// once the token's hour is up.
+	if status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, map[string]any{
+		"display_name": "renamed", "auth": map[string]any{"type": "mcp_oauth", "expires_at": "2020-01-01T00:00:00Z"}}); status != http.StatusOK {
+		t.Fatalf("an update with a past expiry: status %d (%v), want 200", status, resp)
+	}
+	if _, got := s.do("GET", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, nil); got["auth"].(map[string]any)["expires_at"] != "2020-01-01T00:00:00Z" {
+		t.Fatalf("an update with a past expiry did not store it: %v", got)
 	}
 	// display_name too long on update.
 	if status, _ := s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+envID, map[string]any{
