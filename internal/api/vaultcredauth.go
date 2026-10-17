@@ -131,6 +131,9 @@ func parseMCPOAuthCreate(obj map[string]json.RawMessage) (*credAuth, error) {
 	if doc.ExpiresAt, err = timeField(obj, "expires_at"); err != nil {
 		return nil, err
 	}
+	if err := requireFutureExpiry(doc.ExpiresAt); err != nil {
+		return nil, err
+	}
 	secrets := map[string]string{"access_token": accessToken}
 	if refreshRaw, ok := obj["refresh"]; ok && !isNull(refreshRaw) {
 		refresh, refreshSecrets, err := parseRefreshCreate(refreshRaw)
@@ -445,6 +448,19 @@ func timeField(obj map[string]json.RawMessage, key string) (*time.Time, error) {
 	return &t, nil
 }
 
+// requireFutureExpiry refuses an mcp_oauth expires_at that is already past, in
+// the reference's words (2026-09-03 batch2 `cred.create.oauth-te-*`; #589). A
+// credential stored already expired is an input nobody can have meant, and
+// accepting it only buys a refresh on the first dial. The update applies the
+// same rule by inference: only the create was recorded, and an update that
+// could backdate the field would store what the create refuses.
+func requireFutureExpiry(t *time.Time) error {
+	if t != nil && !t.After(time.Now()) {
+		return errInvalid("auth.expires_at must be in the future.")
+	}
+	return nil
+}
+
 // optionalStringPtr parses an optional string field; absent and explicit null
 // both yield nil (the field renders null).
 func optionalStringPtr(obj map[string]json.RawMessage, key string) (*string, error) {
@@ -537,6 +553,9 @@ func applyMCPOAuthUpdate(obj map[string]json.RawMessage, existingDoc []byte, sec
 		} else {
 			t, err := timeField(obj, "expires_at")
 			if err != nil {
+				return nil, err
+			}
+			if err := requireFutureExpiry(t); err != nil {
 				return nil, err
 			}
 			doc.ExpiresAt = t
