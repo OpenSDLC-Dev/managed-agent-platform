@@ -9,6 +9,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -255,6 +256,16 @@ func (s *stream) Close() error {
 	return err
 }
 
+// stopNote is provider.StopNote over what message_delta has reported so far,
+// for an error that ends the stream early.
+func (s *stream) stopNote() string {
+	var usage *domain.ModelUsage
+	if s.sawUsage {
+		usage = &s.usage
+	}
+	return provider.StopNote(s.stopReason, usage)
+}
+
 func (s *stream) Next() bool {
 	if len(s.pending) > 0 {
 		s.cur, s.pending = s.pending[0], s.pending[1:]
@@ -399,7 +410,8 @@ func (s *stream) Next() bool {
 
 		case "message_stop":
 			if s.inTool {
-				s.err = fmt.Errorf("message_stop with tool_use block %d still open", s.toolIndex)
+				s.err = fmt.Errorf("message_stop with tool_use block %d still open (%s)",
+					s.toolIndex, s.stopNote())
 				return false
 			}
 			if s.stopReason == "" {
@@ -425,8 +437,11 @@ func (s *stream) Next() bool {
 	// success: callers must never mistake it for a turn that merely
 	// produced no done chunk.
 	if err == nil {
-		err = fmt.Errorf("model stream ended before message_stop")
+		err = errors.New("model stream ended before message_stop")
 	}
+	// Either way the stream ended early, and what message_delta had said by
+	// then tells a turn the output cap cut off from a dropped stream (#951).
+	err = fmt.Errorf("%w (%s)", err, s.stopNote())
 	// Last, so an endpoint that went silent is named as one: what the aborted
 	// read reports is a bare cancellation either way.
 	s.err = s.guard.Cause(err)

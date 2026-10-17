@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -330,6 +332,41 @@ func mentionsOutsideIndex(memories map[string]string, needle string) []string {
 	return paths
 }
 
+// pathToken is a run of the characters a memory path is written in, letters
+// and digits in any script included.
+var pathToken = regexp.MustCompile(`[\p{L}\p{N}_./-]+`)
+
+// tombstoneNamesSuccessor reports whether the in-place dream's tombstone names
+// what replaced the memory it retires: the finance app itself, or a memory in
+// the store that states finance.internal. A caller can follow either. The
+// nightly model often writes the second, "Superseded by facts/expenses.md.",
+// which a check for the word alone failed (#951). A path counts only whole and
+// in the case it is stored in, read from the store root or, like a relative
+// link, from the retired memory's directory. The index never counts: it
+// mentions the new place only by describing the memory that states it.
+func tombstoneNamesSuccessor(tomb, retiredPath string, memories map[string]string) bool {
+	if strings.Contains(strings.ToLower(tomb), "finance") {
+		return true
+	}
+	successors := mentionsOutsideIndex(memories, "finance.internal")
+	for _, tok := range pathToken.FindAllString(tomb, -1) {
+		tok = strings.TrimRight(tok, ".")
+		dirs := []string{"/", path.Dir(retiredPath)}
+		if strings.HasPrefix(tok, "/") {
+			dirs = dirs[:1]
+		}
+		for _, dir := range dirs {
+			// Joined below the root rather than at it, so a path that climbs
+			// out of the store shows as one instead of being clamped back in.
+			rel := path.Join(strings.TrimPrefix(dir, "/"), strings.TrimPrefix(tok, "/"))
+			if rel != ".." && !strings.HasPrefix(rel, "../") && slices.Contains(successors, "/"+rel) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // mentions counts the memories whose content contains needle, case-folded.
 func mentions(memories map[string]string, needle string) []string {
 	var paths []string
@@ -533,8 +570,9 @@ func TestDreamPipeline(t *testing.T) {
 // TestDreamPipelineHundred is the bound (plan 41 §7, §9): a hundred
 // transcripts through one dream, which is what the batch size and the
 // live-thread cap were sized for. It asserts what the seeded case cannot —
-// that a hundred transcripts complete inside the timeout, and that they arrive
-// as thirteen digest threads.
+// that a hundred transcripts complete inside the timeout, and that they fan
+// out into at least thirteen digest threads, more when the coordinator
+// rebuilds missing digests.
 //
 // It costs real money and real minutes. Measured on the first successful run
 // (2026-09-06, claude-haiku-4-5): driving the hundred transcripts took 3m4s and
@@ -625,9 +663,24 @@ func TestDreamPipelineHundred(t *testing.T) {
 		t.Fatalf("dream %s ended %v: %v (pipeline session %v)",
 			dreamID, dream["status"], dream["error"], dream["session_id"])
 	}
-	if threads != batches {
-		t.Errorf("the pipeline session %s ran %d digest threads, want %d (%d transcripts in batches of %d)",
+	// One thread per batch at least. Once the threads report, stage 2 has
+	// the coordinator check every digest on disk and rebuild a missing one,
+	// by spawning that batch again or reading it itself, so a sound dream can
+	// run more threads than batches (#951). No upper bound is asserted here:
+	// the platform's live-thread cap (internal/brain/delegate.go
+	// maxLiveThreads, the primary included) already holds a dream to 24
+	// children, because a child that has reported goes idle and keeps its
+	// slot until an archive the dream never makes. Any tighter number would
+	// be a guess at how many rebuilds a sound dream needs. The count is all this test checks: it cannot show
+	// which batch a thread read, and the digests are in the sandbox's
+	// scratch, which it cannot read.
+	switch {
+	case threads < batches:
+		t.Errorf("the pipeline session %s ran %d digest threads, want at least %d (%d transcripts in batches of %d)",
 			sessionID, threads, batches, transcripts, batch)
+	case threads > batches:
+		t.Logf("the pipeline session %s ran %d digest threads for %d batches, %d more than the batches",
+			sessionID, threads, batches, threads-batches)
 	}
 	after := s.storeMemories(t, outputStoreID(t, dream))
 	if _, ok := after["/MEMORY.md"]; !ok {
@@ -713,10 +766,11 @@ func TestDreamPipelineInPlace(t *testing.T) {
 			retiredPath, memoryPaths(after))
 	}
 	// And it is a tombstone rather than the fact it was: the portal no longer
-	// reads as where expenses are filed, and the successor is named. Emptying
-	// the file is not tombstoning it — that is a deletion this session could
-	// not make, spelled a different way — so the empty case is a failure here
-	// rather than a case to skip.
+	// reads as where expenses are filed, and the successor is named, as the
+	// place or as the memory that states it. Emptying the file is not
+	// tombstoning it — that is a deletion this session could not make, spelled
+	// a different way — so the empty case is a failure here rather than a case
+	// to skip.
 	tomb := after[retiredPath]
 	switch {
 	case strings.TrimSpace(tomb) == "":
@@ -724,7 +778,7 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	case tomb == before[retiredPath]:
 		t.Errorf("%s is unchanged, so the transcript that ended it changed nothing:\n%s",
 			retiredPath, tomb)
-	case !strings.Contains(strings.ToLower(tomb), "finance"):
+	case !tombstoneNamesSuccessor(tomb, retiredPath, after):
 		t.Errorf("%s does not name its successor:\n%s", retiredPath, tomb)
 	}
 	// The successor fact reached the store, in the tombstone or beside it.

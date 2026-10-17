@@ -252,54 +252,55 @@ func TestNULOnlyThinkingDeltaRecordsNoFirstToken(t *testing.T) {
 	}
 }
 
-// The preview lane must strip too: sanitization sits ahead of the delta
-// broadcast, so a live SSE subscriber and the stored event read the same
-// text. The all-NUL control proves no preview opens at all. The drain is
-// bounded by a sentinel frame, not a Wake: wakes are coalesced and the
-// listener's coverage-healing wakeAll buffers one at LISTEN time, so a
-// single Wake can be satisfied before any of the turn's notifications have
-// been dispatched (#294). The sentinel's NOTIFY autocommits after the
-// settle, and the one listening connection delivers in commit order, so
-// every frame the turn broadcast is buffered before the sentinel arrives —
-// including none, which the all-NUL control needs to be able to prove.
-func TestPreviewFramesCarryOnlySanitizedText(t *testing.T) {
-	drain := func(t *testing.T, h *harness) []map[string]any {
-		t.Helper()
-		broker := events.NewBroker(h.pool)
-		sub := broker.Subscribe(h.sessionID)
-		t.Cleanup(sub.Close)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := broker.Ready(ctx); err != nil {
-			t.Fatalf("broker never became ready: %v", err)
-		}
-		h.runOnce(t)
-		// A fresh deadline: the outer ctx has been paying for Ready and the
-		// whole turn, and the sentinel publish must not inherit that debt.
-		pubCtx, pubCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer pubCancel()
-		if err := h.log.PublishEventFrame(pubCtx, h.sessionID,
-			map[string]any{"type": "drain_sentinel"}); err != nil {
-			t.Fatalf("publish drain sentinel: %v", err)
-		}
-		var frames []map[string]any
-		for {
-			select {
-			case raw := <-sub.Frames():
-				var f map[string]any
-				if err := json.Unmarshal(raw, &f); err != nil {
-					t.Fatalf("frame %s: %v", raw, err)
-				}
-				if f["type"] == "drain_sentinel" {
-					return frames
-				}
-				frames = append(frames, f)
-			case <-time.After(10 * time.Second):
-				t.Fatal("the drain sentinel never arrived on the frames lane")
+// drainFrames runs one turn and returns every frame it broadcast on the
+// session's frames lane. The drain is bounded by a sentinel frame, not a Wake:
+// wakes are coalesced and the listener's coverage-healing wakeAll buffers one
+// at LISTEN time, so a single Wake can be satisfied before any of the turn's
+// notifications have been dispatched (#294). The sentinel's NOTIFY autocommits
+// after the settle, and the one listening connection delivers in commit order,
+// so every frame the turn broadcast is buffered before the sentinel arrives —
+// including none, which a test that wants no frames needs to be able to prove.
+func drainFrames(t *testing.T, h *harness) []map[string]any {
+	t.Helper()
+	broker := events.NewBroker(h.pool)
+	sub := broker.Subscribe(h.sessionID)
+	t.Cleanup(sub.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := broker.Ready(ctx); err != nil {
+		t.Fatalf("broker never became ready: %v", err)
+	}
+	h.runOnce(t)
+	// A fresh deadline: the outer ctx has been paying for Ready and the
+	// whole turn, and the sentinel publish must not inherit that debt.
+	pubCtx, pubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pubCancel()
+	if err := h.log.PublishEventFrame(pubCtx, h.sessionID,
+		map[string]any{"type": "drain_sentinel"}); err != nil {
+		t.Fatalf("publish drain sentinel: %v", err)
+	}
+	var frames []map[string]any
+	for {
+		select {
+		case raw := <-sub.Frames():
+			var f map[string]any
+			if err := json.Unmarshal(raw, &f); err != nil {
+				t.Fatalf("frame %s: %v", raw, err)
 			}
+			if f["type"] == "drain_sentinel" {
+				return frames
+			}
+			frames = append(frames, f)
+		case <-time.After(10 * time.Second):
+			t.Fatal("the drain sentinel never arrived on the frames lane")
 		}
 	}
+}
 
+// The preview lane must strip too: sanitization sits ahead of the delta
+// broadcast, so a live SSE subscriber and the stored event read the same
+// text. The all-NUL control proves no preview opens at all.
+func TestPreviewFramesCarryOnlySanitizedText(t *testing.T) {
 	t.Run("delta frames carry the stripped text", func(t *testing.T) {
 		h := newHarness(t, [][]provider.Chunk{{
 			textChunk(0, "he\x00l"), textChunk(0, "lo"),
@@ -307,7 +308,7 @@ func TestPreviewFramesCarryOnlySanitizedText(t *testing.T) {
 		}}, nil)
 		h.wake(t, "hi")
 		var streamed string
-		for _, f := range drain(t, h) {
+		for _, f := range drainFrames(t, h) {
 			if f["type"] != "event_delta" {
 				continue
 			}
@@ -328,7 +329,7 @@ func TestPreviewFramesCarryOnlySanitizedText(t *testing.T) {
 			done("end_turn", 1),
 		}}, nil)
 		h.wake(t, "hi")
-		if frames := drain(t, h); len(frames) != 0 {
+		if frames := drainFrames(t, h); len(frames) != 0 {
 			t.Errorf("an all-NUL delta broadcast %d frame(s): %v", len(frames), frames)
 		}
 	})
