@@ -194,7 +194,7 @@ func (d *delegate) run(ctx context.Context, tx pgx.Tx, calls []delegatedCall) er
 		switch {
 		case call.unoffered:
 			text = unknownToolAnswer(call.name)
-		case call.cut != "" && d.wrongRole(call.name) == "":
+		case call.cut != "" && !(call.six && d.wrongRole(call.name) != ""):
 			text = cutCallAnswer(call.cut)
 		}
 		if text != "" {
@@ -787,7 +787,7 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		genuine := false
 		for _, dc := range delegated {
 			switch {
-			case dc.unoffered || d.wrongRole(dc.name) != "":
+			case dc.unoffered || (dc.six && d.wrongRole(dc.name) != ""):
 			case dc.cut != "":
 				d.cut = true
 			default:
@@ -805,7 +805,9 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		// without it a parking end_turn would hide the remaining external wait.
 		// Mixed turns use the shared tool flow, which advertises requires_action
 		// or schedules the next platform call before the model can continue.
-		park := d.out.park && !gated && settlementOnly
+		// Nor does a wait park beside a call the output cap cut off: the model
+		// has that call to make again, so its next turn is chained (#951).
+		park := d.out.park && !gated && settlementOnly && !d.cut
 		chain := !gated && settlementOnly && !park && !d.out.ended
 		idle := !gated && (park || d.out.ended)
 		// A chain the settlement took on its own answers is the one nobody

@@ -1535,6 +1535,21 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 			[]provider.Chunk{call("toolu_a", `{"query":"batch 8"}`), call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)}, 1,
 			"(stop_reason max_tokens, 8192 output tokens)",
 		},
+		// A delta with no content after the call is no later block.
+		"an empty delta after the cut": {
+			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), textChunk(1, ""), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
+		"an empty delta after a call cut before any input": {
+			[]provider.Chunk{call("toolu_x", `{}`), textChunk(1, ""), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
+		// Text after an earlier call does not count against the last one.
+		"text between a complete call and the cut": {
+			[]provider.Chunk{call("toolu_a", `{"query":"batch 8"}`), textChunk(1, "and the next batch"),
+				call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)}, 1,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{tc.chunks}, nil)

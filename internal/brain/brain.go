@@ -798,6 +798,7 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		// the prefixed name the model called, as an unoffered name does:
 		// replay rebuilds an agent.tool_use from its name as it stands.
 		cut := offered && turn.cut && i == len(turn.toolUses)-1
+		six := c.settlement
 		if !offered || cut {
 			// A name the model was not offered: not a declared custom tool (a
 			// client would answer that one), not a platform tool this thread's
@@ -863,7 +864,7 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		}
 		if c.settlement {
 			// Inline settlement uses the same preallocated event identity.
-			dc := delegatedCall{eventID: id, name: tu.Name, input: tu.Input, unoffered: !offered}
+			dc := delegatedCall{eventID: id, name: tu.Name, input: tu.Input, unoffered: !offered, six: six}
 			if cut {
 				dc.cut = provider.StopNote(turn.stopReason, turn.usage)
 			}
@@ -896,6 +897,11 @@ type delegatedCall struct {
 	// cut is set for a call the output cap cut off: how the stream ended,
 	// which d.run answers it with instead of running it (#951).
 	cut string
+	// six marks a call to one of the six delegation tools, as this thread's
+	// classes resolved the name. Only those meet the role gate: a cut call to
+	// an agent's own custom tool that shares a name with the other half's is
+	// still the agent's own.
+	six bool
 }
 
 // escalate picks the work kind a turn's whole set of platform calls settles to.

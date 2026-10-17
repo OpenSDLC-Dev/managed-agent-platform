@@ -517,6 +517,63 @@ func TestARunOfCutCallsIsStoppedByTheChainCap(t *testing.T) {
 	}
 }
 
+// A child may own a custom tool that shares a name with the coordinator's half
+// (TestACustomToolNamedLikeTheOtherHalfKeepsItsName). Cut, it is the child's
+// own call: answered as cut, not by the role gate, and a report beside it is
+// refused as it is beside any cut call the child could run.
+func TestACutCustomToolNamedLikeTheOtherHalfIsTheChildsOwn(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
+		toolCall("t1", "submit_result", `{"result":"done"}`),
+		toolCall("t2", "create_agent", `{"name":"report.m`),
+		done("max_tokens", 8192),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET agent = jsonb_set(agent, '{tools}',
+		   '[{"type":"custom","name":"create_agent","description":"d","input_schema":{"type":"object"}}]'::jsonb)
+		 WHERE id = $1`, child.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 2 || !got[0].isErr || !strings.Contains(got[0].text, "after your tool calls") ||
+		!got[1].isErr || !strings.Contains(got[1].text, "cut off") {
+		t.Fatalf("answers = %+v, want the report refused and the custom call answered as cut", got)
+	}
+	if n := h.countType(t, "agent.thread_message_sent"); n != 0 {
+		t.Errorf("a refused report still messaged the coordinator")
+	}
+}
+
+// A wait beside a cut call does not park the coordinator: the cut spawn is
+// still to be made, so the next turn is chained rather than left until some
+// child reports.
+func TestAWaitBesideACutCallDoesNotPark(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"digest batch 12"}`),
+		toolCall("t2", "wait_for_agents", `{}`),
+		toolCall("t3", "create_agent", `{"agent_name":"researcher","message":"digest ba`),
+		done("max_tokens", 8192),
+	}}, nil)
+	h.roster(t, "researcher")
+	h.wake(t, "spawn and wait")
+	h.runOnce(t)
+
+	if kids := h.children(t); len(kids) != 1 {
+		t.Fatalf("children = %v, want the one the complete call spawned", kids)
+	}
+	if got := h.answers(t); len(got) != 3 || !got[2].isErr || !strings.Contains(got[2].text, "cut off") {
+		t.Fatalf("answers = %+v, want the cut spawn answered", got)
+	}
+	if s := h.threadStatus(t, domain.PrimaryThreadID(h.sessionID)); s != "running" {
+		t.Errorf("coordinator = %q, want running with its next turn queued, not parked", s)
+	}
+	if n := h.liveTurns(t, ""); n != 1 {
+		t.Errorf("coordinator turns queued = %d, want 1", n)
+	}
+}
+
 // The dream coordinator's failure in #951: a reply spawning children whose
 // last create_agent the output cap cut off. The complete call spawns its
 // child, the cut one is answered with how the stream ended rather than run

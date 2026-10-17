@@ -918,38 +918,6 @@ func TestGenerateEndsAToolBlockOpenAtMessageStop(t *testing.T) {
 	}
 }
 
-// A block a later block passed leaves nothing behind once it closes: the next
-// tool block, cut at the cap, still ends at message_stop.
-func TestGenerateAPassedBlockDoesNotMarkTheNextOne(t *testing.T) {
-	p := start(t, &fakeServer{sse: []string{
-		`{"type":"message_start","message":{"id":"msg_6","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
-		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}}`,
-		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"a\"}"}}`,
-		`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
-		`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"between"}}`,
-		`{"type":"content_block_stop","index":0}`,
-		`{"type":"content_block_stop","index":1}`,
-		`{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_2","name":"create_agent","input":{}}}`,
-		`{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"agent_name\":\"dre"}}`,
-		`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
-		`{"type":"message_stop"}`,
-	}})
-	stream, err := p.Generate(context.Background(), provider.Request{
-		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"spawn them"`)}},
-	})
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-	got := collect(t, stream)
-	last := got[len(got)-2]
-	if last.Kind != provider.KindToolUse || last.Index != 2 || string(last.ToolUse.Input) != `{"agent_name":"dre` {
-		t.Errorf("chunk before done = %+v, want the cut block 2 as it streamed", last)
-	}
-	if done := got[len(got)-1]; done.Kind != provider.KindDone || done.StopReason != "max_tokens" {
-		t.Errorf("last chunk = %+v, want done max_tokens", done)
-	}
-}
-
 // A stream that ends with a tool block open, and without what message_stop
 // would have settled, fails. The error says how far the stream got: the stop
 // reason and the output count, when message_delta sent them (#951).
@@ -977,8 +945,8 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 			},
 			[]string{"message_stop with tool_use block 0 still open (stop_reason end_turn, 50 output tokens)"},
 		},
-		// The cap cuts the response's last block, so a block that began
-		// after the open one leaves it unexplained even under max_tokens.
+		// Blocks run one at a time, so a block that begins, or streams,
+		// inside the open one fails the stream before message_stop.
 		"a later block began": {
 			[]string{
 				`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
@@ -986,7 +954,7 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
 				`{"type":"message_stop"}`,
 			},
-			[]string{"message_stop with tool_use block 0 still open (stop_reason max_tokens, 8192 output tokens)"},
+			[]string{"text block 1 started before tool_use block 0 closed"},
 		},
 		"a later block streamed": {
 			[]string{
@@ -994,7 +962,7 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
 				`{"type":"message_stop"}`,
 			},
-			[]string{"message_stop with tool_use block 0 still open (stop_reason max_tokens, 8192 output tokens)"},
+			[]string{"delta for block 1 before tool_use block 0 closed"},
 		},
 		// A stream that drops before message_stop says how far it got,
 		// whether it ends cleanly or on an error.

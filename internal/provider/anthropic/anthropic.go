@@ -223,10 +223,6 @@ type stream struct {
 	toolJSON  []byte
 	toolSeed  json.RawMessage // complete input carried on content_block_start
 	inTool    bool
-	// toolPassed is set when a later block began, or streamed, while the
-	// tool block was still open. A cut ends the response's last block, so
-	// message_stop cannot end this one as a cut (#951).
-	toolPassed bool
 
 	usage domain.ModelUsage
 	// sawUsage records that a usage object actually arrived on the wire, so
@@ -318,7 +314,13 @@ func (s *stream) Next() bool {
 
 		case "content_block_start":
 			if s.inTool && ev.ContentBlock.Type != "tool_use" {
-				s.toolPassed = true
+				// Blocks run one at a time. One that began inside an open
+				// tool block would be emitted ahead of it, and the brain
+				// reads the order to tell a call the output cap cut off
+				// (#951), so a malformed stream fails here as well.
+				s.err = fmt.Errorf("%s block %d started before tool_use block %d closed",
+					ev.ContentBlock.Type, ev.Index, s.toolIndex)
+				return false
 			}
 			switch ev.ContentBlock.Type {
 			case "redacted_thinking":
@@ -362,7 +364,6 @@ func (s *stream) Next() bool {
 				s.toolName = ev.ContentBlock.Name
 				s.toolJSON = s.toolJSON[:0]
 				s.toolSeed = nil
-				s.toolPassed = false
 				// The official protocol starts tool blocks with input {}
 				// and streams the JSON via deltas, but other
 				// Anthropic-protocol endpoints may put the complete input
@@ -377,7 +378,8 @@ func (s *stream) Next() bool {
 
 		case "content_block_delta":
 			if s.inTool && ev.Index != s.toolIndex {
-				s.toolPassed = true
+				s.err = fmt.Errorf("delta for block %d before tool_use block %d closed", ev.Index, s.toolIndex)
+				return false
 			}
 			switch ev.Delta.Type {
 			case "text_delta":
@@ -431,9 +433,8 @@ func (s *stream) Next() bool {
 			// treats so — message_stop ends the block as surely: it goes out
 			// as it stands, ahead of the done chunk, and the brain reads its
 			// unfinished input as a cut one. Any other stop reason, or none,
-			// leaves an open block unexplained, and so does a later block
-			// that began while it was open: the cut ends the last block.
-			if s.inTool && (!provider.CutOff(s.stopReason) || s.toolPassed) {
+			// leaves an open block unexplained.
+			if s.inTool && !provider.CutOff(s.stopReason) {
 				s.err = fmt.Errorf("message_stop with tool_use block %d still open (%s)",
 					s.toolIndex, s.stopNote())
 				return false
