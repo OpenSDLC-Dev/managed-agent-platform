@@ -877,6 +877,52 @@ func TestGenerateTruncatedStream(t *testing.T) {
 	}
 }
 
+// An endpoint that stops with a tool block still open fails the stream. This
+// is the output cap reached mid-input on an endpoint that sends no
+// content_block_stop for the cut block, so the error carries what
+// message_delta said: the stop reason and the output count (#951).
+func TestGenerateOpenToolBlockAtStopNamesHowTheStreamEnded(t *testing.T) {
+	head := []string{
+		`{"type":"message_start","message":{"id":"msg_5","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"create_agent","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"agent_name\":\"dre"}}`,
+	}
+	for name, tc := range map[string]struct {
+		tail []string
+		want string
+	}{
+		"with message_delta": {
+			[]string{
+				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
+				`{"type":"message_stop"}`,
+			},
+			"message_stop with tool_use block 0 still open (stop_reason max_tokens, 8192 output tokens)",
+		},
+		"without message_delta": {
+			[]string{`{"type":"message_stop"}`},
+			"message_stop with tool_use block 0 still open (no stop reason)",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := start(t, &fakeServer{sse: append(append([]string(nil), head...), tc.tail...)})
+			stream, err := p.Generate(context.Background(), provider.Request{
+				Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"spawn them"`)}},
+			})
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			for stream.Next() {
+				if stream.Chunk().Kind == provider.KindDone {
+					t.Error("a stream with an open tool block produced a done chunk")
+				}
+			}
+			if err := stream.Err(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("stream error = %v, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // An endpoint that reports no usage at all must be distinguishable from one
 // that reports zeroes: the done chunk carries no usage rather than a zeroed
 // one, so the token metric records nothing instead of a free turn (#90).

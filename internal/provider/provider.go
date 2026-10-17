@@ -156,6 +156,20 @@ type Chunk struct {
 	ThinkingAnyPrefix bool
 }
 
+// StopNote says how a stream ended, for the error about a tool call that
+// arrived incomplete. The stop reason and the output count tell a call the
+// output cap cut off from one the model malformed (#951). A nil usage is an
+// endpoint that reported none.
+func StopNote(reason string, usage *domain.ModelUsage) string {
+	switch {
+	case reason == "":
+		return "no stop reason"
+	case usage == nil:
+		return "stop_reason " + reason
+	}
+	return fmt.Sprintf("stop_reason %s, %d output tokens", reason, usage.OutputTokens)
+}
+
 // ToolUse is a complete tool call emitted by the model.
 type ToolUse struct {
 	ID    string

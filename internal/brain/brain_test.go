@@ -1487,6 +1487,63 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 	}
 }
 
+// A tool input the output cap cut off fails the turn like any malformed one,
+// but its error says how the stream ended. The stop reason and the output
+// count arrive after the tool block, so the turn reads the stream to its end
+// before it fails, and nothing that arrives after the bad block is kept (#951).
+func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
+	cut := &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: json.RawMessage(`{"query":"batch 9`)}
+	for name, tc := range map[string]struct {
+		tail []provider.Chunk
+		want string
+	}{
+		"cut at the cap": {
+			[]provider.Chunk{
+				{Kind: provider.KindThinkingDelta, Index: 1, Text: "after the cut"},
+				textChunk(2, "after the cut"),
+				done("max_tokens", 8192),
+			},
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
+		},
+		"no done chunk": {
+			nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason)`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{
+				append([]provider.Chunk{{Kind: provider.KindToolUse, ToolUse: cut}}, tc.tail...),
+			}, nil)
+			h.wake(t, "use the tool")
+			h.runOnce(t)
+
+			evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"session.error"}})
+			if len(evs) != 1 {
+				t.Fatalf("session.error events = %d, want 1", len(evs))
+			}
+			var p struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(evs[0].Body, &p); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(p.Error.Message, tc.want) {
+				t.Errorf("session.error message = %q, want it to contain %q", p.Error.Message, tc.want)
+			}
+			for _, typ := range []string{"agent.thinking", "agent.message"} {
+				if n := h.countType(t, typ); n != 0 {
+					t.Errorf("%s events = %d, want 0: content after the bad block was kept", typ, n)
+				}
+			}
+			if n := h.liveWork(t); n != 0 {
+				t.Errorf("%d work items still live (reclaim loop)", n)
+			}
+		})
+	}
+}
+
 func TestNullToolInputBecomesEmptyObject(t *testing.T) {
 	// An absent or null input is legal and means "no arguments"; it lands
 	// as {} so the emitted event carries a JSON object. Whitespace-padded

@@ -156,8 +156,20 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		return nil
 	}
 
+	// badInput is the first tool input that is not a JSON object. The turn
+	// fails on it, but only once the stream has ended: the stop reason and the
+	// output count arrive after the tool block, and they are what tells a call
+	// the output cap cut off from one the model malformed (#951). Nothing else
+	// the stream carries after it is kept.
+	var badInput error
 	for stream.Next() {
 		c := stream.Chunk()
+		if badInput != nil {
+			if c.Kind == provider.KindDone {
+				turn.stopReason, turn.usage = c.StopReason, c.Usage
+			}
+			continue
+		}
 		switch c.Kind {
 		case provider.KindThinkingDelta:
 			// Thinking is the first content a reasoning model streams, so it is
@@ -250,7 +262,8 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
 			if err != nil {
-				return nil, fmt.Errorf("tool %q: %w", tu.Name, err)
+				badInput = fmt.Errorf("tool %q: %w", tu.Name, err)
+				continue
 			}
 			tu.Input = input
 			turn.toolUses = append(turn.toolUses, tu)
@@ -270,6 +283,9 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 				turn.usage = &u
 			}
 		}
+	}
+	if badInput != nil {
+		return nil, fmt.Errorf("%w (%s)", badInput, provider.StopNote(turn.stopReason, turn.usage))
 	}
 	if err := stream.Err(); err != nil {
 		return nil, fmt.Errorf("model stream: %w", err)

@@ -330,6 +330,26 @@ func mentionsOutsideIndex(memories map[string]string, needle string) []string {
 	return paths
 }
 
+// tombstoneNamesSuccessor reports whether the in-place dream's tombstone names
+// what replaced the memory it retires: the finance app itself, or a memory in
+// the store that states finance.internal. A caller can follow either. The
+// nightly model often writes the second, "Superseded by facts/expenses.md.",
+// which a check for the word alone failed (#951). A path matches written from
+// the store root or without the leading slash; the index never counts, because
+// it mentions the new place only by describing the memory that states it.
+func tombstoneNamesSuccessor(tomb string, memories map[string]string) bool {
+	lower := strings.ToLower(tomb)
+	if strings.Contains(lower, "finance") {
+		return true
+	}
+	for _, path := range mentionsOutsideIndex(memories, "finance.internal") {
+		if strings.Contains(lower, strings.ToLower(strings.TrimPrefix(path, "/"))) {
+			return true
+		}
+	}
+	return false
+}
+
 // mentions counts the memories whose content contains needle, case-folded.
 func mentions(memories map[string]string, needle string) []string {
 	var paths []string
@@ -533,8 +553,9 @@ func TestDreamPipeline(t *testing.T) {
 // TestDreamPipelineHundred is the bound (plan 41 §7, §9): a hundred
 // transcripts through one dream, which is what the batch size and the
 // live-thread cap were sized for. It asserts what the seeded case cannot —
-// that a hundred transcripts complete inside the timeout, and that they arrive
-// as thirteen digest threads.
+// that a hundred transcripts complete inside the timeout, and that every batch
+// of them gets a digest thread: thirteen, or more when the coordinator spawns a
+// batch again.
 //
 // It costs real money and real minutes. Measured on the first successful run
 // (2026-09-06, claude-haiku-4-5): driving the hundred transcripts took 3m4s and
@@ -625,9 +646,18 @@ func TestDreamPipelineHundred(t *testing.T) {
 		t.Fatalf("dream %s ended %v: %v (pipeline session %v)",
 			dreamID, dream["status"], dream["error"], dream["session_id"])
 	}
-	if threads != batches {
-		t.Errorf("the pipeline session %s ran %d digest threads, want %d (%d transcripts in batches of %d)",
+	// At least one thread per batch. More is allowed: stage 2 tells the
+	// coordinator to check every digest on disk and to spawn a batch again when
+	// its digest is missing, so a completed dream with an extra thread is one
+	// that recovered (#951). The digests themselves are in the sandbox's
+	// scratch, which this test cannot read.
+	switch {
+	case threads < batches:
+		t.Errorf("the pipeline session %s ran %d digest threads, want at least %d (%d transcripts in batches of %d)",
 			sessionID, threads, batches, transcripts, batch)
+	case threads > batches:
+		t.Logf("the pipeline session %s ran %d digest threads for %d batches: %d spawned again",
+			sessionID, threads, batches, threads-batches)
 	}
 	after := s.storeMemories(t, outputStoreID(t, dream))
 	if _, ok := after["/MEMORY.md"]; !ok {
@@ -713,10 +743,11 @@ func TestDreamPipelineInPlace(t *testing.T) {
 			retiredPath, memoryPaths(after))
 	}
 	// And it is a tombstone rather than the fact it was: the portal no longer
-	// reads as where expenses are filed, and the successor is named. Emptying
-	// the file is not tombstoning it — that is a deletion this session could
-	// not make, spelled a different way — so the empty case is a failure here
-	// rather than a case to skip.
+	// reads as where expenses are filed, and the successor is named, as the
+	// place or as the memory that states it. Emptying the file is not
+	// tombstoning it — that is a deletion this session could not make, spelled
+	// a different way — so the empty case is a failure here rather than a case
+	// to skip.
 	tomb := after[retiredPath]
 	switch {
 	case strings.TrimSpace(tomb) == "":
@@ -724,7 +755,7 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	case tomb == before[retiredPath]:
 		t.Errorf("%s is unchanged, so the transcript that ended it changed nothing:\n%s",
 			retiredPath, tomb)
-	case !strings.Contains(strings.ToLower(tomb), "finance"):
+	case !tombstoneNamesSuccessor(tomb, after):
 		t.Errorf("%s does not name its successor:\n%s", retiredPath, tomb)
 	}
 	// The successor fact reached the store, in the tombstone or beside it.

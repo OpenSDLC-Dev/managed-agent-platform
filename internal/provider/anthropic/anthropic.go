@@ -399,7 +399,12 @@ func (s *stream) Next() bool {
 
 		case "message_stop":
 			if s.inTool {
-				s.err = fmt.Errorf("message_stop with tool_use block %d still open", s.toolIndex)
+				var usage *domain.ModelUsage
+				if s.sawUsage {
+					usage = &s.usage
+				}
+				s.err = fmt.Errorf("message_stop with tool_use block %d still open (%s)",
+					s.toolIndex, provider.StopNote(s.stopReason, usage))
 				return false
 			}
 			if s.stopReason == "" {
