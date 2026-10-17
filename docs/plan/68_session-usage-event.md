@@ -73,11 +73,16 @@ The recordings in `managed-agents-wire-recordings` add the shape and the order
    - `session.status_idle`, `_rescheduled` and `_terminated` close it;
    - an interval that reads negative, across two hosts' clocks, adds zero.
 
-   No batch this build writes runs a running session again without a close
-   first. A running that finds an interval open therefore means a close went
-   unseen, written by a replica on the earlier build, and it restarts the
-   interval: the count drops that turn's time rather than adding the idle
-   after it.
+   No batch `AppendInTx` writes runs a running session again without a close
+   first. A running that finds an interval open restarts it.
+
+   Before a batch's status events step the clock, it is reconciled with the
+   log's last session-level status event. A status event the columns never
+   saw — one a binary from before migration 0055 wrote, or one committed
+   during the migration's scan — then counts at its own stamp: an idle after
+   an unseen close does not count the gap, and an unseen open is not lost.
+   The cost is one indexed read of the log per batch that carries a status
+   event.
 
    The session's status is the fold over its threads, running while any thread
    runs, so overlap counts once by construction. Rescheduling does not count:
@@ -86,8 +91,8 @@ The recordings in `managed-agents-wire-recordings` add the shape and the order
    renders many sessions.
 5. **Migration 0055 backfills both columns** from each session's stored
    session-level status events. A session's history keeps its time, and a
-   session running at deploy time keeps its open interval. There a running
-   inside an open interval keeps it open: the stored log holds every close.
+   session running at deploy time keeps its open interval. It applies the
+   same rule, a running inside an open interval restarting it.
 6. **The session resource renders the running time to the millisecond.**
    While the stored status is running, it adds the open interval up to the
    read, so a long turn reports time as it spends it. The read's time is the

@@ -224,15 +224,16 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	}
 	// The running time counts the open interval up to this read, so a session
 	// that runs reports time as it spends it (plan 68 decision 6) — but only
-	// while the stored status says running: an interval a replica on the
-	// earlier build closed stays open on the row, and an idle session must not
-	// keep counting it. The read's time is the database's, the one clock every
-	// replica reads; the stamp is the appender's, so the two differ by their
-	// hosts' skew, and the clamp floors a negative one at zero. The create
-	// response, built before its row is read, counts no open interval.
+	// while the stored status says running: an interval whose close a binary
+	// from before migration 0055 wrote stays open on the row until the next
+	// status event reconciles it, and an idle session must not keep counting
+	// it. The read's time is the database's, the one clock every replica
+	// reads; the stamp is the appender's, so the two differ by their hosts'
+	// skew. The create response, built before its row is read, counts no open
+	// interval.
 	active := r.activeSeconds
-	if r.runningSince != nil && r.status == string(domain.SessionRunning) {
-		active += max(0, r.readAt.Sub(*r.runningSince).Seconds())
+	if r.status == string(domain.SessionRunning) {
+		active = events.ActiveSecondsAt(r.activeSeconds, r.runningSince, r.readAt)
 	}
 	return sessionJSON{
 		ID: r.id, Type: "session", Agent: agent, EnvironmentID: r.environmentID,

@@ -177,10 +177,9 @@ func TestUsageSnapshotOnlyBeforeASessionIdle(t *testing.T) {
 
 // active_seconds is the time the session spent running, counted from its own
 // status events: running opens an interval, and idle, rescheduled or
-// terminated closes it. A running inside an open interval — a close an
-// earlier build's replica wrote went unseen — restarts it, an idle with
-// nothing open adds nothing, and an interval two hosts' clocks make negative
-// adds zero.
+// terminated closes it. A running inside an open interval restarts it, an
+// idle with nothing open adds nothing, and an interval two hosts' clocks make
+// negative adds zero.
 func TestUsageActiveSecondsCountsRunningIntervals(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
@@ -230,6 +229,55 @@ func TestUsageActiveSecondsCountsRunningIntervals(t *testing.T) {
 	active, since := storedActive(t, pool, sid)
 	if active < 6.734 || active > 6.735 || since == nil || !since.Equal(*at(50 * s)) {
 		t.Errorf("stored = %v since %v, want 6.734567 and an interval open at %v", active, since, *at(50 * s))
+	}
+}
+
+// legacyStatus writes a session-level status event the way a binary from
+// before migration 0055 does: into the log, leaving the clock's columns as
+// they were.
+func legacyStatus(t *testing.T, pool *pgxpool.Pool, sid domain.ID, typ domain.EventType, stamp *time.Time) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO events (id, session_id, seq, type, payload, processed_at)
+		 SELECT $1, $2, COALESCE(MAX(seq), 0) + 1, $3, '{}', $4 FROM events WHERE session_id = $2`,
+		domain.NewID(domain.PrefixEvent).String(), sid.String(), string(typ), *stamp); err != nil {
+		t.Fatalf("legacy %s: %v", typ, err)
+	}
+}
+
+// A status event the clock's columns never saw is reconciled at the next
+// status event AppendInTx writes, from the log's last one: a close counts at
+// its own stamp, so an idle after it does not count the gap, and an open
+// opens at its own. An unseen close and reopen restarts the clock at the
+// reopen, which loses the time before that close and no more.
+func TestUsageClockReconcilesWithTheLog(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	s := time.Second
+
+	mustAppend(t, log, sid, []events.NewEvent{status(domain.EventSessionStatusRunning, at(0))}, events.AppendOptions{})
+	legacyStatus(t, pool, sid, domain.EventSessionStatusIdle, at(3*s))
+	got := mustAppend(t, log, sid, []events.NewEvent{idleAt(at(100 * s))}, events.AppendOptions{})
+	if v := activeSeconds(t, got[0]); v != 3 {
+		t.Errorf("re-idle after an unseen close: active_seconds = %v, want 3, not the 100 s to the re-idle", v)
+	}
+
+	legacyStatus(t, pool, sid, domain.EventSessionStatusRunning, at(200*s))
+	got = mustAppend(t, log, sid, []events.NewEvent{idleAt(at(204 * s))}, events.AppendOptions{})
+	if v := activeSeconds(t, got[0]); v != 7 {
+		t.Errorf("idle after an unseen open: active_seconds = %v, want 7 (3 + 4)", v)
+	}
+
+	mustAppend(t, log, sid, []events.NewEvent{status(domain.EventSessionStatusRunning, at(300*s))}, events.AppendOptions{})
+	legacyStatus(t, pool, sid, domain.EventSessionStatusIdle, at(301*s))
+	legacyStatus(t, pool, sid, domain.EventSessionStatusRunning, at(310*s))
+	got = mustAppend(t, log, sid, []events.NewEvent{idleAt(at(315 * s))}, events.AppendOptions{})
+	if v := activeSeconds(t, got[0]); v != 12 {
+		t.Errorf("idle after an unseen close and reopen: active_seconds = %v, want 12 (7 + 5)", v)
+	}
+	if active, since := storedActive(t, pool, sid); active != 12 || since != nil {
+		t.Errorf("stored = %v since %v, want 12 and nothing open", active, since)
 	}
 }
 

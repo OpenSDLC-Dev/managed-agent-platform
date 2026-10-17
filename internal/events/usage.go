@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -30,10 +31,10 @@ var sessionStatusTypes = map[domain.EventType]bool{
 
 // withUsageSnapshots returns evs with a session.usage placed immediately
 // before every session.status_idle, or evs itself when it has none. The
-// usage takes the idle's stamp, minted here when the caller left it to the
-// append, so the time it reports is the time the idle closes. Its body is
-// written by the append, which knows the stamps only once the batch's order
-// has settled them.
+// usage takes the idle's stamp when the caller set one; otherwise the append
+// stamps the two in order, the usage first. Its body is written by the
+// append, which knows the stamps only once the batch's order has settled
+// them.
 func withUsageSnapshots(evs []NewEvent) []NewEvent {
 	n := 0
 	for _, ev := range evs {
@@ -47,15 +48,22 @@ func withUsageSnapshots(evs []NewEvent) []NewEvent {
 	out := make([]NewEvent, 0, len(evs)+n)
 	for _, ev := range evs {
 		if ev.Type == domain.EventSessionStatusIdle {
-			if ev.ProcessedAt == nil {
-				now := time.Now().UTC()
-				ev.ProcessedAt = &now
-			}
 			out = append(out, NewEvent{Type: domain.EventSessionUsage, ProcessedAt: ev.ProcessedAt})
 		}
 		out = append(out, ev)
 	}
 	return out
+}
+
+// ActiveSecondsAt is a session's running time read at at: the sum of its
+// closed intervals plus the open one up to at, where an open interval two
+// hosts' clocks make negative counts zero. The session.usage snapshot and the
+// session resource both read the running time this way.
+func ActiveSecondsAt(active float64, since *time.Time, at time.Time) float64 {
+	if since == nil {
+		return active
+	}
+	return active + max(0, at.Sub(*since).Seconds())
 }
 
 // sessionClock is the session's running time through one append: the sum of
@@ -71,11 +79,10 @@ type sessionClock struct {
 // an interval; idle, rescheduled and terminated close it. An interval that
 // reads negative — two hosts' clocks — adds nothing.
 //
-// No batch this build writes runs a running session again without closing
-// first: the reclaim's forced pair closes with its rescheduled. So an interval
-// already open at a running means a close went unseen, written by a replica
-// on the earlier build, and the running restarts it: the count drops that
-// turn's time rather than adding the idle that followed it.
+// No batch AppendInTx writes runs a running session again without closing
+// first: the reclaim's forced pair closes with its rescheduled. A running
+// that finds an interval open restarts it, the rule reconcile and migration
+// 0055 apply too.
 func (c *sessionClock) step(typ domain.EventType, at time.Time) {
 	switch typ {
 	case domain.EventSessionStatusRunning:
@@ -83,25 +90,74 @@ func (c *sessionClock) step(typ domain.EventType, at time.Time) {
 		c.changed = true
 	case domain.EventSessionStatusIdle, domain.EventSessionStatusRescheduled, domain.EventSessionStatusTerminated:
 		if c.since != nil {
-			c.active += max(0, at.Sub(*c.since).Seconds())
+			c.active = ActiveSecondsAt(c.active, c.since, at)
 			c.since = nil
 			c.changed = true
 		}
 	}
 }
 
-// through is the running time with the open interval counted up to at.
-func (c *sessionClock) through(at time.Time) float64 {
-	if c.since == nil {
-		return c.active
-	}
-	return c.active + max(0, at.Sub(*c.since).Seconds())
+// statusMark is a session-level status event the log holds: its type and
+// stamp.
+type statusMark struct {
+	typ domain.EventType
+	at  time.Time
 }
 
-// snapshotUsage is the token totals an idle's snapshot reports: the stored
-// usage, read under the row lock, with the append's own turn folded in, since
-// AppendInTx folds AddUsage only after its insert.
-func snapshotUsage(stored []byte, addUsage *domain.ModelUsage) (domain.Usage, error) {
+// lastSessionStatus is the last session-level status event the session's log
+// holds, nil when it holds none. Read before the batch's insert, it is the
+// status the session had when the batch began.
+func lastSessionStatus(ctx context.Context, tx pgx.Tx, sessionID domain.ID) (*statusMark, error) {
+	types := make([]string, 0, len(sessionStatusTypes))
+	for t := range sessionStatusTypes {
+		types = append(types, string(t))
+	}
+	var (
+		typ string
+		at  time.Time
+	)
+	err := tx.QueryRow(ctx,
+		`SELECT type, processed_at FROM events
+		  WHERE session_id = $1 AND type = ANY($2) AND processed_at IS NOT NULL
+		  ORDER BY seq DESC LIMIT 1`,
+		sessionID.String(), types).Scan(&typ, &at)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &statusMark{typ: domain.EventType(typ), at: at}, nil
+}
+
+// reconcile brings the clock to the log's last session-level status event,
+// before the batch steps it. The two agree on every log AppendInTx alone
+// wrote. They disagree after a status event the columns never saw: one a
+// binary from before migration 0055 wrote, or one committed while the
+// migration's scan ran. A close is then counted at its own stamp, and an open
+// is opened at its own, so an idle that follows does not count the gap, and
+// the interval the event moved is not lost. What stays uncounted is an
+// interval opened and closed between two status events AppendInTx wrote.
+func (c *sessionClock) reconcile(last *statusMark) {
+	switch {
+	case last == nil:
+		if c.since != nil {
+			c.since = nil
+			c.changed = true
+		}
+	case last.typ == domain.EventSessionStatusRunning:
+		if c.since == nil || !c.since.Equal(last.at) {
+			c.step(last.typ, last.at)
+		}
+	default:
+		c.step(last.typ, last.at)
+	}
+}
+
+// usageAfter is the session's token totals once the append commits: the
+// stored usage, read under the row lock, with the append's own turn folded
+// in. A snapshot reports it before the append writes it.
+func usageAfter(stored []byte, addUsage *domain.ModelUsage) (domain.Usage, error) {
 	var usage domain.Usage
 	if err := json.Unmarshal(stored, &usage); err != nil {
 		return usage, fmt.Errorf("decode stored session usage: %w", err)

@@ -14,7 +14,8 @@ import (
 // Migration 0055 backfills each session's active_seconds from its stored
 // session-level status events (plan 68): every running interval an idle,
 // rescheduled or terminated closes, and the interval still open as
-// running_since. Thread status events do not count; the session's own fold
+// running_since. A running inside an open interval restarts it, as the live
+// rule does. Thread status events do not count; the session's own fold
 // already counts concurrent threads once.
 func TestSessionActiveSecondsBackfill(t *testing.T) {
 	ctx := context.Background()
@@ -59,6 +60,9 @@ func TestSessionActiveSecondsBackfill(t *testing.T) {
 		{done, "session.status_idle", "2026-10-17T01:00:13.5Z", 8},
 		{done, "session.thread_status_idle", "2026-10-17T01:00:20Z", 9},
 		{done, "session.status_idle", "2026-10-17T01:00:30Z", 10},
+		// Two hosts' clocks: an idle stamped before the running it closes.
+		{done, "session.status_running", "2026-10-17T01:00:40Z", 11},
+		{done, "session.status_idle", "2026-10-17T01:00:39Z", 12},
 		{running, "session.status_running", "2026-10-17T02:00:00Z", 1},
 		{running, "session.status_idle", "2026-10-17T02:00:01Z", 2},
 		{running, "session.status_running", "2026-10-17T02:00:05Z", 3},
@@ -79,7 +83,9 @@ func TestSessionActiveSecondsBackfill(t *testing.T) {
 		active float64
 		since  *time.Time
 	}{
-		{done, 2.5 + 1 + 1.5, nil},
+		// 2.5, then 1 to the reschedule, then 1.25 from the running that
+		// restarted the interval at 12.25; the skewed pair adds nothing.
+		{done, 2.5 + 1 + 1.25, nil},
 		{running, 1, ptr(time.Date(2026, 10, 17, 2, 0, 5, 0, time.UTC))},
 		{fresh, 0, nil},
 	} {

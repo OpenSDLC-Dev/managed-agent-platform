@@ -258,10 +258,15 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		snapUsage domain.Usage
 	)
 	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return sessionStatusTypes[ev.Type] }) {
+		last, err := lastSessionStatus(ctx, tx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		stored.reconcile(last)
 		clock = &stored
 	}
 	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return ev.Type == domain.EventSessionUsage }) {
-		if snapUsage, err = snapshotUsage(storedUsage, opts.AddUsage); err != nil {
+		if snapUsage, err = usageAfter(storedUsage, opts.AddUsage); err != nil {
 			return nil, err
 		}
 	}
@@ -367,7 +372,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		// and a status event moves that time.
 		if clock != nil && ev.ProcessedAt != nil {
 			if ev.Type == domain.EventSessionUsage {
-				if payload, err = usageSnapshot(snapUsage, clock.through(*ev.ProcessedAt)); err != nil {
+				if payload, err = usageSnapshot(snapUsage, ActiveSecondsAt(clock.active, clock.since, *ev.ProcessedAt)); err != nil {
 					return nil, err
 				}
 			}
@@ -452,17 +457,12 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		}
 	}
 	if opts.AddUsage != nil {
-		// Read-modify-write is race-free here: the session row lock is held.
-		var raw []byte
-		if err := tx.QueryRow(ctx,
-			`SELECT usage FROM sessions WHERE id = $1`, sessionID.String()).Scan(&raw); err != nil {
+		// Read-modify-write is race-free here: the session row lock is held,
+		// and the usage was read under it at the top.
+		usage, err := usageAfter(storedUsage, opts.AddUsage)
+		if err != nil {
 			return nil, err
 		}
-		var usage domain.Usage
-		if err := json.Unmarshal(raw, &usage); err != nil {
-			return nil, fmt.Errorf("decode stored session usage: %w", err)
-		}
-		usage.Add(*opts.AddUsage)
 		if _, err := tx.Exec(ctx,
 			`UPDATE sessions SET usage = $2, updated_at = now() WHERE id = $1`,
 			sessionID.String(), usage); err != nil {
@@ -475,7 +475,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			tid = domain.PrimaryThreadID(sessionID)
 		}
 		var threadRaw []byte
-		err := tx.QueryRow(ctx,
+		err = tx.QueryRow(ctx,
 			`SELECT usage FROM session_threads WHERE id = $1 AND session_id = $2`,
 			tid.String(), sessionID.String()).Scan(&threadRaw)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
