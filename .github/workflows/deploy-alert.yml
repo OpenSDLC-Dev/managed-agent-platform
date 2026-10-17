@@ -225,9 +225,15 @@ jobs:
               # filter out. The BODY is searched as well as the comments — the
               # first report of a run is the issue body, so checking only
               # comments would let the next invocation restate it verbatim.
+              # Only what this workflow wrote counts: anyone can comment on a
+              # public issue, and a copied marker would silence the next report.
+              # gh names the token's identity `app/github-actions` as an issue
+              # author and `github-actions` as a comment author.
               local said
-              said="$(retry gh issue view "$num" --repo "$REPO" --json body,comments \
-                --jq '([.body] + [.comments[].body]) | map(select(contains(env.MARK))) | length')"
+              said="$(retry gh issue view "$num" --repo "$REPO" --json author,body,comments \
+                --jq '([select(.author.login == "app/github-actions") | .body]
+                       + [.comments[] | select(.author.login == "github-actions") | .body])
+                      | map(select(contains(env.MARK))) | length')"
               if [ "$said" != "0" ]; then echo "already reported $RUN_ID on #$num"; return; fi
               gh issue comment "$num" --repo "$REPO" --body "$body"
               echo "commented on #$num"
