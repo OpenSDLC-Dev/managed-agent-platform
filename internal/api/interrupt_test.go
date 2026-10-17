@@ -105,7 +105,7 @@ func TestInterruptEndsATurnStuckOnAnUnansweredToolUse(t *testing.T) {
 	// interrupt, then the idle it ends in — the order the reference recorded.
 	want := []string{"session.status_running", "session.thread_status_running", "user.message",
 		"agent.tool_use", "agent.tool_result", "user.interrupt",
-		"session.thread_status_idle", "session.status_idle"}
+		"session.thread_status_idle", "session.usage", "session.status_idle"}
 	if got := s.eventTypes(sessionID); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
 	}
@@ -222,7 +222,7 @@ func TestInterruptAndRedirectInOneBatch(t *testing.T) {
 	// running pair, and only then the message the new turn consumes.
 	want := []string{"session.status_running", "session.thread_status_running", "user.message",
 		"agent.tool_use", "agent.tool_result", "user.interrupt",
-		"session.thread_status_idle", "session.status_idle",
+		"session.thread_status_idle", "session.usage", "session.status_idle",
 		"session.status_running", "session.thread_status_running", "user.message"}
 	if got := s.eventTypes(sessionID); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)

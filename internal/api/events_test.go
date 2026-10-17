@@ -690,11 +690,13 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		sendEvents(t, s, sid, userMessage(fmt.Sprintf("m%d", i)))
 	}
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
-	// Four platform events sit on top of the six posted ones: the first
+	// Five platform events sit on top of the six posted ones: the first
 	// user.message woke the idle session, and the interrupt ended the turn that
 	// woke, each a primary-thread + session status pair, in processing order
-	// (#793) — session.status_running, session.thread_status_running, m0,
-	// m1..m4, user.interrupt, session.thread_status_idle, session.status_idle.
+	// (#793), with the session's usage before its idle (plan 68) —
+	// session.status_running, session.thread_status_running, m0, m1..m4,
+	// user.interrupt, session.thread_status_idle, session.usage,
+	// session.status_idle.
 
 	// Default: chronological asc, everything, no next_page.
 	status, res := s.do(http.MethodGet, path, nil)
@@ -702,14 +704,14 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatalf("list: %d %v", status, res)
 	}
 	all := listData(t, res)
-	if len(all) != 10 {
-		t.Fatalf("listed %d, want 10", len(all))
+	if len(all) != 11 {
+		t.Fatalf("listed %d, want 11", len(all))
 	}
 	// The list pages on seq, which is monotonic per session, so nothing above
 	// or in the walk below needs the clock. The created_at comparators further
 	// down do: they take a boundary off one event and count both sides, which
 	// holds only while created_at rises with seq across the settlements that
-	// wrote these ten. The emitter guarantees that whatever the database clock
+	// wrote these eleven. The emitter guarantees that whatever the database clock
 	// does (#411); the stamp keeps this test on the filters rather than on how
 	// the rows were dated, as #561 keeps every list here.
 	//
@@ -730,7 +732,7 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Errorf("next_page = %q, want none", np)
 	}
 
-	// Cursor walk at limit=2: pages of 2/2/2/2/2, opaque next_page in between.
+	// Cursor walk at limit=2: pages of 2/2/2/2/2/1, opaque next_page in between.
 	var walked []string
 	page := ""
 	for pages := 0; ; pages++ {
@@ -752,8 +754,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 			t.Fatal("cursor walk did not terminate")
 		}
 	}
-	if len(walked) != 10 {
-		t.Errorf("cursor walk saw %d events, want 10", len(walked))
+	if len(walked) != 11 {
+		t.Errorf("cursor walk saw %d events, want 11", len(walked))
 	}
 	for i, ev := range all {
 		if walked[i] != ev["id"].(string) {
@@ -764,8 +766,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	// desc reverses.
 	_, res = s.do(http.MethodGet, path+"?order=desc", nil)
 	desc := listData(t, res)
-	if desc[0]["id"] != all[9]["id"] {
-		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[9]["id"])
+	if desc[0]["id"] != all[10]["id"] {
+		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[10]["id"])
 	}
 
 	// types filter, both spellings.
@@ -791,8 +793,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[gt]="+midCreated, nil)
-	if got := listData(t, res); len(got) != 6 {
-		t.Errorf("created_at[gt] mid returned %d, want 6", len(got))
+	if got := listData(t, res); len(got) != 7 {
+		t.Errorf("created_at[gt] mid returned %d, want 7", len(got))
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[lte]="+midCreated, nil)
 	if got := listData(t, res); len(got) != 4 {
@@ -967,11 +969,12 @@ func TestStreamLiveTail(t *testing.T) {
 	// A batch streams in processing order, the platform's reaction included
 	// (#793, #539): the interrupt ends the running turn and the message in the
 	// same batch starts the next one, so the interrupt comes first whatever
-	// order it was posted in, then the idle pair it ends in (thread-first),
-	// the running pair (session-first), and the message the new turn consumes.
+	// order it was posted in, then the idle pair it ends in (thread-first,
+	// the session's usage before its idle), the running pair (session-first),
+	// and the message the new turn consumes.
 	sendEvents(t, s, sid, userMessage("after-2"), map[string]any{"type": "user.interrupt"})
 	for i, want := range []string{"user.interrupt",
-		"session.thread_status_idle", "session.status_idle",
+		"session.thread_status_idle", "session.usage", "session.status_idle",
 		"session.status_running", "session.thread_status_running", "user.message"} {
 		if f := st.next(t); f.name != want {
 			t.Errorf("frame %d = %q, want %q", i+2, f.name, want)

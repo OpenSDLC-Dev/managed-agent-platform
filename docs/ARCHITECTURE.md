@@ -149,7 +149,8 @@ they point at is a committed row the listener re-reads for itself.
    queue; the LISTEN/NOTIFY wakes serve the SSE fan-out, the work API's long poll and the
    sandbox reaper — never the brain), replays, and
    continues until the model stops calling tools, then writes `session.status_idle`
-   with `stop_reason.end_turn`.
+   with `stop_reason.end_turn`. Every session idle, whichever path writes it, follows
+   a `session.usage` that `Log.AppendInTx` places before it (plan 68).
 
 **Outcome grading** (plan 21). A session with an active outcome (`user.define_outcome`)
 does not idle on `end_turn`: the settlement commits `span.outcome_evaluation_start`,

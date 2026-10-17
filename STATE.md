@@ -4,9 +4,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 67](./docs/plan/67_startup-exit-status.md) (#942), a status the image's
-startup chose read as no answer, archived 2026-10-17 in three PRs; its delivery record
-is [docs/HISTORY.md](./docs/HISTORY.md).
+**None.** [Plan 68](./docs/plan/68_session-usage-event.md) (#432, one slice), the
+`session.usage` event and `usage.active_seconds`, archived 2026-10-17 in one PR; its
+delivery record is [docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 

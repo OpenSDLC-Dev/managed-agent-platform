@@ -1233,12 +1233,14 @@ func (l *sendLayout) processingOrder() []events.NewEvent {
 // keepLastSessionIdle drops all but the final session.status_idle of a batch. A
 // session-wide interrupt ends its threads one by one, and each end re-idles the
 // session with the fold of that moment; the session is told once, with the fold
-// after the last of them. A single-agent session emits one either way.
+// after the last of them. A single-agent session emits one either way. The
+// kept idle is restated only when every idle was (events.NewEvent.Restated):
+// an earlier one that closed the running interval must still close it.
 func keepLastSessionIdle(batch []events.NewEvent) []events.NewEvent {
-	lastIdle := -1
+	lastIdle, restated := -1, true
 	for i, ev := range batch {
 		if ev.Type == domain.EventSessionStatusIdle {
-			lastIdle = i
+			lastIdle, restated = i, restated && ev.Restated
 		}
 	}
 	if lastIdle < 0 {
@@ -1246,6 +1248,9 @@ func keepLastSessionIdle(batch []events.NewEvent) []events.NewEvent {
 	}
 	kept := batch[:0:0]
 	for i, ev := range batch {
+		if i == lastIdle {
+			ev.Restated = restated
+		}
 		if ev.Type != domain.EventSessionStatusIdle || i == lastIdle {
 			kept = append(kept, ev)
 		}

@@ -31,8 +31,10 @@ import (
 // renderSession resolves for the echo.
 type sessionAgentJSON = domain.ResolvedAgent
 
-// usageJSON is the session-level usage wire shape — the domain type (nested
-// cache_creation, unlike the event-level usage on span.model_request_end).
+// usageJSON is the token usage wire shape — the domain type (nested
+// cache_creation, unlike the event-level usage on span.model_request_end). A
+// thread renders it as is; the session renders it with its running time
+// beside it (domain.SessionUsage).
 type usageJSON = domain.Usage
 
 type statsJSON struct {
@@ -42,23 +44,23 @@ type statsJSON struct {
 
 // sessionJSON is the BetaManagedAgentsSession wire shape.
 type sessionJSON struct {
-	ID                 string            `json:"id"`
-	Type               string            `json:"type"` // "session"
-	Agent              sessionAgentJSON  `json:"agent"`
-	EnvironmentID      string            `json:"environment_id"`
-	Status             string            `json:"status"`
-	Title              string            `json:"title"`
-	Metadata           map[string]string `json:"metadata"`
-	Usage              usageJSON         `json:"usage"`
-	Stats              statsJSON         `json:"stats"`
-	OutcomeEvaluations []json.RawMessage `json:"outcome_evaluations"`
-	Resources          []json.RawMessage `json:"resources"`
-	VaultIDs           []string          `json:"vault_ids"`
-	DeploymentID       *string           `json:"deployment_id"` // set only by a deployment fire; null otherwise
-	Budget             *json.RawMessage  `json:"budget"`        // budgets are not built: always null, which is what the reference renders for a session created without one (recorded; docs/DIVERGENCES.md)
-	CreatedAt          time.Time         `json:"created_at"`
-	UpdatedAt          time.Time         `json:"updated_at"`
-	ArchivedAt         *time.Time        `json:"archived_at"`
+	ID                 string              `json:"id"`
+	Type               string              `json:"type"` // "session"
+	Agent              sessionAgentJSON    `json:"agent"`
+	EnvironmentID      string              `json:"environment_id"`
+	Status             string              `json:"status"`
+	Title              string              `json:"title"`
+	Metadata           map[string]string   `json:"metadata"`
+	Usage              domain.SessionUsage `json:"usage"`
+	Stats              statsJSON           `json:"stats"`
+	OutcomeEvaluations []json.RawMessage   `json:"outcome_evaluations"`
+	Resources          []json.RawMessage   `json:"resources"`
+	VaultIDs           []string            `json:"vault_ids"`
+	DeploymentID       *string             `json:"deployment_id"` // set only by a deployment fire; null otherwise
+	Budget             *json.RawMessage    `json:"budget"`        // budgets are not built: always null, which is what the reference renders for a session created without one (recorded; docs/DIVERGENCES.md)
+	CreatedAt          time.Time           `json:"created_at"`
+	UpdatedAt          time.Time           `json:"updated_at"`
+	ArchivedAt         *time.Time          `json:"archived_at"`
 }
 
 // normalizeSessionID maps the alternate wire spelling session_… onto the
@@ -77,6 +79,9 @@ type sessionRow struct {
 	environmentID        string
 	status, title        string
 	metaJSON, usageJSON  []byte
+	activeSeconds        float64
+	runningSince         *time.Time
+	readAt               time.Time // the database's clock at the read
 	resourcesJSON        []byte
 	outcomesJSON         []byte
 	vaultIDs             []string
@@ -94,12 +99,12 @@ type sessionRow struct {
 const sessionStatusExpr = `CASE WHEN archived_at IS NOT NULL THEN 'terminated' ELSE status END`
 
 const sessionColumns = `id, resolved_agent, environment_id, status, title,
-	metadata, usage, resources, outcome_evaluations, vault_ids, deployment_id, created_at, updated_at, archived_at`
+	metadata, usage, active_seconds, running_since, clock_timestamp(), resources, outcome_evaluations, vault_ids, deployment_id, created_at, updated_at, archived_at`
 
 func scanSession(row pgx.Row) (sessionRow, error) {
 	var r sessionRow
 	err := row.Scan(&r.id, &r.agentJSON, &r.environmentID, &r.status, &r.title,
-		&r.metaJSON, &r.usageJSON, &r.resourcesJSON, &r.outcomesJSON, &r.vaultIDs,
+		&r.metaJSON, &r.usageJSON, &r.activeSeconds, &r.runningSince, &r.readAt, &r.resourcesJSON, &r.outcomesJSON, &r.vaultIDs,
 		&r.deploymentID, &r.createdAt, &r.updatedAt, &r.archivedAt)
 	return r, err
 }
@@ -217,9 +222,22 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	if r.archivedAt != nil {
 		status = string(domain.SessionTerminated)
 	}
+	// The running time counts the open interval up to this read, so a session
+	// that runs reports time as it spends it (plan 68 decision 6) — but only
+	// while the stored status says running: an interval whose close a binary
+	// from before migration 0055 wrote stays open on the row until the
+	// session's next status event drops it, and an idle session must not keep
+	// counting it. The read's time is the database's, the one clock every replica
+	// reads; the stamp is the appender's, so the two differ by their hosts'
+	// skew. The create response, built before its row is read, counts no open
+	// interval.
+	active := r.activeSeconds
+	if r.status == string(domain.SessionRunning) {
+		active = events.ActiveSecondsAt(r.activeSeconds, r.runningSince, r.readAt)
+	}
 	return sessionJSON{
 		ID: r.id, Type: "session", Agent: agent, EnvironmentID: r.environmentID,
-		Status: status, Title: r.title, Metadata: metadata, Usage: usage,
+		Status: status, Title: r.title, Metadata: metadata, Usage: domain.NewSessionUsage(usage, active),
 		Stats: statsJSON{}, OutcomeEvaluations: outcomes,
 		Resources: resources, VaultIDs: r.vaultIDs, DeploymentID: r.deploymentID,
 		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),

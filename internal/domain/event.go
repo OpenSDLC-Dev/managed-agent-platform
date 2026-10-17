@@ -57,6 +57,9 @@ const (
 	EventSessionError             EventType = "session.error"
 	EventSessionUpdated           EventType = "session.updated"
 	EventSessionDeleted           EventType = "session.deleted"
+	// EventSessionUsage is the session's cumulative usage, written
+	// immediately before every session.status_idle (plan 68).
+	EventSessionUsage EventType = "session.usage"
 )
 
 // Session-thread lifecycle events (plan 35). The four status events mirror

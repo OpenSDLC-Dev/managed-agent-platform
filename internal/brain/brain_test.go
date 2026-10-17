@@ -327,7 +327,8 @@ func stopReasonType(t *testing.T, body []byte) string {
 // below state the session-level sequence and the pairing is applied here.
 // withPrimaryThread inserts the primary thread's status event after
 // session.status_running and before every other session status event, as the
-// log records them (#674).
+// log records them (#674), and the session.usage the log puts between the
+// thread's idle and the session's (plan 68).
 func withPrimaryThread(types []string) []string {
 	out := make([]string, 0, len(types)*2)
 	for _, ty := range types {
@@ -336,7 +337,7 @@ func withPrimaryThread(types []string) []string {
 			out = append(out, ty, "session.thread_status_running")
 			continue
 		case "session.status_idle":
-			out = append(out, "session.thread_status_idle")
+			out = append(out, "session.thread_status_idle", "session.usage")
 		case "session.status_rescheduled":
 			out = append(out, "session.thread_status_rescheduled")
 		}
@@ -1980,7 +1981,7 @@ func TestAReplayFailureFailsTheTurnWithItsSpan(t *testing.T) {
 		t.Errorf("provider called %d times on an unreplayable log", n)
 	}
 	want := []string{"span.model_request_start", "span.model_request_end", "session.error",
-		"session.thread_status_idle", "session.status_idle"}
+		"session.thread_status_idle", "session.usage", "session.status_idle"}
 	if got := h.types(t); len(got) < len(want) || !slices.Equal(got[len(got)-len(want):], want) {
 		t.Errorf("event log = %v, want it to end %v", got, want)
 	}

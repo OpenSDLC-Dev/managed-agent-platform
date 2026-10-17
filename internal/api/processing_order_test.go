@@ -81,15 +81,15 @@ func TestARedirectPostedMessageFirstEchoesAsPosted(t *testing.T) {
 		t.Fatalf("echo = %v, want the posted order", echo)
 	}
 	want := []string{"session.status_running", "session.thread_status_running", "user.message",
-		"user.interrupt", "session.thread_status_idle", "session.status_idle",
+		"user.interrupt", "session.thread_status_idle", "session.usage", "session.status_idle",
 		"session.status_running", "session.thread_status_running", "user.message"}
 	if got := s.eventTypes(sid); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
 	}
 	_, list := s.do("GET", "/v1/sessions/"+sid+"/events", nil)
 	evs := listData(t, list)
-	if echo[0]["id"] != evs[8]["id"] || echo[1]["id"] != evs[3]["id"] {
-		t.Errorf("echo ids %v/%v, want the redirect message at 8 and the interrupt at 3", echo[0]["id"], echo[1]["id"])
+	if echo[0]["id"] != evs[9]["id"] || echo[1]["id"] != evs[3]["id"] {
+		t.Errorf("echo ids %v/%v, want the redirect message at 9 and the interrupt at 3", echo[0]["id"], echo[1]["id"])
 	}
 }
 
@@ -105,7 +105,7 @@ func TestAChainedOutcomeFollowsTheEndItReplaces(t *testing.T) {
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"}, defineOutcome("second", nil))
 
 	want := []string{"session.status_running", "session.thread_status_running", "user.define_outcome",
-		"span.outcome_evaluation_end", "user.interrupt", "session.thread_status_idle", "session.status_idle",
+		"span.outcome_evaluation_end", "user.interrupt", "session.thread_status_idle", "session.usage", "session.status_idle",
 		"session.status_running", "session.thread_status_running", "user.define_outcome"}
 	if got := s.eventTypes(sid); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
@@ -125,7 +125,7 @@ func TestTheRunnersInterruptWritesItsResultsFirst(t *testing.T) {
 
 	want := []string{"session.status_running", "session.thread_status_running", "user.message",
 		"agent.tool_use", "agent.tool_result", "user.interrupt",
-		"session.thread_status_idle", "session.status_idle"}
+		"session.thread_status_idle", "session.usage", "session.status_idle"}
 	if got := s.eventTypes(sid); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
 	}
@@ -312,7 +312,7 @@ func TestAnAnswerPostedBesideARedirectLeadsIt(t *testing.T) {
 		map[string]any{"type": "user.interrupt"})
 
 	want := []string{"session.status_running", "session.thread_status_running", "user.message", "agent.custom_tool_use",
-		"user.custom_tool_result", "user.interrupt", "session.thread_status_idle", "session.status_idle",
+		"user.custom_tool_result", "user.interrupt", "session.thread_status_idle", "session.usage", "session.status_idle",
 		"session.status_running", "session.thread_status_running", "user.message"}
 	if got := s.eventTypes(sid); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
@@ -567,7 +567,7 @@ func TestTheFirstInterruptReceivedEndsTheThread(t *testing.T) {
 		map[string]any{"type": "user.interrupt", "session_thread_id": child})
 
 	want := []string{"agent.tool_use", "agent.tool_result", "user.interrupt",
-		"session.thread_status_idle", "session.thread_status_idle", "session.status_idle", "user.interrupt"}
+		"session.thread_status_idle", "session.thread_status_idle", "session.usage", "session.status_idle", "user.interrupt"}
 	if got := wholeLogTypes(t, s, sid); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
 	}
@@ -594,7 +594,7 @@ func TestTheFirstInterruptReceivedEndsTheThreadScopedFirst(t *testing.T) {
 		map[string]any{"type": "user.interrupt"})
 
 	want := []string{"agent.tool_use", "agent.tool_result", "user.interrupt", "session.thread_status_idle",
-		"user.interrupt", "session.thread_status_idle", "session.status_idle"}
+		"user.interrupt", "session.thread_status_idle", "session.usage", "session.status_idle"}
 	if got := wholeLogTypes(t, s, sid); !sameStrings(got, want) {
 		t.Fatalf("event log = %v, want %v", got, want)
 	}
@@ -651,10 +651,10 @@ func TestADenialAndAnInterruptOfItsThreadAnswerTheCallInReceiptOrder(t *testing.
 			"agent.thread_message_received"}, false},
 		{"session-wide deny first", false, true, []string{"agent.tool_use", "agent.custom_tool_use",
 			"user.tool_confirmation", "agent.tool_result", "user.custom_tool_result", "user.interrupt",
-			"session.thread_status_idle", "session.status_idle"}, true},
+			"session.thread_status_idle", "session.usage", "session.status_idle"}, true},
 		{"session-wide interrupt first", false, false, []string{"agent.tool_use", "agent.custom_tool_use",
 			"agent.tool_result", "user.custom_tool_result", "user.interrupt", "session.thread_status_idle",
-			"session.status_idle", "user.tool_confirmation"}, false},
+			"session.usage", "session.status_idle", "user.tool_confirmation"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestServer(t)

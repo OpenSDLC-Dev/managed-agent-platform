@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -103,6 +104,13 @@ type NewEvent struct {
 	// surface filters (ListQuery.Scope).
 	ThreadID    domain.ID
 	CrossPosted bool
+	// Restated marks a session-level close (idle, rescheduled, terminated)
+	// emitted while the session's stored status was not running: a re-idle,
+	// or a move between two statuses neither of which runs. It closes no
+	// running interval, and drops one still open (plan 68, usage.go step).
+	// TransitionThread sets it, as does any emitter that builds such an
+	// event itself.
+	Restated bool
 }
 
 // Log is the append-only event store over the shared pool.
@@ -203,6 +211,10 @@ func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEven
 // that must decide the batch under the session row lock (the API's state
 // machine reads the current status FOR UPDATE, builds the batch, and appends
 // — all one commit). The NOTIFY still fires only on the caller's commit.
+//
+// It places a session.usage immediately before each session.status_idle in
+// evs (plan 68), so the events it returns can outnumber evs: match them to
+// the batch by ID, never by index.
 func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, evs []NewEvent, opts AppendOptions) ([]domain.Event, error) {
 	// An empty batch is allowed when the options carry side effects (a turn
 	// that suspends on tool use changes state without saying anything new).
@@ -222,12 +234,15 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	}
 
 	var (
-		archivedAt *time.Time
-		agentName  *string
+		archivedAt  *time.Time
+		agentName   *string
+		storedUsage []byte
+		stored      sessionClock
 	)
 	err := tx.QueryRow(ctx,
-		`SELECT archived_at, resolved_agent->>'name' FROM sessions WHERE id = $1 FOR UPDATE`,
-		sessionID.String()).Scan(&archivedAt, &agentName)
+		`SELECT archived_at, resolved_agent->>'name', usage, active_seconds, running_since
+		   FROM sessions WHERE id = $1 FOR UPDATE`,
+		sessionID.String()).Scan(&archivedAt, &agentName, &storedUsage, &stored.active, &stored.since)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -239,6 +254,23 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	}
 	if agentName == nil {
 		agentName = new(string)
+	}
+
+	// A session.usage before each session idle, and the session's running
+	// time from its status events (plan 68, usage.go) — both from the row read
+	// under the lock above, so the stamps they take and read are this append's.
+	evs = withUsageSnapshots(evs)
+	var (
+		clock     *sessionClock
+		snapUsage domain.Usage
+	)
+	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return sessionStatusTypes[ev.Type] }) {
+		clock = &stored
+	}
+	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return ev.Type == domain.EventSessionUsage }) {
+		if snapUsage, err = usageAfter(storedUsage, opts.AddUsage); err != nil {
+			return nil, err
+		}
 	}
 
 	// The session's last row, read under the lock: the batch continues its
@@ -338,6 +370,26 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			}
 			lastStamp = *ev.ProcessedAt
 		}
+		// A usage and the idle after it share one stamp, so the snapshot
+		// reads exactly the running time the idle leaves stored.
+		if ev.Type == domain.EventSessionUsage && i+1 < len(evs) && evs[i+1].ProcessedAt == nil {
+			stamp := *ev.ProcessedAt
+			evs[i+1].ProcessedAt = &stamp
+		}
+		// At its settled stamp: a usage reports the running time through it,
+		// and a status event moves that time.
+		if clock != nil && ev.ProcessedAt != nil {
+			if ev.Type == domain.EventSessionUsage {
+				active := ActiveSecondsAt(clock.active, clock.since, *ev.ProcessedAt)
+				if ev.Restated {
+					active = clock.active // its idle drops the open interval
+				}
+				if payload, err = usageSnapshot(snapUsage, active); err != nil {
+					return nil, err
+				}
+			}
+			clock.step(ev.Type, *ev.ProcessedAt, ev.Restated)
+		}
 		if i > 0 {
 			sb.WriteString(", ")
 		}
@@ -377,6 +429,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	if err := insertThinking(ctx, tx, sessionID, opts.Thinking); err != nil {
 		return nil, err
 	}
+	// Before Then, whose nested append reads the running time this one moved.
+	if err := writeSessionClock(ctx, tx, sessionID, clock); err != nil {
+		return nil, err
+	}
 
 	// The session delegation bound's reset (#447): somebody outside the session
 	// asking it for something new returns its autonomy budget. It rides the
@@ -413,17 +469,12 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		}
 	}
 	if opts.AddUsage != nil {
-		// Read-modify-write is race-free here: the session row lock is held.
-		var raw []byte
-		if err := tx.QueryRow(ctx,
-			`SELECT usage FROM sessions WHERE id = $1`, sessionID.String()).Scan(&raw); err != nil {
+		// Read-modify-write is race-free here: the session row lock is held,
+		// and the usage was read under it at the top.
+		usage, err := usageAfter(storedUsage, opts.AddUsage)
+		if err != nil {
 			return nil, err
 		}
-		var usage domain.Usage
-		if err := json.Unmarshal(raw, &usage); err != nil {
-			return nil, fmt.Errorf("decode stored session usage: %w", err)
-		}
-		usage.Add(*opts.AddUsage)
 		if _, err := tx.Exec(ctx,
 			`UPDATE sessions SET usage = $2, updated_at = now() WHERE id = $1`,
 			sessionID.String(), usage); err != nil {
@@ -436,7 +487,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			tid = domain.PrimaryThreadID(sessionID)
 		}
 		var threadRaw []byte
-		err := tx.QueryRow(ctx,
+		err = tx.QueryRow(ctx,
 			`SELECT usage FROM session_threads WHERE id = $1 AND session_id = $2`,
 			tid.String(), sessionID.String()).Scan(&threadRaw)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {

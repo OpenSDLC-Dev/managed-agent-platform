@@ -15,6 +15,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -280,6 +282,66 @@ func TestRenderSessionDefaultsNilCollections(t *testing.T) {
 	}
 	if out.Resources == nil || out.VaultIDs == nil || out.OutcomeEvaluations == nil {
 		t.Errorf("session collections nil: %+v", out)
+	}
+}
+
+// The session's running time is the stored sum plus, while the stored status
+// is running, the open interval up to the read's database time (plan 68
+// decision 6) — exact arithmetic on fixed stamps, which the HTTP test cannot
+// pin against its own timing.
+func TestRenderSessionActiveSecondsAddsTheOpenInterval(t *testing.T) {
+	since := time.Date(2026, 10, 17, 1, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name, status string
+		readAt       time.Time
+		want         float64
+	}{
+		{"running", "running", since.Add(10*time.Second + 250*time.Millisecond), 14.5},
+		{"idle with an interval open", "idle", since.Add(10 * time.Second), 4.25},
+		{"a read before the stamp", "running", since.Add(-time.Second), 4.25},
+	} {
+		out, err := renderSession(sessionRow{
+			id: "sesn_x", agentJSON: []byte(`{}`), metaJSON: []byte(`{}`),
+			usageJSON: []byte(`{}`), resourcesJSON: []byte(`[]`), status: c.status,
+			activeSeconds: 4.2504, runningSince: &since, readAt: c.readAt,
+		})
+		if err != nil {
+			t.Fatalf("%s: renderSession: %v", c.name, err)
+		}
+		if out.Usage.ActiveSeconds != c.want {
+			t.Errorf("%s: active_seconds = %v, want %v", c.name, out.Usage.ActiveSeconds, c.want)
+		}
+	}
+}
+
+// The idle keepLastSessionIdle keeps is restated only when every idle it
+// merges was: an interrupt whose first thread's end closed the running
+// interval must still close it with the idle it keeps (plan 68).
+func TestKeepLastSessionIdleRestatesOnlyWhenEveryIdleWas(t *testing.T) {
+	for _, c := range []struct {
+		restated []bool
+		want     bool
+	}{
+		{[]bool{false, true}, false},
+		{[]bool{true, false}, false},
+		{[]bool{true, true}, true},
+		{[]bool{false}, false},
+	} {
+		var batch []events.NewEvent
+		for _, r := range c.restated {
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Restated: r},
+				events.NewEvent{Type: domain.EventSessionThreadStatusIdle})
+		}
+		got := keepLastSessionIdle(batch)
+		var idles []events.NewEvent
+		for _, ev := range got {
+			if ev.Type == domain.EventSessionStatusIdle {
+				idles = append(idles, ev)
+			}
+		}
+		if len(idles) != 1 || idles[0].Restated != c.want {
+			t.Errorf("restated %v: kept %+v, want one idle restated=%v", c.restated, idles, c.want)
+		}
 	}
 }
 

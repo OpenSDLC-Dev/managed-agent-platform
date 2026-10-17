@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // SessionStatus is the session state-machine value, wire-compatible with
 // Anthropic Managed Agents.
@@ -22,6 +25,21 @@ type Usage struct {
 	OutputTokens         int64         `json:"output_tokens"`
 	CacheReadInputTokens int64         `json:"cache_read_input_tokens"`
 	CacheCreation        CacheCreation `json:"cache_creation"`
+}
+
+// SessionUsage is Usage with the session's running time beside it: the
+// session resource's usage and the session.usage event's (plan 68). It is
+// not stored as one value — the tokens are sessions.usage, the time
+// sessions.active_seconds — and a thread's usage does not carry the time.
+type SessionUsage struct {
+	Usage
+	ActiveSeconds float64 `json:"active_seconds"`
+}
+
+// NewSessionUsage renders the running time to the millisecond, the precision
+// the reference reports it at.
+func NewSessionUsage(u Usage, activeSeconds float64) SessionUsage {
+	return SessionUsage{Usage: u, ActiveSeconds: math.Round(activeSeconds*1000) / 1000}
 }
 
 // CacheCreation splits cache-creation input tokens by cache TTL.

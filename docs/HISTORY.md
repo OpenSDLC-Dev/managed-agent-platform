@@ -49,6 +49,49 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## The `session.usage` event and `usage.active_seconds` (plan 68, #432) — archived 2026-10-17, delivered in one PR
+
+#432 registered the reference's session-budget surface at anthropic-sdk-go v1.62.0. Checked on 2026-10-17, the surface was unchanged from v1.63.1 to v1.82.0, and the public docs now define it. The owner chose one slice that day: the `session.usage` event before every session idle, and `active_seconds`, with no price table. Budgets, `list_cost`, `server_tool_use` and `session.budget_reached` stay registered under #432, which stays open.
+
+Review, round 1. Codex (`gpt-6.1-sol`, `xhigh`) found one P3, fixed: the docs said a running session's resource read "as of the last idle", where a reclaim's reschedule moves it too. `/code-review` (`claude-opus-5-5`, `xhigh`, no cap) raised nine findings. Fixed:
+
+- a running session's resource left out its open interval, so a long turn showed no time until it idled; it now adds the interval up to the read, while the stored status is running;
+- a running that found an interval open kept it, which no batch this build writes produces; after a close that a replica on the earlier build wrote, that counted the idle that followed, so a running now restarts the interval;
+- the clock's columns and the stored usage are read in the append's `FOR UPDATE`, not in a second query;
+- migration 0055's comment and the changelog said the upgrade blocks appends; its lock blocks every read of a session too;
+- the transition tests' helper dropped every `session.usage` unchecked; it now checks that each sits immediately before a session idle;
+- `AppendInTx`'s doc comment now says it returns more events than it was given;
+- the plan archives in this PR.
+
+Declined: bumping `updated_at` when the clock moves, because with the open interval counted at read time the rendered value no longer jumps at a write that moves no status; and building the clock's event set from `sessionStatusOf`, because a new session status needs a decision in `sessionClock.step` — open, close or neither — that the built set would not make.
+
+Of the round's 5 behavior mutants, 5 were caught by an assertion.
+
+Round 2. Codex, on the fixes, found no path that runs a running session again without a close, which the restart's premise needs. It raised three findings. Fixed: the render read the rendering host's clock, so two replicas could disagree by their skew; it now reads the database's. Fixed: the render test's bound admitted an open interval counted twice; it now allows only the time its reads took, and 3 render mutants, double counting among them, were each caught. Declined: counting the open interval in the create response, which is built inside the creating transaction, where that interval is the milliseconds since the running stamp in the same request.
+
+CodeRabbit found the migration's events scan ran under the sessions lock. It proposed a batched backfill outside the migration transaction, which needs a job runner the platform does not have. The scan now runs first, into a scratch table, and the lock covers only the update of each session row. Measured on 2,000,000 events over 5,000 sessions, with 0055 the only migration pending: the lock held 4.21 s before and 34 ms after, and a sessions read, an append and a session update all went through during the scan. Both forms gave the same result. CodeRabbit also found a registry entry, the session delegation bound's, that still said `session.usage` is never emitted; it now says the event carries no `budget`.
+
+Round 3. Codex, on that change, found three things, all fixed. The scratch table was temporary, which needs a database privilege a managed role can lack; it is now an ordinary unlogged table the migration drops. The lock claim held only with 0055 the only migration pending: the migrator runs every pending one in one transaction, and 0053's `ALTER` of sessions holds its lock through the scan; the migration comment and the changelog now say so. The render test's bound still admitted double counting after a long stall; a unit test now pins the render's arithmetic on fixed stamps. Two mutants were each caught: the scratch table left behind, and the open interval counted twice, against the unit test alone.
+
+Round 4. `/code-review`, a second pass on the whole PR, raised ten findings. Fixed:
+
+- an idle that found an interval open from before an unseen close counted the gap: a re-idle three days after a binary from before 0055 closed the session added three days. The clock now reconciles with the log's last session-level status event before a batch steps it, one indexed read per batch that carries a status event. An unseen close counts at its own stamp, and an unseen open opens at its own. The backfill now restarts on a running inside an open interval, as the live rule does, so the two agree;
+- the usage of an unstamped idle was stamped before the batch's other rows, so the floor lifted the idle to the row before it; the append now stamps the two in order;
+- the `AddUsage` fold read and decoded the stored usage a second time; it now reuses the read under the lock;
+- the backfill's `UPDATE` rewrote sessions whose values equal the defaults;
+- the render repeated the clock's arithmetic; both now call `events.ActiveSecondsAt`;
+- comments named "the earlier build", which a later release makes ambiguous; they now name a binary from before migration 0055.
+
+The verifier, on bdc6d40d, found the plan-35 threads entry still said `session.usage` was not built, and that no backfill row tested the SQL clamp; both fixed. Of the 5 mutants on the reconcile and the backfill, 5 were caught.
+
+Documented: a read while running can sit above the value its close settles by the skew between two hosts' clocks. Declined: reading the usage only on the batches that need it, because it rides the row the lock already fetches; folding the clock's `UPDATE` into another, which couples three conditional writes for one tuple version at a turn boundary; and taking the lock before the scan so a lock conflict's retry does not repeat it, which brings back the lock over the scan on every upgrade.
+
+Round 5. Codex, on the reconcile, found it wrong two ways, and it was replaced. An old binary's close followed by its re-idle still counted the gap, because only the log's last status event was read. And no index covers the status-type filter, so the read checked every event since the last status event, under the session lock: for a long multiagent run, every event of the run. Recovering the unseen history in full would need a stored fold position and that same scan. In its place, `TransitionThread` marks a close it emits while the stored status was not running `NewEvent.Restated`, as does the child archive's re-idle. A restated close drops an open interval without counting it, and its snapshot reports the closed sum; `keepLastSessionIdle` keeps one restated only when every idle it merges was. A re-idle after an unseen close no longer counts the gap, at no read. The turn that close ended goes uncounted, as does a running an old binary writes; the changelog says so. Its third finding, that the changelog described the loss too narrowly, is answered by the same rewrite. Of the round's 7 mutants, 7 were caught; the child archive's flag needed a test of its own to be.
+
+Round 6. Codex, on the flag, found no path that marks a real close restated and no merge that carries the flag onto one, and raised two findings, both answered. When an old binary writes both the close and the next running, nothing drops the stale interval and the next close counts the idle between; no cheap signal tells it apart, so migration 0055's comment and plan 68 now name it, with the unseen running's lost turn. The usage and an unstamped idle took separate stamps, so a pause between them had no bound; the idle now takes the usage's stamp, and the snapshot equals the stored value again. The verifier failed 24e73316 on one blocker, the changelog fragment at 1570 bytes over the 1500-byte cap; it is now 1137, with the rolling-upgrade detail left to the migration's comment. It found the rest sound on the frozen tree, and checked both emitters and every copy of a status event for the flag.
+
+**Plan 68 progress summary (archived).** Delivered in one PR: migration 0055, the event in `Log.AppendInTx`, and `usage.active_seconds` on the session resource.
+
 ## A status the image's startup chose is no answer (plan 67, #942) — archived 2026-10-17, delivered in three PRs (#946, #947 and this close-out)
 
 #941 fixed the one case that destroyed data, the repository presence probe, and left the rest to #942. The owner settled three questions on 2026-10-16, before any code: every exit-status script runs framed; a tool call answers a tool error; and an exec that returned no status is a transport fault, where one that returned a status with no frame had its script ended by the startup.

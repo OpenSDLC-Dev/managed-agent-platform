@@ -169,7 +169,10 @@ func TransitionThread(ctx context.Context, tx pgx.Tx, sessionID domain.ID, t Thr
 		if emit == domain.SessionIdle && stop != nil {
 			payload["stop_reason"] = stop
 		}
-		session = &NewEvent{Type: sessionStatusOf[emit], Payload: mustJSON(payload)}
+		// current is the stored status before this move: a close emitted
+		// while it was not running is restated (NewEvent.Restated).
+		session = &NewEvent{Type: sessionStatusOf[emit], Payload: mustJSON(payload),
+			Restated: emit != domain.SessionRunning && current != string(domain.SessionRunning)}
 		// Not t.Status: the fold can land elsewhere (a sibling decides it, or
 		// the moving row is outside it).
 		sessionFirst = emit == domain.SessionRunning
