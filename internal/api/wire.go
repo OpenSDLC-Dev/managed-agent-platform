@@ -565,10 +565,11 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 			// The frame an MCP tool's model-facing name is composed in is
 			// reserved, in the reference's words (2026-09-03 batch2
 			// `agent.create.mcp-name-collision`; #573), so no custom tool can
-			// take an MCP tool's name. Only the agent routes: a session
-			// override's tools were never probed, and for them, as for an agent
-			// stored before this check, the brain still settles a contested name
-			// by declaration order.
+			// take an MCP tool's name. Only the agent routes: neither session
+			// route (a create's tool override, a mid-session agent.tools
+			// update) was probed, and for them, as for an agent stored before
+			// this check, the brain still settles a contested name by
+			// declaration order.
 			if agentRoute && strings.HasPrefix(probe.Name, domain.MCPModelNamePrefix) {
 				return nil, errInvalid("%stools.%d.custom.name: custom tool name %q uses reserved MCP tool prefix",
 					prefix, i, probe.Name)

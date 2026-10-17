@@ -215,6 +215,19 @@ func TestAgentCustomToolMCPPrefixIsReserved(t *testing.T) {
 	for _, name := range []string{"mcp_search", "my__mcp__search", "MCP__docs__search"} {
 		createAgent(t, s, agentBody(map[string]any{"tools": []any{customTool(name)}}))
 	}
+
+	// Neither session route is checked, both unprobed on the reference (docs/
+	// DIVERGENCES.md): a create's tool override and a mid-session agent.tools
+	// update keep the name, and the brain settles the contest by declaration
+	// order (internal/brain TestAnMCPToolLosesAContestedName).
+	agentID, envID := fixture(t, s)
+	sess := createSession(t, s, map[string]any{"environment_id": envID, "agent": map[string]any{
+		"type": "agent_with_overrides", "id": agentID, "tools": []any{customTool("mcp__docs__search")}}})
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sess["id"].(string), map[string]any{
+		"agent": map[string]any{"tools": []any{customTool("mcp__docs__fetch")}}})
+	if status != http.StatusOK {
+		t.Errorf("a session's agent.tools update with an mcp__ name: status %d (%v), want 200", status, res)
+	}
 }
 
 func TestAgentCreateMinimal(t *testing.T) {
