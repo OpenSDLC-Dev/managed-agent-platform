@@ -167,39 +167,35 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	// the stream has ended: the cap cuts what is still open when it is
 	// reached, under a stop reason that arrives after it (#951). An adapter
 	// hands a tool call on when its block closes, so the call holds {} until
-	// then, and anything generated after it makes its input the model's own
-	// malformation (late). When the turn fails on it,
-	// nothing of the response is kept but how the stream ended, and reading on
-	// is bounded as every turn's reading is, by the route's stall guard.
+	// then, and anything generated after it (passed) makes its input the
+	// model's own malformation. When the turn fails on it, nothing of the
+	// response is kept but how the stream ended, and reading on is bounded as
+	// every turn's reading is, by the route's stall guard.
 	var unfinished error
-	late := false
 	// notObject marks an unfinished string or array: only an object, or
 	// nothing yet, can be a cut one, so its turn fails whatever ended it.
 	notObject := false
-	// passed is set when the stream carried content after its last tool call:
-	// the cap then cut that content, not the call. Each tool call clears it.
+	// passed is set when the stream carried content after its last tool call,
+	// whose block is lastTool: the cap then cut that content, not the call.
+	// A later call clears it, unless an unfinished input came first.
 	passed := false
+	var lastTool int64
 	for stream.Next() {
 		c := stream.Chunk()
-		// A chunk with no content moves neither late nor passed: an empty or
-		// NUL-only text or thinking delta, which the paths below skip too, or
-		// the signature that seals a thinking block the model wrote before.
-		content := (c.Kind != provider.KindTextDelta && c.Kind != provider.KindThinkingDelta &&
-			c.Kind != provider.KindThinkingSignature) || toolset.SanitizeText(c.Text) != ""
+		switch {
+		case c.Kind == provider.KindToolUse && unfinished == nil:
+			passed = false
+		case len(turn.toolUses) > 0 && generated(c, lastTool):
+			passed = true
+		}
 		if unfinished != nil {
 			if c.Kind != provider.KindDone {
-				late = late || content
 				continue
 			}
-			if late || !provider.CutOff(c.StopReason) {
+			if passed || !provider.CutOff(c.StopReason) {
 				turn.stopReason, turn.usage = c.StopReason, copyUsage(c.Usage)
 				continue
 			}
-		}
-		if c.Kind == provider.KindToolUse {
-			passed = false
-		} else if c.Kind != provider.KindDone && content && len(turn.toolUses) > 0 {
-			passed = true
 		}
 		switch c.Kind {
 		case provider.KindThinkingDelta:
@@ -289,6 +285,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			// input is `"oops"` or a truncated `{` would either abort every
 			// settlement (a silent reclaim loop) or make the model reject
 			// every future replay of this session.
+			lastTool = c.Index
 			tu := *c.ToolUse
 			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
@@ -324,13 +321,13 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	// classification).
 	n := len(turn.toolUses)
 	cut := provider.CutOff(turn.stopReason) && n > 0 && !passed && string(turn.toolUses[n-1].Input) == "{}"
-	if unfinished != nil && (late || notObject || !cut || stream.Err() != nil) {
+	if unfinished != nil && (notObject || !cut || stream.Err() != nil) {
 		// An unfinished input the cap did not cut is the model's own
 		// malformation, and never goes out. The turn goes back with the
 		// error, because what the call spent is a fact of the call: runTurn
 		// records it for a failed turn too.
 		note := provider.StopNote(turn.stopReason, turn.usage)
-		if late {
+		if passed {
 			note += "; the response went on past it"
 		}
 		if err := stream.Err(); err != nil {
@@ -351,6 +348,24 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			"stop", provider.StopNote(turn.stopReason, turn.usage))
 	}
 	return turn, nil
+}
+
+// generated reports whether a chunk carries something the model generated
+// after the tool call whose block is lastTool (#951). An empty or NUL-only text
+// or thinking delta does not, which the stream's own paths skip too, nor does
+// the signature that seals a thinking block begun before that call. A
+// signature on a later block is that block, on a model that sends no thinking
+// text.
+func generated(c provider.Chunk, lastTool int64) bool {
+	switch c.Kind {
+	case provider.KindDone:
+		return false
+	case provider.KindTextDelta, provider.KindThinkingDelta:
+		return toolset.SanitizeText(c.Text) != ""
+	case provider.KindThinkingSignature:
+		return c.Index > lastTool
+	}
+	return true
 }
 
 // digestThinking gives each block a finished response kept the digest it is

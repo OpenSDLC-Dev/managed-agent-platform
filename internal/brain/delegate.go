@@ -160,13 +160,6 @@ type delegate struct {
 	out delegation
 }
 
-// wrongRole reports why this thread may not call name, or "" when it may. A
-// child is a child by having a thread id: the primary's is empty.
-//
-// The message names the tool the model should have reached for, because the
-// model can see neither its own role nor the half it was not offered — it has
-// simply called something that is not in front of it, and the only useful
-// answer says what is.
 // foreign reports a call that is not this thread's to make: a name the model
 // was not offered, or one of the six that belongs to the other half. d.run
 // answers it as any call to that name, cut or not, and it spends no delegation
@@ -175,6 +168,13 @@ func (d *delegate) foreign(call delegatedCall) bool {
 	return call.unoffered || (call.six && d.wrongRole(call.name) != "")
 }
 
+// wrongRole reports why this thread may not call name, or "" when it may. A
+// child is a child by having a thread id: the primary's is empty.
+//
+// The message names the tool the model should have reached for, because the
+// model can see neither its own role nor the half it was not offered — it has
+// simply called something that is not in front of it, and the only useful
+// answer says what is.
 func (d *delegate) wrongRole(name string) string {
 	child := d.caller.ThreadID != ""
 	switch {

@@ -1506,6 +1506,10 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 		return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 			ID: id, Name: "lookup", Input: json.RawMessage(input)}}
 	}
+	at := func(index int64, c provider.Chunk) provider.Chunk {
+		c.Index = index
+		return c
+	}
 	for name, tc := range map[string]struct {
 		chunks []provider.Chunk
 		asked  int    // custom tool calls the client is asked to run
@@ -1555,12 +1559,12 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 		// A signature seals a thinking block the model wrote before the call;
 		// it is not more of the response.
 		"a signature for an earlier block after the cut": {
-			[]provider.Chunk{thinkingChunk(0, "plan the batch"), call("toolu_x", `{"query":"batch 9`),
-				signatureChunk(0, "sig"), done("max_tokens", 8192)}, 0,
+			[]provider.Chunk{thinkingChunk(1, "plan the batch"), at(2, call("toolu_x", `{"query":"batch 9`)),
+				signatureChunk(1, "sig"), done("max_tokens", 8192)}, 0,
 			"(stop_reason max_tokens, 8192 output tokens)",
 		},
 		"a signature after a call cut before any input": {
-			[]provider.Chunk{thinkingChunk(0, "plan the batch"), call("toolu_x", `{}`),
+			[]provider.Chunk{thinkingChunk(0, "plan the batch"), at(1, call("toolu_x", `{}`)),
 				signatureChunk(0, "sig"), done("max_tokens", 8192)}, 0,
 			"(stop_reason max_tokens, 8192 output tokens)",
 		},
@@ -1622,6 +1626,8 @@ func TestOnlyTheLastCallCanBeCut(t *testing.T) {
 		"the last call complete": {call("toolu_b", `{"query":"batch 8"}`), 0},
 		"the last call cut":      {call("toolu_b", `{"query":"batch 9`), 1},
 		"text after it":          {textChunk(1, "the cap cut this text"), 0},
+		// A thinking block that sends no text is a block all the same.
+		"a signature-only block after it": {signatureChunk(1, "sig"), 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{{
@@ -1698,9 +1704,9 @@ func TestACutCallIsNeitherAskedNorQueued(t *testing.T) {
 
 // A tool input that stops before its JSON object is complete, where the output
 // cap cannot have cut it, is the model's own malformation, and its turn fails
-// saying how the stream ended (#951). The cap cuts the response's last block
-// under a stop reason that says so, so an unfinished input fails when the
-// stream ends any other way or carries anything after it. Nothing the stream
+// saying how the stream ended (#951). The cap cuts what is still open when it
+// is reached, under a stop reason that says so, so an unfinished input fails
+// when the stream ends any other way or carries anything generated after it. Nothing the stream
 // carries after the block is kept or broadcast, and what the call spent is
 // recorded as for any turn. Any other bad input fails its turn at once.
 func TestAnUnfinishedInputTheCapDidNotCutFailsTheTurn(t *testing.T) {
@@ -1759,10 +1765,25 @@ func TestAnUnfinishedInputTheCapDidNotCutFailsTheTurn(t *testing.T) {
 			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason; model stream: model endpoint stalled: no data for 10m0s)`,
 			0,
 		},
-		// Only an object can be a cut one, so a cut string or array fails
-		// at once, whatever ends the stream.
+		// A cut-off stop does not excuse a stream that failed after it.
+		"stream failed after the cap stop": {
+			nil, cut, []provider.Chunk{done("max_tokens", 8192)}, errors.New("connection reset"),
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens; model stream: connection reset)`,
+			8192,
+		},
+		"a redacted block after it": {
+			nil, cut, []provider.Chunk{redactedChunk(1, "opaque"), done("max_tokens", 8192)}, nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens; the response went on past it)`,
+			8192,
+		},
 		// Only an object can be a cut one; the stream is still read to its
 		// end for how it ended and what it spent.
+		// A thinking block that sends no text is a block all the same.
+		"a signature-only block after it": {
+			nil, cut, []provider.Chunk{signatureChunk(1, "sig"), done("max_tokens", 8192)}, nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens; the response went on past it)`,
+			8192,
+		},
 		"not an object": {
 			nil, json.RawMessage(`["a",`), []provider.Chunk{done("max_tokens", 8192)}, nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,

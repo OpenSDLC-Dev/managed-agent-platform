@@ -989,6 +989,30 @@ func TestGenerateInterleavedBlocks(t *testing.T) {
 	}
 }
 
+// A block may also begin inside an open tool block. Its text goes out as it
+// streams; the tool block, still open at a cut-off message_stop, goes out after
+// it, so the brain answers the call as one the cap cut (#951).
+func TestGenerateABlockBegunInsideAnOpenToolBlock(t *testing.T) {
+	p := start(t, &fakeServer{sse: append(append([]string(nil), openToolHead...),
+		`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"beside it"}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
+		`{"type":"message_stop"}`,
+	)})
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"spawn them"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	got := collect(t, stream)
+	if len(got) != 3 || got[0].Kind != provider.KindTextDelta || got[0].Text != "beside it" ||
+		got[1].Kind != provider.KindToolUse || string(got[1].ToolUse.Input) != `{"agent_name":"dre` ||
+		got[2].Kind != provider.KindDone || got[2].StopReason != "max_tokens" {
+		t.Fatalf("chunks = %+v, want the text, then the open tool block as it stands, then done", got)
+	}
+}
+
 // A stream that ends with a tool block open, and without what message_stop
 // would have settled, fails. The error says how far the stream got: the stop
 // reason and the output count, when message_delta sent them (#951).
