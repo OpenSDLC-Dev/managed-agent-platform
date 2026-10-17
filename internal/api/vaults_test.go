@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
@@ -501,9 +502,10 @@ func TestCredentialValidationRules(t *testing.T) {
 
 	// The recorded refusals answer the reference's sentences verbatim (#540),
 	// on the recorded bodies: a static_bearer without its server URL
-	// (2026-09-03 batch1 `cred.create.throwaway` #39) and an empty secret_name
-	// (`cred.create.secret-name-empty` #62). The neighbouring conditions,
-	// never recorded, keep ours.
+	// (2026-09-03 batch1 `cred.create.throwaway` #39), an empty secret_name
+	// (`cred.create.secret-name-empty` #62), and an mcp_oauth credential dated
+	// 2020 (batch2 `cred.create.oauth-te-*` #99, #101, #103; #589). The
+	// neighbouring conditions, never recorded, keep ours.
 	for _, c := range []struct {
 		name string
 		auth map[string]any
@@ -521,10 +523,24 @@ func TestCredentialValidationRules(t *testing.T) {
 		{"absent secret_name", map[string]any{"type": "environment_variable",
 			"secret_value": "x", "networking": map[string]any{"type": "unrestricted"}},
 			"secret_name is required"},
+		{"past expires_at", map[string]any{"type": "mcp_oauth", "access_token": "rec80-stale-access",
+			"mcp_server_url": "https://mcp.deepwiki.com/mcp", "expires_at": "2020-01-01T00:00:00Z",
+			"refresh": map[string]any{"client_id": "rec80-client", "refresh_token": "rec80-rtok",
+				"token_endpoint":      "https://httpbin.org/status/400",
+				"token_endpoint_auth": map[string]any{"type": "none"}}},
+			"auth.expires_at must be in the future."},
 	} {
 		status, resp := s.do("POST", "/v1/vaults/"+vaultID+"/credentials",
 			map[string]any{"display_name": "rec79", "auth": c.auth})
 		wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", c.msg)
+	}
+	// The recorded 200 arm of the same probes: an expiry 30 seconds ahead is
+	// stored (batch2 #105), so the refusal keeps no margin such as the dial's
+	// refresh leeway.
+	soon := time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339)
+	if status, resp := s.do("POST", "/v1/vaults/"+vaultID+"/credentials", map[string]any{"auth": map[string]any{
+		"type": "mcp_oauth", "access_token": "at", "mcp_server_url": "https://mcp.deepwiki.com/mcp", "expires_at": soon}}); status != http.StatusOK {
+		t.Fatalf("an expiry 30s ahead: status %d (%v), want 200", status, resp)
 	}
 
 	// 16 allowed hosts pass; 17 fail. Wildcards and IPv4 literals pass.
@@ -771,14 +787,14 @@ func TestCredentialUpdateSuccess(t *testing.T) {
 	})["id"].(string)
 	status, body = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, map[string]any{
 		"auth": map[string]any{"type": "mcp_oauth",
-			"access_token": "at2", "expires_at": "2027-01-01T00:00:00Z",
+			"access_token": "at2", "expires_at": "2099-01-01T00:00:00Z",
 			"refresh": map[string]any{"refresh_token": "rt2", "scope": "read",
 				"token_endpoint_auth": map[string]any{"type": "client_secret_basic"}}},
 	})
 	if status != http.StatusOK {
 		t.Fatalf("oauth update: status %d (%v)", status, body)
 	}
-	if body["auth"].(map[string]any)["expires_at"] != "2027-01-01T00:00:00Z" {
+	if body["auth"].(map[string]any)["expires_at"] != "2099-01-01T00:00:00Z" {
 		t.Fatalf("expires_at not set: %v", body["auth"])
 	}
 	// Clearing expires_at and the scope with explicit null.
@@ -880,6 +896,17 @@ func TestCredentialUpdateErrors(t *testing.T) {
 			t.Fatalf("auth %v: status %d (%v), want 400", c.auth, status, resp)
 		}
 	}
+	// A past expires_at is no error on update, unlike on create (#589): the
+	// console resends the stored expiry with every save, and a stored expiry
+	// passes with time. A rename beside a past expiry is the body it sends
+	// once the token's hour is up.
+	if status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, map[string]any{
+		"display_name": "renamed", "auth": map[string]any{"type": "mcp_oauth", "expires_at": "2020-01-01T00:00:00Z"}}); status != http.StatusOK {
+		t.Fatalf("an update with a past expiry: status %d (%v), want 200", status, resp)
+	}
+	if _, got := s.do("GET", "/v1/vaults/"+vaultID+"/credentials/"+oauthID, nil); got["auth"].(map[string]any)["expires_at"] != "2020-01-01T00:00:00Z" {
+		t.Fatalf("an update with a past expiry did not store it: %v", got)
+	}
 	// display_name too long on update.
 	if status, _ := s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+envID, map[string]any{
 		"display_name": strings.Repeat("n", 256)}); status != http.StatusBadRequest {
@@ -917,8 +944,8 @@ func TestCredentialExpiresAtNormalizedToUTC(t *testing.T) {
 	vaultID := createVault(t, s, "tz")
 	body := createCredential(t, s, vaultID, map[string]any{
 		"type": "mcp_oauth", "mcp_server_url": "https://m.example.com", "access_token": "at",
-		"expires_at": "2027-01-01T00:00:00+08:00"})
-	if got := body["auth"].(map[string]any)["expires_at"]; got != "2026-12-31T16:00:00Z" {
+		"expires_at": "2099-01-01T00:00:00+08:00"})
+	if got := body["auth"].(map[string]any)["expires_at"]; got != "2098-12-31T16:00:00Z" {
 		t.Fatalf("expires_at not normalized to UTC Z: %v", got)
 	}
 }

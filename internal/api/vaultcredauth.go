@@ -131,6 +131,9 @@ func parseMCPOAuthCreate(obj map[string]json.RawMessage) (*credAuth, error) {
 	if doc.ExpiresAt, err = timeField(obj, "expires_at"); err != nil {
 		return nil, err
 	}
+	if err := requireFutureExpiry(doc.ExpiresAt); err != nil {
+		return nil, err
+	}
 	secrets := map[string]string{"access_token": accessToken}
 	if refreshRaw, ok := obj["refresh"]; ok && !isNull(refreshRaw) {
 		refresh, refreshSecrets, err := parseRefreshCreate(refreshRaw)
@@ -443,6 +446,22 @@ func timeField(obj map[string]json.RawMessage, key string) (*time.Time, error) {
 	// timestamp, rather than round-tripping a client-supplied +HH:MM offset.
 	t = t.UTC()
 	return &t, nil
+}
+
+// requireFutureExpiry refuses an mcp_oauth create whose expires_at is already
+// past, in the reference's words (2026-09-03 batch2 `cred.create.oauth-te-*`;
+// #589). It judges by the host clock, as vaultresolve's refresh does when it
+// reads the value.
+//
+// Only the create is refused, the half that was recorded. A stored expiry
+// passes with time anyway, and a client may echo one back on update: the
+// managed-agent console resends the stored expires_at on every save, so an
+// update refusal would turn a rename into a 400 once the token's hour is up.
+func requireFutureExpiry(t *time.Time) error {
+	if t != nil && !t.After(time.Now()) {
+		return errInvalid("auth.expires_at must be in the future.")
+	}
+	return nil
 }
 
 // optionalStringPtr parses an optional string field; absent and explicit null

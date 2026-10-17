@@ -26,6 +26,7 @@ func TestXShouldRetryFollowsTheRecordings(t *testing.T) {
 	skill := s.createSkill(t)
 	skillID, _ := skill["id"].(string)
 	versionID, _ := skill["latest_version_id"].(string)
+	vault := createVault(t, s, "noretry")
 	const absentEnv = "env_0000000000000000000000gk"
 
 	mgmt := map[string]string{"x-api-key": testKey}
@@ -84,6 +85,11 @@ func TestXShouldRetryFollowsTheRecordings(t *testing.T) {
 		{"a stale agent version", http.MethodPost, "/v1/agents/" + agentID, map[string]any{"version": 7, "name": "renamed"}, mgmt, 409, false},
 		{"a session in an absent environment", http.MethodPost, "/v1/sessions", map[string]any{"agent": agentID, "environment_id": absentEnv}, mgmt, 404, false},
 		{"reading an absent environment", http.MethodGet, "/v1/environments/" + absentEnv, nil, mgmt, 404, false},
+		// 2026-09-03 batch2 idx 99 `cred.create.oauth-te-*`, its body verbatim (#589).
+		{"a past mcp_oauth expires_at", http.MethodPost, "/v1/vaults/" + vault + "/credentials", map[string]any{"display_name": "rec80-oauth-te-400", "auth": map[string]any{
+			"type": "mcp_oauth", "access_token": "rec80-stale-access", "mcp_server_url": "https://mcp.deepwiki.com/mcp",
+			"expires_at": "2020-01-01T00:00:00Z", "refresh": map[string]any{"client_id": "rec80-client", "refresh_token": "rec80-rtok",
+				"token_endpoint": "https://httpbin.org/status/400", "token_endpoint_auth": map[string]any{"type": "none"}}}}, mgmt, 400, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := s.doRaw(tc.method, tc.path, tc.body, tc.headers)
