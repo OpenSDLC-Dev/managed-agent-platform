@@ -590,8 +590,8 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 // components.schemas.BetaManagedAgentsGitHubRepositoryResourceParams.properties.mount_path,
 // checked against anthropic-sdk-go v1.70.1 — spec
 // components.schemas.BetaManagedAgentsFileResourceParams.properties.mount_path):
-// session create, deployment create and update, and a session's resource add
-// all take those params. Only session create's refusal of a
+// session create and deployment create and update take both, and a session's
+// resource add takes the file one. Only session create's refusal of a
 // repository's was recorded, and parseRepoResource words that one as the
 // reference does; every other route and arm takes this sentence of ours.
 func errEmptyMountPath() error {
