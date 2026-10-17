@@ -10,7 +10,8 @@ this notifier exists to end, and it fails nothing on its own.
 The histories are in the shape the runs endpoint returns
 (`GET /repos/{owner}/{repo}/actions/workflows/evals.yml/runs?branch=main&status=completed`,
 its `workflow_runs` array), cut to the fields the script reads. The incident row
-is measured: it is the history that endpoint returned on 2026-10-17. The re-run
+is measured: it is the history that endpoint returned at 2026-10-17T04:48Z,
+after the stuck run was cancelled and before the next run finished. The re-run
 rows are not: no evals run had been re-run by then, so they rest on the
 endpoint's documented meaning of `run_attempt` and `updated_at`.
 """
@@ -51,7 +52,8 @@ def at(run_id, conclusion, updated_at, attempt=1):
             "conclusion": conclusion, "updated_at": updated_at}
 
 
-# The history the runs endpoint returned on 2026-10-17, newest created first.
+# The history the runs endpoint returned at 2026-10-17T04:48Z, newest created
+# first.
 # Run 37611523380 sat in `waiting` from 2026-10-07 and held the `evals`
 # concurrency group, so each later scheduled run queued behind it and was
 # cancelled by the next one. It was cancelled by hand on 2026-10-17, which is
@@ -160,6 +162,14 @@ def main():
         if got.returncode != 2 or "usage:" not in got.stderr:
             failures.append(f"  {argv!r} -> exit {got.returncode}, stderr"
                             f" {got.stderr.strip()!r}, want 2 and the usage line")
+
+    # A leading zero is decimal, not octal: bash arithmetic reads `048` as an
+    # invalid octal number and fails.
+    got = call([str(NOW), "048"], json.dumps([run(3, "success", 47)]))
+    want = f"healthy 3 1 success {stamp(NOW - 47 * HOUR)}"
+    if got.stdout.strip() != want or got.returncode != 0:
+        failures.append(f"  stale-hours 048: {got.stdout.strip()!r} (exit {got.returncode},"
+                        f" stderr {got.stderr.strip()!r}), want {want!r}")
 
     # Input that is not the runs array must fail, never classify: read as an
     # empty history, any of these would report `stale` forever over a suite

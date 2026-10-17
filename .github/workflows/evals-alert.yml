@@ -26,7 +26,7 @@ name: evals-alert
 on:
   schedule:
     # Every six hours, at :37. evals.yml is scheduled for 04:17 and has started
-    # up to seven hours late, so one fixed daily time would race it. Four checks
+    # more than twelve hours late, so one fixed daily time would race it. Four checks
     # a day report a failure within six hours of the run that found it, and a
     # stall within six hours of the threshold below.
     - cron: '37 */6 * * *'

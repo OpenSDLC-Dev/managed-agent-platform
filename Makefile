@@ -329,9 +329,8 @@ openbao-init-test:
 
 # The classifier deploy-alert.yml keys on, run rather than read — it is the one
 # piece of shell here that the PR changing it cannot execute (see the script's
-# own header). shellcheck rides along because this is the repo's fourth
-# checked-in shell script and a lint target of its own, for one file, would be
-# more machinery than the line it replaces.
+# own header). shellcheck rides along because a lint target of its own, for one
+# file, would be more machinery than the line it replaces.
 cd-outcome-test:
 	shellcheck .github/scripts/cd-outcome.sh
 	python3 .github/scripts/cd_outcome_test.py
