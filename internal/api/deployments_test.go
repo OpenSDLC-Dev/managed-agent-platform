@@ -448,9 +448,9 @@ func TestDeploymentScheduleComputesItsTimestamps(t *testing.T) {
 // reserves for an archived one.
 //
 // The recorded refusals answer the reference's sentences verbatim (2026-09-02
-// batch2: `deployment.create.unsatisfiable-cron` #425, `bad-timezone` #427,
-// `no-timezone` #428, `6-field-cron` #429 — the expressions and zones are the
-// recorded ones, #540). The rest are ours; "L" and the "Local" zone keep our
+// batch2: `deployment.create.unsatisfiable-cron` #425, `dom+dow-cron` #426
+// (#543), `bad-timezone` #427, `no-timezone` #428, `6-field-cron` #429 — the
+// expressions and zones are the recorded ones, #540). The rest are ours; "L" and the "Local" zone keep our
 // detail after the recorded prefix.
 func TestDeploymentScheduleRejections(t *testing.T) {
 	s := newTestServer(t)
@@ -468,6 +468,10 @@ func TestDeploymentScheduleRejections(t *testing.T) {
 			"`schedule.expression` is not a valid 5-field cron expression: expected 5 fields, got 1"},
 		"L is unsupported": {map[string]any{"type": "cron", "expression": "0 0 L * *", "timezone": "UTC"},
 			"`schedule.expression` is not a valid 5-field cron expression: \"L\" in day-of-month field is not a number"},
+		// The recorded body and sentence (2026-09-02 batch2
+		// `deployment.create.dom+dow-cron`; #543).
+		"both day fields": {map[string]any{"type": "cron", "expression": "0 0 1 * 1", "timezone": "UTC"},
+			"`schedule.expression` cannot restrict both day-of-month and day-of-week; use `*` for one"},
 		"unknown zone": {map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "Mars/Olympus"},
 			"`schedule.timezone` \"Mars/Olympus\" is not a valid IANA timezone"},
 		"host-local zone": {map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "Local"},
@@ -498,6 +502,49 @@ func TestDeploymentScheduleRejections(t *testing.T) {
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
 		"schedule": map[string]any{"type": "cron", "expression": "0 9 * * *"}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "schedule.timezone: Field required")
+	// So does a schedule that restricts both day fields.
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
+		"schedule": map[string]any{"type": "cron", "expression": "0 0 13 * 5", "timezone": "UTC"}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"`schedule.expression` cannot restrict both day-of-month and day-of-week; use `*` for one")
+
+	// A schedule stored before that refusal still reads: the matcher keeps the
+	// POSIX union for it, so its upcoming runs render rather than the read
+	// failing.
+	if _, err := s.pool.Exec(t.Context(), `UPDATE deployments
+	    SET schedule_expression = '0 0 13 * 5', schedule_timezone = 'UTC' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	status, res = s.do(http.MethodGet, "/v1/deployments/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get a stored two-day schedule: status %d (%v)", status, res)
+	}
+	sched, _ := res["schedule"].(map[string]any)
+	up, _ := sched["upcoming_runs_at"].([]any)
+	if sched["expression"] != "0 0 13 * 5" || len(up) != 5 {
+		t.Fatalf("a stored two-day schedule renders as %v, want its expression and 5 runs", sched)
+	}
+	// Every run is a 13th or a Friday, and five runs always hold a Friday
+	// that is not the 13th, which intersection or a 13th-only reading would
+	// never list. A Friday-only reading would pass here; the cron package's
+	// TestDayOfMonthUnionDayOfWeek is what pins the union itself.
+	var plainFriday bool
+	for _, r := range up {
+		at := stamp(t, r)
+		if at.Day() != 13 && at.Weekday() != time.Friday {
+			t.Errorf("upcoming run %v is neither a 13th nor a Friday", at)
+		}
+		plainFriday = plainFriday || (at.Weekday() == time.Friday && at.Day() != 13)
+	}
+	if !plainFriday {
+		t.Errorf("upcoming runs %v hold no Friday that is not the 13th: an intersection or a 13th-only reading", up)
+	}
+	// An update that leaves the schedule out keeps a stored two-day one; only
+	// a write of the expression is refused.
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"name": "renamed"})
+	if status != http.StatusOK || res["schedule"].(map[string]any)["expression"] != "0 0 13 * 5" {
+		t.Errorf("a rename of a stored two-day schedule: status %d (%v), want 200 keeping it", status, res)
+	}
 }
 
 // The two recorded schedule refusals that drop server-side detail keep it in

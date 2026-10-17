@@ -121,7 +121,10 @@ func TestSundayIsZeroAndSeven(t *testing.T) {
 func TestDayOfMonthUnionDayOfWeek(t *testing.T) {
 	// POSIX union, not intersection: with both fields restricted, a match on
 	// EITHER fires. "0 0 13 * 5" is the 13th of any month OR any Friday, so
-	// Friday the 13th is not the only match (plan 37 §3.1, entry 15).
+	// Friday the 13th is not the only match (plan 37 §3.1, entry 15). The API
+	// refuses to store this shape since #543 (internal/api
+	// TestDeploymentScheduleRejections); the union serves the schedules
+	// stored before that.
 	got, err := cron.Upcoming("0 0 13 * 5", "UTC", time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), 5)
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +144,29 @@ func TestDayOfMonthUnionDayOfWeek(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertInstants(t, dom, []string{"2026-03-13T00:00:00Z", "2026-04-13T00:00:00Z"})
+}
+
+// A field is restricted when it is written as anything but "*", even when it
+// covers every day: the reference's sentence says "use `*` for one".
+func TestRestrictsBothDays(t *testing.T) {
+	for expr, want := range map[string]bool{
+		"0 0 1 * 1":     true, // the recorded body (#543)
+		"0 0 13 * 5":    true,
+		"0 0 */2 * 1-5": true,
+		"0 0 1-31 * 0":  true,
+		"0 0 */1 * 0-7": true, // both fields cover every day, but neither is "*"
+		"0 0 1 * *":     false,
+		"0 0 * * 1":     false,
+		"* * * * *":     false,
+	} {
+		got, err := cron.RestrictsBothDays(expr)
+		if err != nil || got != want {
+			t.Errorf("RestrictsBothDays(%q) = %v, %v; want %v", expr, got, err, want)
+		}
+	}
+	if _, err := cron.RestrictsBothDays("0 0 1 *"); !errors.Is(err, cron.ErrExpression) {
+		t.Errorf("a four-field expression: err = %v, want ErrExpression", err)
+	}
 }
 
 func TestDSTSpringForwardSkips(t *testing.T) {
