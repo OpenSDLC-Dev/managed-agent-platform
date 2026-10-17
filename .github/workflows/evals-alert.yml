@@ -149,13 +149,14 @@ jobs:
               # Never say the same thing twice: every run until the next
               # verdict settles on the same answer. The body is searched as
               # well as the comments, because the first report is the body.
-              # Only this workflow's comments count: anyone can comment on a
+              # Only what this workflow wrote counts: anyone can comment on a
               # public issue, and a copied marker would silence the next report.
-              # The body is trusted, because the issue is found by its label,
-              # which only someone with triage access can apply.
+              # gh names the token's identity `app/github-actions` as an issue
+              # author and `github-actions` as a comment author.
               local said
-              said="$(retry gh issue view "$num" --repo "$REPO" --json body,comments \
-                --jq '([.body] + [.comments[] | select(.author.login == "github-actions") | .body])
+              said="$(retry gh issue view "$num" --repo "$REPO" --json author,body,comments \
+                --jq '([select(.author.login == "app/github-actions") | .body]
+                       + [.comments[] | select(.author.login == "github-actions") | .body])
                       | map(select(contains(env.MARK))) | length')"
               if [ "$said" != "0" ]; then echo "already reported on #$num"; return; fi
               gh issue comment "$num" --repo "$REPO" --body "$body"

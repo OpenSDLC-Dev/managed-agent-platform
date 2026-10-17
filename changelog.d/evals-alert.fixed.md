@@ -1,1 +1,1 @@
-- **The deploy failure notifier counts only its own comments as an earlier report** — a comment by anyone else that copied the hidden marker of a failed deploy made `deploy-alert.yml` skip that report on the open issue. The new eval notifier applies the same rule. (#950)
+- **The deploy failure notifier counts only the issue and comments it wrote as an earlier report** — a comment by anyone else that copied the hidden marker of a failed deploy made `deploy-alert.yml` skip that report on the open issue. The new eval notifier applies the same rule. (#950)
