@@ -1487,46 +1487,58 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 	}
 }
 
-// A tool input the output cap cut off fails the turn like any malformed one,
-// but its error says how the stream ended. The stop reason and the output
-// count arrive after the tool block, so the turn reads the stream to its end
-// before it fails, and nothing that arrives after the bad block is kept (#951).
+// A tool input that ends before its JSON object does may be one the output cap
+// cut off, so its turn fails only once the stream has ended, saying how it
+// ended: the stop reason and the output count arrive after the tool block
+// (#951). Nothing the stream carries after the block is kept or broadcast, and
+// what the call spent is recorded as for any turn. Any other bad input is the
+// model's own, and fails its turn at once.
 func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
-	cut := &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: json.RawMessage(`{"query":"batch 9`)}
+	cut := json.RawMessage(`{"query":"batch 9`)
+	after := func(end ...provider.Chunk) []provider.Chunk {
+		return append([]provider.Chunk{
+			{Kind: provider.KindThinkingDelta, Index: 1, Text: "after the cut"},
+			textChunk(2, "after the cut"),
+		}, end...)
+	}
 	for name, tc := range map[string]struct {
-		tail []provider.Chunk
-		err  error
-		want string
+		input  json.RawMessage
+		tail   []provider.Chunk
+		err    error
+		want   string
+		output int64 // the output tokens the token metric records
 	}{
 		"cut at the cap": {
-			[]provider.Chunk{
-				{Kind: provider.KindThinkingDelta, Index: 1, Text: "after the cut"},
-				textChunk(2, "after the cut"),
-				done("max_tokens", 8192),
-			},
-			nil,
+			cut, after(done("max_tokens", 8192)), nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
+			8192,
 		},
 		"no done chunk": {
-			nil,
-			nil,
+			cut, nil, nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason)`,
+			0,
 		},
 		// The stream's own failure is part of how it ended, so it is named
 		// beside the bad block rather than hidden behind it.
 		"stream failed after the cut": {
-			nil,
-			fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
-			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason; model stream: ` +
-				provider.ErrStalled.Error(),
+			cut, nil, fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
+			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason; model stream: model endpoint stalled: no data for 10m0s)`,
+			0,
+		},
+		"malformed, not cut": {
+			json.RawMessage(`"oops"`), after(done("tool_use", 12)), nil,
+			`tool "lookup": input must be a JSON object: json: cannot unmarshal string into Go value of type map[string]interface {}`,
+			0,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			collect := collectBrainMetrics(t)
 			h := newHarness(t, [][]provider.Chunk{
-				append([]provider.Chunk{{Kind: provider.KindToolUse, ToolUse: cut}}, tc.tail...),
+				append([]provider.Chunk{{Kind: provider.KindToolUse,
+					ToolUse: &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: tc.input}}}, tc.tail...),
 			}, []error{tc.err})
 			h.wake(t, "use the tool")
-			h.runOnce(t)
+			frames := drainFrames(t, h)
 
 			evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"session.error"}})
 			if len(evs) != 1 {
@@ -1540,13 +1552,19 @@ func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
 			if err := json.Unmarshal(evs[0].Body, &p); err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(p.Error.Message, tc.want) {
-				t.Errorf("session.error message = %q, want it to contain %q", p.Error.Message, tc.want)
+			if p.Error.Message != tc.want {
+				t.Errorf("session.error message = %q, want %q", p.Error.Message, tc.want)
 			}
-			for _, typ := range []string{"agent.thinking", "agent.message"} {
-				if n := h.countType(t, typ); n != 0 {
-					t.Errorf("%s events = %d, want 0: content after the bad block was kept", typ, n)
+			if n := h.countType(t, "agent.thinking"); n != 0 {
+				t.Errorf("agent.thinking events = %d, want 0: thinking after the bad block was kept", n)
+			}
+			for _, f := range frames {
+				if raw, _ := json.Marshal(f); strings.Contains(string(raw), "after the cut") {
+					t.Errorf("frame %s: text after the bad block was broadcast", raw)
 				}
+			}
+			if got := tokenSums(t, collect())["output"]; got != tc.output {
+				t.Errorf("output tokens recorded = %d, want %d", got, tc.output)
 			}
 			if n := h.liveWork(t); n != 0 {
 				t.Errorf("%d work items still live (reclaim loop)", n)

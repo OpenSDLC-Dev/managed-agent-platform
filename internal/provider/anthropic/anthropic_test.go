@@ -880,8 +880,9 @@ func TestGenerateTruncatedStream(t *testing.T) {
 // An endpoint that stops with a tool block still open fails the stream. This
 // is the output cap reached mid-input on an endpoint that sends no
 // content_block_stop for the cut block, so the error carries what
-// message_delta said: the stop reason and the output count (#951).
-func TestGenerateOpenToolBlockAtStopNamesHowTheStreamEnded(t *testing.T) {
+// message_delta said: the stop reason and the output count (#951). The same
+// holds for an endpoint that drops the stream before message_stop.
+func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 	head := []string{
 		`{"type":"message_start","message":{"id":"msg_5","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
 		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"create_agent","input":{}}}`,
@@ -901,6 +902,11 @@ func TestGenerateOpenToolBlockAtStopNamesHowTheStreamEnded(t *testing.T) {
 		"without message_delta": {
 			[]string{`{"type":"message_stop"}`},
 			"message_stop with tool_use block 0 still open (no stop reason)",
+		},
+		// A stream that drops before message_stop says how far it got too.
+		"without message_stop": {
+			[]string{`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`},
+			"model stream ended before message_stop (stop_reason max_tokens, 8192 output tokens)",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

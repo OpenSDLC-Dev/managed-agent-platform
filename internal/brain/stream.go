@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -156,17 +157,19 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		return nil
 	}
 
-	// badInput is the first tool input that is not a JSON object. The turn
-	// fails on it, but only once the stream has ended: the stop reason and the
-	// output count arrive after the tool block, and they are what tells a call
-	// the output cap cut off from one the model malformed (#951). Nothing else
-	// the stream carries after it is kept.
+	// badInput is a tool input that ends before its JSON object does, the one
+	// shape a cut leaves. The turn fails on it, but only once the stream has
+	// ended: the stop reason and the output count arrive after the tool block,
+	// and they are what tells a call the output cap cut off from one the model
+	// closed early (#951). Reading on is bounded as every turn's reading is,
+	// by the route's stall guard, and nothing else the stream carries after
+	// the block is kept.
 	var badInput error
 	for stream.Next() {
 		c := stream.Chunk()
 		if badInput != nil {
 			if c.Kind == provider.KindDone {
-				turn.stopReason, turn.usage = c.StopReason, c.Usage
+				turn.stopReason, turn.usage = c.StopReason, copyUsage(c.Usage)
 			}
 			continue
 		}
@@ -262,7 +265,11 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
 			if err != nil {
-				badInput = fmt.Errorf("tool %q: %w", tu.Name, err)
+				err = fmt.Errorf("tool %q: %w", tu.Name, err)
+				if !errors.Is(err, io.ErrUnexpectedEOF) {
+					return nil, err
+				}
+				badInput = err
 				continue
 			}
 			tu.Input = input
@@ -276,20 +283,17 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 				return nil, err
 			}
 			turn.stopReason = c.StopReason
-			if c.Usage != nil {
-				// Copied, not aliased: the chunk belongs to the provider,
-				// and this value outlives the stream it came from.
-				u := *c.Usage
-				turn.usage = &u
-			}
+			turn.usage = copyUsage(c.Usage)
 		}
 	}
 	if badInput != nil {
+		// The turn goes back with the error, because what the call spent is
+		// a fact of the call: runTurn records it for a failed turn too.
 		note := provider.StopNote(turn.stopReason, turn.usage)
 		if err := stream.Err(); err != nil {
-			note += "; model stream: " + err.Error()
+			return turn, fmt.Errorf("%w (%s; model stream: %w)", badInput, note, err)
 		}
-		return nil, fmt.Errorf("%w (%s)", badInput, note)
+		return turn, fmt.Errorf("%w (%s)", badInput, note)
 	}
 	if err := stream.Err(); err != nil {
 		return nil, fmt.Errorf("model stream: %w", err)
@@ -365,6 +369,16 @@ func stripValue(v any) (any, error) {
 		return x, nil
 	}
 	return v, nil
+}
+
+// copyUsage copies a done chunk's usage rather than aliasing it: the chunk
+// belongs to the provider, and the turn outlives the stream it came from.
+func copyUsage(u *domain.ModelUsage) *domain.ModelUsage {
+	if u == nil {
+		return nil
+	}
+	c := *u
+	return &c
 }
 
 // normalizeToolInput accepts an absent or null input as the empty object,
