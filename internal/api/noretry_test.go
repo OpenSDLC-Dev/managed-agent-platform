@@ -80,8 +80,6 @@ func TestXShouldRetryFollowsTheRecordings(t *testing.T) {
 		// `agent.update.stale-version`, #160's lane for session create; and an environment's own 404 on a route
 		// no recording reaches.
 		{"an unknown dream subpath", http.MethodGet, "/v1/dreams/drm_0000000000000000000000gk/bogus", nil, mgmt, 404, false},
-		// 2026-09-02 free_batch1 idx 14 `mem.list.prefix/x` (#549).
-		{"an unslashed path_prefix", http.MethodGet, "/v1/memory_stores/" + store + "/memories?path_prefix=/x", nil, mgmt, 400, false},
 		{"deleting an agent", http.MethodDelete, "/v1/agents/" + agentID, nil, mgmt, 404, false},
 		{"an environment key's agents list", http.MethodGet, "/v1/agents", nil, bearer(shKey), 401, false},
 		{"a stale agent version", http.MethodPost, "/v1/agents/" + agentID, map[string]any{"version": 7, "name": "renamed"}, mgmt, 409, false},
@@ -92,6 +90,8 @@ func TestXShouldRetryFollowsTheRecordings(t *testing.T) {
 			"type": "mcp_oauth", "access_token": "rec80-stale-access", "mcp_server_url": "https://mcp.deepwiki.com/mcp",
 			"expires_at": "2020-01-01T00:00:00Z", "refresh": map[string]any{"client_id": "rec80-client", "refresh_token": "rec80-rtok",
 				"token_endpoint": "https://httpbin.org/status/400", "token_endpoint_auth": map[string]any{"type": "none"}}}}, mgmt, 400, false},
+		// 2026-09-02 free_batch1 idx 14 `mem.list.prefix/x` (#549).
+		{"an unslashed path_prefix", http.MethodGet, "/v1/memory_stores/" + store + "/memories?path_prefix=/x", nil, mgmt, 400, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := s.doRaw(tc.method, tc.path, tc.body, tc.headers)

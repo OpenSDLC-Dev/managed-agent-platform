@@ -710,7 +710,8 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		}
 		// The reference's words for a prefix that does not end with "/"
 		// (2026-09-02 free_batch1 `mem.list.prefix/x`; #549). Matched
-		// literally, /notes would reach /notes-archive/.
+		// literally, /notes would reach /notes-archive/. One sent empty
+		// never gets here: it reads as omitted (docs/DIVERGENCES.md).
 		if !strings.HasSuffix(v, "/") {
 			return nil, errInvalid("path_prefix must be segment-aligned and end with /")
 		}
