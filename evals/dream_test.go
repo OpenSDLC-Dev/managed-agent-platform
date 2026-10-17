@@ -669,8 +669,9 @@ func TestDreamPipelineHundred(t *testing.T) {
 	// run more threads than batches (#951). No upper bound is asserted here:
 	// the platform's live-thread cap (internal/brain/delegate.go
 	// maxLiveThreads, the primary included) already holds a dream to 24
-	// children, and any tighter number would be a guess at how many rebuilds
-	// a sound dream needs. The count is all this test checks: it cannot show
+	// children, because a child that has reported goes idle and keeps its
+	// slot until an archive the dream never makes. Any tighter number would
+	// be a guess at how many rebuilds a sound dream needs. The count is all this test checks: it cannot show
 	// which batch a thread read, and the digests are in the sandbox's
 	// scratch, which it cannot read.
 	switch {
