@@ -46,9 +46,10 @@ func rejectUnknownNested(raw json.RawMessage, allowed ...string) error {
 // days — so upcoming_runs_at would be [] on an active deployment, which is the
 // shape the wire reserves for an archived one (plan 37 §8.1 entry 27).
 //
-// The refusals for an absent timezone, a bad expression or zone and an
-// unsatisfiable expression are the reference's recorded sentences (2026-09-02
-// batch2 `deployment.create.*`, #540); the others are ours.
+// The refusals for an absent timezone, a bad expression or zone, an expression
+// restricting both day fields and an unsatisfiable expression are the
+// reference's recorded sentences (2026-09-02 batch2 `deployment.create.*`,
+// #540 and #543); the others are ours.
 func parseDeploymentSchedule(ctx context.Context, obj map[string]json.RawMessage) (expr, tz string, set, null bool, err error) {
 	raw, ok := obj["schedule"]
 	if !ok {

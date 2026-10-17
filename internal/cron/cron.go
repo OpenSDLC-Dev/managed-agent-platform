@@ -278,9 +278,10 @@ func parseValue(s string, f fieldSpec) (int, error) {
 }
 
 // matchesDay applies the POSIX union: with both day fields restricted, either
-// matching is enough. With one restricted, only that one decides. The rule is
-// unstated in the reference's schema, but it names the dialect POSIX twice and
-// union is what POSIX specifies (plan 37 §8.1 entry 15).
+// matching is enough. With one restricted, only that one decides. The
+// reference refuses to store an expression that restricts both (#543;
+// RestrictsBothDays), so the union now decides only for a schedule stored
+// before this platform refused it too.
 func (s *schedule) matchesDay(y int, mo time.Month, d int) bool {
 	dom := s.dom[d]
 	dow := s.dow[int(time.Date(y, mo, d, 12, 0, 0, 0, time.UTC).Weekday())]

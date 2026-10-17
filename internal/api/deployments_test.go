@@ -448,9 +448,9 @@ func TestDeploymentScheduleComputesItsTimestamps(t *testing.T) {
 // reserves for an archived one.
 //
 // The recorded refusals answer the reference's sentences verbatim (2026-09-02
-// batch2: `deployment.create.unsatisfiable-cron` #425, `bad-timezone` #427,
-// `no-timezone` #428, `6-field-cron` #429 — the expressions and zones are the
-// recorded ones, #540). The rest are ours; "L" and the "Local" zone keep our
+// batch2: `deployment.create.unsatisfiable-cron` #425, `dom+dow-cron` #426
+// (#543), `bad-timezone` #427, `no-timezone` #428, `6-field-cron` #429 — the
+// expressions and zones are the recorded ones, #540). The rest are ours; "L" and the "Local" zone keep our
 // detail after the recorded prefix.
 func TestDeploymentScheduleRejections(t *testing.T) {
 	s := newTestServer(t)
