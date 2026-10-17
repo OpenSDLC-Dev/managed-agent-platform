@@ -7,14 +7,17 @@ Each row names the run history it stands for. The risk in this classifier is a
 history that lands in `healthy` while no eval has passed: that is the silence
 this notifier exists to end, and it fails nothing on its own.
 
-The histories are in the shape the runs endpoint returns
-(`GET /repos/{owner}/{repo}/actions/workflows/evals.yml/runs?branch=main`, its
-`workflow_runs` array), cut to the fields the script reads. The incident rows
-are measured: they are the history that endpoint returned at 2026-10-17T04:48Z,
-after the stuck run was cancelled and before the next run finished, and the run
-that then finished. The re-run rows are not: no evals run had been re-run by
-then, so they rest on the endpoint's documented meaning of `run_attempt`,
-`created_at` and `updated_at`.
+The histories are in the shape the workflow passes: the runs endpoint's
+`workflow_runs` (`GET /repos/{owner}/{repo}/actions/workflows/evals.yml/runs?branch=main`),
+each entry its run's latest attempt, plus the earlier attempts of every re-run
+(`GET /repos/{owner}/{repo}/actions/runs/{id}/attempts/{n}`), cut to the fields
+the script reads. The incident rows are measured: they are the history the
+runs endpoint returned at 2026-10-17T04:48Z, after the stuck run was cancelled
+and before the next run finished, and the run that then finished. No evals run
+had been re-run by then. The re-run rows rest on CI run 38659188445 instead,
+measured the same day: its list entry carries attempt 2 (`success`, updated
+05:38:03), and the attempts endpoint answers attempt 1 as `failure`, updated
+00:39:06, with the same `run_number`.
 """
 
 import datetime
@@ -42,39 +45,37 @@ NOW = epoch("2026-10-17T12:00:00Z")
 HOUR = 3600
 
 
-def at(run_id, conclusion, created_at, updated_at, attempt=1):
-    status = "completed" if conclusion else "in_progress"
-    return {"id": run_id, "run_attempt": attempt, "status": status,
-            "conclusion": conclusion, "created_at": created_at, "updated_at": updated_at}
+def at(run_id, number, conclusion, updated_at, attempt=1):
+    return {"id": run_id, "run_number": number, "run_attempt": attempt,
+            "conclusion": conclusion, "updated_at": updated_at}
 
 
-def run(run_id, conclusion, hours_ago, attempt=1, created_hours_ago=None):
-    """A run last updated `hours_ago` before NOW, created an hour before that
-    unless `created_hours_ago` says otherwise. `conclusion` None is in flight."""
-    created = hours_ago + 1 if created_hours_ago is None else created_hours_ago
-    return at(run_id, conclusion, stamp(NOW - created * HOUR), stamp(NOW - hours_ago * HOUR), attempt)
+def run(number, conclusion, hours_ago, attempt=1):
+    """Attempt `attempt` of run `number`, last updated `hours_ago` before NOW.
+    The run's id is its number. `conclusion` None is still in progress."""
+    return at(number, number, conclusion, stamp(NOW - hours_ago * HOUR), attempt)
 
 
-# The history the runs endpoint returned at 2026-10-17T04:48Z, newest created
-# first. Run 37611523380 sat in `waiting` from 2026-10-07 and held the `evals`
+# The history the runs endpoint returned at 2026-10-17T04:48Z, newest first.
+# Run 37611523380 sat in `waiting` from 2026-10-07 and held the `evals`
 # concurrency group, so each later scheduled run queued behind it and was
 # cancelled by the next one. It was cancelled by hand on 2026-10-17, which is
 # why its own `updated_at` is the newest of all.
 INCIDENT = [
-    at(38710656616, "cancelled", "2026-10-15T09:07:46Z", "2026-10-16T09:01:02Z"),
-    at(38542763502, "cancelled", "2026-10-14T09:29:49Z", "2026-10-15T09:07:47Z"),
-    at(38392524911, "cancelled", "2026-10-13T11:46:20Z", "2026-10-14T09:29:50Z"),
-    at(38245954938, "cancelled", "2026-10-12T11:57:13Z", "2026-10-13T11:46:21Z"),
-    at(38133269097, "cancelled", "2026-10-11T10:48:30Z", "2026-10-12T11:57:15Z"),
-    at(38045448271, "cancelled", "2026-10-10T10:35:45Z", "2026-10-11T10:48:31Z"),
-    at(37922950786, "cancelled", "2026-10-09T11:18:51Z", "2026-10-10T10:35:46Z"),
-    at(37769461459, "cancelled", "2026-10-08T11:21:07Z", "2026-10-09T11:18:53Z"),
-    at(37611523380, "cancelled", "2026-10-07T11:03:40Z", "2026-10-17T04:48:05Z"),
-    at(37455198881, "success", "2026-10-06T11:15:30Z", "2026-10-06T11:37:43Z"),
-    at(37303016408, "failure", "2026-10-05T11:27:10Z", "2026-10-05T11:45:52Z"),
+    at(38710656616, 88, "cancelled", "2026-10-16T09:01:02Z"),
+    at(38542763502, 87, "cancelled", "2026-10-15T09:07:47Z"),
+    at(38392524911, 86, "cancelled", "2026-10-14T09:29:50Z"),
+    at(38245954938, 85, "cancelled", "2026-10-13T11:46:21Z"),
+    at(38133269097, 84, "cancelled", "2026-10-12T11:57:15Z"),
+    at(38045448271, 83, "cancelled", "2026-10-11T10:48:31Z"),
+    at(37922950786, 82, "cancelled", "2026-10-10T10:35:46Z"),
+    at(37769461459, 81, "cancelled", "2026-10-09T11:18:53Z"),
+    at(37611523380, 80, "cancelled", "2026-10-17T04:48:05Z"),
+    at(37455198881, 79, "success", "2026-10-06T11:37:43Z"),
+    at(37303016408, 78, "failure", "2026-10-05T11:45:52Z"),
 ]
 # The run queued behind the stuck one, which started once it was cancelled.
-RELEASED = at(38877555478, "failure", "2026-10-16T09:01:00Z", "2026-10-17T05:01:47Z")
+RELEASED = at(38877555478, 89, "failure", "2026-10-17T05:01:47Z")
 
 # (name, history, now, expected line, why)
 CASES = [
@@ -130,37 +131,39 @@ CASES = [
     ("old failure", [run(3, "failure", STALE_HOURS + 1)], NOW,
      f"stale 3 1 failure {stamp(NOW - (STALE_HOURS + 1) * HOUR)}",
      "nothing has run since the failure"),
-    # The newest run is the newest CREATED, whatever finished last: a re-run
-    # of an older run tests older code. The older run is the re-run here, so
-    # an implementation that ranks by attempt or by `updated_at` fails these.
+    # The newest verdict is the highest run number, whatever finished last: a
+    # re-run of an older run tests older code. The older run is the re-run
+    # here, so ranking by attempt or by `updated_at` fails these.
     ("an older run re-run passes after a newer failure",
-     [run(5, "failure", 10), run(4, "success", 2, attempt=2, created_hours_ago=30)], NOW,
+     [run(5, "failure", 10), run(4, "success", 2, attempt=2), run(4, "failure", 30)], NOW,
      f"failing 5 1 failure {stamp(NOW - 10 * HOUR)}",
      "the newest code is red"),
     ("an older run re-run fails after a newer pass",
-     [run(5, "success", 10), run(4, "failure", 1, attempt=2, created_hours_ago=30)], NOW,
+     [run(5, "success", 10), run(4, "failure", 1, attempt=2), run(4, "success", 30)], NOW,
      f"healthy 5 1 success {stamp(NOW - 10 * HOUR)}",
      "the newest code is green"),
     ("listed oldest first", [run(4, "success", 20), run(5, "failure", 3)], NOW,
      f"failing 5 1 failure {stamp(NOW - 3 * HOUR)}",
-     "the rank is `created_at`, not the endpoint's order"),
+     "the rank is the run number, not the endpoint's order"),
+    # Within a run, the latest attempt with a verdict is the run's verdict.
     ("the newest run re-run passes",
-     [run(5, "success", 1, attempt=2, created_hours_ago=30), run(4, "failure", 20, created_hours_ago=40)], NOW,
+     [run(5, "success", 1, attempt=2), run(5, "failure", 20), run(4, "failure", 40)], NOW,
      f"healthy 5 2 success {stamp(NOW - 1 * HOUR)}",
      "its latest attempt is its verdict"),
-    # A re-run hides its earlier attempt's verdict, which may be a failure.
-    ("the newest run is being re-run",
-     [run(5, None, 0, attempt=2, created_hours_ago=30), run(4, "success", 40)], NOW,
-     f"pending 5 2 null {stamp(NOW)}",
-     "falling back to the older pass would close a failure nobody fixed"),
+    # A re-run in flight, or cancelled, has no verdict of its own: the
+    # earlier attempt's still stands, failure and timestamp alike.
+    ("the newest run is being re-run after a failure",
+     [run(5, None, 0, attempt=2), run(5, "failure", 20), run(4, "success", 40)], NOW,
+     f"failing 5 1 failure {stamp(NOW - 20 * HOUR)}",
+     "an older pass must not close a failure nobody fixed"),
     ("the newest run's re-run was cancelled",
-     [run(5, "cancelled", 1, attempt=2, created_hours_ago=30), run(4, "success", 40)], NOW,
-     f"pending 5 2 cancelled {stamp(NOW - 1 * HOUR)}",
+     [run(5, "cancelled", 1, attempt=2), run(5, "failure", 20), run(4, "success", 40)], NOW,
+     f"failing 5 1 failure {stamp(NOW - 20 * HOUR)}",
      "the same, for good"),
-    ("a re-run stuck past the limit",
-     [run(5, None, STALE_HOURS + 2, attempt=2, created_hours_ago=80), run(4, "success", 90)], NOW,
-     f"stale 5 2 null {stamp(NOW - (STALE_HOURS + 2) * HOUR)}",
-     "pending does not hide a stall"),
+    ("a re-run does not reset the stale clock",
+     [run(5, "cancelled", 1, attempt=2), run(5, "success", STALE_HOURS + 24)], NOW,
+     f"stale 5 1 success {stamp(NOW - (STALE_HOURS + 24) * HOUR)}",
+     "starting or cancelling a re-run is not a verdict"),
 ]
 
 # (name, stale-hours, history, expected line): the limit is the argument, not
@@ -214,11 +217,11 @@ def main():
             failures.append(f"  {argv!r} -> exit {got.returncode}, stderr"
                             f" {got.stderr.strip()!r}, want 2 and the usage line")
 
-    # Input that is not one runs array must fail, never classify: read as an
-    # empty history, most of these would report `stale` forever over a suite
-    # that is passing. The first two are what a caller passes when it drops
-    # its `--jq` or misspells the key; the object of runs is one that reshaped
-    # its `--jq` into an object, which jq's `map` would iterate all the same.
+    # Input that is not one array must fail, never classify: read as an empty
+    # history, most of these would report `stale` forever over a suite that is
+    # passing. The first two are what a caller passes when it drops its `--jq`
+    # or misspells the key; the object of runs is one that reshaped its `--jq`
+    # into an object, which jq's `map` would iterate all the same.
     one = run(3, "success", 1)
     for name, stdin in (("the whole response", json.dumps({"total_count": 1, "workflow_runs": [one]})),
                         ("null", "null"),
@@ -240,7 +243,7 @@ def main():
         return 1
     print(f"ok: evals-health.sh classifies all {len(CASES)} histories and"
           f" {len(THRESHOLDS)} limits, refuses bad arguments, and fails on input"
-          " that is not one runs array")
+          " that is not one array")
     return 0
 
 

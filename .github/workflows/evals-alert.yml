@@ -101,22 +101,32 @@ jobs:
 
           # THE QUERY GOES IN THE PATH: `gh api` switches to POST as soon as one
           # `-f` is present, and this route has no POST (deploy-alert.yml).
-          # Runs in every status, because a re-run in flight is one the
-          # classifier must see. Only the fields it reads are kept.
-          runs="$(retry gh api \
+          # Runs in every status. Only the fields the classifier reads are kept.
+          fields='{id, run_number, run_attempt, conclusion, updated_at}'
+          attempts="$(retry gh api \
             "repos/$REPO/actions/workflows/$EVALS_WORKFLOW/runs?branch=main&per_page=100" \
-            --jq '[.workflow_runs[] | {id, run_attempt, conclusion, created_at, updated_at}]')"
-          verdict="$(bash .github/scripts/evals-health.sh "$(date -u +%s)" "$STALE_HOURS" <<<"$runs")"
+            --jq "[.workflow_runs[] | $fields]")"
+
+          # A run's entry is its LATEST attempt, so a re-run hides the verdict
+          # before it: while the new attempt runs it has no conclusion, and if
+          # it is cancelled it never gets one. Each earlier attempt of a re-run
+          # is read back and added, so that verdict still counts — with its own
+          # timestamp, so a re-run does not reset the staleness clock either.
+          reruns="$(jq -r '.[] | select(.run_attempt > 1) | "\(.id) \(.run_attempt)"' <<<"$attempts")"
+          while read -r id last; do
+            [ -n "$id" ] || continue
+            for ((n = 1; n < last; n++)); do
+              earlier="$(retry gh api "repos/$REPO/actions/runs/$id/attempts/$n" --jq "$fields")"
+              attempts="$(jq --argjson a "$earlier" '. + [$a]' <<<"$attempts")"
+            done
+          done <<<"$reruns"
+
+          verdict="$(bash .github/scripts/evals-health.sh "$(date -u +%s)" "$STALE_HOURS" <<<"$attempts")"
           read -r state RUN_ID RUN_ATTEMPT RUN_CONCLUSION FINISHED <<<"$verdict"
-          echo "the state rests on run $RUN_ID attempt $RUN_ATTEMPT, $RUN_CONCLUSION at $FINISHED -> $state"
+          echo "newest verdict: run $RUN_ID attempt $RUN_ATTEMPT, $RUN_CONCLUSION at $FINISHED -> $state"
 
           RUN_URL="$GITHUB_SERVER_URL/$REPO/actions/runs/$RUN_ID"
           LIST_URL="$GITHUB_SERVER_URL/$REPO/actions/workflows/$EVALS_WORKFLOW"
-
-          if [ "$state" = pending ]; then
-            echo "::notice::run $RUN_ID is being re-run, or its re-run was cancelled, so its earlier verdict is not in the list — the tracking issue is left as it is"
-            exit 0
-          fi
 
           # Ensured before the lookup, so the query does not depend on how `gh`
           # answers a filter naming a label that does not exist yet.
@@ -182,17 +192,17 @@ jobs:
               # reported once, and a stall after a re-run or after a reported
               # failure is still news.
               export MARK="<!-- evals-alert stale since run:$RUN_ID attempt:$RUN_ATTEMPT -->"
-              case "$RUN_CONCLUSION" in
-                -) newest="None of the newest 100 runs on \`main\` reached a verdict." ;;
-                null) newest="The newest run it rests on is $RUN_URL (attempt $RUN_ATTEMPT), a re-run that has not completed since $FINISHED." ;;
-                *) newest="The newest run it rests on is $RUN_URL (attempt $RUN_ATTEMPT), which ended **$RUN_CONCLUSION** at $FINISHED." ;;
-              esac
+              if [ "$RUN_ID" = "-" ]; then
+                newest="None of the newest 100 runs on \`main\` reached a verdict."
+              else
+                newest="The newest verdict is $RUN_URL (attempt $RUN_ATTEMPT), which ended **$RUN_CONCLUSION** at $FINISHED."
+              fi
               open_or_comment "$(printf '%s\n' \
                 "No run of the nightly eval suite has passed or failed on \`main\` in the last $STALE_HOURS hours. $newest" \
                 "" \
                 "A run that ends \`cancelled\` carries no verdict. That is how a pending run ends when a newer one replaces it, and how a run ends when it is cancelled by hand or when it hits its job timeout." \
                 "" \
-                "Look in $LIST_URL for runs that have not completed. The oldest of them holds the \`evals\` concurrency group, and while it does, each later scheduled run is cancelled by the next. If it is stuck, cancel it. If every recent run was cancelled after running for hours, they hit the job timeout. Also check that the workflow is enabled.")"
+                "Look in $LIST_URL for a run that is in progress or waiting: it holds the \`evals\` concurrency group. At most one other run is pending behind it, and each later run replaces that one. If the holder is stuck, cancel it. If every recent run was cancelled after running for hours, they hit the job timeout. Also check that the workflow is enabled.")"
               ;;
             *)
               echo "::error::evals-health.sh answered '$verdict', which this workflow does not handle"
