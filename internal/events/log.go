@@ -370,6 +370,12 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			}
 			lastStamp = *ev.ProcessedAt
 		}
+		// A usage and the idle after it share one stamp, so the snapshot
+		// reads exactly the running time the idle leaves stored.
+		if ev.Type == domain.EventSessionUsage && i+1 < len(evs) && evs[i+1].ProcessedAt == nil {
+			stamp := *ev.ProcessedAt
+			evs[i+1].ProcessedAt = &stamp
+		}
 		// At its settled stamp: a usage reports the running time through it,
 		// and a status event moves that time.
 		if clock != nil && ev.ProcessedAt != nil {

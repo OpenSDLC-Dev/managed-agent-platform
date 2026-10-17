@@ -31,10 +31,11 @@ var sessionStatusTypes = map[domain.EventType]bool{
 // withUsageSnapshots returns evs with a session.usage placed immediately
 // before every session.status_idle, or evs itself when it has none. The
 // usage takes the idle's stamp when the caller set one; otherwise the append
-// stamps the two in order, the usage first. It takes the idle's Restated
-// too: the snapshot of a restated idle reports the closed sum alone, the
-// value that idle leaves stored. Its body is written by the append, which
-// knows the stamps only once the batch's order has settled them.
+// stamps the usage in its place and gives the idle the same. It takes the
+// idle's Restated too: the snapshot of a restated idle reports the closed sum
+// alone, the value that idle leaves stored. Its body is written by the
+// append, which knows the stamps only once the batch's order has settled
+// them.
 func withUsageSnapshots(evs []NewEvent) []NewEvent {
 	n := 0
 	for _, ev := range evs {

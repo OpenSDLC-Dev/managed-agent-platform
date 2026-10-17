@@ -13,7 +13,11 @@
 -- from before this migration writes, or one committed while the scan runs —
 -- leaves an interval open on the row. The session's next running restarts
 -- it, and its next re-idle drops it (internal/events/usage.go step), so the
--- idle after that close is not counted; the turn it ended is lost.
+-- idle after that close is not counted; the turn it ended is lost. Two cases
+-- stay miscounted. A running such a binary writes is never seen, so its turn
+-- is lost too. And when it writes both the close and the next running, the
+-- interval stays open from before the close, and the close this build writes
+-- next counts the idle between.
 --
 -- The scan of events runs first, into a scratch table dropped at the end,
 -- before this migration locks sessions: reading events blocks no append. An

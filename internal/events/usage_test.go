@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -154,6 +155,24 @@ func mustMarshal(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// An idle its emitter left unstamped takes its usage's stamp, so the snapshot
+// reports exactly the running time the idle stores.
+func TestUsageSnapshotSharesItsIdlesStamp(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	start := time.Now().UTC().Add(-2 * time.Second)
+	mustAppend(t, log, sid, []events.NewEvent{status(domain.EventSessionStatusRunning, &start)}, events.AppendOptions{})
+	got := mustAppend(t, log, sid, []events.NewEvent{idleAt(nil)}, events.AppendOptions{})
+	if len(got) != 2 || !got[0].ProcessedAt.Equal(*got[1].ProcessedAt) {
+		t.Fatalf("usage stamped %v, idle %v, want one stamp", got[0].ProcessedAt, got[1].ProcessedAt)
+	}
+	stored, _ := storedActive(t, pool, sid)
+	if v := activeSeconds(t, got[0]); v != math.Round(stored*1000)/1000 {
+		t.Errorf("snapshot active_seconds = %v, stored %v, want the stored value to the millisecond", v, stored)
+	}
 }
 
 // Only the session's own idle gets a snapshot: a thread's idle, the session's

@@ -80,7 +80,10 @@ The recordings in `managed-agents-wire-recordings` add the shape and the order
    the columns never saw — one a binary from before migration 0055 wrote, or
    one committed during the migration's scan. A running restarts it and a
    restated close drops it, so neither counts the idle after that close. The
-   turn the unseen close ended goes uncounted. Reading the log's history to
+   turn the unseen close ended goes uncounted. When the old binary also
+   writes the next running, nothing drops the stale interval, and the next
+   close counts the idle between; migration 0055's comment names both cases.
+   Reading the log's history to
    recover it was the alternative: a status-type filter no index covers, and
    a read of every event since the last status event, under the lock.
 
