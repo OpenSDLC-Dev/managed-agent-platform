@@ -65,6 +65,12 @@ Review, round 1. Codex (`gpt-6.1-sol`, `xhigh`) found one P3, fixed: the docs sa
 
 Declined: bumping `updated_at` when the clock moves, because with the open interval counted at read time the rendered value no longer jumps at a write that moves no status; and building the clock's event set from `sessionStatusOf`, because a new session status needs a decision in `sessionClock.step` — open, close or neither — that the built set would not make.
 
+Of the round's 5 behavior mutants, 5 were caught by an assertion.
+
+Round 2. Codex, on the fixes, found no path that runs a running session again without a close, which the restart's premise needs. It raised three findings. Fixed: the render read the rendering host's clock, so two replicas could disagree by their skew; it now reads the database's. Fixed: the render test's bound admitted an open interval counted twice; it now allows only the time its reads took, and 3 render mutants, double counting among them, were each caught. Declined: counting the open interval in the create response, which is built inside the creating transaction, where that interval is the milliseconds since the running stamp in the same request.
+
+CodeRabbit found the migration's events scan ran under the sessions lock. It proposed a batched backfill outside the migration transaction, which needs a job runner the platform does not have. The scan now runs first, into a temporary table, and the lock covers only the update of each session row. Measured on 2,000,000 events over 5,000 sessions: the lock held 4.21 s before and 34 ms after, and a sessions read, an append and a session update all went through during the scan. Both forms gave the same result. CodeRabbit also found a registry entry, the session delegation bound's, that still said `session.usage` is never emitted; it now says the event carries no `budget`.
+
 **Plan 68 progress summary (archived).** Delivered in one PR: migration 0055, the event in `Log.AppendInTx`, and `usage.active_seconds` on the session resource.
 
 ## A status the image's startup chose is no answer (plan 67, #942) — archived 2026-10-17, delivered in three PRs (#946, #947 and this close-out)

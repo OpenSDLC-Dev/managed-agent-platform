@@ -81,6 +81,7 @@ type sessionRow struct {
 	metaJSON, usageJSON  []byte
 	activeSeconds        float64
 	runningSince         *time.Time
+	readAt               time.Time // the database's clock at the read
 	resourcesJSON        []byte
 	outcomesJSON         []byte
 	vaultIDs             []string
@@ -98,12 +99,12 @@ type sessionRow struct {
 const sessionStatusExpr = `CASE WHEN archived_at IS NOT NULL THEN 'terminated' ELSE status END`
 
 const sessionColumns = `id, resolved_agent, environment_id, status, title,
-	metadata, usage, active_seconds, running_since, resources, outcome_evaluations, vault_ids, deployment_id, created_at, updated_at, archived_at`
+	metadata, usage, active_seconds, running_since, clock_timestamp(), resources, outcome_evaluations, vault_ids, deployment_id, created_at, updated_at, archived_at`
 
 func scanSession(row pgx.Row) (sessionRow, error) {
 	var r sessionRow
 	err := row.Scan(&r.id, &r.agentJSON, &r.environmentID, &r.status, &r.title,
-		&r.metaJSON, &r.usageJSON, &r.activeSeconds, &r.runningSince, &r.resourcesJSON, &r.outcomesJSON, &r.vaultIDs,
+		&r.metaJSON, &r.usageJSON, &r.activeSeconds, &r.runningSince, &r.readAt, &r.resourcesJSON, &r.outcomesJSON, &r.vaultIDs,
 		&r.deploymentID, &r.createdAt, &r.updatedAt, &r.archivedAt)
 	return r, err
 }
@@ -225,10 +226,13 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	// that runs reports time as it spends it (plan 68 decision 6) — but only
 	// while the stored status says running: an interval a replica on the
 	// earlier build closed stays open on the row, and an idle session must not
-	// keep counting it.
+	// keep counting it. The read's time is the database's, the one clock every
+	// replica reads; the stamp is the appender's, so the two differ by their
+	// hosts' skew, and the clamp floors a negative one at zero. The create
+	// response, built before its row is read, counts no open interval.
 	active := r.activeSeconds
 	if r.runningSince != nil && r.status == string(domain.SessionRunning) {
-		active += max(0, time.Since(*r.runningSince).Seconds())
+		active += max(0, r.readAt.Sub(*r.runningSince).Seconds())
 	}
 	return sessionJSON{
 		ID: r.id, Type: "session", Agent: agent, EnvironmentID: r.environmentID,

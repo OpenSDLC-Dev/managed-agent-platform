@@ -90,8 +90,9 @@ The recordings in `managed-agents-wire-recordings` add the shape and the order
    inside an open interval keeps it open: the stored log holds every close.
 6. **The session resource renders the running time to the millisecond.**
    While the stored status is running, it adds the open interval up to the
-   read, so a long turn reports time as it spends it. An idle session ignores
-   an interval left open on its row. The reference's GET read 0.1–0.23 s
+   read, so a long turn reports time as it spends it. The read's time is the
+   database's clock, the one every replica reads. An idle session ignores an
+   interval left open on its row. The reference's GET read 0.1–0.23 s
    above its last event's value (recorded), and its value while running is
    unobserved, so this is an inference.
 7. **`domain.Usage` stays the stored token shape.** The session resource

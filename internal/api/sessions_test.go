@@ -455,10 +455,12 @@ func TestSessionUsageRendersActiveSeconds(t *testing.T) {
 		t.Errorf("listed usage.active_seconds = %v, want 4.25", usage["active_seconds"])
 	}
 
-	// The stamp comes from this process's clock, as AppendInTx's do, not the
-	// database's.
+	// The open interval is read on the database's clock, so the stamp is
+	// taken on it too: ten seconds before, plus at most the time the
+	// statements below take.
+	start := time.Now()
 	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE sessions SET running_since = $2 WHERE id = $1`, id, time.Now().Add(-10*time.Second)); err != nil {
+		`UPDATE sessions SET running_since = clock_timestamp() - interval '10 seconds' WHERE id = $1`, id); err != nil {
 		t.Fatalf("set running_since: %v", err)
 	}
 	_, got = s.do(http.MethodGet, "/v1/sessions/"+id, nil)
@@ -470,9 +472,10 @@ func TestSessionUsageRendersActiveSeconds(t *testing.T) {
 		t.Fatalf("set running: %v", err)
 	}
 	_, got = s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+	took := time.Since(start).Seconds()
 	usage, _ = got["usage"].(map[string]any)
-	if v, _ := usage["active_seconds"].(float64); v < 14.25 || v > 74.25 {
-		t.Errorf("running: active_seconds = %v, want 4.25 plus the open interval of about 10 s", usage["active_seconds"])
+	if v, _ := usage["active_seconds"].(float64); v < 14.25 || v > 14.252+took {
+		t.Errorf("running: active_seconds = %v, want 4.25 + 10 s + at most the %.3f s the reads took", usage["active_seconds"], took)
 	}
 }
 
